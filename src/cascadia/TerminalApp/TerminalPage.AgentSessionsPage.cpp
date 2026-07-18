@@ -49,6 +49,7 @@
 #include "pch.h"
 #include "TerminalPage.h"
 
+#include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
 #include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the shared tooltip-dismissal recipe
 #include "AgentModelMenu.h" // AgentFillModelPickItems / AgentModelEditHint — the shared "Open New Session Here ▸ <model>" picker (launch-model picker)
 #include "AgentStatusColors.h" // ResolveTagDisplayColor / TagColorFor — the Tags column's bookmark ribbons
@@ -1045,7 +1046,7 @@ namespace winrt::TerminalApp::implementation
             {
                 self->_sessionsIndexing.store(false); // re-arm the one-pass gate (see the note above)
             }
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[sessions] _RefreshSessionsRows: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_RefreshSessionsRows");
         }
     }
 
@@ -1172,7 +1173,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[sessions] _RunSessionsSearch: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_RunSessionsSearch");
         }
     }
 
@@ -2555,7 +2556,7 @@ namespace winrt::TerminalApp::implementation
         catch (...)
         {
             text.clear();
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[summary] contained _LoadSessionsSummary analyze throw (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_LoadSessionsSummary analyze (contained)");
         }
 
         co_await winrt::resume_foreground(Dispatcher());
@@ -2590,7 +2591,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[summary] contained _LoadSessionsSummary throw (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_LoadSessionsSummary");
         }
     }
 

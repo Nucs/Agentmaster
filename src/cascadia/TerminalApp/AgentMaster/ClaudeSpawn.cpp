@@ -729,6 +729,237 @@ try {
         return id.empty() ? std::wstring{ L"(none)" } : id.substr(0, 8);
     }
 
+    // ── Exception forensics (the "never lose a swallowed exception" policy — see ClaudeSpawn.h) ──
+    namespace
+    {
+        constexpr ULONG kMsvcCppExceptionCode = 0xE06D7363UL; // the MSVC C++ `throw` SEH code
+        constexpr size_t kThrowFrameCap = 64;
+        constexpr size_t kThrowRingSize = 4;
+
+        struct ThrowStackEntry
+        {
+            void* frames[kThrowFrameCap];
+            USHORT count = 0;
+            ULONGLONG tick = 0; // GetTickCount64 at raise time (for the "age Nms" label)
+        };
+        struct ThrowStackRing
+        {
+            ThrowStackEntry entries[kThrowRingSize];
+            size_t next = 0;
+            size_t seen = 0;
+        };
+        // Per-thread: a C++ throw is raised + unwound on one thread, so the catch site reads its own
+        // thread's ring. A coroutine's stored exception RE-raises at the resuming co_await (captured
+        // again, on the resuming thread) — the resume thread's ring then holds the rethrow, and when
+        // throw + resume share a thread the older entries still hold the ORIGINAL raise.
+        thread_local ThrowStackRing t_throwRing;
+
+        // The VEH: capture-only, first-position, never handles — dispatch is untouched. Runs BEFORE
+        // unwinding, i.e. while the throw-site stack is still intact (the whole point). Lock-free +
+        // allocation-free (a raw RtlCaptureStackBackTrace into thread_local storage).
+        LONG CALLBACK _ThrowStackCaptureVeh(PEXCEPTION_POINTERS info) noexcept
+        {
+            if (info && info->ExceptionRecord && info->ExceptionRecord->ExceptionCode == kMsvcCppExceptionCode)
+            {
+                auto& ring = t_throwRing;
+                auto& e = ring.entries[ring.next];
+                e.count = ::RtlCaptureStackBackTrace(1, static_cast<ULONG>(kThrowFrameCap), e.frames, nullptr);
+                e.tick = ::GetTickCount64();
+                ring.next = (ring.next + 1) % kThrowRingSize;
+                ++ring.seen;
+            }
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        // Narrow (what()) -> wide, printable-ASCII-safe (exception messages are effectively ASCII;
+        // anything else renders '?' rather than guessing a codepage).
+        std::wstring WidenNarrowMsg(const char* s)
+        {
+            std::wstring w;
+            if (!s)
+            {
+                return w;
+            }
+            for (; *s; ++s)
+            {
+                const unsigned char c = static_cast<unsigned char>(*s);
+                w.push_back((c >= 0x20 && c < 0x7f) ? static_cast<wchar_t>(c) : L'?');
+            }
+            return w;
+        }
+    }
+
+    void InstallThrowStackCapture() noexcept
+    {
+        try
+        {
+            static std::once_flag s_once;
+            std::call_once(s_once, []() noexcept {
+                ::AddVectoredExceptionHandler(1 /* first */, &_ThrowStackCaptureVeh);
+            });
+        }
+        catch (...)
+        {
+        }
+    }
+
+    std::wstring FormatAddressModuleRva(const void* address) noexcept
+    {
+        try
+        {
+            HMODULE mod{};
+            if (::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                     reinterpret_cast<LPCWSTR>(address),
+                                     &mod) &&
+                mod)
+            {
+                wchar_t path[MAX_PATH]{};
+                const DWORD len = ::GetModuleFileNameW(mod, path, MAX_PATH);
+                std::wstring leaf = (len > 0) ? std::wstring{ path, len } : std::wstring{};
+                if (const auto slash = leaf.find_last_of(L"\\/"); slash != std::wstring::npos)
+                {
+                    leaf.erase(0, slash + 1);
+                }
+                if (leaf.empty())
+                {
+                    leaf = L"?";
+                }
+                wchar_t rva[24]{};
+                swprintf_s(rva, L"+0x%llX", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(mod)));
+                return leaf + rva;
+            }
+            wchar_t raw[24]{};
+            swprintf_s(raw, L"0x%p", address);
+            return raw;
+        }
+        catch (...)
+        {
+            return L"?";
+        }
+    }
+
+    std::wstring CaptureRecentThrowStacksText(size_t maxEntries) noexcept
+    {
+        try
+        {
+            const ThrowStackRing ring = t_throwRing; // snapshot FIRST (a classification rethrow would displace entries)
+            const ULONGLONG now = ::GetTickCount64();
+            const size_t have = (ring.seen < kThrowRingSize) ? ring.seen : kThrowRingSize;
+            const size_t emit = (maxEntries < have) ? maxEntries : have;
+            constexpr size_t kFramesPerLine = 40; // keep the line greppable; deep tails elide
+            std::wstring out;
+            for (size_t k = 0; k < emit; ++k)
+            {
+                // newest-first: next-1 is the most recent write
+                const auto& e = ring.entries[(ring.next + kThrowRingSize - 1 - k) % kThrowRingSize];
+                if (e.count == 0)
+                {
+                    continue;
+                }
+                out += L"[exc]   throw#" + std::to_wstring(k) +
+                       L" (age " + std::to_wstring(now >= e.tick ? now - e.tick : 0) + L"ms, " +
+                       std::to_wstring(e.count) + L" frames):";
+                const size_t n = (e.count < kFramesPerLine) ? e.count : kFramesPerLine;
+                for (size_t i = 0; i < n; ++i)
+                {
+                    out += L" " + FormatAddressModuleRva(e.frames[i]);
+                }
+                if (e.count > kFramesPerLine)
+                {
+                    out += L" ...";
+                }
+                out += L"\n";
+            }
+            return out;
+        }
+        catch (...)
+        {
+            return {};
+        }
+    }
+
+    bool ExcLogThrottleAllow(const std::wstring& key, unsigned& suppressed) noexcept
+    {
+        suppressed = 0;
+        try
+        {
+            static std::mutex s_mtx;
+            static std::unordered_map<std::wstring, std::pair<ULONGLONG, unsigned>> s_last; // key -> {last-allowed tick, suppressed since}
+            constexpr ULONGLONG kWindowMs = 2000;
+            const ULONGLONG now = ::GetTickCount64();
+            std::lock_guard<std::mutex> lk{ s_mtx };
+            auto& slot = s_last[key];
+            if (slot.first != 0 && now - slot.first < kWindowMs)
+            {
+                ++slot.second;
+                return false;
+            }
+            slot.first = now;
+            suppressed = slot.second;
+            slot.second = 0;
+            return true;
+        }
+        catch (...)
+        {
+            return true; // fail OPEN — losing the throttle must never lose the log
+        }
+    }
+
+    void LogSwallowedExceptionCore(const wchar_t* context, const std::wstring& detail, const std::wstring& stacksText) noexcept
+    {
+        try
+        {
+            const std::wstring ctx = context ? context : L"?";
+            unsigned suppressed = 0;
+            if (!ExcLogThrottleAllow(L"exc:" + ctx, suppressed))
+            {
+                return;
+            }
+            wchar_t tid[16]{};
+            swprintf_s(tid, L"0x%X", static_cast<unsigned>(::GetCurrentThreadId()));
+            std::wstring block = L"[exc] " + ctx + L": swallowed " + detail + L" tid=" + tid;
+            if (suppressed != 0)
+            {
+                block += L" [suppressed " + std::to_wstring(suppressed) + L" earlier repeat(s)]";
+            }
+            block += L" (no crash)\n";
+            block += stacksText;
+            AppendStateLog(L"hooks.log", block);
+        }
+        catch (...)
+        {
+        }
+    }
+
+    void LogSwallowedException(const wchar_t* context) noexcept
+    {
+        try
+        {
+            const std::wstring stacks = CaptureRecentThrowStacksText(); // BEFORE the classification rethrow
+            std::wstring detail;
+            try
+            {
+                throw; // classify the in-flight exception (caller guarantees we're inside a catch)
+            }
+            catch (const std::system_error& e)
+            {
+                detail = L"std::system_error code=" + std::to_wstring(e.code().value()) + L" msg=\"" + WidenNarrowMsg(e.what()) + L"\"";
+            }
+            catch (const std::exception& e)
+            {
+                detail = L"std::exception msg=\"" + WidenNarrowMsg(e.what()) + L"\"";
+            }
+            catch (...)
+            {
+                detail = L"unknown exception";
+            }
+            LogSwallowedExceptionCore(context, detail, stacks);
+        }
+        catch (...)
+        {
+        }
+    }
+
     std::pair<std::wstring, std::wstring> MaterializeSharedHookFiles(const std::wstring& stateDir, const AppSettings& settings)
     {
         const std::wstring forwarderPath = stateDir + L"\\agentmaster-hook.ps1";

@@ -33,6 +33,7 @@
 #include "TerminalPage.h"
 
 #include "../../types/inc/utils.hpp" // IsValidDirectory + GuidToPlainString (shell-tab cwd capture)
+#include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog
 #include "AgentMaster/Engine.h" // RecoverableWindows (the reopen dispatch)
 #include "AgentMaster/Persistence.h" // SaveWindowRecord
@@ -740,6 +741,7 @@ namespace winrt::TerminalApp::implementation
             }
             catch (...)
             {
+                ::Agentmaster::AgentLogCaughtException(L"_AgentmasterReopenTarget resolve");
             }
         }
         return L"agentmaster.exe"; // last-resort: the historical by-name launch

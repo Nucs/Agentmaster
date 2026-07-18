@@ -64,6 +64,8 @@
 #include <winrt/Windows.UI.Xaml.h>
 #include <winrt/Windows.UI.Xaml.Interop.h>
 
+#include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
+
 namespace winrt::TerminalApp::implementation
 {
     namespace agent_tip_details
@@ -251,6 +253,7 @@ namespace winrt::TerminalApp::implementation
                 }
                 catch (...)
                 {
+                    ::Agentmaster::AgentLogCaughtException(L"tip host close");
                 }
             }
             if (h.openOwner)
@@ -340,6 +343,7 @@ namespace winrt::TerminalApp::implementation
             {
                 // A tooltip that can't open is moot — never crash over a tip. Detach again so the
                 // failed open leaves no service registration behind.
+                ::Agentmaster::AgentLogCaughtException(L"tip host open");
                 winrt::Windows::UI::Xaml::Controls::ToolTipService::SetToolTip(el, nullptr);
                 return;
             }

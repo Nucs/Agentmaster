@@ -34,6 +34,7 @@
 
 #include "../../types/inc/utils.hpp" // GuidToPlainString (WT_SESSION match)
 
+#include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
 #include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot)
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
 #include "AgentMaster/ClaudeSpawn.h" // BuildClaudeSpawn / ClaudeConversationExists / AppendStateLog
@@ -171,7 +172,7 @@ namespace winrt::TerminalApp::implementation
             {
                 strong->_claudeMissingPromptShowing = false; // re-arm (see the note above)
             }
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[dialog] _PromptClaudeMissing: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_PromptClaudeMissing");
         }
     }
 
@@ -579,7 +580,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[restore] _RestoreClaudeSessions: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_RestoreClaudeSessions");
         }
         co_return;
     }
@@ -799,6 +800,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
+            ::Agentmaster::AgentLogCaughtException(L"remove session from window records");
         }
     }
 

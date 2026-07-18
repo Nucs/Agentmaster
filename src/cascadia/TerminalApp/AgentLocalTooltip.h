@@ -478,7 +478,10 @@ namespace winrt::TerminalApp::implementation
             }
             catch (...)
             {
-                return; // not in the live tree yet — the next SizeChanged re-runs this
+                // Likely benign (anchor not in the live tree yet — the next SizeChanged re-runs this),
+                // but per the forensics policy the throw is still recorded (throttled).
+                ::Agentmaster::AgentLogCaughtException(L"local-tip anchor transform");
+                return;
             }
             const double hostW = host.ActualWidth();
             const double hostH = host.ActualHeight();

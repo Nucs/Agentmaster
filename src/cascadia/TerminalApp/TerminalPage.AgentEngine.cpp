@@ -35,6 +35,7 @@
 
 #include "AgentManagerContent.h" // the Manager tab's content (C1 UI) — created + wired here
 #include "AgentTabOverlay.h" // ~TerminalPage destroys the com_ptr<AgentTabOverlay> maps — needs the complete type
+#include "AgentCatchLog.h" // exception forensics: InstallAgentExceptionTrace (VEH throw-stack ring + wil failure logger, engine init below)
 #include "AgentToastActivator.h" // System notifications: the toast COM activator (registered once, process-wide, from the engine init below)
 #include "TabHeaderControl.h" // Agentmaster: SetTabRenameCommitMode (push the GLOBAL rename-commit mode to tab headers)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / AgentmasterStateDir / MaterializeSharedHookFiles
@@ -536,6 +537,11 @@ namespace winrt::TerminalApp::implementation
             static std::once_flag toastActivatorOnce;
             std::call_once(toastActivatorOnce, [] { ::Agentmaster::ToastActivator::Register(); });
         }
+
+        // Agentmaster (exception forensics): install the VEH throw-stack ring + this module's wil
+        // failure sink, so every swallowed catch(...) / CATCH_LOG logs WHAT threw and the THROW-SITE
+        // stack (module+RVA, offline-symbolizable) to hooks.log. Self-onced; cheap when idle.
+        ::Agentmaster::InstallAgentExceptionTrace();
 
         // M10 (PERSISTENCE.md §13): claim this window's persisted record — an existing
         // windows/<id>.json (geometry + Manager lens + ordered tab refs), or a fresh GUID if none
@@ -1414,6 +1420,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
+            ::Agentmaster::AgentLogCaughtException(L"_DescribeTabForLog");
             return L"?";
         }
     }
@@ -1540,7 +1547,7 @@ namespace winrt::TerminalApp::implementation
         {
             // Surface the failure in OUR log too (a swallowed settle re-opens the crash window).
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[tabdrag-guard] settle UpdateLayout threw\n");
-            LOG_CAUGHT_EXCEPTION();
+            ::Agentmaster::AgentLogCaughtException(L"tabdrag-guard settle UpdateLayout");
         }
     }
 

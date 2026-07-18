@@ -39,6 +39,7 @@
 #include <objbase.h>
 #include <string>
 
+#include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / LogNav / ShortId
 #include "AgentMaster/Engine.h" // ActivateSessionInOtherWindows — the cross-window "surface this session" fan-out
 #include "AgentMaster/ProfileBootstrap.h" // Profiles::IsDevPackage — pick this identity's CLSID
@@ -97,6 +98,7 @@ namespace Agentmaster::ToastActivator
         }
         catch (...)
         {
+            ::Agentmaster::AgentLogCaughtException(L"toast activate (click jump)");
             return S_OK; // never fail back into the shell over a jump we couldn't make
         }
     };
@@ -170,6 +172,7 @@ namespace Agentmaster::ToastActivator
         }
         catch (...)
         {
+            ::Agentmaster::AgentLogCaughtException(L"toast activator register");
             cookie = 0;
         }
     }

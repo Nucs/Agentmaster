@@ -49,6 +49,7 @@
 #include "pch.h"
 #include "TerminalPage.h"
 
+#include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
 #include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the shared tooltip-dismissal recipe
 #include "AgentStatusColors.h" // ResolveTagDisplayColor — the per-tag bookmark-ribbon color (the tag filter chips' leading icon)
 #include "AgentMaster/ClaudeSpawn.h" // ClaudeProjectsDir / AppendStateLog
@@ -246,7 +247,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[dialog] _PromptResumeOrForkSession: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_PromptResumeOrForkSession");
         }
     }
 

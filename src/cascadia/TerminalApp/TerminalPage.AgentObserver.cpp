@@ -34,6 +34,7 @@
 
 #include "../../types/inc/utils.hpp" // GuidToPlainString (WT_SESSION keys)
 
+#include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
 #include "AgentManagerContent.h" // push the External census / RefreshNow
 #include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot); TagColorFor (bookmark tags)
 #include "AgentTipHelpers.h" // AgentSetTip — the islands-safe hover tooltips on the Tag panel's rows
@@ -989,6 +990,7 @@ namespace winrt::TerminalApp::implementation
             }
             catch (...)
             {
+                ::Agentmaster::AgentLogCaughtException(L"tag-editor popup position");
             }
             page->_tagEditorPopup.HorizontalOffset(std::max(0.0, cx));
             page->_tagEditorPopup.VerticalOffset(std::max(0.0, y));
@@ -1972,6 +1974,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
+            ::Agentmaster::AgentLogCaughtException(L"tag-hover popup position");
         }
         _tagHoverPopup.HorizontalOffset(std::max(0.0, x));
         _tagHoverPopup.VerticalOffset(std::max(0.0, y));
@@ -2406,7 +2409,7 @@ namespace winrt::TerminalApp::implementation
                 // Contained on the BACKGROUND thread (no UI-map access here) — fall through to the
                 // resume_foreground cleanup so the in-flight guard is always cleared. Leave the
                 // header-only card (body stays empty).
-                OutputDebugStringW(L"[Agentmaster] _EnsureTabTooltipSummary: swallowed background analyze/render exception (no crash)\n");
+                ::Agentmaster::AgentLogCaughtException(L"_EnsureTabTooltipSummary analyze (contained)");
             }
 
             co_await wil::resume_foreground(Dispatcher());
@@ -2436,7 +2439,7 @@ namespace winrt::TerminalApp::implementation
             // XAML-build throw. Deliberately does NOT touch the UI-thread maps (we may be off-thread on a
             // resume failure; on a UI-thread throw the in-flight flag was already erased above). A leaked
             // flag can only happen on teardown, where the map dies with the page — moot. Never rethrow.
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[tab-tooltip] _EnsureTabTooltipSummary: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_EnsureTabTooltipSummary");
         }
     }
 
@@ -2759,7 +2762,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _SweepAgentPendingToasts: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_SweepAgentPendingToasts");
         }
     }
 
@@ -2895,6 +2898,7 @@ namespace winrt::TerminalApp::implementation
             {
                 _agentToastFailLogged = true; // once is signal, per-fire is noise (an unpackaged build throws on every Show)
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[notify] toast failed (no package identity / notifications unavailable) - further failures muted\n");
+                ::Agentmaster::AgentLogCaughtException(L"notify toast Show"); // full detail (hr/msg/stack) for the ONE logged failure
             }
         }
     }
@@ -4211,7 +4215,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[prompt-nav] ReadPromptNavIfGrown: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"ReadPromptNavIfGrown");
         }
         return false;
     }
@@ -4271,7 +4275,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[prompt-nav] _ScrollAdjacentPrompt: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_ScrollAdjacentPrompt");
         }
     }
 
@@ -4319,7 +4323,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[prompt-nav] _RefreshPromptNavCache: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_RefreshPromptNavCache");
         }
     }
 
@@ -4371,7 +4375,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[prompt-nav] _NavigateAdjacentPrompt: scroll/highlight threw (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_NavigateAdjacentPrompt scroll/highlight");
             _PlayPromptNavLimitSound();
         }
     }
@@ -4659,7 +4663,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _AdoptExternalSession: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_AdoptExternalSession");
         }
     }
 
@@ -4927,7 +4931,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _SweepClaudeLiveness: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_SweepClaudeLiveness");
         }
     }
 
@@ -5127,7 +5131,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _ScanPendingInput: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_ScanPendingInput");
         }
     }
 
@@ -5178,6 +5182,7 @@ namespace winrt::TerminalApp::implementation
             }
             catch (...)
             {
+                ::Agentmaster::AgentLogCaughtException(L"_ScanPendingInput read (skip tab)");
                 continue; // a control torn down mid-tick — skip it
             }
 
@@ -5285,7 +5290,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _ScanInferredTabColors: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_ScanInferredTabColors");
         }
     }
 
@@ -5521,7 +5526,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _ReconcileClaudeTabs: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_ReconcileClaudeTabs");
         }
     }
 
@@ -5659,7 +5664,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _ObserverProbe: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_ObserverProbe");
         }
     }
 
@@ -6007,7 +6012,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _RefreshObserverData: swallowed exception (no crash)\n");
+            ::Agentmaster::AgentLogCaughtException(L"_RefreshObserverData");
         }
     }
 

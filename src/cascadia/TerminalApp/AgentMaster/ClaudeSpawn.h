@@ -260,6 +260,47 @@ namespace Agentmaster
     // substr clamps, so a shorter id is returned whole). "" -> "(none)".
     std::wstring ShortId(const std::wstring& id);
 
+    // ── Exception forensics (the "never lose a swallowed exception" policy) ────────────────────
+    // A swallowed catch(...) must not discard WHAT was thrown nor WHERE FROM. The catch site runs
+    // AFTER the unwind (the throw-site stack is gone by then), so a process-wide Vectored Exception
+    // Handler captures the raw stack AT RAISE TIME (VEH runs before unwinding) for every MSVC C++
+    // throw (0xE06D7363) into a per-thread ring — rethrows (e.g. a coroutine's stored exception
+    // re-raised at co_await) capture again, so the ring's older entries keep the ORIGINAL throw.
+    // Frames are logged as `Module.dll+0xRVA` — offline-symbolizable against the build's PDBs with
+    // the debug-dumps diasym tool (ASLR-stable), so a hooks.log line alone pins file:line later.
+
+    // Install the VEH throw-stack capture. Process-once (internal call_once), cheap (a capture only
+    // runs when something actually throws), never handles/alters exception dispatch. Safe to call
+    // from any thread; called at engine init (AgentCatchLog.h's InstallAgentExceptionTrace).
+    void InstallThrowStackCapture() noexcept;
+
+    // "Module.dll+0xRVA" for a code address (module resolved from the address; a non-module
+    // address renders as raw hex). Best-effort, never throws.
+    std::wstring FormatAddressModuleRva(const void* address) noexcept;
+
+    // Snapshot + format THIS thread's most recent captured throw stacks, newest first, as
+    // ready-to-append "[exc]   throw#K (age Nms, F frames): mod+rva ...\n" lines ("" when none).
+    // Call BEFORE any classification rethrow (`try { throw; } catch ...`) — the rethrow itself is
+    // captured by the VEH and would otherwise displace the entry you came to read.
+    std::wstring CaptureRecentThrowStacksText(size_t maxEntries = 2) noexcept;
+
+    // Per-key rate gate for exception logging (a hot-path catch may fire in bursts): true => log
+    // now (suppressed = how many were dropped since the last allowed log for this key), false =>
+    // drop. ~2s window, thread-safe, best-effort (fails open).
+    bool ExcLogThrottleAllow(const std::wstring& key, unsigned& suppressed) noexcept;
+
+    // The one log chokepoint behind every swallowed-exception report: writes
+    //   "[exc] <context>: swallowed <detail> tid=0x… (no crash)\n" + the captured throw-stack lines
+    // to hooks.log, throttled per context. `detail` = the classified type/hr/message (composed by
+    // the caller — the winrt-aware classifier lives in AgentCatchLog.h, above the engine).
+    void LogSwallowedExceptionCore(const wchar_t* context, const std::wstring& detail, const std::wstring& stacksText) noexcept;
+
+    // Engine-level "log the current exception" for a plain-C++ catch(...) site (classifies
+    // std::system_error / std::exception / unknown — no WinRT here; TerminalApp-side sites use
+    // AgentCatchLog.h's AgentLogCaughtException, which adds hresult_error/wil detail).
+    // MUST be called from INSIDE a catch block (it rethrows to classify).
+    void LogSwallowedException(const wchar_t* context) noexcept;
+
     // A fresh lowercase hyphenated UUID (CoCreateGuid).
     std::wstring NewSessionId();
 

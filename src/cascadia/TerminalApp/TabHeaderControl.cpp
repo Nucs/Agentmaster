@@ -7,6 +7,7 @@
 
 #include "TabHeaderControl.g.cpp"
 
+#include "AgentCatchLog.h" // Agentmaster: AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
 #include "AgentTipHelpers.h" // Agentmaster: islands-safe hover tooltip for the tab-strip status dot
 #include "AgentStatusColors.h" // Agentmaster (bookmark tags): ParseArgbHexColor (the spec-carried picked color) + TagColorFor (the name-hash fallback)
 
@@ -150,6 +151,7 @@ namespace winrt::TerminalApp::implementation
                 }
                 catch (...)
                 {
+                    ::Agentmaster::AgentLogCaughtException(L"tab-header tag popup close (unload)");
                 }
             }
         });
@@ -358,6 +360,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
+            ::Agentmaster::AgentLogCaughtException(L"tab-header pending-dots storyboard");
         }
     }
 
@@ -507,6 +510,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
+            ::Agentmaster::AgentLogCaughtException(L"tab-header badge repos schedule");
             _badgeReposQueued = false; // no dispatcher (teardown) — drop the request
         }
     }
@@ -543,6 +547,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
+            ::Agentmaster::AgentLogCaughtException(L"tab-header badge position (title x)");
         }
         constexpr double kBadgeHeight = 9.3; // the ribbon Polygon's height (_UpdateTagBadges)
         double top = 0.0;
@@ -584,6 +589,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
+            ::Agentmaster::AgentLogCaughtException(L"tab-header badge position (anchor)");
         }
         if (!pinned)
         {
@@ -648,6 +654,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
+            ::Agentmaster::AgentLogCaughtException(L"tab-header badge visibility");
         }
 
         const bool parentMoved = std::abs(absX - _badgeLastAbsX) > 0.5 || std::abs(absY - _badgeLastAbsY) > 0.5;
@@ -838,6 +845,7 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
+            ::Agentmaster::AgentLogCaughtException(L"tab-header renamer measure");
         }
 
         // With a real on-screen left, cap to (left -> window right); otherwise (box not arranged yet)
