@@ -312,6 +312,25 @@ namespace
         return ::Agentmaster::BuildClaudeCommandline(settingsPath, id, resume, skipPerms, {}, eng.claudeExePath);
     }
 
+    // Make a copied launch CLI paste-and-run in PowerShell (the Windows 11 default shell). A launch
+    // command line begins with the exe as a "quoted path" (BuildLaunchCli / the live PEB commandline
+    // quote it — needed for spaces + how ConPTY feeds CreateProcessW). PowerShell parses a statement
+    // that STARTS with a "quoted string" in EXPRESSION mode (a string literal), so the next bare token
+    // (--dangerously-skip-permissions) is "Unexpected token" and the paste fails to run. Prefixing the
+    // call operator `&` forces command mode, so the exe is invoked and the rest are its arguments.
+    // Applied ONLY when the command opens with a quote — a bare `claude ...` / `codex ...` / `cmd /c ...`
+    // (empty-launcher fallbacks) already pastes fine and is left untouched. (cmd.exe users drop the `&`;
+    // we bias to PowerShell as the Windows-native default.)
+    inline std::wstring PwshRunnable(std::wstring cli)
+    {
+        const auto first = cli.find_first_not_of(L" \t");
+        if (first != std::wstring::npos && cli[first] == L'"')
+        {
+            cli.insert(0, L"& ");
+        }
+        return cli;
+    }
+
     // Resolve a session's transcript OFF the UI thread (the claude glob is shallow, but the codex
     // rollout glob recurses the date-sharded sessions tree), read it into a plain-text conversation
     // (user + assistant TEXT only — no tools/results/thinking), then hop back to `disp` to copy

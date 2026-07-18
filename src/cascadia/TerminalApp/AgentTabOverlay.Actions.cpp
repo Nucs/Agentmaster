@@ -382,10 +382,12 @@ namespace winrt::TerminalApp::implementation
             }
             break;
         case 3: // Claude Launch CLI — the REAL full command (live commandline / would-use builder)
-            CopyTextToClipboard(BuildLaunchCli(s, /*wantCodex*/ false));
+            // PwshRunnable: prefix the `&` call operator so the copied (quoted-exe) command pastes-and-
+            // runs in PowerShell (the Windows-native default shell) instead of ParserError-ing.
+            CopyTextToClipboard(PwshRunnable(BuildLaunchCli(s, /*wantCodex*/ false)));
             break;
         case 4: // Codex Launch CLI — the REAL full command
-            CopyTextToClipboard(BuildLaunchCli(s, /*wantCodex*/ true));
+            CopyTextToClipboard(PwshRunnable(BuildLaunchCli(s, /*wantCodex*/ true)));
             break;
         case 5: // Transcript — the whole conversation (user + assistant text only), off-thread
             CopyConversationAsync(dispatcher, codex, s.id, s.codexSessionId);
