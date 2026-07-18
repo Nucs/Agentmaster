@@ -909,6 +909,13 @@ namespace winrt::TerminalApp::implementation
             co_return; // one pass at a time; the runner re-renders when it lands
         }
         auto weakThis{ get_weak() };
+        // Agentmaster (terminate-net): the OFF-THREAD gather parses transcripts (a corrupt/huge .jsonl,
+        // filesystem errors, bad_alloc) and the foreground resume can throw at window teardown — any of
+        // it escaping this fire_and_forget would std::terminate the app. Worse, a throw would strand
+        // _sessionsIndexing TRUE forever (the exchange gate above), so the Sessions page could never
+        // refresh again — the catch RE-ARMS it (atomic — safe from whichever thread threw) + logs.
+        try
+        {
         const int64_t fromMs = _SessionsCutoffFromMs();
         const int64_t toMs = _sessionsToMs;
         if (_sessionsCountText)
@@ -1031,6 +1038,15 @@ namespace winrt::TerminalApp::implementation
         }
         self->_RebuildSessionsTagChips(); // bookmark tags: (re)list the header chips from the fresh tag load (also prunes a facet whose tag vanished)
         self->_RunSessionsSearch(); // re-applies the current query (incl. the empty one) + renders
+        }
+        catch (...)
+        {
+            if (const auto self = weakThis.get())
+            {
+                self->_sessionsIndexing.store(false); // re-arm the one-pass gate (see the note above)
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[sessions] _RefreshSessionsRows: swallowed exception (no crash)\n");
+        }
     }
 
     // The two-phase search. FAST runs inline (in-memory over the index entries); the history
@@ -1039,6 +1055,12 @@ namespace winrt::TerminalApp::implementation
     {
         const uint64_t gen = ++_sessionsSearchGen;
 
+        // Agentmaster (terminate-net): the fast phase builds regexes from the raw query, the slow phase
+        // spawns rg + reads transcripts off-thread, and the foreground re-render can throw at window
+        // teardown — any of it escaping this fire_and_forget would std::terminate the app over a search.
+        // Contain + log; no state to re-arm (the generation counter supersedes naturally on re-type).
+        try
+        {
         ::Agentmaster::SessionQuery q;
         q.text = _sessionsQueryText;
         // scopeTitle defaults ON (SessionQuery default true): a null button can't silently drop it.
@@ -1146,6 +1168,11 @@ namespace winrt::TerminalApp::implementation
         if (!self->_sessionsSelectedId.empty())
         {
             self->_ShowSessionsDetail(self->_sessionsSelectedId); // refresh the snippets pane
+        }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[sessions] _RunSessionsSearch: swallowed exception (no crash)\n");
         }
     }
 

@@ -201,6 +201,11 @@ namespace winrt::TerminalApp::implementation
     // so the fork seam derives a smart name.
     winrt::fire_and_forget TerminalPage::_PromptResumeOrForkSession(std::wstring sessionId, std::wstring dir, std::wstring title, std::wstring forkTitle)
     {
+        // Agentmaster (terminate-net): a dialog lane — ShowDialog on a tearing-down presenter, the
+        // dialog build, or the follow-on resume/fork launch throwing would std::terminate the app
+        // (fire_and_forget). Contain + log; a failed prompt leaves the row as-is (re-invokable).
+        try
+        {
         const auto presenter{ _dialogPresenter.get() };
         if (!presenter)
         {
@@ -238,6 +243,11 @@ namespace winrt::TerminalApp::implementation
             _ForkSessionFromDisk(sessionId, dir, forkTitle);
         }
         // else Close/Cancel -> do nothing
+        }
+        catch (...)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[dialog] _PromptResumeOrForkSession: swallowed exception (no crash)\n");
+        }
     }
 
     // Recolor the row highlights for _sessionsSelectedId WITHOUT rebuilding the table (the

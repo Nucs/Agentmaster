@@ -97,49 +97,6 @@ namespace winrt::TerminalApp::implementation
             fi.IsHitTestVisible(false);
             b.Content(fi);
             AgentSetTip(b, winrt::hstring{ tip });
-            // ── DIAGNOSTIC (dead-click trace — remove once the icon-click root cause is confirmed
-            // fixed). The reported bug: clicking an action ICON did nothing. Root cause found: the
-            // DEV-ONLY tooltip-id feature (AgentDevTooltipNames.h) resolved the button's TEMPLATE
-            // ContentPresenter (the stock template root is x:Name="ContentPresenter") and permanently
-            // SetToolTip'd that template CHILD — framework tooltip machinery below ButtonBase on the
-            // press route, eating the press before the button could see it. That resolver is fixed;
-            // this trace stays one deploy to PROVE the fix (and to name any second eater if one
-            // exists): for every press/release it logs whether the event REACHED the button and
-            // whether a descendant had already Handled it (handledEventsToo=true sees those too),
-            // plus capture-loss mid-press (a steal/reparent cancels a click) and the Click itself.
-            // Rare, human-scale events — one short hooks.log line each ([overlay-hit]).
-            const uint32_t glyphCp = static_cast<uint32_t>(glyph[0]); // E8B7 folder / E8C8 copy / E70F pencil / 2191 up / 2193 down
-            const auto hitLine = [glyphCp](const wchar_t* what, const winrt::Windows::Foundation::IInspectable& src, bool handled) {
-                wchar_t cp[8]{};
-                swprintf_s(cp, L"%04X", glyphCp);
-                std::wstring cls{ L"-" };
-                if (src)
-                {
-                    cls = std::wstring{ winrt::get_class_name(src) };
-                    if (const auto dot = cls.find_last_of(L'.'); dot != std::wstring::npos)
-                    {
-                        cls = cls.substr(dot + 1); // "Windows.UI.Xaml.Controls.Button" -> "Button"
-                    }
-                }
-                ::Agentmaster::AppendStateLog(L"hooks.log", std::wstring{ L"[overlay-hit] btn=" } + cp + L" " + what + L" src=" + cls + (handled ? L" handled=1\n" : L" handled=0\n"));
-            };
-            b.AddHandler(UIElement::PointerPressedEvent(),
-                         winrt::box_value(PointerEventHandler{ [hitLine](const IInspectable&, const PointerRoutedEventArgs& e) {
-                             hitLine(L"press", e.OriginalSource(), e.Handled());
-                         } }),
-                         true /* handledEventsToo — see the press even when a descendant already ate it */);
-            b.AddHandler(UIElement::PointerReleasedEvent(),
-                         winrt::box_value(PointerEventHandler{ [hitLine](const IInspectable&, const PointerRoutedEventArgs& e) {
-                             hitLine(L"release", e.OriginalSource(), e.Handled());
-                         } }),
-                         true);
-            b.PointerCaptureLost([hitLine](const IInspectable&, const PointerRoutedEventArgs& e) {
-                hitLine(L"capture-lost", e.OriginalSource(), e.Handled());
-            });
-            b.Click([hitLine](const IInspectable&, const RoutedEventArgs&) {
-                hitLine(L"CLICK", nullptr, false); // the ButtonBase click actually fired
-            });
-            // ── end DIAGNOSTIC ──
             return b;
         };
 

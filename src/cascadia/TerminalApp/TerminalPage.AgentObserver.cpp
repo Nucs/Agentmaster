@@ -4646,6 +4646,25 @@ namespace winrt::TerminalApp::implementation
     // and the registry is left untouched. Runs on the UI thread (XAML walk).
     winrt::fire_and_forget TerminalPage::_AdoptExternalSession(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken)
     {
+        // Agentmaster (terminate-net): the adoption lane — fired from the engine's adoption fan-out
+        // (bridge/registry threads) on every SessionStart, it hops to the UI thread and does XAML bind
+        // work (_BindClaudeSessionToTab: injector + overlay + title + color). An exception escaping this
+        // fire_and_forget (incl. resume_foreground on a dying dispatcher at window close) would
+        // std::terminate the app. The body is an awaitable IAsyncAction (_AdoptExternalSessionImpl)
+        // whose exceptions propagate to this co_await (see _SweepClaudeLiveness).
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await _AdoptExternalSessionImpl(sessionId, cwd, tabToken);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _AdoptExternalSession: swallowed exception (no crash)\n");
+        }
+    }
+
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_AdoptExternalSessionImpl(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken)
+    {
         auto strongThis{ get_strong() };
         co_await wil::resume_foreground(Dispatcher());
 

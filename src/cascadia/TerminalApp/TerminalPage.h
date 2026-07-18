@@ -1004,6 +1004,7 @@ namespace winrt::TerminalApp::implementation
         void _SettleTabStripLayout(); // Agentmaster: commit the strip's item->container mapping synchronously after a TabItems() mutation (MUX drag-start AV guard, layer 1 — a belt; see TerminalPage.AgentEngine.cpp)
         void _GuardTabDragUntilRegistered(const Microsoft::UI::Xaml::Controls::TabViewItem& tabViewItem); // Agentmaster: a (re)inserted tab stays undraggable until ContainerFromItem resolves it (MUX drag AV guard, layer 2 — a belt: keeps a not-yet-mapped tab ungrabbable)
         std::wstring _DescribeTabForLog(const TerminalApp::Tab& tab); // Agentmaster: `<sid8> "<title>"` (title-only for a shell tab) — the tab-strip forensic log identity; never throws
+        winrt::Windows::Foundation::IAsyncAction _AdoptExternalSessionImpl(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken); // Agentmaster (terminate-net): the body of _AdoptExternalSession, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
         winrt::fire_and_forget _AdoptExternalSession(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken); // Agentmaster: bind a hand-typed `claude` to its ConPTY
         winrt::Windows::Foundation::IAsyncAction _SweepClaudeLivenessImpl(); // Agentmaster (terminate-net): the body of _SweepClaudeLiveness, awaited inside its try/catch so a throw can't escape the fire_and_forget (std::terminate)
         winrt::fire_and_forget _SweepClaudeLiveness(); // Agentmaster: archive this window's claude tabs whose ConPTY has Closed (scanner-ticked)

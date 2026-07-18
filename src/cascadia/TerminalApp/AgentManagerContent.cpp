@@ -191,6 +191,17 @@ namespace winrt::TerminalApp::implementation
     // (and stops pinning its DispatcherQueue alive). The observer captures get_weak(), so a stray
     // late call is already a no-op; this also keeps the observer list bounded across many window
     // open/close cycles. _registry (held by SharedEngine) outlives us, so the call stays valid.
+    // Agentmaster (terminate-net — teardown can run on a BACKGROUND thread): when a window closes
+    // mid-tick, a scanner-lane fire_and_forget (e.g. _ObserverProbe) can hold the LAST get_strong()
+    // ref to the whole TerminalPage; its coroutine-frame destruction on the thread pool then runs
+    // ~TerminalPage -> ~Tab -> ~Pane -> THIS destructor there. DispatcherTimer is UI-thread-affine,
+    // so each Stop() below throws RPC_E_WRONG_THREAD on that path — and a throw escaping a destructor
+    // => std::terminate (0xC0000409 FAST_FAIL_FATAL_APP_EXIT; hit live in 0.6.7.6: close a
+    // seconds-old window and the probe's last-ref release tore the page down on the pool thread, the
+    // FIRST unguarded Stop() killed the whole process — ~TerminalPage was already guarded, this
+    // destructor in its cascade was not). Guard each Stop individually (the ~TerminalPage idiom);
+    // the engine detach stays bare — thread-safe, and it must never be skipped by a guarded throw.
+    // Unstopped is harmless: the timer dies with the page and every Tick captures get_weak().
     AgentManagerContent::~AgentManagerContent()
     {
         if (_registry && _observerToken)
@@ -199,15 +210,27 @@ namespace winrt::TerminalApp::implementation
         }
         if (_cardRefreshTimer)
         {
-            _cardRefreshTimer.Stop(); // UI thread; stop the periodic ⚡/timing refresh
+            try
+            {
+                _cardRefreshTimer.Stop(); // UI thread; stop the periodic ⚡/timing refresh
+            }
+            CATCH_LOG();
         }
         if (_progressTimer)
         {
-            _progressTimer.Stop(); // UI thread; stop the Waiting-for-you countdown-bar drainer
+            try
+            {
+                _progressTimer.Stop(); // UI thread; stop the Waiting-for-you countdown-bar drainer
+            }
+            CATCH_LOG();
         }
         if (_refreshDelayTimer)
         {
-            _refreshDelayTimer.Stop(); // UI thread; stop the trailing-throttle one-shot (perf coalescing)
+            try
+            {
+                _refreshDelayTimer.Stop(); // UI thread; stop the trailing-throttle one-shot (perf coalescing)
+            }
+            CATCH_LOG();
         }
     }
 

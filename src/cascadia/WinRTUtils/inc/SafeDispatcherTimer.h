@@ -68,11 +68,23 @@ struct SafeDispatcherTimer
             return;
         }
 
-        _timer.Stop();
-        if (_token)
+        // Agentmaster (terminate-net): Destroy() runs from destructors (~SafeDispatcherTimer — e.g.
+        // Tab::_bellIndicatorTimer inside the ~TerminalPage -> ~Tab teardown cascade), and that
+        // cascade can run on a BACKGROUND thread when a fire_and_forget coroutine held the page's
+        // last get_strong() ref (see ~TerminalPage's terminate-net note). DispatcherTimer is
+        // UI-thread-affine, so Stop() / Tick(revoke) throw RPC_E_WRONG_THREAD there — and a throw
+        // escaping a destructor => std::terminate (0xC0000409 FAST_FAIL_FATAL_APP_EXIT, the class
+        // that killed 0.6.7.6 via ~AgentManagerContent's unguarded Stop). Guarded: an unstopped
+        // timer on a dead dispatcher never ticks again, and the references still drop below.
+        try
         {
-            _timer.Tick(_token);
+            _timer.Stop();
+            if (_token)
+            {
+                _timer.Tick(_token);
+            }
         }
+        CATCH_LOG();
         _timer = nullptr;
         _token = {};
     }

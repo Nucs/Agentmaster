@@ -20,7 +20,6 @@
 #include "AgentManagerContent.h"
 #include "AgentTabOverlay.h"
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (tab "Copy >" submenu routes through it, like the overlay + Manager menus)
-#include "AgentDevTooltipNames.h" // Agentmaster (DEV ONLY): InstallDevTooltipNames — prepend each element's unique id as the first tooltip row (AgentmasterDev package only)
 #include "AgentMaster/ClaudeSpawn.h"
 #include "AgentMaster/Engine.h"
 #include "AgentMaster/HookWire.h"
@@ -801,13 +800,6 @@ namespace winrt::TerminalApp::implementation
             // changes keep them in sync (ViewChanged/SizeChanged + _OnTabItemsChanged/_OnTabSelectionChanged
             // + the lens-changed push).
             _UpdateManagerNavButtons();
-
-            // Agentmaster (DEV ONLY): append each element's unique identifier as the FIRST ROW of
-            // its tooltip, so any control can be referenced by name (hover -> read the ⟦id⟧ row ->
-            // tell the assistant). No-op outside the AgentmasterDev package (the release Agentmaster
-            // package never shows it), so this is invisible in shipped builds. One bubbling
-            // PointerMoved handler over the whole window tree (Root) — see AgentDevTooltipNames.h.
-            InstallDevTooltipNames(Root());
 
             // Agentmaster ([startup] timing): the whole first-layout cost for THIS window. Compare to
             // the +Nms anchor to see how much launch time is window setup vs. the exe-side prelude.

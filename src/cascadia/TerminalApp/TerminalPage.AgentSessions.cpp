@@ -127,6 +127,14 @@ namespace winrt::TerminalApp::implementation
         }
         _claudeMissingPromptShowing = true; // set BEFORE the first co_await so a synchronous bulk loop dedupes
 
+        // Agentmaster (terminate-net): an exception escaping this fire_and_forget (a teardown-race
+        // ShowDialog throw, XAML failing the dialog build) would std::terminate the app over an
+        // informational prompt. Contain it — and RE-ARM the dedupe flag in the catch, else a failed
+        // dialog would leave _claudeMissingPromptShowing stuck true and the not-found prompt could
+        // never show again for the window's lifetime.
+        const auto weak = get_weak();
+        try
+        {
         ContentDialog dialog;
         dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
         dialog.Title(winrt::box_value(L"Claude Code (native) not found"));
@@ -141,7 +149,6 @@ namespace winrt::TerminalApp::implementation
         dialog.CloseButtonText(L"OK");
         dialog.DefaultButton(ContentDialogButton::Close);
 
-        const auto weak = get_weak();
         const auto result = co_await presenter.ShowDialog(dialog);
         const auto strong = weak.get(); // ShowDialog awaits; re-acquire before touching state
         if (!strong)
@@ -156,6 +163,15 @@ namespace winrt::TerminalApp::implementation
                 winrt::Windows::System::Launcher::LaunchUriAsync(winrt::Windows::Foundation::Uri{ L"https://code.claude.com/docs/en/setup" });
             }
             CATCH_LOG();
+        }
+        }
+        catch (...)
+        {
+            if (const auto strong = weak.get())
+            {
+                strong->_claudeMissingPromptShowing = false; // re-arm (see the note above)
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[dialog] _PromptClaudeMissing: swallowed exception (no crash)\n");
         }
     }
 
@@ -519,6 +535,11 @@ namespace winrt::TerminalApp::implementation
         // The block below MUST stay strictly synchronous (no co_await): a fire_and_forget can resume on a
         // different thread, and releasing a std::mutex on a thread other than the one that acquired it is
         // undefined. Keep the lock_guard's scope co_await-free.
+        // Agentmaster (terminate-net): a throw in the load (sessions.json IO/parse, a bad_alloc on a
+        // huge fleet) escaping this fire_and_forget would std::terminate the app AT STARTUP. Contain +
+        // log; the lock_guard unwinds on this same thread (no co_await inside — the rule above), and
+        // eng.restored stays false on a failed load so the next window's barrier pass retries.
+        try
         {
             auto& eng = ::Agentmaster::SharedEngine();
             std::lock_guard<std::mutex> restoreGuard{ eng.restoreMutex };
@@ -555,6 +576,10 @@ namespace winrt::TerminalApp::implementation
                 }
                 eng.restored = true; // publish ONLY after the registry is fully populated (still under the lock)
             }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[restore] _RestoreClaudeSessions: swallowed exception (no crash)\n");
         }
         co_return;
     }

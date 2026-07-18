@@ -15,8 +15,8 @@
 //     writes), so every existing AgentSetTip call site feeds a LocalTooltip unchanged. A TITLE
 //     line is auto-derived from the element (its Header / string Content — the settings rows'
 //     natural labels), overridable per element via AgentSetTipTitle.
-//   * ROUTING — AttachScope(root) installs ONE bubbling PointerMoved on the SCOPE root (the
-//     InstallDevTooltipNames idiom): resolve the nearest ancestor of OriginalSource carrying a
+//   * ROUTING — AttachScope(root) installs ONE bubbling PointerMoved on the SCOPE root (one
+//     handler over the whole scope, never per element): resolve the nearest ancestor of OriginalSource carrying a
 //     tip text (innermost wins, like the floating recipe's nested-tip rule) and render it
 //     IMMEDIATELY (a side panel is out of the pointer's path, so it needs no hover-rest delay,
 //     can't flicker under the cursor, and can't eat a click). STICKY on purpose: crossing the
@@ -351,7 +351,7 @@ namespace winrt::TerminalApp::implementation
             }
             if (s->lastTarget.get() == found)
             {
-                return; // same control as the last move — no re-render (the devtip throttle idiom)
+                return; // same control as the last move — no re-render (throttle on the resolved target)
             }
             s->lastTarget = winrt::make_weak(found);
             _ShowIn(s, _DeriveTitleFor(found), text);
