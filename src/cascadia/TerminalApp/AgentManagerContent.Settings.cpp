@@ -871,6 +871,23 @@ namespace winrt::TerminalApp::implementation
             browse.Click([this](const IInspectable&, const RoutedEventArgs&) { _BrowseForClaudeExe(true); });
             panel.Children().Append(browse);
         }
+        // One-click install/migrate — shown only when NO native claude.exe is detected (label + visibility
+        // set in _RefreshSettingsForm from ClaudeInstallKind()). Opens a visible PowerShell window running
+        // `claude install` (npm-legacy) or the official claude.ai bootstrap (none); the app re-resolves on
+        // the next launch attempt / cog reopen, so no restart is needed.
+        _setClaudeInstallBtn = Button{};
+        _setClaudeInstallBtn.Content(winrt::box_value(L"Install Claude Code"));
+        _setClaudeInstallBtn.Margin(Thickness{ 0, 6, 0, 0 });
+        _setClaudeInstallBtn.Visibility(Visibility::Collapsed);
+        AgentSetTip(_setClaudeInstallBtn, L"Install or migrate to the native claude.exe in a PowerShell window \x2014 the app re-checks automatically on your next launch.");
+        _setClaudeInstallBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+            const auto kind = ::Agentmaster::ClaudeInstallKind();
+            if (kind != ::Agentmaster::ClaudeInstallState::Native)
+            {
+                ::Agentmaster::LaunchClaudeInstall(kind);
+            }
+        });
+        panel.Children().Append(_setClaudeInstallBtn);
 
         // === TESTS AUTORUNNER tab ===
         panel = autorunnerPanel;
@@ -1661,7 +1678,7 @@ namespace winrt::TerminalApp::implementation
         // Profiles::ApplyPersistedDebugMode), so a change applies on the NEXT start — matching the flag's own
         // "relaunch to persist" behaviour. On a Dev build these tools are always on: _ShowSettings shows the
         // toggle ON + disabled with a note, and OnSave skips writing it (so the forced display can't persist).
-        panel.Children().Append(Text(L"DEVELOPER", 11, true, 0.6));
+        panel.Children().Append(SettingsSeparator(L"DEVELOPER"));
         _setDebugMode = ToggleSwitch{};
         _setDebugMode.Header(winrt::box_value(L"Enable Debug Mode"));
         AgentSetTip(_setDebugMode, L"Unlock the developer Auto Testing / Tests Autorunner tools \x2014 queue prompts, auto-send them on turn-complete, the per-tab autorunner control, and the cog's Tests Autorunner tab \x2014 in this build. The durable equivalent of launching with --debug (or setting the AGENTMASTER_DEBUG environment variable). Applies after you restart Agentmaster.");
@@ -1834,6 +1851,24 @@ namespace winrt::TerminalApp::implementation
         {
             const auto& exe = ::Agentmaster::SharedEngine().claudeExePath;
             _setClaudeDetected.Text(winrt::hstring{ exe.empty() ? std::wstring{ L"Detected: none \x2014 Claude launch/fork/resume is disabled until a native claude.exe is found" } : (L"Detected: " + exe) });
+        }
+        if (_setClaudeInstallBtn)
+        {
+            // Offer the one-click fix only when a native claude.exe is missing; label it for the situation.
+            switch (::Agentmaster::ClaudeInstallKind())
+            {
+            case ::Agentmaster::ClaudeInstallState::LegacyNpm:
+                _setClaudeInstallBtn.Content(winrt::box_value(L"Run claude install (migrate to native)"));
+                _setClaudeInstallBtn.Visibility(Visibility::Visible);
+                break;
+            case ::Agentmaster::ClaudeInstallState::None:
+                _setClaudeInstallBtn.Content(winrt::box_value(L"Install native (PowerShell)"));
+                _setClaudeInstallBtn.Visibility(Visibility::Visible);
+                break;
+            default:
+                _setClaudeInstallBtn.Visibility(Visibility::Collapsed);
+                break;
+            }
         }
         if (_setDefaultMode)
         {
@@ -3288,6 +3323,32 @@ namespace winrt::TerminalApp::implementation
         buttons.HorizontalAlignment(HorizontalAlignment::Right);
         buttons.Spacing(8);
         buttons.Margin(Thickness{ 0, 8, 0, 0 });
+        // One-click install/migrate — the primary fix. Its label + tooltip are set in _ShowClaudeMissing
+        // from ClaudeInstallKind() (LegacyNpm => "Run claude install"; None => "Install native (PowerShell)");
+        // hidden when a native claude is somehow already present. Opens a VISIBLE PowerShell window running
+        // the official command so the user can watch it, then click Re-check (the gate also auto-recovers).
+        _claudeMissingInstallBtn = Button{};
+        _claudeMissingInstallBtn.Content(winrt::box_value(L"Install Claude Code"));
+        _claudeMissingInstallBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+            const auto kind = ::Agentmaster::ClaudeInstallKind();
+            if (kind == ::Agentmaster::ClaudeInstallState::Native)
+            {
+                _HideClaudeMissing(); // installed via another path while the modal was open — clear the gate
+                _ValidateLaunchBox();
+                return;
+            }
+            if (::Agentmaster::LaunchClaudeInstall(kind))
+            {
+                if (_claudeMissingStatus)
+                {
+                    _claudeMissingStatus.Text(L"Installing in a PowerShell window\x2026 when it finishes, click Re-check.");
+                }
+            }
+            else if (_claudeMissingStatus)
+            {
+                _claudeMissingStatus.Text(L"Couldn't open PowerShell \x2014 use Get Claude Code, or install manually.");
+            }
+        });
         auto getClaude = Button{};
         getClaude.Content(winrt::box_value(L"Get Claude Code"));
         AgentSetTip(getClaude, L"Open the Claude Code setup docs in your browser.");
@@ -3321,6 +3382,7 @@ namespace winrt::TerminalApp::implementation
         close.Content(winrt::box_value(L"Close"));
         AgentSetTip(close, L"Dismiss this notice \x2014 Claude launch / resume / fork stay disabled until a native claude.exe is found.");
         close.Click([this](const IInspectable&, const RoutedEventArgs&) { _HideClaudeMissing(); });
+        buttons.Children().Append(_claudeMissingInstallBtn); // leftmost = the primary one-click fix
         buttons.Children().Append(getClaude);
         buttons.Children().Append(browse);
         buttons.Children().Append(recheck);
@@ -3342,6 +3404,27 @@ namespace winrt::TerminalApp::implementation
         {
             const auto& exe = ::Agentmaster::SharedEngine().claudeExePath;
             _claudeMissingStatus.Text(winrt::hstring{ exe.empty() ? std::wstring{ L"Status: no native claude.exe detected." } : (L"Status: using " + exe) });
+        }
+        // Point the one-click install button at the RIGHT fix for the user's situation (recomputed each
+        // show — a claude may have appeared/vanished since the modal was built).
+        if (_claudeMissingInstallBtn)
+        {
+            switch (::Agentmaster::ClaudeInstallKind())
+            {
+            case ::Agentmaster::ClaudeInstallState::LegacyNpm:
+                _claudeMissingInstallBtn.Content(winrt::box_value(L"Run claude install"));
+                AgentSetTip(_claudeMissingInstallBtn, L"An npm/Node `claude` is installed but not the native build. Opens a PowerShell window and runs  claude install  to migrate it to native \x2014 then click Re-check.");
+                _claudeMissingInstallBtn.Visibility(Visibility::Visible);
+                break;
+            case ::Agentmaster::ClaudeInstallState::None:
+                _claudeMissingInstallBtn.Content(winrt::box_value(L"Install native (PowerShell)"));
+                AgentSetTip(_claudeMissingInstallBtn, L"Opens a PowerShell window and runs the official installer  irm https://claude.ai/install.ps1 | iex  (from claude.ai) \x2014 then click Re-check.");
+                _claudeMissingInstallBtn.Visibility(Visibility::Visible);
+                break;
+            default: // Native — already resolved; nothing to install
+                _claudeMissingInstallBtn.Visibility(Visibility::Collapsed);
+                break;
+            }
         }
         _claudeMissingOverlay.Visibility(Visibility::Visible);
     }

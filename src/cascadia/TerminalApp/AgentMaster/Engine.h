@@ -254,6 +254,33 @@ namespace Agentmaster
     // restart. Updates SharedEngine().claudeExePath and returns it ("" => still not detected).
     std::wstring RefreshClaudeExe(std::wstring_view overridePath);
 
+    // Agentmaster (native-exe-only policy — the "Claude not detected" install prompt). Which install
+    // situation the user is in, so the not-found UI can offer the RIGHT one-click fix:
+    //   Native    — a native claude.exe is resolved (the prompt never shows; here only defensively).
+    //   LegacyNpm — no native .exe, but a real npm/Node `claude.cmd`/`.bat` is on PATH: the fix is
+    //               `<that launcher> install` (npm -> native migration; claude is already on PATH).
+    //   None      — no claude at all: the fix is the official claude.ai native bootstrap.
+    enum class ClaudeInstallState
+    {
+        Native,
+        LegacyNpm,
+        None,
+    };
+
+    // Classify the current install situation (reads the cached claudeExePath — the not-found gates that
+    // call this have already re-resolved via EnsureClaudeAvailable — then a fresh PATH scan for a real
+    // npm launcher, excluding our shim). Cheap; UI-thread-called at prompt/settings render time.
+    ClaudeInstallState ClaudeInstallKind();
+
+    // Open a VISIBLE PowerShell window that runs the official install/migrate command for `state`, so the
+    // user watches it + can answer any prompts, then returns to Agentmaster and clicks Re-check (the gate
+    // auto-recovers on the next launch attempt anyway). LegacyNpm -> `& '<npm launcher>' install` (run by
+    // full path, bypassing our --settings shim); None (and the defensive default) -> `irm
+    // https://claude.ai/install.ps1 | iex` (the official claude.ai bootstrap — the ONLY online source, per
+    // the setup docs). Not elevated (the installer needs no admin). Best-effort; returns false if the
+    // shell couldn't be launched. Pure Win32 (ShellExecuteW) — safe to call from the UI thread.
+    bool LaunchClaudeInstall(ClaudeInstallState state);
+
     // M10: claim this window's persisted record (geometry + Manager lens + ordered tab refs), or
     // nullopt if none remains — in which case the window mints a fresh id. Pops from the shared
     // engine's unclaimed set under lock (loading windows/*.json once on first call). Each window

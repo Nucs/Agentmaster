@@ -19,6 +19,7 @@
 #include "StartupTiming.h" // [startup] phase timing — find where launch spends its time
 
 #include <windows.h>
+#include <shellapi.h> // Agentmaster: ShellExecuteW (LaunchClaudeInstall opens a visible PowerShell install window)
 
 #include <algorithm> // Agentmaster: std::min (the autosaver's debounce deadline)
 #include <atomic>
@@ -479,6 +480,82 @@ namespace Agentmaster
         e.claudeExePath = ResolveClaudeExe(overridePath);
         AppendStateLog(L"hooks.log", L"[engine] claude.exe refreshed: " + (e.claudeExePath.empty() ? std::wstring{ L"<not detected>" } : e.claudeExePath) + L"\n");
         return e.claudeExePath;
+    }
+
+    ClaudeInstallState ClaudeInstallKind()
+    {
+        // A native claude.exe is already resolved (the not-found UI won't show, but be honest if asked).
+        if (!SharedEngine().claudeExePath.empty())
+        {
+            return ClaudeInstallState::Native;
+        }
+        // No native exe. A real npm/Node claude.cmd/.bat on PATH (excluding our shim) => LegacyNpm (offer
+        // `claude install`); nothing at all => None (offer the claude.ai native bootstrap).
+        return NpmClaudeLauncherOnPath().empty() ? ClaudeInstallState::None : ClaudeInstallState::LegacyNpm;
+    }
+
+    bool LaunchClaudeInstall(ClaudeInstallState state)
+    {
+        // Build the inner PowerShell command. Everything here is SINGLE-quoted so the whole command can be
+        // wrapped once in double quotes for `-Command "..."` with no nested-quote conflict (the Windows
+        // command-line quoting trap). A launcher path with a literal ' is escaped PowerShell-style ('' ).
+        std::wstring inner;
+        if (state == ClaudeInstallState::LegacyNpm)
+        {
+            std::wstring launcher = NpmClaudeLauncherOnPath();
+            if (launcher.empty())
+            {
+                // The npm launcher vanished between detection and click — fall back to the native bootstrap.
+                inner = L"irm https://claude.ai/install.ps1 | iex";
+            }
+            else
+            {
+                std::wstring escaped;
+                escaped.reserve(launcher.size() + 8);
+                for (const wchar_t c : launcher)
+                {
+                    escaped.push_back(c);
+                    if (c == L'\'')
+                    {
+                        escaped.push_back(L'\''); // PowerShell single-quote escape: ' -> ''
+                    }
+                }
+                // Run the REAL npm launcher by full path (bypasses our --settings shim) to migrate to native.
+                inner = L"& '" + escaped + L"' install";
+            }
+        }
+        else
+        {
+            // None (and any defensive default): the official claude.ai native install (the ONLY online
+            // source per the setup docs). `irm` = Invoke-RestMethod, `iex` = Invoke-Expression.
+            inner = L"irm https://claude.ai/install.ps1 | iex";
+        }
+
+        const std::wstring psCommand =
+            L"Write-Host 'Agentmaster: installing Claude Code (native build)...' -ForegroundColor Cyan; " +
+            inner +
+            L"; Write-Host ''; Write-Host 'When it finishes, return to Agentmaster and click Re-check.' -ForegroundColor Green";
+
+        // Prefer the pwsh 7 we already resolved; else Windows PowerShell (always present, honors irm/iex).
+        std::wstring shell = SharedEngine().pwshExePath;
+        if (shell.empty())
+        {
+            shell = L"powershell.exe";
+        }
+        // -NoProfile: fast + predictable; -ExecutionPolicy Bypass: allow the irm|iex bootstrap; -NoExit:
+        // keep the window so the user can read the result before clicking Re-check.
+        const std::wstring args = L"-NoProfile -ExecutionPolicy Bypass -NoExit -Command \"" + psCommand + L"\"";
+
+        AppendStateLog(L"hooks.log",
+                       L"[claude-install] launching " + std::wstring{ state == ClaudeInstallState::LegacyNpm ? L"npm-migrate (claude install)" : L"native-bootstrap (claude.ai/install.ps1)" } + L" via " + shell + L"\n");
+
+        const auto rc = reinterpret_cast<INT_PTR>(::ShellExecuteW(nullptr, L"open", shell.c_str(), args.c_str(), nullptr, SW_SHOWNORMAL));
+        if (rc <= 32)
+        {
+            AppendStateLog(L"hooks.log", L"[claude-install] ShellExecute failed (rc=" + std::to_wstring(rc) + L")\n");
+            return false;
+        }
+        return true;
     }
 
     std::optional<WindowRecord> ClaimWindowRecord()

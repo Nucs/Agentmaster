@@ -780,6 +780,7 @@ namespace winrt::TerminalApp::implementation
         // ---- "Claude not detected" overlay (native-exe-only policy gate) ----
         winrt::Windows::UI::Xaml::Controls::Grid _claudeMissingOverlay{ nullptr }; // dimmed modal layer; shown when launch/fork is blocked by no native claude.exe
         winrt::Windows::UI::Xaml::Controls::TextBlock _claudeMissingStatus{ nullptr }; // the live detection status line (updated by Browse / Re-check)
+        winrt::Windows::UI::Xaml::Controls::Button _claudeMissingInstallBtn{ nullptr }; // one-click install: `claude install` (npm-legacy) or the claude.ai native bootstrap (none); label/visibility set in _ShowClaudeMissing from ClaudeInstallKind()
         // ---- Settings overlay (the cog dialog) ----
         winrt::Windows::UI::Xaml::Controls::Grid _settingsOverlay{ nullptr }; // dimmed modal layer over _root
         // Agentmaster (LocalTooltip, AgentLocalTooltip.h): the cog's hover-description panel — every
@@ -895,6 +896,7 @@ namespace winrt::TerminalApp::implementation
         bool _envTabIsDir{ false }; // which tab is showing (false = Global)
         winrt::Windows::UI::Xaml::Controls::TextBlock _setClaudeDetected{ nullptr }; // Agentmaster: the AUTO-DETECTED native claude.exe (read-only; "Not detected" when none)
         winrt::Windows::UI::Xaml::Controls::TextBox _setClaudeExePath{ nullptr }; // Agentmaster: explicit claude.exe override (blank = auto-detect; must be an .exe)
+        winrt::Windows::UI::Xaml::Controls::Button _setClaudeInstallBtn{ nullptr }; // Agentmaster: one-click install/migrate — shown only when no native claude.exe is detected (label from ClaudeInstallKind())
         winrt::Windows::UI::Xaml::Controls::TextBox _setCleanupDays{ nullptr }; // ENV_VARS.md §8: cleanupPeriodDays in the user's GLOBAL ~/.claude/settings.json (history retention; read/written via the ClaudeUserSettings repo, NOT AppSettings)
         // ---- UPDATES (Agentmaster updater; Updater.h) ----
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAllowPrerelease{ nullptr }; // include GitHub pre-releases in the update check (default OFF)
@@ -905,6 +907,9 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::HyperlinkButton _setUpdateChangelog{ nullptr }; // opens the AVAILABLE update's release page; shown only after a check found one
         std::wstring _lastUpdateChangelogUrl; // the available update's release page (drives _setUpdateChangelog's click)
         winrt::Windows::UI::Xaml::Controls::Button _setUninstallBtn{ nullptr }; // Agentmaster (updater): "Uninstall Agentmaster…" -> remove THIS install (per-user; profile data kept), then quit. Shown only for packaged installs.
+        // ---- DEVELOPER (Agentmaster debug escape hatch; ProfileBootstrap.h IsDebugPackage) ----
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setDebugMode{ nullptr }; // About-tab "Enable Debug Mode" — the durable --debug twin (unlocks the Auto Testing / Tests Autorunner tools in a Release build; applies after restart). FORM-owned (AppSettings.debugMode); forced ON+disabled on a Dev build.
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setDebugModeNote{ nullptr }; // caption under the toggle — "Applies after restart." / dev-build / active-now state
         winrt::Windows::UI::Xaml::Controls::TextBox _templateNameBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _templateCombo{ nullptr };
         std::vector<::Agentmaster::PlanTemplate> _templates;

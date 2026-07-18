@@ -1342,6 +1342,58 @@ try {
         return ResolveClaudeExeIn(overridePath, dirs, GetEnvW(L"USERPROFILE"));
     }
 
+    std::wstring NpmClaudeLauncherInPath(const std::vector<std::wstring>& pathDirs, std::wstring_view excludeDir)
+    {
+        // The legacy npm/Node launcher: claude.cmd (cmd/PowerShell) or claude.bat, in PATH order,
+        // returned by FULL PATH so `<launcher> install` runs the REAL npm claude (never our shim, never
+        // a PATHEXT surprise). Skip `excludeDir` (OUR prepended shim dir) so the shim's own claude.cmd,
+        // which sits first on PATH, is never mistaken for a real npm install. [Agentmaster]
+        for (const auto& raw : pathDirs)
+        {
+            const std::wstring dir = NormalizeDir(raw);
+            if (dir.empty())
+            {
+                continue;
+            }
+            if (!excludeDir.empty() &&
+                ::CompareStringOrdinal(dir.c_str(), static_cast<int>(dir.size()), excludeDir.data(), static_cast<int>(excludeDir.size()), TRUE) == CSTR_EQUAL)
+            {
+                continue; // our shim dir — not a real npm claude (both are NormalizeDir-shaped)
+            }
+            if (FileExistsNotDir(dir + L"claude.cmd"))
+            {
+                return dir + L"claude.cmd";
+            }
+            if (FileExistsNotDir(dir + L"claude.bat"))
+            {
+                return dir + L"claude.bat";
+            }
+        }
+        return {};
+    }
+
+    std::wstring NpmClaudeLauncherOnPath()
+    {
+        // Gather PATH dirs from the environment (same split as ResolveClaudeExe) and exclude our own
+        // shim dir (<stateDir>\shim, NormalizeDir-shaped so the case-insensitive compare in the core
+        // matches), then delegate to the testable core.
+        std::vector<std::wstring> dirs;
+        const std::wstring path = GetEnvW(L"PATH");
+        size_t start = 0;
+        while (start <= path.size())
+        {
+            size_t sc = path.find(L';', start);
+            if (sc == std::wstring::npos)
+            {
+                sc = path.size();
+            }
+            dirs.push_back(path.substr(start, sc - start));
+            start = sc + 1;
+        }
+        const std::wstring shimDir = NormalizeDir(AgentmasterStateDir() + L"\\shim");
+        return NpmClaudeLauncherInPath(dirs, shimDir);
+    }
+
     std::wstring MaterializeClaudeShim(const std::wstring& stateDir, const std::wstring& settingsPath)
     {
         // Resolve the real claude FIRST (PATH is still un-mutated here, so this never finds

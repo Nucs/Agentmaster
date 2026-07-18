@@ -364,6 +364,20 @@ namespace Agentmaster
     std::wstring ResolveClaudeExeIn(std::wstring_view overridePath, const std::vector<std::wstring>& pathDirs, std::wstring_view homeDir);
     std::wstring ResolveClaudeExe(std::wstring_view overridePath = {});
 
+    // Agentmaster (native-exe-only policy — the "Claude not detected" install prompt). Detect a LEGACY
+    // npm/Node claude LAUNCHER on PATH: the first `claude.cmd`/`claude.bat` found, returned as a FULL
+    // path (empty if none). This is the case that STILL shows the not-found modal even though "npm claude
+    // is installed" — a .cmd/.bat whose FollowNpmCmdToExe found no native binary behind it (the pure-Node
+    // CLI); the modal offers `<that launcher> install` (the npm->native migration) for it. Deliberately
+    // the INVERSE of ResolveClaudeExe (which only ever returns a native .exe): here we WANT the .cmd/.bat,
+    // by full path, so `claude install` runs the REAL npm launcher and bypasses our --settings shim.
+    // `excludeDir` (normalized, trailing-slash) is skipped case-insensitively — the caller passes OUR
+    // <profile>\shim dir so a legacy claude isn't falsely detected as our own prepended shim claude.cmd.
+    // `...In` is the OS-light, unit-testable core (PATH dirs in); the wrapper gathers PATH + the shim dir
+    // from the environment.
+    std::wstring NpmClaudeLauncherInPath(const std::vector<std::wstring>& pathDirs, std::wstring_view excludeDir = {});
+    std::wstring NpmClaudeLauncherOnPath();
+
     // Agentmaster (Codex managed-session support). Resolve the `codex` launcher to spawn a managed
     // Codex session, as a FULL PATH. Same ConPTY/CreateProcessW hazard as claude — a bare `codex`
     // token appends only ".exe", ignores PATHEXT, and so misses an npm `codex.cmd`, dying with

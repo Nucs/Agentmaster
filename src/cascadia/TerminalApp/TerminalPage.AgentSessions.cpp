@@ -136,6 +136,13 @@ namespace winrt::TerminalApp::implementation
         const auto weak = get_weak();
         try
         {
+        // Which one-click fix applies (npm-legacy => migrate via `claude install`; nothing => the official
+        // claude.ai native bootstrap). Computed before the dialog so the Primary button is labeled for it.
+        const auto installKind = ::Agentmaster::ClaudeInstallKind();
+        const wchar_t* const installText = (installKind == ::Agentmaster::ClaudeInstallState::LegacyNpm) ?
+                                               L"Run claude install" :
+                                               L"Install native (PowerShell)";
+
         ContentDialog dialog;
         dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
         dialog.Title(winrt::box_value(L"Claude Code (native) not found"));
@@ -143,12 +150,14 @@ namespace winrt::TerminalApp::implementation
             L"Agentmaster drives the native claude.exe, and none was found on PATH, in "
             L"%USERPROFILE%\\.local\\bin, or behind an npm claude.cmd. Launching, resuming, forking, and "
             L"adopting Claude sessions stay disabled until one is available \x2014 a pure-Node `claude` is "
-            L"not supported.\n\nInstall it: open a terminal, run  claude install , then try again \x2014 "
-            L"Agentmaster re-checks automatically, so this notice stops appearing once it's found. You can "
-            L"also point at an existing claude.exe in Settings \x2192 Claude binary." }));
-        dialog.PrimaryButtonText(L"Get Claude Code");
+            L"not supported.\n\nUse the button below to install it in a PowerShell window (or run  claude "
+            L"install  yourself), then try again \x2014 Agentmaster re-checks automatically, so this notice "
+            L"stops appearing once it's found. You can also point at an existing claude.exe in "
+            L"Settings \x2192 Claude binary." }));
+        dialog.PrimaryButtonText(installText); // the one-click install/migrate
+        dialog.SecondaryButtonText(L"Get Claude Code"); // opens the setup docs
         dialog.CloseButtonText(L"OK");
-        dialog.DefaultButton(ContentDialogButton::Close);
+        dialog.DefaultButton(ContentDialogButton::Close); // Enter/Esc = dismiss (never auto-launch an installer)
 
         const auto result = co_await presenter.ShowDialog(dialog);
         const auto strong = weak.get(); // ShowDialog awaits; re-acquire before touching state
@@ -158,6 +167,10 @@ namespace winrt::TerminalApp::implementation
         }
         strong->_claudeMissingPromptShowing = false; // dialog dismissed — re-arm for the next not-found gate
         if (result == ContentDialogResult::Primary)
+        {
+            ::Agentmaster::LaunchClaudeInstall(installKind); // open a visible PowerShell window running the install/migrate command
+        }
+        else if (result == ContentDialogResult::Secondary)
         {
             try
             {
