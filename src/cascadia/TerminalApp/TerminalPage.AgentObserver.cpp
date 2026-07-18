@@ -2351,7 +2351,14 @@ namespace winrt::TerminalApp::implementation
                 cachedMtime = it->second.mtime;
             }
             const bool wrapNewlines = _appSettings.summaryPanelWrapNewlines;
-            const bool truncate = _appSettings.summaryPanelTruncate;
+            // Agentmaster (tab tooltip): the hover card ALWAYS trims its messages, independent of the
+            // summary PANEL's global "Truncate long messages" toggle (AppSettings::summaryPanelTruncate).
+            // The tooltip is a compact, read-only card with NO button to control trimming — so turning
+            // truncation OFF in the panel (which owns the toggle) must not bloat the tooltip into a
+            // screen-tall wall of full messages. This also aligns the Claude branch with the Codex branch
+            // below, which already renders via SummaryEscapeMsg's truncate=true default. (Wrap still
+            // follows the global toggle; only trimming is pinned ON here.)
+            const bool truncate = true;
             const std::wstring codexUuid{ codexId };
             const std::wstring dir{ cwd };
 
