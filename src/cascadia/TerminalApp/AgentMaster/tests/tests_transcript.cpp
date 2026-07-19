@@ -739,6 +739,19 @@ void TestBlockedAndInterruptedStates()
     CHECK(!ShouldHoldCompletionToast(SessionState::NeedsApproval, true, true), "toast-hold: NeedsApproval never holds (external work can't answer a question)");
     CHECK(!ShouldHoldCompletionToast(SessionState::Error, true, true), "toast-hold: Error never holds");
     CHECK(!ShouldHoldCompletionToast(SessionState::Done, true, true), "toast-hold: Done (claude exited) never holds");
+    // Toast HOLD gates — SHORT-SPAN twin (the "0 seconds complete but still running" bug): a Running ->
+    // Idle/Waiting completion whose observed Running span is under kNotifySpuriousSpanMs is a suspected
+    // FLICKER (a slow-path Stop landing ~20ms after the next turn's prompt; proven live on 6e2d0b48 /
+    // 532dc9ac / e7fa7fcc / 09e226cb) and is HELD like an external-work hold -- the sweep DROPs it on the
+    // Running re-light. Span 0 (entry unseen -> unknown span) and the hard needs-you states never hold.
+    CHECK(ShouldHoldShortCompletionToast(SessionState::WaitingForInput, 25), "toast-hold(short): Waiting + a 25ms span (the 6e2d0b48 repro) holds for confirmation");
+    CHECK(ShouldHoldShortCompletionToast(SessionState::Idle, kNotifySpuriousSpanMs - 1), "toast-hold(short): Idle + a just-under-2s span holds");
+    CHECK(!ShouldHoldShortCompletionToast(SessionState::WaitingForInput, kNotifySpuriousSpanMs), "toast-hold(short): exactly at the 2s threshold is a plausible completion -> fire");
+    CHECK(!ShouldHoldShortCompletionToast(SessionState::WaitingForInput, 30000), "toast-hold(short): a long, plausible span fires immediately");
+    CHECK(!ShouldHoldShortCompletionToast(SessionState::WaitingForInput, 0), "toast-hold(short): span 0 == entry unseen (adopted mid-turn) -> UNKNOWN, not short, never held on this basis");
+    CHECK(!ShouldHoldShortCompletionToast(SessionState::NeedsApproval, 25), "toast-hold(short): NeedsApproval never holds (a question needs you regardless of how fast the turn read)");
+    CHECK(!ShouldHoldShortCompletionToast(SessionState::Done, 25), "toast-hold(short): Done (claude exited) never holds");
+    CHECK(!ShouldHoldShortCompletionToast(SessionState::Error, 25), "toast-hold(short): Error never holds");
     CHECK(DecideHeldToast(SessionState::Running, true, true, 5000) == HeldToastVerdict::Drop, "held-toast: re-lit Running -> DROP (the promotion confirmed the completion spurious)");
     CHECK(DecideHeldToast(SessionState::WaitingForInput, false, true, 5000) == HeldToastVerdict::Drop, "held-toast: archived mid-hold -> DROP (no deferred toast off a previous life)");
     CHECK(DecideHeldToast(SessionState::WaitingForInput, true, false, 5000) == HeldToastVerdict::Fire, "held-toast: signal cleared while still at rest -> FIRE (the busy-linger case, one sweep tick late)");

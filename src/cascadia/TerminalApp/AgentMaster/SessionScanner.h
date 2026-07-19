@@ -594,6 +594,34 @@ namespace Agentmaster
         return presenceWorking || subagentFresh;
     }
 
+    // Agentmaster (System notifications — the SHORT-SPAN twin of the external-work hold): the OTHER
+    // spurious-completion class. A completion whose observed Running span is implausibly short is a
+    // rapid Running -> Idle/Waiting -> Running FLICKER: a slow-path Stop hook lands ~20ms after the
+    // NEXT turn's UserPromptSubmit (the same slow-Stop race NextSessionStateOrdered's stale guard
+    // targets, but seen here as a genuine sub-second registry dip because the guard let it through),
+    // and the session re-lights Running right after. The toast would read "Has completed after 0s ..."
+    // while the session is in fact still running -- the reported bug, proven live on 6e2d0b48 /
+    // 532dc9ac / e7fa7fcc / 09e226cb (UPS->Running, a Stop 16-42ms later ->Waiting, then another
+    // UPS->Running within ~0.2-1.1s, all well inside one kScanSweepMs tick). Such a completion is HELD
+    // exactly like an external-work hold: the sweep DROPs it on the Running re-light (the primary drop
+    // is the push edge, the sweep the belt) or FIREs it with a now-plausible span once it settles (a
+    // genuinely fast turn -- rare, and a ~one-tick delay on a background toast is a fair price).
+    inline constexpr int64_t kNotifySpuriousSpanMs = 2000; // a Running span under this renders "0s"/"1s"; the completion is a suspected flicker and is HELD for confirmation rather than toasted immediately
+    // PURE: should a Running -> `target` completion be HELD purely because its observed Running span was
+    // implausibly short? Only Idle / WaitingForInput hold -- the DecideHeldToast-Keepable states, and the
+    // only ones a re-light can veto (a NeedsApproval question / an Error / an exit needs you regardless).
+    // runningSpanMs == 0 means the Running ENTRY edge was never observed (adopted mid-turn) -> the span is
+    // UNKNOWN, not short: never held on this basis (its toast omits the "after <span>" clause entirely,
+    // so it can never read "0s" and is never the reported bug).
+    inline bool ShouldHoldShortCompletionToast(SessionState target, int64_t runningSpanMs) noexcept
+    {
+        if (target != SessionState::Idle && target != SessionState::WaitingForInput)
+        {
+            return false;
+        }
+        return runningSpanMs > 0 && runningSpanMs < kNotifySpuriousSpanMs;
+    }
+
     // PURE: the per-sweep ruling on one HELD toast. Drop == the completion proved spurious (the
     // session re-lit Running — the outlived-turn promotion or a real new turn) or the session left
     // the fleet (archived); Fire == the completion stands (signal cleared, or the session moved to a
