@@ -1653,6 +1653,10 @@ namespace winrt::TerminalApp::implementation
                 // instant you look at it — kick a cheap, mtime-gated content re-read of the now-focused
                 // tab's summary panel so it isn't up to ~5 s stale (its own timer-backstop cadence).
                 _RefreshFocusedTabSummary(tab);
+                // Agentmaster (SUMMARY_JUMP.md §4, perf): mirror the new selection onto every linked
+                // overlay, so only the focused panel runs the expensive periodic jump-eligibility resolve
+                // (and the one we just switched TO resolves once, immediately).
+                _SyncOverlayFocusToTab(tab);
                 // Agentmaster (PENDING_INPUT.md): a colored tab's effective background shifts on
                 // selection (WT draws a deselected tab at 30% over the tab row, much darker), so the
                 // now-deselected and now-selected pending tabs must re-pick their "3 dots" light/dark

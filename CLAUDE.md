@@ -595,13 +595,32 @@ inside `Please deploy dev`), or a longer prompt that **backed off** onto a short
 (`tests/tests_summary_anchor.cpp`). The chain: overlay ▸ button → `TerminalPage::_JumpToPromptInSession` (resolves the tab's control
 live) → `TermControl::JumpToConversationPrompt` → `ControlCore::ResolveConversationPromptRow` (read-only:
 linearize a recent window → `ResolvePromptAnchors` → offset→row) → center via the scrollbar. **Performance
-(benchmarked in the 1005-check engine harness):** steady state **0** (resolves only on click); per-click
-**~9 ms** at a realistic ~2 MB scrollback (parity with Ctrl+Shift+F, under the read-lock), `validate`
-fast-path ~3.5 µs. Optimizations: index-written normalization (~37% off the common case), a true-absence
-membership pre-check (~8× on a scrolled-off prompt), and a recent-window haystack cap
-(`kAnchorRecentWindowChars`) bounding cost regardless of scrollback depth. Deferred (non-blocking): a flash
-highlight on landing, a mutation-id epoch cache (repeat clicks → O(1)), "end of turn" jumps (neighbor-
-derived), Codex prompts, and a context-sensitive Ctrl+F reusing the same resolve+center path.
+(benchmarked in the 1005-check engine harness):** per-click **~9 ms** at a realistic ~2 MB scrollback
+(parity with Ctrl+Shift+F, under the read-lock), `validate` fast-path ~3.5 µs. Optimizations:
+index-written normalization (~37% off the common case), a true-absence membership pre-check (~8× on a
+scrolled-off prompt), and a recent-window haystack cap (`kAnchorRecentWindowChars`) bounding cost
+regardless of scrollback depth. **The PERIODIC icon-eligibility refresh is the part that had to be gated —
+ungated, it FROZE the release app (2026-07-19; SUMMARY_JUMP.md §4a).** `_summaryTimer` is started per
+overlay by `SetSummaryEnabled`, which mirrors the GLOBAL `showSummaryPanel` — *not* tab visibility — so
+**every** linked Claude tab ran a full 5 s resolve, not just the visible one; with 19 live sessions and
+182/244-prompt conversations (most prompts scrolled off ⇒ the expensive all-miss path) the UI thread
+pegged at **~98% of a core inside `ResolvePromptAnchors`** and the window stopped pumping input entirely
+(diagnosed by IP-sampling the wedged thread: 94% in that function + its STL substring searches). Three
+gates now bound it, none weakening "never lose sync": **(1) an epoch cache** in
+`ControlCore::ResolveConversationPromptRows`, keyed on `TextBuffer::GetLastMutationId()` + an FNV-1a
+fingerprint of the prompt list (`AgentPromptListFingerprint`) — identical key ⇒ the rows provably can't
+have changed; ANY buffer write bumps the id (`GetMutableRowByOffset`), the same invariant
+`ReadPendingInputDraft`'s gate already ships on; **(2) a focus gate** —
+`AgentTabOverlay::SetTabFocused`, driven from the one tab-switch funnel via
+`TerminalPage::_SyncOverlayFocusToTab` (Manager/shell/null tab ⇒ none focused) and seeded in
+`_AttachClaudeOverlay`, so only the SELECTED tab refreshes periodically and becoming focused FORCES one
+immediate resolve; **(3) an interval floor** `kJumpEligibilityMinIntervalMs` (**2m30s**) that both
+periodic callers (the panel's 5 s tick + the page's 30 s focused refresh) pass through, so it — not the
+timers — sets the cadence. The panel REBUILD path is deliberately NOT forced (it rebuilds on every
+transcript growth); the focus transition and a click ARE (both usually free via the cache — neither a tab
+switch nor a viewport scroll mutates the buffer). Deferred (non-blocking): a flash
+highlight on landing, "end of turn" jumps (neighbor-derived), Codex prompts, moving the eligibility
+resolve off the UI thread entirely, and a context-sensitive Ctrl+F reusing the same resolve+center path.
 
 **Pending-input monitor ([`PENDING_INPUT.md`](doc/agentmaster/PENDING_INPUT.md)) — complete: detection +
 the "yes pending / no pending" observer NOTIFY + a "3 dots" animation on BOTH the tab strip and the

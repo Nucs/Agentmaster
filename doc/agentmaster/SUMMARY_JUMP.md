@@ -274,19 +274,23 @@ pure all-miss. The realistic figure runs *higher* than the synthetic rows becaus
 short prefixes with on-screen text, so the membership pre-check passes and they pay the full backoff +
 global-rfind path (a synthetic absent needle is nowhere → one scan). This is the cost of **always-full-resolve,
 no cache** (the "never lose sync" decision, point 2): fine for a per-keypress jump / alt-nav (a deliberate
-one-off), **but the periodic eligibility refresh (5 s visible / 30 s focused) runs the SAME resolve on the UI
-thread** — a recurring ~100 ms hitch on a heavy session. Follow-up if felt: move ONLY the eligibility resolve
-off the UI thread (still no cache) — the jump/nav stay synchronous.
+one-off), **but the periodic eligibility refresh ran the SAME resolve on the UI thread** — and on a heavy
+fleet that is what froze the app outright (§4a, 2026-07-19). It is now bounded by an epoch cache + a focus
+gate + a 2 m 30 s floor; the jump/nav paths stay synchronous and uncached-in-effect (any buffer change
+misses the cache). Remaining follow-up if still felt: move ONLY the eligibility resolve off the UI thread.
 
 **Production-effective ceiling ≈ the 1.84 MB row (~9 ms / ~16 ms).** `ControlCore` caps the linearized
 haystack to `kAnchorRecentWindowChars` (1.2M wchars ≈ 2.4 MB ≈ a typical full WT scrollback) before
 resolving, so even a 50k-row buffer resolves over ~the medium row, not the uncapped 9 MB figure. A prompt
 older than the window has scrolled out of practical reach anyway; the greedy cursor handles the gap.
 
-**Real-world impact is far below even that**, because the resolve runs **only on a click** (a user action,
-parity with the existing Ctrl+Shift+F search which also scans under lock on the UI thread):
-- **Steady state (idle or actively rendering): 0** — nothing resolves unless you click a jump button.
-- **Per click: ~9 ms** under the read-lock at a realistic scrollback; **0** if the epoch cache is later added and the buffer is quiet.
+**Per-click impact** (a user action, parity with the existing Ctrl+Shift+F search which also scans under
+lock on the UI thread):
+- **Per click: ~9 ms** under the read-lock at a realistic scrollback; **0** when the epoch cache hits (the
+  buffer hasn't changed since the last resolve — a repeat click, or a click right after the panel's own
+  refresh).
+- The *periodic* eligibility path is the one that must be gated — see §4a. "Steady state = 0" holds only
+  for the click path; the panel's timers are what made steady state non-zero.
 
 **Optimizations applied** (each measured):
 1. **Index-written normalization** — the dominant cost (it touches the whole haystack) writes the
@@ -309,18 +313,52 @@ the working icons are obvious. The state is computed by a **single batch resolve
 `ControlCore::ResolveConversationPromptRows` → a row (or -1) per prompt in one linearize+resolve — surfaced
 to the overlay through `TermControl::ResolveConversationPromptRows` and `TerminalPage::_JumpEligibilityInSession`.
 
-Refresh is gated to stay cheap (the user's "don't hurt performance"):
-- **On (re)build** of the panel — which only happens when the transcript grew (the existing mtime gate), so
-  it tracks buffer changes during active sessions for free.
-- **On a 5 s tick** — reusing `_summaryTimer`, which is **stopped while the panel is hidden**, so idle/hidden
-  cost is 0; a visible panel pays at most one bounded resolve per 5 s.
-- **On a 30 s tick while the TAB is FOCUSED** — `TerminalPage::_promptNavRefreshTimer` (independent of the
-  panel's visibility) re-reads the focused Claude session's prompts (mtime-gated) into `_promptNavCache` and
-  calls `AgentTabOverlay::RefreshJumpData()`, so both alt-nav and the panel icons stay in sync as the buffer
-  scrolls under a focused-but-idle session — without a keypress.
-- **After a click** — a jump makes the other icons re-check immediately (the buffer/viewport just moved).
+### The 2026-07-19 UI freeze — and the three gates that now bound this
 
-(A mutation-id epoch gate could make an idle *visible* panel free too — noted as a future optimization.)
+**What happened.** The release instance (`0.6.8.0`, 82 tabs / **19 live Claude sessions** in one window)
+stopped repainting and stopped accepting input, while its worker threads kept logging normally
+(`[observer] census` on its 5-min keepalive). The process was NOT deadlocked and NOT leaking: 438 MB
+working set, `Responding=False`, and the **UI thread pegged at ~98 % of a core** — 13.4 h of CPU over
+19.8 h of wall time. Sampling its instruction pointer (150 samples) put **94 %** inside
+`Agentmaster::ResolvePromptAnchors` and the STL substring searches it drives (`__std_find_end_impl` /
+`__std_find_trivial_impl`), symbolized against the Release PDB.
+
+**Why.** The gating above was wrong in one word: `_summaryTimer` is started per overlay by
+`SetSummaryEnabled`, which mirrors the **GLOBAL** `AppSettings::showSummaryPanel` — *not* tab
+visibility. So "stopped while the panel is hidden" only ever meant "the feature is switched off": with
+the panel on, **every linked Claude tab** ran its own 5 s eligibility resolve, not just the visible one.
+Multiply by the real cost — the two focused sessions carried **182** and **244** noise-filtered prompts,
+and most had scrolled out of the 1.2 M-char window, i.e. the expensive all-miss path (§4's measured
+~0.3 s class) — and ~19 resolves per 5 s exceeded the 5 s budget several times over. The thread never
+returned to the message pump, so the window froze permanently. It degrades *into* this state: early in
+a session N is small and the buffer shallow; it crossed the budget after ~19 h and never recovered.
+
+**The fix — three gates, none of which weakens "never lose sync":**
+1. **Epoch cache (`ControlCore`).** `ResolveConversationPromptRows` keys its result on
+   `TextBuffer::GetLastMutationId()` + an FNV-1a fingerprint of the prompt list
+   (`AgentPromptListFingerprint`). Identical key ⇒ the rows provably cannot have changed ⇒ return them
+   without scanning. Any buffer write bumps the mutation id (`GetMutableRowByOffset`), so a scroll,
+   reflow or a single new character misses the cache — this is the same invariant
+   `ReadPendingInputDraft`'s gate has been shipping on. Repeat clicks and quiet tabs become O(1).
+2. **Focus gate (`AgentTabOverlay::SetTabFocused`).** Only the window's **selected** tab runs the
+   periodic resolve. Driven from the one tab-switch funnel via `TerminalPage::_SyncOverlayFocusToTab`
+   (a Manager/shell/null tab focuses none) and seeded in `_AttachClaudeOverlay` for the
+   bound-while-already-focused case. Becoming focused **forces** one resolve, so the panel you switch to
+   is accurate immediately.
+3. **Interval floor (`kJumpEligibilityMinIntervalMs`, 2 m 30 s).** Both periodic callers land in
+   `_RefreshJumpEligibility(force=false)`, so this — not the 5 s / 30 s timers — sets the real cadence.
+
+Refresh therefore now runs:
+- **On (re)build** of the panel — *not* forced. The panel rebuilds on every transcript growth, so forcing
+  here would reinstate exactly the churn the gates exist to stop. Fresh buttons keep their default
+  opacity until the next gated pass; an unresolvable button is still clickable and re-checks on click.
+- **On the 5 s `_summaryTimer` tick** and **on the 30 s focused `_promptNavRefreshTimer`** — both subject
+  to the focus gate + the 2 m 30 s floor.
+- **On the focus transition** and **after a click** — forced (user-visible immediacy), and usually free:
+  neither a tab switch nor a viewport scroll mutates the buffer, so the epoch cache answers outright.
+
+Worst case after the fix is one resolve per 2 m 30 s on one tab (≈0.2 % of a core on the session that
+froze it), against ~19 per 5 s before.
 
 **Uninitialized-core safety (regression fix, commit `80856ae92`).** A tab restored on relaunch but never
 activated has a live `ControlCore` whose `TextBuffer` isn't created yet (`Initialize()` is gated on the

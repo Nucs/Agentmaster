@@ -3155,6 +3155,26 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (SUMMARY_JUMP.md §4, perf): mirror "which tab is selected" onto every linked overlay.
+    // The summary panel's jump-eligibility resolve is O(prompts x the 1.2M-char buffer window) and its only
+    // effect is the icon opacities of a panel you can see, but it used to run on a 5 s timer for EVERY
+    // linked overlay in the window — with ~19 live Claude tabs and 200+-prompt conversations that
+    // saturated the UI thread outright (the 2026-07-19 release freeze). AgentTabOverlay::SetTabFocused
+    // is the gate: the focused overlay resolves (once, on the transition, then on its interval floor) and
+    // the rest go quiet. `tab` may be the Manager tab / a shell tab / null — then NOTHING is focused,
+    // which is exactly right. Cheap: one map walk over the window's overlays per tab switch.
+    void TerminalPage::_SyncOverlayFocusToTab(const TerminalApp::Tab& tab)
+    {
+        const auto focusedId = tab ? _ClaudeSessionForTab(tab) : std::wstring{};
+        for (auto& [id, overlay] : _claudeOverlays)
+        {
+            if (overlay)
+            {
+                overlay->SetTabFocused(!focusedId.empty() && id == focusedId);
+            }
+        }
+    }
+
     // Agentmaster (Waiting-for-you "unread" model): stamp this session READ now. The engine gate
     // (ShouldDecayWaitingToIdle) then permits a past-timeout WaitingForInput card to demote to Idle —
     // an unread session keeps waiting until this lands. Quiet (no observer churn): the visible demote
@@ -3851,6 +3871,14 @@ namespace winrt::TerminalApp::implementation
             }
             impl->SetAgentManaged(true); // exclude this managed-session pane from broadcast input (item 2)
             _claudeOverlays[sessionId] = overlay; // replaces any prior overlay for this id
+            // Agentmaster (SUMMARY_JUMP.md §4, perf): seed the focus flag — a fresh overlay defaults to
+            // NOT focused, so a session bound while its own tab is already selected (a launch focuses the
+            // new tab, then the observer binds it a tick later — no further tab switch follows) would
+            // otherwise never run its jump-eligibility resolve. The tab-switch funnel maintains it after.
+            if (const auto focused = _GetFocusedTab())
+            {
+                overlay->SetTabFocused(_ClaudeSessionForTab(focused) == sessionId);
+            }
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[overlay] " + sessionId + L" attached\n");
         }
     }

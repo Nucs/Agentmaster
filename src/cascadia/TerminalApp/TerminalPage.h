@@ -860,6 +860,7 @@ namespace winrt::TerminalApp::implementation
         void _StopAgentFlash(const std::wstring& sessionId); // stop flashing + hide the red ring; stops the shared timer when none remain
         void _VisitTabClearFlash(const TerminalApp::Tab& tab); // visiting (selecting) a tab marks it seen -> stop its red flash (from _OnTabSelectionChanged)
         void _RefreshFocusedTabSummary(const TerminalApp::Tab& tab); // Agentmaster (TAB_OVERLAY.md summary panel): on a tab switch, kick a cheap mtime-gated content re-read of that tab's summary panel so a focused "here-and-now lens" is current instead of up to ~5s stale (from _OnTabSelectionChanged; no-op for a non-session tab / panel off / unchanged transcript)
+        void _SyncOverlayFocusToTab(const TerminalApp::Tab& tab); // Agentmaster (SUMMARY_JUMP.md §4, perf): on a tab switch, mirror the selection onto every linked overlay so ONLY the focused panel runs the expensive periodic jump-eligibility resolve (from _OnTabSelectionChanged; a Manager/shell/null tab focuses none)
         void _EnsureAgentFlashTimer(); // lazily create + (re)start the shared 600ms flash timer (a fresh burst begins on the red phase)
         void _StopAgentFlashTimer(); // stop the shared flash timer (no flashing tabs remain)
         void _OnAgentFlashTick(); // shared-timer tick: toggle the phase + show/hide every flashing tab's red RING together (the synchronized blink)

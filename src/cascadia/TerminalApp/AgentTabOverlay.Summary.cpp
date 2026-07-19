@@ -958,7 +958,7 @@ namespace winrt::TerminalApp::implementation
                             ::PlaySoundW(L"SystemAsterisk", nullptr, SND_ALIAS | SND_ASYNC);
                             self->HighlightSummaryMessage(idx); // mark the row we jumped to
                         }
-                        self->_RefreshJumpEligibility(); // a click makes the others eligible to re-check
+                        self->_RefreshJumpEligibility(true); // a click makes the others eligible to re-check (user action -> bypass the periodic floor; usually free via the epoch cache)
                     }
                 }
             });
@@ -1024,7 +1024,12 @@ namespace winrt::TerminalApp::implementation
             i = nl + 1;
         }
         flushSeg();
-        _RefreshJumpEligibility(); // dim the jump buttons whose prompt isn't currently on screen
+        // Dim the jump buttons whose prompt isn't currently on screen. NOT forced: this runs on every panel
+        // re-render, and the panel re-renders on every transcript growth — forcing here would reinstate the
+        // unbounded resolve churn the focus/interval gate exists to stop. Freshly built buttons therefore
+        // keep their default opacity until the next gated pass (or the focus transition, which forces one);
+        // a button that resolves to nothing is still clickable and re-checks on click.
+        _RefreshJumpEligibility();
         _ApplySummaryHighlight(); // re-apply the jumped-to band onto the freshly-rebuilt rows
     }
 
@@ -1053,11 +1058,43 @@ namespace winrt::TerminalApp::implementation
     // icons are visually distinct from the working ones. Called on (re)build, on the 5 s times-line tick
     // (visible-only), and after a click. Bounded + opt-in (only when the summary panel is shown), so the
     // cost is a single linearize+resolve at most every few seconds per visible panel.
-    void AgentTabOverlay::_RefreshJumpEligibility()
+    void AgentTabOverlay::_RefreshJumpEligibility(bool force)
     {
         if (!_onResolveEligibility || _jumpButtons.empty() || _summaryUserMsgs.empty())
         {
             return;
+        }
+        // Agentmaster (SUMMARY_JUMP.md §4, perf) — the two gates that keep this off the UI thread's back.
+        // The resolve behind _onResolveEligibility is O(prompts x the 1.2M-char buffer window): every
+        // prompt that has scrolled out of the buffer (most of them, on a long conversation) costs the FULL
+        // probe set, so a 244-prompt session measured ~0.3s per pass. It used to be driven by the panel's
+        // own 5 s timer on EVERY linked overlay in the window (the "visible-only" comment was aspirational
+        // -- SetSummaryEnabled starts the timer per overlay, gated only on the GLOBAL showSummaryPanel), so
+        // ~19 live Claude tabs asked for ~19 of those every 5 s. The UI thread never caught up: it wedged
+        // at ~98% of a core inside ResolvePromptAnchors and the window stopped pumping input entirely
+        // (the 2026-07-19 release freeze). Both gates are skipped for `force` -- a user action or the
+        // focus transition, where the answer must be current right now.
+        if (!force)
+        {
+            // (a) Only the SELECTED tab. The result paints nothing but this panel's icon opacities, and a
+            //     background panel's pixels aren't on screen -- switching to it forces a resolve anyway.
+            if (!_tabFocused)
+            {
+                return;
+            }
+            // (b) A floor between periodic passes. Both periodic callers (the panel's 5 s tick and the
+            //     page's 30 s focused refresh) land here, so this is what sets the real cadence.
+            const auto now = std::chrono::steady_clock::now();
+            if (_lastJumpEligibilityRun.time_since_epoch().count() != 0 &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - _lastJumpEligibilityRun).count() < kJumpEligibilityMinIntervalMs)
+            {
+                return;
+            }
+            _lastJumpEligibilityRun = now;
+        }
+        else
+        {
+            _lastJumpEligibilityRun = std::chrono::steady_clock::now();
         }
         const auto rows = _onResolveEligibility(_summaryUserMsgs);
         for (const auto& [idx, btn] : _jumpButtons)
@@ -1076,7 +1113,24 @@ namespace winrt::TerminalApp::implementation
     // reaches into privates.
     void AgentTabOverlay::RefreshJumpData()
     {
-        _RefreshJumpEligibility();
+        _RefreshJumpEligibility(); // periodic -> subject to the focus + interval gates
+    }
+
+    // Agentmaster (SUMMARY_JUMP.md §4, perf): the page's tab-selection funnel mirrors the window's selected
+    // tab onto every linked overlay. Only the focused overlay runs the periodic (expensive) eligibility
+    // resolve; the moment a tab BECOMES focused we force one so its panel is accurate immediately rather
+    // than up to kJumpEligibilityMinIntervalMs stale. Losing focus is silent -- the panel is off screen.
+    void AgentTabOverlay::SetTabFocused(bool focused)
+    {
+        if (_tabFocused == focused)
+        {
+            return;
+        }
+        _tabFocused = focused;
+        if (focused && _summaryEnabled)
+        {
+            _RefreshJumpEligibility(true);
+        }
     }
 
     // Agentmaster (TAB_OVERLAY.md summary panel): a cheap, mtime-gated content re-read from the freshest

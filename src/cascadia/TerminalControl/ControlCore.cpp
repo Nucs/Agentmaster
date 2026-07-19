@@ -756,6 +756,38 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
     }
 
+    // Agentmaster (SUMMARY_JUMP.md §4, perf): a cheap order-sensitive fingerprint of the prompt list, the
+    // second half of ResolveConversationPromptRows' epoch cache key (the first is the buffer's mutation
+    // id). FNV-1a over each message's bytes with a length/separator fold, so a changed, added, removed or
+    // REORDERED prompt misses the cache. Hashing ~200 short strings is microseconds against the ~0.3s
+    // resolve it guards.
+    static uint64_t AgentPromptListFingerprint(const std::vector<std::wstring>& msgs)
+    {
+        uint64_t h = 1469598103934665603ULL; // FNV-1a offset basis
+        const auto foldByte = [&h](uint8_t b) {
+            h ^= b;
+            h *= 1099511628211ULL;
+        };
+        const auto foldLen = [&foldByte](uint64_t v) {
+            for (int i = 0; i < 8; ++i)
+            {
+                foldByte(static_cast<uint8_t>(v >> (i * 8)));
+            }
+        };
+        foldLen(msgs.size());
+        for (const auto& m : msgs)
+        {
+            foldLen(m.size());
+            for (const auto wc : m)
+            {
+                const auto u = static_cast<uint16_t>(wc);
+                foldByte(static_cast<uint8_t>(u));
+                foldByte(static_cast<uint8_t>(u >> 8));
+            }
+        }
+        return h;
+    }
+
     // Agentmaster (SUMMARY_JUMP.md): resolve the i-th conversation prompt to a buffer row, or -1 if it
     // isn't on screen. Read-only: it linearizes a RECENT window of the buffer (rows concatenated; a hard
     // line-break adds one '\n', a soft wrap adds nothing — so a wrapped prompt stays continuous, matching
@@ -800,11 +832,34 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         const auto lock = _terminal->LockForReading();
         const auto& tb = _terminal->GetTextBuffer();
+
+        // Agentmaster (SUMMARY_JUMP.md §4, perf): the epoch cache — see _promptRowsScanValid in the
+        // header. The resolve below is O(prompts x 1.2M-char haystack); the summary panel re-asks on a
+        // timer, so without this a 200+-prompt conversation pegs the UI thread forever. The rows are a
+        // pure function of (buffer bytes, prompt list) — an unchanged mutation id + fingerprint means the
+        // previous answer is still exact, and ANY buffer write bumps the id, so sync is never lost.
+        const auto mutationId = tb.GetLastMutationId();
+        const auto msgsFingerprint = AgentPromptListFingerprint(msgs);
+        if (_promptRowsScanValid &&
+            mutationId == _promptRowsScanMutationId &&
+            msgsFingerprint == _promptRowsScanMsgsFingerprint &&
+            _promptRowsScanResult.size() == msgs.size())
+        {
+            return winrt::single_threaded_vector<int32_t>(std::vector<int32_t>{ _promptRowsScanResult });
+        }
+        const auto cacheResult = [&](std::vector<int32_t> resolved) {
+            _promptRowsScanMutationId = mutationId;
+            _promptRowsScanMsgsFingerprint = msgsFingerprint;
+            _promptRowsScanResult = resolved;
+            _promptRowsScanValid = true;
+            return winrt::single_threaded_vector<int32_t>(std::move(resolved));
+        };
+
         const auto width = (std::max)(1, tb.GetSize().Width());
         const auto lastRow = tb.GetLastNonSpaceCharacter().y;
         if (lastRow < 0)
         {
-            return winrt::single_threaded_vector<int32_t>(std::move(rows));
+            return cacheResult(std::move(rows));
         }
 
         // Cap to a recent window so the cost is bounded regardless of total scrollback depth
@@ -850,13 +905,15 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             const size_t ri = (it == rowStartOffsets.begin()) ? 0 : static_cast<size_t>((it - rowStartOffsets.begin()) - 1);
             rows[k] = rowAbs[ri];
         }
-        return winrt::single_threaded_vector<int32_t>(std::move(rows));
+        return cacheResult(std::move(rows));
     }
 
     // Single prompt -> its buffer row. Deliberately delegates to the BATCH ResolveConversationPromptRows
     // over the FULL list (then indexes) — NEVER a per-anchor resolve — so the order-preserving, duplicate-
-    // aware assignment (PromptAnchor.h / SUMMARY_JUMP.md §3) is identical to eligibility + alt-nav. Every
-    // scan re-resolves all anchors from scratch (no cache, by design — "never lose sync"). Keep it so.
+    // aware assignment (PromptAnchor.h / SUMMARY_JUMP.md §3) is identical to eligibility + alt-nav. Never
+    // resolve a single anchor on its own — keep it so. (The batch call re-resolves from scratch on every
+    // BUFFER OR PROMPT-LIST CHANGE; its epoch cache only short-circuits the case where re-resolving is
+    // provably a no-op, so "never lose sync" still holds. See _promptRowsScanValid in the header.)
     int32_t ControlCore::ResolveConversationPromptRow(const Windows::Foundation::Collections::IVector<winrt::hstring>& messages, uint32_t index)
     {
         const auto rows = ResolveConversationPromptRows(messages);

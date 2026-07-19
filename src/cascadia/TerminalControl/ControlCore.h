@@ -446,6 +446,22 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         bool _pendingInputScanValid{ false };
         winrt::hstring _pendingInputScanResult{};
 
+        // Agentmaster (SUMMARY_JUMP.md §4, perf): ResolveConversationPromptRows' epoch cache. The batch
+        // resolve is O(prompts x haystack) -- up to kAnchorRecentWindowChars (1.2M) chars scanned several
+        // times per prompt -- and the summary panel re-asks on a timer, so a long conversation (200+
+        // prompts) turned it into a permanent UI-thread hot loop (the 2026-07-19 freeze: 97% of a core
+        // inside ResolvePromptAnchors, window stopped pumping). The answer is a pure function of (buffer
+        // bytes, prompt list): when the TextBuffer's mutation id AND the message fingerprint both match
+        // the last resolve, the rows cannot have changed -- so return them instead of re-scanning. This
+        // does NOT weaken "never lose sync" (the no-cache rule the single-prompt delegate documents):
+        // ANY buffer write (output, scroll-out, reflow) bumps the mutation id and misses the cache.
+        // Only ever touched from ResolveConversationPromptRows (the window's UI thread), under the
+        // terminal read lock.
+        uint64_t _promptRowsScanMutationId{ 0 };
+        uint64_t _promptRowsScanMsgsFingerprint{ 0 };
+        bool _promptRowsScanValid{ false };
+        std::vector<int32_t> _promptRowsScanResult{};
+
         struct StashedColorScheme
         {
             std::array<COLORREF, TextColor::TABLE_SIZE> scheme;

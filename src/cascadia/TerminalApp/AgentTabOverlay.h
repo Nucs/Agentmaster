@@ -38,6 +38,7 @@
 #include <winrt/Windows.UI.Xaml.Controls.h>
 #include <winrt/Windows.System.h>
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -188,6 +189,13 @@ namespace winrt::TerminalApp::implementation
         // is closed / has no jump buttons. Call on the UI thread.
         void RefreshJumpData();
 
+        // Agentmaster (SUMMARY_JUMP.md §4, perf): tell this overlay whether its tab is the window's
+        // SELECTED one. The jump-eligibility resolve is expensive and only ever changes what a VISIBLE
+        // panel renders, so the periodic refreshes run for the focused tab alone; switching TO a tab forces
+        // one immediate resolve so its panel is accurate the moment you look at it. Page-driven from the
+        // tab-selection funnel. Call on the UI thread.
+        void SetTabFocused(bool focused);
+
         // Agentmaster (TAB_OVERLAY.md summary panel): a cheap, mtime-gated content re-read from the
         // freshest registry snapshot — the SAME reload the panel's own 5 s backstop timer performs.
         // Exposed so the page can kick it when this tab is FOCUSED (switching TO a background tab then
@@ -336,7 +344,19 @@ namespace winrt::TerminalApp::implementation
         // The jump buttons of the currently-rendered panel, paired with their 0-based prompt index, so
         // _RefreshJumpEligibility can dim the ones whose prompt no longer resolves. Rebuilt each _SetSummaryContent.
         std::vector<std::pair<int, winrt::Windows::UI::Xaml::Controls::Button>> _jumpButtons;
-        void _RefreshJumpEligibility(); // resolve all prompts -> set each jump button's opacity (match vs dim); SUMMARY_JUMP.md
+        // Resolve all prompts -> set each jump button's opacity (match vs dim); SUMMARY_JUMP.md.
+        // EXPENSIVE (O(prompts x 1.2M-char buffer window), ~0.3s on a 200+-prompt conversation), so the
+        // periodic callers are gated: `force == false` runs ONLY on the FOCUSED tab and at most once per
+        // kJumpEligibilityMinIntervalMs. `force == true` is for user actions + the focus transition, where
+        // the answer must be current immediately (and is usually free — ControlCore's epoch cache returns
+        // the previous rows outright when neither the buffer nor the prompt list moved).
+        void _RefreshJumpEligibility(bool force = false);
+        // The floor between two PERIODIC eligibility resolves (2m30s). Before this gate existed the panel's
+        // own 5 s tick x every linked tab (the "visible-only" comment was never enforced) x a 244-prompt
+        // conversation saturated the UI thread permanently — the 2026-07-19 release freeze.
+        static constexpr int64_t kJumpEligibilityMinIntervalMs = 150'000;
+        bool _tabFocused{ false }; // is this overlay's tab the window's selected one? (page-driven, SetTabFocused)
+        std::chrono::steady_clock::time_point _lastJumpEligibilityRun{}; // last resolve; default == epoch, so the first call always runs
         // The numbered-message ROW containers (the 2-col Grid), paired with their 0-based prompt index, so
         // HighlightSummaryMessage can paint a band behind the jumped-to row. Rebuilt each _SetSummaryContent.
         std::vector<std::pair<int, winrt::Windows::UI::Xaml::Controls::Grid>> _summaryMsgRows;
