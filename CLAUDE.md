@@ -598,8 +598,11 @@ linearize a recent window → `ResolvePromptAnchors` → offset→row) → cente
 (benchmarked in the 1005-check engine harness):** per-click **~9 ms** at a realistic ~2 MB scrollback
 (parity with Ctrl+Shift+F, under the read-lock), `validate` fast-path ~3.5 µs. Optimizations:
 index-written normalization (~37% off the common case), a true-absence membership pre-check (~8× on a
-scrolled-off prompt), and a recent-window haystack cap (`kAnchorRecentWindowChars`) bounding cost
-regardless of scrollback depth. **The PERIODIC icon-eligibility refresh is the part that had to be gated —
+scrolled-off prompt), a **lazy floor-hit candidate index** capping the MISS CASCADE (a floor-present
+prompt whose longer prefixes are absent pays ~2 full scans instead of one per backoff length × probe
+family — 3-5× on the freeze-shape cascade bench, results bit-identical, dense floors fall back to the
+legacy scans; `detail::FloorHitIndex`), and a recent-window haystack cap (`kAnchorRecentWindowChars`)
+bounding cost regardless of scrollback depth. **The PERIODIC icon-eligibility refresh is the part that had to be gated —
 ungated, it FROZE the release app (2026-07-19; SUMMARY_JUMP.md §4a).** `_summaryTimer` is started per
 overlay by `SetSummaryEnabled`, which mirrors the GLOBAL `showSummaryPanel` — *not* tab visibility — so
 **every** linked Claude tab ran a full 5 s resolve, not just the visible one; with 19 live sessions and

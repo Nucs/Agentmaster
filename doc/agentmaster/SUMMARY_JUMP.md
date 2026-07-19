@@ -301,9 +301,23 @@ lock on the UI thread):
    fallback (~8× on a genuine miss).
 3. **Recent-window cap** (`kAnchorRecentWindowChars`) — bounds the haystack so cost is independent of
    total scrollback depth.
+4. **Lazy floor-hit index** (`detail::FloorHitIndex`) — the **miss-cascade cap**. Every backoff needle is
+   a prefix of the same normalized first line, so ONE O(haystack) pass over the shortest (floor) prefix
+   collects a candidate superset for every longer length; built lazily on a prompt's FIRST legacy miss
+   and shared by all four probe families (in-order + global-rfind, marker-enforced + soft-fallback), so a
+   floor-present prompt whose longer prefixes are absent — the shape real conversations produce (see the
+   heavy-session note above) and the §4a freeze's unit cost — pays **~2 full scans instead of one per
+   length × family (~10-20)**. Overlapping occurrences are collected (+1 step, a true superset); a floor
+   DENSE in the haystack (> 512 candidates) aborts to the legacy vectorized scans (which handle dense
+   inputs well); results are **bit-identical by construction** (`TestPromptAnchorFloorIndex` pits the
+   indexed batch against the never-indexed single-prompt path on every stress shape). Measured on the
+   cascade bench (`resolve(cascade)`: marker-enforced floor-present misses): 3.6 → 1.1 ms (0.18 MB / 20
+   prompts), 79 → 20 ms (1.84 MB / 50), **1336 → 275 ms** (9.19 MB / 200); the present / all-miss /
+   normalize rows are unchanged — the happy path never builds the index.
 
 Not done (deliberately): a single-pass multi-pattern matcher (Aho-Corasick) for the all-miss case — the
-window cap already bounds it to ~16 ms, and the extra build cost would regress the common *present* path.
+window cap already bounds it to ~16 ms, and the extra build cost would regress the common *present* path
+(the floor-hit index above buys most of that win lazily, without touching the present path).
 
 ## 4a. Icon eligibility (dimming dead jumps)
 

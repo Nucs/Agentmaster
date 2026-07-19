@@ -55,6 +55,7 @@ int wmain()
     TestPromptAnchor();
     TestPromptAnchorEdgeCases();
     TestPromptAnchorCollisions();
+    TestPromptAnchorFloorIndex();
     TestPromptAnchorRealCorpus();
     TestSummaryUserMsgNoise();
     TestSummaryTableTrim();

@@ -520,6 +520,108 @@ void TestPromptAnchorCollisions()
     }
 }
 
+// Agentmaster (SUMMARY_JUMP.md §4): the lazy floor-prefix candidate index that caps the MISS-CASCADE
+// cost (the release-0.6.8 UI-freeze unit cost: a prompt whose floor prefix occurs in the haystack but
+// whose longer prefixes don't pays in-order + global-rfind x every backoff length x the marker
+// soft-fallback — each a full O(haystack) scan). The index must be INVISIBLE: bit-identical results to
+// the legacy scans on every shape — overlapping occurrences, the marker echo-storm, and the dense
+// (> kFloorIndexMaxHits candidates) fallback. Single-prompt equality pits ResolveOnePromptAnchor
+// (legacy scans, never indexed) against the 1-element batch (the index engages after the first miss)
+// on identical inputs, so the two paths cross-check each other.
+void TestPromptAnchorFloorIndex()
+{
+    using namespace Agentmaster;
+    std::wprintf(L"Prompt resolver floor-hit index (miss-cascade cost cap, SUMMARY_JUMP.md §4):\n");
+    const std::wstring caret(1, static_cast<wchar_t>(0x276F)); // the U+276F prompt ornament
+    AnchorOptions mk;
+    mk.promptMarkers = std::wstring{ kClaudePromptMarkers };
+
+    const auto sameMatch = [](const AnchorMatch& a, const AnchorMatch& b) {
+        const double dq = a.quality - b.quality;
+        return a.found == b.found &&
+               (!a.found || (a.offset == b.offset && a.length == b.length &&
+                             a.outOfOrder == b.outOfOrder && a.partial == b.partial &&
+                             a.needleLen == b.needleLen && dq < 1e-9 && dq > -1e-9));
+    };
+    const auto batchEqualsSingle = [&](const std::wstring& hay, const std::wstring& msg, const AnchorOptions& o) {
+        const auto one = ResolveOnePromptAnchor(hay, msg, 0, o);
+        const auto batch = ResolvePromptAnchors(hay, { msg }, o);
+        return batch.size() == 1 && sameMatch(one, batch[0]);
+    };
+
+    // Overlapping floor occurrences, happy path: the longest needle hits in-order immediately (no
+    // index ever builds) — the common case must stay byte-identical.
+    {
+        const std::wstring hay = L"filler line before\nnow aaaaaaaaaaaa tail\nfiller after\n"; // 12 a's
+        const std::wstring msg = L"aaaaaaaaaa"; // 10 a's
+        CHECK(batchEqualsSingle(hay, msg, {}), "floor-index: overlapping-run happy path == legacy");
+        const auto r = ResolvePromptAnchors(hay, { msg });
+        CHECK(r[0].found && !r[0].partial && hay.substr(r[0].offset, msg.size()) == msg,
+              "floor-index: overlapping-run lands at the run start, full quality");
+    }
+    // Overlapping floor occurrences THROUGH the index: the full needle misses (absent suffix), the
+    // floor (8 a's) has overlapping candidates at every offset of the run — collection must step by
+    // +1 so the backed-off needle still lands the run start.
+    {
+        const std::wstring hay = L"filler line before\nnow aaaaaaaaaaaa tail\nfiller after\n";
+        const std::wstring msg = L"aaaaaaaaaazz"; // 10 a's + absent tail -> len12 misses, len8 resolves
+        CHECK(batchEqualsSingle(hay, msg, {}), "floor-index: overlapping-run via index == legacy");
+        const auto r = ResolvePromptAnchors(hay, { msg });
+        CHECK(r[0].found && r[0].needleLen == 8 && r[0].offset == hay.find(L'a'),
+              "floor-index: backed-off overlapping-run lands the FIRST candidate");
+    }
+
+    // The MISS-CASCADE shape: floor-8 ("cascade ") present as unmarked echoes, every longer prefix
+    // absent, markers enforced -> the enforced in-order + global probes reject every echo and the
+    // soft fallback lands the first echo as a partial. The full 4-family cascade on both paths.
+    {
+        std::wstring hay = caret + L" some other real prompt\nassistant filler output line\n";
+        for (int i = 0; i < 30; ++i)
+        {
+            hay += L"cascade " + std::to_wstring(i) + L" echo text that diverges from the real prompt\n";
+        }
+        const std::wstring msg = L"cascade prompt full text that is nowhere rendered in this scrollback";
+        CHECK(batchEqualsSingle(hay, msg, mk), "floor-index: miss-cascade == legacy");
+        const auto r = ResolvePromptAnchors(hay, { msg }, mk);
+        CHECK(r[0].found && r[0].partial && r[0].needleLen == 8,
+              "floor-index: cascade falls back to the floor needle, partial");
+    }
+
+    // Marker echo-storm THROUGH the index: 30 unmarked floor echoes, then ONE MARKED one — the
+    // enforced candidate walk must skip every unmarked echo and land the marked occurrence in-order.
+    {
+        std::wstring hay = L"assistant preamble line\n";
+        for (int i = 0; i < 30; ++i)
+        {
+            hay += L"cascadence unmarked echo " + std::to_wstring(i) + L" diverges here\n";
+        }
+        const size_t markedLine = hay.size();
+        hay += caret + L" cascadence marked echo diverges here too\n";
+        const std::wstring msg = L"cascadence prompt full text absent from this scrollback entirely";
+        CHECK(batchEqualsSingle(hay, msg, mk), "floor-index: echo-storm == legacy");
+        const auto r = ResolvePromptAnchors(hay, { msg }, mk);
+        CHECK(r[0].found && r[0].offset > markedLine && !r[0].outOfOrder,
+              "floor-index: enforced walk skips 30 unmarked echoes, lands the marked one");
+    }
+
+    // DENSE fallback: > kFloorIndexMaxHits floor occurrences -> the index aborts to the legacy
+    // vectorized scans (which handle dense-hit inputs well) with an identical result — no cliff.
+    {
+        std::wstring hay;
+        for (int i = 0; i < 600; ++i)
+        {
+            // Contains the floor-8 ("repeated") but diverges immediately after it, so every longer
+            // backoff length (13/26/52 here) misses and only the floor needle can land.
+            hay += L"repeated echo " + std::to_wstring(i) + L" diverges\n";
+        }
+        const std::wstring msg = L"repeated floor prompt whose full text never rendered";
+        CHECK(batchEqualsSingle(hay, msg, {}), "floor-index: dense (600 candidates) == legacy");
+        const auto r = ResolvePromptAnchors(hay, { msg });
+        CHECK(r[0].found && r[0].partial && r[0].needleLen == 8,
+              "floor-index: dense case still resolves via the floor needle");
+    }
+}
+
 // Agentmaster (SUMMARY_JUMP.md §5): edge-case + crash-safety fuzz for the prompt resolver with marker
 // validation ON. The resolver feeds alt-nav + jump on the UI thread, so a pathological haystack/needle must
 // never AV / read OOB / infinite-loop / throw -- a crash here takes the whole app. Each case asserts it
@@ -781,6 +883,48 @@ static std::wstring BuildBenchHaystack(int rows, int prompts, std::vector<std::w
     return hay;
 }
 
+// The release-0.6.8 UI-freeze's UNIT-COST shape (SUMMARY_JUMP.md §4a): every prompt's FLOOR prefix
+// occurs in the haystack (as unmarked echoes) but no longer prefix does, and marker validation is
+// enforced — so each prompt pays the full in-order + global-rfind backoff cascade PLUS the marker
+// soft-fallback repeat. This is what the floor-hit index caps; the plain "all-miss" case above is
+// short-circuited by the membership pre-check and never reaches the cascade.
+static std::wstring BuildBenchCascade(int rows, int prompts, std::vector<std::wstring>& outMsgs)
+{
+    std::wstring hay;
+    hay.reserve(static_cast<size_t>(rows) * 64);
+    outMsgs.clear();
+    hay += std::wstring(1, static_cast<wchar_t>(0x276F)) + L" warmup real prompt line\n"; // enables marker enforcement
+    const auto tag = [](int p) {
+        std::wstring t = std::to_wstring(p);
+        while (t.size() < 4)
+        {
+            t.insert(t.begin(), L'0');
+        }
+        return L"p" + t + L" ";
+    };
+    const int echoes = prompts * 3;
+    const int step = (std::max)(1, rows / (std::max)(1, echoes));
+    int made = 0;
+    for (int i = 0; i < rows; ++i)
+    {
+        if (i % step == 0 && made < echoes)
+        {
+            // Contains the prompt's floor-8 ("pNNNN th") but diverges before any longer prefix.
+            hay += tag(made % prompts) + L"the-echo" + std::to_wstring(made) + L" diverges from anything real\n";
+            ++made;
+        }
+        else
+        {
+            hay += L"assistant output filler lorem ipsum dolor sit amet consectetur adipiscing elit\n";
+        }
+    }
+    for (int p = 0; p < prompts; ++p)
+    {
+        outMsgs.push_back(tag(p) + L"the real prompt text that never got rendered in this scrollback at all");
+    }
+    return hay;
+}
+
 static volatile size_t g_benchSink = 0;
 
 template<class F>
@@ -827,11 +971,19 @@ void BenchPromptAnchor()
         const double tPresent = TimeMsAvg(c.iters, [&] { const auto r = ResolvePromptAnchors(hay, msgsPresent); g_benchSink += r.size() + (r.empty() ? 0 : r[0].offset); });
         const double tMiss = TimeMsAvg(c.iters, [&] { const auto r = ResolvePromptAnchors(hay, msgsMiss); g_benchSink += r.size(); });
         const double tNorm = TimeMsAvg(c.iters, [&] { const auto n = NormalizeForMatch(hay); g_benchSink += n.size(); });
+
+        // The marker-enforced miss-cascade (the 0.6.8 freeze's unit cost; capped by the floor-hit index).
+        std::vector<std::wstring> msgsCascade;
+        const auto hayCascade = BuildBenchCascade(c.rows, c.prompts, msgsCascade);
+        Agentmaster::AnchorOptions mkBench;
+        mkBench.promptMarkers = std::wstring{ kClaudePromptMarkers };
+        const double tCascade = TimeMsAvg((std::max)(1, c.iters / 4), [&] { const auto r = ResolvePromptAnchors(hayCascade, msgsCascade, mkBench); g_benchSink += r.size(); });
         const int vIters = 200000;
         const double tValTotal = TimeMsAvg(1, [&] { for (int i = 0; i < vIters; ++i) { g_benchSink += ValidatePromptAnchor(hay, msgsPresent[0], rr[0].offset) ? 1u : 0u; } });
 
         std::wprintf(L"  %s : haystack=%6.2f MB, prompts=%3d\n", c.name, mb, c.prompts);
         std::wprintf(L"      resolve(present)=%8.3f ms   resolve(all-miss)=%8.3f ms   normalize-only=%8.3f ms\n", tPresent, tMiss, tNorm);
+        std::wprintf(L"      resolve(cascade)=%8.3f ms   (marker-enforced floor-present misses; the 0.6.8 freeze shape)\n", tCascade);
         std::wprintf(L"      validate-one    =%8.4f us   (epoch-unchanged fast path = 0)\n", (tValTotal / vIters) * 1000.0);
     }
     std::wprintf(L"  [sink %zu]\n", static_cast<size_t>(g_benchSink));

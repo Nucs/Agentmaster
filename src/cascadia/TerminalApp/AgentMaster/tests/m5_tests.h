@@ -169,6 +169,7 @@ void TestSummaryTableTrim();
 void TestPromptAnchor();
 void TestPromptAnchorEdgeCases();
 void TestPromptAnchorCollisions();
+void TestPromptAnchorFloorIndex();
 void TestPromptAnchorRealCorpus();
 void TestSummaryUserMsgNoise();
 void TestPendingInput();

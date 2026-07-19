@@ -40,7 +40,10 @@
 //    re-check at the cached offset (O(needle)); a full ResolvePromptAnchors (O(haystack)) runs only on
 //    a validate miss or a gated idle refresh — never per render frame. The dominant cost is normalizing
 //    the haystack (index-written, not push_back'd); a true-absence membership pre-check short-circuits a
-//    "scrolled-off" prompt in one scan; and the adapter caps the haystack to a recent window
+//    "scrolled-off" prompt in one scan; a LAZY FLOOR-HIT INDEX (detail::FloorHitIndex) caps the miss
+//    CASCADE — a floor-present prompt whose longer prefixes are absent pays ~2 full scans instead of one
+//    per backoff length x probe family (the release-0.6.8 UI-freeze unit cost, tests_summary_anchor's
+//    cascade bench); and the adapter caps the haystack to a recent window
 //    (kAnchorRecentWindowChars) so cost is bounded regardless of total scrollback. See SUMMARY_JUMP.md §4.
 
 #pragma once
@@ -316,6 +319,100 @@ namespace Agentmaster
             }
         }
 
+        // Agentmaster (SUMMARY_JUMP.md §4, perf) — the LAZY FLOOR-HIT INDEX, the miss-cascade cost cap.
+        // Every backoff needle is a PREFIX of the same normalized first line, so every occurrence of ANY
+        // backoff length starts at an occurrence of the SHORTEST (floor) prefix. When a prompt heads into
+        // the miss cascade (its longest needle absent — up to ~4 probe families x ~4 lengths, each a full
+        // O(haystack) scan: in-order + global-rfind, marker-enforced + the soft-fallback repeat), ONE
+        // O(haystack) pass collects the floor-prefix hit positions and every remaining probe becomes a
+        // walk of those candidates with an O(needle) verify — capping a pathological prompt at ~2 full
+        // scans instead of ~10-20. Built LAZILY on the first legacy miss so the common on-screen case
+        // (longest needle hits in-order immediately) never pays the collection. Occurrences are collected
+        // with a +1 step so OVERLAPPING occurrences are candidates too (the set must be a true superset
+        // of every longer needle's occurrence set). A haystack DENSE in the floor prefix
+        // (> kFloorIndexMaxHits candidates — e.g. a repeated-character needle over a repeated-character
+        // buffer) aborts to Dense and every probe stays on the legacy vectorized scan, which handles
+        // dense-hit inputs well (matches are found early). This cascade was the release-0.6.8 UI freeze's
+        // UNIT cost — 19 panels x a 200+-prompt conversation x ~10-20 scans per scrolled-off prompt (the
+        // caller-side epoch cache / focus gate / interval floor bound how OFTEN a resolve runs; this
+        // bounds the resolve ITSELF).
+        struct FloorHitIndex
+        {
+            uint8_t state = 0; // 0 = not built, 1 = built (hits valid), 2 = dense (use the legacy scans)
+            std::vector<size_t> hits; // ascending normalized offsets of the floor prefix (state 1 only)
+        };
+        inline constexpr size_t kFloorIndexMaxHits = 512;
+
+        inline void EnsureFloorIndex(const std::wstring& norm, const std::wstring& needle, size_t floorLen, FloorHitIndex& idx)
+        {
+            if (idx.state != 0)
+            {
+                return;
+            }
+            const auto f = std::wstring_view{ needle }.substr(0, (std::min)(floorLen, needle.size()));
+            idx.state = 1;
+            if (f.empty())
+            {
+                return; // no needle => no candidates (mirrors FindAcceptable's empty-pat npos)
+            }
+            for (size_t scan = 0;;)
+            {
+                const auto p = norm.find(f, scan);
+                if (p == std::wstring::npos)
+                {
+                    return;
+                }
+                if (idx.hits.size() >= kFloorIndexMaxHits)
+                {
+                    idx.hits.clear();
+                    idx.state = 2; // dense — the legacy scans stay cheap + equivalent here
+                    return;
+                }
+                idx.hits.push_back(p);
+                scan = p + 1; // +1, not +len: overlapping occurrences must be candidates too
+            }
+        }
+
+        // FindAcceptable over the candidate index: the same result as the legacy scan by construction —
+        // the candidate set is a superset of pat's occurrences (pat extends the floor prefix), walked in
+        // the same direction with the same marker gate; a candidate qualifies iff pat matches there.
+        inline size_t FindAcceptableIndexed(const std::wstring& norm,
+                                            std::wstring_view pat,
+                                            size_t from,
+                                            bool global,
+                                            bool enforceMarker,
+                                            std::wstring_view markers,
+                                            size_t lookback,
+                                            const FloorHitIndex& idx)
+        {
+            if (pat.empty())
+            {
+                return std::wstring::npos;
+            }
+            const auto matchesAt = [&](size_t p) noexcept {
+                return p + pat.size() <= norm.size() && norm.compare(p, pat.size(), pat) == 0;
+            };
+            if (!global)
+            {
+                for (auto it = std::lower_bound(idx.hits.begin(), idx.hits.end(), from); it != idx.hits.end(); ++it)
+                {
+                    if (matchesAt(*it) && (!enforceMarker || MarkerBefore(norm, *it, markers, lookback)))
+                    {
+                        return *it;
+                    }
+                }
+                return std::wstring::npos;
+            }
+            for (auto it = idx.hits.rbegin(); it != idx.hits.rend(); ++it)
+            {
+                if (matchesAt(*it) && (!enforceMarker || MarkerBefore(norm, *it, markers, lookback)))
+                {
+                    return *it;
+                }
+            }
+            return std::wstring::npos;
+        }
+
         // Locate `nmsg` — and, when `tryRev`, its char-reversal `rmsg` (the visual form an RTL line takes
         // in the buffer) — in `norm`, longest needle first. `global`=false searches at/after `cursor`
         // (earliest occurrence); true searches the LAST occurrence (rfind). Forward is always tried first
@@ -336,12 +433,30 @@ namespace Agentmaster
                                           const AnchorOptions& opts,
                                           bool global,
                                           bool enforceMarker,
-                                          size_t* cursorEnd)
+                                          size_t* cursorEnd,
+                                          FloorHitIndex* fwdIdx = nullptr,
+                                          FloorHitIndex* revIdx = nullptr)
         {
+            // One probe of one orientation at one needle length. Legacy-scan until a first MISS proves
+            // the backoff cascade has begun, then build the floor-hit index ONCE (per orientation; the
+            // caller owns it across the in-order / global / soft-fallback probe families of one prompt)
+            // and answer every later probe from the candidate walk. idx == nullptr, or Dense => legacy.
+            const auto probe = [&](const std::wstring& msg, size_t len, bool enforce, FloorHitIndex* idx) -> size_t {
+                const auto pat = std::wstring_view{ msg }.substr(0, len);
+                if (idx && idx->state == 1)
+                {
+                    return FindAcceptableIndexed(norm, pat, cursor, global, enforce, opts.promptMarkers, opts.markerLookback, *idx);
+                }
+                const auto p = FindAcceptable(norm, pat, cursor, global, enforce, opts.promptMarkers, opts.markerLookback);
+                if (idx && idx->state == 0 && p == std::wstring::npos)
+                {
+                    EnsureFloorIndex(norm, msg, lens.back(), *idx); // first miss — the cascade begins; index the rest
+                }
+                return p;
+            };
             for (const auto len : lens)
             {
-                const auto fpos = FindAcceptable(norm, std::wstring_view{ nmsg }.substr(0, len), cursor, global,
-                                                 enforceMarker, opts.promptMarkers, opts.markerLookback);
+                const auto fpos = probe(nmsg, len, enforceMarker, fwdIdx);
                 if (fpos != std::wstring::npos)
                 {
                     if (cursorEnd)
@@ -352,8 +467,7 @@ namespace Agentmaster
                 }
                 if (tryRev)
                 {
-                    const auto rpos = FindAcceptable(norm, std::wstring_view{ rmsg }.substr(0, len), cursor, global,
-                                                     /*enforceMarker*/ false, opts.promptMarkers, opts.markerLookback);
+                    const auto rpos = probe(rmsg, len, /*enforce*/ false, revIdx);
                     if (rpos != std::wstring::npos)
                     {
                         if (cursorEnd)
@@ -564,6 +678,13 @@ namespace Agentmaster
                 continue; // results[mi] stays not-found; cursor unchanged
             }
 
+            // Lazy floor-hit index (see detail::FloorHitIndex), shared by ALL FOUR probe families below
+            // (in-order + global, marker-enforced + soft-fallback) so a miss-cascade prompt pays ~2 full
+            // scans instead of ~10-20. Per prompt — the floor prefix differs per needle.
+            detail::FloorHitIndex fwdIdx;
+            detail::FloorHitIndex revIdx;
+            detail::FloorHitIndex* const revIdxPtr = tryRev ? &revIdx : nullptr;
+
             // Marker-PREFERRED, order-preserving resolve (SUMMARY_JUMP.md §3/§5). When enforceMarker, the
             // first two probes accept ONLY a marked occurrence (a real user-prompt render), so a match binds
             // to the prompt and not to an assistant echo of the same words: in-order first (advances the
@@ -574,12 +695,12 @@ namespace Agentmaster
             // legacy would resolve vanish. (When !enforceMarker the first probes already ARE the legacy ones,
             // so the fallback is a no-op and is skipped.)
             size_t cend = cursor;
-            AnchorMatch m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, cursor, lens, opts, /*global*/ false, enforceMarker, &cend);
+            AnchorMatch m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, cursor, lens, opts, /*global*/ false, enforceMarker, &cend, &fwdIdx, revIdxPtr);
             if (m.found)
             {
                 cursor = cend;
             }
-            else if (m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, 0, lens, opts, /*global*/ true, enforceMarker, nullptr); m.found)
+            else if (m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, 0, lens, opts, /*global*/ true, enforceMarker, nullptr, &fwdIdx, revIdxPtr); m.found)
             {
                 m.outOfOrder = true;
             }
@@ -587,12 +708,12 @@ namespace Agentmaster
             {
                 // No marked hit -> legacy (marker-agnostic) resolve: in-order (advance) else global (oo-order).
                 size_t cend2 = cursor;
-                m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, cursor, lens, opts, /*global*/ false, /*enforceMarker*/ false, &cend2);
+                m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, cursor, lens, opts, /*global*/ false, /*enforceMarker*/ false, &cend2, &fwdIdx, revIdxPtr);
                 if (m.found)
                 {
                     cursor = cend2;
                 }
-                else if (m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, 0, lens, opts, /*global*/ true, /*enforceMarker*/ false, nullptr); m.found)
+                else if (m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, 0, lens, opts, /*global*/ true, /*enforceMarker*/ false, nullptr, &fwdIdx, revIdxPtr); m.found)
                 {
                     m.outOfOrder = true;
                 }
