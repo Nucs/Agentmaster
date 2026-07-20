@@ -692,12 +692,22 @@ namespace winrt::TerminalApp::implementation
             const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
             _commandActionToken = ::Agentmaster::RegisterCommandActionHandler(_windowId, [weakThis, dispatcher](const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload) {
                 dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, sessionId, command, payload]() {
-                    if (auto self = weakThis.get())
+                    // Safeguard: a background-originated action landing on the UI thread must
+                    // never unwind unhandled (an uncaught throw here terminates the app). The
+                    // handler is internally guarded too; this is the dispatch-lambda belt.
+                    try
                     {
-                        if (command == L"handover")
+                        if (auto self = weakThis.get())
                         {
-                            self->_HandleCommandHandover(sessionId, payload);
+                            if (command == L"handover")
+                            {
+                                self->_HandleCommandHandover(sessionId, payload);
+                            }
                         }
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"command-action sink dispatch");
                     }
                 });
             });

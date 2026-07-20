@@ -8,8 +8,10 @@
 
 Engine: `AgentMaster/CommandWatch.{h,cpp}` (+ parser/scanner seams in `SessionScanner.{h,cpp}`,
 wiring in `Engine.{h,cpp}`); UI action: `TerminalPage.AgentEngine.cpp` (sink) +
-`TerminalPage.AgentSessions.cpp` (`_HandleCommandHandover`). Tests: `tests/tests_commands.cpp`
-(the `TestCommandWatch` suite) + the refined `/model`-echo invariant in `tests_transcript.cpp`.
+`TerminalPage.AgentSessions.cpp` (`_HandleCommandHandover`). Tests: `tests/tests_commands.cpp` —
+three suites (§8): `TestCommandWatch` (units + safeguard belts), `TestCommandHandoverE2E` (the
+fabricated end-to-end /handover session), `TestCommandEchoRealCorpus` (real-transcript replay) —
+plus the refined `/model`-echo invariant in `tests_transcript.cpp`. Hardening map: §7.
 
 ## 1. Why the transcript, and what a command looks like there
 
@@ -176,7 +178,87 @@ deferred over, shipped here because the feature IS the ask). The definition's lo
 lines, which the await depends on: *use the Write tool* (a shell-redirect write is invisible to
 the transcript's tool_use stream) and *name it `HANDOVER-<topic>.md`* (the leaf preference).
 
-## 7. What was deliberately NOT changed
+## 7. Hardening & safeguards
+
+The feature crosses three threads (scanner worker → engine fan-out → per-window UI dispatchers)
+and consumes transcript fields we do not control, so every seam is belt-and-suspenders — under
+the repo's *never-lose-a-swallowed-exception* policy (each catch logs through
+`LogSwallowedException` / `AgentLogCaughtException` with the VEH throw-stack ring, so a hooks.log
+line alone pins the throw site later):
+
+* **The watch is SELF-CONTAINED** — every public feed (`OnCommandSighting` / `OnFileToolWrite` /
+  `OnTurnEnd` / `Tick` / `DropSession`) runs as a function-try-block: a watch bug, a throwing
+  bound handler, or a throwing injected probe can never cost the SCANNER a reconcile pass (nor
+  the process its worker thread). The scanner's feed sites therefore carry no guards of their
+  own (documented on the class).
+* **A bound handler is caught PER FIRE** (`_fire`) — one bad handler cannot block a later fire.
+* **A throwing file probe reads as "file absent"** (`_probeFile`) — the pending survives and is
+  re-probed next Tick / swept by the deadline, instead of unwinding into the feed.
+* **The sane-path gate** (`IsSaneWatchPath`, pure + tested): a matched path flows into a log
+  line, the disk probe, and the successor's single-line launch prompt — so a resolved path
+  carrying a control character, a double quote, or absurd length (malformed or adversarial tool
+  input; none is a legal Windows path) is **rejected at the match** (logged
+  `md match REJECTED`), leaving the pending unmatched for a later sane write.
+* **Fan-out survives a dead window** — `RaiseCommandActionInWindows` catches per sink, so one
+  window's tearing-down dispatcher cannot stop the fan-out from reaching the host window.
+* **The UI dispatch lambda is guarded** (the command-action sink in `TerminalPage.AgentEngine.cpp`)
+  — a background-originated action landing on the UI thread must never unwind unhandled (an
+  uncaught throw there terminates the app); `AgentLogCaughtException` records it.
+* **`_HandleCommandHandover` is a guarded function-try** and RE-ASSERTS its inputs at action
+  time: `IsSaneWatchPath(mdPath)` again (the prompt/log belt), and the **md's continued
+  existence on disk** (non-empty, non-directory) — the file can vanish in the fire → UI-hop
+  window, and a successor pointed at nothing is worse than none (logged
+  `[handover] … md vanished before spawn`, user re-runs the command). A spawn-path failure logs
+  and leaves the nav trail's unpaired `handover-begin` as the forensics marker.
+* **`EnsureHandoverCommandFileIn` is best-effort** — a failure logs (`[persist-fail]` /
+  swallowed-exception) and engine init proceeds; the feature stays dormant until a later launch
+  succeeds.
+* Pre-existing bounds double as safeguards: the parser's own whole-chunk catch
+  (`ParseTranscriptDelta` never throws), the freshness + turn-scope + deadline + per-session-cap
+  bounds (§3), and the structural fresh-launch-only gate on the initial prompt (§5).
+
+## 8. Test coverage
+
+`tests/tests_commands.cpp`, three suites in the standalone harness (`run-m5-tests.bat`):
+
+* **`TestCommandWatch` — the units.** `ParseCommandEcho` across both real strata (current
+  name-first user line, June message-first, system/`local_command`), the markdown/path
+  predicates + the leaf preference, the parser's `Command` + `fileWritePaths` events (real
+  corpus shapes, verbatim), the full watch machine against a fabricated clock + injected probe
+  (arm / match / disk-await / FIFO / relative-path resolve / turn-end + deadline expiry /
+  freshness replay guard / per-session cap / DropSession / never-fires-twice),
+  `DeriveSuffixedTitle` (+ `DeriveForkTitle` parity), `PsDoubleQuote`, the initial-prompt
+  commandline arg (empty == byte-identical to the pre-parameter form), and
+  `EnsureHandoverCommandFileIn` under a **temp** config dir (create-if-absent; a user edit is
+  never overwritten) — never the real `~/.claude`. Plus the safeguard belts: `IsSaneWatchPath`,
+  an insane matched path rejected at the match (a later sane write still satisfies), a throwing
+  handler swallowed per fire (the watch keeps firing), a throwing probe reading as absent then
+  firing on recovery.
+* **`TestCommandHandoverE2E` — the FABRICATED session** (the design's expected transcript,
+  fabricated with real ISO timestamps and replayed through the REAL `ParseTranscriptDelta` + a
+  feed mapping kept in lockstep with `_readDelta`'s): scenario A the happy path — echo →
+  assistant `Write(HANDOVER-*.md)` → tool_result → `end_turn`, asserted event shape
+  (1 Command + 2 Assistant + 1 ToolResult, **0 UserPrompt**), fired once via the **DEFAULT
+  GetFileAttributesExW probe against a real on-disk md** (the deployed code path), args riding
+  the fire; plus a chunked scanner-style parse (awkward split points, partial-line re-reads)
+  proving event-sequence equivalence with the whole-parse. Scenario B: a clarification round
+  still fires (the 2-turn window). Scenario C: no md within 2 turns → expired, no fire, no
+  leak. Scenario D: **two /handovers in one conversation → two fires**, each with its own
+  md + args (the explicit repeatability requirement). Scenario E: the same session replayed
+  with 2-hour-old timestamps (the restart/adopt history read) never arms — no ghost successor
+  tabs on reopen.
+* **`TestCommandEchoRealCorpus` — the REAL corpus** (guarded; `[info]`-skips on a machine
+  without `~/.claude`): the newest ~120 on-disk transcripts (2 MB heads, whole-line-safe)
+  line-scanned for genuine command echoes and Write-tool lines, each replayed through the real
+  parser — asserting **every** echo parses to a `Command` event, **zero** echoes leak a turn
+  event (the /model false-Running invariant, corpus-wide), timestamps parse (the freshness
+  guard's input), and every real `Write` tool_use yields its `file_path`. On this machine's
+  corpus at authoring time: 54 user-echo + 22 system-echo + 60 Write lines, all green.
+
+The pre-existing `/model`-echo test in `tests_transcript.cpp` pins the §2 invariant from the
+state-machine side (no TURN event; the echo reads back as the non-turn `Command` event).
+
+## 9. What was deliberately NOT changed
 
 * **State machine untouched** — a command echo remains a non-event (§2); the successor's
   `Running` comes from its own real `UserPromptSubmit`.
@@ -187,7 +269,7 @@ the transcript's tool_use stream) and *name it `HANDOVER-<topic>.md`* (the leaf 
 * **Observe-only externals excluded** — the scanner reconciles registry sessions only; an
   external claude's `/handover` never fires (we host no tab to anchor the successor to).
 
-## 8. Follow-ups (non-blocking)
+## 10. Follow-ups (non-blocking)
 
 * A push fast-path (the `UserPromptSubmit` hook's prompt field) behind the same feed, dedup by
   sighting identity, for sub-second latency.

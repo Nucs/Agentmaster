@@ -144,6 +144,22 @@ namespace Agentmaster
         return !path.empty() && (path[0] == L'\\' || path[0] == L'/'); // rooted on the current drive
     }
 
+    bool IsSaneWatchPath(std::wstring_view path)
+    {
+        if (path.empty() || path.size() > kWatchMaxPathChars)
+        {
+            return false;
+        }
+        for (const wchar_t c : path)
+        {
+            if (c < 0x20 || c == L'"')
+            {
+                return false; // control char / quote: never a real Windows path — reject at the match, not downstream
+            }
+        }
+        return true;
+    }
+
     std::wstring PickMarkdownWritePath(const std::vector<std::wstring>& paths, std::wstring_view preferLeafContains)
     {
         std::wstring firstMd;
@@ -200,7 +216,18 @@ namespace Agentmaster
     {
         if (_fileProbe)
         {
-            return _fileProbe(path);
+            // Safeguard: an injected probe (tests, future callers) that THROWS reads as "file
+            // absent" — the pending stays and is re-probed next Tick / swept by the deadline —
+            // instead of unwinding into the feed (whose own catch would abort the whole batch).
+            try
+            {
+                return _fileProbe(path);
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"CommandWatch::_probeFile");
+                return false;
+            }
         }
         WIN32_FILE_ATTRIBUTE_DATA fad{};
         if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
@@ -215,6 +242,7 @@ namespace Agentmaster
     }
 
     void CommandWatch::OnCommandSighting(const std::wstring& sessionId, const SlashCommand& cmd, int64_t lineTsMs, int64_t nowMs)
+    try
     {
         if (sessionId.empty() || cmd.name.empty())
         {
@@ -269,8 +297,13 @@ namespace Agentmaster
         }
         AppendStateLog(L"hooks.log", L"[cmd] /" + cmd.name + L" sighted " + ShortId(sessionId) + L" args=\"" + argsPreview + L"\" (awaiting md)\n");
     }
+    catch (...)
+    {
+        LogSwallowedException(L"CommandWatch::OnCommandSighting"); // self-contained: the scanner pass survives any watch failure
+    }
 
     void CommandWatch::OnFileToolWrite(const std::wstring& sessionId, const std::vector<std::wstring>& paths, const std::wstring& sessionCwd, int64_t nowMs)
+    try
     {
         if (sessionId.empty() || paths.empty())
         {
@@ -299,8 +332,19 @@ namespace Agentmaster
                         joined += pick;
                         pick = std::move(joined);
                     }
-                    it->matchedPath = std::move(pick);
-                    matchedLog = L"[cmd] /" + it->command + L" md matched " + ShortId(sessionId) + L" path=" + it->matchedPath + L"\n";
+                    // Safeguard: the RESOLVED path flows into a log line, the disk probe, and the
+                    // successor's single-line launch prompt — a control char / quote / unbounded
+                    // length (malformed or adversarial tool input; none is a legal Windows path)
+                    // is rejected HERE, leaving the pending unmatched for a later, sane write.
+                    if (IsSaneWatchPath(pick))
+                    {
+                        it->matchedPath = std::move(pick);
+                        matchedLog = L"[cmd] /" + it->command + L" md matched " + ShortId(sessionId) + L" path=" + it->matchedPath + L"\n";
+                    }
+                    else
+                    {
+                        matchedLog = L"[cmd] /" + it->command + L" md match REJECTED " + ShortId(sessionId) + L" (insane path: control char/quote/oversize)\n";
+                    }
                 }
             }
             ready = _takeReadyLocked(nowMs); // the common case: the file is already on disk by parse time
@@ -311,8 +355,13 @@ namespace Agentmaster
         }
         _fire(ready);
     }
+    catch (...)
+    {
+        LogSwallowedException(L"CommandWatch::OnFileToolWrite"); // self-contained: the scanner pass survives any watch failure
+    }
 
     void CommandWatch::OnTurnEnd(const std::wstring& sessionId)
+    try
     {
         std::vector<std::wstring> expired;
         {
@@ -338,8 +387,13 @@ namespace Agentmaster
             AppendStateLog(L"hooks.log", line);
         }
     }
+    catch (...)
+    {
+        LogSwallowedException(L"CommandWatch::OnTurnEnd"); // self-contained: the scanner pass survives any watch failure
+    }
 
     void CommandWatch::Tick(int64_t nowMs)
+    try
     {
         std::vector<std::pair<Pending, MarkdownReadyHandler>> ready;
         std::vector<std::wstring> expired;
@@ -368,12 +422,21 @@ namespace Agentmaster
         }
         _fire(ready);
     }
+    catch (...)
+    {
+        LogSwallowedException(L"CommandWatch::Tick"); // self-contained: the scanner pass survives any watch failure
+    }
 
     void CommandWatch::DropSession(const std::wstring& sessionId)
+    try
     {
         std::lock_guard lk{ _mtx };
         _pending.erase(std::remove_if(_pending.begin(), _pending.end(), [&](const Pending& p) { return p.sessionId == sessionId; }),
                        _pending.end());
+    }
+    catch (...)
+    {
+        LogSwallowedException(L"CommandWatch::DropSession"); // self-contained: the scanner pass survives any watch failure
     }
 
     void CommandWatch::SetFileProbe(std::function<bool(const std::wstring&)> probe)

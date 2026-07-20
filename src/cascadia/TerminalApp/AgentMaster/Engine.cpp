@@ -954,7 +954,17 @@ namespace Agentmaster
         }
         for (const auto& fn : sinks)
         {
-            fn(sessionId, command, payload);
+            // Safeguard: one window's sink failing (a tearing-down dispatcher's RunAsync throw,
+            // a dead apartment) must not stop the fan-out — the HOST window's sink may be later
+            // in the list, and dropping it would silently swallow the whole command action.
+            try
+            {
+                fn(sessionId, command, payload);
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"RaiseCommandActionInWindows sink");
+            }
         }
     }
 

@@ -740,9 +740,11 @@ tag no session carries lists at **·0** (sorts last).
   are same-window instant; another window catches up on next bind/launch/gather (the panel/editor/chips always
   read the store fresh).
 
-**Slash-command bindings + /handover ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented:
-engine-tested (2111/2111 incl. the new `TestCommandWatch` suite) + lib-compiled green; rides the next
-deploy cycle.** Bind to `/commands` the user TYPES into a managed Claude session and AWAIT the session's
+**Slash-command bindings + /handover ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
+HARDENED: engine-tested (2139/2139 — the `TestCommandWatch` units + safeguard belts, the FABRICATED
+end-to-end `/handover` session `TestCommandHandoverE2E`, and the REAL-corpus echo replay
+`TestCommandEchoRealCorpus`) + lib-compiled green; rides the next deploy cycle.** Bind to `/commands`
+the user TYPES into a managed Claude session and AWAIT the session's
 follow-up activity — async, bounded, zero state-machine impact. A typed command's transcript ECHO (a
 `type:"user"` line carrying `<command-name>/x</command-name>` + `<command-args>` — current Claude Code
 writes even built-ins this way; the older `system/local_command` stratum parses too, order-agnostic
@@ -770,7 +772,22 @@ commandline's positional prompt** (`BuildClaudeCommandline(..., initialPrompt)`,
 window; the prompt fires a real `UserPromptSubmit` so Running + the record ride the normal push path;
 structurally dropped on any restore/resume. Repeatable — every /handover in a conversation spawns its
 own successor. Logs: `[cmd]`/`[cmd-fire]`/`[cmd-expire]` + the `[nav] handover-begin ↔ handover-done`
-pair. Deferred: a hook push fast-path, more bindings/await shapes, a cog off-switch (COMMANDS.md §8).
+pair. **Safeguards (COMMANDS.md §7, all under the never-lose-a-swallowed-exception policy):** every
+CommandWatch feed is a SELF-CONTAINED function-try (a watch bug / throwing handler / throwing probe can
+never cost the scanner a pass), handlers caught PER FIRE, a throwing probe reads "file absent"
+(retried), the **sane-path gate** (`IsSaneWatchPath` — control chars / quotes / oversize rejected AT
+THE MATCH, since the path flows into logs + the successor's launch prompt), per-sink catch in the
+fan-out (a dead window's dispatcher can't stop the host window's sink), the UI dispatch lambda +
+`_HandleCommandHandover` guarded (`AgentLogCaughtException`) with the md's existence + path sanity
+RE-ASSERTED at action time (a vanished md drops with `[handover] … md vanished` instead of spawning a
+successor pointed at nothing), and the command-definition write best-effort (engine init never
+derails). **Coverage (COMMANDS.md §8):** a fabricated expected-behavior `/handover` transcript (real
+ISO timestamps) replayed through the REAL parser + the `_readDelta` feed mapping + the DEFAULT disk
+probe — happy path (asserted event shape, one fire), clarification round, no-md expiry, TWO handovers
+in one conversation, stale restart replay (never arms), and chunked scanner-style parse equivalence —
+plus a guarded REAL-corpus sweep (newest ~120 transcripts: at authoring 54 user-echo + 22 system-echo
++ 60 Write-tool lines — every echo parses to a Command event, ZERO turn-event leaks corpus-wide).
+Deferred: a hook push fast-path, more bindings/await shapes, a cog off-switch (COMMANDS.md §10).
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single

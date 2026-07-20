@@ -98,6 +98,8 @@ int wmain()
     TestConversationLineage();
     TestAnalyzeFootprint();
     TestCommandWatch();
+    TestCommandHandoverE2E();
+    TestCommandEchoRealCorpus();
     TestSessionSearch();
     TestProcessInspectLive();
     TestTeammateLiveCorpus();

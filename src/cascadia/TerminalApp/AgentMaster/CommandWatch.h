@@ -100,8 +100,26 @@ namespace Agentmaster
     // messages, first-seen still wins (we cannot hold an armed await hostage to a name).
     std::wstring PickMarkdownWritePath(const std::vector<std::wstring>& paths, std::wstring_view preferLeafContains);
 
+    // PURE (safeguard): is this a path we are willing to MATCH, probe, and hand to an action —
+    // non-empty, bounded (<= kWatchMaxPathChars), and free of control characters and double
+    // quotes? A matched path flows into a log line, a disk probe, and ultimately the successor's
+    // single-line launch prompt — a transcript field carrying a newline / quote / NUL (malformed
+    // or adversarial tool input; none is legal in a real Windows path) must be rejected at the
+    // MATCH, not discovered downstream. Applied to the resolved path in OnFileToolWrite.
+    inline constexpr size_t kWatchMaxPathChars = 4096;
+    bool IsSaneWatchPath(std::wstring_view path);
+
     // Binds slash commands to awaited follow-up activity. One process-wide instance, owned by the
     // Engine beside the scanner that feeds it (Engine::commandWatch).
+    //
+    // EXCEPTION CONTAINMENT (safeguard): every public feed (OnCommandSighting / OnFileToolWrite /
+    // OnTurnEnd / Tick / DropSession) is SELF-CONTAINED — its body runs under try/catch and a
+    // failure is logged (LogSwallowedException, the never-lose-a-swallowed-exception policy) and
+    // swallowed, so the SCANNER WORKER can never lose a reconcile pass (or the process a thread)
+    // to a watch bug, a throwing injected probe, or a throwing bound handler. A bound handler is
+    // additionally caught PER FIRE (_fire), so one bad handler cannot block a later fire, and a
+    // throwing injected file probe reads as "file absent" (retried next Tick) rather than
+    // propagating. The scanner's own feed sites therefore need no guards of their own.
     class CommandWatch
     {
     public:

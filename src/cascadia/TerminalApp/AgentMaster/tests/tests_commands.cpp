@@ -10,6 +10,14 @@
 //   * DeriveSuffixedTitle (the generalized fork-title derivation the /handover successor shares)
 //   * BuildClaudeCommandline's initial-prompt positional arg + PsDoubleQuote
 //   * EnsureHandoverCommandFileIn (create-if-absent under a temp config dir — never the real one)
+//   * safeguard belts (COMMANDS.md §7): IsSaneWatchPath + insane-match rejection, a throwing
+//     handler swallowed per fire, a throwing probe reading as absent then recovering
+//   * TestCommandHandoverE2E — the FABRICATED expected-behavior /handover session (real ISO
+//     timestamps) through the REAL parser + the _readDelta feed mapping + the DEFAULT disk probe:
+//     happy path / clarification round / no-md expiry / two handovers in one conversation /
+//     stale restart replay / chunked scanner-style parse equivalence
+//   * TestCommandEchoRealCorpus — REAL ~/.claude transcripts replayed (guarded, [info]-skips):
+//     every echo -> a Command event, zero turn-event leaks, Write lines yield file_path
 
 #include "m5_tests.h"
 
@@ -17,8 +25,11 @@
 #include "../SessionScanner.h" // ParseTranscriptDelta / TranscriptEvent
 
 #include <algorithm>
+#include <ctime>
 #include <fstream>
 #include <iterator>
+#include <stdexcept>
+#include <string_view>
 
 using namespace Agentmaster;
 
@@ -233,6 +244,68 @@ void TestCommandWatch()
         CHECK(w.PendingCount() == kCommandMaxPendingPerSession, "per-session cap bounds pendings (oldest evicted)");
     }
 
+    // ---- safeguards: sane-path gate, throwing handler, throwing probe ----
+    {
+        CHECK(IsSaneWatchPath(L"K:\\r\\HANDOVER-x.md"), "sane path accepted");
+        CHECK(!IsSaneWatchPath(L""), "empty path rejected");
+        CHECK(!IsSaneWatchPath(L"K:\\r\\bad\npath.md"), "embedded newline rejected (never a real Windows path)");
+        CHECK(!IsSaneWatchPath(L"K:\\r\\bad\"quote.md"), "embedded quote rejected");
+        CHECK(!IsSaneWatchPath(std::wstring(kWatchMaxPathChars + 1, L'a')), "oversize path rejected");
+    }
+    {
+        // An INSANE matched path (control char smuggled through a tool input) is rejected AT THE
+        // MATCH — the pending stays unmatched and a later sane write still satisfies it.
+        CommandWatch w;
+        std::wstring firedPath;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring& md, const std::wstring&) { firedPath = md; });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\evil\nHANDOVER-a.md" }, L"K:\\r", now);
+        CHECK(firedPath.empty() && w.PendingCount() == 1, "insane path rejected at match; pending stays unmatched");
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-b.md" }, L"K:\\r", now);
+        CHECK(firedPath == L"K:\\r\\HANDOVER-b.md", "a later sane write still satisfies the pending");
+    }
+    {
+        // A THROWING bound handler is caught per fire (LogSwallowedException) — the watch stays
+        // fully functional for the next sighting/fire.
+        CommandWatch w;
+        int calls = 0;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring&, const std::wstring&) {
+            if (++calls == 1)
+            {
+                throw std::runtime_error("handler boom");
+            }
+        });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-1.md" }, L"K:\\r", now);
+        CHECK(calls == 1 && w.PendingCount() == 0, "throwing handler swallowed; fire consumed");
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-2.md" }, L"K:\\r", now);
+        CHECK(calls == 2, "the watch keeps firing after a handler throw (self-contained)");
+    }
+    {
+        // A THROWING injected probe reads as "file absent" — the pending survives and fires once
+        // the probe stops throwing (the retried-next-Tick contract).
+        CommandWatch w;
+        int fired = 0;
+        bool probeThrows = true;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring&, const std::wstring&) { ++fired; });
+        w.SetFileProbe([&](const std::wstring&) -> bool {
+            if (probeThrows)
+            {
+                throw std::runtime_error("probe boom");
+            }
+            return true;
+        });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-x.md" }, L"K:\\r", now);
+        CHECK(fired == 0 && w.PendingCount() == 1, "throwing probe reads absent; pending kept");
+        probeThrows = false;
+        w.Tick(now + 1'000);
+        CHECK(fired == 1 && w.PendingCount() == 0, "pending fires once the probe recovers");
+    }
+
     // ---- DeriveSuffixedTitle (the generalized fork-title derivation) ----
     {
         CHECK(DeriveSuffixedTitle(L"Obs", L"handover") == L"Obs (handover)", "first handover appends the group");
@@ -286,5 +359,453 @@ void TestCommandWatch()
         ::DeleteFileW(p1.c_str());
         ::RemoveDirectoryW((cfg + L"\\commands").c_str());
         ::RemoveDirectoryW(cfg.c_str());
+    }
+}
+
+namespace
+{
+    // Unix ms -> the transcript's ISO-Z stamp ("2026-07-20T10:00:00.000Z"). The fabricated
+    // session writes REAL timestamps so the watch's freshness gate exercises for real.
+    std::wstring IsoZ(int64_t unixMs)
+    {
+        const __time64_t secs = static_cast<__time64_t>(unixMs / 1000);
+        tm g{};
+        _gmtime64_s(&g, &secs);
+        wchar_t buf[40];
+        swprintf_s(buf, L"%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+                   g.tm_year + 1900, g.tm_mon + 1, g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec,
+                   static_cast<int>(unixMs % 1000));
+        return buf;
+    }
+
+    int64_t WallNowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    // Escape a wstring for embedding inside a JSON string literal within a fabricated line.
+    std::wstring JsonEsc(std::wstring_view s)
+    {
+        std::wstring out;
+        for (const wchar_t c : s)
+        {
+            if (c == L'\\' || c == L'"')
+            {
+                out.push_back(L'\\');
+                out.push_back(c);
+            }
+            else if (c == L'\n')
+            {
+                out += L"\\n";
+            }
+            else if (c == L'\r')
+            {
+                out += L"\\r";
+            }
+            else
+            {
+                out.push_back(c);
+            }
+        }
+        return out;
+    }
+
+    // --- the fabricated transcript lines (the EXPECTED /handover session shape) ---
+    std::wstring FabUserEcho(const std::wstring& sid, const std::wstring& args, int64_t tsMs)
+    {
+        // The CURRENT (2026-07) echo shape verbatim: name tag first, indented message/args tags.
+        return L"{\"parentUuid\":\"p0\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/handover</command-name>\\n            <command-message>handover</command-message>\\n            <command-args>" +
+               JsonEsc(args) + L"</command-args>\"},\"uuid\":\"u-echo\",\"timestamp\":\"" + IsoZ(tsMs) + L"\",\"sessionId\":\"" + sid + L"\",\"cwd\":\"K:\\\\repo\",\"version\":\"2.1.190\",\"gitBranch\":\"agentmaster\"}\n";
+    }
+    std::wstring FabAssistantWrite(const std::wstring& mdPath, int64_t tsMs, const std::wstring& uuid)
+    {
+        // Mid-turn assistant message: a text block + the Write tool_use (stop_reason tool_use).
+        return L"{\"parentUuid\":\"u-echo\",\"isSidechain\":false,\"type\":\"assistant\",\"message\":{\"model\":\"claude-fable-5\",\"role\":\"assistant\",\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"text\",\"text\":\"Writing the handover document now.\"},{\"type\":\"tool_use\",\"id\":\"toolu_fab01\",\"name\":\"Write\",\"input\":{\"file_path\":\"" +
+               JsonEsc(mdPath) + L"\",\"content\":\"# Handover\\n\\nGoal, state, next steps...\"}}]},\"uuid\":\"" + uuid + L"\",\"timestamp\":\"" + IsoZ(tsMs) + L"\"}\n";
+    }
+    std::wstring FabToolResult(int64_t tsMs)
+    {
+        return L"{\"parentUuid\":\"a-write\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_fab01\",\"type\":\"tool_result\",\"content\":\"File created successfully.\"}]},\"uuid\":\"u-result\",\"timestamp\":\"" + IsoZ(tsMs) + L"\"}\n";
+    }
+    std::wstring FabAssistantEnd(const std::wstring& text, int64_t tsMs, const std::wstring& uuid)
+    {
+        return L"{\"parentUuid\":\"u-result\",\"isSidechain\":false,\"type\":\"assistant\",\"message\":{\"model\":\"claude-fable-5\",\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"" +
+               JsonEsc(text) + L"\"}]},\"uuid\":\"" + uuid + L"\",\"timestamp\":\"" + IsoZ(tsMs) + L"\"}\n";
+    }
+    std::wstring FabUserPrompt(const std::wstring& text, int64_t tsMs)
+    {
+        return L"{\"parentUuid\":\"a-q\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"" +
+               JsonEsc(text) + L"\"},\"uuid\":\"u-answer\",\"timestamp\":\"" + IsoZ(tsMs) + L"\"}\n";
+    }
+
+    // Mirror SessionScanner::_readDelta's PRIMED feed mapping exactly (the one glue this harness
+    // replicates, kept in lockstep with the scanner's event loop; COMMANDS.md testing section):
+    // Command -> OnCommandSighting; assistant -> OnFileToolWrite then (terminal) OnTurnEnd;
+    // a user interrupt marker -> OnTurnEnd. Nothing else feeds.
+    void FeedParsedEvents(CommandWatch& w, const std::wstring& sid, const std::wstring& cwd, const TranscriptParse& parsed, int64_t nowMs)
+    {
+        for (const auto& ev : parsed.events)
+        {
+            if (ev.kind == TranscriptEvent::Kind::Command)
+            {
+                w.OnCommandSighting(sid, SlashCommand{ ev.commandName, ev.commandArgs }, ev.lineTsMs, nowMs);
+            }
+            else if (ev.kind == TranscriptEvent::Kind::Assistant)
+            {
+                if (!ev.fileWritePaths.empty())
+                {
+                    w.OnFileToolWrite(sid, ev.fileWritePaths, cwd, nowMs);
+                }
+                if (IsTerminalStopReason(ev.stopReason))
+                {
+                    w.OnTurnEnd(sid);
+                }
+            }
+            else if (ev.kind == TranscriptEvent::Kind::UserPrompt && IsUserInterruptMarker(ev.text))
+            {
+                w.OnTurnEnd(sid);
+            }
+        }
+    }
+}
+
+void TestCommandHandoverE2E()
+{
+    std::wprintf(L"/handover fabricated session (end-to-end: parse -> feed -> fire, real disk probe):\n");
+    const int64_t now = WallNowMs();
+    const std::wstring sid = L"fab-handover-session";
+
+    // A REAL md on disk in a temp dir, so scenario A runs the DEFAULT GetFileAttributesExW probe
+    // (no injection) — the same code the deployed app runs.
+    wchar_t tmp[MAX_PATH];
+    ::GetTempPathW(MAX_PATH, tmp);
+    const std::wstring dir = std::wstring{ tmp } + L"am-handover-e2e";
+    ::CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring mdPath = dir + L"\\HANDOVER-commandwatch.md";
+    {
+        std::ofstream f(std::filesystem::path{ mdPath }, std::ios::binary | std::ios::trunc);
+        f << "# Handover\n\nGoal, state, decisions, next steps.\n";
+    }
+
+    // ---- scenario A (the happy path, exactly the designed flow): /handover echo -> assistant
+    //      Write(HANDOVER-*.md) -> tool_result -> end_turn. ONE fire, real disk probe. ----
+    {
+        const std::wstring content =
+            FabUserEcho(sid, L"wrap up the CommandWatch work; see COMMANDS.md", now - 3000) +
+            FabAssistantWrite(mdPath, now - 2000, L"a-write") +
+            FabToolResult(now - 1500) +
+            FabAssistantEnd(L"Handover written. Ending the turn here.", now - 1000, L"a-end");
+        const auto parsed = ParseTranscriptDelta(content);
+        CHECK(parsed.consumed == content.size(), "fabricated session parses whole (every line newline-terminated)");
+        // The expected event shape of the designed flow:
+        size_t cCmd = 0, cAsst = 0, cToolRes = 0, cUser = 0;
+        for (const auto& ev : parsed.events)
+        {
+            cCmd += ev.kind == TranscriptEvent::Kind::Command;
+            cAsst += ev.kind == TranscriptEvent::Kind::Assistant;
+            cToolRes += ev.kind == TranscriptEvent::Kind::ToolResult;
+            cUser += ev.kind == TranscriptEvent::Kind::UserPrompt;
+        }
+        CHECK(cCmd == 1 && cAsst == 2 && cToolRes == 1 && cUser == 0, "expected event shape: 1 Command + 2 Assistant + 1 ToolResult, 0 UserPrompt (the echo is not a prompt)");
+
+        CommandWatch w; // DEFAULT probe — the real GetFileAttributesExW path
+        std::vector<FiredHandover> fired;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& s, const std::wstring& md, const std::wstring& args) {
+            fired.push_back({ s, md, args });
+        });
+        FeedParsedEvents(w, sid, dir, parsed, now);
+        CHECK(fired.size() == 1, "scenario A: exactly one fire");
+        CHECK(!fired.empty() && fired[0].sessionId == sid && fired[0].mdPath == mdPath, "scenario A: fired with the real on-disk md path (default probe verified it)");
+        CHECK(!fired.empty() && fired[0].args == L"wrap up the CommandWatch work; see COMMANDS.md", "scenario A: the command's args ride the fire");
+        CHECK(w.PendingCount() == 0, "scenario A: nothing pending after the fire");
+
+        // ---- chunked-delta equivalence: the SAME session parsed the way the scanner actually
+        //      reads it (bounded windows; only complete lines consumed, a partial trailing line
+        //      re-read whole next pass) yields the IDENTICAL event sequence. ----
+        std::vector<TranscriptEvent::Kind> whole;
+        for (const auto& ev : parsed.events)
+        {
+            whole.push_back(ev.kind);
+        }
+        std::vector<TranscriptEvent::Kind> chunked;
+        size_t pos = 0;
+        size_t window = 217; // deliberately awkward: splits mid-JSON, mid-tag, mid-escape
+        while (pos < content.size())
+        {
+            const std::wstring_view chunk = std::wstring_view{ content }.substr(pos, (std::min)(window, content.size() - pos)); // (std::min) — windows.h min macro guard
+            const auto part = ParseTranscriptDelta(chunk);
+            for (const auto& ev : part.events)
+            {
+                chunked.push_back(ev.kind);
+            }
+            if (part.consumed == 0)
+            {
+                window += 217; // no complete line fit the window — the scanner re-reads the partial whole with more bytes next pass
+                continue;
+            }
+            pos += part.consumed;
+            window = 217;
+        }
+        CHECK(chunked == whole, "chunked (scanner-style, partial-line-safe) parse == whole parse (same event sequence)");
+    }
+
+    // ---- scenario B (clarification round): echo -> assistant QUESTION (end_turn, boundary 1)
+    //      -> user answer -> assistant Write + end_turn. Fires — the 2-turn window covers it. ----
+    {
+        CommandWatch w;
+        int fired = 0;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring&, const std::wstring&) { ++fired; });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        const std::wstring content =
+            FabUserEcho(sid, L"hand this over", now - 5000) +
+            FabAssistantEnd(L"Before I write it: should the successor continue the tests too?", now - 4000, L"a-q") +
+            FabUserPrompt(L"yes, tests too", now - 3000) +
+            FabAssistantWrite(mdPath, now - 2000, L"a-write2") +
+            FabAssistantEnd(L"Written.", now - 1000, L"a-end2");
+        FeedParsedEvents(w, sid, dir, ParseTranscriptDelta(content), now);
+        CHECK(fired == 1, "scenario B: one clarification round still fires (the 2-turn window)");
+    }
+
+    // ---- scenario C (no md ever): echo -> two end_turns -> expired, never fires. ----
+    {
+        CommandWatch w;
+        int fired = 0;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring&, const std::wstring&) { ++fired; });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        const std::wstring content =
+            FabUserEcho(sid, L"hand this over", now - 5000) +
+            FabAssistantEnd(L"I need more context than that; what should the successor do?", now - 4000, L"a-q1") +
+            FabUserPrompt(L"never mind", now - 3000) +
+            FabAssistantEnd(L"Okay, not writing a handover.", now - 2000, L"a-q2");
+        FeedParsedEvents(w, sid, dir, ParseTranscriptDelta(content), now);
+        CHECK(fired == 0 && w.PendingCount() == 0, "scenario C: no md within 2 turns -> expired, no fire, no leak");
+    }
+
+    // ---- scenario D (repeatable — the explicit design requirement): two /handovers in ONE
+    //      conversation, each fires its own successor with its own md + args. ----
+    {
+        CommandWatch w;
+        std::vector<FiredHandover> fired;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& s, const std::wstring& md, const std::wstring& args) {
+            fired.push_back({ s, md, args });
+        });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        const std::wstring md2 = dir + L"\\HANDOVER-round-two.md";
+        const std::wstring content =
+            FabUserEcho(sid, L"first handover", now - 9000) +
+            FabAssistantWrite(mdPath, now - 8000, L"a-w1") +
+            FabAssistantEnd(L"Written.", now - 7000, L"a-e1") +
+            FabUserEcho(sid, L"second handover", now - 4000) +
+            FabAssistantWrite(md2, now - 3000, L"a-w2") +
+            FabAssistantEnd(L"Written again.", now - 2000, L"a-e2");
+        FeedParsedEvents(w, sid, dir, ParseTranscriptDelta(content), now);
+        CHECK(fired.size() == 2, "scenario D: two /handovers in one conversation -> two fires");
+        CHECK(fired.size() == 2 && fired[0].mdPath == mdPath && fired[0].args == L"first handover", "scenario D: first fire carries the first md + args");
+        CHECK(fired.size() == 2 && fired[1].mdPath == md2 && fired[1].args == L"second handover", "scenario D: second fire carries the second md + args");
+    }
+
+    // ---- scenario E (restart replay): the SAME session with OLD timestamps (a restored/adopted
+    //      session's history read) never arms — no ghost successor tabs on reopen. ----
+    {
+        CommandWatch w;
+        int fired = 0;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring&, const std::wstring&) { ++fired; });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        const int64_t old = now - 2 * 60 * 60 * 1000; // two hours ago
+        const std::wstring content =
+            FabUserEcho(sid, L"stale handover", old) +
+            FabAssistantWrite(mdPath, old + 1000, L"a-wold") +
+            FabAssistantEnd(L"Written.", old + 2000, L"a-eold");
+        FeedParsedEvents(w, sid, dir, ParseTranscriptDelta(content), now);
+        CHECK(fired == 0 && w.PendingCount() == 0, "scenario E: a replayed old /handover (stale line timestamps) never arms nor fires");
+    }
+
+    ::DeleteFileW(mdPath.c_str());
+    ::RemoveDirectoryW(dir.c_str());
+}
+
+void TestCommandEchoRealCorpus()
+{
+    std::wprintf(L"Command echoes, REAL corpus (~/.claude transcripts replayed through the parser):\n");
+    const std::wstring proj = ClaudeProjectsDir();
+    if (proj.empty() || ::GetFileAttributesW(proj.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        std::wprintf(L"  [info] no Claude projects dir on this machine - corpus replay skipped\n");
+        return;
+    }
+
+    // Gather the NEWEST transcripts (mtime-desc — biases to the CURRENT echo stratum, which is
+    // what /handover will produce; older strata lines are still counted when the window reaches
+    // them). Bounded sweep: a stat pass over everything, then head-read the newest kMaxFiles.
+    struct Cand
+    {
+        std::wstring path;
+        int64_t mtime;
+    };
+    std::vector<Cand> files;
+    {
+        std::error_code ec;
+        for (std::filesystem::directory_iterator projIt{ std::filesystem::path{ proj }, ec }, projEnd; !ec && projIt != projEnd; projIt.increment(ec))
+        {
+            std::error_code ed;
+            if (!projIt->is_directory(ed))
+            {
+                continue;
+            }
+            std::error_code es;
+            for (std::filesystem::directory_iterator f{ projIt->path(), es }, fEnd; !es && f != fEnd; f.increment(es))
+            {
+                std::error_code ef;
+                if (!f->is_regular_file(ef) || f->path().extension() != L".jsonl")
+                {
+                    continue;
+                }
+                WIN32_FILE_ATTRIBUTE_DATA fad{};
+                if (::GetFileAttributesExW(f->path().c_str(), GetFileExInfoStandard, &fad))
+                {
+                    ULARGE_INTEGER u{};
+                    u.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+                    u.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+                    files.push_back({ f->path().wstring(), static_cast<int64_t>(u.QuadPart) });
+                }
+            }
+        }
+    }
+    if (files.empty())
+    {
+        std::wprintf(L"  [info] no transcripts found - corpus replay skipped\n");
+        return;
+    }
+    std::sort(files.begin(), files.end(), [](const Cand& a, const Cand& b) { return a.mtime > b.mtime; });
+
+    constexpr size_t kMaxFiles = 120;
+    constexpr size_t kHeadBytes = 2u << 20; // 2 MB head per file — echoes are sprinkled, a sample is the point
+    constexpr size_t kMaxEchoes = 400;
+    constexpr size_t kMaxWriteLines = 60;
+
+    size_t userEchoes = 0, sysEchoes = 0, echoParsed = 0, echoWithTs = 0, turnEventLeaks = 0;
+    size_t writeLines = 0, writePathsOk = 0;
+    size_t filesScanned = 0;
+    std::wstring firstLeak;
+
+    for (const auto& cand : files)
+    {
+        if (filesScanned >= kMaxFiles || userEchoes + sysEchoes >= kMaxEchoes)
+        {
+            break;
+        }
+        ++filesScanned;
+        std::ifstream f(std::filesystem::path{ cand.path }, std::ios::binary);
+        if (!f)
+        {
+            continue;
+        }
+        std::string head(kHeadBytes, '\0');
+        f.read(head.data(), static_cast<std::streamsize>(head.size()));
+        head.resize(static_cast<size_t>(f.gcount()));
+        // Only whole lines (drop a truncated tail — the head cap can split a line).
+        const size_t lastNl = head.rfind('\n');
+        if (lastNl == std::string::npos)
+        {
+            continue;
+        }
+        head.resize(lastNl + 1);
+
+        size_t lineStart = 0;
+        while (lineStart < head.size())
+        {
+            size_t nl = head.find('\n', lineStart);
+            if (nl == std::string::npos)
+            {
+                break;
+            }
+            const std::string_view line{ head.data() + lineStart, nl - lineStart };
+            lineStart = nl + 1;
+
+            const bool isUserEcho = line.find("\"message\":{\"role\":\"user\",\"content\":\"<command-") != std::string_view::npos &&
+                                    line.find("\"isMeta\":true") == std::string_view::npos &&
+                                    line.find("\"isCompactSummary\":true") == std::string_view::npos &&
+                                    line.find("\"isSidechain\":true") == std::string_view::npos;
+            const bool isSysEcho = !isUserEcho &&
+                                   line.find("\"subtype\":\"local_command\"") != std::string_view::npos &&
+                                   line.find("<command-name>") != std::string_view::npos &&
+                                   line.find("\"isSidechain\":true") == std::string_view::npos;
+            const bool isWriteLine = !isUserEcho && !isSysEcho && writeLines < kMaxWriteLines &&
+                                     line.find("\"type\":\"assistant\"") != std::string_view::npos &&
+                                     line.find("\"type\":\"tool_use\"") != std::string_view::npos &&
+                                     line.find("\"name\":\"Write\"") != std::string_view::npos &&
+                                     line.find("\"file_path\"") != std::string_view::npos;
+            if (!isUserEcho && !isSysEcho && !isWriteLine)
+            {
+                continue;
+            }
+            // Convert just this line and replay it through the REAL parser.
+            const int need = ::MultiByteToWideChar(CP_UTF8, 0, line.data(), static_cast<int>(line.size()), nullptr, 0);
+            if (need <= 0)
+            {
+                continue;
+            }
+            std::wstring wide(static_cast<size_t>(need), L'\0');
+            ::MultiByteToWideChar(CP_UTF8, 0, line.data(), static_cast<int>(line.size()), wide.data(), need);
+            wide += L"\n";
+            const auto r = ParseTranscriptDelta(wide);
+
+            if (isUserEcho || isSysEcho)
+            {
+                (isUserEcho ? userEchoes : sysEchoes)++;
+                bool sawCommand = false, sawTurn = false;
+                for (const auto& ev : r.events)
+                {
+                    if (ev.kind == TranscriptEvent::Kind::Command && !ev.commandName.empty())
+                    {
+                        sawCommand = true;
+                        echoWithTs += ev.lineTsMs > 0;
+                    }
+                    sawTurn = sawTurn || ev.kind == TranscriptEvent::Kind::UserPrompt || ev.kind == TranscriptEvent::Kind::Assistant || ev.kind == TranscriptEvent::Kind::ToolResult;
+                }
+                echoParsed += sawCommand;
+                if (sawTurn)
+                {
+                    ++turnEventLeaks;
+                    if (firstLeak.empty())
+                    {
+                        firstLeak = cand.path;
+                    }
+                }
+            }
+            else // isWriteLine
+            {
+                ++writeLines;
+                for (const auto& ev : r.events)
+                {
+                    if (ev.kind == TranscriptEvent::Kind::Assistant && !ev.fileWritePaths.empty())
+                    {
+                        ++writePathsOk;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    std::wprintf(L"  [info] corpus: %zu files scanned, %zu user-echo + %zu system-echo lines, %zu Write-tool lines\n",
+                 filesScanned, userEchoes, sysEchoes, writeLines);
+    if (userEchoes + sysEchoes == 0)
+    {
+        std::wprintf(L"  [info] no command echoes in the sampled window - echo assertions skipped\n");
+    }
+    else
+    {
+        CHECK(echoParsed == userEchoes + sysEchoes, "every real command echo parses to a Command event (name extracted)");
+        CHECK(turnEventLeaks == 0, "no real command echo EVER leaks a turn event (the /model false-Running invariant, corpus-wide)");
+        if (turnEventLeaks != 0)
+        {
+            std::wprintf(L"  [FAIL-detail] first leaking file: %s\n", firstLeak.c_str());
+        }
+        CHECK(echoWithTs > 0, "real echoes carry parseable line timestamps (the freshness guard's input)");
+    }
+    if (writeLines > 0)
+    {
+        CHECK(writePathsOk == writeLines, "every real Write tool_use line yields its file_path in fileWritePaths");
     }
 }

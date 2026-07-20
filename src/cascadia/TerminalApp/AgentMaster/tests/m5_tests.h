@@ -177,7 +177,19 @@ void TestPendingInput();
 
 // tests_commands.cpp — COMMANDS.md: slash-command bindings (ParseCommandEcho + the parser's
 // Command/fileWritePaths events + the CommandWatch state machine + DeriveSuffixedTitle + the
-// initial-prompt commandline arg + EnsureHandoverCommandFileIn)
+// initial-prompt commandline arg + EnsureHandoverCommandFileIn + the safeguard belts: sane-path
+// gate, throwing-handler/probe containment)
 void TestCommandWatch();
+// tests_commands.cpp — the FABRICATED /handover session: the design's expected transcript shape
+// (echo -> Write -> tool_result -> end_turn, real ISO timestamps) driven end-to-end through the
+// REAL parser + the _readDelta feed mapping + the DEFAULT disk probe; scenarios: happy path,
+// clarification round, no-md expiry, two handovers in one conversation, stale restart replay,
+// chunked scanner-style parse equivalence
+void TestCommandHandoverE2E();
+// tests_commands.cpp — REAL-corpus replay (guarded, [info]-skips without a corpus): every command
+// echo in the newest ~120 on-disk transcripts parses to a Command event, leaks ZERO turn events
+// (the /model false-Running invariant corpus-wide), carries timestamps; real Write tool_use lines
+// yield their file_path in fileWritePaths
+void TestCommandEchoRealCorpus();
 void BenchPromptAnchor();
 void BenchPromptAnchorRealSession();

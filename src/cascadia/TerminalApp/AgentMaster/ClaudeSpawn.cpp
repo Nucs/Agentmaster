@@ -1012,6 +1012,7 @@ try {
     }
 
     std::wstring EnsureHandoverCommandFileIn(const std::wstring& configDir)
+    try
     {
         // The /handover slash-command DEFINITION (COMMANDS.md). Create-if-absent ONLY: an existing
         // file — the user's own /handover, or an edited copy of this one — is never overwritten,
@@ -1064,6 +1065,13 @@ prompt points it at your file.
             return {};
         }
         return path;
+    }
+    catch (...)
+    {
+        // Safeguard: engine init must never be derailed by this best-effort global-config write
+        // (the feature simply stays dormant until a later launch succeeds).
+        LogSwallowedException(L"EnsureHandoverCommandFileIn");
+        return {};
     }
 
     std::wstring EnsureHandoverCommandFile()

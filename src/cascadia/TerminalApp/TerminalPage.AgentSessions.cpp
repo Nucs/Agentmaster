@@ -38,6 +38,7 @@
 #include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot)
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
 #include "AgentMaster/ClaudeSpawn.h" // BuildClaudeSpawn / ClaudeConversationExists / AppendStateLog
+#include "AgentMaster/CommandWatch.h" // IsSaneWatchPath — the /handover action's path re-assert (COMMANDS.md)
 #include "AgentMaster/Engine.h" // SharedEngine (AM_SESSION stamp; restoreMutex barrier)
 #include "AgentMaster/HooksBridge.h" // PipeName for the spawn spec
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / Save-LoadSessions / LoadAppSettings / dir colors
@@ -228,15 +229,31 @@ namespace winrt::TerminalApp::implementation
     // UserPromptSubmit, so state/record ride the normal push path). Repeatable by design — every
     // /handover in a conversation spawns its own successor.
     void TerminalPage::_HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPath)
+    try
     {
         const auto tabIt = _claudeTabs.find(sessionId);
         if (tabIt == _claudeTabs.end())
         {
             return; // not our window (the fan-out reaches every window; the single host acts)
         }
-        if (!_sessionRegistry || mdPath.empty())
+        // Safeguard belts. The watch already vetted the path (IsSaneWatchPath at match) and the
+        // file's presence (the fire gate) — re-assert BOTH here: the path feeds a log line + the
+        // successor's single-line launch prompt (a control char / quote would corrupt either),
+        // and the file can vanish in the fire -> UI-hop window (a deleted/moved md would spawn a
+        // successor pointed at nothing — worse than not spawning: the user re-runs /handover).
+        if (!_sessionRegistry || !::Agentmaster::IsSaneWatchPath(mdPath))
         {
             return;
+        }
+        {
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (!::GetFileAttributesExW(mdPath.c_str(), GetFileExInfoStandard, &fad) ||
+                (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                (fad.nFileSizeLow == 0 && fad.nFileSizeHigh == 0))
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" md vanished before spawn: " + mdPath + L" (dropped)\n");
+                return;
+            }
         }
         const auto s = _sessionRegistry->Get(sessionId);
         if (!s || !s->live)
@@ -289,6 +306,13 @@ namespace winrt::TerminalApp::implementation
         const auto successorTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ successorTitle }, std::nullopt, {}, insertPosition, {}, prompt);
         const std::wstring newId = successorTab ? _ClaudeSessionForTab(successorTab) : std::wstring{};
         ::Agentmaster::LogNav(L"handover-done " + (newId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(newId))) + L" from=" + ::Agentmaster::ShortId(sessionId));
+    }
+    catch (...)
+    {
+        // Safeguard: a spawn-path failure (a torn-down tab mid-hop, a WinRT hresult, bad_alloc)
+        // must never unwind the UI thread; the nav trail's unpaired handover-begin plus this
+        // forensics line pinpoint the abort.
+        ::Agentmaster::AgentLogCaughtException(L"_HandleCommandHandover");
     }
 
     // Agentmaster: launch a claude.exe on a ConPTY in `workingDir`, wired for hooks, as a
