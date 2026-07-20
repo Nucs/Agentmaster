@@ -35,6 +35,11 @@ namespace Agentmaster
     class SessionRegistry;
 }
 
+namespace Agentmaster::Updater
+{
+    struct UpdateInfo; // Updater.h (included by the .cpp only — winhttp/comctl must not fan out through this header)
+}
+
 namespace winrt::TerminalApp::implementation
 {
     class AgentManagerContent : public winrt::implements<AgentManagerContent, IPaneContent>, public BasicPaneEvents
@@ -482,6 +487,7 @@ namespace winrt::TerminalApp::implementation
         // "Update now" launches the embedded am-update installer (detached) and asks the app to quit
         // via _quitForUpdateHandler so the package isn't in use while it upgrades + relaunches.
         void _CheckForUpdates(bool interactive);
+        void _ApplyUpdateCheckResult(bool interactive, const std::wstring& stateDir, const ::Agentmaster::Updater::UpdateInfo& info); // the check's UI completion (label/changelog/prompt+apply); split out so the worker's recovery catch stays small
 
         // Agentmaster (native-exe-only policy): the "Claude not detected" modal — shown when a
         // launch/fork is attempted with no native claude.exe (::Agentmaster::ClaudeAvailable() false).

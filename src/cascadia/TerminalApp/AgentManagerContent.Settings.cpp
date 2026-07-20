@@ -784,15 +784,31 @@ namespace winrt::TerminalApp::implementation
             {
                 return; // a cog-open seed, not a user flip
             }
-            const bool on = _setAllowPrerelease.IsOn();
-            _appSettings.allowUpdatePrerelease = on;
-            auto disk = ::Agentmaster::LoadAppSettings();
-            disk.allowUpdatePrerelease = on;
-            ::Agentmaster::SaveAppSettings(disk);
-            ::Agentmaster::LogNav(std::wstring{ L"update-prerelease -> " } + (on ? L"on" : L"off"));
-            // Re-run the silent check so the "vX.Y.Z available!" label + changelog link reflect the
-            // new channel right away (release channel only — _CheckForUpdates gates itself).
-            _CheckForUpdates(false);
+            // Guarded: this runs straight off a XAML event — an escape would fail-fast the app over
+            // a settings write. A failed flip is logged and harmless (the switch re-seeds from disk
+            // at the next cog open, so UI and truth re-converge).
+            try
+            {
+                const bool on = _setAllowPrerelease.IsOn();
+                _appSettings.allowUpdatePrerelease = on;
+                auto disk = ::Agentmaster::LoadAppSettings();
+                disk.allowUpdatePrerelease = on;
+                ::Agentmaster::SaveAppSettings(disk);
+                ::Agentmaster::LogNav(std::wstring{ L"update-prerelease -> " } + (on ? L"on" : L"off"));
+                // Re-run the silent check so the "vX.Y.Z available!" label + changelog link reflect the
+                // new channel right away (release channel only — _CheckForUpdates gates itself).
+                _CheckForUpdates(false);
+            }
+            catch (...)
+            {
+                try
+                {
+                    ::Agentmaster::LogNav(L"update-prerelease toggle FAILED (exception swallowed)");
+                }
+                catch (...)
+                {
+                }
+            }
         });
         panel.Children().Append(_setAllowPrerelease);
 
@@ -1722,10 +1738,19 @@ namespace winrt::TerminalApp::implementation
                      L"This removes the installed Agentmaster package. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster will close to finish uninstalling.",
                      L"Uninstall",
                      [this]() {
-                         const std::wstring stateDir = ::Agentmaster::Profiles::ResolveProfileDir();
-                         if (::Agentmaster::Updater::LaunchUninstaller(stateDir) && _quitForUpdateHandler)
+                         // Guarded: quits ONLY when the uninstaller actually launched (LaunchUninstaller
+                         // is no-throw and false on any failure) — never close the app with nothing
+                         // uninstalling, and never let a resolution hiccup crash the confirm callback.
+                         try
                          {
-                             _quitForUpdateHandler();
+                             const std::wstring stateDir = ::Agentmaster::Profiles::ResolveProfileDir();
+                             if (::Agentmaster::Updater::LaunchUninstaller(stateDir) && _quitForUpdateHandler)
+                             {
+                                 _quitForUpdateHandler();
+                             }
+                         }
+                         catch (...)
+                         {
                          }
                      });
         });
@@ -2160,11 +2185,20 @@ namespace winrt::TerminalApp::implementation
         {
             // Seed from DISK, not the in-memory copy: the toggle INSTANT-APPLIES via a freshest-disk
             // RMW (possibly flipped from another window since this window's copy was seeded), so disk
-            // is the one truth. The latch keeps the programmatic IsOn from re-firing the Toggled RMW.
-            const bool diskOn = ::Agentmaster::LoadAppSettings().allowUpdatePrerelease;
-            _appSettings.allowUpdatePrerelease = diskOn;
-            _seedingAllowPrerelease = true;
-            _setAllowPrerelease.IsOn(diskOn);
+            // is the one truth. The latch keeps the programmatic IsOn from re-firing the Toggled RMW —
+            // and MUST clear on every path: a latch stuck true would silently ignore every future
+            // flip (the toggle would look alive but persist nothing — the exact bug class this
+            // instant-apply replaced), so the IsOn is guarded and the clear is unconditional.
+            try
+            {
+                const bool diskOn = ::Agentmaster::LoadAppSettings().allowUpdatePrerelease;
+                _appSettings.allowUpdatePrerelease = diskOn;
+                _seedingAllowPrerelease = true;
+                _setAllowPrerelease.IsOn(diskOn);
+            }
+            catch (...)
+            {
+            }
             _seedingAllowPrerelease = false;
         }
         if (_setDebugMode)
@@ -2206,9 +2240,14 @@ namespace winrt::TerminalApp::implementation
         // placeholder), so don't check or offer it: disable the button, hide the changelog links, and
         // explain. Only the release install checks (silently on open) + shows "vX.Y.Z available!".
         const bool updaterChannel = ::Agentmaster::Updater::IsUpdaterChannel();
+        // Wedge-proofing: the in-flight flag + "Checking…" label are normally restored by the check's
+        // completion — but if a worker/completion ever died mid-flight, they'd stay latched and every
+        // future interactive check would silently no-op FOREVER. A fresh cog open is a fresh state.
+        _interactiveUpdateInFlight = false;
         if (_setCheckUpdates)
         {
             _setCheckUpdates.IsEnabled(updaterChannel);
+            _setCheckUpdates.Content(winrt::box_value(L"Check for updates"));
         }
         if (_setUninstallBtn)
         {
@@ -3205,102 +3244,191 @@ namespace winrt::TerminalApp::implementation
 
         auto weak = get_weak();
         auto disp = _dispatcher;
-        std::thread([weak, disp, interactive, prerelease, stateDir, cur]() {
-            // The network round-trip (Updater.h uses WinHTTP) — bounded; a longer budget for the
-            // explicit button than the silent on-open check.
-            const ::Agentmaster::Updater::UpdateInfo info =
-                ::Agentmaster::Updater::CheckForUpdate(cur, prerelease, interactive ? 8000 : 5000);
-            // The cog leg of the [update] observability trail (the startup/hourly legs log inside
-            // RunUpdateCheckAndPrompt; this path calls CheckForUpdate directly, so log here).
+        // The worker body is FULLY guarded: an exception escaping a DETACHED thread is
+        // std::terminate — instant process death over a background version check. The catch also
+        // marshals a UI reset so the button/flag never stay latched ("Checking…" forever).
+        const auto worker = [weak, disp, interactive, prerelease, stateDir, cur]() {
+            try
             {
-                const std::wstring tag = interactive ? L"check (cog)" : L"check (cog-silent)";
-                std::wstring line;
-                if (!info.checked)
+                // The network round-trip (Updater.h uses WinHTTP) — bounded; a longer budget for the
+                // explicit button than the silent on-open check.
+                const ::Agentmaster::Updater::UpdateInfo info =
+                    ::Agentmaster::Updater::CheckForUpdate(cur, prerelease, interactive ? 8000 : 5000);
+                // The cog leg of the [update] observability trail (the startup/hourly legs log inside
+                // RunUpdateCheckAndPrompt; this path calls CheckForUpdate directly, so log here).
                 {
-                    line = tag + L" failed: " + (info.error.empty() ? std::wstring{ L"unknown" } : info.error);
-                }
-                else if (info.available)
-                {
-                    line = tag + L" done: " + ::Agentmaster::Updater::DisplayVersion(info) + L" available (" + (info.isPrerelease ? L"pre-release" : L"stable") + (info.installable ? L", installable)" : L", NO installable assets)");
-                }
-                else
-                {
-                    line = tag + L" done: up to date (latest=" + (info.latestTag.empty() ? std::wstring{ L"none" } : info.latestTag) + L")";
-                }
-                ::Agentmaster::Updater::LogUpdate(stateDir, line + L" cur=" + info.currentVersionStr + L" prerelease=" + (prerelease ? L"on" : L"off"));
-            }
-            if (!disp)
-            {
-                return;
-            }
-            disp.TryEnqueue([weak, interactive, stateDir, info]() {
-                auto self = weak.get();
-                if (!self)
-                {
-                    return;
-                }
-                if (interactive)
-                {
-                    self->_interactiveUpdateInFlight = false;
-                    if (self->_setCheckUpdates)
+                    const std::wstring tag = interactive ? L"check (cog)" : L"check (cog-silent)";
+                    std::wstring line;
+                    if (!info.checked)
                     {
-                        self->_setCheckUpdates.IsEnabled(true);
-                        self->_setCheckUpdates.Content(winrt::box_value(L"Check for updates"));
+                        line = tag + L" failed: " + (info.error.empty() ? std::wstring{ L"unknown" } : info.error);
                     }
-                }
-                if (self->_setUpdateStatus)
-                {
-                    if (info.available)
+                    else if (info.available)
                     {
-                        // "v0.4.3 available!" — dark green, legible on the dark settings card.
-                        self->_setUpdateStatus.Text(winrt::hstring{ ::Agentmaster::Updater::DisplayVersion(info) + L" available!" });
-                        self->_setUpdateStatus.Foreground(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x2E, 0xA0, 0x43) });
-                    }
-                    else if (interactive)
-                    {
-                        self->_setUpdateStatus.Text(info.checked ? winrt::hstring{ L"You're on the latest version" } : winrt::hstring{ L"Couldn't reach GitHub" });
-                        self->_setUpdateStatus.Foreground(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x99, 0x99, 0x99) });
+                        line = tag + L" done: " + ::Agentmaster::Updater::DisplayVersion(info) + L" available (" + (info.isPrerelease ? L"pre-release" : L"stable") + (info.installable ? L", installable)" : L", NO installable assets)");
                     }
                     else
                     {
-                        self->_setUpdateStatus.Text(L""); // silent check: stay quiet unless there IS an update
+                        line = tag + L" done: up to date (latest=" + (info.latestTag.empty() ? std::wstring{ L"none" } : info.latestTag) + L")";
                     }
+                    ::Agentmaster::Updater::LogUpdate(stateDir, line + L" cur=" + info.currentVersionStr + L" prerelease=" + (prerelease ? L"on" : L"off"));
                 }
-                // "Update's changelog" link: reveal it (and remember its release page) when an update is
-                // available — from EITHER the silent on-open check or the explicit button — else hide it.
-                if (info.available)
+                if (!disp)
                 {
-                    self->_lastUpdateChangelogUrl = ::Agentmaster::Updater::ChangelogUrl(info);
-                    if (self->_setUpdateChangelog)
+                    return;
+                }
+                disp.TryEnqueue([weak, interactive, stateDir, info]() {
+                    auto self = weak.get();
+                    if (!self)
                     {
-                        self->_setUpdateChangelog.Visibility(Visibility::Visible);
+                        return;
                     }
-                }
-                else
-                {
-                    self->_lastUpdateChangelogUrl.clear();
-                    if (self->_setUpdateChangelog)
+                    try
                     {
-                        self->_setUpdateChangelog.Visibility(Visibility::Collapsed);
+                        self->_ApplyUpdateCheckResult(interactive, stateDir, info);
                     }
-                }
-                // Interactive only: prompt + apply on a found update (the silent on-open check just labels).
-                if (interactive && info.available)
-                {
-                    const HWND owner = ::GetActiveWindow();
-                    const auto d = ::Agentmaster::Updater::ShowUpdatePrompt(owner, info);
-                    if (::Agentmaster::Updater::ApplyDecision(stateDir, info, d, owner))
+                    catch (...)
                     {
-                        // The installer was launched detached; close the app gracefully so the package
-                        // isn't in use while it upgrades + relaunches (the page's RequestQuit).
-                        if (self->_quitForUpdateHandler)
+                        // Recovery: never leave the button dead / the flag latched over a UI hiccup —
+                        // the next click must still work.
+                        try
                         {
-                            self->_quitForUpdateHandler();
+                            self->_interactiveUpdateInFlight = false;
+                            if (self->_setCheckUpdates)
+                            {
+                                self->_setCheckUpdates.IsEnabled(true);
+                                self->_setCheckUpdates.Content(winrt::box_value(L"Check for updates"));
+                            }
+                            ::Agentmaster::Updater::LogUpdate(stateDir, L"check (cog) UI completion CRASHED (recovered \x2014 button restored)");
+                        }
+                        catch (...)
+                        {
                         }
                     }
+                });
+            }
+            catch (...)
+            {
+                try
+                {
+                    ::Agentmaster::Updater::LogUpdate(stateDir, L"check (cog) worker CRASHED (exception swallowed)");
+                    if (disp)
+                    {
+                        disp.TryEnqueue([weak, interactive]() {
+                            try
+                            {
+                                if (auto self = weak.get(); self && interactive)
+                                {
+                                    self->_interactiveUpdateInFlight = false;
+                                    if (self->_setCheckUpdates)
+                                    {
+                                        self->_setCheckUpdates.IsEnabled(true);
+                                        self->_setCheckUpdates.Content(winrt::box_value(L"Check for updates"));
+                                    }
+                                    if (self->_setUpdateStatus)
+                                    {
+                                        self->_setUpdateStatus.Text(L"Check failed");
+                                    }
+                                }
+                            }
+                            catch (...)
+                            {
+                            }
+                        });
+                    }
                 }
-            });
-        }).detach();
+                catch (...)
+                {
+                }
+            }
+        };
+        try
+        {
+            std::thread(worker).detach();
+        }
+        catch (...)
+        {
+            // std::thread construction can throw (resource limits) — restore the interactive UI so
+            // the button isn't left disabled at "Checking…" with the flag latched.
+            _interactiveUpdateInFlight = false;
+            if (_setCheckUpdates)
+            {
+                _setCheckUpdates.IsEnabled(true);
+                _setCheckUpdates.Content(winrt::box_value(L"Check for updates"));
+            }
+            if (_setUpdateStatus)
+            {
+                _setUpdateStatus.Text(L"Check failed");
+            }
+        }
+    }
+
+    // The check's UI completion — label/changelog updates + (interactive only) the prompt + apply.
+    // Split out of the worker lambda so the recovery catch above stays small; runs on the UI thread.
+    void AgentManagerContent::_ApplyUpdateCheckResult(bool interactive, const std::wstring& stateDir, const ::Agentmaster::Updater::UpdateInfo& info)
+    {
+        if (interactive)
+        {
+            _interactiveUpdateInFlight = false;
+            if (_setCheckUpdates)
+            {
+                _setCheckUpdates.IsEnabled(true);
+                _setCheckUpdates.Content(winrt::box_value(L"Check for updates"));
+            }
+        }
+        if (_setUpdateStatus)
+        {
+            if (info.available)
+            {
+                // "v0.4.3 available!" — dark green, legible on the dark settings card.
+                _setUpdateStatus.Text(winrt::hstring{ ::Agentmaster::Updater::DisplayVersion(info) + L" available!" });
+                _setUpdateStatus.Foreground(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x2E, 0xA0, 0x43) });
+            }
+            else if (interactive)
+            {
+                _setUpdateStatus.Text(info.checked ? winrt::hstring{ L"You're on the latest version" } : winrt::hstring{ L"Couldn't reach GitHub" });
+                _setUpdateStatus.Foreground(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x99, 0x99, 0x99) });
+            }
+            else
+            {
+                _setUpdateStatus.Text(L""); // silent check: stay quiet unless there IS an update
+            }
+        }
+        // "Update's changelog" link: reveal it (and remember its release page) when an update is
+        // available — from EITHER the silent on-open check or the explicit button — else hide it.
+        if (info.available)
+        {
+            _lastUpdateChangelogUrl = ::Agentmaster::Updater::ChangelogUrl(info);
+            if (_setUpdateChangelog)
+            {
+                _setUpdateChangelog.Visibility(Visibility::Visible);
+            }
+        }
+        else
+        {
+            _lastUpdateChangelogUrl.clear();
+            if (_setUpdateChangelog)
+            {
+                _setUpdateChangelog.Visibility(Visibility::Collapsed);
+            }
+        }
+        // Interactive only: prompt + apply on a found update (the silent on-open check just labels).
+        // ShowUpdatePrompt/ApplyDecision are themselves no-throw (Updater.h) — a broken prompt reads
+        // as Not now, a failed decision-apply never quits the app with no installer running.
+        if (interactive && info.available)
+        {
+            const HWND owner = ::GetActiveWindow();
+            const auto d = ::Agentmaster::Updater::ShowUpdatePrompt(owner, info);
+            if (::Agentmaster::Updater::ApplyDecision(stateDir, info, d, owner))
+            {
+                // The installer was launched detached; close the app gracefully so the package
+                // isn't in use while it upgrades + relaunches (the page's RequestQuit).
+                if (_quitForUpdateHandler)
+                {
+                    _quitForUpdateHandler();
+                }
+            }
+        }
     }
 
     // ---- "Claude not detected" overlay (native-exe-only policy gate) --------

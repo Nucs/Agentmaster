@@ -1601,8 +1601,17 @@ void WindowEmperor::_setupUpdateAutocheck()
     // right for an hourly, non-urgent check. _window exists by now (_createMessageWindow ran above).
     SetTimer(_window.get(), AM_UPDATE_CHECK_TIMER_ID, AM_UPDATE_CHECK_INTERVAL_MS, nullptr);
     // Anchor the [update] trail: every later "check (periodic) …" line pairs against this arm, so a
-    // missing hourly line is diagnosable (timer never armed vs a tick that didn't run).
-    ::Agentmaster::Updater::LogUpdate(::Agentmaster::Profiles::ResolveProfileDir(), L"hourly autocheck armed (every 60m; first tick in 60m)");
+    // missing hourly line is diagnosable (timer never armed vs a tick that didn't run). Guarded —
+    // the timer is ALREADY armed above; a logging hiccup (profile resolve / alloc) must not take
+    // down window-setup on the launch path.
+    try
+    {
+        ::Agentmaster::Updater::LogUpdate(::Agentmaster::Profiles::ResolveProfileDir(), L"hourly autocheck armed (every 60m; first tick in 60m)");
+    }
+    catch (...)
+    {
+        LOG_CAUGHT_EXCEPTION();
+    }
 }
 
 void WindowEmperor::_persistState(const ApplicationState& state) const

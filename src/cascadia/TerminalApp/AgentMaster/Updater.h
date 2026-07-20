@@ -106,12 +106,16 @@ namespace Agentmaster::Updater
             default: break;
             }
         };
+        // Component cap: a degenerate/hostile tag ("v99999999999.0.0") must not overflow the int
+        // accumulator (signed overflow is UB — a garbage/negative component would corrupt every
+        // later CompareVersion). Real versions are tiny; clamping preserves ordering semantics.
+        constexpr int kMaxComponent = 100000000; // 1e8: acc < 1e8 ⇒ acc*10+9 ≤ 1e9+9 < INT_MAX (no overflow)
         for (; i < s.size(); ++i)
         {
             const wchar_t c = s[i];
             if (c >= L'0' && c <= L'9')
             {
-                acc = acc * 10 + static_cast<int>(c - L'0');
+                acc = acc < kMaxComponent ? acc * 10 + static_cast<int>(c - L'0') : kMaxComponent;
                 any = true;
             }
             else if (c == L'.')
@@ -163,31 +167,47 @@ namespace Agentmaster::Updater
 
     // The running package's manifest version, or {0,0,0,0} when unpackaged (so an unpackaged run
     // treats every release as newer — harmless, since the startup auto-check is gated off it).
+    // No-throw: called from unguarded UI paths (the cog) — zeros are the safe default.
     inline Version CurrentPackageVersion()
     {
         Version v;
-        UINT32 bufLen = 0;
-        const LONG rc = ::GetCurrentPackageId(&bufLen, nullptr);
-        if (rc != ERROR_INSUFFICIENT_BUFFER || bufLen == 0)
+        try
         {
-            return v;
+            UINT32 bufLen = 0;
+            const LONG rc = ::GetCurrentPackageId(&bufLen, nullptr);
+            if (rc != ERROR_INSUFFICIENT_BUFFER || bufLen == 0)
+            {
+                return v;
+            }
+            std::vector<BYTE> buf(bufLen);
+            if (::GetCurrentPackageId(&bufLen, buf.data()) != ERROR_SUCCESS)
+            {
+                return v;
+            }
+            const auto* id = reinterpret_cast<const PACKAGE_ID*>(buf.data());
+            v.major = id->version.Major;
+            v.minor = id->version.Minor;
+            v.patch = id->version.Build; // PACKAGE_VERSION: Major.Minor.Build.Revision == X.Y.Z.W
+            v.build = id->version.Revision;
         }
-        std::vector<BYTE> buf(bufLen);
-        if (::GetCurrentPackageId(&bufLen, buf.data()) != ERROR_SUCCESS)
+        catch (...)
         {
-            return v;
+            v = Version{};
         }
-        const auto* id = reinterpret_cast<const PACKAGE_ID*>(buf.data());
-        v.major = id->version.Major;
-        v.minor = id->version.Minor;
-        v.patch = id->version.Build; // PACKAGE_VERSION: Major.Minor.Build.Revision == X.Y.Z.W
-        v.build = id->version.Revision;
         return v;
     }
 
+    // No-throw: gate helpers must never take down a caller (Profiles resolution allocates).
     inline bool IsPackaged()
     {
-        return !Profiles::PackageFamilyName().empty();
+        try
+        {
+            return !Profiles::PackageFamilyName().empty();
+        }
+        catch (...)
+        {
+            return false;
+        }
     }
 
     // ============================ small helpers ============================
@@ -347,34 +367,41 @@ namespace Agentmaster::Updater
         // we also fall back to the module this inline code is linked into, for robustness.
         inline std::wstring LoadResourceTextUtf8(const wchar_t* resName)
         {
-            const auto readFrom = [resName](HMODULE mod) -> std::wstring {
-                if (!mod)
-                {
-                    return {};
-                }
-                const HRSRC res = ::FindResourceW(mod, resName, RT_RCDATA);
-                if (!res)
-                {
-                    return {};
-                }
-                const HGLOBAL loaded = ::LoadResource(mod, res);
-                const DWORD sz = ::SizeofResource(mod, res);
-                const void* ptr = loaded ? ::LockResource(loaded) : nullptr;
-                if (!ptr || sz == 0)
-                {
-                    return {};
-                }
-                return Utf8ToWide(std::string_view{ reinterpret_cast<const char*>(ptr), sz });
-            };
-            if (std::wstring s = readFrom(::GetModuleHandleW(nullptr)); !s.empty())
+            try
             {
-                return s;
+                const auto readFrom = [resName](HMODULE mod) -> std::wstring {
+                    if (!mod)
+                    {
+                        return {};
+                    }
+                    const HRSRC res = ::FindResourceW(mod, resName, RT_RCDATA);
+                    if (!res)
+                    {
+                        return {};
+                    }
+                    const HGLOBAL loaded = ::LoadResource(mod, res);
+                    const DWORD sz = ::SizeofResource(mod, res);
+                    const void* ptr = loaded ? ::LockResource(loaded) : nullptr;
+                    if (!ptr || sz == 0)
+                    {
+                        return {};
+                    }
+                    return Utf8ToWide(std::string_view{ reinterpret_cast<const char*>(ptr), sz });
+                };
+                if (std::wstring s = readFrom(::GetModuleHandleW(nullptr)); !s.empty())
+                {
+                    return s;
+                }
+                HMODULE self{};
+                ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                     reinterpret_cast<LPCWSTR>(&LoadResourceTextUtf8),
+                                     &self);
+                return readFrom(self);
             }
-            HMODULE self{};
-            ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                 reinterpret_cast<LPCWSTR>(&LoadResourceTextUtf8),
-                                 &self);
-            return readFrom(self);
+            catch (...)
+            {
+                return {}; // missing/unreadable resource reads as absent — callers bail gracefully
+            }
         }
     }
 
@@ -503,11 +530,18 @@ namespace Agentmaster::Updater
 
     // TaskDialog hyperlink handler: a clicked <a href="URL"> hands the URL in lParam — open it in the
     // default browser. Used by ShowUpdatePrompt's "What's new" link (TDF_ENABLE_HYPERLINKS).
+    // No-throw: an exception must never unwind through comctl32's callback boundary (UB).
     inline HRESULT CALLBACK UpdatePromptCallback(HWND /*hwnd*/, UINT msg, WPARAM /*wParam*/, LPARAM lParam, LONG_PTR /*ref*/)
     {
-        if (msg == TDN_HYPERLINK_CLICKED && lParam)
+        try
         {
-            ::ShellExecuteW(nullptr, L"open", reinterpret_cast<PCWSTR>(lParam), nullptr, nullptr, SW_SHOWNORMAL);
+            if (msg == TDN_HYPERLINK_CLICKED && lParam)
+            {
+                ::ShellExecuteW(nullptr, L"open", reinterpret_cast<PCWSTR>(lParam), nullptr, nullptr, SW_SHOWNORMAL);
+            }
+        }
+        catch (...)
+        {
         }
         return S_OK;
     }
@@ -545,49 +579,80 @@ namespace Agentmaster::Updater
             ::WinHttpCloseHandle(hSession);
             return body;
         }
-        // GitHub requires a User-Agent; the v3 Accept header is good manners.
-        const std::wstring headers = L"User-Agent: Agentmaster-Updater\r\nAccept: application/vnd.github+json\r\n";
-        BOOL ok = ::WinHttpSendRequest(hRequest, headers.c_str(), static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-        if (ok)
+        // The allocating section (headers string, chunk buffers, body growth) is guarded so a
+        // bad_alloc mid-read can't UNWIND PAST the handle closes below — the three WinHTTP handles
+        // would leak once per tick, forever. On an exception the partial body is discarded (a
+        // truncated JSON must never parse as a real answer) and the closes still run.
+        try
         {
-            ok = ::WinHttpReceiveResponse(hRequest, nullptr);
-        }
-        if (ok)
-        {
-            DWORD status = 0, slen = sizeof(status);
-            ::WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                                  WINHTTP_HEADER_NAME_BY_INDEX, &status, &slen, WINHTTP_NO_HEADER_INDEX);
-            if (status >= 200 && status < 300)
+            // GitHub requires a User-Agent; the v3 Accept header is good manners.
+            const std::wstring headers = L"User-Agent: Agentmaster-Updater\r\nAccept: application/vnd.github+json\r\n";
+            BOOL ok = ::WinHttpSendRequest(hRequest, headers.c_str(), static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+            if (ok)
             {
-                for (;;)
+                ok = ::WinHttpReceiveResponse(hRequest, nullptr);
+            }
+            if (ok)
+            {
+                DWORD status = 0, slen = sizeof(status);
+                ::WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                      WINHTTP_HEADER_NAME_BY_INDEX, &status, &slen, WINHTTP_NO_HEADER_INDEX);
+                if (status >= 200 && status < 300)
                 {
-                    DWORD avail = 0;
-                    if (!::WinHttpQueryDataAvailable(hRequest, &avail) || avail == 0)
+                    for (;;)
                     {
-                        break;
+                        DWORD avail = 0;
+                        if (!::WinHttpQueryDataAvailable(hRequest, &avail) || avail == 0)
+                        {
+                            break;
+                        }
+                        std::string chunk(avail, '\0');
+                        DWORD read = 0;
+                        if (!::WinHttpReadData(hRequest, chunk.data(), avail, &read) || read == 0)
+                        {
+                            break;
+                        }
+                        body.append(chunk.data(), read);
                     }
-                    std::string chunk(avail, '\0');
-                    DWORD read = 0;
-                    if (!::WinHttpReadData(hRequest, chunk.data(), avail, &read) || read == 0)
-                    {
-                        break;
-                    }
-                    body.append(chunk.data(), read);
+                }
+                else
+                {
+                    errOut = L"HTTP status " + std::to_wstring(status);
                 }
             }
             else
             {
-                errOut = L"HTTP status " + std::to_wstring(status);
+                errOut = L"request failed (" + std::to_wstring(::GetLastError()) + L")";
             }
         }
-        else
+        catch (...)
         {
-            errOut = L"request failed (" + std::to_wstring(::GetLastError()) + L")";
+            body.clear();
+            try
+            {
+                errOut = L"exception during read";
+            }
+            catch (...)
+            {
+            }
         }
         ::WinHttpCloseHandle(hRequest);
         ::WinHttpCloseHandle(hConnect);
         ::WinHttpCloseHandle(hSession);
         return body;
+    }
+
+    // Defense-in-depth on the asset URLs: the installer DOWNLOADS AND EXECUTES what these point at
+    // (am-update.ps1 fetches the bundle, trusts the cer, Add-AppxPackage), so only OUR repo's own
+    // release-download URLs are ever accepted — https://github.com/<kRepo>/releases/download/…,
+    // exactly what the GitHub API emits for a release asset. The TLS channel to api.github.com
+    // already authenticates the JSON; this is the belt should that channel ever be intercepted or
+    // the parse confused — a foreign URL simply reads as "no installable assets" (the prompt then
+    // links to the releases page instead of silently installing from elsewhere).
+    inline bool IsTrustedAssetUrl(const std::wstring& url)
+    {
+        const std::wstring prefix = std::wstring{ L"https://github.com/" } + kRepo + L"/releases/download/";
+        return url.size() > prefix.size() && url.compare(0, prefix.size(), prefix) == 0;
     }
 
     // Fill an UpdateInfo from one parsed release JSON object (tag/prerelease/body/url + the
@@ -614,9 +679,9 @@ namespace Agentmaster::Updater
             {
                 const std::wstring name = a.StrAt(L"name");
                 const std::wstring url = a.StrAt(L"browser_download_url");
-                if (url.empty())
+                if (url.empty() || !IsTrustedAssetUrl(url))
                 {
-                    continue;
+                    continue; // a non-own-repo download URL is never an installable asset (see IsTrustedAssetUrl)
                 }
                 if (detail::EndsWithNoCase(name, L".msixbundle"))
                 {
@@ -729,34 +794,41 @@ namespace Agentmaster::Updater
     inline UpdatePrefs ReadPrefs(const std::wstring& stateDir)
     {
         UpdatePrefs p;
-        const auto parsed = json::Parse(detail::ReadFileWide(SettingsPath(stateDir)));
-        if (!parsed || parsed->type != json::Value::Type::Obj)
+        try
         {
-            return p;
+            const auto parsed = json::Parse(detail::ReadFileWide(SettingsPath(stateDir)));
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                return p;
+            }
+            const json::Value* nested = parsed->Find(L"settings");
+            const bool haveNested = nested && nested->type == json::Value::Type::Obj;
+            const json::Value& o = haveNested ? *nested : *parsed;
+            p.allowPrerelease = o.BoolAt(L"allowUpdatePrerelease", false);
+            p.skippedVersion = o.StrAt(L"updateSkippedVersion");
+            p.postponedUntilUnixMs = o.I64At(L"updatePostponedUntilUnixMs", 0);
+            if (haveNested)
+            {
+                // Legacy strays from the pre-fix top-level RMW: honor them only where the nested key is
+                // unset, so an old Skip/Postpone isn't forgotten by the fix itself (the next
+                // WriteUpdateState heals them into the envelope and drops the strays).
+                if (!p.allowPrerelease)
+                {
+                    p.allowPrerelease = parsed->BoolAt(L"allowUpdatePrerelease", false);
+                }
+                if (p.skippedVersion.empty())
+                {
+                    p.skippedVersion = parsed->StrAt(L"updateSkippedVersion");
+                }
+                if (p.postponedUntilUnixMs == 0)
+                {
+                    p.postponedUntilUnixMs = parsed->I64At(L"updatePostponedUntilUnixMs", 0);
+                }
+            }
         }
-        const json::Value* nested = parsed->Find(L"settings");
-        const bool haveNested = nested && nested->type == json::Value::Type::Obj;
-        const json::Value& o = haveNested ? *nested : *parsed;
-        p.allowPrerelease = o.BoolAt(L"allowUpdatePrerelease", false);
-        p.skippedVersion = o.StrAt(L"updateSkippedVersion");
-        p.postponedUntilUnixMs = o.I64At(L"updatePostponedUntilUnixMs", 0);
-        if (haveNested)
+        catch (...)
         {
-            // Legacy strays from the pre-fix top-level RMW: honor them only where the nested key is
-            // unset, so an old Skip/Postpone isn't forgotten by the fix itself (the next
-            // WriteUpdateState heals them into the envelope and drops the strays).
-            if (!p.allowPrerelease)
-            {
-                p.allowPrerelease = parsed->BoolAt(L"allowUpdatePrerelease", false);
-            }
-            if (p.skippedVersion.empty())
-            {
-                p.skippedVersion = parsed->StrAt(L"updateSkippedVersion");
-            }
-            if (p.postponedUntilUnixMs == 0)
-            {
-                p.postponedUntilUnixMs = parsed->I64At(L"updatePostponedUntilUnixMs", 0);
-            }
+            p = UpdatePrefs{}; // unreadable prefs read as pristine defaults — check stable, prompt normally
         }
         return p;
     }
@@ -875,18 +947,29 @@ namespace Agentmaster::Updater
         }
         catch (...)
         {
+            // Best-effort trace, then swallow: a failed persist means the user gets re-asked, never
+            // a crash. (LogUpdate itself never throws, but its ARGUMENT construction can — nest.)
+            try
+            {
+                LogUpdate(stateDir, L"settings-write CRASHED (exception \x2014 choice not persisted)");
+            }
+            catch (...)
+            {
+            }
             return false;
         }
     }
 
-    inline void WriteSkip(const std::wstring& stateDir, const std::wstring& tag)
+    // Both return whether the choice actually PERSISTED (the RMW can refuse/fail) so ApplyDecision
+    // can log an honest outcome — a swallowed failure here used to read as a successful postpone.
+    inline bool WriteSkip(const std::wstring& stateDir, const std::wstring& tag)
     {
-        WriteUpdateState(stateDir, &tag, nullptr);
+        return WriteUpdateState(stateDir, &tag, nullptr);
     }
 
-    inline void WritePostpone(const std::wstring& stateDir, long long untilUnixMs)
+    inline bool WritePostpone(const std::wstring& stateDir, long long untilUnixMs)
     {
-        WriteUpdateState(stateDir, nullptr, &untilUnixMs);
+        return WriteUpdateState(stateDir, nullptr, &untilUnixMs);
     }
 
     // ============================ "Not now" (declined this run) ============================
@@ -901,14 +984,23 @@ namespace Agentmaster::Updater
     // mid-run (a different tag) still prompts. Child processes inherit it; nothing else reads it.
     inline constexpr const wchar_t* kDeclinedEnvVar = L"AGENTMASTER_UPDATE_DECLINED";
 
-    inline void MarkDeclinedThisRun(const std::wstring& tag)
+    inline void MarkDeclinedThisRun(const std::wstring& tag) noexcept
     {
         ::SetEnvironmentVariableW(kDeclinedEnvVar, tag.empty() ? nullptr : tag.c_str());
     }
 
+    // No-throw (GetEnv allocates): an unreadable latch reads as "not declined" — worst case one
+    // extra prompt, never a crash.
     inline bool WasDeclinedThisRun(const std::wstring& tag)
     {
-        return !tag.empty() && detail::GetEnv(kDeclinedEnvVar) == tag;
+        try
+        {
+            return !tag.empty() && detail::GetEnv(kDeclinedEnvVar) == tag;
+        }
+        catch (...)
+        {
+            return false;
+        }
     }
 
     // ============================ the prompt ============================
@@ -926,14 +1018,31 @@ namespace Agentmaster::Updater
     // The "same question" shown at startup AND from the cog: Update now / Postpone / Not now, with
     // the postpone DURATION chosen via a radio group (3 / 7 / 30 days / skip this version) — the
     // TaskDialog analog of the requested dropdown (a TaskDialog can't host a combobox; radios are
-    // the idiomatic in-dialog choice). Cancel / X == Not now (the least-destructive default).
+    // the idiomatic in-dialog choice). Cancel / X == Not now (the least-destructive default) — and
+    // ALSO the answer on any exception: a broken prompt must never crash the caller (the cog path
+    // calls this straight off a UI lambda) nor fabricate a consequential choice.
     inline Decision ShowUpdatePrompt(HWND owner, const UpdateInfo& info)
     {
-        const std::wstring instruction = L"Agentmaster " + DisplayVersion(info) + L" is available";
-        std::wstring content = L"You're on v" + info.currentVersionStr + L".\n\n";
-        content += info.installable ?
-                       L"Choose \x201CUpdate now\x201D and Agentmaster will close and reopen automatically once the new version is installed, or pick when to be reminded." :
-                       L"Choose \x201CUpdate now\x201D to open the download page, or pick when to be reminded.";
+        // The allocating part (string building) under guard; the remainder is plain structs + one
+        // Win32 call, which do not throw.
+        std::wstring instruction, content, footer;
+        try
+        {
+            instruction = L"Agentmaster " + DisplayVersion(info) + L" is available";
+            content = L"You're on v" + info.currentVersionStr + L".\n\n";
+            content += info.installable ?
+                           L"Choose \x201CUpdate now\x201D and Agentmaster will close and reopen automatically once the new version is installed, or pick when to be reminded." :
+                           L"Choose \x201CUpdate now\x201D to open the download page, or pick when to be reminded.";
+            // "What's new" OPENS this release's GitHub page (the changelog fixated on the specific
+            // release), rather than dumping notes inline — a TaskDialog hyperlink (TDF_ENABLE_HYPERLINKS)
+            // that UpdatePromptCallback ShellExecutes on click. The URL has no chars that need escaping
+            // inside the <a href="…"> markup (a GitHub release URL).
+            footer = L"<a href=\"" + ChangelogUrl(info) + L"\">What's new \x2192</a>";
+        }
+        catch (...)
+        {
+            return Decision::NotNow;
+        }
 
         constexpr int idUpdate = 2001, idPostpone = 2002, idNotNow = 2003;
         constexpr int rid3 = 3001, rid7 = 3002, rid30 = 3003, ridSkip = 3004;
@@ -949,12 +1058,6 @@ namespace Agentmaster::Updater
             { rid30, L"Remind me in 30 days" },
             { ridSkip, L"Skip this version" },
         };
-
-        // "What's new" OPENS this release's GitHub page (the changelog fixated on the specific
-        // release), rather than dumping notes inline — a TaskDialog hyperlink (TDF_ENABLE_HYPERLINKS)
-        // that UpdatePromptCallback ShellExecutes on click. The URL has no chars that need escaping
-        // inside the <a href="…"> markup (a GitHub release URL).
-        const std::wstring footer = L"<a href=\"" + ChangelogUrl(info) + L"\">What's new \x2192</a>";
 
         TASKDIALOGCONFIG cfg{};
         cfg.cbSize = sizeof(cfg);
@@ -1035,45 +1138,69 @@ namespace Agentmaster::Updater
     // exit / quit the app so the package isn't in use while it upgrades + relaunches.
     inline bool LaunchInstaller(const std::wstring& stateDir, const UpdateInfo& info)
     {
-        if (!info.installable)
-        {
-            return false;
-        }
-        const std::wstring ps1 = InstallerPs1();
-        if (ps1.empty())
-        {
-            return false; // the AM_UPDATE_PS1 resource is missing (only possible in a broken build)
-        }
-
-        std::wstring cmd = L"@echo off\r\ntitle Agentmaster Update\r\n";
-        cmd += L"powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0am-update.ps1\"";
-        cmd += L" -BundleUrl " + CmdArg(info.bundleUrl);
-        cmd += L" -CerUrl " + CmdArg(info.cerUrl);
-        cmd += L" -Version " + CmdArg(DisplayVersion(info));
-        if (!info.bundleSha256.empty())
-        {
-            cmd += L" -BundleSha256 " + CmdArg(info.bundleSha256);
-        }
-        cmd += L" -Family " + CmdArg(kReleaseFamily);
-        cmd += L" -WaitPid " + std::to_wstring(::GetCurrentProcessId());
-        cmd += L"\r\n";
-
-        const std::wstring ps1Path = stateDir + L"\\am-update.ps1";
-        const std::wstring cmdPath = stateDir + L"\\am-update.cmd";
         try
         {
-            std::filesystem::create_directories(std::filesystem::path{ stateDir });
+            if (!info.installable)
+            {
+                return false;
+            }
+            // Belt on top of ParseReleaseObj's gate: never hand a non-own-repo URL to a script that
+            // downloads + installs it, no matter how the UpdateInfo was assembled.
+            if (!IsTrustedAssetUrl(info.bundleUrl) || !IsTrustedAssetUrl(info.cerUrl))
+            {
+                LogUpdate(stateDir, L"installer REFUSED (asset URL outside our release downloads)");
+                return false;
+            }
+            const std::wstring ps1 = InstallerPs1();
+            if (ps1.empty())
+            {
+                LogUpdate(stateDir, L"installer REFUSED (AM_UPDATE_PS1 resource missing \x2014 broken build)");
+                return false; // the AM_UPDATE_PS1 resource is missing (only possible in a broken build)
+            }
+
+            std::wstring cmd = L"@echo off\r\ntitle Agentmaster Update\r\n";
+            cmd += L"powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0am-update.ps1\"";
+            cmd += L" -BundleUrl " + CmdArg(info.bundleUrl);
+            cmd += L" -CerUrl " + CmdArg(info.cerUrl);
+            cmd += L" -Version " + CmdArg(DisplayVersion(info));
+            if (!info.bundleSha256.empty())
+            {
+                cmd += L" -BundleSha256 " + CmdArg(info.bundleSha256);
+            }
+            cmd += L" -Family " + CmdArg(kReleaseFamily);
+            cmd += L" -WaitPid " + std::to_wstring(::GetCurrentProcessId());
+            cmd += L"\r\n";
+
+            const std::wstring ps1Path = stateDir + L"\\am-update.ps1";
+            const std::wstring cmdPath = stateDir + L"\\am-update.cmd";
+            try
+            {
+                std::filesystem::create_directories(std::filesystem::path{ stateDir });
+            }
+            catch (...)
+            {
+            }
+            if (!detail::WriteFileUtf8(ps1Path, ps1) || !detail::WriteFileUtf8(cmdPath, cmd))
+            {
+                LogUpdate(stateDir, L"installer materialize FAILED (am-update.ps1 / am-update.cmd write)");
+                return false;
+            }
+            const HINSTANCE h = ::ShellExecuteW(nullptr, L"open", cmdPath.c_str(), nullptr, stateDir.c_str(), SW_SHOWNORMAL);
+            return reinterpret_cast<INT_PTR>(h) > 32;
         }
         catch (...)
         {
-        }
-        if (!detail::WriteFileUtf8(ps1Path, ps1) || !detail::WriteFileUtf8(cmdPath, cmd))
-        {
-            LogUpdate(stateDir, L"installer materialize FAILED (am-update.ps1 / am-update.cmd write)");
+            // false == "not launched": the caller keeps the app open and the user can retry — the
+            // one thing that must never happen is exiting the app with NO installer running.
+            try
+            {
+                LogUpdate(stateDir, L"installer launch CRASHED (exception \x2014 not launched)");
+            }
+            catch (...)
+            {
+            }
             return false;
         }
-        const HINSTANCE h = ::ShellExecuteW(nullptr, L"open", cmdPath.c_str(), nullptr, stateDir.c_str(), SW_SHOWNORMAL);
-        return reinterpret_cast<INT_PTR>(h) > 32;
     }
 
     // Materialize the SAME am-update.ps1 + an am-uninstall.cmd launcher that runs it with -Uninstall,
@@ -1083,41 +1210,57 @@ namespace Agentmaster::Updater
     // is an unpackaged build (nothing registered to remove) or the resource is missing.
     inline bool LaunchUninstaller(const std::wstring& stateDir)
     {
-        const std::wstring family = Profiles::PackageFamilyName();
-        if (family.empty())
-        {
-            return false; // unpackaged — there is no registered package to uninstall
-        }
-        const std::wstring ps1 = InstallerPs1();
-        if (ps1.empty())
-        {
-            return false;
-        }
-
-        std::wstring cmd = L"@echo off\r\ntitle Agentmaster Uninstall\r\n";
-        cmd += L"powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0am-update.ps1\" -Uninstall";
-        cmd += L" -Family " + CmdArg(family);
-        cmd += L" -WaitPid " + std::to_wstring(::GetCurrentProcessId());
-        cmd += L"\r\n";
-
-        const std::wstring ps1Path = stateDir + L"\\am-update.ps1";
-        const std::wstring cmdPath = stateDir + L"\\am-uninstall.cmd";
         try
         {
-            std::filesystem::create_directories(std::filesystem::path{ stateDir });
+            const std::wstring family = Profiles::PackageFamilyName();
+            if (family.empty())
+            {
+                return false; // unpackaged — there is no registered package to uninstall
+            }
+            const std::wstring ps1 = InstallerPs1();
+            if (ps1.empty())
+            {
+                LogUpdate(stateDir, L"uninstaller REFUSED (AM_UPDATE_PS1 resource missing \x2014 broken build)");
+                return false;
+            }
+
+            std::wstring cmd = L"@echo off\r\ntitle Agentmaster Uninstall\r\n";
+            cmd += L"powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0am-update.ps1\" -Uninstall";
+            cmd += L" -Family " + CmdArg(family);
+            cmd += L" -WaitPid " + std::to_wstring(::GetCurrentProcessId());
+            cmd += L"\r\n";
+
+            const std::wstring ps1Path = stateDir + L"\\am-update.ps1";
+            const std::wstring cmdPath = stateDir + L"\\am-uninstall.cmd";
+            try
+            {
+                std::filesystem::create_directories(std::filesystem::path{ stateDir });
+            }
+            catch (...)
+            {
+            }
+            if (!detail::WriteFileUtf8(ps1Path, ps1) || !detail::WriteFileUtf8(cmdPath, cmd))
+            {
+                LogUpdate(stateDir, L"uninstaller materialize FAILED (am-update.ps1 / am-uninstall.cmd write)");
+                return false;
+            }
+            const HINSTANCE h = ::ShellExecuteW(nullptr, L"open", cmdPath.c_str(), nullptr, stateDir.c_str(), SW_SHOWNORMAL);
+            const bool launched = reinterpret_cast<INT_PTR>(h) > 32;
+            LogUpdate(stateDir, launched ? L"uninstaller launched (" + family + L") \x2014 app exiting for removal" : L"uninstaller ShellExecute FAILED");
+            return launched;
         }
         catch (...)
         {
-        }
-        if (!detail::WriteFileUtf8(ps1Path, ps1) || !detail::WriteFileUtf8(cmdPath, cmd))
-        {
-            LogUpdate(stateDir, L"uninstaller materialize FAILED (am-update.ps1 / am-uninstall.cmd write)");
+            // false == "not launched": the caller must NOT quit the app (nothing is uninstalling).
+            try
+            {
+                LogUpdate(stateDir, L"uninstaller launch CRASHED (exception \x2014 not launched)");
+            }
+            catch (...)
+            {
+            }
             return false;
         }
-        const HINSTANCE h = ::ShellExecuteW(nullptr, L"open", cmdPath.c_str(), nullptr, stateDir.c_str(), SW_SHOWNORMAL);
-        const bool launched = reinterpret_cast<INT_PTR>(h) > 32;
-        LogUpdate(stateDir, launched ? L"uninstaller launched (" + family + L") \x2014 app exiting for removal" : L"uninstaller ShellExecute FAILED");
-        return launched;
     }
 
 
@@ -1129,41 +1272,61 @@ namespace Agentmaster::Updater
     // through, so the decision trail is complete regardless of which surface asked.
     inline bool ApplyDecision(const std::wstring& stateDir, const UpdateInfo& info, Decision d, HWND owner)
     {
-        constexpr long long kDayMs = 24LL * 60 * 60 * 1000;
-        const long long now = NowUnixMs();
-        switch (d)
+        try
         {
-        case Decision::UpdateNow:
-            if (info.installable)
+            constexpr long long kDayMs = 24LL * 60 * 60 * 1000;
+            const long long now = NowUnixMs();
+            // One honest outcome line per decision: a Postpone/Skip whose PERSIST failed must not
+            // read like it stuck (the user WILL be asked again — say so).
+            const auto logChoice = [&](const wchar_t* what, bool persisted) {
+                LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> " + what + (persisted ? L"" : L" \x2014 persist FAILED, will ask again"));
+            };
+            switch (d)
             {
-                const bool launched = LaunchInstaller(stateDir, info);
-                LogUpdate(stateDir, launched ? L"prompt " + DisplayVersion(info) + L" -> Update now; installer launched \x2014 app exiting for upgrade" :
-                                               L"prompt " + DisplayVersion(info) + L" -> Update now; installer launch FAILED (resource/write/exec)");
-                return launched;
+            case Decision::UpdateNow:
+                if (info.installable)
+                {
+                    const bool launched = LaunchInstaller(stateDir, info);
+                    LogUpdate(stateDir, launched ? L"prompt " + DisplayVersion(info) + L" -> Update now; installer launched \x2014 app exiting for upgrade" :
+                                                   L"prompt " + DisplayVersion(info) + L" -> Update now; installer launch FAILED (resource/write/exec) \x2014 app stays open");
+                    return launched;
+                }
+                LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Update now (no installable assets \x2014 opening releases page)");
+                ::ShellExecuteW(owner, L"open", info.htmlUrl.empty() ? kReleasesPage : info.htmlUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                return false;
+            case Decision::Postpone3:
+                logChoice(L"Postpone 3d", WritePostpone(stateDir, now + 3 * kDayMs));
+                return false;
+            case Decision::Postpone7:
+                logChoice(L"Postpone 7d", WritePostpone(stateDir, now + 7 * kDayMs));
+                return false;
+            case Decision::Postpone30:
+                logChoice(L"Postpone 30d", WritePostpone(stateDir, now + 30 * kDayMs));
+                return false;
+            case Decision::Skip:
+                logChoice(L"Skip this version", WriteSkip(stateDir, info.latestTag));
+                return false;
+            case Decision::NotNow:
+            default:
+                MarkDeclinedThisRun(info.latestTag); // silence the hourly re-prompt for THIS tag, this run
+                LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Not now (asking again next launch; hourly re-prompt latched off)");
+                return false;
             }
-            LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Update now (no installable assets \x2014 opening releases page)");
-            ::ShellExecuteW(owner, L"open", info.htmlUrl.empty() ? kReleasesPage : info.htmlUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-            return false;
-        case Decision::Postpone3:
-            WritePostpone(stateDir, now + 3 * kDayMs);
-            LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Postpone 3d");
-            return false;
-        case Decision::Postpone7:
-            WritePostpone(stateDir, now + 7 * kDayMs);
-            LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Postpone 7d");
-            return false;
-        case Decision::Postpone30:
-            WritePostpone(stateDir, now + 30 * kDayMs);
-            LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Postpone 30d");
-            return false;
-        case Decision::Skip:
-            WriteSkip(stateDir, info.latestTag);
-            LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Skip this version");
-            return false;
-        case Decision::NotNow:
-        default:
-            MarkDeclinedThisRun(info.latestTag); // silence the hourly re-prompt for THIS tag, this run
-            LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Not now (asking again next launch; hourly re-prompt latched off)");
+        }
+        catch (...)
+        {
+            // Never let a decision crash the caller (the cog invokes this straight off a UI
+            // lambda). Latch the tag like Not-now so a persistently-failing path can't decay into
+            // an hourly nag loop; the next LAUNCH asks again. false == installer not launched, so
+            // the caller keeps the app open.
+            MarkDeclinedThisRun(info.latestTag);
+            try
+            {
+                LogUpdate(stateDir, L"decision apply CRASHED (exception \x2014 treated as Not now)");
+            }
+            catch (...)
+            {
+            }
             return false;
         }
     }
@@ -1182,13 +1345,23 @@ namespace Agentmaster::Updater
     // NOTE: a LOCALLY-built RELEASE install is also 0.0.1.0 (only CI stamps the version), so it shows
     // "available" until it picks up a CI-published build — that's correct: same family, real in-place
     // update to the published release.
+    // No-throw: this gate runs UNGUARDED on the launch path (_setupUpdateAutocheck) and in the cog;
+    // an undeterminable channel reads as "not the updater channel" — the updater goes quiet, the
+    // app never breaks.
     inline bool IsUpdaterChannel()
     {
-        if (!detail::GetEnv(L"AGENTMASTER_UPDATE_STARTUP").empty())
+        try
         {
-            return true;
+            if (!detail::GetEnv(L"AGENTMASTER_UPDATE_STARTUP").empty())
+            {
+                return true;
+            }
+            return IsPackaged() && !Profiles::IsDevPackage();
         }
-        return IsPackaged() && !Profiles::IsDevPackage();
+        catch (...)
+        {
+            return false;
+        }
     }
 
     // ============================ check orchestration ============================
@@ -1284,7 +1457,16 @@ namespace Agentmaster::Updater
         }
         catch (...)
         {
-            return false; // an update check must never throw into the caller (nor block startup)
+            // An update check must never throw into the caller (nor block startup). Leave a trace —
+            // a silent swallow here would be the one crash the [update] trail couldn't explain.
+            try
+            {
+                LogUpdate(Profiles::ResolveProfileDir(), std::wstring{ L"check (" } + origin + L") CRASHED (exception swallowed \x2014 flow aborted this pass)");
+            }
+            catch (...)
+            {
+            }
+            return false;
         }
     }
 

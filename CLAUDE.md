@@ -592,7 +592,22 @@ every check logs an **`[update]`** line to hooks.log via `Updater::LogUpdate` (t
 timer armed, per-tick begin/outcome tagged `(startup)`/`(periodic)`/`(cog)`/`(cog-silent)` (incl.
 postponed-skip with time left, up-to-date, available, skipped/declined suppression), every prompt
 decision, installer/uninstaller launch + failures — so the hourly cadence is verifiable straight off
-the log (previously fully silent). Toggle flips log `[nav] update-prerelease -> on/off`.
+the log (previously fully silent). Toggle flips log `[nav] update-prerelease -> on/off`. **The whole
+surface is HARDENED no-throw**: every Updater.h entry point is try/catch-logged with a safe default
+(channel gate ⇒ not-channel, prompt ⇒ Not now, decision-apply ⇒ latched Not-now, installer/uninstaller
+⇒ not-launched so the app never quits with nothing running, prefs ⇒ pristine defaults; the comctl
+hyperlink callback and `HttpsGet`'s read loop are guarded too — the latter closed its 3 WinHTTP handles
+on the throw path, a per-tick leak), `ParseVersion` clamps components (no signed-overflow UB on a
+hostile tag), and an **asset-URL allowlist** (`IsTrustedAssetUrl` — only
+`https://github.com/<repo>/releases/download/…`) gates both `ParseReleaseObj` and `LaunchInstaller`,
+since the installer downloads + executes what those URLs point at. The cog is wedge-proof: the check
+worker (a DETACHED thread — an escape is process death) and its UI completion
+(`_ApplyUpdateCheckResult`) are fully guarded with button/flag recovery, `std::thread` spawn failure
+restores the UI, and a fresh cog open resets `_interactiveUpdateInFlight` + the button label so a dead
+check can never permanently kill "Check for updates"; the prerelease seed latch clears on every path
+(a stuck latch would silently ignore all future flips). Covered by the harness's hardening suite
+(clamp, trust gate, synthetic-release parse, malformed/garbage/blocked-dir robustness, LogUpdate,
+decision→persist→read-back loop, full-fidelity envelope preservation).
 
 **Summary-panel JUMP ([`SUMMARY_JUMP.md`](doc/agentmaster/SUMMARY_JUMP.md)) — core complete, tested +
 benchmarked + optimized; full chain lib-compiles green (TerminalControlLib + TerminalAppLib); runtime

@@ -1474,5 +1474,248 @@ void TestUpdaterVersionLogic()
 
         ::SetEnvironmentVariableW(U::kDeclinedEnvVar, hadPrev ? prev.c_str() : nullptr);
     }
+
+    // ==== Hardening suite ("never break updating") — safeguards added with the try-catch-log pass ====
+
+    // ParseVersion overflow clamp: a degenerate/hostile tag must not overflow the int accumulator
+    // (UB — a negative component would corrupt every CompareVersion after it).
+    {
+        const auto huge = U::ParseVersion(L"v99999999999999.2.3");
+        CHECK(huge.major == 100000000 && huge.minor == 2 && huge.patch == 3, "clamp: absurd component clamps, later parts intact");
+        CHECK(huge.major > 0 && U::CompareVersion(huge, U::ParseVersion(L"v1.0.0")) > 0, "clamp: clamped version stays positive + orders sanely");
+    }
+
+    // Trusted-asset gate (IsTrustedAssetUrl): the installer DOWNLOADS AND EXECUTES what these URLs
+    // point at, so only our own repo's release-download URLs may ever qualify as installable.
+    {
+        CHECK(U::IsTrustedAssetUrl(L"https://github.com/Nucs/Agentmaster/releases/download/v1.0.0/Agentmaster.msixbundle"), "trust: own release-download URL accepted");
+        CHECK(!U::IsTrustedAssetUrl(L"https://evil.example/Agentmaster.msixbundle"), "trust: foreign host rejected");
+        CHECK(!U::IsTrustedAssetUrl(L"http://github.com/Nucs/Agentmaster/releases/download/v1/x.msixbundle"), "trust: plain http rejected");
+        CHECK(!U::IsTrustedAssetUrl(L"https://github.com/Nucs/Agentmaster/releases/download-evil/v1/x.msixbundle"), "trust: prefix-confusable path rejected");
+        CHECK(!U::IsTrustedAssetUrl(L"https://github.com/SomeoneElse/Agentmaster/releases/download/v1/x.msixbundle"), "trust: another repo rejected");
+        CHECK(!U::IsTrustedAssetUrl(L""), "trust: empty rejected");
+    }
+
+    // ParseReleaseObj: a synthetic GitHub release object end-to-end — asset detection (extension
+    // case-insensitive), digest capture, availability vs the current version, and the URL gate.
+    {
+        const std::wstring relJson =
+            L"{\"tag_name\":\"v2.0.0\",\"prerelease\":true,\"html_url\":\"https://github.com/Nucs/Agentmaster/releases/tag/v2.0.0\","
+            L"\"body\":\"notes\",\"assets\":["
+            L"{\"name\":\"Agentmaster.MsixBundle\",\"browser_download_url\":\"https://github.com/Nucs/Agentmaster/releases/download/v2.0.0/Agentmaster.MsixBundle\",\"digest\":\"sha256:abc\"},"
+            L"{\"name\":\"Agentmaster.cer\",\"browser_download_url\":\"https://github.com/Nucs/Agentmaster/releases/download/v2.0.0/Agentmaster.cer\"},"
+            L"{\"name\":\"portable.zip\",\"browser_download_url\":\"https://github.com/Nucs/Agentmaster/releases/download/v2.0.0/portable.zip\"}]}";
+        const auto rel = json::Parse(relJson);
+        CHECK(rel && rel->type == json::Value::Type::Obj, "release: synthetic JSON parses");
+        U::UpdateInfo info;
+        U::Version cur;
+        cur.major = 1; // 1.0.0 -> a v2.0.0 release is newer
+        U::ParseReleaseObj(*rel, cur, info);
+        CHECK(info.available && info.isPrerelease, "release: newer prerelease reads available");
+        CHECK(info.installable && !info.bundleUrl.empty() && !info.cerUrl.empty(), "release: bundle+cer detected (ext case-insensitive)");
+        CHECK(info.bundleSha256 == L"sha256:abc", "release: digest captured for the installer's verify");
+        CHECK(info.latestVersionStr == L"2.0.0", "release: tag 'v' stripped for display");
+
+        U::UpdateInfo eq;
+        U::ParseReleaseObj(*rel, U::ParseVersion(L"2.0.0"), eq);
+        CHECK(!eq.available, "release: equal version not available");
+        U::UpdateInfo older;
+        U::ParseReleaseObj(*rel, U::ParseVersion(L"2.0.1"), older);
+        CHECK(!older.available, "release: older release not available");
+
+        // A tampered (foreign-host) asset set: still 'available' (the version IS newer) but NEVER
+        // installable — the prompt then links to the releases page instead of installing it.
+        const std::wstring evilJson =
+            L"{\"tag_name\":\"v2.0.0\",\"assets\":["
+            L"{\"name\":\"x.msixbundle\",\"browser_download_url\":\"https://evil.example/x.msixbundle\"},"
+            L"{\"name\":\"x.cer\",\"browser_download_url\":\"https://evil.example/x.cer\"}]}";
+        const auto evil = json::Parse(evilJson);
+        U::UpdateInfo einfo;
+        U::ParseReleaseObj(*evil, cur, einfo);
+        CHECK(einfo.available && !einfo.installable && einfo.bundleUrl.empty(), "release: foreign asset URLs rejected (not installable)");
+    }
+
+    // Display/link/format helpers (each feeds a user-visible surface — a regression here corrupts
+    // the prompt, the changelog links, or the [update] trail).
+    {
+        U::UpdateInfo i1;
+        i1.latestTag = L"v1.2.3";
+        CHECK(U::DisplayVersion(i1) == L"v1.2.3", "display: v-tag verbatim");
+        U::UpdateInfo i2;
+        i2.latestTag = L"1.2.3";
+        i2.latestVersionStr = L"1.2.3";
+        CHECK(U::DisplayVersion(i2) == L"v1.2.3", "display: bare tag gains the v");
+        CHECK(U::ReleasePageForTag(L"0.6.8") == L"https://github.com/Nucs/Agentmaster/releases/tag/v0.6.8", "link: bare tag page ensures v");
+        CHECK(U::ReleasePageForTag(L"v0.6.8") == L"https://github.com/Nucs/Agentmaster/releases/tag/v0.6.8", "link: v-tag page verbatim");
+        U::UpdateInfo i3;
+        i3.htmlUrl = L"https://x/y";
+        i3.latestTag = L"v9";
+        CHECK(U::ChangelogUrl(i3) == L"https://x/y", "link: html_url wins");
+        i3.htmlUrl.clear();
+        CHECK(U::ChangelogUrl(i3) == L"https://github.com/Nucs/Agentmaster/releases/tag/v9", "link: built from tag when no html_url");
+        CHECK(U::CmdArg(L"50%off") == L"\"50%%off\"", "cmdarg: quoted + % doubled (cmd metachar)");
+        CHECK(U::detail::EndsWithNoCase(L"A.MsixBundle", L".msixbundle") && !U::detail::EndsWithNoCase(L"A.zip", L".msixbundle"), "endswith: case-insensitive suffix");
+        CHECK(U::FormatSpanShort(-5) == L"0m" && U::FormatSpanShort(0) == L"0m", "span: negative/zero -> 0m");
+        CHECK(U::FormatSpanShort(59LL * 60000) == L"59m", "span: minutes");
+        CHECK(U::FormatSpanShort(60LL * 60000) == L"1h", "span: exact hour");
+        CHECK(U::FormatSpanShort(24LL * 60 * 60000) == L"1d", "span: exact day");
+        CHECK(U::FormatSpanShort((25LL * 60 + 10) * 60000) == L"1d1h", "span: day+hour");
+    }
+
+    // ReadPrefs/WriteUpdateState robustness: malformed and wrong-shaped files read as pristine
+    // defaults / are repaired or refused — never a throw, never a clobber.
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring dir = std::wstring{ tmp } + L"am-upd-robust-" + NewSessionId();
+        const std::wstring sj = dir + L"\\settings.json";
+        std::filesystem::create_directories(std::filesystem::path{ dir });
+        const auto put = [&](const std::wstring& text) {
+            CHECK(U::detail::WriteFileUtf8(sj, text), "robust: seed written");
+        };
+
+        put(L"{{{{ not json");
+        const auto g = U::ReadPrefs(dir);
+        CHECK(!g.allowPrerelease && g.skippedVersion.empty() && g.postponedUntilUnixMs == 0, "robust: garbage file -> defaults");
+
+        put(L"[1,2,3]");
+        CHECK(U::ReadPrefs(dir).skippedVersion.empty(), "robust: array root -> defaults");
+
+        put(L"{\"version\":1,\"settings\":\"oops\",\"updateSkippedVersion\":\"v0.3.0\"}");
+        CHECK(U::ReadPrefs(dir).skippedVersion == L"v0.3.0", "robust: settings-as-string falls back to the top-level read");
+
+        put(L"{\"version\":1,\"settings\":{\"allowUpdatePrerelease\":\"true\",\"updatePostponedUntilUnixMs\":\"soon\"}}");
+        const auto w = U::ReadPrefs(dir);
+        CHECK(!w.allowPrerelease && w.postponedUntilUnixMs == 0, "robust: wrong-typed nested values -> defaults");
+
+        // A malformed "settings" member (a number) is replaced in place by the RMW; unrelated
+        // top-level keys survive.
+        put(L"{\"version\":1,\"settings\":42,\"model\":\"keepme\"}");
+        {
+            const std::wstring tag = L"v1.1.1";
+            CHECK(U::WriteUpdateState(dir, &tag, nullptr), "robust: settings-as-number RMW succeeds");
+            const auto doc = json::Parse(U::detail::ReadFileWide(sj));
+            const auto* s = doc ? doc->Find(L"settings") : nullptr;
+            CHECK(s && s->type == json::Value::Type::Obj && s->StrAt(L"updateSkippedVersion") == L"v1.1.1", "robust: malformed settings member replaced with a real object");
+            CHECK(doc && doc->StrAt(L"model") == L"keepme", "robust: unrelated top-level keys survive the repair");
+        }
+
+        // Duplicate stray keys (a hand-mangled file): the heal leaves exactly ONE nested copy and
+        // still migrates the value.
+        put(L"{\"version\":1,\"updateSkippedVersion\":\"a\",\"updateSkippedVersion\":\"b\",\"settings\":{}}");
+        {
+            long long pp = 777;
+            CHECK(U::WriteUpdateState(dir, nullptr, &pp), "robust: duplicate-stray RMW succeeds");
+            const std::wstring healed = U::detail::ReadFileWide(sj);
+            size_t n = 0;
+            for (size_t at = healed.find(L"updateSkippedVersion"); at != std::wstring::npos; at = healed.find(L"updateSkippedVersion", at + 1))
+            {
+                ++n;
+            }
+            CHECK(n == 1, "robust: duplicate strays healed to one nested key");
+            CHECK(U::ReadPrefs(dir).skippedVersion == L"a" && U::ReadPrefs(dir).postponedUntilUnixMs == 777, "robust: first stray migrated, postpone landed");
+        }
+
+        // A FILE standing where the state DIR should be: every writer fails gracefully (false).
+        const std::wstring blocked = std::wstring{ tmp } + L"am-upd-blocked-" + NewSessionId();
+        {
+            std::ofstream f{ std::filesystem::path{ blocked }, std::ios::binary };
+            f << "im a file";
+        }
+        {
+            long long pp = 1;
+            CHECK(!U::WriteUpdateState(blocked, nullptr, &pp), "robust: dir-blocked-by-file RMW returns false (no throw)");
+            CHECK(!U::WritePostpone(blocked, 2), "robust: WritePostpone propagates the failure");
+            const std::wstring tag2 = L"v1";
+            CHECK(!U::WriteSkip(blocked, tag2), "robust: WriteSkip propagates the failure");
+            CHECK(U::ReadPrefs(blocked).postponedUntilUnixMs == 0, "robust: nothing landed behind the blocked dir");
+        }
+        ::DeleteFileW(blocked.c_str());
+
+        // LogUpdate: stamped [update] lines land in hooks.log, one per call; bad dirs are no-ops.
+        {
+            U::LogUpdate(dir, L"unit-test line one");
+            U::LogUpdate(dir, L"unit-test line two");
+            const std::wstring log = U::detail::ReadFileWide(dir + L"\\hooks.log");
+            CHECK(log.find(L"[update] unit-test line one\n") != std::wstring::npos, "log: line one written + newline-terminated");
+            CHECK(log.find(L"[update] unit-test line two\n") != std::wstring::npos, "log: line two appended");
+            CHECK(!log.empty() && log[0] == L'[', "log: [HH:MM:SS.mmm] stamp leads the line");
+            U::LogUpdate(L"", L"never lands"); // empty stateDir -> no-op
+            U::LogUpdate(dir + L"\\no-such-sub\\deeper", L"never lands"); // missing dir -> no-op
+            CHECK(true, "log: bad stateDirs are safe no-ops (no throw)");
+        }
+
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
+    }
+
+    // ApplyDecision: the decision -> persist -> read-back loop, exactly what a prompt drives.
+    // UpdateNow is deliberately NOT exercised (it ShellExecutes a browser / the real installer).
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring dir = std::wstring{ tmp } + L"am-upd-decide-" + NewSessionId();
+        std::filesystem::create_directories(std::filesystem::path{ dir });
+
+        wchar_t prevBuf[256];
+        const DWORD prevLen = ::GetEnvironmentVariableW(U::kDeclinedEnvVar, prevBuf, 256);
+        const bool hadPrev = prevLen > 0 && prevLen < 256;
+        const std::wstring prev = hadPrev ? std::wstring{ prevBuf, prevLen } : std::wstring{};
+        U::MarkDeclinedThisRun(L"");
+
+        U::UpdateInfo info;
+        info.latestTag = L"v9.9.9";
+        info.latestVersionStr = L"9.9.9";
+
+        constexpr long long kDay = 24LL * 60 * 60 * 1000;
+        const long long t0 = U::NowUnixMs();
+        CHECK(!U::ApplyDecision(dir, info, U::Decision::Postpone3, nullptr), "decide: postpone3 returns not-launched");
+        const auto p3 = U::ReadPrefs(dir).postponedUntilUnixMs;
+        CHECK(p3 >= t0 + 3 * kDay - 60000 && p3 <= U::NowUnixMs() + 3 * kDay + 60000, "decide: postpone3 lands ~3 days out");
+        CHECK(!U::ApplyDecision(dir, info, U::Decision::Postpone30, nullptr), "decide: postpone30 returns not-launched");
+        const auto p30 = U::ReadPrefs(dir).postponedUntilUnixMs;
+        CHECK(p30 > p3 && p30 >= t0 + 30 * kDay - 60000, "decide: postpone30 replaces with ~30 days");
+
+        CHECK(!U::ApplyDecision(dir, info, U::Decision::Skip, nullptr), "decide: skip returns not-launched");
+        CHECK(U::ReadPrefs(dir).skippedVersion == L"v9.9.9", "decide: skip persists the exact tag");
+
+        const std::wstring before = U::detail::ReadFileWide(dir + L"\\settings.json");
+        CHECK(!U::ApplyDecision(dir, info, U::Decision::NotNow, nullptr), "decide: not-now returns not-launched");
+        CHECK(U::WasDeclinedThisRun(L"v9.9.9"), "decide: not-now latches the declined marker (no hourly nag)");
+        CHECK(U::detail::ReadFileWide(dir + L"\\settings.json") == before, "decide: not-now persists NOTHING to settings.json");
+
+        ::SetEnvironmentVariableW(U::kDeclinedEnvVar, hadPrev ? prev.c_str() : nullptr);
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
+    }
+
+    // Full-fidelity envelope: an updater RMW must not disturb ANY other cog setting (the broad
+    // "an update choice can never break your settings" guarantee, past the model-only check above).
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring dir = std::wstring{ tmp } + L"am-upd-fidelity-" + NewSessionId();
+        std::filesystem::create_directories(std::filesystem::path{ dir });
+        AppSettings a;
+        a.model = L"opus";
+        a.env = L"FOO=1;BAR=two words";
+        a.launchModels = L"Fable 5 | claude-fable-5\nOpus | claude-opus-4-8";
+        a.flashRingColor = L"#CC00FF00";
+        a.recentDirsLimit = 17;
+        a.maxTags = 33;
+        a.skipPermissions = false;
+        a.notifySound = false;
+        a.hiddenSessionIds.push_back(L"11111111-2222-3333-4444-555555555555");
+        CHECK(U::detail::WriteFileUtf8(dir + L"\\settings.json", SerializeAppSettings(a)), "fidelity: engine-shaped seed written");
+        CHECK(U::WritePostpone(dir, 123456789LL), "fidelity: RMW succeeds");
+        const AppSettings b = DeserializeAppSettings(U::detail::ReadFileWide(dir + L"\\settings.json"));
+        CHECK(b.model == a.model && b.env == a.env && b.launchModels == a.launchModels, "fidelity: strings intact through the RMW");
+        CHECK(b.flashRingColor == a.flashRingColor && b.recentDirsLimit == a.recentDirsLimit && b.maxTags == a.maxTags, "fidelity: numbers/colors intact");
+        CHECK(b.skipPermissions == a.skipPermissions && b.notifySound == a.notifySound, "fidelity: bools intact");
+        CHECK(b.hiddenSessionIds.size() == 1 && b.hiddenSessionIds[0] == a.hiddenSessionIds[0], "fidelity: lists intact");
+        CHECK(b.updatePostponedUntilUnixMs == 123456789LL, "fidelity: the RMW'd key visible to the engine");
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
+    }
 }
 
