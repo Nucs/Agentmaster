@@ -1341,9 +1341,11 @@ namespace Agentmaster
         // Agentmaster (updater; Updater.h): the in-app GitHub-release updater's state. allowUpdatePrerelease
         // is the Settings cog's "Allow updating to pre-release versions" toggle (default OFF — the check
         // uses /releases/latest, which excludes prereleases; ON uses the list endpoint, newest published).
-        // updateSkippedVersion / updatePostponedUntilUnixMs are written OUTSIDE the cog form by the updater
-        // (a freshest-disk JSON read-modify-write that the WindowsTerminal EXE can do without linking the
-        // engine — see Updater.h), so the cog's Save PRESERVES them from disk like the summary-panel fields:
+        // ALL THREE are written OUTSIDE the cog form — allowUpdatePrerelease by the switch's own
+        // INSTANT-APPLY freshest-disk RMW (flipping it persists immediately, no Save), skip/postpone by the
+        // updater prompt's JSON RMW (which the WindowsTerminal EXE can do without linking the engine — see
+        // Updater.h; it writes INSIDE the {version, settings:{...}} envelope, where these fields round-trip)
+        // — so the cog's Save PRESERVES all three from disk like the summary-panel fields:
         // skip == the exact tag the user chose to "Skip this version" (never re-prompt for it); postpone ==
         // the epoch-ms before which no check/prompt fires ("Remind me in 3/7/30 days"). All three default to
         // a no-op (prompt normally, nothing skipped, not postponed) so a missing settings.json changes nothing.

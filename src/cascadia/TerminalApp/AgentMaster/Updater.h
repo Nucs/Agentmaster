@@ -21,13 +21,22 @@
 // settings helpers — but it CAN include this header (and Json.h, which is itself header-only) just
 // as it includes ProfileBootstrap.h.
 //
-// Persisted update state lives as three keys INSIDE settings.json (the active profile):
-//   allowUpdatePrerelease (bool)        — the cog's "Allow updating to pre-release versions" toggle.
+// Persisted update state lives as three keys INSIDE settings.json (the active profile) — and
+// settings.json is the engine's ENVELOPE `{version: 1, settings: {...}}` (Persistence.cpp
+// SerializeAppSettings), so the keys live NESTED under "settings", never at the top level (a
+// top-level key is silently DROPPED by the next engine save, which rebuilds the envelope from the
+// AppSettings struct — the original schema-mismatch bug that blinded the startup/hourly checks):
+//   allowUpdatePrerelease (bool)        — the cog's "Allow updating to pre-release versions" toggle
+//                                         (INSTANT-APPLY: the switch itself RMWs it on flip — no Save).
 //   updateSkippedVersion (string tag)   — "Skip this version" -> never re-prompt for that exact tag.
 //   updatePostponedUntilUnixMs (number) — "Postpone N days" -> no check / no prompt until this time.
-// The cog FORM owns allowUpdatePrerelease (it round-trips through AppSettings); skip/postpone are
-// written by THIS module via a freshest-disk JSON read-modify-write (so the EXE can write them too
-// without linking the engine), and the cog's Save preserves them from disk (the summaryPanel idiom).
+// skip/postpone are written by THIS module via a freshest-disk JSON read-modify-write INTO the
+// envelope (so the EXE can write them too without linking the engine); AppSettings carries all three
+// fields, so the engine round-trips them and the cog's Save preserves them from disk (the
+// summaryPanel idiom). "Not now" persists NOTHING durable — it latches a process-scoped
+// declined-this-run marker (kDeclinedEnvVar) so the hourly autocheck doesn't nag, and the next
+// LAUNCH asks again (the original semantic). Every check/prompt/decision logs an "[update]" line to
+// the profile's hooks.log (LogUpdate — the EXE-safe twin of the engine's AppendStateLog).
 
 #pragma once
 
@@ -269,18 +278,42 @@ namespace Agentmaster::Updater
             }
         }
 
+        // ATOMIC write — the engine's Persistence::WriteAllUtf8 recipe (temp sibling + FlushFileBuffers
+        // + MoveFileExW REPLACE_EXISTING|WRITE_THROUGH), which this EXE-safe module cannot call. The
+        // settings.json RMW below rides this, so a crash/power loss mid-write can never leave the user's
+        // whole settings file torn/truncated (the old truncate-in-place ofstream could); a reader sees
+        // either the whole old file or the whole new one. The installer scripts ride it too (harmless).
         inline bool WriteFileUtf8(const std::wstring& path, std::wstring_view content)
         {
             try
             {
-                std::ofstream f{ std::filesystem::path{ path }, std::ios::binary | std::ios::trunc };
-                if (!f)
+                const auto bytes = WideToUtf8(content);
+                // Per-thread temp name so two concurrent writers of one target never collide; same
+                // directory as the target so the rename is a same-volume (atomic) metadata move.
+                const std::wstring tmp = path + L".tmp." + std::to_wstring(::GetCurrentThreadId());
+                const HANDLE h = ::CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (h == INVALID_HANDLE_VALUE)
                 {
                     return false;
                 }
-                const auto bytes = WideToUtf8(content);
-                f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-                return f.good();
+                DWORD wrote = 0;
+                const BOOL ok = bytes.empty() ? TRUE : ::WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &wrote, nullptr);
+                if (ok)
+                {
+                    ::FlushFileBuffers(h); // best-effort: data on the platter BEFORE the rename commits
+                }
+                ::CloseHandle(h);
+                if (!ok || wrote != bytes.size())
+                {
+                    ::DeleteFileW(tmp.c_str());
+                    return false;
+                }
+                if (!::MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                {
+                    ::DeleteFileW(tmp.c_str()); // the old file stays fully intact on failure
+                    return false;
+                }
+                return true;
             }
             catch (...)
             {
@@ -356,6 +389,65 @@ namespace Agentmaster::Updater
         constexpr unsigned long long kEpochDiff100ns = 116444736000000000ULL;
         const unsigned long long t = u.QuadPart - kEpochDiff100ns;
         return static_cast<long long>(t / 10000ULL);
+    }
+
+    // ============================ observability ============================
+
+    // Append one "[update] …" line to the profile's hooks.log — the SAME file, local-time stamp
+    // format ([HH:MM:SS.mmm]) and whole-line-per-write discipline as the engine's AppendStateLog,
+    // which this module cannot call (the EXE links TerminalApp.dll, not the engine lib). One
+    // FILE_APPEND_DATA WriteFile per line keeps records intact against the engine's concurrent
+    // appends (append-mode writes serialize per-write). Best-effort, never throws — an update trace
+    // must never break an update. This is what makes the hourly autocheck VERIFIABLE from the log
+    // (one line per tick), previously a fully silent path.
+    inline void LogUpdate(const std::wstring& stateDir, const std::wstring& msg)
+    {
+        try
+        {
+            if (stateDir.empty())
+            {
+                return;
+            }
+            const std::wstring path = stateDir + L"\\hooks.log";
+            const HANDLE h = ::CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE)
+            {
+                return;
+            }
+            SYSTEMTIME st{};
+            ::GetLocalTime(&st);
+            wchar_t stamp[24];
+            ::swprintf(stamp, 24, L"[%02u:%02u:%02u.%03u] ", static_cast<unsigned>(st.wHour), static_cast<unsigned>(st.wMinute), static_cast<unsigned>(st.wSecond), static_cast<unsigned>(st.wMilliseconds));
+            const std::string bytes = detail::WideToUtf8(std::wstring{ stamp } + L"[update] " + msg + L"\n");
+            DWORD wrote = 0;
+            ::WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &wrote, nullptr);
+            ::CloseHandle(h);
+        }
+        catch (...)
+        {
+        }
+    }
+
+    // A short human span for the postpone-gate log line: "3d2h" / "5h10m" / "42m".
+    inline std::wstring FormatSpanShort(long long ms)
+    {
+        if (ms < 0)
+        {
+            ms = 0;
+        }
+        const long long mins = ms / 60000;
+        const long long days = mins / (24 * 60);
+        const long long hours = (mins / 60) % 24;
+        const long long rem = mins % 60;
+        if (days > 0)
+        {
+            return std::to_wstring(days) + L"d" + (hours > 0 ? std::to_wstring(hours) + L"h" : L"");
+        }
+        if (hours > 0)
+        {
+            return std::to_wstring(hours) + L"h" + (rem > 0 ? std::to_wstring(rem) + L"m" : L"");
+        }
+        return std::to_wstring(rem) + L"m";
     }
 
     // ============================ GitHub check ============================
@@ -627,15 +719,44 @@ namespace Agentmaster::Updater
         return stateDir + L"\\settings.json";
     }
 
+    // settings.json is the engine's ENVELOPE — `{version: 1, settings: {...}}` (Persistence.cpp
+    // SerializeAppSettings) — so the update keys live NESTED under "settings". Reading/writing the
+    // ROOT was the original bug: ReadPrefs never saw the cog-saved allowUpdatePrerelease (the
+    // startup/hourly checks ran stable-only forever), and a Skip/Postpone written at the top level
+    // was silently WIPED by the next engine save (which rebuilds the whole envelope from the
+    // AppSettings struct). Nested-first with a top-level fallback: a file last touched by the
+    // pre-fix RMW (strays beside "settings") or a hand-made flat file still honors the old choice.
     inline UpdatePrefs ReadPrefs(const std::wstring& stateDir)
     {
         UpdatePrefs p;
         const auto parsed = json::Parse(detail::ReadFileWide(SettingsPath(stateDir)));
-        if (parsed && parsed->type == json::Value::Type::Obj)
+        if (!parsed || parsed->type != json::Value::Type::Obj)
         {
-            p.allowPrerelease = parsed->BoolAt(L"allowUpdatePrerelease", false);
-            p.skippedVersion = parsed->StrAt(L"updateSkippedVersion");
-            p.postponedUntilUnixMs = parsed->I64At(L"updatePostponedUntilUnixMs", 0);
+            return p;
+        }
+        const json::Value* nested = parsed->Find(L"settings");
+        const bool haveNested = nested && nested->type == json::Value::Type::Obj;
+        const json::Value& o = haveNested ? *nested : *parsed;
+        p.allowPrerelease = o.BoolAt(L"allowUpdatePrerelease", false);
+        p.skippedVersion = o.StrAt(L"updateSkippedVersion");
+        p.postponedUntilUnixMs = o.I64At(L"updatePostponedUntilUnixMs", 0);
+        if (haveNested)
+        {
+            // Legacy strays from the pre-fix top-level RMW: honor them only where the nested key is
+            // unset, so an old Skip/Postpone isn't forgotten by the fix itself (the next
+            // WriteUpdateState heals them into the envelope and drops the strays).
+            if (!p.allowPrerelease)
+            {
+                p.allowPrerelease = parsed->BoolAt(L"allowUpdatePrerelease", false);
+            }
+            if (p.skippedVersion.empty())
+            {
+                p.skippedVersion = parsed->StrAt(L"updateSkippedVersion");
+            }
+            if (p.postponedUntilUnixMs == 0)
+            {
+                p.postponedUntilUnixMs = parsed->I64At(L"updatePostponedUntilUnixMs", 0);
+            }
         }
         return p;
     }
@@ -655,27 +776,102 @@ namespace Agentmaster::Updater
         obj.members.emplace_back(key, std::move(v));
     }
 
+    // Mutable member lookup + removal (Json.h's Find is const-only and Set appends).
+    inline json::Value* FindMember(json::Value& obj, std::wstring_view key)
+    {
+        for (auto& m : obj.members)
+        {
+            if (m.first == key)
+            {
+                return &m.second;
+            }
+        }
+        return nullptr;
+    }
+
+    inline void RemoveMember(json::Value& obj, std::wstring_view key)
+    {
+        for (auto it = obj.members.begin(); it != obj.members.end();)
+        {
+            it = (it->first == key) ? obj.members.erase(it) : std::next(it);
+        }
+    }
+
     // Freshest-disk read-modify-write of settings.json: parse the whole file, set just the given
-    // update key(s), re-serialize (every other key is preserved verbatim). The EXE uses this to
-    // persist a Skip/Postpone choice without linking the engine; the cog's Save preserves these
-    // same keys from disk so a form Save never regresses them.
+    // update key(s) INSIDE the engine's `{version, settings:{...}}` envelope (where AppSettings
+    // round-trips them, so an engine save preserves instead of wiping them), re-serialize with
+    // every other key preserved verbatim, and write ATOMICALLY. The EXE uses this to persist a
+    // Skip/Postpone choice without linking the engine; the cog's Save preserves these same keys
+    // from disk so a form Save never regresses them. A non-empty file that doesn't parse is NOT
+    // ours to rebuild — bail (the choice stays unpersisted) rather than clobber the user's whole
+    // settings with an update-keys-only skeleton; the engine's writes are atomic, so that is a
+    // foreign/corrupt file, never a torn mid-write read.
     inline bool WriteUpdateState(const std::wstring& stateDir, const std::wstring* skipTag, const long long* postponeMs)
     {
         try
         {
-            json::Value obj;
-            const auto parsed = json::Parse(detail::ReadFileWide(SettingsPath(stateDir)));
-            obj = (parsed && parsed->type == json::Value::Type::Obj) ? *parsed : json::Value::MkObj();
+            const std::wstring raw = detail::ReadFileWide(SettingsPath(stateDir));
+            const auto parsed = json::Parse(raw);
+            const bool haveObj = parsed && parsed->type == json::Value::Type::Obj;
+            if (!raw.empty() && !haveObj)
+            {
+                LogUpdate(stateDir, L"settings-write REFUSED (settings.json unparseable \x2014 choice not persisted)");
+                return false;
+            }
+            json::Value root = haveObj ? *parsed : json::Value::MkObj();
+            // Capture the pre-fix top-level strays for MIGRATION (not deletion): a legacy Skip/
+            // Postpone/prerelease written beside "settings" by the old RMW is folded INTO the
+            // envelope below when this write isn't itself setting that key and the nested key is
+            // still unset — healing must never forget a choice the user already made. Root-level
+            // structure is mutated FIRST (every root append/erase can reallocate `members`), the
+            // nested `settings` pointer is taken LAST, and root is never touched after.
+            const std::wstring straySkip = root.StrAt(L"updateSkippedVersion");
+            const long long strayPostpone = root.I64At(L"updatePostponedUntilUnixMs", 0);
+            const bool strayPrerelease = root.BoolAt(L"allowUpdatePrerelease", false);
+            RemoveMember(root, L"updateSkippedVersion");
+            RemoveMember(root, L"updatePostponedUntilUnixMs");
+            RemoveMember(root, L"allowUpdatePrerelease");
+            if (!FindMember(root, L"version"))
+            {
+                SetMember(root, L"version", json::Value::MkNum(1));
+            }
+            json::Value* settings = FindMember(root, L"settings");
+            if (settings && settings->type != json::Value::Type::Obj)
+            {
+                *settings = json::Value::MkObj(); // a malformed "settings" — replace in place
+            }
+            else if (!settings)
+            {
+                SetMember(root, L"settings", json::Value::MkObj());
+                settings = FindMember(root, L"settings");
+            }
             if (skipTag)
             {
-                SetMember(obj, L"updateSkippedVersion", json::Value::MkStr(*skipTag));
+                SetMember(*settings, L"updateSkippedVersion", json::Value::MkStr(*skipTag));
+            }
+            else if (!straySkip.empty() && settings->StrAt(L"updateSkippedVersion").empty())
+            {
+                SetMember(*settings, L"updateSkippedVersion", json::Value::MkStr(straySkip));
             }
             if (postponeMs)
             {
-                SetMember(obj, L"updatePostponedUntilUnixMs", json::Value::MkNum(static_cast<double>(*postponeMs)));
+                SetMember(*settings, L"updatePostponedUntilUnixMs", json::Value::MkNum(static_cast<double>(*postponeMs)));
+            }
+            else if (strayPostpone != 0 && settings->I64At(L"updatePostponedUntilUnixMs", 0) == 0)
+            {
+                SetMember(*settings, L"updatePostponedUntilUnixMs", json::Value::MkNum(static_cast<double>(strayPostpone)));
+            }
+            if (strayPrerelease && !settings->BoolAt(L"allowUpdatePrerelease", false))
+            {
+                SetMember(*settings, L"allowUpdatePrerelease", json::Value::MkBool(true));
             }
             std::filesystem::create_directories(std::filesystem::path{ stateDir });
-            return detail::WriteFileUtf8(SettingsPath(stateDir), json::Dump(obj));
+            const bool ok = detail::WriteFileUtf8(SettingsPath(stateDir), json::Dump(root));
+            if (!ok)
+            {
+                LogUpdate(stateDir, L"settings-write FAILED (skip/postpone not persisted)");
+            }
+            return ok;
         }
         catch (...)
         {
@@ -691,6 +887,28 @@ namespace Agentmaster::Updater
     inline void WritePostpone(const std::wstring& stateDir, long long untilUnixMs)
     {
         WriteUpdateState(stateDir, nullptr, &untilUnixMs);
+    }
+
+    // ============================ "Not now" (declined this run) ============================
+
+    // "Not now" means "ask me again NEXT LAUNCH" — but the hourly autocheck re-runs the same flow
+    // every hour, which decayed it into an hourly nag. The latch is PROCESS-scoped, keyed by the
+    // declined tag, and deliberately an ENVIRONMENT VARIABLE: Updater.h is compiled into BOTH
+    // WindowsTerminal.exe (the startup + hourly checks) and TerminalApp.dll (the cog's prompt) — an
+    // inline/static would exist once PER MODULE, but the env block is one per PROCESS, so a "Not
+    // now" clicked on the cog's prompt also silences the EXE's hourly re-prompt. It dies with the
+    // process (the next launch asks again — the original semantic), and a NEWER release appearing
+    // mid-run (a different tag) still prompts. Child processes inherit it; nothing else reads it.
+    inline constexpr const wchar_t* kDeclinedEnvVar = L"AGENTMASTER_UPDATE_DECLINED";
+
+    inline void MarkDeclinedThisRun(const std::wstring& tag)
+    {
+        ::SetEnvironmentVariableW(kDeclinedEnvVar, tag.empty() ? nullptr : tag.c_str());
+    }
+
+    inline bool WasDeclinedThisRun(const std::wstring& tag)
+    {
+        return !tag.empty() && detail::GetEnv(kDeclinedEnvVar) == tag;
     }
 
     // ============================ the prompt ============================
@@ -851,6 +1069,7 @@ namespace Agentmaster::Updater
         }
         if (!detail::WriteFileUtf8(ps1Path, ps1) || !detail::WriteFileUtf8(cmdPath, cmd))
         {
+            LogUpdate(stateDir, L"installer materialize FAILED (am-update.ps1 / am-update.cmd write)");
             return false;
         }
         const HINSTANCE h = ::ShellExecuteW(nullptr, L"open", cmdPath.c_str(), nullptr, stateDir.c_str(), SW_SHOWNORMAL);
@@ -892,16 +1111,22 @@ namespace Agentmaster::Updater
         }
         if (!detail::WriteFileUtf8(ps1Path, ps1) || !detail::WriteFileUtf8(cmdPath, cmd))
         {
+            LogUpdate(stateDir, L"uninstaller materialize FAILED (am-update.ps1 / am-uninstall.cmd write)");
             return false;
         }
         const HINSTANCE h = ::ShellExecuteW(nullptr, L"open", cmdPath.c_str(), nullptr, stateDir.c_str(), SW_SHOWNORMAL);
-        return reinterpret_cast<INT_PTR>(h) > 32;
+        const bool launched = reinterpret_cast<INT_PTR>(h) > 32;
+        LogUpdate(stateDir, launched ? L"uninstaller launched (" + family + L") \x2014 app exiting for removal" : L"uninstaller ShellExecute FAILED");
+        return launched;
     }
 
 
     // Apply the user's choice. Returns true IFF the installer was launched (UpdateNow + installable)
-    // — the caller then exits/quits. Postpone/Skip persist to settings.json; Not now does nothing;
-    // UpdateNow with no installable asset opens the releases page instead.
+    // — the caller then exits/quits. Postpone/Skip persist to settings.json (inside the envelope);
+    // Not now latches the declined-this-run marker (no durable state — the next launch asks again);
+    // UpdateNow with no installable asset opens the releases page instead. Every outcome logs an
+    // [update] line — this is the ONE chokepoint every prompt (startup / hourly / cog) applies
+    // through, so the decision trail is complete regardless of which surface asked.
     inline bool ApplyDecision(const std::wstring& stateDir, const UpdateInfo& info, Decision d, HWND owner)
     {
         constexpr long long kDayMs = 24LL * 60 * 60 * 1000;
@@ -911,24 +1136,34 @@ namespace Agentmaster::Updater
         case Decision::UpdateNow:
             if (info.installable)
             {
-                return LaunchInstaller(stateDir, info);
+                const bool launched = LaunchInstaller(stateDir, info);
+                LogUpdate(stateDir, launched ? L"prompt " + DisplayVersion(info) + L" -> Update now; installer launched \x2014 app exiting for upgrade" :
+                                               L"prompt " + DisplayVersion(info) + L" -> Update now; installer launch FAILED (resource/write/exec)");
+                return launched;
             }
+            LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Update now (no installable assets \x2014 opening releases page)");
             ::ShellExecuteW(owner, L"open", info.htmlUrl.empty() ? kReleasesPage : info.htmlUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             return false;
         case Decision::Postpone3:
             WritePostpone(stateDir, now + 3 * kDayMs);
+            LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Postpone 3d");
             return false;
         case Decision::Postpone7:
             WritePostpone(stateDir, now + 7 * kDayMs);
+            LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Postpone 7d");
             return false;
         case Decision::Postpone30:
             WritePostpone(stateDir, now + 30 * kDayMs);
+            LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Postpone 30d");
             return false;
         case Decision::Skip:
             WriteSkip(stateDir, info.latestTag);
+            LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Skip this version");
             return false;
         case Decision::NotNow:
         default:
+            MarkDeclinedThisRun(info.latestTag); // silence the hourly re-prompt for THIS tag, this run
+            LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Not now (asking again next launch; hourly re-prompt latched off)");
             return false;
         }
     }
@@ -968,8 +1203,9 @@ namespace Agentmaster::Updater
     // Safe to call on the MAIN thread (startup, before the message loop) OR a BACKGROUND thread (the
     // hourly autocheck): the network round-trip runs on its own worker bounded to kDeadlineMs, and the
     // prompt is a modal Win32 TaskDialog that pumps its own nested message loop (independent of XAML,
-    // so a background-thread call never touches the UI thread). Never throws.
-    inline bool RunUpdateCheckAndPrompt(HWND owner)
+    // so a background-thread call never touches the UI thread). Never throws. `origin` tags the
+    // [update] trail ("startup" / "periodic") so each hourly tick is verifiable in hooks.log.
+    inline bool RunUpdateCheckAndPrompt(HWND owner, const wchar_t* origin = L"startup")
     {
         try
         {
@@ -978,12 +1214,18 @@ namespace Agentmaster::Updater
                 return false; // dev/unpackaged: the updater targets the RELEASE install (see IsUpdaterChannel)
             }
             const std::wstring stateDir = Profiles::ResolveProfileDir();
+            const std::wstring tag = std::wstring{ L"check (" } + origin + L")";
             const UpdatePrefs prefs = ReadPrefs(stateDir);
-            if (prefs.postponedUntilUnixMs > NowUnixMs())
+            const long long nowMs = NowUnixMs();
+            if (prefs.postponedUntilUnixMs > nowMs)
             {
-                return false; // still postponed: no network check, no prompt
+                // Still postponed: no network check, no prompt. Logged so the hourly tick stays
+                // visible (the liveness proof) even while it deliberately does nothing.
+                LogUpdate(stateDir, tag + L" skipped: postponed (" + FormatSpanShort(prefs.postponedUntilUnixMs - nowMs) + L" left)");
+                return false;
             }
             const Version cur = CurrentPackageVersion();
+            LogUpdate(stateDir, tag + L" begin: cur=" + VersionToString(cur) + L" prerelease=" + (prefs.allowPrerelease ? L"on" : L"off"));
 
             // Bound the TOTAL network wait so a slow-but-present network can't wedge launch: WinHTTP's
             // per-phase timeouts (resolve/connect/send/receive) could otherwise sum to ~4x, and this
@@ -1010,17 +1252,33 @@ namespace Agentmaster::Updater
             }
             if (!shared->done.load(std::memory_order_acquire))
             {
+                LogUpdate(stateDir, tag + L" abandoned: network slower than the 6s deadline (retry next tick/launch)");
                 return false; // network too slow this launch — proceed; the detached worker self-cleans
             }
             const UpdateInfo info = shared->info; // done==true => the worker finished writing
+            if (!info.checked)
+            {
+                LogUpdate(stateDir, tag + L" failed: " + (info.error.empty() ? std::wstring{ L"unknown" } : info.error));
+                return false;
+            }
             if (!info.available)
             {
+                LogUpdate(stateDir, tag + L" done: up to date (latest=" + (info.latestTag.empty() ? std::wstring{ L"none" } : info.latestTag) + L")");
                 return false;
             }
             if (!prefs.skippedVersion.empty() && prefs.skippedVersion == info.latestTag)
             {
+                LogUpdate(stateDir, tag + L" done: " + DisplayVersion(info) + L" available but SKIPPED by the user \x2014 no prompt");
                 return false; // the user skipped exactly this version
             }
+            if (WasDeclinedThisRun(info.latestTag))
+            {
+                // "Not now" was clicked for THIS tag earlier in this run (startup prompt, an earlier
+                // hourly tick, or the cog's prompt) — asking again is the next LAUNCH's job.
+                LogUpdate(stateDir, tag + L" done: " + DisplayVersion(info) + L" available but declined this run \x2014 no re-prompt");
+                return false;
+            }
+            LogUpdate(stateDir, tag + L" done: " + DisplayVersion(info) + L" available (" + (info.isPrerelease ? L"pre-release" : L"stable") + (info.installable ? L", installable) \x2014 prompting" : L", NO installable assets) \x2014 prompting"));
             const Decision d = ShowUpdatePrompt(owner, info);
             return ApplyDecision(stateDir, info, d, owner);
         }
@@ -1034,7 +1292,7 @@ namespace Agentmaster::Updater
     // main thread — the bounded worker-and-poll inside the core keeps it from wedging launch.
     inline bool RunStartupUpdateCheck(HWND owner)
     {
-        return RunUpdateCheckAndPrompt(owner);
+        return RunUpdateCheckAndPrompt(owner, L"startup");
     }
 
     // The periodic autocheck (WindowEmperor's hourly WM_TIMER -> a detached background thread, so
@@ -1043,6 +1301,6 @@ namespace Agentmaster::Updater
     // true IFF the installer was launched — the caller then exits the process so it isn't in use.
     inline bool RunPeriodicUpdateCheck(HWND owner)
     {
-        return RunUpdateCheckAndPrompt(owner);
+        return RunUpdateCheckAndPrompt(owner, L"periodic");
     }
 }

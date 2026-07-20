@@ -568,10 +568,30 @@ rules reopen the workspace on the updated relaunch) so the package isn't in use.
 family is ever
 published, so a dev install that updates **graduates** to release. The Settings cog's **UPDATES**
 section is the manual twin — a "Check for updates" button, a "vX.Y.Z available!" label, and an "Allow
-pre-release versions" toggle (NOT startup-gated, available on any build). State persists in
-`settings.json`: `allowUpdatePrerelease` (round-trips through the cog form) + `updateSkippedVersion` /
-`updatePostponedUntilUnixMs` (written by a freshest-disk JSON RMW outside the form — so the EXE can
-write them without linking the engine — and preserved from disk on a cog Save, the summary-panel idiom).
+pre-release versions" toggle (NOT startup-gated, available on any build; **INSTANT-APPLY** — flipping
+it persists immediately via a freshest-disk RMW + re-kicks the silent check, no Save needed — a flip
+followed by a backdrop-tap close used to be silently discarded, the "checkbox doesn't persist" report).
+State persists in `settings.json` — **INSIDE the engine's `{version, settings:{...}}` ENVELOPE**, the
+schema-mismatch fix: `Updater::ReadPrefs`/`WriteUpdateState` used to read/write the TOP level, so the
+startup + hourly checks NEVER saw the saved `allowUpdatePrerelease` (they queried `/releases/latest`,
+stable-only, forever — with every v0.6.4+ release marked pre-release, they compared against v0.6.1 and
+never prompted) and a top-level Skip/Postpone was WIPED by the next engine save (`SerializeAppSettings`
+rebuilds the whole envelope). Now all three keys — `allowUpdatePrerelease` (written by the toggle's own
+RMW) + `updateSkippedVersion` / `updatePostponedUntilUnixMs` (written by the prompt's RMW, EXE-safe, no
+engine link) — live nested where `AppSettings` round-trips them; BOTH cog-Save preserve blocks (content
++ page sink) restore all three from disk, `ReadPrefs` falls back to a pre-fix top-level stray, and
+`WriteUpdateState` MIGRATES strays into the envelope (never drops a made choice), refuses to rebuild an
+unparseable non-empty file (no clobber), and writes ATOMICALLY (temp + flush + `MoveFileExW`, the
+engine's `WriteAllUtf8` recipe — was a torn-file-prone trunc `ofstream`). **"Not now" no longer nags
+hourly**: it latches a process-scoped declined-this-run marker (`AGENTMASTER_UPDATE_DECLINED=<tag>` env
+var — one env block per PROCESS, unlike a per-module inline, so the cog's DLL prompt silences the EXE's
+hourly timer too; dies at exit = "ask again next launch", a NEWER tag still prompts). **Observability**:
+every check logs an **`[update]`** line to hooks.log via `Updater::LogUpdate` (the EXE-safe
+`AppendStateLog` twin — same file, same `[HH:MM:SS.mmm]` stamp, one `FILE_APPEND_DATA` write per line):
+timer armed, per-tick begin/outcome tagged `(startup)`/`(periodic)`/`(cog)`/`(cog-silent)` (incl.
+postponed-skip with time left, up-to-date, available, skipped/declined suppression), every prompt
+decision, installer/uninstaller launch + failures — so the hourly cadence is verifiable straight off
+the log (previously fully silent). Toggle flips log `[nav] update-prerelease -> on/off`.
 
 **Summary-panel JUMP ([`SUMMARY_JUMP.md`](doc/agentmaster/SUMMARY_JUMP.md)) — core complete, tested +
 benchmarked + optimized; full chain lib-compiles green (TerminalControlLib + TerminalAppLib); runtime
@@ -1703,7 +1723,7 @@ What works, by area:
   (`ClaudeSpawn.cpp`, thread-safe + best-effort). Three layers: (1) the **hook event stream**
   (`[SessionStart]`/`[UserPromptSubmit]`/`[Stop]`/…) — the push state machine; (2) **engine-mechanism
   tags** — `[fork]`/`[resume]`/`[restore-fresh]`/`[rehome]`/`[spawn]`/`[launch-fail]`/`[archive]`/`[teardown-archive]`/
-  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[pending]`/`[notify]`/`[persist-fail]`/`[observer]`/`[activity]`/… (each
+  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[pending]`/`[notify]`/`[update]`/`[persist-fail]`/`[observer]`/`[activity]`/… (each
   carries the resulting ids), plus the **window-restore story** — one coherent trace per `windowId`:
   `[window-claim]`/`[window-fresh]` (claim a saved record or start fresh, at engine init) → `[rehome-begin]`
   (every tab ref listed BY SESSION ID + the focus target) → per-tab `[rehome] window <id> resume|skip <sid>`

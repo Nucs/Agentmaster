@@ -899,7 +899,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _setClaudeInstallBtn{ nullptr }; // Agentmaster: one-click install/migrate — shown only when no native claude.exe is detected (label from ClaudeInstallKind())
         winrt::Windows::UI::Xaml::Controls::TextBox _setCleanupDays{ nullptr }; // ENV_VARS.md §8: cleanupPeriodDays in the user's GLOBAL ~/.claude/settings.json (history retention; read/written via the ClaudeUserSettings repo, NOT AppSettings)
         // ---- UPDATES (Agentmaster updater; Updater.h) ----
-        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAllowPrerelease{ nullptr }; // include GitHub pre-releases in the update check (default OFF)
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAllowPrerelease{ nullptr }; // include GitHub pre-releases in the update check (default OFF; INSTANT-APPLY — the switch RMWs settings.json on flip, no Save needed)
+        bool _seedingAllowPrerelease{ false }; // latch: a cog-open programmatic IsOn seed must not re-fire the switch's instant-apply RMW
         winrt::Windows::UI::Xaml::Controls::Button _setCheckUpdates{ nullptr }; // "Check for updates" -> the same prompt the startup check shows
         winrt::Windows::UI::Xaml::Controls::TextBlock _setUpdateStatus{ nullptr }; // status label ("vX.Y.Z available!" dark green / "up to date" / "Checking…")
         bool _interactiveUpdateInFlight{ false }; // guard so a double-click of "Check for updates" can't fire two prompts

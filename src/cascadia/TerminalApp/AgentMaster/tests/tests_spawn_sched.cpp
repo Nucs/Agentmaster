@@ -1322,48 +1322,157 @@ void TestUpdaterVersionLogic()
         CHECK(!U::IsPackaged(), "unpackaged: IsPackaged false");
     }
 
-    // Skip/Postpone RMW on settings.json (explicit stateDir -> a temp profile): defaults on a
-    // missing file, write-then-read of both keys, preserve-foreign-keys, replace-not-append.
+    // Skip/Postpone/prerelease persistence on settings.json (explicit stateDir -> a temp profile).
+    // settings.json is the engine's ENVELOPE ({version:1, settings:{...}} — Persistence::
+    // SerializeAppSettings), so the update keys must live NESTED under "settings", where AppSettings
+    // round-trips them. Reading/writing the ROOT was the original updater bug: the startup/hourly
+    // checks never saw the cog-saved prerelease opt-in (they checked stable-only forever), and a
+    // top-level Skip/Postpone was silently WIPED by the next engine save (which rebuilds the whole
+    // envelope from the struct).
     {
         wchar_t tmp[MAX_PATH]{};
         ::GetTempPathW(MAX_PATH, tmp);
         const std::wstring dir = std::wstring{ tmp } + L"am-updater-test-" + NewSessionId();
+        const std::wstring sj = dir + L"\\settings.json";
+        const auto countKey = [](const std::wstring& text, const wchar_t* key) {
+            size_t n = 0;
+            for (size_t at = text.find(key); at != std::wstring::npos; at = text.find(key, at + 1))
+            {
+                ++n;
+            }
+            return n;
+        };
 
         const auto missing = U::ReadPrefs(dir);
         CHECK(!missing.allowPrerelease && missing.skippedVersion.empty() && missing.postponedUntilUnixMs == 0,
               "prefs: missing settings.json -> defaults");
 
-        // Seed a settings.json with FOREIGN keys (a cog-shaped doc), then RMW the update keys in.
-        std::filesystem::create_directories(std::filesystem::path{ dir });
-        {
-            std::ofstream f{ std::filesystem::path{ dir } / L"settings.json", std::ios::binary };
-            f << "{\"model\":\"opus\",\"allowUpdatePrerelease\":true}";
-        }
+        // An RMW on a MISSING file mints the engine envelope (version + nested settings), never a
+        // flat doc a later engine save would half-ignore.
         U::WriteSkip(dir, L"v0.9.9");
+        {
+            const auto doc = json::Parse(U::detail::ReadFileWide(sj));
+            CHECK(doc && doc->type == json::Value::Type::Obj, "prefs: fresh RMW parses");
+            const auto* s = doc ? doc->Find(L"settings") : nullptr;
+            CHECK(s && s->type == json::Value::Type::Obj && s->StrAt(L"updateSkippedVersion") == L"v0.9.9",
+                  "prefs: fresh RMW mints the ENGINE ENVELOPE (key nested under settings)");
+            CHECK(doc->NumAt(L"version", 0) == 1, "prefs: fresh RMW stamps version 1");
+            CHECK(!doc->Find(L"updateSkippedVersion"), "prefs: no top-level stray minted");
+        }
+
+        // ENGINE round-trip — the bug-1 + bug-2 regression pair. Seed an engine-shaped file exactly
+        // as the cog's Save writes it (model set, prerelease opted in), then verify both directions.
+        AppSettings cogSaved;
+        cogSaved.model = L"opus";
+        cogSaved.allowUpdatePrerelease = true;
+        CHECK(U::detail::WriteFileUtf8(sj, SerializeAppSettings(cogSaved)), "atomic: engine-shaped seed lands");
+        CHECK(U::ReadPrefs(dir).allowPrerelease, "prefs: cog-saved (nested) prerelease opt-in is READ (bug-1 regression)");
+
+        U::WriteSkip(dir, L"v1.0.0");
         U::WritePostpone(dir, 1234567890123LL);
         const auto p = U::ReadPrefs(dir);
-        CHECK(p.skippedVersion == L"v0.9.9", "prefs: WriteSkip round-trips");
+        CHECK(p.skippedVersion == L"v1.0.0", "prefs: WriteSkip round-trips");
         CHECK(p.postponedUntilUnixMs == 1234567890123LL, "prefs: WritePostpone round-trips (int64 survives the double)");
-        CHECK(p.allowPrerelease, "prefs: foreign allowUpdatePrerelease preserved by the RMW");
-
-        // SetMember must REPLACE, not append: a second skip leaves exactly ONE key, latest value.
-        U::WriteSkip(dir, L"v1.0.0");
-        const auto p2 = U::ReadPrefs(dir);
-        CHECK(p2.skippedVersion == L"v1.0.0", "prefs: a second skip replaces the tag");
+        CHECK(p.allowPrerelease, "prefs: the RMW preserves the cog's nested prerelease");
         {
-            std::wifstream f{ std::filesystem::path{ dir } / L"settings.json" };
-            std::wstring text{ std::istreambuf_iterator<wchar_t>(f), std::istreambuf_iterator<wchar_t>() };
-            size_t n = 0;
-            for (size_t at = text.find(L"updateSkippedVersion"); at != std::wstring::npos; at = text.find(L"updateSkippedVersion", at + 1))
+            const AppSettings loaded = DeserializeAppSettings(U::detail::ReadFileWide(sj));
+            CHECK(loaded.model == L"opus", "prefs: the cog's model survives the updater RMW");
+            CHECK(loaded.updateSkippedVersion == L"v1.0.0" && loaded.updatePostponedUntilUnixMs == 1234567890123LL,
+                  "prefs: the ENGINE reads the updater's skip/postpone (same nested fields)");
+            // The engine-save cycle (bug-2 regression): rebuild the envelope from the struct — the
+            // updater's choices must SURVIVE it (top-level keys used to be wiped exactly here).
+            CHECK(U::detail::WriteFileUtf8(sj, SerializeAppSettings(loaded)), "atomic: engine save-cycle lands");
+            const auto after = U::ReadPrefs(dir);
+            CHECK(after.skippedVersion == L"v1.0.0" && after.postponedUntilUnixMs == 1234567890123LL && after.allowPrerelease,
+                  "prefs: skip/postpone/prerelease SURVIVE an engine save (bug-2 regression)");
+        }
+
+        // SetMember must REPLACE, not append: a second skip leaves exactly ONE (nested) key.
+        U::WriteSkip(dir, L"v1.0.1");
+        {
+            CHECK(U::ReadPrefs(dir).skippedVersion == L"v1.0.1", "prefs: a second skip replaces the tag");
+            CHECK(countKey(U::detail::ReadFileWide(sj), L"updateSkippedVersion") == 1,
+                  "prefs: SetMember replaces in place (one nested key, no stray)");
+        }
+
+        // Legacy strays (a file the PRE-FIX updater touched): top-level skip/postpone beside the
+        // envelope are honored on read (fallback), the NESTED value wins when both are set, and the
+        // next write MIGRATES the stray into the envelope (healing must never forget a choice).
+        {
+            const std::wstring legacy =
+                L"{\"version\": 1, \"updateSkippedVersion\": \"v0.5.0\", \"updatePostponedUntilUnixMs\": 777, "
+                L"\"settings\": {\"model\": \"opus\", \"updateSkippedVersion\": \"\", \"updatePostponedUntilUnixMs\": 0}}";
+            CHECK(U::detail::WriteFileUtf8(sj, legacy), "legacy: seed written");
+            const auto lp = U::ReadPrefs(dir);
+            CHECK(lp.skippedVersion == L"v0.5.0" && lp.postponedUntilUnixMs == 777,
+                  "legacy: top-level strays honored while nested unset");
+            U::WritePostpone(dir, 999);
+            const std::wstring healed = U::detail::ReadFileWide(sj);
+            CHECK(countKey(healed, L"updateSkippedVersion") == 1, "legacy: heal leaves ONE nested key");
+            const auto hp = U::ReadPrefs(dir);
+            CHECK(hp.postponedUntilUnixMs == 999 && hp.skippedVersion == L"v0.5.0",
+                  "legacy: heal MIGRATES the stray skip into the envelope (not dropped)");
+            const AppSettings engineView = DeserializeAppSettings(healed);
+            CHECK(engineView.updateSkippedVersion == L"v0.5.0" && engineView.model == L"opus",
+                  "legacy: after the heal the ENGINE sees the migrated skip + keeps its own keys");
+
+            const std::wstring both =
+                L"{\"version\":1,\"updateSkippedVersion\":\"v0.1.0\",\"settings\":{\"updateSkippedVersion\":\"v0.2.0\"}}";
+            CHECK(U::detail::WriteFileUtf8(sj, both), "legacy: both-set seed written");
+            CHECK(U::ReadPrefs(dir).skippedVersion == L"v0.2.0", "legacy: the NESTED value wins over a stray");
+        }
+
+        // A non-empty file that doesn't parse is REFUSED — never clobbered by an update-keys-only
+        // skeleton (the user's whole settings live in this file).
+        {
+            CHECK(U::detail::WriteFileUtf8(sj, L"{not json!!"), "garbage: seeded");
+            const std::wstring tag = L"v9.9.9";
+            CHECK(!U::WriteUpdateState(dir, &tag, nullptr), "garbage: RMW refuses an unparseable file");
+            CHECK(U::detail::ReadFileWide(sj) == L"{not json!!", "garbage: file bytes untouched");
+        }
+
+        // The atomic writer: full replace of an existing (longer) file + no temp leftovers.
+        {
+            CHECK(U::detail::WriteFileUtf8(sj, L"short"), "atomic: replace long with short");
+            CHECK(U::detail::ReadFileWide(sj) == L"short", "atomic: no tail of the old content");
+            bool leftover = false;
+            for (const auto& e : std::filesystem::directory_iterator{ std::filesystem::path{ dir } })
             {
-                ++n;
+                if (e.path().filename().wstring().find(L".tmp.") != std::wstring::npos)
+                {
+                    leftover = true;
+                }
             }
-            CHECK(n == 1, "prefs: SetMember replaces in place (no duplicate key)");
-            CHECK(text.find(L"\"model\"") != std::wstring::npos, "prefs: the cog's model key survives our RMW");
+            CHECK(!leftover, "atomic: no .tmp.* leftover");
         }
 
         std::error_code ec;
         std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
+    }
+
+    // "Not now" declined-this-run latch (Updater.h): PROCESS-scoped via an env var (one env block
+    // per process, unlike a per-module inline/static — the cog's DLL prompt must silence the EXE's
+    // hourly re-prompt), keyed by the exact declined tag so a NEWER release still prompts, cleared
+    // by process exit ("ask again next launch"). Save/restore the ambient var (harness hygiene).
+    {
+        wchar_t prevBuf[256];
+        const DWORD prevLen = ::GetEnvironmentVariableW(U::kDeclinedEnvVar, prevBuf, 256);
+        const bool hadPrev = prevLen > 0 && prevLen < 256;
+        const std::wstring prev = hadPrev ? std::wstring{ prevBuf, prevLen } : std::wstring{};
+
+        U::MarkDeclinedThisRun(L""); // ensure a clean slate regardless of the ambient env
+        CHECK(!U::WasDeclinedThisRun(L"v0.6.8"), "declined: unset -> false");
+        U::MarkDeclinedThisRun(L"v0.6.8");
+        CHECK(U::WasDeclinedThisRun(L"v0.6.8"), "declined: same tag latched (no hourly re-nag)");
+        CHECK(!U::WasDeclinedThisRun(L"v0.6.9"), "declined: a NEWER tag still prompts");
+        CHECK(!U::WasDeclinedThisRun(L""), "declined: empty tag never matches");
+        U::MarkDeclinedThisRun(L"v0.7.0");
+        CHECK(!U::WasDeclinedThisRun(L"v0.6.8") && U::WasDeclinedThisRun(L"v0.7.0"),
+              "declined: re-decline replaces the tag (single-slot latch)");
+        U::MarkDeclinedThisRun(L"");
+        CHECK(!U::WasDeclinedThisRun(L"v0.7.0"), "declined: cleared");
+
+        ::SetEnvironmentVariableW(U::kDeclinedEnvVar, hadPrev ? prev.c_str() : nullptr);
     }
 }
 

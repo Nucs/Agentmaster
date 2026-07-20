@@ -771,7 +771,29 @@ namespace winrt::TerminalApp::implementation
 
         _setAllowPrerelease = ToggleSwitch{};
         _setAllowPrerelease.Header(winrt::box_value(L"Allow updating to pre-release versions"));
-        AgentSetTip(_setAllowPrerelease, L"When on, update checks also consider GitHub pre-releases (beta builds), not just stable releases. Off by default.");
+        AgentSetTip(_setAllowPrerelease, L"When on, update checks also consider GitHub pre-releases (beta builds), not just stable releases. Off by default. Applies immediately \x2014 no Save needed.");
+        // INSTANT-APPLY (no Save gate): flipping the switch persists immediately via a freshest-disk
+        // RMW of just this field (the showSummaryPanel idiom) — a flip followed by a backdrop-tap
+        // close used to be silently discarded, reading as "the checkbox doesn't persist". The form no
+        // longer owns the field: the Save path preserves it from disk, the switch re-seeds from disk
+        // at every cog open (behind _seedingAllowPrerelease so the programmatic IsOn can't re-fire
+        // this), and the startup/hourly checks read settings.json fresh each pass (Updater::ReadPrefs)
+        // — so no broadcast is needed for correctness anywhere.
+        _setAllowPrerelease.Toggled([this](const IInspectable&, const RoutedEventArgs&) {
+            if (_seedingAllowPrerelease)
+            {
+                return; // a cog-open seed, not a user flip
+            }
+            const bool on = _setAllowPrerelease.IsOn();
+            _appSettings.allowUpdatePrerelease = on;
+            auto disk = ::Agentmaster::LoadAppSettings();
+            disk.allowUpdatePrerelease = on;
+            ::Agentmaster::SaveAppSettings(disk);
+            ::Agentmaster::LogNav(std::wstring{ L"update-prerelease -> " } + (on ? L"on" : L"off"));
+            // Re-run the silent check so the "vX.Y.Z available!" label + changelog link reflect the
+            // new channel right away (release channel only — _CheckForUpdates gates itself).
+            _CheckForUpdates(false);
+        });
         panel.Children().Append(_setAllowPrerelease);
 
         // (The "Uninstall Agentmaster…" button is built at the END of the About tab, after the Profile row.)
@@ -2136,7 +2158,14 @@ namespace winrt::TerminalApp::implementation
         }
         if (_setAllowPrerelease)
         {
-            _setAllowPrerelease.IsOn(_appSettings.allowUpdatePrerelease);
+            // Seed from DISK, not the in-memory copy: the toggle INSTANT-APPLIES via a freshest-disk
+            // RMW (possibly flipped from another window since this window's copy was seeded), so disk
+            // is the one truth. The latch keeps the programmatic IsOn from re-firing the Toggled RMW.
+            const bool diskOn = ::Agentmaster::LoadAppSettings().allowUpdatePrerelease;
+            _appSettings.allowUpdatePrerelease = diskOn;
+            _seedingAllowPrerelease = true;
+            _setAllowPrerelease.IsOn(diskOn);
+            _seedingAllowPrerelease = false;
         }
         if (_setDebugMode)
         {
@@ -2541,10 +2570,6 @@ namespace winrt::TerminalApp::implementation
             _appSettings.tabOverlayRestOpacity = _overlayRestVal;
             _appSettings.tabOverlayHoverOpacity = _overlayHoverVal;
         }
-        if (_setAllowPrerelease)
-        {
-            _appSettings.allowUpdatePrerelease = _setAllowPrerelease.IsOn(); // UPDATES: the form OWNS this field
-        }
         if (_setDebugMode && !::Agentmaster::Profiles::IsDevPackage())
         {
             // DEVELOPER: the form owns debugMode — but only when it is user-controllable. On a Dev build the
@@ -2556,13 +2581,15 @@ namespace winrt::TerminalApp::implementation
         // does the same for hiddenSessionIds/showSummaryPanel): the summary panel SIZE (width/height
         // fractions, TAB_OVERLAY.md) is written by the panel's resize grips, not this form, so a form Save
         // must not regress a resize done since the modal was seeded (incl. from another window). The
-        // updater's skip/postpone state (Updater.h) is likewise written outside this form (a JSON RMW),
-        // so preserve it too — only allowUpdatePrerelease (above) is the form's to write.
+        // updater's state (Updater.h) is likewise written outside this form — skip/postpone by the
+        // prompt's JSON RMW, allowUpdatePrerelease by the switch's own INSTANT-APPLY RMW — so preserve
+        // all three (a stale form copy must never overwrite a flip made since the modal was seeded).
         {
             const auto disk = ::Agentmaster::LoadAppSettings();
             _appSettings.summaryPanelWidthFraction = disk.summaryPanelWidthFraction;
             _appSettings.summaryPanelHeightFraction = disk.summaryPanelHeightFraction;
             _appSettings.summaryPanelWrapNewlines = disk.summaryPanelWrapNewlines; // wrap-line toggle (panel times bar), out-of-cog UI action
+            _appSettings.allowUpdatePrerelease = disk.allowUpdatePrerelease; // updater pre-release opt-in (instant-applied by the switch itself)
             _appSettings.updateSkippedVersion = disk.updateSkippedVersion; // updater "Skip this version" (out-of-cog JSON RMW)
             _appSettings.updatePostponedUntilUnixMs = disk.updatePostponedUntilUnixMs; // updater "Postpone N days" (out-of-cog JSON RMW)
             _appSettings.envDefaultsVersion = disk.envDefaultsVersion; // shipped-default seed marker (engine-init, out-of-cog) — a Save must never reset it (would re-add a deleted default)
@@ -3183,6 +3210,25 @@ namespace winrt::TerminalApp::implementation
             // explicit button than the silent on-open check.
             const ::Agentmaster::Updater::UpdateInfo info =
                 ::Agentmaster::Updater::CheckForUpdate(cur, prerelease, interactive ? 8000 : 5000);
+            // The cog leg of the [update] observability trail (the startup/hourly legs log inside
+            // RunUpdateCheckAndPrompt; this path calls CheckForUpdate directly, so log here).
+            {
+                const std::wstring tag = interactive ? L"check (cog)" : L"check (cog-silent)";
+                std::wstring line;
+                if (!info.checked)
+                {
+                    line = tag + L" failed: " + (info.error.empty() ? std::wstring{ L"unknown" } : info.error);
+                }
+                else if (info.available)
+                {
+                    line = tag + L" done: " + ::Agentmaster::Updater::DisplayVersion(info) + L" available (" + (info.isPrerelease ? L"pre-release" : L"stable") + (info.installable ? L", installable)" : L", NO installable assets)");
+                }
+                else
+                {
+                    line = tag + L" done: up to date (latest=" + (info.latestTag.empty() ? std::wstring{ L"none" } : info.latestTag) + L")";
+                }
+                ::Agentmaster::Updater::LogUpdate(stateDir, line + L" cur=" + info.currentVersionStr + L" prerelease=" + (prerelease ? L"on" : L"off"));
+            }
             if (!disp)
             {
                 return;

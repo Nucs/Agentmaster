@@ -1099,9 +1099,12 @@ namespace winrt::TerminalApp::implementation
                     s.showSummaryPanel = disk.showSummaryPanel;
                     s.summaryPanelWrapNewlines = disk.summaryPanelWrapNewlines; // wrap-line toggle (panel times bar), out-of-cog UI action
                     s.summaryPanelTruncate = disk.summaryPanelTruncate; // truncate toggle (panel times bar), out-of-cog UI action
-                    // Updater (Updater.h): skip/postpone are written outside the cog form (a JSON RMW
-                    // from the prompt, possibly from another window or the startup check). The form
-                    // owns ONLY allowUpdatePrerelease, so preserve these two from disk on Save.
+                    // Updater (Updater.h): ALL update state is written outside the cog form —
+                    // skip/postpone by the prompt's JSON RMW (possibly from another window or the
+                    // startup check), allowUpdatePrerelease by the switch's own INSTANT-APPLY RMW —
+                    // so preserve all three from disk on Save (a stale form copy must never regress
+                    // a flip/choice made since the modal was seeded).
+                    s.allowUpdatePrerelease = disk.allowUpdatePrerelease;
                     s.updateSkippedVersion = disk.updateSkippedVersion;
                     s.updatePostponedUntilUnixMs = disk.updatePostponedUntilUnixMs;
                 }

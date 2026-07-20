@@ -1600,6 +1600,9 @@ void WindowEmperor::_setupUpdateAutocheck()
     // WM_TIMER is low priority (delivered only when the queue is otherwise idle), which is exactly
     // right for an hourly, non-urgent check. _window exists by now (_createMessageWindow ran above).
     SetTimer(_window.get(), AM_UPDATE_CHECK_TIMER_ID, AM_UPDATE_CHECK_INTERVAL_MS, nullptr);
+    // Anchor the [update] trail: every later "check (periodic) …" line pairs against this arm, so a
+    // missing hourly line is diagnosable (timer never armed vs a tick that didn't run).
+    ::Agentmaster::Updater::LogUpdate(::Agentmaster::Profiles::ResolveProfileDir(), L"hourly autocheck armed (every 60m; first tick in 60m)");
 }
 
 void WindowEmperor::_persistState(const ApplicationState& state) const
