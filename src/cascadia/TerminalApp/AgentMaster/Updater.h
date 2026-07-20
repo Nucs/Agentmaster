@@ -34,9 +34,13 @@
 // envelope (so the EXE can write them too without linking the engine); AppSettings carries all three
 // fields, so the engine round-trips them and the cog's Save preserves them from disk (the
 // summaryPanel idiom). "Not now" persists NOTHING durable — it latches a process-scoped
-// declined-this-run marker (kDeclinedEnvVar) so the hourly autocheck doesn't nag, and the next
-// LAUNCH asks again (the original semantic). Every check/prompt/decision logs an "[update]" line to
-// the profile's hooks.log (LogUpdate — the EXE-safe twin of the engine's AppendStateLog).
+// declined-this-run marker (kDeclinedEnvVar) that silences the startup + hourly checks ENTIRELY
+// (pre-network presence gate: no query, no prompt, even for a newer release published mid-run)
+// until the NEXT LAUNCH, which always asks again (RunStartupUpdateCheck clears an inherited latch);
+// the cog's explicit "Check for updates" stays fully live. Every check/prompt/decision logs an
+// "[update]" line to the profile's hooks.log (LogUpdate — the EXE-safe twin of the engine's
+// AppendStateLog), and NO catch swallows silently: every guard either logs, or is itself the
+// logger / a logger-failed nested catch (each annotated as such at the site).
 
 #pragma once
 
@@ -76,6 +80,12 @@ namespace Agentmaster::Updater
     inline constexpr const wchar_t* kReleaseAumid = L"Agentmaster_56k4f06dsfp9r!App";
     inline constexpr const wchar_t* kReleaseFamily = L"Agentmaster_56k4f06dsfp9r";
     inline constexpr const wchar_t* kReleasesPage = L"https://github.com/Nucs/Agentmaster/releases";
+
+    // Defined in the observability section below; declared first so EVERY function in this header —
+    // incl. the version gates and the detail:: file helpers — can trace its own failures (POLICY:
+    // no catch swallows without a log — every guard either logs or is itself the logger / a
+    // logger-failed nested catch, annotated as such).
+    inline void LogUpdate(const std::wstring& stateDir, const std::wstring& msg);
 
     // ============================ version ============================
 
@@ -193,6 +203,14 @@ namespace Agentmaster::Updater
         catch (...)
         {
             v = Version{};
+            try
+            {
+                LogUpdate(Profiles::ResolveProfileDir(), L"package-version read CRASHED (0.0.0 assumed)");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
         }
         return v;
     }
@@ -206,6 +224,14 @@ namespace Agentmaster::Updater
         }
         catch (...)
         {
+            try
+            {
+                LogUpdate(Profiles::ResolveProfileDir(), L"packaged-state read CRASHED (assuming unpackaged)");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
             return false;
         }
     }
@@ -214,6 +240,13 @@ namespace Agentmaster::Updater
 
     namespace detail
     {
+        // The directory holding `path` — where that file's hooks.log lives, for the file helpers'
+        // failure traces ("" when path has no separator; LogUpdate no-ops on "").
+        inline std::wstring DirOfPath(const std::wstring& path)
+        {
+            const size_t at = path.find_last_of(L"\\/");
+            return at == std::wstring::npos ? std::wstring{} : path.substr(0, at);
+        }
         inline std::wstring GetEnv(const wchar_t* name)
         {
             const DWORD need = ::GetEnvironmentVariableW(name, nullptr, 0);
@@ -314,6 +347,7 @@ namespace Agentmaster::Updater
                 const HANDLE h = ::CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
                 if (h == INVALID_HANDLE_VALUE)
                 {
+                    LogUpdate(DirOfPath(path), L"file-write FAILED (temp open): " + path);
                     return false;
                 }
                 DWORD wrote = 0;
@@ -326,17 +360,27 @@ namespace Agentmaster::Updater
                 if (!ok || wrote != bytes.size())
                 {
                     ::DeleteFileW(tmp.c_str());
+                    LogUpdate(DirOfPath(path), L"file-write FAILED (incomplete): " + path);
                     return false;
                 }
                 if (!::MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
                 {
                     ::DeleteFileW(tmp.c_str()); // the old file stays fully intact on failure
+                    LogUpdate(DirOfPath(path), L"file-write FAILED (atomic replace): " + path);
                     return false;
                 }
                 return true;
             }
             catch (...)
             {
+                try
+                {
+                    LogUpdate(DirOfPath(path), L"file-write CRASHED (exception): " + path);
+                }
+                catch (...)
+                {
+                    // logger-failed: nothing left to report through
+                }
                 return false;
             }
         }
@@ -348,13 +392,22 @@ namespace Agentmaster::Updater
                 std::ifstream in{ std::filesystem::path{ path }, std::ios::binary };
                 if (!in)
                 {
-                    return {};
+                    return {}; // a MISSING file is the normal first-run case — deliberately unlogged
                 }
                 const std::string bytes{ std::istreambuf_iterator<char>{ in }, std::istreambuf_iterator<char>{} };
                 return Utf8ToWide(bytes);
             }
             catch (...)
             {
+                // A genuine exception (not file-absence, which early-returns above) — trace it.
+                try
+                {
+                    LogUpdate(DirOfPath(path), L"file-read CRASHED (exception): " + path);
+                }
+                catch (...)
+                {
+                    // logger-failed: nothing left to report through
+                }
                 return {};
             }
         }
@@ -400,7 +453,17 @@ namespace Agentmaster::Updater
             }
             catch (...)
             {
-                return {}; // missing/unreadable resource reads as absent — callers bail gracefully
+                // Missing/unreadable resource reads as absent — callers refuse-and-log the semantic
+                // consequence ("REFUSED, resource missing"); this traces the raw exception itself.
+                try
+                {
+                    LogUpdate(Profiles::ResolveProfileDir(), std::wstring{ L"resource read CRASHED (exception): " } + (resName ? resName : L"(null)"));
+                }
+                catch (...)
+                {
+                    // logger-failed: nothing left to report through
+                }
+                return {};
             }
         }
     }
@@ -452,6 +515,7 @@ namespace Agentmaster::Updater
         }
         catch (...)
         {
+            // this IS the logger — a trace that can't be written has nowhere left to go
         }
     }
 
@@ -542,6 +606,14 @@ namespace Agentmaster::Updater
         }
         catch (...)
         {
+            try
+            {
+                LogUpdate(Profiles::ResolveProfileDir(), L"changelog link open CRASHED (exception)");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
         }
         return S_OK;
     }
@@ -630,10 +702,11 @@ namespace Agentmaster::Updater
             body.clear();
             try
             {
-                errOut = L"exception during read";
+                errOut = L"exception during read"; // surfaced by the caller's "check failed: …" log line
             }
             catch (...)
             {
+                // even the error string failed to build (alloc exhaustion) — terminal swallow
             }
         }
         ::WinHttpCloseHandle(hRequest);
@@ -829,6 +902,14 @@ namespace Agentmaster::Updater
         catch (...)
         {
             p = UpdatePrefs{}; // unreadable prefs read as pristine defaults — check stable, prompt normally
+            try
+            {
+                LogUpdate(stateDir, L"prefs read CRASHED (exception \x2014 defaults assumed: stable channel, nothing skipped/postponed)");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
         }
         return p;
     }
@@ -955,6 +1036,7 @@ namespace Agentmaster::Updater
             }
             catch (...)
             {
+                // logger-failed: nothing left to report through
             }
             return false;
         }
@@ -974,14 +1056,17 @@ namespace Agentmaster::Updater
 
     // ============================ "Not now" (declined this run) ============================
 
-    // "Not now" means "ask me again NEXT LAUNCH" — but the hourly autocheck re-runs the same flow
-    // every hour, which decayed it into an hourly nag. The latch is PROCESS-scoped, keyed by the
-    // declined tag, and deliberately an ENVIRONMENT VARIABLE: Updater.h is compiled into BOTH
+    // "Not now" means "leave me alone until the NEXT LAUNCH" — a decline silences the startup +
+    // hourly checks ENTIRELY (gated BEFORE the network round-trip in RunUpdateCheckAndPrompt: no
+    // query, no prompt — even a NEWER release published mid-run waits for the next launch; the
+    // cog's explicit "Check for updates" stays fully live, it's user-initiated). The latch is
+    // PROCESS-scoped and deliberately an ENVIRONMENT VARIABLE: Updater.h is compiled into BOTH
     // WindowsTerminal.exe (the startup + hourly checks) and TerminalApp.dll (the cog's prompt) — an
     // inline/static would exist once PER MODULE, but the env block is one per PROCESS, so a "Not
-    // now" clicked on the cog's prompt also silences the EXE's hourly re-prompt. It dies with the
-    // process (the next launch asks again — the original semantic), and a NEWER release appearing
-    // mid-run (a different tag) still prompts. Child processes inherit it; nothing else reads it.
+    // now" clicked on the cog's prompt also silences the EXE's hourly timer. It dies with the
+    // process; child processes inherit it (harmless — RunStartupUpdateCheck CLEARS it at every
+    // fresh launch, so an installer-relaunched / child-spawned instance still asks). The tag is
+    // stored for the log trail; the gate is PRESENCE-based.
     inline constexpr const wchar_t* kDeclinedEnvVar = L"AGENTMASTER_UPDATE_DECLINED";
 
     inline void MarkDeclinedThisRun(const std::wstring& tag) noexcept
@@ -989,18 +1074,33 @@ namespace Agentmaster::Updater
         ::SetEnvironmentVariableW(kDeclinedEnvVar, tag.empty() ? nullptr : tag.c_str());
     }
 
-    // No-throw (GetEnv allocates): an unreadable latch reads as "not declined" — worst case one
-    // extra prompt, never a crash.
-    inline bool WasDeclinedThisRun(const std::wstring& tag)
+    // The declined tag ("" when nothing was declined this run). No-throw (GetEnv allocates): an
+    // unreadable latch reads as "not declined" — fails toward ONE extra prompt, never toward a
+    // silently dead updater.
+    inline std::wstring DeclinedThisRunTag()
     {
         try
         {
-            return !tag.empty() && detail::GetEnv(kDeclinedEnvVar) == tag;
+            return detail::GetEnv(kDeclinedEnvVar);
         }
         catch (...)
         {
-            return false;
+            try
+            {
+                LogUpdate(Profiles::ResolveProfileDir(), L"declined-latch read CRASHED (exception \x2014 assuming not declined)");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
+            return {};
         }
+    }
+
+    // Exact-tag query (kept for tests + callers that reason about a specific version).
+    inline bool WasDeclinedThisRun(const std::wstring& tag)
+    {
+        return !tag.empty() && DeclinedThisRunTag() == tag;
     }
 
     // ============================ the prompt ============================
@@ -1041,6 +1141,14 @@ namespace Agentmaster::Updater
         }
         catch (...)
         {
+            try
+            {
+                LogUpdate(Profiles::ResolveProfileDir(), L"prompt build CRASHED (exception \x2014 treated as Not now, no dialog shown)");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
             return Decision::NotNow;
         }
 
@@ -1179,6 +1287,8 @@ namespace Agentmaster::Updater
             }
             catch (...)
             {
+                // deliberately quiet: if the dir is truly unusable the very next WriteFileUtf8
+                // fails AND logs ("file-write FAILED (temp open)"), so the failure is never silent
             }
             if (!detail::WriteFileUtf8(ps1Path, ps1) || !detail::WriteFileUtf8(cmdPath, cmd))
             {
@@ -1198,6 +1308,7 @@ namespace Agentmaster::Updater
             }
             catch (...)
             {
+                // logger-failed: nothing left to report through
             }
             return false;
         }
@@ -1238,6 +1349,8 @@ namespace Agentmaster::Updater
             }
             catch (...)
             {
+                // deliberately quiet: if the dir is truly unusable the very next WriteFileUtf8
+                // fails AND logs ("file-write FAILED (temp open)"), so the failure is never silent
             }
             if (!detail::WriteFileUtf8(ps1Path, ps1) || !detail::WriteFileUtf8(cmdPath, cmd))
             {
@@ -1258,6 +1371,7 @@ namespace Agentmaster::Updater
             }
             catch (...)
             {
+                // logger-failed: nothing left to report through
             }
             return false;
         }
@@ -1308,8 +1422,8 @@ namespace Agentmaster::Updater
                 return false;
             case Decision::NotNow:
             default:
-                MarkDeclinedThisRun(info.latestTag); // silence the hourly re-prompt for THIS tag, this run
-                LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Not now (asking again next launch; hourly re-prompt latched off)");
+                MarkDeclinedThisRun(info.latestTag); // startup + hourly checks fully off until the next launch
+                LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Not now (startup + hourly checks off until the next launch)");
                 return false;
             }
         }
@@ -1326,6 +1440,7 @@ namespace Agentmaster::Updater
             }
             catch (...)
             {
+                // logger-failed: nothing left to report through
             }
             return false;
         }
@@ -1360,6 +1475,14 @@ namespace Agentmaster::Updater
         }
         catch (...)
         {
+            try
+            {
+                LogUpdate(Profiles::ResolveProfileDir(), L"channel gate CRASHED (exception \x2014 updater treated as off for this call)");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
             return false;
         }
     }
@@ -1395,6 +1518,16 @@ namespace Agentmaster::Updater
                 // Still postponed: no network check, no prompt. Logged so the hourly tick stays
                 // visible (the liveness proof) even while it deliberately does nothing.
                 LogUpdate(stateDir, tag + L" skipped: postponed (" + FormatSpanShort(prefs.postponedUntilUnixMs - nowMs) + L" left)");
+                return false;
+            }
+            if (const std::wstring declined = DeclinedThisRunTag(); !declined.empty())
+            {
+                // "Not now" was clicked THIS RUN (startup prompt, an earlier hourly tick, or the
+                // cog's prompt) — the WHOLE check is off until the next launch: no network query,
+                // no prompt, even for a newer release published mid-run. Gated BEFORE the network
+                // so a decline truly quiets the hourly tick, not just its prompt. The cog's
+                // explicit check never passes through here, so it stays fully live.
+                LogUpdate(stateDir, tag + L" skipped: declined this run (" + declined + L" \x2014 asking again next launch)");
                 return false;
             }
             const Version cur = CurrentPackageVersion();
@@ -1444,13 +1577,7 @@ namespace Agentmaster::Updater
                 LogUpdate(stateDir, tag + L" done: " + DisplayVersion(info) + L" available but SKIPPED by the user \x2014 no prompt");
                 return false; // the user skipped exactly this version
             }
-            if (WasDeclinedThisRun(info.latestTag))
-            {
-                // "Not now" was clicked for THIS tag earlier in this run (startup prompt, an earlier
-                // hourly tick, or the cog's prompt) — asking again is the next LAUNCH's job.
-                LogUpdate(stateDir, tag + L" done: " + DisplayVersion(info) + L" available but declined this run \x2014 no re-prompt");
-                return false;
-            }
+            // (A this-run decline never reaches here — the presence gate above skips pre-network.)
             LogUpdate(stateDir, tag + L" done: " + DisplayVersion(info) + L" available (" + (info.isPrerelease ? L"pre-release" : L"stable") + (info.installable ? L", installable) \x2014 prompting" : L", NO installable assets) \x2014 prompting"));
             const Decision d = ShowUpdatePrompt(owner, info);
             return ApplyDecision(stateDir, info, d, owner);
@@ -1465,6 +1592,7 @@ namespace Agentmaster::Updater
             }
             catch (...)
             {
+                // logger-failed: nothing left to report through
             }
             return false;
         }
@@ -1474,6 +1602,10 @@ namespace Agentmaster::Updater
     // main thread — the bounded worker-and-poll inside the core keeps it from wedging launch.
     inline bool RunStartupUpdateCheck(HWND owner)
     {
+        // A FRESH LAUNCH always asks again — clear a declined latch INHERITED through the env block
+        // (the installer's relaunch and any child-spawned instance carry the parent's env; without
+        // this, a decline could outlive its process and silently kill the new run's checks too).
+        MarkDeclinedThisRun(L"");
         return RunUpdateCheckAndPrompt(owner, L"startup");
     }
 

@@ -583,10 +583,15 @@ engine link) — live nested where `AppSettings` round-trips them; BOTH cog-Save
 + page sink) restore all three from disk, `ReadPrefs` falls back to a pre-fix top-level stray, and
 `WriteUpdateState` MIGRATES strays into the envelope (never drops a made choice), refuses to rebuild an
 unparseable non-empty file (no clobber), and writes ATOMICALLY (temp + flush + `MoveFileExW`, the
-engine's `WriteAllUtf8` recipe — was a torn-file-prone trunc `ofstream`). **"Not now" no longer nags
-hourly**: it latches a process-scoped declined-this-run marker (`AGENTMASTER_UPDATE_DECLINED=<tag>` env
-var — one env block per PROCESS, unlike a per-module inline, so the cog's DLL prompt silences the EXE's
-hourly timer too; dies at exit = "ask again next launch", a NEWER tag still prompts). **Observability**:
+engine's `WriteAllUtf8` recipe — was a torn-file-prone trunc `ofstream`). **"Not now" silences the
+updater until the NEXT LAUNCH**: it latches a process-scoped declined-this-run marker
+(`AGENTMASTER_UPDATE_DECLINED=<tag>` env var — one env block per PROCESS, unlike a per-module inline,
+so the cog's DLL prompt silences the EXE's hourly timer too) that gates the startup/hourly checks
+**pre-network, PRESENCE-based** — no query, no prompt, even for a NEWER release published mid-run —
+while the cog's explicit "Check for updates" stays fully live (user-initiated); the latch dies at
+exit, and `RunStartupUpdateCheck` **clears an inherited latch** at every fresh launch (the installer
+relaunch / a child-spawned instance carries the parent's env), so a new run always asks again. Each
+suppressed tick still logs (`check (periodic) skipped: declined this run`). **Observability**:
 every check logs an **`[update]`** line to hooks.log via `Updater::LogUpdate` (the EXE-safe
 `AppendStateLog` twin — same file, same `[HH:MM:SS.mmm]` stamp, one `FILE_APPEND_DATA` write per line):
 timer armed, per-tick begin/outcome tagged `(startup)`/`(periodic)`/`(cog)`/`(cog-silent)` (incl.
@@ -605,9 +610,14 @@ worker (a DETACHED thread — an escape is process death) and its UI completion
 (`_ApplyUpdateCheckResult`) are fully guarded with button/flag recovery, `std::thread` spawn failure
 restores the UI, and a fresh cog open resets `_interactiveUpdateInFlight` + the button label so a dead
 check can never permanently kill "Check for updates"; the prerelease seed latch clears on every path
-(a stuck latch would silently ignore all future flips). Covered by the harness's hardening suite
-(clamp, trust gate, synthetic-release parse, malformed/garbage/blocked-dir robustness, LogUpdate,
-decision→persist→read-back loop, full-fidelity envelope preservation).
+(a stuck latch would silently ignore all future flips). **No-silent-catch POLICY**: every catch on
+the update surface either logs (the `[update]`/`[nav]` trail — incl. the `detail::` file helpers,
+which log with the target path, and every safe-default gate) or is one of the two structurally
+un-loggable cases, each ANNOTATED in place: the logger itself (`LogUpdate`'s own catch) and a
+logger-failed nested catch (the trace's argument construction threw). Covered by the harness's
+hardening suite (clamp, trust gate, synthetic-release parse, malformed/garbage/blocked-dir
+robustness, LogUpdate, decision→persist→read-back loop, declined-latch presence gate + the
+fresh-launch clear, full-fidelity envelope preservation).
 
 **Summary-panel JUMP ([`SUMMARY_JUMP.md`](doc/agentmaster/SUMMARY_JUMP.md)) — core complete, tested +
 benchmarked + optimized; full chain lib-compiles green (TerminalControlLib + TerminalAppLib); runtime

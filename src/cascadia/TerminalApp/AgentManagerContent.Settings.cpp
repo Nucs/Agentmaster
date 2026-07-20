@@ -807,6 +807,7 @@ namespace winrt::TerminalApp::implementation
                 }
                 catch (...)
                 {
+                    // logger-failed: nothing left to report through
                 }
             }
         });
@@ -1751,6 +1752,14 @@ namespace winrt::TerminalApp::implementation
                          }
                          catch (...)
                          {
+                             try
+                             {
+                                 ::Agentmaster::LogNav(L"uninstall launch FAILED (exception \x2014 app stays open)");
+                             }
+                             catch (...)
+                             {
+                                 // logger-failed: nothing left to report through
+                             }
                          }
                      });
         });
@@ -2198,6 +2207,14 @@ namespace winrt::TerminalApp::implementation
             }
             catch (...)
             {
+                try
+                {
+                    ::Agentmaster::LogNav(L"update-prerelease seed FAILED (exception \x2014 switch shows a stale state until reopen)");
+                }
+                catch (...)
+                {
+                    // logger-failed: nothing left to report through
+                }
             }
             _seedingAllowPrerelease = false;
         }
@@ -3303,6 +3320,8 @@ namespace winrt::TerminalApp::implementation
                         }
                         catch (...)
                         {
+                            // recovery-of-recovery: the crash above IS logged (or the logger itself
+                            // failed) — _ShowSettings' fresh-open reset is the final backstop
                         }
                     }
                 });
@@ -3333,12 +3352,16 @@ namespace winrt::TerminalApp::implementation
                             }
                             catch (...)
                             {
+                                // recovery-of-recovery: the worker crash was already logged above —
+                                // _ShowSettings' fresh-open reset is the final backstop
                             }
                         });
                     }
                 }
                 catch (...)
                 {
+                    // logger-failed (the crash log or the reset enqueue threw): a detached thread
+                    // must swallow terminally — nothing left to report through
                 }
             }
         };
@@ -3359,6 +3382,14 @@ namespace winrt::TerminalApp::implementation
             if (_setUpdateStatus)
             {
                 _setUpdateStatus.Text(L"Check failed");
+            }
+            try
+            {
+                ::Agentmaster::Updater::LogUpdate(stateDir, L"check (cog) worker spawn FAILED (thread \x2014 UI restored)");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
             }
         }
     }

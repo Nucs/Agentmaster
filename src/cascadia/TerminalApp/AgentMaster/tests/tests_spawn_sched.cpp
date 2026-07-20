@@ -23,6 +23,13 @@
 
 #include "../Updater.h" // version parse/compare + the settings.json skip/postpone RMW (TestUpdaterVersionLogic)
 
+// The updater tests odr-use RunStartupUpdateCheck (the fresh-launch latch-clear check), which pulls
+// ShowUpdatePrompt -> TaskDialogIndirect — imported from comctl32 BY ORDINAL (345), which only
+// exists in comctl32 v6. The APP declares v6 in WindowsTerminal.manifest; the bare harness exe would
+// bind System32's v5.82 and DIE AT LOAD with STATUS_ORDINAL_NOT_FOUND (0xC0000138) before main —
+// zero output, exit 127. This linker directive gives the harness the same v6 dependency.
+#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+
 void TestSpawnBuilders()
 {
     std::wprintf(L"ClaudeSpawn builders:\n");
@@ -1452,8 +1459,10 @@ void TestUpdaterVersionLogic()
 
     // "Not now" declined-this-run latch (Updater.h): PROCESS-scoped via an env var (one env block
     // per process, unlike a per-module inline/static — the cog's DLL prompt must silence the EXE's
-    // hourly re-prompt), keyed by the exact declined tag so a NEWER release still prompts, cleared
-    // by process exit ("ask again next launch"). Save/restore the ambient var (harness hygiene).
+    // hourly re-prompt). The GATE is PRESENCE-based (any decline turns the startup/hourly checks
+    // fully off, pre-network, until the next launch); the tag is kept for the log trail + queries.
+    // A fresh launch (RunStartupUpdateCheck) CLEARS an inherited latch so "next launch asks again"
+    // holds even across env inheritance. Save/restore the ambient var (harness hygiene).
     {
         wchar_t prevBuf[256];
         const DWORD prevLen = ::GetEnvironmentVariableW(U::kDeclinedEnvVar, prevBuf, 256);
@@ -1461,16 +1470,36 @@ void TestUpdaterVersionLogic()
         const std::wstring prev = hadPrev ? std::wstring{ prevBuf, prevLen } : std::wstring{};
 
         U::MarkDeclinedThisRun(L""); // ensure a clean slate regardless of the ambient env
+        CHECK(U::DeclinedThisRunTag().empty(), "declined: unset -> empty tag (checks run)");
         CHECK(!U::WasDeclinedThisRun(L"v0.6.8"), "declined: unset -> false");
         U::MarkDeclinedThisRun(L"v0.6.8");
-        CHECK(U::WasDeclinedThisRun(L"v0.6.8"), "declined: same tag latched (no hourly re-nag)");
-        CHECK(!U::WasDeclinedThisRun(L"v0.6.9"), "declined: a NEWER tag still prompts");
+        CHECK(U::DeclinedThisRunTag() == L"v0.6.8", "declined: PRESENCE gate sees the latch (whole check skipped until restart)");
+        CHECK(U::WasDeclinedThisRun(L"v0.6.8"), "declined: exact-tag query matches");
+        CHECK(!U::WasDeclinedThisRun(L"v0.6.9"), "declined: exact-tag query rejects another tag");
         CHECK(!U::WasDeclinedThisRun(L""), "declined: empty tag never matches");
         U::MarkDeclinedThisRun(L"v0.7.0");
         CHECK(!U::WasDeclinedThisRun(L"v0.6.8") && U::WasDeclinedThisRun(L"v0.7.0"),
               "declined: re-decline replaces the tag (single-slot latch)");
         U::MarkDeclinedThisRun(L"");
         CHECK(!U::WasDeclinedThisRun(L"v0.7.0"), "declined: cleared");
+
+        // A FRESH LAUNCH always asks again: RunStartupUpdateCheck clears an INHERITED latch first
+        // (the installer relaunch / a child-spawned instance carries the parent's env). In the
+        // harness the channel gate then bails before any network — so this exercises exactly the
+        // clear + the gate, nothing else. AGENTMASTER_UPDATE_STARTUP is neutralized for the call:
+        // if a dev shell exported it, the forced-on channel would do a REAL network round-trip and
+        // could raise a REAL TaskDialog mid-harness.
+        {
+            wchar_t forceBuf[256];
+            const DWORD forceLen = ::GetEnvironmentVariableW(L"AGENTMASTER_UPDATE_STARTUP", forceBuf, 256);
+            const bool hadForce = forceLen > 0 && forceLen < 256;
+            const std::wstring force = hadForce ? std::wstring{ forceBuf, forceLen } : std::wstring{};
+            ::SetEnvironmentVariableW(L"AGENTMASTER_UPDATE_STARTUP", nullptr);
+            U::MarkDeclinedThisRun(L"v0.6.8");
+            CHECK(!U::RunStartupUpdateCheck(nullptr), "declined: startup check no-ops off-channel (harness is unpackaged)");
+            CHECK(U::DeclinedThisRunTag().empty(), "declined: a fresh launch CLEARS an inherited latch (asks again)");
+            ::SetEnvironmentVariableW(L"AGENTMASTER_UPDATE_STARTUP", hadForce ? force.c_str() : nullptr);
+        }
 
         ::SetEnvironmentVariableW(U::kDeclinedEnvVar, hadPrev ? prev.c_str() : nullptr);
     }
