@@ -4,6 +4,7 @@
 // Plain C++ engine TU — no WinRT, no precompiled header (the vcxproj marks it NotUsing and
 // the standalone test harness compiles it directly). The pipe transport is raw Win32.
 #include "HooksBridge.h"
+#include "ClaudeSpawn.h" // LogSwallowedException (the never-lose-a-swallowed-exception policy)
 #include "HookWire.h"
 
 #include <windows.h>
@@ -240,6 +241,11 @@ namespace Agentmaster
                             }
                             catch (...)
                             {
+                                // Forensics: the hook-event sink (bridge -> registry -> state
+                                // machine). A throw DROPS that hook entirely, so the push state
+                                // machine desyncs — a lost Stop strands a session Running until the
+                                // scanner's missed-Stop backstop happens to reconcile it.
+                                LogSwallowedException(L"HooksBridge sink (framed line)");
                             }
                         }
                     }
@@ -258,6 +264,9 @@ namespace Agentmaster
                         }
                         catch (...)
                         {
+                            // Forensics: same sink, the trailing unterminated record (a client that
+                            // closed without a final '\n'). Same desync cost as the framed path.
+                            LogSwallowedException(L"HooksBridge sink (trailing line)");
                         }
                     }
                 }

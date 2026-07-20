@@ -117,6 +117,10 @@ namespace
         catch (...)
         {
             AppendStateLog(L"hooks.log", L"[persist-fail] " + path + L" (exception \x2014 state NOT saved)\n");
+            // Forensics: [persist-fail] says WHICH file was lost; this says WHAT was thrown and from
+            // where. This is the Rule-#16 durability chokepoint (sessions.json / window records /
+            // templates / dir-colors), so a silent loss here is exactly what must stay diagnosable.
+            Agentmaster::LogSwallowedException(L"WriteAllUtf8"); // qualified: file-scope anonymous namespace
             return false;
         }
     }
@@ -135,6 +139,10 @@ namespace
         }
         catch (...)
         {
+            // Forensics: an empty return is indistinguishable from "the file legitimately has no
+            // content", so a throw here reads downstream as "no sessions / no window record" — and
+            // the next save then writes that emptiness back over good state (Rule #16). Must be loud.
+            Agentmaster::LogSwallowedException(L"ReadAllUtf8"); // qualified: file-scope anonymous namespace
             return {};
         }
     }
@@ -1546,6 +1554,9 @@ namespace Agentmaster
         }
         catch (...)
         {
+            // Forensics: a std::filesystem throw on a pathological working dir silently drops the
+            // session to the "claude" fallback title — a visible-but-unexplained naming regression.
+            LogSwallowedException(L"DeriveSessionTitle (path decompose)");
         }
         if (base.empty())
         {
@@ -2502,6 +2513,9 @@ namespace Agentmaster
         }
         catch (...)
         {
+            // Forensics: no windows\ dir => the WriteAllUtf8 below cannot land => this window's
+            // geometry/lens/tab-refs are silently not persisted (Rule #16 "never lose a window").
+            LogSwallowedException(L"SaveWindowRecord (create windows dir)");
         }
         WriteAllUtf8(dir + L"\\" + record.windowId + L".json", SerializeWindowRecord(record));
     }
@@ -2543,6 +2557,9 @@ namespace Agentmaster
         }
         catch (...)
         {
+            // Forensics: a partial/empty list here silently shrinks the reopen set AND the Manager's
+            // "Reopen Windows (N)" count — the user's whole saved workspace appears to have vanished.
+            LogSwallowedException(L"LoadWindowRecords");
         }
         return out;
     }
@@ -2568,6 +2585,9 @@ namespace Agentmaster
         }
         catch (...)
         {
+            // Forensics: nullopt reads as "no saved record", so the window starts FRESH and its
+            // first autosave overwrites the good record on disk — a silent workspace loss.
+            LogSwallowedException(L"LoadWindowRecord");
         }
         return std::nullopt;
     }
@@ -2584,6 +2604,9 @@ namespace Agentmaster
         }
         catch (...)
         {
+            // Forensics: a failed delete leaves a stale record that keeps offering a dead window in
+            // "Reopen Windows (N)" — the inverse durability bug (a phantom instead of a loss).
+            LogSwallowedException(L"DeleteWindowRecord");
         }
     }
 

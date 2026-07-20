@@ -127,6 +127,7 @@ namespace Agentmaster
         catch (...)
         {
             OutputDebugStringW(L"[Agentmaster] ReadConversationText: swallowed parse exception (no crash)\n");
+            LogSwallowedException(L"ReadConversationText"); // + hooks.log: OutputDebugString needs a live debugger
             return {};
         }
     }
@@ -888,9 +889,14 @@ namespace Agentmaster
     // unguarded substr, a std::bad_alloc on a huge file -- would unwind with no frame to catch it and
     // std::terminate the whole app, taking every session with it. This thin wrapper contains any throw
     // and returns an empty result (== the existing "not found" path); the real work is the Impl below
-    // (served through the burst-collapsing cache above). OutputDebugString can't throw and needs no
-    // profile/logging dependency, so the engine stays pure for the test harness + CLI while a genuine
-    // parse bug stays discoverable (DebugView / a debugger).
+    // (served through the burst-collapsing cache above). OutputDebugString can't throw, so it stays as
+    // the debugger-attached signal — but it is only visible with a debugger attached AT THE TIME, which
+    // made these swallows effectively silent in the field. Per the never-lose-a-swallowed-exception
+    // policy each now ALSO calls LogSwallowedException (type/hr/message + the VEH-captured throw-site
+    // stack -> hooks.log). That costs no purity: this TU already includes ClaudeSpawn.h, and
+    // ClaudeSpawn.cpp is linked into BOTH the standalone test harness and the CLI, so the engine still
+    // builds exactly where it did before. (Being noexcept + throttled, it can't turn a contained parse
+    // bug into a new failure.)
     SessionSummary AnalyzeSessionTranscript(std::wstring_view transcriptPath, size_t maxBytes)
     {
         try
@@ -900,6 +906,7 @@ namespace Agentmaster
         catch (...)
         {
             OutputDebugStringW(L"[Agentmaster] AnalyzeSessionTranscript: swallowed parse exception (no crash)\n");
+            LogSwallowedException(L"AnalyzeSessionTranscript"); // + hooks.log: OutputDebugString needs a live debugger
             return {};
         }
     }
@@ -924,6 +931,7 @@ namespace Agentmaster
         catch (...)
         {
             OutputDebugStringW(L"[Agentmaster] CollectConversationLineage: swallowed exception (no crash)\n");
+            LogSwallowedException(L"CollectConversationLineage"); // + hooks.log: OutputDebugString needs a live debugger
             return {};
         }
     }
@@ -1560,6 +1568,7 @@ namespace Agentmaster
         catch (...)
         {
             OutputDebugStringW(L"[Agentmaster] FindPlanFileInTranscript: swallowed exception (no crash)\n");
+            LogSwallowedException(L"FindPlanFileInTranscript"); // + hooks.log: OutputDebugString needs a live debugger
             return {};
         }
     }

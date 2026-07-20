@@ -275,6 +275,7 @@ namespace Agentmaster
         catch (...)
         {
             OutputDebugStringW(L"[Agentmaster] ReadTranscriptInfoIn: swallowed exception (no crash)\n");
+            LogSwallowedException(L"ReadTranscriptInfoIn"); // + hooks.log: OutputDebugString needs a live debugger
             return {};
         }
     }
@@ -1316,6 +1317,7 @@ namespace Agentmaster
         catch (...)
         {
             OutputDebugStringW(L"[Agentmaster] ReadCodexRolloutInfo: swallowed parse exception (no crash)\n");
+            LogSwallowedException(L"ReadCodexRolloutInfo"); // + hooks.log: OutputDebugString needs a live debugger
             return {};
         }
     }

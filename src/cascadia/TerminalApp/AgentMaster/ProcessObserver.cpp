@@ -275,6 +275,10 @@ namespace Agentmaster
             }
             catch (...)
             {
+                // Forensics: the Fleet Observer S-lane's top-level net. A throw costs a whole survey
+                // (census + correlation + enrichment), and a recurring one silently retires the
+                // always-correct PULL floor — no-hook claudes then never appear at all.
+                LogSwallowedException(L"ProcessObserver::_worker (_surveyOnce)");
             }
             std::unique_lock lk{ _mtx };
             if (!_running.load())

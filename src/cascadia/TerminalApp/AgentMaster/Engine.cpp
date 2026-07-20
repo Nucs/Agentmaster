@@ -450,6 +450,11 @@ namespace Agentmaster
             }
             catch (...)
             {
+                // Forensics: this net spans the whole one-time engine bring-up (hook files, the
+                // claude/codex/pwsh launcher resolution, the adoption shim, the CCMGR_HOOK_PIPE +
+                // PATH exports). A throw part-way leaves the engine SILENTLY half-initialized for
+                // the entire run — the [engine] lines above just stop, with no reason recorded.
+                LogSwallowedException(L"Engine init (hook files / launchers / shim / PATH)");
             }
 
             // Fleet Observer S-lane (OBSERVER.md §8): the process-wide PULL census/correlation

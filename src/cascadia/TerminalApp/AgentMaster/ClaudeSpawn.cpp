@@ -71,6 +71,11 @@ namespace
         }
         catch (...)
         {
+            // Forensics: a failed hook-config / shim / handover-definition write is state silently NOT
+            // written (the caller's [persist-fail] line says WHICH file; this says WHAT was thrown and
+            // from where). Safe to log here — this helper is NOT on the logging path (AppendStateLog
+            // writes via its own ofstream, never through WriteFileUtf8), so there is no recursion.
+            Agentmaster::LogSwallowedException(L"WriteFileUtf8"); // qualified: this helper sits in the file-scope anonymous namespace
             return false;
         }
     }
@@ -694,6 +699,12 @@ try {
         }
         catch (...)
         {
+            // ⚠ DELIBERATELY BARE — do NOT add LogSwallowedException here (see the "logging-path
+            // recursion" note above LogSwallowedExceptionCore). AppendStateLog calls THIS function to
+            // build its path, so logging from here is: throw -> log -> AppendStateLog ->
+            // AgentmasterStateDir -> throw -> ... unbounded recursion, and (when reached from inside
+            // AppendStateLog) a self-deadlock on its non-recursive mutex. The state dir failing is
+            // already visible as "no log file at all" — the loudest signal there is.
         }
         return dir;
     }
@@ -749,6 +760,10 @@ try {
         }
         catch (...)
         {
+            // ⚠ DELIBERATELY BARE — do NOT add LogSwallowedException here (see the "logging-path
+            // recursion" note above LogSwallowedExceptionCore). This IS the log sink: logging a
+            // log failure re-enters AppendStateLog and SELF-DEADLOCKS on the non-recursive `mtx`
+            // already held above (lock_guard, line ~728) before it could even recurse.
         }
     }
 
@@ -765,6 +780,18 @@ try {
     // ── Exception forensics (the "never lose a swallowed exception" policy — see ClaudeSpawn.h) ──
     namespace
     {
+        // ⚠ LOGGING-PATH RECURSION RULE (read before "completing" the catch(...) sweep in this file).
+        // The never-lose-a-swallowed-exception policy says every catch(...) should call
+        // LogSwallowedException. There is exactly ONE class of exemption, and it lives in this file:
+        // a catch that is itself ON the logging path must stay BARE. The call chain is
+        //     LogSwallowedException -> LogSwallowedExceptionCore
+        //         -> ExcLogThrottleAllow / CaptureRecentThrowStacksText -> FormatAddressModuleRva
+        //         -> AppendStateLog -> AgentmasterStateDir
+        // so logging from any link re-enters the chain: unbounded recursion, and inside AppendStateLog
+        // a hard self-deadlock on its non-recursive mutex. The bare links are marked individually:
+        // AgentmasterStateDir, AppendStateLog, InstallThrowStackCapture, FormatAddressModuleRva,
+        // CaptureRecentThrowStacksText, ExcLogThrottleAllow, LogSwallowedExceptionCore, and
+        // LogSwallowedException's own two guards. Every OTHER catch(...) in the engine logs.
         constexpr ULONG kMsvcCppExceptionCode = 0xE06D7363UL; // the MSVC C++ `throw` SEH code
         constexpr size_t kThrowFrameCap = 64;
         constexpr size_t kThrowRingSize = 4;
@@ -833,6 +860,9 @@ try {
         }
         catch (...)
         {
+            // ⚠ DELIBERATELY BARE (logging-path recursion rule): the capture isn't installed yet, so
+            // a log here would report a throw with no stack — and this runs from the same init that
+            // brings logging up. Failure degrades to "no throw-site stacks", never to a crash.
         }
     }
 
@@ -867,6 +897,8 @@ try {
         }
         catch (...)
         {
+            // ⚠ DELIBERATELY BARE (logging-path recursion rule): called BY the formatter for every
+            // captured frame. "?" degrades one frame of one stack; logging would recurse per frame.
             return L"?";
         }
     }
@@ -907,6 +939,8 @@ try {
         }
         catch (...)
         {
+            // ⚠ DELIBERATELY BARE (logging-path recursion rule): called BY LogSwallowedExceptionCore.
+            // Degrades to "no stack lines" — the [exc] header (type/hr/message) is still emitted.
             return {};
         }
     }
@@ -934,6 +968,7 @@ try {
         }
         catch (...)
         {
+            // ⚠ DELIBERATELY BARE (logging-path recursion rule): called BY LogSwallowedExceptionCore.
             return true; // fail OPEN — losing the throttle must never lose the log
         }
     }
@@ -961,6 +996,8 @@ try {
         }
         catch (...)
         {
+            // ⚠ DELIBERATELY BARE (logging-path recursion rule): this IS the log chokepoint. A throw
+            // here (OOM composing the block) means the report is lost — reporting THAT would recurse.
         }
     }
 
@@ -984,12 +1021,16 @@ try {
             }
             catch (...)
             {
+                // Not a recursion exemption — this is the classifier's terminal arm (the rethrown
+                // exception matched no known type). It RECORDS the unknown, it doesn't swallow.
                 detail = L"unknown exception";
             }
             LogSwallowedExceptionCore(context, detail, stacks);
         }
         catch (...)
         {
+            // ⚠ DELIBERATELY BARE (logging-path recursion rule): the outer noexcept guard of the
+            // reporter itself. Keeps the policy's own machinery from ever becoming the crash.
         }
     }
 
@@ -1524,6 +1565,10 @@ prompt points it at your file.
         }
         catch (...)
         {
+            // Forensics: returning {} silently disables the transparent `claude` PATH shim for the
+            // whole run — a hand-typed claude then fires ZERO hooks and only the Fleet Observer finds
+            // it. That "why is my + tab not wiring up" mystery should never be un-diagnosable.
+            LogSwallowedException(L"MaterializeClaudeShim (create shim dir)");
             return {};
         }
 

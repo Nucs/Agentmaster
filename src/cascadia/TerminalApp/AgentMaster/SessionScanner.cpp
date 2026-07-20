@@ -174,6 +174,11 @@ namespace Agentmaster
         catch (...)
         {
             OutputDebugStringW(L"[Agentmaster] ParseTranscriptDelta: swallowed parse exception (no crash)\n");
+            // Forensics: OutputDebugString needs a debugger ATTACHED AT THE TIME to be seen, so on a
+            // user's machine this was effectively silent. An empty delta = "no state change this
+            // pass", which looks exactly like a quiet session — the state machine degrades invisibly.
+            // Throttled per context (~2s), so a persistently-malformed transcript can't flood the log.
+            LogSwallowedException(L"ParseTranscriptDelta");
             return {};
         }
     }
@@ -560,6 +565,10 @@ namespace Agentmaster
             }
             catch (...)
             {
+                // Forensics: the scanner worker's top-level net. A throw costs a WHOLE reconcile pass
+                // (every session's missed-Stop / blocked-on-user / API-error synthesis), and if it
+                // recurs the PULL state engine is effectively dead while the app looks healthy.
+                LogSwallowedException(L"SessionScanner::_worker (_scanOnce)");
                 sleepMs = kScanLiveIdleMs;
             }
 
@@ -1368,6 +1377,10 @@ namespace Agentmaster
                 }
                 catch (...)
                 {
+                    // Forensics: the per-window liveness probe fan-out — it ticks _ObserverProbe,
+                    // _ReconcileClaudeTabs, _SweepClaudeLiveness and _ScanPendingInput. A throw here
+                    // silently stops THAT window binding new tabs at all.
+                    LogSwallowedException(L"SessionScanner liveness probe");
                 }
             }
         }

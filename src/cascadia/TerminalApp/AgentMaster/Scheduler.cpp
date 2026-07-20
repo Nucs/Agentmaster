@@ -111,6 +111,9 @@ namespace Agentmaster
                 }
                 catch (...)
                 {
+                    // Forensics: the autorunner's advance. A throw drops THIS advance — the queue
+                    // just never moves for that session and no backstop reports why.
+                    LogSwallowedException(L"Scheduler::_worker (_process)");
                 }
             }
             // Always sweep the Enter-retry watch list (cheap no-op when empty); a _process above may
@@ -121,6 +124,9 @@ namespace Agentmaster
             }
             catch (...)
             {
+                // Forensics: the Enter-retry sweep (the "TUI ate my submit Enter" backstop). A throw
+                // here disables the rescue, so an eaten CR strands the prompt typed-but-unsubmitted.
+                LogSwallowedException(L"Scheduler::_sweepPendingPickups");
             }
         }
     }

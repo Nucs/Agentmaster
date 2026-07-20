@@ -82,6 +82,10 @@ namespace Agentmaster
                 }
                 catch (...)
                 {
+                    // Forensics: a throwing lens observer silently stops THAT window refreshing its
+                    // board/tree/tab-dot while the others keep updating — the hardest kind of "the UI
+                    // is stale in one window only" report to chase without the throw site.
+                    LogSwallowedException(L"SessionRegistry::_notify observer");
                 }
             }
         }
@@ -484,6 +488,9 @@ namespace Agentmaster
                     }
                     catch (...)
                     {
+                        // Forensics: the hook-push adoption fan-out. A throw here means a hand-typed
+                        // claude never gets bound to its tab (no injector => no Send-now/autorunner).
+                        LogSwallowedException(L"SessionRegistry::OnHookEvent adopt");
                     }
                 }
             }
@@ -496,6 +503,9 @@ namespace Agentmaster
             }
             catch (...)
             {
+                // Forensics: the turn-complete -> Tests Autorunner advance seam. A throw here stalls
+                // the queue for that session with no visible cause (it just never sends the next one).
+                LogSwallowedException(L"SessionRegistry::OnHookEvent advance");
             }
         }
     }
@@ -652,6 +662,10 @@ namespace Agentmaster
                     }
                     catch (...)
                     {
+                        // Forensics: the PULL (Fleet Observer) adoption fan-out — the always-correct
+                        // floor beneath the lossy hook push. A throw here is the no-hooks claude's
+                        // LAST chance to be bound, so losing it silently loses the session entirely.
+                        LogSwallowedException(L"SessionRegistry::ObserveClaude adopt");
                     }
                 }
             }
@@ -874,6 +888,11 @@ namespace Agentmaster
         }
         catch (...)
         {
+            // Forensics: the stdin injector. `false` is the Rule-#4 contract (the caller rolls the
+            // prompt back to Pending rather than stranding a phantom `Sent`), so the recovery is
+            // correct but the CAUSE was invisible — a dead ConptyConnection and a genuine bug look
+            // identical from the queue's side.
+            LogSwallowedException(L"SessionRegistry::Inject");
             return false;
         }
         return true;

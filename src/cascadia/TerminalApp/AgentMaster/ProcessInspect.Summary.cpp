@@ -359,6 +359,7 @@ namespace Agentmaster
         catch (...)
         {
             OutputDebugStringW(L"[Agentmaster] RenderSessionSummaryBox: swallowed exception (no crash)\n");
+            LogSwallowedException(L"RenderSessionSummaryBox"); // + hooks.log: OutputDebugString needs a live debugger
             return {};
         }
     }
@@ -486,6 +487,7 @@ namespace Agentmaster
         catch (...)
         {
             OutputDebugStringW(L"[Agentmaster] RenderCodexSummaryBox: swallowed exception (no crash)\n");
+            LogSwallowedException(L"RenderCodexSummaryBox"); // + hooks.log: OutputDebugString needs a live debugger
             return {};
         }
     }
