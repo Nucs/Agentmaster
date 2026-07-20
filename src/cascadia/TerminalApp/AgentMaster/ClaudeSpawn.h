@@ -467,8 +467,8 @@ namespace Agentmaster
     // handover markdown via the Write tool — exactly the signal the CommandWatch's markdown await
     // keys on — and (since the content-injection change) to write it AS the successor's first user
     // message, because the file's content is injected verbatim. Write policy: create-if-absent,
-    // PLUS a VERSION-AWARE UPGRADE — a file whose bytes are IDENTICAL to a PRIOR shipped version
-    // (ShippedHandoverCommandHistory) is ours, untouched by the user, and is silently upgraded to
+    // PLUS a VERSION-AWARE UPGRADE — a file whose SHA-256 matches a PRIOR shipped version
+    // (ShippedHandoverCommandHashes) is ours, untouched by the user, and is silently upgraded to
     // the current text; anything else — the user's own /handover, or an edited copy of ours — is
     // NEVER overwritten (the ApplyEnvDefaults discipline: a user edit sticks forever). Still the
     // deliberate, additive write into the user's GLOBAL ~/.claude config, inert until the command
@@ -480,11 +480,22 @@ namespace Agentmaster
     std::wstring EnsureHandoverCommandFileIn(const std::wstring& configDir);
     std::wstring EnsureHandoverCommandFile();
 
-    // The ordered shipped-version history of the /handover command definition (oldest first; the
-    // LAST entry is the current text EnsureHandoverCommandFile writes). Exposed for the upgrade
-    // rule + its tests: an on-disk file byte-identical (as UTF-8) to any PRIOR entry upgrades to
-    // the current one; anything else is user-owned and untouched.
-    const std::vector<std::wstring_view>& ShippedHandoverCommandHistory();
+    // The ordered shipped-version history of the /handover command definition, as the SHA-256
+    // (lowercase hex) of each version's UTF-8 bytes exactly as they are written to disk — oldest
+    // first, the LAST entry being the digest of the CURRENT text (ShippedHandoverCommandText, what
+    // EnsureHandoverCommandFile writes). Exposed for the upgrade rule + its tests: an on-disk file
+    // whose digest matches any PRIOR entry is a pristine older OURS and upgrades to the current
+    // text; anything else is user-owned and untouched. DIGESTS, not the texts: recognizing "a
+    // version we shipped, unmodified" is a content-IDENTITY question, so a superseded version costs
+    // one 64-char line instead of a frozen multi-KB literal (the texts stay in git history). The
+    // list is APPEND-ONLY — editing or dropping an entry orphans every install still on that
+    // version (it would read as user-owned and never upgrade again).
+    const std::vector<std::string_view>& ShippedHandoverCommandHashes();
+
+    // The CURRENT /handover definition text (the last version of the history above; its digest is
+    // ShippedHandoverCommandHashes().back(), an identity the engine harness asserts so a text edit
+    // without an appended digest fails the suite).
+    std::wstring_view ShippedHandoverCommandText();
 
     // Agentmaster (COMMANDS.md — the /handover-here integration): the IN-PLACE twin of /handover.
     // Its OWN definition file at <configDir>\commands\handover-here.md under the SAME write policy
@@ -497,10 +508,25 @@ namespace Agentmaster
     std::wstring EnsureHandoverHereCommandFileIn(const std::wstring& configDir);
     std::wstring EnsureHandoverHereCommandFile();
 
-    // The /handover-here definition's shipped-version history — the ShippedHandoverCommandHistory
-    // contract verbatim: oldest first, the LAST entry is current, PRIOR entries stay byte-frozen
-    // forever (the upgrade rule recognizes an untouched install by byte-identity), only ever APPEND.
-    const std::vector<std::wstring_view>& ShippedHandoverHereCommandHistory();
+    // The /handover-here definition's shipped-version history + current text — the
+    // ShippedHandoverCommandHashes contract verbatim: SHA-256 per version, oldest first, the LAST
+    // entry being the current text's digest, entries frozen forever, only ever APPEND.
+    const std::vector<std::string_view>& ShippedHandoverHereCommandHashes();
+    std::wstring_view ShippedHandoverHereCommandText();
+
+    // The shared core BOTH shipped-definition writers route through, so the write policy can never
+    // drift between the two files (COMMANDS.md §6): create-if-absent PLUS the version-aware upgrade
+    // — an existing file whose SHA-256 matches a PRIOR entry of `shippedHashes` (the command's full
+    // history, oldest first, CURRENT text's digest last) is rewritten with `currentText`; anything
+    // else is left exactly as it is. Returns the definition's full path ("" only on a failed
+    // create). Exposed for the harness: the real histories carry digests only, so a prior version's
+    // bytes no longer exist to lay on disk — the upgrade/leave-alone policy is unit-tested over a
+    // SYNTHETIC command whose own "prior version" text the test still holds.
+    std::wstring EnsureShippedCommandFileIn(const std::wstring& configDir,
+                                            std::wstring_view fileLeaf,
+                                            const std::vector<std::string_view>& shippedHashes,
+                                            std::wstring_view currentText,
+                                            std::wstring_view logLabel);
 
     // Build a complete spawn spec and ensure the shared hook files exist. `pipeName` is the
     // live HooksBridge pipe (HookPipeName(pid)). If `resumeSessionId` is non-empty, the spec

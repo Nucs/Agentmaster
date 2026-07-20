@@ -769,11 +769,13 @@ tag no session carries lists at **·0** (sorts last).
 ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
 HARDENED, delivery = FULL CONTENT INJECTION (never truncated), RESTART-RESILIENT (durable
 per-session progress) + MULTI-FILE (one command's several HANDOVER files consumed as one):
-engine-tested (2302/2302 — the
+engine-tested (2328/2328 — the
 `TestCommandWatch` units + safeguard belts + the content-injection/tier units + the /handover-here
 twin units (hyphen echo, name-exact binding isolation, its own definition file) + the multi-file
 collect/seal/settle units + the durable-progress units (watermark / marker revival / prune /
-encode-decode) + the family-supersede race-guard units, the FABRICATED
+encode-decode) + the family-supersede race-guard units + the SHA-256 definition-history units
+(NIST vectors + padding edges; the create/upgrade/never-overwrite policy over a synthetic command;
+the `last digest == sha256(current text)` version gate; the two histories disjoint), the FABRICATED
 end-to-end `/handover` session `TestCommandHandoverE2E` (incl. the multi-file scenario F, the
 restart-persistence scenario G + the family-race pivot scenario H), and the REAL-corpus echo replay
 `TestCommandEchoRealCorpus`) + lib-compiled green; rides the next deploy cycle.** Bind to `/commands`
@@ -816,10 +818,20 @@ pendings are untouched — every satisfied command still fires) — at most ONE 
 exists per session, so a family write has exactly one possible owner. A same-command re-run
 supersedes too (a retry is one operation).
 **The `/handover <context-or-filepath>` integration:** engine init materializes the command DEFINITION
-`<claude-config>/commands/handover.md` (**create-if-absent + a VERSION-AWARE UPGRADE — the ONE write
-outside the profile**: a file byte-identical to a PRIOR shipped version (`ShippedHandoverCommandHistory`,
-v1 byte-frozen, only ever APPEND) silently upgrades to current, anything user-edited is NEVER touched —
-the ApplyEnvDefaults discipline; a deliberate additive `~/.claude` mutation. The current V6 instructs
+`<claude-config>/commands/handover.md` (**create-if-absent + a VERSION-AWARE UPGRADE gated on SHA-256 —
+the ONE write outside the profile**: the shipped history is a list of **DIGESTS**
+(`ShippedHandoverCommandHashes` — the SHA-256 of each version's UTF-8 bytes as written to disk, oldest
+first, the LAST entry being the digest of the CURRENT text `ShippedHandoverCommandText()`; append-only,
+frozen forever), so the on-disk file is hashed (`AgentMaster/Sha256.h`, pure + header-only, hand-rolled
+like `Base64Encode` so no bcrypt has to be threaded through lib + harness + CLI) and a match on a PRIOR
+entry — a pristine older OURS — silently upgrades to current, while anything user-edited (or already
+current, whose digest is the LAST entry, never a prior one) is NEVER touched — the ApplyEnvDefaults
+discipline; a deliberate additive `~/.claude` mutation. Digests, not texts: recognizing "a version WE
+shipped, unmodified" is a content-IDENTITY question, so a superseded version costs ONE line instead of a
+frozen 2–3 KB literal (retired texts live in git history), and the harness's
+`last == sha256(current text)` gate — whose failure message PRINTS the digest to append — makes the
+history self-maintaining: a text edit that forgot its digest fails the suite instead of silently
+orphaning the upgrade rule. The current V6 instructs
 Claude to Write each `HANDOVER-<topic>.md` AS a SELF-CONTAINED direct briefing TO its successor —
 because EACH file's content becomes a DIFFERENT successor's first message (the FAN-OUT: N files in
 one turn = N parallel successor tabs, in write order; "never write 'continue in file B'") — then
@@ -859,8 +871,10 @@ a failed spawn logs `(failed)` at its position). Repeatable — every /handover 
 spawns its own successor(s). Logs: `[cmd]`/`[cmd-fire]`/`[cmd-expire]` + the `[nav] handover-begin ↔
 handover-done` pair. **The `/handover-here <context-or-filepath>` twin (COMMANDS.md §5a)** reuses this ENTIRE
 pipeline — its own definition `handover-here.md` (`EnsureHandoverHereCommandFile` /
-`ShippedHandoverHereCommandHistory` v1, both files through the ONE shared
-`EnsureShippedCommandFileIn` core so the write policy can't drift), the same markdown await (same
+`ShippedHandoverHereCommandHashes` + `...Text()`, both files through the ONE shared
+`EnsureShippedCommandFileIn(configDir, leaf, shippedHashes, currentText, label)` core so the write
+policy can't drift, and the two digest histories are asserted DISJOINT so neither can cross-upgrade the
+other's file), the same markdown await (same
 "handover" leaf; the watch's name-EXACT binding lookup keeps the two from cross-firing), the same
 guards/title/tiers/fan-out — but **the FIRST file's successor REPLACES the origin tab IN PLACE**
 (additional files' successors open beside it): the
@@ -2154,7 +2168,11 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     `PendingInput.h` (header-only, pure — the **pending-input detector**, PENDING_INPUT.md: given the
     bottom region of the terminal buffer, finds Claude's input box by the bottom-most `❯` line wrapped
     by `─` rules and extracts the UNSENT draft; the `PromptAnchor.h` idiom — pure-ASCII source, header-
-    only so `ControlCore` + `tests/` share it. Unit-tested in `tests/`), `Json.h`, `Persistence.{h,cpp}`,
+    only so `ControlCore` + `tests/` share it. Unit-tested in `tests/`),
+    `Sha256.h` (header-only, pure — FIPS 180-4 SHA-256, hand-rolled like `Base64Encode` so no
+    bcrypt/crypt32 has to be threaded through the lib + harness + CLI builds; the content-IDENTITY
+    primitive behind the shipped `/handover`+`/handover-here` definitions' digest version history —
+    COMMANDS.md §6. NIST-vector + padding-edge tested in `tests/`), `Json.h`, `Persistence.{h,cpp}`,
     `ProfileBootstrap.h` (header-only, pure Win32 — the per-install state PROFILE: resolution
     [env > portable marker > saved choice > per-identity default], the `.agentmaster.profiles`
     choice file, the first-launch TaskDialog picker + folder Browse, legacy-data migration,

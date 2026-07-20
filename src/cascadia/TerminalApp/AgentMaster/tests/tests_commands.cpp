@@ -13,7 +13,14 @@
 //     survives a restart, deadline-anchored at its original stamp), past-deadline marker pruning
 //   * DeriveSuffixedTitle (the generalized fork-title derivation the /handover successor shares)
 //   * BuildClaudeCommandline's initial-prompt positional arg + PsDoubleQuote
-//   * EnsureHandoverCommandFileIn (create-if-absent under a temp config dir — never the real one)
+//   * Sha256 (NIST vectors + the 55/56/63/64/65-byte padding edges + the 1,000,000-byte case) —
+//     the identity primitive the shipped command definitions' version history is built on
+//   * EnsureShippedCommandFileIn (COMMANDS.md §6): the whole create / digest-matched UPGRADE /
+//     never-overwrite policy over a SYNTHETIC command (the real histories keep digests only, so a
+//     prior version's bytes no longer exist to lay on disk), plus EnsureHandoverCommandFileIn +
+//     EnsureHandoverHereCommandFileIn against a temp config dir — never the real ~/.claude — and
+//     the "history's last digest == sha256(current text)" gate that catches a text edit which
+//     forgot to append its digest
 //   * safeguard belts (COMMANDS.md §7): IsSaneWatchPath + insane-match rejection, a throwing
 //     handler swallowed per fire, a throwing probe reading as absent then recovering
 //   * TestCommandHandoverE2E — the FABRICATED expected-behavior /handover session (real ISO
@@ -55,6 +62,21 @@ namespace
     FiredHandover MakeFired(const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args)
     {
         return FiredHandover{ sid, mds.empty() ? std::wstring{} : mds.front(), args, mds };
+    }
+
+    // The UTF-8 bytes of a wide string EXACTLY as WriteFileUtf8 lays them on disk — what the
+    // shipped command definitions are hashed and compared as (ClaudeSpawn's own Utf16ToUtf8 is
+    // file-static, so the tests carry the same two lines).
+    std::string Utf8Of(std::wstring_view w)
+    {
+        std::string out;
+        const int need = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+        if (need > 0)
+        {
+            out.resize(static_cast<size_t>(need));
+            ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), out.data(), need, nullptr, nullptr);
+        }
+        return out;
     }
 }
 
@@ -681,6 +703,85 @@ void TestCommandWatch()
         ::RemoveDirectoryW(dir.c_str());
     }
 
+    // ---- Sha256 (the shipped-definition history's identity primitive, COMMANDS.md §6) ----
+    {
+        // FIPS 180-4 / NIST vectors plus the padding edges: 55 = the last length whose 0x80 + the
+        // 64-bit length still fit one block, 56 = the first that SPILLS into a second block, and
+        // 63/64/65 straddle the block boundary. A drift in any of these would silently break the
+        // command-definition upgrade rule for every install (a mismatching digest reads as
+        // "user-owned": no upgrade, no error, no log).
+        CHECK(Sha256Hex(std::string_view{}) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "sha256(empty message) — the NIST vector");
+        CHECK(Sha256Hex("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "sha256(\"abc\") — the NIST vector");
+        CHECK(Sha256Hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1", "sha256(448-bit NIST vector)");
+        CHECK(Sha256Hex(std::string(55, 'a')) == "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318", "sha256(55 bytes — the last length that fits its own final block)");
+        CHECK(Sha256Hex(std::string(56, 'a')) == "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a", "sha256(56 bytes — the length spills into a second block)");
+        CHECK(Sha256Hex(std::string(63, 'a')) == "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34", "sha256(63 bytes — one short of a full block)");
+        CHECK(Sha256Hex(std::string(64, 'a')) == "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb", "sha256(64 bytes — exactly one block, all padding in the second)");
+        CHECK(Sha256Hex(std::string(65, 'a')) == "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0", "sha256(65 bytes — one past a full block)");
+        CHECK(Sha256Hex(std::string(1000000, 'a')) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0", "sha256(1,000,000 x 'a') — the multi-block NIST vector");
+        CHECK(Sha256Hex("handover") != Sha256Hex("handovef"), "a one-byte difference changes the digest (the whole point of the upgrade gate)");
+    }
+
+    // ---- EnsureShippedCommandFileIn: the create / upgrade / never-overwrite POLICY ----
+    // Driven over a SYNTHETIC command, because the real histories carry digests ONLY — a prior
+    // version's bytes no longer exist in the binary to lay on disk. This is the one place the whole
+    // policy (the shared core both real definitions route through) is exercised end to end.
+    {
+        wchar_t tmp[MAX_PATH];
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring cfg = std::wstring{ tmp } + L"am-shipped-cmd-policy";
+        const std::wstring leaf = L"am-test-cmd.md";
+        const std::wstring path = cfg + L"\\commands\\" + leaf;
+        ::DeleteFileW(path.c_str());
+        ::RemoveDirectoryW((cfg + L"\\commands").c_str());
+        ::RemoveDirectoryW(cfg.c_str());
+
+        static constexpr std::wstring_view kV1 = L"# pretend shipped v1\nUse the Write tool.\n";
+        static constexpr std::wstring_view kV2 = L"# pretend shipped v2\nUse the Write tool, and say more.\n";
+        static constexpr std::wstring_view kV3 = L"# pretend shipped v3 (current)\nUse the Write tool, and say the most.\n";
+        const std::string h1 = Sha256Hex(Utf8Of(kV1));
+        const std::string h2 = Sha256Hex(Utf8Of(kV2));
+        const std::string h3 = Sha256Hex(Utf8Of(kV3));
+        const std::vector<std::string_view> history{ h1, h2, h3 }; // oldest first, current last
+
+        const auto readBack = [&path] {
+            std::ifstream f(std::filesystem::path{ path }, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        };
+        const auto layDown = [&path](std::string_view body) {
+            std::ofstream f(std::filesystem::path{ path }, std::ios::binary | std::ios::trunc);
+            f.write(body.data(), static_cast<std::streamsize>(body.size()));
+        };
+        const auto ensure = [&] { return EnsureShippedCommandFileIn(cfg, leaf, history, kV3, L"am-test"); };
+
+        CHECK(ensure() == path && readBack() == Utf8Of(kV3), "absent -> the CURRENT text is created (dirs made)");
+        layDown(Utf8Of(kV1));
+        CHECK(ensure() == path && readBack() == Utf8Of(kV3), "a pristine OLDEST shipped version (v1) upgrades to the current text");
+        layDown(Utf8Of(kV2));
+        CHECK(ensure() == path && readBack() == Utf8Of(kV3), "the version right before current (v2) upgrades too");
+        CHECK(ensure() == path && readBack() == Utf8Of(kV3), "an ALREADY-CURRENT file is left alone (its digest is the history's last entry, never a prior one)");
+        layDown("# my own /handover\n");
+        CHECK(ensure() == path && readBack() == "# my own /handover\n", "a user-owned file is NEVER overwritten");
+        layDown(Utf8Of(kV1) + " ");
+        CHECK(ensure() == path && readBack() == Utf8Of(kV1) + " ", "ONE byte off a shipped version reads as user-EDITED (no upgrade — the edit sticks forever)");
+        layDown("");
+        CHECK(ensure() == path && readBack().empty(), "an EMPTY file is left alone too (never rewritten blind)");
+        // A history that doesn't KNOW the on-disk bytes never rewrites them — the guarantee that
+        // protects a user's own same-named command from a sibling command's history.
+        layDown(Utf8Of(kV1));
+        const std::vector<std::string_view> foreign{ h2, h3 };
+        CHECK(EnsureShippedCommandFileIn(cfg, leaf, foreign, kV3, L"am-test") == path && readBack() == Utf8Of(kV1), "bytes absent from THIS command's history are user-owned (no cross-command upgrade)");
+        // Degenerate inputs are refused outright (no write, no path).
+        CHECK(EnsureShippedCommandFileIn(L"", leaf, history, kV3, L"am-test").empty(), "no config dir -> no write");
+        CHECK(EnsureShippedCommandFileIn(cfg, leaf, {}, kV3, L"am-test").empty(), "an EMPTY history -> no write (a command with no shipped version is a bug, not a create)");
+        CHECK(EnsureShippedCommandFileIn(cfg, leaf, history, L"", L"am-test").empty(), "an EMPTY current text -> no write (never truncate the user's file to nothing)");
+        CHECK(readBack() == Utf8Of(kV1), "the refused calls left the file exactly as it was");
+
+        ::DeleteFileW(path.c_str());
+        ::RemoveDirectoryW((cfg + L"\\commands").c_str());
+        ::RemoveDirectoryW(cfg.c_str());
+    }
+
     // ---- EnsureHandoverCommandFileIn: create-if-absent under a TEMP config dir ----
     {
         wchar_t tmp[MAX_PATH];
@@ -698,37 +799,39 @@ void TestCommandWatch()
             CHECK(body.find("HANDOVER-") != std::string::npos && body.find("Write tool") != std::string::npos, "definition instructs a Write-tool HANDOVER-*.md (the await's signal)");
             CHECK(body.find("injected VERBATIM") != std::string::npos, "current definition briefs Claude on content injection (write AS the successor's message)");
         }
-        // Version-aware UPGRADE: a file byte-identical to a PRIOR shipped version is ours and
-        // untouched — it silently upgrades to the current text on the next ensure.
+        // The shipped-version HISTORY is a list of SHA-256 digests (COMMANDS.md §6): the upgrade
+        // rule recognizes a pristine older OURS by digest, so the superseded texts no longer live
+        // in the binary. Two things must hold — the current text still carries every load-bearing
+        // sentinel, and the history's LAST entry is that text's digest.
         {
-            const auto& history = ShippedHandoverCommandHistory();
-            CHECK(history.size() >= 6 && history.back().find(L"injected VERBATIM") != std::wstring_view::npos, "shipped history: >= 6 versions, current is the content-injection text");
-            CHECK(history.back().find(L"whatever its size") != std::wstring_view::npos &&
-                      history.back().find(L"truncated") == std::wstring_view::npos,
+            const auto& hashes = ShippedHandoverCommandHashes();
+            const std::wstring_view current = ShippedHandoverCommandText();
+            CHECK(hashes.size() >= 6 && current.find(L"injected VERBATIM") != std::wstring_view::npos, "shipped history: >= 6 versions, current is the content-injection text");
+            CHECK(current.find(L"whatever its size") != std::wstring_view::npos &&
+                      current.find(L"truncated") == std::wstring_view::npos,
                   "current definition promises FULL delivery (never-truncate) and carries no truncation caution");
-            CHECK(history.back().find(L"MORE THAN ONE") != std::wstring_view::npos, "current definition permits writing several HANDOVER files in one turn");
-            CHECK(history.back().find(L"YOU invoked the skill yourself") != std::wstring_view::npos, "current definition carries the SELF-INVOCATION guard (V5 — a model-invoked skill writes no command echo, so nothing watches; redirect the user to TYPE the command)");
-            CHECK(history.back().find(L"its OWN successor") != std::wstring_view::npos, "current definition briefs the FAN-OUT semantics (V6 — each file starts its OWN successor tab; files must be self-contained)");
-            const auto utf8Of = [](std::wstring_view w) {
-                std::string out;
-                const int need = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
-                if (need > 0)
-                {
-                    out.resize(static_cast<size_t>(need));
-                    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), out.data(), need, nullptr, nullptr);
-                }
-                return out;
-            };
+            CHECK(current.find(L"MORE THAN ONE") != std::wstring_view::npos, "current definition permits writing several HANDOVER files in one turn");
+            CHECK(current.find(L"YOU invoked the skill yourself") != std::wstring_view::npos, "current definition carries the SELF-INVOCATION guard (V5 — a model-invoked skill writes no command echo, so nothing watches; redirect the user to TYPE the command)");
+            CHECK(current.find(L"its OWN successor") != std::wstring_view::npos, "current definition briefs the FAN-OUT semantics (V6 — each file starts its OWN successor tab; files must be self-contained)");
+            // Well-formed + unique digests: a typo'd entry silently disables that version's upgrade
+            // path forever (its installs would read as user-owned), a duplicated one hides a version.
+            bool wellFormed = true;
+            bool unique = true;
+            for (size_t i = 0; i < hashes.size(); ++i)
             {
-                std::ofstream f(std::filesystem::path{ p1 }, std::ios::binary | std::ios::trunc);
-                const std::string v1 = utf8Of(history.front());
-                f.write(v1.data(), static_cast<std::streamsize>(v1.size())); // pretend this install still carries shipped v1
+                wellFormed = wellFormed && hashes[i].size() == 64 && hashes[i].find_first_not_of("0123456789abcdef") == std::string_view::npos;
+                for (size_t j = i + 1; j < hashes.size(); ++j)
+                {
+                    unique = unique && hashes[i] != hashes[j];
+                }
             }
-            const auto pUp = EnsureHandoverCommandFileIn(cfg);
-            CHECK(pUp == p1, "upgrade path returns the same file");
-            std::ifstream f(std::filesystem::path{ p1 }, std::ios::binary);
-            std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-            CHECK(body == utf8Of(history.back()), "a pristine PRIOR shipped version silently upgrades to the current text");
+            CHECK(wellFormed, "every shipped-history entry is a 64-char lowercase-hex SHA-256");
+            CHECK(unique, "the shipped history holds no duplicate digest");
+            // THE version gate: edit the definition text without appending its digest and this
+            // fails — printing the digest to append (see ClaudeSpawn.cpp's history comment).
+            const std::string digest = Sha256Hex(Utf8Of(current));
+            const std::string msg = "shipped history's LAST entry == sha256(current /handover text) — after editing the text, APPEND this digest: " + digest;
+            CHECK(!hashes.empty() && digest == hashes.back(), msg.c_str());
         }
         // A user edit is NEVER overwritten (create-if-absent).
         {
@@ -766,11 +869,32 @@ void TestCommandWatch()
             CHECK(body.find("REPLACES") != std::string::npos && body.find("RESTARTS THIS TAB") != std::string::npos, "handover-here definition briefs the IN-PLACE semantics (the tab is replaced, not a new one opened)");
         }
         {
-            const auto& history = ShippedHandoverHereCommandHistory();
-            CHECK(history.size() >= 4 && history.back().find(L"RESTARTS THIS TAB") != std::wstring_view::npos, "shipped handover-here history: >= 4 versions; the current text names the in-place restart");
-            CHECK(history.back().find(L"MORE THAN ONE") != std::wstring_view::npos, "current handover-here definition permits writing several HANDOVER files in one turn");
-            CHECK(history.back().find(L"YOU invoked the skill yourself") != std::wstring_view::npos, "current handover-here definition carries the SELF-INVOCATION guard (V3)");
-            CHECK(history.back().find(L"its OWN successor") != std::wstring_view::npos && history.back().find(L"FIRST file's successor REPLACES this tab") != std::wstring_view::npos, "current handover-here definition briefs the FAN-OUT semantics (V4 — first file replaces this tab, additional files open beside it)");
+            const auto& hashes = ShippedHandoverHereCommandHashes();
+            const std::wstring_view current = ShippedHandoverHereCommandText();
+            CHECK(hashes.size() >= 4 && current.find(L"RESTARTS THIS TAB") != std::wstring_view::npos, "shipped handover-here history: >= 4 versions; the current text names the in-place restart");
+            CHECK(current.find(L"MORE THAN ONE") != std::wstring_view::npos, "current handover-here definition permits writing several HANDOVER files in one turn");
+            CHECK(current.find(L"YOU invoked the skill yourself") != std::wstring_view::npos, "current handover-here definition carries the SELF-INVOCATION guard (V3)");
+            CHECK(current.find(L"its OWN successor") != std::wstring_view::npos && current.find(L"FIRST file's successor REPLACES this tab") != std::wstring_view::npos, "current handover-here definition briefs the FAN-OUT semantics (V4 — first file replaces this tab, additional files open beside it)");
+            bool wellFormed = true;
+            for (const auto& h : hashes)
+            {
+                wellFormed = wellFormed && h.size() == 64 && h.find_first_not_of("0123456789abcdef") == std::string_view::npos;
+            }
+            CHECK(wellFormed, "every shipped handover-here history entry is a 64-char lowercase-hex SHA-256");
+            const std::string digest = Sha256Hex(Utf8Of(current));
+            const std::string msg = "shipped handover-here history's LAST entry == sha256(current text) — after editing the text, APPEND this digest: " + digest;
+            CHECK(!hashes.empty() && digest == hashes.back(), msg.c_str());
+            // The two commands share the markdown-await leaf hint but are DISTINCT documents, so
+            // their histories can never collide (a shared digest would cross-upgrade the files).
+            bool disjoint = true;
+            for (const auto& a : ShippedHandoverCommandHashes())
+            {
+                for (const auto& b : hashes)
+                {
+                    disjoint = disjoint && a != b;
+                }
+            }
+            CHECK(disjoint, "the /handover and /handover-here histories share no digest (no cross-upgrade)");
         }
         // A user edit is NEVER overwritten (the shared create-if-absent + upgrade discipline —
         // EnsureShippedCommandFileIn is the one core both wrappers share).

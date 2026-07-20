@@ -328,16 +328,38 @@ nothing would ever reach the transcript), so engine init materializes
 **`<claude-config>/commands/handover.md`** (`EnsureHandoverCommandFile`; `CLAUDE_CONFIG_DIR` >
 `~/.claude`, the `ClaudeProjectsDir` resolution) — logged `[engine] handover command: <path>` —
 **and its in-place twin `handover-here.md`** (`EnsureHandoverHereCommandFile`, logged
-`[engine] handover-here command: <path>`; shipped history `ShippedHandoverHereCommandHistory`,
-v1). Both route through the ONE shared core `EnsureShippedCommandFileIn(configDir, leaf,
-history, label)`, so the write policy below can never drift between the two files.
+`[engine] handover-here command: <path>`; shipped history `ShippedHandoverHereCommandHashes`).
+Both route through the ONE shared core `EnsureShippedCommandFileIn(configDir, leaf,
+shippedHashes, currentText, label)`, so the write policy below can never drift between the two
+files.
 
-**Create-if-absent + a version-aware UPGRADE:** a file whose bytes are IDENTICAL (UTF-8) to a
-**prior shipped version** (`ShippedHandoverCommandHistory` — v1 byte-frozen forever, only ever
-APPEND a version) is ours and untouched by the user, so it silently upgrades to the current text
-(logged `[engine] handover command upgraded (shipped vN -> vM)`); anything else — the user's own
-`/handover`, or an edited copy of ours — is NEVER overwritten (the `ApplyEnvDefaults`
-discipline: a user edit sticks forever). This is deliberately called out as **the one place
+**Create-if-absent + a version-aware UPGRADE, gated on SHA-256:** each command carries a
+**shipped-version history of digests** (`ShippedHandoverCommandHashes` /
+`ShippedHandoverHereCommandHashes` — the SHA-256, lowercase hex, of each version's UTF-8 bytes
+exactly as `WriteFileUtf8` lays them on disk; oldest first, the LAST entry being the digest of
+the CURRENT text, `ShippedHandoverCommandText()`). On every engine init the on-disk file is read
+(bounded 64 KiB) and hashed (`AgentMaster/Sha256.h` — pure, header-only, hand-rolled like
+`Base64Encode` so no bcrypt/crypt32 has to be threaded through the lib + harness + CLI builds):
+a digest matching a **PRIOR** entry means the file is a pristine older OURS — untouched by the
+user — so it silently upgrades to the current text (logged
+`[engine] handover command upgraded (shipped vN -> vM)`); anything else — the user's own
+`/handover`, an edited copy of ours, or simply the already-current text (its digest is the
+history's LAST entry, never a prior one ⇒ no rewrite, no log line) — is NEVER overwritten (the
+`ApplyEnvDefaults` discipline: a user edit sticks forever).
+
+*Why digests and not the texts:* the rule only ever asks "are these bytes something WE shipped,
+unmodified?" — a content-IDENTITY question a 64-char digest answers completely — so a superseded
+version costs ONE line instead of a permanently frozen 2–3 KB literal (the retired texts stay in
+git history; `git log -S<digest>` lands on the commit that retired one). The list is
+**APPEND-ONLY and frozen**: editing or dropping an entry makes every install still carrying that
+version read as user-owned, and it would never auto-upgrade again. **To ship a new version:**
+edit the text, rename the literal to `kHandoverCommandV<N+1>`, run the harness — the failing
+`last entry == sha256(current text)` check PRINTS the digest to append — and append it. That
+gate is what makes the digest history self-maintaining: a text edit that forgot its digest fails
+the suite instead of silently orphaning the upgrade rule. (The engine harness additionally pins
+`Sha256.h` to the NIST vectors + the 55/56/63/64/65-byte padding edges, and drives the whole
+create/upgrade/never-overwrite policy over a SYNTHETIC command — the real histories keep digests
+only, so a prior version's bytes no longer exist to lay on disk.) This is deliberately called out as **the one place
 Agentmaster writes outside its active profile** (a global `~/.claude` config mutation — additive
 and inert until the user actually types `/handover`; the same product-decision class the
 Codex-C3 `~/.codex` hooks change was deferred over, shipped here because the feature IS the
@@ -436,10 +458,19 @@ line alone pins the throw site later):
   `DeriveSuffixedTitle` (+ `DeriveForkTitle` parity), `PsDoubleQuote`, the initial-prompt
   commandline arg (empty == byte-identical to the pre-parameter form), and
   `EnsureHandoverCommandFileIn` under a **temp** config dir — never the real `~/.claude`:
-  create-if-absent, the content-injection sentinel, the **version-aware upgrade** (a pristine
-  shipped-v1 file upgrades to current; a user edit is never overwritten;
-  `ShippedHandoverCommandHistory` sanity incl. the V3 never-truncate promise — "whatever its
-  size", no truncation caution). Content-injection units: `PsEscapedCost` (the tier check's
+  create-if-absent, the content-injection sentinel, and the digest history's sanity —
+  `ShippedHandoverCommandHashes` entries all 64-char lowercase hex + unique, the V3
+  never-truncate promise ("whatever its size", no truncation caution), and the **version gate**
+  `last entry == sha256(ShippedHandoverCommandText())` (whose failure message prints the digest
+  to append). The **upgrade policy itself** is exercised by its own suite over a SYNTHETIC
+  command through the shared `EnsureShippedCommandFileIn` core — absent→create, a pristine
+  OLDEST version upgrades, the version right before current upgrades, an already-current file is
+  left alone, a user-owned file and a one-byte-off copy are never overwritten, an empty file is
+  left alone, bytes absent from THIS command's history never rewrite (no cross-command upgrade),
+  and the degenerate inputs (no config dir / empty history / empty current text) refuse outright
+  — because the real histories carry digests only, so a prior version's bytes no longer exist to
+  lay on disk. `Sha256.h` itself is pinned to the NIST vectors ("", "abc", the 448-bit vector,
+  1,000,000×'a') plus the 55/56/63/64/65-byte padding edges. Content-injection units: `PsEscapedCost` (the tier check's
   cost model, asserted against the REAL `PsDoubleQuote` output size so the two can't drift;
   budget-sized plain text fits the commandline tier, escape-heavy text of the same raw length
   overflows to the paste tier) and `ReadHandoverDocumentPrompt` (BOM strip + CRLF→LF +
@@ -468,8 +499,10 @@ line alone pins the throw site later):
   lookup, no prefix aliasing), and `EnsureHandoverHereCommandFileIn` under the same temp-config
   discipline: its OWN `handover-here.md` created beside `handover.md`, carrying the load-bearing
   signal (Write tool + `HANDOVER-`), the content-injection + never-truncate briefing, AND the
-  in-place sentinels ("REPLACES" / "RESTARTS THIS TAB"); `ShippedHandoverHereCommandHistory`
-  sanity; a user-edited file never overwritten (the shared `EnsureShippedCommandFileIn` core).
+  in-place sentinels ("REPLACES" / "RESTARTS THIS TAB"); `ShippedHandoverHereCommandHashes`
+  sanity + its own `last == sha256(current text)` gate, and that the two commands' histories are
+  DISJOINT (a shared digest would cross-upgrade the files); a user-edited file never overwritten
+  (the shared `EnsureShippedCommandFileIn` core).
 * **`TestCommandHandoverE2E` — the FABRICATED session** (the design's expected transcript,
   fabricated with real ISO timestamps and replayed through the REAL `ParseTranscriptDelta` + a
   feed mapping kept in lockstep with `_readDelta`'s): scenario A the happy path — echo →

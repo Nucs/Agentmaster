@@ -62,6 +62,7 @@
 #include "../SessionScanner.h" // ParseTranscriptDelta (pure)
 #include "../SessionSearch.h" // the Sessions page's two-phase search (SESSIONS.md §6)
 #include "../SessionStore.h" // the generalized DURABLE per-session key/value store (titles, ...)
+#include "../Sha256.h" // SHA-256 (the shipped command definitions' version identity) - pure, header-only
 #include "../TranscriptStore.h" // the on-disk Claude-session store API (SESSIONS.md §6)
 
 using namespace Agentmaster;
