@@ -12,8 +12,14 @@ REM outside any app (no inherited AGENTMASTER_PROFILE), it defaults to ~/.agentm
 REM /utf-8: matches the msbuild build (common.build.pre.props; agentmaster-cli.vcxproj inherits it)
 REM — the engine sources are BOM-less UTF-8, so without it the SessionSearch snippet markers
 REM (the scope emoji + ellipsis wide literals) compile to ANSI-codepage mojibake in THIS exe only.
+REM The source list MUST stay in lockstep with agentmaster-cli.vcxproj's ClCompile set (this
+REM script is the standalone twin of that project). CommandWatch.cpp is required even though the
+REM CLI never drives a slash-command binding: SessionScanner.cpp CALLS into it unconditionally
+REM (ParseCommandEcho + the five CommandWatch feeds), so omitting it fails at LINK, not compile —
+REM which is exactly how it went unnoticed from 3ded15111 (the commit that introduced CommandWatch
+REM and updated the vcxproj but not this script) until 2026-07-20.
 cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE /D AGENTMASTER_DEV /Fe:agentcli.exe agentcli.cpp ^
-   ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ^
+   ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\CommandWatch.cpp ^
    ..\SessionScanner.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ^
    ole32.lib user32.lib oleaut32.lib
 if errorlevel 1 (
