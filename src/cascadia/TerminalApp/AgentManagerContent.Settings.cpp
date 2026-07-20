@@ -26,6 +26,7 @@
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
+#include "AgentMaster/RegexUtil.h" // COMMANDS.md §6b — live validation of the Commands tab's regex boxes
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
@@ -1224,7 +1225,7 @@ namespace winrt::TerminalApp::implementation
         panel = commandsPanel;
         panel.Children().Append(SettingsSeparator(L"SLASH COMMANDS (the /handover family)", true)); // leading section
         {
-            auto intro = Text(L"Agentmaster ships two slash commands into your global Claude commands folder (~\\.claude\\commands, or CLAUDE_CONFIG_DIR). Typed into a managed Claude session, they write a HANDOVER-*.md briefing that Agentmaster turns into fresh successor session(s). Rename or disable them here \x2014 changes apply AFTER RESTART. A rename/disable deletes the old definition file only when it is byte-identical to a version Agentmaster shipped; a file you edited yourself is never touched (and a disabled command's edited file keeps working as YOUR command, just unwatched).", 11, false, 0.6);
+            auto intro = Text(L"Agentmaster ships two slash commands into your global Claude commands folder (~\\.claude\\commands, or CLAUDE_CONFIG_DIR). Typed into a managed Claude session, they write a HANDOVER-*.md briefing that Agentmaster turns into fresh successor session(s). Rename or disable them here \x2014 names, enables, and the file-match pattern apply AFTER RESTART; the successor shaping below (model \x00B7 title rewrite \x00B7 delete-after) applies to the NEXT handover right after Save. A rename/disable deletes the old definition file only when it is byte-identical to a version Agentmaster shipped; a file you edited yourself is never touched (and a disabled command's edited file keeps working as YOUR command, just unwatched).", 11, false, 0.6);
             intro.TextWrapping(TextWrapping::Wrap);
             panel.Children().Append(intro);
         }
@@ -1243,6 +1244,14 @@ namespace winrt::TerminalApp::implementation
         _setCmdHandoverStatus = Text(L"", 11, false, 0.7);
         _setCmdHandoverStatus.TextWrapping(TextWrapping::Wrap);
         panel.Children().Append(_setCmdHandoverStatus);
+        // §6b: the command's SUCCESSOR MODEL — "Default" (the settings model, index 0) + the
+        // launch-model picker's list. Items are (re)seeded at every _ShowSettings (the launchModels
+        // box may have changed since the overlay was built); the parallel _cmdModelIds* vector maps
+        // SelectedIndex -> the stored model id. Applies to the NEXT handover right after Save.
+        _setCmdModelHandover = ComboBox{};
+        _setCmdModelHandover.Header(winrt::box_value(L"Successor model"));
+        AgentSetTip(_setCmdModelHandover, L"The model this command's successor session(s) launch with. Default keeps the Sessions tab's Model box (the shipped behavior); the other entries come from the Launch models list and add --model <id> to just the successor's launch. Applies to the next handover \x2014 no restart needed.");
+        panel.Children().Append(_setCmdModelHandover);
         panel.Children().Append(SettingsSeparator(L"HAND OVER IN PLACE (REPLACE THIS TAB)"));
         _setCmdHandoverHereEnabled = ToggleSwitch{};
         _setCmdHandoverHereEnabled.Header(winrt::box_value(L"Enable (first successor replaces the tab)"));
@@ -1258,6 +1267,61 @@ namespace winrt::TerminalApp::implementation
         _setCmdHandoverHereStatus = Text(L"", 11, false, 0.7);
         _setCmdHandoverHereStatus.TextWrapping(TextWrapping::Wrap);
         panel.Children().Append(_setCmdHandoverHereStatus);
+        _setCmdModelHandoverHere = ComboBox{};
+        _setCmdModelHandoverHere.Header(winrt::box_value(L"Successor model"));
+        AgentSetTip(_setCmdModelHandoverHere, L"The model the in-place successor (and any additional-file tabs) launches with. Default keeps the Sessions tab's Model box; the other entries come from the Launch models list and add --model <id> to just the successor's launch. Applies to the next handover \x2014 no restart needed.");
+        panel.Children().Append(_setCmdModelHandoverHere);
+
+        // §6b SUCCESSOR SHAPING — family-wide (both commands), built on the ONE reusable regex
+        // component (RegexUtil.h): the successor-TITLE find/replace pair, the HANDOVER file-match
+        // pattern, and the delete-after-hand-off toggle. The status line below the boxes calls out
+        // an invalid pattern live (an invalid regex never breaks a handover — the consumers fall
+        // back to the shipped behavior; the line is the honesty channel).
+        panel.Children().Append(SettingsSeparator(L"SUCCESSOR SHAPING (both commands)"));
+        {
+            // The title rewrite: [ find (regex) | replace ] side by side (a Grid, so the pair reads
+            // as one rule: successorTitle = regex_replace(originTitle, find, replace)).
+            auto titleRow = Grid{};
+            {
+                ColumnDefinition cFind;
+                cFind.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+                ColumnDefinition cGap;
+                cGap.Width(GridLengthHelper::FromValueAndType(8, GridUnitType::Pixel));
+                ColumnDefinition cRepl;
+                cRepl.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+                titleRow.ColumnDefinitions().Append(cFind);
+                titleRow.ColumnDefinitions().Append(cGap);
+                titleRow.ColumnDefinitions().Append(cRepl);
+            }
+            _setCmdTitleFind = TextBox{};
+            _setCmdTitleFind.Header(winrt::box_value(L"Successor title: find (regex)"));
+            _setCmdTitleFind.PlaceholderText(L"blank \x2014 default \x201C(handover)\x201D naming");
+            AgentSetTip(_setCmdTitleFind, L"Rewrite successor titles with a regex applied to the ORIGIN tab's title: every match of this pattern is replaced by the text on the right ($1 backrefs work; anchor with ^/$ to match the whole title). Blank, invalid, or not matching a title \x2192 the default \x201C<origin> (handover)\x201D naming. Titles are still made unique afterwards. Applies to the next handover.");
+            _setCmdTitleFind.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _UpdateCommandsTabStatus(); });
+            Grid::SetColumn(_setCmdTitleFind, 0);
+            titleRow.Children().Append(_setCmdTitleFind);
+            _setCmdTitleReplace = TextBox{};
+            _setCmdTitleReplace.Header(winrt::box_value(L"replace with"));
+            _setCmdTitleReplace.PlaceholderText(L"e.g. $1 (next)");
+            AgentSetTip(_setCmdTitleReplace, L"The replacement for every match of the find pattern \x2014 $1, $2 \x2026 insert the pattern's capture groups; an empty replacement deletes the matched part. A rewrite that would leave the title blank falls back to the default naming (a title never goes empty).");
+            _setCmdTitleReplace.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _UpdateCommandsTabStatus(); });
+            Grid::SetColumn(_setCmdTitleReplace, 2);
+            titleRow.Children().Append(_setCmdTitleReplace);
+            panel.Children().Append(titleRow);
+        }
+        _setCmdFileMatch = TextBox{};
+        _setCmdFileMatch.Header(winrt::box_value(L"Handover file match (regex \x2014 applies after restart)"));
+        _setCmdFileMatch.PlaceholderText(L"blank \x2014 default: file name contains \x201Chandover\x201D");
+        AgentSetTip(_setCmdFileMatch, L"Which markdown files a handover COLLECTS, matched against the written file's NAME (case-insensitive regex search; anchor with ^/$ for a whole-name match, e.g. ^BRIEF-.*\\.md$). Blank keeps the shipped rule \x2014 the name contains \x201Chandover\x201D (the HANDOVER-*.md contract); an invalid pattern falls back to that rule too. Applies after restart. The shipped command definitions still tell Claude to write HANDOVER-<topic>.md \x2014 pair a custom pattern with an edited definition that names files to match it.");
+        _setCmdFileMatch.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _UpdateCommandsTabStatus(); });
+        panel.Children().Append(_setCmdFileMatch);
+        _setCmdDeleteAfter = ToggleSwitch{};
+        _setCmdDeleteAfter.Header(winrt::box_value(L"Delete the handover file after a successful hand-off"));
+        AgentSetTip(_setCmdDeleteAfter, L"Once a HANDOVER-*.md's successor session is created and its briefing is secured (delivered on the launch commandline, or parked durably on the successor's queue for the paste injection), the file itself is deleted \x2014 no more HANDOVER-*.md litter in your repos. A file whose successor got only a POINTER to it is never deleted (the successor must read it), and a failed spawn leaves its file. Off by default; applies to the next handover.");
+        panel.Children().Append(_setCmdDeleteAfter);
+        _setCmdShapingStatus = Text(L"", 11, false, 0.7);
+        _setCmdShapingStatus.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setCmdShapingStatus);
 
         // === TABS & OVERLAY tab ===
         panel = tabsPanel;
@@ -2072,6 +2136,56 @@ namespace winrt::TerminalApp::implementation
             _cmdLiveHandoverName = disk.commandHandoverMaterializedName;
             _cmdLiveHandoverHereName = disk.commandHandoverHereMaterializedName;
         }
+        // §6b successor shaping: (re)seed the two model combos from the CURRENT launchModels list
+        // — rebuilt at every open, so an edit to the Launch models box shows here next open. The
+        // parallel id vectors map SelectedIndex -> stored id ([0] == "" Default); a stored id no
+        // longer in the list is appended as "(custom) <id>" so it round-trips instead of silently
+        // resetting to Default.
+        if (_setCmdModelHandover && _setCmdModelHandoverHere)
+        {
+            const auto models = ::Agentmaster::ParseLaunchModels(_appSettings.launchModels);
+            const auto seedModelCombo = [&models](const winrt::Windows::UI::Xaml::Controls::ComboBox& combo, std::vector<std::wstring>& ids, const std::wstring& stored) {
+                combo.Items().Clear();
+                ids.clear();
+                combo.Items().Append(winrt::box_value(L"Default"));
+                ids.push_back(L"");
+                int sel = 0;
+                for (const auto& [display, id] : models)
+                {
+                    combo.Items().Append(winrt::box_value(winrt::hstring{ display }));
+                    ids.push_back(id);
+                    if (sel == 0 && !stored.empty() && id == stored)
+                    {
+                        sel = static_cast<int>(ids.size()) - 1;
+                    }
+                }
+                if (!stored.empty() && sel == 0)
+                {
+                    combo.Items().Append(winrt::box_value(winrt::hstring{ L"(custom) " + stored }));
+                    ids.push_back(stored);
+                    sel = static_cast<int>(ids.size()) - 1;
+                }
+                combo.SelectedIndex(sel);
+            };
+            seedModelCombo(_setCmdModelHandover, _cmdModelIdsHandover, _appSettings.commandHandoverSuccessorModel);
+            seedModelCombo(_setCmdModelHandoverHere, _cmdModelIdsHandoverHere, _appSettings.commandHandoverHereSuccessorModel);
+        }
+        if (_setCmdTitleFind)
+        {
+            _setCmdTitleFind.Text(winrt::hstring{ _appSettings.commandHandoverTitleFindRegex });
+        }
+        if (_setCmdTitleReplace)
+        {
+            _setCmdTitleReplace.Text(winrt::hstring{ _appSettings.commandHandoverTitleReplace });
+        }
+        if (_setCmdFileMatch)
+        {
+            _setCmdFileMatch.Text(winrt::hstring{ _appSettings.commandHandoverFileMatchRegex });
+        }
+        if (_setCmdDeleteAfter)
+        {
+            _setCmdDeleteAfter.IsOn(_appSettings.commandHandoverDeleteFileAfterLaunch);
+        }
         // The seeds above re-fire TextChanged/Toggled, but be explicit so the status lines never
         // depend on a programmatic set actually raising them (the _UpdateTitleNamingPreview rule).
         _UpdateCommandsTabStatus();
@@ -2558,6 +2672,39 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::ResolveCommandNamePair(ho, hh);
             _appSettings.commandHandoverName = ho;
             _appSettings.commandHandoverHereName = hh;
+        }
+        // §6b successor shaping. The model combos map SelectedIndex -> the parallel id vector
+        // ([0]/none == "" Default); the regexes store VERBATIM (freeform patterns — RegexUtil
+        // guards every use, the status line already warned on invalid), the toggle as-is.
+        {
+            const auto comboPick = [](const winrt::Windows::UI::Xaml::Controls::ComboBox& combo, const std::vector<std::wstring>& ids) -> std::wstring {
+                const int idx = combo ? combo.SelectedIndex() : -1;
+                return (idx > 0 && idx < static_cast<int>(ids.size())) ? ids[static_cast<size_t>(idx)] : std::wstring{};
+            };
+            if (_setCmdModelHandover)
+            {
+                _appSettings.commandHandoverSuccessorModel = comboPick(_setCmdModelHandover, _cmdModelIdsHandover);
+            }
+            if (_setCmdModelHandoverHere)
+            {
+                _appSettings.commandHandoverHereSuccessorModel = comboPick(_setCmdModelHandoverHere, _cmdModelIdsHandoverHere);
+            }
+        }
+        if (_setCmdTitleFind)
+        {
+            _appSettings.commandHandoverTitleFindRegex = std::wstring{ _setCmdTitleFind.Text() };
+        }
+        if (_setCmdTitleReplace)
+        {
+            _appSettings.commandHandoverTitleReplace = std::wstring{ _setCmdTitleReplace.Text() };
+        }
+        if (_setCmdFileMatch)
+        {
+            _appSettings.commandHandoverFileMatchRegex = std::wstring{ _setCmdFileMatch.Text() };
+        }
+        if (_setCmdDeleteAfter)
+        {
+            _appSettings.commandHandoverDeleteFileAfterLaunch = _setCmdDeleteAfter.IsOn();
         }
         if (_setRenameCommit)
         {
@@ -3165,6 +3312,41 @@ namespace winrt::TerminalApp::implementation
         if (_setCmdHandoverHereStatus)
         {
             _setCmdHandoverHereStatus.Text(winrt::hstring{ lineFor(hhOn, _cmdLiveHandoverHereName, hh, hhAlone) });
+        }
+        // §6b shaping summary — the honesty line under the regex boxes: what the CURRENT (unsaved)
+        // patterns will actually do, an INVALID one called out explicitly (the consumers fall back
+        // to the shipped behavior rather than break, so the only way the user learns is here).
+        if (_setCmdShapingStatus)
+        {
+            const std::wstring find = _setCmdTitleFind ? std::wstring{ _setCmdTitleFind.Text() } : std::wstring{};
+            const std::wstring fileRe = _setCmdFileMatch ? std::wstring{ _setCmdFileMatch.Text() } : std::wstring{};
+            std::wstring t = L"Titles: ";
+            if (find.empty())
+            {
+                t += L"default \x201C(handover)\x201D naming.";
+            }
+            else if (!::Agentmaster::RegexIsValid(find))
+            {
+                t += L"find regex INVALID \x2014 default naming applies.";
+            }
+            else
+            {
+                t += L"regex rewrite (a title the pattern doesn't match keeps the default naming).";
+            }
+            t += L"  Files: ";
+            if (fileRe.empty())
+            {
+                t += L"name contains \x201Chandover\x201D (default).";
+            }
+            else if (!::Agentmaster::RegexIsValid(fileRe))
+            {
+                t += L"match regex INVALID \x2014 the default rule applies (checked again at next start).";
+            }
+            else
+            {
+                t += L"regex match \x2014 applies after restart.";
+            }
+            _setCmdShapingStatus.Text(winrt::hstring{ t });
         }
     }
 

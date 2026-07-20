@@ -448,6 +448,68 @@ PROFILE row's idiom, live state read from the disk markers below).
   "undone" by the other's next init re-materializing ITS configured names. Run one install
   primarily, or configure both alike.
 
+## 6b. Successor shaping — model · title rewrite · file match · delete-after
+
+The Commands tab's second half configures what a handover PRODUCES. Unlike the names/enables
+above, most of it is consumed at ACTION time (`_HandleCommandHandover` reads the live
+`_appSettings` when a handover fires), so it applies to the **next handover right after Save —
+no restart**. The ONE exception is the file-match pattern, which rides the engine-init binding.
+
+**The shared regex component** (`AgentMaster/RegexUtil.h`, header-only + pure — the
+`PromptAnchor.h` idiom, so the engine, the UI layer, and the harness share one definition).
+Every user-typed pattern in Agentmaster goes through it instead of touching `std::wregex`,
+because raw `std::wregex` is the wrong shape for user input three ways: **construction THROWS**
+on an invalid pattern (and a pattern being edited is invalid on most keystrokes), cost is
+**unbounded** (a pathological pattern can backtrack for seconds), and semantics would drift per
+call site. `RegexIsValid` / `RegexSearch` / `RegexReplace` never throw (invalid ⇒ no-match /
+input unchanged), cap the pattern (512) and input (4096) lengths, and fix ONE flavor —
+ECMAScript, `regex_search` semantics (anchor with `^`/`$` for whole-string), optional
+case-insensitivity, `$1` backrefs, replace-ALL. `RegexReplace`'s `applied` out-param is the
+"configured AND it did something" signal the title fallback keys on. Its catches are the
+documented Rule #18 *expected control flow* exemption (an invalid pattern mid-edit is the normal
+state; the cog surfaces invalidity to the user instead of flooding hooks.log).
+
+* **Successor model** — `commandHandoverSuccessorModel` / `commandHandoverHereSuccessorModel`,
+  **per command**: `""` == **Default** (the settings `model` decides — the shipped behavior),
+  else a model id threaded as this launch's `--model <id>` through the EXISTING launch-model
+  picker seam (`BuildClaudeCommandline`'s `modelOverride`) — for the new-tab path via
+  `_LaunchClaudeSession`, for the in-place path via `_RestartTabIntoFreshSession`'s new
+  `modelOverride` param. Every file of one command's fan-out launches with that command's pick.
+  The cog offers **Default** + the `launchModels` list, rebuilt at each cog open; a stored id no
+  longer in the list is listed as `(custom) <id>` so it round-trips instead of silently resetting.
+* **Title rewrite** — `commandHandoverTitleFindRegex` + `commandHandoverTitleReplace`, ONE pair
+  for the whole family (both commands name successors alike). The pure, guarded
+  `DeriveHandoverSuccessorTitle(originTitle, find, replace)` returns a candidate, or `""`
+  whenever the rewrite does not apply — **unset · invalid · matches nowhere · blank result** —
+  and the caller then falls back to the classic `DeriveSuffixedTitle` `"(handover)"` naming. So
+  the rewrite can only ever IMPROVE a title, never lose one (Rule #11's never-empty invariant);
+  the result is trimmed and capped at 255 (252 + `...`) like `DeriveSessionTitle`, and the
+  caller's uniqueness bump past registry titles applies exactly as before. `$1` backrefs make
+  the common shapes one-liners: append `^(.*)$` → `$1 - continued`, bump `\d+` → `4`, strip a
+  prefix, etc.
+* **File match** — `commandHandoverFileMatchRegex`, shared by BOTH commands (they are one await
+  family — a per-command pattern would split the §3 supersede family, whose key stays the leaf
+  HINT). `""` == the shipped rule (leaf CONTAINS `handover`); non-empty + valid ⇒ a markdown
+  qualifies when the pattern regex-SEARCHES its file NAME (case-insensitive; anchor for a whole-
+  name match, e.g. `^BRIEF-.*\.md$`). A **valid pattern is authoritative** (a `HANDOVER-*.md` no
+  longer qualifies unless the pattern says so); an **invalid** one falls back to the hint —
+  belted twice: the engine validates once at bind time and logs
+  `[engine] handover file-match regex INVALID - using the default 'handover' leaf hint: …`, and
+  the watch re-checks per leaf. **Restart-applied** (`BindMarkdownAwait`'s new optional
+  `leafMatchRegex`; bindings register once at init). NOTE: the shipped definitions still tell
+  Claude to write `HANDOVER-<topic>.md`, so a custom pattern normally pairs with an edited
+  definition (which the §6 policy then treats as user-owned — by design).
+* **Delete after hand-off** — `commandHandoverDeleteFileAfterLaunch` (default **OFF**; deleting
+  user-visible files is opt-in). After a successor is created AND its delivery is **secured**,
+  the markdown is deleted: the **content** tier has the whole document on the successor's launch
+  commandline, the **paste** tier has it parked durably at the FRONT of the successor's queue
+  (`sessions.json` — restart-safe, Send-now-able). The **pointer** tier NEVER deletes (the
+  successor's first message names the file — deleting it would strand the handover), and a
+  **failed spawn** leaves its file. Best-effort: a locked/undeletable file just stays, logged
+  `[handover] delete-after-hand-off FAILED (le=…), file left in place: …`; a success logs
+  `[handover] deleted md after successful hand-off (delivered=content|paste, successor=<sid8>): …`.
+  This is the answer to `HANDOVER-*.md` litter accumulating at repo roots (§gap-8).
+
 ## 7. Hardening & safeguards
 
 The feature crosses three threads (scanner worker → engine fan-out → per-window UI dispatchers)
@@ -561,6 +623,30 @@ line alone pins the throw site later):
   sanity + its own `last == sha256(current text)` gate, and that the two commands' histories are
   DISJOINT (a shared digest would cross-upgrade the files); a user-edited file never overwritten
   (the shared `EnsureShippedCommandFileIn` core).
+  **§6a CUSTOMIZATION units:** `NormalizeCommandName` (slug rules, `/`-strip, path chars dropped,
+  the 64-cap) + `ResolveCommandNamePair` (defaults, both collision directions); the
+  render↔identity INVERSE over a synthetic text with a boundary hazard (`/am-cmd` vs
+  `/am-cmd-here`) AND the REAL texts (a custom render carries only the custom token, the
+  await's load-bearing signals survive, a custom-named CURRENT render digests back onto the
+  history's last entry, a default-name render is byte-identical); the named
+  ensure/remove/reconcile policy over a synthetic 2-version history (create rendered, upgrade a
+  custom-named prior version, never overwrite a user edit, remove pristine-any-version vs leave
+  user-owned, and the full reconcile story: first materialize → rename-migrate → rename away
+  from a user-EDITED file (left in place) → disable-delete → re-enable → enabled-but-blank
+  fallback); plus the AppSettings round-trip incl. marker semantics (a PRESENT-empty marker ==
+  disabled vs an absent key == the default), the load-time collision heal, and a hand-edited
+  marker normalizing.
+  **§6b SHAPING units:** `RegexUtil` end to end (valid/invalid/empty classification, the
+  pattern + input caps, case-insensitivity, unanchored search semantics, replace-ALL, `$1`
+  backrefs, and — the contract that matters — an invalid pattern reading as no-match /
+  unchanged with `applied=false`); `DeriveHandoverSuccessorTitle`'s five fallback paths (unset ·
+  invalid · no-match · blank result · the >255 cap) beside the real rewrites (plain, `$1`
+  append, numeric bump, trimming); the CommandWatch **leaf-match regex** (a valid pattern is
+  authoritative — `BRIEF-*` collected case-insensitively while a hint-named `HANDOVER-old.md`
+  is EXCLUDED — and an invalid one falls back to the shipped hint); and the shaping AppSettings
+  round-trip (models, the find/replace pair + file pattern stored VERBATIM with regex chars and
+  `$` backrefs unmangled, the toggle, absent keys == shipped behavior, and an invalid stored
+  pattern degrading at USE time).
 * **`TestCommandHandoverE2E` — the FABRICATED session** (the design's expected transcript,
   fabricated with real ISO timestamps and replayed through the REAL `ParseTranscriptDelta` + a
   feed mapping kept in lockstep with `_readDelta`'s): scenario A the happy path — echo →
@@ -618,6 +704,11 @@ state-machine side (no TURN event; the echo reads back as the non-turn `Command`
   **SHIPPED, per-command** — §6a: the cog's Commands tab disables (and renames) each command
   individually, applied at the next start.
 * Surfacing an armed await on the origin tab's overlay (a dim `⏳ handover pending` row).
+* A **fan-out cap** — a definition-following Claude writing, say, 10 files opens 10 tabs. The
+  §6b file-match regex narrows WHAT counts and delete-after cleans up, but nothing bounds the
+  COUNT yet.
+* Live-applying the §6b **file-match** pattern (re-binding mid-run) — deliberately restart-only
+  today, because the scanner worker reads the binding set unsynchronized.
 * First-prompt `/handover` in a brand-new session is a degenerate no-op by construction (there
   is nothing to hand over); the freshness gate also skips a `/handover` typed moments before an
   app restart — the user re-runs it. Documented, accepted.

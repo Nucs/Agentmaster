@@ -19,6 +19,7 @@
 #include "Persistence.h" // GetDirEnv (the per-directory env overrides; ResolveSessionEnv reads it)
 #include "ProcessInspect.h" // SnapshotProcesses / FindDescendantByImage / ReadProcessCwd (moved here)
 #include "ProfileBootstrap.h" // the per-install state PROFILE (AgentmasterStateDir now resolves through it)
+#include "RegexUtil.h" // COMMANDS.md §6b — the successor-title regex rewrite (DeriveHandoverSuccessorTitle)
 #include "Sha256.h" // the shipped-command-definition version history is a list of SHA-256 digests
 
 namespace
@@ -1673,6 +1674,42 @@ file) in this working directory, injecting each document as its session's openin
         // and builds a path); same recovery — markers unchanged, nothing claimed.
         LogSwallowedException(L"ReconcileHandoverCommandFiles");
         return { settings.commandHandoverMaterializedName, settings.commandHandoverHereMaterializedName };
+    }
+
+    std::wstring DeriveHandoverSuccessorTitle(std::wstring_view originTitle, std::wstring_view findRegex, std::wstring_view replacement)
+    {
+        if (findRegex.empty())
+        {
+            return {}; // rewrite not configured — the caller's default "(handover)" naming applies
+        }
+        bool applied = false;
+        std::wstring out = RegexReplace(originTitle, findRegex, replacement, /*caseInsensitive*/ false, &applied);
+        if (!applied)
+        {
+            return {}; // invalid pattern, or it matched nowhere in THIS title — default naming
+        }
+        // A title is never blank (Rule #11): trim, refuse whitespace-only, and apply the same
+        // degenerate cap DeriveSessionTitle uses (252 + "..." == 255 — a safety net, not a look).
+        size_t b = 0;
+        size_t e = out.size();
+        while (b < e && (out[b] == L' ' || out[b] == L'\t' || out[b] == L'\r' || out[b] == L'\n'))
+        {
+            ++b;
+        }
+        while (e > b && (out[e - 1] == L' ' || out[e - 1] == L'\t' || out[e - 1] == L'\r' || out[e - 1] == L'\n'))
+        {
+            --e;
+        }
+        out = out.substr(b, e - b);
+        if (out.empty())
+        {
+            return {}; // the rewrite deleted everything — default naming beats a blank title
+        }
+        if (out.size() > 255)
+        {
+            out = out.substr(0, 252) + L"...";
+        }
+        return out;
     }
 
     std::wstring ReadHandoverDocumentPrompt(const std::wstring& mdPath)

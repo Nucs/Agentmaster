@@ -7,6 +7,7 @@
 #include "CommandWatch.h"
 
 #include "ClaudeSpawn.h" // AppendStateLog / ShortId (the [cmd] trace lines)
+#include "RegexUtil.h" // §6b: the optional leaf-match regex (guarded — invalid falls back to the hint)
 
 #include <windows.h>
 
@@ -315,7 +316,7 @@ namespace Agentmaster
         return firstMd;
     }
 
-    void CommandWatch::BindMarkdownAwait(std::wstring commandName, std::wstring preferLeafContains, MarkdownReadyHandler handler)
+    void CommandWatch::BindMarkdownAwait(std::wstring commandName, std::wstring preferLeafContains, MarkdownReadyHandler handler, std::wstring leafMatchRegex)
     {
         for (auto& c : commandName)
         {
@@ -327,11 +328,12 @@ namespace Agentmaster
             if (b.command == commandName)
             {
                 b.preferLeafContains = std::move(preferLeafContains);
+                b.leafMatchRegex = std::move(leafMatchRegex);
                 b.onReady = std::move(handler);
                 return; // one binding per name — last wins
             }
         }
-        _bindings.push_back(Binding{ std::move(commandName), std::move(preferLeafContains), std::move(handler) });
+        _bindings.push_back(Binding{ std::move(commandName), std::move(preferLeafContains), std::move(leafMatchRegex), std::move(handler) });
     }
 
     const CommandWatch::Binding* CommandWatch::_findBindingLocked(std::wstring_view command) const
@@ -553,12 +555,37 @@ namespace Agentmaster
             {
                 const Binding* b = _findBindingLocked(it->command);
                 const std::wstring_view hint = b ? std::wstring_view{ b->preferLeafContains } : std::wstring_view{};
+                const std::wstring_view leafRegex = b ? std::wstring_view{ b->leafMatchRegex } : std::wstring_view{};
+                // §6b leaf qualifier: a configured VALID regex REPLACES the contains-hint (a leaf
+                // qualifies when the pattern regex-searches its file name, case-insensitive); a
+                // configured-but-INVALID pattern falls back to the hint (a broken user regex must
+                // degrade to the shipped behavior, never silently kill the await — the cog warns
+                // live and the engine logs once at bind time). No regex == the classic hint.
+                const auto leafQualifies = [&](const std::wstring& p) {
+                    if (!IsMarkdownPath(p))
+                    {
+                        return false;
+                    }
+                    const auto leaf = PathLeaf(p);
+                    if (!leafRegex.empty())
+                    {
+                        if (RegexSearch(leaf, leafRegex, /*caseInsensitive*/ true))
+                        {
+                            return true;
+                        }
+                        if (RegexIsValid(leafRegex))
+                        {
+                            return false; // a valid pattern is authoritative — no hint fallback per leaf
+                        }
+                    }
+                    return !hint.empty() && ContainsCi(leaf, hint);
+                };
                 std::vector<std::wstring> picks;
                 for (const auto& raw : paths)
                 {
-                    if (IsMarkdownPath(raw) && !hint.empty() && ContainsCi(PathLeaf(raw), hint))
+                    if (leafQualifies(raw))
                     {
-                        picks.push_back(raw); // hint-matching markdown — the command's own file family
+                        picks.push_back(raw); // family-matching markdown — the command's own files
                     }
                 }
                 if (picks.empty() && it->matchedPaths.empty())

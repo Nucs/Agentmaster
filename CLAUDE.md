@@ -769,7 +769,7 @@ tag no session carries lists at **·0** (sorts last).
 ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
 HARDENED, delivery = FULL CONTENT INJECTION (never truncated), RESTART-RESILIENT (durable
 per-session progress) + MULTI-FILE (one command's several HANDOVER files consumed as one):
-engine-tested (2370/2370 — the
+engine-tested (2403/2403 — the
 `TestCommandWatch` units + safeguard belts + the content-injection/tier units + the /handover-here
 twin units (hyphen echo, name-exact binding isolation, its own definition file) + the multi-file
 collect/seal/settle units + the durable-progress units (watermark / marker revival / prune /
@@ -778,7 +778,9 @@ encode-decode) + the family-supersede race-guard units + the SHA-256 definition-
 the `last digest == sha256(current text)` version gate; the two histories disjoint) + the §6a
 CUSTOMIZATION units (name normalize/pair-heal, the render↔identity inverse over synthetic AND real
 texts, the named ensure/remove + rename/disable reconcile policy, the AppSettings round-trip incl.
-marker semantics), the FABRICATED
+marker semantics) + the §6b SHAPING units (RegexUtil's never-throw/caps/backrefs contract, the
+successor-title rewrite's five fallback paths, the authoritative-vs-invalid leaf-match regex, the
+shaping settings round-trip), the FABRICATED
 end-to-end `/handover` session `TestCommandHandoverE2E` (incl. the multi-file scenario F, the
 restart-persistence scenario G + the family-race pivot scenario H), and the REAL-corpus echo replay
 `TestCommandEchoRealCorpus`) + lib-compiled green; rides the next deploy cycle.** Bind to `/commands`
@@ -833,7 +835,30 @@ is recognized under ANY name (custom-named pristine files still auto-upgrade); t
 ONLY when byte-identical to something we shipped (a user-edited file is NEVER touched) — and the
 fan-out action names stay canonical `handover`/`handover-here`, so a rename never reaches the UI
 layer. (Two-install caveat: dev + release share `~/.claude/commands` with separate settings — the
-other install's init re-materializes ITS configured names.)
+other install's init re-materializes ITS configured names.) **SUCCESSOR SHAPING (COMMANDS.md §6b —
+the Commands tab's second half) configures what a handover PRODUCES**, consumed at ACTION time so it
+applies to the NEXT handover right after Save (no restart) except where noted: a **per-command
+successor MODEL** (`commandHandoverSuccessorModel`/`…Here…`; `""` == Default, else this launch's
+`--model <id>` through the existing launch-model seam — `_LaunchClaudeSession`'s `modelOverride` and
+`_RestartTabIntoFreshSession`'s new one; the cog lists Default + `launchModels`, an unlisted stored id
+shown `(custom) <id>`), a family **TITLE REWRITE** (`commandHandoverTitleFindRegex`/`…TitleReplace` →
+the pure `DeriveHandoverSuccessorTitle`, which returns `""` on unset/invalid/no-match/blank-result so
+the classic `"(handover)"` naming is the fallback — the rewrite can only IMPROVE a title, never lose
+one; `$1` backrefs, trimmed, 255-capped, still uniqueness-bumped), a family **FILE-MATCH regex**
+(`commandHandoverFileMatchRegex` → `BindMarkdownAwait`'s new optional `leafMatchRegex`: a VALID
+pattern is authoritative over the leaf hint — case-insensitive search on the file NAME — while an
+invalid one falls back to the shipped hint, belted at bind time (logged) AND per leaf; **RESTART-
+applied**, bindings register once; the §3 supersede family key stays the leaf HINT so the two commands
+stay one family), and **DELETE-AFTER-HAND-OFF** (`commandHandoverDeleteFileAfterLaunch`, default OFF:
+the md is deleted once its successor exists AND delivery is SECURED — content tier on the launch
+commandline, paste tier parked durably at the queue front — never the POINTER tier, never a failed
+spawn; best-effort, logged both ways — the answer to `HANDOVER-*.md` litter). All user-typed patterns
+run through the ONE shared **`AgentMaster/RegexUtil.h`** (header-only + pure, the `PromptAnchor.h`
+idiom): `RegexIsValid`/`RegexSearch`/`RegexReplace` never throw (invalid ⇒ no-match/unchanged), cap
+pattern (512) + input (4096), and fix one flavor (ECMAScript, search semantics, optional
+case-insensitivity, `$1` backrefs, replace-ALL); its catches are the documented Rule #18
+*expected-control-flow* exemption (an invalid pattern mid-edit is normal — the cog's live status line
+is the reporting channel).
 **The `/handover <context-or-filepath>` integration:** engine init materializes the command DEFINITION
 `<claude-config>/commands/handover.md` (**create-if-absent + a VERSION-AWARE UPGRADE gated on SHA-256 —
 the ONE write outside the profile**: the shipped history is a list of **DIGESTS**
@@ -1687,7 +1712,18 @@ What works, by area:
   lines staging `/old → /new after restart`] or disable it entirely; **applies at the NEXT START** —
   engine init binds + reconciles the definition files, migrating a renamed/disabled command's old
   file away only when it is pristine-ours; the engine-owned `command*MaterializedName` markers are
-  preserved-from-disk on Save like the seed markers), and (the
+  preserved-from-disk on Save like the seed markers) **plus the SUCCESSOR SHAPING half (§6b)** —
+  **`commandHandoverSuccessorModel`/`…HereSuccessorModel`** (a per-command "Successor model" combo:
+  Default + the `launchModels` list, rebuilt each cog open, an unlisted stored id shown `(custom)
+  <id>`), **`commandHandoverTitleFindRegex`/`…TitleReplace`** (a find/replace pair rewriting successor
+  titles off the origin title — `$1` backrefs; unset/invalid/no-match/blank falls back to the classic
+  `"(handover)"` naming), **`commandHandoverFileMatchRegex`** (which markdown files a handover
+  collects, matched case-insensitively against the file NAME; blank/invalid == the shipped
+  "name contains handover" rule — **the one restart-applied field here**), and
+  **`commandHandoverDeleteFileAfterLaunch`** (delete the md once its successor exists + delivery is
+  secured; never the pointer tier — the `HANDOVER-*.md` litter fix). Model/title/delete apply to the
+  NEXT handover right after Save; a live status line under the boxes calls out an INVALID regex
+  (validated through the shared `RegexUtil.h`), and (the
   **NOTIFICATIONS tab** — **System notifications**) **`notificationsEnabled`** + the five per-target-state
   switches **`notifyOnWaiting`/`notifyOnNeedsApproval`/`notifyOnIdle`/`notifyOnDone`/`notifyOnError`** +
   **`notifySuppressFocused`** + **`notifySound`** (ALL default ON — a **Windows toast** whenever a managed
@@ -2196,7 +2232,16 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     `Sha256.h` (header-only, pure — FIPS 180-4 SHA-256, hand-rolled like `Base64Encode` so no
     bcrypt/crypt32 has to be threaded through the lib + harness + CLI builds; the content-IDENTITY
     primitive behind the shipped `/handover`+`/handover-here` definitions' digest version history —
-    COMMANDS.md §6. NIST-vector + padding-edge tested in `tests/`), `Json.h`, `Persistence.{h,cpp}`,
+    COMMANDS.md §6. NIST-vector + padding-edge tested in `tests/`),
+    `RegexUtil.h` (header-only, pure — the ONE **guarded regex component** every user-typed pattern
+    goes through, COMMANDS.md §6b: `RegexIsValid`/`RegexSearch`/`RegexReplace` never throw (an
+    invalid pattern reads as no-match / input-unchanged — the state a box being EDITED is in most
+    keystrokes), cap pattern (512) + input (4096) against pathological backtracking, and fix ONE
+    flavor — ECMAScript, `regex_search` semantics, optional case-insensitivity, `$1` backrefs,
+    replace-ALL, plus an `applied` out-param as the "configured AND it did something" signal.
+    Shared by CommandWatch (the file-match leaf qualifier), ClaudeSpawn
+    (`DeriveHandoverSuccessorTitle`), Engine (bind-time validation), and the Settings cog (live
+    validation). Unit-tested in `tests/`), `Json.h`, `Persistence.{h,cpp}`,
     `ProfileBootstrap.h` (header-only, pure Win32 — the per-install state PROFILE: resolution
     [env > portable marker > saved choice > per-identity default], the `.agentmaster.profiles`
     choice file, the first-launch TaskDialog picker + folder Browse, legacy-data migration,

@@ -13,6 +13,7 @@
 #include "Persistence.h"
 #include "ProcessObserver.h"
 #include "ProfileBootstrap.h" // Profiles::IsDevPackage — Auto Testing / Tests Autorunner is a DEV-OR-DEBUG feature (IsDevOrDebugPackage)
+#include "RegexUtil.h" // COMMANDS.md §6b — validate the configured file-match pattern once at bind time
 #include "Scheduler.h"
 #include "SessionRegistry.h"
 #include "SessionScanner.h"
@@ -352,6 +353,17 @@ namespace Agentmaster
             std::wstring handoverCmdName = cmdSettings.commandHandoverName;
             std::wstring handoverHereCmdName = cmdSettings.commandHandoverHereName;
             ResolveCommandNamePair(handoverCmdName, handoverHereCmdName); // belt — the load already heals
+            // §6b file-match pattern: ONE regex shared by BOTH bindings (they are one await
+            // family — a per-command pattern would split the §3 supersede family). Validated
+            // ONCE here so a broken pattern is a logged fact, not a silent kill: invalid ⇒ pass
+            // "" (the shipped "handover" leaf hint applies; the watch has the same fallback as
+            // a second belt). Restart-applied by construction — bindings register once.
+            std::wstring leafMatchRegex = cmdSettings.commandHandoverFileMatchRegex;
+            if (!leafMatchRegex.empty() && !RegexIsValid(leafMatchRegex))
+            {
+                AppendStateLog(L"hooks.log", L"[engine] handover file-match regex INVALID - using the default 'handover' leaf hint: " + leafMatchRegex + L"\n");
+                leafMatchRegex.clear();
+            }
             // A fire may carry SEVERAL markdown files (one command splitting its briefing); the
             // sink payload is one string, so the paths ride '|'-joined (JoinWatchPaths — '|' is
             // illegal in a real Windows path and IsSaneWatchPath rejects it per-path).
@@ -359,7 +371,7 @@ namespace Agentmaster
             {
                 e->commandWatch->BindMarkdownAwait(handoverCmdName, L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& /*args*/) {
                     RaiseCommandActionInWindows(sessionId, L"handover", JoinWatchPaths(mdPaths));
-                });
+                }, leafMatchRegex);
             }
             // /handover-here — the IN-PLACE twin: the SAME markdown await (same "handover" leaf
             // preference — its definition instructs the same `HANDOVER-<topic>.md` name), a
@@ -371,7 +383,7 @@ namespace Agentmaster
             {
                 e->commandWatch->BindMarkdownAwait(handoverHereCmdName, L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& /*args*/) {
                     RaiseCommandActionInWindows(sessionId, L"handover-here", JoinWatchPaths(mdPaths));
-                });
+                }, leafMatchRegex);
             }
             e->scanner->SetCommandWatch(e->commandWatch);
             // The COMMAND DEFINITIONS (COMMANDS.md §6/§6a): without a definition under

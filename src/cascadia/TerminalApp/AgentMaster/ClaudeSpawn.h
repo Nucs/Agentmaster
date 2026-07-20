@@ -596,6 +596,17 @@ namespace Agentmaster
     std::pair<std::wstring, std::wstring> ReconcileHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings);
     std::pair<std::wstring, std::wstring> ReconcileHandoverCommandFiles(const AppSettings& settings);
 
+    // COMMANDS.md §6b (successor shaping — the TITLE rewrite): the successor-title CANDIDATE under
+    // the user's regex find/replace pair, or "" when the rewrite does not apply — findRegex unset,
+    // invalid (RegexUtil.h), matching nowhere in the origin title, or producing a
+    // whitespace-only result (a title must never go empty/blank — Rule #11). On "" the caller
+    // falls back to the classic DeriveSuffixedTitle "(handover)" naming, so the rewrite can only
+    // ever IMPROVE a title, never lose one. $1-style backrefs honored, every occurrence replaced
+    // (RegexReplace); the result is trimmed and, degenerate-guarded like DeriveSessionTitle,
+    // capped at 255 chars (252 + "..."). PURE + unit-tested; the caller still uniqueness-bumps
+    // the candidate past registry titles exactly like the default naming.
+    std::wstring DeriveHandoverSuccessorTitle(std::wstring_view originTitle, std::wstring_view findRegex, std::wstring_view replacement);
+
     // Build a complete spawn spec and ensure the shared hook files exist. `pipeName` is the
     // live HooksBridge pipe (HookPipeName(pid)). If `resumeSessionId` is non-empty, the spec
     // RESUMES that conversation (claude --resume <id>) and reuses the id; otherwise a fresh

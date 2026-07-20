@@ -327,6 +327,18 @@ namespace winrt::TerminalApp::implementation
         {
             nextInsert = originTab.TabViewIndex() + 1;
         }
+        // §6b successor shaping (read from the live _appSettings — Save/broadcast keep it fresh,
+        // so these apply to the NEXT handover with no restart):
+        //   * model — the PER-COMMAND successor model ("" == Default, the settings model); every
+        //     file of one command's fan-out launches with its command's pick;
+        //   * title — the family find/replace rewrite candidate (pure, guarded — "" when unset /
+        //     invalid / no-match / blank result, falling back to the classic "(handover)" naming;
+        //     either way the uniqueness bump below applies);
+        //   * delete-after — remove a HANDOVER md once its successor exists and the delivery is
+        //     SECURED (content tier: the document rides the launch commandline; paste tier: parked
+        //     durably at the front of the successor's queue). The POINTER tier never deletes (the
+        //     successor must read the file), and a failed spawn leaves its file untouched.
+        const std::wstring successorModel = inPlace ? _appSettings.commandHandoverHereSuccessorModel : _appSettings.commandHandoverSuccessorModel;
         std::wstring doneIds; // the -done nav line's parallel per-file lists (position i == file i)
         std::wstring doneModes;
         bool inPlaceFellBack = false;
@@ -335,7 +347,11 @@ namespace winrt::TerminalApp::implementation
             const std::wstring& mdPath = mdPaths[fileIdx];
             // Per-file successor title — re-snapshot each iteration: the previous file's
             // successor is already Upserted, so the bump walks the chain instead of colliding.
-            std::wstring successorTitle = ::Agentmaster::DeriveSuffixedTitle(s->title, L"handover");
+            std::wstring successorTitle = ::Agentmaster::DeriveHandoverSuccessorTitle(s->title, _appSettings.commandHandoverTitleFindRegex, _appSettings.commandHandoverTitleReplace);
+            if (successorTitle.empty())
+            {
+                successorTitle = ::Agentmaster::DeriveSuffixedTitle(s->title, L"handover");
+            }
             {
                 const auto sessions = _sessionRegistry->Snapshot();
                 const auto taken = [&sessions](const std::wstring& t) {
@@ -375,7 +391,7 @@ namespace winrt::TerminalApp::implementation
                 // /handover-here: the FIRST file's successor takes over the origin tab itself.
                 if (const auto originTab = tabIt->second.get())
                 {
-                    newId = _RestartTabIntoFreshSession(originTab, *s, dir, successorTitle, launchPrompt);
+                    newId = _RestartTabIntoFreshSession(originTab, *s, dir, successorTitle, launchPrompt, successorModel);
                 }
                 if (newId.empty())
                 {
@@ -385,7 +401,7 @@ namespace winrt::TerminalApp::implementation
             }
             if (newId.empty())
             {
-                const auto successorTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ successorTitle }, std::nullopt, {}, nextInsert, {}, launchPrompt);
+                const auto successorTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ successorTitle }, std::nullopt, {}, nextInsert, successorModel, launchPrompt);
                 newId = successorTab ? _ClaudeSessionForTab(successorTab) : std::wstring{};
                 if (!newId.empty() && nextInsert != static_cast<uint32_t>(-1))
                 {
@@ -411,6 +427,26 @@ namespace winrt::TerminalApp::implementation
                 });
                 _pendingHandoverInjections[newId] = PendingHandoverInjection{ qp.id, static_cast<int64_t>(::GetTickCount64()), 0 };
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(newId) + L" document over the commandline tier (escaped cost " + std::to_wstring(::Agentmaster::PsEscapedCost(content)) + L" > " + std::to_wstring(::Agentmaster::kHandoverPromptEscapedBudget) + L") - queued FULL document for paste-injection\n");
+            }
+            // §6b delete-after-hand-off (opt-in): the file is no longer load-bearing once its
+            // successor EXISTS and the delivery is SECURED — content tier: the whole document is
+            // already ON the successor's launch commandline (bound to its connection); paste
+            // tier: parked durably at the FRONT of its queue just above (sessions.json —
+            // restart-safe, Send-now-able). The POINTER tier is excluded by construction (the
+            // successor's first message names the file — deleting it would strand the handover),
+            // as is a failed spawn (newId empty ⇒ nothing consumed the file). Best-effort: a
+            // locked/undeletable file just stays (logged), never blocks the fan-out.
+            if (!newId.empty() && _appSettings.commandHandoverDeleteFileAfterLaunch &&
+                std::wstring_view{ injectMode } != L"pointer")
+            {
+                if (::DeleteFileW(mdPath.c_str()))
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] deleted md after successful hand-off (delivered=" + std::wstring{ injectMode } + L", successor=" + ::Agentmaster::ShortId(newId) + L"): " + mdPath + L"\n");
+                }
+                else
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] delete-after-hand-off FAILED (le=" + std::to_wstring(::GetLastError()) + L"), file left in place: " + mdPath + L"\n");
+                }
             }
             if (fileIdx > 0)
             {
@@ -448,10 +484,12 @@ namespace winrt::TerminalApp::implementation
     // past NotConnected -> SetStarted(true) immediately — exactly what _PumpHandoverInjections gates
     // on), and persists the fleet. `initialPrompt` rides the fresh commandline as the positional
     // first prompt (the commandline delivery tier; the caller parks an over-budget document on the
-    // successor's queue for the paste pump instead, and passes "" here). Returns the successor's
+    // successor's queue for the paste pump instead, and passes "" here). `modelOverride` (§6b —
+    // the Commands tab's per-command successor model): non-empty adds ` --model <id>` to THIS
+    // launch; "" keeps Default (the settings model). Returns the successor's
     // session id ("" == refused/failed — the caller degrades to the classic new-tab spawn so the
     // handover itself is never lost). UI thread only.
-    std::wstring TerminalPage::_RestartTabIntoFreshSession(const TerminalApp::Tab& originTab, const ::Agentmaster::SessionInfo& origin, const std::wstring& dir, const std::wstring& title, const std::wstring& initialPrompt)
+    std::wstring TerminalPage::_RestartTabIntoFreshSession(const TerminalApp::Tab& originTab, const ::Agentmaster::SessionInfo& origin, const std::wstring& dir, const std::wstring& title, const std::wstring& initialPrompt, const std::wstring& modelOverride)
     {
         if (!_sessionRegistry || !_hooksBridge || !originTab)
         {
@@ -527,10 +565,11 @@ namespace winrt::TerminalApp::implementation
         }
 
         // "New Session Here -> Default": a FRESH spawn spec — a newly minted id, no resume/fork,
-        // no model override (the settings model decides), hooks wired, the handover content riding
-        // as the launch commandline's positional first prompt when the commandline tier fits
-        // (else "" here — the caller parks the full document on the successor's queue).
-        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, title, _hooksBridge->PipeName(), {}, ::Agentmaster::LoadAppSettings(), {}, ::Agentmaster::SharedEngine().claudeExePath, {}, {}, initialPrompt);
+        // hooks wired, the handover content riding as the launch commandline's positional first
+        // prompt when the commandline tier fits (else "" here — the caller parks the full
+        // document on the successor's queue). The model is Default (the settings model) unless
+        // the §6b per-command successor model overrides THIS launch.
+        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, title, _hooksBridge->PipeName(), {}, ::Agentmaster::LoadAppSettings(), {}, ::Agentmaster::SharedEngine().claudeExePath, {}, modelOverride, initialPrompt);
         const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline);
         auto newConn = _BuildAgentConnection(hostedCmd, dir, title, spec.env, /*inheritCursor*/ true);
         if (!newConn)

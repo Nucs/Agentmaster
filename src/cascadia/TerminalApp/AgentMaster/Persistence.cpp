@@ -723,6 +723,15 @@ namespace Agentmaster
         o.Set(L"commandHandoverHereEnabled", json::Value::MkBool(s.commandHandoverHereEnabled));
         o.Set(L"commandHandoverMaterializedName", json::Value::MkStr(s.commandHandoverMaterializedName));
         o.Set(L"commandHandoverHereMaterializedName", json::Value::MkStr(s.commandHandoverHereMaterializedName));
+        // §6b successor shaping: per-command successor model ("" == Default), the family title
+        // find/replace pair + file-match pattern (regexes stored VERBATIM — validated at use,
+        // the cog warns live), and the delete-after-hand-off toggle.
+        o.Set(L"commandHandoverSuccessorModel", json::Value::MkStr(s.commandHandoverSuccessorModel));
+        o.Set(L"commandHandoverHereSuccessorModel", json::Value::MkStr(s.commandHandoverHereSuccessorModel));
+        o.Set(L"commandHandoverTitleFindRegex", json::Value::MkStr(s.commandHandoverTitleFindRegex));
+        o.Set(L"commandHandoverTitleReplace", json::Value::MkStr(s.commandHandoverTitleReplace));
+        o.Set(L"commandHandoverFileMatchRegex", json::Value::MkStr(s.commandHandoverFileMatchRegex));
+        o.Set(L"commandHandoverDeleteFileAfterLaunch", json::Value::MkBool(s.commandHandoverDeleteFileAfterLaunch));
         o.Set(L"envDefaultsVersion", json::Value::MkNum(s.envDefaultsVersion));
         o.Set(L"claudeCleanupDaysSeeded", json::Value::MkBool(s.claudeCleanupDaysSeeded));
         return o;
@@ -895,6 +904,16 @@ namespace Agentmaster
         s.commandHandoverHereEnabled = v.BoolAt(L"commandHandoverHereEnabled", true);
         s.commandHandoverMaterializedName = NormalizeCommandName(v.StrAt(L"commandHandoverMaterializedName", kDefaultHandoverCommandName));
         s.commandHandoverHereMaterializedName = NormalizeCommandName(v.StrAt(L"commandHandoverHereMaterializedName", kDefaultHandoverHereCommandName));
+        // §6b successor shaping. The model ids + regexes read back VERBATIM (a regex is freeform
+        // user input — RegexUtil guards every use, the cog validates live; normalizing here would
+        // corrupt patterns). Absent keys => the shipped behavior (Default model, default
+        // "(handover)" naming, the "handover" leaf hint, no delete).
+        s.commandHandoverSuccessorModel = v.StrAt(L"commandHandoverSuccessorModel");
+        s.commandHandoverHereSuccessorModel = v.StrAt(L"commandHandoverHereSuccessorModel");
+        s.commandHandoverTitleFindRegex = v.StrAt(L"commandHandoverTitleFindRegex");
+        s.commandHandoverTitleReplace = v.StrAt(L"commandHandoverTitleReplace");
+        s.commandHandoverFileMatchRegex = v.StrAt(L"commandHandoverFileMatchRegex");
+        s.commandHandoverDeleteFileAfterLaunch = v.BoolAt(L"commandHandoverDeleteFileAfterLaunch", false);
         // Shipped-default seeding markers (ENV_VARS.md §8). Absent => 0 / false, so a pre-feature
         // settings.json runs the one-time seed once (new installs + updaters alike get the defaults).
         s.envDefaultsVersion = v.U32At(L"envDefaultsVersion", 0);

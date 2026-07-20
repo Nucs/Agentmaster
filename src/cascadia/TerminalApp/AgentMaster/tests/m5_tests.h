@@ -57,6 +57,7 @@
 #include "../ProcessInspect.h" // SnapshotProcesses / ReadClaudeFacts / ResolveSessionId (Observer O1)
 #include "../PromptAnchor.h" // the summary-panel JUMP resolver (SUMMARY_JUMP.md) - pure, benchmarked here
 #include "../ProfileBootstrap.h" // the per-install state PROFILE (choice file / resolution / migrate)
+#include "../RegexUtil.h" // the ONE guarded regex component (COMMANDS.md §6b) - pure, header-only
 #include "../Scheduler.h" // DecideAdvance (pure)
 #include "../SessionRegistry.h"
 #include "../SessionScanner.h" // ParseTranscriptDelta (pure)

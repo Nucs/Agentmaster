@@ -844,7 +844,24 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _setCmdHandoverHereStatus{ nullptr }; // live-vs-configured status line
         std::wstring _cmdLiveHandoverName; // the name ACTIVE this run ("" == disabled) — the disk marker at cog open
         std::wstring _cmdLiveHandoverHereName;
-        void _UpdateCommandsTabStatus(); // re-render both status lines from the current (unsaved) control state
+        void _UpdateCommandsTabStatus(); // re-render the status lines (names + §6b shaping) from the current (unsaved) control state
+        // §6b successor shaping (COMMANDS.md): per-command successor-model combos ("Default" +
+        // the launchModels list, items rebuilt at every cog open so a launch-models edit shows;
+        // the parallel id vectors map SelectedIndex -> the stored model id, [0] == "" Default,
+        // a stored id no longer listed appended as "(custom) <id>" so it round-trips), the
+        // family title find/replace regex pair + the HANDOVER file-match regex (validated live
+        // via RegexUtil — the shaping status line calls out an invalid pattern), and the
+        // delete-after-hand-off toggle. Model/title/delete apply to the NEXT handover right
+        // after Save; the file-match pattern is binding-time (applies after restart).
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setCmdModelHandover{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setCmdModelHandoverHere{ nullptr };
+        std::vector<std::wstring> _cmdModelIdsHandover; // index-aligned with _setCmdModelHandover's items
+        std::vector<std::wstring> _cmdModelIdsHandoverHere;
+        winrt::Windows::UI::Xaml::Controls::TextBox _setCmdTitleFind{ nullptr }; // successor-title rewrite: the FIND regex ("" == default "(handover)" naming)
+        winrt::Windows::UI::Xaml::Controls::TextBox _setCmdTitleReplace{ nullptr }; // …and its REPLACE text ($1 backrefs honored)
+        winrt::Windows::UI::Xaml::Controls::TextBox _setCmdFileMatch{ nullptr }; // the HANDOVER file-match regex ("" == leaf contains "handover"; restart-applied)
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCmdDeleteAfter{ nullptr }; // delete a HANDOVER md after its successor spawned + delivery secured (never the pointer tier)
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setCmdShapingStatus{ nullptr }; // the shaping summary/validation line (invalid regexes called out)
         winrt::Windows::UI::Xaml::Controls::ComboBox _setRenameCommit{ nullptr }; // how the tab rename box commits via the keyboard (None / +Shift+Enter / +Enter); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setWaitingNever{ nullptr }; // Waiting-for-you "unread" model: ON => never time-decay (stay Waiting until read); disables the slider
         winrt::Windows::UI::Xaml::Controls::Slider _setWaitingDecaySlider{ nullptr }; // Waiting-for-you -> Idle timeout, 1..10080 minutes (1m..7d); the "Never" toggle above owns 0, the textbox (left) is the source of truth and may exceed 7d (slider then sits maxed)

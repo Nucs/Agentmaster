@@ -182,7 +182,14 @@ namespace Agentmaster
         // the handler fires ONCE with all of them (scanner thread). One binding per name (last
         // wins; lookup is name-EXACT — no prefix aliasing). Register at engine init BEFORE the
         // scanner starts — the feeder assumes the binding set is stable.
-        void BindMarkdownAwait(std::wstring commandName, std::wstring preferLeafContains, MarkdownReadyHandler handler);
+        // `leafMatchRegex` (COMMANDS.md §6b — optional): when non-empty and VALID (RegexUtil.h),
+        // it REPLACES the contains-hint as the leaf qualifier — a markdown collects when the
+        // pattern regex-SEARCHES its file name (case-insensitive; the user anchors with ^/$ for a
+        // full-name match). An INVALID pattern falls back to the contains-hint (a broken user
+        // regex must degrade to the shipped behavior, never silently kill the await). The §3
+        // same-family supersede still keys on `preferLeafContains` alone — the /handover family
+        // passes ONE shared pattern to both bindings, so the family stays whole either way.
+        void BindMarkdownAwait(std::wstring commandName, std::wstring preferLeafContains, MarkdownReadyHandler handler, std::wstring leafMatchRegex = {});
 
         // Durable progress store (COMMANDS.md §3a — restart resilience): `load` returns the
         // session's encoded CommandProgress ("" == none), `save` persists it ("" == remove). The
@@ -236,7 +243,8 @@ namespace Agentmaster
         struct Binding
         {
             std::wstring command; // bare lowercase name
-            std::wstring preferLeafContains;
+            std::wstring preferLeafContains; // ALSO the §3 supersede family key — regex or not
+            std::wstring leafMatchRegex; // §6b: non-empty + valid => replaces the contains-hint as the leaf qualifier
             MarkdownReadyHandler onReady;
         };
         struct Pending

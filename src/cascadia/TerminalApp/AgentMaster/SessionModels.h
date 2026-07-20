@@ -1425,6 +1425,49 @@ namespace Agentmaster
         // disk (both preserve blocks), like every other out-of-form field.
         std::wstring commandHandoverMaterializedName{ L"handover" };
         std::wstring commandHandoverHereMaterializedName{ L"handover-here" };
+        // SUCCESSOR SHAPING (COMMANDS.md §6b — the Commands tab's second half). Unlike the
+        // names/enables above, most of these are consumed at ACTION time (_HandleCommandHandover
+        // reads the live _appSettings when a handover fires), so they apply to the NEXT handover
+        // immediately — no restart. The ONE exception is the file-match regex (binding-time,
+        // restart-applied — noted on its field).
+        //   * commandHandoverSuccessorModel / commandHandoverHereSuccessorModel — the model the
+        //     command's successors LAUNCH with, per command: "" == Default (the settings `model`
+        //     decides, the shipped behavior), else a model id passed as this launch's
+        //     `--model <id>` (the launch-model picker's per-launch override, reused verbatim —
+        //     BuildClaudeCommandline's modelOverride). The cog offers "Default" + the launchModels
+        //     list; a stored id no longer in that list still round-trips (shown as custom).
+        std::wstring commandHandoverSuccessorModel{};
+        std::wstring commandHandoverHereSuccessorModel{};
+        //   * commandHandoverTitleFindRegex / commandHandoverTitleReplace — ONE find/replace pair
+        //     for the WHOLE family: when the find regex is non-empty, VALID (RegexUtil.h), and
+        //     MATCHES the origin title, the successor's title = regex_replace(originTitle, find,
+        //     replace) ($1 backrefs honored, every occurrence replaced) instead of the default
+        //     "<origin> (handover)" suffixing — still uniqueness-bumped past registry titles.
+        //     Unset / invalid / no-match / empty-result => the default naming (the rewrite can
+        //     never lose a title — Rule #11's never-empty invariant holds). Stored VERBATIM
+        //     (a regex is freeform; the cog validates live, the consumers guard).
+        std::wstring commandHandoverTitleFindRegex{};
+        std::wstring commandHandoverTitleReplace{};
+        //   * commandHandoverFileMatchRegex — the markdown await's FILE-MATCH pattern, shared by
+        //     BOTH commands (they are one await family — same files, one owner; a per-command
+        //     pattern would split the §3 supersede family). "" == the shipped behavior (leaf
+        //     CONTAINS "handover" — the HANDOVER-*.md contract); non-empty + valid == a leaf
+        //     qualifies when the regex SEARCHES its file name (case-insensitive; anchor with ^/$
+        //     for a full-name match); invalid falls back to the shipped hint (a broken pattern
+        //     must not silently kill handovers — the cog warns live). RESTART-APPLIED: the
+        //     pattern rides the CommandWatch binding registered at engine init. NOTE: this gates
+        //     what Agentmaster COLLECTS — the shipped definitions still instruct Claude to write
+        //     HANDOVER-<topic>.md, so a custom pattern usually pairs with an edited definition.
+        std::wstring commandHandoverFileMatchRegex{};
+        //   * commandHandoverDeleteFileAfterLaunch — delete a HANDOVER markdown after its
+        //     successor is SUCCESSFULLY created and the delivery is SECURED: the content tier has
+        //     the document on the successor's launch commandline, the paste tier has it parked
+        //     DURABLY at the front of the successor's queue (sessions.json — restart-safe,
+        //     Send-now-able) — in both the file is no longer load-bearing. The POINTER tier never
+        //     deletes (the successor must read the file), and a failed spawn leaves its file.
+        //     Default OFF (deleting user-visible files is opt-in); the answer to the
+        //     HANDOVER-*.md litter accumulating at repo roots.
+        bool commandHandoverDeleteFileAfterLaunch{ false };
 
         // --- shipped-default seeding markers (ENV_VARS.md §8; NOT shown in the cog) ---
         // Agentmaster ships a few defaults ONCE and then respects user edits/removals. These markers

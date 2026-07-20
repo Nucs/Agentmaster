@@ -222,6 +222,41 @@ void TestCommandWatch()
         CHECK(!fired.empty() && (fired[0].mdPaths == std::vector<std::wstring>{ L"K:\\r\\HANDOVER-part1.md", L"K:\\r\\HANDOVER-part2.md" }), "all HANDOVER files collected in write order, deduped, incidental md excluded");
         CHECK(!fired.empty() && fired[0].args == L"split briefing", "args ride the multi-file fire");
     }
+    // §6b FILE-MATCH REGEX: a configured VALID pattern REPLACES the contains-hint as the leaf
+    // qualifier (case-insensitive regex search over the file NAME), so a user can rename the
+    // briefing family entirely; an INVALID pattern falls back to the shipped hint (a broken user
+    // regex must never silently kill handovers).
+    {
+        CommandWatch w;
+        std::vector<FiredHandover> fired;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            fired.push_back(MakeFired(sid, mds, args));
+        }, LR"(^BRIEF-.*\.md$)");
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
+        // The regex is AUTHORITATIVE: a BRIEF-*.md qualifies though its leaf lacks "handover", and
+        // a HANDOVER-*.md does NOT (the pattern, not the hint, decides) — but the nothing-collected
+        // fallback still can't fire alone, so assert against the collected set at the turn end.
+        w.OnFileToolWrite(L"s", { L"K:\\r\\BRIEF-alpha.md", L"K:\\r\\HANDOVER-old.md" }, L"K:\\r", now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\brief-beta.MD" }, L"K:\\r", now); // case-insensitive match
+        w.OnTurnEnd(L"s");
+        CHECK(fired.size() == 1, "regex leaf match: one fire for the command");
+        CHECK(!fired.empty() && (fired[0].mdPaths == std::vector<std::wstring>{ L"K:\\r\\BRIEF-alpha.md", L"K:\\r\\brief-beta.MD" }),
+              "regex leaf match: the PATTERN decides (BRIEF-* collected case-insensitively; the hint-named HANDOVER-old.md excluded)");
+    }
+    {
+        CommandWatch w;
+        std::vector<FiredHandover> fired;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            fired.push_back(MakeFired(sid, mds, args));
+        }, L"([unclosed"); // invalid pattern — RegexIsValid false
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-a.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s");
+        CHECK(fired.size() == 1 && !fired.empty() && fired[0].mdPath == L"K:\\r\\HANDOVER-a.md",
+              "an INVALID leaf regex falls back to the shipped 'handover' hint (a broken pattern never kills the await)");
+    }
     // file NOT yet on disk -> stays pending; a later Tick with the file present fires.
     {
         CommandWatch w;
@@ -783,7 +818,6 @@ void TestCommandWatch()
         CHECK(::GetFileAttributesW((path + L".am-tmp").c_str()) == INVALID_FILE_ATTRIBUTES, "the atomic write leaves no temp file behind");
         CHECK(ensure() == path && readBack() == Utf8Of(kV3) && ::GetFileAttributesW((path + L".am-tmp").c_str()) == INVALID_FILE_ATTRIBUTES, "an upgrade over an existing file replaces it atomically, leaving no temp");
 
-
         ::DeleteFileW(path.c_str());
         ::RemoveDirectoryW((cfg + L"\\commands").c_str());
         ::RemoveDirectoryW(cfg.c_str());
@@ -836,6 +870,50 @@ void TestCommandWatch()
             const std::wstring rh = RenderShippedCommandText(ShippedHandoverHereCommandText(), kDefaultHandoverHereCommandName, L"swap");
             CHECK(rh.find(L"/swap") != std::wstring::npos && rh.find(L"/handover") == std::wstring::npos, "render: the real /handover-here text carries only the custom name");
             CHECK(Sha256Hex(NormalizeCommandBytesForIdentity(Utf8Of(rh), kDefaultHandoverHereCommandName, L"swap")) == ShippedHandoverHereCommandHashes().back(), "identity: a custom-named CURRENT render digests back onto the history's last entry");
+        }
+    }
+
+    // ---- RegexUtil (COMMANDS.md §6b): the ONE guarded regex component ----
+    // Everything user-typed goes through here, so the contract is: NEVER throw, invalid reads as
+    // no-match / unchanged, bounded input+pattern, ECMAScript search semantics + $1 backrefs.
+    {
+        CHECK(RegexIsValid(LR"(^HANDOVER-.*\.md$)") && !RegexIsValid(L"([unclosed") && !RegexIsValid(L""),
+              "regex: valid / invalid / empty classified (the cog's live-validation probe)");
+        CHECK(!RegexIsValid(std::wstring(kRegexMaxPatternChars + 1, L'a')), "regex: an over-cap PATTERN is refused (unbounded-cost guard)");
+        CHECK(RegexSearch(L"HANDOVER-docs.md", LR"(^HANDOVER-.*\.md$)") && !RegexSearch(L"notes.md", LR"(^HANDOVER-.*\.md$)"),
+              "regex: search matches/rejects by pattern");
+        CHECK(RegexSearch(L"brief-A.MD", LR"(^brief-.*\.md$)", /*ci*/ true) && !RegexSearch(L"brief-A.MD", LR"(^brief-.*\.md$)", /*ci*/ false),
+              "regex: the case-insensitive flag is honored (the leaf matcher's mode)");
+        CHECK(!RegexSearch(L"anything", L"([unclosed"), "regex: an INVALID pattern reads as no-match (never throws)");
+        CHECK(!RegexSearch(std::wstring(kRegexMaxInputChars + 1, L'x'), L"x"), "regex: an over-cap INPUT is refused");
+        CHECK(RegexSearch(L"a handover file", L"handover"), "regex: unanchored patterns match anywhere (regex_search semantics)");
+        bool applied = false;
+        CHECK(RegexReplace(L"Fix the parser", L"Fix", L"Ship", false, &applied) == L"Ship the parser" && applied, "regex: replace + the applied flag");
+        CHECK(RegexReplace(L"a-a-a", L"a", L"b") == L"b-b-b", "regex: EVERY occurrence is replaced");
+        CHECK(RegexReplace(L"Fix parser", LR"(^(\w+) (\w+)$)", L"$2 $1") == L"parser Fix", "regex: $1/$2 backrefs work");
+        applied = true;
+        CHECK(RegexReplace(L"untouched", L"([unclosed", L"x", false, &applied) == L"untouched" && !applied, "regex: an INVALID pattern leaves the text UNCHANGED + applied=false");
+        applied = true;
+        CHECK(RegexReplace(L"untouched", L"zzz", L"x", false, &applied) == L"untouched" && !applied, "regex: NO match leaves the text unchanged + applied=false (the title fallback's signal)");
+    }
+
+    // ---- DeriveHandoverSuccessorTitle (§6b): the successor-title regex rewrite ----
+    // Contract: "" whenever the rewrite does not apply (unset / invalid / no-match / blank result),
+    // so the caller falls back to the classic "(handover)" naming — the rewrite can only IMPROVE a
+    // title, never lose one (Rule #11's never-empty invariant).
+    {
+        CHECK(DeriveHandoverSuccessorTitle(L"Parser work", L"", L"x").empty(), "title rewrite: unset find regex -> \"\" (default naming)");
+        CHECK(DeriveHandoverSuccessorTitle(L"Parser work", L"([unclosed", L"x").empty(), "title rewrite: an INVALID pattern -> \"\" (default naming)");
+        CHECK(DeriveHandoverSuccessorTitle(L"Parser work", L"zzz", L"x").empty(), "title rewrite: a pattern matching nowhere -> \"\" (default naming)");
+        CHECK(DeriveHandoverSuccessorTitle(L"Parser work", L"^.*$", L"   ").empty(), "title rewrite: a blank RESULT -> \"\" (a title never goes empty)");
+        CHECK(DeriveHandoverSuccessorTitle(L"Parser work", L"work", L"next") == L"Parser next", "title rewrite: plain find/replace");
+        CHECK(DeriveHandoverSuccessorTitle(L"Parser (v2)", LR"(^(.*)$)", L"$1 - continued") == L"Parser (v2) - continued", "title rewrite: $1 backref (the append idiom)");
+        CHECK(DeriveHandoverSuccessorTitle(L"  Parser work  ", L"work", L"next") == L"Parser next", "title rewrite: the result is trimmed");
+        CHECK(DeriveHandoverSuccessorTitle(L"Parser 3", LR"(\d+)", L"4") == L"Parser 4", "title rewrite: a numeric bump pattern");
+        {
+            const std::wstring longTitle(400, L'x');
+            const auto capped = DeriveHandoverSuccessorTitle(longTitle, L"^", L"pre-");
+            CHECK(capped.size() == 255 && capped.rfind(L"...") == 252, "title rewrite: a degenerate >255-char result caps at 252 + \"...\" (DeriveSessionTitle's net)");
         }
     }
 
@@ -945,6 +1023,36 @@ void TestCommandWatch()
         auto o = json::Value::MkObj(); // fresh object: json::Value::Set APPENDS and Find returns the FIRST hit, so a re-Set on a ToJson output would be shadowed
         o.Set(L"commandHandoverMaterializedName", json::Value::MkStr(L"..\\evil"));
         CHECK(AppSettingsFromJson(o).commandHandoverMaterializedName == L"evil", "cmd settings: a hand-edited marker normalizes (path chars can never reach the commands-dir delete)");
+    }
+
+    // ---- AppSettings round-trip: the §6b SUCCESSOR SHAPING fields ----
+    {
+        AppSettings as;
+        as.commandHandoverSuccessorModel = L"claude-opus-4-8";
+        as.commandHandoverHereSuccessorModel = L""; // Default
+        as.commandHandoverTitleFindRegex = LR"(^(.*)$)";
+        as.commandHandoverTitleReplace = L"$1 - next";
+        as.commandHandoverFileMatchRegex = LR"(^BRIEF-.*\.md$)";
+        as.commandHandoverDeleteFileAfterLaunch = true;
+        const auto back = AppSettingsFromJson(ToJson(as));
+        CHECK(back.commandHandoverSuccessorModel == L"claude-opus-4-8" && back.commandHandoverHereSuccessorModel.empty(),
+              "shaping: the per-command successor models round-trip (\"\" == Default)");
+        CHECK(back.commandHandoverTitleFindRegex == LR"(^(.*)$)" && back.commandHandoverTitleReplace == L"$1 - next",
+              "shaping: the title find/replace pair round-trips VERBATIM (regex chars + $ backrefs unmangled)");
+        CHECK(back.commandHandoverFileMatchRegex == LR"(^BRIEF-.*\.md$)", "shaping: the file-match regex round-trips verbatim");
+        CHECK(back.commandHandoverDeleteFileAfterLaunch, "shaping: the delete-after toggle round-trips");
+        const auto fresh = AppSettingsFromJson(json::Value::MkObj());
+        CHECK(fresh.commandHandoverSuccessorModel.empty() && fresh.commandHandoverHereSuccessorModel.empty() &&
+                  fresh.commandHandoverTitleFindRegex.empty() && fresh.commandHandoverTitleReplace.empty() &&
+                  fresh.commandHandoverFileMatchRegex.empty() && !fresh.commandHandoverDeleteFileAfterLaunch,
+              "shaping: absent keys reproduce the shipped behavior (Default model, \"(handover)\" naming, the \"handover\" hint, no delete)");
+        // An INVALID stored pattern round-trips as typed (it is validated at USE, not at load —
+        // the consumers fall back and the cog warns; normalizing here would corrupt patterns).
+        AppSettings bad;
+        bad.commandHandoverTitleFindRegex = L"([unclosed";
+        CHECK(AppSettingsFromJson(ToJson(bad)).commandHandoverTitleFindRegex == L"([unclosed", "shaping: an invalid pattern is stored verbatim (validated at use, not at load)");
+        CHECK(DeriveHandoverSuccessorTitle(L"any title", AppSettingsFromJson(ToJson(bad)).commandHandoverTitleFindRegex, L"x").empty(),
+              "shaping: … and that invalid pattern degrades to the default naming at USE time");
     }
 
     // ---- EnsureHandoverCommandFileIn: create-if-absent under a TEMP config dir ----
