@@ -340,35 +340,60 @@ namespace Agentmaster
             e->commandWatch->SetProgressStore(
                 [](const std::wstring& sid) { return GetSessionStoreField(sid, kSessionStoreCommandProgressKey); },
                 [](const std::wstring& sid, const std::wstring& enc) { SetSessionStoreField(sid, kSessionStoreCommandProgressKey, enc); });
+            // The /handover family is USER-CUSTOMIZABLE (COMMANDS.md §6a — the cog's "Commands"
+            // tab): each command's NAME and ENABLED come from settings.json (normalized +
+            // collision-healed at load) and are applied HERE, once per process — a cog change
+            // deliberately binds at the NEXT start only (the scanner worker reads the binding set
+            // unsynchronized; engine-init registration before Start() is the happens-before).
+            // The fan-out ACTION names stay the canonical L"handover"/L"handover-here" whatever
+            // the typed names are — the per-window sinks dispatch on them
+            // (TerminalPage.AgentEngine.cpp), so a rename never touches the UI layer.
+            const AppSettings cmdSettings = LoadAppSettings();
+            std::wstring handoverCmdName = cmdSettings.commandHandoverName;
+            std::wstring handoverHereCmdName = cmdSettings.commandHandoverHereName;
+            ResolveCommandNamePair(handoverCmdName, handoverHereCmdName); // belt — the load already heals
             // A fire may carry SEVERAL markdown files (one command splitting its briefing); the
             // sink payload is one string, so the paths ride '|'-joined (JoinWatchPaths — '|' is
             // illegal in a real Windows path and IsSaneWatchPath rejects it per-path).
-            e->commandWatch->BindMarkdownAwait(L"handover", L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& /*args*/) {
-                RaiseCommandActionInWindows(sessionId, L"handover", JoinWatchPaths(mdPaths));
-            });
+            if (cmdSettings.commandHandoverEnabled)
+            {
+                e->commandWatch->BindMarkdownAwait(handoverCmdName, L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& /*args*/) {
+                    RaiseCommandActionInWindows(sessionId, L"handover", JoinWatchPaths(mdPaths));
+                });
+            }
             // /handover-here — the IN-PLACE twin: the SAME markdown await (same "handover" leaf
             // preference — its definition instructs the same `HANDOVER-<topic>.md` name), a
             // different fan-out action: the hosting window REPLACES the origin tab in place (the
             // Restart-session swap into a fresh "New Session Here -> Default" conversation)
             // instead of opening a successor tab beside it. The watch's binding lookup is
-            // name-EXACT, so the two commands can never cross-fire.
-            e->commandWatch->BindMarkdownAwait(L"handover-here", L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& /*args*/) {
-                RaiseCommandActionInWindows(sessionId, L"handover-here", JoinWatchPaths(mdPaths));
-            });
-            e->scanner->SetCommandWatch(e->commandWatch);
-            // The /handover COMMAND DEFINITION (create-if-absent — the user's own/edited file is
-            // never overwritten): without a definition under <claude-config>/commands, a typed
-            // /handover is rejected client-side and never reaches the transcript. The ONE write
-            // Agentmaster makes outside its profile (COMMANDS.md §6 — additive, inert until typed).
-            if (const std::wstring handoverCmd = EnsureHandoverCommandFile(); !handoverCmd.empty())
+            // name-EXACT, so the two commands can never cross-fire (whatever they are named).
+            if (cmdSettings.commandHandoverHereEnabled)
             {
-                AppendStateLog(L"hooks.log", L"[engine] handover command: " + handoverCmd + L"\n");
+                e->commandWatch->BindMarkdownAwait(handoverHereCmdName, L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& /*args*/) {
+                    RaiseCommandActionInWindows(sessionId, L"handover-here", JoinWatchPaths(mdPaths));
+                });
             }
-            // Its in-place twin's definition (/handover-here) — same write policy (create-if-absent
-            // + version-aware upgrade), its own file. Also a deliberate ~/.claude write (§6).
-            if (const std::wstring handoverHereCmd = EnsureHandoverHereCommandFile(); !handoverHereCmd.empty())
+            e->scanner->SetCommandWatch(e->commandWatch);
+            // The COMMAND DEFINITIONS (COMMANDS.md §6/§6a): without a definition under
+            // <claude-config>/commands, a typed /command is rejected client-side and never reaches
+            // the transcript. Reconcile BOTH files against the configured names/enables —
+            // create-if-absent + the version-aware upgrade, PLUS the rename/disable migration: the
+            // previously-materialized file is deleted when (and only when) it is byte-identical to
+            // something we shipped (under whatever name — the digest is taken after normalizing
+            // the custom name back), so the user's edited copy always sticks. Still the ONE write
+            // Agentmaster makes outside its profile (additive, inert until typed). The
+            // MATERIALIZED-NAME markers then RMW back into settings.json so the NEXT init knows
+            // what to migrate (the reconcile logs the per-command outcome lines).
             {
-                AppendStateLog(L"hooks.log", L"[engine] handover-here command: " + handoverHereCmd + L"\n");
+                const auto [materializedHandover, materializedHandoverHere] = ReconcileHandoverCommandFiles(cmdSettings);
+                if (materializedHandover != cmdSettings.commandHandoverMaterializedName ||
+                    materializedHandoverHere != cmdSettings.commandHandoverHereMaterializedName)
+                {
+                    auto rmw = LoadAppSettings(); // freshest-disk RMW (the marker is the only field we own here)
+                    rmw.commandHandoverMaterializedName = materializedHandover;
+                    rmw.commandHandoverHereMaterializedName = materializedHandoverHere;
+                    SaveAppSettings(rmw);
+                }
             }
             e->scanner->Start();
             // Keep the scanner ticking even with nothing live, so each window's liveness probe — which

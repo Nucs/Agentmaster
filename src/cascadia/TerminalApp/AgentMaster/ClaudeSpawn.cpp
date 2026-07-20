@@ -1217,6 +1217,106 @@ file) in this working directory, injecting each document as its session's openin
         return kHandoverHereCommandV4;
     }
 
+    // ---- customizable command names (COMMANDS.md §6a) — the render / identity pair ----
+    //
+    // A renamed command's definition text must SAY the new name (the self-invocation guard tells
+    // the user what to TYPE), so materializing under a custom name substitutes the "/<default>"
+    // token; and recognizing "a version WE shipped, unmodified" under a custom name substitutes it
+    // BACK before hashing (the histories stay digests of the DEFAULT-name texts — no per-name
+    // digest freezing). The two substitutions are exact inverses because both replace the token
+    // only at a WORD BOUNDARY (the following char must not extend the slug — which also keeps a
+    // "/handover" replacement from ever corrupting a "/handover-here" mention) and command names
+    // are strict ASCII slugs (NormalizeCommandName), so the byte-level form can never split a
+    // UTF-8 multi-byte sequence (every continuation byte has the high bit set == a boundary).
+
+    // Does `next` END a "/<name>" token? (Anything that could extend the slug does not.)
+    static bool CmdTokenBoundaryW(wchar_t next)
+    {
+        return !((next >= L'a' && next <= L'z') || (next >= L'A' && next <= L'Z') ||
+                 (next >= L'0' && next <= L'9') || next == L'-' || next == L'_');
+    }
+    static bool CmdTokenBoundaryA(char next)
+    {
+        return !((next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') ||
+                 (next >= '0' && next <= '9') || next == '-' || next == '_');
+    }
+
+    std::wstring RenderShippedCommandText(std::wstring_view text, std::wstring_view defaultName, std::wstring_view commandName)
+    {
+        if (defaultName.empty() || commandName.empty() || defaultName == commandName)
+        {
+            return std::wstring{ text }; // the default name (or degenerate input) renders verbatim
+        }
+        const std::wstring token = L"/" + std::wstring{ defaultName };
+        const std::wstring repl = L"/" + std::wstring{ commandName };
+        std::wstring out;
+        out.reserve(text.size() + 32);
+        size_t i = 0;
+        while (i < text.size())
+        {
+            if (text.compare(i, token.size(), token) == 0 &&
+                (i + token.size() >= text.size() || CmdTokenBoundaryW(text[i + token.size()])))
+            {
+                out += repl;
+                i += token.size();
+            }
+            else
+            {
+                out.push_back(text[i]);
+                ++i;
+            }
+        }
+        return out;
+    }
+
+    std::string NormalizeCommandBytesForIdentity(std::string_view bytes, std::wstring_view defaultName, std::wstring_view commandName)
+    {
+        if (defaultName.empty() || commandName.empty() || defaultName == commandName)
+        {
+            return std::string{ bytes }; // identity — nothing was renamed
+        }
+        // Narrow the two ASCII slugs. A non-ASCII char can't come out of NormalizeCommandName; if
+        // one ever arrives (a hand-built caller), refuse the substitution rather than mangle bytes
+        // — the file then just reads as user-owned (never a wrong delete/overwrite).
+        const auto narrowSlug = [](std::wstring_view w, std::string& out) {
+            out.clear();
+            out.push_back('/');
+            for (const wchar_t c : w)
+            {
+                if (c > 0x7F)
+                {
+                    return false;
+                }
+                out.push_back(static_cast<char>(c));
+            }
+            return true;
+        };
+        std::string token; // the CUSTOM token as it sits in the file
+        std::string repl; // the default token the history hashes carry
+        if (!narrowSlug(commandName, token) || !narrowSlug(defaultName, repl))
+        {
+            return std::string{ bytes };
+        }
+        std::string out;
+        out.reserve(bytes.size() + 32);
+        size_t i = 0;
+        while (i < bytes.size())
+        {
+            if (bytes.compare(i, token.size(), token) == 0 &&
+                (i + token.size() >= bytes.size() || CmdTokenBoundaryA(bytes[i + token.size()])))
+            {
+                out += repl;
+                i += token.size();
+            }
+            else
+            {
+                out.push_back(bytes[i]);
+                ++i;
+            }
+        }
+        return out;
+    }
+
     // Shared core of the shipped slash-command DEFINITION writers (the /handover family —
     // COMMANDS.md §6). Write policy: create-if-absent PLUS a version-aware UPGRADE — a file whose
     // SHA-256 matches a PRIOR shipped version of THIS command is ours and untouched by the user, so
@@ -1224,21 +1324,23 @@ file) in this working directory, injecting each document as its session's openin
     // copy of ours, or the already-current text) is NEVER overwritten (the ApplyEnvDefaults
     // discipline: a user edit sticks forever). `shippedHashes` is that command's FULL history,
     // oldest first with the CURRENT text's digest last — so the walk below covers exactly the PRIOR
-    // versions and an already-current file matches nothing (no rewrite, no log line). Exposed (not
-    // file-static) so the harness can drive the whole policy over a SYNTHETIC command whose "prior
-    // version" text it still has: the real histories keep digests only, so a prior version's bytes
-    // no longer exist in the binary to reproduce on disk. The load-bearing instructions every
-    // version of every command in the family keeps: "use the Write tool" (the transcript tool_use
-    // is the signal the markdown await keys on — a shell-redirect write is invisible) and the
-    // "HANDOVER-" name (the await's leaf preference). `logLabel` names the command in the two log
-    // lines so the trails stay per-command ("handover" / "handover-here").
-    std::wstring EnsureShippedCommandFileIn(const std::wstring& configDir, std::wstring_view fileLeaf, const std::vector<std::string_view>& shippedHashes, std::wstring_view currentText, std::wstring_view logLabel)
+    // versions and an already-current file matches nothing (no rewrite, no log line). The
+    // load-bearing instructions every version of every command in the family keeps: "use the Write
+    // tool" (the transcript tool_use is the signal the markdown await keys on — a shell-redirect
+    // write is invisible) and the "HANDOVER-" name (the await's leaf preference). `logLabel` names
+    // the command in the log lines so the trails stay per-command ("handover" / "handover-here").
+    // `defaultName`/`commandName` are the §6a custom-name seam: a CUSTOM name writes the RENDERED
+    // text and digests through the byte normalization above; empty/equal names are a pass-through
+    // on both (the pre-§6a behavior, byte-identical).
+    static std::wstring EnsureShippedCommandFileCore(const std::wstring& configDir, std::wstring_view fileLeaf, const std::vector<std::string_view>& shippedHashes, std::wstring_view currentText, std::wstring_view logLabel, std::wstring_view defaultName, std::wstring_view commandName)
     try
     {
-        if (configDir.empty() || shippedHashes.empty() || currentText.empty())
+        if (configDir.empty() || fileLeaf.empty() || shippedHashes.empty() || currentText.empty())
         {
             return {};
         }
+        const bool custom = !commandName.empty() && !defaultName.empty() && commandName != defaultName;
+        const std::wstring textToWrite = custom ? RenderShippedCommandText(currentText, defaultName, commandName) : std::wstring{ currentText };
         const std::wstring commandsDir = configDir + L"\\commands";
         const std::wstring path = commandsDir + L"\\" + std::wstring{ fileLeaf };
         if (::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
@@ -1262,12 +1364,13 @@ file) in this working directory, injecting each document as its session's openin
             {
                 bytes.clear(); // unreadable now — treat as user-owned (never overwrite blind)
             }
-            const std::string digest = bytes.empty() ? std::string{} : Sha256Hex(bytes);
+            const std::string identityBytes = (custom && !bytes.empty()) ? NormalizeCommandBytesForIdentity(bytes, defaultName, commandName) : bytes;
+            const std::string digest = identityBytes.empty() ? std::string{} : Sha256Hex(identityBytes);
             for (size_t i = 0; !digest.empty() && i + 1 < shippedHashes.size(); ++i)
             {
                 if (digest == shippedHashes[i])
                 {
-                    if (WriteFileUtf8(path, currentText))
+                    if (WriteFileUtf8(path, textToWrite))
                     {
                         AppendStateLog(L"hooks.log", L"[engine] " + std::wstring{ logLabel } + L" command upgraded (shipped v" + std::to_wstring(i + 1) + L" -> v" + std::to_wstring(shippedHashes.size()) + L"): " + path + L"\n");
                     }
@@ -1278,7 +1381,7 @@ file) in this working directory, injecting each document as its session's openin
         }
         ::CreateDirectoryW(configDir.c_str(), nullptr);
         ::CreateDirectoryW(commandsDir.c_str(), nullptr);
-        if (!WriteFileUtf8(path, currentText))
+        if (!WriteFileUtf8(path, textToWrite))
         {
             AppendStateLog(L"hooks.log", L"[persist-fail] " + std::wstring{ logLabel } + L" command definition: " + path + L"\n");
             return {};
@@ -1291,6 +1394,119 @@ file) in this working directory, injecting each document as its session's openin
         // (the feature simply stays dormant until a later launch succeeds).
         LogSwallowedException(L"EnsureShippedCommandFileIn");
         return {};
+    }
+
+    std::wstring EnsureShippedCommandFileIn(const std::wstring& configDir, std::wstring_view fileLeaf, const std::vector<std::string_view>& shippedHashes, std::wstring_view currentText, std::wstring_view logLabel)
+    {
+        // The nameless (default-name) form — the pre-§6a signature, byte-identical behavior.
+        return EnsureShippedCommandFileCore(configDir, fileLeaf, shippedHashes, currentText, logLabel, {}, {});
+    }
+
+    std::wstring EnsureShippedCommandFileNamedIn(const std::wstring& configDir, std::wstring_view defaultName, const std::vector<std::string_view>& shippedHashes, std::wstring_view currentText, std::wstring_view logLabel, std::wstring_view commandName)
+    {
+        // Belt: the leaf is built from the name, so it MUST be a clean slug even if a caller skips
+        // the settings-layer normalization (a path separator here would escape the commands dir).
+        const std::wstring name = NormalizeCommandName(commandName);
+        if (name.empty())
+        {
+            return {};
+        }
+        return EnsureShippedCommandFileCore(configDir, name + L".md", shippedHashes, currentText, logLabel, defaultName, name);
+    }
+
+    bool RemoveShippedCommandFileNamedIn(const std::wstring& configDir, std::wstring_view defaultName, const std::vector<std::string_view>& shippedHashes, std::wstring_view logLabel, std::wstring_view commandName)
+    try
+    {
+        const std::wstring name = NormalizeCommandName(commandName); // slug belt, like the named Ensure
+        if (configDir.empty() || name.empty() || shippedHashes.empty())
+        {
+            return false;
+        }
+        const std::wstring path = configDir + L"\\commands\\" + name + L".md";
+        if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+        {
+            return false; // already gone — nothing to migrate
+        }
+        std::string bytes;
+        try
+        {
+            std::ifstream f(std::filesystem::path{ path }, std::ios::binary);
+            if (f)
+            {
+                bytes.resize(64 * 1024);
+                f.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+                bytes.resize(static_cast<size_t>(f.gcount()));
+            }
+        }
+        catch (...)
+        {
+            bytes.clear();
+        }
+        if (bytes.empty())
+        {
+            return false; // unreadable/empty — never delete blind (user-owned until proven ours)
+        }
+        // ANY shipped version counts here — INCLUDING the current one (unlike the upgrade walk,
+        // which excludes the last entry): a rename/disable must migrate a fully-current pristine
+        // file away just the same as a stale one. A digest match after the name normalization is
+        // proof the bytes are OURS, unmodified, under whatever name.
+        const std::string digest = Sha256Hex(NormalizeCommandBytesForIdentity(bytes, defaultName, name));
+        bool ours = false;
+        for (const auto& h : shippedHashes)
+        {
+            if (digest == h)
+            {
+                ours = true;
+                break;
+            }
+        }
+        if (!ours)
+        {
+            return false; // user-owned (edited, or a same-named foreign command) — never delete
+        }
+        if (!::DeleteFileW(path.c_str()))
+        {
+            AppendStateLog(L"hooks.log", L"[persist-fail] " + std::wstring{ logLabel } + L" command removal (renamed/disabled): " + path + L"\n");
+            return false;
+        }
+        AppendStateLog(L"hooks.log", L"[engine] " + std::wstring{ logLabel } + L" command removed (renamed/disabled; pristine ours): " + path + L"\n");
+        return true;
+    }
+    catch (...)
+    {
+        LogSwallowedException(L"RemoveShippedCommandFileNamedIn");
+        return false;
+    }
+
+    std::wstring ReconcileShippedCommandFileIn(const std::wstring& configDir, std::wstring_view defaultName, const std::vector<std::string_view>& shippedHashes, std::wstring_view currentText, std::wstring_view logLabel, std::wstring_view previouslyMaterializedName, std::wstring_view configuredName, bool enabled)
+    {
+        const std::wstring prev = NormalizeCommandName(previouslyMaterializedName);
+        std::wstring want = enabled ? NormalizeCommandName(configuredName) : std::wstring{};
+        if (enabled && want.empty())
+        {
+            want = defaultName; // "enabled but nameless" is not a state — fall back to the default
+        }
+        // 1) The previously-materialized file is no longer wanted under that name (rename /
+        //    disable) — migrate it away. Ours-pristine only: a file the user edited sticks
+        //    forever and is simply left in place (their content, their command).
+        if (!prev.empty() && prev != want)
+        {
+            RemoveShippedCommandFileNamedIn(configDir, defaultName, shippedHashes, logLabel, prev);
+        }
+        // 2) Disabled — nothing materialized (the marker goes empty; the binding side skips too).
+        if (want.empty())
+        {
+            AppendStateLog(L"hooks.log", L"[engine] " + std::wstring{ logLabel } + L" command disabled (no definition materialized)\n");
+            return {};
+        }
+        // 3) Materialize the configured name (create-if-absent + the version-aware upgrade).
+        const std::wstring path = EnsureShippedCommandFileNamedIn(configDir, defaultName, shippedHashes, currentText, logLabel, want);
+        if (path.empty())
+        {
+            return {}; // failed write — marker stays empty, the next init just tries again
+        }
+        AppendStateLog(L"hooks.log", L"[engine] " + std::wstring{ logLabel } + L" command: " + path + L"\n");
+        return want;
     }
 
     std::wstring EnsureHandoverCommandFileIn(const std::wstring& configDir)
@@ -1330,6 +1546,47 @@ file) in this working directory, injecting each document as its session's openin
     {
         const std::wstring base = ResolveClaudeCommandsBase();
         return base.empty() ? std::wstring{} : EnsureHandoverHereCommandFileIn(base);
+    }
+
+    std::pair<std::wstring, std::wstring> ReconcileHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings)
+    {
+        // Belt: heal the configured pair again here (the Persistence load already does) so a
+        // hand-built AppSettings can never reconcile two commands onto ONE name. The two
+        // histories are digest-disjoint (test-asserted), so even a pathological marker overlap
+        // can't make one command's migration delete the OTHER's pristine file — the ours-check
+        // hashes against each command's OWN history.
+        std::wstring hoName = settings.commandHandoverName;
+        std::wstring hhName = settings.commandHandoverHereName;
+        ResolveCommandNamePair(hoName, hhName);
+        const std::wstring ho = ReconcileShippedCommandFileIn(configDir,
+                                                              kDefaultHandoverCommandName,
+                                                              ShippedHandoverCommandHashes(),
+                                                              ShippedHandoverCommandText(),
+                                                              L"handover",
+                                                              settings.commandHandoverMaterializedName,
+                                                              hoName,
+                                                              settings.commandHandoverEnabled);
+        const std::wstring hh = ReconcileShippedCommandFileIn(configDir,
+                                                              kDefaultHandoverHereCommandName,
+                                                              ShippedHandoverHereCommandHashes(),
+                                                              ShippedHandoverHereCommandText(),
+                                                              L"handover-here",
+                                                              settings.commandHandoverHereMaterializedName,
+                                                              hhName,
+                                                              settings.commandHandoverHereEnabled);
+        return { ho, hh };
+    }
+
+    std::pair<std::wstring, std::wstring> ReconcileHandoverCommandFiles(const AppSettings& settings)
+    {
+        const std::wstring base = ResolveClaudeCommandsBase();
+        if (base.empty())
+        {
+            // No config root resolvable — report the previous reality unchanged (never flip the
+            // markers to "" over a transient env problem; nothing was migrated or written).
+            return { settings.commandHandoverMaterializedName, settings.commandHandoverHereMaterializedName };
+        }
+        return ReconcileHandoverCommandFilesIn(base, settings);
     }
 
     std::wstring ReadHandoverDocumentPrompt(const std::wstring& mdPath)

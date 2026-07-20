@@ -714,6 +714,15 @@ namespace Agentmaster
             hidden.Push(json::Value::MkStr(id));
         }
         o.Set(L"hiddenSessionIds", std::move(hidden));
+        // Slash commands (COMMANDS.md §6a — the cog's "Commands" tab): the /handover family's
+        // configured names + enables (cog-owned), plus the ENGINE-owned materialized-name markers
+        // (which name's definition file the last engine init wrote; "" == none — disabled/failed).
+        o.Set(L"commandHandoverName", json::Value::MkStr(s.commandHandoverName));
+        o.Set(L"commandHandoverEnabled", json::Value::MkBool(s.commandHandoverEnabled));
+        o.Set(L"commandHandoverHereName", json::Value::MkStr(s.commandHandoverHereName));
+        o.Set(L"commandHandoverHereEnabled", json::Value::MkBool(s.commandHandoverHereEnabled));
+        o.Set(L"commandHandoverMaterializedName", json::Value::MkStr(s.commandHandoverMaterializedName));
+        o.Set(L"commandHandoverHereMaterializedName", json::Value::MkStr(s.commandHandoverHereMaterializedName));
         o.Set(L"envDefaultsVersion", json::Value::MkNum(s.envDefaultsVersion));
         o.Set(L"claudeCleanupDaysSeeded", json::Value::MkBool(s.claudeCleanupDaysSeeded));
         return o;
@@ -869,6 +878,23 @@ namespace Agentmaster
                 }
             }
         }
+        // Slash commands (COMMANDS.md §6a). The configured NAMES normalize + collision-heal on
+        // load (ResolveCommandNamePair — a hand-edited junk value self-heals like maxTags, and the
+        // two names can never end up equal); enables default ON; absent keys reproduce the shipped
+        // /handover + /handover-here exactly. The MATERIALIZED markers record engine reality ("the
+        // name whose file the last init wrote"): ABSENT (a pre-feature settings.json) => the
+        // DEFAULT name — those installs have the default-named files on disk, so a later rename
+        // knows what to migrate — while a PRESENT empty string == nothing materialized (disabled).
+        // Markers are normalized but NOT pair-healed (they are facts, not preferences); the
+        // normalize keeps a hand-edit from smuggling path separators into the reconcile's
+        // "<name>.md" delete.
+        s.commandHandoverName = v.StrAt(L"commandHandoverName", kDefaultHandoverCommandName);
+        s.commandHandoverHereName = v.StrAt(L"commandHandoverHereName", kDefaultHandoverHereCommandName);
+        ResolveCommandNamePair(s.commandHandoverName, s.commandHandoverHereName);
+        s.commandHandoverEnabled = v.BoolAt(L"commandHandoverEnabled", true);
+        s.commandHandoverHereEnabled = v.BoolAt(L"commandHandoverHereEnabled", true);
+        s.commandHandoverMaterializedName = NormalizeCommandName(v.StrAt(L"commandHandoverMaterializedName", kDefaultHandoverCommandName));
+        s.commandHandoverHereMaterializedName = NormalizeCommandName(v.StrAt(L"commandHandoverHereMaterializedName", kDefaultHandoverHereCommandName));
         // Shipped-default seeding markers (ENV_VARS.md §8). Absent => 0 / false, so a pre-feature
         // settings.json runs the one-time seed once (new installs + updaters alike get the defaults).
         s.envDefaultsVersion = v.U32At(L"envDefaultsVersion", 0);

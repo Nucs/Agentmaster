@@ -1398,6 +1398,34 @@ namespace Agentmaster
         // the toast is visual-only. Default ON; a missing key => ON.
         bool notifySound{ true };
 
+        // --- Slash commands (COMMANDS.md §6a; the cog's "Commands" tab) ---
+        // Agentmaster's /handover command family is user-customizable: each command can be RENAMED
+        // (the bare word the user types after '/' — the shipped definition then materializes as
+        // <name>.md and the CommandWatch binding keys on that name) and DISABLED (no definition
+        // file materialized, no binding registered — the command simply doesn't exist). BOTH apply
+        // at the NEXT START only: the definition files + the watch bindings are set up once at
+        // engine init, deliberately never re-bound mid-run (the scanner worker reads the binding
+        // set unsynchronized — engine-init registration is the happens-before). Names are stored
+        // NORMALIZED (NormalizeCommandName: lowercase ASCII slug [a-z0-9-_], '/'-stripped, <=64
+        // chars) and COLLISION-HEALED (ResolveCommandNamePair — the watch's binding lookup is
+        // name-exact, so the two commands can never share a name). Missing keys reproduce the
+        // shipped behavior exactly: /handover + /handover-here, both enabled.
+        std::wstring commandHandoverName{ L"handover" };
+        bool commandHandoverEnabled{ true };
+        std::wstring commandHandoverHereName{ L"handover-here" };
+        bool commandHandoverHereEnabled{ true };
+        // ENGINE-owned markers (NOT shown in the cog; the envDefaultsVersion discipline): the name
+        // whose definition file the LAST engine init actually materialized for each command —
+        // "" == none (the command was disabled, or the write failed). The init reconcile compares
+        // marker vs configured name to know WHICH old file a rename/disable must migrate away
+        // (deleting it ONLY when it is byte-identical to something we shipped — a user-edited file
+        // is never touched), then RMWs the marker to the new reality. Defaults to the DEFAULT
+        // names, because a pre-feature install has the default-named files on disk with no marker
+        // — so its first rename knows exactly what to clean up. The cog Save PRESERVES these from
+        // disk (both preserve blocks), like every other out-of-form field.
+        std::wstring commandHandoverMaterializedName{ L"handover" };
+        std::wstring commandHandoverHereMaterializedName{ L"handover-here" };
+
         // --- shipped-default seeding markers (ENV_VARS.md §8; NOT shown in the cog) ---
         // Agentmaster ships a few defaults ONCE and then respects user edits/removals. These markers
         // record that the one-time seed ran, so a default a user deletes never returns:
@@ -1440,6 +1468,81 @@ namespace Agentmaster
             return 0.1;
         }
         return v > 1.0 ? 1.0 : v;
+    }
+
+    // Agentmaster (COMMANDS.md §6a — customizable slash commands): the shipped defaults of the
+    // /handover family's command names. ONE definition each — AppSettings' struct defaults, the
+    // Persistence absent-key fallbacks, the reconcile's "what a pre-feature install has on disk",
+    // and the collision-heal targets all read these.
+    inline constexpr std::wstring_view kDefaultHandoverCommandName = L"handover";
+    inline constexpr std::wstring_view kDefaultHandoverHereCommandName = L"handover-here";
+
+    // Agentmaster (COMMANDS.md §6a): normalize a user-typed command name into the form everything
+    // downstream agrees on — the transcript echo parser lowercases ASCII (ParseCommandEcho), the
+    // CommandWatch binding lookup is exact, and the name becomes a file LEAF (<name>.md under
+    // <claude-config>\commands) AND a token substituted into the definition text ("/<name>") — so
+    // the alphabet is a strict ASCII slug: [a-z0-9-_] only, everything else dropped (spaces, dots,
+    // path separators, unicode — a hand-edited settings.json can never smuggle "..\" into the
+    // commands-dir file operations). A leading '/' (the user typed "/foo") and leading whitespace
+    // are tolerated and stripped; length is capped at 64 (Claude Code names are short slugs).
+    // Empty in => empty out (the caller decides the fallback — ResolveCommandNamePair).
+    inline std::wstring NormalizeCommandName(std::wstring_view raw)
+    {
+        std::wstring out;
+        out.reserve(raw.size() < 64 ? raw.size() : 64);
+        bool leading = true;
+        for (wchar_t c : raw)
+        {
+            if (leading && (c == L'/' || c == L' ' || c == L'\t'))
+            {
+                continue; // tolerate a typed "/name" / pasted leading whitespace
+            }
+            leading = false;
+            if (c >= L'A' && c <= L'Z')
+            {
+                c = static_cast<wchar_t>(c - L'A' + L'a');
+            }
+            if ((c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9') || c == L'-' || c == L'_')
+            {
+                out.push_back(c);
+                if (out.size() >= 64)
+                {
+                    break;
+                }
+            }
+            // anything else is dropped (never a placeholder char — the result stays a clean slug)
+        }
+        return out;
+    }
+
+    // Agentmaster (COMMANDS.md §6a): resolve the CONFIGURED /handover-family name pair into the
+    // pair actually USED — normalize both, fall back to the default on empty, and COLLISION-HEAL:
+    // the CommandWatch binding lookup is name-EXACT, so two bindings under one name would make the
+    // second silently shadow the first (BindMarkdownAwait is last-wins). Deterministic rule: on a
+    // collision the HERE name falls back to its default; if that STILL collides (the user named
+    // /handover literally "handover-here"), the handover name falls back to its default too — so
+    // the healed pair is always two distinct, non-empty slugs. Shared by the Persistence load
+    // (a hand-edited settings.json self-heals) and the cog Save (typed input heals identically).
+    inline void ResolveCommandNamePair(std::wstring& handoverName, std::wstring& handoverHereName)
+    {
+        handoverName = NormalizeCommandName(handoverName);
+        handoverHereName = NormalizeCommandName(handoverHereName);
+        if (handoverName.empty())
+        {
+            handoverName = kDefaultHandoverCommandName;
+        }
+        if (handoverHereName.empty())
+        {
+            handoverHereName = kDefaultHandoverHereCommandName;
+        }
+        if (handoverName == handoverHereName)
+        {
+            handoverHereName = kDefaultHandoverHereCommandName;
+            if (handoverName == handoverHereName)
+            {
+                handoverName = kDefaultHandoverCommandName;
+            }
+        }
     }
 
     // ===== Workspace persistence (M10; see doc/agentmaster/PERSISTENCE.md) =====

@@ -596,7 +596,7 @@ namespace winrt::TerminalApp::implementation
         card.BorderThickness(Thickness{ 1, 1, 1, 1 });
         card.CornerRadius(CornerRadius{ 8, 8, 8, 8 });
         card.Padding(Thickness{ 20, 16, 20, 16 });
-        card.Width(660); // Agentmaster: wider so the seven top-tab buttons (incl. Notifications) fit on one row
+        card.Width(730); // Agentmaster: wider so the eight top-tab buttons (incl. Commands + Notifications) fit on one row
         card.HorizontalAlignment(HorizontalAlignment::Center);
         card.VerticalAlignment(VerticalAlignment::Center);
         card.RequestedTheme(ElementTheme::Dark);
@@ -607,20 +607,22 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: the cog is organized into TOP TABS — a horizontal button-tab strip swapping one
         // scrollable panel per settings group (the _SwitchEnvTab idiom; deliberately NOT a Pivot, which
         // themes unreliably under XAML Islands). Save/Cancel is a fixed footer OUTSIDE the tabs (always
-        // reachable). Each section below appends into one of the seven group panels; the `panel` variable is
+        // reachable). Each section below appends into one of the eight group panels; the `panel` variable is
         // RESEATED at every group boundary (a StackPanel is a ref-counted handle, so `panel = claudePanel`
         // just re-points it) so the per-control creation code stays byte-for-byte identical to before.
         auto outer = StackPanel{};
         outer.Spacing(8);
         outer.Children().Append(Text(L"Agentmaster Settings", 18, true, 1.0));
 
-        // The seven group panels (built empty; filled by the sections below, in this label order).
+        // The eight group panels (built empty; filled by the sections below, in this label order).
         auto sessionsPanel = StackPanel{};
         sessionsPanel.Spacing(10);
         auto autorunnerPanel = StackPanel{};
         autorunnerPanel.Spacing(10);
         auto behaviorPanel = StackPanel{};
         behaviorPanel.Spacing(10);
+        auto commandsPanel = StackPanel{}; // COMMANDS.md §6a — the /handover family customization
+        commandsPanel.Spacing(10);
         auto notificationsPanel = StackPanel{};
         notificationsPanel.Spacing(10);
         auto tabsPanel = StackPanel{};
@@ -1212,6 +1214,51 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(_setNotifySound, L"Play the Windows notification sound with the toast. Off shows the toast silently. Default on.");
         panel.Children().Append(_setNotifySound);
 
+        // === COMMANDS tab (COMMANDS.md §6a) ===
+        // The /handover slash-command family: rename + enable/disable each command. Everything
+        // here applies at the NEXT START only — the definition files under <claude-config>\commands
+        // and the CommandWatch bindings are set up once at engine init (deliberately never re-bound
+        // mid-run), so the status lines under the boxes read the LIVE state (the engine's
+        // materialized-name markers, read fresh from disk at cog open) against the CONFIGURED one
+        // and show the "after restart" staging explicitly (the PROFILE row's idiom).
+        panel = commandsPanel;
+        panel.Children().Append(SettingsSeparator(L"SLASH COMMANDS (the /handover family)", true)); // leading section
+        {
+            auto intro = Text(L"Agentmaster ships two slash commands into your global Claude commands folder (~\\.claude\\commands, or CLAUDE_CONFIG_DIR). Typed into a managed Claude session, they write a HANDOVER-*.md briefing that Agentmaster turns into fresh successor session(s). Rename or disable them here \x2014 changes apply AFTER RESTART. A rename/disable deletes the old definition file only when it is byte-identical to a version Agentmaster shipped; a file you edited yourself is never touched (and a disabled command's edited file keeps working as YOUR command, just unwatched).", 11, false, 0.6);
+            intro.TextWrapping(TextWrapping::Wrap);
+            panel.Children().Append(intro);
+        }
+        panel.Children().Append(SettingsSeparator(L"HAND OVER \x2192 NEW TAB(S)"));
+        _setCmdHandoverEnabled = ToggleSwitch{};
+        _setCmdHandoverEnabled.Header(winrt::box_value(L"Enable (successors open in new tabs)"));
+        AgentSetTip(_setCmdHandoverEnabled, L"The classic handover: the command's HANDOVER-*.md file(s) each open a fresh successor session in a NEW TAB beside this one, the document injected as its first user message. Off = the command is not offered and Agentmaster ignores it. Applies after restart.");
+        _setCmdHandoverEnabled.Toggled([this](const IInspectable&, const RoutedEventArgs&) { _UpdateCommandsTabStatus(); });
+        panel.Children().Append(_setCmdHandoverEnabled);
+        _setCmdHandoverName = TextBox{};
+        _setCmdHandoverName.Header(winrt::box_value(L"Command name"));
+        _setCmdHandoverName.PlaceholderText(L"handover \x2014 typed as /handover");
+        AgentSetTip(_setCmdHandoverName, L"The word you type after '/' to run the new-tab handover (also the definition's file name, <name>.md). Lowercase letters, digits, '-' and '_' only \x2014 anything else is dropped. Blank falls back to \x201Chandover\x201D. Applies after restart; the old name's pristine definition file is deleted, a hand-edited one is left alone.");
+        _setCmdHandoverName.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _UpdateCommandsTabStatus(); });
+        panel.Children().Append(_setCmdHandoverName);
+        _setCmdHandoverStatus = Text(L"", 11, false, 0.7);
+        _setCmdHandoverStatus.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setCmdHandoverStatus);
+        panel.Children().Append(SettingsSeparator(L"HAND OVER IN PLACE (REPLACE THIS TAB)"));
+        _setCmdHandoverHereEnabled = ToggleSwitch{};
+        _setCmdHandoverHereEnabled.Header(winrt::box_value(L"Enable (first successor replaces the tab)"));
+        AgentSetTip(_setCmdHandoverHereEnabled, L"The in-place twin: the FIRST HANDOVER-*.md's successor RESTARTS this very tab into a fresh session (the origin conversation is archived, resumable from Sessions); additional files open beside it. Off = the command is not offered and Agentmaster ignores it. Applies after restart.");
+        _setCmdHandoverHereEnabled.Toggled([this](const IInspectable&, const RoutedEventArgs&) { _UpdateCommandsTabStatus(); });
+        panel.Children().Append(_setCmdHandoverHereEnabled);
+        _setCmdHandoverHereName = TextBox{};
+        _setCmdHandoverHereName.Header(winrt::box_value(L"Command name"));
+        _setCmdHandoverHereName.PlaceholderText(L"handover-here \x2014 typed as /handover-here");
+        AgentSetTip(_setCmdHandoverHereName, L"The word you type after '/' to run the in-place handover (also the definition's file name, <name>.md). Lowercase letters, digits, '-' and '_' only. Blank falls back to \x201Chandover-here\x201D; a name equal to the other command's falls back too (the two must differ). Applies after restart.");
+        _setCmdHandoverHereName.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _UpdateCommandsTabStatus(); });
+        panel.Children().Append(_setCmdHandoverHereName);
+        _setCmdHandoverHereStatus = Text(L"", 11, false, 0.7);
+        _setCmdHandoverHereStatus.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setCmdHandoverHereStatus);
+
         // === TABS & OVERLAY tab ===
         panel = tabsPanel;
         // TABS — close affordances on the terminal tab strip (GLOBAL across windows, applied live
@@ -1779,6 +1826,7 @@ namespace winrt::TerminalApp::implementation
             addSettingsTab(L"Tests Autorunner", L"Tests Autorunner defaults stamped onto every new session \x2014 the starting mode and its backstops.", autorunnerPanel);
         }
         addSettingsTab(L"Behavior", L"Interaction + session-state behavior \x2014 close confirms, the rename commit key, and the Waiting-for-you \x201Cunread\x201D timeout.", behaviorPanel);
+        addSettingsTab(L"Commands", L"The /handover slash-command family \x2014 rename each command or disable it entirely. Applies after restart.", commandsPanel);
         addSettingsTab(L"Notifications", L"Windows notifications when a session's status changes from Running to another state \x2014 which states notify, the focused-tab skip, and the sound.", notificationsPanel);
         addSettingsTab(L"Tabs & Overlay", L"The terminal tab strip + the per-tab overlay badge \x2014 close affordances, the favorite marker, the status-flash color, and overlay opacity.", tabsPanel);
         addSettingsTab(L"Claude", L"The Claude install Agentmaster drives \x2014 which native claude.exe, and how long Claude keeps session history.", claudePanel);
@@ -1999,6 +2047,34 @@ namespace winrt::TerminalApp::implementation
         {
             _setNotifySound.IsOn(_appSettings.notifySound);
         }
+        // COMMANDS tab (COMMANDS.md §6a): seed the /handover-family controls, and capture the LIVE
+        // names from DISK — the engine-owned materialized-name markers, RMW'd at engine init, are
+        // what is actually bound/on-disk THIS RUN ("" == disabled) — so the status lines can stage
+        // a pending change as "… after restart" (the PROFILE row's current -> new idiom).
+        if (_setCmdHandoverEnabled)
+        {
+            _setCmdHandoverEnabled.IsOn(_appSettings.commandHandoverEnabled);
+        }
+        if (_setCmdHandoverName)
+        {
+            _setCmdHandoverName.Text(winrt::hstring{ _appSettings.commandHandoverName });
+        }
+        if (_setCmdHandoverHereEnabled)
+        {
+            _setCmdHandoverHereEnabled.IsOn(_appSettings.commandHandoverHereEnabled);
+        }
+        if (_setCmdHandoverHereName)
+        {
+            _setCmdHandoverHereName.Text(winrt::hstring{ _appSettings.commandHandoverHereName });
+        }
+        {
+            const auto disk = ::Agentmaster::LoadAppSettings();
+            _cmdLiveHandoverName = disk.commandHandoverMaterializedName;
+            _cmdLiveHandoverHereName = disk.commandHandoverHereMaterializedName;
+        }
+        // The seeds above re-fire TextChanged/Toggled, but be explicit so the status lines never
+        // depend on a programmatic set actually raising them (the _UpdateTitleNamingPreview rule).
+        _UpdateCommandsTabStatus();
         if (_setRenameCommit)
         {
             // Items are ordered to match TabRenameCommitMode (0 click-away / 1 +Shift+Enter / 2 +Enter).
@@ -2462,6 +2538,27 @@ namespace winrt::TerminalApp::implementation
         {
             _appSettings.notifySound = _setNotifySound.IsOn();
         }
+        // COMMANDS tab (COMMANDS.md §6a): store the /handover-family names NORMALIZED +
+        // COLLISION-HEALED (the same ResolveCommandNamePair the Persistence load applies, so the
+        // stored pair is always two distinct slugs — exactly what the status lines previewed).
+        // Applies at the NEXT START (engine init binds + reconciles the definition files then);
+        // the engine-owned materialized-name markers are preserved from disk below.
+        if (_setCmdHandoverEnabled)
+        {
+            _appSettings.commandHandoverEnabled = _setCmdHandoverEnabled.IsOn();
+        }
+        if (_setCmdHandoverHereEnabled)
+        {
+            _appSettings.commandHandoverHereEnabled = _setCmdHandoverHereEnabled.IsOn();
+        }
+        if (_setCmdHandoverName && _setCmdHandoverHereName)
+        {
+            std::wstring ho{ _setCmdHandoverName.Text() };
+            std::wstring hh{ _setCmdHandoverHereName.Text() };
+            ::Agentmaster::ResolveCommandNamePair(ho, hh);
+            _appSettings.commandHandoverName = ho;
+            _appSettings.commandHandoverHereName = hh;
+        }
         if (_setRenameCommit)
         {
             const int idx = _setRenameCommit.SelectedIndex();
@@ -2650,6 +2747,8 @@ namespace winrt::TerminalApp::implementation
             _appSettings.updatePostponedUntilUnixMs = disk.updatePostponedUntilUnixMs; // updater "Postpone N days" (out-of-cog JSON RMW)
             _appSettings.envDefaultsVersion = disk.envDefaultsVersion; // shipped-default seed marker (engine-init, out-of-cog) — a Save must never reset it (would re-add a deleted default)
             _appSettings.claudeCleanupDaysSeeded = disk.claudeCleanupDaysSeeded; // shipped-default seed marker (engine-init, out-of-cog)
+            _appSettings.commandHandoverMaterializedName = disk.commandHandoverMaterializedName; // engine-owned reality: which name's definition file the last init wrote (COMMANDS.md §6a) — a Save must never rewrite history
+            _appSettings.commandHandoverHereMaterializedName = disk.commandHandoverHereMaterializedName; // ditto for the in-place twin
         }
         if (_settingsSink)
         {
@@ -2659,7 +2758,9 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::LogNav(std::wstring{ L"settings-save skipPerms=" } + (_appSettings.skipPermissions ? L"1" : L"0") +
                                   L" model=" + (_appSettings.model.empty() ? std::wstring{ L"(default)" } : _appSettings.model) +
                                   L" autorunner=" + (_appSettings.defaultAutorunnerMode == AutorunnerMode::Full ? L"Full" : _appSettings.defaultAutorunnerMode == AutorunnerMode::SemiAuto ? L"Semi" : L"Off") +
-                                  L" claudeExe=" + (_appSettings.claudeExePath.empty() ? std::wstring{ L"(auto)" } : _appSettings.claudeExePath));
+                                  L" claudeExe=" + (_appSettings.claudeExePath.empty() ? std::wstring{ L"(auto)" } : _appSettings.claudeExePath) +
+                                  L" handover=" + (_appSettings.commandHandoverEnabled ? (L"/" + _appSettings.commandHandoverName) : std::wstring{ L"off" }) +
+                                  L" here=" + (_appSettings.commandHandoverHereEnabled ? (L"/" + _appSettings.commandHandoverHereName) : std::wstring{ L"off" }) /* both apply at next start (COMMANDS.md §6a) */);
             _settingsSink(_appSettings); // page persists + applies to future spawns
         }
         // Native-exe-only policy: re-resolve the claude.exe now, so a changed/cleared override (or a
@@ -3010,6 +3111,63 @@ namespace winrt::TerminalApp::implementation
     // of made-up example paths through the REAL 2-arg DeriveSessionTitle, so the preview is exactly
     // what a launch under these picks would name. The examples are chosen so every technique reads
     // visibly different (dotted, one-word camel, spaced, mixed-caps).
+    // COMMANDS tab (COMMANDS.md §6a): re-render both /handover-family status lines from the
+    // CURRENT (unsaved) control state — the effective (normalized + collision-healed) name each
+    // box resolves to, staged against the LIVE state captured at cog open (_cmdLive*, the engine's
+    // materialized-name markers; "" == disabled this run). Runs on every keystroke/toggle, so the
+    // user sees "what Save will make of this" before saving — including a junk name falling back
+    // and a colliding here-name healing to its default.
+    void AgentManagerContent::_UpdateCommandsTabStatus()
+    {
+        if (!_setCmdHandoverStatus && !_setCmdHandoverHereStatus)
+        {
+            return;
+        }
+        std::wstring ho = _setCmdHandoverName ? std::wstring{ _setCmdHandoverName.Text() } : std::wstring{ ::Agentmaster::kDefaultHandoverCommandName };
+        std::wstring hh = _setCmdHandoverHereName ? std::wstring{ _setCmdHandoverHereName.Text() } : std::wstring{ ::Agentmaster::kDefaultHandoverHereCommandName };
+        // What each box normalizes to ALONE (to tell "fell back because invalid/blank" apart from
+        // "fell back because it collides with the other command").
+        const std::wstring hoAlone = ::Agentmaster::NormalizeCommandName(ho);
+        const std::wstring hhAlone = ::Agentmaster::NormalizeCommandName(hh);
+        ::Agentmaster::ResolveCommandNamePair(ho, hh); // the pair Save will store
+        const bool hoOn = _setCmdHandoverEnabled && _setCmdHandoverEnabled.IsOn();
+        const bool hhOn = _setCmdHandoverHereEnabled && _setCmdHandoverHereEnabled.IsOn();
+        const auto lineFor = [](bool enabled, const std::wstring& live, const std::wstring& want, const std::wstring& alone) {
+            std::wstring s;
+            if (!enabled)
+            {
+                s = live.empty() ? std::wstring{ L"Disabled." } :
+                                   (L"Active as /" + live + L" \x2014 DISABLED after restart.");
+            }
+            else if (want == live)
+            {
+                s = L"Active as /" + want + L".";
+            }
+            else if (live.empty())
+            {
+                s = L"Disabled this run \x2014 enabled as /" + want + L" after restart.";
+            }
+            else
+            {
+                s = L"Active as /" + live + L" \x2192 becomes /" + want + L" after restart.";
+            }
+            if (enabled && alone != want)
+            {
+                s += alone.empty() ? L" (blank/invalid name \x2014 falls back to the default)" :
+                                     L" (name collides with the other command \x2014 falls back)";
+            }
+            return s;
+        };
+        if (_setCmdHandoverStatus)
+        {
+            _setCmdHandoverStatus.Text(winrt::hstring{ lineFor(hoOn, _cmdLiveHandoverName, ho, hoAlone) });
+        }
+        if (_setCmdHandoverHereStatus)
+        {
+            _setCmdHandoverHereStatus.Text(winrt::hstring{ lineFor(hhOn, _cmdLiveHandoverHereName, hh, hhAlone) });
+        }
+    }
+
     void AgentManagerContent::_UpdateTitleNamingPreview()
     {
         if (!_titleNamingPreview)

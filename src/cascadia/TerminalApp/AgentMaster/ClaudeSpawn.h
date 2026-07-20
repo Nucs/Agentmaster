@@ -528,6 +528,74 @@ namespace Agentmaster
                                             std::wstring_view currentText,
                                             std::wstring_view logLabel);
 
+    // ---- CUSTOMIZABLE COMMAND NAMES (COMMANDS.md §6a — the cog's "Commands" tab) ----
+    // A /handover-family command can be RENAMED: its definition then lives at <configDir>\commands\
+    // <name>.md and its text mentions "/<name>" instead of "/<defaultName>" (the self-invocation
+    // guard tells the user what to TYPE, so the token must match the file's actual name). The
+    // shipped-version histories stay DIGESTS OF THE DEFAULT-NAME TEXTS — so identity questions
+    // about a custom-named file first normalize its bytes BACK to the default-name form and then
+    // hash. That one trick makes every shipped version recognizable under ANY name without ever
+    // freezing per-name digests: render(text, name) and the byte normalization are exact inverses
+    // (both substitute the "/<word>" token at a word boundary only; names are ASCII slugs —
+    // NormalizeCommandName — so the UTF-8 byte substitution can never split a multi-byte char).
+
+    // Render a shipped command text for a custom name: every "/<defaultName>" token (word-boundary
+    // bounded, so a "/handover" can never corrupt a "/handover-here" mention) becomes
+    // "/<commandName>". commandName == defaultName returns the text verbatim.
+    std::wstring RenderShippedCommandText(std::wstring_view text, std::wstring_view defaultName, std::wstring_view commandName);
+
+    // The identity inverse over a file's raw UTF-8 bytes: every "/<commandName>" token becomes
+    // "/<defaultName>", so the result can be SHA-256'd against the shipped history. commandName ==
+    // defaultName returns the bytes verbatim.
+    std::string NormalizeCommandBytesForIdentity(std::string_view bytes, std::wstring_view defaultName, std::wstring_view commandName);
+
+    // The name-aware EnsureShippedCommandFileIn: materialize <commandName>.md carrying
+    // RenderShippedCommandText(currentText, defaultName, commandName), under the SAME write policy
+    // (create-if-absent + the version-aware upgrade, digest identity through the byte
+    // normalization above; a user-edited file is NEVER overwritten). Returns the file's full path
+    // ("" on failure / degenerate input).
+    std::wstring EnsureShippedCommandFileNamedIn(const std::wstring& configDir,
+                                                 std::wstring_view defaultName,
+                                                 const std::vector<std::string_view>& shippedHashes,
+                                                 std::wstring_view currentText,
+                                                 std::wstring_view logLabel,
+                                                 std::wstring_view commandName);
+
+    // Remove <configDir>\commands\<commandName>.md IFF its (name-normalized) digest matches ANY
+    // shipped version of this command — i.e. it is OURS and untouched, under whatever name. The
+    // rename/disable migration: the old file goes away so Claude stops offering a dead command.
+    // A user-edited (or foreign same-named) file never matches and is LEFT IN PLACE; returns
+    // whether the file was actually deleted (logged "[engine] <label> command removed …").
+    bool RemoveShippedCommandFileNamedIn(const std::wstring& configDir,
+                                         std::wstring_view defaultName,
+                                         const std::vector<std::string_view>& shippedHashes,
+                                         std::wstring_view logLabel,
+                                         std::wstring_view commandName);
+
+    // The per-command engine-init reconcile (COMMANDS.md §6a): when the previously-materialized
+    // name (the durable AppSettings marker; "" == nothing materialized) differs from what is now
+    // wanted (configuredName, or nothing when !enabled), migrate the old file away (the ours-only
+    // Remove above), then materialize the configured name (the named Ensure). Returns the NEW
+    // marker value — configuredName on success, "" when disabled or the write failed (a failed
+    // write self-heals: next init sees marker "" and just materializes again).
+    std::wstring ReconcileShippedCommandFileIn(const std::wstring& configDir,
+                                               std::wstring_view defaultName,
+                                               const std::vector<std::string_view>& shippedHashes,
+                                               std::wstring_view currentText,
+                                               std::wstring_view logLabel,
+                                               std::wstring_view previouslyMaterializedName,
+                                               std::wstring_view configuredName,
+                                               bool enabled);
+
+    // The engine-init entry: reconcile BOTH /handover-family definition files against the
+    // settings' configured names/enables (each command through ReconcileShippedCommandFileIn).
+    // Returns { handover materialized name, handover-here materialized name } — the values the
+    // engine RMWs back into the AppSettings markers. The `In` form takes the Claude config dir
+    // explicitly (the unit-testable core); the wrapper resolves CLAUDE_CONFIG_DIR > ~/.claude
+    // like EnsureHandoverCommandFile.
+    std::pair<std::wstring, std::wstring> ReconcileHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings);
+    std::pair<std::wstring, std::wstring> ReconcileHandoverCommandFiles(const AppSettings& settings);
+
     // Build a complete spawn spec and ensure the shared hook files exist. `pipeName` is the
     // live HooksBridge pipe (HookPipeName(pid)). If `resumeSessionId` is non-empty, the spec
     // RESUMES that conversation (claude --resume <id>) and reuses the id; otherwise a fresh

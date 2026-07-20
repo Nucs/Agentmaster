@@ -390,6 +390,64 @@ tab-replacing /handover-here on its own — that safety property is preserved). 
 paragraph tells a self-invoked model to write NOTHING and redirect the user to TYPE the
 command instead.
 
+## 6a. Customizable names + disable — the cog's "Commands" tab
+
+Both commands are user-customizable from the Settings cog's **Commands** tab: each can be
+**RENAMED** (the word typed after `/` — which is also the definition's file leaf, `<name>.md`)
+and **DISABLED** (no definition file materialized, no binding registered — the command simply
+does not exist). **Everything applies at the NEXT START only**: the definition files and the
+CommandWatch bindings are set up once at engine init and deliberately never re-bound mid-run
+(the scanner worker reads the binding set unsynchronized — engine-init registration before
+`Start()` is the happens-before), so the tab's per-command status lines stage a pending change
+explicitly (`Active as /handover → becomes /ho after restart` / `DISABLED after restart` — the
+PROFILE row's idiom, live state read from the disk markers below).
+
+* **Settings model** (`AppSettings`, settings.json): `commandHandoverName`/`Enabled` +
+  `commandHandoverHereName`/`Enabled` (cog-owned), stored NORMALIZED
+  (`NormalizeCommandName` — lowercase ASCII slug `[a-z0-9-_]`, `/`-stripped, ≤64 chars; a
+  hand-edited junk value self-heals on load) and **collision-healed**
+  (`ResolveCommandNamePair` — the watch's binding lookup is name-exact and `BindMarkdownAwait`
+  is last-wins, so two commands must never share a name: on a collision the HERE name falls
+  back to its default, and if that still collides the handover name falls back too). Absent
+  keys reproduce the shipped `/handover` + `/handover-here` exactly.
+* **The RENDER / IDENTITY pair** (`RenderShippedCommandText` /
+  `NormalizeCommandBytesForIdentity`, ClaudeSpawn): a renamed command's definition must SAY
+  the new name (the self-invocation guard tells the user what to TYPE), so materializing
+  substitutes every `"/<default>"` token — **word-boundary bounded**, so a `/handover`
+  substitution can never corrupt a `/handover-here` mention — while the §6 histories stay
+  digests of the DEFAULT-name texts: identity questions about a custom-named file substitute
+  the name BACK over the raw UTF-8 bytes and hash that (names are ASCII slugs, so the byte
+  substitution can never split a multi-byte char). One trick, and every shipped version is
+  recognizable under ANY name — no per-name digest freezing, and a custom-named pristine file
+  still auto-UPGRADES when a new version ships.
+* **The engine-init reconcile** (`ReconcileHandoverCommandFiles` →
+  `ReconcileShippedCommandFileIn` per command): the durable **materialized-name markers**
+  (`commandHandoverMaterializedName`/`…HereMaterializedName` — engine-owned AppSettings fields,
+  RMW'd at init, preserved from disk by BOTH cog-Save preserve blocks; absent keys read as the
+  DEFAULT names so a pre-feature install's on-disk files migrate correctly, `""` == nothing
+  materialized) record which file the LAST init wrote. When marker ≠ wanted (rename, or
+  disable ⇒ wanted = none), the old file is **deleted ONLY when its (name-normalized) digest
+  matches ANY shipped version — including the current one** (`RemoveShippedCommandFileNamedIn`;
+  unlike the upgrade walk, which excludes the last entry): pristine-ours migrates away so
+  Claude stops offering a dead name, while **a user-edited file is NEVER touched** (their
+  content, their command — a disabled command's edited file keeps working as THEIR command,
+  just unwatched). Then the wanted name materializes (`EnsureShippedCommandFileNamedIn`,
+  create-if-absent + upgrade) and the markers RMW to the new reality. A failed write leaves the
+  marker empty — the next init just tries again (self-healing); logs:
+  `[engine] handover command: <path>` / `… command removed (renamed/disabled; pristine ours)` /
+  `… command disabled (no definition materialized)`.
+* **Bindings**: engine init registers `BindMarkdownAwait(<configuredName>, "handover", …)` only
+  for ENABLED commands; the fan-out **action names stay the canonical
+  `L"handover"`/`L"handover-here"`** whatever the typed names are, so the per-window sinks and
+  `_HandleCommandHandover` never see a rename (zero UI-layer changes). The same-family
+  supersede (§3) keys on the shared LEAF HINT, not the names — renamed commands still
+  supersede each other correctly. An old `/handover` echo replayed after a rename finds no
+  binding and stays inert.
+* **Caveat (pre-existing seam, §gap-3 class)**: the dev and release installs share
+  `~/.claude/commands` but keep separate settings — a rename/disable in one install can be
+  "undone" by the other's next init re-materializing ITS configured names. Run one install
+  primarily, or configure both alike.
+
 ## 7. Hardening & safeguards
 
 The feature crosses three threads (scanner worker → engine fan-out → per-window UI dispatchers)
@@ -556,7 +614,9 @@ state-machine side (no TURN event; the echo reads back as the non-turn `Command`
   sighting identity, for sub-second latency.
 * More bindings on the same infra (the generic await shapes beyond markdown: "next turn-complete",
   "next file matching \<glob\>", `/command`-driven queue operations).
-* A cog off-switch (`commandBindingsEnabled`) if a user ever wants the echoes ignored.
+* ~~A cog off-switch (`commandBindingsEnabled`) if a user ever wants the echoes ignored.~~
+  **SHIPPED, per-command** — §6a: the cog's Commands tab disables (and renames) each command
+  individually, applied at the next start.
 * Surfacing an armed await on the origin tab's overlay (a dim `⏳ handover pending` row).
 * First-prompt `/handover` in a brand-new session is a degenerate no-op by construction (there
   is nothing to hand over); the freshness gate also skips a `/handover` typed moments before an

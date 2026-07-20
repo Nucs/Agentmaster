@@ -830,6 +830,21 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::CheckBox _setNotifyError{ nullptr }; // Running -> Error
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setNotifySuppressFocused{ nullptr }; // skip the toast when the session's tab is focused in the active window (default ON)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setNotifySound{ nullptr }; // play the Windows notification sound (OFF => <audio silent/>; default ON)
+        // COMMANDS tab (COMMANDS.md §6a): the /handover slash-command family — each command's
+        // Enable toggle + Command-name box + a status line reading the LIVE vs CONFIGURED state
+        // ("Active as /x" / "becomes /y after restart" / "disabled after restart"). Rename +
+        // disable apply at the NEXT START (the definition files + CommandWatch bindings are set up
+        // once at engine init); the LIVE names come from the engine-owned materialized-name
+        // markers read fresh from disk at cog open (_cmdLive*; "" == disabled this run).
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCmdHandoverEnabled{ nullptr }; // /handover family: enable the NEW-TAB handover command
+        winrt::Windows::UI::Xaml::Controls::TextBox _setCmdHandoverName{ nullptr }; // its typed name (normalized slug; default "handover")
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setCmdHandoverStatus{ nullptr }; // live-vs-configured status line
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCmdHandoverHereEnabled{ nullptr }; // enable the IN-PLACE (replace-this-tab) handover command
+        winrt::Windows::UI::Xaml::Controls::TextBox _setCmdHandoverHereName{ nullptr }; // its typed name (default "handover-here")
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setCmdHandoverHereStatus{ nullptr }; // live-vs-configured status line
+        std::wstring _cmdLiveHandoverName; // the name ACTIVE this run ("" == disabled) — the disk marker at cog open
+        std::wstring _cmdLiveHandoverHereName;
+        void _UpdateCommandsTabStatus(); // re-render both status lines from the current (unsaved) control state
         winrt::Windows::UI::Xaml::Controls::ComboBox _setRenameCommit{ nullptr }; // how the tab rename box commits via the keyboard (None / +Shift+Enter / +Enter); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setWaitingNever{ nullptr }; // Waiting-for-you "unread" model: ON => never time-decay (stay Waiting until read); disables the slider
         winrt::Windows::UI::Xaml::Controls::Slider _setWaitingDecaySlider{ nullptr }; // Waiting-for-you -> Idle timeout, 1..10080 minutes (1m..7d); the "Never" toggle above owns 0, the textbox (left) is the source of truth and may exceed 7d (slider then sits maxed)

@@ -769,13 +769,16 @@ tag no session carries lists at **·0** (sorts last).
 ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
 HARDENED, delivery = FULL CONTENT INJECTION (never truncated), RESTART-RESILIENT (durable
 per-session progress) + MULTI-FILE (one command's several HANDOVER files consumed as one):
-engine-tested (2328/2328 — the
+engine-tested (2370/2370 — the
 `TestCommandWatch` units + safeguard belts + the content-injection/tier units + the /handover-here
 twin units (hyphen echo, name-exact binding isolation, its own definition file) + the multi-file
 collect/seal/settle units + the durable-progress units (watermark / marker revival / prune /
 encode-decode) + the family-supersede race-guard units + the SHA-256 definition-history units
 (NIST vectors + padding edges; the create/upgrade/never-overwrite policy over a synthetic command;
-the `last digest == sha256(current text)` version gate; the two histories disjoint), the FABRICATED
+the `last digest == sha256(current text)` version gate; the two histories disjoint) + the §6a
+CUSTOMIZATION units (name normalize/pair-heal, the render↔identity inverse over synthetic AND real
+texts, the named ensure/remove + rename/disable reconcile policy, the AppSettings round-trip incl.
+marker semantics), the FABRICATED
 end-to-end `/handover` session `TestCommandHandoverE2E` (incl. the multi-file scenario F, the
 restart-persistence scenario G + the family-race pivot scenario H), and the REAL-corpus echo replay
 `TestCommandEchoRealCorpus`) + lib-compiled green; rides the next deploy cycle.** Bind to `/commands`
@@ -816,7 +819,21 @@ the next write, so a /handover pivoted to /handover-here fires the in-place path
 new-tab spawn; a matched-but-unsealed one defensively seals and fires with its own files; SEALED
 pendings are untouched — every satisfied command still fires) — at most ONE unsealed family pending
 exists per session, so a family write has exactly one possible owner. A same-command re-run
-supersedes too (a retry is one operation).
+supersedes too (a retry is one operation). **The family is USER-CUSTOMIZABLE (COMMANDS.md §6a — the
+Settings cog's new "Commands" tab):** each command can be RENAMED (the typed word == the definition's
+file leaf `<name>.md`; stored normalized `NormalizeCommandName` + collision-healed
+`ResolveCommandNamePair` — the two names can never collide) and DISABLED (no definition materialized,
+no binding registered), both **applied at the NEXT START** (bindings register once at engine init; the
+tab's status lines stage `/old → /new after restart` off the engine-owned `command*MaterializedName`
+markers). A rename renders the definition text for the new name (`RenderShippedCommandText`,
+word-boundary token substitution) while the digest HISTORY stays default-name — identity checks
+substitute the name BACK before hashing (`NormalizeCommandBytesForIdentity`), so ANY shipped version
+is recognized under ANY name (custom-named pristine files still auto-upgrade); the init reconcile
+(`ReconcileHandoverCommandFiles`) then migrates a renamed/disabled command's OLD file away — deleted
+ONLY when byte-identical to something we shipped (a user-edited file is NEVER touched) — and the
+fan-out action names stay canonical `handover`/`handover-here`, so a rename never reaches the UI
+layer. (Two-install caveat: dev + release share `~/.claude/commands` with separate settings — the
+other install's init re-materializes ITS configured names.)
 **The `/handover <context-or-filepath>` integration:** engine init materializes the command DEFINITION
 `<claude-config>/commands/handover.md` (**create-if-absent + a VERSION-AWARE UPGRADE gated on SHA-256 —
 the ONE write outside the profile**: the shipped history is a list of **DIGESTS**
@@ -1663,7 +1680,14 @@ What works, by area:
   deliberately NOT the `lastActivityUnixMs` decay anchor, which launch/adopt/resume `SessionStart`s and the
   "Move to Waiting-for-you" triage promote stamp "now" with ZERO API traffic — the old ⚡ false positives
   ("shows right after adopting / after Move to Waiting-for-you / on a never-prompted launch"); Claude-only —
-  a managed Codex never shows it), `recentDirsLimit` (the path-picker MRU size, default 10), and (the
+  a managed Codex never shows it), `recentDirsLimit` (the path-picker MRU size, default 10), (the
+  **COMMANDS tab** — COMMANDS.md §6a) the **/handover-family customization** —
+  **`commandHandoverName`/`Enabled` + `commandHandoverHereName`/`Enabled`** (rename each command [the
+  typed word == the definition file `<name>.md`; normalized + collision-healed, per-command status
+  lines staging `/old → /new after restart`] or disable it entirely; **applies at the NEXT START** —
+  engine init binds + reconciles the definition files, migrating a renamed/disabled command's old
+  file away only when it is pristine-ours; the engine-owned `command*MaterializedName` markers are
+  preserved-from-disk on Save like the seed markers), and (the
   **NOTIFICATIONS tab** — **System notifications**) **`notificationsEnabled`** + the five per-target-state
   switches **`notifyOnWaiting`/`notifyOnNeedsApproval`/`notifyOnIdle`/`notifyOnDone`/`notifyOnError`** +
   **`notifySuppressFocused`** + **`notifySound`** (ALL default ON — a **Windows toast** whenever a managed

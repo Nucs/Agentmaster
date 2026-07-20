@@ -1151,6 +1151,13 @@ namespace winrt::TerminalApp::implementation
                     s.allowUpdatePrerelease = disk.allowUpdatePrerelease;
                     s.updateSkippedVersion = disk.updateSkippedVersion;
                     s.updatePostponedUntilUnixMs = disk.updatePostponedUntilUnixMs;
+                    // Slash commands (COMMANDS.md §6a): the MATERIALIZED-name markers are engine
+                    // reality (which name's definition file the last init wrote), RMW'd at engine
+                    // init — never form state. Preserve them like the seed markers so a cog Save
+                    // can't rewrite what is actually on disk (the next init's migration relies
+                    // on them to know which old file to clean up).
+                    s.commandHandoverMaterializedName = disk.commandHandoverMaterializedName;
+                    s.commandHandoverHereMaterializedName = disk.commandHandoverHereMaterializedName;
                 }
                 // Inferred-workdir inputs (mode / "Use .git folder to infer") — capture the change
                 // BEFORE adopting `s`, for the scan-state reset below.

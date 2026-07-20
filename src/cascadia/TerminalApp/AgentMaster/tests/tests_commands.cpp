@@ -782,6 +782,164 @@ void TestCommandWatch()
         ::RemoveDirectoryW(cfg.c_str());
     }
 
+    // ---- customizable command names (COMMANDS.md §6a): normalize / pair-heal / render / identity ----
+    {
+        // NormalizeCommandName: the strict ASCII slug every downstream layer agrees on.
+        CHECK(NormalizeCommandName(L"/Handover ") == L"handover", "names: leading '/' stripped, ASCII lowered, junk dropped");
+        CHECK(NormalizeCommandName(L"  /ho-2_x") == L"ho-2_x", "names: leading whitespace + '/' tolerated; -/_ and digits kept");
+        CHECK(NormalizeCommandName(L"My Cmd!") == L"mycmd", "names: spaces + punctuation dropped (a clean slug remains)");
+        CHECK(NormalizeCommandName(L"..\\evil/name") == L"evilname", "names: path separators + dots can never survive (the file-leaf safety)");
+        CHECK(NormalizeCommandName(L"").empty() && NormalizeCommandName(L"/ ").empty(), "names: blank/degenerate -> empty (the caller's fallback decides)");
+        CHECK(NormalizeCommandName(std::wstring(100, L'a')).size() == 64, "names: capped at 64 chars");
+        // ResolveCommandNamePair: normalize + default-fallback + collision-heal (deterministic).
+        {
+            std::wstring a, b;
+            ResolveCommandNamePair(a, b);
+            CHECK(a == L"handover" && b == L"handover-here", "pair: blanks -> the shipped defaults");
+            a = L"/HO ";
+            b = L"x y";
+            ResolveCommandNamePair(a, b);
+            CHECK(a == L"ho" && b == L"xy", "pair: each side normalizes independently");
+            a = L"same";
+            b = L"same";
+            ResolveCommandNamePair(a, b);
+            CHECK(a == L"same" && b == L"handover-here", "pair: a collision heals the HERE side to its default");
+            a = L"handover-here";
+            b = L"";
+            ResolveCommandNamePair(a, b);
+            CHECK(a == L"handover" && b == L"handover-here", "pair: /handover named 'handover-here' would still collide with the healed default -> BOTH fall back");
+        }
+        // RenderShippedCommandText / NormalizeCommandBytesForIdentity: exact inverses, word-boundary
+        // bounded (a "/am-cmd" substitution must never corrupt an "/am-cmd-here" mention).
+        {
+            static constexpr std::wstring_view kText = L"Type /am-cmd now (never /am-cmd-here); type `/am-cmd <x>`.\n";
+            CHECK(RenderShippedCommandText(kText, L"am-cmd", L"am-cmd") == kText, "render: the default name renders verbatim");
+            const std::wstring r = RenderShippedCommandText(kText, L"am-cmd", L"zz");
+            CHECK(r == L"Type /zz now (never /am-cmd-here); type `/zz <x>`.\n", "render: every bounded /am-cmd token renamed; the -here mention untouched (word boundary)");
+            CHECK(NormalizeCommandBytesForIdentity(Utf8Of(r), L"am-cmd", L"zz") == Utf8Of(kText), "identity: the byte normalization inverts the render exactly");
+            CHECK(NormalizeCommandBytesForIdentity(Utf8Of(kText), L"am-cmd", L"am-cmd") == Utf8Of(kText), "identity: default name -> bytes verbatim");
+        }
+        // The REAL definitions render clean: every "/<default>" mention takes the custom name and
+        // none survives (the self-invocation guard then tells the user to TYPE the right thing).
+        {
+            const std::wstring r = RenderShippedCommandText(ShippedHandoverCommandText(), kDefaultHandoverCommandName, L"ho");
+            CHECK(r.find(L"/ho") != std::wstring::npos && r.find(L"/handover") == std::wstring::npos, "render: the real /handover text carries only the custom name");
+            CHECK(r.find(L"HANDOVER-") != std::wstring::npos && r.find(L"Write tool") != std::wstring::npos, "render: the await's load-bearing signals survive a rename (leaf hint + Write tool)");
+            CHECK(Utf8Of(RenderShippedCommandText(ShippedHandoverCommandText(), kDefaultHandoverCommandName, kDefaultHandoverCommandName)) == Utf8Of(ShippedHandoverCommandText()), "render: default-name render is byte-identical (digest history stays valid)");
+            const std::wstring rh = RenderShippedCommandText(ShippedHandoverHereCommandText(), kDefaultHandoverHereCommandName, L"swap");
+            CHECK(rh.find(L"/swap") != std::wstring::npos && rh.find(L"/handover") == std::wstring::npos, "render: the real /handover-here text carries only the custom name");
+            CHECK(Sha256Hex(NormalizeCommandBytesForIdentity(Utf8Of(rh), kDefaultHandoverHereCommandName, L"swap")) == ShippedHandoverHereCommandHashes().back(), "identity: a custom-named CURRENT render digests back onto the history's last entry");
+        }
+    }
+
+    // ---- name-aware Ensure / Remove / Reconcile: the rename + disable migration POLICY ----
+    // Same synthetic-command discipline as the block above (real histories are digests only), now
+    // with texts that CARRY the command token so the render/identity path is exercised end to end.
+    {
+        wchar_t tmp[MAX_PATH];
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring cfg = std::wstring{ tmp } + L"am-shipped-cmd-rename";
+        const auto pathOf = [&cfg](std::wstring_view name) { return cfg + L"\\commands\\" + std::wstring{ name } + L".md"; };
+        const auto wipe = [&] {
+            for (const auto n : { L"am-cmd", L"zz", L"qq" })
+            {
+                ::DeleteFileW(pathOf(n).c_str());
+            }
+            ::RemoveDirectoryW((cfg + L"\\commands").c_str());
+            ::RemoveDirectoryW(cfg.c_str());
+        };
+        wipe();
+
+        static constexpr std::wstring_view kN1 = L"# shipped n1\nType /am-cmd to run.\nUse the Write tool.\n";
+        static constexpr std::wstring_view kN2 = L"# shipped n2 (current)\nType /am-cmd (see also /am-cmd-here).\nUse the Write tool.\n";
+        const std::string nh1 = Sha256Hex(Utf8Of(kN1));
+        const std::string nh2 = Sha256Hex(Utf8Of(kN2));
+        const std::vector<std::string_view> history{ nh1, nh2 };
+        const auto readAt = [](const std::wstring& p) {
+            std::ifstream f(std::filesystem::path{ p }, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        };
+        const auto layAt = [](const std::wstring& p, std::string_view body) {
+            std::ofstream f(std::filesystem::path{ p }, std::ios::binary | std::ios::trunc);
+            f.write(body.data(), static_cast<std::streamsize>(body.size()));
+        };
+        const auto renderedCurrent = [&](std::wstring_view name) { return Utf8Of(RenderShippedCommandText(kN2, L"am-cmd", name)); };
+
+        // Named Ensure: create under a custom name (rendered), upgrade a custom-named PRIOR
+        // version, never overwrite a user edit — the §6 policy through the identity seam.
+        CHECK(EnsureShippedCommandFileNamedIn(cfg, L"am-cmd", history, kN2, L"am-test", L"zz") == pathOf(L"zz") && readAt(pathOf(L"zz")) == renderedCurrent(L"zz"),
+              "named ensure: absent -> the custom-named RENDERED current text is created");
+        layAt(pathOf(L"zz"), Utf8Of(RenderShippedCommandText(kN1, L"am-cmd", L"zz")));
+        CHECK(EnsureShippedCommandFileNamedIn(cfg, L"am-cmd", history, kN2, L"am-test", L"zz") == pathOf(L"zz") && readAt(pathOf(L"zz")) == renderedCurrent(L"zz"),
+              "named ensure: a custom-named PRISTINE PRIOR version upgrades (identity through the name normalization)");
+        layAt(pathOf(L"zz"), "# my own zz command\n");
+        CHECK(EnsureShippedCommandFileNamedIn(cfg, L"am-cmd", history, kN2, L"am-test", L"zz") == pathOf(L"zz") && readAt(pathOf(L"zz")) == "# my own zz command\n",
+              "named ensure: a user-owned custom-named file is NEVER overwritten");
+        CHECK(EnsureShippedCommandFileNamedIn(cfg, L"am-cmd", history, kN2, L"am-test", L"").empty(), "named ensure: a blank name refuses (no leaf to build)");
+
+        // Ours-only Remove: pristine (ANY shipped version, incl. current) deletes; a user edit or
+        // an absent file does not.
+        CHECK(!RemoveShippedCommandFileNamedIn(cfg, L"am-cmd", history, L"am-test", L"zz") && readAt(pathOf(L"zz")) == "# my own zz command\n",
+              "remove: a user-owned file is LEFT IN PLACE (and reported not-deleted)");
+        layAt(pathOf(L"zz"), renderedCurrent(L"zz"));
+        CHECK(RemoveShippedCommandFileNamedIn(cfg, L"am-cmd", history, L"am-test", L"zz") && ::GetFileAttributesW(pathOf(L"zz").c_str()) == INVALID_FILE_ATTRIBUTES,
+              "remove: a pristine CURRENT custom-named file deletes (rename/disable migration)");
+        layAt(pathOf(L"zz"), Utf8Of(RenderShippedCommandText(kN1, L"am-cmd", L"zz")));
+        CHECK(RemoveShippedCommandFileNamedIn(cfg, L"am-cmd", history, L"am-test", L"zz"), "remove: a pristine PRIOR version deletes too (any shipped version is ours)");
+        CHECK(!RemoveShippedCommandFileNamedIn(cfg, L"am-cmd", history, L"am-test", L"zz"), "remove: an absent file is a no-op");
+
+        // Reconcile: the full engine-init story — materialize, rename-migrate, respect a user
+        // edit, disable, re-enable, and the enabled-but-blank fallback.
+        CHECK(ReconcileShippedCommandFileIn(cfg, L"am-cmd", history, kN2, L"am-test", L"", L"am-cmd", true) == L"am-cmd" && readAt(pathOf(L"am-cmd")) == Utf8Of(kN2),
+              "reconcile: first materialize under the default name (marker was empty)");
+        CHECK(ReconcileShippedCommandFileIn(cfg, L"am-cmd", history, kN2, L"am-test", L"am-cmd", L"zz", true) == L"zz",
+              "reconcile: rename returns the new marker");
+        CHECK(::GetFileAttributesW(pathOf(L"am-cmd").c_str()) == INVALID_FILE_ATTRIBUTES && readAt(pathOf(L"zz")) == renderedCurrent(L"zz"),
+              "reconcile: rename DELETED the pristine default file and materialized the custom one");
+        layAt(pathOf(L"zz"), "# my edited zz\n");
+        CHECK(ReconcileShippedCommandFileIn(cfg, L"am-cmd", history, kN2, L"am-test", L"zz", L"qq", true) == L"qq" &&
+                  readAt(pathOf(L"zz")) == "# my edited zz\n" && readAt(pathOf(L"qq")) == renderedCurrent(L"qq"),
+              "reconcile: a rename away from a USER-EDITED file leaves it in place (their command) and still materializes the new name");
+        CHECK(ReconcileShippedCommandFileIn(cfg, L"am-cmd", history, kN2, L"am-test", L"qq", L"qq", false).empty() &&
+                  ::GetFileAttributesW(pathOf(L"qq").c_str()) == INVALID_FILE_ATTRIBUTES,
+              "reconcile: DISABLE deletes the pristine file and returns an empty marker");
+        CHECK(ReconcileShippedCommandFileIn(cfg, L"am-cmd", history, kN2, L"am-test", L"", L"am-cmd", true) == L"am-cmd" && readAt(pathOf(L"am-cmd")) == Utf8Of(kN2),
+              "reconcile: RE-ENABLE from an empty marker just materializes again");
+        CHECK(ReconcileShippedCommandFileIn(cfg, L"am-cmd", history, kN2, L"am-test", L"am-cmd", L"", true) == L"am-cmd",
+              "reconcile: enabled-but-blank configured name falls back to the default (never 'enabled but nameless')");
+        wipe(); // (also clears the user-edited zz.md the rename-away test deliberately left behind)
+    }
+
+    // ---- AppSettings round-trip: the /handover-family customization fields (COMMANDS.md §6a) ----
+    {
+        AppSettings as;
+        as.commandHandoverName = L"ho";
+        as.commandHandoverEnabled = false;
+        as.commandHandoverHereName = L"swap";
+        as.commandHandoverHereEnabled = true;
+        as.commandHandoverMaterializedName = L""; // disabled last run — nothing materialized
+        as.commandHandoverHereMaterializedName = L"swap";
+        const auto back = AppSettingsFromJson(ToJson(as));
+        CHECK(back.commandHandoverName == L"ho" && !back.commandHandoverEnabled, "cmd settings: the /handover name + enable round-trip");
+        CHECK(back.commandHandoverHereName == L"swap" && back.commandHandoverHereEnabled, "cmd settings: the /handover-here name + enable round-trip");
+        CHECK(back.commandHandoverMaterializedName.empty(), "cmd settings: a PRESENT empty marker round-trips as empty (the disabled state, not the absent-key default)");
+        CHECK(back.commandHandoverHereMaterializedName == L"swap", "cmd settings: a custom marker round-trips");
+        const auto fresh = AppSettingsFromJson(json::Value::MkObj());
+        CHECK(fresh.commandHandoverName == L"handover" && fresh.commandHandoverEnabled &&
+                  fresh.commandHandoverHereName == L"handover-here" && fresh.commandHandoverHereEnabled,
+              "cmd settings: absent keys reproduce the shipped commands exactly");
+        CHECK(fresh.commandHandoverMaterializedName == L"handover" && fresh.commandHandoverHereMaterializedName == L"handover-here",
+              "cmd settings: absent markers read as the DEFAULT names (a pre-feature install has those files on disk to migrate)");
+        AppSettings col;
+        col.commandHandoverName = L"x";
+        col.commandHandoverHereName = L"x";
+        const auto healed = AppSettingsFromJson(ToJson(col));
+        CHECK(healed.commandHandoverName == L"x" && healed.commandHandoverHereName == L"handover-here", "cmd settings: a stored collision heals on load (HERE falls back)");
+        auto o = json::Value::MkObj(); // fresh object: json::Value::Set APPENDS and Find returns the FIRST hit, so a re-Set on a ToJson output would be shadowed
+        o.Set(L"commandHandoverMaterializedName", json::Value::MkStr(L"..\\evil"));
+        CHECK(AppSettingsFromJson(o).commandHandoverMaterializedName == L"evil", "cmd settings: a hand-edited marker normalizes (path chars can never reach the commands-dir delete)");
+    }
+
     // ---- EnsureHandoverCommandFileIn: create-if-absent under a TEMP config dir ----
     {
         wchar_t tmp[MAX_PATH];
