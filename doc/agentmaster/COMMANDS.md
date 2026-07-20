@@ -207,32 +207,32 @@ them).
      (`(handover 2)`, …) — the generalized `DeriveForkTitle` (which now delegates to it) — then
      bumped past any title already in the registry (live or archived), so sibling handovers from
      one origin never collide;
-   * **placement** — inserted at `originTab.TabViewIndex()+1`, beside the origin (the *New
-     Session Here* placement);
-   * **the handover message** — the CONTENT of EVERY collected md (`_HandleCommandHandover`
-     splits the payload via `SplitWatchPaths`, re-asserts sanity + existence PER PATH — a
-     vanished/insane subset is dropped with a log, only an empty survivor set drops the whole
-     action), delivered VERBATIM and **IN FULL** as the successor's **first user message** ("as
-     if the user typed it") — **NEVER truncated**. Each file goes through
-     `ReadHandoverDocumentPrompt` (4 MiB sanity cap per file — a ceiling on absurdity, not a
-     message bound; UTF-8 BOM stripped, CRLF → LF, stray C0 controls except `\n`/`\t` dropped —
-     which also makes the paste framing below injection-proof, since ESC can never survive into
-     the content — outer whitespace trimmed), and a multi-file set is JOINED in write order with
-     a blank line between the parts (one message, the parts in the order Claude authored them).
-     The DELIVERY then tiers on `PsEscapedCost` of the joined whole (the PsDoubleQuote cost
-     model — ` `` ` `"` `$` cost 2) against `kHandoverPromptEscapedBudget` (11,500 — the size
-     math in step 5):
-       - **fits** → the launch commandline's positional prompt (the zero-race channel);
-       - **over budget** → the FULL document rides the **ConPTY stdin instead — a streamed pipe
-         with NO CreateProcessW ceiling**: parked as a Pending prompt at the FRONT of the
-         successor's queue (the durable, visible carrier — Auto Testing lists it, Send-now can
-         deliver it manually, a restart keeps it) and paste-injected by
-         `_PumpHandoverInjections` (below) the moment the session actually starts;
-       - **every file unreadable / whitespace-only / beyond-cap** (a rewrite-in-flight race past
-         the §7 re-asserts) → the pointer-style prompt naming ALL the files (`Read the handover
-         document(s) at <p1> ; <p2> …`), logged — the handover still functions and nothing was
-         silently cut (a partially-readable set proceeds with what read back).
-     `handover-done` carries `inject=content|paste|pointer`.
+   * **FAN-OUT — one successor PER collected file** (`_HandleCommandHandover` splits the payload
+     via `SplitWatchPaths`, re-asserts sanity + existence PER PATH — a vanished/insane subset is
+     dropped with a log, only an empty survivor set drops the whole action): one typed
+     `/handover` writing N files hands off to **N parallel successor sessions**, in write order,
+     each file becoming ITS successor's **first user message** ("as if the user typed it") —
+     VERBATIM, **IN FULL**, **NEVER truncated**. Titles chain per successor (`(handover)` →
+     `(handover 2)` → … — each registers before the next derives);
+   * **placement** — sequential slots starting at `originTab.TabViewIndex()+1`, so write order
+     reads left-to-right on the strip (the *New Session Here* placement, generalized);
+   * **per-file delivery** — each file goes through `ReadHandoverDocumentPrompt` (4 MiB sanity
+     cap per file — a ceiling on absurdity, not a message bound; UTF-8 BOM stripped, CRLF → LF,
+     stray C0 controls except `\n`/`\t` dropped — which also makes the paste framing below
+     injection-proof, since ESC can never survive into the content — outer whitespace trimmed),
+     then tiers on ITS OWN `PsEscapedCost` (the PsDoubleQuote cost model — ` `` ` `"` `$` cost
+     2) against `kHandoverPromptEscapedBudget` (11,500 — the size math in step 5):
+       - **fits** → that successor's launch commandline positional prompt (the zero-race channel);
+       - **over budget** → that file rides the **ConPTY stdin instead — a streamed pipe with NO
+         CreateProcessW ceiling**: parked as a Pending prompt at the FRONT of ITS successor's
+         queue (the durable, visible carrier — Auto Testing lists it, Send-now can deliver it
+         manually, a restart keeps it) and paste-injected by `_PumpHandoverInjections` (below)
+         the moment that session actually starts;
+       - **unreadable / whitespace-only / beyond-cap** (a rewrite-in-flight race past the §7
+         re-asserts) → that successor gets the pointer-style prompt naming its file, so its
+         handover still functions and nothing was silently cut.
+     `handover-done` carries parallel per-file lists: `new=<sid8>,<sid8> …
+     inject=content,paste` (position i == file i; a failed spawn logs `(failed)` at its position).
    * **the paste pump** (`TerminalPage::_PumpHandoverInjections`, ticked by the scanner's
      liveness probe ~2.5s): waits for `SessionInfo.started` (the control initialized and
      `Start()` ran — a pre-Connected `WriteInput` is SILENTLY dropped by ConPTY, so injecting
@@ -272,11 +272,12 @@ them).
 
 **`/handover-here <context-or-filepath>`** reuses the ENTIRE /handover pipeline — the same
 markdown await (same `"handover"` leaf preference; its definition instructs the same
-`HANDOVER-<topic>.md` name), the same §5 guards/title/dir resolution, and the same three
-delivery tiers — and differs in exactly ONE step: **where the successor lives**. Instead of a
-new tab beside the origin, the hosting window **REPLACES the origin tab in place**
+`HANDOVER-<topic>.md` name), the same §5 guards/title/dir resolution, the same per-file
+delivery tiers and fan-out — and differs in exactly ONE step: **where the FIRST successor
+lives**. The FIRST collected file's successor **REPLACES the origin tab in place**
 (`TerminalPage::_RestartTabIntoFreshSession`, dispatched by `_HandleCommandHandover`'s
-`inPlace` flag):
+`inPlace` flag); each ADDITIONAL file's successor opens as a new tab beside it (the §5
+fan-out):
 
 * **The spawn is "Open New Session Here → Default"** — a brand-new FRESH conversation:
   `BuildClaudeSpawn` with a newly minted id, NO resume/fork, NO model override (the settings
@@ -347,10 +348,15 @@ Claude that the file's content is injected VERBATIM as the successor's first use
 the document must be written AS a direct, self-contained briefing TO the successor (imperative,
 second person). **V3 (never truncate)** drops V2's "long documents truncate to a pointer"
 caution — the document is delivered IN FULL whatever its size (the paste tier, §5), so
-thoroughness is encouraged, not traded against delivery. **V4 (multi-file)** permits a
-genuinely-better-split briefing — "you may write MORE THAN ONE `HANDOVER-*.md` file in this
-same turn - all of them are delivered together, in the order written" (the §3 collection; ONE
-file stays the recommendation). `handover-here.md` **V2** carries the same line.
+thoroughness is encouraged, not traded against delivery. **V4 (multi-file)** permitted a
+split briefing delivered joined; `handover-here.md` **V2** carried the same line. **V6 /
+handover-here V4 (FAN-OUT — the current semantics)** supersede that: "EACH `HANDOVER-*.md`
+file you write in this turn starts its OWN successor tab, in write order" — one command
+writing N files fans out N parallel successors, so every file must be a SELF-CONTAINED
+briefing to a DIFFERENT session ("never write 'continue in file B'" — the live multi-file
+test's origin wrote exactly that cross-reference under the join semantics, which the fan-out
+text now prevents); handover-here's first file replaces the origin tab, additional files open
+beside it.
 **V5 / handover-here V3 (the SELF-INVOCATION guard — found by a live skill-creator review):**
 Claude Code lists the commands as invocable SKILLS, but a MODEL-initiated Skill invocation
 writes **no `<command-name>` transcript echo** (proven empirically against a live transcript —
@@ -479,8 +485,9 @@ line alone pins the throw site later):
   md + args (the explicit repeatability requirement). Scenario E: the same session replayed
   with 2-hour-old timestamps (the restart/adopt history read) never arms — no ghost successor
   tabs on reopen. Scenario F: **one /handover writing TWO real HANDOVER files → ONE fire
-  carrying both in write order** (default disk probe; the joined first message reads back part 1
-  then part 2). Scenario G: **the restart story over a durable store** — run 1 fires; the
+  carrying both in write order** (default disk probe; each file reads back as ITS OWN
+  successor's first message — the action fans out one successor per file). Scenario G: **the
+  restart story over a durable store** — run 1 fires; the
   restarted instance replays the same still-fresh history and never re-fires (the watermark);
   and an armed-but-unresolved command from run 1 REVIVES in run 2's replay (echo now stale) and
   completes exactly once. Scenario H: **the family-race pivot** — /handover answered with a

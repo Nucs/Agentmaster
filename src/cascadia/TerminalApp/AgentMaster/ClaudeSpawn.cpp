@@ -1241,9 +1241,55 @@ a successor session tab (named like this one, ending in "(handover)") in this wo
 directory and injects your document(s) as its opening user message.
 )md";
 
+    // V6 (fan-out): the delivery semantics changed by request — each HANDOVER-*.md now starts its
+    // OWN successor tab (one command writing N files == N parallel successors, in write order)
+    // instead of all files joining into one successor's message. The definition must therefore
+    // brief each file as a SELF-CONTAINED briefing to a DIFFERENT session (the live multi-file
+    // test's origin wrote "Continue to file B below" — correct under the join, wrong under the
+    // fan-out; this text prevents that).
+    static constexpr std::wstring_view kHandoverCommandV6 =
+        LR"md(---
+description: Hand this session's work over to a fresh successor session (Agentmaster opens it automatically)
+---
+The user wants to HAND OVER this session's work to a fresh successor Claude session.
+Handover context from the user (inline context, or a path to a file you should read and fold in):
+
+$ARGUMENTS
+
+IMPORTANT - this pipeline is triggered ONLY by the user actually TYPING /handover as their
+message (Agentmaster detects the typed command's transcript echo; a model-initiated Skill
+invocation leaves no such echo, so nothing would be watching). If you are reading this because
+YOU invoked the skill yourself rather than the user typing /handover: do NOT write any
+handover file - tell the user to type `/handover <context>` themselves, then continue what
+you were doing.
+
+Do this NOW, in this exact order:
+1. If the context above names a readable file, read it first and incorporate it.
+2. Using the Write tool (NOT a shell redirect - the Write tool call itself is the signal
+   Agentmaster detects), create ONE new markdown file in the current working directory named
+   `HANDOVER-<short-topic>.md` (pick a short kebab-case topic slug; if that name already
+   exists, append `-2`, `-3`, ...). EACH `HANDOVER-*.md` file you write in this turn starts
+   its OWN successor tab, in write order - so write ONE file for one successor, or write
+   MORE THAN ONE file to fan out several parallel successors at once.
+3. Each file's CONTENT is injected VERBATIM as ITS successor session's FIRST USER MESSAGE - so
+   write every file as a direct briefing TO that successor (imperative, second person), fully
+   self-contained: the goal, the current state, decisions made and why, work completed, work
+   still in flight, concrete ordered next steps, key file paths (absolute), and any gotchas
+   or constraints discovered along the way. A successor has NO other context, cannot see this
+   conversation, and cannot see the OTHER files (each goes to a different session - never
+   write "continue in file B"). Each file is delivered as ONE message whatever its size - be
+   as thorough as the work demands.
+4. End your turn right after writing the file(s) (a one-line confirmation is fine). Do not
+   start new work.
+
+Agentmaster is watching for those markdown writes: when your turn ends it automatically opens
+a successor session tab PER FILE (named like this one, ending in "(handover)", "(handover 2)",
+...) in this working directory and injects each document as its own tab's opening user message.
+)md";
+
     const std::vector<std::wstring_view>& ShippedHandoverCommandHistory()
     {
-        static const std::vector<std::wstring_view> kHistory{ kHandoverCommandV1, kHandoverCommandV2, kHandoverCommandV3, kHandoverCommandV4, kHandoverCommandV5 };
+        static const std::vector<std::wstring_view> kHistory{ kHandoverCommandV1, kHandoverCommandV2, kHandoverCommandV3, kHandoverCommandV4, kHandoverCommandV5, kHandoverCommandV6 };
         return kHistory;
     }
 
@@ -1368,9 +1414,54 @@ RESTARTS THIS TAB into a fresh successor session in this working directory and i
 document(s) as its opening user message.
 )md";
 
+    // V4 (fan-out): the /handover V6 semantics for the in-place twin — the FIRST file's successor
+    // REPLACES this tab, each additional file opens its own tab beside it.
+    static constexpr std::wstring_view kHandoverHereCommandV4 =
+        LR"md(---
+description: Hand this session's work over to a fresh session that REPLACES this one in this same tab (Agentmaster restarts the tab automatically)
+---
+The user wants to HAND OVER this session's work to a fresh successor Claude session that
+REPLACES this conversation IN THIS SAME TAB - Agentmaster restarts the tab into the
+successor automatically; this conversation is archived and stays resumable from the
+Sessions browser.
+Handover context from the user (inline context, or a path to a file you should read and fold in):
+
+$ARGUMENTS
+
+IMPORTANT - this pipeline is triggered ONLY by the user actually TYPING /handover-here as
+their message (Agentmaster detects the typed command's transcript echo; a model-initiated
+Skill invocation leaves no such echo, so nothing would be watching and no tab would ever be
+replaced). If you are reading this because YOU invoked the skill yourself rather than the
+user typing /handover-here: do NOT write any handover file - tell the user to type
+`/handover-here <context>` themselves, then continue what you were doing.
+
+Do this NOW, in this exact order:
+1. If the context above names a readable file, read it first and incorporate it.
+2. Using the Write tool (NOT a shell redirect - the Write tool call itself is the signal
+   Agentmaster detects), create ONE new markdown file in the current working directory named
+   `HANDOVER-<short-topic>.md` (pick a short kebab-case topic slug; if that name already
+   exists, append `-2`, `-3`, ...). EACH `HANDOVER-*.md` file you write in this turn starts
+   its OWN successor, in write order: the FIRST file's successor REPLACES this tab, and each
+   additional file (you may write MORE THAN ONE) opens its own new tab beside it.
+3. Each file's CONTENT is injected VERBATIM as ITS successor session's FIRST USER MESSAGE - so
+   write every file as a direct briefing TO that successor (imperative, second person), fully
+   self-contained: the goal, the current state, decisions made and why, work completed, work
+   still in flight, concrete ordered next steps, key file paths (absolute), and any gotchas
+   or constraints discovered along the way. A successor has NO other context, cannot see this
+   conversation, and cannot see the OTHER files (each goes to a different session - never
+   write "continue in file B"). Each file is delivered as ONE message whatever its size - be
+   as thorough as the work demands.
+4. End your turn right after writing the file(s) (a one-line confirmation is fine). Do not
+   start new work - this session is about to be replaced.
+
+Agentmaster is watching for those markdown writes: when your turn ends it automatically
+RESTARTS THIS TAB into the first file's successor session (and opens a new tab per additional
+file) in this working directory, injecting each document as its session's opening user message.
+)md";
+
     const std::vector<std::wstring_view>& ShippedHandoverHereCommandHistory()
     {
-        static const std::vector<std::wstring_view> kHistory{ kHandoverHereCommandV1, kHandoverHereCommandV2, kHandoverHereCommandV3 };
+        static const std::vector<std::wstring_view> kHistory{ kHandoverHereCommandV1, kHandoverHereCommandV2, kHandoverHereCommandV3, kHandoverHereCommandV4 };
         return kHistory;
     }
 

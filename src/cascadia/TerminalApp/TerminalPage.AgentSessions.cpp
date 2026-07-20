@@ -223,16 +223,18 @@ namespace winrt::TerminalApp::implementation
     // instructed to Write now exists on disk. Every window's command-action sink lands here (UI
     // thread, via the engine fan-out); ONLY the window hosting the origin session's tab acts.
     // COMMON to both commands: same effective working dir (the "Open New Session Here" semantics),
-    // titled "<origin title> (handover)" (bumping to "(handover 2)"/… against titles already in the
-    // registry, so sibling handovers from one origin never collide), and the markdown's CONTENT
-    // delivered VERBATIM and IN FULL as the successor's FIRST USER MESSAGE (the three delivery
-    // tiers below — commandline positional prompt / bracketed-paste stdin / pointer fallback). They
-    // differ ONLY in where the successor lives: /handover spawns a NEW tab right beside the origin;
-    // /handover-here REPLACES the origin tab in place (_RestartTabIntoFreshSession — the
-    // Restart-session swap into a fresh "New Session Here -> Default" conversation; the origin is
-    // archived, resumable from the Sessions browser), DEGRADING to the new-tab spawn when the
-    // in-place swap is unavailable so the handover itself is never lost. Repeatable by design —
-    // every /handover(-here) in a conversation creates its own successor.
+    // "<origin title> (handover)"-chained titles, and FAN-OUT delivery — EACH collected
+    // HANDOVER-*.md starts its OWN successor session whose FIRST USER MESSAGE is that file's
+    // CONTENT, VERBATIM and IN FULL (the per-file delivery tiers below — commandline positional
+    // prompt / bracketed-paste stdin / pointer fallback): one command writing N files hands off to
+    // N parallel successors, in write order. They differ ONLY in where the FIRST successor lives:
+    // /handover spawns every successor as a NEW tab right of the origin; /handover-here's first
+    // file REPLACES the origin tab in place (_RestartTabIntoFreshSession — the Restart-session
+    // swap into a fresh "New Session Here -> Default" conversation; the origin is archived,
+    // resumable from the Sessions browser) with any additional files' successors beside it,
+    // DEGRADING to the new-tab spawn when the in-place swap is unavailable so the handover itself
+    // is never lost. Repeatable by design — every /handover(-here) in a conversation creates its
+    // own successor(s).
     void TerminalPage::_HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPayload, bool inPlace)
     try
     {
@@ -294,131 +296,131 @@ namespace winrt::TerminalApp::implementation
         // ambiguous). DeriveSuffixedTitle bumps its own trailing group, so re-deriving from the
         // last candidate walks (handover) -> (handover 2) -> (handover 3) …; the cap is a
         // pathological-registry guard, not a real limit.
-        std::wstring successorTitle = ::Agentmaster::DeriveSuffixedTitle(s->title, L"handover");
-        {
-            const auto sessions = _sessionRegistry->Snapshot();
-            const auto taken = [&sessions](const std::wstring& t) {
-                for (const auto& x : sessions)
-                {
-                    if (x.title == t)
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            };
-            for (int i = 0; i < 50 && taken(successorTitle); ++i)
-            {
-                successorTitle = ::Agentmaster::DeriveSuffixedTitle(successorTitle, L"handover");
-            }
-        }
-
-        // Land the successor right beside the origin tab (the "New Session Here" placement).
-        uint32_t insertPosition = static_cast<uint32_t>(-1);
+        // FAN-OUT delivery (COMMANDS.md §5): EACH collected HANDOVER-*.md starts its OWN
+        // successor — one typed /handover writing N files hands off to N parallel successor
+        // sessions, in write order, each file becoming ITS successor's first user message.
+        // (The original join-into-one-successor semantics is superseded by design: "two
+        // HANDOVER-*.md files start TWO tabs, one for message a and one for message b".)
+        // Per file:
+        //   * title — "<origin title> (handover)", bumped past titles the registry already holds
+        //     (live OR archived — two identical rows in the Sessions browser would be ambiguous;
+        //     DeriveSuffixedTitle bumps its own trailing group). Each successor REGISTERS before
+        //     the next file's title derives (a fresh per-file snapshot), so a fan-out chains
+        //     (handover) -> (handover 2) -> (handover 3) naturally; the cap is a
+        //     pathological-registry guard, not a real limit;
+        //   * placement — sequential slots right of the origin tab, so write order reads
+        //     left-to-right on the strip. /handover-here's FIRST file REPLACES the origin tab in
+        //     place instead (_RestartTabIntoFreshSession; a refused/failed swap DEGRADES to the
+        //     new-tab spawn — losing the in-place nicety beats losing the handover), and each
+        //     ADDITIONAL file opens its own tab beside it;
+        //   * delivery — the file's CONTENT, VERBATIM and IN FULL, NEVER truncated, through the
+        //     per-file tiers: fits the escape-aware commandline threshold (PsEscapedCost <=
+        //     kHandoverPromptEscapedBudget) -> the launch commandline's positional prompt (the
+        //     zero-race channel; both CreateProcessW hops cap at 32,767 chars, hence the tier);
+        //     over it -> parked as a Pending prompt on THAT successor's queue and injected as ONE
+        //     bracketed paste by _PumpHandoverInjections once its session starts (the ConPTY
+        //     stdin has no size ceiling); unreadable/whitespace-only/beyond-sanity-cap -> that
+        //     successor gets the pointer-style prompt naming its file, so its handover still
+        //     functions and nothing was silently cut.
+        uint32_t nextInsert = static_cast<uint32_t>(-1); // -1 == end/NewTabPosition default
         if (const auto originTab = tabIt->second.get())
         {
-            insertPosition = originTab.TabViewIndex() + 1;
+            nextInsert = originTab.TabViewIndex() + 1;
         }
-
-        // The handover message for the new tab IS the markdown — the CONTENT of EVERY collected
-        // file, delivered VERBATIM and IN FULL as the successor's first user message ("as if the
-        // user typed it"), NEVER truncated (COMMANDS.md §5). A multi-file handover joins the
-        // documents in write order with a blank line between them (one message, the parts in the
-        // order Claude authored them). Three delivery tiers:
-        //   * content fits the commandline's escape-aware threshold (PsEscapedCost <=
-        //     kHandoverPromptEscapedBudget) -> the launch commandline's positional prompt (the
-        //     zero-race channel; one PS double-quoted arg inside -EncodedCommand — nothing is
-        //     typed into a TUI, so multi-line is safe, but BOTH CreateProcessW hops cap at
-        //     32,767 chars, hence the tier);
-        //   * over the threshold -> the FULL document rides the ConPTY stdin instead (no size
-        //     ceiling): queued as a Pending prompt on the successor and injected as ONE bracketed
-        //     paste by _PumpHandoverInjections once the session has actually started — the
-        //     Send-now recipe, so echo dedup + the Enter-retry watchdog back the submit;
-        //   * every file unreadable/whitespace-only/beyond-sanity-cap (a rewrite-in-flight race
-        //     past the re-asserts above) -> the pointer-style prompt naming ALL the files, so the
-        //     handover still functions and nothing was silently cut.
-        std::wstring content;
-        for (const auto& p : mdPaths)
-        {
-            const std::wstring part = ::Agentmaster::ReadHandoverDocumentPrompt(p);
-            if (part.empty())
-            {
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" md unreadable at spawn (skipped from the message): " + p + L"\n");
-                continue;
-            }
-            if (!content.empty())
-            {
-                content += L"\n\n";
-            }
-            content += part;
-        }
-        const bool fitsCommandline = !content.empty() && ::Agentmaster::PsEscapedCost(content) <= ::Agentmaster::kHandoverPromptEscapedBudget;
-        std::wstring launchPrompt; // the commandline tier's positional prompt ("" for the paste tier)
-        const wchar_t* injectMode = L" inject=paste";
-        if (content.empty())
-        {
-            launchPrompt = L"Read the handover document" + std::wstring{ mdPaths.size() == 1 ? L" at " : L"s at " };
-            for (size_t i = 0; i < mdPaths.size(); ++i)
-            {
-                if (i > 0)
-                {
-                    launchPrompt += L" ; ";
-                }
-                launchPrompt += mdPaths[i];
-            }
-            launchPrompt += mdPaths.size() == 1 ? L" and continue the work it describes." : L" and continue the work they describe.";
-            injectMode = L" inject=pointer";
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" no readable md content at spawn - falling back to the pointer prompt: " + ::Agentmaster::JoinWatchPaths(mdPaths) + L"\n");
-        }
-        else if (fitsCommandline)
-        {
-            launchPrompt = content;
-            injectMode = L" inject=content";
-        }
-
-        // Create the successor. /handover-here (inPlace): REPLACE the origin tab via the
-        // Restart-session swap; a refused/failed swap (origin tab torn down mid-hop, a dormant
-        // control, a failed connection build) DEGRADES to the classic new-tab spawn — losing the
-        // in-place nicety beats losing the handover.
-        std::wstring newId;
+        std::wstring doneIds; // the -done nav line's parallel per-file lists (position i == file i)
+        std::wstring doneModes;
         bool inPlaceFellBack = false;
-        if (inPlace)
+        for (size_t fileIdx = 0; fileIdx < mdPaths.size(); ++fileIdx)
         {
-            if (const auto originTab = tabIt->second.get())
+            const std::wstring& mdPath = mdPaths[fileIdx];
+            // Per-file successor title — re-snapshot each iteration: the previous file's
+            // successor is already Upserted, so the bump walks the chain instead of colliding.
+            std::wstring successorTitle = ::Agentmaster::DeriveSuffixedTitle(s->title, L"handover");
             {
-                newId = _RestartTabIntoFreshSession(originTab, *s, dir, successorTitle, launchPrompt);
+                const auto sessions = _sessionRegistry->Snapshot();
+                const auto taken = [&sessions](const std::wstring& t) {
+                    for (const auto& x : sessions)
+                    {
+                        if (x.title == t)
+                        {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                for (int i = 0; i < 50 && taken(successorTitle); ++i)
+                {
+                    successorTitle = ::Agentmaster::DeriveSuffixedTitle(successorTitle, L"handover");
+                }
+            }
+            const std::wstring content = ::Agentmaster::ReadHandoverDocumentPrompt(mdPath);
+            const bool fitsCommandline = !content.empty() && ::Agentmaster::PsEscapedCost(content) <= ::Agentmaster::kHandoverPromptEscapedBudget;
+            std::wstring launchPrompt; // the commandline tier's positional prompt ("" for the paste tier)
+            const wchar_t* injectMode = L"paste";
+            if (content.empty())
+            {
+                launchPrompt = L"Read the handover document at " + mdPath + L" and continue the work it describes.";
+                injectMode = L"pointer";
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" md unreadable at spawn - falling back to the pointer prompt: " + mdPath + L"\n");
+            }
+            else if (fitsCommandline)
+            {
+                launchPrompt = content;
+                injectMode = L"content";
+            }
+
+            std::wstring newId;
+            if (inPlace && fileIdx == 0)
+            {
+                // /handover-here: the FIRST file's successor takes over the origin tab itself.
+                if (const auto originTab = tabIt->second.get())
+                {
+                    newId = _RestartTabIntoFreshSession(originTab, *s, dir, successorTitle, launchPrompt);
+                }
+                if (newId.empty())
+                {
+                    inPlaceFellBack = true;
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-here] " + ::Agentmaster::ShortId(sessionId) + L" in-place restart unavailable - falling back to a NEW successor tab beside the origin\n");
+                }
             }
             if (newId.empty())
             {
-                inPlaceFellBack = true;
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-here] " + ::Agentmaster::ShortId(sessionId) + L" in-place restart unavailable - falling back to a NEW successor tab beside the origin\n");
+                const auto successorTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ successorTitle }, std::nullopt, {}, nextInsert, {}, launchPrompt);
+                newId = successorTab ? _ClaudeSessionForTab(successorTab) : std::wstring{};
+                if (!newId.empty() && nextInsert != static_cast<uint32_t>(-1))
+                {
+                    ++nextInsert; // the next file's tab lands right of this one (write order == strip order)
+                }
             }
+            if (!newId.empty() && !content.empty() && !fitsCommandline)
+            {
+                // The over-budget tier: park THIS file's FULL document on ITS successor's queue
+                // (Pending — the durable, visible carrier: Auto Testing lists it, Send-now can
+                // deliver it manually, and a restart keeps it) and arm the pump to paste-inject
+                // it once the session starts.
+                ::Agentmaster::QueuedPrompt qp;
+                qp.id = ::Agentmaster::NewSessionId();
+                std::wstring label = content.substr(0, 56);
+                std::replace(label.begin(), label.end(), L'\n', L' ');
+                std::replace(label.begin(), label.end(), L'\r', L' ');
+                qp.label = label;
+                qp.text = content;
+                qp.status = ::Agentmaster::PromptStatus::Pending;
+                _sessionRegistry->Update(newId, [&](::Agentmaster::SessionInfo& ss) {
+                    ss.queue.insert(ss.queue.begin(), qp); // FRONT: the handover brief precedes anything else ever queued
+                });
+                _pendingHandoverInjections[newId] = PendingHandoverInjection{ qp.id, static_cast<int64_t>(::GetTickCount64()), 0 };
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(newId) + L" document over the commandline tier (escaped cost " + std::to_wstring(::Agentmaster::PsEscapedCost(content)) + L" > " + std::to_wstring(::Agentmaster::kHandoverPromptEscapedBudget) + L") - queued FULL document for paste-injection\n");
+            }
+            if (fileIdx > 0)
+            {
+                doneIds += L",";
+                doneModes += L",";
+            }
+            doneIds += newId.empty() ? std::wstring{ L"(failed)" } : ::Agentmaster::ShortId(newId);
+            doneModes += injectMode;
         }
-        if (newId.empty())
-        {
-            const auto successorTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ successorTitle }, std::nullopt, {}, insertPosition, {}, launchPrompt);
-            newId = successorTab ? _ClaudeSessionForTab(successorTab) : std::wstring{};
-        }
-        if (!newId.empty() && !content.empty() && !fitsCommandline)
-        {
-            // The over-budget tier: park the FULL document on the successor's queue (Pending — the
-            // durable, visible carrier: Auto Testing lists it, Send-now can deliver it manually,
-            // and a restart keeps it) and arm the pump to paste-inject it once the session starts.
-            ::Agentmaster::QueuedPrompt qp;
-            qp.id = ::Agentmaster::NewSessionId();
-            std::wstring label = content.substr(0, 56);
-            std::replace(label.begin(), label.end(), L'\n', L' ');
-            std::replace(label.begin(), label.end(), L'\r', L' ');
-            qp.label = label;
-            qp.text = content;
-            qp.status = ::Agentmaster::PromptStatus::Pending;
-            _sessionRegistry->Update(newId, [&](::Agentmaster::SessionInfo& ss) {
-                ss.queue.insert(ss.queue.begin(), qp); // FRONT: the handover brief precedes anything else ever queued
-            });
-            _pendingHandoverInjections[newId] = PendingHandoverInjection{ qp.id, static_cast<int64_t>(::GetTickCount64()), 0 };
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(newId) + L" document over the commandline tier (escaped cost " + std::to_wstring(::Agentmaster::PsEscapedCost(content)) + L" > " + std::to_wstring(::Agentmaster::kHandoverPromptEscapedBudget) + L") - queued FULL document for paste-injection\n");
-        }
-        ::Agentmaster::LogNav(navTag + L"-done " + (newId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(newId))) + L" from=" + ::Agentmaster::ShortId(sessionId) + injectMode + (inPlaceFellBack ? L" (fallback=new-tab)" : L""));
+        ::Agentmaster::LogNav(navTag + L"-done new=" + doneIds + L" from=" + ::Agentmaster::ShortId(sessionId) + L" inject=" + doneModes + (inPlaceFellBack ? L" (fallback=new-tab)" : L""));
     }
     catch (...)
     {

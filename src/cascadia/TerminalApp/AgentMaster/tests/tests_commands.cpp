@@ -702,12 +702,13 @@ void TestCommandWatch()
         // untouched — it silently upgrades to the current text on the next ensure.
         {
             const auto& history = ShippedHandoverCommandHistory();
-            CHECK(history.size() >= 5 && history.back().find(L"injected VERBATIM") != std::wstring_view::npos, "shipped history: >= 5 versions, current is the content-injection text");
+            CHECK(history.size() >= 6 && history.back().find(L"injected VERBATIM") != std::wstring_view::npos, "shipped history: >= 6 versions, current is the content-injection text");
             CHECK(history.back().find(L"whatever its size") != std::wstring_view::npos &&
                       history.back().find(L"truncated") == std::wstring_view::npos,
                   "current definition promises FULL delivery (never-truncate) and carries no truncation caution");
-            CHECK(history.back().find(L"MORE THAN ONE") != std::wstring_view::npos, "current definition permits a split multi-file briefing (V4 — all files are delivered)");
+            CHECK(history.back().find(L"MORE THAN ONE") != std::wstring_view::npos, "current definition permits writing several HANDOVER files in one turn");
             CHECK(history.back().find(L"YOU invoked the skill yourself") != std::wstring_view::npos, "current definition carries the SELF-INVOCATION guard (V5 — a model-invoked skill writes no command echo, so nothing watches; redirect the user to TYPE the command)");
+            CHECK(history.back().find(L"its OWN successor") != std::wstring_view::npos, "current definition briefs the FAN-OUT semantics (V6 — each file starts its OWN successor tab; files must be self-contained)");
             const auto utf8Of = [](std::wstring_view w) {
                 std::string out;
                 const int need = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
@@ -766,9 +767,10 @@ void TestCommandWatch()
         }
         {
             const auto& history = ShippedHandoverHereCommandHistory();
-            CHECK(history.size() >= 3 && history.back().find(L"RESTARTS THIS TAB") != std::wstring_view::npos, "shipped handover-here history: >= 3 versions; the current text names the in-place restart");
-            CHECK(history.back().find(L"MORE THAN ONE") != std::wstring_view::npos, "current handover-here definition permits a split multi-file briefing (V2)");
+            CHECK(history.size() >= 4 && history.back().find(L"RESTARTS THIS TAB") != std::wstring_view::npos, "shipped handover-here history: >= 4 versions; the current text names the in-place restart");
+            CHECK(history.back().find(L"MORE THAN ONE") != std::wstring_view::npos, "current handover-here definition permits writing several HANDOVER files in one turn");
             CHECK(history.back().find(L"YOU invoked the skill yourself") != std::wstring_view::npos, "current handover-here definition carries the SELF-INVOCATION guard (V3)");
+            CHECK(history.back().find(L"its OWN successor") != std::wstring_view::npos && history.back().find(L"FIRST file's successor REPLACES this tab") != std::wstring_view::npos, "current handover-here definition briefs the FAN-OUT semantics (V4 — first file replaces this tab, additional files open beside it)");
         }
         // A user edit is NEVER overwritten (the shared create-if-absent + upgrade discipline —
         // EnsureShippedCommandFileIn is the one core both wrappers share).
@@ -1079,12 +1081,12 @@ void TestCommandHandoverE2E()
         FeedParsedEvents(w, sid, dir, ParseTranscriptDelta(content), now);
         CHECK(fired.size() == 1, "scenario F: one fire for the whole multi-file command");
         CHECK(!fired.empty() && (fired[0].mdPaths == std::vector<std::wstring>{ mdPath, mdPathB }), "scenario F: both HANDOVER files ride the fire, in write order");
-        // The successor's first message: the parts joined in write order (what
-        // _HandleCommandHandover assembles from the path set).
+        // FAN-OUT delivery: each fired path reads back as ITS OWN successor's first user message
+        // (_HandleCommandHandover spawns one successor per file, in this order).
         if (!fired.empty() && fired[0].mdPaths.size() == 2)
         {
-            const std::wstring joined = ReadHandoverDocumentPrompt(fired[0].mdPaths[0]) + L"\n\n" + ReadHandoverDocumentPrompt(fired[0].mdPaths[1]);
-            CHECK(joined.find(L"# Handover") == 0 && joined.rfind(L"Appendix: the gotchas.") != std::wstring::npos, "scenario F: the joined message carries part 1 then part 2");
+            CHECK(ReadHandoverDocumentPrompt(fired[0].mdPaths[0]).find(L"# Handover") == 0, "scenario F: file A's content is successor 1's first message");
+            CHECK(ReadHandoverDocumentPrompt(fired[0].mdPaths[1]).rfind(L"Appendix: the gotchas.") != std::wstring::npos, "scenario F: file B's content is successor 2's first message");
         }
     }
 

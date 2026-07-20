@@ -769,7 +769,7 @@ tag no session carries lists at **·0** (sorts last).
 ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
 HARDENED, delivery = FULL CONTENT INJECTION (never truncated), RESTART-RESILIENT (durable
 per-session progress) + MULTI-FILE (one command's several HANDOVER files consumed as one):
-engine-tested (2297/2297 — the
+engine-tested (2302/2302 — the
 `TestCommandWatch` units + safeguard belts + the content-injection/tier units + the /handover-here
 twin units (hyphen echo, name-exact binding isolation, its own definition file) + the multi-file
 collect/seal/settle units + the durable-progress units (watermark / marker revival / prune /
@@ -819,10 +819,11 @@ supersedes too (a retry is one operation).
 `<claude-config>/commands/handover.md` (**create-if-absent + a VERSION-AWARE UPGRADE — the ONE write
 outside the profile**: a file byte-identical to a PRIOR shipped version (`ShippedHandoverCommandHistory`,
 v1 byte-frozen, only ever APPEND) silently upgrades to current, anything user-edited is NEVER touched —
-the ApplyEnvDefaults discipline; a deliberate additive `~/.claude` mutation. The current V5 instructs
-Claude to Write `HANDOVER-<topic>.md` AS a direct briefing TO the successor — because the files'
-content IS its first message — then end the turn, permits a genuinely-better-split briefing
-across SEVERAL `HANDOVER-*.md` files in the same turn (all delivered in write order), and carries
+the ApplyEnvDefaults discipline; a deliberate additive `~/.claude` mutation. The current V6 instructs
+Claude to Write each `HANDOVER-<topic>.md` AS a SELF-CONTAINED direct briefing TO its successor —
+because EACH file's content becomes a DIFFERENT successor's first message (the FAN-OUT: N files in
+one turn = N parallel successor tabs, in write order; "never write 'continue in file B'") — then
+end the turn, and carries
 the SELF-INVOCATION guard (a MODEL-invoked Skill call writes no `<command-name>` echo, so the watch
 never arms — the guard makes a self-invoked model write nothing and redirect the user to TYPE the
 command; handover-here V3 same)) and binds
@@ -831,14 +832,14 @@ sinks** (`Engine::CommandActionSink`, the activateSinks idiom — registered at 
 token-detached in `~TerminalPage`). The hosting window's `_HandleCommandHandover` spawns the
 successor: same **effective working dir**, titled `"<origin> (handover)"` via the generalized
 **`DeriveSuffixedTitle`** (DeriveForkTitle now delegates to it; registry-bumped so sibling handovers
-never collide), inserted BESIDE the origin tab, and handed **the CONTENT of EVERY collected md,
-delivered VERBATIM and
-IN FULL as its FIRST USER MESSAGE** ("as if the user typed it") — **NEVER truncated**; a multi-file
-set is JOINED in write order (per-path sanity + existence re-asserted; a vanished subset drops with a
-log, the survivors proceed).
+never collide) — **FAN-OUT: EACH collected md starts its OWN successor tab** (write order ==
+strip order, sequential slots beside the origin; per-path sanity + existence re-asserted, a
+vanished subset drops with a log, the survivors proceed), each file **delivered VERBATIM and
+IN FULL as ITS successor's FIRST USER MESSAGE** ("as if the user typed it") — **NEVER truncated**:
+one command writing N files hands off to N parallel successors.
 `ReadHandoverDocumentPrompt` reads (4 MiB sanity cap per file) + normalizes (BOM strip, CRLF→LF, C0
 controls dropped — which also makes the paste framing injection-proof, ESC can't survive — trimmed);
-the DELIVERY then tiers on the pure `PsEscapedCost` of the joined whole vs
+each file's DELIVERY then tiers on its own pure `PsEscapedCost` vs
 **`kHandoverPromptEscapedBudget`** (11,500
 escaped chars — the pwsh `-EncodedCommand` wrap costs ≈2.67× and both CreateProcessW hops cap at
 32,767; ` `` ` `"` `$` cost 2): **fits** ⇒ the launch commandline's positional prompt
@@ -852,15 +853,17 @@ Testing, Send-now-able, restart-safe) and paste-injected by **`_PumpHandoverInje
 1.5s settle, then the Send-now recipe: mark Sent → `Inject(BuildPromptSubmission(text))` — the
 existing bracketed-paste ONE-block submit — rollback on failure, echo dedup + the Enter-retry watchdog
 backing it like any flight prompt; 10-min give-up leaves it Pending, never lost);
-**unreadable/whitespace-only/beyond-cap** ⇒ the pointer-style prompt fallback. `handover-done …
-inject=content|paste|pointer`. Repeatable — every /handover in a conversation spawns its
-own successor. Logs: `[cmd]`/`[cmd-fire]`/`[cmd-expire]` + the `[nav] handover-begin ↔ handover-done`
-pair. **The `/handover-here <context-or-filepath>` twin (COMMANDS.md §5a)** reuses this ENTIRE
+**unreadable/whitespace-only/beyond-cap** ⇒ that successor gets the pointer-style prompt fallback.
+`handover-done` carries parallel per-file lists (`new=<sid8>,<sid8> … inject=content,paste`;
+a failed spawn logs `(failed)` at its position). Repeatable — every /handover in a conversation
+spawns its own successor(s). Logs: `[cmd]`/`[cmd-fire]`/`[cmd-expire]` + the `[nav] handover-begin ↔
+handover-done` pair. **The `/handover-here <context-or-filepath>` twin (COMMANDS.md §5a)** reuses this ENTIRE
 pipeline — its own definition `handover-here.md` (`EnsureHandoverHereCommandFile` /
 `ShippedHandoverHereCommandHistory` v1, both files through the ONE shared
 `EnsureShippedCommandFileIn` core so the write policy can't drift), the same markdown await (same
 "handover" leaf; the watch's name-EXACT binding lookup keeps the two from cross-firing), the same
-guards/title/tiers — but **REPLACES the origin tab IN PLACE** instead of opening a new one: the
+guards/title/tiers/fan-out — but **the FIRST file's successor REPLACES the origin tab IN PLACE**
+(additional files' successors open beside it): the
 hosting window's `_RestartTabIntoFreshSession` runs a **"New Session Here → Default" spawn through
 the Restart-session swap** (`BuildClaudeSpawn` fresh minted id / settings model / same effective
 dir; `_RestartManagedSession`'s recipe — tabToken-matched pane, NotConnected guard,
