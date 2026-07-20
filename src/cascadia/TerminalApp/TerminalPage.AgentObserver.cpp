@@ -5438,6 +5438,70 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::AgentLogCaughtException(L"_PumpHandoverInjections"); // scanner-ticked UI lane: never unwind
     }
 
+    // Agentmaster (COMMANDS.md §6b — "delete the handover file after a successful hand-off"): the
+    // DEFERRED half of the opt-in delete. _HandleCommandHandover only ARMS an entry (successor id
+    // -> md path); the file is removed here, on the same liveness tick as the paste pump, once the
+    // successor has actually STARTED — SessionInfo.started, i.e. its ConPTY/claude really launched.
+    //
+    // Why deferred rather than deleted at spawn: a successor opened in a BACKGROUND tab starts
+    // LAZILY (WT only builds the control on first layout, so claude.exe may not run for minutes),
+    // and a launch that never comes up must leave the briefing ON DISK for the user to re-run. So:
+    //   * started            -> delete (the delivery is secured: the content tier put the whole
+    //                          document on the launch commandline, the paste tier parked it durably
+    //                          at the front of the successor's queue);
+    //   * gone / archived    -> DROP the entry WITHOUT deleting (the successor died before running
+    //                          — the file is the only copy the user can act on);
+    //   * past the deadline  -> give up, leave the file (logged) — same 10 min the pump uses;
+    //   * delete failed      -> logged, file left in place (best-effort; never blocks anything).
+    // The POINTER tier never arms an entry at all (its successor's first message NAMES the file).
+    void TerminalPage::_SweepHandoverDeletes()
+    try
+    {
+        if (_pendingHandoverDeletes.empty() || !_sessionRegistry)
+        {
+            return;
+        }
+        constexpr int64_t kHandoverDeleteDeadlineMs = 10 * 60 * 1000; // matches the paste pump's give-up
+        const int64_t now = static_cast<int64_t>(::GetTickCount64());
+        for (auto it = _pendingHandoverDeletes.begin(); it != _pendingHandoverDeletes.end();)
+        {
+            const std::wstring& id = it->first;
+            const auto& entry = it->second;
+            const auto s = _sessionRegistry->Get(id);
+            if (!s || !s->live)
+            {
+                // The successor vanished/archived before it ever started — KEEP the briefing.
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(id) + L" successor gone before start - md KEPT: " + entry.mdPath + L"\n");
+                it = _pendingHandoverDeletes.erase(it);
+                continue;
+            }
+            if (!s->started)
+            {
+                if (now - entry.armedMs >= kHandoverDeleteDeadlineMs)
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(id) + L" successor never started within 10 min - md KEPT: " + entry.mdPath + L"\n");
+                    it = _pendingHandoverDeletes.erase(it);
+                    continue;
+                }
+                ++it; // still lazily-dormant (a background tab) — wait for its claude to launch
+                continue;
+            }
+            if (::DeleteFileW(entry.mdPath.c_str()))
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] deleted md after successful hand-off (successor=" + ::Agentmaster::ShortId(id) + L" started): " + entry.mdPath + L"\n");
+            }
+            else
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] delete-after-hand-off FAILED (le=" + std::to_wstring(::GetLastError()) + L"), file left in place: " + entry.mdPath + L"\n");
+            }
+            it = _pendingHandoverDeletes.erase(it);
+        }
+    }
+    catch (...)
+    {
+        ::Agentmaster::AgentLogCaughtException(L"_SweepHandoverDeletes"); // scanner-ticked UI lane: never unwind
+    }
+
     // Agentmaster (tab color modes — InferredWorkingDirectory): the inferred-workdir scan.
     // Periodically re-infer each ADMITTED hosted Claude session's ACTUAL working directory from the
     // paths its tool calls touch (files read / edited / created + searched dirs) and re-key its tab

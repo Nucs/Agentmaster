@@ -588,10 +588,19 @@ namespace Agentmaster
                         picks.push_back(raw); // family-matching markdown — the command's own files
                     }
                 }
-                if (picks.empty() && it->matchedPaths.empty())
+                // The legacy nothing-collected-yet fallback: the batch's FIRST markdown
+                // (PickMarkdownWritePath's else-branch, verbatim) — tolerance for a Claude that
+                // mis-named its single briefing file, which only makes sense against the loose
+                // shipped HINT. A VALID custom leaf regex (§6b) is a STATEMENT OF INTENT about
+                // exactly which files count, so the fallback is SUPPRESSED there: with the
+                // fallback live, a first batch writing an unrelated `notes.md` would be collected
+                // as the briefing (spawning a successor from an incidental doc edit — the very
+                // thing the hint preference exists to prevent) and the documented "a valid
+                // pattern is authoritative" would be false. An INVALID pattern degrades to the
+                // hint, so it keeps the fallback too.
+                const bool authoritativeRegex = !leafRegex.empty() && RegexIsValid(leafRegex);
+                if (picks.empty() && it->matchedPaths.empty() && !authoritativeRegex)
                 {
-                    // No hint match in this batch and nothing collected yet — the legacy fallback:
-                    // the batch's first markdown (PickMarkdownWritePath's else-branch, verbatim).
                     const std::wstring first = PickMarkdownWritePath(paths, {});
                     if (!first.empty())
                     {

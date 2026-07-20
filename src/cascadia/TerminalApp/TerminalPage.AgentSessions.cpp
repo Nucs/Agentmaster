@@ -428,25 +428,21 @@ namespace winrt::TerminalApp::implementation
                 _pendingHandoverInjections[newId] = PendingHandoverInjection{ qp.id, static_cast<int64_t>(::GetTickCount64()), 0 };
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(newId) + L" document over the commandline tier (escaped cost " + std::to_wstring(::Agentmaster::PsEscapedCost(content)) + L" > " + std::to_wstring(::Agentmaster::kHandoverPromptEscapedBudget) + L") - queued FULL document for paste-injection\n");
             }
-            // §6b delete-after-hand-off (opt-in): the file is no longer load-bearing once its
-            // successor EXISTS and the delivery is SECURED — content tier: the whole document is
-            // already ON the successor's launch commandline (bound to its connection); paste
+            // §6b delete-after-hand-off (opt-in): ARM the deferred delete. The file stops being
+            // load-bearing once its successor has actually STARTED and the delivery is SECURED —
+            // content tier: the whole document is on the successor's launch commandline; paste
             // tier: parked durably at the FRONT of its queue just above (sessions.json —
-            // restart-safe, Send-now-able). The POINTER tier is excluded by construction (the
-            // successor's first message names the file — deleting it would strand the handover),
-            // as is a failed spawn (newId empty ⇒ nothing consumed the file). Best-effort: a
-            // locked/undeletable file just stays (logged), never blocks the fan-out.
+            // restart-safe, Send-now-able). Deliberately NOT deleted here: a successor spawned in
+            // a BACKGROUND tab starts lazily (its claude.exe only launches on first layout), and a
+            // launch that never comes up must leave the briefing on disk for the user to re-run —
+            // so _SweepHandoverDeletes waits for SessionInfo.started, gives up after the same 10
+            // min, and drops WITHOUT deleting if the session dies/archives first. The POINTER tier
+            // is excluded by construction (its successor's first message NAMES the file), as is a
+            // failed spawn (newId empty ⇒ nothing consumed the file).
             if (!newId.empty() && _appSettings.commandHandoverDeleteFileAfterLaunch &&
                 std::wstring_view{ injectMode } != L"pointer")
             {
-                if (::DeleteFileW(mdPath.c_str()))
-                {
-                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] deleted md after successful hand-off (delivered=" + std::wstring{ injectMode } + L", successor=" + ::Agentmaster::ShortId(newId) + L"): " + mdPath + L"\n");
-                }
-                else
-                {
-                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] delete-after-hand-off FAILED (le=" + std::to_wstring(::GetLastError()) + L"), file left in place: " + mdPath + L"\n");
-                }
+                _pendingHandoverDeletes[newId] = PendingHandoverDelete{ mdPath, static_cast<int64_t>(::GetTickCount64()) };
             }
             if (fileIdx > 0)
             {

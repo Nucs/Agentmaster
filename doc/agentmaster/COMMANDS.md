@@ -491,23 +491,37 @@ state; the cog surfaces invalidity to the user instead of flooding hooks.log).
   family — a per-command pattern would split the §3 supersede family, whose key stays the leaf
   HINT). `""` == the shipped rule (leaf CONTAINS `handover`); non-empty + valid ⇒ a markdown
   qualifies when the pattern regex-SEARCHES its file NAME (case-insensitive; anchor for a whole-
-  name match, e.g. `^BRIEF-.*\.md$`). A **valid pattern is authoritative** (a `HANDOVER-*.md` no
-  longer qualifies unless the pattern says so); an **invalid** one falls back to the hint —
+  name match, e.g. `^BRIEF-.*\.md$`). A **valid pattern is authoritative** — a `HANDOVER-*.md` no
+  longer qualifies unless the pattern says so, AND it **suppresses the legacy
+  nothing-collected-yet fallback** (the batch's first markdown, tolerance that only makes sense
+  against the loose shipped hint: with it live, a first batch writing an unrelated `notes.md`
+  would be collected as the briefing and spawn a successor from an incidental doc edit).
+  An **invalid** one falls back to the hint (fallback included) —
   belted twice: the engine validates once at bind time and logs
   `[engine] handover file-match regex INVALID - using the default 'handover' leaf hint: …`, and
   the watch re-checks per leaf. **Restart-applied** (`BindMarkdownAwait`'s new optional
   `leafMatchRegex`; bindings register once at init). NOTE: the shipped definitions still tell
   Claude to write `HANDOVER-<topic>.md`, so a custom pattern normally pairs with an edited
   definition (which the §6 policy then treats as user-owned — by design).
-* **Delete after hand-off** — `commandHandoverDeleteFileAfterLaunch` (default **OFF**; deleting
-  user-visible files is opt-in). After a successor is created AND its delivery is **secured**,
-  the markdown is deleted: the **content** tier has the whole document on the successor's launch
-  commandline, the **paste** tier has it parked durably at the FRONT of the successor's queue
-  (`sessions.json` — restart-safe, Send-now-able). The **pointer** tier NEVER deletes (the
-  successor's first message names the file — deleting it would strand the handover), and a
-  **failed spawn** leaves its file. Best-effort: a locked/undeletable file just stays, logged
-  `[handover] delete-after-hand-off FAILED (le=…), file left in place: …`; a success logs
-  `[handover] deleted md after successful hand-off (delivered=content|paste, successor=<sid8>): …`.
+* **Delete after launch AND successful start** — `commandHandoverDeleteFileAfterLaunch` (default
+  **OFF**; deleting user-visible files is opt-in). The delete is **DEFERRED, not fired at spawn**:
+  `_HandleCommandHandover` only ARMS an entry (successor id → md path) and
+  `TerminalPage::_SweepHandoverDeletes` — ticked on the same liveness pass as the paste pump —
+  removes the file once the successor has **actually STARTED** (`SessionInfo.started`, i.e. its
+  ConPTY/claude really launched). Why deferred: a successor opened in a **background tab starts
+  LAZILY** (WT builds the control on first layout, so claude.exe may not run for minutes), and a
+  launch that never comes up must leave the briefing on disk to re-run. The four outcomes:
+  **started** ⇒ delete (delivery is secured — the **content** tier put the whole document on the
+  launch commandline, the **paste** tier parked it durably at the FRONT of the successor's queue,
+  `sessions.json`: restart-safe, Send-now-able); **gone/archived before starting** ⇒ drop the
+  entry and **KEEP** the file (the successor died — the md is the only copy the user can act on);
+  **past the 10-min deadline** (the pump's) ⇒ give up, keep the file; **delete failed** (locked)
+  ⇒ logged, file left in place. The **pointer** tier never arms an entry at all (its successor's
+  first message NAMES the file), and a **failed spawn** never arms one. Logs:
+  `[handover] deleted md after successful hand-off (successor=<sid8> started): …` ·
+  `[handover] <sid8> successor gone before start - md KEPT: …` ·
+  `[handover] <sid8> successor never started within 10 min - md KEPT: …` ·
+  `[handover] delete-after-hand-off FAILED (le=…), file left in place: …`.
   This is the answer to `HANDOVER-*.md` litter accumulating at repo roots (§gap-8).
 
 ## 7. Hardening & safeguards
@@ -643,7 +657,9 @@ line alone pins the throw site later):
   invalid · no-match · blank result · the >255 cap) beside the real rewrites (plain, `$1`
   append, numeric bump, trimming); the CommandWatch **leaf-match regex** (a valid pattern is
   authoritative — `BRIEF-*` collected case-insensitively while a hint-named `HANDOVER-old.md`
-  is EXCLUDED — and an invalid one falls back to the shipped hint); and the shaping AppSettings
+  is EXCLUDED, and it SUPPRESSES the first-markdown fallback so an unrelated `notes.md` never
+  becomes the briefing, while the shipped-hint case KEEPS that fallback — and an invalid pattern
+  falls back to the shipped hint); and the shaping AppSettings
   round-trip (models, the find/replace pair + file pattern stored VERBATIM with regex chars and
   `$` backrefs unmangled, the toggle, absent keys == shipped behavior, and an invalid stored
   pattern degrading at USE time).

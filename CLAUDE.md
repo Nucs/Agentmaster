@@ -769,7 +769,7 @@ tag no session carries lists at **·0** (sorts last).
 ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
 HARDENED, delivery = FULL CONTENT INJECTION (never truncated), RESTART-RESILIENT (durable
 per-session progress) + MULTI-FILE (one command's several HANDOVER files consumed as one):
-engine-tested (2403/2403 — the
+engine-tested (2405/2405 — the
 `TestCommandWatch` units + safeguard belts + the content-injection/tier units + the /handover-here
 twin units (hyphen echo, name-exact binding isolation, its own definition file) + the multi-file
 collect/seal/settle units + the durable-progress units (watermark / marker revival / prune /
@@ -847,12 +847,16 @@ the classic `"(handover)"` naming is the fallback — the rewrite can only IMPRO
 one; `$1` backrefs, trimmed, 255-capped, still uniqueness-bumped), a family **FILE-MATCH regex**
 (`commandHandoverFileMatchRegex` → `BindMarkdownAwait`'s new optional `leafMatchRegex`: a VALID
 pattern is authoritative over the leaf hint — case-insensitive search on the file NAME — while an
-invalid one falls back to the shipped hint, belted at bind time (logged) AND per leaf; **RESTART-
-applied**, bindings register once; the §3 supersede family key stays the leaf HINT so the two commands
-stay one family), and **DELETE-AFTER-HAND-OFF** (`commandHandoverDeleteFileAfterLaunch`, default OFF:
-the md is deleted once its successor exists AND delivery is SECURED — content tier on the launch
-commandline, paste tier parked durably at the queue front — never the POINTER tier, never a failed
-spawn; best-effort, logged both ways — the answer to `HANDOVER-*.md` litter). All user-typed patterns
+invalid one falls back to the shipped hint, belted at bind time (logged) AND per leaf; a VALID
+pattern also SUPPRESSES the legacy first-markdown fallback, so an unrelated `notes.md` can never
+become the briefing; **RESTART-applied**, bindings register once; the §3 supersede family key stays the leaf HINT so the two commands
+stay one family), and **DELETE-AFTER-HAND-OFF** (`commandHandoverDeleteFileAfterLaunch`, default OFF)
+— **DEFERRED to a successful START, not fired at spawn**: `_HandleCommandHandover` only ARMS
+(successor id → md path) and `_SweepHandoverDeletes` (same liveness tick as the paste pump) deletes
+once `SessionInfo.started` — because a successor in a BACKGROUND tab starts LAZILY and a launch that
+never comes up must keep its briefing on disk. Gone/archived-before-start ⇒ KEEP the file; past the
+10-min deadline ⇒ KEEP; delete failed ⇒ logged, kept. Never the POINTER tier (its first message NAMES
+the file), never a failed spawn — the answer to `HANDOVER-*.md` litter. All user-typed patterns
 run through the ONE shared **`AgentMaster/RegexUtil.h`** (header-only + pure, the `PromptAnchor.h`
 idiom): `RegexIsValid`/`RegexSearch`/`RegexReplace` never throw (invalid ⇒ no-match/unchanged), cap
 pattern (512) + input (4096), and fix one flavor (ECMAScript, search semantics, optional

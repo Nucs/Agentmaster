@@ -836,6 +836,21 @@ namespace winrt::TerminalApp::implementation
         };
         std::unordered_map<std::wstring, PendingHandoverInjection> _pendingHandoverInjections;
         void _PumpHandoverInjections(); // ticked alongside _ScanPendingInput (TerminalPage.AgentObserver.cpp)
+        // Agentmaster (COMMANDS.md §6b — "delete the handover file after a successful hand-off"):
+        // the opt-in delete is deferred until the successor has actually STARTED (its ConPTY/claude
+        // launched — SessionInfo.started), not merely been created: a tab spawned in the background
+        // starts lazily, and a launch that never comes up must LEAVE the briefing on disk so the
+        // user can re-run. {successor sessionId -> the md path + arm time}; swept by
+        // _SweepHandoverDeletes on the same liveness tick as the paste pump. Only the content +
+        // paste tiers ever enter (the pointer tier's successor must READ the file), and a session
+        // that dies/archives before starting drops WITHOUT deleting.
+        struct PendingHandoverDelete
+        {
+            std::wstring mdPath;
+            int64_t armedMs{ 0 };
+        };
+        std::unordered_map<std::wstring, PendingHandoverDelete> _pendingHandoverDeletes;
+        void _SweepHandoverDeletes(); // ticked beside _PumpHandoverInjections (TerminalPage.AgentObserver.cpp)
         winrt::fire_and_forget _RestoreClaudeSessions(); // Agentmaster: load persisted sessions as ARCHIVED (restorable) — does NOT auto-launch (Rule #6)
         void _RestoreWindowTabs(); // Agentmaster (M10 window-grouped restore): re-home THIS window's persisted tabs — resume each Claude session + replay each Other (shell) tab from its WindowRecord, in order. Only a claimed record (a reopened window) restores.
         void _AttachClaudeOverlay(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster: build + install the per-tab link badge (gated on AppSettings.showTabOverlay)

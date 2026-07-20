@@ -244,6 +244,33 @@ void TestCommandWatch()
         CHECK(!fired.empty() && (fired[0].mdPaths == std::vector<std::wstring>{ L"K:\\r\\BRIEF-alpha.md", L"K:\\r\\brief-beta.MD" }),
               "regex leaf match: the PATTERN decides (BRIEF-* collected case-insensitively; the hint-named HANDOVER-old.md excluded)");
     }
+    // …and a VALID pattern is authoritative ALL the way: it also SUPPRESSES the legacy
+    // nothing-collected-yet fallback (the batch's first markdown), which exists only as tolerance
+    // for a mis-named single file under the loose shipped hint. With it live, a first batch
+    // writing an unrelated notes.md would be collected as the briefing and spawn a successor from
+    // an incidental doc edit — exactly what the hint preference exists to prevent.
+    {
+        CommandWatch w;
+        int fired = 0;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired; }, LR"(^BRIEF-.*\.md$)");
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\notes.md" }, L"K:\\r", now); // NOTHING collected yet + no qualifying file
+        w.OnTurnEnd(L"s");
+        CHECK(fired == 0, "a VALID leaf regex suppresses the first-markdown fallback (an unrelated notes.md never becomes the briefing)");
+    }
+    {
+        // The shipped-hint case KEEPS the fallback (unchanged behavior — a mis-named single file
+        // still hands over, the tolerance the fallback was added for).
+        CommandWatch w;
+        std::wstring firedPath;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>& mds, const std::wstring&) { firedPath = mds.empty() ? std::wstring{} : mds.front(); });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\notes.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s");
+        CHECK(firedPath == L"K:\\r\\notes.md", "with the shipped hint (no regex) the legacy first-markdown fallback still applies");
+    }
     {
         CommandWatch w;
         std::vector<FiredHandover> fired;
