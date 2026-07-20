@@ -486,6 +486,22 @@ namespace Agentmaster
     // the current one; anything else is user-owned and untouched.
     const std::vector<std::wstring_view>& ShippedHandoverCommandHistory();
 
+    // Agentmaster (COMMANDS.md — the /handover-here integration): the IN-PLACE twin of /handover.
+    // Its OWN definition file at <configDir>\commands\handover-here.md under the SAME write policy
+    // (create-if-absent + the version-aware upgrade; a user edit sticks forever) and the SAME
+    // await-signal contract ("use the Write tool", the `HANDOVER-<topic>.md` leaf) — but the
+    // briefed outcome differs: instead of opening a successor TAB beside the origin, Agentmaster
+    // RESTARTS the origin tab in place into a fresh "New Session Here -> Default" conversation
+    // (the origin is archived, resumable from the Sessions browser) and injects the document as
+    // its first user message. Same wrappers/returns as the /handover pair above.
+    std::wstring EnsureHandoverHereCommandFileIn(const std::wstring& configDir);
+    std::wstring EnsureHandoverHereCommandFile();
+
+    // The /handover-here definition's shipped-version history — the ShippedHandoverCommandHistory
+    // contract verbatim: oldest first, the LAST entry is current, PRIOR entries stay byte-frozen
+    // forever (the upgrade rule recognizes an untouched install by byte-identity), only ever APPEND.
+    const std::vector<std::wstring_view>& ShippedHandoverHereCommandHistory();
+
     // Build a complete spawn spec and ensure the shared hook files exist. `pipeName` is the
     // live HooksBridge pipe (HookPipeName(pid)). If `resumeSessionId` is non-empty, the spec
     // RESUMES that conversation (claude --resume <id>) and reuses the id; otherwise a fresh

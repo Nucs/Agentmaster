@@ -178,7 +178,8 @@ void TestPendingInput();
 // tests_commands.cpp — COMMANDS.md: slash-command bindings (ParseCommandEcho + the parser's
 // Command/fileWritePaths events + the CommandWatch state machine + DeriveSuffixedTitle + the
 // initial-prompt commandline arg + EnsureHandoverCommandFileIn + the safeguard belts: sane-path
-// gate, throwing-handler/probe containment)
+// gate, throwing-handler/probe containment; plus the /handover-here twin units — hyphenated
+// echo, name-exact binding isolation, EnsureHandoverHereCommandFileIn's own definition file)
 void TestCommandWatch();
 // tests_commands.cpp — the FABRICATED /handover session: the design's expected transcript shape
 // (echo -> Write -> tool_result -> end_turn, real ISO timestamps) driven end-to-end through the

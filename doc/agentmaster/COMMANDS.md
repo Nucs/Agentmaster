@@ -5,7 +5,10 @@
 > First integration: **`/handover <handover-context-or-filepath>`** → await the handover
 > markdown the command instructs Claude to write → open a successor tab named
 > `"<origin title> (handover)"` in the same working dir, whose FIRST USER MESSAGE is that
-> document's content injected verbatim.
+> document's content injected verbatim. Its IN-PLACE twin
+> **`/handover-here <handover-context-or-filepath>`** (§5a) reuses the whole pipeline but
+> REPLACES the origin tab instead of opening a new one — the Restart-session swap into a
+> fresh "New Session Here → Default" conversation, the origin archived (resumable).
 
 Engine: `AgentMaster/CommandWatch.{h,cpp}` (+ parser/scanner seams in `SessionScanner.{h,cpp}`,
 wiring in `Engine.{h,cpp}`); UI action: `TerminalPage.AgentEngine.cpp` (sink) +
@@ -115,12 +118,16 @@ commands (`/model`, `/compact`, …) produce no state and no logs.
 ## 4. Fan-out — the command-action sinks
 
 The engine's `/handover` binding (registered in `Engine.cpp` init, before the scanner starts)
-does one thing: `RaiseCommandActionInWindows(sessionId, L"handover", mdPath)`. That is a new
-per-window sink family (`Engine::CommandActionSink` — the `activateSinks` idiom verbatim:
-registered at engine init, token-detached in `~TerminalPage` (Rule #10), snapshot-under-lock /
-invoke-outside). Unlike Activate there is NO source window to exclude — the fire originates on
-the scanner thread — so every window's sink runs; each hops onto its own UI dispatcher and only
-the (single) window whose `_claudeTabs` hosts the origin session acts.
+does one thing: `RaiseCommandActionInWindows(sessionId, L"handover", mdPath)`; the
+`/handover-here` binding is its twin with the action name `L"handover-here"` (the watch's
+binding lookup is name-EXACT, so the two commands can never cross-fire — no prefix aliasing).
+That is a per-window sink family (`Engine::CommandActionSink` — the `activateSinks` idiom
+verbatim: registered at engine init, token-detached in `~TerminalPage` (Rule #10),
+snapshot-under-lock / invoke-outside). Unlike Activate there is NO source window to exclude —
+the fire originates on the scanner thread — so every window's sink runs; each hops onto its own
+UI dispatcher and only the (single) window whose `_claudeTabs` hosts the origin session acts
+(the sink dispatches both action names into `_HandleCommandHandover`, `inPlace` distinguishing
+them).
 
 ## 5. /handover end-to-end
 
@@ -193,12 +200,68 @@ the (single) window whose `_claudeTabs` hosts the origin session acts.
    its own successor; chains title naturally (`(handover)` → `(handover 2)` when run from the
    successor, registry-bumped when run again from the origin).
 
+## 5a. /handover-here — the IN-PLACE twin (replace the origin tab)
+
+**`/handover-here <context-or-filepath>`** reuses the ENTIRE /handover pipeline — the same
+markdown await (same `"handover"` leaf preference; its definition instructs the same
+`HANDOVER-<topic>.md` name), the same §5 guards/title/dir resolution, and the same three
+delivery tiers — and differs in exactly ONE step: **where the successor lives**. Instead of a
+new tab beside the origin, the hosting window **REPLACES the origin tab in place**
+(`TerminalPage::_RestartTabIntoFreshSession`, dispatched by `_HandleCommandHandover`'s
+`inPlace` flag):
+
+* **The spawn is "Open New Session Here → Default"** — a brand-new FRESH conversation:
+  `BuildClaudeSpawn` with a newly minted id, NO resume/fork, NO model override (the settings
+  model decides), hooks wired, the same effective working dir — with the handover content
+  riding the commandline's positional prompt when the §5 commandline tier fits (the paste /
+  pointer tiers behave identically, keyed on the successor's id).
+* **The swap is the Restart-session mechanism** (`_RestartManagedSession`'s recipe): build the
+  new ConPTY connection (`inheritCursor` — the origin conversation's scrollback stays readable
+  above the successor), `HardResetWithoutErase`, `Connection(newConn)`, `Start()` — with
+  deliberately NO explicit `oldConn.Close()` first (the swap revokes the output handlers and
+  THEN closes the old connection, so the dying origin claude's teardown banner never prints
+  into the successor's pane). The swap targets the ORIGIN SESSION's pane specifically —
+  resolved by its connection's `WT_SESSION` == the record's `tabToken` (a user split's focused
+  sibling shell is never the victim), first-terminal-pane fallback. The
+  `_restartPaneConnection` NotConnected guard applies (never swap a never-initialized
+  control); `SuppressAutoClose` is (re-)applied so an ADOPTED origin's plain profile pane
+  keeps the readable-dead-pane behavior.
+* **The bookkeeping is ONE `_BindClaudeSessionToTab` call** — its re-home block (the
+  in-session `/resume` machinery, reused verbatim) archives the ORIGIN record (`live=false`,
+  injector cleared, the `[rehome]` + `tab-swap` nav trail; **the origin stays resumable from
+  the Sessions browser** — Close-semantics, nothing deleted), re-keys
+  `_claudeTabs`/`_claudeOverlays` onto the successor, binds the successor's stdin injector
+  (Rule #3), pins the successor's own title (Rule #11 — `"<origin> (handover)"`, same bumping
+  as /handover), re-colors, re-attaches the overlay, and marks it **started** (the control is
+  already initialized and `Start()` ran → `SetStarted(true)` immediately — exactly what the
+  §5 paste pump gates on, so the over-budget tier works unchanged). The successor's fresh
+  registration carries the cog's Autorunner defaults plus the restore-fresh CONTINUITY seeds
+  (the origin's `inferredWorkingDir` + Individual-mode `tabColorHex` — same tab, same work,
+  best first guess).
+* **Degrades, never loses the handover**: a refused/failed swap (origin tab torn down in the
+  fire → UI-hop window, a dormant control, a failed connection build, no claude.exe) falls
+  back to the classic §5 new-tab spawn, logged
+  `[handover-here] … in-place restart unavailable - falling back …` + `(fallback=new-tab)` on
+  the done line.
+* Nav trail: `[nav] handover-here-begin <sid8> md=…` ↔ `[nav] handover-here-done new=<sid8'>
+  from=<sid8> inject=content|paste|pointer` (the same pairing rule — an unpaired begin means a
+  crash mid-action), plus the mechanism line `[handover-here] <new> replaced <old> in place …`
+  and the re-home's own `[rehome]`/`tab-swap`.
+* A crash between the swap and the debounced `WindowRecord` save reopens the ARCHIVED origin
+  ref on next launch (the pre-existing in-session `/resume` re-home characteristic; the
+  successor is still in `sessions.json`, resumable) — `_ScheduleWindowRecordSave` is kicked
+  right after the swap to shrink that window.
+
 ## 6. The shipped command definition — the ONE write outside the profile
 
 A typed `/handover` must BE a command (Claude Code rejects unknown slash commands client-side —
 nothing would ever reach the transcript), so engine init materializes
 **`<claude-config>/commands/handover.md`** (`EnsureHandoverCommandFile`; `CLAUDE_CONFIG_DIR` >
-`~/.claude`, the `ClaudeProjectsDir` resolution) — logged `[engine] handover command: <path>`.
+`~/.claude`, the `ClaudeProjectsDir` resolution) — logged `[engine] handover command: <path>` —
+**and its in-place twin `handover-here.md`** (`EnsureHandoverHereCommandFile`, logged
+`[engine] handover-here command: <path>`; shipped history `ShippedHandoverHereCommandHistory`,
+v1). Both route through the ONE shared core `EnsureShippedCommandFileIn(configDir, leaf,
+history, label)`, so the write policy below can never drift between the two files.
 
 **Create-if-absent + a version-aware UPGRADE:** a file whose bytes are IDENTICAL (UTF-8) to a
 **prior shipped version** (`ShippedHandoverCommandHistory` — v1 byte-frozen forever, only ever
@@ -258,9 +321,17 @@ line alone pins the throw site later):
   CreateProcessW ceiling. The paste pump inherits the queue machinery's own belts: Send-now-
   recipe rollback on a failed inject, echo dedup, the Enter-retry watchdog, a give-up deadline
   that leaves the prompt Pending (visible + manually sendable) rather than lost.
+* **The in-place path carries its own belts** (§5a): `_RestartTabIntoFreshSession` runs inside
+  `_HandleCommandHandover`'s guarded function-try; the `_restartPaneConnection` **NotConnected
+  guard** (never `HardResetWithoutErase` a never-initialized control — a null state machine is
+  an AV) is re-applied even though the origin just ran the command (the fire → UI-hop window is
+  real); the swap targets the origin session's OWN pane (tabToken-matched — a user split's
+  focused sibling shell is never the victim); and every refusal/failure **degrades to the
+  classic new-tab spawn** (`(fallback=new-tab)` on the done line) — the handover itself is
+  never lost to the in-place nicety.
 * **`EnsureHandoverCommandFileIn` is best-effort** — a failure logs (`[persist-fail]` /
   swallowed-exception) and engine init proceeds; the feature stays dormant until a later launch
-  succeeds.
+  succeeds. (`EnsureHandoverHereCommandFileIn` rides the same shared, guarded core.)
 * Pre-existing bounds double as safeguards: the parser's own whole-chunk catch
   (`ParseTranscriptDelta` never throws), the freshness + turn-scope + deadline + per-session-cap
   bounds (§3), and the structural fresh-launch-only gate on the initial prompt (§5).
@@ -290,7 +361,14 @@ line alone pins the throw site later):
   whitespace-only/missing → empty for the fallback). Plus the safeguard belts: `IsSaneWatchPath`,
   an insane matched path rejected at the match (a later sane write still satisfies), a throwing
   handler swallowed per fire (the watch keeps firing), a throwing probe reading as absent then
-  firing on recovery.
+  firing on recovery. **/handover-here units (§5a):** the hyphenated echo parses whole
+  (`ParseCommandEcho` keeps the hyphen — bindings key on the exact name), a `/handover-here`
+  sighting beside a registered `/handover` binding fires ONLY its own handler (name-exact
+  lookup, no prefix aliasing), and `EnsureHandoverHereCommandFileIn` under the same temp-config
+  discipline: its OWN `handover-here.md` created beside `handover.md`, carrying the load-bearing
+  signal (Write tool + `HANDOVER-`), the content-injection + never-truncate briefing, AND the
+  in-place sentinels ("REPLACES" / "RESTARTS THIS TAB"); `ShippedHandoverHereCommandHistory`
+  sanity; a user-edited file never overwritten (the shared `EnsureShippedCommandFileIn` core).
 * **`TestCommandHandoverE2E` — the FABRICATED session** (the design's expected transcript,
   fabricated with real ISO timestamps and replayed through the REAL `ParseTranscriptDelta` + a
   feed mapping kept in lockstep with `_readDelta`'s): scenario A the happy path — echo →
@@ -322,7 +400,9 @@ state-machine side (no TURN event; the echo reads back as the non-turn `Command`
 * **State machine untouched** — a command echo remains a non-event (§2); the successor's
   `Running` comes from its own real `UserPromptSubmit`.
 * **No injection into the ORIGIN session** — the origin is read via the transcript only
-  (Rule #13-adjacent); the action spawns a NEW session.
+  (Rule #13-adjacent); the action spawns a NEW session. (/handover-here upholds the same rule:
+  nothing is ever written to the origin's stdin — the swap CLOSES its connection, which is the
+  Restart-session mechanism, and archives the record like a Close.)
 * **Codex excluded** — rollouts carry no command echoes; `/handover` is Claude-only (the
   successor is a Claude session).
 * **Observe-only externals excluded** — the scanner reconciles registry sessions only; an

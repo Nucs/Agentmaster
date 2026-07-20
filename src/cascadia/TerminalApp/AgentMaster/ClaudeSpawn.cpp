@@ -1166,24 +1166,70 @@ document as its opening user message.
         return kHistory;
     }
 
-    std::wstring EnsureHandoverCommandFileIn(const std::wstring& configDir)
+    // The /handover-here command definition (COMMANDS.md — the IN-PLACE twin): same await-signal
+    // contract as /handover ("use the Write tool", the `HANDOVER-<topic>.md` name — the leaf
+    // preference) and the same content-injection + never-truncate briefing, but the outcome it
+    // describes is the in-place REPLACE: Agentmaster restarts THIS tab into the fresh successor
+    // instead of opening a new tab beside it. V1 must stay byte-frozen forever (the
+    // ShippedHandoverCommandHistory upgrade discipline) — only ever APPEND a version.
+    static constexpr std::wstring_view kHandoverHereCommandV1 =
+        LR"md(---
+description: Hand this session's work over to a fresh session that REPLACES this one in this same tab (Agentmaster restarts the tab automatically)
+---
+The user wants to HAND OVER this session's work to a fresh successor Claude session that
+REPLACES this conversation IN THIS SAME TAB - Agentmaster restarts the tab into the
+successor automatically; this conversation is archived and stays resumable from the
+Sessions browser.
+Handover context from the user (inline context, or a path to a file you should read and fold in):
+
+$ARGUMENTS
+
+Do this NOW, in this exact order:
+1. If the context above names a readable file, read it first and incorporate it.
+2. Using the Write tool (NOT a shell redirect - the Write tool call itself is the signal
+   Agentmaster detects), create ONE new markdown file in the current working directory named
+   `HANDOVER-<short-topic>.md` (pick a short kebab-case topic slug; if that name already
+   exists, append `-2`, `-3`, ...).
+3. The file's CONTENT is injected VERBATIM as the successor session's FIRST USER MESSAGE - so
+   write it as a direct briefing TO the successor (imperative, second person), fully
+   self-contained: the goal, the current state, decisions made and why, work completed, work
+   still in flight, concrete ordered next steps, key file paths (absolute), and any gotchas
+   or constraints discovered along the way. The successor has NO other context and cannot see
+   this conversation. It is delivered as ONE message whatever its size - be as thorough as the
+   work demands.
+4. End your turn right after writing the file (a one-line confirmation is fine). Do not
+   start new work - this session is about to be replaced.
+
+Agentmaster is watching for that markdown write: it automatically RESTARTS THIS TAB into a
+fresh successor session in this working directory and injects your document as its opening
+user message.
+)md";
+
+    const std::vector<std::wstring_view>& ShippedHandoverHereCommandHistory()
+    {
+        static const std::vector<std::wstring_view> kHistory{ kHandoverHereCommandV1 };
+        return kHistory;
+    }
+
+    // Shared core of the shipped slash-command DEFINITION writers (the /handover family —
+    // COMMANDS.md §6). Write policy: create-if-absent PLUS a version-aware UPGRADE — a file
+    // byte-identical (UTF-8) to a PRIOR shipped version of THIS command is ours and untouched by
+    // the user, so it silently upgrades to the current text; anything else (the user's own
+    // command, an edited copy of ours) is NEVER overwritten (the ApplyEnvDefaults discipline: a
+    // user edit sticks forever). The load-bearing instructions every version of every command in
+    // the family keeps: "use the Write tool" (the transcript tool_use is the signal the markdown
+    // await keys on — a shell-redirect write is invisible) and the "HANDOVER-" name (the await's
+    // leaf preference). `logLabel` names the command in the two log lines so the trails stay
+    // per-command ("handover" / "handover-here").
+    static std::wstring EnsureShippedCommandFileIn(const std::wstring& configDir, std::wstring_view fileLeaf, const std::vector<std::wstring_view>& history, std::wstring_view logLabel)
     try
     {
-        // The /handover slash-command DEFINITION (COMMANDS.md §6). Write policy: create-if-absent
-        // PLUS a version-aware UPGRADE — a file byte-identical (UTF-8) to a PRIOR shipped version
-        // is ours and untouched by the user, so it silently upgrades to the current text; anything
-        // else (the user's own /handover, an edited copy of ours) is NEVER overwritten (the
-        // ApplyEnvDefaults discipline: a user edit sticks forever). The load-bearing instructions
-        // every version keeps: "use the Write tool" (the transcript tool_use is the signal the
-        // markdown await keys on — a shell-redirect write is invisible) and the "HANDOVER-" name
-        // (the await's leaf preference).
-        if (configDir.empty())
+        if (configDir.empty() || history.empty())
         {
             return {};
         }
         const std::wstring commandsDir = configDir + L"\\commands";
-        const std::wstring path = commandsDir + L"\\handover.md";
-        const auto& history = ShippedHandoverCommandHistory();
+        const std::wstring path = commandsDir + L"\\" + std::wstring{ fileLeaf };
         const std::wstring_view current = history.back();
         if (::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
         {
@@ -1211,7 +1257,7 @@ document as its opening user message.
                 {
                     if (WriteFileUtf8(path, current))
                     {
-                        AppendStateLog(L"hooks.log", L"[engine] handover command upgraded (shipped v" + std::to_wstring(i + 1) + L" -> v" + std::to_wstring(history.size()) + L"): " + path + L"\n");
+                        AppendStateLog(L"hooks.log", L"[engine] " + std::wstring{ logLabel } + L" command upgraded (shipped v" + std::to_wstring(i + 1) + L" -> v" + std::to_wstring(history.size()) + L"): " + path + L"\n");
                     }
                     return path; // upgraded (or failed best-effort — the old text still works)
                 }
@@ -1222,7 +1268,7 @@ document as its opening user message.
         ::CreateDirectoryW(commandsDir.c_str(), nullptr);
         if (!WriteFileUtf8(path, current))
         {
-            AppendStateLog(L"hooks.log", L"[persist-fail] handover command definition: " + path + L"\n");
+            AppendStateLog(L"hooks.log", L"[persist-fail] " + std::wstring{ logLabel } + L" command definition: " + path + L"\n");
             return {};
         }
         return path;
@@ -1231,14 +1277,24 @@ document as its opening user message.
     {
         // Safeguard: engine init must never be derailed by this best-effort global-config write
         // (the feature simply stays dormant until a later launch succeeds).
-        LogSwallowedException(L"EnsureHandoverCommandFileIn");
+        LogSwallowedException(L"EnsureShippedCommandFileIn");
         return {};
     }
 
-    std::wstring EnsureHandoverCommandFile()
+    std::wstring EnsureHandoverCommandFileIn(const std::wstring& configDir)
     {
-        // CLAUDE_CONFIG_DIR > ~/.claude — the same resolution ClaudeProjectsDir applies (the
-        // commands dir is a sibling of projects/ under the one Claude config root).
+        return EnsureShippedCommandFileIn(configDir, L"handover.md", ShippedHandoverCommandHistory(), L"handover");
+    }
+
+    std::wstring EnsureHandoverHereCommandFileIn(const std::wstring& configDir)
+    {
+        return EnsureShippedCommandFileIn(configDir, L"handover-here.md", ShippedHandoverHereCommandHistory(), L"handover-here");
+    }
+
+    // CLAUDE_CONFIG_DIR > ~/.claude — the same resolution ClaudeProjectsDir applies (the
+    // commands dir is a sibling of projects/ under the one Claude config root).
+    static std::wstring ResolveClaudeCommandsBase()
+    {
         std::wstring base = GetEnvW(L"CLAUDE_CONFIG_DIR");
         if (base.empty())
         {
@@ -1249,7 +1305,19 @@ document as its opening user message.
             }
             base = home + L"\\.claude";
         }
-        return EnsureHandoverCommandFileIn(base);
+        return base;
+    }
+
+    std::wstring EnsureHandoverCommandFile()
+    {
+        const std::wstring base = ResolveClaudeCommandsBase();
+        return base.empty() ? std::wstring{} : EnsureHandoverCommandFileIn(base);
+    }
+
+    std::wstring EnsureHandoverHereCommandFile()
+    {
+        const std::wstring base = ResolveClaudeCommandsBase();
+        return base.empty() ? std::wstring{} : EnsureHandoverHereCommandFileIn(base);
     }
 
     std::wstring ReadHandoverDocumentPrompt(const std::wstring& mdPath)

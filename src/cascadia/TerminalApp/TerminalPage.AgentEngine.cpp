@@ -703,6 +703,13 @@ namespace winrt::TerminalApp::implementation
                             {
                                 self->_HandleCommandHandover(sessionId, payload);
                             }
+                            else if (command == L"handover-here")
+                            {
+                                // COMMANDS.md — the in-place twin: REPLACE the origin tab (the
+                                // Restart-session swap into a fresh successor) instead of
+                                // spawning a new tab beside it.
+                                self->_HandleCommandHandover(sessionId, payload, /*inPlace*/ true);
+                            }
                         }
                     }
                     catch (...)

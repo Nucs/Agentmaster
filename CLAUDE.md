@@ -77,7 +77,7 @@ Summary-panel JUMP (transcript→buffer resolve + center the view on a prompt): 
 Favorite + Close refactor (Archive removed; Sessions is the sole history view): [`doc/agentmaster/FAVORITES.md`](doc/agentmaster/FAVORITES.md).
 Pending-input monitor (detect an UNSENT draft in a Claude tab's input box): [`doc/agentmaster/PENDING_INPUT.md`](doc/agentmaster/PENDING_INPUT.md).
 System notifications (Windows toasts when a session leaves Running; click = foreground + jump to tab): [`doc/agentmaster/NOTIFICATIONS.md`](doc/agentmaster/NOTIFICATIONS.md).
-Slash-command bindings + /handover (CommandWatch: bind to typed /commands, await follow-up activity): [`doc/agentmaster/COMMANDS.md`](doc/agentmaster/COMMANDS.md).
+Slash-command bindings + /handover + /handover-here (CommandWatch: bind to typed /commands, await follow-up activity): [`doc/agentmaster/COMMANDS.md`](doc/agentmaster/COMMANDS.md).
 
 ## Status
 
@@ -765,9 +765,11 @@ tag no session carries lists at **·0** (sorts last).
   are same-window instant; another window catches up on next bind/launch/gather (the panel/editor/chips always
   read the store fresh).
 
-**Slash-command bindings + /handover ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
-HARDENED, delivery = FULL CONTENT INJECTION (never truncated): engine-tested (2230/2230 — the
-`TestCommandWatch` units + safeguard belts + the content-injection/tier units, the FABRICATED
+**Slash-command bindings + /handover + its in-place twin /handover-here
+([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
+HARDENED, delivery = FULL CONTENT INJECTION (never truncated): engine-tested (2242/2242 — the
+`TestCommandWatch` units + safeguard belts + the content-injection/tier units + the /handover-here
+twin units (hyphen echo, name-exact binding isolation, its own definition file), the FABRICATED
 end-to-end `/handover` session `TestCommandHandoverE2E`, and the REAL-corpus echo replay
 `TestCommandEchoRealCorpus`) + lib-compiled green; rides the next deploy cycle.** Bind to `/commands`
 the user TYPES into a managed Claude session and AWAIT the session's
@@ -815,7 +817,22 @@ backing it like any flight prompt; 10-min give-up leaves it Pending, never lost)
 **unreadable/whitespace-only/beyond-cap** ⇒ the pointer-style prompt fallback. `handover-done …
 inject=content|paste|pointer`. Repeatable — every /handover in a conversation spawns its
 own successor. Logs: `[cmd]`/`[cmd-fire]`/`[cmd-expire]` + the `[nav] handover-begin ↔ handover-done`
-pair. **Safeguards (COMMANDS.md §7, all under the never-lose-a-swallowed-exception policy):** every
+pair. **The `/handover-here <context-or-filepath>` twin (COMMANDS.md §5a)** reuses this ENTIRE
+pipeline — its own definition `handover-here.md` (`EnsureHandoverHereCommandFile` /
+`ShippedHandoverHereCommandHistory` v1, both files through the ONE shared
+`EnsureShippedCommandFileIn` core so the write policy can't drift), the same markdown await (same
+"handover" leaf; the watch's name-EXACT binding lookup keeps the two from cross-firing), the same
+guards/title/tiers — but **REPLACES the origin tab IN PLACE** instead of opening a new one: the
+hosting window's `_RestartTabIntoFreshSession` runs a **"New Session Here → Default" spawn through
+the Restart-session swap** (`BuildClaudeSpawn` fresh minted id / settings model / same effective
+dir; `_RestartManagedSession`'s recipe — tabToken-matched pane, NotConnected guard,
+`HardResetWithoutErase` + `Connection(newConn)` + `Start()`, inheritCursor so the origin's
+scrollback stays readable, `SuppressAutoClose` re-applied), then ONE `_BindClaudeSessionToTab`
+re-home archives the ORIGIN (live=false, injector cleared — resumable from the Sessions browser,
+Close semantics) and re-keys tab/overlay/injector/title onto the successor (started=true
+immediately, so the paste tier works unchanged); any refusal/failure **degrades to the classic
+new-tab spawn** (`(fallback=new-tab)`). Logs: `[nav] handover-here-begin ↔ handover-here-done` +
+`[handover-here] <new> replaced <old> in place` + the re-home's `[rehome]`/`tab-swap`. **Safeguards (COMMANDS.md §7, all under the never-lose-a-swallowed-exception policy):** every
 CommandWatch feed is a SELF-CONTAINED function-try (a watch bug / throwing handler / throwing probe can
 never cost the scanner a pass), handlers caught PER FIRE, a throwing probe reads "file absent"
 (retried), the **sane-path gate** (`IsSaneWatchPath` — control chars / quotes / oversize rejected AT

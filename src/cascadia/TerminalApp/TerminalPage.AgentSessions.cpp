@@ -217,20 +217,23 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::LogNav(L"open-new claude done " + (spawnedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(spawnedId))));
     }
 
-    // Agentmaster (COMMANDS.md — the /handover integration): the CommandWatch's markdown await
-    // resolved — the origin session ran `/handover <context-or-filepath>` and the handover markdown
-    // it was instructed to Write now exists on disk. Every window's command-action sink lands here
-    // (UI thread, via the engine fan-out); ONLY the window hosting the origin session's tab acts:
-    // spawn the successor session — same effective working dir (the "Open New Session Here"
-    // semantics), titled "<origin title> (handover)" (bumping to "(handover 2)"/… against titles
-    // already in the registry, so sibling handovers from one origin never collide), inserted right
-    // beside the origin tab, and handed the markdown's CONTENT — injected verbatim as its FIRST
-    // USER MESSAGE via the launch commandline's positional prompt (zero-race: no stdin injection,
-    // no TUI-init window; the prompt fires a real UserPromptSubmit, so state/record ride the
-    // normal push path), budget-clamped with a pointer tail when oversized, pointer-prompt
-    // fallback when unreadable. Repeatable by design — every /handover in a conversation spawns
-    // its own successor.
-    void TerminalPage::_HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPath)
+    // Agentmaster (COMMANDS.md — the /handover family): a CommandWatch markdown await resolved —
+    // the origin session ran `/handover <context-or-filepath>` (inPlace=false) or its in-place twin
+    // `/handover-here <context-or-filepath>` (inPlace=true), and the handover markdown it was
+    // instructed to Write now exists on disk. Every window's command-action sink lands here (UI
+    // thread, via the engine fan-out); ONLY the window hosting the origin session's tab acts.
+    // COMMON to both commands: same effective working dir (the "Open New Session Here" semantics),
+    // titled "<origin title> (handover)" (bumping to "(handover 2)"/… against titles already in the
+    // registry, so sibling handovers from one origin never collide), and the markdown's CONTENT
+    // delivered VERBATIM and IN FULL as the successor's FIRST USER MESSAGE (the three delivery
+    // tiers below — commandline positional prompt / bracketed-paste stdin / pointer fallback). They
+    // differ ONLY in where the successor lives: /handover spawns a NEW tab right beside the origin;
+    // /handover-here REPLACES the origin tab in place (_RestartTabIntoFreshSession — the
+    // Restart-session swap into a fresh "New Session Here -> Default" conversation; the origin is
+    // archived, resumable from the Sessions browser), DEGRADING to the new-tab spawn when the
+    // in-place swap is unavailable so the handover itself is never lost. Repeatable by design —
+    // every /handover(-here) in a conversation creates its own successor.
+    void TerminalPage::_HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPath, bool inPlace)
     try
     {
         const auto tabIt = _claudeTabs.find(sessionId);
@@ -262,7 +265,8 @@ namespace winrt::TerminalApp::implementation
         {
             return; // archived/vanished between fire and hop — nothing to hand over to
         }
-        ::Agentmaster::LogNav(L"handover-begin " + ::Agentmaster::ShortId(sessionId) + L" md=" + mdPath);
+        const std::wstring navTag = inPlace ? L"handover-here" : L"handover"; // the [nav] begin/end pair stays per-command
+        ::Agentmaster::LogNav(navTag + L"-begin " + ::Agentmaster::ShortId(sessionId) + L" md=" + mdPath);
 
         // The successor spawns where the origin WORKS (EffectiveWorkingDir — the same dir every
         // "Open New Session Here" uses), falling back to the launch cwd inside that resolver.
@@ -330,8 +334,29 @@ namespace winrt::TerminalApp::implementation
             injectMode = L" inject=content";
         }
 
-        const auto successorTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ successorTitle }, std::nullopt, {}, insertPosition, {}, launchPrompt);
-        const std::wstring newId = successorTab ? _ClaudeSessionForTab(successorTab) : std::wstring{};
+        // Create the successor. /handover-here (inPlace): REPLACE the origin tab via the
+        // Restart-session swap; a refused/failed swap (origin tab torn down mid-hop, a dormant
+        // control, a failed connection build) DEGRADES to the classic new-tab spawn — losing the
+        // in-place nicety beats losing the handover.
+        std::wstring newId;
+        bool inPlaceFellBack = false;
+        if (inPlace)
+        {
+            if (const auto originTab = tabIt->second.get())
+            {
+                newId = _RestartTabIntoFreshSession(originTab, *s, dir, successorTitle, launchPrompt);
+            }
+            if (newId.empty())
+            {
+                inPlaceFellBack = true;
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-here] " + ::Agentmaster::ShortId(sessionId) + L" in-place restart unavailable - falling back to a NEW successor tab beside the origin\n");
+            }
+        }
+        if (newId.empty())
+        {
+            const auto successorTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ successorTitle }, std::nullopt, {}, insertPosition, {}, launchPrompt);
+            newId = successorTab ? _ClaudeSessionForTab(successorTab) : std::wstring{};
+        }
         if (!newId.empty() && !content.empty() && !fitsCommandline)
         {
             // The over-budget tier: park the FULL document on the successor's queue (Pending — the
@@ -351,14 +376,175 @@ namespace winrt::TerminalApp::implementation
             _pendingHandoverInjections[newId] = PendingHandoverInjection{ qp.id, static_cast<int64_t>(::GetTickCount64()), 0 };
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(newId) + L" document over the commandline tier (escaped cost " + std::to_wstring(::Agentmaster::PsEscapedCost(content)) + L" > " + std::to_wstring(::Agentmaster::kHandoverPromptEscapedBudget) + L") - queued FULL document for paste-injection\n");
         }
-        ::Agentmaster::LogNav(L"handover-done " + (newId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(newId))) + L" from=" + ::Agentmaster::ShortId(sessionId) + injectMode);
+        ::Agentmaster::LogNav(navTag + L"-done " + (newId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(newId))) + L" from=" + ::Agentmaster::ShortId(sessionId) + injectMode + (inPlaceFellBack ? L" (fallback=new-tab)" : L""));
     }
     catch (...)
     {
         // Safeguard: a spawn-path failure (a torn-down tab mid-hop, a WinRT hresult, bad_alloc)
-        // must never unwind the UI thread; the nav trail's unpaired handover-begin plus this
+        // must never unwind the UI thread; the nav trail's unpaired handover(-here)-begin plus this
         // forensics line pinpoint the abort.
         ::Agentmaster::AgentLogCaughtException(L"_HandleCommandHandover");
+    }
+
+    // Agentmaster (COMMANDS.md — the /handover-here integration): REPLACE a managed session's live
+    // pane IN PLACE with a brand-new FRESH conversation — the "Open New Session Here -> Default"
+    // spawn semantics (a newly minted id, no resume/fork, no model override so the settings model
+    // decides, the given working dir) delivered through the RESTART-SESSION mechanism instead of a
+    // new tab. The swap recipe is _RestartManagedSession's: build the new connection (inheritCursor
+    // — the origin conversation's scrollback stays readable above the successor), HardResetWithoutErase,
+    // swap, Start — with deliberately NO explicit oldConn.Close() first (control.Connection() revokes
+    // the output handlers and THEN closes the old connection, so the dying origin claude's teardown
+    // banner lands in revoked handlers instead of printing "[process exited …]" into the successor's
+    // pane). The tab bookkeeping is then ONE _BindClaudeSessionToTab call: its re-home block archives
+    // the ORIGIN record (live=false + injector cleared + the [rehome]/tab-swap trail; it stays
+    // resumable from the Sessions browser), re-keys _claudeTabs/_claudeOverlays onto the successor,
+    // binds the successor's stdin injector to the NEW connection (Rule #3), pins the successor's own
+    // title (Rule #11 — the origin's pinned text must not bleed), re-colors, re-attaches the overlay,
+    // marks it started (the control is already initialized and Start() ran, so ConnectionState is
+    // past NotConnected -> SetStarted(true) immediately — exactly what _PumpHandoverInjections gates
+    // on), and persists the fleet. `initialPrompt` rides the fresh commandline as the positional
+    // first prompt (the commandline delivery tier; the caller parks an over-budget document on the
+    // successor's queue for the paste pump instead, and passes "" here). Returns the successor's
+    // session id ("" == refused/failed — the caller degrades to the classic new-tab spawn so the
+    // handover itself is never lost). UI thread only.
+    std::wstring TerminalPage::_RestartTabIntoFreshSession(const TerminalApp::Tab& originTab, const ::Agentmaster::SessionInfo& origin, const std::wstring& dir, const std::wstring& title, const std::wstring& initialPrompt)
+    {
+        if (!_sessionRegistry || !_hooksBridge || !originTab)
+        {
+            return {};
+        }
+        // Native-exe-only policy backstop (mirrors _RestartManagedSession): silent log — the
+        // caller's fallback spawn path re-gates and raises the install prompt itself.
+        if (!::Agentmaster::EnsureClaudeAvailable())
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-here] " + ::Agentmaster::ShortId(origin.id) + L" blocked - no native claude.exe\n");
+            return {};
+        }
+        // Resolve the ORIGIN SESSION's pane specifically — by its connection's WT_SESSION == the
+        // record's tabToken (the liveness sweep's discipline), NOT the tab's active/first pane: in
+        // a user split the focused pane could be a sibling shell, and swapping THAT would replace
+        // the wrong pane. A token-less/unmatched walk falls back to the tab's first terminal pane
+        // (the single-pane norm).
+        const auto tabImpl = _GetTabImpl(originTab);
+        const auto rootPane = tabImpl ? tabImpl->GetRootPane() : nullptr;
+        if (!rootPane)
+        {
+            return {};
+        }
+        TerminalApp::TerminalPaneContent originContent{ nullptr };
+        TerminalApp::TerminalPaneContent firstContent{ nullptr };
+        rootPane->WalkTree([&](auto&& pane) {
+            if (const auto content = pane->GetContent())
+            {
+                if (const auto term = content.try_as<TerminalApp::TerminalPaneContent>())
+                {
+                    if (!firstContent)
+                    {
+                        firstContent = term;
+                    }
+                    if (!origin.tabToken.empty())
+                    {
+                        if (const auto ctrl = term.GetTermControl())
+                        {
+                            if (const auto conn = ctrl.Connection(); conn && ::Agentmaster::TabTokenEq(origin.tabToken, ::Microsoft::Console::Utils::GuidToPlainString(conn.SessionId())))
+                            {
+                                originContent = term;
+                                return true; // found the session's own pane — stop walking
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
+        });
+        if (!originContent)
+        {
+            originContent = firstContent;
+        }
+        TermControl control{ nullptr };
+        if (originContent)
+        {
+            control = originContent.GetTermControl();
+        }
+        if (!control)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-here] " + ::Agentmaster::ShortId(origin.id) + L" no terminal pane resolved - in-place restart unavailable\n");
+            return {};
+        }
+        // The _restartPaneConnection NotConnected guard: never HardReset/swap a never-initialized
+        // control (Terminal::HardResetWithoutErase derefs a null state machine -> AV; the new
+        // connection's first output would hit a null main buffer). Unreachable in practice — the
+        // origin just RAN the command, so its control is initialized — but the fire -> UI-hop
+        // window is real, so keep the belt.
+        if (control.ConnectionState() == TerminalConnection::ConnectionState::NotConnected)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-here] " + ::Agentmaster::ShortId(origin.id) + L" connection not started - in-place restart unavailable\n");
+            return {};
+        }
+
+        // "New Session Here -> Default": a FRESH spawn spec — a newly minted id, no resume/fork,
+        // no model override (the settings model decides), hooks wired, the handover content riding
+        // as the launch commandline's positional first prompt when the commandline tier fits
+        // (else "" here — the caller parks the full document on the successor's queue).
+        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, title, _hooksBridge->PipeName(), {}, ::Agentmaster::LoadAppSettings(), {}, ::Agentmaster::SharedEngine().claudeExePath, {}, {}, initialPrompt);
+        const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline);
+        auto newConn = _BuildAgentConnection(hostedCmd, dir, title, spec.env, /*inheritCursor*/ true);
+        if (!newConn)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-here] " + ::Agentmaster::ShortId(origin.id) + L" connection build failed - in-place restart unavailable\n");
+            return {};
+        }
+
+        // Register the successor BEFORE the swap (the _RestartManagedSession discipline: the record
+        // carries the NEW connection's WT_SESSION as its tabToken before any liveness/observer pass
+        // can see the swapped pane, and _BindClaudeSessionToTab below expects the record — its title
+        // pin reads it). Fresh-spawn registration parity with _LaunchClaudeSession: Idle, managed,
+        // live, eager tabToken, the cog's Autorunner defaults — PLUS the restore-fresh continuity
+        // seeds: the successor continues the SAME work in the SAME tab, so it inherits the origin's
+        // inferred working dir + Individual-mode tab color as the best first guess (the
+        // inferred-workdir scan replaces them with the successor's own honest inference once it has
+        // history of its own).
+        ::Agentmaster::SessionInfo info;
+        info.id = spec.sessionId;
+        info.title = title;
+        info.workingDir = dir;
+        info.state = ::Agentmaster::SessionState::Idle;
+        info.external = false;
+        info.live = true;
+        info.tabToken = ::Microsoft::Console::Utils::GuidToPlainString(newConn.SessionId());
+        info.inferredWorkingDir = origin.inferredWorkingDir;
+        info.tabColorHex = origin.tabColorHex;
+        info.autorunner.mode = _appSettings.defaultAutorunnerMode;
+        info.autorunner.maxAutoSends = _appSettings.maxAutoSends;
+        info.autorunner.stopOnError = _appSettings.stopOnError;
+        info.autorunner.pauseOnHumanInput = _appSettings.pauseOnHumanInput;
+        _sessionRegistry->Upsert(info);
+
+        // SuppressAutoClose parity with _LaunchClaudeSession: the pane must survive pwsh exiting
+        // into a readable dead pane (the liveness sweep's design) instead of auto-closing the tab.
+        // A pane WE launched already has it; an ADOPTED origin's plain profile pane does not —
+        // idempotent either way.
+        if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(originContent))
+        {
+            impl->SuppressAutoClose();
+        }
+
+        // The Restart-session swap (upstream's order — see _RestartManagedSession on why there is
+        // deliberately NO explicit oldConn.Close() first). HardResetWithoutErase keeps the origin
+        // conversation's scrollback readable above the successor; the swap closes the old
+        // connection, which shuts the origin claude down.
+        control.HardResetWithoutErase();
+        control.Connection(newConn);
+        newConn.Start();
+
+        // ONE bookkeeping seam re-homes the tab onto the successor (see the function comment):
+        // archive the origin, re-key the maps, bind the injector, pin the title, re-color,
+        // re-attach the overlay, mark started, persist.
+        _BindClaudeSessionToTab(originTab, newConn, spec.sessionId, dir, L"handover-here");
+
+        _ScheduleWindowRecordSave(); // the tab's session REF changed in place — capture it (debounced; a crash before it saves degrades to reopening the archived origin)
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-here] " + spec.sessionId + L" replaced " + origin.id + L" in place \"" + title + L"\" cwd=" + dir + L"\n");
+        return spec.sessionId;
     }
 
     // Agentmaster: launch a claude.exe on a ConPTY in `workingDir`, wired for hooks, as a

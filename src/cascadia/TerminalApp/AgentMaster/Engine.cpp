@@ -336,6 +336,15 @@ namespace Agentmaster
             e->commandWatch->BindMarkdownAwait(L"handover", L"handover", [](const std::wstring& sessionId, const std::wstring& mdPath, const std::wstring& /*args*/) {
                 RaiseCommandActionInWindows(sessionId, L"handover", mdPath);
             });
+            // /handover-here — the IN-PLACE twin: the SAME markdown await (same "handover" leaf
+            // preference — its definition instructs the same `HANDOVER-<topic>.md` name), a
+            // different fan-out action: the hosting window REPLACES the origin tab in place (the
+            // Restart-session swap into a fresh "New Session Here -> Default" conversation)
+            // instead of opening a successor tab beside it. The watch's binding lookup is
+            // name-EXACT, so the two commands can never cross-fire.
+            e->commandWatch->BindMarkdownAwait(L"handover-here", L"handover", [](const std::wstring& sessionId, const std::wstring& mdPath, const std::wstring& /*args*/) {
+                RaiseCommandActionInWindows(sessionId, L"handover-here", mdPath);
+            });
             e->scanner->SetCommandWatch(e->commandWatch);
             // The /handover COMMAND DEFINITION (create-if-absent — the user's own/edited file is
             // never overwritten): without a definition under <claude-config>/commands, a typed
@@ -344,6 +353,12 @@ namespace Agentmaster
             if (const std::wstring handoverCmd = EnsureHandoverCommandFile(); !handoverCmd.empty())
             {
                 AppendStateLog(L"hooks.log", L"[engine] handover command: " + handoverCmd + L"\n");
+            }
+            // Its in-place twin's definition (/handover-here) — same write policy (create-if-absent
+            // + version-aware upgrade), its own file. Also a deliberate ~/.claude write (§6).
+            if (const std::wstring handoverHereCmd = EnsureHandoverHereCommandFile(); !handoverHereCmd.empty())
+            {
+                AppendStateLog(L"hooks.log", L"[engine] handover-here command: " + handoverHereCmd + L"\n");
             }
             e->scanner->Start();
             // Keep the scanner ticking even with nothing live, so each window's liveness probe — which

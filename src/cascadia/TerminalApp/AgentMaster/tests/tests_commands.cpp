@@ -216,6 +216,31 @@ void TestCommandWatch()
         CHECK(fired.size() == 2 && fired[0].args == L"first" && fired[0].mdPath == L"K:\\r\\HANDOVER-1.md", "FIFO: first write -> the older sighting");
         CHECK(fired.size() == 2 && fired[1].args == L"second" && fired[1].mdPath == L"K:\\r\\HANDOVER-2.md", "FIFO: second write -> the newer sighting");
     }
+    // /handover-here (COMMANDS.md — the in-place twin): the hyphenated echo parses whole, and the
+    // binding lookup is name-EXACT — a /handover-here sighting fires ONLY its own binding, never
+    // prefix-aliasing onto /handover (both share the "handover" leaf preference by design: one
+    // HANDOVER-<topic>.md definition contract).
+    {
+        SlashCommand c;
+        CHECK(ParseCommandEcho(L"<command-name>/handover-here</command-name>\n            <command-message>handover-here</command-message>\n            <command-args>ship the tests</command-args>", c), "hyphenated command echo parses");
+        CHECK(c.name == L"handover-here" && c.args == L"ship the tests", "the hyphen survives extraction (bindings key on the exact name)");
+    }
+    {
+        CommandWatch w;
+        int firedHandover = 0;
+        std::vector<FiredHandover> firedHere;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring&, const std::wstring&) { ++firedHandover; });
+        w.BindMarkdownAwait(L"handover-here", L"handover", [&](const std::wstring& sid, const std::wstring& md, const std::wstring& args) {
+            firedHere.push_back({ sid, md, args });
+        });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover-here", L"replace me" }, freshTs, now);
+        CHECK(w.PendingCount() == 1, "/handover-here arms its own pending beside the /handover binding");
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-swap.md" }, L"K:\\r", now);
+        CHECK(firedHere.size() == 1 && firedHandover == 0, "the md write fires ONLY the /handover-here binding (name-exact lookup, no prefix aliasing)");
+        CHECK(!firedHere.empty() && firedHere[0].mdPath == L"K:\\r\\HANDOVER-swap.md" && firedHere[0].args == L"replace me", "fired with the resolved path + the command's args");
+    }
+
     // turn-end expiry for UNMATCHED pendings (the command turn + one clarification round).
     {
         CommandWatch w;
@@ -436,6 +461,46 @@ void TestCommandWatch()
             std::ifstream f(std::filesystem::path{ p1 }, std::ios::binary);
             std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
             CHECK(body == "user-owned", "an existing (user-edited) definition is never overwritten");
+        }
+        ::DeleteFileW(p1.c_str());
+        ::RemoveDirectoryW((cfg + L"\\commands").c_str());
+        ::RemoveDirectoryW(cfg.c_str());
+    }
+
+    // ---- EnsureHandoverHereCommandFileIn: the in-place twin's OWN definition file ----
+    {
+        wchar_t tmp[MAX_PATH];
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring cfg = std::wstring{ tmp } + L"am-cmdwatch-test-cfg2";
+        // wipe from a previous run
+        ::DeleteFileW((cfg + L"\\commands\\handover-here.md").c_str());
+        ::RemoveDirectoryW((cfg + L"\\commands").c_str());
+        ::RemoveDirectoryW(cfg.c_str());
+        const auto p1 = EnsureHandoverHereCommandFileIn(cfg);
+        CHECK(!p1.empty() && p1.find(L"handover-here.md") != std::wstring::npos && ::GetFileAttributesW(p1.c_str()) != INVALID_FILE_ATTRIBUTES, "absent -> handover-here definition created (its own file, beside handover.md)");
+        {
+            std::ifstream f(std::filesystem::path{ p1 }, std::ios::binary);
+            std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            CHECK(body.find("HANDOVER-") != std::string::npos && body.find("Write tool") != std::string::npos, "handover-here definition keeps the await's load-bearing signal (Write tool + HANDOVER-*.md)");
+            CHECK(body.find("injected VERBATIM") != std::string::npos && body.find("whatever its size") != std::string::npos, "handover-here definition carries the content-injection + never-truncate briefing (the /handover contract)");
+            CHECK(body.find("REPLACES") != std::string::npos && body.find("RESTARTS THIS TAB") != std::string::npos, "handover-here definition briefs the IN-PLACE semantics (the tab is replaced, not a new one opened)");
+        }
+        {
+            const auto& history = ShippedHandoverHereCommandHistory();
+            CHECK(!history.empty() && history.back().find(L"RESTARTS THIS TAB") != std::wstring_view::npos, "shipped handover-here history present; the current text names the in-place restart");
+        }
+        // A user edit is NEVER overwritten (the shared create-if-absent + upgrade discipline —
+        // EnsureShippedCommandFileIn is the one core both wrappers share).
+        {
+            std::ofstream f(std::filesystem::path{ p1 }, std::ios::binary | std::ios::trunc);
+            f << "user-owned-here";
+        }
+        const auto p2 = EnsureHandoverHereCommandFileIn(cfg);
+        CHECK(p2 == p1, "present -> same path returned");
+        {
+            std::ifstream f(std::filesystem::path{ p1 }, std::ios::binary);
+            std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            CHECK(body == "user-owned-here", "an existing (user-edited) handover-here definition is never overwritten");
         }
         ::DeleteFileW(p1.c_str());
         ::RemoveDirectoryW((cfg + L"\\commands").c_str());
