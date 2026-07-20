@@ -1885,6 +1885,31 @@ What works, by area:
   null-pane returns) and any failed state write (`[persist-fail]` — the `WriteAllUtf8` chokepoint behind
   sessions.json / window-records / templates / dir-colors / …, i.e. state silently lost on next launch) now
   LOG instead of vanishing.
+  **Exception forensics — `[exc]` / `[wil]` (DONE; the *never lose a swallowed exception* policy, Rule #18).**
+  A `catch (...)` that recovers silently used to discard BOTH what was thrown and where from — and a catch
+  block runs AFTER the unwind, so by then the throw-site stack is already gone. A process-wide **Vectored
+  Exception Handler** (`InstallThrowStackCapture`, `ClaudeSpawn.{h,cpp}`) therefore captures at **raise**
+  time (VEH runs *before* unwinding): every MSVC C++ throw (`0xE06D7363`) snapshots ≤64 frames + a tick into
+  a **per-thread 4-entry ring** — lock-free, allocation-free, capture-only (`EXCEPTION_CONTINUE_SEARCH`
+  always, dispatch untouched), so a coroutine's stored exception re-raised at `co_await` captures again while
+  the older ring entries keep the ORIGINAL throw. Two reporters share one chokepoint
+  (`LogSwallowedExceptionCore`): **`Agentmaster::LogSwallowedException(L"<context>")`** for the plain-C++
+  engine TUs (no WinRT — they must keep compiling in the standalone harness + the CLI) and
+  **`AgentLogCaughtException(context)`** (`AgentCatchLog.h`) for the TerminalApp layer, which additionally
+  classifies `winrt::hresult_error` (hr + message) / `wil::ResultException` / `std::system_error` (**RTTI is
+  OFF repo-wide**, so classification is by rethrow, never `typeid`). `AgentCatchLog.h` also installs
+  **`AgentWilFailureLogger`** — the `wil::SetResultLoggingCallback` sink for **TerminalApp.dll** (wil state
+  is per-MODULE), so every pre-existing `CATCH_LOG` / `LOG_*` / fail-fast in that binary now lands as
+  `[wil] <kind> hr=… at <file>:<line> … ret=Module+RVA`. Both are `noexcept`, throttled ~2s per context
+  (fails OPEN, with a `[suppressed N earlier repeat(s)]` counter), and installed process-once by
+  `InstallAgentExceptionTrace()` at engine init (`[exc] exception forensics installed …`). Frames log as
+  **`Module.dll+0xRVA`** — ASLR-stable, so a bare hooks.log line is symbolizable offline later against that
+  build's PDBs: `./.claude/skills/debug-dumps/scripts/diasym.exe <TerminalApp.pdb> 0x22B0F9` (the PDB **must**
+  match the build that produced the log). Shape:
+  `[exc] _ObserverProbe: swallowed winrt::hresult_error hr=0x8001010E msg="…" tid=0x1586C (no crash)` followed
+  by `[exc]   throw#0 (age 2ms, 31 frames): TerminalApp.dll+0x22B0F9 …`. Swept across the TerminalApp layer
+  (35 sites / 10 files) and the engine (31 sites; 9 already logged), each keeping its recovery side-effects —
+  **except the 9 sites that are themselves ON the logging path, which must stay bare (see Gotchas).**
 
 Follow-ups (not blocking): the PROFILES.md §5 set (per-identity defterm/shellext CLSIDs — the one
 shared seam left between the release and dev packages; distinct dev iconography; profile
@@ -2771,6 +2796,41 @@ build **binlog uploads as an artifact** to diagnose the first run.
   ModuleListStream → `TerminalApp.dll` base/size) + scanning the stack for in-module return addresses,
   symbolized through the same DIA session, reconstructs the stack top-down. This is how the re-home
   use-after-free above was pinned exactly.
+- **A fire_and_forget coroutine can drop the LAST page ref on a POOL thread, destructing the whole UI
+  tree off the UI thread — where any UI-affine call in a destructor becomes `std::terminate`.** The
+  2026-07-18 release crash (`0xC0000409`, `ucrtbase+0xA527E`, `ExceptionInformation[0]==7` ==
+  `FAST_FAIL_FATAL_APP_EXIT`): closing a window while the ~2 s `_ObserverProbe` tick was in flight holding
+  `get_strong()` meant the **coroutine frame's destruction on the threadpool thread** released the final
+  reference, so `~TerminalPage → ~Tab → ~Pane → ~AgentManagerContent` all ran on that thread, and
+  `DispatcherTimer.Stop()` (UI-thread-affine) threw `RPC_E_WRONG_THREAD` **inside a noexcept destructor** →
+  terminate → the WHOLE process (all windows — one WindowEmperor process) died from ONE window closing.
+  Note `~TerminalPage` itself was ALREADY guarded for exactly this mechanism; the **destructor cascade it
+  triggers** was not — a guard on the coroutine BODY (the 2026-07-01 net) does not cover the FRAME's
+  destruction. So: (1) every destructor reachable from a page teardown wraps UI-affine calls in
+  `try { … } CATCH_LOG();` — done in `~AgentManagerContent` (3 timer `Stop()`s) and
+  `SafeDispatcherTimer::Destroy()` (the latent twin: `~Tab`'s `_bellIndicatorTimer`, which only escaped the
+  live crash because that 4-second-old window had never shown a bell); (2) release/revoke lines stay
+  OUTSIDE the try so refs always drop; (3) a thread-safe engine detach (`RemoveObserver`) stays BARE on
+  purpose — it must never be skipped by a guarded throw; and (4) **every `fire_and_forget` needs a
+  terminate-net** — an escaped exception there IS `winrt::terminate`, the same `0xC0000409` (16 lanes
+  audited; the pattern for one needing `co_await` is to split the body into an awaited `IAsyncAction`, as
+  `_AdoptExternalSession`/`_AdoptExternalSessionImpl` and `_SweepClaudeLiveness` do). A catch that re-arms
+  a latch (`_claudeMissingPromptShowing`, `_sessionsIndexing`) must keep doing so, or the feature is dead
+  for the window's life. Not-yet-done hardening: ending each lane with a best-effort hop back to the
+  dispatcher so the last ref normally releases on the UI thread.
+- **⚠ The exception-forensics logging path must never log its own failures — 9 `catch (...)` sites in
+  `ClaudeSpawn.cpp` are DELIBERATELY BARE.** The *never lose a swallowed exception* policy (Rule #18) says
+  every `catch (...)` reports — with exactly one class of exemption, and it is a hard constraint, not a
+  judgement call. The chain is `LogSwallowedException → LogSwallowedExceptionCore →
+  ExcLogThrottleAllow / CaptureRecentThrowStacksText → FormatAddressModuleRva → AppendStateLog →
+  AgentmasterStateDir`, so logging from any link re-enters it. Two links are worse than unbounded
+  recursion: **`AgentmasterStateDir` is called BY `AppendStateLog`** to build its path (throw → log →
+  throw → …), and **`AppendStateLog` holds a NON-RECURSIVE `std::mutex`**, so logging its own failure
+  **self-deadlocks** before it could even recurse — i.e. "completing" the sweep here wedges the app on the
+  first failed log. Each of the nine carries an explicit `⚠ DELIBERATELY BARE` marker naming its
+  degradation, under one authoritative `LOGGING-PATH RECURSION RULE` block listing them all. (The
+  classifier's terminal `catch (...)` — which RECORDS `"unknown exception"` — is explicitly *not* one of
+  them, and is annotated so it isn't "fixed" either.)
 - **A managed session's conversation id can DIVERGE from its launch id — attribute state + bind by
   Claude's CURRENT conversation, never the pinned launch id.** `/resume` (into another
   conversation), `/clear`, and `/compact` all switch a live claude's active `session_id`, while the
@@ -3087,6 +3147,23 @@ build **binlog uploads as an artifact** to diagnose the first run.
     `ResolveTagDisplayColor` (user-picked `tag-colors.json` > `TagColorFor` name-hash), and the tab badges +
     tooltip read it from the resolved `AgentTagsSpec` (`name\t#AARRGGBB`) the producer wrote — never
     re-resolve per consumer, or the same tag can wear two colors.
+18. **Never lose a swallowed exception.** Wherever we `catch (...)` — at ALL times, in ALL cases — the
+    exception and its origin must survive into `hooks.log`, so any later report is diagnosable in full
+    without a repro. A catch may still recover silently *for the user*; it may not be silent *for us*.
+    Report through the ONE chokepoint: **`Agentmaster::LogSwallowedException(L"<context>")`** in the
+    plain-C++ engine TUs (no WinRT — they must keep compiling in the standalone harness and the CLI) and
+    **`AgentLogCaughtException(context)`** (`AgentCatchLog.h`) in the TerminalApp layer, which adds
+    `hresult_error`/`wil` detail; both attach the VEH-captured **throw-site** stack as
+    `Module.dll+0xRVA` (the catch site itself runs after the unwind, so the raise-time ring is the only
+    place that stack still exists). **Preserve every recovery side-effect exactly** — a re-armed latch, a
+    fallback return, a `continue`-skip — logging is purely additive; and never gate behavior on it (both
+    reporters are `noexcept` and throttled, so they cannot turn a contained failure into a new one). Two
+    exemptions, both narrow: a catch that is itself on the **logging path** MUST stay bare (it recurses /
+    self-deadlocks — see Gotchas; mark it `⚠ DELIBERATELY BARE` with its degradation), and a catch whose
+    throw is genuinely expected control flow in a hot loop may stay bare *with a comment saying so*.
+    "It's just a best-effort helper" is NOT an exemption — those are exactly the ones that vanished
+    (`OutputDebugStringW` doesn't count: it needs a debugger attached at the time, so in the field it is
+    silence). Don't add a bare `catch (...)` to this codebase.
 
 ## Conventions
 
