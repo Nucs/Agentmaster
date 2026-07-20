@@ -81,6 +81,56 @@ namespace
         }
     }
 
+    // ATOMIC variant, for a file whose PARTIALLY-written content would be worse than no write at
+    // all: write a temp sibling, flush it, then MoveFileExW(REPLACE_EXISTING) over the target — the
+    // rename is atomic, so any reader (another install's engine init, or Claude Code enumerating
+    // commands) sees either the OLD or the NEW complete file, never a truncated one.
+    //
+    // WHY the shipped slash-command DEFINITIONS need it (COMMANDS.md §6): their identity IS their
+    // bytes. A trunc-write that dies after truncating (disk full, I/O error, a crash mid-write) —
+    // or a concurrent reader catching the window — leaves bytes that match NO shipped digest, so
+    // the file reads as USER-OWNED from then on and is NEVER repaired: a permanently broken
+    // /handover, silently. The temp+rename removes that state entirely, and a FAILED rename (target
+    // locked by an editor, read-only) leaves the ORIGINAL definition intact instead of a stub.
+    // (Updater.h's WriteUpdateState learned the same lesson — "was a torn-file-prone trunc ofstream".)
+    // The temp leaf deliberately does NOT end in .md, so a leftover from a killed process can never
+    // be picked up as a command.
+    bool WriteFileUtf8Atomic(const std::wstring& path, std::wstring_view content)
+    {
+        try
+        {
+            const std::wstring tmp = path + L".am-tmp";
+            {
+                std::ofstream f(std::filesystem::path{ tmp }, std::ios::binary | std::ios::trunc);
+                if (!f)
+                {
+                    return false;
+                }
+                const auto bytes = Utf16ToUtf8(content);
+                f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+                f.flush();
+                if (!f.good())
+                {
+                    f.close();
+                    ::DeleteFileW(tmp.c_str()); // never leave a half-written temp behind
+                    return false;
+                }
+            } // closed before the rename — MoveFileExW cannot replace through an open handle
+            if (!::MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            {
+                ::DeleteFileW(tmp.c_str()); // target locked / read-only — the ORIGINAL stays valid
+                return false;
+            }
+            return true;
+        }
+        catch (...)
+        {
+            // Same forensics + same non-recursion argument as WriteFileUtf8 above.
+            Agentmaster::LogSwallowedException(L"WriteFileUtf8Atomic"); // qualified: file-scope anonymous namespace
+            return false;
+        }
+    }
+
     // Standard base64 (RFC 4648) of a raw byte buffer. Used to build a pwsh -EncodedCommand payload
     // (which expects base64 of the command's UTF-16LE bytes). Hand-rolled so the pure helper has no
     // crypt32 dependency and the standalone test harness links it unchanged.
@@ -1362,6 +1412,11 @@ file) in this working directory, injecting each document as its session's openin
             }
             catch (...)
             {
+                // Rule #18 — this recovery is CONSEQUENTIAL, so it must never be silent: an
+                // unreadable definition reads as USER-OWNED, and a user-owned file is never
+                // overwritten, so this command silently stops upgrading FOREVER. Safe to log (this
+                // is not on the logging path — see the WriteFileUtf8 note).
+                LogSwallowedException(L"EnsureShippedCommandFileCore (definition read)");
                 bytes.clear(); // unreadable now — treat as user-owned (never overwrite blind)
             }
             const std::string identityBytes = (custom && !bytes.empty()) ? NormalizeCommandBytesForIdentity(bytes, defaultName, commandName) : bytes;
@@ -1370,9 +1425,19 @@ file) in this working directory, injecting each document as its session's openin
             {
                 if (digest == shippedHashes[i])
                 {
-                    if (WriteFileUtf8(path, textToWrite))
+                    const std::wstring vArrow = L" (shipped v" + std::to_wstring(i + 1) + L" -> v" + std::to_wstring(shippedHashes.size()) + L"): ";
+                    if (WriteFileUtf8Atomic(path, textToWrite))
                     {
-                        AppendStateLog(L"hooks.log", L"[engine] " + std::wstring{ logLabel } + L" command upgraded (shipped v" + std::to_wstring(i + 1) + L" -> v" + std::to_wstring(shippedHashes.size()) + L"): " + path + L"\n");
+                        AppendStateLog(L"hooks.log", L"[engine] " + std::wstring{ logLabel } + L" command upgraded" + vArrow + path + L"\n");
+                    }
+                    else
+                    {
+                        // Silent-failure surfacing (the [persist-fail] convention the create path
+                        // below already follows): the upgrade could not be written — a locked or
+                        // read-only file, a full disk. Atomicity means the PRIOR definition is
+                        // still intact and still works, and the next engine init retries; but a
+                        // definition stuck on an old version must not be invisible.
+                        AppendStateLog(L"hooks.log", L"[persist-fail] " + std::wstring{ logLabel } + L" command upgrade" + vArrow + path + L"\n");
                     }
                     return path; // upgraded (or failed best-effort — the old text still works)
                 }
@@ -1381,7 +1446,7 @@ file) in this working directory, injecting each document as its session's openin
         }
         ::CreateDirectoryW(configDir.c_str(), nullptr);
         ::CreateDirectoryW(commandsDir.c_str(), nullptr);
-        if (!WriteFileUtf8(path, textToWrite))
+        if (!WriteFileUtf8Atomic(path, textToWrite))
         {
             AppendStateLog(L"hooks.log", L"[persist-fail] " + std::wstring{ logLabel } + L" command definition: " + path + L"\n");
             return {};
@@ -1549,6 +1614,7 @@ file) in this working directory, injecting each document as its session's openin
     }
 
     std::pair<std::wstring, std::wstring> ReconcileHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings)
+    try
     {
         // Belt: heal the configured pair again here (the Persistence load already does) so a
         // hand-built AppSettings can never reconcile two commands onto ONE name. The two
@@ -1576,8 +1642,21 @@ file) in this working directory, injecting each document as its session's openin
                                                               settings.commandHandoverHereEnabled);
         return { ho, hh };
     }
+    catch (...)
+    {
+        // Safeguard + Rule #18. This runs at engine init from a point OUTSIDE Engine.cpp's own
+        // init net, and only the leaf writers (EnsureShippedCommandFileCore /
+        // RemoveShippedCommandFileNamedIn) carry function-try blocks — the name healing, the
+        // marker plumbing and the log-line building above do not. An escape here would derail
+        // engine init for the whole run. Report the PREVIOUS markers unchanged (the same recovery
+        // the no-config-root path takes): never flip a marker over a failure we did not complete,
+        // so the next init reconciles from the truth on disk.
+        LogSwallowedException(L"ReconcileHandoverCommandFilesIn");
+        return { settings.commandHandoverMaterializedName, settings.commandHandoverHereMaterializedName };
+    }
 
     std::pair<std::wstring, std::wstring> ReconcileHandoverCommandFiles(const AppSettings& settings)
+    try
     {
         const std::wstring base = ResolveClaudeCommandsBase();
         if (base.empty())
@@ -1587,6 +1666,13 @@ file) in this working directory, injecting each document as its session's openin
             return { settings.commandHandoverMaterializedName, settings.commandHandoverHereMaterializedName };
         }
         return ReconcileHandoverCommandFilesIn(base, settings);
+    }
+    catch (...)
+    {
+        // The env-resolution half of the same net (ResolveClaudeCommandsBase reads the environment
+        // and builds a path); same recovery — markers unchanged, nothing claimed.
+        LogSwallowedException(L"ReconcileHandoverCommandFiles");
+        return { settings.commandHandoverMaterializedName, settings.commandHandoverHereMaterializedName };
     }
 
     std::wstring ReadHandoverDocumentPrompt(const std::wstring& mdPath)

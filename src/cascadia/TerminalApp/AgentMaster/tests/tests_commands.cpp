@@ -776,6 +776,13 @@ void TestCommandWatch()
         CHECK(EnsureShippedCommandFileIn(cfg, leaf, {}, kV3, L"am-test").empty(), "an EMPTY history -> no write (a command with no shipped version is a bug, not a create)");
         CHECK(EnsureShippedCommandFileIn(cfg, leaf, history, L"", L"am-test").empty(), "an EMPTY current text -> no write (never truncate the user's file to nothing)");
         CHECK(readBack() == Utf8Of(kV1), "the refused calls left the file exactly as it was");
+        // The definition is written ATOMICALLY (temp sibling + MoveFileExW) so a torn write can
+        // never leave bytes that match no shipped digest — which would read as user-owned and
+        // never be repaired. The temp must not survive a successful write (and never as a .md,
+        // which Claude Code would offer as a command).
+        CHECK(::GetFileAttributesW((path + L".am-tmp").c_str()) == INVALID_FILE_ATTRIBUTES, "the atomic write leaves no temp file behind");
+        CHECK(ensure() == path && readBack() == Utf8Of(kV3) && ::GetFileAttributesW((path + L".am-tmp").c_str()) == INVALID_FILE_ATTRIBUTES, "an upgrade over an existing file replaces it atomically, leaving no temp");
+
 
         ::DeleteFileW(path.c_str());
         ::RemoveDirectoryW((cfg + L"\\commands").c_str());
