@@ -284,6 +284,104 @@ void TestCommandWatch()
         CHECK(!firedHere.empty() && firedHere[0].mdPath == L"K:\\r\\HANDOVER-swap.md" && firedHere[0].args == L"replace me", "fired with the resolved path + the command's args");
     }
 
+    // ---- SAME-FAMILY SUPERSEDE (the /handover vs /handover-here race guard): both await the
+    // SAME HANDOVER-* family, so they are ONE logical operation with different handling paths —
+    // a new family sighting RE-AIMS a still-unsatisfied older await instead of queueing behind
+    // it (FIFO would hand the NEW command's write to the OLD pending and fire the WRONG path). ----
+    {
+        // THE reported race: /handover left unmatched (a clarification round), THEN
+        // /handover-here, THEN Claude writes. The write must fire the /handover-here path — the
+        // user's latest intent — never the stale /handover.
+        CommandWatch w;
+        int firedHandover = 0;
+        std::vector<FiredHandover> firedHere;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++firedHandover; });
+        w.BindMarkdownAwait(L"handover-here", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            firedHere.push_back(MakeFired(sid, mds, args));
+        });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"first intent" }, freshTs, now);
+        w.OnTurnEnd(L"s"); // the clarification round ends turn 1 — /handover still unmatched
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover-here", L"replace instead" }, freshTs + 1, now);
+        CHECK(w.PendingCount() == 1, "the unmatched /handover is SUPERSEDED — one family, the newest handling path owns the await");
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-x.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s");
+        CHECK(firedHandover == 0 && firedHere.size() == 1, "the write fires ONLY the newest family command (/handover-here) — never the stale /handover");
+        CHECK(!firedHere.empty() && firedHere[0].mdPath == L"K:\\r\\HANDOVER-x.md" && firedHere[0].args == L"replace instead", "the newer command got its own file + args");
+        CHECK(w.PendingCount() == 0, "nothing pending (the superseded await left no residue)");
+    }
+    {
+        // The reverse order guards identically: /handover-here superseded by a later /handover.
+        CommandWatch w;
+        std::vector<FiredHandover> firedHandover;
+        int firedHere = 0;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            firedHandover.push_back(MakeFired(sid, mds, args));
+        });
+        w.BindMarkdownAwait(L"handover-here", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++firedHere; });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover-here", L"" }, freshTs, now);
+        w.OnTurnEnd(L"s");
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs + 1, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-y.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s");
+        CHECK(firedHere == 0 && firedHandover.size() == 1 && firedHandover[0].mdPath == L"K:\\r\\HANDOVER-y.md", "supersede is direction-agnostic (the newest family command wins either way)");
+    }
+    {
+        // A SEALED older family pending is a COMPLETE distinct operation — never superseded: it
+        // fires with its OWN file (even while awaiting an approval-held disk write), and the new
+        // command's write goes to the new pending. Repeatability upheld.
+        CommandWatch w;
+        std::vector<FiredHandover> firedHandover;
+        std::vector<FiredHandover> firedHere;
+        bool filePresent = false;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            firedHandover.push_back(MakeFired(sid, mds, args));
+        });
+        w.BindMarkdownAwait(L"handover-here", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            firedHere.push_back(MakeFired(sid, mds, args));
+        });
+        w.SetFileProbe([&](const std::wstring&) { return filePresent; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"keep me" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-a.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s"); // /handover SEALED with its own file, awaiting the (approval-held) disk
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover-here", L"and me" }, freshTs + 1, now);
+        CHECK(w.PendingCount() == 2, "a SEALED family pending is untouched by a newer sighting (a distinct completed collection)");
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-b.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s");
+        filePresent = true;
+        w.Tick(now + 1'000);
+        CHECK(firedHandover.size() == 1 && firedHandover[0].mdPath == L"K:\\r\\HANDOVER-a.md", "the sealed /handover fired with ITS OWN file");
+        CHECK(firedHere.size() == 1 && firedHere[0].mdPath == L"K:\\r\\HANDOVER-b.md", "the /handover-here fired with ITS OWN file (no cross-steal in either direction)");
+    }
+    {
+        // A same-command re-run supersedes too (a /handover retry mid-clarification is ONE
+        // operation, not two successors) — and a matched-but-UNSEALED predecessor (no turn end
+        // seen yet) is defensively SEALED instead of killed: its collected file is its own.
+        CommandWatch w;
+        std::vector<FiredHandover> fired;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            fired.push_back(MakeFired(sid, mds, args));
+        });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"take one" }, freshTs, now);
+        w.OnTurnEnd(L"s");
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"take two" }, freshTs + 1, now);
+        CHECK(w.PendingCount() == 1, "a re-run /handover supersedes its own unmatched predecessor (one retry == one successor)");
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-retry.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s");
+        CHECK(fired.size() == 1 && fired[0].args == L"take two", "the retry's fire carries the NEWEST args");
+        // Defensive seal: matched-but-unsealed predecessor at the moment a family echo arrives.
+        w.OnCommandSighting(L"s2", SlashCommand{ L"handover", L"one" }, freshTs, now);
+        w.OnFileToolWrite(L"s2", { L"K:\\r\\HANDOVER-one.md" }, L"K:\\r", now); // matched, turn NOT ended
+        w.OnCommandSighting(L"s2", SlashCommand{ L"handover", L"two" }, freshTs + 1, now); // family echo -> predecessor defensively sealed
+        w.OnFileToolWrite(L"s2", { L"K:\\r\\HANDOVER-two.md" }, L"K:\\r", now); // must go to the NEW pending
+        w.OnTurnEnd(L"s2");
+        CHECK(fired.size() == 3, "both s2 operations fired (the defensively-sealed one + the new one)");
+        CHECK(fired.size() == 3 && fired[1].args == L"one" && fired[1].mdPath == L"K:\\r\\HANDOVER-one.md", "the defensively-sealed predecessor fired with ITS OWN file");
+        CHECK(fired.size() == 3 && fired[2].args == L"two" && fired[2].mdPath == L"K:\\r\\HANDOVER-two.md", "the new pending collected the LATER write (no steal)");
+    }
+
     // turn-end expiry for UNMATCHED pendings (the command turn + one clarification round).
     {
         CommandWatch w;
@@ -309,13 +407,24 @@ void TestCommandWatch()
         w.OnCommandSighting(L"s2b", SlashCommand{ L"handover", L"" }, freshTs, now);
         CHECK(w.PendingCount() == 1, "re-feeding the SAME echo (identical session/command/timestamp) never double-arms (replay idempotence)");
         w.DropSession(L"s2b");
+        // Six SAME-FAMILY sightings collapse to ONE pending (the supersede: each re-run re-aims
+        // the await) — they can never queue toward the cap.
         for (int i = 0; i < 6; ++i)
         {
             // Distinct line timestamps — six REAL commands (identical stamps would be the same
             // echo re-fed, dropped by the idempotence guard above).
             w.OnCommandSighting(L"s3", SlashCommand{ L"handover", L"" }, freshTs + i, now);
         }
-        CHECK(w.PendingCount() == kCommandMaxPendingPerSession, "per-session cap bounds pendings (oldest evicted)");
+        CHECK(w.PendingCount() == 1, "same-family sightings collapse to ONE pending (supersede), never queue toward the cap");
+        w.DropSession(L"s3");
+        // The cap needs DISTINCT families (distinct leaf hints — no supersede between them).
+        for (int i = 0; i < 6; ++i)
+        {
+            const std::wstring name = L"cmd" + std::to_wstring(i);
+            w.BindMarkdownAwait(name, L"hint" + std::to_wstring(i), [](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) {});
+            w.OnCommandSighting(L"s3", SlashCommand{ name, L"" }, freshTs + i, now);
+        }
+        CHECK(w.PendingCount() == kCommandMaxPendingPerSession, "per-session cap bounds pendings across distinct families (oldest evicted)");
     }
 
     // ---- safeguards: sane-path gate, throwing handler, throwing probe ----
@@ -727,11 +836,15 @@ namespace
     }
 
     // --- the fabricated transcript lines (the EXPECTED /handover session shape) ---
-    std::wstring FabUserEcho(const std::wstring& sid, const std::wstring& args, int64_t tsMs)
+    std::wstring FabUserEchoNamed(const std::wstring& sid, const std::wstring& cmdName, const std::wstring& args, int64_t tsMs)
     {
         // The CURRENT (2026-07) echo shape verbatim: name tag first, indented message/args tags.
-        return L"{\"parentUuid\":\"p0\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/handover</command-name>\\n            <command-message>handover</command-message>\\n            <command-args>" +
+        return L"{\"parentUuid\":\"p0\",\"isSidechain\":false,\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/" + cmdName + L"</command-name>\\n            <command-message>" + cmdName + L"</command-message>\\n            <command-args>" +
                JsonEsc(args) + L"</command-args>\"},\"uuid\":\"u-echo\",\"timestamp\":\"" + IsoZ(tsMs) + L"\",\"sessionId\":\"" + sid + L"\",\"cwd\":\"K:\\\\repo\",\"version\":\"2.1.190\",\"gitBranch\":\"agentmaster\"}\n";
+    }
+    std::wstring FabUserEcho(const std::wstring& sid, const std::wstring& args, int64_t tsMs)
+    {
+        return FabUserEchoNamed(sid, L"handover", args, tsMs);
     }
     std::wstring FabAssistantWrite(const std::wstring& mdPath, int64_t tsMs, const std::wstring& uuid)
     {
@@ -1026,6 +1139,32 @@ void TestCommandHandoverE2E()
                 CHECK(fired2 == 1, "scenario G: a mid-await command REVIVES across the restart and completes (fired once, never lost)");
             }
         }
+    }
+
+    // ---- scenario H (the FAMILY race, end-to-end): /handover answered with a clarifying
+    //      question (turn ends unmatched), the user pivots to /handover-here, Claude writes.
+    //      With BOTH bindings registered, the write must fire ONLY the /handover-here handling
+    //      path — the stale /handover await was superseded, never handed the newer command's
+    //      file (the FIFO race guard). ----
+    {
+        CommandWatch w;
+        int firedHandover = 0;
+        std::vector<FiredHandover> firedHere;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++firedHandover; });
+        w.BindMarkdownAwait(L"handover-here", L"handover", [&](const std::wstring& s, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            firedHere.push_back(MakeFired(s, mds, args));
+        });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        const std::wstring content =
+            FabUserEcho(sid, L"hand this over", now - 6000) +
+            FabAssistantEnd(L"New tab or replace this one?", now - 5000, L"a-hq") +
+            FabUserEchoNamed(sid, L"handover-here", L"replace this tab", now - 4000) +
+            FabAssistantWrite(mdPath, now - 3000, L"a-hw") +
+            FabAssistantEnd(L"Written - replacing.", now - 2000, L"a-he");
+        FeedParsedEvents(w, sid, dir, ParseTranscriptDelta(content), now);
+        CHECK(firedHandover == 0 && firedHere.size() == 1, "scenario H: the pivot fires ONLY /handover-here (the stale /handover was superseded, not fed the file)");
+        CHECK(!firedHere.empty() && firedHere[0].mdPath == mdPath && firedHere[0].args == L"replace this tab", "scenario H: the newest family command owns the write");
+        CHECK(w.PendingCount() == 0, "scenario H: no residue");
     }
 
     ::DeleteFileW(mdPath.c_str());

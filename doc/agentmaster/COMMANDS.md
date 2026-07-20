@@ -118,6 +118,20 @@ unit-tests offline.
 * `kCommandMaxPendingPerSession` (4) caps memory, oldest evicted; FIFO across sightings (a
   second `/handover` arms its own pending; the turn-end seal pairs each command's writes with
   its own turn);
+* **SAME-FAMILY SUPERSEDE — /handover and /handover-here can never race each other's files.**
+  Bindings sharing a leaf hint (both use `"handover"` — one `HANDOVER-*` contract) await the
+  same indistinguishable file family, so they are treated as ONE logical operation with
+  different HANDLING paths, not two queued FIFO awaits: a new family sighting **re-aims** the
+  await — an older UNSEALED family pending with no collected paths is **superseded** (removed,
+  its durable marker retired, logged `[cmd] /handover superseded by /handover-here …`; the
+  newest handling path takes the next write — a `/handover` left hanging on a clarification and
+  then pivoted to `/handover-here` fires the in-place path, never a stale new-tab spawn); an
+  older unsealed pending that already collected paths (structurally rare — a user echo implies
+  the prior turn closed, which seals) is defensively **sealed** so it fires with its own files;
+  SEALED pendings are untouched (distinct resolved operations — repeatability upheld: every
+  satisfied command still fires). At most ONE unsealed family pending exists per session, so a
+  family write has exactly one possible owner. A same-command re-run supersedes too (a retry is
+  one operation, not two successors);
 * pendings themselves stay transient in-memory — but the session's PROGRESS is durable (§3a),
   so a restart neither double-processes a fired command nor loses one that was mid-await.
 
@@ -164,7 +178,9 @@ survives archiving, because it is what makes the later resume/replay safe. No st
 The engine's `/handover` binding (registered in `Engine.cpp` init, before the scanner starts)
 does one thing: `RaiseCommandActionInWindows(sessionId, L"handover", mdPath)`; the
 `/handover-here` binding is its twin with the action name `L"handover-here"` (the watch's
-binding lookup is name-EXACT, so the two commands can never cross-fire — no prefix aliasing).
+binding lookup is name-EXACT, so the two commands can never cross-fire — no prefix aliasing —
+and the §3 same-family supersede means they can never race each other's FILES either: back to
+back, the newest one owns the await).
 That is a per-window sink family (`Engine::CommandActionSink` — the `activateSinks` idiom
 verbatim: registered at engine init, token-detached in `~TerminalPage` (Rule #10),
 snapshot-under-lock / invoke-outside). Unlike Activate there is NO source window to exclude —
@@ -424,7 +440,13 @@ line alone pins the throw site later):
   `Encode/DecodeCommandProgress` round-trip + garbage tolerance, arming persists a marker, a
   fire advances the watermark + retires the marker, a SECOND watch instance over the same store
   never re-fires the replayed echo, a mid-await marker REVIVES a stale echo and completes, a
-  past-deadline marker prunes at load, same-echo idempotence never double-arms. **/handover-here units (§5a):** the hyphenated echo parses whole
+  past-deadline marker prunes at load, same-echo idempotence never double-arms.
+  **Family-supersede units (§3):** the exact reported race (/handover unmatched → /handover-here
+  → write fires ONLY the newer path) in both directions, a SEALED predecessor untouched (both
+  fire with their own files), a same-command re-run collapsing to one fire with the newest args,
+  the defensive seal of a matched-but-unsealed predecessor (no cross-steal either way), plus E2E
+  scenario H (the fabricated pivot transcript through the real parser + both bindings).
+  **/handover-here units (§5a):** the hyphenated echo parses whole
   (`ParseCommandEcho` keeps the hyphen — bindings key on the exact name), a `/handover-here`
   sighting beside a registered `/handover` binding fires ONLY its own handler (name-exact
   lookup, no prefix aliasing), and `EnsureHandoverHereCommandFileIn` under the same temp-config
@@ -451,7 +473,9 @@ line alone pins the throw site later):
   then part 2). Scenario G: **the restart story over a durable store** — run 1 fires; the
   restarted instance replays the same still-fresh history and never re-fires (the watermark);
   and an armed-but-unresolved command from run 1 REVIVES in run 2's replay (echo now stale) and
-  completes exactly once.
+  completes exactly once. Scenario H: **the family-race pivot** — /handover answered with a
+  clarifying question, the user pivots to /handover-here, the write fires ONLY the in-place
+  path (the stale /handover superseded, never fed the newer command's file).
 * **`TestCommandEchoRealCorpus` — the REAL corpus** (guarded; `[info]`-skips on a machine
   without `~/.claude`): the newest ~120 on-disk transcripts (2 MB heads, whole-line-safe)
   line-scanned for genuine command echoes and Write-tool lines, each replayed through the real

@@ -196,8 +196,15 @@ namespace Agentmaster
         // A command echo. `lineTsMs` is the transcript line's own timestamp (0 == absent — never
         // armed). Arms when FRESH (within kCommandSightingFreshMs) or REVIVED (a persisted armed
         // marker matches — the restart-mid-await case); an echo at/under the session's fired
-        // watermark never re-arms (the durable double-processing guard). Unbound names are
-        // ignored (no state, no logs, no progress reads).
+        // watermark never re-arms (the durable double-processing guard). SAME-FAMILY SUPERSEDE:
+        // bindings sharing a leaf hint (e.g. /handover + /handover-here, both "handover") await
+        // the same indistinguishable file family, so a new family sighting RE-AIMS the await —
+        // an older UNSEALED family pending with no collected paths is superseded (removed, its
+        // marker retired: the newest handling path wins); one that did collect is defensively
+        // sealed (fires with its own files); sealed pendings are untouched. At most ONE unsealed
+        // family pending exists per session, so a family write has exactly one possible owner —
+        // the two commands can never race each other's files. Unbound names are ignored (no
+        // state, no logs, no progress reads).
         void OnCommandSighting(const std::wstring& sessionId, const SlashCommand& cmd, int64_t lineTsMs, int64_t nowMs);
         // The file-writing tool_use paths of one assistant message (Write/Edit file_path values,
         // block order). `sessionCwd` resolves a relative path. The oldest UNSEALED pending of the

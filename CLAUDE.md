@@ -769,13 +769,13 @@ tag no session carries lists at **·0** (sorts last).
 ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
 HARDENED, delivery = FULL CONTENT INJECTION (never truncated), RESTART-RESILIENT (durable
 per-session progress) + MULTI-FILE (one command's several HANDOVER files consumed as one):
-engine-tested (2280/2280 — the
+engine-tested (2297/2297 — the
 `TestCommandWatch` units + safeguard belts + the content-injection/tier units + the /handover-here
 twin units (hyphen echo, name-exact binding isolation, its own definition file) + the multi-file
 collect/seal/settle units + the durable-progress units (watermark / marker revival / prune /
-encode-decode), the FABRICATED
-end-to-end `/handover` session `TestCommandHandoverE2E` (incl. the multi-file scenario F + the
-restart-persistence scenario G), and the REAL-corpus echo replay
+encode-decode) + the family-supersede race-guard units, the FABRICATED
+end-to-end `/handover` session `TestCommandHandoverE2E` (incl. the multi-file scenario F, the
+restart-persistence scenario G + the family-race pivot scenario H), and the REAL-corpus echo replay
 `TestCommandEchoRealCorpus`) + lib-compiled green; rides the next deploy cycle.** Bind to `/commands`
 the user TYPES into a managed Claude session and AWAIT the session's
 follow-up activity — async, bounded, zero state-machine impact. A typed command's transcript ECHO (a
@@ -806,7 +806,15 @@ markers prune at load; markers retire on fire/expiry/eviction and override the w
 out-of-order fire). An echo neither fresh nor marked never arms (foreign/deep history stays inert);
 same-echo idempotence never double-arms one line; bounded everywhere (2 turn-ends for an unmatched
 sighting, 15-min deadline, per-session cap, FIFO — the seal pairs each command's writes with its own
-turn; pendings stay transient in-memory, the PROGRESS is the durable half).
+turn; pendings stay transient in-memory, the PROGRESS is the durable half). **SAME-FAMILY SUPERSEDE
+— /handover and /handover-here never race each other's files:** bindings sharing a leaf hint are ONE
+logical operation with different handling paths, so a new family sighting RE-AIMS a still-unsatisfied
+older await (an unmatched predecessor is superseded — marker retired, the newest handling path takes
+the next write, so a /handover pivoted to /handover-here fires the in-place path, never a stale
+new-tab spawn; a matched-but-unsealed one defensively seals and fires with its own files; SEALED
+pendings are untouched — every satisfied command still fires) — at most ONE unsealed family pending
+exists per session, so a family write has exactly one possible owner. A same-command re-run
+supersedes too (a retry is one operation).
 **The `/handover <context-or-filepath>` integration:** engine init materializes the command DEFINITION
 `<claude-config>/commands/handover.md` (**create-if-absent + a VERSION-AWARE UPGRADE — the ONE write
 outside the profile**: a file byte-identical to a PRIOR shipped version (`ShippedHandoverCommandHistory`,

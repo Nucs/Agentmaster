@@ -77,6 +77,13 @@ namespace
         const size_t sep = path.find_last_of(L"/\\");
         return sep == std::wstring_view::npos ? path : path.substr(sep + 1);
     }
+
+    // Case-insensitive (ASCII) equality — the await-FAMILY key comparison (two bindings with the
+    // same leaf hint await the same file family). Equal sizes + ContainsCi == CI-equal.
+    bool EqualsCi(std::wstring_view a, std::wstring_view b)
+    {
+        return a.size() == b.size() && ContainsCi(a, b);
+    }
 }
 
 namespace Agentmaster
@@ -381,9 +388,11 @@ namespace Agentmaster
             return;
         }
         bool revived = false;
+        std::vector<std::wstring> familyLines; // supersede/defensive-seal logs, flushed outside the lock
         {
             std::lock_guard lk{ _mtx };
-            if (!_findBindingLocked(cmd.name))
+            const Binding* binding = _findBindingLocked(cmd.name);
+            if (!binding)
             {
                 return; // unbound command (/model, /compact, …): no state, no logs, no progress reads
             }
@@ -426,6 +435,45 @@ namespace Agentmaster
                     return;
                 }
             }
+            // SAME-FAMILY SUPERSEDE (the /handover vs /handover-here race guard). Bindings that
+            // await the SAME file family (same leaf hint — "handover" for both /handover and
+            // /handover-here) are ONE logical operation with different HANDLING paths; their
+            // writes are indistinguishable (one HANDOVER-* contract), so they must never race as
+            // independent FIFO pendings: the oldest-unsealed collector would hand the NEW
+            // command's file to the OLD await and fire the WRONG handling path (a /handover
+            // clarification round left unmatched, then /handover-here typed, then Claude writes —
+            // the old /handover would spawn a new tab where the user asked for the in-place
+            // replace, and the /handover-here await would starve out). So a new family sighting
+            // RE-AIMS the await — the newest handling path wins:
+            //   * an older UNSEALED family pending with NO collected paths is SUPERSEDED —
+            //     removed, its durable marker retired (the user changed their mind / re-ran);
+            //   * an older UNSEALED family pending that DID collect paths (structurally rare — a
+            //     user echo implies the prior turn closed, which seals) is defensively SEALED so
+            //     it fires with ITS OWN files and can never steal the new command's;
+            //   * SEALED pendings are untouched — their collection is complete, they are distinct
+            //     resolved operations (repeatability: every satisfied /handover still fires).
+            // After this sweep at most ONE unsealed family pending exists (the one armed below),
+            // so the family's next writes have exactly one possible owner.
+            for (auto pit = _pending.begin(); pit != _pending.end();)
+            {
+                if (pit->sessionId == sessionId && !pit->sealed)
+                {
+                    const Binding* ob = _findBindingLocked(pit->command);
+                    if (ob && EqualsCi(ob->preferLeafContains, binding->preferLeafContains))
+                    {
+                        if (pit->matchedPaths.empty())
+                        {
+                            familyLines.push_back(L"[cmd] /" + pit->command + L" superseded by /" + cmd.name + L" " + ShortId(sessionId) + L" (same await family; the newer handling path takes the next write)\n");
+                            _dropArmedMarkerLocked(pit->sessionId, pit->command, pit->lineTsMs);
+                            pit = _pending.erase(pit);
+                            continue;
+                        }
+                        pit->sealed = true; // defensive: its collected files are its own; the new pending is the sole collector from here
+                        familyLines.push_back(L"[cmd] /" + pit->command + L" sealed " + ShortId(sessionId) + L" files=" + std::to_wstring(pit->matchedPaths.size()) + L" (a newer family command arrived)\n");
+                    }
+                }
+                ++pit;
+            }
             // Per-session cap (bounded memory): evict the OLDEST pending of this session — and
             // retire its durable marker with it (an evicted await must not revive on replay).
             size_t mine = 0;
@@ -461,6 +509,10 @@ namespace Agentmaster
                 prog.armed.emplace_back(cmd.name, lineTsMs);
                 _saveProgressLocked(sessionId); // durable: a restart mid-await can revive it
             }
+        }
+        for (const auto& line : familyLines)
+        {
+            AppendStateLog(L"hooks.log", line);
         }
         std::wstring argsPreview = cmd.args.substr(0, 120);
         for (auto& c : argsPreview)
