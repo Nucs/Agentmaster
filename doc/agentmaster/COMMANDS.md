@@ -351,6 +351,16 @@ thoroughness is encouraged, not traded against delivery. **V4 (multi-file)** per
 genuinely-better-split briefing — "you may write MORE THAN ONE `HANDOVER-*.md` file in this
 same turn - all of them are delivered together, in the order written" (the §3 collection; ONE
 file stays the recommendation). `handover-here.md` **V2** carries the same line.
+**V5 / handover-here V3 (the SELF-INVOCATION guard — found by a live skill-creator review):**
+Claude Code lists the commands as invocable SKILLS, but a MODEL-initiated Skill invocation
+writes **no `<command-name>` transcript echo** (proven empirically against a live transcript —
+the invocation is an assistant `tool_use`, not the typed-command expansion), so the
+CommandWatch never arms for it and the prior texts' closing "Agentmaster is watching" promise
+was FALSE on that path: the model would write the file, end its turn, and nothing would ever
+pick it up (silently confusing; conversely it also means Claude can never trigger the
+tab-replacing /handover-here on its own — that safety property is preserved). The guard
+paragraph tells a self-invoked model to write NOTHING and redirect the user to TYPE the
+command instead.
 
 ## 7. Hardening & safeguards
 

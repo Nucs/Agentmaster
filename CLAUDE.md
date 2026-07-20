@@ -819,10 +819,13 @@ supersedes too (a retry is one operation).
 `<claude-config>/commands/handover.md` (**create-if-absent + a VERSION-AWARE UPGRADE — the ONE write
 outside the profile**: a file byte-identical to a PRIOR shipped version (`ShippedHandoverCommandHistory`,
 v1 byte-frozen, only ever APPEND) silently upgrades to current, anything user-edited is NEVER touched —
-the ApplyEnvDefaults discipline; a deliberate additive `~/.claude` mutation. The current V4 instructs
+the ApplyEnvDefaults discipline; a deliberate additive `~/.claude` mutation. The current V5 instructs
 Claude to Write `HANDOVER-<topic>.md` AS a direct briefing TO the successor — because the files'
-content IS its first message — then end the turn, and permits a genuinely-better-split briefing
-across SEVERAL `HANDOVER-*.md` files in the same turn, all delivered in write order) and binds
+content IS its first message — then end the turn, permits a genuinely-better-split briefing
+across SEVERAL `HANDOVER-*.md` files in the same turn (all delivered in write order), and carries
+the SELF-INVOCATION guard (a MODEL-invoked Skill call writes no `<command-name>` echo, so the watch
+never arms — the guard makes a self-invoked model write nothing and redirect the user to TYPE the
+command; handover-here V3 same)) and binds
 `handover` → the new per-window **command-action
 sinks** (`Engine::CommandActionSink`, the activateSinks idiom — registered at page init,
 token-detached in `~TerminalPage`). The hosting window's `_HandleCommandHandover` spawns the

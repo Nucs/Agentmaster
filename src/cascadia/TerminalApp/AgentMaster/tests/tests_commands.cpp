@@ -702,11 +702,12 @@ void TestCommandWatch()
         // untouched — it silently upgrades to the current text on the next ensure.
         {
             const auto& history = ShippedHandoverCommandHistory();
-            CHECK(history.size() >= 4 && history.back().find(L"injected VERBATIM") != std::wstring_view::npos, "shipped history: >= 4 versions, current is the content-injection text");
+            CHECK(history.size() >= 5 && history.back().find(L"injected VERBATIM") != std::wstring_view::npos, "shipped history: >= 5 versions, current is the content-injection text");
             CHECK(history.back().find(L"whatever its size") != std::wstring_view::npos &&
                       history.back().find(L"truncated") == std::wstring_view::npos,
                   "current definition promises FULL delivery (never-truncate) and carries no truncation caution");
             CHECK(history.back().find(L"MORE THAN ONE") != std::wstring_view::npos, "current definition permits a split multi-file briefing (V4 — all files are delivered)");
+            CHECK(history.back().find(L"YOU invoked the skill yourself") != std::wstring_view::npos, "current definition carries the SELF-INVOCATION guard (V5 — a model-invoked skill writes no command echo, so nothing watches; redirect the user to TYPE the command)");
             const auto utf8Of = [](std::wstring_view w) {
                 std::string out;
                 const int need = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
@@ -765,8 +766,9 @@ void TestCommandWatch()
         }
         {
             const auto& history = ShippedHandoverHereCommandHistory();
-            CHECK(history.size() >= 2 && history.back().find(L"RESTARTS THIS TAB") != std::wstring_view::npos, "shipped handover-here history: >= 2 versions; the current text names the in-place restart");
+            CHECK(history.size() >= 3 && history.back().find(L"RESTARTS THIS TAB") != std::wstring_view::npos, "shipped handover-here history: >= 3 versions; the current text names the in-place restart");
             CHECK(history.back().find(L"MORE THAN ONE") != std::wstring_view::npos, "current handover-here definition permits a split multi-file briefing (V2)");
+            CHECK(history.back().find(L"YOU invoked the skill yourself") != std::wstring_view::npos, "current handover-here definition carries the SELF-INVOCATION guard (V3)");
         }
         // A user edit is NEVER overwritten (the shared create-if-absent + upgrade discipline —
         // EnsureShippedCommandFileIn is the one core both wrappers share).
