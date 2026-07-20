@@ -224,10 +224,12 @@ namespace winrt::TerminalApp::implementation
     // spawn the successor session — same effective working dir (the "Open New Session Here"
     // semantics), titled "<origin title> (handover)" (bumping to "(handover 2)"/… against titles
     // already in the registry, so sibling handovers from one origin never collide), inserted right
-    // beside the origin tab, and FIRST-PROMPTED at the markdown via the launch commandline's
-    // positional prompt (zero-race: no stdin injection, no TUI-init window; the prompt fires a real
-    // UserPromptSubmit, so state/record ride the normal push path). Repeatable by design — every
-    // /handover in a conversation spawns its own successor.
+    // beside the origin tab, and handed the markdown's CONTENT — injected verbatim as its FIRST
+    // USER MESSAGE via the launch commandline's positional prompt (zero-race: no stdin injection,
+    // no TUI-init window; the prompt fires a real UserPromptSubmit, so state/record ride the
+    // normal push path), budget-clamped with a pointer tail when oversized, pointer-prompt
+    // fallback when unreadable. Repeatable by design — every /handover in a conversation spawns
+    // its own successor.
     void TerminalPage::_HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPath)
     try
     {
@@ -297,15 +299,59 @@ namespace winrt::TerminalApp::implementation
             insertPosition = originTab.TabViewIndex() + 1;
         }
 
-        // The handover message for the new tab IS the markdown — delivered BY REFERENCE (a
-        // single-line pointer prompt): the launch commandline carries one positional arg, and a
-        // multi-line body would be hostage to prompt-injection quoting; the file outlives the
-        // prompt and the successor Reads it as its first action.
-        const std::wstring prompt = L"Read the handover document at " + mdPath + L" and continue the work it describes.";
+        // The handover message for the new tab IS the markdown — its CONTENT delivered VERBATIM
+        // and IN FULL as the successor's first user message ("as if the user typed it"), NEVER
+        // truncated (COMMANDS.md §5). Three delivery tiers:
+        //   * content fits the commandline's escape-aware threshold (PsEscapedCost <=
+        //     kHandoverPromptEscapedBudget) -> the launch commandline's positional prompt (the
+        //     zero-race channel; one PS double-quoted arg inside -EncodedCommand — nothing is
+        //     typed into a TUI, so multi-line is safe, but BOTH CreateProcessW hops cap at
+        //     32,767 chars, hence the tier);
+        //   * over the threshold -> the FULL document rides the ConPTY stdin instead (no size
+        //     ceiling): queued as a Pending prompt on the successor and injected as ONE bracketed
+        //     paste by _PumpHandoverInjections once the session has actually started — the
+        //     Send-now recipe, so echo dedup + the Enter-retry watchdog back the submit;
+        //   * unreadable/whitespace-only/beyond-sanity-cap read (a rewrite-in-flight race past
+        //     the re-asserts above) -> the pointer-style prompt, so the handover still functions
+        //     and nothing was silently cut.
+        const std::wstring content = ::Agentmaster::ReadHandoverDocumentPrompt(mdPath);
+        const bool fitsCommandline = !content.empty() && ::Agentmaster::PsEscapedCost(content) <= ::Agentmaster::kHandoverPromptEscapedBudget;
+        std::wstring launchPrompt; // the commandline tier's positional prompt ("" for the paste tier)
+        const wchar_t* injectMode = L" inject=paste";
+        if (content.empty())
+        {
+            launchPrompt = L"Read the handover document at " + mdPath + L" and continue the work it describes.";
+            injectMode = L" inject=pointer";
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" md unreadable at spawn - falling back to the pointer prompt: " + mdPath + L"\n");
+        }
+        else if (fitsCommandline)
+        {
+            launchPrompt = content;
+            injectMode = L" inject=content";
+        }
 
-        const auto successorTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ successorTitle }, std::nullopt, {}, insertPosition, {}, prompt);
+        const auto successorTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ successorTitle }, std::nullopt, {}, insertPosition, {}, launchPrompt);
         const std::wstring newId = successorTab ? _ClaudeSessionForTab(successorTab) : std::wstring{};
-        ::Agentmaster::LogNav(L"handover-done " + (newId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(newId))) + L" from=" + ::Agentmaster::ShortId(sessionId));
+        if (!newId.empty() && !content.empty() && !fitsCommandline)
+        {
+            // The over-budget tier: park the FULL document on the successor's queue (Pending — the
+            // durable, visible carrier: Auto Testing lists it, Send-now can deliver it manually,
+            // and a restart keeps it) and arm the pump to paste-inject it once the session starts.
+            ::Agentmaster::QueuedPrompt qp;
+            qp.id = ::Agentmaster::NewSessionId();
+            std::wstring label = content.substr(0, 56);
+            std::replace(label.begin(), label.end(), L'\n', L' ');
+            std::replace(label.begin(), label.end(), L'\r', L' ');
+            qp.label = label;
+            qp.text = content;
+            qp.status = ::Agentmaster::PromptStatus::Pending;
+            _sessionRegistry->Update(newId, [&](::Agentmaster::SessionInfo& ss) {
+                ss.queue.insert(ss.queue.begin(), qp); // FRONT: the handover brief precedes anything else ever queued
+            });
+            _pendingHandoverInjections[newId] = PendingHandoverInjection{ qp.id, static_cast<int64_t>(::GetTickCount64()), 0 };
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(newId) + L" document over the commandline tier (escaped cost " + std::to_wstring(::Agentmaster::PsEscapedCost(content)) + L" > " + std::to_wstring(::Agentmaster::kHandoverPromptEscapedBudget) + L") - queued FULL document for paste-injection\n");
+        }
+        ::Agentmaster::LogNav(L"handover-done " + (newId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(newId))) + L" from=" + ::Agentmaster::ShortId(sessionId) + injectMode);
     }
     catch (...)
     {

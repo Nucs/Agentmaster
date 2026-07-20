@@ -328,6 +328,57 @@ void TestCommandWatch()
         CHECK(BuildClaudeCommandline(L"C:/p/s.json", L"sid", false, true) == BuildClaudeCommandline(L"C:/p/s.json", L"sid", false, true, {}, {}, {}, {}), "empty initial prompt is byte-identical to the pre-parameter form");
     }
 
+    // ---- PsEscapedCost (the commandline-vs-paste TIER check; never a truncation bound) ----
+    {
+        CHECK(PsEscapedCost(L"plain") == 5, "plain chars cost 1 each");
+        CHECK(PsEscapedCost(L"a$b`c\"d") == 10, "` \" $ cost 2 each (4 plain + 3 doubled)");
+        // The definitive drift-proof assertion: cost == the ACTUAL PsDoubleQuote output size
+        // minus the two wrapping quotes, for a mixed string.
+        const std::wstring mixed = L"line one\n$var and `tick` plus \"quote\" end";
+        CHECK(PsEscapedCost(mixed) == PsDoubleQuote(mixed).size() - 2, "cost model mirrors PsDoubleQuote exactly (no drift)");
+        CHECK(PsEscapedCost(std::wstring(kHandoverPromptEscapedBudget, L'a')) <= kHandoverPromptEscapedBudget, "budget-sized plain text fits the commandline tier");
+        CHECK(PsEscapedCost(std::wstring(kHandoverPromptEscapedBudget, L'$')) > kHandoverPromptEscapedBudget, "escape-heavy text of the same raw length overflows to the paste tier");
+    }
+
+    // ---- ReadHandoverDocumentPrompt (the injected first-user-message shaping) ----
+    {
+        wchar_t tmp[MAX_PATH];
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring dir = std::wstring{ tmp } + L"am-handover-read";
+        ::CreateDirectoryW(dir.c_str(), nullptr);
+        const std::wstring md = dir + L"\\HANDOVER-read.md";
+        {
+            std::ofstream f(std::filesystem::path{ md }, std::ios::binary | std::ios::trunc);
+            f << "\xEF\xBB\xBF" // UTF-8 BOM (a user-edited md may carry one)
+              << "# Handover\r\n\r\nGoal: finish it.\x07\r\n"; // CRLF + a stray control char (BEL)
+        }
+        const auto p = ReadHandoverDocumentPrompt(md);
+        CHECK(p == L"# Handover\n\nGoal: finish it.", "content read VERBATIM: BOM stripped, CRLF -> LF, stray control dropped, outer ws trimmed");
+        // Oversized document -> returned IN FULL, never truncated (the caller tiers the channel:
+        // PsEscapedCost over the budget routes it to the bracketed-paste stdin injection).
+        {
+            std::ofstream f(std::filesystem::path{ md }, std::ios::binary | std::ios::trunc);
+            for (int i = 0; i < 2000; ++i)
+            {
+                f << "line with some $vars and `ticks` in it to cost extra escapes\n";
+            }
+        }
+        const auto big = ReadHandoverDocumentPrompt(md);
+        CHECK(big.size() > 100'000, "oversized document comes back IN FULL (never truncated)");
+        CHECK(big.find(L"[handover truncated") == std::wstring::npos, "no truncation tail — the message is whole");
+        CHECK(PsEscapedCost(big) > kHandoverPromptEscapedBudget, "an over-budget document reads as the PASTE tier (the caller's channel decision)");
+        CHECK(big.rfind(L"extra escapes") == big.size() - 13, "the document's LAST line survives verbatim (trimmed only)");
+        // Whitespace-only + missing -> "" (the caller's pointer fallback).
+        {
+            std::ofstream f(std::filesystem::path{ md }, std::ios::binary | std::ios::trunc);
+            f << "  \r\n\t\n";
+        }
+        CHECK(ReadHandoverDocumentPrompt(md).empty(), "whitespace-only document -> empty (pointer fallback beats an empty first message)");
+        ::DeleteFileW(md.c_str());
+        CHECK(ReadHandoverDocumentPrompt(md).empty(), "missing file -> empty (pointer fallback)");
+        ::RemoveDirectoryW(dir.c_str());
+    }
+
     // ---- EnsureHandoverCommandFileIn: create-if-absent under a TEMP config dir ----
     {
         wchar_t tmp[MAX_PATH];
@@ -343,6 +394,36 @@ void TestCommandWatch()
             std::ifstream f(std::filesystem::path{ p1 }, std::ios::binary);
             std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
             CHECK(body.find("HANDOVER-") != std::string::npos && body.find("Write tool") != std::string::npos, "definition instructs a Write-tool HANDOVER-*.md (the await's signal)");
+            CHECK(body.find("injected VERBATIM") != std::string::npos, "current definition briefs Claude on content injection (write AS the successor's message)");
+        }
+        // Version-aware UPGRADE: a file byte-identical to a PRIOR shipped version is ours and
+        // untouched — it silently upgrades to the current text on the next ensure.
+        {
+            const auto& history = ShippedHandoverCommandHistory();
+            CHECK(history.size() >= 3 && history.back().find(L"injected VERBATIM") != std::wstring_view::npos, "shipped history: >= 3 versions, current is the content-injection text");
+            CHECK(history.back().find(L"whatever its size") != std::wstring_view::npos &&
+                      history.back().find(L"truncated") == std::wstring_view::npos,
+                  "current definition promises FULL delivery (never-truncate) and carries no truncation caution");
+            const auto utf8Of = [](std::wstring_view w) {
+                std::string out;
+                const int need = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+                if (need > 0)
+                {
+                    out.resize(static_cast<size_t>(need));
+                    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), out.data(), need, nullptr, nullptr);
+                }
+                return out;
+            };
+            {
+                std::ofstream f(std::filesystem::path{ p1 }, std::ios::binary | std::ios::trunc);
+                const std::string v1 = utf8Of(history.front());
+                f.write(v1.data(), static_cast<std::streamsize>(v1.size())); // pretend this install still carries shipped v1
+            }
+            const auto pUp = EnsureHandoverCommandFileIn(cfg);
+            CHECK(pUp == p1, "upgrade path returns the same file");
+            std::ifstream f(std::filesystem::path{ p1 }, std::ios::binary);
+            std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            CHECK(body == utf8Of(history.back()), "a pristine PRIOR shipped version silently upgrades to the current text");
         }
         // A user edit is NEVER overwritten (create-if-absent).
         {
@@ -518,6 +599,13 @@ void TestCommandHandoverE2E()
         CHECK(!fired.empty() && fired[0].sessionId == sid && fired[0].mdPath == mdPath, "scenario A: fired with the real on-disk md path (default probe verified it)");
         CHECK(!fired.empty() && fired[0].args == L"wrap up the CommandWatch work; see COMMANDS.md", "scenario A: the command's args ride the fire");
         CHECK(w.PendingCount() == 0, "scenario A: nothing pending after the fire");
+        // Content injection (the fired path -> the successor's first user message): the REAL file's
+        // content comes back verbatim (trimmed), exactly what _HandleCommandHandover injects.
+        if (!fired.empty())
+        {
+            CHECK(ReadHandoverDocumentPrompt(fired[0].mdPath) == L"# Handover\n\nGoal, state, decisions, next steps.",
+                  "scenario A: the fired md's CONTENT reads back verbatim for injection (the successor's first user message)");
+        }
 
         // ---- chunked-delta equivalence: the SAME session parsed the way the scanner actually
         //      reads it (bounded windows; only complete lines consumed, a partial trailing line

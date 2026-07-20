@@ -41,6 +41,9 @@
     <ClCompile Include="..\SessionScanner.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\CommandWatch.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\ProcessInspect.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

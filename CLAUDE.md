@@ -766,7 +766,8 @@ tag no session carries lists at **·0** (sorts last).
   read the store fresh).
 
 **Slash-command bindings + /handover ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
-HARDENED: engine-tested (2139/2139 — the `TestCommandWatch` units + safeguard belts, the FABRICATED
+HARDENED, delivery = FULL CONTENT INJECTION (never truncated): engine-tested (2230/2230 — the
+`TestCommandWatch` units + safeguard belts + the content-injection/tier units, the FABRICATED
 end-to-end `/handover` session `TestCommandHandoverE2E`, and the REAL-corpus echo replay
 `TestCommandEchoRealCorpus`) + lib-compiled green; rides the next deploy cycle.** Bind to `/commands`
 the user TYPES into a managed Claude session and AWAIT the session's
@@ -784,18 +785,35 @@ Write/Edit after the command, leaf-preference-ranked, fire gated on the FILE act
 (caught-up cursor + the line's OWN timestamp within 60s) and bounded everywhere (2 turn-ends for an
 unmatched sighting, 15-min deadline, per-session cap, FIFO; pendings transient — never persisted).
 **The `/handover <context-or-filepath>` integration:** engine init materializes the command DEFINITION
-`<claude-config>/commands/handover.md` (**create-if-absent — the ONE write outside the profile**, a
-deliberate additive `~/.claude` mutation, user-owned from first materialization; it instructs Claude to
-Write ONE `HANDOVER-<topic>.md` then end the turn) and binds `handover` → the new per-window
-**command-action sinks** (`Engine::CommandActionSink`, the activateSinks idiom — registered at page
-init, token-detached in `~TerminalPage`). The hosting window's `_HandleCommandHandover` spawns the
+`<claude-config>/commands/handover.md` (**create-if-absent + a VERSION-AWARE UPGRADE — the ONE write
+outside the profile**: a file byte-identical to a PRIOR shipped version (`ShippedHandoverCommandHistory`,
+v1 byte-frozen, only ever APPEND) silently upgrades to current, anything user-edited is NEVER touched —
+the ApplyEnvDefaults discipline; a deliberate additive `~/.claude` mutation. V2 instructs Claude to
+Write ONE `HANDOVER-<topic>.md` AS a direct briefing TO the successor — because the file's content IS
+its first message — then end the turn) and binds `handover` → the new per-window **command-action
+sinks** (`Engine::CommandActionSink`, the activateSinks idiom — registered at page init,
+token-detached in `~TerminalPage`). The hosting window's `_HandleCommandHandover` spawns the
 successor: same **effective working dir**, titled `"<origin> (handover)"` via the generalized
 **`DeriveSuffixedTitle`** (DeriveForkTitle now delegates to it; registry-bumped so sibling handovers
-never collide), inserted BESIDE the origin tab, and **first-prompted at the md via the launch
-commandline's positional prompt** (`BuildClaudeCommandline(..., initialPrompt)`, PS-quoted
-`PsDoubleQuote` for the pwsh-host `&` context) — zero-race: no stdin injection, no Enter-eaten TUI
-window; the prompt fires a real `UserPromptSubmit` so Running + the record ride the normal push path;
-structurally dropped on any restore/resume. Repeatable — every /handover in a conversation spawns its
+never collide), inserted BESIDE the origin tab, and handed **the md's CONTENT delivered VERBATIM and
+IN FULL as its FIRST USER MESSAGE** ("as if the user typed it") — **NEVER truncated**.
+`ReadHandoverDocumentPrompt` reads (4 MiB sanity cap) + normalizes the file (BOM strip, CRLF→LF, C0
+controls dropped — which also makes the paste framing injection-proof, ESC can't survive — trimmed);
+the DELIVERY then tiers on the pure `PsEscapedCost` vs **`kHandoverPromptEscapedBudget`** (11,500
+escaped chars — the pwsh `-EncodedCommand` wrap costs ≈2.67× and both CreateProcessW hops cap at
+32,767; ` `` ` `"` `$` cost 2): **fits** ⇒ the launch commandline's positional prompt
+(`BuildClaudeCommandline(..., initialPrompt)`, PS-quoted `PsDoubleQuote` for the pwsh-host `&` context
+— a PS double-quoted string legally spans newlines; zero-race: nothing typed into the TUI, a real
+`UserPromptSubmit` fires so Running + the record ride the push path; structurally dropped on any
+restore/resume); **over budget** ⇒ the FULL document rides the **ConPTY stdin instead — no size
+ceiling**: parked as a Pending prompt at the FRONT of the successor's queue (durable + visible in Auto
+Testing, Send-now-able, restart-safe) and paste-injected by **`_PumpHandoverInjections`**
+(scanner-ticked; waits for `SessionInfo.started` — a pre-Connected `WriteInput` silently drops — + a
+1.5s settle, then the Send-now recipe: mark Sent → `Inject(BuildPromptSubmission(text))` — the
+existing bracketed-paste ONE-block submit — rollback on failure, echo dedup + the Enter-retry watchdog
+backing it like any flight prompt; 10-min give-up leaves it Pending, never lost);
+**unreadable/whitespace-only/beyond-cap** ⇒ the pointer-style prompt fallback. `handover-done …
+inject=content|paste|pointer`. Repeatable — every /handover in a conversation spawns its
 own successor. Logs: `[cmd]`/`[cmd-fire]`/`[cmd-expire]` + the `[nav] handover-begin ↔ handover-done`
 pair. **Safeguards (COMMANDS.md §7, all under the never-lose-a-swallowed-exception policy):** every
 CommandWatch feed is a SELF-CONTAINED function-try (a watch bug / throwing handler / throwing probe can

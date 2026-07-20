@@ -219,6 +219,18 @@ namespace Agentmaster
         return out;
     }
 
+    size_t PsEscapedCost(std::wstring_view text)
+    {
+        // The cost model MUST mirror PsDoubleQuote above: exactly ` " $ double (the backtick
+        // escape), everything else is one char. Tested against PsDoubleQuote so they can't drift.
+        size_t total = 0;
+        for (const wchar_t c : text)
+        {
+            total += (c == L'`' || c == L'"' || c == L'$') ? 2u : 1u;
+        }
+        return total;
+    }
+
     std::wstring BuildForwarderScript(const std::wstring& stateDir)
     {
         // Pure-ASCII PowerShell. Reads the hook JSON from stdin, correlates via env, and
@@ -1052,30 +1064,13 @@ try {
         return { settingsPath, forwarderPath };
     }
 
-    std::wstring EnsureHandoverCommandFileIn(const std::wstring& configDir)
-    try
-    {
-        // The /handover slash-command DEFINITION (COMMANDS.md). Create-if-absent ONLY: an existing
-        // file — the user's own /handover, or an edited copy of this one — is never overwritten,
-        // so the user owns the wording from the first launch that materialized it. The body's ONE
-        // load-bearing instruction is "create the handover file with the Write tool, named
-        // HANDOVER-*.md": the Write tool_use is the transcript signal the CommandWatch's markdown
-        // await keys on (a shell-redirect write is invisible to it), and the HANDOVER- name is the
-        // await's leaf preference (an incidental doc edit in the same message never outranks it).
-        if (configDir.empty())
-        {
-            return {};
-        }
-        const std::wstring commandsDir = configDir + L"\\commands";
-        const std::wstring path = commandsDir + L"\\handover.md";
-        if (::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
-        {
-            return path; // present (ours or the user's) — never overwrite
-        }
-        ::CreateDirectoryW(configDir.c_str(), nullptr);
-        ::CreateDirectoryW(commandsDir.c_str(), nullptr);
-        static constexpr std::wstring_view kHandoverCommand =
-            LR"md(---
+    // The /handover command definition's SHIPPED VERSION HISTORY (COMMANDS.md §6). V1 must stay
+    // byte-frozen forever — the upgrade rule recognizes an untouched install by byte-identity
+    // against PRIOR versions, so editing a historical literal would orphan real installs on the
+    // old text. Only ever APPEND a new version (and keep the "Write tool" + "HANDOVER-" phrases:
+    // they are the load-bearing instructions the markdown await keys on).
+    static constexpr std::wstring_view kHandoverCommandV1 =
+        LR"md(---
 description: Hand this session's work over to a fresh successor session (Agentmaster opens it automatically)
 ---
 The user wants to HAND OVER this session's work to a fresh successor Claude session.
@@ -1100,7 +1095,132 @@ Agentmaster is watching for that markdown write: it automatically opens a succes
 tab (named like this one, ending in "(handover)") in this working directory, whose first
 prompt points it at your file.
 )md";
-        if (!WriteFileUtf8(path, kHandoverCommand))
+    // V2 (content injection): the file's content IS the successor's first user message — so the
+    // document must be written AS a direct briefing to the successor, not as a note about one.
+    static constexpr std::wstring_view kHandoverCommandV2 =
+        LR"md(---
+description: Hand this session's work over to a fresh successor session (Agentmaster opens it automatically)
+---
+The user wants to HAND OVER this session's work to a fresh successor Claude session.
+Handover context from the user (inline context, or a path to a file you should read and fold in):
+
+$ARGUMENTS
+
+Do this NOW, in this exact order:
+1. If the context above names a readable file, read it first and incorporate it.
+2. Using the Write tool (NOT a shell redirect - the Write tool call itself is the signal
+   Agentmaster detects), create ONE new markdown file in the current working directory named
+   `HANDOVER-<short-topic>.md` (pick a short kebab-case topic slug; if that name already
+   exists, append `-2`, `-3`, ...).
+3. The file's CONTENT is injected VERBATIM as the successor session's FIRST USER MESSAGE - so
+   write it as a direct briefing TO the successor (imperative, second person), fully
+   self-contained: the goal, the current state, decisions made and why, work completed, work
+   still in flight, concrete ordered next steps, key file paths (absolute), and any gotchas
+   or constraints discovered along the way. The successor has NO other context and cannot see
+   this conversation. Keep it focused - it is delivered as one message, and a very long
+   document is truncated down to a pointer at the file.
+4. End your turn right after writing the file (a one-line confirmation is fine). Do not
+   start new work.
+
+Agentmaster is watching for that markdown write: it automatically opens a successor session
+tab (named like this one, ending in "(handover)") in this working directory and injects your
+document as its opening user message.
+)md";
+    // V3 (never truncate): the document is delivered IN FULL whatever its size (an over-budget
+    // one rides a bracketed-paste stdin injection instead of the commandline), so V2's
+    // "very long documents get truncated to a pointer" caution is gone — thoroughness is now
+    // encouraged, not traded against delivery.
+    static constexpr std::wstring_view kHandoverCommandV3 =
+        LR"md(---
+description: Hand this session's work over to a fresh successor session (Agentmaster opens it automatically)
+---
+The user wants to HAND OVER this session's work to a fresh successor Claude session.
+Handover context from the user (inline context, or a path to a file you should read and fold in):
+
+$ARGUMENTS
+
+Do this NOW, in this exact order:
+1. If the context above names a readable file, read it first and incorporate it.
+2. Using the Write tool (NOT a shell redirect - the Write tool call itself is the signal
+   Agentmaster detects), create ONE new markdown file in the current working directory named
+   `HANDOVER-<short-topic>.md` (pick a short kebab-case topic slug; if that name already
+   exists, append `-2`, `-3`, ...).
+3. The file's CONTENT is injected VERBATIM as the successor session's FIRST USER MESSAGE - so
+   write it as a direct briefing TO the successor (imperative, second person), fully
+   self-contained: the goal, the current state, decisions made and why, work completed, work
+   still in flight, concrete ordered next steps, key file paths (absolute), and any gotchas
+   or constraints discovered along the way. The successor has NO other context and cannot see
+   this conversation. It is delivered as ONE message whatever its size - be as thorough as the
+   work demands.
+4. End your turn right after writing the file (a one-line confirmation is fine). Do not
+   start new work.
+
+Agentmaster is watching for that markdown write: it automatically opens a successor session
+tab (named like this one, ending in "(handover)") in this working directory and injects your
+document as its opening user message.
+)md";
+
+    const std::vector<std::wstring_view>& ShippedHandoverCommandHistory()
+    {
+        static const std::vector<std::wstring_view> kHistory{ kHandoverCommandV1, kHandoverCommandV2, kHandoverCommandV3 };
+        return kHistory;
+    }
+
+    std::wstring EnsureHandoverCommandFileIn(const std::wstring& configDir)
+    try
+    {
+        // The /handover slash-command DEFINITION (COMMANDS.md §6). Write policy: create-if-absent
+        // PLUS a version-aware UPGRADE — a file byte-identical (UTF-8) to a PRIOR shipped version
+        // is ours and untouched by the user, so it silently upgrades to the current text; anything
+        // else (the user's own /handover, an edited copy of ours) is NEVER overwritten (the
+        // ApplyEnvDefaults discipline: a user edit sticks forever). The load-bearing instructions
+        // every version keeps: "use the Write tool" (the transcript tool_use is the signal the
+        // markdown await keys on — a shell-redirect write is invisible) and the "HANDOVER-" name
+        // (the await's leaf preference).
+        if (configDir.empty())
+        {
+            return {};
+        }
+        const std::wstring commandsDir = configDir + L"\\commands";
+        const std::wstring path = commandsDir + L"\\handover.md";
+        const auto& history = ShippedHandoverCommandHistory();
+        const std::wstring_view current = history.back();
+        if (::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+        {
+            // Present. Ours-and-stale (byte-identical to a PRIOR shipped version) upgrades;
+            // anything else — user-owned or already current — is left exactly as it is. Bounded
+            // read (the definition is ~2 KB; a >64 KB file is certainly not a pristine ours).
+            std::string bytes;
+            try
+            {
+                std::ifstream f(std::filesystem::path{ path }, std::ios::binary);
+                if (f)
+                {
+                    bytes.resize(64 * 1024);
+                    f.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+                    bytes.resize(static_cast<size_t>(f.gcount()));
+                }
+            }
+            catch (...)
+            {
+                bytes.clear(); // unreadable now — treat as user-owned (never overwrite blind)
+            }
+            for (size_t i = 0; !bytes.empty() && i + 1 < history.size(); ++i)
+            {
+                if (bytes == Utf16ToUtf8(history[i]))
+                {
+                    if (WriteFileUtf8(path, current))
+                    {
+                        AppendStateLog(L"hooks.log", L"[engine] handover command upgraded (shipped v" + std::to_wstring(i + 1) + L" -> v" + std::to_wstring(history.size()) + L"): " + path + L"\n");
+                    }
+                    return path; // upgraded (or failed best-effort — the old text still works)
+                }
+            }
+            return path; // user-owned or already-current — never overwrite
+        }
+        ::CreateDirectoryW(configDir.c_str(), nullptr);
+        ::CreateDirectoryW(commandsDir.c_str(), nullptr);
+        if (!WriteFileUtf8(path, current))
         {
             AppendStateLog(L"hooks.log", L"[persist-fail] handover command definition: " + path + L"\n");
             return {};
@@ -1130,6 +1250,84 @@ prompt points it at your file.
             base = home + L"\\.claude";
         }
         return EnsureHandoverCommandFileIn(base);
+    }
+
+    std::wstring ReadHandoverDocumentPrompt(const std::wstring& mdPath)
+    try
+    {
+        // The successor's first user message IS the handover document (COMMANDS.md §5 — "inject
+        // the content AS IF it is the user message"), IN FULL — never truncated: the caller picks
+        // commandline vs paste-injection by PsEscapedCost. The 4 MiB cap is a sanity ceiling only
+        // (nothing that size is a handover briefing); a beyond-cap file returns "" -> the pointer
+        // fallback, never a silent partial. Read cap+1 so "hit the cap" is detectable.
+        constexpr size_t kReadCapBytes = 4 * 1024 * 1024;
+        std::string bytes;
+        {
+            std::ifstream f(std::filesystem::path{ mdPath }, std::ios::binary);
+            if (!f)
+            {
+                return {}; // unreadable — the caller falls back to the pointer-style prompt
+            }
+            bytes.resize(kReadCapBytes + 1);
+            f.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            bytes.resize(static_cast<size_t>(f.gcount()));
+        }
+        if (bytes.empty())
+        {
+            return {};
+        }
+        if (bytes.size() > kReadCapBytes)
+        {
+            AppendStateLog(L"hooks.log", L"[handover] document exceeds the 4 MiB sanity cap - pointer fallback (never a silent partial): " + mdPath + L"\n");
+            return {};
+        }
+        // UTF-8 BOM strip (the Write tool never emits one, but a user-edited md may carry it).
+        if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF &&
+            static_cast<unsigned char>(bytes[1]) == 0xBB && static_cast<unsigned char>(bytes[2]) == 0xBF)
+        {
+            bytes.erase(0, 3);
+        }
+        const int need = ::MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
+        if (need <= 0)
+        {
+            return {};
+        }
+        std::wstring wide(static_cast<size_t>(need), L'\0');
+        ::MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), wide.data(), need);
+        // Normalize for a single PS argv + a clean transcript: CRLF -> LF (drop \r), and drop the
+        // remaining C0 control chars except \n and \t — never legitimate markdown, and stray
+        // controls in an argv gunk the PS string and the recorded user message.
+        std::wstring norm;
+        norm.reserve(wide.size());
+        for (const wchar_t c : wide)
+        {
+            if (c == L'\r' || (c < 0x20 && c != L'\n' && c != L'\t'))
+            {
+                continue;
+            }
+            norm.push_back(c);
+        }
+        size_t b = 0;
+        size_t e = norm.size();
+        while (b < e && (norm[b] == L' ' || norm[b] == L'\t' || norm[b] == L'\n'))
+        {
+            ++b;
+        }
+        while (e > b && (norm[e - 1] == L' ' || norm[e - 1] == L'\t' || norm[e - 1] == L'\n'))
+        {
+            --e;
+        }
+        norm = norm.substr(b, e - b);
+        if (norm.empty())
+        {
+            return {}; // whitespace-only document — pointer fallback beats an empty first message
+        }
+        return norm; // FULL content — the caller tiers the delivery channel (never truncates)
+    }
+    catch (...)
+    {
+        LogSwallowedException(L"ReadHandoverDocumentPrompt");
+        return {}; // the caller falls back to the pointer-style prompt
     }
 
     std::wstring ResolveRealClaude()

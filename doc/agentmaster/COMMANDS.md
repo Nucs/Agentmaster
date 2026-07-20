@@ -4,7 +4,8 @@
 > follow-up activity — asynchronously, bounded, and without touching the state machine.
 > First integration: **`/handover <handover-context-or-filepath>`** → await the handover
 > markdown the command instructs Claude to write → open a successor tab named
-> `"<origin title> (handover)"` in the same working dir, first-prompted at that file.
+> `"<origin title> (handover)"` in the same working dir, whose FIRST USER MESSAGE is that
+> document's content injected verbatim.
 
 Engine: `AgentMaster/CommandWatch.{h,cpp}` (+ parser/scanner seams in `SessionScanner.{h,cpp}`,
 wiring in `Engine.{h,cpp}`); UI action: `TerminalPage.AgentEngine.cpp` (sink) +
@@ -139,23 +140,53 @@ the (single) window whose `_claudeTabs` hosts the origin session acts.
      one origin never collide;
    * **placement** — inserted at `originTab.TabViewIndex()+1`, beside the origin (the *New
      Session Here* placement);
-   * **the handover message** — the md is delivered BY REFERENCE: the successor's launch
-     commandline carries ONE positional prompt, `Read the handover document at <mdPath> and
-     continue the work it describes.` A multi-line md body injected as a prompt would be hostage
-     to quoting and to the known multi-line-injection limitation; the file outlives the prompt
-     and the successor Reads it as its first action.
+   * **the handover message** — the md's CONTENT, delivered VERBATIM and **IN FULL** as the
+     successor's **first user message** ("as if the user typed it") — **NEVER truncated**.
+     `ReadHandoverDocumentPrompt` reads the file (4 MiB sanity cap — a ceiling on absurdity, not
+     a message bound) and normalizes it only (UTF-8 BOM stripped, CRLF → LF, stray C0 controls
+     except `\n`/`\t` dropped — which also makes the paste framing below injection-proof, since
+     ESC can never survive into the content — outer whitespace trimmed). The DELIVERY then tiers
+     on `PsEscapedCost` (the PsDoubleQuote cost model — ` `` ` `"` `$` cost 2) against
+     `kHandoverPromptEscapedBudget` (11,500 — the size math in step 5):
+       - **fits** → the launch commandline's positional prompt (the zero-race channel);
+       - **over budget** → the FULL document rides the **ConPTY stdin instead — a streamed pipe
+         with NO CreateProcessW ceiling**: parked as a Pending prompt at the FRONT of the
+         successor's queue (the durable, visible carrier — Auto Testing lists it, Send-now can
+         deliver it manually, a restart keeps it) and paste-injected by
+         `_PumpHandoverInjections` (below) the moment the session actually starts;
+       - **unreadable / whitespace-only / beyond-cap** (a rewrite-in-flight race past the §7
+         re-asserts) → the pointer-style prompt (`Read the handover document at <mdPath> …`),
+         logged — the handover still functions and nothing was silently cut.
+     `handover-done` carries `inject=content|paste|pointer`.
+   * **the paste pump** (`TerminalPage::_PumpHandoverInjections`, ticked by the scanner's
+     liveness probe ~2.5s): waits for `SessionInfo.started` (the control initialized and
+     `Start()` ran — a pre-Connected `WriteInput` is SILENTLY dropped by ConPTY, so injecting
+     earlier would lose the text) plus a 1.5s settle, then delivers via the **Send-now recipe**:
+     mark `Sent` → `Inject(BuildPromptSubmission(text))` — the existing bracketed-paste submit
+     (`ESC[200~ … ESC[201~` + one trailing CR), which Claude's TUI treats as ONE pasted block
+     regardless of embedded newlines — → roll back to `Pending` on failure (Rule #4). The echo
+     dedup marks it consumed when its `UserPromptSubmit` lands, and the scheduler's
+     **Enter-retry watchdog** re-presses a swallowed submit CR — the full backstop set of any
+     flight prompt, for free. Give-up deadline 10 min (a dormant never-focused tab): the entry
+     drops but the prompt STAYS Pending in the queue — visible, Send-now-able, never lost.
 5. The spawn is a normal fresh `_LaunchClaudeSession` — Default model, hooks wired, registry
    card, per-dir color — plus the **initial prompt on the commandline**:
    `BuildClaudeCommandline(..., initialPrompt)` appends it LAST as a positional arg claude
    submits as the session's first turn. Zero-race by construction: no stdin injection, no
-   TUI-init Enter-eaten window (the Enter-retry class of problem does not exist here), and the
-   prompt fires a real `UserPromptSubmit`, so state (`Running`) and the Typed record ride the
-   normal push path. PS-quoted via `PsDoubleQuote` (`` ` ``→` `` ``, `"`→`` `" ``, `$`→`` `$ ``)
-   because the managed commandline is invoked by the pwsh host's `&` operator
-   (`BuildPwshHostedCommandline`) — PowerShell parsing, not CreateProcessW, governs its args (a
-   claude launch is never the `cmd /c` batch form: native-exe-only policy). FRESH launches only —
-   `_LaunchClaudeSession` structurally drops the prompt on any restore/resume (its turn already
-   ran and lives in the transcript).
+   TUI-init Enter-eaten window (the Enter-retry class of problem does not exist here — a
+   MULTI-LINE body is safe precisely because nothing is typed into the TUI: the whole document
+   is ONE argv), and the prompt fires a real `UserPromptSubmit`, so state (`Running`) and the
+   Typed record ride the normal push path. PS-quoted via `PsDoubleQuote` (`` ` ``→` `` ``,
+   `"`→`` `" ``, `$`→`` `$ ``) because the managed commandline is invoked by the pwsh host's `&`
+   operator (`BuildPwshHostedCommandline`) — PowerShell parsing, not CreateProcessW, governs its
+   args (a claude launch is never the `cmd /c` batch form: native-exe-only policy), and a PS
+   double-quoted string legally spans newlines. **The size ceiling that forces the budget:** the
+   prompt crosses TWO CreateProcessW hops capped at 32,767 chars each, and the binding one is the
+   outer `-EncodedCommand` wrap — base64(UTF-16LE) costs ≈2.67× the inner commandline, so the
+   inner must stay ≤ ~12,200 chars; minus launch overhead that leaves ~11,500 POST-escape chars
+   for the prompt (the constant, with margin; ` `` ` `"` `$` each cost 2 — why the budget is
+   escape-aware, not raw-length). FRESH launches only — `_LaunchClaudeSession` structurally
+   drops the prompt on any restore/resume (its turn already ran and lives in the transcript).
 6. Nav trail: `[nav] handover-begin <sid8> md=…` ↔ `[nav] handover-done new=<sid8'> from=<sid8>`
    (the fork-managed begin/end convention — an unpaired begin means a crash mid-action).
 7. **Repeatable by design** — every `/handover` in a conversation arms its own await and spawns
@@ -169,14 +200,23 @@ nothing would ever reach the transcript), so engine init materializes
 **`<claude-config>/commands/handover.md`** (`EnsureHandoverCommandFile`; `CLAUDE_CONFIG_DIR` >
 `~/.claude`, the `ClaudeProjectsDir` resolution) — logged `[engine] handover command: <path>`.
 
-**Strictly create-if-absent:** a file that exists — the user's own `/handover`, or an edited
-copy of ours — is NEVER overwritten; from the first materialization the user owns the wording.
-This is deliberately called out as **the one place Agentmaster writes outside its active
-profile** (a global `~/.claude` config mutation — additive and inert until the user actually
-types `/handover`; the same product-decision class the Codex-C3 `~/.codex` hooks change was
-deferred over, shipped here because the feature IS the ask). The definition's load-bearing
-lines, which the await depends on: *use the Write tool* (a shell-redirect write is invisible to
-the transcript's tool_use stream) and *name it `HANDOVER-<topic>.md`* (the leaf preference).
+**Create-if-absent + a version-aware UPGRADE:** a file whose bytes are IDENTICAL (UTF-8) to a
+**prior shipped version** (`ShippedHandoverCommandHistory` — v1 byte-frozen forever, only ever
+APPEND a version) is ours and untouched by the user, so it silently upgrades to the current text
+(logged `[engine] handover command upgraded (shipped vN -> vM)`); anything else — the user's own
+`/handover`, or an edited copy of ours — is NEVER overwritten (the `ApplyEnvDefaults`
+discipline: a user edit sticks forever). This is deliberately called out as **the one place
+Agentmaster writes outside its active profile** (a global `~/.claude` config mutation — additive
+and inert until the user actually types `/handover`; the same product-decision class the
+Codex-C3 `~/.codex` hooks change was deferred over, shipped here because the feature IS the
+ask). The definition's load-bearing lines, which the await depends on: *use the Write tool* (a
+shell-redirect write is invisible to the transcript's tool_use stream) and *name it
+`HANDOVER-<topic>.md`* (the leaf preference). **V2 (content injection)** additionally briefs
+Claude that the file's content is injected VERBATIM as the successor's first user message — so
+the document must be written AS a direct, self-contained briefing TO the successor (imperative,
+second person). **V3 (never truncate)** drops V2's "long documents truncate to a pointer"
+caution — the document is delivered IN FULL whatever its size (the paste tier, §5), so
+thoroughness is encouraged, not traded against delivery.
 
 ## 7. Hardening & safeguards
 
@@ -210,6 +250,14 @@ line alone pins the throw site later):
   window, and a successor pointed at nothing is worse than none (logged
   `[handover] … md vanished before spawn`, user re-runs the command). A spawn-path failure logs
   and leaves the nav trail's unpaired `handover-begin` as the forensics marker.
+* **The content read degrades, never blocks — and never truncates** —
+  `ReadHandoverDocumentPrompt` is itself a guarded function-try with a bounded read; an
+  unreadable / whitespace-only / beyond-sanity-cap result (a rewrite race past the re-asserts)
+  falls back to the pointer-style prompt (`inject=pointer` on `handover-done`), and an
+  over-budget document switches CHANNEL (the §5 paste tier) instead of being cut or busting the
+  CreateProcessW ceiling. The paste pump inherits the queue machinery's own belts: Send-now-
+  recipe rollback on a failed inject, echo dedup, the Enter-retry watchdog, a give-up deadline
+  that leaves the prompt Pending (visible + manually sendable) rather than lost.
 * **`EnsureHandoverCommandFileIn` is best-effort** — a failure logs (`[persist-fail]` /
   swallowed-exception) and engine init proceeds; the feature stays dormant until a later launch
   succeeds.
@@ -229,8 +277,17 @@ line alone pins the throw site later):
   freshness replay guard / per-session cap / DropSession / never-fires-twice),
   `DeriveSuffixedTitle` (+ `DeriveForkTitle` parity), `PsDoubleQuote`, the initial-prompt
   commandline arg (empty == byte-identical to the pre-parameter form), and
-  `EnsureHandoverCommandFileIn` under a **temp** config dir (create-if-absent; a user edit is
-  never overwritten) — never the real `~/.claude`. Plus the safeguard belts: `IsSaneWatchPath`,
+  `EnsureHandoverCommandFileIn` under a **temp** config dir — never the real `~/.claude`:
+  create-if-absent, the content-injection sentinel, the **version-aware upgrade** (a pristine
+  shipped-v1 file upgrades to current; a user edit is never overwritten;
+  `ShippedHandoverCommandHistory` sanity incl. the V3 never-truncate promise — "whatever its
+  size", no truncation caution). Content-injection units: `PsEscapedCost` (the tier check's
+  cost model, asserted against the REAL `PsDoubleQuote` output size so the two can't drift;
+  budget-sized plain text fits the commandline tier, escape-heavy text of the same raw length
+  overflows to the paste tier) and `ReadHandoverDocumentPrompt` (BOM strip + CRLF→LF +
+  control-char drop + trim, verbatim read-back; an oversized document comes back **IN FULL** —
+  no truncation tail, last line intact, cost over the budget == the paste-tier decision;
+  whitespace-only/missing → empty for the fallback). Plus the safeguard belts: `IsSaneWatchPath`,
   an insane matched path rejected at the match (a later sane write still satisfies), a throwing
   handler swallowed per fire (the watch keeps firing), a throwing probe reading as absent then
   firing on recovery.
@@ -240,8 +297,10 @@ line alone pins the throw site later):
   assistant `Write(HANDOVER-*.md)` → tool_result → `end_turn`, asserted event shape
   (1 Command + 2 Assistant + 1 ToolResult, **0 UserPrompt**), fired once via the **DEFAULT
   GetFileAttributesExW probe against a real on-disk md** (the deployed code path), args riding
-  the fire; plus a chunked scanner-style parse (awkward split points, partial-line re-reads)
-  proving event-sequence equivalence with the whole-parse. Scenario B: a clarification round
+  the fire, and the fired path's content reading back VERBATIM through
+  `ReadHandoverDocumentPrompt` (exactly what `_HandleCommandHandover` injects as the
+  successor's first user message); plus a chunked scanner-style parse (awkward split points,
+  partial-line re-reads) proving event-sequence equivalence with the whole-parse. Scenario B: a clarification round
   still fires (the 2-turn window). Scenario C: no md within 2 turns → expired, no fire, no
   leak. Scenario D: **two /handovers in one conversation → two fires**, each with its own
   md + args (the explicit repeatability requirement). Scenario E: the same session replayed

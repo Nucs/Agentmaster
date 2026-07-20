@@ -815,7 +815,26 @@ namespace winrt::TerminalApp::implementation
         void _InitAgentmasterEngine(); // Agentmaster: start the SessionRegistry + hooks bridge
         void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition = -1, winrt::hstring model = {}); // Agentmaster (insertPosition: -1 == end/NewTabPosition default; a tab-context-menu spawn passes clickedIndex+1 so the new tab lands next to the clicked tab. model: the launch-model picker's per-LAUNCH `--model <id>` pick from an "Open New Session Here" submenu; "" = Default, the settings model)
         TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId = {}, uint32_t insertPosition = -1, const std::wstring& modelOverride = {}, const std::wstring& initialPrompt = {}); // Agentmaster (returns the created tab; forkFromId set => fork that conversation into a new id; insertPosition threads tab placement, default -1 == end; modelOverride: launch-model picker — non-empty adds ` --model <id>` to THIS launch's commandline; initialPrompt: COMMANDS.md — non-empty rides the commandline as the positional prompt claude submits as the session's FIRST turn, the /handover successor's kickoff)
-        void _HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPath); // Agentmaster (COMMANDS.md): the /handover await resolved — if THIS window hosts the origin session's tab, spawn the "<title> (handover)" successor beside it, first-prompted at the handover markdown
+        void _HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPath); // Agentmaster (COMMANDS.md): the /handover await resolved — if THIS window hosts the origin session's tab, spawn the "<title> (handover)" successor beside it and deliver the markdown's CONTENT as its first user message (commandline tier under the escaped budget; full-document bracketed-paste injection above it; NEVER truncated)
+        // Agentmaster (COMMANDS.md §5 — the over-budget /handover delivery): a successor spawned with a
+        // document too large for the commandline carries it as a Pending queue prompt instead; this map
+        // tracks {successor sessionId -> the queued prompt id + timing} and the PUMP (ticked by the
+        // scanner's liveness probe) injects it as ONE bracketed paste (BuildPromptSubmission — the
+        // stdin pipe has no CreateProcessW ceiling) once the session has STARTED (SessionInfo.started:
+        // its ConPTY/claude actually launched; injecting earlier is silently dropped by a
+        // pre-Connected WriteInput) plus a short settle. Delivered via the Send-now recipe (mark Sent
+        // -> Inject -> roll back to Pending on failure), so the echo dedup + the scheduler's
+        // Enter-retry watchdog back it exactly like any other sent prompt. Transient (not persisted):
+        // after a restart the prompt is still Pending in the session's queue — visible in Auto
+        // Testing, deliverable by Send-now — it just no longer auto-injects. UI thread only.
+        struct PendingHandoverInjection
+        {
+            std::wstring promptId; // the queued prompt carrying the full document
+            int64_t armedMs{ 0 }; // when the successor spawned (drives the give-up deadline)
+            int64_t startedSeenMs{ 0 }; // first tick that saw SessionInfo.started (inject after the settle delay)
+        };
+        std::unordered_map<std::wstring, PendingHandoverInjection> _pendingHandoverInjections;
+        void _PumpHandoverInjections(); // ticked alongside _ScanPendingInput (TerminalPage.AgentObserver.cpp)
         winrt::fire_and_forget _RestoreClaudeSessions(); // Agentmaster: load persisted sessions as ARCHIVED (restorable) — does NOT auto-launch (Rule #6)
         void _RestoreWindowTabs(); // Agentmaster (M10 window-grouped restore): re-home THIS window's persisted tabs — resume each Claude session + replay each Other (shell) tab from its WindowRecord, in order. Only a claimed record (a reopened window) restores.
         void _AttachClaudeOverlay(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster: build + install the per-tab link badge (gated on AppSettings.showTabOverlay)

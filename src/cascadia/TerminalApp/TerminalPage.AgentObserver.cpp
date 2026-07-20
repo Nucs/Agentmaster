@@ -5306,6 +5306,138 @@ namespace winrt::TerminalApp::implementation
         co_return;
     }
 
+    // Agentmaster (COMMANDS.md §5 — the over-budget /handover delivery): inject a spawned
+    // successor's FULL handover document through the ConPTY stdin as ONE bracketed paste, once
+    // its claude has actually STARTED. The commandline tier caps at the CreateProcessW ceiling;
+    // the stdin pipe has none — this pump is what makes "never truncate the message" hold for
+    // arbitrarily large documents. Ticked by the scanner's liveness probe (~2.5s) alongside
+    // _ScanPendingInput; steady state with no pending injections is one empty-map check.
+    //
+    // Per pending entry (successor sessionId -> the queued prompt carrying the document):
+    //   * session gone/archived, or the prompt no longer Pending (delivered by the scheduler's
+    //     deferred-send under a non-Off autorunner, or the user's manual Send-now) -> drop the
+    //     entry (the queue is the single source of truth; this map is only the auto-trigger);
+    //   * not yet started (SessionInfo.started — the control initialized and Start() ran; a
+    //     pre-Connected WriteInput is SILENTLY dropped by ConPTY, so injecting earlier would
+    //     lose the text and strand a phantom Sent) -> wait;
+    //   * started -> after a short settle (kHandoverInjectSettleMs — lands the paste closer to
+    //     the TUI's raw-mode init, fewer Enter-retries; the submit CR is backed by the
+    //     scheduler's Enter-retry watchdog regardless), deliver via the Send-now recipe: mark
+    //     Sent -> Inject(BuildPromptSubmission(text)) -> roll back to Pending on failure (Rule
+    //     #4 — never a phantom Sent). Echo dedup marks it consumed when the UserPromptSubmit
+    //     lands, exactly like any other flight prompt.
+    //   * give-up deadline (kHandoverInjectDeadlineMs): stop auto-trying — the prompt stays
+    //     Pending in the queue (visible in Auto Testing, Send-now-able), logged. Never lost.
+    void TerminalPage::_PumpHandoverInjections()
+    try
+    {
+        if (_pendingHandoverInjections.empty() || !_sessionRegistry)
+        {
+            return;
+        }
+        constexpr int64_t kHandoverInjectSettleMs = 1500; // post-started settle before the paste
+        constexpr int64_t kHandoverInjectDeadlineMs = 10 * 60 * 1000; // stop auto-trying after 10 min (dormant tab never focused)
+        const int64_t now = static_cast<int64_t>(::GetTickCount64());
+        for (auto it = _pendingHandoverInjections.begin(); it != _pendingHandoverInjections.end();)
+        {
+            const std::wstring& id = it->first;
+            auto& entry = it->second;
+            const auto s = _sessionRegistry->Get(id);
+            const ::Agentmaster::QueuedPrompt* prompt = nullptr;
+            if (s)
+            {
+                for (const auto& p : s->queue)
+                {
+                    if (p.id == entry.promptId)
+                    {
+                        prompt = &p;
+                        break;
+                    }
+                }
+            }
+            if (!s || !s->live || !prompt || prompt->status != ::Agentmaster::PromptStatus::Pending)
+            {
+                // Gone, archived, or already delivered/handled elsewhere — the map is only the
+                // auto-trigger; the queue record (if any) remains the truth.
+                it = _pendingHandoverInjections.erase(it);
+                continue;
+            }
+            if (now - entry.armedMs >= kHandoverInjectDeadlineMs)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(id) + L" paste-injection gave up after 10 min (session never started) - document stays Pending in the queue (Send-now delivers it)\n");
+                it = _pendingHandoverInjections.erase(it);
+                continue;
+            }
+            if (!s->started || !_sessionRegistry->HasInjector(id))
+            {
+                ++it; // claude not launched yet (a pre-Connected WriteInput silently drops) — wait
+                continue;
+            }
+            if (entry.startedSeenMs == 0)
+            {
+                entry.startedSeenMs = now; // first tick with the session started — begin the settle
+                ++it;
+                continue;
+            }
+            if (now - entry.startedSeenMs < kHandoverInjectSettleMs)
+            {
+                ++it;
+                continue;
+            }
+            // Deliver via the Send-now recipe (mark Sent -> inject -> roll back on failure).
+            std::wstring text;
+            _sessionRegistry->Update(id, [&](::Agentmaster::SessionInfo& ss) {
+                for (auto& p : ss.queue)
+                {
+                    if (p.id == entry.promptId && p.status == ::Agentmaster::PromptStatus::Pending)
+                    {
+                        text = p.text;
+                        p.status = ::Agentmaster::PromptStatus::Sent;
+                        p.sentAtUnixMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                        p.attempts += 1;
+                        p.echoed = false; // await this injection's UserPromptSubmit echo
+                        p.enterRetries = 0; // fresh send -> arm the Enter-retry watch
+                        break;
+                    }
+                }
+            });
+            if (text.empty())
+            {
+                ++it; // raced a concurrent deliverer — re-evaluated (and likely dropped) next tick
+                continue;
+            }
+            const bool delivered = _sessionRegistry->Inject(id, ::Agentmaster::BuildPromptSubmission(text));
+            if (delivered)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-inject] " + ::Agentmaster::ShortId(id) + L" FULL document pasted (" + std::to_wstring(text.size()) + L" chars) + submit\n");
+                it = _pendingHandoverInjections.erase(it);
+                continue;
+            }
+            // Injector vanished mid-flight (tab closing): roll back to Pending (Rule #4) and retry
+            // next tick until the deadline; the entry-liveness check above drops a dead session.
+            _sessionRegistry->Update(id, [&](::Agentmaster::SessionInfo& ss) {
+                for (auto& p : ss.queue)
+                {
+                    if (p.id == entry.promptId && p.status == ::Agentmaster::PromptStatus::Sent)
+                    {
+                        p.status = ::Agentmaster::PromptStatus::Pending;
+                        p.echoed = false;
+                        if (p.attempts > 0)
+                        {
+                            p.attempts -= 1;
+                        }
+                        break;
+                    }
+                }
+            });
+            ++it;
+        }
+    }
+    catch (...)
+    {
+        ::Agentmaster::AgentLogCaughtException(L"_PumpHandoverInjections"); // scanner-ticked UI lane: never unwind
+    }
+
     // Agentmaster (tab color modes — InferredWorkingDirectory): the inferred-workdir scan.
     // Periodically re-infer each ADMITTED hosted Claude session's ACTUAL working directory from the
     // paths its tool calls touch (files read / edited / created + searched dirs) and re-key its tab

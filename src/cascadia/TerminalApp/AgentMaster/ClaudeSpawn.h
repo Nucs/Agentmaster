@@ -153,6 +153,38 @@ namespace Agentmaster
     // Pure + unit-tested.
     std::wstring PsDoubleQuote(std::wstring_view s);
 
+    // Agentmaster (COMMANDS.md — /handover content injection). The COMMANDLINE-TIER threshold, in
+    // POST-PsDoubleQuote-escape characters — NOT a truncation bound (the message is NEVER
+    // truncated): content whose escaped cost fits rides the launch commandline's positional
+    // prompt (the zero-race channel); anything larger is delivered IN FULL through the ConPTY
+    // stdin as a bracketed PASTE (BuildPromptSubmission via the queue/injector machinery — a
+    // streamed pipe with no size ceiling). Why the commandline caps: the prompt crosses TWO
+    // CreateProcessW hops, each hard-capped at 32,767 chars — and the BINDING one is the outer
+    // pwsh `-EncodedCommand <base64(UTF-16LE("& <inner>"))>` wrap: base64 costs 4·ceil(2·I/3) ≈
+    // 2.67·I chars for an inner commandline of I wchars, so I ≤ ~12,200; minus the inner's
+    // non-prompt overhead (claude full path + --settings full path + flags + the session guid,
+    // ~300-700 depending on profile paths) that leaves ~11,500 escaped chars for the quoted
+    // prompt — the constant, with margin. Escaped chars ≈ raw chars + one per ` " $ (PsDoubleQuote
+    // doubles exactly those three), which is why the tier check is escape-aware, not raw-length.
+    inline constexpr size_t kHandoverPromptEscapedBudget = 11'500;
+
+    // PURE: `text`'s POST-PsDoubleQuote-escape character cost (the tier check's input — the
+    // PsDoubleQuote cost model: ` " $ cost 2, everything else 1). Unit-tested against the REAL
+    // PsDoubleQuote output size so the model can't drift.
+    size_t PsEscapedCost(std::wstring_view text);
+
+    // Agentmaster (COMMANDS.md — /handover content injection). Read the handover markdown and
+    // shape it into the successor's FIRST USER MESSAGE — the file's content VERBATIM and IN FULL
+    // ("as if the user typed it"; NEVER truncated — the caller picks the delivery channel by
+    // PsEscapedCost: commandline under the tier threshold, bracketed-paste stdin injection
+    // above it), normalized only (UTF-8 BOM stripped, CRLF -> LF, other C0 control chars except
+    // \n/\t dropped — never legitimate markdown, and they would gunk the PS arg / paste framing +
+    // the transcript; outer whitespace trimmed). Bounded read (4 MiB cap — a sanity ceiling, not
+    // a message bound; a document beyond it is not a handover briefing). Returns "" on a
+    // missing/unreadable/empty/beyond-cap file — the caller falls back to the pointer-style
+    // prompt so the handover still functions and NOTHING is ever silently cut.
+    std::wstring ReadHandoverDocumentPrompt(const std::wstring& mdPath);
+
     // Parse a list of NAME=VALUE assignments into pairs, for AppSettings.env (extra environment
     // applied to every spawned session) and the per-directory env (dir-env.json). Entries are
     // separated by EITHER a newline (the multi-line editor format) OR a ';' (the legacy single-line
@@ -432,17 +464,27 @@ namespace Agentmaster
     // DEFINITION exists at <configDir>\commands\handover.md — the file that makes a typed
     // `/handover <context-or-filepath>` a real Claude Code command (an unknown command is rejected
     // client-side and never reaches the transcript). Its body instructs Claude to write ONE
-    // handover markdown via the Write tool, which is exactly the signal the CommandWatch's
-    // markdown await keys on. STRICTLY create-if-absent: an existing file — the user's own
-    // /handover, or an edited copy of ours — is NEVER overwritten (this is a deliberate, additive
-    // write into the user's GLOBAL ~/.claude config, inert until the user types the command; the
-    // one place Agentmaster writes outside its profile, called out in COMMANDS.md §6). Returns the
-    // file's full path ("" on I/O failure), whether it was just created or already present.
+    // handover markdown via the Write tool — exactly the signal the CommandWatch's markdown await
+    // keys on — and (since the content-injection change) to write it AS the successor's first user
+    // message, because the file's content is injected verbatim. Write policy: create-if-absent,
+    // PLUS a VERSION-AWARE UPGRADE — a file whose bytes are IDENTICAL to a PRIOR shipped version
+    // (ShippedHandoverCommandHistory) is ours, untouched by the user, and is silently upgraded to
+    // the current text; anything else — the user's own /handover, or an edited copy of ours — is
+    // NEVER overwritten (the ApplyEnvDefaults discipline: a user edit sticks forever). Still the
+    // deliberate, additive write into the user's GLOBAL ~/.claude config, inert until the command
+    // is typed; the one place Agentmaster writes outside its profile (COMMANDS.md §6). Returns the
+    // file's full path ("" on I/O failure), whether created, upgraded, or already present.
     // `...In` takes the Claude CONFIG dir explicitly (the unit-testable core; the harness points it
     // at a temp dir so tests never touch the real ~/.claude); the wrapper resolves
     // CLAUDE_CONFIG_DIR > ~/.claude, exactly like ClaudeProjectsDir.
     std::wstring EnsureHandoverCommandFileIn(const std::wstring& configDir);
     std::wstring EnsureHandoverCommandFile();
+
+    // The ordered shipped-version history of the /handover command definition (oldest first; the
+    // LAST entry is the current text EnsureHandoverCommandFile writes). Exposed for the upgrade
+    // rule + its tests: an on-disk file byte-identical (as UTF-8) to any PRIOR entry upgrades to
+    // the current one; anything else is user-owned and untouched.
+    const std::vector<std::wstring_view>& ShippedHandoverCommandHistory();
 
     // Build a complete spawn spec and ensure the shared hook files exist. `pipeName` is the
     // live HooksBridge pipe (HookPipeName(pid)). If `resumeSessionId` is non-empty, the spec
