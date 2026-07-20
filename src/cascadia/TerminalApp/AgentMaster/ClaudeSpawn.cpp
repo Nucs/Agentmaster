@@ -1160,9 +1160,44 @@ tab (named like this one, ending in "(handover)") in this working directory and 
 document as its opening user message.
 )md";
 
+    // V4 (multi-file): the CommandWatch now COLLECTS every HANDOVER-*.md written in the command's
+    // turn and delivers them all (joined, in write order) as the one first message — so the
+    // definition may now say a split briefing is fine. ONE file stays the recommendation.
+    static constexpr std::wstring_view kHandoverCommandV4 =
+        LR"md(---
+description: Hand this session's work over to a fresh successor session (Agentmaster opens it automatically)
+---
+The user wants to HAND OVER this session's work to a fresh successor Claude session.
+Handover context from the user (inline context, or a path to a file you should read and fold in):
+
+$ARGUMENTS
+
+Do this NOW, in this exact order:
+1. If the context above names a readable file, read it first and incorporate it.
+2. Using the Write tool (NOT a shell redirect - the Write tool call itself is the signal
+   Agentmaster detects), create ONE new markdown file in the current working directory named
+   `HANDOVER-<short-topic>.md` (pick a short kebab-case topic slug; if that name already
+   exists, append `-2`, `-3`, ...). If the briefing is genuinely better split, you may write
+   MORE THAN ONE `HANDOVER-*.md` file in this same turn - all of them are delivered together,
+   in the order written.
+3. The files' CONTENT is injected VERBATIM as the successor session's FIRST USER MESSAGE - so
+   write it as a direct briefing TO the successor (imperative, second person), fully
+   self-contained: the goal, the current state, decisions made and why, work completed, work
+   still in flight, concrete ordered next steps, key file paths (absolute), and any gotchas
+   or constraints discovered along the way. The successor has NO other context and cannot see
+   this conversation. It is delivered as ONE message whatever its size - be as thorough as the
+   work demands.
+4. End your turn right after writing the file(s) (a one-line confirmation is fine). Do not
+   start new work.
+
+Agentmaster is watching for those markdown writes: when your turn ends it automatically opens
+a successor session tab (named like this one, ending in "(handover)") in this working
+directory and injects your document(s) as its opening user message.
+)md";
+
     const std::vector<std::wstring_view>& ShippedHandoverCommandHistory()
     {
-        static const std::vector<std::wstring_view> kHistory{ kHandoverCommandV1, kHandoverCommandV2, kHandoverCommandV3 };
+        static const std::vector<std::wstring_view> kHistory{ kHandoverCommandV1, kHandoverCommandV2, kHandoverCommandV3, kHandoverCommandV4 };
         return kHistory;
     }
 
@@ -1205,9 +1240,46 @@ fresh successor session in this working directory and injects your document as i
 user message.
 )md";
 
+    // V2 (multi-file): the same split-permission line V4 added to /handover — the watch collects
+    // every HANDOVER-*.md of the command's turn and delivers them all as the one first message.
+    static constexpr std::wstring_view kHandoverHereCommandV2 =
+        LR"md(---
+description: Hand this session's work over to a fresh session that REPLACES this one in this same tab (Agentmaster restarts the tab automatically)
+---
+The user wants to HAND OVER this session's work to a fresh successor Claude session that
+REPLACES this conversation IN THIS SAME TAB - Agentmaster restarts the tab into the
+successor automatically; this conversation is archived and stays resumable from the
+Sessions browser.
+Handover context from the user (inline context, or a path to a file you should read and fold in):
+
+$ARGUMENTS
+
+Do this NOW, in this exact order:
+1. If the context above names a readable file, read it first and incorporate it.
+2. Using the Write tool (NOT a shell redirect - the Write tool call itself is the signal
+   Agentmaster detects), create ONE new markdown file in the current working directory named
+   `HANDOVER-<short-topic>.md` (pick a short kebab-case topic slug; if that name already
+   exists, append `-2`, `-3`, ...). If the briefing is genuinely better split, you may write
+   MORE THAN ONE `HANDOVER-*.md` file in this same turn - all of them are delivered together,
+   in the order written.
+3. The files' CONTENT is injected VERBATIM as the successor session's FIRST USER MESSAGE - so
+   write it as a direct briefing TO the successor (imperative, second person), fully
+   self-contained: the goal, the current state, decisions made and why, work completed, work
+   still in flight, concrete ordered next steps, key file paths (absolute), and any gotchas
+   or constraints discovered along the way. The successor has NO other context and cannot see
+   this conversation. It is delivered as ONE message whatever its size - be as thorough as the
+   work demands.
+4. End your turn right after writing the file(s) (a one-line confirmation is fine). Do not
+   start new work - this session is about to be replaced.
+
+Agentmaster is watching for those markdown writes: when your turn ends it automatically
+RESTARTS THIS TAB into a fresh successor session in this working directory and injects your
+document(s) as its opening user message.
+)md";
+
     const std::vector<std::wstring_view>& ShippedHandoverHereCommandHistory()
     {
-        static const std::vector<std::wstring_view> kHistory{ kHandoverHereCommandV1 };
+        static const std::vector<std::wstring_view> kHistory{ kHandoverHereCommandV1, kHandoverHereCommandV2 };
         return kHistory;
     }
 

@@ -333,8 +333,18 @@ namespace Agentmaster
             // the same message. Fires on the scanner thread; the sinks marshal to their own UI
             // dispatchers (the activate-sink idiom).
             e->commandWatch = std::make_shared<CommandWatch>();
-            e->commandWatch->BindMarkdownAwait(L"handover", L"handover", [](const std::wstring& sessionId, const std::wstring& mdPath, const std::wstring& /*args*/) {
-                RaiseCommandActionInWindows(sessionId, L"handover", mdPath);
+            // Durable per-session command progress (COMMANDS.md §3a — restart resilience): the
+            // fired watermark + armed markers ride the SessionStore KV (session-store/<sid>.json,
+            // one small key), so a history replay after a restart/resume can neither re-fire an
+            // already-processed /handover(-here) NOR lose one that was mid-await at shutdown.
+            e->commandWatch->SetProgressStore(
+                [](const std::wstring& sid) { return GetSessionStoreField(sid, kSessionStoreCommandProgressKey); },
+                [](const std::wstring& sid, const std::wstring& enc) { SetSessionStoreField(sid, kSessionStoreCommandProgressKey, enc); });
+            // A fire may carry SEVERAL markdown files (one command splitting its briefing); the
+            // sink payload is one string, so the paths ride '|'-joined (JoinWatchPaths — '|' is
+            // illegal in a real Windows path and IsSaneWatchPath rejects it per-path).
+            e->commandWatch->BindMarkdownAwait(L"handover", L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& /*args*/) {
+                RaiseCommandActionInWindows(sessionId, L"handover", JoinWatchPaths(mdPaths));
             });
             // /handover-here — the IN-PLACE twin: the SAME markdown await (same "handover" leaf
             // preference — its definition instructs the same `HANDOVER-<topic>.md` name), a
@@ -342,8 +352,8 @@ namespace Agentmaster
             // Restart-session swap into a fresh "New Session Here -> Default" conversation)
             // instead of opening a successor tab beside it. The watch's binding lookup is
             // name-EXACT, so the two commands can never cross-fire.
-            e->commandWatch->BindMarkdownAwait(L"handover-here", L"handover", [](const std::wstring& sessionId, const std::wstring& mdPath, const std::wstring& /*args*/) {
-                RaiseCommandActionInWindows(sessionId, L"handover-here", mdPath);
+            e->commandWatch->BindMarkdownAwait(L"handover-here", L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& /*args*/) {
+                RaiseCommandActionInWindows(sessionId, L"handover-here", JoinWatchPaths(mdPaths));
             });
             e->scanner->SetCommandWatch(e->commandWatch);
             // The /handover COMMAND DEFINITION (create-if-absent — the user's own/edited file is

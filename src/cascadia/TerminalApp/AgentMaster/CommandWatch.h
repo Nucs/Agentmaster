@@ -42,6 +42,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -60,12 +61,21 @@ namespace Agentmaster
     // clarification round. Scoping the await to the command's vicinity is what keeps an unrelated
     // `.md` edit three turns later from ever satisfying a forgotten /handover (spawning a
     // spurious tab is worse than missing one — the user just re-runs the command). A MATCHED
-    // sighting (path known, file not yet on disk) is exempt — only the deadline bounds it (the
+    // sighting (>=1 path collected) never ages by turns — the FIRST turn end after a match SEALS
+    // it instead (the collection boundary, below), and only the deadline bounds it from there (a
     // write may be sitting behind a permission approval across turn boundaries).
     inline constexpr int kCommandAwaitMaxTurnEnds = 2;
     // Per-session pending cap (bounded memory; oldest evicted). Generous: even chained handovers
     // resolve within a turn, so two concurrently-pending sightings is already unusual.
     inline constexpr size_t kCommandMaxPendingPerSession = 4;
+    // MULTI-FILE collection settle (the no-turn-end fallback): a matched pending normally SEALS —
+    // stops collecting further markdown writes and becomes fire-eligible — at the first turn end
+    // after its match (the command's definition ends the turn right after writing, so every file
+    // of one command lands in ONE turn). When no turn end ever arrives (the session died mid-turn,
+    // a truncated tail), this much write-silence after the LAST collected path seals it instead,
+    // so a matched await can still fire without waiting out the full deadline. Comfortably above
+    // the scanner cadence (<=2.5s) and any realistic gap between one command's several writes.
+    inline constexpr int64_t kCommandMatchSettleMs = 20'000;
 
     // A typed slash command extracted from its transcript echo. `name` is the bare command word —
     // leading '/' stripped, ASCII-lowercased (bindings match case-insensitively; Claude Code
@@ -101,13 +111,50 @@ namespace Agentmaster
     std::wstring PickMarkdownWritePath(const std::vector<std::wstring>& paths, std::wstring_view preferLeafContains);
 
     // PURE (safeguard): is this a path we are willing to MATCH, probe, and hand to an action —
-    // non-empty, bounded (<= kWatchMaxPathChars), and free of control characters and double
-    // quotes? A matched path flows into a log line, a disk probe, and ultimately the successor's
-    // single-line launch prompt — a transcript field carrying a newline / quote / NUL (malformed
-    // or adversarial tool input; none is legal in a real Windows path) must be rejected at the
-    // MATCH, not discovered downstream. Applied to the resolved path in OnFileToolWrite.
+    // non-empty, bounded (<= kWatchMaxPathChars), and free of control characters, double quotes,
+    // and pipes? A matched path flows into a log line, a disk probe, and ultimately the
+    // successor's single-line launch prompt — a transcript field carrying a newline / quote / NUL
+    // (malformed or adversarial tool input; none is legal in a real Windows path) must be
+    // rejected at the MATCH, not discovered downstream. `|` is rejected for the same "never legal
+    // in a real Windows path" reason AND because it is the multi-path fan-out separator
+    // (JoinWatchPaths), so a hostile path can never smuggle a fake second path through the
+    // payload. Applied to the resolved path in OnFileToolWrite.
     inline constexpr size_t kWatchMaxPathChars = 4096;
     bool IsSaneWatchPath(std::wstring_view path);
+
+    // PURE: the fan-out payload form of a fired await's PATH SET. A fire can carry several
+    // markdown files (one /handover writing HANDOVER-a.md + HANDOVER-b.md — the multi-file
+    // collection below), but the per-window command-action sink payload is ONE string — so the
+    // paths ride '|'-joined ('|' is illegal in a real Windows path and IsSaneWatchPath rejects it
+    // per-path, making the separator unambiguous). SplitWatchPaths tolerates empty segments
+    // (dropped) so a hand-built payload can't produce phantom empties.
+    std::wstring JoinWatchPaths(const std::vector<std::wstring>& paths);
+    std::vector<std::wstring> SplitWatchPaths(std::wstring_view payload);
+
+    // Durable per-session COMMAND PROGRESS (the restart-resilience state; COMMANDS.md §3a) — what
+    // survives an app restart so a transcript-history replay can neither DOUBLE-PROCESS a command
+    // nor lose one that was mid-await:
+    //   * processedMs — the FIRED watermark: the max transcript-line timestamp of every sighting
+    //     this session has already fired. A replayed echo at/under it never re-arms (the
+    //     double-fire guard: resuming a handed-over session moments later, a crash right after a
+    //     fire, a truncation rewind — all replay the echo fresh enough to pass the 60s gate).
+    //   * armed — the (command, lineTsMs) markers of sightings that ARMED but have not resolved
+    //     (fired/expired) yet. A replayed echo matching a marker REVIVES its await even when the
+    //     stamp is long past the freshness window (the crash/shutdown-mid-await case), with the
+    //     ORIGINAL timestamp as its arm time so the 15-min deadline keeps its absolute meaning —
+    //     a marker older than the deadline is pruned at load and never revives. An echo that is
+    //     neither fresh nor marked never arms (an adopted/foreign transcript's deep history stays
+    //     inert, exactly as before).
+    // Persisted per session through an injectable store seam (SetProgressStore below; the engine
+    // wires it to the SessionStore KV — session-store/<sid>.json, key kSessionStoreCommandProgressKey);
+    // encode/decode are PURE and tolerant (malformed/unknown input decodes to the empty default).
+    struct CommandProgress
+    {
+        int64_t processedMs{ 0 };
+        std::vector<std::pair<std::wstring, int64_t>> armed; // (bare lowercase command, lineTsMs)
+    };
+    std::wstring EncodeCommandProgress(const CommandProgress& p); // "" for the empty default (the store removes the key — sparse)
+    CommandProgress DecodeCommandProgress(std::wstring_view encoded);
 
     // Binds slash commands to awaited follow-up activity. One process-wide instance, owned by the
     // Engine beside the scanner that feeds it (Engine::commandWatch).
@@ -123,31 +170,51 @@ namespace Agentmaster
     class CommandWatch
     {
     public:
-        // sessionId, resolved absolute md path (verified present on disk), the command's args.
-        using MarkdownReadyHandler = std::function<void(const std::wstring& sessionId, const std::wstring& mdPath, const std::wstring& args)>;
+        // sessionId, the resolved absolute md paths (each verified present on disk, in the order
+        // written — ONE command may produce several HANDOVER-*.md files), the command's args.
+        using MarkdownReadyHandler = std::function<void(const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& args)>;
 
         // Register the MARKDOWN await for `commandName` (bare, lowercase — "handover"): when the
-        // command is sighted in any managed session, the next `.md` Write/Edit after it (leaf
-        // preference `preferLeafContains`, may be empty) is awaited; once the file exists on disk
-        // the handler fires (scanner thread). One binding per name (last wins). Register at
-        // engine init BEFORE the scanner starts — the feeder assumes the binding set is stable.
+        // command is sighted in any managed session, the `.md` Write/Edits after it are COLLECTED
+        // (every markdown whose leaf contains `preferLeafContains`; a batch's first markdown as
+        // the fallback while nothing collected yet) until the turn ends (the SEAL — plus the
+        // kCommandMatchSettleMs no-turn-end fallback); once every collected file exists on disk
+        // the handler fires ONCE with all of them (scanner thread). One binding per name (last
+        // wins; lookup is name-EXACT — no prefix aliasing). Register at engine init BEFORE the
+        // scanner starts — the feeder assumes the binding set is stable.
         void BindMarkdownAwait(std::wstring commandName, std::wstring preferLeafContains, MarkdownReadyHandler handler);
 
+        // Durable progress store (COMMANDS.md §3a — restart resilience): `load` returns the
+        // session's encoded CommandProgress ("" == none), `save` persists it ("" == remove). The
+        // engine wires these to the SessionStore KV; tests inject an in-memory map; UNSET == the
+        // pre-persistence semantics (freshness gate only, nothing durable). Set before feeding.
+        using ProgressLoadFn = std::function<std::wstring(const std::wstring& sessionId)>;
+        using ProgressSaveFn = std::function<void(const std::wstring& sessionId, const std::wstring& encoded)>;
+        void SetProgressStore(ProgressLoadFn load, ProgressSaveFn save);
+
         // --- scanner feeds (transcript order within a session; scanner worker thread) ---
-        // A fresh command echo. `lineTsMs` is the transcript line's own timestamp (0 == absent —
-        // treated as not-fresh, never armed). Unbound names are ignored (no state, no logs).
+        // A command echo. `lineTsMs` is the transcript line's own timestamp (0 == absent — never
+        // armed). Arms when FRESH (within kCommandSightingFreshMs) or REVIVED (a persisted armed
+        // marker matches — the restart-mid-await case); an echo at/under the session's fired
+        // watermark never re-arms (the durable double-processing guard). Unbound names are
+        // ignored (no state, no logs, no progress reads).
         void OnCommandSighting(const std::wstring& sessionId, const SlashCommand& cmd, int64_t lineTsMs, int64_t nowMs);
         // The file-writing tool_use paths of one assistant message (Write/Edit file_path values,
-        // block order). `sessionCwd` resolves a relative path. Matches the oldest unmatched
-        // pending; a match already on disk fires immediately.
+        // block order). `sessionCwd` resolves a relative path. The oldest UNSEALED pending of the
+        // session collects the batch's qualifying markdowns (multi-file: every hint-matching one;
+        // the batch's first markdown only while the pending has none).
         void OnFileToolWrite(const std::wstring& sessionId, const std::vector<std::wstring>& paths, const std::wstring& sessionCwd, int64_t nowMs);
-        // A turn boundary (terminal stop_reason / user interrupt): unmatched pendings age one
-        // turn and expire past kCommandAwaitMaxTurnEnds.
+        // A turn boundary (terminal stop_reason / user interrupt): a MATCHED pending SEALS (its
+        // collection is complete — fires as soon as every file is on disk, often immediately
+        // here); unmatched pendings age one turn and expire past kCommandAwaitMaxTurnEnds.
         void OnTurnEnd(const std::wstring& sessionId);
-        // Periodic sweep (every scanner pass): deadline expiry + the disk poll that fires a
-        // matched-but-not-yet-present await the moment its file lands.
+        // Periodic sweep (every scanner pass): deadline expiry, the settle-seal fallback, + the
+        // disk poll that fires a sealed await the moment its last file lands.
         void Tick(int64_t nowMs);
-        // The session left the live set (archived/removed) — drop its pendings.
+        // The session left the live set (archived/removed) — drop its in-memory pendings + cached
+        // progress. The PERSISTED progress (watermark + armed markers) deliberately survives:
+        // it is what makes a later resume/replay of this session safe (no re-fire) and able to
+        // revive a mid-await command.
         void DropSession(const std::wstring& sessionId);
 
         // Test seam: replace the "does this file exist with content?" probe (default: a real
@@ -171,22 +238,37 @@ namespace Agentmaster
             std::wstring sessionId;
             std::wstring command;
             std::wstring args;
-            int64_t armedMs{ 0 };
+            int64_t lineTsMs{ 0 }; // the echo line's own timestamp — the durable identity (watermark/marker key)
+            int64_t armedMs{ 0 }; // deadline anchor (a REVIVED pending anchors at its ORIGINAL lineTsMs)
             int turnEnds{ 0 };
-            std::wstring matchedPath; // "" until a Write/Edit matched; then the resolved absolute path
+            std::vector<std::wstring> matchedPaths; // collected in write order; empty until the first match
+            bool sealed{ false }; // collection complete (turn end / settle) — fire once all paths present
+            int64_t lastMatchMs{ 0 }; // when the newest path was collected (the settle fallback's anchor)
         };
 
-        // Locked helpers (callers hold _mtx). _takeReady pops every pending whose matched file is
-        // on disk (probe true) into fire-able (pending, handler) pairs — invoked OUTSIDE the lock.
+        // Locked helpers (callers hold _mtx). _takeReady pops every SEALED pending whose files are
+        // all on disk (probe true) into fire-able (pending, handler) pairs — invoked OUTSIDE the
+        // lock — marking each fired sighting into the session's durable progress (watermark +
+        // marker removal) BEFORE the handler ever runs (at-most-once across a restart).
         std::vector<std::pair<Pending, MarkdownReadyHandler>> _takeReadyLocked(int64_t nowMs);
         const Binding* _findBindingLocked(std::wstring_view command) const;
         bool _probeFile(const std::wstring& path) const;
         static void _fire(const std::vector<std::pair<Pending, MarkdownReadyHandler>>& ready);
+        // Progress plumbing (callers hold _mtx). _progressLocked lazily loads + caches a
+        // session's persisted CommandProgress (pruning armed markers past the deadline when
+        // nowMs > 0); _saveProgressLocked persists the cache entry ("" when empty — the store
+        // removes the key); _dropArmedMarkerLocked removes one (command, ts) marker + saves.
+        CommandProgress& _progressLocked(const std::wstring& sessionId, int64_t nowMs);
+        void _saveProgressLocked(const std::wstring& sessionId);
+        void _dropArmedMarkerLocked(const std::wstring& sessionId, const std::wstring& command, int64_t lineTsMs);
 
         mutable std::mutex _mtx;
         std::vector<Binding> _bindings;
         std::vector<Pending> _pending; // FIFO per session (global order == arm order)
         uint64_t _nextPendingId{ 1 };
         std::function<bool(const std::wstring&)> _fileProbe; // empty => real disk probe
+        ProgressLoadFn _progressLoad; // empty => no persistence (in-memory progress only)
+        ProgressSaveFn _progressSave;
+        std::unordered_map<std::wstring, CommandProgress> _progress; // per-session cache over the store
     };
 }

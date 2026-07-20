@@ -63,6 +63,15 @@ namespace Agentmaster
     // The AppSettings::maxTags cap gates only the creation of a NEW name.
     inline constexpr const wchar_t* kSessionStoreTagsKey = L"tags";
 
+    // The COMMAND-PROGRESS field key (COMMANDS.md §3a): CommandWatch's durable per-session
+    // progress marking — "v1;p=<firedWatermarkMs>;a=<cmd>@<ts>,…" (EncodeCommandProgress). The
+    // fired watermark makes a transcript-history replay after a restart/resume unable to re-fire
+    // an already-processed /handover(-here) (the double-processing guard), and the armed markers
+    // let an await that was pending at crash/shutdown REVIVE on the next replay (bounded by its
+    // original 15-min deadline). Written by the engine's CommandWatch through its injected store
+    // seam; an empty value removes the key (the store stays sparse).
+    inline constexpr const wchar_t* kSessionStoreCommandProgressKey = L"cmdProgress";
+
     // ===== testable core (explicit store dir) ================================================
 
     // The whole record for `sessionId` (empty map if it has no stored file / unreadable / bad id).

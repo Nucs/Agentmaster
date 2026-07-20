@@ -5,8 +5,12 @@
 //   * ParseCommandEcho / IsMarkdownPath / IsAbsolutePathForWatch / PickMarkdownWritePath (pure)
 //   * ParseTranscriptDelta's Command events + assistant fileWritePaths (both echo strata, real
 //     corpus shapes) — and that a command echo stays a NON-event for the state machine
-//   * the CommandWatch state machine (arm / match / disk-await / FIFO / turn-end + deadline
-//     expiry / freshness replay guard / per-session cap / DropSession), injected file probe
+//   * the CommandWatch state machine (arm / MULTI-FILE collect + seal-at-turn-end + settle
+//     fallback / disk-await / FIFO / turn-end + deadline expiry / freshness replay guard /
+//     per-session cap / same-echo idempotence / DropSession), injected file probe
+//   * durable per-session progress (COMMANDS.md §3a): Encode/DecodeCommandProgress, the fired
+//     watermark (no re-fire across a restart/replay), armed-marker revival (a mid-await command
+//     survives a restart, deadline-anchored at its original stamp), past-deadline marker pruning
 //   * DeriveSuffixedTitle (the generalized fork-title derivation the /handover successor shares)
 //   * BuildClaudeCommandline's initial-prompt positional arg + PsDoubleQuote
 //   * EnsureHandoverCommandFileIn (create-if-absent under a temp config dir — never the real one)
@@ -28,6 +32,7 @@
 #include <ctime>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <stdexcept>
 #include <string_view>
 
@@ -35,13 +40,22 @@ using namespace Agentmaster;
 
 namespace
 {
-    // A minimal registry of fired handovers the handler under test records into.
+    // A minimal registry of fired handovers the handler under test records into. A fire carries a
+    // PATH SET (multi-file, COMMANDS.md §5); mdPath keeps the first for the single-file common
+    // case's assertions, mdPaths holds the whole set for the multi-file ones.
     struct FiredHandover
     {
         std::wstring sessionId;
         std::wstring mdPath;
         std::wstring args;
+        std::vector<std::wstring> mdPaths;
     };
+
+    // The vector-handler capture shared by the tests: record (sid, first path, args, all paths).
+    FiredHandover MakeFired(const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args)
+    {
+        return FiredHandover{ sid, mds.empty() ? std::wstring{} : mds.front(), args, mds };
+    }
 }
 
 void TestCommandWatch()
@@ -143,37 +157,62 @@ void TestCommandWatch()
     const int64_t now = 1'700'000'000'000;
     const auto freshTs = now - 2'000; // well inside kCommandSightingFreshMs
 
-    // arm -> match -> file present -> fires once, with args + the resolved path.
+    // arm -> match -> SEAL at turn end -> file present -> fires once, with args + the path.
     {
         CommandWatch w;
         std::vector<FiredHandover> fired;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& sid, const std::wstring& md, const std::wstring& args) {
-            fired.push_back({ sid, md, args });
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            fired.push_back(MakeFired(sid, mds, args));
         });
         w.SetFileProbe([](const std::wstring&) { return true; });
         w.OnCommandSighting(L"sess-1", SlashCommand{ L"handover", L"finish the docs" }, freshTs, now);
         CHECK(w.PendingCount() == 1, "fresh sighting arms one pending");
         w.OnFileToolWrite(L"sess-1", { L"K:\\r\\HANDOVER-docs.md" }, L"K:\\r", now);
-        CHECK(fired.size() == 1, "matched write with the file on disk fires exactly once");
+        CHECK(fired.empty() && w.PendingCount() == 1, "a matched write alone does NOT fire yet (the collection stays open until the turn ends)");
+        w.OnTurnEnd(L"sess-1");
+        CHECK(fired.size() == 1, "the turn end SEALS the collection and fires (file already on disk)");
         CHECK(!fired.empty() && fired[0].sessionId == L"sess-1" && fired[0].mdPath == L"K:\\r\\HANDOVER-docs.md", "fired with the session + path");
+        CHECK(!fired.empty() && fired[0].mdPaths.size() == 1, "single-file command fires with a one-path set");
         CHECK(!fired.empty() && fired[0].args == L"finish the docs", "fired with the command's args");
         CHECK(w.PendingCount() == 0, "fired pending consumed");
         w.OnFileToolWrite(L"sess-1", { L"K:\\r\\HANDOVER-docs.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"sess-1");
         CHECK(fired.size() == 1, "a later write with no pending fires nothing (never twice)");
+    }
+    // MULTI-FILE (COMMANDS.md §5): one command writes SEVERAL HANDOVER-*.md files — every
+    // hint-matching markdown after the command is COLLECTED (across batches, deduped, an
+    // incidental non-hint md never rides along) and the turn end fires ONE handover with all of
+    // them, in write order.
+    {
+        CommandWatch w;
+        std::vector<FiredHandover> fired;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            fired.push_back(MakeFired(sid, mds, args));
+        });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"split briefing" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-part1.md" }, L"K:\\r", now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\notes.md", L"K:\\r\\HANDOVER-part2.md" }, L"K:\\r", now); // the incidental notes.md must NOT ride along
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-part1.md" }, L"K:\\r", now); // an Edit of part1 again — dedup, not a third file
+        CHECK(fired.empty() && w.PendingCount() == 1, "collection stays open (no fire) until the turn ends");
+        w.OnTurnEnd(L"s");
+        CHECK(fired.size() == 1, "ONE fire for the whole multi-file command");
+        CHECK(!fired.empty() && (fired[0].mdPaths == std::vector<std::wstring>{ L"K:\\r\\HANDOVER-part1.md", L"K:\\r\\HANDOVER-part2.md" }), "all HANDOVER files collected in write order, deduped, incidental md excluded");
+        CHECK(!fired.empty() && fired[0].args == L"split briefing", "args ride the multi-file fire");
     }
     // file NOT yet on disk -> stays pending; a later Tick with the file present fires.
     {
         CommandWatch w;
         int firedCount = 0;
         bool filePresent = false;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring&, const std::wstring&) { ++firedCount; });
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++firedCount; });
         w.SetFileProbe([&](const std::wstring&) { return filePresent; });
         w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
         w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-a.md" }, L"K:\\r", now);
         CHECK(firedCount == 0 && w.PendingCount() == 1, "matched but absent file -> still pending (approval-gated write)");
+        w.OnTurnEnd(L"s"); // seals the collection (file still absent -> no fire yet)
         w.OnTurnEnd(L"s");
-        w.OnTurnEnd(L"s");
-        CHECK(w.PendingCount() == 1, "a MATCHED pending never expires by turn-ends (deadline-bounded only)");
+        CHECK(w.PendingCount() == 1, "a MATCHED (sealed) pending never expires by turn-ends (deadline-bounded only)");
         filePresent = true;
         w.Tick(now + 5'000);
         CHECK(firedCount == 1 && w.PendingCount() == 0, "Tick fires the moment the file lands");
@@ -181,7 +220,7 @@ void TestCommandWatch()
     // freshness replay guard: an old line timestamp / a missing one never arms.
     {
         CommandWatch w;
-        w.BindMarkdownAwait(L"handover", L"handover", [](const std::wstring&, const std::wstring&, const std::wstring&) {});
+        w.BindMarkdownAwait(L"handover", L"handover", [](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) {});
         w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, now - kCommandSightingFreshMs - 1, now);
         CHECK(w.PendingCount() == 0, "stale line timestamp never arms (history replay guard)");
         w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, 0, now);
@@ -193,28 +232,31 @@ void TestCommandWatch()
     {
         CommandWatch w;
         std::wstring firedPath;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring& md, const std::wstring&) { firedPath = md; });
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>& mds, const std::wstring&) { firedPath = mds.empty() ? std::wstring{} : mds.front(); });
         w.SetFileProbe([](const std::wstring&) { return true; });
         w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
         w.OnFileToolWrite(L"s", { L"HANDOVER-rel.md" }, L"K:\\repo", now);
+        w.OnTurnEnd(L"s");
         CHECK(firedPath == L"K:\\repo\\HANDOVER-rel.md", "relative write path resolved against the session cwd");
     }
-    // FIFO: two sightings, two writes — the first write satisfies the OLDER pending.
+    // FIFO across commands: each command's writes belong to ITS turn — the turn end seals the
+    // older pending before the next command's writes arrive, so pairs can never bleed.
     {
         CommandWatch w;
         std::vector<FiredHandover> fired;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& sid, const std::wstring& md, const std::wstring& args) {
-            fired.push_back({ sid, md, args });
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            fired.push_back(MakeFired(sid, mds, args));
         });
         w.SetFileProbe([](const std::wstring&) { return true; });
         w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"first" }, freshTs, now);
-        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"second" }, freshTs, now);
-        CHECK(w.PendingCount() == 2, "two sightings arm two pendings");
         w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-1.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s"); // seals + fires the FIRST command with its own file
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"second" }, freshTs + 1, now);
         w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-2.md" }, L"K:\\r", now);
-        CHECK(fired.size() == 2, "both pendings satisfied");
-        CHECK(fired.size() == 2 && fired[0].args == L"first" && fired[0].mdPath == L"K:\\r\\HANDOVER-1.md", "FIFO: first write -> the older sighting");
-        CHECK(fired.size() == 2 && fired[1].args == L"second" && fired[1].mdPath == L"K:\\r\\HANDOVER-2.md", "FIFO: second write -> the newer sighting");
+        w.OnTurnEnd(L"s");
+        CHECK(fired.size() == 2, "both commands fired, one per turn");
+        CHECK(fired.size() == 2 && fired[0].args == L"first" && fired[0].mdPath == L"K:\\r\\HANDOVER-1.md", "FIFO: the first command's turn owns the first write");
+        CHECK(fired.size() == 2 && fired[1].args == L"second" && fired[1].mdPath == L"K:\\r\\HANDOVER-2.md", "FIFO: the second command's turn owns the second write");
     }
     // /handover-here (COMMANDS.md — the in-place twin): the hyphenated echo parses whole, and the
     // binding lookup is name-EXACT — a /handover-here sighting fires ONLY its own binding, never
@@ -229,14 +271,15 @@ void TestCommandWatch()
         CommandWatch w;
         int firedHandover = 0;
         std::vector<FiredHandover> firedHere;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring&, const std::wstring&) { ++firedHandover; });
-        w.BindMarkdownAwait(L"handover-here", L"handover", [&](const std::wstring& sid, const std::wstring& md, const std::wstring& args) {
-            firedHere.push_back({ sid, md, args });
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++firedHandover; });
+        w.BindMarkdownAwait(L"handover-here", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            firedHere.push_back(MakeFired(sid, mds, args));
         });
         w.SetFileProbe([](const std::wstring&) { return true; });
         w.OnCommandSighting(L"s", SlashCommand{ L"handover-here", L"replace me" }, freshTs, now);
         CHECK(w.PendingCount() == 1, "/handover-here arms its own pending beside the /handover binding");
         w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-swap.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s");
         CHECK(firedHere.size() == 1 && firedHandover == 0, "the md write fires ONLY the /handover-here binding (name-exact lookup, no prefix aliasing)");
         CHECK(!firedHere.empty() && firedHere[0].mdPath == L"K:\\r\\HANDOVER-swap.md" && firedHere[0].args == L"replace me", "fired with the resolved path + the command's args");
     }
@@ -244,17 +287,17 @@ void TestCommandWatch()
     // turn-end expiry for UNMATCHED pendings (the command turn + one clarification round).
     {
         CommandWatch w;
-        w.BindMarkdownAwait(L"handover", L"handover", [](const std::wstring&, const std::wstring&, const std::wstring&) {});
+        w.BindMarkdownAwait(L"handover", L"handover", [](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) {});
         w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
         w.OnTurnEnd(L"s");
         CHECK(w.PendingCount() == 1, "one turn-end: still armed (a clarification round is allowed)");
         w.OnTurnEnd(L"s");
         CHECK(w.PendingCount() == 0, "second turn-end with no md: expired (never grabs a later unrelated md)");
     }
-    // deadline expiry + DropSession + the per-session cap.
+    // deadline expiry + DropSession + the per-session cap + same-echo idempotence.
     {
         CommandWatch w;
-        w.BindMarkdownAwait(L"handover", L"handover", [](const std::wstring&, const std::wstring&, const std::wstring&) {});
+        w.BindMarkdownAwait(L"handover", L"handover", [](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) {});
         w.SetFileProbe([](const std::wstring&) { return false; });
         w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
         w.Tick(now + kCommandAwaitDeadlineMs);
@@ -262,9 +305,15 @@ void TestCommandWatch()
         w.OnCommandSighting(L"s2", SlashCommand{ L"handover", L"" }, freshTs, now);
         w.DropSession(L"s2");
         CHECK(w.PendingCount() == 0, "DropSession clears the session's pendings");
+        w.OnCommandSighting(L"s2b", SlashCommand{ L"handover", L"" }, freshTs, now);
+        w.OnCommandSighting(L"s2b", SlashCommand{ L"handover", L"" }, freshTs, now);
+        CHECK(w.PendingCount() == 1, "re-feeding the SAME echo (identical session/command/timestamp) never double-arms (replay idempotence)");
+        w.DropSession(L"s2b");
         for (int i = 0; i < 6; ++i)
         {
-            w.OnCommandSighting(L"s3", SlashCommand{ L"handover", L"" }, freshTs, now);
+            // Distinct line timestamps — six REAL commands (identical stamps would be the same
+            // echo re-fed, dropped by the idempotence guard above).
+            w.OnCommandSighting(L"s3", SlashCommand{ L"handover", L"" }, freshTs + i, now);
         }
         CHECK(w.PendingCount() == kCommandMaxPendingPerSession, "per-session cap bounds pendings (oldest evicted)");
     }
@@ -275,19 +324,27 @@ void TestCommandWatch()
         CHECK(!IsSaneWatchPath(L""), "empty path rejected");
         CHECK(!IsSaneWatchPath(L"K:\\r\\bad\npath.md"), "embedded newline rejected (never a real Windows path)");
         CHECK(!IsSaneWatchPath(L"K:\\r\\bad\"quote.md"), "embedded quote rejected");
+        CHECK(!IsSaneWatchPath(L"K:\\r\\bad|pipe.md"), "embedded pipe rejected (illegal in a path AND the fan-out separator)");
         CHECK(!IsSaneWatchPath(std::wstring(kWatchMaxPathChars + 1, L'a')), "oversize path rejected");
+        // Join/Split — the multi-path fan-out payload round-trip.
+        const std::vector<std::wstring> two{ L"K:\\r\\HANDOVER-a.md", L"K:\\r\\HANDOVER-b.md" };
+        CHECK(JoinWatchPaths(two) == L"K:\\r\\HANDOVER-a.md|K:\\r\\HANDOVER-b.md", "JoinWatchPaths '|'-joins");
+        CHECK(SplitWatchPaths(JoinWatchPaths(two)) == two, "SplitWatchPaths round-trips the set");
+        CHECK(SplitWatchPaths(L"|a||b|") == (std::vector<std::wstring>{ L"a", L"b" }), "empty segments dropped (no phantom paths)");
+        CHECK(SplitWatchPaths(L"").empty() && JoinWatchPaths({}).empty(), "empty payload <-> empty set");
     }
     {
         // An INSANE matched path (control char smuggled through a tool input) is rejected AT THE
-        // MATCH — the pending stays unmatched and a later sane write still satisfies it.
+        // MATCH — the pending stays collecting and a later sane write still satisfies it.
         CommandWatch w;
         std::wstring firedPath;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring& md, const std::wstring&) { firedPath = md; });
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>& mds, const std::wstring&) { firedPath = mds.empty() ? std::wstring{} : mds.front(); });
         w.SetFileProbe([](const std::wstring&) { return true; });
         w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
         w.OnFileToolWrite(L"s", { L"K:\\r\\evil\nHANDOVER-a.md" }, L"K:\\r", now);
         CHECK(firedPath.empty() && w.PendingCount() == 1, "insane path rejected at match; pending stays unmatched");
         w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-b.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s");
         CHECK(firedPath == L"K:\\r\\HANDOVER-b.md", "a later sane write still satisfies the pending");
     }
     {
@@ -295,7 +352,7 @@ void TestCommandWatch()
         // fully functional for the next sighting/fire.
         CommandWatch w;
         int calls = 0;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring&, const std::wstring&) {
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) {
             if (++calls == 1)
             {
                 throw std::runtime_error("handler boom");
@@ -304,9 +361,11 @@ void TestCommandWatch()
         w.SetFileProbe([](const std::wstring&) { return true; });
         w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
         w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-1.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s");
         CHECK(calls == 1 && w.PendingCount() == 0, "throwing handler swallowed; fire consumed");
-        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs + 1, now); // a distinct second command (a same-stamp re-feed would be the idempotence guard)
         w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-2.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s");
         CHECK(calls == 2, "the watch keeps firing after a handler throw (self-contained)");
     }
     {
@@ -315,7 +374,7 @@ void TestCommandWatch()
         CommandWatch w;
         int fired = 0;
         bool probeThrows = true;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring&, const std::wstring&) { ++fired; });
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired; });
         w.SetFileProbe([&](const std::wstring&) -> bool {
             if (probeThrows)
             {
@@ -325,10 +384,119 @@ void TestCommandWatch()
         });
         w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
         w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-x.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s"); // sealed — awaiting the disk
         CHECK(fired == 0 && w.PendingCount() == 1, "throwing probe reads absent; pending kept");
         probeThrows = false;
         w.Tick(now + 1'000);
         CHECK(fired == 1 && w.PendingCount() == 0, "pending fires once the probe recovers");
+    }
+
+    // ---- durable progress (COMMANDS.md §3a): encode/decode, the fired watermark, marker revival ----
+    {
+        // Encode/decode round-trip + tolerance.
+        CommandProgress p;
+        CHECK(EncodeCommandProgress(p).empty(), "empty progress encodes to \"\" (the store removes the key)");
+        p.processedMs = 1'700'000'000'123;
+        p.armed.emplace_back(L"handover", 1'700'000'000'456);
+        p.armed.emplace_back(L"handover-here", 1'700'000'000'789);
+        const auto enc = EncodeCommandProgress(p);
+        const auto back = DecodeCommandProgress(enc);
+        CHECK(back.processedMs == p.processedMs && back.armed == p.armed, "progress round-trips through the encoding");
+        CHECK(DecodeCommandProgress(L"").processedMs == 0 && DecodeCommandProgress(L"").armed.empty(), "empty decodes to the default");
+        CHECK(DecodeCommandProgress(L"garbage!!").processedMs == 0, "garbage decodes to the default (tolerant)");
+        CHECK(DecodeCommandProgress(L"v1;p=42;a=x@nonsense,ok@7").armed == (std::vector<std::pair<std::wstring, int64_t>>{ { L"ok", 7 } }), "malformed armed entries skipped, sane ones kept");
+    }
+    {
+        // The FIRED WATERMARK: a fire persists processedMs; a SECOND watch instance over the SAME
+        // store (== the app restarted) replaying the SAME still-fresh echo never re-arms — the
+        // restart double-processing guard (resume-a-handed-over-session / crash-after-fire).
+        std::map<std::wstring, std::wstring> store; // the injected in-memory "SessionStore"
+        const auto load = [&](const std::wstring& sid) { const auto it = store.find(sid); return it == store.end() ? std::wstring{} : it->second; };
+        const auto save = [&](const std::wstring& sid, const std::wstring& v) { if (v.empty()) { store.erase(sid); } else { store[sid] = v; } };
+        int fired = 0;
+        {
+            CommandWatch w;
+            w.SetProgressStore(load, save);
+            w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired; });
+            w.SetFileProbe([](const std::wstring&) { return true; });
+            w.OnCommandSighting(L"sp", SlashCommand{ L"handover", L"" }, freshTs, now);
+            CHECK(!load(L"sp").empty(), "arming persists an armed marker (durable mid-await state)");
+            w.OnFileToolWrite(L"sp", { L"K:\\r\\HANDOVER-p.md" }, L"K:\\r", now);
+            w.OnTurnEnd(L"sp");
+            CHECK(fired == 1, "first run fires");
+            const auto prog = DecodeCommandProgress(load(L"sp"));
+            CHECK(prog.processedMs == freshTs && prog.armed.empty(), "the fire advanced the watermark and retired the armed marker");
+        }
+        {
+            CommandWatch w2; // "the app restarted" — a fresh instance over the same store
+            w2.SetProgressStore(load, save);
+            w2.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired; });
+            w2.SetFileProbe([](const std::wstring&) { return true; });
+            w2.OnCommandSighting(L"sp", SlashCommand{ L"handover", L"" }, freshTs, now); // the history replay: same echo, still fresh
+            CHECK(w2.PendingCount() == 0, "a replayed already-FIRED echo never re-arms (the watermark remembers across the restart)");
+            w2.OnFileToolWrite(L"sp", { L"K:\\r\\HANDOVER-p.md" }, L"K:\\r", now);
+            w2.OnTurnEnd(L"sp");
+            CHECK(fired == 1, "no double-processing: the successor is never spawned twice");
+        }
+    }
+    {
+        // MARKER REVIVAL: a watch armed an await and the app died before the md landed. The next
+        // run's history replay carries the echo with a stamp PAST the freshness window — the
+        // persisted armed marker revives it (deadline anchored at the ORIGINAL typing time), and
+        // the md write later in history / live still fires it. A marker past the deadline prunes
+        // instead (never revives).
+        std::map<std::wstring, std::wstring> store;
+        const auto load = [&](const std::wstring& sid) { const auto it = store.find(sid); return it == store.end() ? std::wstring{} : it->second; };
+        const auto save = [&](const std::wstring& sid, const std::wstring& v) { if (v.empty()) { store.erase(sid); } else { store[sid] = v; } };
+        const int64_t typedAt = now - 5 * 60'000; // typed 5 min ago (fresh THEN, stale NOW)
+        {
+            CommandWatch w;
+            w.SetProgressStore(load, save);
+            w.BindMarkdownAwait(L"handover", L"handover", [](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) {});
+            w.OnCommandSighting(L"sr", SlashCommand{ L"handover", L"revive me" }, typedAt, typedAt + 1'000); // armed while fresh
+            CHECK(w.PendingCount() == 1 && !load(L"sr").empty(), "armed + marker persisted, then the app 'dies'");
+        }
+        {
+            CommandWatch w2;
+            int fired = 0;
+            std::wstring firedArgs;
+            w2.SetProgressStore(load, save);
+            w2.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring& args) { ++fired; firedArgs = args; });
+            w2.SetFileProbe([](const std::wstring&) { return true; });
+            w2.OnCommandSighting(L"sr", SlashCommand{ L"handover", L"revive me" }, typedAt, now); // 5 min old — stale for the freshness gate, but MARKED
+            CHECK(w2.PendingCount() == 1, "a marked mid-await echo REVIVES past the freshness window (restart resilience)");
+            w2.OnFileToolWrite(L"sr", { L"K:\\r\\HANDOVER-revived.md" }, L"K:\\r", now);
+            w2.OnTurnEnd(L"sr");
+            CHECK(fired == 1 && firedArgs == L"revive me", "the revived await completes normally (fired with its original args)");
+            CHECK(DecodeCommandProgress(load(L"sr")).armed.empty(), "the revived fire retired its marker");
+        }
+        {
+            // Past-deadline marker: prunes at load, never revives.
+            store.clear();
+            CommandProgress stale;
+            stale.armed.emplace_back(L"handover", now - kCommandAwaitDeadlineMs - 60'000);
+            store[L"sx"] = EncodeCommandProgress(stale);
+            CommandWatch w3;
+            w3.SetProgressStore(load, save);
+            w3.BindMarkdownAwait(L"handover", L"handover", [](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) {});
+            w3.OnCommandSighting(L"sx", SlashCommand{ L"handover", L"" }, now - kCommandAwaitDeadlineMs - 60'000, now);
+            CHECK(w3.PendingCount() == 0, "a marker older than the await deadline never revives (pruned at load)");
+            CHECK(DecodeCommandProgress(load(L"sx")).armed.empty(), "the stale marker was garbage-collected from the store");
+        }
+    }
+    {
+        // The settle-seal fallback: a matched pending whose turn end never arrives (session died
+        // mid-turn) seals after kCommandMatchSettleMs of write-silence and still fires.
+        CommandWatch w;
+        int fired = 0;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired; });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-alone.md" }, L"K:\\r", now);
+        w.Tick(now + kCommandMatchSettleMs - 1);
+        CHECK(fired == 0 && w.PendingCount() == 1, "before the settle window: still collecting (no turn end seen)");
+        w.Tick(now + kCommandMatchSettleMs);
+        CHECK(fired == 1 && w.PendingCount() == 0, "the settle fallback seals + fires without a turn end");
     }
 
     // ---- DeriveSuffixedTitle (the generalized fork-title derivation) ----
@@ -425,10 +593,11 @@ void TestCommandWatch()
         // untouched — it silently upgrades to the current text on the next ensure.
         {
             const auto& history = ShippedHandoverCommandHistory();
-            CHECK(history.size() >= 3 && history.back().find(L"injected VERBATIM") != std::wstring_view::npos, "shipped history: >= 3 versions, current is the content-injection text");
+            CHECK(history.size() >= 4 && history.back().find(L"injected VERBATIM") != std::wstring_view::npos, "shipped history: >= 4 versions, current is the content-injection text");
             CHECK(history.back().find(L"whatever its size") != std::wstring_view::npos &&
                       history.back().find(L"truncated") == std::wstring_view::npos,
                   "current definition promises FULL delivery (never-truncate) and carries no truncation caution");
+            CHECK(history.back().find(L"MORE THAN ONE") != std::wstring_view::npos, "current definition permits a split multi-file briefing (V4 — all files are delivered)");
             const auto utf8Of = [](std::wstring_view w) {
                 std::string out;
                 const int need = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
@@ -487,7 +656,8 @@ void TestCommandWatch()
         }
         {
             const auto& history = ShippedHandoverHereCommandHistory();
-            CHECK(!history.empty() && history.back().find(L"RESTARTS THIS TAB") != std::wstring_view::npos, "shipped handover-here history present; the current text names the in-place restart");
+            CHECK(history.size() >= 2 && history.back().find(L"RESTARTS THIS TAB") != std::wstring_view::npos, "shipped handover-here history: >= 2 versions; the current text names the in-place restart");
+            CHECK(history.back().find(L"MORE THAN ONE") != std::wstring_view::npos, "current handover-here definition permits a split multi-file briefing (V2)");
         }
         // A user edit is NEVER overwritten (the shared create-if-absent + upgrade discipline —
         // EnsureShippedCommandFileIn is the one core both wrappers share).
@@ -656,8 +826,8 @@ void TestCommandHandoverE2E()
 
         CommandWatch w; // DEFAULT probe — the real GetFileAttributesExW path
         std::vector<FiredHandover> fired;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& s, const std::wstring& md, const std::wstring& args) {
-            fired.push_back({ s, md, args });
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& s, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            fired.push_back(MakeFired(s, mds, args));
         });
         FeedParsedEvents(w, sid, dir, parsed, now);
         CHECK(fired.size() == 1, "scenario A: exactly one fire");
@@ -707,7 +877,7 @@ void TestCommandHandoverE2E()
     {
         CommandWatch w;
         int fired = 0;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring&, const std::wstring&) { ++fired; });
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired; });
         w.SetFileProbe([](const std::wstring&) { return true; });
         const std::wstring content =
             FabUserEcho(sid, L"hand this over", now - 5000) +
@@ -723,7 +893,7 @@ void TestCommandHandoverE2E()
     {
         CommandWatch w;
         int fired = 0;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring&, const std::wstring&) { ++fired; });
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired; });
         w.SetFileProbe([](const std::wstring&) { return true; });
         const std::wstring content =
             FabUserEcho(sid, L"hand this over", now - 5000) +
@@ -739,8 +909,8 @@ void TestCommandHandoverE2E()
     {
         CommandWatch w;
         std::vector<FiredHandover> fired;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& s, const std::wstring& md, const std::wstring& args) {
-            fired.push_back({ s, md, args });
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& s, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            fired.push_back(MakeFired(s, mds, args));
         });
         w.SetFileProbe([](const std::wstring&) { return true; });
         const std::wstring md2 = dir + L"\\HANDOVER-round-two.md";
@@ -762,7 +932,7 @@ void TestCommandHandoverE2E()
     {
         CommandWatch w;
         int fired = 0;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::wstring&, const std::wstring&) { ++fired; });
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired; });
         w.SetFileProbe([](const std::wstring&) { return true; });
         const int64_t old = now - 2 * 60 * 60 * 1000; // two hours ago
         const std::wstring content =
@@ -773,7 +943,93 @@ void TestCommandHandoverE2E()
         CHECK(fired == 0 && w.PendingCount() == 0, "scenario E: a replayed old /handover (stale line timestamps) never arms nor fires");
     }
 
+    // ---- scenario F (MULTI-FILE, real disk): one /handover writes TWO HANDOVER files in its
+    //      turn -> ONE fire carrying both, contents joined for the successor's first message. ----
+    const std::wstring mdPathB = dir + L"\\HANDOVER-commandwatch-part2.md";
+    {
+        std::ofstream f(std::filesystem::path{ mdPathB }, std::ios::binary | std::ios::trunc);
+        f << "# Handover part 2\n\nAppendix: the gotchas.\n";
+    }
+    {
+        CommandWatch w; // DEFAULT probe — both files really on disk
+        std::vector<FiredHandover> fired;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& s, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            fired.push_back(MakeFired(s, mds, args));
+        });
+        const std::wstring content =
+            FabUserEcho(sid, L"split handover", now - 4000) +
+            FabAssistantWrite(mdPath, now - 3000, L"a-wf1") +
+            FabAssistantWrite(mdPathB, now - 2000, L"a-wf2") +
+            FabAssistantEnd(L"Both parts written.", now - 1000, L"a-ef");
+        FeedParsedEvents(w, sid, dir, ParseTranscriptDelta(content), now);
+        CHECK(fired.size() == 1, "scenario F: one fire for the whole multi-file command");
+        CHECK(!fired.empty() && (fired[0].mdPaths == std::vector<std::wstring>{ mdPath, mdPathB }), "scenario F: both HANDOVER files ride the fire, in write order");
+        // The successor's first message: the parts joined in write order (what
+        // _HandleCommandHandover assembles from the path set).
+        if (!fired.empty() && fired[0].mdPaths.size() == 2)
+        {
+            const std::wstring joined = ReadHandoverDocumentPrompt(fired[0].mdPaths[0]) + L"\n\n" + ReadHandoverDocumentPrompt(fired[0].mdPaths[1]);
+            CHECK(joined.find(L"# Handover") == 0 && joined.rfind(L"Appendix: the gotchas.") != std::wstring::npos, "scenario F: the joined message carries part 1 then part 2");
+        }
+    }
+
+    // ---- scenario G (RESTART PERSISTENCE, the full fabricated session over a durable store):
+    //      run 1 fires; "the app restarts"; run 2 replays the SAME history (stamps now stale but
+    //      inside the raw freshness window is irrelevant — the WATERMARK blocks it) -> no second
+    //      fire. Then a run that armed-but-never-resolved revives after the restart and fires. ----
+    {
+        std::map<std::wstring, std::wstring> store;
+        const auto load = [&](const std::wstring& s) { const auto it = store.find(s); return it == store.end() ? std::wstring{} : it->second; };
+        const auto save = [&](const std::wstring& s, const std::wstring& v) { if (v.empty()) { store.erase(s); } else { store[s] = v; } };
+        const std::wstring content =
+            FabUserEcho(sid, L"persisted handover", now - 3000) +
+            FabAssistantWrite(mdPath, now - 2000, L"a-wg") +
+            FabAssistantEnd(L"Written.", now - 1000, L"a-eg");
+        int fired = 0;
+        {
+            CommandWatch w;
+            w.SetProgressStore(load, save);
+            w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired; });
+            FeedParsedEvents(w, sid, dir, ParseTranscriptDelta(content), now);
+            CHECK(fired == 1, "scenario G: run 1 fires once");
+        }
+        {
+            CommandWatch w2; // the restarted app: fresh instance, same durable store
+            w2.SetProgressStore(load, save);
+            w2.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired; });
+            FeedParsedEvents(w2, sid, dir, ParseTranscriptDelta(content), now + 10'000); // the reopen's history replay
+            CHECK(fired == 1 && w2.PendingCount() == 0, "scenario G: the replay after the restart never re-fires (the durable watermark)");
+        }
+        {
+            // Armed-but-unresolved at "shutdown": echo only in run 1; the write + end_turn land
+            // in run 2's replay (typed moments before the app closed) -> revives + fires once.
+            store.clear();
+            const std::wstring sid2 = L"fab-handover-revive";
+            int fired2 = 0;
+            {
+                CommandWatch w;
+                w.SetProgressStore(load, save);
+                w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired2; });
+                FeedParsedEvents(w, sid2, dir, ParseTranscriptDelta(FabUserEcho(sid2, L"mid-await", now - 3000)), now);
+                CHECK(fired2 == 0 && w.PendingCount() == 1 && !load(sid2).empty(), "scenario G: armed + marker persisted, app 'dies' mid-await");
+            }
+            {
+                CommandWatch w2;
+                w2.SetProgressStore(load, save);
+                w2.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired2; });
+                const int64_t later = now + 3 * 60'000; // reopened 3 min later — the echo is stale for the freshness gate
+                const std::wstring replay =
+                    FabUserEcho(sid2, L"mid-await", now - 3000) +
+                    FabAssistantWrite(mdPath, now + 2 * 60'000, L"a-wr") +
+                    FabAssistantEnd(L"Written after the reopen.", now + 2 * 60'000 + 500, L"a-er");
+                FeedParsedEvents(w2, sid2, dir, ParseTranscriptDelta(replay), later);
+                CHECK(fired2 == 1, "scenario G: a mid-await command REVIVES across the restart and completes (fired once, never lost)");
+            }
+        }
+    }
+
     ::DeleteFileW(mdPath.c_str());
+    ::DeleteFileW(mdPathB.c_str());
     ::RemoveDirectoryW(dir.c_str());
 }
 

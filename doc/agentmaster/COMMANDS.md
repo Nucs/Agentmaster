@@ -89,31 +89,75 @@ order, mutex-guarded, handlers fired on the scanner thread (consumers marshal �
    never arm. An absent stamp (0) never arms either.
 
 **The markdown await** (v1's one binding shape, `BindMarkdownAwait(name, preferLeafContains,
-handler)`): after the command, the next `.md` `Write`/`Edit` is the match —
-`PickMarkdownWritePath` prefers, within a message's batch, a path whose LEAF contains the
-binding's hint (`"handover"` → the command's own `HANDOVER-*.md` outranks an incidental doc
-edit in the same message), else the first markdown. A relative tool path resolves against the
-session's working dir. **The tool_use line only proves the REQUEST** — the write may still be
-pending a permission approval — so the fire is gated on the DISK: the pending fires when the
-file actually exists non-empty (probed at match time, then per `Tick`). The file probe is
-injectable (`SetFileProbe`) so the whole machine unit-tests offline.
+handler)`) — **MULTI-FILE: one command consumes EVERY qualifying markdown written after it.**
+The oldest UNSEALED pending of the session COLLECTS, from each assistant message's Write/Edit
+batch, every markdown whose LEAF contains the binding's hint (`"handover"` → the command's own
+`HANDOVER-*.md` family; an incidental doc edit in the same turn never rides along), in write
+order, case-insensitively deduped (a Write-then-Edit of one file collects once); while the
+pending has collected NOTHING, a batch's first markdown is the fallback pick (the legacy
+mis-named-single-file tolerance). A relative tool path resolves against the session's working
+dir. **The collection SEALS at the first turn end after a match** (the definitions end the turn
+right after writing, so everything belonging to one command lands in ONE turn — sealing is also
+what keeps a SECOND command's writes from bleeding into the first, and what makes the
+/handover-here swap happen only after the origin's turn completed), with a
+`kCommandMatchSettleMs` (20s) write-silence fallback when no turn end ever arrives (a session
+killed mid-turn). **The tool_use lines only prove the REQUEST** — a write may still be pending
+a permission approval — so the fire is gated on the DISK: a sealed pending fires once EVERY
+collected file exists non-empty (probed at seal, then per `Tick`), delivering the whole path
+set to the handler. The file probe is injectable (`SetFileProbe`) so the whole machine
+unit-tests offline.
 
 **Every await is bounded** (state can never leak):
 
 * an UNMATCHED sighting expires after `kCommandAwaitMaxTurnEnds` (2) turn boundaries — the
   command's own turn + one clarification round. Scoping the await to the command's vicinity is
   what keeps an unrelated `.md` edit three turns later from spawning a spurious tab (worse than
-  a missed one — the user just re-runs the command). A MATCHED-but-not-yet-on-disk pending is
-  exempt (approval can span boundaries) and is bounded by the deadline alone;
+  a missed one — the user just re-runs the command). A MATCHED (sealed) pending never ages by
+  turns (approval can span boundaries) and is bounded by the deadline alone;
 * `kCommandAwaitDeadlineMs` (15 min) hard-caps everything;
 * `kCommandMaxPendingPerSession` (4) caps memory, oldest evicted; FIFO across sightings (a
-  second `/handover` before the first resolves waits for the NEXT write);
-* pure v1 semantics: pendings are transient (never persisted — a deliberate Rule-#16-adjacent
-  choice like `pendingInput`: an await does not survive an app restart).
+  second `/handover` arms its own pending; the turn-end seal pairs each command's writes with
+  its own turn);
+* pendings themselves stay transient in-memory — but the session's PROGRESS is durable (§3a),
+  so a restart neither double-processes a fired command nor loses one that was mid-await.
 
-Logs (hooks.log): `[cmd] /handover sighted <sid8> args="…"` → `[cmd] /handover md matched …` →
-`[cmd-fire] /handover <sid8> md=…`, with `[cmd-expire] …` for the bounded ends. Unbound
-commands (`/model`, `/compact`, …) produce no state and no logs.
+Logs (hooks.log): `[cmd] /handover sighted <sid8> args="…"` (`(revived after restart, …)` when
+§3a revived it) → `[cmd] /handover md matched … (N files)` → `[cmd] /handover sealed … files=N
+(turn end|settle)` → `[cmd-fire] /handover <sid8> md=<p1>|<p2>`, with `[cmd-expire] …` for the
+bounded ends. Unbound commands (`/model`, `/compact`, …) produce no state and no logs.
+
+## 3a. Durable per-session progress — restart resilience without double-processing
+
+The watch persists a tiny per-session PROGRESS record through an injectable store seam
+(`SetProgressStore(load, save)`; the engine wires it to the **SessionStore KV** —
+`session-store/<sid>.json`, key `cmdProgress`, value `EncodeCommandProgress`:
+`"v1;p=<processedMs>;a=<cmd>@<ts>,…"`, empty ⇒ key removed, the store stays sparse). Two facts,
+both keyed by the echo line's OWN transcript timestamp (the durable identity of a command
+occurrence):
+
+* **The fired watermark (`processedMs`)** — advanced (and saved) INSIDE the fire path, BEFORE
+  the handler runs (at-most-once across a restart: a crash after the mark but before the spawn
+  loses that fire — the user re-runs — it never doubles). A replayed echo at/under the
+  watermark **never re-arms**, which closes the real double-processing holes the 60s freshness
+  gate could not: **resuming a just-handed-over origin session** (its tail replays the echo +
+  write fresh enough to pass the gate — previously a second successor / a second in-place swap),
+  a **crash-restart within the freshness window of a fire**, and a truncation-rewind re-feed
+  (also guarded in-memory by same-echo idempotence).
+* **Armed markers (`armed[]`)** — one `(command, lineTs)` per sighting that armed but has not
+  resolved. A replayed echo matching a marker **REVIVES** its await even past the freshness
+  window (the app restarted / the session was closed mid-await and later resumed), with the
+  deadline anchored at the ORIGINAL timestamp — so the 15-min bound stays absolute across the
+  restart, and a marker older than it is pruned at load (garbage-collected) and never revives.
+  Markers retire on fire, on turn-end/deadline expiry, and on cap eviction. A marker also
+  overrides the watermark (an out-of-order fire — a later command fired while an earlier one
+  still awaited its approval-held file — must not orphan the earlier await).
+
+An echo that is neither fresh nor marked never arms — an adopted/foreign transcript's deep
+history stays inert exactly as before (including a `/handover` typed into the same conversation
+from OUTSIDE Agentmaster while the app was closed: no marker ⇒ no ghost successor).
+`DropSession` drops only the in-memory pendings + cache — the persisted progress deliberately
+survives archiving, because it is what makes the later resume/replay safe. No store wired
+(harness default) ⇒ the exact pre-persistence semantics.
 
 ## 4. Fan-out — the command-action sinks
 
@@ -136,8 +180,10 @@ them).
    to create ONE `HANDOVER-<topic>.md` in the cwd carrying everything a successor needs, then end
    the turn.
 2. The scanner's next delta surfaces the echo → `[cmd] /handover sighted`, await armed.
-3. Claude's Write tool_use lands in a later delta → matched (leaf preference `handover`); the
-   disk probe confirms the file → `[cmd-fire]` → engine fan-out → the hosting window's UI thread.
+3. Claude's Write tool_use(s) land in later deltas → COLLECTED (leaf preference `handover`;
+   one command may write several `HANDOVER-*.md` files — §3); the turn's end SEALS the set and
+   the disk probe confirms every file → `[cmd-fire] … md=<p1>|<p2>` → engine fan-out (the
+   '|'-joined path set, `JoinWatchPaths`) → the hosting window's UI thread.
 4. `TerminalPage::_HandleCommandHandover` (miss ⇒ no-op; archived/vanished ⇒ drop):
    * **dir** — `EffectiveWorkingDir(tabColorMode, *s)`: the same "here" every *Open New Session
      Here* uses (falls back to the launch cwd inside the resolver);
@@ -147,23 +193,29 @@ them).
      one origin never collide;
    * **placement** — inserted at `originTab.TabViewIndex()+1`, beside the origin (the *New
      Session Here* placement);
-   * **the handover message** — the md's CONTENT, delivered VERBATIM and **IN FULL** as the
-     successor's **first user message** ("as if the user typed it") — **NEVER truncated**.
-     `ReadHandoverDocumentPrompt` reads the file (4 MiB sanity cap — a ceiling on absurdity, not
-     a message bound) and normalizes it only (UTF-8 BOM stripped, CRLF → LF, stray C0 controls
-     except `\n`/`\t` dropped — which also makes the paste framing below injection-proof, since
-     ESC can never survive into the content — outer whitespace trimmed). The DELIVERY then tiers
-     on `PsEscapedCost` (the PsDoubleQuote cost model — ` `` ` `"` `$` cost 2) against
-     `kHandoverPromptEscapedBudget` (11,500 — the size math in step 5):
+   * **the handover message** — the CONTENT of EVERY collected md (`_HandleCommandHandover`
+     splits the payload via `SplitWatchPaths`, re-asserts sanity + existence PER PATH — a
+     vanished/insane subset is dropped with a log, only an empty survivor set drops the whole
+     action), delivered VERBATIM and **IN FULL** as the successor's **first user message** ("as
+     if the user typed it") — **NEVER truncated**. Each file goes through
+     `ReadHandoverDocumentPrompt` (4 MiB sanity cap per file — a ceiling on absurdity, not a
+     message bound; UTF-8 BOM stripped, CRLF → LF, stray C0 controls except `\n`/`\t` dropped —
+     which also makes the paste framing below injection-proof, since ESC can never survive into
+     the content — outer whitespace trimmed), and a multi-file set is JOINED in write order with
+     a blank line between the parts (one message, the parts in the order Claude authored them).
+     The DELIVERY then tiers on `PsEscapedCost` of the joined whole (the PsDoubleQuote cost
+     model — ` `` ` `"` `$` cost 2) against `kHandoverPromptEscapedBudget` (11,500 — the size
+     math in step 5):
        - **fits** → the launch commandline's positional prompt (the zero-race channel);
        - **over budget** → the FULL document rides the **ConPTY stdin instead — a streamed pipe
          with NO CreateProcessW ceiling**: parked as a Pending prompt at the FRONT of the
          successor's queue (the durable, visible carrier — Auto Testing lists it, Send-now can
          deliver it manually, a restart keeps it) and paste-injected by
          `_PumpHandoverInjections` (below) the moment the session actually starts;
-       - **unreadable / whitespace-only / beyond-cap** (a rewrite-in-flight race past the §7
-         re-asserts) → the pointer-style prompt (`Read the handover document at <mdPath> …`),
-         logged — the handover still functions and nothing was silently cut.
+       - **every file unreadable / whitespace-only / beyond-cap** (a rewrite-in-flight race past
+         the §7 re-asserts) → the pointer-style prompt naming ALL the files (`Read the handover
+         document(s) at <p1> ; <p2> …`), logged — the handover still functions and nothing was
+         silently cut (a partially-readable set proceeds with what read back).
      `handover-done` carries `inject=content|paste|pointer`.
    * **the paste pump** (`TerminalPage::_PumpHandoverInjections`, ticked by the scanner's
      liveness probe ~2.5s): waits for `SessionInfo.started` (the control initialized and
@@ -279,7 +331,10 @@ Claude that the file's content is injected VERBATIM as the successor's first use
 the document must be written AS a direct, self-contained briefing TO the successor (imperative,
 second person). **V3 (never truncate)** drops V2's "long documents truncate to a pointer"
 caution — the document is delivered IN FULL whatever its size (the paste tier, §5), so
-thoroughness is encouraged, not traded against delivery.
+thoroughness is encouraged, not traded against delivery. **V4 (multi-file)** permits a
+genuinely-better-split briefing — "you may write MORE THAN ONE `HANDOVER-*.md` file in this
+same turn - all of them are delivered together, in the order written" (the §3 collection; ONE
+file stays the recommendation). `handover-here.md` **V2** carries the same line.
 
 ## 7. Hardening & safeguards
 
@@ -358,10 +413,18 @@ line alone pins the throw site later):
   overflows to the paste tier) and `ReadHandoverDocumentPrompt` (BOM strip + CRLF→LF +
   control-char drop + trim, verbatim read-back; an oversized document comes back **IN FULL** —
   no truncation tail, last line intact, cost over the budget == the paste-tier decision;
-  whitespace-only/missing → empty for the fallback). Plus the safeguard belts: `IsSaneWatchPath`,
+  whitespace-only/missing → empty for the fallback). Plus the safeguard belts: `IsSaneWatchPath`
+  (incl. `|`), `Join/SplitWatchPaths` round-trip,
   an insane matched path rejected at the match (a later sane write still satisfies), a throwing
   handler swallowed per fire (the watch keeps firing), a throwing probe reading as absent then
-  firing on recovery. **/handover-here units (§5a):** the hyphenated echo parses whole
+  firing on recovery. **Multi-file + seal units (§3):** several hint-matching writes across
+  batches collect into ONE fire in write order (deduped; an incidental non-hint md excluded),
+  no fire before the seal, the settle fallback fires without a turn end, FIFO pairs each
+  command's writes with its own turn. **Durable-progress units (§3a):**
+  `Encode/DecodeCommandProgress` round-trip + garbage tolerance, arming persists a marker, a
+  fire advances the watermark + retires the marker, a SECOND watch instance over the same store
+  never re-fires the replayed echo, a mid-await marker REVIVES a stale echo and completes, a
+  past-deadline marker prunes at load, same-echo idempotence never double-arms. **/handover-here units (§5a):** the hyphenated echo parses whole
   (`ParseCommandEcho` keeps the hyphen — bindings key on the exact name), a `/handover-here`
   sighting beside a registered `/handover` binding fires ONLY its own handler (name-exact
   lookup, no prefix aliasing), and `EnsureHandoverHereCommandFileIn` under the same temp-config
@@ -383,7 +446,12 @@ line alone pins the throw site later):
   leak. Scenario D: **two /handovers in one conversation → two fires**, each with its own
   md + args (the explicit repeatability requirement). Scenario E: the same session replayed
   with 2-hour-old timestamps (the restart/adopt history read) never arms — no ghost successor
-  tabs on reopen.
+  tabs on reopen. Scenario F: **one /handover writing TWO real HANDOVER files → ONE fire
+  carrying both in write order** (default disk probe; the joined first message reads back part 1
+  then part 2). Scenario G: **the restart story over a durable store** — run 1 fires; the
+  restarted instance replays the same still-fresh history and never re-fires (the watermark);
+  and an armed-but-unresolved command from run 1 REVIVES in run 2's replay (echo now stale) and
+  completes exactly once.
 * **`TestCommandEchoRealCorpus` — the REAL corpus** (guarded; `[info]`-skips on a machine
   without `~/.claude`): the newest ~120 on-disk transcripts (2 MB heads, whole-line-safe)
   line-scanned for genuine command echoes and Write-tool lines, each replayed through the real

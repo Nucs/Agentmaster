@@ -233,7 +233,7 @@ namespace winrt::TerminalApp::implementation
     // archived, resumable from the Sessions browser), DEGRADING to the new-tab spawn when the
     // in-place swap is unavailable so the handover itself is never lost. Repeatable by design —
     // every /handover(-here) in a conversation creates its own successor.
-    void TerminalPage::_HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPath, bool inPlace)
+    void TerminalPage::_HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPayload, bool inPlace)
     try
     {
         const auto tabIt = _claudeTabs.find(sessionId);
@@ -241,24 +241,41 @@ namespace winrt::TerminalApp::implementation
         {
             return; // not our window (the fan-out reaches every window; the single host acts)
         }
-        // Safeguard belts. The watch already vetted the path (IsSaneWatchPath at match) and the
-        // file's presence (the fire gate) — re-assert BOTH here: the path feeds a log line + the
-        // successor's single-line launch prompt (a control char / quote would corrupt either),
-        // and the file can vanish in the fire -> UI-hop window (a deleted/moved md would spawn a
-        // successor pointed at nothing — worse than not spawning: the user re-runs /handover).
-        if (!_sessionRegistry || !::Agentmaster::IsSaneWatchPath(mdPath))
+        if (!_sessionRegistry)
         {
             return;
         }
+        // The payload is the fired await's PATH SET — one command may have written SEVERAL
+        // HANDOVER-*.md files, '|'-joined by the engine binding (JoinWatchPaths; '|' is illegal
+        // in a real Windows path and rejected per-path at the match, so the split is unambiguous).
+        //
+        // Safeguard belts, re-asserted per path. The watch already vetted each (IsSaneWatchPath
+        // at match) and their presence (the fire gate) — re-assert BOTH here: a path feeds a log
+        // line + the successor's launch prompt (a control char / quote would corrupt either), and
+        // a file can vanish in the fire -> UI-hop window. A vanished/insane SUBSET is dropped
+        // (logged) and the handover proceeds with the survivors; ALL gone -> drop entirely (a
+        // successor pointed at nothing is worse than none — the user re-runs the command).
+        std::vector<std::wstring> mdPaths;
+        for (const auto& p : ::Agentmaster::SplitWatchPaths(mdPayload))
         {
+            if (!::Agentmaster::IsSaneWatchPath(p))
+            {
+                continue; // never log an insane path
+            }
             WIN32_FILE_ATTRIBUTE_DATA fad{};
-            if (!::GetFileAttributesExW(mdPath.c_str(), GetFileExInfoStandard, &fad) ||
+            if (!::GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &fad) ||
                 (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
                 (fad.nFileSizeLow == 0 && fad.nFileSizeHigh == 0))
             {
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" md vanished before spawn: " + mdPath + L" (dropped)\n");
-                return;
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" md vanished before spawn: " + p + L" (dropped from the set)\n");
+                continue;
             }
+            mdPaths.push_back(p);
+        }
+        if (mdPaths.empty())
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" every md vanished/insane before spawn (dropped)\n");
+            return;
         }
         const auto s = _sessionRegistry->Get(sessionId);
         if (!s || !s->live)
@@ -266,7 +283,7 @@ namespace winrt::TerminalApp::implementation
             return; // archived/vanished between fire and hop — nothing to hand over to
         }
         const std::wstring navTag = inPlace ? L"handover-here" : L"handover"; // the [nav] begin/end pair stays per-command
-        ::Agentmaster::LogNav(navTag + L"-begin " + ::Agentmaster::ShortId(sessionId) + L" md=" + mdPath);
+        ::Agentmaster::LogNav(navTag + L"-begin " + ::Agentmaster::ShortId(sessionId) + L" md=" + ::Agentmaster::JoinWatchPaths(mdPaths));
 
         // The successor spawns where the origin WORKS (EffectiveWorkingDir — the same dir every
         // "Open New Session Here" uses), falling back to the launch cwd inside that resolver.
@@ -303,9 +320,11 @@ namespace winrt::TerminalApp::implementation
             insertPosition = originTab.TabViewIndex() + 1;
         }
 
-        // The handover message for the new tab IS the markdown — its CONTENT delivered VERBATIM
-        // and IN FULL as the successor's first user message ("as if the user typed it"), NEVER
-        // truncated (COMMANDS.md §5). Three delivery tiers:
+        // The handover message for the new tab IS the markdown — the CONTENT of EVERY collected
+        // file, delivered VERBATIM and IN FULL as the successor's first user message ("as if the
+        // user typed it"), NEVER truncated (COMMANDS.md §5). A multi-file handover joins the
+        // documents in write order with a blank line between them (one message, the parts in the
+        // order Claude authored them). Three delivery tiers:
         //   * content fits the commandline's escape-aware threshold (PsEscapedCost <=
         //     kHandoverPromptEscapedBudget) -> the launch commandline's positional prompt (the
         //     zero-race channel; one PS double-quoted arg inside -EncodedCommand — nothing is
@@ -315,18 +334,41 @@ namespace winrt::TerminalApp::implementation
         //     ceiling): queued as a Pending prompt on the successor and injected as ONE bracketed
         //     paste by _PumpHandoverInjections once the session has actually started — the
         //     Send-now recipe, so echo dedup + the Enter-retry watchdog back the submit;
-        //   * unreadable/whitespace-only/beyond-sanity-cap read (a rewrite-in-flight race past
-        //     the re-asserts above) -> the pointer-style prompt, so the handover still functions
-        //     and nothing was silently cut.
-        const std::wstring content = ::Agentmaster::ReadHandoverDocumentPrompt(mdPath);
+        //   * every file unreadable/whitespace-only/beyond-sanity-cap (a rewrite-in-flight race
+        //     past the re-asserts above) -> the pointer-style prompt naming ALL the files, so the
+        //     handover still functions and nothing was silently cut.
+        std::wstring content;
+        for (const auto& p : mdPaths)
+        {
+            const std::wstring part = ::Agentmaster::ReadHandoverDocumentPrompt(p);
+            if (part.empty())
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" md unreadable at spawn (skipped from the message): " + p + L"\n");
+                continue;
+            }
+            if (!content.empty())
+            {
+                content += L"\n\n";
+            }
+            content += part;
+        }
         const bool fitsCommandline = !content.empty() && ::Agentmaster::PsEscapedCost(content) <= ::Agentmaster::kHandoverPromptEscapedBudget;
         std::wstring launchPrompt; // the commandline tier's positional prompt ("" for the paste tier)
         const wchar_t* injectMode = L" inject=paste";
         if (content.empty())
         {
-            launchPrompt = L"Read the handover document at " + mdPath + L" and continue the work it describes.";
+            launchPrompt = L"Read the handover document" + std::wstring{ mdPaths.size() == 1 ? L" at " : L"s at " };
+            for (size_t i = 0; i < mdPaths.size(); ++i)
+            {
+                if (i > 0)
+                {
+                    launchPrompt += L" ; ";
+                }
+                launchPrompt += mdPaths[i];
+            }
+            launchPrompt += mdPaths.size() == 1 ? L" and continue the work it describes." : L" and continue the work they describe.";
             injectMode = L" inject=pointer";
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" md unreadable at spawn - falling back to the pointer prompt: " + mdPath + L"\n");
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" no readable md content at spawn - falling back to the pointer prompt: " + ::Agentmaster::JoinWatchPaths(mdPaths) + L"\n");
         }
         else if (fitsCommandline)
         {

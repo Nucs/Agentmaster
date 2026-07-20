@@ -767,10 +767,15 @@ tag no session carries lists at **·0** (sorts last).
 
 **Slash-command bindings + /handover + its in-place twin /handover-here
 ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
-HARDENED, delivery = FULL CONTENT INJECTION (never truncated): engine-tested (2242/2242 — the
+HARDENED, delivery = FULL CONTENT INJECTION (never truncated), RESTART-RESILIENT (durable
+per-session progress) + MULTI-FILE (one command's several HANDOVER files consumed as one):
+engine-tested (2280/2280 — the
 `TestCommandWatch` units + safeguard belts + the content-injection/tier units + the /handover-here
-twin units (hyphen echo, name-exact binding isolation, its own definition file), the FABRICATED
-end-to-end `/handover` session `TestCommandHandoverE2E`, and the REAL-corpus echo replay
+twin units (hyphen echo, name-exact binding isolation, its own definition file) + the multi-file
+collect/seal/settle units + the durable-progress units (watermark / marker revival / prune /
+encode-decode), the FABRICATED
+end-to-end `/handover` session `TestCommandHandoverE2E` (incl. the multi-file scenario F + the
+restart-persistence scenario G), and the REAL-corpus echo replay
 `TestCommandEchoRealCorpus`) + lib-compiled green; rides the next deploy cycle.** Bind to `/commands`
 the user TYPES into a managed Claude session and AWAIT the session's
 follow-up activity — async, bounded, zero state-machine impact. A typed command's transcript ECHO (a
@@ -781,27 +786,49 @@ writes even built-ins this way; the older `system/local_command` stratum parses 
 byte-identical, pinned by test), alongside assistant **`fileWritePaths`** (Write/Edit tool_use
 `file_path`s). The scanner feeds both + turn boundaries + a per-pass Tick into the process-wide
 **`CommandWatch`** (`AgentMaster/CommandWatch.{h,cpp}`, `Engine::commandWatch`): a BINDING says "when
-/name is sighted, await X, then fire" — v1's await shape is the **markdown await** (next `.md`
-Write/Edit after the command, leaf-preference-ranked, fire gated on the FILE actually existing on disk
-— a tool_use only proves the request; the write may sit behind an approval). Replay-proof by two gates
-(caught-up cursor + the line's OWN timestamp within 60s) and bounded everywhere (2 turn-ends for an
-unmatched sighting, 15-min deadline, per-session cap, FIFO; pendings transient — never persisted).
+/name is sighted, await X, then fire" — v1's await shape is the **markdown await**, now
+**MULTI-FILE**: every hint-matching `.md` Write/Edit after the command is COLLECTED in write order
+(deduped; a batch's first md only as the nothing-collected-yet fallback — an incidental doc edit
+never rides along), the collection **SEALS at the first turn end after a match** (+ a 20s
+write-silence settle fallback — `kCommandMatchSettleMs` — when no turn end ever arrives), and the
+fire is gated on EVERY collected file actually existing on disk (a tool_use only proves the request;
+a write may sit behind an approval) — ONE fire carrying the whole path set ('|'-joined through the
+fan-out, `Join/SplitWatchPaths`; `IsSaneWatchPath` rejects `|` per-path so the separator is
+unambiguous). Replay-proof by the caught-up-cursor gate + **durable per-session PROGRESS (COMMANDS.md
+§3a — restart resilience)**: the SessionStore KV's `cmdProgress` key (injectable seam
+`SetProgressStore`; `Encode/DecodeCommandProgress`, `"v1;p=<ms>;a=<cmd>@<ts>,…"`) carries the **fired
+watermark** — advanced INSIDE the fire path BEFORE handlers run, so a replayed echo at/under it NEVER
+re-fires (at-most-once across a restart; closes the resume-a-just-handed-over-session and
+crash-after-fire double-successor holes the 60s freshness gate alone could not) — and the **armed
+markers**, which REVIVE a sighting that was mid-await at shutdown even past the freshness window
+(deadline anchored at the ORIGINAL echo timestamp, so the 15-min bound stays absolute; past-deadline
+markers prune at load; markers retire on fire/expiry/eviction and override the watermark for an
+out-of-order fire). An echo neither fresh nor marked never arms (foreign/deep history stays inert);
+same-echo idempotence never double-arms one line; bounded everywhere (2 turn-ends for an unmatched
+sighting, 15-min deadline, per-session cap, FIFO — the seal pairs each command's writes with its own
+turn; pendings stay transient in-memory, the PROGRESS is the durable half).
 **The `/handover <context-or-filepath>` integration:** engine init materializes the command DEFINITION
 `<claude-config>/commands/handover.md` (**create-if-absent + a VERSION-AWARE UPGRADE — the ONE write
 outside the profile**: a file byte-identical to a PRIOR shipped version (`ShippedHandoverCommandHistory`,
 v1 byte-frozen, only ever APPEND) silently upgrades to current, anything user-edited is NEVER touched —
-the ApplyEnvDefaults discipline; a deliberate additive `~/.claude` mutation. V2 instructs Claude to
-Write ONE `HANDOVER-<topic>.md` AS a direct briefing TO the successor — because the file's content IS
-its first message — then end the turn) and binds `handover` → the new per-window **command-action
+the ApplyEnvDefaults discipline; a deliberate additive `~/.claude` mutation. The current V4 instructs
+Claude to Write `HANDOVER-<topic>.md` AS a direct briefing TO the successor — because the files'
+content IS its first message — then end the turn, and permits a genuinely-better-split briefing
+across SEVERAL `HANDOVER-*.md` files in the same turn, all delivered in write order) and binds
+`handover` → the new per-window **command-action
 sinks** (`Engine::CommandActionSink`, the activateSinks idiom — registered at page init,
 token-detached in `~TerminalPage`). The hosting window's `_HandleCommandHandover` spawns the
 successor: same **effective working dir**, titled `"<origin> (handover)"` via the generalized
 **`DeriveSuffixedTitle`** (DeriveForkTitle now delegates to it; registry-bumped so sibling handovers
-never collide), inserted BESIDE the origin tab, and handed **the md's CONTENT delivered VERBATIM and
-IN FULL as its FIRST USER MESSAGE** ("as if the user typed it") — **NEVER truncated**.
-`ReadHandoverDocumentPrompt` reads (4 MiB sanity cap) + normalizes the file (BOM strip, CRLF→LF, C0
+never collide), inserted BESIDE the origin tab, and handed **the CONTENT of EVERY collected md,
+delivered VERBATIM and
+IN FULL as its FIRST USER MESSAGE** ("as if the user typed it") — **NEVER truncated**; a multi-file
+set is JOINED in write order (per-path sanity + existence re-asserted; a vanished subset drops with a
+log, the survivors proceed).
+`ReadHandoverDocumentPrompt` reads (4 MiB sanity cap per file) + normalizes (BOM strip, CRLF→LF, C0
 controls dropped — which also makes the paste framing injection-proof, ESC can't survive — trimmed);
-the DELIVERY then tiers on the pure `PsEscapedCost` vs **`kHandoverPromptEscapedBudget`** (11,500
+the DELIVERY then tiers on the pure `PsEscapedCost` of the joined whole vs
+**`kHandoverPromptEscapedBudget`** (11,500
 escaped chars — the pwsh `-EncodedCommand` wrap costs ≈2.67× and both CreateProcessW hops cap at
 32,767; ` `` ` `"` `$` cost 2): **fits** ⇒ the launch commandline's positional prompt
 (`BuildClaudeCommandline(..., initialPrompt)`, PS-quoted `PsDoubleQuote` for the pwsh-host `&` context
