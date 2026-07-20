@@ -316,7 +316,7 @@ namespace Agentmaster
         return firstMd;
     }
 
-    void CommandWatch::BindMarkdownAwait(std::wstring commandName, std::wstring preferLeafContains, MarkdownReadyHandler handler, std::wstring leafMatchRegex)
+    void CommandWatch::BindMarkdownAwait(std::wstring commandName, std::wstring preferLeafContains, MarkdownReadyHandler handler, std::wstring leafMatchRegex, bool allowFirstMarkdownFallback)
     {
         for (auto& c : commandName)
         {
@@ -329,11 +329,12 @@ namespace Agentmaster
             {
                 b.preferLeafContains = std::move(preferLeafContains);
                 b.leafMatchRegex = std::move(leafMatchRegex);
+                b.allowFirstMarkdownFallback = allowFirstMarkdownFallback;
                 b.onReady = std::move(handler);
                 return; // one binding per name — last wins
             }
         }
-        _bindings.push_back(Binding{ std::move(commandName), std::move(preferLeafContains), std::move(leafMatchRegex), std::move(handler) });
+        _bindings.push_back(Binding{ std::move(commandName), std::move(preferLeafContains), std::move(leafMatchRegex), allowFirstMarkdownFallback, std::move(handler) });
     }
 
     const CommandWatch::Binding* CommandWatch::_findBindingLocked(std::wstring_view command) const
@@ -590,16 +591,18 @@ namespace Agentmaster
                 }
                 // The legacy nothing-collected-yet fallback: the batch's FIRST markdown
                 // (PickMarkdownWritePath's else-branch, verbatim) — tolerance for a Claude that
-                // mis-named its single briefing file, which only makes sense against the loose
-                // shipped HINT. A VALID custom leaf regex (§6b) is a STATEMENT OF INTENT about
-                // exactly which files count, so the fallback is SUPPRESSED there: with the
-                // fallback live, a first batch writing an unrelated `notes.md` would be collected
-                // as the briefing (spawning a successor from an incidental doc edit — the very
-                // thing the hint preference exists to prevent) and the documented "a valid
-                // pattern is authoritative" would be false. An INVALID pattern degrades to the
-                // hint, so it keeps the fallback too.
-                const bool authoritativeRegex = !leafRegex.empty() && RegexIsValid(leafRegex);
-                if (picks.empty() && it->matchedPaths.empty() && !authoritativeRegex)
+                // mis-named its single briefing file. It is meaningful only under the SHIPPED
+                // rule; a USER-CUSTOMIZED pattern (§6b) is a statement of intent about exactly
+                // which files count, and with the fallback live a first batch writing an
+                // unrelated `notes.md` would be collected as the briefing (spawning a successor
+                // from an incidental doc edit — the very thing the hint preference exists to
+                // prevent). The CALLER owns that policy (`allowFirstMarkdownFallback`) because
+                // only it can tell "the shipped default" from "customized" — the default pattern
+                // is now a real, visible SETTING value, not an empty box, so the watch cannot
+                // infer it. An INVALID pattern degrades to the hint, and the caller likewise
+                // leaves the tolerance on.
+                const bool allowFallback = b ? b->allowFirstMarkdownFallback : true;
+                if (picks.empty() && it->matchedPaths.empty() && allowFallback)
                 {
                     const std::wstring first = PickMarkdownWritePath(paths, {});
                     if (!first.empty())

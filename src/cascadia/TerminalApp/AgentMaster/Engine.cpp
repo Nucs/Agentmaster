@@ -364,6 +364,13 @@ namespace Agentmaster
                 AppendStateLog(L"hooks.log", L"[engine] handover file-match regex INVALID - using the default 'handover' leaf hint: " + leafMatchRegex + L"\n");
                 leafMatchRegex.clear();
             }
+            // The legacy first-markdown tolerance (a mis-named single briefing file) rides ONLY
+            // the SHIPPED rule: the default pattern (or a cleared/invalid one, both of which fall
+            // back to the contains-hint) keeps it, while a CUSTOMIZED pattern turns it off — the
+            // user has said exactly which files count, so an unrelated first `notes.md` must never
+            // become the briefing. Only this layer can make that call: the default is now a real
+            // setting VALUE, so the watch itself cannot tell default from customized.
+            const bool allowFirstMarkdownFallback = leafMatchRegex.empty() || leafMatchRegex == kDefaultCommandFileMatchRegex;
             // A fire may carry SEVERAL markdown files (one command splitting its briefing); the
             // sink payload is one string, so the paths ride '|'-joined (JoinWatchPaths — '|' is
             // illegal in a real Windows path and IsSaneWatchPath rejects it per-path).
@@ -371,7 +378,7 @@ namespace Agentmaster
             {
                 e->commandWatch->BindMarkdownAwait(handoverCmdName, L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& /*args*/) {
                     RaiseCommandActionInWindows(sessionId, L"handover", JoinWatchPaths(mdPaths));
-                }, leafMatchRegex);
+                }, leafMatchRegex, allowFirstMarkdownFallback);
             }
             // /handover-here — the IN-PLACE twin: the SAME markdown await (same "handover" leaf
             // preference — its definition instructs the same `HANDOVER-<topic>.md` name), a
@@ -383,7 +390,7 @@ namespace Agentmaster
             {
                 e->commandWatch->BindMarkdownAwait(handoverHereCmdName, L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& /*args*/) {
                     RaiseCommandActionInWindows(sessionId, L"handover-here", JoinWatchPaths(mdPaths));
-                }, leafMatchRegex);
+                }, leafMatchRegex, allowFirstMarkdownFallback);
             }
             e->scanner->SetCommandWatch(e->commandWatch);
             // The COMMAND DEFINITIONS (COMMANDS.md §6/§6a): without a definition under

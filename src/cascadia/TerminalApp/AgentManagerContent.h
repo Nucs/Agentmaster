@@ -805,6 +805,15 @@ namespace winrt::TerminalApp::implementation
         // one of these panels.
         std::vector<winrt::Windows::UI::Xaml::Controls::Button> _settingsTabButtons;
         std::vector<winrt::Windows::UI::Xaml::Controls::StackPanel> _settingsTabPanels; // one content panel per tab
+        // PER-TAB "Reset" (the footer button left of Cancel): index-aligned with the two vectors
+        // above — a tab that supplies a handler gets the button while it is showing, a tab that
+        // passes nullptr (every tab but Commands today) simply doesn't. The mechanism is generic
+        // on purpose so wiring another tab is one lambda at its addSettingsTab call; nothing else
+        // changes. A handler resets that tab's CONTROLS to the shipped defaults (AppSettings{}),
+        // NOT the disk: the change only lands on Save, so Cancel still discards it and no confirm
+        // dialog is needed (a ContentDialog over this in-content modal is the XAML-Islands trap).
+        std::vector<std::function<void()>> _settingsTabResets;
+        winrt::Windows::UI::Xaml::Controls::Button _settingsResetBtn{ nullptr }; // footer, left of Cancel; shown only for a tab with a reset handler
         winrt::Windows::UI::Xaml::Controls::ScrollViewer _settingsScroll{ nullptr }; // single scroller; its Content is the active tab's panel
         int _settingsActiveTab{ 0 }; // index of the showing tab (reset to 0 on each _ShowSettings)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setSkipPermissions{ nullptr };

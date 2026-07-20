@@ -1062,6 +1062,32 @@ namespace Agentmaster
     // autorunner MODE is stamped onto EVERY opened session (new / adopted / restored); the other
     // autorunner backstops are stamped onto NEW sessions only. These are GLOBAL defaults/backstops;
     // per-session autorunner mode still lives in the Auto Testing (changeable after open).
+    // Agentmaster (COMMANDS.md §6a — customizable slash commands): the shipped defaults of the
+    // /handover family's command names. ONE definition each — AppSettings' struct defaults, the
+    // Persistence absent-key fallbacks, the reconcile's "what a pre-feature install has on disk",
+    // and the collision-heal targets all read these.
+    inline constexpr std::wstring_view kDefaultHandoverCommandName = L"handover";
+    inline constexpr std::wstring_view kDefaultHandoverHereCommandName = L"handover-here";
+
+    // Agentmaster (COMMANDS.md §6b): the SHIPPED DEFAULT regex settings of the /handover family.
+    // These are REAL VALUES seeded into settings.json and shown in the cog's boxes — deliberately
+    // NOT invisible code fallbacks: the user can SEE what the default rule is and edit from it
+    // (the launchModels/modelFamilies idiom — presence-gated on load, so an absent key seeds the
+    // default while a PRESENT empty string is a deliberate "fall back to the built-in behavior").
+    //
+    //  * the TITLE pair reproduces the classic "<origin> (handover)" naming EXACTLY, chaining
+    //    included: the find pattern optionally EATS an existing " (handover)" / " (handover N)"
+    //    suffix, so a successor of "Foo (handover)" resolves to "Foo (handover)" again — which the
+    //    caller's uniqueness bump (DeriveSuffixedTitle) then walks to "(handover 2)", "(handover
+    //    3)", … instead of STACKING "(handover) (handover)". That is the whole reason the pattern
+    //    is not the naive `^(.*)$`: a stacked suffix was the exact bug DeriveForkTitle exists to
+    //    prevent, and it must not come back through a default.
+    //  * the FILE-MATCH pattern is the regex spelling of the historical rule "the file NAME
+    //    contains 'handover'" (unanchored search, applied case-insensitively).
+    inline constexpr std::wstring_view kDefaultCommandTitleFindRegex = L"^(.*?)(?: \\(handover(?: \\d+)?\\))?$";
+    inline constexpr std::wstring_view kDefaultCommandTitleReplace = L"$1 (handover)";
+    inline constexpr std::wstring_view kDefaultCommandFileMatchRegex = L"handover";
+
     struct AppSettings
     {
         // --- Claude sessions (spawn recipe; see ClaudeSpawn) ---
@@ -1441,24 +1467,31 @@ namespace Agentmaster
         //   * commandHandoverTitleFindRegex / commandHandoverTitleReplace — ONE find/replace pair
         //     for the WHOLE family: when the find regex is non-empty, VALID (RegexUtil.h), and
         //     MATCHES the origin title, the successor's title = regex_replace(originTitle, find,
-        //     replace) ($1 backrefs honored, every occurrence replaced) instead of the default
-        //     "<origin> (handover)" suffixing — still uniqueness-bumped past registry titles.
-        //     Unset / invalid / no-match / empty-result => the default naming (the rewrite can
-        //     never lose a title — Rule #11's never-empty invariant holds). Stored VERBATIM
-        //     (a regex is freeform; the cog validates live, the consumers guard).
-        std::wstring commandHandoverTitleFindRegex{};
-        std::wstring commandHandoverTitleReplace{};
+        //     replace) ($1 backrefs honored, every occurrence replaced) — still uniqueness-bumped
+        //     past registry titles. SEEDED with the shipped defaults above (which reproduce the
+        //     classic "<origin> (handover)" naming, chain-bumping included), so the rule is
+        //     VISIBLE and editable rather than hidden in code; CLEARING either box falls back to
+        //     the built-in DeriveSuffixedTitle suffixer, as do an invalid pattern, a pattern
+        //     matching nowhere, and a blank result (the rewrite can never lose a title — Rule
+        //     #11's never-empty invariant holds). Stored VERBATIM (a regex is freeform; the cog
+        //     validates live, the consumers guard). Presence-gated on load like launchModels.
+        std::wstring commandHandoverTitleFindRegex{ kDefaultCommandTitleFindRegex };
+        std::wstring commandHandoverTitleReplace{ kDefaultCommandTitleReplace };
         //   * commandHandoverFileMatchRegex — the markdown await's FILE-MATCH pattern, shared by
         //     BOTH commands (they are one await family — same files, one owner; a per-command
-        //     pattern would split the §3 supersede family). "" == the shipped behavior (leaf
-        //     CONTAINS "handover" — the HANDOVER-*.md contract); non-empty + valid == a leaf
-        //     qualifies when the regex SEARCHES its file name (case-insensitive; anchor with ^/$
-        //     for a full-name match); invalid falls back to the shipped hint (a broken pattern
-        //     must not silently kill handovers — the cog warns live). RESTART-APPLIED: the
-        //     pattern rides the CommandWatch binding registered at engine init. NOTE: this gates
-        //     what Agentmaster COLLECTS — the shipped definitions still instruct Claude to write
-        //     HANDOVER-<topic>.md, so a custom pattern usually pairs with an edited definition.
-        std::wstring commandHandoverFileMatchRegex{};
+        //     pattern would split the §3 supersede family). SEEDED with the shipped default
+        //     (kDefaultCommandFileMatchRegex — the regex spelling of the historical "leaf CONTAINS
+        //     handover" rule), so the rule is visible and editable; a leaf qualifies when the
+        //     regex SEARCHES its file name (case-insensitive; anchor with ^/$ for a full-name
+        //     match). CLEARING the box falls back to the built-in contains-hint, and an INVALID
+        //     pattern does too (a broken pattern must not silently kill handovers — the cog warns
+        //     live). A pattern DIFFERING from the shipped default also suppresses the legacy
+        //     first-markdown fallback (it is a statement of intent — see CommandWatch).
+        //     RESTART-APPLIED: the pattern rides the CommandWatch binding registered at engine
+        //     init. NOTE: this gates what Agentmaster COLLECTS — the shipped definitions still
+        //     instruct Claude to write HANDOVER-<topic>.md, so a custom pattern usually pairs
+        //     with an edited definition.
+        std::wstring commandHandoverFileMatchRegex{ kDefaultCommandFileMatchRegex };
         //   * commandHandoverDeleteFileAfterLaunch — delete a HANDOVER markdown after its
         //     successor is SUCCESSFULLY created and the delivery is SECURED: the content tier has
         //     the document on the successor's launch commandline, the paste tier has it parked
@@ -1513,12 +1546,6 @@ namespace Agentmaster
         return v > 1.0 ? 1.0 : v;
     }
 
-    // Agentmaster (COMMANDS.md §6a — customizable slash commands): the shipped defaults of the
-    // /handover family's command names. ONE definition each — AppSettings' struct defaults, the
-    // Persistence absent-key fallbacks, the reconcile's "what a pre-feature install has on disk",
-    // and the collision-heal targets all read these.
-    inline constexpr std::wstring_view kDefaultHandoverCommandName = L"handover";
-    inline constexpr std::wstring_view kDefaultHandoverHereCommandName = L"handover-here";
 
     // Agentmaster (COMMANDS.md §6a): normalize a user-typed command name into the form everything
     // downstream agrees on — the transcript echo parser lowercases ASCII (ParseCommandEcho), the

@@ -910,9 +910,24 @@ namespace Agentmaster
         // "(handover)" naming, the "handover" leaf hint, no delete).
         s.commandHandoverSuccessorModel = v.StrAt(L"commandHandoverSuccessorModel");
         s.commandHandoverHereSuccessorModel = v.StrAt(L"commandHandoverHereSuccessorModel");
-        s.commandHandoverTitleFindRegex = v.StrAt(L"commandHandoverTitleFindRegex");
-        s.commandHandoverTitleReplace = v.StrAt(L"commandHandoverTitleReplace");
-        s.commandHandoverFileMatchRegex = v.StrAt(L"commandHandoverFileMatchRegex");
+        // The three REGEX settings are PRESENCE-GATED (the launchModels idiom): an ABSENT key —
+        // a pre-§6b settings.json, or a fresh install — seeds the SHIPPED DEFAULT (the struct
+        // default), so the cog shows the real rule ready to edit instead of an empty box hiding a
+        // code fallback; a PRESENT value is kept VERBATIM, including a deliberate empty string
+        // (the user cleared the box == "fall back to the built-in behavior", which the consumers
+        // still honor). Never normalized — a regex is freeform, validated at USE.
+        if (v.Find(L"commandHandoverTitleFindRegex"))
+        {
+            s.commandHandoverTitleFindRegex = v.StrAt(L"commandHandoverTitleFindRegex");
+        }
+        if (v.Find(L"commandHandoverTitleReplace"))
+        {
+            s.commandHandoverTitleReplace = v.StrAt(L"commandHandoverTitleReplace");
+        }
+        if (v.Find(L"commandHandoverFileMatchRegex"))
+        {
+            s.commandHandoverFileMatchRegex = v.StrAt(L"commandHandoverFileMatchRegex");
+        }
         s.commandHandoverDeleteFileAfterLaunch = v.BoolAt(L"commandHandoverDeleteFileAfterLaunch", false);
         // Shipped-default seeding markers (ENV_VARS.md §8). Absent => 0 / false, so a pre-feature
         // settings.json runs the one-time seed once (new installs + updaters alike get the defaults).

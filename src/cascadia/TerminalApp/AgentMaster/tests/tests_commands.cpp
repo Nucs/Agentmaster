@@ -249,27 +249,44 @@ void TestCommandWatch()
     // for a mis-named single file under the loose shipped hint. With it live, a first batch
     // writing an unrelated notes.md would be collected as the briefing and spawn a successor from
     // an incidental doc edit — exactly what the hint preference exists to prevent.
+    // The first-markdown tolerance is now a CALLER-OWNED policy (the default pattern is a real
+    // setting value, so the watch can't infer "default vs customized" itself): Engine passes
+    // allowFirstMarkdownFallback = (pattern is the shipped default or empty/invalid).
     {
         CommandWatch w;
         int fired = 0;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired; }, LR"(^BRIEF-.*\.md$)");
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired; }, LR"(^BRIEF-.*\.md$)", /*allowFirstMarkdownFallback*/ false);
         w.SetFileProbe([](const std::wstring&) { return true; });
         w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
         w.OnFileToolWrite(L"s", { L"K:\\r\\notes.md" }, L"K:\\r", now); // NOTHING collected yet + no qualifying file
         w.OnTurnEnd(L"s");
-        CHECK(fired == 0, "a VALID leaf regex suppresses the first-markdown fallback (an unrelated notes.md never becomes the briefing)");
+        CHECK(fired == 0, "a CUSTOMIZED leaf regex (fallback off) never adopts an unrelated notes.md as the briefing");
     }
     {
-        // The shipped-hint case KEEPS the fallback (unchanged behavior — a mis-named single file
-        // still hands over, the tolerance the fallback was added for).
+        // The DEFAULT rule keeps the tolerance (unchanged behavior — a mis-named single file still
+        // hands over). Driven with the REAL shipped default pattern + fallback-on, exactly what
+        // Engine.cpp passes for an untouched install.
         CommandWatch w;
         std::wstring firedPath;
-        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>& mds, const std::wstring&) { firedPath = mds.empty() ? std::wstring{} : mds.front(); });
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>& mds, const std::wstring&) { firedPath = mds.empty() ? std::wstring{} : mds.front(); }, std::wstring{ kDefaultCommandFileMatchRegex }, /*allowFirstMarkdownFallback*/ true);
         w.SetFileProbe([](const std::wstring&) { return true; });
         w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
         w.OnFileToolWrite(L"s", { L"K:\\r\\notes.md" }, L"K:\\r", now);
         w.OnTurnEnd(L"s");
-        CHECK(firedPath == L"K:\\r\\notes.md", "with the shipped hint (no regex) the legacy first-markdown fallback still applies");
+        CHECK(firedPath == L"K:\\r\\notes.md", "the SHIPPED DEFAULT pattern keeps the legacy first-markdown tolerance");
+    }
+    {
+        // …and that same default pattern still matches a normal HANDOVER-*.md by NAME (it is the
+        // regex spelling of "the leaf contains handover", case-insensitive).
+        CommandWatch w;
+        std::vector<FiredHandover> fired;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) { fired.push_back(MakeFired(sid, mds, args)); }, std::wstring{ kDefaultCommandFileMatchRegex }, true);
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\notes.md", L"K:\\r\\HANDOVER-a.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s");
+        CHECK(fired.size() == 1 && !fired.empty() && (fired[0].mdPaths == std::vector<std::wstring>{ L"K:\\r\\HANDOVER-a.md" }),
+              "the default pattern collects the HANDOVER file and excludes the incidental notes.md (== the historical contains-hint behavior)");
     }
     {
         CommandWatch w;
@@ -942,6 +959,23 @@ void TestCommandWatch()
             const auto capped = DeriveHandoverSuccessorTitle(longTitle, L"^", L"pre-");
             CHECK(capped.size() == 255 && capped.rfind(L"...") == 252, "title rewrite: a degenerate >255-char result caps at 252 + \"...\" (DeriveSessionTitle's net)");
         }
+        // The SHIPPED DEFAULT pair (now a real, visible setting rather than a hidden code path)
+        // must reproduce the classic naming EXACTLY — including the chain-bump, which is the
+        // reason it is not the naive ^(.*)$: that would STACK "(handover) (handover)", the very
+        // bug DeriveForkTitle exists to prevent. The pattern eats an existing suffix and re-adds
+        // it, so a repeat resolves to the SAME title as its origin — which the caller's
+        // uniqueness bump (DeriveSuffixedTitle, asserted here as the second step) then walks.
+        {
+            const auto def = [](std::wstring_view t) { return DeriveHandoverSuccessorTitle(t, kDefaultCommandTitleFindRegex, kDefaultCommandTitleReplace); };
+            CHECK(RegexIsValid(kDefaultCommandTitleFindRegex), "default title pattern is a VALID regex (a broken shipped default would silently disable the rewrite)");
+            CHECK(def(L"Parser work") == L"Parser work (handover)", "default title pair: a plain title gets \" (handover)\" — identical to DeriveSuffixedTitle");
+            CHECK(def(L"Parser work") == DeriveSuffixedTitle(L"Parser work", L"handover"), "default title pair: byte-identical to the built-in suffixer on a plain title");
+            CHECK(def(L"Parser work (handover)") == L"Parser work (handover)", "default title pair: a CHAINED handover resolves to the origin's own title (never stacked) …");
+            CHECK(DeriveSuffixedTitle(L"Parser work (handover)", L"handover") == L"Parser work (handover 2)", "… and the caller's uniqueness bump then walks it to (handover 2)");
+            CHECK(def(L"Parser work (handover 7)") == L"Parser work (handover)", "default title pair: a numbered chain also collapses to the base (the bump re-walks it)");
+            CHECK(def(L"Fix (handover) notes") == L"Fix (handover) notes (handover)", "default title pair: an INTERIOR \"(handover)\" is not a suffix — left alone");
+            CHECK(!def(L"x").empty(), "default title pair: always applies (the pattern matches any title, so the rewrite is never a silent no-op)");
+        }
     }
 
     // ---- name-aware Ensure / Remove / Reconcile: the rename + disable migration POLICY ----
@@ -1068,11 +1102,24 @@ void TestCommandWatch()
               "shaping: the title find/replace pair round-trips VERBATIM (regex chars + $ backrefs unmangled)");
         CHECK(back.commandHandoverFileMatchRegex == LR"(^BRIEF-.*\.md$)", "shaping: the file-match regex round-trips verbatim");
         CHECK(back.commandHandoverDeleteFileAfterLaunch, "shaping: the delete-after toggle round-trips");
+        // The three REGEX fields are PRESENCE-GATED (the launchModels idiom): an ABSENT key seeds
+        // the SHIPPED DEFAULT — the boxes show the real rule instead of hiding a code fallback —
+        // while a PRESENT empty string is a deliberate "fall back to the built-in behavior".
         const auto fresh = AppSettingsFromJson(json::Value::MkObj());
-        CHECK(fresh.commandHandoverSuccessorModel.empty() && fresh.commandHandoverHereSuccessorModel.empty() &&
-                  fresh.commandHandoverTitleFindRegex.empty() && fresh.commandHandoverTitleReplace.empty() &&
-                  fresh.commandHandoverFileMatchRegex.empty() && !fresh.commandHandoverDeleteFileAfterLaunch,
-              "shaping: absent keys reproduce the shipped behavior (Default model, \"(handover)\" naming, the \"handover\" hint, no delete)");
+        CHECK(fresh.commandHandoverSuccessorModel.empty() && fresh.commandHandoverHereSuccessorModel.empty() && !fresh.commandHandoverDeleteFileAfterLaunch,
+              "shaping: absent keys reproduce the shipped behavior (Default model, no delete)");
+        CHECK(fresh.commandHandoverTitleFindRegex == kDefaultCommandTitleFindRegex &&
+                  fresh.commandHandoverTitleReplace == kDefaultCommandTitleReplace &&
+                  fresh.commandHandoverFileMatchRegex == kDefaultCommandFileMatchRegex,
+              "shaping: an ABSENT regex key SEEDS the shipped default (a pre-6b settings.json gets the visible rule, not an empty box)");
+        {
+            auto cleared = json::Value::MkObj();
+            cleared.Set(L"commandHandoverTitleFindRegex", json::Value::MkStr(L""));
+            cleared.Set(L"commandHandoverFileMatchRegex", json::Value::MkStr(L""));
+            const auto c = AppSettingsFromJson(cleared);
+            CHECK(c.commandHandoverTitleFindRegex.empty() && c.commandHandoverFileMatchRegex.empty(),
+                  "shaping: a PRESENT empty regex is kept (the user cleared the box == use the built-in behavior)");
+        }
         // An INVALID stored pattern round-trips as typed (it is validated at USE, not at load —
         // the consumers fall back and the cog warns; normalizing here would corrupt patterns).
         AppSettings bad;

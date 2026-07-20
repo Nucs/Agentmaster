@@ -477,25 +477,46 @@ state; the cog surfaces invalidity to the user instead of flooding hooks.log).
   `modelOverride` param. Every file of one command's fan-out launches with that command's pick.
   The cog offers **Default** + the `launchModels` list, rebuilt at each cog open; a stored id no
   longer in the list is listed as `(custom) <id>` so it round-trips instead of silently resetting.
+**The defaults are REAL VALUES, not hidden code paths.** All three regex settings ship
+**seeded** (`kDefaultCommandTitleFindRegex` / `…TitleReplace` / `…FileMatchRegex` in
+SessionModels.h) and **presence-gated** on load (the `launchModels` idiom): an absent key seeds
+the shipped default so the cog's boxes show the ACTUAL rule ready to edit, while a **present
+empty string** is a deliberate "fall back to the built-in behavior" the consumers still honor.
+Nothing about the default rule is invisible any more — and the **Reset** button (below) puts a
+box back to it.
+
 * **Title rewrite** — `commandHandoverTitleFindRegex` + `commandHandoverTitleReplace`, ONE pair
   for the whole family (both commands name successors alike). The pure, guarded
   `DeriveHandoverSuccessorTitle(originTitle, find, replace)` returns a candidate, or `""`
-  whenever the rewrite does not apply — **unset · invalid · matches nowhere · blank result** —
-  and the caller then falls back to the classic `DeriveSuffixedTitle` `"(handover)"` naming. So
+  whenever the rewrite does not apply — **cleared · invalid · matches nowhere · blank result** —
+  and the caller then falls back to the built-in `DeriveSuffixedTitle` `"(handover)"` naming. So
   the rewrite can only ever IMPROVE a title, never lose one (Rule #11's never-empty invariant);
   the result is trimmed and capped at 255 (252 + `...`) like `DeriveSessionTitle`, and the
   caller's uniqueness bump past registry titles applies exactly as before. `$1` backrefs make
   the common shapes one-liners: append `^(.*)$` → `$1 - continued`, bump `\d+` → `4`, strip a
   prefix, etc.
+  **The shipped default pair reproduces the classic naming EXACTLY, chaining included** —
+  find `^(.*?)(?: \(handover(?: \d+)?\))?$`, replace `$1 (handover)`. It is deliberately NOT the
+  naive `^(.*)$` → `$1 (handover)`: that would STACK `"(handover) (handover)"` on a repeat, the
+  exact bug `DeriveForkTitle` exists to prevent. Instead the pattern optionally EATS an existing
+  `" (handover)"` / `" (handover N)"` ending and re-adds it, so a chained handover resolves to
+  its origin's own title — which the caller's uniqueness bump then walks to `(handover 2)`,
+  `(handover 3)`, … Unit-tested against `DeriveSuffixedTitle` for byte-parity on a plain title
+  and for the chain/interior-mention cases.
 * **File match** — `commandHandoverFileMatchRegex`, shared by BOTH commands (they are one await
   family — a per-command pattern would split the §3 supersede family, whose key stays the leaf
-  HINT). `""` == the shipped rule (leaf CONTAINS `handover`); non-empty + valid ⇒ a markdown
-  qualifies when the pattern regex-SEARCHES its file NAME (case-insensitive; anchor for a whole-
-  name match, e.g. `^BRIEF-.*\.md$`). A **valid pattern is authoritative** — a `HANDOVER-*.md` no
-  longer qualifies unless the pattern says so, AND it **suppresses the legacy
-  nothing-collected-yet fallback** (the batch's first markdown, tolerance that only makes sense
-  against the loose shipped hint: with it live, a first batch writing an unrelated `notes.md`
-  would be collected as the briefing and spawn a successor from an incidental doc edit).
+  HINT). It ships seeded with `handover` — the regex spelling of the historical "leaf CONTAINS
+  handover" rule — and a markdown qualifies when the pattern regex-SEARCHES its file NAME
+  (case-insensitive; anchor for a whole-name match, e.g. `^BRIEF-.*\.md$`). **Clearing** the box
+  falls back to the built-in contains-hint. A **valid pattern is authoritative** — a
+  `HANDOVER-*.md` no longer qualifies unless the pattern says so — and a **CUSTOMIZED** one (≠ the
+  shipped default) additionally **suppresses the legacy nothing-collected-yet fallback** (the
+  batch's first markdown: tolerance for a mis-named single briefing file, which only makes sense
+  under the shipped rule — with it live, a first batch writing an unrelated `notes.md` would be
+  collected as the briefing and spawn a successor from an incidental doc edit). That policy is
+  **caller-owned** (`BindMarkdownAwait`'s `allowFirstMarkdownFallback`, set by Engine.cpp to
+  `pattern == kDefaultCommandFileMatchRegex || pattern.empty()`) precisely BECAUSE the default is
+  now a real setting value — the watch itself can no longer tell "default" from "customized".
   An **invalid** one falls back to the hint (fallback included) —
   belted twice: the engine validates once at bind time and logs
   `[engine] handover file-match regex INVALID - using the default 'handover' leaf hint: …`, and
@@ -523,6 +544,18 @@ state; the cog surfaces invalidity to the user instead of flooding hooks.log).
   `[handover] <sid8> successor never started within 10 min - md KEPT: …` ·
   `[handover] delete-after-hand-off FAILED (le=…), file left in place: …`.
   This is the answer to `HANDOVER-*.md` litter accumulating at repo roots (§gap-8).
+
+**Per-tab Reset (the cog footer).** A **Reset** button sits LEFT of Cancel and is shown only
+while the active tab supplies a reset handler — today just **Commands**; every other tab passes
+`nullptr` to `addSettingsTab` and simply doesn't offer it. The mechanism is deliberately generic
+(`_settingsTabResets`, index-aligned with the tab buttons/panels; `_SwitchSettingsTab`
+re-evaluates visibility), so wiring another tab is ONE lambda at its `addSettingsTab` call and
+nothing else. A handler restores that tab's CONTROLS from a default-constructed `AppSettings` —
+one source of truth, no hand-copied literals to drift — and touches **nothing on disk**: Save
+commits the reset, Cancel discards it. That is also why it needs no confirm dialog (a
+`ContentDialog` over this in-content modal is the XAML-Islands keypress trap). The engine-owned
+materialized-name markers are deliberately NOT reset — they are disk reality, not a preference.
+Logged `[nav] settings-reset tab=Commands …`.
 
 ## 7. Hardening & safeguards
 

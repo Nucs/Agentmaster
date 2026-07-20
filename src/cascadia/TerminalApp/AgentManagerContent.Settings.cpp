@@ -637,6 +637,7 @@ namespace winrt::TerminalApp::implementation
         // parallel-indexed for _SwitchSettingsTab, which swaps panel i into _settingsScroll.
         _settingsTabButtons.clear();
         _settingsTabPanels.clear();
+        _settingsTabResets.clear();
         auto tabStrip = StackPanel{};
         tabStrip.Orientation(Orientation::Horizontal);
         tabStrip.Spacing(0);
@@ -650,7 +651,10 @@ namespace winrt::TerminalApp::implementation
         _settingsScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
         _settingsScroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
         _settingsScroll.MaxHeight(470);
-        const auto addSettingsTab = [&](const wchar_t* label, const wchar_t* tip, const StackPanel& body) {
+        // `reset` (optional): this tab's "Reset" handler — see _settingsTabResets. Pass nullptr
+        // (the default, what every tab but Commands does today) and the footer button simply
+        // isn't offered while that tab is showing.
+        const auto addSettingsTab = [&](const wchar_t* label, const wchar_t* tip, const StackPanel& body, std::function<void()> reset = nullptr) {
             const int index = static_cast<int>(_settingsTabButtons.size());
             auto btn = Button{};
             btn.Content(winrt::box_value(winrt::hstring{ label }));
@@ -662,6 +666,7 @@ namespace winrt::TerminalApp::implementation
             tabStrip.Children().Append(btn);
             _settingsTabButtons.push_back(btn);
             _settingsTabPanels.push_back(body); // _SwitchSettingsTab swaps the selected panel into _settingsScroll
+            _settingsTabResets.push_back(std::move(reset)); // parallel-indexed; empty => no Reset button on this tab
         };
 
         // The sections below run top-to-bottom; `panel` starts on About (the version + updates block leads
@@ -1295,8 +1300,8 @@ namespace winrt::TerminalApp::implementation
             }
             _setCmdTitleFind = TextBox{};
             _setCmdTitleFind.Header(winrt::box_value(L"Successor title: find (regex)"));
-            _setCmdTitleFind.PlaceholderText(L"blank \x2014 default \x201C(handover)\x201D naming");
-            AgentSetTip(_setCmdTitleFind, L"Rewrite successor titles with a regex applied to the ORIGIN tab's title: every match of this pattern is replaced by the text on the right ($1 backrefs work; anchor with ^/$ to match the whole title). Blank, invalid, or not matching a title \x2192 the default \x201C<origin> (handover)\x201D naming. Titles are still made unique afterwards. Applies to the next handover.");
+            _setCmdTitleFind.PlaceholderText(L"cleared \x2014 falls back to built-in \x201C(handover)\x201D naming");
+            AgentSetTip(_setCmdTitleFind, L"Rewrite successor titles with a regex applied to the ORIGIN tab's title: every match of this pattern is replaced by the text on the right ($1 backrefs work; anchor with ^/$ to match the whole title).\n\nThe box ships with Agentmaster's ACTUAL default rule, so you can see and edit it rather than guess: it optionally eats an existing \x201C (handover)\x201D / \x201C (handover 2)\x201D ending and re-adds \x201C (handover)\x201D \x2014 which is why handing over repeatedly gives (handover 2), (handover 3) instead of stacking \x201C(handover) (handover)\x201D.\n\nClearing the box, an invalid pattern, one that doesn't match a title, or a result that would be blank all fall back to the built-in naming. Titles are still made unique afterwards. Applies to the next handover.");
             _setCmdTitleFind.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _UpdateCommandsTabStatus(); });
             Grid::SetColumn(_setCmdTitleFind, 0);
             titleRow.Children().Append(_setCmdTitleFind);
@@ -1311,8 +1316,8 @@ namespace winrt::TerminalApp::implementation
         }
         _setCmdFileMatch = TextBox{};
         _setCmdFileMatch.Header(winrt::box_value(L"Handover file match (regex \x2014 applies after restart)"));
-        _setCmdFileMatch.PlaceholderText(L"blank \x2014 default: file name contains \x201Chandover\x201D");
-        AgentSetTip(_setCmdFileMatch, L"Which markdown files a handover COLLECTS, matched against the written file's NAME (case-insensitive regex search; anchor with ^/$ for a whole-name match, e.g. ^BRIEF-.*\\.md$). Blank keeps the shipped rule \x2014 the name contains \x201Chandover\x201D (the HANDOVER-*.md contract); an invalid pattern falls back to that rule too. Applies after restart. The shipped command definitions still tell Claude to write HANDOVER-<topic>.md \x2014 pair a custom pattern with an edited definition that names files to match it.");
+        _setCmdFileMatch.PlaceholderText(L"cleared \x2014 falls back to the built-in \x201Cname contains handover\x201D rule");
+        AgentSetTip(_setCmdFileMatch, L"Which markdown files a handover COLLECTS, matched against the written file's NAME (case-insensitive regex search; anchor with ^/$ for a whole-name match, e.g. ^BRIEF-.*\\.md$).\n\nThe box ships with the ACTUAL default rule \x2014 \x201Chandover\x201D, i.e. the name contains it (the HANDOVER-*.md contract) \x2014 so it is visible and editable. Clearing it or an invalid pattern falls back to that same built-in rule.\n\nCHANGING it away from the default also makes the match STRICT: the tolerance that would otherwise adopt the turn's first markdown when nothing matched is switched off, so an unrelated notes.md can't become the briefing. Applies after restart. The shipped command definitions still tell Claude to write HANDOVER-<topic>.md \x2014 pair a custom pattern with an edited definition that names files to match it.");
         _setCmdFileMatch.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _UpdateCommandsTabStatus(); });
         panel.Children().Append(_setCmdFileMatch);
         _setCmdDeleteAfter = ToggleSwitch{};
@@ -1890,7 +1895,57 @@ namespace winrt::TerminalApp::implementation
             addSettingsTab(L"Tests Autorunner", L"Tests Autorunner defaults stamped onto every new session \x2014 the starting mode and its backstops.", autorunnerPanel);
         }
         addSettingsTab(L"Behavior", L"Interaction + session-state behavior \x2014 close confirms, the rename commit key, and the Waiting-for-you \x201Cunread\x201D timeout.", behaviorPanel);
-        addSettingsTab(L"Commands", L"The /handover slash-command family \x2014 rename each command or disable it entirely. Applies after restart.", commandsPanel);
+        // COMMANDS is the first tab to offer a per-tab RESET: put every control back to the
+        // SHIPPED DEFAULTS, read from a default-constructed AppSettings so there is ONE source of
+        // truth (no hand-copied literals to drift). It touches the FORM only — Save commits it,
+        // Cancel discards it — so no confirm dialog is needed. The engine-owned materialized-name
+        // markers are deliberately untouched (they are disk reality, not a preference).
+        addSettingsTab(L"Commands", L"The /handover slash-command family \x2014 rename or disable each command, pick the successor model, and shape the successor (title rewrite, file match, delete-after). \x201C" L"Reset\x201D restores this tab's shipped defaults.", commandsPanel, [this]() {
+            const ::Agentmaster::AppSettings d{}; // the shipped defaults, verbatim
+            if (_setCmdHandoverEnabled)
+            {
+                _setCmdHandoverEnabled.IsOn(d.commandHandoverEnabled);
+            }
+            if (_setCmdHandoverName)
+            {
+                _setCmdHandoverName.Text(winrt::hstring{ d.commandHandoverName });
+            }
+            if (_setCmdHandoverHereEnabled)
+            {
+                _setCmdHandoverHereEnabled.IsOn(d.commandHandoverHereEnabled);
+            }
+            if (_setCmdHandoverHereName)
+            {
+                _setCmdHandoverHereName.Text(winrt::hstring{ d.commandHandoverHereName });
+            }
+            // Successor models -> "Default" (index 0 of both combos, by construction).
+            if (_setCmdModelHandover && !_cmdModelIdsHandover.empty())
+            {
+                _setCmdModelHandover.SelectedIndex(0);
+            }
+            if (_setCmdModelHandoverHere && !_cmdModelIdsHandoverHere.empty())
+            {
+                _setCmdModelHandoverHere.SelectedIndex(0);
+            }
+            if (_setCmdTitleFind)
+            {
+                _setCmdTitleFind.Text(winrt::hstring{ d.commandHandoverTitleFindRegex });
+            }
+            if (_setCmdTitleReplace)
+            {
+                _setCmdTitleReplace.Text(winrt::hstring{ d.commandHandoverTitleReplace });
+            }
+            if (_setCmdFileMatch)
+            {
+                _setCmdFileMatch.Text(winrt::hstring{ d.commandHandoverFileMatchRegex });
+            }
+            if (_setCmdDeleteAfter)
+            {
+                _setCmdDeleteAfter.IsOn(d.commandHandoverDeleteFileAfterLaunch);
+            }
+            _UpdateCommandsTabStatus(); // explicit: never depend on a programmatic set raising the change events
+            ::Agentmaster::LogNav(L"settings-reset tab=Commands (form only \x2014 Save commits, Cancel discards)");
+        });
         addSettingsTab(L"Notifications", L"Windows notifications when a session's status changes from Running to another state \x2014 which states notify, the focused-tab skip, and the sound.", notificationsPanel);
         addSettingsTab(L"Tabs & Overlay", L"The terminal tab strip + the per-tab overlay badge \x2014 close affordances, the favorite marker, the status-flash color, and overlay opacity.", tabsPanel);
         addSettingsTab(L"Claude", L"The Claude install Agentmaster drives \x2014 which native claude.exe, and how long Claude keeps session history.", claudePanel);
@@ -1914,6 +1969,33 @@ namespace winrt::TerminalApp::implementation
         buttons.HorizontalAlignment(HorizontalAlignment::Right);
         buttons.Spacing(8);
         buttons.Margin(Thickness{ 0, 8, 0, 0 });
+        // Per-tab RESET — LEFT of Cancel, and shown ONLY while the active tab supplies a handler
+        // (_settingsTabResets; today just Commands). It restores that tab's controls to the
+        // shipped defaults WITHOUT touching disk: Save commits the reset, Cancel discards it —
+        // which is also why it needs no confirm (and a ContentDialog over this in-content modal
+        // is the XAML-Islands keypress trap anyway). _SwitchSettingsTab re-evaluates visibility.
+        _settingsResetBtn = Button{};
+        _settingsResetBtn.Content(winrt::box_value(L"Reset"));
+        _settingsResetBtn.Visibility(Visibility::Collapsed); // _SwitchSettingsTab(0) decides on open
+        AgentSetTip(_settingsResetBtn, L"Put THIS tab's settings back to Agentmaster's defaults. Nothing is written yet \x2014 press Save to keep the reset, or Cancel to discard it. Other tabs are unaffected.");
+        _settingsResetBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+            // Guarded: this runs straight off a XAML event, and a reset handler touches many
+            // controls — an escape here would fail-fast the app over a cosmetic action.
+            try
+            {
+                if (_settingsActiveTab >= 0 && _settingsActiveTab < static_cast<int>(_settingsTabResets.size()))
+                {
+                    if (const auto& reset = _settingsTabResets[static_cast<size_t>(_settingsActiveTab)])
+                    {
+                        reset();
+                    }
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"settings tab reset");
+            }
+        });
         auto cancel = Button{};
         cancel.Content(winrt::box_value(L"Cancel"));
         AgentSetTip(cancel, L"Close without saving \x2014 discard any changes made here.");
@@ -1922,6 +2004,7 @@ namespace winrt::TerminalApp::implementation
         save.Content(winrt::box_value(L"Save"));
         AgentSetTip(save, L"Save these settings and apply them \x2014 they persist to disk and govern future sessions (and live-apply where possible, e.g. the Claude binary and tab options).");
         save.Click([this](const IInspectable&, const RoutedEventArgs&) { _SaveSettings(); });
+        buttons.Children().Append(_settingsResetBtn); // leftmost — Reset · Cancel · Save
         buttons.Children().Append(cancel);
         buttons.Children().Append(save);
         outer.Children().Append(buttons);
@@ -1972,6 +2055,14 @@ namespace winrt::TerminalApp::implementation
             const bool active = static_cast<int>(i) == index;
             b.Background(active ? Fill(0xFF, 0x0E, 0x63, 0x9C) : Fill(0x00, 0x00, 0x00, 0x00));
             b.Foreground(active ? Fill(0xFF, 0xFF, 0xFF, 0xFF) : Fill(0xFF, 0xB0, 0xB0, 0xB0));
+        }
+        // The footer's per-tab "Reset" follows the ACTIVE tab: shown only where a handler was
+        // registered (today Commands; every other tab passes nullptr and simply doesn't offer it).
+        if (_settingsResetBtn)
+        {
+            const bool hasReset = index < static_cast<int>(_settingsTabResets.size()) &&
+                                  static_cast<bool>(_settingsTabResets[static_cast<size_t>(index)]);
+            _settingsResetBtn.Visibility(hasReset ? Visibility::Visible : Visibility::Collapsed);
         }
     }
 
@@ -3319,32 +3410,41 @@ namespace winrt::TerminalApp::implementation
         if (_setCmdShapingStatus)
         {
             const std::wstring find = _setCmdTitleFind ? std::wstring{ _setCmdTitleFind.Text() } : std::wstring{};
+            const std::wstring replace = _setCmdTitleReplace ? std::wstring{ _setCmdTitleReplace.Text() } : std::wstring{};
             const std::wstring fileRe = _setCmdFileMatch ? std::wstring{ _setCmdFileMatch.Text() } : std::wstring{};
             std::wstring t = L"Titles: ";
             if (find.empty())
             {
-                t += L"default \x201C(handover)\x201D naming.";
+                t += L"cleared \x2014 built-in \x201C(handover)\x201D naming.";
             }
             else if (!::Agentmaster::RegexIsValid(find))
             {
-                t += L"find regex INVALID \x2014 default naming applies.";
+                t += L"find regex INVALID \x2014 built-in naming applies.";
+            }
+            else if (find == ::Agentmaster::kDefaultCommandTitleFindRegex && replace == ::Agentmaster::kDefaultCommandTitleReplace)
+            {
+                t += L"default rule \x2014 \x201C<origin> (handover)\x201D, bumping to (handover 2) on a repeat.";
             }
             else
             {
-                t += L"regex rewrite (a title the pattern doesn't match keeps the default naming).";
+                t += L"CUSTOM rewrite (a title the pattern doesn't match keeps the built-in naming).";
             }
             t += L"  Files: ";
             if (fileRe.empty())
             {
-                t += L"name contains \x201Chandover\x201D (default).";
+                t += L"cleared \x2014 built-in \x201Cname contains handover\x201D rule.";
             }
             else if (!::Agentmaster::RegexIsValid(fileRe))
             {
-                t += L"match regex INVALID \x2014 the default rule applies (checked again at next start).";
+                t += L"match regex INVALID \x2014 the built-in rule applies (re-checked at next start).";
+            }
+            else if (fileRe == ::Agentmaster::kDefaultCommandFileMatchRegex)
+            {
+                t += L"default rule \x2014 name contains \x201Chandover\x201D.";
             }
             else
             {
-                t += L"regex match \x2014 applies after restart.";
+                t += L"CUSTOM match, strict (no first-markdown fallback) \x2014 applies after restart.";
             }
             _setCmdShapingStatus.Text(winrt::hstring{ t });
         }

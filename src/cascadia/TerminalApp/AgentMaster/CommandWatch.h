@@ -189,7 +189,14 @@ namespace Agentmaster
         // regex must degrade to the shipped behavior, never silently kill the await). The §3
         // same-family supersede still keys on `preferLeafContains` alone — the /handover family
         // passes ONE shared pattern to both bindings, so the family stays whole either way.
-        void BindMarkdownAwait(std::wstring commandName, std::wstring preferLeafContains, MarkdownReadyHandler handler, std::wstring leafMatchRegex = {});
+        // `allowFirstMarkdownFallback` is the legacy nothing-collected-yet tolerance (take the
+        // batch's FIRST markdown when nothing qualified yet — for a Claude that mis-named its
+        // single briefing file). The CALLER owns the policy because only it knows whether the
+        // pattern is still the SHIPPED DEFAULT (tolerance applies — the historical behavior) or
+        // a USER-CUSTOMIZED one (a statement of intent about exactly which files count, where an
+        // unrelated first `notes.md` must never become the briefing). Engine.cpp passes
+        // `pattern == kDefaultCommandFileMatchRegex`; the harness drives both.
+        void BindMarkdownAwait(std::wstring commandName, std::wstring preferLeafContains, MarkdownReadyHandler handler, std::wstring leafMatchRegex = {}, bool allowFirstMarkdownFallback = true);
 
         // Durable progress store (COMMANDS.md §3a — restart resilience): `load` returns the
         // session's encoded CommandProgress ("" == none), `save` persists it ("" == remove). The
@@ -245,6 +252,7 @@ namespace Agentmaster
             std::wstring command; // bare lowercase name
             std::wstring preferLeafContains; // ALSO the §3 supersede family key — regex or not
             std::wstring leafMatchRegex; // §6b: non-empty + valid => replaces the contains-hint as the leaf qualifier
+            bool allowFirstMarkdownFallback{ true }; // §6b: the legacy mis-named-single-file tolerance (caller-owned — off for a CUSTOMIZED pattern)
             MarkdownReadyHandler onReady;
         };
         struct Pending

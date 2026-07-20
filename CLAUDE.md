@@ -769,7 +769,7 @@ tag no session carries lists at **·0** (sorts last).
 ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
 HARDENED, delivery = FULL CONTENT INJECTION (never truncated), RESTART-RESILIENT (durable
 per-session progress) + MULTI-FILE (one command's several HANDOVER files consumed as one):
-engine-tested (2405/2405 — the
+engine-tested (2416/2416 — the
 `TestCommandWatch` units + safeguard belts + the content-injection/tier units + the /handover-here
 twin units (hyphen echo, name-exact binding isolation, its own definition file) + the multi-file
 collect/seal/settle units + the durable-progress units (watermark / marker revival / prune /
@@ -862,7 +862,17 @@ idiom): `RegexIsValid`/`RegexSearch`/`RegexReplace` never throw (invalid ⇒ no-
 pattern (512) + input (4096), and fix one flavor (ECMAScript, search semantics, optional
 case-insensitivity, `$1` backrefs, replace-ALL); its catches are the documented Rule #18
 *expected-control-flow* exemption (an invalid pattern mid-edit is normal — the cog's live status line
-is the reporting channel).
+is the reporting channel). **The three regex settings ship SEEDED with their real defaults** (`kDefaultCommandTitleFindRegex`
+/`…TitleReplace`/`…FileMatchRegex`, presence-gated on load like `launchModels`) — the cog's boxes show
+the ACTUAL rule instead of hiding a code fallback, a CLEARED box means "use the built-in behavior", and
+the default title pair reproduces the classic naming EXACTLY *including* the chain-bump (it eats an
+existing `(handover N)` suffix and re-adds it, so the uniqueness bump walks `(handover 2)` instead of
+STACKING `(handover) (handover)` — the DeriveForkTitle bug). Because the default is now a VALUE, the
+first-markdown-tolerance policy moved to the CALLER (`BindMarkdownAwait`'s `allowFirstMarkdownFallback`,
+Engine passes `pattern == default || empty`). The cog also gained a **per-tab Reset** (footer, left of
+Cancel — `_settingsTabResets`, index-aligned; shown only for a tab that registered a handler, today just
+Commands, the rest passing `nullptr`): it restores that tab's CONTROLS from a default-constructed
+`AppSettings` and touches no disk (Save commits, Cancel discards — hence no confirm).
 **The `/handover <context-or-filepath>` integration:** engine init materializes the command DEFINITION
 `<claude-config>/commands/handover.md` (**create-if-absent + a VERSION-AWARE UPGRADE gated on SHA-256 —
 the ONE write outside the profile**: the shipped history is a list of **DIGESTS**
