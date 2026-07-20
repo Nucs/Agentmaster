@@ -223,6 +223,11 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::UnregisterWindowActivateHandler(_windowActivateToken);
         }
         // Agentmaster (cross-window restart): drop this window's restart sink too (Rule #10).
+        if (_commandActionToken)
+        {
+            ::Agentmaster::UnregisterCommandActionHandler(_commandActionToken);
+            _commandActionToken = 0;
+        }
         if (_windowRestartToken)
         {
             ::Agentmaster::UnregisterWindowRestartHandler(_windowRestartToken);
@@ -672,6 +677,27 @@ namespace winrt::TerminalApp::implementation
                     if (auto self = weakThis.get())
                     {
                         self->_ActivateAllDormantTabsLocal();
+                    }
+                });
+            });
+        }
+
+        // Command-action sink (COMMANDS.md): a CommandWatch binding's await resolved — v1 the
+        // /handover markdown landed on disk. Fired on the engine's scanner thread and fanned to
+        // EVERY window (no source window exists); this sink hops to this window's UI thread, and
+        // the handler acts only when THIS window hosts the origin session's tab (spawn the
+        // "(handover)" successor beside it). A miss is a no-op. Detached in ~TerminalPage (Rule #10).
+        {
+            const auto weakThis = get_weak();
+            const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
+            _commandActionToken = ::Agentmaster::RegisterCommandActionHandler(_windowId, [weakThis, dispatcher](const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload) {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, sessionId, command, payload]() {
+                    if (auto self = weakThis.get())
+                    {
+                        if (command == L"handover")
+                        {
+                            self->_HandleCommandHandover(sessionId, payload);
+                        }
                     }
                 });
             });

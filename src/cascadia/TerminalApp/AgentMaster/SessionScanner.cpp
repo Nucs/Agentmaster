@@ -7,6 +7,7 @@
 #include "SessionScanner.h"
 
 #include "ClaudeSpawn.h" // ResolveClaudeTranscriptPath, AppendStateLog
+#include "CommandWatch.h" // ParseCommandEcho + the slash-command binding/await feeds (COMMANDS.md)
 #include "Json.h"
 #include "ProcessInspect.h" // SubagentActivityUnixMs — subagent/Task side-file activity (the parent transcript stays quiescent while a subagent runs)
 #include "SessionRegistry.h"
@@ -91,6 +92,41 @@ namespace
             }
         }
         return {};
+    }
+
+    // Agentmaster (COMMANDS.md): the file-WRITING tool_use paths of this message — each
+    // Write/Edit (and legacy MultiEdit) block's input.file_path, in block order. Feeds the
+    // CommandWatch's markdown await (the /handover "look for the .md being written" signal).
+    // A read-only tool (Read/Grep/Glob/Bash/…) never collects; a missing/empty file_path is
+    // skipped. Cheap: the line's JSON DOM is already parsed — this is a field walk, no re-parse.
+    std::vector<std::wstring> CollectFileWritePaths(const Agentmaster::json::Value* content)
+    {
+        using Agentmaster::json::Value;
+        std::vector<std::wstring> paths;
+        if (!content || content->type != Value::Type::Arr)
+        {
+            return paths;
+        }
+        for (const auto& blk : content->arr)
+        {
+            if (blk.type != Value::Type::Obj || blk.StrAt(L"type") != L"tool_use")
+            {
+                continue;
+            }
+            const std::wstring name = blk.StrAt(L"name");
+            if (name != L"Write" && name != L"Edit" && name != L"MultiEdit")
+            {
+                continue;
+            }
+            if (const auto* input = blk.Find(L"input"); input && input->type == Value::Type::Obj)
+            {
+                if (std::wstring fp = input->StrAt(L"file_path"); !fp.empty())
+                {
+                    paths.push_back(std::move(fp));
+                }
+            }
+        }
+        return paths;
     }
 
     // Concatenate the text blocks of a Claude message `content` (string, or array of blocks).
@@ -233,6 +269,7 @@ namespace Agentmaster
                 const auto* content = msg->Find(L"content");
                 ev.text = CollectText(content);
                 ev.toolName = CollectInteractiveToolName(content); // "" unless an interactive tool_use is present
+                ev.fileWritePaths = CollectFileWritePaths(content); // Write/Edit file_path values (COMMANDS.md markdown await)
                 // Context occupancy from message.usage (≈ the size of the request that produced this
                 // message). cache_read carries the whole conversation forward, so this single block is
                 // the current context size; the newest assistant line wins downstream.
@@ -335,6 +372,22 @@ namespace Agentmaster
                     // exempted and still flows through as a UserPrompt event.
                     if (IsNoiseUserPrompt(prompt) && !IsUserInterruptMarker(prompt))
                     {
+                        // Agentmaster (COMMANDS.md): a slash-command ECHO stays noise for the state
+                        // machine (dropped as a prompt, never a turn event — the /model false-Running
+                        // fix is untouched) but is surfaced as an ORDERED Command event so CommandWatch
+                        // bindings can key on it (the /handover integration). Current Claude Code
+                        // writes even built-ins as this user-line shape; the tag order varies across
+                        // strata, so the extractor is order-agnostic. The line's own timestamp rides
+                        // along as the watch's replay guard.
+                        if (SlashCommand sc; ParseCommandEcho(prompt, sc))
+                        {
+                            TranscriptEvent ev;
+                            ev.kind = TranscriptEvent::Kind::Command;
+                            ev.commandName = std::move(sc.name);
+                            ev.commandArgs = std::move(sc.args);
+                            ev.lineTsMs = ParseTranscriptTimestamp(obj.StrAt(L"timestamp"));
+                            out.events.push_back(std::move(ev));
+                        }
                         continue;
                     }
                     TranscriptEvent ev;
@@ -345,6 +398,23 @@ namespace Agentmaster
             }
             else if (type == L"system")
             {
+                // Agentmaster (COMMANDS.md): the OLDER slash-command echo shape — a
+                // `system/local_command` line carrying the same <command-name>/<command-args> tags
+                // (the June-2026 strata; current Claude Code writes the user-line shape above).
+                // Emitted as a Command event exactly like that shape; the line still ALSO feeds
+                // emitNode below (lineage is orthogonal).
+                if (obj.StrAt(L"subtype") == L"local_command")
+                {
+                    if (SlashCommand sc; ParseCommandEcho(obj.StrAt(L"content"), sc))
+                    {
+                        TranscriptEvent ev;
+                        ev.kind = TranscriptEvent::Kind::Command;
+                        ev.commandName = std::move(sc.name);
+                        ev.commandArgs = std::move(sc.args);
+                        ev.lineTsMs = ParseTranscriptTimestamp(obj.StrAt(L"timestamp"));
+                        out.events.push_back(std::move(ev));
+                    }
+                }
                 if (obj.StrAt(L"subtype") == L"away_summary")
                 {
                     // Agentmaster: the Claude Code idle RECAP. NOT a turn event (it never touches the state
@@ -559,8 +629,27 @@ namespace Agentmaster
                         break;
                     }
                 }
-                it = live ? std::next(it) : _scan.erase(it);
+                if (!live)
+                {
+                    if (_commandWatch)
+                    {
+                        _commandWatch->DropSession(it->first); // COMMANDS.md: a gone/archived session's pendings go with its cursor
+                    }
+                    it = _scan.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
             }
+        }
+
+        // COMMANDS.md: the per-pass sweep — deadline expiry + the disk poll that fires a matched
+        // await the moment its file lands (a write held behind a permission approval materializes
+        // between ticks). Steady state (no pendings) is one empty-check, no I/O.
+        if (_commandWatch)
+        {
+            _commandWatch->Tick(now);
         }
 
         // Run the app-layer probes when armed even with nothing live, so each window's probe can
@@ -1015,6 +1104,15 @@ namespace Agentmaster
             });
         }
         bool consumedTurnEvent = false; // a human prompt / assistant line (NOT a bare tool_result)
+        // Agentmaster (COMMANDS.md): CommandWatch feeds are gated on the cursor being CAUGHT UP at
+        // parse time (st.primed reflects THIS read — a caught-up small read, including a fresh
+        // session's very first prompt, feeds; a capped mid-replay backlog chunk does not). The
+        // watch's own line-timestamp freshness gate is the second belt — an adopted session's
+        // one-shot history read primes during the same pass, but its old commands carry old stamps
+        // and never arm. Feeds happen IN the event loop so transcript order (arm -> match -> turn
+        // end) is preserved within a batch.
+        const bool primedAtParse = st.primed;
+        const bool feedWatch = primedAtParse && _commandWatch != nullptr;
         for (const auto& ev : parsed.events)
         {
             if (ev.kind == TranscriptEvent::Kind::Assistant)
@@ -1093,6 +1191,22 @@ namespace Agentmaster
                     const std::wstring mdl = ev.model;
                     _registry->Update(s.id, [&mdl](SessionInfo& ss) { ss.currentModel = mdl; });
                 }
+                // COMMANDS.md feeds: this message's file-writing tool_use paths (the markdown
+                // await's match signal) and — when its stop_reason is TERMINAL — a turn boundary
+                // (unmatched sightings age a turn; see kCommandAwaitMaxTurnEnds). Order matters:
+                // the write feed precedes the boundary feed of the SAME message, so a handover md
+                // written by the turn's last message matches before the boundary ages the await.
+                if (feedWatch)
+                {
+                    if (!ev.fileWritePaths.empty())
+                    {
+                        _commandWatch->OnFileToolWrite(s.id, ev.fileWritePaths, s.workingDir, NowMs());
+                    }
+                    if (IsTerminalStopReason(ev.stopReason))
+                    {
+                        _commandWatch->OnTurnEnd(s.id);
+                    }
+                }
             }
             else if (ev.kind == TranscriptEvent::Kind::ToolResult)
             {
@@ -1127,6 +1241,18 @@ namespace Agentmaster
                     st.errorBranchUuids.insert(ev.uuid);
                 }
             }
+            else if (ev.kind == TranscriptEvent::Kind::Command)
+            {
+                // A slash-command ECHO (COMMANDS.md). Deliberately NOT a turn event and NOT a tail
+                // mutation — the echo was pure noise before (dropped in the parser), and the state
+                // machine must see byte-identical behavior (the /model false-Running fix). Its ONLY
+                // consumer is the CommandWatch: arm a binding's await (the watch's own freshness
+                // gate rejects a replayed old command by the line's timestamp).
+                if (feedWatch)
+                {
+                    _commandWatch->OnCommandSighting(s.id, SlashCommand{ ev.commandName, ev.commandArgs }, ev.lineTsMs, NowMs());
+                }
+            }
             else // UserPrompt: a new human turn began, OR a turn-abort interrupt marker
             {
                 consumedTurnEvent = true;
@@ -1147,6 +1273,10 @@ namespace Agentmaster
                     // stop_reason — so without this flag the turn's end goes unseen and the
                     // session stays Running forever. Flag it; recon-stop releases it to Waiting.
                     st.interrupted = true;
+                    if (feedWatch)
+                    {
+                        _commandWatch->OnTurnEnd(s.id); // an interrupt ends the command's turn too (COMMANDS.md)
+                    }
                 }
                 else
                 {

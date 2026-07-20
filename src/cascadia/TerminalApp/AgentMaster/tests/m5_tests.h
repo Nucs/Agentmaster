@@ -15,6 +15,7 @@
 //   tests_persistence.cpp     - persistence / manager layout / window record / app settings / tab naming + color / engine window lifecycle
 //   tests_transcript.cpp      - transcript scan + reconcilers / ProcessInspect tree+parse / transcript resolve / Codex / store / lineage / search / live / bring-to-front
 //   tests_summary_anchor.cpp  - summary table-trim + user-msg noise / PromptAnchor (+ edge/corpus/benches) / pending-input
+//   tests_commands.cpp        - COMMANDS.md: slash-command bindings (ParseCommandEcho / CommandWatch / DeriveSuffixedTitle / initial-prompt arg / handover command file)
 // ======================================================================================
 //
 // Agentmaster - M5 standalone test harness: SHARED declarations.
@@ -173,5 +174,10 @@ void TestPromptAnchorFloorIndex();
 void TestPromptAnchorRealCorpus();
 void TestSummaryUserMsgNoise();
 void TestPendingInput();
+
+// tests_commands.cpp — COMMANDS.md: slash-command bindings (ParseCommandEcho + the parser's
+// Command/fileWritePaths events + the CommandWatch state machine + DeriveSuffixedTitle + the
+// initial-prompt commandline arg + EnsureHandoverCommandFileIn)
+void TestCommandWatch();
 void BenchPromptAnchor();
 void BenchPromptAnchorRealSession();

@@ -1653,11 +1653,15 @@ namespace Agentmaster
         return o;
     }
 
-    std::wstring DeriveForkTitle(const std::wstring& sourceTitle)
+    std::wstring DeriveSuffixedTitle(const std::wstring& sourceTitle, std::wstring_view word)
     {
-        // Only a trailing " (fork)" or " (fork N)" group counts — recognize it and BUMP the counter
+        // Only a trailing " (<word>)" or " (<word> N)" group counts — recognize it and BUMP the counter
         // rather than appending another suffix (the "X (fork) (fork)" growth). A nested/earlier paren
-        // group ("Foo (bar)") or a non-fork trailer ("Foo (1.0)") is left intact and just gets " (fork)".
+        // group ("Foo (bar)"), a non-matching trailer ("Foo (1.0)"), or ANOTHER word's group
+        // ("Foo (fork)" under word "handover") is left intact and just gets " (<word>)". The
+        // generalized DeriveForkTitle body verbatim, "fork" -> `word` (COMMANDS.md: the /handover
+        // successor tab shares the derivation).
+        const std::wstring w{ word };
         if (!sourceTitle.empty() && sourceTitle.back() == L')')
         {
             const auto open = sourceTitle.rfind(L'('); // the LAST '(' -> the trailing group, nested-paren safe
@@ -1665,13 +1669,13 @@ namespace Agentmaster
             {
                 const std::wstring prefix = sourceTitle.substr(0, open - 1); // text before the " (" separator
                 const std::wstring inner = sourceTitle.substr(open + 1, sourceTitle.size() - open - 2); // between ( and )
-                if (inner == L"fork")
+                if (inner == w)
                 {
-                    return prefix + L" (fork 2)"; // the unnumbered first fork -> the second
+                    return prefix + L" (" + w + L" 2)"; // the unnumbered first -> the second
                 }
-                if (inner.rfind(L"fork ", 0) == 0)
+                if (inner.rfind(w + L" ", 0) == 0)
                 {
-                    const std::wstring numStr = inner.substr(5);
+                    const std::wstring numStr = inner.substr(w.size() + 1);
                     bool allDigits = !numStr.empty();
                     for (const wchar_t c : numStr)
                     {
@@ -1688,12 +1692,17 @@ namespace Agentmaster
                         {
                             n = n * 10ull + static_cast<unsigned long long>(c - L'0');
                         }
-                        return prefix + L" (fork " + std::to_wstring(n + 1) + L")";
+                        return prefix + L" (" + w + L" " + std::to_wstring(n + 1) + L")";
                     }
                 }
             }
         }
-        return sourceTitle + L" (fork)";
+        return sourceTitle + L" (" + w + L")";
+    }
+
+    std::wstring DeriveForkTitle(const std::wstring& sourceTitle)
+    {
+        return DeriveSuffixedTitle(sourceTitle, L"fork");
     }
 
     std::wstring NormDirKey(const std::wstring& dir)

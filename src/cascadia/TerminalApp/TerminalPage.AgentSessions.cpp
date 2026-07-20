@@ -216,6 +216,81 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::LogNav(L"open-new claude done " + (spawnedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(spawnedId))));
     }
 
+    // Agentmaster (COMMANDS.md — the /handover integration): the CommandWatch's markdown await
+    // resolved — the origin session ran `/handover <context-or-filepath>` and the handover markdown
+    // it was instructed to Write now exists on disk. Every window's command-action sink lands here
+    // (UI thread, via the engine fan-out); ONLY the window hosting the origin session's tab acts:
+    // spawn the successor session — same effective working dir (the "Open New Session Here"
+    // semantics), titled "<origin title> (handover)" (bumping to "(handover 2)"/… against titles
+    // already in the registry, so sibling handovers from one origin never collide), inserted right
+    // beside the origin tab, and FIRST-PROMPTED at the markdown via the launch commandline's
+    // positional prompt (zero-race: no stdin injection, no TUI-init window; the prompt fires a real
+    // UserPromptSubmit, so state/record ride the normal push path). Repeatable by design — every
+    // /handover in a conversation spawns its own successor.
+    void TerminalPage::_HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPath)
+    {
+        const auto tabIt = _claudeTabs.find(sessionId);
+        if (tabIt == _claudeTabs.end())
+        {
+            return; // not our window (the fan-out reaches every window; the single host acts)
+        }
+        if (!_sessionRegistry || mdPath.empty())
+        {
+            return;
+        }
+        const auto s = _sessionRegistry->Get(sessionId);
+        if (!s || !s->live)
+        {
+            return; // archived/vanished between fire and hop — nothing to hand over to
+        }
+        ::Agentmaster::LogNav(L"handover-begin " + ::Agentmaster::ShortId(sessionId) + L" md=" + mdPath);
+
+        // The successor spawns where the origin WORKS (EffectiveWorkingDir — the same dir every
+        // "Open New Session Here" uses), falling back to the launch cwd inside that resolver.
+        const std::wstring dir = ::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, *s);
+
+        // "<origin title> (handover)", bumped past titles the registry already holds (live OR
+        // archived — the Sessions browser lists both, and two rows named identically would be
+        // ambiguous). DeriveSuffixedTitle bumps its own trailing group, so re-deriving from the
+        // last candidate walks (handover) -> (handover 2) -> (handover 3) …; the cap is a
+        // pathological-registry guard, not a real limit.
+        std::wstring successorTitle = ::Agentmaster::DeriveSuffixedTitle(s->title, L"handover");
+        {
+            const auto sessions = _sessionRegistry->Snapshot();
+            const auto taken = [&sessions](const std::wstring& t) {
+                for (const auto& x : sessions)
+                {
+                    if (x.title == t)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            for (int i = 0; i < 50 && taken(successorTitle); ++i)
+            {
+                successorTitle = ::Agentmaster::DeriveSuffixedTitle(successorTitle, L"handover");
+            }
+        }
+
+        // Land the successor right beside the origin tab (the "New Session Here" placement).
+        uint32_t insertPosition = static_cast<uint32_t>(-1);
+        if (const auto originTab = tabIt->second.get())
+        {
+            insertPosition = originTab.TabViewIndex() + 1;
+        }
+
+        // The handover message for the new tab IS the markdown — delivered BY REFERENCE (a
+        // single-line pointer prompt): the launch commandline carries one positional arg, and a
+        // multi-line body would be hostage to prompt-injection quoting; the file outlives the
+        // prompt and the successor Reads it as its first action.
+        const std::wstring prompt = L"Read the handover document at " + mdPath + L" and continue the work it describes.";
+
+        const auto successorTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ successorTitle }, std::nullopt, {}, insertPosition, {}, prompt);
+        const std::wstring newId = successorTab ? _ClaudeSessionForTab(successorTab) : std::wstring{};
+        ::Agentmaster::LogNav(L"handover-done " + (newId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(newId))) + L" from=" + ::Agentmaster::ShortId(sessionId));
+    }
+
     // Agentmaster: launch a claude.exe on a ConPTY in `workingDir`, wired for hooks, as a
     // normal terminal tab, and register it so its hook-driven state is tracked. Both the
     // user (keystrokes) and the orchestrator (Autorunner) write the same stdin.
@@ -224,7 +299,7 @@ namespace winrt::TerminalApp::implementation
     // restores its Auto Testing + autorunner from persistence (DESIGN §13) — so closing and
     // reopening the app brings the session back exactly as it was. `Sent` prompts are kept
     // Sent (never replayed, Correctness Rule #4).
-    TerminalApp::Tab TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId, uint32_t insertPosition, const std::wstring& modelOverride)
+    TerminalApp::Tab TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId, uint32_t insertPosition, const std::wstring& modelOverride, const std::wstring& initialPrompt)
     {
         if (!_sessionRegistry || !_hooksBridge)
         {
@@ -316,7 +391,12 @@ namespace winrt::TerminalApp::implementation
         // ignores PATHEXT, so the full path is mandatory. This is reached ONLY when ClaudeAvailable() (the
         // Manager gates launch/new/fork/resume otherwise), so claudeExePath is non-empty here; the empty
         // bare-token fallback never executes.
-        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, ::Agentmaster::LoadAppSettings(), effectiveForkFrom, ::Agentmaster::SharedEngine().claudeExePath, forkIntoId, modelOverride);
+        // initialPrompt (COMMANDS.md — the /handover successor): rides the commandline as the trailing
+        // positional prompt claude submits as the FIRST turn. FRESH launches only — a restore/resume
+        // must never re-submit it (its turn already ran and lives in the transcript), and no restore
+        // path passes one; the guard makes that structural rather than conventional.
+        const std::wstring launchPrompt = (restored || !resumeId.empty()) ? std::wstring{} : initialPrompt;
+        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, ::Agentmaster::LoadAppSettings(), effectiveForkFrom, ::Agentmaster::SharedEngine().claudeExePath, forkIntoId, modelOverride, launchPrompt);
 
         // Build the ConPTY connection (commandline = claude + our hooks settings; child env = spec.env
         // [CCMGR_SESSION_ID + CCMGR_HOOK_PIPE + the cog's global env] plus this window's AM_SESSION

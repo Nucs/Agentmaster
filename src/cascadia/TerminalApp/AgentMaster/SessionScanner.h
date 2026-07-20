@@ -41,6 +41,7 @@
 namespace Agentmaster
 {
     class SessionRegistry;
+    class CommandWatch; // COMMANDS.md — the slash-command binding/await engine the scanner feeds
 
     // --- cadence + bound tunables (see DecideAdvance-style separation: values are explicit) ---
     inline constexpr int64_t kScanRunningMs = 300; // a turn is in progress: poll quickly
@@ -82,6 +83,14 @@ namespace Agentmaster
             // ApiErrorIsActiveLeaf recognizes the advanced leaf as still being the error tail. Emitted only
             // when both uuid + parentUuid are present (mode/permission-mode config lines carry neither).
             Node,
+            // Agentmaster (COMMANDS.md): a typed SLASH-COMMAND echo — a `type:"user"` line whose
+            // string content carries `<command-name>/x</command-name>` (+ `<command-args>`), or the
+            // older `type:"system","subtype":"local_command"` shape with the same tags. NOT a turn
+            // event (the echo stays NOISE for the state machine, exactly as when it was dropped
+            // outright — it never clears tail facts, never counts as a human prompt); emitted as an
+            // ORDERED event so the CommandWatch can bind to it and await the session's follow-up
+            // activity (the /handover integration). Carries commandName/commandArgs + lineTsMs.
+            Command,
         };
         Kind kind{ Kind::Assistant };
         std::wstring text; // UserPrompt: the prompt body. Assistant: concatenated text blocks (may be empty). LeafMarker: the leafUuid.
@@ -116,6 +125,20 @@ namespace Agentmaster
         // apiErrorStatus (429 / 529 / 500 / 404 / 401), or 0 for a client-side error that carries
         // none ("Prompt is too long"). Preserved onto SessionInfo.errorStatus for the Error card.
         int apiErrorStatus{ 0 };
+        // Command only (COMMANDS.md): the bare command word (leading '/' stripped, ASCII-lowered —
+        // "handover") + the <command-args> body verbatim (outer-trimmed; "" when absent).
+        std::wstring commandName;
+        std::wstring commandArgs;
+        // Command only: the transcript line's own `timestamp` -> Unix ms (0 when absent). The
+        // CommandWatch's replay guard — only a fresh stamp arms a sighting, so a history replay
+        // (a restored/adopted session's initial read, a truncation rewind) can never re-fire an
+        // old command. Deliberately NOT filled for other kinds (per-line parse cost for nothing).
+        int64_t lineTsMs{ 0 };
+        // Assistant only (COMMANDS.md): the file-WRITING tool_use paths of this message — each
+        // Write/Edit (and legacy MultiEdit) block's input.file_path, in block order. Feeds the
+        // CommandWatch's markdown await (the /handover "look for the .md being written" signal);
+        // empty for a message with no file-writing tool_use. Never affects the state machine.
+        std::vector<std::wstring> fileWritePaths;
     };
 
     struct TranscriptParse
@@ -741,6 +764,15 @@ namespace Agentmaster
             _waitingDecayMinutes.store(minutes);
         }
 
+        // Agentmaster (COMMANDS.md): attach the process-wide CommandWatch the delta parse feeds —
+        // command sightings, file-writing tool_use paths, turn boundaries, and the per-pass Tick.
+        // Set ONCE at engine init BEFORE Start() (the worker reads it unsynchronized; the thread
+        // creation is the happens-before). Null == no command bindings (tests / headless).
+        void SetCommandWatch(std::shared_ptr<CommandWatch> watch) noexcept
+        {
+            _commandWatch = std::move(watch);
+        }
+
     private:
         // Per-session tail cursor (owned solely by the worker thread — no lock needed).
         struct ScanState
@@ -835,6 +867,9 @@ namespace Agentmaster
         // sweep keep running). Set once via ArmDiscovery at engine init; the transcript-ENUMERATION
         // it used to also drive is retired (O7) — the Fleet Observer's PEB correlation subsumes it.
         std::atomic<bool> _discoverArmed{ false };
+
+        // COMMANDS.md: the slash-command binding/await engine (set once before Start; may be null).
+        std::shared_ptr<CommandWatch> _commandWatch;
 
         // Waiting-for-you -> Idle timeout in minutes (see SetWaitingDecayMinutes). The default
         // mirrors AppSettings::waitingForYouTimeoutMinutes (3 days) so the behavior holds even before the seed lands.

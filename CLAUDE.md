@@ -77,6 +77,7 @@ Summary-panel JUMP (transcript→buffer resolve + center the view on a prompt): 
 Favorite + Close refactor (Archive removed; Sessions is the sole history view): [`doc/agentmaster/FAVORITES.md`](doc/agentmaster/FAVORITES.md).
 Pending-input monitor (detect an UNSENT draft in a Claude tab's input box): [`doc/agentmaster/PENDING_INPUT.md`](doc/agentmaster/PENDING_INPUT.md).
 System notifications (Windows toasts when a session leaves Running; click = foreground + jump to tab): [`doc/agentmaster/NOTIFICATIONS.md`](doc/agentmaster/NOTIFICATIONS.md).
+Slash-command bindings + /handover (CommandWatch: bind to typed /commands, await follow-up activity): [`doc/agentmaster/COMMANDS.md`](doc/agentmaster/COMMANDS.md).
 
 ## Status
 
@@ -738,6 +739,38 @@ tag no session carries lists at **·0** (sorts last).
   a CLEAN tick after layout settles. **Cross-window caveat** (like the favorite crown): badge/chip/column paints
   are same-window instant; another window catches up on next bind/launch/gather (the panel/editor/chips always
   read the store fresh).
+
+**Slash-command bindings + /handover ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented:
+engine-tested (2111/2111 incl. the new `TestCommandWatch` suite) + lib-compiled green; rides the next
+deploy cycle.** Bind to `/commands` the user TYPES into a managed Claude session and AWAIT the session's
+follow-up activity — async, bounded, zero state-machine impact. A typed command's transcript ECHO (a
+`type:"user"` line carrying `<command-name>/x</command-name>` + `<command-args>` — current Claude Code
+writes even built-ins this way; the older `system/local_command` stratum parses too, order-agnostic
+`ParseCommandEcho`) now surfaces from `ParseTranscriptDelta` as an ordered, NON-turn
+**`Kind::Command`** event (the echo stays NOISE for the state machine — the /model false-Running fix is
+byte-identical, pinned by test), alongside assistant **`fileWritePaths`** (Write/Edit tool_use
+`file_path`s). The scanner feeds both + turn boundaries + a per-pass Tick into the process-wide
+**`CommandWatch`** (`AgentMaster/CommandWatch.{h,cpp}`, `Engine::commandWatch`): a BINDING says "when
+/name is sighted, await X, then fire" — v1's await shape is the **markdown await** (next `.md`
+Write/Edit after the command, leaf-preference-ranked, fire gated on the FILE actually existing on disk
+— a tool_use only proves the request; the write may sit behind an approval). Replay-proof by two gates
+(caught-up cursor + the line's OWN timestamp within 60s) and bounded everywhere (2 turn-ends for an
+unmatched sighting, 15-min deadline, per-session cap, FIFO; pendings transient — never persisted).
+**The `/handover <context-or-filepath>` integration:** engine init materializes the command DEFINITION
+`<claude-config>/commands/handover.md` (**create-if-absent — the ONE write outside the profile**, a
+deliberate additive `~/.claude` mutation, user-owned from first materialization; it instructs Claude to
+Write ONE `HANDOVER-<topic>.md` then end the turn) and binds `handover` → the new per-window
+**command-action sinks** (`Engine::CommandActionSink`, the activateSinks idiom — registered at page
+init, token-detached in `~TerminalPage`). The hosting window's `_HandleCommandHandover` spawns the
+successor: same **effective working dir**, titled `"<origin> (handover)"` via the generalized
+**`DeriveSuffixedTitle`** (DeriveForkTitle now delegates to it; registry-bumped so sibling handovers
+never collide), inserted BESIDE the origin tab, and **first-prompted at the md via the launch
+commandline's positional prompt** (`BuildClaudeCommandline(..., initialPrompt)`, PS-quoted
+`PsDoubleQuote` for the pwsh-host `&` context) — zero-race: no stdin injection, no Enter-eaten TUI
+window; the prompt fires a real `UserPromptSubmit` so Running + the record ride the normal push path;
+structurally dropped on any restore/resume. Repeatable — every /handover in a conversation spawns its
+own successor. Logs: `[cmd]`/`[cmd-fire]`/`[cmd-expire]` + the `[nav] handover-begin ↔ handover-done`
+pair. Deferred: a hook push fast-path, more bindings/await shapes, a cog off-switch (COMMANDS.md §8).
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
@@ -1723,7 +1756,7 @@ What works, by area:
   (`ClaudeSpawn.cpp`, thread-safe + best-effort). Three layers: (1) the **hook event stream**
   (`[SessionStart]`/`[UserPromptSubmit]`/`[Stop]`/…) — the push state machine; (2) **engine-mechanism
   tags** — `[fork]`/`[resume]`/`[restore-fresh]`/`[rehome]`/`[spawn]`/`[launch-fail]`/`[archive]`/`[teardown-archive]`/
-  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[pending]`/`[notify]`/`[update]`/`[persist-fail]`/`[observer]`/`[activity]`/… (each
+  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[pending]`/`[notify]`/`[update]`/`[cmd]`/`[cmd-fire]`/`[cmd-expire]`/`[persist-fail]`/`[observer]`/`[activity]`/… (each
   carries the resulting ids), plus the **window-restore story** — one coherent trace per `windowId`:
   `[window-claim]`/`[window-fresh]` (claim a saved record or start fresh, at engine init) → `[rehome-begin]`
   (every tab ref listed BY SESSION ID + the focus target) → per-tab `[rehome] window <id> resume|skip <sid>`
@@ -1742,6 +1775,7 @@ What works, by area:
   ↔ `fork-managed-done` (the LIVE managed-session fork — the WT tab "Fork session" / board+tree menu) ·
   `resume-click` ↔ `resume-done` (or the early `resume -> jump` when already open) · `open-new {claude,codex}`
   ↔ `open-new … done` · `adopt-{external,codex}` ↔ `adopt-… done` · `restart-begin` ↔ `restart-done` ·
+  `handover-begin` ↔ `handover-done new=… from=…` (the /handover successor spawn — COMMANDS.md) ·
   `close-begin` ↔ `close-done` · `sessions-page open-begin` ↔ `shown` (the page-open crash class) ·
   `reopen-windows-begin` ↔ `…-done` (the toolbar "Reopen Windows (N)" dispatch loop). A blocked launch (no
   native `claude.exe`) still emits its `…-done (blocked …)` so an unpaired begin ALWAYS means a crash, never
@@ -1941,7 +1975,10 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     model — `AgentKind kind` / `codexSessionId` — and `TabKind::Codex`), `HookEvents.h`, `HookWire.h`,
     `SessionRegistry.{h,cpp}`, `HooksBridge.{h,cpp}`, `ClaudeSpawn.{h,cpp}` (+ `BuildCodexCommandline`),
     `Scheduler.{h,cpp}`, `Engine.{h,cpp}` (the M9 process-wide `SharedEngine`),
-    `SessionScanner.{h,cpp}` (the interval reconciler / PULL transcript tail), the **Fleet
+    `SessionScanner.{h,cpp}` (the interval reconciler / PULL transcript tail; its parser also emits
+    the non-turn `Kind::Command` slash-command echoes + assistant `fileWritePaths` — COMMANDS.md),
+    `CommandWatch.{h,cpp}` (slash-command bindings + bounded async awaits — `ParseCommandEcho`,
+    the markdown await, the /handover binding's feed; COMMANDS.md), the **Fleet
     Observer** — `Activity.h` (data models — incl. `AgentKind` / `CodexProcessFacts` / `CodexState`),
     `ProcessInspect.{h,cpp}` (PEB / Toolhelp / transcript primitives — id resolution + content: title /
     prompts / ctime·mtime timing; the Codex date-sharded rollout resolver + `ReadCodexFacts` + the C2

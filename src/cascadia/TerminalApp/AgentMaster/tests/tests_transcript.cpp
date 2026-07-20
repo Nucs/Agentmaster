@@ -130,7 +130,19 @@ void TestTranscriptScan()
     {
         const std::wstring line = LR"j({"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args></command-args>"}})j" L"\n";
         const auto r = ParseTranscriptDelta(line);
-        CHECK(r.events.empty(), "a /model <command-name> echo (non-meta user line) -> NO turn event");
+        // COMMANDS.md refinement: the echo now surfaces as a Kind::Command event (the CommandWatch's
+        // feed), but the /model false-Running invariant is unchanged — it must never come back as a
+        // TURN event (UserPrompt/Assistant/ToolResult), and _readDelta's Command branch touches no
+        // tail facts. (This line carries no timestamp, so its lineTsMs is 0 — the watch's freshness
+        // gate would never arm it either.)
+        bool anyTurnEvent = false;
+        for (const auto& ev : r.events)
+        {
+            anyTurnEvent = anyTurnEvent || ev.kind == TranscriptEvent::Kind::UserPrompt || ev.kind == TranscriptEvent::Kind::Assistant || ev.kind == TranscriptEvent::Kind::ToolResult;
+        }
+        CHECK(!anyTurnEvent, "a /model <command-name> echo (non-meta user line) -> NO turn event");
+        CHECK(r.events.size() == 1 && r.events[0].kind == TranscriptEvent::Kind::Command && r.events[0].commandName == L"model",
+              "a /model echo surfaces as a (non-turn) Command event for the CommandWatch");
     }
     {
         const std::wstring line = LR"j({"type":"user","message":{"role":"user","content":"<local-command-stdout>Set model to Opus 4.8 and saved as your default</local-command-stdout>"}})j" L"\n";

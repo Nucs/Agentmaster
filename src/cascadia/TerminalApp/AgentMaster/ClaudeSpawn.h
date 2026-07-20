@@ -86,7 +86,15 @@ namespace Agentmaster
     //   the Fleet Observer reads it back off the live commandline (ReadClaudeFacts), so the card /
     //   overlay `model·effort` adornment shows the pick with no extra plumbing. Quoted iff it
     //   contains whitespace. Empty => no flag (exactly the pre-picker commandline).
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view modelOverride = {});
+    // initialPrompt (Agentmaster, COMMANDS.md — the /handover successor): non-empty => append it as
+    //   the trailing POSITIONAL prompt argument (`claude [flags] "<prompt>"`), which claude submits
+    //   as the session's FIRST turn on startup — the zero-race way to hand a new session its opening
+    //   message (no stdin injection, no TUI-init Enter-eaten window; the prompt fires a real
+    //   UserPromptSubmit hook, so state/record ride the normal push path). PS-quoted via
+    //   PsDoubleQuote — the managed commandline is invoked by the pwsh host's `&` operator
+    //   (BuildPwshHostedCommandline), so PowerShell parsing rules govern the arg. Empty => no arg
+    //   (byte-identical to the pre-parameter commandline).
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view modelOverride = {}, std::wstring_view initialPrompt = {});
 
     // Assemble the codex (OpenAI Codex CLI) command line (Agentmaster — Codex managed-session
     // support). Codex CANNOT pin a session id and takes NO --settings (unlike claude), so a FRESH
@@ -134,6 +142,16 @@ namespace Agentmaster
     // and $ are inert there). Used to embed the per-profile bridge.json path into the
     // generated forwarder script. Pure + unit-tested.
     std::wstring PsSingleQuote(std::wstring_view s);
+
+    // Agentmaster (COMMANDS.md): quote a string as a PowerShell DOUBLE-quoted argument — "text"
+    // with the three characters PS interprets inside double quotes backtick-escaped (` -> ``,
+    // " -> `", $ -> `$). Used for the launch commandline's initial-prompt positional arg: the
+    // managed commandline runs under the pwsh host's `&` operator (BuildPwshHostedCommandline),
+    // so PS parsing — not CreateProcessW — governs its args, and a path carrying $ or ` must not
+    // expand. (PsSingleQuote is unsuitable here only by convention — the commandline's existing
+    // args are all double-quoted, and mixing styles in one line reads worse in Copy-Launch-CLI.)
+    // Pure + unit-tested.
+    std::wstring PsDoubleQuote(std::wstring_view s);
 
     // Parse a list of NAME=VALUE assignments into pairs, for AppSettings.env (extra environment
     // applied to every spawned session) and the per-directory env (dir-env.json). Entries are
@@ -410,6 +428,22 @@ namespace Agentmaster
     // whose process did not inherit CCMGR_HOOK_PIPE can still discover the bridge.
     void WriteBridgeDiscovery(std::wstring_view pipeName);
 
+    // Agentmaster (COMMANDS.md — the /handover integration). Ensure the `/handover` slash-command
+    // DEFINITION exists at <configDir>\commands\handover.md — the file that makes a typed
+    // `/handover <context-or-filepath>` a real Claude Code command (an unknown command is rejected
+    // client-side and never reaches the transcript). Its body instructs Claude to write ONE
+    // handover markdown via the Write tool, which is exactly the signal the CommandWatch's
+    // markdown await keys on. STRICTLY create-if-absent: an existing file — the user's own
+    // /handover, or an edited copy of ours — is NEVER overwritten (this is a deliberate, additive
+    // write into the user's GLOBAL ~/.claude config, inert until the user types the command; the
+    // one place Agentmaster writes outside its profile, called out in COMMANDS.md §6). Returns the
+    // file's full path ("" on I/O failure), whether it was just created or already present.
+    // `...In` takes the Claude CONFIG dir explicitly (the unit-testable core; the harness points it
+    // at a temp dir so tests never touch the real ~/.claude); the wrapper resolves
+    // CLAUDE_CONFIG_DIR > ~/.claude, exactly like ClaudeProjectsDir.
+    std::wstring EnsureHandoverCommandFileIn(const std::wstring& configDir);
+    std::wstring EnsureHandoverCommandFile();
+
     // Build a complete spawn spec and ensure the shared hook files exist. `pipeName` is the
     // live HooksBridge pipe (HookPipeName(pid)). If `resumeSessionId` is non-empty, the spec
     // RESUMES that conversation (claude --resume <id>) and reuses the id; otherwise a fresh
@@ -432,7 +466,11 @@ namespace Agentmaster
     // ` --model <id>` — the per-LAUNCH model picked from an "Open New Session Here" submenu (see
     // BuildClaudeCommandline). Per-launch only, deliberately NOT persisted on the session: a later
     // resume/restart follows the settings model again (the pick was for THAT launch).
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view forkIntoSessionId = {}, std::wstring_view modelOverride = {});
+    // `initialPrompt` (Agentmaster, COMMANDS.md — the /handover successor): non-empty => the
+    // commandline carries it as the trailing positional prompt claude submits as the session's
+    // FIRST turn (see BuildClaudeCommandline). Per-launch only, never persisted: a restart/resume
+    // must not re-submit it (the turn already ran and lives in the transcript).
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view forkIntoSessionId = {}, std::wstring_view modelOverride = {}, std::wstring_view initialPrompt = {});
 
     // Build a spec to RELAUNCH an existing managed conversation IN PLACE — the tab's connection died and
     // the user hit "Restart session" (WT's restartConnection). Unlike BuildClaudeSpawn it NEVER mints a

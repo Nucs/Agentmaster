@@ -97,6 +97,7 @@ int wmain()
     TestInferWorkingDirectory();
     TestConversationLineage();
     TestAnalyzeFootprint();
+    TestCommandWatch();
     TestSessionSearch();
     TestProcessInspectLive();
     TestTeammateLiveCorpus();

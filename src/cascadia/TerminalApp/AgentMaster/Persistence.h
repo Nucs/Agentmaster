@@ -193,10 +193,20 @@ namespace Agentmaster
     // derive gates its ReadGitBranchForDir on this, and the cog preview gates its example-branch
     // note on the same predicate (single-source, so they can't drift).
     bool TitleNamingUsesBranch(TabTitleNaming n);
+    // Agentmaster (COMMANDS.md): the GENERALIZED suffix-title derivation behind DeriveForkTitle —
+    // append " (<word>)" to a source title, and when the source ALREADY ends in that group, BUMP a
+    // counter (" (<word> 2)", " (<word> 3)", ...) instead of stacking ("X (fork) (fork)"). Only a
+    // trailing " (<word>)" / " (<word> N)" group is recognized (nested/earlier parens left intact);
+    // a DIFFERENT word's trailing group is left intact too ("T (fork)" + "handover" ->
+    // "T (fork) (handover)" — a handover OF a fork keeps both lineages readable). Pure + testable;
+    // "fork" (both fork entry points) and "handover" (the /handover successor tab) share it.
+    std::wstring DeriveSuffixedTitle(const std::wstring& sourceTitle, std::wstring_view word);
+
     // Derive a fork's title from its source's: a first fork appends " (fork)"; forking a fork BUMPS a
     // counter (" (fork 2)", " (fork 3)", ...) instead of stacking suffixes ("X (fork) (fork)"). Only a
     // trailing " (fork)" / " (fork N)" group is recognized (nested/earlier parens are left intact).
     // Pure + testable; shared by both fork entry points (duplicate-tab fork, fork-from-disk).
+    // (== DeriveSuffixedTitle(sourceTitle, L"fork").)
     std::wstring DeriveForkTitle(const std::wstring& sourceTitle);
     // Whether a single path segment (any case) is a generic build/output/structural folder name
     // we skip when naming (bin, obj, debug, release, build, ... — the top 20).

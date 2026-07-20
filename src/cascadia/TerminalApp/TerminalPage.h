@@ -349,6 +349,12 @@ namespace winrt::TerminalApp::implementation
         // the shared engine — the Manager's fleet-wide "Activate All" in ANOTHER window fans out here, and
         // this window eager-inits its own dormant controls. Detached in ~TerminalPage (Rule #10).
         uint64_t _windowActivateAllToken{ 0 };
+        // Agentmaster (COMMANDS.md — command actions): this window's command-action sink on the shared
+        // engine — a CommandWatch binding's await resolved (v1: /handover's markdown is on disk); the
+        // sink hops to this window's UI thread and acts only when this window HOSTS the origin
+        // session's tab (spawn the "<title> (handover)" successor beside it). Detached in
+        // ~TerminalPage (Rule #10).
+        uint64_t _commandActionToken{ 0 };
         // Agentmaster (eager-init / "Activate All Tabs" PACING): waking N dormant tabs in one burst spawns
         // N claude.exe + N swapchains on one UI-thread pass and freezes the app (enough of them, the PC),
         // so the wake is DRIP-FED: _activateAllQueue holds the session ids still to wake and
@@ -808,7 +814,8 @@ namespace winrt::TerminalApp::implementation
         void _OpenAgentManagerTab(); // Agentmaster
         void _InitAgentmasterEngine(); // Agentmaster: start the SessionRegistry + hooks bridge
         void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition = -1, winrt::hstring model = {}); // Agentmaster (insertPosition: -1 == end/NewTabPosition default; a tab-context-menu spawn passes clickedIndex+1 so the new tab lands next to the clicked tab. model: the launch-model picker's per-LAUNCH `--model <id>` pick from an "Open New Session Here" submenu; "" = Default, the settings model)
-        TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId = {}, uint32_t insertPosition = -1, const std::wstring& modelOverride = {}); // Agentmaster (returns the created tab; forkFromId set => fork that conversation into a new id; insertPosition threads tab placement, default -1 == end; modelOverride: launch-model picker — non-empty adds ` --model <id>` to THIS launch's commandline)
+        TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId = {}, uint32_t insertPosition = -1, const std::wstring& modelOverride = {}, const std::wstring& initialPrompt = {}); // Agentmaster (returns the created tab; forkFromId set => fork that conversation into a new id; insertPosition threads tab placement, default -1 == end; modelOverride: launch-model picker — non-empty adds ` --model <id>` to THIS launch's commandline; initialPrompt: COMMANDS.md — non-empty rides the commandline as the positional prompt claude submits as the session's FIRST turn, the /handover successor's kickoff)
+        void _HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPath); // Agentmaster (COMMANDS.md): the /handover await resolved — if THIS window hosts the origin session's tab, spawn the "<title> (handover)" successor beside it, first-prompted at the handover markdown
         winrt::fire_and_forget _RestoreClaudeSessions(); // Agentmaster: load persisted sessions as ARCHIVED (restorable) — does NOT auto-launch (Rule #6)
         void _RestoreWindowTabs(); // Agentmaster (M10 window-grouped restore): re-home THIS window's persisted tabs — resume each Claude session + replay each Other (shell) tab from its WindowRecord, in order. Only a claimed record (a reopened window) restores.
         void _AttachClaudeOverlay(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster: build + install the per-tab link badge (gated on AppSettings.showTabOverlay)

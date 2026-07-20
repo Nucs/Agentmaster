@@ -7,6 +7,7 @@
 #include "Engine.h"
 
 #include "ClaudeSpawn.h"
+#include "CommandWatch.h" // COMMANDS.md — slash-command bindings (the /handover integration)
 #include "HookWire.h"
 #include "HooksBridge.h"
 #include "Persistence.h"
@@ -321,6 +322,29 @@ namespace Agentmaster
             // 0 disables (the cog's "Never"). (A second tiny LoadAppSettings read happens below for the
             // hook files — both are one small-file read at process init.)
             e->scanner->SetWaitingDecayMinutes(LoadAppSettings().waitingForYouTimeoutMinutes);
+            // Agentmaster (COMMANDS.md): the slash-command binding/await engine, attached BEFORE the
+            // scanner worker starts (the feed pointer is read unsynchronized on the worker; thread
+            // creation is the happens-before). The one v1 binding is /handover: when a managed
+            // session's user types `/handover <context-or-filepath>`, await the handover markdown
+            // the command instructs Claude to Write, then fan the resolved (sessionId, mdPath) out
+            // to the per-window command-action sinks — the window hosting the origin tab spawns the
+            // "<title> (handover)" successor session pointed at the file. The leaf preference
+            // "handover" makes the command's own HANDOVER-*.md outrank an incidental doc edit in
+            // the same message. Fires on the scanner thread; the sinks marshal to their own UI
+            // dispatchers (the activate-sink idiom).
+            e->commandWatch = std::make_shared<CommandWatch>();
+            e->commandWatch->BindMarkdownAwait(L"handover", L"handover", [](const std::wstring& sessionId, const std::wstring& mdPath, const std::wstring& /*args*/) {
+                RaiseCommandActionInWindows(sessionId, L"handover", mdPath);
+            });
+            e->scanner->SetCommandWatch(e->commandWatch);
+            // The /handover COMMAND DEFINITION (create-if-absent — the user's own/edited file is
+            // never overwritten): without a definition under <claude-config>/commands, a typed
+            // /handover is rejected client-side and never reaches the transcript. The ONE write
+            // Agentmaster makes outside its profile (COMMANDS.md §6 — additive, inert until typed).
+            if (const std::wstring handoverCmd = EnsureHandoverCommandFile(); !handoverCmd.empty())
+            {
+                AppendStateLog(L"hooks.log", L"[engine] handover command: " + handoverCmd + L"\n");
+            }
             e->scanner->Start();
             // Keep the scanner ticking even with nothing live, so each window's liveness probe — which
             // also drives the Fleet Observer's per-window roster publish — keeps running (a hand-typed
@@ -871,6 +895,66 @@ namespace Agentmaster
         for (const auto& fn : sinks)
         {
             fn(); // fire-and-forget; each other window wakes its own dormant tabs
+        }
+    }
+
+    uint64_t RegisterCommandActionHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload)> handler)
+    {
+        if (!handler)
+        {
+            return 0;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.commandActionMutex);
+        const auto token = e.nextCommandActionToken++;
+        e.commandActionSinks.push_back({ token, windowId, std::move(handler) });
+        return token;
+    }
+
+    void UnregisterCommandActionHandler(uint64_t token)
+    {
+        if (token == 0)
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.commandActionMutex);
+        for (auto it = e.commandActionSinks.begin(); it != e.commandActionSinks.end(); ++it)
+        {
+            if (it->token == token)
+            {
+                e.commandActionSinks.erase(it);
+                return;
+            }
+        }
+    }
+
+    void RaiseCommandActionInWindows(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload)
+    {
+        if (sessionId.empty() || command.empty())
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        // Snapshot under the lock, invoke outside it (the ActivateSessionInOtherWindows pattern):
+        // each sink hops into its own window's dispatcher; the fire originates on the scanner
+        // thread, so EVERY window is a candidate (no source to exclude) and only the (single)
+        // window hosting the session's tab acts.
+        std::vector<std::function<void(const std::wstring&, const std::wstring&, const std::wstring&)>> sinks;
+        {
+            std::lock_guard<std::mutex> lk(e.commandActionMutex);
+            sinks.reserve(e.commandActionSinks.size());
+            for (const auto& s : e.commandActionSinks)
+            {
+                if (s.fn)
+                {
+                    sinks.push_back(s.fn);
+                }
+            }
+        }
+        for (const auto& fn : sinks)
+        {
+            fn(sessionId, command, payload);
         }
     }
 

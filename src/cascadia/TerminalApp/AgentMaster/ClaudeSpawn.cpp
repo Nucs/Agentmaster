@@ -192,6 +192,28 @@ namespace Agentmaster
         return out;
     }
 
+    std::wstring PsDoubleQuote(std::wstring_view s)
+    {
+        // PowerShell DOUBLE-quoted argument: inside "…" PS interprets exactly three characters —
+        // the backtick (its escape char), the double quote (ends the string), and $ (variable /
+        // subexpression expansion). Backtick-escape each; everything else (backslashes included)
+        // is inert. Used for the initial-prompt positional arg, whose text embeds a filesystem
+        // path we do not control (COMMANDS.md).
+        std::wstring out;
+        out.reserve(s.size() + 2);
+        out.push_back(L'"');
+        for (const wchar_t c : s)
+        {
+            if (c == L'`' || c == L'"' || c == L'$')
+            {
+                out.push_back(L'`');
+            }
+            out.push_back(c);
+        }
+        out.push_back(L'"');
+        return out;
+    }
+
     std::wstring BuildForwarderScript(const std::wstring& stateDir)
     {
         // Pure-ASCII PowerShell. Reads the hook JSON from stdin, correlates via env, and
@@ -386,7 +408,7 @@ try {
         return json;
     }
 
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view modelOverride)
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view modelOverride, std::wstring_view initialPrompt)
     {
         // When skipPermissions is ON (the cog default), spawn with --dangerously-skip-permissions:
         // the app drives claude programmatically (Autorunner + injected prompts) and gates risky
@@ -459,6 +481,17 @@ try {
             const bool needsQuotes = modelOverride.find_first_of(L" \t") != std::wstring_view::npos;
             cmd += needsQuotes ? (L" --model \"" + std::wstring{ modelOverride } + L"\"") :
                                  (L" --model " + std::wstring{ modelOverride });
+        }
+
+        // Initial prompt (Agentmaster, COMMANDS.md — the /handover successor): the trailing
+        // POSITIONAL prompt claude submits as the session's first turn on startup. Appended LAST
+        // (claude's arg parser takes the positional after any flags), PS-double-quoted — the
+        // managed commandline is invoked by the pwsh host's `&` operator, so PowerShell parsing
+        // governs it (a claude launch is never the `cmd /c` batch form below: the native-exe-only
+        // policy resolves a real claude.exe, and the empty-launcher fallback is a bare token).
+        if (!initialPrompt.empty())
+        {
+            cmd += L" " + PsDoubleQuote(initialPrompt);
         }
 
         if (batch)
@@ -976,6 +1009,78 @@ try {
             return { std::wstring{}, std::wstring{} };
         }
         return { settingsPath, forwarderPath };
+    }
+
+    std::wstring EnsureHandoverCommandFileIn(const std::wstring& configDir)
+    {
+        // The /handover slash-command DEFINITION (COMMANDS.md). Create-if-absent ONLY: an existing
+        // file — the user's own /handover, or an edited copy of this one — is never overwritten,
+        // so the user owns the wording from the first launch that materialized it. The body's ONE
+        // load-bearing instruction is "create the handover file with the Write tool, named
+        // HANDOVER-*.md": the Write tool_use is the transcript signal the CommandWatch's markdown
+        // await keys on (a shell-redirect write is invisible to it), and the HANDOVER- name is the
+        // await's leaf preference (an incidental doc edit in the same message never outranks it).
+        if (configDir.empty())
+        {
+            return {};
+        }
+        const std::wstring commandsDir = configDir + L"\\commands";
+        const std::wstring path = commandsDir + L"\\handover.md";
+        if (::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+        {
+            return path; // present (ours or the user's) — never overwrite
+        }
+        ::CreateDirectoryW(configDir.c_str(), nullptr);
+        ::CreateDirectoryW(commandsDir.c_str(), nullptr);
+        static constexpr std::wstring_view kHandoverCommand =
+            LR"md(---
+description: Hand this session's work over to a fresh successor session (Agentmaster opens it automatically)
+---
+The user wants to HAND OVER this session's work to a fresh successor Claude session.
+Handover context from the user (inline context, or a path to a file you should read and fold in):
+
+$ARGUMENTS
+
+Do this NOW, in this exact order:
+1. If the context above names a readable file, read it first and incorporate it.
+2. Using the Write tool (NOT a shell redirect - the Write tool call itself is the signal
+   Agentmaster detects), create ONE new markdown file in the current working directory named
+   `HANDOVER-<short-topic>.md` (pick a short kebab-case topic slug; if that name already
+   exists, append `-2`, `-3`, ...).
+3. Write into it everything a successor session needs to continue seamlessly WITHOUT this
+   conversation: the goal, the current state, decisions made and why, work completed, work
+   still in flight, concrete ordered next steps, key file paths, and any gotchas or
+   constraints discovered along the way. Be specific - the successor has NO other context.
+4. End your turn right after writing the file (a one-line confirmation is fine). Do not
+   start new work.
+
+Agentmaster is watching for that markdown write: it automatically opens a successor session
+tab (named like this one, ending in "(handover)") in this working directory, whose first
+prompt points it at your file.
+)md";
+        if (!WriteFileUtf8(path, kHandoverCommand))
+        {
+            AppendStateLog(L"hooks.log", L"[persist-fail] handover command definition: " + path + L"\n");
+            return {};
+        }
+        return path;
+    }
+
+    std::wstring EnsureHandoverCommandFile()
+    {
+        // CLAUDE_CONFIG_DIR > ~/.claude — the same resolution ClaudeProjectsDir applies (the
+        // commands dir is a sibling of projects/ under the one Claude config root).
+        std::wstring base = GetEnvW(L"CLAUDE_CONFIG_DIR");
+        if (base.empty())
+        {
+            const std::wstring home = GetEnvW(L"USERPROFILE");
+            if (home.empty())
+            {
+                return {};
+            }
+            base = home + L"\\.claude";
+        }
+        return EnsureHandoverCommandFileIn(base);
     }
 
     std::wstring ResolveRealClaude()
@@ -1976,7 +2081,7 @@ try {
         }
     }
 
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view forkIntoSessionId, std::wstring_view modelOverride)
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view forkIntoSessionId, std::wstring_view modelOverride, std::wstring_view initialPrompt)
     {
         ClaudeSpawnSpec spec;
         spec.workingDir = std::wstring{ workingDir };
@@ -2002,7 +2107,7 @@ try {
         spec.forwarderPath = forwarderPath;
 
         const auto settingsFwd = ToForwardSlashes(settingsPath);
-        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFromSessionId, claudeLauncher, modelOverride);
+        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFromSessionId, claudeLauncher, modelOverride, initialPrompt);
 
         // The cog's global env + the hook-correlation vars, applied to every session (CCMGR_* always win).
         AppendManagedClaudeEnv(spec, settings);

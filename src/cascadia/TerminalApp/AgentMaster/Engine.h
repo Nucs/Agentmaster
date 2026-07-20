@@ -41,6 +41,7 @@ namespace Agentmaster
     class Scheduler;
     class SessionScanner;
     class ProcessObserver;
+    class CommandWatch; // COMMANDS.md — slash-command bindings + awaited follow-up activity
 
     // The shared engine's three long-lived owners. Held by the process singleton; windows copy
     // the shared_ptrs into their TerminalPage so the registry/bridge/scheduler outlive any one
@@ -52,6 +53,7 @@ namespace Agentmaster
         std::shared_ptr<Scheduler> scheduler;
         std::shared_ptr<SessionScanner> scanner; // the interval reconciler (PULL; complements the bridge's PUSH)
         std::shared_ptr<ProcessObserver> observer; // the Fleet Observer S-lane (PULL census/correlation; OBSERVER.md §8)
+        std::shared_ptr<CommandWatch> commandWatch; // slash-command bindings + async awaits, fed by the scanner (COMMANDS.md)
 
         // Agentmaster (Fleet Observer, OBSERVER.md §7): the per-PROCESS ownership stamp. Minted once
         // in SharedEngine() and exported as the AM_SESSION env var on our process, so every ConPTY
@@ -221,6 +223,25 @@ namespace Agentmaster
         std::mutex activateAllMutex;
         std::vector<ActivateAllSink> activateAllSinks;
         uint64_t nextActivateAllToken{ 1 };
+
+        // Agentmaster (COMMANDS.md — command actions): per-window "a bound slash command's await
+        // resolved" sinks. A CommandWatch binding fires on the SCANNER thread with a session id +
+        // a payload (the /handover binding's payload is the handover markdown's path); the ACTION
+        // — spawn the successor tab beside the origin — can only run in the window that HOSTS the
+        // origin session's tab. The watch's engine-level binding fans out here to EVERY window
+        // (there is no source window to exclude — the fire originates off-window); each sink hops
+        // to its own UI thread, checks its _claudeTabs, and only the (single) host acts. Same
+        // shape + lifetime as activateSinks: registered at engine init, token-detached in
+        // ~TerminalPage (Rule #10), snapshot-under-lock / invoke-outside-it.
+        struct CommandActionSink
+        {
+            uint64_t token{ 0 };
+            std::wstring windowId;
+            std::function<void(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload)> fn;
+        };
+        std::mutex commandActionMutex;
+        std::vector<CommandActionSink> commandActionSinks;
+        uint64_t nextCommandActionToken{ 1 };
     };
 
     // The one process-wide engine. The FIRST call constructs it (creates the registry, wires
@@ -331,6 +352,17 @@ namespace Agentmaster
     uint64_t RegisterActivateAllDormantHandler(const std::wstring& windowId, std::function<void()> handler);
     void UnregisterActivateAllDormantHandler(uint64_t token);
     void ActivateAllDormantInOtherWindows(const std::wstring& sourceWindowId);
+
+    // Agentmaster (COMMANDS.md — command actions): register THIS window's command-action sink
+    // (monotonic token; detach with UnregisterCommandActionHandler — removing a stale token is a
+    // no-op, the registry-token pattern). RaiseCommandActionInWindows fans (sessionId, command,
+    // payload) out to EVERY registered sink — the fire originates on the engine's scanner thread,
+    // so there is no source window to exclude; exactly one window hosts the session's tab, so at
+    // most one sink acts (each hops to its own UI thread and checks its _claudeTabs; a miss is a
+    // no-op). v1 commands: "handover" (payload == the handover markdown's absolute path).
+    uint64_t RegisterCommandActionHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload)> handler);
+    void UnregisterCommandActionHandler(uint64_t token);
+    void RaiseCommandActionInWindows(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload);
 
     // Agentmaster (cross-window restart): register THIS window's restart sink (monotonic token; detach
     // with UnregisterWindowRestartHandler — removing a stale token is a no-op, the registry-token
