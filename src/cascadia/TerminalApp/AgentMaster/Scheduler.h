@@ -19,6 +19,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "SessionModels.h"
@@ -314,6 +315,15 @@ namespace Agentmaster
         // (DecideEnterRetry). Runs on the worker thread each poll tick; drains _pending as sessions
         // start their turn / give up. Does its registry I/O OUTSIDE _mtx.
         void _sweepPendingPickups();
+        // Agentmaster (no-silent-stall): a DecideAdvance that answers None used to leave NO trace, so
+        // a queue held by the question-guard / global pause / maxAutoSends / a manual gate was
+        // indistinguishable in autorunner.log from a dead scheduler (the "stuck in Pending, log shows
+        // nothing" report). _noteAdvanceSkip logs `[advance-skip] <id> (<reason>)` change-deduped per
+        // session (the reasons are fixed literals, so equality is exact); _clearAdvanceSkip forgets
+        // the session's last reason whenever its plan makes progress (a send / an armed confirm /
+        // plan-done), so the NEXT stall logs again instead of being swallowed by the dedup.
+        void _noteAdvanceSkip(const std::wstring& id, const std::wstring& reason);
+        void _clearAdvanceSkip(const std::wstring& id);
 
         std::shared_ptr<SessionRegistry> _registry;
         std::thread _thread;
@@ -324,6 +334,10 @@ namespace Agentmaster
         // Armed in OnObserved (every send path marks the prompt Sent via the registry, which
         // notifies this observer), drained in _sweepPendingPickups. Guarded by _mtx.
         std::unordered_set<std::wstring> _pending;
+        // sessionId -> the last [advance-skip] reason logged for it (the change-dedup state; see
+        // _noteAdvanceSkip). Guarded by _mtx; erased on plan progress; wholesale-reset past a
+        // generous cap (the Engine.cpp [Unknown]-dedup precedent) so a long run can't grow it.
+        std::unordered_map<std::wstring, std::wstring> _lastSkipReason;
         std::atomic<bool> _running{ false };
         std::atomic<bool> _globalPause{ false };
     };

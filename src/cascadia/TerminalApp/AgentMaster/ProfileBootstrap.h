@@ -356,11 +356,32 @@ namespace Agentmaster::Profiles
     // (the AppSettings `debugMode` field the Settings cog's About tab writes). A header-only read — the
     // EXE cannot link the engine's LoadAppSettings, so this parses the one key directly, mirroring how
     // Updater::ReadPrefs reads its own settings.json keys. Any missing file / parse failure => false.
+    // Agentmaster (schema fix — the toggle used to be a permanent NO-OP): the cog persists
+    // AppSettings INSIDE the engine's {version, settings:{...}} ENVELOPE (SaveAppSettings ->
+    // root.Set(L"settings", ToJson(settings))), so the key lives at settings.debugMode — the
+    // original TOP-LEVEL BoolAt could never see it (Json.h's *At readers are flat, non-traversing),
+    // exactly the envelope-vs-top-level mismatch the updater keys once had. Consequence in the
+    // field: a release instance relaunched without --debug came up with the Tests Autorunner
+    // DISABLED no matter what the About-tab toggle said, and every queued prompt sat Pending
+    // forever (the "queued while Running, never sent" report — journey2). Read the envelope first;
+    // keep a top-level fallback for a hand-edited/stray file (the Updater::ReadPrefs
+    // migration-tolerant idiom: never drop a value the user expressed, wherever it landed).
     inline bool PersistedDebugModeEnabled()
     {
         const std::wstring path = ResolveProfileDir() + L"\\settings.json";
         const auto parsed = json::Parse(detail::ReadUtf8File(path));
-        return parsed && parsed->type == json::Value::Type::Obj && parsed->BoolAt(L"debugMode", false);
+        if (!parsed || parsed->type != json::Value::Type::Obj)
+        {
+            return false;
+        }
+        // The envelope's settings.debugMode is authoritative when the key is PRESENT there — a
+        // nested false must not fall through to (and be overridden by) a stale top-level stray.
+        if (const auto* nested = parsed->Find(L"settings");
+            nested && nested->type == json::Value::Type::Obj && nested->Find(L"debugMode"))
+        {
+            return nested->BoolAt(L"debugMode", false);
+        }
+        return parsed->BoolAt(L"debugMode", false);
     }
 
     // Turn the DEBUG escape hatch ON for this process (idempotent, one-way — never disables). Feeds

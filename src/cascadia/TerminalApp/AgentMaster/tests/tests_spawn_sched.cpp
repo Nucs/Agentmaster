@@ -717,6 +717,54 @@ void TestProfileBootstrap()
         fs::remove_all(src, ec);
         fs::remove_all(dst, ec);
     }
+
+    // PersistedDebugModeEnabled reads the ENGINE ENVELOPE — {version, settings:{debugMode}} — the
+    // shape SaveAppSettings actually writes. The original top-level-only read could never see the
+    // nested key (Json.h's *At readers are flat), which made the About-tab "Enable Debug Mode"
+    // toggle a permanent no-op: a release relaunched without --debug ran with the Tests Autorunner
+    // disabled and queued prompts sat Pending forever (the journey2 report). Exercised against the
+    // ACTIVE profile's settings.json — run-m5-tests.bat / wmain point AGENTMASTER_PROFILE at the
+    // wiped scratch dir, so ResolveProfileDir() lands there; whatever an earlier suite wrote is
+    // saved and restored so this block perturbs nothing.
+    {
+        namespace fs = std::filesystem;
+        const std::wstring dir = P::ResolveProfileDir();
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        const fs::path sj = fs::path{ dir } / L"settings.json";
+        std::string prevBody;
+        bool hadPrev = false;
+        {
+            std::ifstream f{ sj, std::ios::binary };
+            if (f)
+            {
+                hadPrev = true;
+                prevBody.assign(std::istreambuf_iterator<char>{ f }, std::istreambuf_iterator<char>{});
+            }
+        }
+        auto put = [&](const std::string& bytes) {
+            std::ofstream f{ sj, std::ios::binary | std::ios::trunc };
+            f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        };
+        put("{\"version\":1,\"settings\":{\"debugMode\":true}}");
+        CHECK(P::PersistedDebugModeEnabled(), "debugMode: envelope true is read (the cog's real shape)");
+        put("{\"version\":1,\"settings\":{\"debugMode\":false}}");
+        CHECK(!P::PersistedDebugModeEnabled(), "debugMode: envelope false stays off");
+        put("{\"version\":1,\"settings\":{\"skipPermissions\":true}}");
+        CHECK(!P::PersistedDebugModeEnabled(), "debugMode: envelope without the key -> off");
+        put("{\"debugMode\":true}");
+        CHECK(P::PersistedDebugModeEnabled(), "debugMode: top-level stray still honored (fallback)");
+        put("{\"version\":1,\"settings\":{\"debugMode\":false},\"debugMode\":true}");
+        CHECK(!P::PersistedDebugModeEnabled(), "debugMode: a PRESENT envelope key wins over a top-level stray");
+        put("not json at all");
+        CHECK(!P::PersistedDebugModeEnabled(), "debugMode: garbage file -> off");
+        fs::remove(sj, ec);
+        CHECK(!P::PersistedDebugModeEnabled(), "debugMode: missing file -> off");
+        if (hadPrev)
+        {
+            put(prevBody);
+        }
+    }
 }
 
 static bool WriteLineToPipe(const std::wstring& pipeName, const std::string& utf8Line)

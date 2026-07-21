@@ -508,6 +508,32 @@ namespace Agentmaster
                 LogSwallowedException(L"SessionRegistry::OnHookEvent advance");
             }
         }
+        else if (triggerAdvance)
+        {
+            // Agentmaster (no-silent-inertness): a clean turn-complete landed but NO advance handler
+            // is wired — this process runs without the Tests Autorunner (a release build without
+            // Debug Mode / --debug; Engine.cpp logs its one-time "[engine] ... autorunner disabled"
+            // at init and skips SetAdvanceHandler). A session that actually HAS queued work will sit
+            // Pending forever in this process, previously with ZERO per-session trace — the "queued
+            // while Running, stuck Pending, never sent" report: queued in a --debug run, the app
+            // relaunched without the flag, and every later turn-complete was dropped right here
+            // silently. Leave a breadcrumb ONLY when there is Pending/Held work (a release session
+            // with an empty queue — the normal case — still logs nothing).
+            size_t pendingWork = 0;
+            for (const auto& p : snapshot.queue)
+            {
+                if (p.status == PromptStatus::Pending || p.status == PromptStatus::Held)
+                {
+                    ++pendingWork;
+                }
+            }
+            if (pendingWork > 0)
+            {
+                AppendStateLog(L"hooks.log",
+                               L"[advance-dropped] " + msg.sessionId + L" pending=" + std::to_wstring(pendingWork) +
+                                   L" (turn-complete, but the Tests Autorunner is not running in this process - enable Debug Mode / --debug; the queue cannot auto-send)\n");
+            }
+        }
     }
 
     void SessionRegistry::ObserveClaude(const ObservedClaude& o)

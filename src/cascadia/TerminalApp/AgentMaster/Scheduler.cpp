@@ -227,6 +227,33 @@ namespace Agentmaster
         }
     }
 
+    void Scheduler::_noteAdvanceSkip(const std::wstring& id, const std::wstring& reason)
+    {
+        {
+            std::lock_guard lk{ _mtx };
+            // Bounded like the [Unknown]-dedup precedent (Engine.cpp): past a generous cap, reset
+            // wholesale before admitting a NEW id — the cost is one repeat [advance-skip] line per
+            // still-stuck session while the dedup re-primes, nothing next to unbounded growth.
+            if (_lastSkipReason.size() > 256 && _lastSkipReason.find(id) == _lastSkipReason.end())
+            {
+                _lastSkipReason.clear();
+            }
+            auto& prev = _lastSkipReason[id];
+            if (prev == reason)
+            {
+                return; // same stall as last time — already on record
+            }
+            prev = reason;
+        }
+        AppendStateLog(L"autorunner.log", L"[advance-skip] " + id + L" (" + reason + L")\n");
+    }
+
+    void Scheduler::_clearAdvanceSkip(const std::wstring& id)
+    {
+        std::lock_guard lk{ _mtx };
+        _lastSkipReason.erase(id);
+    }
+
     void Scheduler::_process(const std::wstring& id)
     {
         auto s = _registry->Get(id);
@@ -294,6 +321,9 @@ namespace Agentmaster
                         ss.pendingConfirmPromptId.clear();
                     }
                 });
+                // The plan progressed (a send is being attempted): drop the change-dedup state so a
+                // LATER stall on this session logs its [advance-skip] afresh.
+                _clearAdvanceSkip(id);
                 if (!text.empty())
                 {
                     // Inject + submit via a bracketed paste so a multi-line body lands as ONE message
@@ -358,11 +388,23 @@ namespace Agentmaster
                 }
             });
             AppendStateLog(L"autorunner.log", L"[await-confirm] " + id + L"\n");
+            _clearAdvanceSkip(id); // progress: the next prompt is armed for confirm
             break;
         case AdvanceAction::PlanDone:
             AppendStateLog(L"autorunner.log", L"[plan-done] " + id + L"\n");
+            _clearAdvanceSkip(id); // progress: the queue drained
             break;
         case AdvanceAction::None:
+            // Agentmaster (no-silent-stall): record WHY the queue did not move — the question-guard,
+            // global pause, maxAutoSends, a manual gate, not-ready, the pickup guard. Change-deduped
+            // per session (_noteAdvanceSkip), so a held queue costs one line per distinct stall, not
+            // one per advance request — and "stuck Pending forever" is finally diagnosable from
+            // autorunner.log alone.
+            if (!plan.reason.empty())
+            {
+                _noteAdvanceSkip(id, plan.reason);
+            }
+            break;
         case AdvanceAction::Send: // (already handled / state changed away from Send)
         default:
             break;
