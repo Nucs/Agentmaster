@@ -416,6 +416,25 @@ namespace Agentmaster
         return L"\x1b[200~" + body + L"\x1b[201~";
     }
 
+    // Agentmaster (COMMANDS.md §5b — the standby fill's HANDS-OFF latch): has the user already
+    // driven this session? The pump's standby lane must never FILL (or re-fill) a session the
+    // user owns — and sampling the STATE alone has a hole: a prompt submitted and COMPLETED
+    // between pump ticks lands the state back at rest (Idle/WaitingForInput), where a box-empty
+    // read past the verify window would be mistaken for an eaten paste and RE-FILL the
+    // already-delivered briefing. So the latch also keys on proof a prompt was EVER submitted,
+    // on BOTH channels: turns.lastPromptUnixMs (the push side — set only by a UserPromptSubmit
+    // hook, sub-second) and convLastActivityUnixMs (the pull side — line-derived transcript
+    // activity; a standby successor is always a FRESH spawn whose transcript does not exist
+    // until its first real submit, so both read 0 until the user sends something). PURE.
+    inline bool StandbySessionTakenOver(SessionState state, int64_t lastPromptUnixMs, int64_t convLastActivityUnixMs)
+    {
+        if (state != SessionState::Idle && state != SessionState::WaitingForInput)
+        {
+            return true; // a turn is in flight right now
+        }
+        return lastPromptUnixMs != 0 || convLastActivityUnixMs != 0; // one ever ran (completed between ticks)
+    }
+
     // Agentmaster (#6 — multi-line submit): build the ConPTY input that types `text` into Claude's
     // Ink TUI and submits it as ONE message. A bare `text + CR` makes Ink submit on the FIRST embedded
     // line break (the WinUI compose TextBox emits CR per line), tearing a multi-line prompt across

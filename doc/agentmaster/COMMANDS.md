@@ -359,9 +359,16 @@ dispatched to `_HandleCommandHandover(…, standby=true)`.
   `kStandbyVerifyMs` (12s) means the TUI ate the paste pre-raw-mode (the Enter-retry gotcha's
   text-eaten sibling) → **re-fill**, at most `kStandbyMaxAttempts` (2) times, then give up
   with the file kept. Pre-fill, a box already holding ANY text means the user is typing —
-  the fill holds off entirely (never append to a human draft; the 10-min deadline caps). A
-  session that leaves Idle/Waiting mid-verify means the user took over (likely pressed Enter
-  on the draft themselves) — hands off immediately. The pending-input monitor then lights the
+  the fill holds off entirely (never append to a human draft; the 10-min deadline caps). And a
+  session the USER DROVE is never touched — the pure `StandbySessionTakenOver` latch
+  (SessionModels.h, unit-tested), checked in BOTH phases: a turn in flight NOW (state off
+  Idle/Waiting), or proof one EVER ran (`turns.lastPromptUnixMs` push-side /
+  `convLastActivityUnixMs` pull-side — both 0 on a fresh standby successor until a real
+  submit). The latch is what closes the fast-turn hole: a prompt submitted AND completed
+  between pump ticks lands the state back at rest with an empty box, which a state check alone
+  would misread as an eaten paste and RE-FILL the already-delivered briefing; pre-fill it also
+  keeps a fill out of a session the user claimed with their own prompt during the settle.
+  Hands off always keeps the file. The pending-input monitor then lights the
   "3 dots" unsent-draft indicator on the standby tab for free (the draft IS a pending input).
 * **Delete-after arms only on a VERIFIED fill** — never in `_HandleCommandHandover`. An
   unverified/undelivered draft always leaves its `HANDOVER-*.md` on disk (it is standby's only
@@ -867,8 +874,12 @@ line alone pins the throw site later):
   note "handover" is a PREFIX of "handover-standby", the exact aliasing hazard) + the family
   supersede pivot (/handover → /handover-standby fires the standby path); `BuildPromptFill`
   (bracketed paste, CR/CRLF→LF, NO trailing CR ever — and `BuildPromptSubmission == fill +
-  "\r"`, so the two channels provably share every byte up to the submit); the standby
-  settings' round-trip (name/enable/marker/successor-model) + the triple heal.
+  "\r"`, so the two channels provably share every byte up to the submit); the
+  `StandbySessionTakenOver` hands-off latch (fresh-fillable, a turn in flight, and the
+  fast-completed-turn push/pull evidence cases); the standby
+  settings' round-trip (name/enable/marker/successor-model) + the triple heal. The §6c
+  render↔identity inverse below runs over ALL THREE shipped texts, so a phrase drift that
+  would freeze a command's custom-location files is caught per text.
   **§6a CUSTOMIZATION units:** `NormalizeCommandName` (slug rules, `/`-strip, path chars dropped,
   the 64-cap) + `ResolveCommandNameTriple` (defaults, every collision direction incl. the
   squatter-eviction cascade); the
@@ -899,8 +910,8 @@ line alone pins the throw site later):
   **§6c WRITE-LOCATION units:** `NormalizeCommandWritePath` (trim, the trailing-separator drop
   that spares the degenerate roots, the line-breaking chars dropped, the length cap) +
   `CommandWritePathIsScratchpad` (blank == the token, case-insensitively); the rendered phrase
-  per shape (default · `./` · relative · absolute); the render↔identity INVERSE over BOTH REAL
-  texts — the marker is present, the shipped default renders BYTE-IDENTICALLY, a configured
+  per shape (default · `./` · relative · absolute); the render↔identity INVERSE over ALL THREE
+  REAL texts — the marker is present, the shipped default renders BYTE-IDENTICALLY, a configured
   folder lands on the marker line while the `HANDOVER-<topic>.md` name contract is untouched, the
   phrase stays ONE line (line count unchanged), a location-rendered current text digests back
   onto the history's last entry, a marker-less (pre-§6c) text is returned verbatim so those

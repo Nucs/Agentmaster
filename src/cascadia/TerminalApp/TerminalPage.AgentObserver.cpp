@@ -5346,9 +5346,14 @@ namespace winrt::TerminalApp::implementation
     //   * a box still EMPTY after kStandbyVerifyMs means the TUI ate the paste pre-raw-mode (the
     //     Enter-retry gotcha's text-eaten sibling) — re-fill, at most kStandbyMaxAttempts times,
     //     then give up (file kept, logged);
-    //   * the session leaving Idle/WaitingForInput mid-verify means the user took over (possibly
-    //     submitted the draft themselves) — hands off immediately, file kept (we cannot tell
+    //   * the user DRIVING the session means hands off immediately, file kept (we cannot tell
     //     "sent our draft" from "our fill was eaten and they typed their own", so never delete).
+    //     The gate is the pure StandbySessionTakenOver latch, checked in BOTH phases: a turn in
+    //     flight NOW (state off Idle/WaitingForInput), or proof one EVER ran
+    //     (turns.lastPromptUnixMs / convLastActivityUnixMs — a fast turn submitted and COMPLETED
+    //     between ticks lands the state back at rest, where the emptied box would otherwise read
+    //     as an eaten paste and the pump would RE-FILL an already-delivered briefing; both
+    //     signals are 0 on a fresh standby successor until a real submit).
     winrt::fire_and_forget TerminalPage::_PumpHandoverInjections()
     {
         // Terminate-net (the _SweepClaudeLiveness idiom): an exception escaping a fire_and_forget
@@ -5415,6 +5420,23 @@ namespace winrt::TerminalApp::implementation
                     ++it;
                     continue;
                 }
+                // HANDS-OFF latch, BOTH phases (StandbySessionTakenOver — pure, unit-tested): the
+                // user drove this session — a turn in flight NOW, or proof one EVER ran
+                // (turns.lastPromptUnixMs / convLastActivityUnixMs; a fast turn submitted AND
+                // completed between pump ticks lands the state back at rest, where the state
+                // check alone would mistake the emptied box for an eaten paste and RE-FILL the
+                // already-delivered briefing). Pre-fill it also covers a user who claimed the
+                // fresh successor with their own prompt during the settle (the state-only gap:
+                // the box reads empty mid-turn, and filling into a RUNNING session is exactly
+                // the intrusion standby exists to avoid). Either way the session is theirs:
+                // hands off permanently, and NEVER delete the file (we cannot tell "sent our
+                // draft" from "fill eaten + typed their own" — the briefing stays their copy).
+                if (::Agentmaster::StandbySessionTakenOver(s->state, s->turns.lastPromptUnixMs, s->convLastActivityUnixMs))
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-standby] " + ::Agentmaster::ShortId(id) + (entry.injectedAtMs == 0 ? L" session in use before the fill" : L" session took over before verification") + L" (a prompt ran) - hands off, md kept\n");
+                    it = _pendingHandoverInjections.erase(it);
+                    continue;
+                }
                 // Read the successor's live input box (the verification channel — UI thread).
                 std::wstring draft;
                 bool draftKnown = false;
@@ -5436,7 +5458,9 @@ namespace winrt::TerminalApp::implementation
                 }
                 if (entry.injectedAtMs != 0)
                 {
-                    // Verify phase — a fill was injected; is it visible in the box?
+                    // Verify phase — a fill was injected; is it visible in the box? (The latch
+                    // above already excluded every "the user drove it" case, so a non-empty box
+                    // here is OUR fill.)
                     if (draftKnown && !draft.empty())
                     {
                         ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-standby] " + ::Agentmaster::ShortId(id) + L" draft VERIFIED in the input box (chars=" + std::to_wstring(draft.size()) + L") - one Enter away\n");
@@ -5446,16 +5470,6 @@ namespace winrt::TerminalApp::implementation
                         {
                             _pendingHandoverDeletes[id] = PendingHandoverDelete{ entry.standbyMdPath, now };
                         }
-                        it = _pendingHandoverInjections.erase(it);
-                        continue;
-                    }
-                    if (s->state != ::Agentmaster::SessionState::Idle && s->state != ::Agentmaster::SessionState::WaitingForInput)
-                    {
-                        // A turn started before verification — the user (most likely) pressed
-                        // Enter on the draft themselves, or typed their own message. Either way
-                        // the session is theirs now: hands off, and NEVER delete the file (we
-                        // cannot tell "sent our draft" from "fill eaten + typed their own").
-                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-standby] " + ::Agentmaster::ShortId(id) + L" session took over before verification (state moved) - hands off, md kept\n");
                         it = _pendingHandoverInjections.erase(it);
                         continue;
                     }

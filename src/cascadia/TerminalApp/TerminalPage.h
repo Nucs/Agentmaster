@@ -839,8 +839,11 @@ namespace winrt::TerminalApp::implementation
         // (ControlCore::ReadPendingInputDraft, the PENDING_INPUT.md primitive): a box still empty
         // after the verify window means the TUI ate the paste pre-raw-mode (the Enter-retry
         // gotcha's text-eaten sibling — there is no echo to watchdog a fill), so it re-fills, at
-        // most kStandbyMaxAttempts times, and NEVER while the box holds ANY text (a user draft
-        // must never be appended to). Deliberately OUTSIDE the queue: a Pending row could be
+        // most kStandbyMaxAttempts times, NEVER while the box holds ANY text (a user draft
+        // must never be appended to), and NEVER once the user has DRIVEN the session (the pure
+        // StandbySessionTakenOver latch, both phases: a turn in flight now, or proof one ever
+        // ran — a fast turn completed between ticks would otherwise read as an eaten paste and
+        // re-fill the delivered briefing). Deliberately OUTSIDE the queue: a Pending row could be
         // auto-SENT by a Full autorunner and a Sent row would arm the Enter-retry watchdog —
         // either would defeat standby, whose whole contract is "nothing submits without the
         // user's Enter". Not restart-durable — the briefing FILE is the durable copy (standby

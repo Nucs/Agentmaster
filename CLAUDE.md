@@ -1011,8 +1011,12 @@ primitive — no echo ever confirms a fill): box non-empty ⇒ verified (logged 
 Enter away`; the §6b delete-after arms ONLY here — an unverified draft always leaves its briefing
 file, standby's one durable copy); box still empty after 12s ⇒ the TUI ate the paste pre-raw-mode ⇒
 re-fill (≤2 attempts, then give up + keep the file); a box already holding USER text is never
-touched (no append-to-a-human-draft, the 10-min deadline caps); a session leaving Idle/Waiting
-mid-verify means the user took over ⇒ hands off, file kept. The pending-input monitor's "3 dots"
+touched (no append-to-a-human-draft, the 10-min deadline caps); a session the user DROVE is
+never filled/re-filled — the pure `StandbySessionTakenOver` latch, BOTH phases: a turn in
+flight now OR proof one ever ran (`turns.lastPromptUnixMs`/`convLastActivityUnixMs`, both 0 on
+a fresh successor until a real submit — closing the fast-turn hole where a submit+complete
+between ticks reads as an eaten paste and would re-fill the delivered briefing) ⇒ hands off,
+file kept. The pending-input monitor's "3 dots"
 then mark the standby tab for free (the draft IS a pending input). Full settings suite: its own
 Commands-tab section (enable + rename + status + Successor-model combo,
 `commandHandoverStandby*`), every family-wide §6b/§6c rule (title rewrite · file match · write

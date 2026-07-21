@@ -1277,11 +1277,25 @@ void TestCommandWatch()
               "phrase: an absolute folder is not called relative, and is still created if missing");
 
         // Render <-> identity are EXACT inverses over the real shipped texts — the property the
-        // whole upgrade rule rests on (a location-rendered file must digest back onto the history).
-        for (const bool here : { false, true })
+        // whole upgrade rule rests on (a location-rendered file must digest back onto the
+        // history). ALL THREE family texts: a one-byte drift between a text's embedded phrase and
+        // the shipped-phrase constant would make every CUSTOM-location file of that command read
+        // user-owned and freeze — exactly what this loop exists to catch.
+        struct FamilyText
         {
-            const std::wstring_view current = here ? ShippedHandoverHereCommandText() : ShippedHandoverCommandText();
-            const auto& hashes = here ? ShippedHandoverHereCommandHashes() : ShippedHandoverCommandHashes();
+            std::wstring_view current;
+            const std::vector<std::string_view>* hashes;
+            std::wstring_view defName;
+        };
+        const FamilyText family[] = {
+            { ShippedHandoverCommandText(), &ShippedHandoverCommandHashes(), kDefaultHandoverCommandName },
+            { ShippedHandoverHereCommandText(), &ShippedHandoverHereCommandHashes(), kDefaultHandoverHereCommandName },
+            { ShippedHandoverStandbyCommandText(), &ShippedHandoverStandbyCommandHashes(), kDefaultHandoverStandbyCommandName },
+        };
+        for (const auto& f : family)
+        {
+            const std::wstring_view current = f.current;
+            const auto& hashes = *f.hashes;
             CHECK(current.find(L"WRITE IT IN: ") != std::wstring_view::npos, "shipped text carries the write-location MARKER (the render/identity span)");
             CHECK(Utf8Of(RenderShippedCommandWritePath(current, L"")) == Utf8Of(current) &&
                       Utf8Of(RenderShippedCommandWritePath(current, L"scratchpad")) == Utf8Of(current),
@@ -1296,9 +1310,8 @@ void TestCommandWatch()
                   "identity: a location-rendered CURRENT text digests back onto the history's last entry");
             // Both customizations at once (a renamed command with a custom location) must still
             // resolve to the shipped digest — the two spans are independent.
-            const std::wstring_view defName = here ? kDefaultHandoverHereCommandName : kDefaultHandoverCommandName;
-            const std::wstring both = RenderShippedCommandWritePath(RenderShippedCommandText(current, defName, L"zz"), L"D:\\briefs");
-            CHECK(Sha256Hex(NormalizeCommandBytesForIdentity(NormalizeCommandWritePathBytesForIdentity(Utf8Of(both)), defName, L"zz")) == hashes.back(),
+            const std::wstring both = RenderShippedCommandWritePath(RenderShippedCommandText(current, f.defName, L"zz"), L"D:\\briefs");
+            CHECK(Sha256Hex(NormalizeCommandBytesForIdentity(NormalizeCommandWritePathBytesForIdentity(Utf8Of(both)), f.defName, L"zz")) == hashes.back(),
                   "identity: a RENAMED command with a CUSTOM location still digests onto the shipped history (both spans invert)");
         }
         // A text WITHOUT the marker (every pre-6c version) is returned verbatim — exactly what
@@ -1593,6 +1606,21 @@ void TestCommandWatch()
         CHECK(BuildPromptSubmission(L"do a\r\nthen b\rthen c") == fill + L"\r", "fill + one CR == the submit builder (the two channels can never drift)");
         CHECK(BuildPromptFill(L"one line") == L"\x1b[200~one line\x1b[201~", "fill: a single-line draft is a complete delimited paste with no submit");
         CHECK(BuildPromptFill(L"").find(L'\r') == std::wstring::npos, "fill: no CR anywhere, even empty (nothing this builder emits can ever submit)");
+    }
+
+    // ---- StandbySessionTakenOver (COMMANDS.md §5b — the fill's HANDS-OFF latch) ----
+    // The pump must never fill/re-fill a session the user drove. State alone has a hole: a
+    // prompt submitted AND completed between pump ticks lands the state back at rest, where an
+    // emptied box past the verify window would read as an eaten paste and RE-FILL the delivered
+    // briefing — so the latch also keys on proof a prompt EVER ran (push: turns.lastPromptUnixMs;
+    // pull: convLastActivityUnixMs — both 0 on a fresh standby successor until a real submit).
+    {
+        CHECK(!StandbySessionTakenOver(SessionState::Idle, 0, 0), "latch: a fresh idle successor is fillable");
+        CHECK(!StandbySessionTakenOver(SessionState::WaitingForInput, 0, 0), "latch: at-rest WaitingForInput with no prompt evidence is fillable");
+        CHECK(StandbySessionTakenOver(SessionState::Running, 0, 0), "latch: a turn in flight = hands off (fill would land in a running session)");
+        CHECK(StandbySessionTakenOver(SessionState::NeedsApproval, 0, 0), "latch: blocked-on-user = hands off (a turn is in progress)");
+        CHECK(StandbySessionTakenOver(SessionState::WaitingForInput, 1'752'900'000'000, 0), "latch: back at rest but a UserPromptSubmit was seen = hands off (the fast-completed-turn hole)");
+        CHECK(StandbySessionTakenOver(SessionState::Idle, 0, 1'752'900'000'000), "latch: back at rest but the transcript has activity = hands off (the pull-side belt, no-hook turns)");
     }
 }
 
