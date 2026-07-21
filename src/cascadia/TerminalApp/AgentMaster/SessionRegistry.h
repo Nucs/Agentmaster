@@ -125,6 +125,20 @@ namespace Agentmaster
         ObserverToken AddObserver(RegistryObserver observer);
         void RemoveObserver(ObserverToken token);
         void SetAdvanceHandler(AdvanceHandler handler);
+        // Agentmaster (adopt/re-home autorunner default): the Tests Autorunner MODE stamped onto a
+        // session record the registry CREATES itself — the hook SessionStart adopt path and the Fleet
+        // Observer's first-sight create. Every other opened session gets the cog default at its
+        // launch/restore seam (TerminalPage.AgentSessions.cpp), but these two records are minted
+        // INSIDE the engine where AppSettings isn't in scope, so they silently defaulted to Off — an
+        // adopted hand-typed claude (or the NEW conversation id an in-session /clear or /resume mints
+        // on a re-homed tab) then never auto-sent its queued prompts, contradicting the documented
+        // "the MODE seeds every OPENED session — new, adopted, AND restored" (AppSettings,
+        // SessionModels.h) and reading as "queued prompts stuck Pending, never sent". Wired at engine
+        // init (gated on IsDevOrDebugPackage like the Scheduler itself, so a plain release keeps
+        // minting Off records to match its never-started autorunner) and re-pushed live by the cog
+        // Save. CREATION-only: an existing record's mode is the user's per-session choice (or the
+        // launch/restore stamp) and is never touched here.
+        void SetDefaultAutorunnerMode(AutorunnerMode mode);
         // Multiple adoption handlers may register — one per window (M9). When a hook arrives for
         // a session we didn't Launch, ALL are invoked (outside the lock); whichever window hosts
         // the `+` tab binds it, the rest no-op. AddAdoptionHandler returns a token; the window
@@ -173,6 +187,10 @@ namespace Agentmaster
         std::vector<std::pair<ObserverToken, RegistryObserver>> _observers;
         uint64_t _nextObserverId{ 1 };
         AdvanceHandler _advance;
+        // The creation-time autorunner mode for records the registry mints itself (hook-adopt +
+        // observer first-sight) — see SetDefaultAutorunnerMode. Off until wired, so the standalone
+        // harness / CLI / a release build behave exactly as before. Guarded by _mtx.
+        AutorunnerMode _defaultAutorunnerMode{ AutorunnerMode::Off };
         std::vector<std::pair<AdoptionToken, AdoptionHandler>> _adopters;
         uint64_t _nextAdopterId{ 1 };
         // Monotonic counter for ids of `Typed` prompts the registry synthesizes from

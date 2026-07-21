@@ -127,8 +127,11 @@ namespace winrt::TerminalApp::implementation
         _planHeaderHost.Children().Append(titleRow);
         _planHeaderHost.Children().Append(Text(winrt::hstring{ _WorkDirOf(*sel) }, 12, false, 0.6)); // the EFFECTIVE work dir — matches the tree group / board card / tab color
 
-        // reflect autorunner mode on the header toggle
-        _UpdateAutorunnerButton(sel->autorunner.mode, true);
+        // reflect autorunner mode on the header toggle. A managed CODEX session is lifecycle+state
+        // only — no stdin injector, no hooks, so the Tests Autorunner can never drive it (C4 is the
+        // deferred injector work): show its (Off) mode DISABLED instead of an armable placebo that
+        // would leave queued prompts silently Pending forever.
+        _UpdateAutorunnerButton(sel->autorunner.mode, sel->kind == ::Agentmaster::AgentKind::Claude);
 
         // SemiAuto one-click confirm banner (the scheduler armed the next prompt).
         if (!sel->pendingConfirmPromptId.empty())
@@ -1079,6 +1082,13 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // A managed CODEX session can never be driven (no stdin injector, no hooks — C4 deferred):
+        // refuse to arm a mode that would only strand queued prompts as silently-Pending. The header
+        // toggle is disabled for Codex (_RebuildPlan), so this is the belt for any other caller.
+        if (const auto cur = _registry->Get(_selectedId); cur && cur->kind != ::Agentmaster::AgentKind::Claude)
+        {
+            return;
+        }
         const AutorunnerMode mode = index == 2 ? AutorunnerMode::Full : index == 1 ? AutorunnerMode::SemiAuto :
                                                                                    AutorunnerMode::Off;
         // Nav audit: the user changed this session's Autorunner mode (the Auto-Testing header toggle).
@@ -1106,6 +1116,10 @@ namespace winrt::TerminalApp::implementation
         if (!s || !s->live)
         {
             return; // nothing live to drive (the button is disabled in this state anyway)
+        }
+        if (s->kind != ::Agentmaster::AgentKind::Claude)
+        {
+            return; // a managed Codex has no injector/hooks — never armable (the button is disabled too)
         }
         // Off(0) -> Semi-auto(1) -> Full(2) -> Off — same index order the old combo used.
         const int next = s->autorunner.mode == AutorunnerMode::Off ? 1 :

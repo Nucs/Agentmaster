@@ -1013,6 +1013,42 @@ void TestObserveClaude()
     noId.cwd = L"K:/x";
     reg.ObserveClaude(noId);
     CHECK(reg.Count() == countBefore, "ObserveClaude no-ops for an empty sessionId");
+
+    // 5. Adopt/re-home autorunner default (SetDefaultAutorunnerMode): a record the registry mints
+    //    ITSELF — the observer first-sight create AND the hook SessionStart adopt create — carries the
+    //    wired default MODE, so an adopted hand-typed claude / a /clear-minted re-home conversation is
+    //    driven like any launched session instead of silently defaulting Off ("queued prompts stuck
+    //    Pending, never sent"). CREATION-only: an existing record's mode is never touched.
+    {
+        // Un-wired (the harness / CLI / a plain release): both create paths still mint Off.
+        CHECK(reg.Get(L"obs-1") && reg.Get(L"obs-1")->autorunner.mode == AutorunnerMode::Off,
+              "default-mode: un-wired registry minted Off (release/harness behavior unchanged)");
+
+        reg.SetDefaultAutorunnerMode(AutorunnerMode::Full);
+
+        ObservedClaude nu; // observer first-sight create AFTER wiring
+        nu.sessionId = L"obs-def-full";
+        nu.tabToken = L"wt-9";
+        nu.cwd = L"K:/proj";
+        nu.pid = 4321;
+        nu.observedUnixMs = 9000;
+        reg.ObserveClaude(nu);
+        CHECK(reg.Get(L"obs-def-full") && reg.Get(L"obs-def-full")->autorunner.mode == AutorunnerMode::Full,
+              "default-mode: observer first-sight create carries the wired default (Full)");
+
+        // Hook SessionStart create (the adopt / re-home NEW-conversation-id path).
+        reg.OnHookEvent(Msg(L"hook-def-full", HookEvent::SessionStart));
+        CHECK(reg.Get(L"hook-def-full") && reg.Get(L"hook-def-full")->autorunner.mode == AutorunnerMode::Full,
+              "default-mode: hook SessionStart create carries the wired default (Full)");
+
+        // CREATION-only: obs-1 existed before the wiring (mode Off) — a later observe/enrich of it
+        // must NOT re-stamp (the per-session toggle is the user's; the default applies at mint time).
+        o.observedUnixMs = 9500;
+        o.model = L"haiku"; // a genuine fact change so the merge path runs fully
+        reg.ObserveClaude(o);
+        CHECK(reg.Get(L"obs-1") && reg.Get(L"obs-1")->autorunner.mode == AutorunnerMode::Off,
+              "default-mode: an EXISTING record's mode is never re-stamped by an observe");
+    }
 }
 
 // Agentmaster (one ConPTY = one live conversation; Rule #14 / session-id divergence): a single

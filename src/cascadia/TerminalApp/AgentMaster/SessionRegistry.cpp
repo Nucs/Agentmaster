@@ -317,6 +317,13 @@ namespace Agentmaster
                 // Mark it external/observe-only; the adoption handler (fired below, outside
                 // the lock) tries to bind it to its ConPTY for full control.
                 created.external = true;
+                // Agentmaster (adopt/re-home autorunner default — SetDefaultAutorunnerMode): a record
+                // minted HERE is a newly-OPENED session (a hand-typed adopted claude, or the NEW
+                // conversation id an in-session /clear or /resume mints on a re-homed tab), so it gets
+                // the same cog default MODE the launch/restore seams stamp — it used to default Off,
+                // silently exempting exactly these sessions from the Tests Autorunner. Config only,
+                // creation only; never SessionState.
+                created.autorunner.mode = _defaultAutorunnerMode;
                 _order.push_back(msg.sessionId);
                 it = _sessions.emplace(msg.sessionId, std::move(created)).first;
             }
@@ -561,6 +568,13 @@ namespace Agentmaster
                 s.state = SessionState::Idle;
                 s.external = true;
                 s.live = true;
+                // Agentmaster (adopt/re-home autorunner default — SetDefaultAutorunnerMode): mirror
+                // the hook SessionStart creation above — a first-sight observed claude is a newly-
+                // OPENED session, so it gets the cog default MODE (it used to default Off, silently
+                // exempting observer-adopted sessions from the Tests Autorunner). Config at CREATION
+                // only — enrichment merges below never touch autorunner state, and ObserveClaude
+                // still NEVER sets SessionState.
+                s.autorunner.mode = _defaultAutorunnerMode;
                 _order.push_back(o.sessionId);
                 it = _sessions.emplace(o.sessionId, std::move(s)).first;
                 created = true;
@@ -855,6 +869,12 @@ namespace Agentmaster
         _observers.erase(
             std::remove_if(_observers.begin(), _observers.end(), [token](const auto& o) { return o.first == token; }),
             _observers.end());
+    }
+
+    void SessionRegistry::SetDefaultAutorunnerMode(AutorunnerMode mode)
+    {
+        std::lock_guard guard{ _mtx };
+        _defaultAutorunnerMode = mode;
     }
 
     void SessionRegistry::SetAdvanceHandler(AdvanceHandler handler)
