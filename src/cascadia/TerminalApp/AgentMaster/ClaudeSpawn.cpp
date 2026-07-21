@@ -2028,6 +2028,116 @@ file) in this working directory, injecting each document as its session's openin
         return out;
     }
 
+    std::wstring PickModelFromArgsHint(std::wstring_view args, std::wstring_view launchModelsSpec)
+    {
+        const auto models = ParseLaunchModels(launchModelsSpec);
+        if (models.empty())
+        {
+            return {};
+        }
+        // The characters-only fold both sides of the comparison go through: lowercase [a-z0-9],
+        // everything else dropped — "Fable 5" == "fable5", "claude-fable-5" == "claudefable5",
+        // "[fable]" == "fable". Caseless + separator-blind by construction.
+        const auto fold = [](std::wstring_view s) {
+            std::wstring out;
+            out.reserve(s.size());
+            for (wchar_t c : s)
+            {
+                if (c >= L'A' && c <= L'Z')
+                {
+                    out.push_back(static_cast<wchar_t>(c - L'A' + L'a'));
+                }
+                else if ((c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9'))
+                {
+                    out.push_back(c);
+                }
+            }
+            return out;
+        };
+        // First matching entry in LIST ORDER wins (the user's own ordering is the tie-break —
+        // same rule the launch-model submenus render by). Returns the model ID to launch with.
+        const auto matchHint = [&](const std::wstring& hint) -> const std::wstring* {
+            if (hint.empty())
+            {
+                return nullptr;
+            }
+            for (const auto& [display, id] : models)
+            {
+                if (fold(display).find(hint) != std::wstring::npos || fold(id).find(hint) != std::wstring::npos)
+                {
+                    return &id;
+                }
+            }
+            return nullptr;
+        };
+        // Only the FIRST LINE's leading portion is a hint position — a model word deep inside a
+        // multi-line briefing context must never hijack the successor's model. (substr clamps an
+        // npos count natively — no-newline args read whole; std::min is a windows.h macro hazard
+        // in this TU.)
+        std::wstring_view line = args.substr(0, args.find(L'\n'));
+        size_t pos = 0;
+        while (pos < line.size() && (line[pos] == L' ' || line[pos] == L'\t' || line[pos] == L'\r'))
+        {
+            ++pos;
+        }
+        line.remove_prefix(pos);
+        if (line.empty())
+        {
+            return {};
+        }
+        if (line.front() == L'[')
+        {
+            // The explicit bracketed form: the bracket body is the hint, whole. Unterminated or
+            // absurdly long (nobody types a 64+-char model hint) reads as "not a hint" — the text
+            // is just part of the user's context, never an error.
+            const size_t close = line.find(L']', 1);
+            if (close == std::wstring_view::npos || close > 65)
+            {
+                return {};
+            }
+            const auto* id = matchHint(fold(line.substr(1, close - 1)));
+            return id ? *id : std::wstring{};
+        }
+        // The bare form: the FIRST word must hit on its own (folded >= 3 chars, so a stray short
+        // word can never accidentally pick a model), then greedily extend a word at a time (up to
+        // 4) while the longer fold still matches — longest match wins, so "fable 5 fix x" resolves
+        // "fable5" and stops at "fable5fix".
+        std::wstring concat;
+        std::wstring best;
+        size_t at = 0;
+        for (int words = 1; words <= 4; ++words)
+        {
+            while (at < line.size() && (line[at] == L' ' || line[at] == L'\t' || line[at] == L'\r'))
+            {
+                ++at;
+            }
+            if (at >= line.size())
+            {
+                break;
+            }
+            const size_t wordEnd = line.find_first_of(L" \t\r", at); // npos == the last word (substr clamps)
+            concat += fold(line.substr(at, wordEnd - at));
+            at = wordEnd == std::wstring_view::npos ? line.size() : wordEnd;
+            if (words == 1 && concat.size() < 3)
+            {
+                return {}; // too short to be a deliberate bare hint ("a", "do", "5")
+            }
+            if (const auto* id = matchHint(concat))
+            {
+                best = *id;
+            }
+            else if (words == 1)
+            {
+                return {}; // the FIRST word must match — no scanning deeper into the sentence
+            }
+            else
+            {
+                break; // the extension stopped matching — keep the longest hit
+            }
+        }
+        return best;
+    }
+
     std::wstring ReadHandoverDocumentPrompt(const std::wstring& mdPath)
     try
     {

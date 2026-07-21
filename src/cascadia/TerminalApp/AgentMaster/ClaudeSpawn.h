@@ -670,6 +670,30 @@ namespace Agentmaster
     // the candidate past registry titles exactly like the default naming.
     std::wstring DeriveHandoverSuccessorTitle(std::wstring_view originTitle, std::wstring_view findRegex, std::wstring_view replacement);
 
+    // COMMANDS.md §6b (successor shaping — the per-MESSAGE model hint): a /handover(-here) message
+    // may LEAD with a model pick that overrides the per-command "Successor model" combo for THAT
+    // handover alone — `/handover [fable] do a b c`, `/handover fable 5: fix the tests`. Given the
+    // command's ARGS (the transcript echo's <command-args>, delivered on the fire) and the
+    // launchModels spec, returns the picked model ID ("" == no hint — the combo/Default applies).
+    //
+    // Matching is PARTIAL + CASELESS + CHARACTERS-ONLY: both the typed hint and each entry's TWO
+    // sides (the display name AND the model id, ParseLaunchModels) fold to lowercase [a-z0-9]
+    // (spaces/dots/hyphens/brackets dropped), and the hint matches an entry when it is a SUBSTRING
+    // of either folded side — "fable" hits "Fable 5"/"claude-fable-5", "sonnet" hits
+    // "claude-sonnet-5". First matching entry in list order wins. Only the args' FIRST LINE's
+    // LEADING portion is consulted:
+    //   * `[hint]` — the explicit bracketed form: the bracket body is the hint (any non-empty fold;
+    //     an unterminated/absurdly long bracket or a no-match reads as no hint — the text just
+    //     stays part of the origin's context);
+    //   * bare leading word(s) — the FIRST word must hit on its own (and fold to >= 3 chars — a
+    //     stray "a"/"do" can never accidentally pick a model), then the hint greedily EXTENDS one
+    //     word at a time (up to 4) while the longer fold still matches, longest match winning —
+    //     so "fable 5 do x" resolves "fable5" (not just "fable") and stops before "do".
+    // The hint is NOT stripped from anything: the origin already received the full text as
+    // $ARGUMENTS (harmless context), and the successor's first message is the FILE content. PURE
+    // (ParseLaunchModels over the spec, no I/O) + unit-tested.
+    std::wstring PickModelFromArgsHint(std::wstring_view args, std::wstring_view launchModelsSpec);
+
     // Build a complete spawn spec and ensure the shared hook files exist. `pipeName` is the
     // live HooksBridge pipe (HookPipeName(pid)). If `resumeSessionId` is non-empty, the spec
     // RESUMES that conversation (claude --resume <id>) and reuses the id; otherwise a fresh

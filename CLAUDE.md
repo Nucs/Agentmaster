@@ -841,7 +841,15 @@ applies to the NEXT handover right after Save (no restart) except where noted: a
 successor MODEL** (`commandHandoverSuccessorModel`/`…Here…`; `""` == Default, else this launch's
 `--model <id>` through the existing launch-model seam — `_LaunchClaudeSession`'s `modelOverride` and
 `_RestartTabIntoFreshSession`'s new one; the cog lists Default + `launchModels`, an unlisted stored id
-shown `(custom) <id>`), a family **TITLE REWRITE** (`commandHandoverTitleFindRegex`/`…TitleReplace` →
+shown `(custom) <id>` — **overridable PER MESSAGE by a leading model word in the typed command**:
+`/handover [fable] do a b c` / `/handover fable 5: fix x` — `PickModelFromArgsHint`, pure + tested:
+partial + caseless + characters-only fold matched as a SUBSTRING of EITHER side of every launchModels
+entry (display name / model id), first entry wins; brackets optional — bare form needs the FIRST word
+to hit alone (≥3 folded chars, so a stray "a"/"do" never picks) then greedily extends ≤4 words while
+still matching, longest wins; only the args' first line's leading words are consulted, nothing is
+stripped from the text; the echo's `<command-args>` now rides the whole fan-out — `CommandActionSink`/
+`RaiseCommandActionInWindows`/the per-window sink/`_HandleCommandHandover` gained an `args` leg —
+logged `[handover] <sid8> successor model from the message hint: <id>`), a family **TITLE REWRITE** (`commandHandoverTitleFindRegex`/`…TitleReplace` →
 the pure `DeriveHandoverSuccessorTitle`, which returns `""` on unset/invalid/no-match/blank-result so
 the classic `"(handover)"` naming is the fallback — the rewrite can only IMPROVE a title, never lose
 one; `$1` backrefs, trimmed, 255-capped, still uniqueness-bumped), a family **FILE-MATCH regex**
@@ -1765,7 +1773,9 @@ What works, by area:
   preserved-from-disk on Save like the seed markers) **plus the SUCCESSOR SHAPING half (§6b)** —
   **`commandHandoverSuccessorModel`/`…HereSuccessorModel`** (a per-command "Successor model" combo:
   Default + the `launchModels` list, rebuilt each cog open, an unlisted stored id shown `(custom)
-  <id>`), **`commandHandoverTitleFindRegex`/`…TitleReplace`** (a find/replace pair rewriting successor
+  <id>`; a LEADING model word in the typed command — `/handover [fable] …` / `/handover fable 5: …`,
+  partial/caseless/characters-only against either side of a launchModels entry — overrides the combo
+  for that one handover, `PickModelFromArgsHint`), **`commandHandoverTitleFindRegex`/`…TitleReplace`** (a find/replace pair rewriting successor
   titles off the origin title — `$1` backrefs; unset/invalid/no-match/blank falls back to the classic
   `"(handover)"` naming), **`commandHandoverFileMatchRegex`** (which markdown files a handover
   collects, matched case-insensitively against the file NAME; seeded `HANDOVER\-` == the

@@ -261,6 +261,16 @@ namespace Agentmaster
                 e->registry->AddObserver([sched](const SessionInfo& s, HookEvent) {
                     sched->OnObserved(s);
                 });
+                // Adopt/re-home autorunner default (SetDefaultAutorunnerMode): the MODE the registry
+                // stamps onto records it mints ITSELF — the hook SessionStart adopt create + the Fleet
+                // Observer's first-sight create (a hand-typed adopted claude; the NEW conversation id
+                // an in-session /clear or /resume mints on a re-homed tab). The launch/restore seams
+                // stamp the cog default in TerminalPage, but these two creations happen inside the
+                // engine and used to default Off — silently exempting exactly those sessions from the
+                // autorunner ("queued prompts stuck Pending"). Seeded here from the persisted settings;
+                // the cog Save re-pushes it live. Deliberately INSIDE this dev-or-debug gate: a plain
+                // release (scheduler never started) keeps minting Off records that match reality.
+                e->registry->SetDefaultAutorunnerMode(LoadAppSettings().defaultAutorunnerMode);
             }
             else
             {
@@ -376,8 +386,11 @@ namespace Agentmaster
             // illegal in a real Windows path and IsSaneWatchPath rejects it per-path).
             if (cmdSettings.commandHandoverEnabled)
             {
-                e->commandWatch->BindMarkdownAwait(handoverCmdName, L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& /*args*/) {
-                    RaiseCommandActionInWindows(sessionId, L"handover", JoinWatchPaths(mdPaths));
+                // `args` (the typed command's <command-args>) rides the fan-out verbatim — the
+                // hosting window parses the §6b per-message model hint out of its leading words
+                // at action time (PickModelFromArgsHint), where the live settings are at hand.
+                e->commandWatch->BindMarkdownAwait(handoverCmdName, L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& args) {
+                    RaiseCommandActionInWindows(sessionId, L"handover", JoinWatchPaths(mdPaths), args);
                 }, leafMatchRegex, allowFirstMarkdownFallback);
             }
             // /handover-here — the IN-PLACE twin: the SAME markdown await (same "handover" leaf
@@ -388,8 +401,8 @@ namespace Agentmaster
             // name-EXACT, so the two commands can never cross-fire (whatever they are named).
             if (cmdSettings.commandHandoverHereEnabled)
             {
-                e->commandWatch->BindMarkdownAwait(handoverHereCmdName, L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& /*args*/) {
-                    RaiseCommandActionInWindows(sessionId, L"handover-here", JoinWatchPaths(mdPaths));
+                e->commandWatch->BindMarkdownAwait(handoverHereCmdName, L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& args) {
+                    RaiseCommandActionInWindows(sessionId, L"handover-here", JoinWatchPaths(mdPaths), args);
                 }, leafMatchRegex, allowFirstMarkdownFallback);
             }
             e->scanner->SetCommandWatch(e->commandWatch);
@@ -972,7 +985,7 @@ namespace Agentmaster
         }
     }
 
-    uint64_t RegisterCommandActionHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload)> handler)
+    uint64_t RegisterCommandActionHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload, const std::wstring& args)> handler)
     {
         if (!handler)
         {
@@ -1003,7 +1016,7 @@ namespace Agentmaster
         }
     }
 
-    void RaiseCommandActionInWindows(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload)
+    void RaiseCommandActionInWindows(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload, const std::wstring& args)
     {
         if (sessionId.empty() || command.empty())
         {
@@ -1014,7 +1027,7 @@ namespace Agentmaster
         // each sink hops into its own window's dispatcher; the fire originates on the scanner
         // thread, so EVERY window is a candidate (no source to exclude) and only the (single)
         // window hosting the session's tab acts.
-        std::vector<std::function<void(const std::wstring&, const std::wstring&, const std::wstring&)>> sinks;
+        std::vector<std::function<void(const std::wstring&, const std::wstring&, const std::wstring&, const std::wstring&)>> sinks;
         {
             std::lock_guard<std::mutex> lk(e.commandActionMutex);
             sinks.reserve(e.commandActionSinks.size());
@@ -1033,7 +1046,7 @@ namespace Agentmaster
             // in the list, and dropping it would silently swallow the whole command action.
             try
             {
-                fn(sessionId, command, payload);
+                fn(sessionId, command, payload, args);
             }
             catch (...)
             {

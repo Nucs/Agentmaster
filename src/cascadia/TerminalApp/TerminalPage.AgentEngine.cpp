@@ -42,6 +42,7 @@
 #include "AgentMaster/Engine.h" // SharedEngine / ClaimWindowRecord / Register-UnregisterLiveWindow
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings
 #include "AgentMaster/ProcessObserver.h" // UnpublishWindow (teardown; Rule #10)
+#include "AgentMaster/ProfileBootstrap.h" // IsDevOrDebugPackage — gate the registry's adopt-default autorunner mode push like the scheduler
 #include "AgentMaster/Scheduler.h" // SetGlobalPause / Confirm (Manager callbacks)
 #include "AgentMaster/SessionRegistry.h" // adoption-handler + registry-observer tokens
 #include "AgentMaster/SessionScanner.h" // liveness-probe token
@@ -690,25 +691,27 @@ namespace winrt::TerminalApp::implementation
         {
             const auto weakThis = get_weak();
             const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
-            _commandActionToken = ::Agentmaster::RegisterCommandActionHandler(_windowId, [weakThis, dispatcher](const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload) {
-                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, sessionId, command, payload]() {
+            _commandActionToken = ::Agentmaster::RegisterCommandActionHandler(_windowId, [weakThis, dispatcher](const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload, const std::wstring& args) {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, sessionId, command, payload, args]() {
                     // Safeguard: a background-originated action landing on the UI thread must
                     // never unwind unhandled (an uncaught throw here terminates the app). The
                     // handler is internally guarded too; this is the dispatch-lambda belt.
+                    // `args` = the typed command's <command-args> verbatim — the §6b per-message
+                    // model hint parses out of their leading words inside the handler.
                     try
                     {
                         if (auto self = weakThis.get())
                         {
                             if (command == L"handover")
                             {
-                                self->_HandleCommandHandover(sessionId, payload);
+                                self->_HandleCommandHandover(sessionId, payload, args);
                             }
                             else if (command == L"handover-here")
                             {
                                 // COMMANDS.md — the in-place twin: REPLACE the origin tab (the
                                 // Restart-session swap into a fresh successor) instead of
                                 // spawning a new tab beside it.
-                                self->_HandleCommandHandover(sessionId, payload, /*inPlace*/ true);
+                                self->_HandleCommandHandover(sessionId, payload, args, /*inPlace*/ true);
                             }
                         }
                     }
@@ -1166,6 +1169,16 @@ namespace winrt::TerminalApp::implementation
                                                 self->_appSettings.inferGitRoot != s.inferGitRoot;
                 self->_appSettings = s;
                 ::Agentmaster::SaveAppSettings(s);
+                // Adopt/re-home autorunner default: the registry stamps this MODE onto records it
+                // creates ITSELF (the hook-adopt + observer first-sight creates — the two open-seams
+                // outside TerminalPage's launch/restore stamping). Engine init seeds it from disk;
+                // keep it live with the cog here. ONE shared engine per process, so no broadcast leg
+                // is needed. Gated like the scheduler wiring (dev-or-debug): a plain release keeps
+                // minting Off records to match its never-started autorunner.
+                if (::Agentmaster::Profiles::IsDevOrDebugPackage() && self->_sessionRegistry)
+                {
+                    self->_sessionRegistry->SetDefaultAutorunnerMode(s.defaultAutorunnerMode);
+                }
                 // Apply the (possibly changed) GLOBAL rename-commit mode to every window's tab
                 // headers immediately (process-wide static), not just next launch.
                 SetTabRenameCommitMode(static_cast<int32_t>(s.tabRenameCommitMode));

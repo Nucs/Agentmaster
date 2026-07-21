@@ -1255,7 +1255,7 @@ namespace winrt::TerminalApp::implementation
         // SelectedIndex -> the stored model id. Applies to the NEXT handover right after Save.
         _setCmdModelHandover = ComboBox{};
         _setCmdModelHandover.Header(winrt::box_value(L"Successor model"));
-        AgentSetTip(_setCmdModelHandover, L"The model this command's successor session(s) launch with. Default keeps the Sessions tab's Model box (the shipped behavior); the other entries come from the Launch models list and add --model <id> to just the successor's launch. Applies to the next handover \x2014 no restart needed.");
+        AgentSetTip(_setCmdModelHandover, L"The model this command's successor session(s) launch with. Default keeps the Sessions tab's Model box (the shipped behavior); the other entries come from the Launch models list and add --model <id> to just the successor's launch. You can also pick per MESSAGE \x2014 start the command with a model word, \x201C/handover [fable] do a b c\x201D or \x201C/handover fable 5: \x2026\x201D (partial, case-blind, matches either the display name or the model id) \x2014 which overrides this for that one handover. Applies to the next handover \x2014 no restart needed.");
         panel.Children().Append(_setCmdModelHandover);
         panel.Children().Append(SettingsSeparator(L"HAND OVER IN PLACE (REPLACE THIS TAB)"));
         _setCmdHandoverHereEnabled = ToggleSwitch{};
@@ -1274,7 +1274,7 @@ namespace winrt::TerminalApp::implementation
         panel.Children().Append(_setCmdHandoverHereStatus);
         _setCmdModelHandoverHere = ComboBox{};
         _setCmdModelHandoverHere.Header(winrt::box_value(L"Successor model"));
-        AgentSetTip(_setCmdModelHandoverHere, L"The model the in-place successor (and any additional-file tabs) launches with. Default keeps the Sessions tab's Model box; the other entries come from the Launch models list and add --model <id> to just the successor's launch. Applies to the next handover \x2014 no restart needed.");
+        AgentSetTip(_setCmdModelHandoverHere, L"The model the in-place successor (and any additional-file tabs) launches with. Default keeps the Sessions tab's Model box; the other entries come from the Launch models list and add --model <id> to just the successor's launch. A model word at the START of the typed command (\x201C/handover-here [fable] \x2026\x201D \x2014 partial, case-blind, display name or id) overrides this for that one handover. Applies to the next handover \x2014 no restart needed.");
         panel.Children().Append(_setCmdModelHandoverHere);
 
         // §6b SUCCESSOR SHAPING — family-wide (both commands), built on the ONE reusable regex

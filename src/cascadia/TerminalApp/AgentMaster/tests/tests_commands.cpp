@@ -993,6 +993,39 @@ void TestCommandWatch()
         }
     }
 
+    // ---- PickModelFromArgsHint (§6b): the per-MESSAGE successor-model hint ----
+    // "/handover [fable] do a b c" / "/handover fable 5: fix x" — the args' LEADING words pick the
+    // successor's model, matched partially + caselessly + characters-only against BOTH sides of
+    // every launchModels entry (display name AND model id); first list entry wins; no hit == "".
+    {
+        static constexpr std::wstring_view kSpec =
+            L"Fable 5 | claude-fable-5\n"
+            L"Opus 4.8 | claude-opus-4-8\n"
+            L"Sonnet 5 | claude-sonnet-5\n";
+        const auto pick = [&](std::wstring_view args) { return PickModelFromArgsHint(args, kSpec); };
+        // The bracketed (explicit) form.
+        CHECK(pick(L"[fable] do a b c") == L"claude-fable-5", "model hint: the reported example — \"[fable] do a b c\" picks Fable 5");
+        CHECK(pick(L"  [ Fable 5 ] rest") == L"claude-fable-5", "model hint: bracket body folds caselessly + characters-only (spaces/case ignored)");
+        CHECK(pick(L"[claude-opus] x") == L"claude-opus-4-8", "model hint: the bracket matches the MODEL-ID side too (both sides checked)");
+        CHECK(pick(L"[zzz] x").empty(), "model hint: a bracket matching NO entry is just context — no override, never an error");
+        CHECK(pick(L"[] x").empty() && pick(L"[unterminated rest of line").empty(), "model hint: an empty/unterminated bracket is not a hint");
+        // The bare leading-word form.
+        CHECK(pick(L"fable do a b c") == L"claude-fable-5", "model hint: a bare first word suffices");
+        CHECK(pick(L"FABLE: fix the tests") == L"claude-fable-5", "model hint: caseless + punctuation-blind (\"FABLE:\" folds to fable)");
+        CHECK(pick(L"sonnet please refactor") == L"claude-sonnet-5", "model hint: a bare word hits the ID side (\"sonnet\" ⊂ claude-sonnet-5)");
+        CHECK(pick(L"fable 5 do the thing") == L"claude-fable-5", "model hint: the hint EXTENDS across words while it still matches (\"fable 5\" == fable5)");
+        CHECK(pick(L"opus 4.8 go") == L"claude-opus-4-8", "model hint: dots/digits fold away in the extension too (\"opus 4.8\" == opus48)");
+        CHECK(pick(L"do a b c").empty(), "model hint: an ordinary sentence is NOT a hint (\"do\" matches nothing — and folds under 3 chars)");
+        CHECK(pick(L"a fable tale").empty(), "model hint: the FIRST word must hit — a model word deeper in the sentence never hijacks");
+        CHECK(pick(L"sonnets are nice").empty(), "model hint: an over-typed word is no substring of any side (\"sonnets\" ⊄ sonnet5) — no hint");
+        CHECK(pick(L"fix the tests").empty(), "model hint: a plain imperative first word matches nothing");
+        CHECK(pick(L"").empty() && pick(L"   ").empty(), "model hint: empty/blank args — no hint");
+        CHECK(pick(L"do\nfable next line").empty(), "model hint: only the FIRST LINE's leading words are consulted");
+        // Precedence + degenerate specs.
+        CHECK(PickModelFromArgsHint(L"[fable] x", L"").empty(), "model hint: an empty launchModels list can never hint (nothing to match)");
+        CHECK(PickModelFromArgsHint(L"claude x", kSpec) == L"claude-fable-5", "model hint: an ambiguous hint takes the FIRST list entry (the user's own ordering is the tie-break)");
+    }
+
     // ---- name-aware Ensure / Remove / Reconcile: the rename + disable migration POLICY ----
     // Same synthetic-command discipline as the block above (real histories are digests only), now
     // with texts that CARRY the command token so the render/identity path is exercised end to end.

@@ -235,7 +235,7 @@ namespace winrt::TerminalApp::implementation
     // DEGRADING to the new-tab spawn when the in-place swap is unavailable so the handover itself
     // is never lost. Repeatable by design — every /handover(-here) in a conversation creates its
     // own successor(s).
-    void TerminalPage::_HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPayload, bool inPlace)
+    void TerminalPage::_HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPayload, const std::wstring& commandArgs, bool inPlace)
     try
     {
         const auto tabIt = _claudeTabs.find(sessionId);
@@ -330,7 +330,9 @@ namespace winrt::TerminalApp::implementation
         // §6b successor shaping (read from the live _appSettings — Save/broadcast keep it fresh,
         // so these apply to the NEXT handover with no restart):
         //   * model — the PER-COMMAND successor model ("" == Default, the settings model); every
-        //     file of one command's fan-out launches with its command's pick;
+        //     file of one command's fan-out launches with its command's pick. A per-MESSAGE hint
+        //     in the typed command's leading words ("/handover [fable] …") overrides it for THIS
+        //     handover alone (resolved just below);
         //   * title — the family find/replace rewrite candidate (pure, guarded — "" when unset /
         //     invalid / no-match / blank result, falling back to the classic "(handover)" naming;
         //     either way the uniqueness bump below applies);
@@ -338,7 +340,18 @@ namespace winrt::TerminalApp::implementation
         //     SECURED (content tier: the document rides the launch commandline; paste tier: parked
         //     durably at the front of the successor's queue). The POINTER tier never deletes (the
         //     successor must read the file), and a failed spawn leaves its file untouched.
-        const std::wstring successorModel = inPlace ? _appSettings.commandHandoverHereSuccessorModel : _appSettings.commandHandoverSuccessorModel;
+        std::wstring successorModel = inPlace ? _appSettings.commandHandoverHereSuccessorModel : _appSettings.commandHandoverSuccessorModel;
+        // §6b per-MESSAGE model hint: the typed command's leading words may name a model —
+        // "/handover [fable] do a b c", "/handover fable 5: fix x" — matched partially/caselessly
+        // (characters-only) against BOTH sides of every launchModels entry (display name + id,
+        // PickModelFromArgsHint). A hit overrides the per-command combo for THIS handover alone
+        // (every file of the fan-out — one command, one pick); no hit changes nothing. The hint
+        // text itself stays in the origin's context verbatim (nothing is stripped anywhere).
+        if (const std::wstring hinted = ::Agentmaster::PickModelFromArgsHint(commandArgs, _appSettings.launchModels); !hinted.empty())
+        {
+            successorModel = hinted;
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" successor model from the message hint: " + hinted + L"\n");
+        }
         std::wstring doneIds; // the -done nav line's parallel per-file lists (position i == file i)
         std::wstring doneModes;
         bool inPlaceFellBack = false;

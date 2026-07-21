@@ -237,7 +237,10 @@ namespace Agentmaster
         {
             uint64_t token{ 0 };
             std::wstring windowId;
-            std::function<void(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload)> fn;
+            // sessionId · the canonical command action ("handover"/"handover-here") · the fired
+            // await's payload (the '|'-joined md path set) · the typed command's ARGS verbatim
+            // (the §6b per-message model hint parses out of their leading words at action time).
+            std::function<void(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload, const std::wstring& args)> fn;
         };
         std::mutex commandActionMutex;
         std::vector<CommandActionSink> commandActionSinks;
@@ -356,13 +359,15 @@ namespace Agentmaster
     // Agentmaster (COMMANDS.md — command actions): register THIS window's command-action sink
     // (monotonic token; detach with UnregisterCommandActionHandler — removing a stale token is a
     // no-op, the registry-token pattern). RaiseCommandActionInWindows fans (sessionId, command,
-    // payload) out to EVERY registered sink — the fire originates on the engine's scanner thread,
-    // so there is no source window to exclude; exactly one window hosts the session's tab, so at
-    // most one sink acts (each hops to its own UI thread and checks its _claudeTabs; a miss is a
-    // no-op). v1 commands: "handover" (payload == the handover markdown's absolute path).
-    uint64_t RegisterCommandActionHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload)> handler);
+    // payload, args) out to EVERY registered sink — the fire originates on the engine's scanner
+    // thread, so there is no source window to exclude; exactly one window hosts the session's tab,
+    // so at most one sink acts (each hops to its own UI thread and checks its _claudeTabs; a miss
+    // is a no-op). Commands: "handover"/"handover-here" (payload == the '|'-joined absolute md
+    // path set; args == the typed command's <command-args> verbatim — the §6b per-message model
+    // hint parses out of their leading words at action time, PickModelFromArgsHint).
+    uint64_t RegisterCommandActionHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload, const std::wstring& args)> handler);
     void UnregisterCommandActionHandler(uint64_t token);
-    void RaiseCommandActionInWindows(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload);
+    void RaiseCommandActionInWindows(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload, const std::wstring& args = {});
 
     // Agentmaster (cross-window restart): register THIS window's restart sink (monotonic token; detach
     // with UnregisterWindowRestartHandler — removing a stale token is a no-op, the registry-token

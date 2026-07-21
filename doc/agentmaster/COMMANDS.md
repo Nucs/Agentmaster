@@ -484,6 +484,23 @@ state; the cog surfaces invalidity to the user instead of flooding hooks.log).
   `modelOverride` param. Every file of one command's fan-out launches with that command's pick.
   The cog offers **Default** + the `launchModels` list, rebuilt at each cog open; a stored id no
   longer in the list is listed as `(custom) <id>` so it round-trips instead of silently resetting.
+* **The per-MESSAGE model hint** (`PickModelFromArgsHint`, pure + tested) — the typed command's
+  LEADING words may pick the model for THAT handover alone, overriding the combo above:
+  `/handover [fable] do a b c`, `/handover fable 5: fix the tests`. Matching is **partial +
+  caseless + characters-only**: the hint and BOTH sides of every `launchModels` entry (display
+  name AND model id) fold to lowercase `[a-z0-9]`, and the hint hits when it is a **substring**
+  of either side (`fable` ⊂ `fable5`/`claudefable5`; `sonnet` ⊂ `claudesonnet5`); the first list
+  entry wins a tie. Only the args' FIRST LINE's leading portion is consulted: the **bracketed**
+  form `[hint]` is explicit (any non-empty fold; unterminated/no-match reads as plain context),
+  the **bare** form requires the FIRST word to hit on its own (folded ≥ 3 chars — a stray
+  `a`/`do` can never pick a model) and then greedily extends word-by-word (≤ 4) while the longer
+  fold still matches, longest hit winning (`fable 5 do x` → `fable5`, stopping before `do`).
+  Plumbing: the echo's `<command-args>` now rides the fire verbatim — `CommandActionSink` /
+  `RaiseCommandActionInWindows` / the per-window sink / `_HandleCommandHandover` all gained an
+  `args` leg — and the hint is resolved at ACTION time against the live `launchModels`. Nothing
+  is stripped anywhere: the origin already received the full text as `$ARGUMENTS` (harmless
+  context) and the successor's first message is the FILE content. Logged
+  `[handover] <sid8> successor model from the message hint: <id>`.
 **The defaults are REAL VALUES, not hidden code paths.** All three regex settings ship
 **seeded** (`kDefaultCommandTitleFindRegex` / `…TitleReplace` / `…FileMatchRegex` in
 SessionModels.h) and **presence-gated** on load (the `launchModels` idiom): an absent key seeds
