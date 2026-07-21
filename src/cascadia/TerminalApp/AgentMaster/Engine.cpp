@@ -361,7 +361,7 @@ namespace Agentmaster
             std::wstring leafMatchRegex = cmdSettings.commandHandoverFileMatchRegex;
             if (!leafMatchRegex.empty() && !RegexIsValid(leafMatchRegex))
             {
-                AppendStateLog(L"hooks.log", L"[engine] handover file-match regex INVALID - using the default 'handover' leaf hint: " + leafMatchRegex + L"\n");
+                AppendStateLog(L"hooks.log", L"[engine] handover file-match regex INVALID - using the built-in 'handover' leaf hint: " + leafMatchRegex + L"\n");
                 leafMatchRegex.clear();
             }
             // The legacy first-markdown tolerance (a mis-named single briefing file) rides ONLY

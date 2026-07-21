@@ -505,10 +505,15 @@ box back to it.
   and for the chain/interior-mention cases.
 * **File match** — `commandHandoverFileMatchRegex`, shared by BOTH commands (they are one await
   family — a per-command pattern would split the §3 supersede family, whose key stays the leaf
-  HINT). It ships seeded with `handover` — the regex spelling of the historical "leaf CONTAINS
-  handover" rule — and a markdown qualifies when the pattern regex-SEARCHES its file NAME
-  (case-insensitive; anchor for a whole-name match, e.g. `^BRIEF-.*\.md$`). **Clearing** the box
-  falls back to the built-in contains-hint. A **valid pattern is authoritative** — a
+  HINT). It ships seeded with `HANDOVER\-` — the regex spelling of the shipped definitions' own
+  `HANDOVER-<topic>.md` naming contract — and a markdown qualifies when the pattern regex-SEARCHES
+  its file NAME (case-insensitive, so `handover-notes.md` matches too; anchor for a whole-name
+  match, e.g. `^BRIEF-.*\.md$`). The default is deliberately **tighter than the contains-"handover"
+  leaf hint** it spells out: a repo doc merely MENTIONING handover in its name (`handover.md`,
+  `HANDOVER_NOTES.md`, `old-handover.md`) is not collected as a briefing — such a file still rides
+  the nothing-collected-yet tolerance below when it is the turn's only markdown, so a lone
+  mis-named briefing keeps working. **Clearing** the box falls back to the (looser) built-in
+  contains-hint. A **valid pattern is authoritative** — a
   `HANDOVER-*.md` no longer qualifies unless the pattern says so — and a **CUSTOMIZED** one (≠ the
   shipped default) additionally **suppresses the legacy nothing-collected-yet fallback** (the
   batch's first markdown: tolerance for a mis-named single briefing file, which only makes sense
@@ -519,11 +524,15 @@ box back to it.
   now a real setting value — the watch itself can no longer tell "default" from "customized".
   An **invalid** one falls back to the hint (fallback included) —
   belted twice: the engine validates once at bind time and logs
-  `[engine] handover file-match regex INVALID - using the default 'handover' leaf hint: …`, and
+  `[engine] handover file-match regex INVALID - using the built-in 'handover' leaf hint: …`, and
   the watch re-checks per leaf. **Restart-applied** (`BindMarkdownAwait`'s new optional
   `leafMatchRegex`; bindings register once at init). NOTE: the shipped definitions still tell
-  Claude to write `HANDOVER-<topic>.md`, so a custom pattern normally pairs with an edited
-  definition (which the §6 policy then treats as user-owned — by design).
+  Claude to write `HANDOVER-<topic>.md` — which is exactly what the default pattern spells — so a
+  custom pattern normally pairs with an edited definition (which the §6 policy then treats as
+  user-owned — by design). (The seed is presence-gated and never re-seeded, so an install that
+  already SAVED the earlier `handover` seed keeps it — and, differing from the shipped default, it
+  now reads as CUSTOMIZED; clear the box or retype `HANDOVER\-` to adopt the new rule. Only
+  unreleased builds can be in that state — the seeding never shipped in a tagged release.)
 * **Delete after launch AND successful start** — `commandHandoverDeleteFileAfterLaunch` (default
   **OFF**; deleting user-visible files is opt-in). The delete is **DEFERRED, not fired at spawn**:
   `_HandleCommandHandover` only ARMS an entry (successor id → md path) and

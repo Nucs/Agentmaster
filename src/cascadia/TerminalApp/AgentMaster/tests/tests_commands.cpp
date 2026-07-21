@@ -276,8 +276,8 @@ void TestCommandWatch()
         CHECK(firedPath == L"K:\\r\\notes.md", "the SHIPPED DEFAULT pattern keeps the legacy first-markdown tolerance");
     }
     {
-        // …and that same default pattern still matches a normal HANDOVER-*.md by NAME (it is the
-        // regex spelling of "the leaf contains handover", case-insensitive).
+        // …and that same default pattern matches a normal HANDOVER-*.md by NAME (it is the regex
+        // spelling of the definitions' own `HANDOVER-<topic>.md` contract, case-insensitive).
         CommandWatch w;
         std::vector<FiredHandover> fired;
         w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) { fired.push_back(MakeFired(sid, mds, args)); }, std::wstring{ kDefaultCommandFileMatchRegex }, true);
@@ -286,7 +286,22 @@ void TestCommandWatch()
         w.OnFileToolWrite(L"s", { L"K:\\r\\notes.md", L"K:\\r\\HANDOVER-a.md" }, L"K:\\r", now);
         w.OnTurnEnd(L"s");
         CHECK(fired.size() == 1 && !fired.empty() && (fired[0].mdPaths == std::vector<std::wstring>{ L"K:\\r\\HANDOVER-a.md" }),
-              "the default pattern collects the HANDOVER file and excludes the incidental notes.md (== the historical contains-hint behavior)");
+              "the default pattern collects the HANDOVER-*.md and excludes the incidental notes.md");
+    }
+    {
+        // The default is TIGHTER than the contains-"handover" leaf hint it replaced: a doc whose
+        // name merely MENTIONS handover (no `HANDOVER-` separator) is NOT a briefing. It rides the
+        // batch's-first-markdown tolerance here (the default keeps that on, so a lone mis-named
+        // file still hands over) — but it must never be collected ALONGSIDE a real HANDOVER-*.md.
+        CommandWatch w;
+        std::vector<FiredHandover> fired;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) { fired.push_back(MakeFired(sid, mds, args)); }, std::wstring{ kDefaultCommandFileMatchRegex }, true);
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-a.md", L"K:\\r\\old-handover.md", L"K:\\r\\handover-b.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s");
+        CHECK(fired.size() == 1 && !fired.empty() && (fired[0].mdPaths == std::vector<std::wstring>{ L"K:\\r\\HANDOVER-a.md", L"K:\\r\\handover-b.md" }),
+              "the default pattern requires the HANDOVER- separator: a bare mention (old-handover.md) is not collected, a lowercase handover-b.md is");
     }
     {
         CommandWatch w;

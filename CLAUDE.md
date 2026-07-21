@@ -867,7 +867,12 @@ is the reporting channel). **The three regex settings ship SEEDED with their rea
 the ACTUAL rule instead of hiding a code fallback, a CLEARED box means "use the built-in behavior", and
 the default title pair reproduces the classic naming EXACTLY *including* the chain-bump (it eats an
 existing `(handover N)` suffix and re-adds it, so the uniqueness bump walks `(handover 2)` instead of
-STACKING `(handover) (handover)` — the DeriveForkTitle bug). Because the default is now a VALUE, the
+STACKING `(handover) (handover)` — the DeriveForkTitle bug), while the default FILE MATCH is
+**`HANDOVER\-`** — the regex spelling of the definitions' own `HANDOVER-<topic>.md` contract, and
+deliberately TIGHTER than the contains-`handover` leaf hint a cleared/invalid box falls back to (a doc
+merely mentioning handover — `handover.md`, `old-handover.md` — is no longer collected as a briefing;
+a lone mis-named file still rides the first-markdown tolerance, which the default keeps ON). Because
+the default is now a VALUE, the
 first-markdown-tolerance policy moved to the CALLER (`BindMarkdownAwait`'s `allowFirstMarkdownFallback`,
 Engine passes `pattern == default || empty`). The cog also gained a **per-tab Reset** (footer, left of
 Cancel — `_settingsTabResets`, index-aligned; shown only for a tab that registered a handler, today just
@@ -1732,8 +1737,9 @@ What works, by area:
   <id>`), **`commandHandoverTitleFindRegex`/`…TitleReplace`** (a find/replace pair rewriting successor
   titles off the origin title — `$1` backrefs; unset/invalid/no-match/blank falls back to the classic
   `"(handover)"` naming), **`commandHandoverFileMatchRegex`** (which markdown files a handover
-  collects, matched case-insensitively against the file NAME; blank/invalid == the shipped
-  "name contains handover" rule — **the one restart-applied field here**), and
+  collects, matched case-insensitively against the file NAME; seeded `HANDOVER\-` == the
+  `HANDOVER-<topic>.md` contract, blank/invalid falling back to the looser built-in
+  "name contains handover" hint — **the one restart-applied field here**), and
   **`commandHandoverDeleteFileAfterLaunch`** (delete the md once its successor exists + delivery is
   secured; never the pointer tier — the `HANDOVER-*.md` litter fix). Model/title/delete apply to the
   NEXT handover right after Save; a live status line under the boxes calls out an INVALID regex

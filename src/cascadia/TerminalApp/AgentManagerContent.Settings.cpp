@@ -1317,7 +1317,7 @@ namespace winrt::TerminalApp::implementation
         _setCmdFileMatch = TextBox{};
         _setCmdFileMatch.Header(winrt::box_value(L"Handover file match (regex \x2014 applies after restart)"));
         _setCmdFileMatch.PlaceholderText(L"cleared \x2014 falls back to the built-in \x201Cname contains handover\x201D rule");
-        AgentSetTip(_setCmdFileMatch, L"Which markdown files a handover COLLECTS, matched against the written file's NAME (case-insensitive regex search; anchor with ^/$ for a whole-name match, e.g. ^BRIEF-.*\\.md$).\n\nThe box ships with the ACTUAL default rule \x2014 \x201Chandover\x201D, i.e. the name contains it (the HANDOVER-*.md contract) \x2014 so it is visible and editable. Clearing it or an invalid pattern falls back to that same built-in rule.\n\nCHANGING it away from the default also makes the match STRICT: the tolerance that would otherwise adopt the turn's first markdown when nothing matched is switched off, so an unrelated notes.md can't become the briefing. Applies after restart. The shipped command definitions still tell Claude to write HANDOVER-<topic>.md \x2014 pair a custom pattern with an edited definition that names files to match it.");
+        AgentSetTip(_setCmdFileMatch, L"Which markdown files a handover COLLECTS, matched against the written file's NAME (case-insensitive regex search; anchor with ^/$ for a whole-name match, e.g. ^BRIEF-.*\\.md$).\n\nThe box ships with the ACTUAL default rule \x2014 HANDOVER\\- , i.e. the name contains \x201CHANDOVER-\x201D (the HANDOVER-<topic>.md contract the shipped definitions instruct) \x2014 so it is visible and editable. Clearing it or an invalid pattern falls back to the LOOSER built-in rule: the name merely contains \x201Chandover\x201D.\n\nCHANGING it away from the default also makes the match STRICT: the tolerance that would otherwise adopt the turn's first markdown when nothing matched is switched off, so an unrelated notes.md can't become the briefing. Applies after restart. The shipped command definitions still tell Claude to write HANDOVER-<topic>.md \x2014 pair a custom pattern with an edited definition that names files to match it.");
         _setCmdFileMatch.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _UpdateCommandsTabStatus(); });
         panel.Children().Append(_setCmdFileMatch);
         _setCmdDeleteAfter = ToggleSwitch{};
@@ -3440,7 +3440,7 @@ namespace winrt::TerminalApp::implementation
             }
             else if (fileRe == ::Agentmaster::kDefaultCommandFileMatchRegex)
             {
-                t += L"default rule \x2014 name contains \x201Chandover\x201D.";
+                t += L"default rule \x2014 name contains \x201CHANDOVER-\x201D.";
             }
             else
             {

@@ -1082,11 +1082,18 @@ namespace Agentmaster
     //    3)", … instead of STACKING "(handover) (handover)". That is the whole reason the pattern
     //    is not the naive `^(.*)$`: a stacked suffix was the exact bug DeriveForkTitle exists to
     //    prevent, and it must not come back through a default.
-    //  * the FILE-MATCH pattern is the regex spelling of the historical rule "the file NAME
-    //    contains 'handover'" (unanchored search, applied case-insensitively).
+    //  * the FILE-MATCH pattern spells the file-NAME contract the shipped command definitions
+    //    actually instruct — `HANDOVER-<topic>.md`, i.e. the name contains "HANDOVER-" (unanchored
+    //    search, applied case-insensitively, so `handover-notes.md` matches too). It is DELIBERATELY
+    //    tighter than the plain contains-"handover" leaf hint it replaced: a repo doc merely
+    //    MENTIONING handover in its name (`handover.md`, `HANDOVER_NOTES.md`, `old-handover.md`)
+    //    is no longer collected as a briefing. The hyphen is escaped (`\-`) — a valid ECMAScript
+    //    identity escape, kept because it reads as "the separator is literal" in the cog's box.
+    //    Files the pattern misses are still covered by the nothing-collected-yet tolerance (the
+    //    batch's first markdown), which the DEFAULT keeps on — see Engine.cpp / CommandWatch.
     inline constexpr std::wstring_view kDefaultCommandTitleFindRegex = L"^(.*?)(?: \\(handover(?: \\d+)?\\))?$";
     inline constexpr std::wstring_view kDefaultCommandTitleReplace = L"$1 (handover)";
-    inline constexpr std::wstring_view kDefaultCommandFileMatchRegex = L"handover";
+    inline constexpr std::wstring_view kDefaultCommandFileMatchRegex = L"HANDOVER\\-";
 
     struct AppSettings
     {
@@ -1480,10 +1487,11 @@ namespace Agentmaster
         //   * commandHandoverFileMatchRegex — the markdown await's FILE-MATCH pattern, shared by
         //     BOTH commands (they are one await family — same files, one owner; a per-command
         //     pattern would split the §3 supersede family). SEEDED with the shipped default
-        //     (kDefaultCommandFileMatchRegex — the regex spelling of the historical "leaf CONTAINS
-        //     handover" rule), so the rule is visible and editable; a leaf qualifies when the
-        //     regex SEARCHES its file name (case-insensitive; anchor with ^/$ for a full-name
-        //     match). CLEARING the box falls back to the built-in contains-hint, and an INVALID
+        //     (kDefaultCommandFileMatchRegex — `HANDOVER\-`, the regex spelling of the definitions'
+        //     own `HANDOVER-<topic>.md` naming contract), so the rule is visible and editable; a
+        //     leaf qualifies when the regex SEARCHES its file name (case-insensitive; anchor with
+        //     ^/$ for a full-name match). CLEARING the box falls back to the built-in
+        //     contains-"handover" leaf hint (LOOSER than this default), and an INVALID
         //     pattern does too (a broken pattern must not silently kill handovers — the cog warns
         //     live). A pattern DIFFERING from the shipped default also suppresses the legacy
         //     first-markdown fallback (it is a statement of intent — see CommandWatch).
