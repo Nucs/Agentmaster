@@ -721,13 +721,17 @@ namespace Agentmaster
         o.Set(L"commandHandoverEnabled", json::Value::MkBool(s.commandHandoverEnabled));
         o.Set(L"commandHandoverHereName", json::Value::MkStr(s.commandHandoverHereName));
         o.Set(L"commandHandoverHereEnabled", json::Value::MkBool(s.commandHandoverHereEnabled));
+        o.Set(L"commandHandoverStandbyName", json::Value::MkStr(s.commandHandoverStandbyName));
+        o.Set(L"commandHandoverStandbyEnabled", json::Value::MkBool(s.commandHandoverStandbyEnabled));
         o.Set(L"commandHandoverMaterializedName", json::Value::MkStr(s.commandHandoverMaterializedName));
         o.Set(L"commandHandoverHereMaterializedName", json::Value::MkStr(s.commandHandoverHereMaterializedName));
+        o.Set(L"commandHandoverStandbyMaterializedName", json::Value::MkStr(s.commandHandoverStandbyMaterializedName));
         // §6b successor shaping: per-command successor model ("" == Default), the family title
         // find/replace pair + file-match pattern (regexes stored VERBATIM — validated at use,
         // the cog warns live), and the delete-after-hand-off toggle.
         o.Set(L"commandHandoverSuccessorModel", json::Value::MkStr(s.commandHandoverSuccessorModel));
         o.Set(L"commandHandoverHereSuccessorModel", json::Value::MkStr(s.commandHandoverHereSuccessorModel));
+        o.Set(L"commandHandoverStandbySuccessorModel", json::Value::MkStr(s.commandHandoverStandbySuccessorModel));
         o.Set(L"commandHandoverTitleFindRegex", json::Value::MkStr(s.commandHandoverTitleFindRegex));
         o.Set(L"commandHandoverTitleReplace", json::Value::MkStr(s.commandHandoverTitleReplace));
         o.Set(L"commandHandoverFileMatchRegex", json::Value::MkStr(s.commandHandoverFileMatchRegex));
@@ -889,28 +893,33 @@ namespace Agentmaster
             }
         }
         // Slash commands (COMMANDS.md §6a). The configured NAMES normalize + collision-heal on
-        // load (ResolveCommandNamePair — a hand-edited junk value self-heals like maxTags, and the
-        // two names can never end up equal); enables default ON; absent keys reproduce the shipped
-        // /handover + /handover-here exactly. The MATERIALIZED markers record engine reality ("the
-        // name whose file the last init wrote"): ABSENT (a pre-feature settings.json) => the
-        // DEFAULT name — those installs have the default-named files on disk, so a later rename
-        // knows what to migrate — while a PRESENT empty string == nothing materialized (disabled).
-        // Markers are normalized but NOT pair-healed (they are facts, not preferences); the
-        // normalize keeps a hand-edit from smuggling path separators into the reconcile's
-        // "<name>.md" delete.
+        // load (ResolveCommandNameTriple — a hand-edited junk value self-heals like maxTags, and
+        // no two names can end up equal); enables default ON; absent keys reproduce the shipped
+        // /handover + /handover-here + /handover-standby exactly. The MATERIALIZED markers record
+        // engine reality ("the name whose file the last init wrote"): ABSENT (a pre-feature
+        // settings.json) => the DEFAULT name — those installs have the default-named files on
+        // disk, so a later rename knows what to migrate (for standby, whose file may simply never
+        // have existed, the migration's remove of a nonexistent file is a no-op) — while a PRESENT
+        // empty string == nothing materialized (disabled). Markers are normalized but NOT
+        // collision-healed (they are facts, not preferences); the normalize keeps a hand-edit
+        // from smuggling path separators into the reconcile's "<name>.md" delete.
         s.commandHandoverName = v.StrAt(L"commandHandoverName", kDefaultHandoverCommandName);
         s.commandHandoverHereName = v.StrAt(L"commandHandoverHereName", kDefaultHandoverHereCommandName);
-        ResolveCommandNamePair(s.commandHandoverName, s.commandHandoverHereName);
+        s.commandHandoverStandbyName = v.StrAt(L"commandHandoverStandbyName", kDefaultHandoverStandbyCommandName);
+        ResolveCommandNameTriple(s.commandHandoverName, s.commandHandoverHereName, s.commandHandoverStandbyName);
         s.commandHandoverEnabled = v.BoolAt(L"commandHandoverEnabled", true);
         s.commandHandoverHereEnabled = v.BoolAt(L"commandHandoverHereEnabled", true);
+        s.commandHandoverStandbyEnabled = v.BoolAt(L"commandHandoverStandbyEnabled", true);
         s.commandHandoverMaterializedName = NormalizeCommandName(v.StrAt(L"commandHandoverMaterializedName", kDefaultHandoverCommandName));
         s.commandHandoverHereMaterializedName = NormalizeCommandName(v.StrAt(L"commandHandoverHereMaterializedName", kDefaultHandoverHereCommandName));
+        s.commandHandoverStandbyMaterializedName = NormalizeCommandName(v.StrAt(L"commandHandoverStandbyMaterializedName", kDefaultHandoverStandbyCommandName));
         // §6b successor shaping. The model ids + regexes read back VERBATIM (a regex is freeform
         // user input — RegexUtil guards every use, the cog validates live; normalizing here would
         // corrupt patterns). Absent keys => the shipped behavior (Default model, default
         // "(handover)" naming, the "handover" leaf hint, no delete).
         s.commandHandoverSuccessorModel = v.StrAt(L"commandHandoverSuccessorModel");
         s.commandHandoverHereSuccessorModel = v.StrAt(L"commandHandoverHereSuccessorModel");
+        s.commandHandoverStandbySuccessorModel = v.StrAt(L"commandHandoverStandbySuccessorModel");
         // The three REGEX settings are PRESENCE-GATED (the launchModels idiom): an ABSENT key —
         // a pre-§6b settings.json, or a fresh install — seeds the SHIPPED DEFAULT (the struct
         // default), so the cog shows the real rule ready to edit instead of an empty box hiding a

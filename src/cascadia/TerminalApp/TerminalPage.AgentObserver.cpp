@@ -5312,6 +5312,10 @@ namespace winrt::TerminalApp::implementation
     // the stdin pipe has none — this pump is what makes "never truncate the message" hold for
     // arbitrarily large documents. Ticked by the scanner's liveness probe (~2.5s) alongside
     // _ScanPendingInput; steady state with no pending injections is one empty-map check.
+    // SELF-MARSHALS to the UI thread (the _ScanPendingInput fire_and_forget + Impl idiom): the
+    // probe fires on the SCANNER thread while _HandleCommandHandover writes the map on the UI
+    // thread — the map is UI-thread-only state (and the standby lane below reads the tab's
+    // TermControl, which is UI-affine).
     //
     // Per pending entry (successor sessionId -> the queued prompt carrying the document):
     //   * session gone/archived, or the prompt no longer Pending (delivered by the scheduler's
@@ -5328,21 +5332,175 @@ namespace winrt::TerminalApp::implementation
     //     lands, exactly like any other flight prompt.
     //   * give-up deadline (kHandoverInjectDeadlineMs): stop auto-trying — the prompt stays
     //     Pending in the queue (visible in Auto Testing, Send-now-able), logged. Never lost.
-    void TerminalPage::_PumpHandoverInjections()
-    try
+    //
+    // The STANDBY lane (COMMANDS.md §5b — /handover-standby; an entry whose standbyText is
+    // non-empty): FILL, don't send — Inject(BuildPromptFill(text)), the bracketed paste with NO
+    // submit CR, so the briefing sits in the successor's input box one Enter away. No echo ever
+    // confirms a fill (nothing is submitted), so delivery is VERIFIED by reading the input box
+    // itself (ControlCore::ReadPendingInputDraft — the PENDING_INPUT.md primitive, legal here
+    // because the pump marshals to the UI thread):
+    //   * before the first fill, a box already holding ANY text means the user is typing — hold
+    //     off entirely (never append to a human draft; the deadline caps the wait);
+    //   * after a fill, a NON-EMPTY box == verified (logged; the §6b delete-after arms HERE, and
+    //     only here — an unverified draft always leaves its briefing file on disk);
+    //   * a box still EMPTY after kStandbyVerifyMs means the TUI ate the paste pre-raw-mode (the
+    //     Enter-retry gotcha's text-eaten sibling) — re-fill, at most kStandbyMaxAttempts times,
+    //     then give up (file kept, logged);
+    //   * the session leaving Idle/WaitingForInput mid-verify means the user took over (possibly
+    //     submitted the draft themselves) — hands off immediately, file kept (we cannot tell
+    //     "sent our draft" from "our fill was eaten and they typed their own", so never delete).
+    winrt::fire_and_forget TerminalPage::_PumpHandoverInjections()
     {
+        // Terminate-net (the _SweepClaudeLiveness idiom): an exception escaping a fire_and_forget
+        // IS winrt::terminate, so the body lives in an awaitable IAsyncAction whose exceptions
+        // propagate to this co_await.
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await _PumpHandoverInjectionsImpl();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_PumpHandoverInjections");
+        }
+    }
+
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_PumpHandoverInjectionsImpl()
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
         if (_pendingHandoverInjections.empty() || !_sessionRegistry)
         {
-            return;
+            co_return;
         }
         constexpr int64_t kHandoverInjectSettleMs = 1500; // post-started settle before the paste
         constexpr int64_t kHandoverInjectDeadlineMs = 10 * 60 * 1000; // stop auto-trying after 10 min (dormant tab never focused)
+        constexpr int64_t kStandbyVerifyMs = 12 * 1000; // a filled draft must show in the input box within this, else re-fill
+        constexpr int32_t kStandbyMaxAttempts = 2; // fills injected before giving up (file kept)
         const int64_t now = static_cast<int64_t>(::GetTickCount64());
         for (auto it = _pendingHandoverInjections.begin(); it != _pendingHandoverInjections.end();)
         {
             const std::wstring& id = it->first;
             auto& entry = it->second;
             const auto s = _sessionRegistry->Get(id);
+
+            // ---- the STANDBY lane (fill, don't send) ----
+            if (!entry.standbyText.empty())
+            {
+                if (!s || !s->live)
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-standby] " + ::Agentmaster::ShortId(id) + L" successor gone before the fill - briefing NOT typed (md kept on disk)\n");
+                    it = _pendingHandoverInjections.erase(it);
+                    continue;
+                }
+                if (now - entry.armedMs >= kHandoverInjectDeadlineMs)
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-standby] " + ::Agentmaster::ShortId(id) + L" gave up after 10 min " + (entry.injectedAtMs == 0 ? L"(session never started / box never free)" : L"(fill never verified)") + L" - md kept on disk\n");
+                    it = _pendingHandoverInjections.erase(it);
+                    continue;
+                }
+                if (!s->started || !_sessionRegistry->HasInjector(id))
+                {
+                    ++it; // claude not launched yet (a pre-Connected WriteInput silently drops) — wait
+                    continue;
+                }
+                if (entry.startedSeenMs == 0)
+                {
+                    entry.startedSeenMs = now; // first tick with the session started — begin the settle
+                    ++it;
+                    continue;
+                }
+                if (now - entry.startedSeenMs < kHandoverInjectSettleMs)
+                {
+                    ++it;
+                    continue;
+                }
+                // Read the successor's live input box (the verification channel — UI thread).
+                std::wstring draft;
+                bool draftKnown = false;
+                if (const auto control = _ControlForSession(id))
+                {
+                    if (control.ConnectionState() != TerminalConnection::ConnectionState::NotConnected)
+                    {
+                        try
+                        {
+                            const auto h = control.ReadPendingInputDraft();
+                            draft.assign(h.c_str(), h.size());
+                            draftKnown = true;
+                        }
+                        catch (...)
+                        {
+                            ::Agentmaster::AgentLogCaughtException(L"_PumpHandoverInjections standby draft read"); // torn down mid-tick — treat as unknown, wait
+                        }
+                    }
+                }
+                if (entry.injectedAtMs != 0)
+                {
+                    // Verify phase — a fill was injected; is it visible in the box?
+                    if (draftKnown && !draft.empty())
+                    {
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-standby] " + ::Agentmaster::ShortId(id) + L" draft VERIFIED in the input box (chars=" + std::to_wstring(draft.size()) + L") - one Enter away\n");
+                        // The delivery is now secured, so the §6b delete may arm (content tier
+                        // only — a pointer fill NAMES the file; setting read LIVE at verify time).
+                        if (!entry.standbyMdPath.empty() && _appSettings.commandHandoverDeleteFileAfterLaunch)
+                        {
+                            _pendingHandoverDeletes[id] = PendingHandoverDelete{ entry.standbyMdPath, now };
+                        }
+                        it = _pendingHandoverInjections.erase(it);
+                        continue;
+                    }
+                    if (s->state != ::Agentmaster::SessionState::Idle && s->state != ::Agentmaster::SessionState::WaitingForInput)
+                    {
+                        // A turn started before verification — the user (most likely) pressed
+                        // Enter on the draft themselves, or typed their own message. Either way
+                        // the session is theirs now: hands off, and NEVER delete the file (we
+                        // cannot tell "sent our draft" from "fill eaten + typed their own").
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-standby] " + ::Agentmaster::ShortId(id) + L" session took over before verification (state moved) - hands off, md kept\n");
+                        it = _pendingHandoverInjections.erase(it);
+                        continue;
+                    }
+                    if (now - entry.injectedAtMs < kStandbyVerifyMs)
+                    {
+                        ++it; // inside the verify window — the pending-input read lags a fill by design
+                        continue;
+                    }
+                    if (entry.fillAttempts >= kStandbyMaxAttempts)
+                    {
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-standby] " + ::Agentmaster::ShortId(id) + L" draft never appeared after " + std::to_wstring(entry.fillAttempts) + L" fill(s) - giving up, md kept on disk\n");
+                        it = _pendingHandoverInjections.erase(it);
+                        continue;
+                    }
+                    if (!draftKnown)
+                    {
+                        ++it; // box unreadable — never re-fill blind (a duplicate paste is worse than a late one)
+                        continue;
+                    }
+                    // Box VERIFIED empty past the window: the paste was eaten (TUI raw-mode race).
+                    // Safe to re-fill — nothing of ours is in the box to duplicate.
+                }
+                else
+                {
+                    // Pre-fill phase: never type over/append to a box that already holds text —
+                    // an early user draft wins, we wait for the box to clear (the deadline caps).
+                    if (!draftKnown || !draft.empty())
+                    {
+                        ++it;
+                        continue;
+                    }
+                }
+                const bool delivered = _sessionRegistry->Inject(id, ::Agentmaster::BuildPromptFill(entry.standbyText));
+                if (delivered)
+                {
+                    entry.injectedAtMs = now;
+                    entry.fillAttempts += 1;
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-standby] " + ::Agentmaster::ShortId(id) + L" briefing FILLED into the input box (chars=" + std::to_wstring(entry.standbyText.size()) + L", attempt " + std::to_wstring(entry.fillAttempts) + L"/" + std::to_wstring(kStandbyMaxAttempts) + L") - NOT submitted, verifying\n");
+                }
+                // Injector vanished mid-flight: nothing was typed — retry next tick (deadline caps).
+                ++it;
+                continue;
+            }
+
+            // ---- the classic paste lane (deliver + submit via the Send-now recipe) ----
             const ::Agentmaster::QueuedPrompt* prompt = nullptr;
             if (s)
             {
@@ -5433,10 +5591,6 @@ namespace winrt::TerminalApp::implementation
             ++it;
         }
     }
-    catch (...)
-    {
-        ::Agentmaster::AgentLogCaughtException(L"_PumpHandoverInjections"); // scanner-ticked UI lane: never unwind
-    }
 
     // Agentmaster (COMMANDS.md §6b — "delete the handover file after a successful hand-off"): the
     // DEFERRED half of the opt-in delete. _HandleCommandHandover only ARMS an entry (successor id
@@ -5453,13 +5607,30 @@ namespace winrt::TerminalApp::implementation
     //                          — the file is the only copy the user can act on);
     //   * past the deadline  -> give up, leave the file (logged) — same 10 min the pump uses;
     //   * delete failed      -> logged, file left in place (best-effort; never blocks anything).
-    // The POINTER tier never arms an entry at all (its successor's first message NAMES the file).
-    void TerminalPage::_SweepHandoverDeletes()
-    try
+    // The POINTER tier never arms an entry at all (its successor's first message NAMES the file),
+    // and the STANDBY lane arms only after a VERIFIED fill (the pump above). SELF-MARSHALS to the
+    // UI thread like the pump — the map is UI-thread-only state written by _HandleCommandHandover.
+    winrt::fire_and_forget TerminalPage::_SweepHandoverDeletes()
     {
+        // Terminate-net (the _SweepClaudeLiveness idiom).
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await _SweepHandoverDeletesImpl();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SweepHandoverDeletes");
+        }
+    }
+
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_SweepHandoverDeletesImpl()
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
         if (_pendingHandoverDeletes.empty() || !_sessionRegistry)
         {
-            return;
+            co_return;
         }
         constexpr int64_t kHandoverDeleteDeadlineMs = 10 * 60 * 1000; // matches the paste pump's give-up
         const int64_t now = static_cast<int64_t>(::GetTickCount64());
@@ -5496,10 +5667,6 @@ namespace winrt::TerminalApp::implementation
             }
             it = _pendingHandoverDeletes.erase(it);
         }
-    }
-    catch (...)
-    {
-        ::Agentmaster::AgentLogCaughtException(L"_SweepHandoverDeletes"); // scanner-ticked UI lane: never unwind
     }
 
     // Agentmaster (tab color modes — InferredWorkingDirectory): the inferred-workdir scan.

@@ -1230,7 +1230,7 @@ namespace winrt::TerminalApp::implementation
         panel = commandsPanel;
         panel.Children().Append(SettingsSeparator(L"SLASH COMMANDS (the /handover family)", true)); // leading section
         {
-            auto intro = Text(L"Agentmaster ships two slash commands into your global Claude commands folder (~\\.claude\\commands, or CLAUDE_CONFIG_DIR). Typed into a managed Claude session, they write a HANDOVER-*.md briefing \x2014 by default into the session's temp scratchpad, since its CONTENT is what gets injected \x2014 that Agentmaster turns into fresh successor session(s). Rename or disable them here \x2014 names, enables, and the file-match pattern apply AFTER RESTART; the successor shaping below (model \x00B7 title rewrite \x00B7 file location \x00B7 delete-after) applies to the NEXT handover right after Save. A rename/disable deletes the old definition file only when it is byte-identical to a version Agentmaster shipped; a file you edited yourself is never touched (and a disabled command's edited file keeps working as YOUR command, just unwatched).", 11, false, 0.6);
+            auto intro = Text(L"Agentmaster ships three slash commands into your global Claude commands folder (~\\.claude\\commands, or CLAUDE_CONFIG_DIR). Typed into a managed Claude session, they write a HANDOVER-*.md briefing \x2014 by default into the session's temp scratchpad, since its CONTENT is what gets injected \x2014 that Agentmaster turns into fresh successor session(s). Rename or disable them here \x2014 names, enables, and the file-match pattern apply AFTER RESTART; the successor shaping below (model \x00B7 title rewrite \x00B7 file location \x00B7 delete-after) applies to the NEXT handover right after Save. A rename/disable deletes the old definition file only when it is byte-identical to a version Agentmaster shipped; a file you edited yourself is never touched (and a disabled command's edited file keeps working as YOUR command, just unwatched).", 11, false, 0.6);
             intro.TextWrapping(TextWrapping::Wrap);
             panel.Children().Append(intro);
         }
@@ -1276,13 +1276,34 @@ namespace winrt::TerminalApp::implementation
         _setCmdModelHandoverHere.Header(winrt::box_value(L"Successor model"));
         AgentSetTip(_setCmdModelHandoverHere, L"The model the in-place successor (and any additional-file tabs) launches with. Default keeps the Sessions tab's Model box; the other entries come from the Launch models list and add --model <id> to just the successor's launch. A model word at the START of the typed command (\x201C/handover-here [fable] \x2026\x201D \x2014 partial, case-blind, display name or id) overrides this for that one handover. Applies to the next handover \x2014 no restart needed.");
         panel.Children().Append(_setCmdModelHandoverHere);
+        // §5b — the STANDBY member: successors open like /handover, but the briefing is TYPED
+        // into each session's input box WITHOUT being submitted (one Enter away).
+        panel.Children().Append(SettingsSeparator(L"HAND OVER \x2192 STANDBY (fill, don't send)"));
+        _setCmdStandbyEnabled = ToggleSwitch{};
+        _setCmdStandbyEnabled.Header(winrt::box_value(L"Enable (briefing pre-typed, never sent)"));
+        AgentSetTip(_setCmdStandbyEnabled, L"The standby handover: each HANDOVER-*.md still opens a fresh successor session in a NEW TAB, but its document is TYPED into that session's input box WITHOUT being submitted \x2014 you review the pre-filled message and press Enter yourself. Nothing runs until you do. Off = the command is not offered and Agentmaster ignores it. Applies after restart.");
+        _setCmdStandbyEnabled.Toggled([this](const IInspectable&, const RoutedEventArgs&) { _UpdateCommandsTabStatus(); });
+        panel.Children().Append(_setCmdStandbyEnabled);
+        _setCmdStandbyName = TextBox{};
+        _setCmdStandbyName.Header(winrt::box_value(L"Command name"));
+        _setCmdStandbyName.PlaceholderText(L"handover-standby \x2014 typed as /handover-standby");
+        AgentSetTip(_setCmdStandbyName, L"The word you type after '/' to run the standby handover (also the definition's file name, <name>.md). Lowercase letters, digits, '-' and '_' only. Blank falls back to \x201Chandover-standby\x201D; a name equal to another command's falls back too (the three must differ). Applies after restart.");
+        _setCmdStandbyName.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _UpdateCommandsTabStatus(); });
+        panel.Children().Append(_setCmdStandbyName);
+        _setCmdStandbyStatus = Text(L"", 11, false, 0.7);
+        _setCmdStandbyStatus.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setCmdStandbyStatus);
+        _setCmdModelStandby = ComboBox{};
+        _setCmdModelStandby.Header(winrt::box_value(L"Successor model"));
+        AgentSetTip(_setCmdModelStandby, L"The model this command's standby successor session(s) launch with. Default keeps the Sessions tab's Model box; the other entries come from the Launch models list and add --model <id> to just the successor's launch. A model word at the START of the typed command (\x201C/handover-standby [fable] \x2026\x201D \x2014 partial, case-blind, display name or id) overrides this for that one handover. Applies to the next handover \x2014 no restart needed.");
+        panel.Children().Append(_setCmdModelStandby);
 
-        // §6b SUCCESSOR SHAPING — family-wide (both commands), built on the ONE reusable regex
+        // §6b SUCCESSOR SHAPING — family-wide (all three commands), built on the ONE reusable regex
         // component (RegexUtil.h): the successor-TITLE find/replace pair, the HANDOVER file-match
         // pattern, and the delete-after-hand-off toggle. The status line below the boxes calls out
         // an invalid pattern live (an invalid regex never breaks a handover — the consumers fall
         // back to the shipped behavior; the line is the honesty channel).
-        panel.Children().Append(SettingsSeparator(L"SUCCESSOR SHAPING (both commands)"));
+        panel.Children().Append(SettingsSeparator(L"SUCCESSOR SHAPING (all commands)"));
         {
             // The title rewrite: [ find (regex) | replace ] side by side (a Grid, so the pair reads
             // as one rule: successorTitle = regex_replace(originTitle, find, replace)).
@@ -1409,10 +1430,10 @@ namespace winrt::TerminalApp::implementation
         _setCmdReinstallBtn = Button{};
         _setCmdReinstallBtn.Content(winrt::box_value(L"Reinstall definition files\x2026"));
         _setCmdReinstallBtn.Margin(Thickness{ 0, 6, 0, 0 });
-        AgentSetTip(_setCmdReinstallBtn, L"Overwrite handover.md and handover-here.md in your Claude commands folder with Agentmaster's shipped text, rendered with the names and file location configured here \x2014 whatever is in them now. This is the only action that overwrites a definition you edited yourself; normally an edited file is left alone forever (which is why an edited one stops following these settings). Your edits are NOT recoverable afterwards.");
+        AgentSetTip(_setCmdReinstallBtn, L"Overwrite handover.md, handover-here.md and handover-standby.md in your Claude commands folder with Agentmaster's shipped text, rendered with the names and file location configured here \x2014 whatever is in them now. This is the only action that overwrites a definition you edited yourself; normally an edited file is left alone forever (which is why an edited one stops following these settings). Your edits are NOT recoverable afterwards.");
         _setCmdReinstallBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
             _Confirm(L"Reinstall the handover command definitions?",
-                     L"handover.md and handover-here.md in your Claude commands folder will be REPLACED with Agentmaster's shipped instructions, using the command names and handover file location configured here. Any edits you made to those two files are lost.",
+                     L"handover.md, handover-here.md and handover-standby.md in your Claude commands folder will be REPLACED with Agentmaster's shipped instructions, using the command names and handover file location configured here. Any edits you made to those files are lost.",
                      L"Reinstall",
                      [this]() {
                          try
@@ -1425,9 +1446,10 @@ namespace winrt::TerminalApp::implementation
                              {
                                  s.commandHandoverWritePath = ::Agentmaster::NormalizeCommandWritePath(std::wstring{ _setCmdWritePath.Text() });
                              }
-                             const auto [ho, hh] = ::Agentmaster::ReinstallHandoverCommandFiles(s);
+                             const auto [ho, hh, hs] = ::Agentmaster::ReinstallHandoverCommandFiles(s);
                              ::Agentmaster::LogNav(L"commands reinstall-definitions handover=" + std::wstring{ ho.empty() ? L"(none)" : L"ok" } +
-                                                   L" here=" + std::wstring{ hh.empty() ? L"(none)" : L"ok" });
+                                                   L" here=" + std::wstring{ hh.empty() ? L"(none)" : L"ok" } +
+                                                   L" standby=" + std::wstring{ hs.empty() ? L"(none)" : L"ok" });
                              _RefreshCommandDefinitionState();
                              _UpdateCommandsTabStatus();
                          }
@@ -2029,7 +2051,15 @@ namespace winrt::TerminalApp::implementation
             {
                 _setCmdHandoverHereName.Text(winrt::hstring{ d.commandHandoverHereName });
             }
-            // Successor models -> "Default" (index 0 of both combos, by construction).
+            if (_setCmdStandbyEnabled)
+            {
+                _setCmdStandbyEnabled.IsOn(d.commandHandoverStandbyEnabled);
+            }
+            if (_setCmdStandbyName)
+            {
+                _setCmdStandbyName.Text(winrt::hstring{ d.commandHandoverStandbyName });
+            }
+            // Successor models -> "Default" (index 0 of every combo, by construction).
             if (_setCmdModelHandover && !_cmdModelIdsHandover.empty())
             {
                 _setCmdModelHandover.SelectedIndex(0);
@@ -2037,6 +2067,10 @@ namespace winrt::TerminalApp::implementation
             if (_setCmdModelHandoverHere && !_cmdModelIdsHandoverHere.empty())
             {
                 _setCmdModelHandoverHere.SelectedIndex(0);
+            }
+            if (_setCmdModelStandby && !_cmdModelIdsStandby.empty())
+            {
+                _setCmdModelStandby.SelectedIndex(0);
             }
             if (_setCmdTitleFind)
             {
@@ -2337,17 +2371,26 @@ namespace winrt::TerminalApp::implementation
         {
             _setCmdHandoverHereName.Text(winrt::hstring{ _appSettings.commandHandoverHereName });
         }
+        if (_setCmdStandbyEnabled)
+        {
+            _setCmdStandbyEnabled.IsOn(_appSettings.commandHandoverStandbyEnabled);
+        }
+        if (_setCmdStandbyName)
+        {
+            _setCmdStandbyName.Text(winrt::hstring{ _appSettings.commandHandoverStandbyName });
+        }
         {
             const auto disk = ::Agentmaster::LoadAppSettings();
             _cmdLiveHandoverName = disk.commandHandoverMaterializedName;
             _cmdLiveHandoverHereName = disk.commandHandoverHereMaterializedName;
+            _cmdLiveStandbyName = disk.commandHandoverStandbyMaterializedName;
         }
         // §6b successor shaping: (re)seed the two model combos from the CURRENT launchModels list
         // — rebuilt at every open, so an edit to the Launch models box shows here next open. The
         // parallel id vectors map SelectedIndex -> stored id ([0] == "" Default); a stored id no
         // longer in the list is appended as "(custom) <id>" so it round-trips instead of silently
         // resetting to Default.
-        if (_setCmdModelHandover && _setCmdModelHandoverHere)
+        if (_setCmdModelHandover && _setCmdModelHandoverHere && _setCmdModelStandby)
         {
             const auto models = ::Agentmaster::ParseLaunchModels(_appSettings.launchModels);
             const auto seedModelCombo = [&models](const winrt::Windows::UI::Xaml::Controls::ComboBox& combo, std::vector<std::wstring>& ids, const std::wstring& stored) {
@@ -2375,6 +2418,7 @@ namespace winrt::TerminalApp::implementation
             };
             seedModelCombo(_setCmdModelHandover, _cmdModelIdsHandover, _appSettings.commandHandoverSuccessorModel);
             seedModelCombo(_setCmdModelHandoverHere, _cmdModelIdsHandoverHere, _appSettings.commandHandoverHereSuccessorModel);
+            seedModelCombo(_setCmdModelStandby, _cmdModelIdsStandby, _appSettings.commandHandoverStandbySuccessorModel);
         }
         if (_setCmdTitleFind)
         {
@@ -2397,8 +2441,8 @@ namespace winrt::TerminalApp::implementation
             // §6c: shown VERBATIM (blank == the scratchpad default, which the placeholder says).
             _setCmdWritePath.Text(winrt::hstring{ _appSettings.commandHandoverWritePath });
         }
-        // §6c: sample what the two definition files on disk currently ARE — once per cog open (the
-        // status pass below runs per keystroke and this reads + hashes two files).
+        // §6c: sample what the definition files on disk currently ARE — once per cog open (the
+        // status pass below runs per keystroke and this reads + hashes three files).
         _RefreshCommandDefinitionState();
         // The seeds above re-fire TextChanged/Toggled, but be explicit so the status lines never
         // depend on a programmatic set actually raising them (the _UpdateTitleNamingPreview rule).
@@ -2867,8 +2911,8 @@ namespace winrt::TerminalApp::implementation
             _appSettings.notifySound = _setNotifySound.IsOn();
         }
         // COMMANDS tab (COMMANDS.md §6a): store the /handover-family names NORMALIZED +
-        // COLLISION-HEALED (the same ResolveCommandNamePair the Persistence load applies, so the
-        // stored pair is always two distinct slugs — exactly what the status lines previewed).
+        // COLLISION-HEALED (the same ResolveCommandNameTriple the Persistence load applies, so the
+        // stored names are always distinct slugs — exactly what the status lines previewed).
         // Applies at the NEXT START (engine init binds + reconciles the definition files then);
         // the engine-owned materialized-name markers are preserved from disk below.
         if (_setCmdHandoverEnabled)
@@ -2879,13 +2923,19 @@ namespace winrt::TerminalApp::implementation
         {
             _appSettings.commandHandoverHereEnabled = _setCmdHandoverHereEnabled.IsOn();
         }
-        if (_setCmdHandoverName && _setCmdHandoverHereName)
+        if (_setCmdStandbyEnabled)
+        {
+            _appSettings.commandHandoverStandbyEnabled = _setCmdStandbyEnabled.IsOn();
+        }
+        if (_setCmdHandoverName && _setCmdHandoverHereName && _setCmdStandbyName)
         {
             std::wstring ho{ _setCmdHandoverName.Text() };
             std::wstring hh{ _setCmdHandoverHereName.Text() };
-            ::Agentmaster::ResolveCommandNamePair(ho, hh);
+            std::wstring hs{ _setCmdStandbyName.Text() };
+            ::Agentmaster::ResolveCommandNameTriple(ho, hh, hs);
             _appSettings.commandHandoverName = ho;
             _appSettings.commandHandoverHereName = hh;
+            _appSettings.commandHandoverStandbyName = hs;
         }
         // §6b successor shaping. The model combos map SelectedIndex -> the parallel id vector
         // ([0]/none == "" Default); the regexes store VERBATIM (freeform patterns — RegexUtil
@@ -2902,6 +2952,10 @@ namespace winrt::TerminalApp::implementation
             if (_setCmdModelHandoverHere)
             {
                 _appSettings.commandHandoverHereSuccessorModel = comboPick(_setCmdModelHandoverHere, _cmdModelIdsHandoverHere);
+            }
+            if (_setCmdModelStandby)
+            {
+                _appSettings.commandHandoverStandbySuccessorModel = comboPick(_setCmdModelStandby, _cmdModelIdsStandby);
             }
         }
         if (_setCmdTitleFind)
@@ -3118,6 +3172,7 @@ namespace winrt::TerminalApp::implementation
             _appSettings.claudeCleanupDaysSeeded = disk.claudeCleanupDaysSeeded; // shipped-default seed marker (engine-init, out-of-cog)
             _appSettings.commandHandoverMaterializedName = disk.commandHandoverMaterializedName; // engine-owned reality: which name's definition file the last init wrote (COMMANDS.md §6a) — a Save must never rewrite history
             _appSettings.commandHandoverHereMaterializedName = disk.commandHandoverHereMaterializedName; // ditto for the in-place twin
+            _appSettings.commandHandoverStandbyMaterializedName = disk.commandHandoverStandbyMaterializedName; // ditto for the §5b standby member
         }
         if (_settingsSink)
         {
@@ -3496,19 +3551,22 @@ namespace winrt::TerminalApp::implementation
     // and a colliding here-name healing to its default.
     void AgentManagerContent::_UpdateCommandsTabStatus()
     {
-        if (!_setCmdHandoverStatus && !_setCmdHandoverHereStatus)
+        if (!_setCmdHandoverStatus && !_setCmdHandoverHereStatus && !_setCmdStandbyStatus)
         {
             return;
         }
         std::wstring ho = _setCmdHandoverName ? std::wstring{ _setCmdHandoverName.Text() } : std::wstring{ ::Agentmaster::kDefaultHandoverCommandName };
         std::wstring hh = _setCmdHandoverHereName ? std::wstring{ _setCmdHandoverHereName.Text() } : std::wstring{ ::Agentmaster::kDefaultHandoverHereCommandName };
+        std::wstring hs = _setCmdStandbyName ? std::wstring{ _setCmdStandbyName.Text() } : std::wstring{ ::Agentmaster::kDefaultHandoverStandbyCommandName };
         // What each box normalizes to ALONE (to tell "fell back because invalid/blank" apart from
-        // "fell back because it collides with the other command").
+        // "fell back because it collides with another command").
         const std::wstring hoAlone = ::Agentmaster::NormalizeCommandName(ho);
         const std::wstring hhAlone = ::Agentmaster::NormalizeCommandName(hh);
-        ::Agentmaster::ResolveCommandNamePair(ho, hh); // the pair Save will store
+        const std::wstring hsAlone = ::Agentmaster::NormalizeCommandName(hs);
+        ::Agentmaster::ResolveCommandNameTriple(ho, hh, hs); // the names Save will store
         const bool hoOn = _setCmdHandoverEnabled && _setCmdHandoverEnabled.IsOn();
         const bool hhOn = _setCmdHandoverHereEnabled && _setCmdHandoverHereEnabled.IsOn();
+        const bool hsOn = _setCmdStandbyEnabled && _setCmdStandbyEnabled.IsOn();
         const auto lineFor = [](bool enabled, const std::wstring& live, const std::wstring& want, const std::wstring& alone) {
             std::wstring s;
             if (!enabled)
@@ -3531,7 +3589,7 @@ namespace winrt::TerminalApp::implementation
             if (enabled && alone != want)
             {
                 s += alone.empty() ? L" (blank/invalid name \x2014 falls back to the default)" :
-                                     L" (name collides with the other command \x2014 falls back)";
+                                     L" (name collides with another command \x2014 falls back)";
             }
             return s;
         };
@@ -3542,6 +3600,10 @@ namespace winrt::TerminalApp::implementation
         if (_setCmdHandoverHereStatus)
         {
             _setCmdHandoverHereStatus.Text(winrt::hstring{ lineFor(hhOn, _cmdLiveHandoverHereName, hh, hhAlone) });
+        }
+        if (_setCmdStandbyStatus)
+        {
+            _setCmdStandbyStatus.Text(winrt::hstring{ lineFor(hsOn, _cmdLiveStandbyName, hs, hsAlone) });
         }
         // §6b shaping summary — the honesty line under the regex boxes: what the CURRENT (unsaved)
         // patterns will actually do, an INVALID one called out explicitly (the consumers fall back
@@ -3594,7 +3656,7 @@ namespace winrt::TerminalApp::implementation
                      (L"written to " + ::Agentmaster::CommandWritePathPhrase(loc) + L".");
             _setCmdShapingStatus.Text(winrt::hstring{ t });
         }
-        // §6c: what the two definition FILES on disk are (sampled at cog open / after a Reinstall).
+        // §6c: what the definition FILES on disk are (sampled at cog open / after a Reinstall).
         // A user-owned file is frozen — it keeps whatever instructions it holds, so the settings on
         // this tab that are delivered THROUGH the definition (the location above, and the command's
         // own name) stop applying to it. That must be said out loud, not discovered.
@@ -3617,8 +3679,11 @@ namespace winrt::TerminalApp::implementation
             t += label(_cmdDefStateHandover);
             t += L"   \x00B7   handover-here.md: ";
             t += label(_cmdDefStateHere);
+            t += L"   \x00B7   handover-standby.md: ";
+            t += label(_cmdDefStateStandby);
             const bool anyUserOwned = _cmdDefStateHandover == ::Agentmaster::ShippedCommandFileState::UserOwned ||
-                                      _cmdDefStateHere == ::Agentmaster::ShippedCommandFileState::UserOwned;
+                                      _cmdDefStateHere == ::Agentmaster::ShippedCommandFileState::UserOwned ||
+                                      _cmdDefStateStandby == ::Agentmaster::ShippedCommandFileState::UserOwned;
             t += anyUserOwned ?
                      L"\nAgentmaster never overwrites a definition you edited \x2014 so that file keeps its own instructions and ignores the settings above. Reinstall to take it back." :
                      L"\nAgentmaster keeps these in step with the settings above; a file you edit yourself is never overwritten.";
@@ -3626,9 +3691,9 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // COMMANDS.md §6c: re-sample both /handover-family definition files from disk. Called at cog
-    // OPEN and after a Reinstall — never from the per-keystroke status pass (two file reads + two
-    // SHA-256s). Uses the freshest disk settings for the engine-owned materialized NAMES (which
+    // COMMANDS.md §6c: re-sample the /handover-family definition files from disk. Called at cog
+    // OPEN and after a Reinstall — never from the per-keystroke status pass (three file reads +
+    // three SHA-256s). Uses the freshest disk settings for the engine-owned materialized NAMES (which
     // file is live) with the location as currently TYPED, so the state answers "what would Save do
     // to the file I'm looking at".
     void AgentManagerContent::_RefreshCommandDefinitionState()
@@ -3639,9 +3704,10 @@ namespace winrt::TerminalApp::implementation
         {
             s.commandHandoverWritePath = ::Agentmaster::NormalizeCommandWritePath(std::wstring{ _setCmdWritePath.Text() });
         }
-        const auto [ho, hh] = ::Agentmaster::InspectHandoverCommandFiles(s);
+        const auto [ho, hh, hs] = ::Agentmaster::InspectHandoverCommandFiles(s);
         _cmdDefStateHandover = ho;
         _cmdDefStateHere = hh;
+        _cmdDefStateStandby = hs;
     }
     catch (...)
     {

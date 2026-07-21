@@ -179,12 +179,15 @@ void TestPendingInput();
 
 // tests_commands.cpp — COMMANDS.md: slash-command bindings (ParseCommandEcho + the parser's
 // Command/fileWritePaths events + the CommandWatch state machine incl. MULTI-FILE collect +
-// seal-at-turn-end + settle fallback + the SAME-FAMILY SUPERSEDE race guard [/handover vs
-// /handover-here never race each other's files] + the durable per-session progress [fired
+// seal-at-turn-end + settle fallback + the SAME-FAMILY SUPERSEDE race guard [no family command
+// ever races another's files] + the durable per-session progress [fired
 // watermark / armed-marker revival / encode-decode] + DeriveSuffixedTitle + the initial-prompt
 // commandline arg + EnsureHandoverCommandFileIn + the safeguard belts: sane-path gate incl. '|',
 // Join/SplitWatchPaths, throwing-handler/probe containment; plus the /handover-here twin units —
-// hyphenated echo, name-exact binding isolation, EnsureHandoverHereCommandFileIn's own file)
+// hyphenated echo, name-exact binding isolation, EnsureHandoverHereCommandFileIn's own file —
+// and the /handover-standby §5b units: EnsureHandoverStandbyCommandFileIn's own file + digest
+// gate + fill-not-send sentinels, THREE-way binding isolation + the supersede pivot onto the
+// standby path, and BuildPromptFill [no trailing CR ever; submit == fill + "\r"])
 void TestCommandWatch();
 // tests_commands.cpp — the FABRICATED /handover session: the design's expected transcript shape
 // (echo -> Write -> tool_result -> end_turn, real ISO timestamps) driven end-to-end through the

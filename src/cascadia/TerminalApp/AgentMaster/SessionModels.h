@@ -385,16 +385,16 @@ namespace Agentmaster
         }
     }
 
-    // Agentmaster (#6 — multi-line submit): build the ConPTY input that types `text` into Claude's
-    // Ink TUI and submits it as ONE message. A bare `text + CR` makes Ink submit on the FIRST embedded
-    // line break (the WinUI compose TextBox emits CR per line), tearing a multi-line prompt across
-    // submits — and the lone-CR Enter-retry can't reassemble it. Wrap the body in a bracketed paste
-    // (ESC[200~ … ESC[201~) so Ink treats embedded newlines as literal pasted text, then a single
-    // trailing CR (outside the paste) submits the whole block. Embedded CR / CRLF are normalized to LF
-    // for clean pasted lines. Assumes Claude's TUI enables bracketed-paste mode (it does — it supports
-    // multi-line paste). Also hardens single-line sends against the CR-eaten race: the submit CR now
-    // follows a complete, delimited paste instead of riding in raw with the text. PURE.
-    inline std::wstring BuildPromptSubmission(std::wstring_view text)
+    // Agentmaster (COMMANDS.md §5b — the /handover-standby FILL): build the ConPTY input that
+    // TYPES `text` into Claude's Ink TUI input box WITHOUT submitting it — BuildPromptSubmission's
+    // bracketed paste minus the trailing submit CR, so the draft sits in the box exactly one Enter
+    // away from sending. The bracketed-paste wrap (ESC[200~ … ESC[201~) is what keeps embedded
+    // newlines LITERAL (Ink would otherwise submit on the first line break), so a multi-line
+    // briefing lands as one multi-line draft. Embedded CR / CRLF normalize to LF for clean pasted
+    // lines. The delimiters also make the fill injection-proof for this channel the same way the
+    // submit path is: the text was C0-stripped upstream, so no ESC can terminate the paste early.
+    // PURE.
+    inline std::wstring BuildPromptFill(std::wstring_view text)
     {
         std::wstring body;
         body.reserve(text.size());
@@ -413,7 +413,23 @@ namespace Agentmaster
                 body.push_back(text[i]);
             }
         }
-        return L"\x1b[200~" + body + L"\x1b[201~\r";
+        return L"\x1b[200~" + body + L"\x1b[201~";
+    }
+
+    // Agentmaster (#6 — multi-line submit): build the ConPTY input that types `text` into Claude's
+    // Ink TUI and submits it as ONE message. A bare `text + CR` makes Ink submit on the FIRST embedded
+    // line break (the WinUI compose TextBox emits CR per line), tearing a multi-line prompt across
+    // submits — and the lone-CR Enter-retry can't reassemble it. Wrap the body in a bracketed paste
+    // (ESC[200~ … ESC[201~) so Ink treats embedded newlines as literal pasted text, then a single
+    // trailing CR (outside the paste) submits the whole block. Embedded CR / CRLF are normalized to LF
+    // for clean pasted lines. Assumes Claude's TUI enables bracketed-paste mode (it does — it supports
+    // multi-line paste). Also hardens single-line sends against the CR-eaten race: the submit CR now
+    // follows a complete, delimited paste instead of riding in raw with the text. PURE; the paste
+    // half is BuildPromptFill above (the /handover-standby fill-not-send channel), so the two can
+    // never drift — this is exactly that fill plus the ONE submit CR.
+    inline std::wstring BuildPromptSubmission(std::wstring_view text)
+    {
+        return BuildPromptFill(text) + L"\r";
     }
 
     struct ApprovalPolicy
@@ -1068,6 +1084,7 @@ namespace Agentmaster
     // and the collision-heal targets all read these.
     inline constexpr std::wstring_view kDefaultHandoverCommandName = L"handover";
     inline constexpr std::wstring_view kDefaultHandoverHereCommandName = L"handover-here";
+    inline constexpr std::wstring_view kDefaultHandoverStandbyCommandName = L"handover-standby";
 
     // Agentmaster (COMMANDS.md §6b): the SHIPPED DEFAULT regex settings of the /handover family.
     // These are REAL VALUES seeded into settings.json and shown in the cog's boxes — deliberately
@@ -1466,13 +1483,18 @@ namespace Agentmaster
         // engine init, deliberately never re-bound mid-run (the scanner worker reads the binding
         // set unsynchronized — engine-init registration is the happens-before). Names are stored
         // NORMALIZED (NormalizeCommandName: lowercase ASCII slug [a-z0-9-_], '/'-stripped, <=64
-        // chars) and COLLISION-HEALED (ResolveCommandNamePair — the watch's binding lookup is
-        // name-exact, so the two commands can never share a name). Missing keys reproduce the
-        // shipped behavior exactly: /handover + /handover-here, both enabled.
+        // chars) and COLLISION-HEALED (ResolveCommandNameTriple — the watch's binding lookup is
+        // name-exact, so no two commands can ever share a name). Missing keys reproduce the
+        // shipped behavior exactly: /handover + /handover-here + /handover-standby, all enabled.
         std::wstring commandHandoverName{ L"handover" };
         bool commandHandoverEnabled{ true };
         std::wstring commandHandoverHereName{ L"handover-here" };
         bool commandHandoverHereEnabled{ true };
+        // The STANDBY member (COMMANDS.md §5b): like /handover, but each successor's briefing is
+        // TYPED into its Claude input box WITHOUT being sent — the user reviews the pre-filled
+        // message and presses Enter themselves ("a handover in standby").
+        std::wstring commandHandoverStandbyName{ L"handover-standby" };
+        bool commandHandoverStandbyEnabled{ true };
         // ENGINE-owned markers (NOT shown in the cog; the envDefaultsVersion discipline): the name
         // whose definition file the LAST engine init actually materialized for each command —
         // "" == none (the command was disabled, or the write failed). The init reconcile compares
@@ -1481,22 +1503,28 @@ namespace Agentmaster
         // is never touched), then RMWs the marker to the new reality. Defaults to the DEFAULT
         // names, because a pre-feature install has the default-named files on disk with no marker
         // — so its first rename knows exactly what to clean up. The cog Save PRESERVES these from
-        // disk (both preserve blocks), like every other out-of-form field.
+        // disk (both preserve blocks), like every other out-of-form field. (For STANDBY the
+        // default-name default is equally safe on an install predating the command: the reconcile's
+        // migration removes a prior file only when it digest-matches something we shipped, so a
+        // marker naming a file that never existed is a no-op remove followed by the create.)
         std::wstring commandHandoverMaterializedName{ L"handover" };
         std::wstring commandHandoverHereMaterializedName{ L"handover-here" };
+        std::wstring commandHandoverStandbyMaterializedName{ L"handover-standby" };
         // SUCCESSOR SHAPING (COMMANDS.md §6b — the Commands tab's second half). Unlike the
         // names/enables above, most of these are consumed at ACTION time (_HandleCommandHandover
         // reads the live _appSettings when a handover fires), so they apply to the NEXT handover
         // immediately — no restart. The ONE exception is the file-match regex (binding-time,
         // restart-applied — noted on its field).
-        //   * commandHandoverSuccessorModel / commandHandoverHereSuccessorModel — the model the
-        //     command's successors LAUNCH with, per command: "" == Default (the settings `model`
-        //     decides, the shipped behavior), else a model id passed as this launch's
-        //     `--model <id>` (the launch-model picker's per-launch override, reused verbatim —
-        //     BuildClaudeCommandline's modelOverride). The cog offers "Default" + the launchModels
-        //     list; a stored id no longer in that list still round-trips (shown as custom).
+        //   * commandHandoverSuccessorModel / commandHandoverHereSuccessorModel /
+        //     commandHandoverStandbySuccessorModel — the model the command's successors LAUNCH
+        //     with, per command: "" == Default (the settings `model` decides, the shipped
+        //     behavior), else a model id passed as this launch's `--model <id>` (the launch-model
+        //     picker's per-launch override, reused verbatim — BuildClaudeCommandline's
+        //     modelOverride). The cog offers "Default" + the launchModels list; a stored id no
+        //     longer in that list still round-trips (shown as custom).
         std::wstring commandHandoverSuccessorModel{};
         std::wstring commandHandoverHereSuccessorModel{};
+        std::wstring commandHandoverStandbySuccessorModel{};
         //   * commandHandoverTitleFindRegex / commandHandoverTitleReplace — ONE find/replace pair
         //     for the WHOLE family: when the find regex is non-empty, VALID (RegexUtil.h), and
         //     MATCHES the origin title, the successor's title = regex_replace(originTitle, find,
@@ -1707,18 +1735,23 @@ namespace Agentmaster
         return true;
     }
 
-    // Agentmaster (COMMANDS.md §6a): resolve the CONFIGURED /handover-family name pair into the
-    // pair actually USED — normalize both, fall back to the default on empty, and COLLISION-HEAL:
-    // the CommandWatch binding lookup is name-EXACT, so two bindings under one name would make the
-    // second silently shadow the first (BindMarkdownAwait is last-wins). Deterministic rule: on a
-    // collision the HERE name falls back to its default; if that STILL collides (the user named
-    // /handover literally "handover-here"), the handover name falls back to its default too — so
-    // the healed pair is always two distinct, non-empty slugs. Shared by the Persistence load
-    // (a hand-edited settings.json self-heals) and the cog Save (typed input heals identically).
-    inline void ResolveCommandNamePair(std::wstring& handoverName, std::wstring& handoverHereName)
+    // Agentmaster (COMMANDS.md §6a): resolve the CONFIGURED /handover-family names into the set
+    // actually USED — normalize each, fall back to its default on empty, and COLLISION-HEAL: the
+    // CommandWatch binding lookup is name-EXACT, so two bindings under one name would make the
+    // second silently shadow the first (BindMarkdownAwait is last-wins), and two definition files
+    // cannot share one <name>.md leaf. Deterministic rule, priority handover > here > standby: on
+    // a collision the LATER command falls back to ITS default; if it is ALREADY on its default
+    // (the earlier command squats that name — e.g. /handover named "handover-standby"), the
+    // EARLIER one is evicted to ITS OWN default instead. Every heal move lands a name on its own
+    // default and the three defaults are pairwise distinct, so the loop reaches a collision-free
+    // fixpoint in <= 3 moves (the guard is a belt, not a real bound) and the healed set is always
+    // three distinct, non-empty slugs. Shared by the Persistence load (a hand-edited settings.json
+    // self-heals) and the cog Save (typed input heals identically).
+    inline void ResolveCommandNameTriple(std::wstring& handoverName, std::wstring& handoverHereName, std::wstring& handoverStandbyName)
     {
         handoverName = NormalizeCommandName(handoverName);
         handoverHereName = NormalizeCommandName(handoverHereName);
+        handoverStandbyName = NormalizeCommandName(handoverStandbyName);
         if (handoverName.empty())
         {
             handoverName = kDefaultHandoverCommandName;
@@ -1727,12 +1760,36 @@ namespace Agentmaster
         {
             handoverHereName = kDefaultHandoverHereCommandName;
         }
-        if (handoverName == handoverHereName)
+        if (handoverStandbyName.empty())
         {
-            handoverHereName = kDefaultHandoverHereCommandName;
-            if (handoverName == handoverHereName)
+            handoverStandbyName = kDefaultHandoverStandbyCommandName;
+        }
+        std::wstring* const names[3] = { &handoverName, &handoverHereName, &handoverStandbyName };
+        const std::wstring_view defaults[3] = { kDefaultHandoverCommandName, kDefaultHandoverHereCommandName, kDefaultHandoverStandbyCommandName };
+        for (int guard = 0; guard < 8; ++guard)
+        {
+            bool changed = false;
+            for (int i = 0; i < 3 && !changed; ++i)
             {
-                handoverName = kDefaultHandoverCommandName;
+                for (int j = i + 1; j < 3 && !changed; ++j)
+                {
+                    if (*names[i] == *names[j])
+                    {
+                        if (*names[j] != defaults[j])
+                        {
+                            *names[j] = defaults[j]; // the later command yields to its own default
+                        }
+                        else
+                        {
+                            *names[i] = defaults[i]; // the earlier one squatted that default — evict it
+                        }
+                        changed = true;
+                    }
+                }
+            }
+            if (!changed)
+            {
+                break;
             }
         }
     }

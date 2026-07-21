@@ -356,13 +356,14 @@ namespace Agentmaster
             // collision-healed at load) and are applied HERE, once per process — a cog change
             // deliberately binds at the NEXT start only (the scanner worker reads the binding set
             // unsynchronized; engine-init registration before Start() is the happens-before).
-            // The fan-out ACTION names stay the canonical L"handover"/L"handover-here" whatever
-            // the typed names are — the per-window sinks dispatch on them
-            // (TerminalPage.AgentEngine.cpp), so a rename never touches the UI layer.
+            // The fan-out ACTION names stay the canonical L"handover"/L"handover-here"/
+            // L"handover-standby" whatever the typed names are — the per-window sinks dispatch
+            // on them (TerminalPage.AgentEngine.cpp), so a rename never touches the UI layer.
             const AppSettings cmdSettings = LoadAppSettings();
             std::wstring handoverCmdName = cmdSettings.commandHandoverName;
             std::wstring handoverHereCmdName = cmdSettings.commandHandoverHereName;
-            ResolveCommandNamePair(handoverCmdName, handoverHereCmdName); // belt — the load already heals
+            std::wstring handoverStandbyCmdName = cmdSettings.commandHandoverStandbyName;
+            ResolveCommandNameTriple(handoverCmdName, handoverHereCmdName, handoverStandbyCmdName); // belt — the load already heals
             // §6b file-match pattern: ONE regex shared by BOTH bindings (they are one await
             // family — a per-command pattern would split the §3 supersede family). Validated
             // ONCE here so a broken pattern is a logged fact, not a silent kill: invalid ⇒ pass
@@ -405,6 +406,17 @@ namespace Agentmaster
                     RaiseCommandActionInWindows(sessionId, L"handover-here", JoinWatchPaths(mdPaths), args);
                 }, leafMatchRegex, allowFirstMarkdownFallback);
             }
+            // /handover-standby — the FILL-NOT-SEND member (COMMANDS.md §5b): the SAME markdown
+            // await + the SAME "handover" leaf hint (so all three commands stay ONE §3 supersede
+            // family — a pivot between them re-aims the unsatisfied await), a third fan-out
+            // action: the hosting window opens each file's successor like /handover but TYPES
+            // the document into its input box WITHOUT submitting (one Enter away).
+            if (cmdSettings.commandHandoverStandbyEnabled)
+            {
+                e->commandWatch->BindMarkdownAwait(handoverStandbyCmdName, L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& args) {
+                    RaiseCommandActionInWindows(sessionId, L"handover-standby", JoinWatchPaths(mdPaths), args);
+                }, leafMatchRegex, allowFirstMarkdownFallback);
+            }
             e->scanner->SetCommandWatch(e->commandWatch);
             // The COMMAND DEFINITIONS (COMMANDS.md §6/§6a): without a definition under
             // <claude-config>/commands, a typed /command is rejected client-side and never reaches
@@ -417,13 +429,15 @@ namespace Agentmaster
             // MATERIALIZED-NAME markers then RMW back into settings.json so the NEXT init knows
             // what to migrate (the reconcile logs the per-command outcome lines).
             {
-                const auto [materializedHandover, materializedHandoverHere] = ReconcileHandoverCommandFiles(cmdSettings);
+                const auto [materializedHandover, materializedHandoverHere, materializedHandoverStandby] = ReconcileHandoverCommandFiles(cmdSettings);
                 if (materializedHandover != cmdSettings.commandHandoverMaterializedName ||
-                    materializedHandoverHere != cmdSettings.commandHandoverHereMaterializedName)
+                    materializedHandoverHere != cmdSettings.commandHandoverHereMaterializedName ||
+                    materializedHandoverStandby != cmdSettings.commandHandoverStandbyMaterializedName)
                 {
-                    auto rmw = LoadAppSettings(); // freshest-disk RMW (the marker is the only field we own here)
+                    auto rmw = LoadAppSettings(); // freshest-disk RMW (the markers are the only fields we own here)
                     rmw.commandHandoverMaterializedName = materializedHandover;
                     rmw.commandHandoverHereMaterializedName = materializedHandoverHere;
+                    rmw.commandHandoverStandbyMaterializedName = materializedHandoverStandby;
                     SaveAppSettings(rmw);
                 }
             }

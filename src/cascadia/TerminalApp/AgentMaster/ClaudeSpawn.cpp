@@ -1280,6 +1280,81 @@ file) in this working directory, injecting each document as its session's openin
         return kHandoverHereCommandV5;
     }
 
+    // ---- the /handover-standby command DEFINITION (COMMANDS.md §5b — the FILL-NOT-SEND member) ----
+    //
+    // Same shipped-history contract as its two siblings, verbatim: SHA-256 per version, oldest
+    // first, the last entry being the current text's digest, append-only, frozen forever. Its text
+    // keeps the SAME await-signal contract ("use the Write tool", the `HANDOVER-<topic>.md` leaf,
+    // the "WRITE IT IN:" location line) and the same self-contained-briefing discipline, but the
+    // outcome it describes is the STANDBY delivery: each file's successor opens as a new tab and
+    // the document is TYPED into that session's input box WITHOUT being submitted — the user
+    // reviews the pre-filled message and presses Enter themselves. Deliberately NO bare mention of
+    // the sibling commands' names in the text: each definition renders only ITS OWN "/<name>"
+    // token (RenderShippedCommandText), so a sibling reference would go stale under a rename.
+    const std::vector<std::string_view>& ShippedHandoverStandbyCommandHashes()
+    {
+        static const std::vector<std::string_view> kHashes{
+            "2d48a7b6d1024a472ea39bb4bf90cb01db8da75b275b78f29774b6571d4e9c16", // v1 (current) — the original standby: fan-out successors whose briefings are PRE-TYPED into the input box, never submitted
+        };
+        return kHashes;
+    }
+
+    // V1 (current) — the standby text: the /handover V7 mechanics (fan-out, self-contained files,
+    // the rendered "WRITE IT IN:" line, the self-invocation guard) with the delivery description
+    // swapped for the fill-not-send contract. KEEP THE MARKER AND KEEP THE PHRASE ON ONE LINE in
+    // every future version (the §6c identity fold), and keep the "Write tool" + "HANDOVER-"
+    // phrases the markdown await keys on.
+    static constexpr std::wstring_view kHandoverStandbyCommandV1 =
+        LR"md(---
+description: Hand this session's work over to fresh successor session(s) whose first message is PRE-TYPED but NOT sent - you review it and press Enter (a handover in standby)
+---
+The user wants to HAND OVER this session's work to a fresh successor Claude session IN
+STANDBY: Agentmaster opens the successor tab(s) automatically and TYPES each briefing into
+its session's input box WITHOUT sending it - the user reviews the pre-filled message there
+and presses Enter themselves when ready. Nothing runs until they do.
+Handover context from the user (inline context, or a path to a file you should read and fold in):
+
+$ARGUMENTS
+
+IMPORTANT - this pipeline is triggered ONLY by the user actually TYPING /handover-standby as
+their message (Agentmaster detects the typed command's transcript echo; a model-initiated
+Skill invocation leaves no such echo, so nothing would be watching). If you are reading this
+because YOU invoked the skill yourself rather than the user typing /handover-standby: do NOT
+write any handover file - tell the user to type `/handover-standby <context>` themselves,
+then continue what you were doing.
+
+Do this NOW, in this exact order:
+1. If the context above names a readable file, read it first and incorporate it.
+2. Using the Write tool (NOT a shell redirect - the Write tool call itself is the signal
+   Agentmaster detects), create ONE new markdown file named `HANDOVER-<short-topic>.md`
+   (pick a short kebab-case topic slug; if that name already exists, append `-2`, `-3`, ...).
+   WRITE IT IN: your session scratchpad directory (the temp scratchpad folder your own instructions name; if you have none, use the system temp folder)
+   EACH `HANDOVER-*.md` file you write in this turn starts its OWN successor tab, in write
+   order - so write ONE file for one successor, or write MORE THAN ONE file to fan out
+   several parallel successors at once.
+3. Each file's CONTENT is PRE-TYPED VERBATIM into ITS successor session's input box as a
+   ready-to-send first user message (typed, NOT submitted - the user presses Enter there) - so
+   write every file as a direct briefing TO that successor (imperative, second person), fully
+   self-contained: the goal, the current state, decisions made and why, work completed, work
+   still in flight, concrete ordered next steps, key file paths (absolute), and any gotchas
+   or constraints discovered along the way. A successor has NO other context, cannot see this
+   conversation, and cannot see the OTHER files (each goes to a different session - never
+   write "continue in file B"). Each file is delivered as ONE message whatever its size - be
+   as thorough as the work demands.
+4. End your turn right after writing the file(s) (a one-line confirmation is fine). Do not
+   start new work.
+
+Agentmaster is watching for those markdown writes: when your turn ends it automatically opens
+a successor session tab PER FILE (named like this one, ending in "(handover)", "(handover 2)",
+...) in this working directory and TYPES each document into its own tab's input box, ready to
+send - nothing is submitted until the user presses Enter in that tab.
+)md";
+
+    std::wstring_view ShippedHandoverStandbyCommandText()
+    {
+        return kHandoverStandbyCommandV1;
+    }
+
     // ---- customizable command names (COMMANDS.md §6a) — the render / identity pair ----
     //
     // A renamed command's definition text must SAY the new name (the self-invocation guard tells
@@ -1780,6 +1855,11 @@ file) in this working directory, injecting each document as its session's openin
         return EnsureShippedCommandFileIn(configDir, L"handover-here.md", ShippedHandoverHereCommandHashes(), ShippedHandoverHereCommandText(), L"handover-here");
     }
 
+    std::wstring EnsureHandoverStandbyCommandFileIn(const std::wstring& configDir)
+    {
+        return EnsureShippedCommandFileIn(configDir, L"handover-standby.md", ShippedHandoverStandbyCommandHashes(), ShippedHandoverStandbyCommandText(), L"handover-standby");
+    }
+
     // CLAUDE_CONFIG_DIR > ~/.claude — the same resolution ClaudeProjectsDir applies (the
     // commands dir is a sibling of projects/ under the one Claude config root).
     static std::wstring ResolveClaudeCommandsBase()
@@ -1809,17 +1889,24 @@ file) in this working directory, injecting each document as its session's openin
         return base.empty() ? std::wstring{} : EnsureHandoverHereCommandFileIn(base);
     }
 
-    std::pair<std::wstring, std::wstring> ReconcileHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings)
+    std::wstring EnsureHandoverStandbyCommandFile()
+    {
+        const std::wstring base = ResolveClaudeCommandsBase();
+        return base.empty() ? std::wstring{} : EnsureHandoverStandbyCommandFileIn(base);
+    }
+
+    HandoverFamilyNames ReconcileHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings)
     try
     {
-        // Belt: heal the configured pair again here (the Persistence load already does) so a
-        // hand-built AppSettings can never reconcile two commands onto ONE name. The two
+        // Belt: heal the configured names again here (the Persistence load already does) so a
+        // hand-built AppSettings can never reconcile two commands onto ONE name. The three
         // histories are digest-disjoint (test-asserted), so even a pathological marker overlap
-        // can't make one command's migration delete the OTHER's pristine file — the ours-check
+        // can't make one command's migration delete ANOTHER's pristine file — the ours-check
         // hashes against each command's OWN history.
         std::wstring hoName = settings.commandHandoverName;
         std::wstring hhName = settings.commandHandoverHereName;
-        ResolveCommandNamePair(hoName, hhName);
+        std::wstring hsName = settings.commandHandoverStandbyName;
+        ResolveCommandNameTriple(hoName, hhName, hsName);
         const std::wstring ho = ReconcileShippedCommandFileIn(configDir,
                                                               kDefaultHandoverCommandName,
                                                               ShippedHandoverCommandHashes(),
@@ -1838,7 +1925,16 @@ file) in this working directory, injecting each document as its session's openin
                                                               hhName,
                                                               settings.commandHandoverHereEnabled,
                                                               settings.commandHandoverWritePath);
-        return { ho, hh };
+        const std::wstring hs = ReconcileShippedCommandFileIn(configDir,
+                                                              kDefaultHandoverStandbyCommandName,
+                                                              ShippedHandoverStandbyCommandHashes(),
+                                                              ShippedHandoverStandbyCommandText(),
+                                                              L"handover-standby",
+                                                              settings.commandHandoverStandbyMaterializedName,
+                                                              hsName,
+                                                              settings.commandHandoverStandbyEnabled,
+                                                              settings.commandHandoverWritePath);
+        return { ho, hh, hs };
     }
     catch (...)
     {
@@ -1850,10 +1946,10 @@ file) in this working directory, injecting each document as its session's openin
         // the no-config-root path takes): never flip a marker over a failure we did not complete,
         // so the next init reconciles from the truth on disk.
         LogSwallowedException(L"ReconcileHandoverCommandFilesIn");
-        return { settings.commandHandoverMaterializedName, settings.commandHandoverHereMaterializedName };
+        return { settings.commandHandoverMaterializedName, settings.commandHandoverHereMaterializedName, settings.commandHandoverStandbyMaterializedName };
     }
 
-    std::pair<std::wstring, std::wstring> ReconcileHandoverCommandFiles(const AppSettings& settings)
+    HandoverFamilyNames ReconcileHandoverCommandFiles(const AppSettings& settings)
     try
     {
         const std::wstring base = ResolveClaudeCommandsBase();
@@ -1861,7 +1957,7 @@ file) in this working directory, injecting each document as its session's openin
         {
             // No config root resolvable — report the previous reality unchanged (never flip the
             // markers to "" over a transient env problem; nothing was migrated or written).
-            return { settings.commandHandoverMaterializedName, settings.commandHandoverHereMaterializedName };
+            return { settings.commandHandoverMaterializedName, settings.commandHandoverHereMaterializedName, settings.commandHandoverStandbyMaterializedName };
         }
         return ReconcileHandoverCommandFilesIn(base, settings);
     }
@@ -1870,7 +1966,7 @@ file) in this working directory, injecting each document as its session's openin
         // The env-resolution half of the same net (ResolveClaudeCommandsBase reads the environment
         // and builds a path); same recovery — markers unchanged, nothing claimed.
         LogSwallowedException(L"ReconcileHandoverCommandFiles");
-        return { settings.commandHandoverMaterializedName, settings.commandHandoverHereMaterializedName };
+        return { settings.commandHandoverMaterializedName, settings.commandHandoverHereMaterializedName, settings.commandHandoverStandbyMaterializedName };
     }
 
     // The name a /handover-family command's definition file lives under RIGHT NOW: the engine's
@@ -1883,10 +1979,11 @@ file) in this working directory, injecting each document as its session's openin
     // restart-applied (§6a), where the file and the binding move together. (A pre-§6a settings.json
     // reads the DEFAULT names as its markers, so "the file exists but the marker is empty" is not a
     // reachable state; a definition someone DELETED still has its marker and is recreated here.)
-    static std::pair<std::wstring, std::wstring> LiveHandoverCommandNames(const AppSettings& settings)
+    static HandoverFamilyNames LiveHandoverCommandNames(const AppSettings& settings)
     {
         return { NormalizeCommandName(settings.commandHandoverMaterializedName),
-                 NormalizeCommandName(settings.commandHandoverHereMaterializedName) };
+                 NormalizeCommandName(settings.commandHandoverHereMaterializedName),
+                 NormalizeCommandName(settings.commandHandoverStandbyMaterializedName) };
     }
 
     // COMMANDS.md §6c — re-render the LIVE definition files with the CURRENT write location (and
@@ -1895,21 +1992,24 @@ file) in this working directory, injecting each document as its session's openin
     // (EnsureShippedCommandFileNamedIn's policy is unchanged — a user-edited definition is left
     // frozen, which the cog surfaces + offers Reinstall for), and it never renames, migrates or
     // deletes anything.
-    std::pair<std::wstring, std::wstring> RefreshHandoverCommandWritePathIn(const std::wstring& configDir, const AppSettings& settings)
+    HandoverFamilyNames RefreshHandoverCommandWritePathIn(const std::wstring& configDir, const AppSettings& settings)
     try
     {
-        const auto [hoName, hhName] = LiveHandoverCommandNames(settings);
-        std::wstring ho;
-        std::wstring hh;
+        const auto [hoName, hhName, hsName] = LiveHandoverCommandNames(settings);
+        HandoverFamilyNames out;
         if (!hoName.empty())
         {
-            ho = EnsureShippedCommandFileNamedIn(configDir, kDefaultHandoverCommandName, ShippedHandoverCommandHashes(), ShippedHandoverCommandText(), L"handover", hoName, settings.commandHandoverWritePath);
+            out.handover = EnsureShippedCommandFileNamedIn(configDir, kDefaultHandoverCommandName, ShippedHandoverCommandHashes(), ShippedHandoverCommandText(), L"handover", hoName, settings.commandHandoverWritePath);
         }
         if (!hhName.empty())
         {
-            hh = EnsureShippedCommandFileNamedIn(configDir, kDefaultHandoverHereCommandName, ShippedHandoverHereCommandHashes(), ShippedHandoverHereCommandText(), L"handover-here", hhName, settings.commandHandoverWritePath);
+            out.here = EnsureShippedCommandFileNamedIn(configDir, kDefaultHandoverHereCommandName, ShippedHandoverHereCommandHashes(), ShippedHandoverHereCommandText(), L"handover-here", hhName, settings.commandHandoverWritePath);
         }
-        return { ho, hh };
+        if (!hsName.empty())
+        {
+            out.standby = EnsureShippedCommandFileNamedIn(configDir, kDefaultHandoverStandbyCommandName, ShippedHandoverStandbyCommandHashes(), ShippedHandoverStandbyCommandText(), L"handover-standby", hsName, settings.commandHandoverWritePath);
+        }
+        return out;
     }
     catch (...)
     {
@@ -1917,11 +2017,11 @@ file) in this working directory, injecting each document as its session's openin
         return {};
     }
 
-    std::pair<std::wstring, std::wstring> RefreshHandoverCommandWritePath(const AppSettings& settings)
+    HandoverFamilyNames RefreshHandoverCommandWritePath(const AppSettings& settings)
     try
     {
         const std::wstring base = ResolveClaudeCommandsBase();
-        return base.empty() ? std::pair<std::wstring, std::wstring>{} : RefreshHandoverCommandWritePathIn(base, settings);
+        return base.empty() ? HandoverFamilyNames{} : RefreshHandoverCommandWritePathIn(base, settings);
     }
     catch (...)
     {
@@ -1929,21 +2029,24 @@ file) in this working directory, injecting each document as its session's openin
         return {};
     }
 
-    std::pair<std::wstring, std::wstring> ReinstallHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings)
+    HandoverFamilyNames ReinstallHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings)
     try
     {
-        const auto [hoName, hhName] = LiveHandoverCommandNames(settings);
-        std::wstring ho;
-        std::wstring hh;
+        const auto [hoName, hhName, hsName] = LiveHandoverCommandNames(settings);
+        HandoverFamilyNames out;
         if (!hoName.empty())
         {
-            ho = ForceReinstallShippedCommandFileNamedIn(configDir, kDefaultHandoverCommandName, ShippedHandoverCommandText(), L"handover", hoName, settings.commandHandoverWritePath);
+            out.handover = ForceReinstallShippedCommandFileNamedIn(configDir, kDefaultHandoverCommandName, ShippedHandoverCommandText(), L"handover", hoName, settings.commandHandoverWritePath);
         }
         if (!hhName.empty())
         {
-            hh = ForceReinstallShippedCommandFileNamedIn(configDir, kDefaultHandoverHereCommandName, ShippedHandoverHereCommandText(), L"handover-here", hhName, settings.commandHandoverWritePath);
+            out.here = ForceReinstallShippedCommandFileNamedIn(configDir, kDefaultHandoverHereCommandName, ShippedHandoverHereCommandText(), L"handover-here", hhName, settings.commandHandoverWritePath);
         }
-        return { ho, hh };
+        if (!hsName.empty())
+        {
+            out.standby = ForceReinstallShippedCommandFileNamedIn(configDir, kDefaultHandoverStandbyCommandName, ShippedHandoverStandbyCommandText(), L"handover-standby", hsName, settings.commandHandoverWritePath);
+        }
+        return out;
     }
     catch (...)
     {
@@ -1951,11 +2054,11 @@ file) in this working directory, injecting each document as its session's openin
         return {};
     }
 
-    std::pair<std::wstring, std::wstring> ReinstallHandoverCommandFiles(const AppSettings& settings)
+    HandoverFamilyNames ReinstallHandoverCommandFiles(const AppSettings& settings)
     try
     {
         const std::wstring base = ResolveClaudeCommandsBase();
-        return base.empty() ? std::pair<std::wstring, std::wstring>{} : ReinstallHandoverCommandFilesIn(base, settings);
+        return base.empty() ? HandoverFamilyNames{} : ReinstallHandoverCommandFilesIn(base, settings);
     }
     catch (...)
     {
@@ -1963,33 +2066,36 @@ file) in this working directory, injecting each document as its session's openin
         return {};
     }
 
-    std::pair<ShippedCommandFileState, ShippedCommandFileState> InspectHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings)
+    HandoverFamilyFileStates InspectHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings)
     try
     {
-        const auto [hoName, hhName] = LiveHandoverCommandNames(settings);
-        const auto ho = hoName.empty() ? ShippedCommandFileState::Missing :
-                                         InspectShippedCommandFileNamedIn(configDir, kDefaultHandoverCommandName, ShippedHandoverCommandHashes(), ShippedHandoverCommandText(), hoName, settings.commandHandoverWritePath);
-        const auto hh = hhName.empty() ? ShippedCommandFileState::Missing :
-                                         InspectShippedCommandFileNamedIn(configDir, kDefaultHandoverHereCommandName, ShippedHandoverHereCommandHashes(), ShippedHandoverHereCommandText(), hhName, settings.commandHandoverWritePath);
-        return { ho, hh };
+        const auto [hoName, hhName, hsName] = LiveHandoverCommandNames(settings);
+        HandoverFamilyFileStates out;
+        out.handover = hoName.empty() ? ShippedCommandFileState::Missing :
+                                        InspectShippedCommandFileNamedIn(configDir, kDefaultHandoverCommandName, ShippedHandoverCommandHashes(), ShippedHandoverCommandText(), hoName, settings.commandHandoverWritePath);
+        out.here = hhName.empty() ? ShippedCommandFileState::Missing :
+                                    InspectShippedCommandFileNamedIn(configDir, kDefaultHandoverHereCommandName, ShippedHandoverHereCommandHashes(), ShippedHandoverHereCommandText(), hhName, settings.commandHandoverWritePath);
+        out.standby = hsName.empty() ? ShippedCommandFileState::Missing :
+                                       InspectShippedCommandFileNamedIn(configDir, kDefaultHandoverStandbyCommandName, ShippedHandoverStandbyCommandHashes(), ShippedHandoverStandbyCommandText(), hsName, settings.commandHandoverWritePath);
+        return out;
     }
     catch (...)
     {
         LogSwallowedException(L"InspectHandoverCommandFilesIn");
-        return { ShippedCommandFileState::OursStale, ShippedCommandFileState::OursStale };
+        return { ShippedCommandFileState::OursStale, ShippedCommandFileState::OursStale, ShippedCommandFileState::OursStale };
     }
 
-    std::pair<ShippedCommandFileState, ShippedCommandFileState> InspectHandoverCommandFiles(const AppSettings& settings)
+    HandoverFamilyFileStates InspectHandoverCommandFiles(const AppSettings& settings)
     try
     {
         const std::wstring base = ResolveClaudeCommandsBase();
-        return base.empty() ? std::pair<ShippedCommandFileState, ShippedCommandFileState>{ ShippedCommandFileState::Missing, ShippedCommandFileState::Missing } :
+        return base.empty() ? HandoverFamilyFileStates{} :
                               InspectHandoverCommandFilesIn(base, settings);
     }
     catch (...)
     {
         LogSwallowedException(L"InspectHandoverCommandFiles");
-        return { ShippedCommandFileState::OursStale, ShippedCommandFileState::OursStale };
+        return { ShippedCommandFileState::OursStale, ShippedCommandFileState::OursStale, ShippedCommandFileState::OursStale };
     }
 
     std::wstring DeriveHandoverSuccessorTitle(std::wstring_view originTitle, std::wstring_view findRegex, std::wstring_view replacement)

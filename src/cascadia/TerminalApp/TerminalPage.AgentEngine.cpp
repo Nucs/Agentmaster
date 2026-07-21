@@ -713,6 +713,13 @@ namespace winrt::TerminalApp::implementation
                                 // spawning a new tab beside it.
                                 self->_HandleCommandHandover(sessionId, payload, args, /*inPlace*/ true);
                             }
+                            else if (command == L"handover-standby")
+                            {
+                                // COMMANDS.md §5b — the FILL-NOT-SEND member: new successor
+                                // tab(s) like /handover, but each briefing is TYPED into its
+                                // session's input box WITHOUT submitting (one Enter away).
+                                self->_HandleCommandHandover(sessionId, payload, args, /*inPlace*/ false, /*standby*/ true);
+                            }
                         }
                     }
                     catch (...)
@@ -1162,6 +1169,8 @@ namespace winrt::TerminalApp::implementation
                     // on them to know which old file to clean up).
                     s.commandHandoverMaterializedName = disk.commandHandoverMaterializedName;
                     s.commandHandoverHereMaterializedName = disk.commandHandoverHereMaterializedName;
+                    s.commandHandoverStandbyMaterializedName = disk.commandHandoverStandbyMaterializedName; // the §5b standby member's marker
+
                 }
                 // Inferred-workdir inputs (mode / "Use .git folder to infer") — capture the change
                 // BEFORE adopting `s`, for the scan-state reset below.

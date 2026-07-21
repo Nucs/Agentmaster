@@ -399,6 +399,37 @@ void TestCommandWatch()
         CHECK(firedHere.size() == 1 && firedHandover == 0, "the md write fires ONLY the /handover-here binding (name-exact lookup, no prefix aliasing)");
         CHECK(!firedHere.empty() && firedHere[0].mdPath == L"K:\\r\\HANDOVER-swap.md" && firedHere[0].args == L"replace me", "fired with the resolved path + the command's args");
     }
+    // /handover-standby (COMMANDS.md §5b — the fill-not-send member): a THIRD binding on the SAME
+    // "handover" leaf hint; name-exact lookup keeps all three from cross-firing, and note
+    // "handover" is a PREFIX of "handover-standby" — exactly the aliasing hazard the exact match
+    // exists to exclude.
+    {
+        CommandWatch w;
+        int firedHandover = 0;
+        int firedHere = 0;
+        std::vector<FiredHandover> firedStandby;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++firedHandover; });
+        w.BindMarkdownAwait(L"handover-here", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++firedHere; });
+        w.BindMarkdownAwait(L"handover-standby", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            firedStandby.push_back(MakeFired(sid, mds, args));
+        });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover-standby", L"park it" }, freshTs, now);
+        CHECK(w.PendingCount() == 1, "/handover-standby arms its own pending beside its two siblings");
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-park.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s");
+        CHECK(firedStandby.size() == 1 && firedHandover == 0 && firedHere == 0, "the md write fires ONLY the /handover-standby binding (three-way name-exact isolation)");
+        CHECK(!firedStandby.empty() && firedStandby[0].mdPath == L"K:\\r\\HANDOVER-park.md" && firedStandby[0].args == L"park it", "fired with the resolved path + the command's args");
+        // And the family supersede treats standby as ONE family with its siblings: an unmatched
+        // /handover pivoted to /handover-standby fires the STANDBY path, never the stale spawn.
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"spawn intent" }, freshTs + 10, now);
+        w.OnTurnEnd(L"s"); // clarification round — /handover left unmatched
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover-standby", L"park instead" }, freshTs + 11, now);
+        CHECK(w.PendingCount() == 1, "the unmatched /handover is SUPERSEDED by the standby sighting (one family)");
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-park2.md" }, L"K:\\r", now);
+        w.OnTurnEnd(L"s");
+        CHECK(firedHandover == 0 && firedStandby.size() == 2 && firedStandby[1].args == L"park instead", "the pivot fires ONLY the newest family command (/handover-standby)");
+    }
 
     // ---- SAME-FAMILY SUPERSEDE (the /handover vs /handover-here race guard): both await the
     // SAME HANDOVER-* family, so they are ONE logical operation with different handling paths —
@@ -891,23 +922,47 @@ void TestCommandWatch()
         CHECK(NormalizeCommandName(L"..\\evil/name") == L"evilname", "names: path separators + dots can never survive (the file-leaf safety)");
         CHECK(NormalizeCommandName(L"").empty() && NormalizeCommandName(L"/ ").empty(), "names: blank/degenerate -> empty (the caller's fallback decides)");
         CHECK(NormalizeCommandName(std::wstring(100, L'a')).size() == 64, "names: capped at 64 chars");
-        // ResolveCommandNamePair: normalize + default-fallback + collision-heal (deterministic).
+        // ResolveCommandNameTriple: normalize + default-fallback + collision-heal (deterministic;
+        // priority handover > here > standby — the later command yields, a default-squatter is
+        // evicted to ITS default, and the loop always reaches three distinct slugs).
         {
-            std::wstring a, b;
-            ResolveCommandNamePair(a, b);
-            CHECK(a == L"handover" && b == L"handover-here", "pair: blanks -> the shipped defaults");
+            std::wstring a, b, c;
+            ResolveCommandNameTriple(a, b, c);
+            CHECK(a == L"handover" && b == L"handover-here" && c == L"handover-standby", "triple: blanks -> the shipped defaults");
             a = L"/HO ";
             b = L"x y";
-            ResolveCommandNamePair(a, b);
-            CHECK(a == L"ho" && b == L"xy", "pair: each side normalizes independently");
+            c = L"/Sb!";
+            ResolveCommandNameTriple(a, b, c);
+            CHECK(a == L"ho" && b == L"xy" && c == L"sb", "triple: each side normalizes independently");
             a = L"same";
             b = L"same";
-            ResolveCommandNamePair(a, b);
-            CHECK(a == L"same" && b == L"handover-here", "pair: a collision heals the HERE side to its default");
+            c = L"other";
+            ResolveCommandNameTriple(a, b, c);
+            CHECK(a == L"same" && b == L"handover-here" && c == L"other", "triple: a ho/here collision heals the HERE side to its default (standby untouched)");
             a = L"handover-here";
             b = L"";
-            ResolveCommandNamePair(a, b);
-            CHECK(a == L"handover" && b == L"handover-here", "pair: /handover named 'handover-here' would still collide with the healed default -> BOTH fall back");
+            c = L"";
+            ResolveCommandNameTriple(a, b, c);
+            CHECK(a == L"handover" && b == L"handover-here" && c == L"handover-standby", "triple: /handover squatting 'handover-here' is evicted to ITS default");
+            a = L"same";
+            b = L"keep";
+            c = L"same";
+            ResolveCommandNameTriple(a, b, c);
+            CHECK(a == L"same" && b == L"keep" && c == L"handover-standby", "triple: a ho/standby collision heals the LATER (standby) side");
+            // The cascade: /handover squats the STANDBY default while /handover-here squats the
+            // HANDOVER default — the evictions ripple until all three land distinct (and here,
+            // all on their own defaults).
+            a = L"handover-standby";
+            b = L"handover";
+            c = L"";
+            ResolveCommandNameTriple(a, b, c);
+            CHECK(a == L"handover" && b == L"handover-here" && c == L"handover-standby", "triple: the squatter-eviction cascade converges to three distinct defaults");
+            CHECK(a != b && b != c && a != c, "triple: the healed set is always three DISTINCT slugs");
+            a = L"x";
+            b = L"x";
+            c = L"x";
+            ResolveCommandNameTriple(a, b, c);
+            CHECK(a == L"x" && b == L"handover-here" && c == L"handover-standby", "triple: a three-way collision keeps the highest-priority name, later ones yield");
         }
         // RenderShippedCommandText / NormalizeCommandBytesForIdentity: exact inverses, word-boundary
         // bounded (a "/am-cmd" substitution must never corrupt an "/am-cmd-here" mention).
@@ -1111,24 +1166,33 @@ void TestCommandWatch()
         as.commandHandoverEnabled = false;
         as.commandHandoverHereName = L"swap";
         as.commandHandoverHereEnabled = true;
+        as.commandHandoverStandbyName = L"park";
+        as.commandHandoverStandbyEnabled = false;
         as.commandHandoverMaterializedName = L""; // disabled last run — nothing materialized
         as.commandHandoverHereMaterializedName = L"swap";
+        as.commandHandoverStandbyMaterializedName = L"park";
         const auto back = AppSettingsFromJson(ToJson(as));
         CHECK(back.commandHandoverName == L"ho" && !back.commandHandoverEnabled, "cmd settings: the /handover name + enable round-trip");
         CHECK(back.commandHandoverHereName == L"swap" && back.commandHandoverHereEnabled, "cmd settings: the /handover-here name + enable round-trip");
+        CHECK(back.commandHandoverStandbyName == L"park" && !back.commandHandoverStandbyEnabled, "cmd settings: the /handover-standby name + enable round-trip");
         CHECK(back.commandHandoverMaterializedName.empty(), "cmd settings: a PRESENT empty marker round-trips as empty (the disabled state, not the absent-key default)");
         CHECK(back.commandHandoverHereMaterializedName == L"swap", "cmd settings: a custom marker round-trips");
+        CHECK(back.commandHandoverStandbyMaterializedName == L"park", "cmd settings: the standby marker round-trips");
         const auto fresh = AppSettingsFromJson(json::Value::MkObj());
         CHECK(fresh.commandHandoverName == L"handover" && fresh.commandHandoverEnabled &&
-                  fresh.commandHandoverHereName == L"handover-here" && fresh.commandHandoverHereEnabled,
-              "cmd settings: absent keys reproduce the shipped commands exactly");
-        CHECK(fresh.commandHandoverMaterializedName == L"handover" && fresh.commandHandoverHereMaterializedName == L"handover-here",
-              "cmd settings: absent markers read as the DEFAULT names (a pre-feature install has those files on disk to migrate)");
+                  fresh.commandHandoverHereName == L"handover-here" && fresh.commandHandoverHereEnabled &&
+                  fresh.commandHandoverStandbyName == L"handover-standby" && fresh.commandHandoverStandbyEnabled,
+              "cmd settings: absent keys reproduce the shipped commands exactly (all three enabled)");
+        CHECK(fresh.commandHandoverMaterializedName == L"handover" && fresh.commandHandoverHereMaterializedName == L"handover-here" &&
+                  fresh.commandHandoverStandbyMaterializedName == L"handover-standby",
+              "cmd settings: absent markers read as the DEFAULT names (a pre-feature install has those files on disk to migrate; standby's remove-of-nothing is a no-op)");
         AppSettings col;
         col.commandHandoverName = L"x";
         col.commandHandoverHereName = L"x";
+        col.commandHandoverStandbyName = L"x";
         const auto healed = AppSettingsFromJson(ToJson(col));
-        CHECK(healed.commandHandoverName == L"x" && healed.commandHandoverHereName == L"handover-here", "cmd settings: a stored collision heals on load (HERE falls back)");
+        CHECK(healed.commandHandoverName == L"x" && healed.commandHandoverHereName == L"handover-here" && healed.commandHandoverStandbyName == L"handover-standby",
+              "cmd settings: a stored collision heals on load (the later commands fall back)");
         auto o = json::Value::MkObj(); // fresh object: json::Value::Set APPENDS and Find returns the FIRST hit, so a re-Set on a ToJson output would be shadowed
         o.Set(L"commandHandoverMaterializedName", json::Value::MkStr(L"..\\evil"));
         CHECK(AppSettingsFromJson(o).commandHandoverMaterializedName == L"evil", "cmd settings: a hand-edited marker normalizes (path chars can never reach the commands-dir delete)");
@@ -1143,8 +1207,10 @@ void TestCommandWatch()
         as.commandHandoverTitleReplace = L"$1 - next";
         as.commandHandoverFileMatchRegex = LR"(^BRIEF-.*\.md$)";
         as.commandHandoverDeleteFileAfterLaunch = true;
+        as.commandHandoverStandbySuccessorModel = L"claude-sonnet-5";
         const auto back = AppSettingsFromJson(ToJson(as));
-        CHECK(back.commandHandoverSuccessorModel == L"claude-opus-4-8" && back.commandHandoverHereSuccessorModel.empty(),
+        CHECK(back.commandHandoverSuccessorModel == L"claude-opus-4-8" && back.commandHandoverHereSuccessorModel.empty() &&
+                  back.commandHandoverStandbySuccessorModel == L"claude-sonnet-5",
               "shaping: the per-command successor models round-trip (\"\" == Default)");
         CHECK(back.commandHandoverTitleFindRegex == LR"(^(.*)$)" && back.commandHandoverTitleReplace == L"$1 - next",
               "shaping: the title find/replace pair round-trips VERBATIM (regex chars + $ backrefs unmangled)");
@@ -1435,6 +1501,98 @@ void TestCommandWatch()
         ::DeleteFileW(p1.c_str());
         ::RemoveDirectoryW((cfg + L"\\commands").c_str());
         ::RemoveDirectoryW(cfg.c_str());
+    }
+
+    // ---- EnsureHandoverStandbyCommandFileIn: the FILL-NOT-SEND member's OWN definition file
+    // (COMMANDS.md §5b) ----
+    {
+        wchar_t tmp[MAX_PATH];
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring cfg = std::wstring{ tmp } + L"am-cmdwatch-test-cfg3";
+        // wipe from a previous run
+        ::DeleteFileW((cfg + L"\\commands\\handover-standby.md").c_str());
+        ::RemoveDirectoryW((cfg + L"\\commands").c_str());
+        ::RemoveDirectoryW(cfg.c_str());
+        const auto p1 = EnsureHandoverStandbyCommandFileIn(cfg);
+        CHECK(!p1.empty() && p1.find(L"handover-standby.md") != std::wstring::npos && ::GetFileAttributesW(p1.c_str()) != INVALID_FILE_ATTRIBUTES, "absent -> handover-standby definition created (its own file, beside its siblings)");
+        {
+            std::ifstream f(std::filesystem::path{ p1 }, std::ios::binary);
+            std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            CHECK(body.find("HANDOVER-") != std::string::npos && body.find("Write tool") != std::string::npos, "handover-standby definition keeps the await's load-bearing signal (Write tool + HANDOVER-*.md)");
+            CHECK(body.find("PRE-TYPED VERBATIM") != std::string::npos && body.find("whatever its size") != std::string::npos, "handover-standby definition briefs the fill-not-send delivery (pre-typed, full size)");
+            CHECK(body.find("WRITE IT IN: ") != std::string::npos, "handover-standby definition carries the 6c write-location marker line");
+        }
+        {
+            const auto& hashes = ShippedHandoverStandbyCommandHashes();
+            const std::wstring_view current = ShippedHandoverStandbyCommandText();
+            CHECK(hashes.size() >= 1 && current.find(L"NOT submitted") != std::wstring_view::npos, "shipped handover-standby history: >= 1 version; the current text says the message is NOT submitted");
+            CHECK(current.find(L"presses Enter") != std::wstring_view::npos, "current handover-standby definition names the user's Enter as the send");
+            CHECK(current.find(L"MORE THAN ONE") != std::wstring_view::npos, "current handover-standby definition permits writing several HANDOVER files in one turn");
+            CHECK(current.find(L"YOU invoked the skill yourself") != std::wstring_view::npos, "current handover-standby definition carries the SELF-INVOCATION guard");
+            CHECK(current.find(L"its OWN successor") != std::wstring_view::npos, "current handover-standby definition briefs the FAN-OUT semantics (each file starts its own successor tab)");
+            // NO bare sibling-command token: each definition renders only ITS OWN "/<name>", so a
+            // "/handover"-at-a-word-boundary mention would go stale under a sibling rename. (Every
+            // "/handover" here is the "/handover-standby" token — '-' extends the slug.)
+            const std::wstring rendered = RenderShippedCommandText(current, kDefaultHandoverStandbyCommandName, L"parked");
+            CHECK(rendered.find(L"/parked") != std::wstring::npos && rendered.find(L"/handover") == std::wstring::npos,
+                  "render: the standby text carries only its OWN command token (no stale sibling mentions under a rename)");
+            CHECK(Sha256Hex(NormalizeCommandBytesForIdentity(Utf8Of(rendered), kDefaultHandoverStandbyCommandName, L"parked")) == hashes.back(),
+                  "identity: a custom-named standby render digests back onto the history's last entry");
+            bool wellFormed = true;
+            for (const auto& h : hashes)
+            {
+                wellFormed = wellFormed && h.size() == 64 && h.find_first_not_of("0123456789abcdef") == std::string_view::npos;
+            }
+            CHECK(wellFormed, "every shipped handover-standby history entry is a 64-char lowercase-hex SHA-256");
+            const std::string digest = Sha256Hex(Utf8Of(current));
+            const std::string msg = "shipped handover-standby history's LAST entry == sha256(current text) — after editing the text, APPEND this digest: " + digest;
+            CHECK(!hashes.empty() && digest == hashes.back(), msg.c_str());
+            // THREE distinct documents on one await family: the histories must stay PAIRWISE
+            // disjoint, or one command's migration could cross-upgrade another's file.
+            bool disjoint = true;
+            for (const auto& a : ShippedHandoverCommandHashes())
+            {
+                for (const auto& b : hashes)
+                {
+                    disjoint = disjoint && a != b;
+                }
+            }
+            for (const auto& a : ShippedHandoverHereCommandHashes())
+            {
+                for (const auto& b : hashes)
+                {
+                    disjoint = disjoint && a != b;
+                }
+            }
+            CHECK(disjoint, "the /handover-standby history shares no digest with either sibling (three-way no-cross-upgrade)");
+        }
+        // A user edit is NEVER overwritten (the one shared write-policy core).
+        {
+            std::ofstream f(std::filesystem::path{ p1 }, std::ios::binary | std::ios::trunc);
+            f << "user-owned-standby";
+        }
+        const auto p2 = EnsureHandoverStandbyCommandFileIn(cfg);
+        CHECK(p2 == p1, "present -> same path returned");
+        {
+            std::ifstream f(std::filesystem::path{ p1 }, std::ios::binary);
+            std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            CHECK(body == "user-owned-standby", "an existing (user-edited) handover-standby definition is never overwritten");
+        }
+        ::DeleteFileW(p1.c_str());
+        ::RemoveDirectoryW((cfg + L"\\commands").c_str());
+        ::RemoveDirectoryW(cfg.c_str());
+    }
+
+    // ---- BuildPromptFill (COMMANDS.md §5b — the standby FILL channel) ----
+    // The submit channel minus its ONE submit CR: same bracketed-paste wrap, same CR/CRLF -> LF
+    // normalization, NO trailing carriage return — so a filled draft can never self-submit, and
+    // the two builders provably share every byte up to the submit.
+    {
+        const std::wstring fill = BuildPromptFill(L"do a\r\nthen b\rthen c");
+        CHECK(fill == L"\x1b[200~do a\nthen b\nthen c\x1b[201~", "fill: bracketed paste, CR/CRLF normalized to LF, NO trailing CR");
+        CHECK(BuildPromptSubmission(L"do a\r\nthen b\rthen c") == fill + L"\r", "fill + one CR == the submit builder (the two channels can never drift)");
+        CHECK(BuildPromptFill(L"one line") == L"\x1b[200~one line\x1b[201~", "fill: a single-line draft is a complete delimited paste with no submit");
+        CHECK(BuildPromptFill(L"").find(L'\r') == std::wstring::npos, "fill: no CR anywhere, even empty (nothing this builder emits can ever submit)");
     }
 }
 

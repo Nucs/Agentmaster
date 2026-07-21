@@ -514,6 +514,22 @@ namespace Agentmaster
     const std::vector<std::string_view>& ShippedHandoverHereCommandHashes();
     std::wstring_view ShippedHandoverHereCommandText();
 
+    // Agentmaster (COMMANDS.md §5b — the /handover-standby integration): the FILL-NOT-SEND member
+    // of the family. Its OWN definition file at <configDir>\commands\handover-standby.md under the
+    // SAME write policy and the SAME await-signal contract ("use the Write tool", the
+    // `HANDOVER-<topic>.md` leaf) — but the briefed outcome is a handover IN STANDBY: each file's
+    // successor opens as a new tab like /handover, and the document is TYPED into that session's
+    // input box WITHOUT being submitted (BuildPromptFill — the bracketed paste minus the submit
+    // CR), so the briefing sits exactly one Enter away and NOTHING runs until the user sends it.
+    // Same wrappers/returns as the /handover pair above.
+    std::wstring EnsureHandoverStandbyCommandFileIn(const std::wstring& configDir);
+    std::wstring EnsureHandoverStandbyCommandFile();
+
+    // The /handover-standby definition's shipped-version history + current text — the same frozen
+    // append-only digest contract as its two siblings.
+    const std::vector<std::string_view>& ShippedHandoverStandbyCommandHashes();
+    std::wstring_view ShippedHandoverStandbyCommandText();
+
     // The shared core BOTH shipped-definition writers route through, so the write policy can never
     // drift between the two files (COMMANDS.md §6): create-if-absent PLUS the version-aware upgrade
     // — an existing file whose SHA-256 matches a PRIOR entry of `shippedHashes` (the command's full
@@ -633,14 +649,30 @@ namespace Agentmaster
                                                bool enabled,
                                                std::wstring_view writePath = {});
 
-    // The engine-init entry: reconcile BOTH /handover-family definition files against the
+    // The per-command values every family-level entry below reports, in ONE named shape (the
+    // family grew to three commands, so the old std::pair returns became these — structured
+    // bindings still read them positionally: `const auto [ho, hh, hs] = …`).
+    struct HandoverFamilyNames
+    {
+        std::wstring handover;
+        std::wstring here;
+        std::wstring standby;
+    };
+    struct HandoverFamilyFileStates
+    {
+        ShippedCommandFileState handover{ ShippedCommandFileState::Missing };
+        ShippedCommandFileState here{ ShippedCommandFileState::Missing };
+        ShippedCommandFileState standby{ ShippedCommandFileState::Missing };
+    };
+
+    // The engine-init entry: reconcile ALL /handover-family definition files against the
     // settings' configured names/enables (each command through ReconcileShippedCommandFileIn).
-    // Returns { handover materialized name, handover-here materialized name } — the values the
-    // engine RMWs back into the AppSettings markers. The `In` form takes the Claude config dir
-    // explicitly (the unit-testable core); the wrapper resolves CLAUDE_CONFIG_DIR > ~/.claude
-    // like EnsureHandoverCommandFile.
-    std::pair<std::wstring, std::wstring> ReconcileHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings);
-    std::pair<std::wstring, std::wstring> ReconcileHandoverCommandFiles(const AppSettings& settings);
+    // Returns the materialized names { handover, here, standby } — the values the engine RMWs
+    // back into the AppSettings markers. The `In` form takes the Claude config dir explicitly
+    // (the unit-testable core); the wrapper resolves CLAUDE_CONFIG_DIR > ~/.claude like
+    // EnsureHandoverCommandFile.
+    HandoverFamilyNames ReconcileHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings);
+    HandoverFamilyNames ReconcileHandoverCommandFiles(const AppSettings& settings);
 
     // COMMANDS.md §6c — the three family-level entries the Settings cog drives, all keyed on the
     // LIVE (materialized) command names so they act on the definition files actually in use, and
@@ -648,16 +680,16 @@ namespace Agentmaster
     //  * Refresh   — re-render the live definitions with the CURRENT write location (the cog's Save
     //                calls it, which is what makes the location apply with no restart). Honors the
     //                normal write policy: a user-edited definition is left frozen.
-    //  * Reinstall — the confirmed OVERWRITE of both files, digest regardless (the escape hatch).
+    //  * Reinstall — the confirmed OVERWRITE of the files, digest regardless (the escape hatch).
     //  * Inspect   — what each file currently IS (the cog's status line + the Reinstall nudge).
-    // Each returns per-command values in { handover, handover-here } order; a command with no
+    // Each returns per-command values in { handover, here, standby } order; a command with no
     // definition to act on (disabled, nothing materialized) yields "" / Missing.
-    std::pair<std::wstring, std::wstring> RefreshHandoverCommandWritePathIn(const std::wstring& configDir, const AppSettings& settings);
-    std::pair<std::wstring, std::wstring> RefreshHandoverCommandWritePath(const AppSettings& settings);
-    std::pair<std::wstring, std::wstring> ReinstallHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings);
-    std::pair<std::wstring, std::wstring> ReinstallHandoverCommandFiles(const AppSettings& settings);
-    std::pair<ShippedCommandFileState, ShippedCommandFileState> InspectHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings);
-    std::pair<ShippedCommandFileState, ShippedCommandFileState> InspectHandoverCommandFiles(const AppSettings& settings);
+    HandoverFamilyNames RefreshHandoverCommandWritePathIn(const std::wstring& configDir, const AppSettings& settings);
+    HandoverFamilyNames RefreshHandoverCommandWritePath(const AppSettings& settings);
+    HandoverFamilyNames ReinstallHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings);
+    HandoverFamilyNames ReinstallHandoverCommandFiles(const AppSettings& settings);
+    HandoverFamilyFileStates InspectHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings);
+    HandoverFamilyFileStates InspectHandoverCommandFiles(const AppSettings& settings);
 
     // COMMANDS.md §6b (successor shaping — the TITLE rewrite): the successor-title CANDIDATE under
     // the user's regex find/replace pair, or "" when the rewrite does not apply — findRegex unset,

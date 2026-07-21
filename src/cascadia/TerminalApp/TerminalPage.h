@@ -815,7 +815,7 @@ namespace winrt::TerminalApp::implementation
         void _InitAgentmasterEngine(); // Agentmaster: start the SessionRegistry + hooks bridge
         void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition = -1, winrt::hstring model = {}); // Agentmaster (insertPosition: -1 == end/NewTabPosition default; a tab-context-menu spawn passes clickedIndex+1 so the new tab lands next to the clicked tab. model: the launch-model picker's per-LAUNCH `--model <id>` pick from an "Open New Session Here" submenu; "" = Default, the settings model)
         TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId = {}, uint32_t insertPosition = -1, const std::wstring& modelOverride = {}, const std::wstring& initialPrompt = {}); // Agentmaster (returns the created tab; forkFromId set => fork that conversation into a new id; insertPosition threads tab placement, default -1 == end; modelOverride: launch-model picker — non-empty adds ` --model <id>` to THIS launch's commandline; initialPrompt: COMMANDS.md — non-empty rides the commandline as the positional prompt claude submits as the session's FIRST turn, the /handover successor's kickoff)
-        void _HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPayload, const std::wstring& commandArgs = {}, bool inPlace = false); // Agentmaster (COMMANDS.md): a /handover-family await resolved — if THIS window hosts the origin session's tab, FAN OUT one successor PER collected markdown (mdPayload = the '|'-joined path set, SplitWatchPaths): each HANDOVER-*.md starts its OWN "<title> (handover N)" successor whose first user message is THAT file's content, via the per-file delivery tiers (commandline under the escaped budget; full-document bracketed-paste injection above it; NEVER truncated), tabs in write order right of the origin. commandArgs = the typed command's <command-args> verbatim — its LEADING words may name a §6b per-message successor-model hint ("/handover [fable] do x…", PickModelFromArgsHint), overriding the per-command Successor-model combo for THIS handover only. inPlace=false (/handover) spawns every successor as a new tab; inPlace=true (/handover-here) puts the FIRST file's successor INTO the origin tab via _RestartTabIntoFreshSession (additional files beside it), degrading to the new-tab spawn if the in-place swap is unavailable
+        void _HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPayload, const std::wstring& commandArgs = {}, bool inPlace = false, bool standby = false); // Agentmaster (COMMANDS.md): a /handover-family await resolved — if THIS window hosts the origin session's tab, FAN OUT one successor PER collected markdown (mdPayload = the '|'-joined path set, SplitWatchPaths): each HANDOVER-*.md starts its OWN "<title> (handover N)" successor whose first user message is THAT file's content, via the per-file delivery tiers (commandline under the escaped budget; full-document bracketed-paste injection above it; NEVER truncated), tabs in write order right of the origin. commandArgs = the typed command's <command-args> verbatim — its LEADING words may name a §6b per-message successor-model hint ("/handover [fable] do x…", PickModelFromArgsHint), overriding the per-command Successor-model combo for THIS handover only. inPlace=false (/handover) spawns every successor as a new tab; inPlace=true (/handover-here) puts the FIRST file's successor INTO the origin tab via _RestartTabIntoFreshSession (additional files beside it), degrading to the new-tab spawn if the in-place swap is unavailable. standby=true (/handover-standby, §5b — mutually exclusive with inPlace) spawns new tabs like /handover but delivers NOTHING at launch: every file (content AND pointer alike) rides the pump's STANDBY lane, which TYPES it into the successor's input box without submitting (BuildPromptFill — one Enter away; the commandline tier is structurally excluded because a positional prompt auto-submits)
         std::wstring _RestartTabIntoFreshSession(const TerminalApp::Tab& originTab, const ::Agentmaster::SessionInfo& origin, const std::wstring& dir, const std::wstring& title, const std::wstring& initialPrompt, const std::wstring& modelOverride = {}); // Agentmaster (COMMANDS.md — /handover-here): REPLACE the origin session's live pane in place with a brand-new FRESH conversation — "Open New Session Here -> Default" spawn semantics (new minted id, the settings model unless the §6b per-command successor modelOverride is set, same dir) delivered through the Restart-session swap (_RestartManagedSession's recipe: HardResetWithoutErase + Connection swap + Start, scrollback kept); _BindClaudeSessionToTab's re-home block then archives the origin (live=false, injector cleared, resumable from Sessions) and re-keys the tab onto the successor. Returns the successor's session id ("" == refused/failed — the caller falls back to the new-tab spawn so the handover is never lost). UI thread only
         // Agentmaster (COMMANDS.md §5 — the over-budget /handover delivery): a successor spawned with a
         // document too large for the commandline carries it as a Pending queue prompt instead; this map
@@ -827,15 +827,38 @@ namespace winrt::TerminalApp::implementation
         // -> Inject -> roll back to Pending on failure), so the echo dedup + the scheduler's
         // Enter-retry watchdog back it exactly like any other sent prompt. Transient (not persisted):
         // after a restart the prompt is still Pending in the session's queue — visible in Auto
-        // Testing, deliverable by Send-now — it just no longer auto-injects. UI thread only.
+        // Testing, deliverable by Send-now — it just no longer auto-injects. UI thread only —
+        // BOTH sweeps below marshal (fire_and_forget + resume_foreground, the _ScanPendingInput
+        // idiom) since the scanner's liveness probe fires on the SCANNER thread while
+        // _HandleCommandHandover writes these maps on the UI thread.
+        //
+        // The STANDBY lane (COMMANDS.md §5b — /handover-standby) rides the SAME map with a
+        // different entry shape: promptId EMPTY + standbyText carrying the document. The pump then
+        // FILLS instead of sends — Inject(BuildPromptFill(text)), the bracketed paste with NO
+        // submit CR — and VERIFIES the draft actually landed by reading the session's input box
+        // (ControlCore::ReadPendingInputDraft, the PENDING_INPUT.md primitive): a box still empty
+        // after the verify window means the TUI ate the paste pre-raw-mode (the Enter-retry
+        // gotcha's text-eaten sibling — there is no echo to watchdog a fill), so it re-fills, at
+        // most kStandbyMaxAttempts times, and NEVER while the box holds ANY text (a user draft
+        // must never be appended to). Deliberately OUTSIDE the queue: a Pending row could be
+        // auto-SENT by a Full autorunner and a Sent row would arm the Enter-retry watchdog —
+        // either would defeat standby, whose whole contract is "nothing submits without the
+        // user's Enter". Not restart-durable — the briefing FILE is the durable copy (standby
+        // arms the §6b delete only AFTER a VERIFIED fill, so an undelivered draft always leaves
+        // its file on disk).
         struct PendingHandoverInjection
         {
-            std::wstring promptId; // the queued prompt carrying the full document
+            std::wstring promptId; // the queued prompt carrying the full document ("" == a standby entry)
             int64_t armedMs{ 0 }; // when the successor spawned (drives the give-up deadline)
             int64_t startedSeenMs{ 0 }; // first tick that saw SessionInfo.started (inject after the settle delay)
+            std::wstring standbyText; // STANDBY: the document to TYPE (non-empty == the standby lane)
+            std::wstring standbyMdPath; // STANDBY: the briefing file — the §6b delete arms on a VERIFIED fill ("" == never, the pointer text names it)
+            int64_t injectedAtMs{ 0 }; // STANDBY: when the last fill was injected (0 == not yet; drives the verify window)
+            int32_t fillAttempts{ 0 }; // STANDBY: fills injected so far (capped at kStandbyMaxAttempts)
         };
         std::unordered_map<std::wstring, PendingHandoverInjection> _pendingHandoverInjections;
-        void _PumpHandoverInjections(); // ticked alongside _ScanPendingInput (TerminalPage.AgentObserver.cpp)
+        winrt::Windows::Foundation::IAsyncAction _PumpHandoverInjectionsImpl(); // Agentmaster (terminate-net): the body, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
+        winrt::fire_and_forget _PumpHandoverInjections(); // ticked alongside _ScanPendingInput (TerminalPage.AgentObserver.cpp); self-marshals to the UI thread
         // Agentmaster (COMMANDS.md §6b — "delete the handover file after a successful hand-off"):
         // the opt-in delete is deferred until the successor has actually STARTED (its ConPTY/claude
         // launched — SessionInfo.started), not merely been created: a tab spawned in the background
@@ -850,7 +873,8 @@ namespace winrt::TerminalApp::implementation
             int64_t armedMs{ 0 };
         };
         std::unordered_map<std::wstring, PendingHandoverDelete> _pendingHandoverDeletes;
-        void _SweepHandoverDeletes(); // ticked beside _PumpHandoverInjections (TerminalPage.AgentObserver.cpp)
+        winrt::Windows::Foundation::IAsyncAction _SweepHandoverDeletesImpl(); // Agentmaster (terminate-net): the body, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
+        winrt::fire_and_forget _SweepHandoverDeletes(); // ticked beside _PumpHandoverInjections (TerminalPage.AgentObserver.cpp); self-marshals to the UI thread
         winrt::fire_and_forget _RestoreClaudeSessions(); // Agentmaster: load persisted sessions as ARCHIVED (restorable) — does NOT auto-launch (Rule #6)
         void _RestoreWindowTabs(); // Agentmaster (M10 window-grouped restore): re-home THIS window's persisted tabs — resume each Claude session + replay each Other (shell) tab from its WindowRecord, in order. Only a claimed record (a reopened window) restores.
         void _AttachClaudeOverlay(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster: build + install the per-tab link badge (gated on AppSettings.showTabOverlay)

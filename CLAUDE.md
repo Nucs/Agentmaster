@@ -765,18 +765,25 @@ tag no session carries lists at **·0** (sorts last).
   are same-window instant; another window catches up on next bind/launch/gather (the panel/editor/chips always
   read the store fresh).
 
-**Slash-command bindings + /handover + its in-place twin /handover-here
+**Slash-command bindings + /handover + its in-place twin /handover-here + its standby member
+/handover-standby
 ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
 HARDENED, delivery = FULL CONTENT INJECTION (never truncated), RESTART-RESILIENT (durable
 per-session progress) + MULTI-FILE (one command's several HANDOVER files consumed as one):
-engine-tested (2416/2416 — the
+engine-tested (2521/2521 — the
 `TestCommandWatch` units + safeguard belts + the content-injection/tier units + the /handover-here
-twin units (hyphen echo, name-exact binding isolation, its own definition file) + the multi-file
+twin units (hyphen echo, name-exact binding isolation, its own definition file) + the
+/handover-standby units (§5b — its own definition file + digest gate + fill-not-send sentinels +
+no-bare-sibling-token render check, the THREE-way binding isolation ["handover" is a PREFIX of
+"handover-standby" — the exact aliasing hazard], the family-supersede pivot onto the standby path,
+`BuildPromptFill` [bracketed paste, NO trailing CR ever; `BuildPromptSubmission == fill + "\r"` so
+the channels can't drift], the standby settings round-trip) + the multi-file
 collect/seal/settle units + the durable-progress units (watermark / marker revival / prune /
 encode-decode) + the family-supersede race-guard units + the SHA-256 definition-history units
 (NIST vectors + padding edges; the create/upgrade/never-overwrite policy over a synthetic command;
-the `last digest == sha256(current text)` version gate; the two histories disjoint) + the §6a
-CUSTOMIZATION units (name normalize/pair-heal, the render↔identity inverse over synthetic AND real
+the `last digest == sha256(current text)` version gate; the three histories pairwise disjoint) + the §6a
+CUSTOMIZATION units (name normalize + the `ResolveCommandNameTriple` heal [defaults, every collision
+direction incl. the squatter-eviction cascade], the render↔identity inverse over synthetic AND real
 texts, the named ensure/remove + rename/disable reconcile policy, the AppSettings round-trip incl.
 marker semantics) + the §6b SHAPING units (RegexUtil's never-throw/caps/backrefs contract, the
 successor-title rewrite's five fallback paths, the authoritative-vs-invalid leaf-match regex, the
@@ -971,11 +978,11 @@ a failed spawn logs `(failed)` at its position). Repeatable — every /handover 
 spawns its own successor(s). Logs: `[cmd]`/`[cmd-fire]`/`[cmd-expire]` + the `[nav] handover-begin ↔
 handover-done` pair. **The `/handover-here <context-or-filepath>` twin (COMMANDS.md §5a)** reuses this ENTIRE
 pipeline — its own definition `handover-here.md` (`EnsureHandoverHereCommandFile` /
-`ShippedHandoverHereCommandHashes` + `...Text()`, both files through the ONE shared
+`ShippedHandoverHereCommandHashes` + `...Text()`, all family files through the ONE shared
 `EnsureShippedCommandFileIn(configDir, leaf, shippedHashes, currentText, label)` core so the write
-policy can't drift, and the two digest histories are asserted DISJOINT so neither can cross-upgrade the
-other's file), the same markdown await (same
-"handover" leaf; the watch's name-EXACT binding lookup keeps the two from cross-firing), the same
+policy can't drift, and the digest histories are asserted pairwise DISJOINT so none can cross-upgrade
+another's file), the same markdown await (same
+"handover" leaf; the watch's name-EXACT binding lookup keeps the family from cross-firing), the same
 guards/title/tiers/fan-out — but **the FIRST file's successor REPLACES the origin tab IN PLACE**
 (additional files' successors open beside it): the
 hosting window's `_RestartTabIntoFreshSession` runs a **"New Session Here → Default" spawn through
@@ -987,7 +994,34 @@ re-home archives the ORIGIN (live=false, injector cleared — resumable from the
 Close semantics) and re-keys tab/overlay/injector/title onto the successor (started=true
 immediately, so the paste tier works unchanged); any refusal/failure **degrades to the classic
 new-tab spawn** (`(fallback=new-tab)`). Logs: `[nav] handover-here-begin ↔ handover-here-done` +
-`[handover-here] <new> replaced <old> in place` + the re-home's `[rehome]`/`tab-swap`. **Safeguards (COMMANDS.md §7, all under the never-lose-a-swallowed-exception policy):** every
+`[handover-here] <new> replaced <old> in place` + the re-home's `[rehome]`/`tab-swap`. **The
+`/handover-standby <context-or-filepath>` member (COMMANDS.md §5b)** is /handover with the SUBMIT
+withheld: its own definition `handover-standby.md` (`EnsureHandoverStandbyCommandFile` /
+`ShippedHandoverStandbyCommandHashes` + `...Text()`, same core/policy), the same await/family (a
+/handover pivoted to /handover-standby fires the standby path — one §3 supersede family of three),
+new successor tabs like /handover — but each briefing is **TYPED into its successor's input box and
+NEVER sent** ("a handover in standby": one Enter away, nothing runs until the user presses it). The
+commandline tier is structurally excluded (a positional prompt auto-submits); every standby file
+(content AND pointer) rides the pump's **STANDBY lane**: `Inject(BuildPromptFill(text))` — the
+bracketed paste with NO submit CR (`BuildPromptSubmission == BuildPromptFill + "\r"`, so the two
+channels can never drift) — deliberately NOT a queue row (a Pending row could be auto-SENT by a
+Full autorunner, a Sent row would arm the Enter-retry watchdog — either defeats standby), then the
+fill is **VERIFIED by reading the input box back** (`ReadPendingInputDraft`, the PENDING_INPUT.md
+primitive — no echo ever confirms a fill): box non-empty ⇒ verified (logged `draft VERIFIED … one
+Enter away`; the §6b delete-after arms ONLY here — an unverified draft always leaves its briefing
+file, standby's one durable copy); box still empty after 12s ⇒ the TUI ate the paste pre-raw-mode ⇒
+re-fill (≤2 attempts, then give up + keep the file); a box already holding USER text is never
+touched (no append-to-a-human-draft, the 10-min deadline caps); a session leaving Idle/Waiting
+mid-verify means the user took over ⇒ hands off, file kept. The pending-input monitor's "3 dots"
+then mark the standby tab for free (the draft IS a pending input). Full settings suite: its own
+Commands-tab section (enable + rename + status + Successor-model combo,
+`commandHandoverStandby*`), every family-wide §6b/§6c rule (title rewrite · file match · write
+location · delete-after) and the per-message model hint apply. Logs: `[nav]
+handover-standby-begin ↔ -done inject=standby|pointer-standby` + the `[handover-standby]`
+armed/FILLED/VERIFIED/kept lines. (This work also fixed a latent race: `_PumpHandoverInjections` +
+`_SweepHandoverDeletes` ran on the SCANNER thread while `_HandleCommandHandover` wrote their maps
+on the UI thread — both now self-marshal, fire_and_forget + Impl, which is also what makes the
+standby lane's UI-affine control read legal.) **Safeguards (COMMANDS.md §7, all under the never-lose-a-swallowed-exception policy):** every
 CommandWatch feed is a SELF-CONTAINED function-try (a watch bug / throwing handler / throwing probe can
 never cost the scanner a pass), handlers caught PER FIRE, a throwing probe reads "file absent"
 (retried), the **sane-path gate** (`IsSaneWatchPath` — control chars / quotes / oversize rejected AT
@@ -1765,13 +1799,15 @@ What works, by area:
   ("shows right after adopting / after Move to Waiting-for-you / on a never-prompted launch"); Claude-only —
   a managed Codex never shows it), `recentDirsLimit` (the path-picker MRU size, default 10), (the
   **COMMANDS tab** — COMMANDS.md §6a) the **/handover-family customization** —
-  **`commandHandoverName`/`Enabled` + `commandHandoverHereName`/`Enabled`** (rename each command [the
-  typed word == the definition file `<name>.md`; normalized + collision-healed, per-command status
+  **`commandHandoverName`/`Enabled` + `commandHandoverHereName`/`Enabled` +
+  `commandHandoverStandbyName`/`Enabled`** (rename each command [the
+  typed word == the definition file `<name>.md`; normalized + collision-healed via
+  `ResolveCommandNameTriple`, per-command status
   lines staging `/old → /new after restart`] or disable it entirely; **applies at the NEXT START** —
   engine init binds + reconciles the definition files, migrating a renamed/disabled command's old
   file away only when it is pristine-ours; the engine-owned `command*MaterializedName` markers are
   preserved-from-disk on Save like the seed markers) **plus the SUCCESSOR SHAPING half (§6b)** —
-  **`commandHandoverSuccessorModel`/`…HereSuccessorModel`** (a per-command "Successor model" combo:
+  **`commandHandoverSuccessorModel`/`…Here…`/`…Standby…`** (a per-command "Successor model" combo:
   Default + the `launchModels` list, rebuilt each cog open, an unlisted stored id shown `(custom)
   <id>`; a LEADING model word in the typed command — `/handover [fable] …` / `/handover fable 5: …`,
   partial/caseless/characters-only against either side of a launchModels entry — overrides the combo

@@ -218,24 +218,30 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster (COMMANDS.md — the /handover family): a CommandWatch markdown await resolved —
-    // the origin session ran `/handover <context-or-filepath>` (inPlace=false) or its in-place twin
-    // `/handover-here <context-or-filepath>` (inPlace=true), and the handover markdown it was
-    // instructed to Write now exists on disk. Every window's command-action sink lands here (UI
+    // the origin session ran `/handover <context-or-filepath>` (inPlace=false), its in-place twin
+    // `/handover-here <context-or-filepath>` (inPlace=true), or the fill-not-send member
+    // `/handover-standby <context-or-filepath>` (standby=true — §5b), and the handover markdown it
+    // was instructed to Write now exists on disk. Every window's command-action sink lands here (UI
     // thread, via the engine fan-out); ONLY the window hosting the origin session's tab acts.
-    // COMMON to both commands: same effective working dir (the "Open New Session Here" semantics),
-    // "<origin title> (handover)"-chained titles, and FAN-OUT delivery — EACH collected
+    // COMMON to all three commands: same effective working dir (the "Open New Session Here"
+    // semantics), "<origin title> (handover)"-chained titles, and FAN-OUT delivery — EACH collected
     // HANDOVER-*.md starts its OWN successor session whose FIRST USER MESSAGE is that file's
     // CONTENT, VERBATIM and IN FULL (the per-file delivery tiers below — commandline positional
     // prompt / bracketed-paste stdin / pointer fallback): one command writing N files hands off to
-    // N parallel successors, in write order. They differ ONLY in where the FIRST successor lives:
-    // /handover spawns every successor as a NEW tab right of the origin; /handover-here's first
-    // file REPLACES the origin tab in place (_RestartTabIntoFreshSession — the Restart-session
-    // swap into a fresh "New Session Here -> Default" conversation; the origin is archived,
-    // resumable from the Sessions browser) with any additional files' successors beside it,
-    // DEGRADING to the new-tab spawn when the in-place swap is unavailable so the handover itself
-    // is never lost. Repeatable by design — every /handover(-here) in a conversation creates its
-    // own successor(s).
-    void TerminalPage::_HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPayload, const std::wstring& commandArgs, bool inPlace)
+    // N parallel successors, in write order. They differ in where the FIRST successor lives and
+    // whether the message is SENT: /handover spawns every successor as a NEW tab right of the
+    // origin; /handover-here's first file REPLACES the origin tab in place
+    // (_RestartTabIntoFreshSession — the Restart-session swap into a fresh "New Session Here ->
+    // Default" conversation; the origin is archived, resumable from the Sessions browser) with any
+    // additional files' successors beside it, DEGRADING to the new-tab spawn when the in-place
+    // swap is unavailable so the handover itself is never lost; /handover-standby spawns new tabs
+    // like /handover but SUBMITS NOTHING — every file (content and pointer alike) is handed to the
+    // pump's STANDBY lane, which TYPES it into the successor's input box (BuildPromptFill, the
+    // bracketed paste minus the submit CR) so the briefing sits one Enter away until the user
+    // sends it. The commandline tier is structurally excluded under standby (a positional prompt
+    // auto-submits at launch — the exact thing standby exists to prevent). Repeatable by design —
+    // every family command in a conversation creates its own successor(s).
+    void TerminalPage::_HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPayload, const std::wstring& commandArgs, bool inPlace, bool standby)
     try
     {
         const auto tabIt = _claudeTabs.find(sessionId);
@@ -284,7 +290,7 @@ namespace winrt::TerminalApp::implementation
         {
             return; // archived/vanished between fire and hop — nothing to hand over to
         }
-        const std::wstring navTag = inPlace ? L"handover-here" : L"handover"; // the [nav] begin/end pair stays per-command
+        const std::wstring navTag = standby ? L"handover-standby" : (inPlace ? L"handover-here" : L"handover"); // the [nav] begin/end pair stays per-command
         ::Agentmaster::LogNav(navTag + L"-begin " + ::Agentmaster::ShortId(sessionId) + L" md=" + ::Agentmaster::JoinWatchPaths(mdPaths));
 
         // The successor spawns where the origin WORKS (EffectiveWorkingDir — the same dir every
@@ -340,7 +346,9 @@ namespace winrt::TerminalApp::implementation
         //     SECURED (content tier: the document rides the launch commandline; paste tier: parked
         //     durably at the front of the successor's queue). The POINTER tier never deletes (the
         //     successor must read the file), and a failed spawn leaves its file untouched.
-        std::wstring successorModel = inPlace ? _appSettings.commandHandoverHereSuccessorModel : _appSettings.commandHandoverSuccessorModel;
+        std::wstring successorModel = standby ? _appSettings.commandHandoverStandbySuccessorModel :
+                                      inPlace ? _appSettings.commandHandoverHereSuccessorModel :
+                                                _appSettings.commandHandoverSuccessorModel;
         // §6b per-MESSAGE model hint: the typed command's leading words may name a model —
         // "/handover [fable] do a b c", "/handover fable 5: fix x" — matched partially/caselessly
         // (characters-only) against BOTH sides of every launchModels entry (display name + id,
@@ -383,13 +391,20 @@ namespace winrt::TerminalApp::implementation
                 }
             }
             const std::wstring content = ::Agentmaster::ReadHandoverDocumentPrompt(mdPath);
-            const bool fitsCommandline = !content.empty() && ::Agentmaster::PsEscapedCost(content) <= ::Agentmaster::kHandoverPromptEscapedBudget;
-            std::wstring launchPrompt; // the commandline tier's positional prompt ("" for the paste tier)
-            const wchar_t* injectMode = L"paste";
+            // §5b: standby NEVER rides the commandline tier — claude auto-submits a positional
+            // prompt at launch, the exact submit standby exists to withhold. Every standby file
+            // (content and pointer alike) goes through the pump's fill lane instead.
+            const bool fitsCommandline = !standby && !content.empty() && ::Agentmaster::PsEscapedCost(content) <= ::Agentmaster::kHandoverPromptEscapedBudget;
+            const std::wstring pointerPrompt = L"Read the handover document at " + mdPath + L" and continue the work it describes.";
+            std::wstring launchPrompt; // the commandline tier's positional prompt ("" for the paste/standby tiers)
+            const wchar_t* injectMode = standby ? L"standby" : L"paste";
             if (content.empty())
             {
-                launchPrompt = L"Read the handover document at " + mdPath + L" and continue the work it describes.";
-                injectMode = L"pointer";
+                injectMode = standby ? L"pointer-standby" : L"pointer";
+                if (!standby)
+                {
+                    launchPrompt = pointerPrompt;
+                }
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" md unreadable at spawn - falling back to the pointer prompt: " + mdPath + L"\n");
             }
             else if (fitsCommandline)
@@ -421,7 +436,24 @@ namespace winrt::TerminalApp::implementation
                     ++nextInsert; // the next file's tab lands right of this one (write order == strip order)
                 }
             }
-            if (!newId.empty() && !content.empty() && !fitsCommandline)
+            if (!newId.empty() && standby)
+            {
+                // §5b: hand the WHOLE document (or the pointer text when unreadable) to the pump's
+                // STANDBY lane — TYPED into the successor's input box once its session starts,
+                // never submitted (BuildPromptFill: the bracketed paste minus the submit CR).
+                // Deliberately NOT a queue row: a Pending row could be auto-SENT by a Full-mode
+                // autorunner and a Sent row would arm the Enter-retry watchdog — either would
+                // defeat standby, whose contract is "nothing submits without the user's Enter".
+                // The mdPath rides along ONLY for the content case: the §6b delete may arm after
+                // a VERIFIED fill; a pointer fill NAMES the file, so it must survive on disk.
+                PendingHandoverInjection entry;
+                entry.armedMs = static_cast<int64_t>(::GetTickCount64());
+                entry.standbyText = content.empty() ? pointerPrompt : content;
+                entry.standbyMdPath = content.empty() ? std::wstring{} : mdPath;
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-standby] " + ::Agentmaster::ShortId(newId) + L" briefing armed for the FILL (chars=" + std::to_wstring(entry.standbyText.size()) + L") - typed into the input box once the session starts, never auto-submitted\n");
+                _pendingHandoverInjections[newId] = std::move(entry);
+            }
+            else if (!newId.empty() && !content.empty() && !fitsCommandline)
             {
                 // The over-budget tier: park THIS file's FULL document on ITS successor's queue
                 // (Pending — the durable, visible carrier: Auto Testing lists it, Send-now can
@@ -451,8 +483,11 @@ namespace winrt::TerminalApp::implementation
             // so _SweepHandoverDeletes waits for SessionInfo.started, gives up after the same 10
             // min, and drops WITHOUT deleting if the session dies/archives first. The POINTER tier
             // is excluded by construction (its successor's first message NAMES the file), as is a
-            // failed spawn (newId empty ⇒ nothing consumed the file).
-            if (!newId.empty() && _appSettings.commandHandoverDeleteFileAfterLaunch &&
+            // failed spawn (newId empty ⇒ nothing consumed the file). STANDBY never arms HERE at
+            // all — its delivery is secured only once the fill is VERIFIED in the input box, so
+            // the pump's standby lane arms the delete itself on a verified fill (an undelivered
+            // draft always leaves its file on disk — the file is standby's only durable copy).
+            if (!newId.empty() && !standby && _appSettings.commandHandoverDeleteFileAfterLaunch &&
                 std::wstring_view{ injectMode } != L"pointer")
             {
                 _pendingHandoverDeletes[newId] = PendingHandoverDelete{ mdPath, static_cast<int64_t>(::GetTickCount64()) };
