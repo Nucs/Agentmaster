@@ -559,7 +559,52 @@ namespace Agentmaster
                                                  const std::vector<std::string_view>& shippedHashes,
                                                  std::wstring_view currentText,
                                                  std::wstring_view logLabel,
-                                                 std::wstring_view commandName);
+                                                 std::wstring_view commandName,
+                                                 std::wstring_view writePath = {});
+
+    // ---- CUSTOMIZABLE WRITE LOCATION (COMMANDS.md §6c — the cog's "Handover file location") ----
+    // WHERE the family tells Claude to write its HANDOVER-<topic>.md briefings. FOLDER-ONLY: the
+    // file NAME contract is untouched (the file-match regex, the one-successor-per-file fan-out and
+    // delete-after all key on it) — only the directory moves. The shipped texts carry ONE
+    // "WRITE IT IN: <phrase>" line whose phrase is the shipped default (the session scratchpad);
+    // materializing renders the configured location into it, and identity questions fold whatever
+    // is there BACK to the shipped phrase before hashing. Unlike the name pair, the inverse is
+    // DELIMITED (marker .. end of line), so it needs no per-install marker and still recognizes a
+    // location someone changed by hand. KEEP THE MARKER + A ONE-LINE PHRASE in every future text.
+
+    // The one-line phrase a configured write path renders to: the shipped scratchpad sentence for
+    // "" / "scratchpad", "the current working directory" for "./", else the value backtick-quoted
+    // with a create-if-missing note (absolute vs relative-to-the-working-directory).
+    std::wstring CommandWritePathPhrase(std::wstring_view writePath);
+
+    // Render a shipped command text for a configured write path (a no-op for the shipped default).
+    std::wstring RenderShippedCommandWritePath(std::wstring_view text, std::wstring_view writePath);
+
+    // The identity inverse over a file's raw UTF-8 bytes: every "WRITE IT IN: …" line's phrase
+    // becomes the shipped one, so the result can be SHA-256'd against the shipped history. A text
+    // without the marker (every pre-§6c version) is returned verbatim — which is exactly what keeps
+    // those versions matching their own historical digests.
+    std::string NormalizeCommandWritePathBytesForIdentity(std::string_view bytes);
+
+    // What a definition file on disk IS, relative to what Agentmaster would write now — the cog's
+    // honesty line + the gate for its Reinstall button. (The enum lives in SessionModels.h so the
+    // UI headers can hold one without pulling in this header's spawn machinery.)
+    ShippedCommandFileState InspectShippedCommandFileNamedIn(const std::wstring& configDir,
+                                                            std::wstring_view defaultName,
+                                                            const std::vector<std::string_view>& shippedHashes,
+                                                            std::wstring_view currentText,
+                                                            std::wstring_view commandName,
+                                                            std::wstring_view writePath = {});
+
+    // The user-initiated, confirmed OVERWRITE of a definition file, digest regardless — the escape
+    // hatch for a hand-edited definition, which the normal policy freezes forever (and which would
+    // therefore keep pointing at the old write location). Returns the path ("" on failure).
+    std::wstring ForceReinstallShippedCommandFileNamedIn(const std::wstring& configDir,
+                                                         std::wstring_view defaultName,
+                                                         std::wstring_view currentText,
+                                                         std::wstring_view logLabel,
+                                                         std::wstring_view commandName,
+                                                         std::wstring_view writePath = {});
 
     // Remove <configDir>\commands\<commandName>.md IFF its (name-normalized) digest matches ANY
     // shipped version of this command — i.e. it is OURS and untouched, under whatever name. The
@@ -585,7 +630,8 @@ namespace Agentmaster
                                                std::wstring_view logLabel,
                                                std::wstring_view previouslyMaterializedName,
                                                std::wstring_view configuredName,
-                                               bool enabled);
+                                               bool enabled,
+                                               std::wstring_view writePath = {});
 
     // The engine-init entry: reconcile BOTH /handover-family definition files against the
     // settings' configured names/enables (each command through ReconcileShippedCommandFileIn).
@@ -595,6 +641,23 @@ namespace Agentmaster
     // like EnsureHandoverCommandFile.
     std::pair<std::wstring, std::wstring> ReconcileHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings);
     std::pair<std::wstring, std::wstring> ReconcileHandoverCommandFiles(const AppSettings& settings);
+
+    // COMMANDS.md §6c — the three family-level entries the Settings cog drives, all keyed on the
+    // LIVE (materialized) command names so they act on the definition files actually in use, and
+    // none of them rename/migrate anything (a rename stays restart-applied — §6a):
+    //  * Refresh   — re-render the live definitions with the CURRENT write location (the cog's Save
+    //                calls it, which is what makes the location apply with no restart). Honors the
+    //                normal write policy: a user-edited definition is left frozen.
+    //  * Reinstall — the confirmed OVERWRITE of both files, digest regardless (the escape hatch).
+    //  * Inspect   — what each file currently IS (the cog's status line + the Reinstall nudge).
+    // Each returns per-command values in { handover, handover-here } order; a command with no
+    // definition to act on (disabled, nothing materialized) yields "" / Missing.
+    std::pair<std::wstring, std::wstring> RefreshHandoverCommandWritePathIn(const std::wstring& configDir, const AppSettings& settings);
+    std::pair<std::wstring, std::wstring> RefreshHandoverCommandWritePath(const AppSettings& settings);
+    std::pair<std::wstring, std::wstring> ReinstallHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings);
+    std::pair<std::wstring, std::wstring> ReinstallHandoverCommandFiles(const AppSettings& settings);
+    std::pair<ShippedCommandFileState, ShippedCommandFileState> InspectHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings);
+    std::pair<ShippedCommandFileState, ShippedCommandFileState> InspectHandoverCommandFiles(const AppSettings& settings);
 
     // COMMANDS.md §6b (successor shaping — the TITLE rewrite): the successor-title CANDIDATE under
     // the user's regex find/replace pair, or "" when the rewrite does not apply — findRegex unset,

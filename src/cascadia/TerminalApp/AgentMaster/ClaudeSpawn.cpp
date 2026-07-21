@@ -1144,18 +1144,25 @@ try {
             "197dab657f66a44211c3bb33b49787e3f4de18cce9712c23a5295eca24c04482", // v3 — never truncate: dropped v2's "long documents truncate to a pointer" caution (the paste tier delivers in full)
             "581aad0004fae77a28bb215415e949e3d84f164eea2496ec0eb2520c6121136e", // v4 — multi-file: several HANDOVER-*.md in one turn, delivered JOINED into one successor
             "f4f1b98250822e018db0dbae0eb75d503078d1b45be99167715e11eb94f604b7", // v5 — self-invocation guard: a MODEL-invoked skill writes no echo, so it must write nothing and redirect the user to TYPE the command
-            "f3c88984e10a9d8689c4f0ac70eab3f19d4aac1001c08bb9a04480d6850fbce5", // v6 — FAN-OUT (current): each file starts its OWN successor tab, so every file must be self-contained
+            "f3c88984e10a9d8689c4f0ac70eab3f19d4aac1001c08bb9a04480d6850fbce5", // v6 — FAN-OUT: each file starts its OWN successor tab, so every file must be self-contained
+            "e03874c5997929a37f923059e7e2e1ef3b61baa34869b28fe38b2cafc5c54e40", // v7 — CONFIGURABLE WRITE LOCATION (current): the folder moved to a rendered "WRITE IT IN:" line, defaulting to the session scratchpad
         };
         return kHashes;
     }
 
-    // V6 (fan-out) — the CURRENT text. The delivery semantics changed by request: each
-    // HANDOVER-*.md now starts its OWN successor tab (one command writing N files == N parallel
-    // successors, in write order) instead of all files joining into one successor's message. The
-    // definition must therefore brief each file as a SELF-CONTAINED briefing to a DIFFERENT session
-    // (the live multi-file test's origin wrote "Continue to file B below" — correct under the join,
-    // wrong under the fan-out; this text prevents that).
-    static constexpr std::wstring_view kHandoverCommandV6 =
+    // V7 (configurable write location) — the CURRENT text. The file's DIRECTORY moved out of the
+    // prose and onto its own "WRITE IT IN: <phrase>" line, rendered from the
+    // AppSettings::commandHandoverWritePath setting (COMMANDS.md §6c) — shipped default: the
+    // session SCRATCHPAD, because a briefing is a transient hand-off document whose CONTENT is
+    // injected into the successor anyway, so the file has no business landing in the user's repo
+    // (the HANDOVER-*.md litter). The line's marker + one-line span are what make the location
+    // reversible for the digest identity (RenderShippedCommandWritePath / its inverse below), so
+    // KEEP THE MARKER AND KEEP THE PHRASE ON ONE LINE in every future version.
+    // V6 (superseded) was the fan-out text: each HANDOVER-*.md starts its OWN successor tab (one
+    // command writing N files == N parallel successors, in write order) instead of all files
+    // joining into one successor's message — hence "never write 'continue in file B'", which V7
+    // keeps verbatim.
+    static constexpr std::wstring_view kHandoverCommandV7 =
         LR"md(---
 description: Hand this session's work over to a fresh successor session (Agentmaster opens it automatically)
 ---
@@ -1174,11 +1181,12 @@ you were doing.
 Do this NOW, in this exact order:
 1. If the context above names a readable file, read it first and incorporate it.
 2. Using the Write tool (NOT a shell redirect - the Write tool call itself is the signal
-   Agentmaster detects), create ONE new markdown file in the current working directory named
-   `HANDOVER-<short-topic>.md` (pick a short kebab-case topic slug; if that name already
-   exists, append `-2`, `-3`, ...). EACH `HANDOVER-*.md` file you write in this turn starts
-   its OWN successor tab, in write order - so write ONE file for one successor, or write
-   MORE THAN ONE file to fan out several parallel successors at once.
+   Agentmaster detects), create ONE new markdown file named `HANDOVER-<short-topic>.md`
+   (pick a short kebab-case topic slug; if that name already exists, append `-2`, `-3`, ...).
+   WRITE IT IN: your session scratchpad directory (the temp scratchpad folder your own instructions name; if you have none, use the system temp folder)
+   EACH `HANDOVER-*.md` file you write in this turn starts its OWN successor tab, in write
+   order - so write ONE file for one successor, or write MORE THAN ONE file to fan out
+   several parallel successors at once.
 3. Each file's CONTENT is injected VERBATIM as ITS successor session's FIRST USER MESSAGE - so
    write every file as a direct briefing TO that successor (imperative, second person), fully
    self-contained: the goal, the current state, decisions made and why, work completed, work
@@ -1197,7 +1205,7 @@ a successor session tab PER FILE (named like this one, ending in "(handover)", "
 
     std::wstring_view ShippedHandoverCommandText()
     {
-        return kHandoverCommandV6;
+        return kHandoverCommandV7;
     }
 
     // ---- the /handover-here command DEFINITION (COMMANDS.md — the IN-PLACE twin) ----
@@ -1214,13 +1222,16 @@ a successor session tab PER FILE (named like this one, ending in "(handover)", "
             "87c06df50f4c6fc85cae1786f7b30331152372775432d73932e834ce2b4163b9", // v1 — the original in-place twin (content injection + never-truncate from birth)
             "af205daa5ee0a81cf04355b87840a8aab28a0054023d8806da9085b729a63ae8", // v2 — multi-file: the /handover v4 split-permission line, delivered JOINED
             "7b8ecdc8599a8ad4621121e1cf6ff467bc477a355d019241878a9d0440188f32", // v3 — self-invocation guard (the /handover v5 guard, doubly important for the REPLACE-this-tab variant)
-            "27fa954882260765c2348255aa026e1beb88332f8b590aef431f484c51d81c30", // v4 — FAN-OUT (current): the FIRST file's successor REPLACES this tab, each additional file opens its own beside it
+            "27fa954882260765c2348255aa026e1beb88332f8b590aef431f484c51d81c30", // v4 — FAN-OUT: the FIRST file's successor REPLACES this tab, each additional file opens its own beside it
+            "fe96f6676fd80a61230bf38265461f331e4c94ec78b184644354d44d88009812", // v5 — CONFIGURABLE WRITE LOCATION (current): the /handover v7 "WRITE IT IN:" line, same family-wide setting
         };
         return kHashes;
     }
 
-    // V4 (fan-out) — the CURRENT text: the /handover V6 semantics for the in-place twin.
-    static constexpr std::wstring_view kHandoverHereCommandV4 =
+    // V5 (configurable write location) — the CURRENT text: the /handover V7 semantics for the
+    // in-place twin (the same "WRITE IT IN: <phrase>" line, rendered from the SAME family-wide
+    // setting — the location is one rule for both commands, like the file-match pattern).
+    static constexpr std::wstring_view kHandoverHereCommandV5 =
         LR"md(---
 description: Hand this session's work over to a fresh session that REPLACES this one in this same tab (Agentmaster restarts the tab automatically)
 ---
@@ -1242,11 +1253,12 @@ user typing /handover-here: do NOT write any handover file - tell the user to ty
 Do this NOW, in this exact order:
 1. If the context above names a readable file, read it first and incorporate it.
 2. Using the Write tool (NOT a shell redirect - the Write tool call itself is the signal
-   Agentmaster detects), create ONE new markdown file in the current working directory named
-   `HANDOVER-<short-topic>.md` (pick a short kebab-case topic slug; if that name already
-   exists, append `-2`, `-3`, ...). EACH `HANDOVER-*.md` file you write in this turn starts
-   its OWN successor, in write order: the FIRST file's successor REPLACES this tab, and each
-   additional file (you may write MORE THAN ONE) opens its own new tab beside it.
+   Agentmaster detects), create ONE new markdown file named `HANDOVER-<short-topic>.md`
+   (pick a short kebab-case topic slug; if that name already exists, append `-2`, `-3`, ...).
+   WRITE IT IN: your session scratchpad directory (the temp scratchpad folder your own instructions name; if you have none, use the system temp folder)
+   EACH `HANDOVER-*.md` file you write in this turn starts its OWN successor, in write order:
+   the FIRST file's successor REPLACES this tab, and each additional file (you may write
+   MORE THAN ONE) opens its own new tab beside it.
 3. Each file's CONTENT is injected VERBATIM as ITS successor session's FIRST USER MESSAGE - so
    write every file as a direct briefing TO that successor (imperative, second person), fully
    self-contained: the goal, the current state, decisions made and why, work completed, work
@@ -1265,7 +1277,7 @@ file) in this working directory, injecting each document as its session's openin
 
     std::wstring_view ShippedHandoverHereCommandText()
     {
-        return kHandoverHereCommandV4;
+        return kHandoverHereCommandV5;
     }
 
     // ---- customizable command names (COMMANDS.md §6a) — the render / identity pair ----
@@ -1368,6 +1380,158 @@ file) in this working directory, injecting each document as its session's openin
         return out;
     }
 
+    // ---- customizable WRITE LOCATION (COMMANDS.md §6c) — the render / identity pair ----
+    //
+    // The same trick the custom NAME uses, over a different span: the shipped texts carry ONE
+    // "WRITE IT IN: <phrase>" line whose phrase is the SHIPPED DEFAULT (the session scratchpad);
+    // materializing under a configured location swaps that phrase, and asking "are these bytes
+    // something WE shipped?" swaps whatever is there BACK to the shipped phrase before hashing.
+    //
+    // The inverse here is DELIMITED, not value-driven: the span is "everything after the marker up
+    // to the end of that line", so the normalization does NOT need to know which location the file
+    // was written with — no per-install marker, and a location changed by hand still reads as ours.
+    // That is also why the phrase must stay ONE LINE and the marker must stay in every version.
+    // (Older versions — v1..v6 / v1..v4 — carry no marker at all, so the normalization is a no-op
+    // on them and they still match their own historical digests, which is what keeps a pristine
+    // pre-§6c file upgrading.)
+    static constexpr std::wstring_view kWriteLocationMarker = L"WRITE IT IN: ";
+    static constexpr std::string_view kWriteLocationMarkerA = "WRITE IT IN: ";
+    // The phrase the SHIPPED texts literally contain (asserted by the harness against both texts).
+    static constexpr std::wstring_view kWriteLocationShippedPhrase = L"your session scratchpad directory (the temp scratchpad folder your own instructions name; if you have none, use the system temp folder)";
+
+    std::wstring CommandWritePathPhrase(std::wstring_view writePath)
+    {
+        const std::wstring v = NormalizeCommandWritePath(writePath);
+        if (CommandWritePathIsScratchpad(v))
+        {
+            return std::wstring{ kWriteLocationShippedPhrase };
+        }
+        if (v == L"./" || v == L".\\" || v == L".")
+        {
+            return L"the current working directory"; // the pre-§6c behavior, as a preset
+        }
+        const bool absolute = (v.size() >= 2 && v[1] == L':') || (!v.empty() && (v[0] == L'\\' || v[0] == L'/'));
+        std::wstring s = L"`" + v + L"`";
+        s += absolute ? L" (create the folder if it does not exist)" :
+                        L", relative to the current working directory (create the folder if it does not exist)";
+        return s;
+    }
+
+    // Replace the phrase on EVERY "WRITE IT IN: …" line with `phrase`. `end` of a span is the line
+    // terminator (a CR before an LF is kept, so a CRLF text round-trips). Shared by the wide render
+    // and the narrow identity inverse, which differ only in their character type.
+    template<typename StrT, typename ViewT>
+    static StrT ReplaceWriteLocationSpans(ViewT text, ViewT marker, ViewT phrase, typename StrT::value_type lf, typename StrT::value_type cr)
+    {
+        StrT out{ text };
+        size_t from = 0;
+        for (;;)
+        {
+            const size_t m = out.find(marker, from);
+            if (m == StrT::npos)
+            {
+                break;
+            }
+            const size_t b = m + marker.size();
+            size_t e = out.find(lf, b);
+            if (e == StrT::npos)
+            {
+                e = out.size();
+            }
+            if (e > b && out[e - 1] == cr)
+            {
+                --e;
+            }
+            out.replace(b, e - b, phrase);
+            from = b + phrase.size();
+        }
+        return out;
+    }
+
+    std::wstring RenderShippedCommandWritePath(std::wstring_view text, std::wstring_view writePath)
+    {
+        const std::wstring phrase = CommandWritePathPhrase(writePath);
+        if (phrase == kWriteLocationShippedPhrase)
+        {
+            return std::wstring{ text }; // the shipped default renders verbatim
+        }
+        return ReplaceWriteLocationSpans<std::wstring, std::wstring_view>(text, kWriteLocationMarker, phrase, L'\n', L'\r');
+    }
+
+    std::string NormalizeCommandWritePathBytesForIdentity(std::string_view bytes)
+    {
+        // ASCII marker + (normally) ASCII phrase; a non-ASCII folder name in the file is spanned by
+        // BYTE positions bounded by '\n', and every UTF-8 continuation byte has the high bit set, so
+        // the span can never split a multi-byte character.
+        const std::string phrase = Utf16ToUtf8(kWriteLocationShippedPhrase);
+        if (bytes.find(kWriteLocationMarkerA) == std::string_view::npos)
+        {
+            return std::string{ bytes }; // no marker (a pre-§6c version, or a rewritten text)
+        }
+        return ReplaceWriteLocationSpans<std::string, std::string_view>(bytes, kWriteLocationMarkerA, phrase, '\n', '\r');
+    }
+
+    // Read a definition file's bytes, bounded (our texts are ~3 KB; a file past 64 KiB is certainly
+    // not a pristine ours, and a truncated read's digest matches nothing anyway). "" == unreadable
+    // or empty, which every caller treats as USER-OWNED (never overwrite/delete blind).
+    static std::string ReadCommandDefinitionBytes(const std::wstring& path)
+    {
+        std::string bytes;
+        try
+        {
+            std::ifstream f(std::filesystem::path{ path }, std::ios::binary);
+            if (f)
+            {
+                bytes.resize(64 * 1024);
+                f.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+                bytes.resize(static_cast<size_t>(f.gcount()));
+            }
+        }
+        catch (...)
+        {
+            // Rule #18 — this recovery is CONSEQUENTIAL, so it must never be silent: an unreadable
+            // definition reads as USER-OWNED, and a user-owned file is never overwritten, so the
+            // command silently stops upgrading. Safe to log (not on the logging path).
+            LogSwallowedException(L"ReadCommandDefinitionBytes");
+            bytes.clear();
+        }
+        return bytes;
+    }
+
+    // "Are these bytes a version WE shipped, unmodified?" — the ONE identity question behind the
+    // upgrade, the rename/disable removal, and the cog's status line. Both customization spans are
+    // undone before hashing: the NAME token (needs the configured pair) and the §6c WRITE-LOCATION
+    // line (delimited, so it needs nothing). Two candidates are tried because the location
+    // normalization must not disturb the historical texts: the name-normalized bytes match any
+    // version verbatim, the additionally location-normalized bytes match a CURRENT version rendered
+    // under a custom location. Returns the matched history index, or -1 for user-owned.
+    static int MatchShippedCommandVersion(std::string_view bytes, const std::vector<std::string_view>& shippedHashes, std::wstring_view defaultName, std::wstring_view commandName)
+    {
+        if (bytes.empty() || shippedHashes.empty())
+        {
+            return -1;
+        }
+        const bool custom = !commandName.empty() && !defaultName.empty() && commandName != defaultName;
+        const std::string nameNorm = custom ? NormalizeCommandBytesForIdentity(bytes, defaultName, commandName) : std::string{ bytes };
+        const std::string locNorm = NormalizeCommandWritePathBytesForIdentity(nameNorm);
+        const std::string digests[2] = { Sha256Hex(nameNorm), locNorm == nameNorm ? std::string{} : Sha256Hex(locNorm) };
+        for (const auto& d : digests)
+        {
+            if (d.empty())
+            {
+                continue;
+            }
+            for (size_t i = 0; i < shippedHashes.size(); ++i)
+            {
+                if (d == shippedHashes[i])
+                {
+                    return static_cast<int>(i);
+                }
+            }
+        }
+        return -1;
+    }
+
     // Shared core of the shipped slash-command DEFINITION writers (the /handover family —
     // COMMANDS.md §6). Write policy: create-if-absent PLUS a version-aware UPGRADE — a file whose
     // SHA-256 matches a PRIOR shipped version of THIS command is ours and untouched by the user, so
@@ -1380,10 +1544,15 @@ file) in this working directory, injecting each document as its session's openin
     // tool" (the transcript tool_use is the signal the markdown await keys on — a shell-redirect
     // write is invisible) and the "HANDOVER-" name (the await's leaf preference). `logLabel` names
     // the command in the log lines so the trails stay per-command ("handover" / "handover-here").
-    // `defaultName`/`commandName` are the §6a custom-name seam: a CUSTOM name writes the RENDERED
-    // text and digests through the byte normalization above; empty/equal names are a pass-through
-    // on both (the pre-§6a behavior, byte-identical).
-    static std::wstring EnsureShippedCommandFileCore(const std::wstring& configDir, std::wstring_view fileLeaf, const std::vector<std::string_view>& shippedHashes, std::wstring_view currentText, std::wstring_view logLabel, std::wstring_view defaultName, std::wstring_view commandName)
+    // `defaultName`/`commandName` are the §6a custom-name seam and `writePath` the §6c
+    // write-location seam: both are RENDERED into the text we write and UNDONE before hashing, so
+    // "ours, unmodified" stays a content-identity question under any name and any location. Empty
+    // values are a pass-through on both (the pre-customization behavior, byte-identical).
+    //
+    // The rewrite rule is "ours AND not already exactly what we would write": that covers a version
+    // UPGRADE (an older digest) and a re-render of the CURRENT version under a changed name or
+    // write location — while a file byte-identical to `textToWrite` is a no-op (no write, no log).
+    static std::wstring EnsureShippedCommandFileCore(const std::wstring& configDir, std::wstring_view fileLeaf, const std::vector<std::string_view>& shippedHashes, std::wstring_view currentText, std::wstring_view logLabel, std::wstring_view defaultName, std::wstring_view commandName, std::wstring_view writePath)
     try
     {
         if (configDir.empty() || fileLeaf.empty() || shippedHashes.empty() || currentText.empty())
@@ -1391,59 +1560,43 @@ file) in this working directory, injecting each document as its session's openin
             return {};
         }
         const bool custom = !commandName.empty() && !defaultName.empty() && commandName != defaultName;
-        const std::wstring textToWrite = custom ? RenderShippedCommandText(currentText, defaultName, commandName) : std::wstring{ currentText };
+        std::wstring textToWrite = custom ? RenderShippedCommandText(currentText, defaultName, commandName) : std::wstring{ currentText };
+        textToWrite = RenderShippedCommandWritePath(textToWrite, writePath); // §6c (no-op on the shipped default)
         const std::wstring commandsDir = configDir + L"\\commands";
         const std::wstring path = commandsDir + L"\\" + std::wstring{ fileLeaf };
         if (::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
         {
-            // Present. Ours-and-stale (SHA-256 == a PRIOR shipped version) upgrades; anything else
-            // — user-owned, or already current — is left exactly as it is. Bounded read (the
-            // definition is ~2–3 KB; a file past 64 KiB is certainly not a pristine ours, and its
-            // truncated digest matches nothing anyway).
-            std::string bytes;
-            try
+            // Present. Ours (SHA-256 == some shipped version, both customization spans undone) and
+            // not already the exact bytes we'd write => rewrite; anything else — user-owned, or
+            // already current — is left exactly as it is.
+            const std::string bytes = ReadCommandDefinitionBytes(path);
+            const int matched = MatchShippedCommandVersion(bytes, shippedHashes, defaultName, commandName);
+            if (matched >= 0)
             {
-                std::ifstream f(std::filesystem::path{ path }, std::ios::binary);
-                if (f)
+                if (bytes == Utf16ToUtf8(textToWrite))
                 {
-                    bytes.resize(64 * 1024);
-                    f.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-                    bytes.resize(static_cast<size_t>(f.gcount()));
+                    return path; // already exactly current, under this name + location — no-op
                 }
-            }
-            catch (...)
-            {
-                // Rule #18 — this recovery is CONSEQUENTIAL, so it must never be silent: an
-                // unreadable definition reads as USER-OWNED, and a user-owned file is never
-                // overwritten, so this command silently stops upgrading FOREVER. Safe to log (this
-                // is not on the logging path — see the WriteFileUtf8 note).
-                LogSwallowedException(L"EnsureShippedCommandFileCore (definition read)");
-                bytes.clear(); // unreadable now — treat as user-owned (never overwrite blind)
-            }
-            const std::string identityBytes = (custom && !bytes.empty()) ? NormalizeCommandBytesForIdentity(bytes, defaultName, commandName) : bytes;
-            const std::string digest = identityBytes.empty() ? std::string{} : Sha256Hex(identityBytes);
-            for (size_t i = 0; !digest.empty() && i + 1 < shippedHashes.size(); ++i)
-            {
-                if (digest == shippedHashes[i])
+                const size_t current = shippedHashes.size();
+                const std::wstring vArrow = (static_cast<size_t>(matched) + 1 < current) ?
+                                                (L" (shipped v" + std::to_wstring(matched + 1) + L" -> v" + std::to_wstring(current) + L"): ") :
+                                                (L" (shipped v" + std::to_wstring(current) + L" re-rendered): ");
+                if (WriteFileUtf8Atomic(path, textToWrite))
                 {
-                    const std::wstring vArrow = L" (shipped v" + std::to_wstring(i + 1) + L" -> v" + std::to_wstring(shippedHashes.size()) + L"): ";
-                    if (WriteFileUtf8Atomic(path, textToWrite))
-                    {
-                        AppendStateLog(L"hooks.log", L"[engine] " + std::wstring{ logLabel } + L" command upgraded" + vArrow + path + L"\n");
-                    }
-                    else
-                    {
-                        // Silent-failure surfacing (the [persist-fail] convention the create path
-                        // below already follows): the upgrade could not be written — a locked or
-                        // read-only file, a full disk. Atomicity means the PRIOR definition is
-                        // still intact and still works, and the next engine init retries; but a
-                        // definition stuck on an old version must not be invisible.
-                        AppendStateLog(L"hooks.log", L"[persist-fail] " + std::wstring{ logLabel } + L" command upgrade" + vArrow + path + L"\n");
-                    }
-                    return path; // upgraded (or failed best-effort — the old text still works)
+                    AppendStateLog(L"hooks.log", L"[engine] " + std::wstring{ logLabel } + L" command upgraded" + vArrow + path + L"\n");
                 }
+                else
+                {
+                    // Silent-failure surfacing (the [persist-fail] convention the create path below
+                    // already follows): the rewrite could not be written — a locked or read-only
+                    // file, a full disk. Atomicity means the PRIOR definition is still intact and
+                    // still works, and the next reconcile retries; but a definition stuck on an old
+                    // version (or an old location) must not be invisible.
+                    AppendStateLog(L"hooks.log", L"[persist-fail] " + std::wstring{ logLabel } + L" command upgrade" + vArrow + path + L"\n");
+                }
+                return path; // rewritten (or failed best-effort — the old text still works)
             }
-            return path; // user-owned or already-current — never overwrite
+            return path; // user-owned — never overwrite (the cog's Reinstall is the explicit escape)
         }
         ::CreateDirectoryW(configDir.c_str(), nullptr);
         ::CreateDirectoryW(commandsDir.c_str(), nullptr);
@@ -1464,11 +1617,11 @@ file) in this working directory, injecting each document as its session's openin
 
     std::wstring EnsureShippedCommandFileIn(const std::wstring& configDir, std::wstring_view fileLeaf, const std::vector<std::string_view>& shippedHashes, std::wstring_view currentText, std::wstring_view logLabel)
     {
-        // The nameless (default-name) form — the pre-§6a signature, byte-identical behavior.
-        return EnsureShippedCommandFileCore(configDir, fileLeaf, shippedHashes, currentText, logLabel, {}, {});
+        // The nameless (default-name, default-location) form — the pre-customization signature.
+        return EnsureShippedCommandFileCore(configDir, fileLeaf, shippedHashes, currentText, logLabel, {}, {}, {});
     }
 
-    std::wstring EnsureShippedCommandFileNamedIn(const std::wstring& configDir, std::wstring_view defaultName, const std::vector<std::string_view>& shippedHashes, std::wstring_view currentText, std::wstring_view logLabel, std::wstring_view commandName)
+    std::wstring EnsureShippedCommandFileNamedIn(const std::wstring& configDir, std::wstring_view defaultName, const std::vector<std::string_view>& shippedHashes, std::wstring_view currentText, std::wstring_view logLabel, std::wstring_view commandName, std::wstring_view writePath)
     {
         // Belt: the leaf is built from the name, so it MUST be a clean slug even if a caller skips
         // the settings-layer normalization (a path separator here would escape the commands dir).
@@ -1477,7 +1630,72 @@ file) in this working directory, injecting each document as its session's openin
         {
             return {};
         }
-        return EnsureShippedCommandFileCore(configDir, name + L".md", shippedHashes, currentText, logLabel, defaultName, name);
+        return EnsureShippedCommandFileCore(configDir, name + L".md", shippedHashes, currentText, logLabel, defaultName, name, writePath);
+    }
+
+    // COMMANDS.md §6c — the cog's "Reinstall definition files" escape hatch. The write policy above
+    // NEVER overwrites a file it does not recognize, which is exactly right (a user edit sticks
+    // forever) but leaves a hand-edited definition frozen on old instructions — and therefore
+    // pointing at the old write location, silently ignoring the setting. This is the ONE
+    // user-initiated, confirmed path that overwrites regardless of digest: same rendered text, same
+    // atomic write, no identity question asked.
+    std::wstring ForceReinstallShippedCommandFileNamedIn(const std::wstring& configDir, std::wstring_view defaultName, std::wstring_view currentText, std::wstring_view logLabel, std::wstring_view commandName, std::wstring_view writePath)
+    try
+    {
+        const std::wstring name = NormalizeCommandName(commandName);
+        if (configDir.empty() || name.empty() || currentText.empty())
+        {
+            return {};
+        }
+        std::wstring textToWrite = RenderShippedCommandText(currentText, defaultName, name);
+        textToWrite = RenderShippedCommandWritePath(textToWrite, writePath);
+        const std::wstring commandsDir = configDir + L"\\commands";
+        const std::wstring path = commandsDir + L"\\" + name + L".md";
+        ::CreateDirectoryW(configDir.c_str(), nullptr);
+        ::CreateDirectoryW(commandsDir.c_str(), nullptr);
+        if (!WriteFileUtf8Atomic(path, textToWrite))
+        {
+            AppendStateLog(L"hooks.log", L"[persist-fail] " + std::wstring{ logLabel } + L" command REINSTALL: " + path + L"\n");
+            return {};
+        }
+        AppendStateLog(L"hooks.log", L"[engine] " + std::wstring{ logLabel } + L" command REINSTALLED (user-requested overwrite): " + path + L"\n");
+        return path;
+    }
+    catch (...)
+    {
+        LogSwallowedException(L"ForceReinstallShippedCommandFileNamedIn");
+        return {};
+    }
+
+    ShippedCommandFileState InspectShippedCommandFileNamedIn(const std::wstring& configDir, std::wstring_view defaultName, const std::vector<std::string_view>& shippedHashes, std::wstring_view currentText, std::wstring_view commandName, std::wstring_view writePath)
+    try
+    {
+        const std::wstring name = NormalizeCommandName(commandName);
+        if (configDir.empty() || name.empty() || currentText.empty() || shippedHashes.empty())
+        {
+            return ShippedCommandFileState::Missing;
+        }
+        const std::wstring path = configDir + L"\\commands\\" + name + L".md";
+        if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+        {
+            return ShippedCommandFileState::Missing;
+        }
+        const std::string bytes = ReadCommandDefinitionBytes(path);
+        if (MatchShippedCommandVersion(bytes, shippedHashes, defaultName, name) < 0)
+        {
+            return ShippedCommandFileState::UserOwned;
+        }
+        std::wstring textToWrite = RenderShippedCommandText(currentText, defaultName, name);
+        textToWrite = RenderShippedCommandWritePath(textToWrite, writePath);
+        return bytes == Utf16ToUtf8(textToWrite) ? ShippedCommandFileState::UpToDate : ShippedCommandFileState::OursStale;
+    }
+    catch (...)
+    {
+        // A read/hash hiccup must not be reported as "yours" (which would nudge the user to
+        // Reinstall over a file we may well own) nor as "up to date" (which would hide a real
+        // divergence): OursStale is the honest middle — the next reconcile re-decides from disk.
+        LogSwallowedException(L"InspectShippedCommandFileNamedIn");
+        return ShippedCommandFileState::OursStale;
     }
 
     bool RemoveShippedCommandFileNamedIn(const std::wstring& configDir, std::wstring_view defaultName, const std::vector<std::string_view>& shippedHashes, std::wstring_view logLabel, std::wstring_view commandName)
@@ -1493,40 +1711,16 @@ file) in this working directory, injecting each document as its session's openin
         {
             return false; // already gone — nothing to migrate
         }
-        std::string bytes;
-        try
-        {
-            std::ifstream f(std::filesystem::path{ path }, std::ios::binary);
-            if (f)
-            {
-                bytes.resize(64 * 1024);
-                f.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-                bytes.resize(static_cast<size_t>(f.gcount()));
-            }
-        }
-        catch (...)
-        {
-            bytes.clear();
-        }
+        const std::string bytes = ReadCommandDefinitionBytes(path);
         if (bytes.empty())
         {
             return false; // unreadable/empty — never delete blind (user-owned until proven ours)
         }
-        // ANY shipped version counts here — INCLUDING the current one (unlike the upgrade walk,
-        // which excludes the last entry): a rename/disable must migrate a fully-current pristine
-        // file away just the same as a stale one. A digest match after the name normalization is
-        // proof the bytes are OURS, unmodified, under whatever name.
-        const std::string digest = Sha256Hex(NormalizeCommandBytesForIdentity(bytes, defaultName, name));
-        bool ours = false;
-        for (const auto& h : shippedHashes)
-        {
-            if (digest == h)
-            {
-                ours = true;
-                break;
-            }
-        }
-        if (!ours)
+        // ANY shipped version counts here — INCLUDING the current one: a rename/disable must
+        // migrate a fully-current pristine file away just the same as a stale one. A digest match
+        // after the name + §6c write-location normalizations is proof the bytes are OURS,
+        // unmodified, under whatever name and whatever configured location.
+        if (MatchShippedCommandVersion(bytes, shippedHashes, defaultName, name) < 0)
         {
             return false; // user-owned (edited, or a same-named foreign command) — never delete
         }
@@ -1544,7 +1738,7 @@ file) in this working directory, injecting each document as its session's openin
         return false;
     }
 
-    std::wstring ReconcileShippedCommandFileIn(const std::wstring& configDir, std::wstring_view defaultName, const std::vector<std::string_view>& shippedHashes, std::wstring_view currentText, std::wstring_view logLabel, std::wstring_view previouslyMaterializedName, std::wstring_view configuredName, bool enabled)
+    std::wstring ReconcileShippedCommandFileIn(const std::wstring& configDir, std::wstring_view defaultName, const std::vector<std::string_view>& shippedHashes, std::wstring_view currentText, std::wstring_view logLabel, std::wstring_view previouslyMaterializedName, std::wstring_view configuredName, bool enabled, std::wstring_view writePath)
     {
         const std::wstring prev = NormalizeCommandName(previouslyMaterializedName);
         std::wstring want = enabled ? NormalizeCommandName(configuredName) : std::wstring{};
@@ -1565,8 +1759,9 @@ file) in this working directory, injecting each document as its session's openin
             AppendStateLog(L"hooks.log", L"[engine] " + std::wstring{ logLabel } + L" command disabled (no definition materialized)\n");
             return {};
         }
-        // 3) Materialize the configured name (create-if-absent + the version-aware upgrade).
-        const std::wstring path = EnsureShippedCommandFileNamedIn(configDir, defaultName, shippedHashes, currentText, logLabel, want);
+        // 3) Materialize the configured name + write location (create-if-absent + the
+        //    version-aware upgrade, which also re-renders on a changed location — §6c).
+        const std::wstring path = EnsureShippedCommandFileNamedIn(configDir, defaultName, shippedHashes, currentText, logLabel, want, writePath);
         if (path.empty())
         {
             return {}; // failed write — marker stays empty, the next init just tries again
@@ -1632,7 +1827,8 @@ file) in this working directory, injecting each document as its session's openin
                                                               L"handover",
                                                               settings.commandHandoverMaterializedName,
                                                               hoName,
-                                                              settings.commandHandoverEnabled);
+                                                              settings.commandHandoverEnabled,
+                                                              settings.commandHandoverWritePath);
         const std::wstring hh = ReconcileShippedCommandFileIn(configDir,
                                                               kDefaultHandoverHereCommandName,
                                                               ShippedHandoverHereCommandHashes(),
@@ -1640,7 +1836,8 @@ file) in this working directory, injecting each document as its session's openin
                                                               L"handover-here",
                                                               settings.commandHandoverHereMaterializedName,
                                                               hhName,
-                                                              settings.commandHandoverHereEnabled);
+                                                              settings.commandHandoverHereEnabled,
+                                                              settings.commandHandoverWritePath);
         return { ho, hh };
     }
     catch (...)
@@ -1674,6 +1871,125 @@ file) in this working directory, injecting each document as its session's openin
         // and builds a path); same recovery — markers unchanged, nothing claimed.
         LogSwallowedException(L"ReconcileHandoverCommandFiles");
         return { settings.commandHandoverMaterializedName, settings.commandHandoverHereMaterializedName };
+    }
+
+    // The name a /handover-family command's definition file lives under RIGHT NOW: the engine's
+    // MATERIALIZED marker — DISK REALITY, never the configured name. "" == this command has no
+    // definition file to act on (it is disabled this run; the marker is what the reconcile set).
+    //
+    // Deliberately marker-only: the configured name may be one the user just TYPED and Save has
+    // not restarted into, so acting on it would materialize a file whose CommandWatch binding does
+    // not exist yet — a typed /newname that does nothing while /oldname disappears. A RENAME stays
+    // restart-applied (§6a), where the file and the binding move together. (A pre-§6a settings.json
+    // reads the DEFAULT names as its markers, so "the file exists but the marker is empty" is not a
+    // reachable state; a definition someone DELETED still has its marker and is recreated here.)
+    static std::pair<std::wstring, std::wstring> LiveHandoverCommandNames(const AppSettings& settings)
+    {
+        return { NormalizeCommandName(settings.commandHandoverMaterializedName),
+                 NormalizeCommandName(settings.commandHandoverHereMaterializedName) };
+    }
+
+    // COMMANDS.md §6c — re-render the LIVE definition files with the CURRENT write location (and
+    // the current shipped text). This is what the cog's Save calls, and it is why the write path
+    // applies to the NEXT handover with no restart: it only ever rewrites a file we RECOGNIZE
+    // (EnsureShippedCommandFileNamedIn's policy is unchanged — a user-edited definition is left
+    // frozen, which the cog surfaces + offers Reinstall for), and it never renames, migrates or
+    // deletes anything.
+    std::pair<std::wstring, std::wstring> RefreshHandoverCommandWritePathIn(const std::wstring& configDir, const AppSettings& settings)
+    try
+    {
+        const auto [hoName, hhName] = LiveHandoverCommandNames(settings);
+        std::wstring ho;
+        std::wstring hh;
+        if (!hoName.empty())
+        {
+            ho = EnsureShippedCommandFileNamedIn(configDir, kDefaultHandoverCommandName, ShippedHandoverCommandHashes(), ShippedHandoverCommandText(), L"handover", hoName, settings.commandHandoverWritePath);
+        }
+        if (!hhName.empty())
+        {
+            hh = EnsureShippedCommandFileNamedIn(configDir, kDefaultHandoverHereCommandName, ShippedHandoverHereCommandHashes(), ShippedHandoverHereCommandText(), L"handover-here", hhName, settings.commandHandoverWritePath);
+        }
+        return { ho, hh };
+    }
+    catch (...)
+    {
+        LogSwallowedException(L"RefreshHandoverCommandWritePathIn");
+        return {};
+    }
+
+    std::pair<std::wstring, std::wstring> RefreshHandoverCommandWritePath(const AppSettings& settings)
+    try
+    {
+        const std::wstring base = ResolveClaudeCommandsBase();
+        return base.empty() ? std::pair<std::wstring, std::wstring>{} : RefreshHandoverCommandWritePathIn(base, settings);
+    }
+    catch (...)
+    {
+        LogSwallowedException(L"RefreshHandoverCommandWritePath");
+        return {};
+    }
+
+    std::pair<std::wstring, std::wstring> ReinstallHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings)
+    try
+    {
+        const auto [hoName, hhName] = LiveHandoverCommandNames(settings);
+        std::wstring ho;
+        std::wstring hh;
+        if (!hoName.empty())
+        {
+            ho = ForceReinstallShippedCommandFileNamedIn(configDir, kDefaultHandoverCommandName, ShippedHandoverCommandText(), L"handover", hoName, settings.commandHandoverWritePath);
+        }
+        if (!hhName.empty())
+        {
+            hh = ForceReinstallShippedCommandFileNamedIn(configDir, kDefaultHandoverHereCommandName, ShippedHandoverHereCommandText(), L"handover-here", hhName, settings.commandHandoverWritePath);
+        }
+        return { ho, hh };
+    }
+    catch (...)
+    {
+        LogSwallowedException(L"ReinstallHandoverCommandFilesIn");
+        return {};
+    }
+
+    std::pair<std::wstring, std::wstring> ReinstallHandoverCommandFiles(const AppSettings& settings)
+    try
+    {
+        const std::wstring base = ResolveClaudeCommandsBase();
+        return base.empty() ? std::pair<std::wstring, std::wstring>{} : ReinstallHandoverCommandFilesIn(base, settings);
+    }
+    catch (...)
+    {
+        LogSwallowedException(L"ReinstallHandoverCommandFiles");
+        return {};
+    }
+
+    std::pair<ShippedCommandFileState, ShippedCommandFileState> InspectHandoverCommandFilesIn(const std::wstring& configDir, const AppSettings& settings)
+    try
+    {
+        const auto [hoName, hhName] = LiveHandoverCommandNames(settings);
+        const auto ho = hoName.empty() ? ShippedCommandFileState::Missing :
+                                         InspectShippedCommandFileNamedIn(configDir, kDefaultHandoverCommandName, ShippedHandoverCommandHashes(), ShippedHandoverCommandText(), hoName, settings.commandHandoverWritePath);
+        const auto hh = hhName.empty() ? ShippedCommandFileState::Missing :
+                                         InspectShippedCommandFileNamedIn(configDir, kDefaultHandoverHereCommandName, ShippedHandoverHereCommandHashes(), ShippedHandoverHereCommandText(), hhName, settings.commandHandoverWritePath);
+        return { ho, hh };
+    }
+    catch (...)
+    {
+        LogSwallowedException(L"InspectHandoverCommandFilesIn");
+        return { ShippedCommandFileState::OursStale, ShippedCommandFileState::OursStale };
+    }
+
+    std::pair<ShippedCommandFileState, ShippedCommandFileState> InspectHandoverCommandFiles(const AppSettings& settings)
+    try
+    {
+        const std::wstring base = ResolveClaudeCommandsBase();
+        return base.empty() ? std::pair<ShippedCommandFileState, ShippedCommandFileState>{ ShippedCommandFileState::Missing, ShippedCommandFileState::Missing } :
+                              InspectHandoverCommandFilesIn(base, settings);
+    }
+    catch (...)
+    {
+        LogSwallowedException(L"InspectHandoverCommandFiles");
+        return { ShippedCommandFileState::OursStale, ShippedCommandFileState::OursStale };
     }
 
     std::wstring DeriveHandoverSuccessorTitle(std::wstring_view originTitle, std::wstring_view findRegex, std::wstring_view replacement)

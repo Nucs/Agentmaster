@@ -340,12 +340,14 @@ exactly as `WriteFileUtf8` lays them on disk; oldest first, the LAST entry being
 the CURRENT text, `ShippedHandoverCommandText()`). On every engine init the on-disk file is read
 (bounded 64 KiB) and hashed (`AgentMaster/Sha256.h` — pure, header-only, hand-rolled like
 `Base64Encode` so no bcrypt/crypt32 has to be threaded through the lib + harness + CLI builds):
-a digest matching a **PRIOR** entry means the file is a pristine older OURS — untouched by the
-user — so it silently upgrades to the current text (logged
-`[engine] handover command upgraded (shipped vN -> vM)`); anything else — the user's own
-`/handover`, an edited copy of ours, or simply the already-current text (its digest is the
-history's LAST entry, never a prior one ⇒ no rewrite, no log line) — is NEVER overwritten (the
-`ApplyEnvDefaults` discipline: a user edit sticks forever).
+a digest matching **any** entry (after undoing the §6a name and §6c write-location renderings —
+`MatchShippedCommandVersion`) means the file is a pristine OURS, untouched by the user, and it is
+rewritten **iff its bytes are not already exactly what we would write** — an older version
+upgrades, and a current version re-renders when the configured name or write location changed
+(logged `[engine] handover command upgraded (shipped vN -> vM)` / `(shipped vN re-rendered)`),
+while a byte-identical file is a no-op (no rewrite, no log line). Anything else — the user's own
+`/handover`, or an edited copy of ours — is NEVER overwritten (the `ApplyEnvDefaults` discipline:
+a user edit sticks forever; §6c's Reinstall button is the one deliberate, confirmed exception).
 
 *Why digests and not the texts:* the rule only ever asks "are these bytes something WE shipped,
 unmodified?" — a content-IDENTITY question a 64-char digest answers completely — so a superseded
@@ -379,6 +381,11 @@ briefing to a DIFFERENT session ("never write 'continue in file B'" — the live
 test's origin wrote exactly that cross-reference under the join semantics, which the fan-out
 text now prevents); handover-here's first file replaces the origin tab, additional files open
 beside it.
+**V7 / handover-here V5 (the CONFIGURABLE WRITE LOCATION — the current texts)** lift the target
+folder out of the prose onto its own rendered `WRITE IT IN: <phrase>` line, defaulting to the
+session scratchpad instead of the working directory — see §6c, which also documents the marker
+contract every future version must keep and the identity inverse that keeps the digest history
+valid.
 **V5 / handover-here V3 (the SELF-INVOCATION guard — found by a live skill-creator review):**
 Claude Code lists the commands as invocable SKILLS, but a MODEL-initiated Skill invocation
 writes **no `<command-name>` transcript echo** (proven empirically against a live transcript —
@@ -566,6 +573,89 @@ commits the reset, Cancel discards it. That is also why it needs no confirm dial
 materialized-name markers are deliberately NOT reset — they are disk reality, not a preference.
 Logged `[nav] settings-reset tab=Commands …`.
 
+## 6c. Where the briefing is WRITTEN — the handover file location
+
+Until v7/v5 of the definitions, the target folder was a hard-coded phrase in the command text:
+*"create ONE new markdown file **in the current working directory** named
+`HANDOVER-<short-topic>.md`"*. That is the whole reason `HANDOVER-*.md` files accumulate at repo
+roots — and it was never load-bearing, because a briefing's **content** is what reaches the
+successor (§5's delivery tiers); the file is a courier. So the folder is now a **setting**,
+`AppSettings::commandHandoverWritePath`, and the shipped default is the session **scratchpad**.
+
+**Folder-only, family-wide.** The setting moves the DIRECTORY and nothing else: the file NAME
+stays the `HANDOVER-<topic>.md` contract every other stage keys on (the §6b file-match regex
+matches the **name**, the §5 fan-out gives one successor per file, delete-after acts on the
+absolute path the tool_use reported), so no other stage changes at all. It is one value for both
+commands, like the file-match pattern — the two are one await family (§3). Values:
+
+| value | meaning |
+|---|---|
+| `scratchpad` (default) or `""` | the session's own temp scratchpad — Claude Code names it in the session's instructions; the definition falls back to the system temp folder if it has none |
+| `./` | the session's working directory — the pre-§6c behavior, kept as a preset |
+| `./docs`, `./handovers`, … | a folder relative to the working directory, created if missing |
+| `D:\briefings` | an absolute folder, created if missing |
+
+`NormalizeCommandWritePath` (SessionModels.h) trims the value, drops a trailing separator (but
+never on the degenerate roots `./` `/` `C:\`), caps the length, and **drops** control characters,
+newlines, backticks, quotes and `|` — the value is inlined into ONE line of a markdown
+instruction, so anything that could break out of that line is removed rather than escaped. It
+runs on the cog's Save AND on the Persistence load, so a hand-edited `settings.json` self-heals.
+
+**How it reaches Claude: a rendered span, like the custom NAME (§6a).** Both shipped texts carry
+exactly one line
+
+```
+   WRITE IT IN: your session scratchpad directory (the temp scratchpad folder your own instructions name; if you have none, use the system temp folder)
+```
+
+`RenderShippedCommandWritePath` swaps that phrase for `CommandWritePathPhrase(writePath)` when
+materializing; `NormalizeCommandWritePathBytesForIdentity` swaps whatever is there BACK before
+hashing. The two are exact inverses, so **every shipped version stays recognizable under any
+location** and a pristine file still auto-upgrades. Two deliberate differences from the name seam:
+
+* the inverse is **delimited** (marker → end of line), not value-driven, so it needs **no
+  per-install marker** and still recognizes a location someone changed by hand;
+* identity therefore tries **two candidates** — the name-normalized bytes (which match any
+  HISTORICAL version verbatim; pre-§6c texts carry no marker at all, so the location
+  normalization is a no-op on them) and the additionally location-normalized bytes (which match
+  the CURRENT version rendered under a custom folder). `MatchShippedCommandVersion` is the one
+  place that asks "are these bytes a version we shipped?", shared by the upgrade, the
+  rename/disable removal, and the cog's status line.
+
+⚠️ **Contract for future versions: keep the `WRITE IT IN: ` marker, and keep the phrase on ONE
+line.** A text that drops the marker silently stops following the setting (it still upgrades —
+the marker-less bytes match their own digest — it just renders nothing).
+
+**Applies on Save, not at restart.** The location only affects the definition TEXT, never a
+binding, so the cog's Save calls `RefreshHandoverCommandWritePath(settings)` right after the
+settings sink persisted — the next `/handover` writes to the new folder with no restart. That
+refresh re-renders the **LIVE** definition files (keyed on the engine-owned *materialized* names,
+`LiveHandoverCommandNames`) and never renames, migrates or deletes anything: a **rename stays
+restart-applied** (§6a), because the file and its CommandWatch binding must never disagree
+mid-run. The write policy is unchanged — a file we don't recognize is never touched — which is
+why the rewrite rule is now *"ours **and** not already exactly what we would write"*: that one
+predicate covers a version upgrade, a name re-render and a location re-render, while a
+byte-identical file stays a no-op (no write, no log).
+
+**Delete-after pairs with it.** A briefing in a temp scratchpad has no reason to linger once its
+successor holds the content, so a **fresh install** now seeds `commandHandoverDeleteFileAfterLaunch`
+**ON** (the absent-key default; an install that already stored `false` keeps it), and picking the
+**Scratchpad** preset in the cog ticks the toggle for you. Everything else about delete-after is
+unchanged (§6b — deferred to a started successor, never the pointer tier, never a failed spawn).
+
+**The definition files, said out loud + the Reinstall escape hatch.** Everything on this tab is
+delivered by writing `<claude-config>\commands\<name>.md`, and Agentmaster **never overwrites a
+definition it does not recognize**. That rule is right (a user edit sticks forever) but it has a
+consequence worth stating: an edited definition **stops following these settings** — it keeps
+whatever folder its own text names. So the Commands tab now carries a **COMMAND DEFINITION FILES**
+section: a state line per file (`up to date` · `managed — updates on Save` · `EDITED BY YOU — left
+alone` · `not installed yet`, from `InspectHandoverCommandFiles`, sampled at cog open and after a
+reinstall — not per keystroke) and a **Reinstall definition files…** button. That button is the
+ONE path that overwrites regardless of digest (`ForceReinstallShippedCommandFileNamedIn`), behind
+a confirm that says the edits are lost, and it writes the shipped text rendered with the configured
+name + location. Logged `[engine] <label> command REINSTALLED (user-requested overwrite): …` and
+`[nav] commands reinstall-definitions …`.
+
 ## 7. Hardening & safeguards
 
 The feature crosses three threads (scanner worker → engine fan-out → per-window UI dispatchers)
@@ -705,6 +795,23 @@ line alone pins the throw site later):
   round-trip (models, the find/replace pair + file pattern stored VERBATIM with regex chars and
   `$` backrefs unmangled, the toggle, absent keys == shipped behavior, and an invalid stored
   pattern degrading at USE time).
+  **§6c WRITE-LOCATION units:** `NormalizeCommandWritePath` (trim, the trailing-separator drop
+  that spares the degenerate roots, the line-breaking chars dropped, the length cap) +
+  `CommandWritePathIsScratchpad` (blank == the token, case-insensitively); the rendered phrase
+  per shape (default · `./` · relative · absolute); the render↔identity INVERSE over BOTH REAL
+  texts — the marker is present, the shipped default renders BYTE-IDENTICALLY, a configured
+  folder lands on the marker line while the `HANDOVER-<topic>.md` name contract is untouched, the
+  phrase stays ONE line (line count unchanged), a location-rendered current text digests back
+  onto the history's last entry, a marker-less (pre-§6c) text is returned verbatim so those
+  versions still upgrade, and a RENAMED command with a CUSTOM location still digests onto the
+  history (the two spans invert independently); the write policy through the location seam over a
+  synthetic 2-version history (a changed location RE-RENDERS the same shipped version, re-running
+  is a no-op, changing back re-renders back, a PRIOR version written under a custom location still
+  upgrades, a user-edited file is STILL never overwritten, and `ForceReinstall…` is the one thing
+  that overwrites it); `InspectShippedCommandFileNamedIn`'s four states; and the AppSettings
+  round-trip incl. the presence gate (absent == the scratchpad default, a hand-edited value
+  normalizing on load) and the delete-after pairing (absent == ON for a fresh install, a stored
+  `false` kept).
 * **`TestCommandHandoverE2E` — the FABRICATED session** (the design's expected transcript,
   fabricated with real ISO timestamps and replayed through the REAL `ParseTranscriptDelta` + a
   feed mapping kept in lockstep with `_readDelta`'s): scenario A the happy path — echo →

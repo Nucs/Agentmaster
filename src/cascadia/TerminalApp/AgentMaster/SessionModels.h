@@ -1095,6 +1095,32 @@ namespace Agentmaster
     inline constexpr std::wstring_view kDefaultCommandTitleReplace = L"$1 (handover)";
     inline constexpr std::wstring_view kDefaultCommandFileMatchRegex = L"HANDOVER\\-";
 
+    // Agentmaster (COMMANDS.md §6c — WHERE a handover briefing is written): the shipped default
+    // location. Both definitions carry ONE "WRITE IT IN: <phrase>" line rendered from the
+    // commandHandoverWritePath setting, so the target folder is a SETTING instead of the
+    // hard-coded "current working directory" the pre-§6c texts named — the answer to HANDOVER-*.md
+    // litter accumulating at repo roots. The default is the session SCRATCHPAD (Claude Code's
+    // per-session temp folder): a briefing is a transient hand-off whose CONTENT is injected into
+    // the successor anyway, so the file itself does not belong in the user's repo. This token and
+    // "" (a deliberately cleared box) mean the same thing.
+    inline constexpr std::wstring_view kCommandWritePathScratchpad = L"scratchpad";
+    // The pre-§6c location, offered as a preset: the session's working directory.
+    inline constexpr std::wstring_view kCommandWritePathWorkingDir = L"./";
+
+    // Agentmaster (COMMANDS.md §6/§6c): what a shipped slash-command DEFINITION file on disk IS,
+    // relative to what Agentmaster would write for it now. The write policy never overwrites a file
+    // it does not recognize, so this is how the cog can SAY that a hand-edited definition is frozen
+    // (and offer the confirmed Reinstall) instead of silently ignoring the settings around it.
+    // Lives here — not in ClaudeSpawn.h — so the UI headers can hold one without pulling in the
+    // spawn machinery. Produced by InspectShippedCommandFileNamedIn / InspectHandoverCommandFiles.
+    enum class ShippedCommandFileState
+    {
+        Missing, // no definition file (the next reconcile creates it)
+        UpToDate, // ours, byte-identical to the current text under this name + write location
+        OursStale, // ours (some shipped version), but not what we'd write — the next reconcile rewrites it
+        UserOwned, // matches nothing we ever shipped: hand-edited or foreign — NEVER touched
+    };
+
     struct AppSettings
     {
         // --- Claude sessions (spawn recipe; see ClaudeSpawn) ---
@@ -1507,8 +1533,20 @@ namespace Agentmaster
         //     Send-now-able) — in both the file is no longer load-bearing. The POINTER tier never
         //     deletes (the successor must read the file), and a failed spawn leaves its file.
         //     Default OFF (deleting user-visible files is opt-in); the answer to the
-        //     HANDOVER-*.md litter accumulating at repo roots.
-        bool commandHandoverDeleteFileAfterLaunch{ false };
+        //     HANDOVER-*.md litter accumulating at repo roots. A FRESH install (no key on disk)
+        //     seeds it ON instead, because the shipped write location is now the scratchpad —
+        //     see commandHandoverWritePath + the Persistence load's absent-key default.
+        bool commandHandoverDeleteFileAfterLaunch{ true };
+        //   * commandHandoverWritePath — WHERE both commands tell Claude to write the briefing
+        //     (COMMANDS.md §6c). FAMILY-WIDE and FOLDER-ONLY: the file NAME keeps the
+        //     HANDOVER-<topic>.md contract the rest of the pipeline keys on (the file-match regex,
+        //     the one-successor-per-file fan-out, delete-after) — only the DIRECTORY moves, so no
+        //     other stage changes. Values: kCommandWritePathScratchpad (the default) or "" == the
+        //     session scratchpad; "./" == the working directory (the pre-§6c behavior); anything
+        //     else is a folder, relative to the working directory or absolute. Consumed at
+        //     MATERIALIZE time — it is rendered into the definition text — and the cog
+        //     re-materializes on Save, so a change applies to the NEXT handover with no restart.
+        std::wstring commandHandoverWritePath{ kCommandWritePathScratchpad };
 
         // --- shipped-default seeding markers (ENV_VARS.md §8; NOT shown in the cog) ---
         // Agentmaster ships a few defaults ONCE and then respects user edits/removals. These markers
@@ -1591,6 +1629,82 @@ namespace Agentmaster
             // anything else is dropped (never a placeholder char — the result stays a clean slug)
         }
         return out;
+    }
+
+    // Agentmaster (COMMANDS.md §6c): normalize a user-typed handover WRITE PATH into the form the
+    // definition renderer may safely inline. The value is rendered into ONE line of a markdown
+    // instruction file (backtick-quoted), so anything that could break that line out — control
+    // characters, a newline, the backtick/quote/pipe glyphs — is DROPPED rather than escaped
+    // (a folder name containing them is not worth supporting; the pipe is also the fan-out
+    // separator). Surrounding whitespace and one pasted quote/backtick pair are trimmed, a
+    // trailing separator is dropped (so `./docs\` and `./docs` are the same folder) EXCEPT on the
+    // degenerate roots ("./", "/", "C:\"), and the length is capped well under MAX_PATH's tail.
+    // Empty in => empty out; the caller reads "" as the shipped default (the scratchpad).
+    inline std::wstring NormalizeCommandWritePath(std::wstring_view raw)
+    {
+        std::wstring out;
+        out.reserve(raw.size());
+        for (const wchar_t c : raw)
+        {
+            if (c < 0x20 || c == 0x7F || c == L'"' || c == L'`' || c == L'|' || c == L'<' || c == L'>')
+            {
+                continue;
+            }
+            out.push_back(c);
+            if (out.size() >= 240)
+            {
+                break;
+            }
+        }
+        const auto isSpace = [](wchar_t c) { return c == L' ' || c == L'\t'; };
+        size_t b = 0;
+        size_t e = out.size();
+        while (b < e && isSpace(out[b]))
+        {
+            ++b;
+        }
+        while (e > b && isSpace(out[e - 1]))
+        {
+            --e;
+        }
+        out = out.substr(b, e - b);
+        // A trailing separator is noise ("./docs\" == "./docs"), but "./", "/", "\" and "C:\" ARE
+        // the value — never strip them down to something that means a different folder.
+        if (out.size() > 2 && (out.back() == L'\\' || out.back() == L'/') &&
+            !(out.size() == 3 && out[1] == L':'))
+        {
+            out.pop_back();
+        }
+        return out;
+    }
+
+    // Agentmaster (COMMANDS.md §6c): does this configured write path mean "the session scratchpad"
+    // (the shipped default)? "" (a cleared box) and the token are the same answer, case-insensitively
+    // for the token so a typed "Scratchpad" is understood.
+    inline bool CommandWritePathIsScratchpad(std::wstring_view writePath)
+    {
+        const std::wstring v = NormalizeCommandWritePath(writePath);
+        if (v.empty())
+        {
+            return true;
+        }
+        if (v.size() != kCommandWritePathScratchpad.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i < v.size(); ++i)
+        {
+            wchar_t c = v[i];
+            if (c >= L'A' && c <= L'Z')
+            {
+                c = static_cast<wchar_t>(c - L'A' + L'a');
+            }
+            if (c != kCommandWritePathScratchpad[i])
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     // Agentmaster (COMMANDS.md §6a): resolve the CONFIGURED /handover-family name pair into the

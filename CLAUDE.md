@@ -850,7 +850,8 @@ pattern is authoritative over the leaf hint — case-insensitive search on the f
 invalid one falls back to the shipped hint, belted at bind time (logged) AND per leaf; a VALID
 pattern also SUPPRESSES the legacy first-markdown fallback, so an unrelated `notes.md` can never
 become the briefing; **RESTART-applied**, bindings register once; the §3 supersede family key stays the leaf HINT so the two commands
-stay one family), and **DELETE-AFTER-HAND-OFF** (`commandHandoverDeleteFileAfterLaunch`, default OFF)
+stay one family), and **DELETE-AFTER-HAND-OFF** (`commandHandoverDeleteFileAfterLaunch`, default ON on
+a FRESH install — the §6c scratchpad pairing below; an install that stored OFF keeps it)
 — **DEFERRED to a successful START, not fired at spawn**: `_HandleCommandHandover` only ARMS
 (successor id → md path) and `_SweepHandoverDeletes` (same liveness tick as the paste pump) deletes
 once `SessionInfo.started` — because a successor in a BACKGROUND tab starts LAZILY and a launch that
@@ -878,6 +879,36 @@ Engine passes `pattern == default || empty`). The cog also gained a **per-tab Re
 Cancel — `_settingsTabResets`, index-aligned; shown only for a tab that registered a handler, today just
 Commands, the rest passing `nullptr`): it restores that tab's CONTROLS from a default-constructed
 `AppSettings` and touches no disk (Save commits, Cancel discards — hence no confirm).
+**WHERE the briefing is WRITTEN is now a setting too (COMMANDS.md §6c — the Commands tab's
+"Handover file location", a free-typed box + a preset menu):** the definitions' hard-coded "in the
+current working directory" moved onto a rendered **`WRITE IT IN: <phrase>`** line, and the shipped
+default is the session **SCRATCHPAD** — a briefing's CONTENT is what reaches the successor, so the
+file is a courier that has no business landing in a repo (the `HANDOVER-*.md` litter, at the
+source). `commandHandoverWritePath` is **FOLDER-ONLY + family-wide**: the `HANDOVER-<topic>.md` NAME
+contract every other stage keys on (the file-match regex, the one-successor-per-file fan-out,
+delete-after) is untouched, so nothing else changes — `scratchpad`/`""` = the temp scratchpad · `./`
+= the working dir (the old behavior, kept as a preset) · `./docs`, `./handovers`, an absolute path =
+that folder, created if missing (`NormalizeCommandWritePath` drops anything that could break the
+one-line instruction out). It renders through the SAME trick as the custom name
+(`RenderShippedCommandWritePath` ↔ `NormalizeCommandWritePathBytesForIdentity`, exact inverses) —
+except the inverse is **DELIMITED** (marker → end of line), so it needs NO per-install marker and
+recognizes a hand-changed location; identity tries TWO candidates (`MatchShippedCommandVersion`:
+name-normalized bytes match any HISTORICAL version verbatim — pre-§6c texts carry no marker, so the
+fold is a no-op on them — and the additionally location-normalized bytes match the CURRENT version
+under a custom folder), which is what keeps every pristine older file auto-upgrading. Because only
+the TEXT changes (never a binding), the cog's Save **applies it immediately**
+(`RefreshHandoverCommandWritePath` re-renders the LIVE definition files, keyed on the engine-owned
+MATERIALIZED names — a rename stays restart-applied so a file and its binding can never disagree
+mid-run), so the rewrite rule generalized to **"ours AND not already exactly what we would write"**
+(one predicate covering a version upgrade, a name re-render and a location re-render; a
+byte-identical file stays a no-op). Picking the **Scratchpad** preset also ticks delete-after. The
+tab's new **COMMAND DEFINITION FILES** section states what each file on disk IS
+(`InspectHandoverCommandFiles` → up-to-date / managed / **EDITED BY YOU — left alone** / not
+installed, sampled at cog open, not per keystroke) — because a hand-edited definition is frozen
+forever and therefore silently STOPS following these settings — and offers the confirmed
+**Reinstall definition files…** (`ForceReinstallShippedCommandFileNamedIn`), the ONE path that
+overwrites regardless of digest. ⚠ Every FUTURE definition version must keep the `WRITE IT IN: `
+marker with its phrase on ONE line, or it silently stops honoring the setting.
 **The `/handover <context-or-filepath>` integration:** engine init materializes the command DEFINITION
 `<claude-config>/commands/handover.md` (**create-if-absent + a VERSION-AWARE UPGRADE gated on SHA-256 —
 the ONE write outside the profile**: the shipped history is a list of **DIGESTS**
@@ -1741,8 +1772,15 @@ What works, by area:
   `HANDOVER-<topic>.md` contract, blank/invalid falling back to the looser built-in
   "name contains handover" hint — **the one restart-applied field here**), and
   **`commandHandoverDeleteFileAfterLaunch`** (delete the md once its successor exists + delivery is
-  secured; never the pointer tier — the `HANDOVER-*.md` litter fix). Model/title/delete apply to the
-  NEXT handover right after Save; a live status line under the boxes calls out an INVALID regex
+  secured; never the pointer tier — the `HANDOVER-*.md` litter fix), **plus the §6c WRITE LOCATION** —
+  **`commandHandoverWritePath`** (the "Handover file location" box + a **Presets ▾** menu — Scratchpad
+  (default, also what a blank box means) · `./` · `./docs` · `./docs/handovers` · `./handovers`, or any
+  typed folder incl. an absolute one; FOLDER-only, the `HANDOVER-<topic>.md` name is untouched; picking
+  Scratchpad also ticks delete-after) and the **COMMAND DEFINITION FILES** section (a per-file state line
+  — up-to-date / managed / **EDITED BY YOU — left alone** / not installed — plus a confirmed **Reinstall
+  definition files…**, the one overwrite that ignores the digest). Model/title/delete/**location** apply
+  to the NEXT handover right after Save (the location by re-rendering the live definition files); a live
+  status line under the boxes calls out an INVALID regex and spells out where briefings will land
   (validated through the shared `RegexUtil.h`), and (the
   **NOTIFICATIONS tab** — **System notifications**) **`notificationsEnabled`** + the five per-target-state
   switches **`notifyOnWaiting`/`notifyOnNeedsApproval`/`notifyOnIdle`/`notifyOnDone`/`notifyOnError`** +

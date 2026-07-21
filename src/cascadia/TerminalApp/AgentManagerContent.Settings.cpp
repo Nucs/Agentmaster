@@ -1230,7 +1230,7 @@ namespace winrt::TerminalApp::implementation
         panel = commandsPanel;
         panel.Children().Append(SettingsSeparator(L"SLASH COMMANDS (the /handover family)", true)); // leading section
         {
-            auto intro = Text(L"Agentmaster ships two slash commands into your global Claude commands folder (~\\.claude\\commands, or CLAUDE_CONFIG_DIR). Typed into a managed Claude session, they write a HANDOVER-*.md briefing that Agentmaster turns into fresh successor session(s). Rename or disable them here \x2014 names, enables, and the file-match pattern apply AFTER RESTART; the successor shaping below (model \x00B7 title rewrite \x00B7 delete-after) applies to the NEXT handover right after Save. A rename/disable deletes the old definition file only when it is byte-identical to a version Agentmaster shipped; a file you edited yourself is never touched (and a disabled command's edited file keeps working as YOUR command, just unwatched).", 11, false, 0.6);
+            auto intro = Text(L"Agentmaster ships two slash commands into your global Claude commands folder (~\\.claude\\commands, or CLAUDE_CONFIG_DIR). Typed into a managed Claude session, they write a HANDOVER-*.md briefing \x2014 by default into the session's temp scratchpad, since its CONTENT is what gets injected \x2014 that Agentmaster turns into fresh successor session(s). Rename or disable them here \x2014 names, enables, and the file-match pattern apply AFTER RESTART; the successor shaping below (model \x00B7 title rewrite \x00B7 file location \x00B7 delete-after) applies to the NEXT handover right after Save. A rename/disable deletes the old definition file only when it is byte-identical to a version Agentmaster shipped; a file you edited yourself is never touched (and a disabled command's edited file keeps working as YOUR command, just unwatched).", 11, false, 0.6);
             intro.TextWrapping(TextWrapping::Wrap);
             panel.Children().Append(intro);
         }
@@ -1314,6 +1314,75 @@ namespace winrt::TerminalApp::implementation
             titleRow.Children().Append(_setCmdTitleReplace);
             panel.Children().Append(titleRow);
         }
+        // §6c WHERE the briefings are written — a free-typed FOLDER with a preset drop-down beside
+        // it. FOLDER-ONLY by design: the file NAME stays the HANDOVER-<topic>.md contract the rest
+        // of the pipeline keys on (the match regex below, the one-successor-per-file fan-out,
+        // delete-after) — only the directory moves. The value is rendered into BOTH definition
+        // files on Save, so it applies to the next handover with no restart.
+        {
+            auto locRow = Grid{};
+            {
+                ColumnDefinition cBox;
+                cBox.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+                ColumnDefinition cGap;
+                cGap.Width(GridLengthHelper::FromValueAndType(6, GridUnitType::Pixel));
+                ColumnDefinition cBtn;
+                cBtn.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+                locRow.ColumnDefinitions().Append(cBox);
+                locRow.ColumnDefinitions().Append(cGap);
+                locRow.ColumnDefinitions().Append(cBtn);
+            }
+            _setCmdWritePath = TextBox{};
+            _setCmdWritePath.Header(winrt::box_value(L"Handover file location (folder)"));
+            _setCmdWritePath.PlaceholderText(L"scratchpad \x2014 the session's temp folder");
+            AgentSetTip(_setCmdWritePath, L"The FOLDER a handover briefing is written to. The file is always named HANDOVER-<topic>.md \x2014 only the folder changes, so everything else (the file match below, one successor per file, delete-after) keeps working.\n\n\x2022 scratchpad (the default, also what a blank box means): the session's own temp scratchpad. A briefing is a transient hand-off whose CONTENT is injected into the successor anyway, so nothing lands in your repo.\n\x2022 ./ : the session's working directory (how it always used to work).\n\x2022 ./docs, ./handovers, \x2026 : a folder relative to the working directory \x2014 created if missing.\n\x2022 An absolute path (D:\\briefings) works too.\n\nSaved changes are written straight into the command definition files, so the next /handover uses the new folder \x2014 no restart. A definition file you edited by hand is never rewritten (see the line below).");
+            _setCmdWritePath.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _UpdateCommandsTabStatus(); });
+            Grid::SetColumn(_setCmdWritePath, 0);
+            locRow.Children().Append(_setCmdWritePath);
+            _setCmdWritePathPresets = Button{};
+            _setCmdWritePathPresets.Content(winrt::box_value(L"Presets \x25BE"));
+            _setCmdWritePathPresets.VerticalAlignment(VerticalAlignment::Bottom);
+            AgentSetTip(_setCmdWritePathPresets, L"Common locations. Picking \x201CScratchpad\x201D also turns on \x201C" L"Delete the handover file after a successful hand-off\x201D \x2014 a temp briefing has no reason to linger once its successor has the content.");
+            {
+                auto flyout = MenuFlyout{};
+                // { label, value, is-the-scratchpad } — the scratchpad entry also ticks delete-after.
+                const struct
+                {
+                    const wchar_t* label;
+                    const wchar_t* value;
+                    bool scratchpad;
+                } presets[] = {
+                    { L"Scratchpad (temp \x2014 recommended)", L"scratchpad", true },
+                    { L"Working directory (./)", L"./", false },
+                    { L"./docs", L"./docs", false },
+                    { L"./docs/handovers", L"./docs/handovers", false },
+                    { L"./handovers", L"./handovers", false },
+                };
+                for (const auto& p : presets)
+                {
+                    auto item = MenuFlyoutItem{};
+                    item.Text(p.label);
+                    const std::wstring value{ p.value };
+                    const bool scratchpad = p.scratchpad;
+                    item.Click([this, value, scratchpad](const IInspectable&, const RoutedEventArgs&) {
+                        if (_setCmdWritePath)
+                        {
+                            _setCmdWritePath.Text(winrt::hstring{ value });
+                        }
+                        if (scratchpad && _setCmdDeleteAfter)
+                        {
+                            _setCmdDeleteAfter.IsOn(true); // the auto-pairing: temp file => clean it up
+                        }
+                        _UpdateCommandsTabStatus();
+                    });
+                    flyout.Items().Append(item);
+                }
+                _setCmdWritePathPresets.Flyout(flyout);
+            }
+            Grid::SetColumn(_setCmdWritePathPresets, 2);
+            locRow.Children().Append(_setCmdWritePathPresets);
+            panel.Children().Append(locRow);
+        }
         _setCmdFileMatch = TextBox{};
         _setCmdFileMatch.Header(winrt::box_value(L"Handover file match (regex \x2014 applies after restart)"));
         _setCmdFileMatch.PlaceholderText(L"cleared \x2014 falls back to the built-in \x201Cname contains handover\x201D rule");
@@ -1327,6 +1396,48 @@ namespace winrt::TerminalApp::implementation
         _setCmdShapingStatus = Text(L"", 11, false, 0.7);
         _setCmdShapingStatus.TextWrapping(TextWrapping::Wrap);
         panel.Children().Append(_setCmdShapingStatus);
+
+        // §6c THE DEFINITION FILES themselves — the honesty line + the escape hatch. Everything on
+        // this tab is delivered by writing <claude-config>\commands\<name>.md, and Agentmaster
+        // NEVER overwrites a definition it doesn't recognize (a hand edit sticks forever). That is
+        // right, but it means an edited file silently ignores the settings above — so we SAY what
+        // each file is, and offer one confirmed overwrite back to the shipped text.
+        panel.Children().Append(SettingsSeparator(L"COMMAND DEFINITION FILES"));
+        _setCmdDefState = Text(L"", 11, false, 0.7);
+        _setCmdDefState.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setCmdDefState);
+        _setCmdReinstallBtn = Button{};
+        _setCmdReinstallBtn.Content(winrt::box_value(L"Reinstall definition files\x2026"));
+        _setCmdReinstallBtn.Margin(Thickness{ 0, 6, 0, 0 });
+        AgentSetTip(_setCmdReinstallBtn, L"Overwrite handover.md and handover-here.md in your Claude commands folder with Agentmaster's shipped text, rendered with the names and file location configured here \x2014 whatever is in them now. This is the only action that overwrites a definition you edited yourself; normally an edited file is left alone forever (which is why an edited one stops following these settings). Your edits are NOT recoverable afterwards.");
+        _setCmdReinstallBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+            _Confirm(L"Reinstall the handover command definitions?",
+                     L"handover.md and handover-here.md in your Claude commands folder will be REPLACED with Agentmaster's shipped instructions, using the command names and handover file location configured here. Any edits you made to those two files are lost.",
+                     L"Reinstall",
+                     [this]() {
+                         try
+                         {
+                             // Freshest disk (the engine owns the materialized-name markers this
+                             // acts on), with the location as currently TYPED — so a Reinstall
+                             // right after changing the box writes the folder the user can see.
+                             auto s = ::Agentmaster::LoadAppSettings();
+                             if (_setCmdWritePath)
+                             {
+                                 s.commandHandoverWritePath = ::Agentmaster::NormalizeCommandWritePath(std::wstring{ _setCmdWritePath.Text() });
+                             }
+                             const auto [ho, hh] = ::Agentmaster::ReinstallHandoverCommandFiles(s);
+                             ::Agentmaster::LogNav(L"commands reinstall-definitions handover=" + std::wstring{ ho.empty() ? L"(none)" : L"ok" } +
+                                                   L" here=" + std::wstring{ hh.empty() ? L"(none)" : L"ok" });
+                             _RefreshCommandDefinitionState();
+                             _UpdateCommandsTabStatus();
+                         }
+                         catch (...)
+                         {
+                             ::Agentmaster::AgentLogCaughtException(L"_ReinstallHandoverDefinitions");
+                         }
+                     });
+        });
+        panel.Children().Append(_setCmdReinstallBtn);
 
         // === TABS & OVERLAY tab ===
         panel = tabsPanel;
@@ -1900,7 +2011,7 @@ namespace winrt::TerminalApp::implementation
         // truth (no hand-copied literals to drift). It touches the FORM only — Save commits it,
         // Cancel discards it — so no confirm dialog is needed. The engine-owned materialized-name
         // markers are deliberately untouched (they are disk reality, not a preference).
-        addSettingsTab(L"Commands", L"The /handover slash-command family \x2014 rename or disable each command, pick the successor model, and shape the successor (title rewrite, file match, delete-after). \x201C" L"Reset\x201D restores this tab's shipped defaults.", commandsPanel, [this]() {
+        addSettingsTab(L"Commands", L"The /handover slash-command family \x2014 rename or disable each command, pick the successor model, and shape the successor (title rewrite, where the briefing file is written, file match, delete-after). \x201C" L"Reset\x201D restores this tab's shipped defaults.", commandsPanel, [this]() {
             const ::Agentmaster::AppSettings d{}; // the shipped defaults, verbatim
             if (_setCmdHandoverEnabled)
             {
@@ -1942,6 +2053,10 @@ namespace winrt::TerminalApp::implementation
             if (_setCmdDeleteAfter)
             {
                 _setCmdDeleteAfter.IsOn(d.commandHandoverDeleteFileAfterLaunch);
+            }
+            if (_setCmdWritePath)
+            {
+                _setCmdWritePath.Text(winrt::hstring{ d.commandHandoverWritePath }); // §6c — back to the scratchpad
             }
             _UpdateCommandsTabStatus(); // explicit: never depend on a programmatic set raising the change events
             ::Agentmaster::LogNav(L"settings-reset tab=Commands (form only \x2014 Save commits, Cancel discards)");
@@ -2277,6 +2392,14 @@ namespace winrt::TerminalApp::implementation
         {
             _setCmdDeleteAfter.IsOn(_appSettings.commandHandoverDeleteFileAfterLaunch);
         }
+        if (_setCmdWritePath)
+        {
+            // §6c: shown VERBATIM (blank == the scratchpad default, which the placeholder says).
+            _setCmdWritePath.Text(winrt::hstring{ _appSettings.commandHandoverWritePath });
+        }
+        // §6c: sample what the two definition files on disk currently ARE — once per cog open (the
+        // status pass below runs per keystroke and this reads + hashes two files).
+        _RefreshCommandDefinitionState();
         // The seeds above re-fire TextChanged/Toggled, but be explicit so the status lines never
         // depend on a programmatic set actually raising them (the _UpdateTitleNamingPreview rule).
         _UpdateCommandsTabStatus();
@@ -2797,6 +2920,14 @@ namespace winrt::TerminalApp::implementation
         {
             _appSettings.commandHandoverDeleteFileAfterLaunch = _setCmdDeleteAfter.IsOn();
         }
+        if (_setCmdWritePath)
+        {
+            // §6c: normalized on the way in (the value is rendered into a one-line markdown
+            // instruction), then pushed into the LIVE definition files further below — after the
+            // settings sink has persisted them, so a crash between the two can't leave the files
+            // describing a location settings.json doesn't hold.
+            _appSettings.commandHandoverWritePath = ::Agentmaster::NormalizeCommandWritePath(std::wstring{ _setCmdWritePath.Text() });
+        }
         if (_setRenameCommit)
         {
             const int idx = _setRenameCommit.SelectedIndex();
@@ -3005,6 +3136,14 @@ namespace winrt::TerminalApp::implementation
         // freshly-installed binary) takes effect this run — no restart needed (RefreshClaudeExe updates
         // the shared engine's cached path; ClaudeAvailable() flips accordingly).
         ::Agentmaster::RefreshClaudeExe(_appSettings.claudeExePath);
+        // COMMANDS.md §6c: push the handover WRITE LOCATION into the live definition files, so the
+        // next /handover writes where the box says — no restart. Runs AFTER the sink persisted
+        // settings.json (the files must never describe a location the settings don't hold) and only
+        // rewrites definitions we RECOGNIZE: a hand-edited one stays frozen (the tab's state line
+        // says so, and its Reinstall button is the explicit way out). Names/enables are NOT applied
+        // here — a rename stays restart-applied so the file and its CommandWatch binding can never
+        // disagree mid-run (§6a). Best-effort: a failed write is logged by the writer itself.
+        ::Agentmaster::RefreshHandoverCommandWritePath(_appSettings);
         _HideSettings();
     }
 
@@ -3446,8 +3585,69 @@ namespace winrt::TerminalApp::implementation
             {
                 t += L"CUSTOM match, strict (no first-markdown fallback) \x2014 applies after restart.";
             }
+            // §6c: WHERE the briefings land, spelled out from the SAME renderer the definition file
+            // gets — so the line is literally the instruction Claude will read, not a paraphrase.
+            const std::wstring loc = _setCmdWritePath ? std::wstring{ _setCmdWritePath.Text() } : std::wstring{};
+            t += L"  Location: ";
+            t += ::Agentmaster::CommandWritePathIsScratchpad(loc) ?
+                     std::wstring{ L"the session scratchpad (temp) \x2014 the default." } :
+                     (L"written to " + ::Agentmaster::CommandWritePathPhrase(loc) + L".");
             _setCmdShapingStatus.Text(winrt::hstring{ t });
         }
+        // §6c: what the two definition FILES on disk are (sampled at cog open / after a Reinstall).
+        // A user-owned file is frozen — it keeps whatever instructions it holds, so the settings on
+        // this tab that are delivered THROUGH the definition (the location above, and the command's
+        // own name) stop applying to it. That must be said out loud, not discovered.
+        if (_setCmdDefState)
+        {
+            const auto label = [](::Agentmaster::ShippedCommandFileState st) -> const wchar_t* {
+                switch (st)
+                {
+                case ::Agentmaster::ShippedCommandFileState::UpToDate:
+                    return L"up to date";
+                case ::Agentmaster::ShippedCommandFileState::OursStale:
+                    return L"managed \x2014 updates on Save";
+                case ::Agentmaster::ShippedCommandFileState::UserOwned:
+                    return L"EDITED BY YOU \x2014 left alone";
+                default:
+                    return L"not installed yet";
+                }
+            };
+            std::wstring t = L"handover.md: ";
+            t += label(_cmdDefStateHandover);
+            t += L"   \x00B7   handover-here.md: ";
+            t += label(_cmdDefStateHere);
+            const bool anyUserOwned = _cmdDefStateHandover == ::Agentmaster::ShippedCommandFileState::UserOwned ||
+                                      _cmdDefStateHere == ::Agentmaster::ShippedCommandFileState::UserOwned;
+            t += anyUserOwned ?
+                     L"\nAgentmaster never overwrites a definition you edited \x2014 so that file keeps its own instructions and ignores the settings above. Reinstall to take it back." :
+                     L"\nAgentmaster keeps these in step with the settings above; a file you edit yourself is never overwritten.";
+            _setCmdDefState.Text(winrt::hstring{ t });
+        }
+    }
+
+    // COMMANDS.md §6c: re-sample both /handover-family definition files from disk. Called at cog
+    // OPEN and after a Reinstall — never from the per-keystroke status pass (two file reads + two
+    // SHA-256s). Uses the freshest disk settings for the engine-owned materialized NAMES (which
+    // file is live) with the location as currently TYPED, so the state answers "what would Save do
+    // to the file I'm looking at".
+    void AgentManagerContent::_RefreshCommandDefinitionState()
+    try
+    {
+        auto s = ::Agentmaster::LoadAppSettings();
+        if (_setCmdWritePath)
+        {
+            s.commandHandoverWritePath = ::Agentmaster::NormalizeCommandWritePath(std::wstring{ _setCmdWritePath.Text() });
+        }
+        const auto [ho, hh] = ::Agentmaster::InspectHandoverCommandFiles(s);
+        _cmdDefStateHandover = ho;
+        _cmdDefStateHere = hh;
+    }
+    catch (...)
+    {
+        // Never let a disk hiccup take the cog down; the states keep their previous value (the
+        // status line then simply shows what the last successful sample said).
+        ::Agentmaster::AgentLogCaughtException(L"_RefreshCommandDefinitionState");
     }
 
     void AgentManagerContent::_UpdateTitleNamingPreview()

@@ -732,6 +732,7 @@ namespace Agentmaster
         o.Set(L"commandHandoverTitleReplace", json::Value::MkStr(s.commandHandoverTitleReplace));
         o.Set(L"commandHandoverFileMatchRegex", json::Value::MkStr(s.commandHandoverFileMatchRegex));
         o.Set(L"commandHandoverDeleteFileAfterLaunch", json::Value::MkBool(s.commandHandoverDeleteFileAfterLaunch));
+        o.Set(L"commandHandoverWritePath", json::Value::MkStr(s.commandHandoverWritePath));
         o.Set(L"envDefaultsVersion", json::Value::MkNum(s.envDefaultsVersion));
         o.Set(L"claudeCleanupDaysSeeded", json::Value::MkBool(s.claudeCleanupDaysSeeded));
         return o;
@@ -928,7 +929,18 @@ namespace Agentmaster
         {
             s.commandHandoverFileMatchRegex = v.StrAt(L"commandHandoverFileMatchRegex");
         }
-        s.commandHandoverDeleteFileAfterLaunch = v.BoolAt(L"commandHandoverDeleteFileAfterLaunch", false);
+        // §6c WRITE PATH: presence-gated like the regexes — an ABSENT key seeds the shipped default
+        // (the scratchpad), a PRESENT value is honored including "" (== the scratchpad too, the
+        // cleared box). Normalized on the way in, so a hand-edited settings.json can never smuggle a
+        // newline/backtick into the rendered definition line.
+        if (v.Find(L"commandHandoverWritePath"))
+        {
+            s.commandHandoverWritePath = NormalizeCommandWritePath(v.StrAt(L"commandHandoverWritePath"));
+        }
+        // Delete-after: an ABSENT key (a FRESH install, or one predating this key) takes the struct
+        // default ON, which pairs with the scratchpad write location above — a briefing written to a
+        // temp folder has no reason to linger. An install that already stored `false` keeps it.
+        s.commandHandoverDeleteFileAfterLaunch = v.BoolAt(L"commandHandoverDeleteFileAfterLaunch", AppSettings{}.commandHandoverDeleteFileAfterLaunch);
         // Shipped-default seeding markers (ENV_VARS.md §8). Absent => 0 / false, so a pre-feature
         // settings.json runs the one-time seed once (new installs + updaters alike get the defaults).
         s.envDefaultsVersion = v.U32At(L"envDefaultsVersion", 0);

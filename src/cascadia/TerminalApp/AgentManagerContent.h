@@ -853,7 +853,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _setCmdHandoverHereStatus{ nullptr }; // live-vs-configured status line
         std::wstring _cmdLiveHandoverName; // the name ACTIVE this run ("" == disabled) — the disk marker at cog open
         std::wstring _cmdLiveHandoverHereName;
-        void _UpdateCommandsTabStatus(); // re-render the status lines (names + §6b shaping) from the current (unsaved) control state
+        void _UpdateCommandsTabStatus(); // re-render the status lines (names + §6b shaping + §6c location) from the current (unsaved) control state
+        void _RefreshCommandDefinitionState(); // re-sample both definition files from disk into _cmdDefState* (cog open / after a Reinstall)
         // §6b successor shaping (COMMANDS.md): per-command successor-model combos ("Default" +
         // the launchModels list, items rebuilt at every cog open so a launch-models edit shows;
         // the parallel id vectors map SelectedIndex -> the stored model id, [0] == "" Default,
@@ -871,6 +872,20 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _setCmdFileMatch{ nullptr }; // the HANDOVER file-match regex ("" == leaf contains "handover"; restart-applied)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCmdDeleteAfter{ nullptr }; // delete a HANDOVER md after its successor spawned + delivery secured (never the pointer tier)
         winrt::Windows::UI::Xaml::Controls::TextBlock _setCmdShapingStatus{ nullptr }; // the shaping summary/validation line (invalid regexes called out)
+        // COMMANDS.md §6c — WHERE the briefings are written: a free-typed FOLDER with a preset
+        // drop-down beside it ("scratchpad" == the shipped default). Rendered into both definition
+        // files on Save (RefreshHandoverCommandWritePath), so it applies to the NEXT handover with
+        // no restart — unless the file was hand-edited, which _setCmdDefState reports and
+        // _setCmdReinstallBtn is the confirmed escape hatch for.
+        winrt::Windows::UI::Xaml::Controls::TextBox _setCmdWritePath{ nullptr }; // the folder ("" / "scratchpad" == the session scratchpad)
+        winrt::Windows::UI::Xaml::Controls::Button _setCmdWritePathPresets{ nullptr }; // its preset menu (scratchpad · ./ · ./docs · …)
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setCmdDefState{ nullptr }; // what the two definition files on disk currently are (ours / yours)
+        winrt::Windows::UI::Xaml::Controls::Button _setCmdReinstallBtn{ nullptr }; // confirmed overwrite of both definitions with the shipped text
+        // The two definition files' state, sampled from disk at cog OPEN (and after a Reinstall) —
+        // not per keystroke: _UpdateCommandsTabStatus runs on every edit and this costs two file
+        // reads + hashes. Rendered by that same status pass.
+        ::Agentmaster::ShippedCommandFileState _cmdDefStateHandover{ ::Agentmaster::ShippedCommandFileState::Missing };
+        ::Agentmaster::ShippedCommandFileState _cmdDefStateHere{ ::Agentmaster::ShippedCommandFileState::Missing };
         winrt::Windows::UI::Xaml::Controls::ComboBox _setRenameCommit{ nullptr }; // how the tab rename box commits via the keyboard (None / +Shift+Enter / +Enter); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setWaitingNever{ nullptr }; // Waiting-for-you "unread" model: ON => never time-decay (stay Waiting until read); disables the slider
         winrt::Windows::UI::Xaml::Controls::Slider _setWaitingDecaySlider{ nullptr }; // Waiting-for-you -> Idle timeout, 1..10080 minutes (1m..7d); the "Never" toggle above owns 0, the textbox (left) is the source of truth and may exceed 7d (slider then sits maxed)

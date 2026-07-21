@@ -1121,8 +1121,19 @@ void TestCommandWatch()
         // the SHIPPED DEFAULT — the boxes show the real rule instead of hiding a code fallback —
         // while a PRESENT empty string is a deliberate "fall back to the built-in behavior".
         const auto fresh = AppSettingsFromJson(json::Value::MkObj());
-        CHECK(fresh.commandHandoverSuccessorModel.empty() && fresh.commandHandoverHereSuccessorModel.empty() && !fresh.commandHandoverDeleteFileAfterLaunch,
-              "shaping: absent keys reproduce the shipped behavior (Default model, no delete)");
+        CHECK(fresh.commandHandoverSuccessorModel.empty() && fresh.commandHandoverHereSuccessorModel.empty(),
+              "shaping: absent model keys reproduce the shipped behavior (Default model)");
+        // §6c pairing: the shipped write location is the session SCRATCHPAD, so a FRESH install
+        // also gets delete-after ON (a temp briefing has no reason to linger once its successor
+        // holds the content). An install that already stored `false` keeps it — see below.
+        CHECK(fresh.commandHandoverDeleteFileAfterLaunch && CommandWritePathIsScratchpad(fresh.commandHandoverWritePath),
+              "shaping: an absent write-path/delete pair reads as the shipped scratchpad + delete-after ON");
+        {
+            auto kept = json::Value::MkObj();
+            kept.Set(L"commandHandoverDeleteFileAfterLaunch", json::Value::MkBool(false));
+            CHECK(!AppSettingsFromJson(kept).commandHandoverDeleteFileAfterLaunch,
+                  "shaping: an install that stored delete-after OFF keeps it (the new default only seeds an ABSENT key)");
+        }
         CHECK(fresh.commandHandoverTitleFindRegex == kDefaultCommandTitleFindRegex &&
                   fresh.commandHandoverTitleReplace == kDefaultCommandTitleReplace &&
                   fresh.commandHandoverFileMatchRegex == kDefaultCommandFileMatchRegex,
@@ -1142,6 +1153,123 @@ void TestCommandWatch()
         CHECK(AppSettingsFromJson(ToJson(bad)).commandHandoverTitleFindRegex == L"([unclosed", "shaping: an invalid pattern is stored verbatim (validated at use, not at load)");
         CHECK(DeriveHandoverSuccessorTitle(L"any title", AppSettingsFromJson(ToJson(bad)).commandHandoverTitleFindRegex, L"x").empty(),
               "shaping: … and that invalid pattern degrades to the default naming at USE time");
+    }
+
+    // ---- customizable WRITE LOCATION (COMMANDS.md §6c): normalize / phrase / render / identity ----
+    {
+        // NormalizeCommandWritePath: the value is inlined into ONE line of a markdown instruction,
+        // so anything that could break that line out is dropped, not escaped.
+        CHECK(NormalizeCommandWritePath(L"  ./docs  ") == L"./docs", "write path: surrounding whitespace trimmed");
+        CHECK(NormalizeCommandWritePath(L"./docs\\") == L"./docs" && NormalizeCommandWritePath(L"./docs/") == L"./docs", "write path: a trailing separator is noise");
+        CHECK(NormalizeCommandWritePath(L"./") == L"./" && NormalizeCommandWritePath(L"C:\\") == L"C:\\", "write path: the degenerate roots ARE the value (never stripped to something else)");
+        CHECK(NormalizeCommandWritePath(L"a\nb\rc`d\"e|f") == L"abcdef", "write path: newlines/backticks/quotes/pipe dropped (the rendered line can never break out)");
+        CHECK(NormalizeCommandWritePath(std::wstring(400, L'a')).size() == 240, "write path: length capped");
+        CHECK(CommandWritePathIsScratchpad(L"") && CommandWritePathIsScratchpad(L"scratchpad") && CommandWritePathIsScratchpad(L" Scratchpad "),
+              "write path: blank == the token == the shipped default (case-insensitively)");
+        CHECK(!CommandWritePathIsScratchpad(L"./") && !CommandWritePathIsScratchpad(L"./scratchpad"), "write path: a real folder is not the scratchpad token");
+
+        // The rendered phrase: the default renders verbatim, "./" is the working directory, and a
+        // folder is quoted + told to be created (absolute vs relative worded differently).
+        CHECK(CommandWritePathPhrase(L"") == CommandWritePathPhrase(L"scratchpad"), "phrase: blank and the token render identically");
+        CHECK(CommandWritePathPhrase(L"./") == L"the current working directory", "phrase: ./ is the pre-6c behavior, spelled out");
+        CHECK(CommandWritePathPhrase(L"./docs").find(L"relative to the current working directory") != std::wstring::npos, "phrase: a relative folder says what it is relative to");
+        CHECK(CommandWritePathPhrase(L"D:\\briefings").find(L"relative") == std::wstring::npos &&
+                  CommandWritePathPhrase(L"D:\\briefings").find(L"create the folder") != std::wstring::npos,
+              "phrase: an absolute folder is not called relative, and is still created if missing");
+
+        // Render <-> identity are EXACT inverses over the real shipped texts — the property the
+        // whole upgrade rule rests on (a location-rendered file must digest back onto the history).
+        for (const bool here : { false, true })
+        {
+            const std::wstring_view current = here ? ShippedHandoverHereCommandText() : ShippedHandoverCommandText();
+            const auto& hashes = here ? ShippedHandoverHereCommandHashes() : ShippedHandoverCommandHashes();
+            CHECK(current.find(L"WRITE IT IN: ") != std::wstring_view::npos, "shipped text carries the write-location MARKER (the render/identity span)");
+            CHECK(Utf8Of(RenderShippedCommandWritePath(current, L"")) == Utf8Of(current) &&
+                      Utf8Of(RenderShippedCommandWritePath(current, L"scratchpad")) == Utf8Of(current),
+                  "render: the shipped default renders BYTE-IDENTICALLY (the digest history stays valid)");
+            const std::wstring rendered = RenderShippedCommandWritePath(current, L"./docs/handovers");
+            CHECK(rendered != current && rendered.find(L"`./docs/handovers`") != std::wstring::npos, "render: a configured folder lands on the marker line");
+            CHECK(rendered.find(L"HANDOVER-<short-topic>.md") != std::wstring::npos, "render: the FILE-NAME contract is untouched (folder-only setting)");
+            CHECK(std::count(rendered.begin(), rendered.end(), L'\n') == std::count(current.begin(), current.end(), L'\n'),
+                  "render: the phrase stays ONE line (line count unchanged)");
+            CHECK(NormalizeCommandWritePathBytesForIdentity(Utf8Of(rendered)) == Utf8Of(current), "identity: the byte normalization inverts the render exactly");
+            CHECK(Sha256Hex(NormalizeCommandWritePathBytesForIdentity(Utf8Of(rendered))) == hashes.back(),
+                  "identity: a location-rendered CURRENT text digests back onto the history's last entry");
+            // Both customizations at once (a renamed command with a custom location) must still
+            // resolve to the shipped digest — the two spans are independent.
+            const std::wstring_view defName = here ? kDefaultHandoverHereCommandName : kDefaultHandoverCommandName;
+            const std::wstring both = RenderShippedCommandWritePath(RenderShippedCommandText(current, defName, L"zz"), L"D:\\briefs");
+            CHECK(Sha256Hex(NormalizeCommandBytesForIdentity(NormalizeCommandWritePathBytesForIdentity(Utf8Of(both)), defName, L"zz")) == hashes.back(),
+                  "identity: a RENAMED command with a CUSTOM location still digests onto the shipped history (both spans invert)");
+        }
+        // A text WITHOUT the marker (every pre-6c version) is returned verbatim — exactly what
+        // keeps those versions matching their own historical digests instead of reading user-owned.
+        CHECK(NormalizeCommandWritePathBytesForIdentity("# no marker here\n") == "# no marker here\n", "identity: a marker-less text is untouched (pre-6c versions still upgrade)");
+
+        // The write policy through the location seam: a pristine file written under location A is
+        // RE-RENDERED when the configured location becomes B (same shipped version — the old
+        // "already current" short-circuit would have frozen it), while a user edit is still never
+        // touched, and ForceReinstall is the only thing that overwrites one.
+        {
+            wchar_t tmp[MAX_PATH];
+            ::GetTempPathW(MAX_PATH, tmp);
+            const std::wstring cfg = std::wstring{ tmp } + L"am-writepath-policy";
+            const std::wstring path = cfg + L"\\commands\\hb.md";
+            const auto readAt = [&path] {
+                std::ifstream f(std::filesystem::path{ path }, std::ios::binary);
+                return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            };
+            const auto wipe = [&] {
+                ::DeleteFileW(path.c_str());
+                ::RemoveDirectoryW((cfg + L"\\commands").c_str());
+                ::RemoveDirectoryW(cfg.c_str());
+            };
+            wipe();
+            static constexpr std::wstring_view kOld = L"# v1\nUse the Write tool.\nWRITE IT IN: your session scratchpad directory (the temp scratchpad folder your own instructions name; if you have none, use the system temp folder)\ndone\n";
+            static constexpr std::wstring_view kNew = L"# v2 (current)\nUse the Write tool.\nWRITE IT IN: your session scratchpad directory (the temp scratchpad folder your own instructions name; if you have none, use the system temp folder)\ndone\n";
+            const std::string h1 = Sha256Hex(Utf8Of(kOld));
+            const std::string h2 = Sha256Hex(Utf8Of(kNew));
+            const std::vector<std::string_view> history{ h1, h2 };
+            const auto ensure = [&](std::wstring_view loc) { return EnsureShippedCommandFileNamedIn(cfg, L"hb", history, kNew, L"am-test", L"hb", loc); };
+
+            CHECK(ensure(L"") == path && readAt() == Utf8Of(kNew), "policy: absent -> the current text at the shipped location");
+            CHECK(ensure(L"./docs") == path && readAt() == Utf8Of(RenderShippedCommandWritePath(kNew, L"./docs")),
+                  "policy: a CHANGED location RE-RENDERS the same shipped version (the file follows the setting)");
+            CHECK(ensure(L"./docs") == path && readAt() == Utf8Of(RenderShippedCommandWritePath(kNew, L"./docs")), "policy: re-running with the same location is a no-op");
+            CHECK(ensure(L"") == path && readAt() == Utf8Of(kNew), "policy: changing back re-renders back");
+            {
+                std::ofstream f(std::filesystem::path{ path }, std::ios::binary | std::ios::trunc);
+                f << Utf8Of(RenderShippedCommandWritePath(kOld, L"./docs"));
+            }
+            CHECK(ensure(L"./docs") == path && readAt() == Utf8Of(RenderShippedCommandWritePath(kNew, L"./docs")),
+                  "policy: a PRIOR version written under a custom location is still recognized and upgraded");
+            CHECK(InspectShippedCommandFileNamedIn(cfg, L"hb", history, kNew, L"hb", L"./docs") == ShippedCommandFileState::UpToDate, "inspect: ours + current == UpToDate");
+            CHECK(InspectShippedCommandFileNamedIn(cfg, L"hb", history, kNew, L"hb", L"./elsewhere") == ShippedCommandFileState::OursStale, "inspect: ours but written for another location == OursStale");
+            {
+                std::ofstream f(std::filesystem::path{ path }, std::ios::binary | std::ios::trunc);
+                f << "# my own command\n";
+            }
+            CHECK(InspectShippedCommandFileNamedIn(cfg, L"hb", history, kNew, L"hb", L"./docs") == ShippedCommandFileState::UserOwned, "inspect: an edited file == UserOwned");
+            CHECK(ensure(L"./docs") == path && readAt() == "# my own command\n", "policy: a user-edited file is STILL never overwritten by the location change");
+            CHECK(ForceReinstallShippedCommandFileNamedIn(cfg, L"hb", kNew, L"am-test", L"hb", L"./docs") == path &&
+                      readAt() == Utf8Of(RenderShippedCommandWritePath(kNew, L"./docs")),
+                  "reinstall: the confirmed escape hatch overwrites a user-owned file, rendered with the configured location");
+            ::DeleteFileW(path.c_str());
+            CHECK(InspectShippedCommandFileNamedIn(cfg, L"hb", history, kNew, L"hb", L"") == ShippedCommandFileState::Missing, "inspect: no file == Missing");
+            wipe();
+        }
+
+        // AppSettings round-trip + the presence gate (an ABSENT key seeds the scratchpad default,
+        // a PRESENT value — including a hand-edited one with junk — is honored, normalized).
+        {
+            AppSettings as;
+            as.commandHandoverWritePath = L"./docs/handovers";
+            CHECK(AppSettingsFromJson(ToJson(as)).commandHandoverWritePath == L"./docs/handovers", "write path: round-trips verbatim");
+            CHECK(CommandWritePathIsScratchpad(AppSettingsFromJson(json::Value::MkObj()).commandHandoverWritePath), "write path: an absent key reads as the shipped scratchpad default");
+            auto o = json::Value::MkObj();
+            o.Set(L"commandHandoverWritePath", json::Value::MkStr(L"  ./x`y  "));
+            CHECK(AppSettingsFromJson(o).commandHandoverWritePath == L"./xy", "write path: a hand-edited value normalizes on load (no line-breaking chars reach the definition)");
+        }
     }
 
     // ---- EnsureHandoverCommandFileIn: create-if-absent under a TEMP config dir ----
