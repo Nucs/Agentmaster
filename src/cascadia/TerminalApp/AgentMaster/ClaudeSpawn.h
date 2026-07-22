@@ -702,28 +702,52 @@ namespace Agentmaster
     // the candidate past registry titles exactly like the default naming.
     std::wstring DeriveHandoverSuccessorTitle(std::wstring_view originTitle, std::wstring_view findRegex, std::wstring_view replacement);
 
-    // COMMANDS.md §6b (successor shaping — the per-MESSAGE model hint): a /handover(-here) message
-    // may LEAD with a model pick that overrides the per-command "Successor model" combo for THAT
-    // handover alone — `/handover [fable] do a b c`, `/handover fable 5: fix the tests`. Given the
-    // command's ARGS (the transcript echo's <command-args>, delivered on the fire) and the
-    // launchModels spec, returns the picked model ID ("" == no hint — the combo/Default applies).
+    // COMMANDS.md §6b (successor shaping — the per-MESSAGE hints): a /handover(-here/-standby)
+    // message may LEAD with a model pick and/or an explicit bracketed successor TITLE, each
+    // overriding its configured counterpart (the "Successor model" combo / the title rewrite +
+    // classic "(handover)" naming) for THAT handover alone:
+    //   `/handover [fable] do a b c`               (model)
+    //   `/handover fable 5: fix the tests`         (model, bare form)
+    //   `/handover [fable] [my title] do a b c`    (model + title)
+    //   `/handover-standby [my title] fix x`       (title alone — the first bracket matched no
+    //                                               model, so it FELL BACK to the title slot)
+    // Given the command's ARGS (the transcript echo's <command-args>, delivered on the fire) and
+    // the launchModels spec, returns both hints ("" == that hint absent — the configured behavior
+    // applies).
     //
-    // Matching is PARTIAL + CASELESS + CHARACTERS-ONLY: both the typed hint and each entry's TWO
-    // sides (the display name AND the model id, ParseLaunchModels) fold to lowercase [a-z0-9]
+    // MODEL matching is PARTIAL + CASELESS + CHARACTERS-ONLY: both the typed hint and each entry's
+    // TWO sides (the display name AND the model id, ParseLaunchModels) fold to lowercase [a-z0-9]
     // (spaces/dots/hyphens/brackets dropped), and the hint matches an entry when it is a SUBSTRING
     // of either folded side — "fable" hits "Fable 5"/"claude-fable-5", "sonnet" hits
     // "claude-sonnet-5". First matching entry in list order wins. Only the args' FIRST LINE's
     // LEADING portion is consulted:
     //   * `[hint]` — the explicit bracketed form: the bracket body is the hint (any non-empty fold;
-    //     an unterminated/absurdly long bracket or a no-match reads as no hint — the text just
-    //     stays part of the origin's context);
+    //     an absurdly long bracket or a no-match is not a model — it FALLS BACK to the TITLE slot
+    //     below; an UNTERMINATED first bracket reads as no hints at all — plain context);
     //   * bare leading word(s) — the FIRST word must hit on its own (and fold to >= 3 chars — a
     //     stray "a"/"do" can never accidentally pick a model), then the hint greedily EXTENDS one
     //     word at a time (up to 4) while the longer fold still matches, longest match winning —
     //     so "fable 5 do x" resolves "fable5" (not just "fable") and stops before "do".
-    // The hint is NOT stripped from anything: the origin already received the full text as
+    // TITLE is BRACKETED ONLY, in one of two positions: the FIRST bracket when its body matches no
+    // model (or none are configured — the fallback semantics), or the NEXT token right after a
+    // recognized model hint (bracketed or bare — "fable 5 [my title] fix x" works too). The body
+    // is taken VERBATIM (any characters — "[my asd \n !!_ title]" keeps its punctuation and its
+    // LITERAL backslash-n exactly as typed), edge-trimmed, "" when blank, degenerate-capped at 255
+    // (252 + "...") like every title path. Deeper brackets are never consulted (a "[x]"
+    // mid-sentence stays context). The caller gives the explicit title precedence over the §6b
+    // find/replace rewrite AND the classic "(handover)" naming; its registry uniqueness bump still
+    // applies (a fan-out's later files walk "<title> (handover)" / "(handover 2)" …).
+    // The hints are NOT stripped from anything: the origin already received the full text as
     // $ARGUMENTS (harmless context), and the successor's first message is the FILE content. PURE
     // (ParseLaunchModels over the spec, no I/O) + unit-tested.
+    struct HandoverArgsHints
+    {
+        std::wstring modelId; // "" == no model hint (the per-command combo / Default applies)
+        std::wstring title; // "" == no explicit title (the rewrite / "(handover)" naming applies)
+    };
+    HandoverArgsHints ParseHandoverArgsHints(std::wstring_view args, std::wstring_view launchModelsSpec);
+    // The model-only view of the same parse (the §6b original signature) — delegates to
+    // ParseHandoverArgsHints, ONE parser, so the two can never disagree.
     std::wstring PickModelFromArgsHint(std::wstring_view args, std::wstring_view launchModelsSpec);
 
     // Build a complete spawn spec and ensure the shared hook files exist. `pipeName` is the

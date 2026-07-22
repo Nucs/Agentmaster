@@ -1081,6 +1081,95 @@ void TestCommandWatch()
         CHECK(PickModelFromArgsHint(L"claude x", kSpec) == L"claude-fable-5", "model hint: an ambiguous hint takes the FIRST list entry (the user's own ordering is the tie-break)");
     }
 
+    // ---- ParseHandoverArgsHints (§6b): the per-MESSAGE successor-TITLE hint ----
+    // "/handover [fable] [my title] do x" / "/handover-standby [my title] fix x" — an optional
+    // BRACKETED title rides the leading args beside the model hint: the SECOND bracket after a
+    // recognized model (bracketed OR bare), or the FIRST bracket when its body matches no model
+    // (the fallback slot). Body VERBATIM + edge-trimmed; PickModelFromArgsHint delegates to the
+    // same parser, so the model side is pinned unchanged by the block above.
+    {
+        static constexpr std::wstring_view kSpec =
+            L"Fable 5 | claude-fable-5\n"
+            L"Opus 4.8 | claude-opus-4-8\n"
+            L"Sonnet 5 | claude-sonnet-5\n";
+        const auto parse = [&](std::wstring_view args) { return ParseHandoverArgsHints(args, kSpec); };
+        // The two-slot form: model first, then the title.
+        {
+            const auto h = parse(L"[fable] [my title] the handover instructions");
+            CHECK(h.modelId == L"claude-fable-5" && h.title == L"my title", "args hints: \"[fable] [my title] …\" — first bracket the model, second the successor title");
+        }
+        // The requested fallback: a first bracket matching NO model IS the title.
+        {
+            const auto h = parse(L"[my title] the title here did not match a model");
+            CHECK(h.modelId.empty() && h.title == L"my title", "args hints: a first bracket matching no model FALLS BACK to the title slot");
+        }
+        // Arbitrary characters ride verbatim (the requested "[my asd \n !!_ title]" — a LITERAL
+        // backslash-n typed in the one-line command, not a real newline).
+        {
+            const auto h = parse(L"[my asd \\n !!_ title] the handover instructions");
+            CHECK(h.modelId.empty() && h.title == L"my asd \\n !!_ title", "args hints: the bracket body is VERBATIM — punctuation, underscores, a literal \\n all keep");
+        }
+        // Model alone — no second bracket, no title (the pinned model-hint block's shape).
+        {
+            const auto h = parse(L"[fable] do a b c");
+            CHECK(h.modelId == L"claude-fable-5" && h.title.empty(), "args hints: a model bracket alone titles nothing (\"do…\" is context, not a slot)");
+        }
+        // The bracketed title composes with the BARE model form too.
+        {
+            const auto h = parse(L"fable 5 [standby run] fix x");
+            CHECK(h.modelId == L"claude-fable-5" && h.title == L"standby run", "args hints: \"fable 5 [standby run] …\" — the title bracket lands right after the bare model words");
+        }
+        {
+            const auto h = parse(L"fable 5 do the thing");
+            CHECK(h.modelId == L"claude-fable-5" && h.title.empty(), "args hints: the bare model form without a bracket titles nothing");
+        }
+        // A non-model first bracket is the title; anything after it stays context.
+        {
+            const auto h = parse(L"[not a model] [second] x");
+            CHECK(h.modelId.empty() && h.title == L"not a model", "args hints: a non-model first bracket IS the title — a second bracket stays context");
+        }
+        // Blank / unterminated / mid-sentence brackets never title.
+        {
+            const auto h = parse(L"[fable] [] x");
+            const auto h2 = parse(L"[fable] [   ] x");
+            CHECK(h.modelId == L"claude-fable-5" && h.title.empty() && h2.title.empty(), "args hints: an empty/blank title bracket is unusable — no title (Rule #11 never-empty)");
+        }
+        {
+            const auto h = parse(L"[fable] [unterminated rest of line");
+            CHECK(h.modelId == L"claude-fable-5" && h.title.empty(), "args hints: an unterminated SECOND bracket is context — the model still applies");
+        }
+        {
+            const auto h = parse(L"[unterminated rest of line");
+            CHECK(h.modelId.empty() && h.title.empty(), "args hints: an unterminated FIRST bracket reads as no hints at all (pinned for the model side above)");
+        }
+        {
+            const auto h = parse(L"fix the [urgent] bug");
+            CHECK(h.modelId.empty() && h.title.empty(), "args hints: a bracket deeper in the sentence is never consulted (no leading bracket, no model)");
+        }
+        // Edge-trim + first-line-only.
+        {
+            const auto h = parse(L"[  spaced title  ] x");
+            CHECK(h.title == L"spaced title", "args hints: the title body is edge-trimmed (interior spacing kept verbatim)");
+        }
+        {
+            const auto h = parse(L"do\n[fable] [t] x");
+            CHECK(h.modelId.empty() && h.title.empty(), "args hints: only the FIRST LINE's leading portion is consulted — a second-line bracket never hints");
+        }
+        // With NO launchModels configured every first bracket is a title (nothing to match).
+        {
+            const auto h = ParseHandoverArgsHints(L"[fable] briefing text", L"");
+            CHECK(h.modelId.empty() && h.title == L"fable", "args hints: an empty launchModels list can never pick a model — the bracket falls back to the title");
+        }
+        // Degenerate cap: a >255-char title trims to 252 + "..." like every title path.
+        {
+            const std::wstring longArgs = L"[" + std::wstring(300, L'a') + L"] x";
+            const auto h = parse(longArgs);
+            CHECK(h.modelId.empty() && h.title.size() == 255 && h.title.compare(252, 3, L"...") == 0, "args hints: a degenerate >255-char title caps at 252 + \"...\" (also covers the >65-char non-model bracket routing to the title slot)");
+        }
+        // Delegation identity: the model-only view is the SAME parse.
+        CHECK(PickModelFromArgsHint(L"[fable] [my title] x", kSpec) == L"claude-fable-5", "args hints: PickModelFromArgsHint delegates — a title bracket never changes the model side");
+    }
+
     // ---- name-aware Ensure / Remove / Reconcile: the rename + disable migration POLICY ----
     // Same synthetic-command discipline as the block above (real histories are digests only), now
     // with texts that CARRY the command token so the render/identity path is exercised end to end.

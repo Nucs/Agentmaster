@@ -398,8 +398,8 @@ namespace Agentmaster
             if (cmdSettings.commandHandoverEnabled)
             {
                 // `args` (the typed command's <command-args>) rides the fan-out verbatim — the
-                // hosting window parses the §6b per-message model hint out of its leading words
-                // at action time (PickModelFromArgsHint), where the live settings are at hand.
+                // hosting window parses the §6b per-message model + title hints out of its leading
+                // words at action time (ParseHandoverArgsHints), where the live settings are at hand.
                 e->commandWatch->BindMarkdownAwait(handoverCmdName, L"handover", [](const std::wstring& sessionId, const std::vector<std::wstring>& mdPaths, const std::wstring& args) {
                     RaiseCommandActionInWindows(sessionId, L"handover", JoinWatchPaths(mdPaths), args);
                 }, leafMatchRegex, allowFirstMarkdownFallback);

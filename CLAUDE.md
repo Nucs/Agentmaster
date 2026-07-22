@@ -826,8 +826,10 @@ tag no session carries lists at **·0** (sorts last).
 ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
 HARDENED, delivery = FULL CONTENT INJECTION (never truncated), RESTART-RESILIENT (durable
 per-session progress) + MULTI-FILE (one command's several HANDOVER files consumed as one):
-engine-tested (2521/2521 — the
-`TestCommandWatch` units + safeguard belts + the content-injection/tier units + the /handover-here
+engine-tested (2601/2601 — the
+`TestCommandWatch` units + safeguard belts + the content-injection/tier units + the per-MESSAGE
+`ParseHandoverArgsHints` model+TITLE hint units (the bracket slots, the no-model→title fallback,
+verbatim/trim/cap, the `PickModelFromArgsHint` delegation identity) + the /handover-here
 twin units (hyphen echo, name-exact binding isolation, its own definition file) + the
 /handover-standby units (§5b — its own definition file + digest gate + fill-not-send sentinels +
 no-bare-sibling-token render check, the THREE-way binding isolation ["handover" is a PREFIX of

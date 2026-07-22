@@ -379,7 +379,8 @@ dispatched to `_HandleCommandHandover(…, standby=true)`.
   Successor-model combo — `commandHandoverStandbyName`/`…Enabled`/`…MaterializedName`/
   `…SuccessorModel`, the §6a name heal generalized to `ResolveCommandNameTriple`), and it
   participates in every family-wide §6b/§6c rule: the title rewrite, the file-match regex, the
-  write location, delete-after, and the per-message model hint (`/handover-standby [fable] …`).
+  write location, delete-after, and the per-message model + title hints
+  (`/handover-standby [fable] …`, `/handover-standby [my title] …`).
 * Nav trail: `[nav] handover-standby-begin <sid8> md=…` ↔ `[nav] handover-standby-done
   new=<sid8'> from=<sid8> inject=standby|pointer-standby`, plus the mechanism lines
   `[handover-standby] … briefing armed for the FILL …` → `… briefing FILLED into the input box
@@ -565,23 +566,38 @@ state; the cog surfaces invalidity to the user instead of flooding hooks.log).
   `modelOverride` param. Every file of one command's fan-out launches with that command's pick.
   The cog offers **Default** + the `launchModels` list, rebuilt at each cog open; a stored id no
   longer in the list is listed as `(custom) <id>` so it round-trips instead of silently resetting.
-* **The per-MESSAGE model hint** (`PickModelFromArgsHint`, pure + tested) — the typed command's
-  LEADING words may pick the model for THAT handover alone, overriding the combo above:
-  `/handover [fable] do a b c`, `/handover fable 5: fix the tests`. Matching is **partial +
-  caseless + characters-only**: the hint and BOTH sides of every `launchModels` entry (display
-  name AND model id) fold to lowercase `[a-z0-9]`, and the hint hits when it is a **substring**
-  of either side (`fable` ⊂ `fable5`/`claudefable5`; `sonnet` ⊂ `claudesonnet5`); the first list
-  entry wins a tie. Only the args' FIRST LINE's leading portion is consulted: the **bracketed**
-  form `[hint]` is explicit (any non-empty fold; unterminated/no-match reads as plain context),
-  the **bare** form requires the FIRST word to hit on its own (folded ≥ 3 chars — a stray
-  `a`/`do` can never pick a model) and then greedily extends word-by-word (≤ 4) while the longer
-  fold still matches, longest hit winning (`fable 5 do x` → `fable5`, stopping before `do`).
-  Plumbing: the echo's `<command-args>` now rides the fire verbatim — `CommandActionSink` /
-  `RaiseCommandActionInWindows` / the per-window sink / `_HandleCommandHandover` all gained an
-  `args` leg — and the hint is resolved at ACTION time against the live `launchModels`. Nothing
-  is stripped anywhere: the origin already received the full text as `$ARGUMENTS` (harmless
-  context) and the successor's first message is the FILE content. Logged
-  `[handover] <sid8> successor model from the message hint: <id>`.
+* **The per-MESSAGE model + title hints** (`ParseHandoverArgsHints`, pure + tested;
+  `PickModelFromArgsHint` is its model-only view — one parser, so the two can never drift) — the
+  typed command's LEADING words may pick the model and/or pin an explicit successor TITLE for
+  THAT handover alone, overriding the combo above / the title naming below:
+  `/handover [fable] do a b c`, `/handover fable 5: fix the tests`,
+  `/handover [fable] [my title] do a b c`, `/handover-standby [my title] fix x`.
+  **Model** matching is **partial + caseless + characters-only**: the hint and BOTH sides of
+  every `launchModels` entry (display name AND model id) fold to lowercase `[a-z0-9]`, and the
+  hint hits when it is a **substring** of either side (`fable` ⊂ `fable5`/`claudefable5`;
+  `sonnet` ⊂ `claudesonnet5`); the first list entry wins a tie. Only the args' FIRST LINE's
+  leading portion is consulted: the **bracketed** form `[hint]` is explicit (any non-empty fold;
+  an unterminated FIRST bracket reads as plain context — no hints at all), the **bare** form
+  requires the FIRST word to hit on its own (folded ≥ 3 chars — a stray `a`/`do` can never pick
+  a model) and then greedily extends word-by-word (≤ 4) while the longer fold still matches,
+  longest hit winning (`fable 5 do x` → `fable5`, stopping before `do`).
+  **Title** is bracketed ONLY, in one of two positions: the FIRST bracket **when its body
+  matches no model** (or none are configured) **falls back to being the title** —
+  `/handover-standby [my title] …` titles without picking — or the very NEXT token after a
+  recognized model hint, bracketed or bare (`[fable] [my title] …`, `fable 5 [my title] …`); a
+  bracket deeper in the sentence is never consulted. The body is **verbatim** (any characters —
+  `[my asd \n !!_ title]` keeps its punctuation and its literal backslash-n), edge-trimmed,
+  unusable when blank, degenerate-capped at 255 like every title path; the explicit title
+  outranks the §6b find/replace rewrite AND the classic `"(handover)"` naming, and the per-file
+  registry uniqueness bump still applies (a fan-out's later files walk `<title> (handover)` /
+  `(handover 2)` …).
+  Plumbing: the echo's `<command-args>` rides the fire verbatim — `CommandActionSink` /
+  `RaiseCommandActionInWindows` / the per-window sink / `_HandleCommandHandover` all carry an
+  `args` leg — and the hints are resolved at ACTION time against the live `launchModels`.
+  Nothing is stripped anywhere: the origin already received the full text as `$ARGUMENTS`
+  (harmless context) and the successor's first message is the FILE content. Logged
+  `[handover] <sid8> successor model from the message hint: <id>` /
+  `[handover] <sid8> successor title from the message hint: <title>`.
 **The defaults are REAL VALUES, not hidden code paths.** All three regex settings ship
 **seeded** (`kDefaultCommandTitleFindRegex` / `…TitleReplace` / `…FileMatchRegex` in
 SessionModels.h) and **presence-gated** on load (the `launchModels` idiom): an absent key seeds

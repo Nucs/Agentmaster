@@ -363,8 +363,8 @@ namespace Agentmaster
     // thread, so there is no source window to exclude; exactly one window hosts the session's tab,
     // so at most one sink acts (each hops to its own UI thread and checks its _claudeTabs; a miss
     // is a no-op). Commands: "handover"/"handover-here" (payload == the '|'-joined absolute md
-    // path set; args == the typed command's <command-args> verbatim — the §6b per-message model
-    // hint parses out of their leading words at action time, PickModelFromArgsHint).
+    // path set; args == the typed command's <command-args> verbatim — the §6b per-message model +
+    // title hints parse out of their leading words at action time, ParseHandoverArgsHints).
     uint64_t RegisterCommandActionHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload, const std::wstring& args)> handler);
     void UnregisterCommandActionHandler(uint64_t token);
     void RaiseCommandActionInWindows(const std::wstring& sessionId, const std::wstring& command, const std::wstring& payload, const std::wstring& args = {});

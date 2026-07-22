@@ -339,9 +339,10 @@ namespace winrt::TerminalApp::implementation
         //     file of one command's fan-out launches with its command's pick. A per-MESSAGE hint
         //     in the typed command's leading words ("/handover [fable] …") overrides it for THIS
         //     handover alone (resolved just below);
-        //   * title — the family find/replace rewrite candidate (pure, guarded — "" when unset /
-        //     invalid / no-match / blank result, falling back to the classic "(handover)" naming;
-        //     either way the uniqueness bump below applies);
+        //   * title — a per-MESSAGE bracketed title in the typed command outranks the family
+        //     find/replace rewrite candidate (pure, guarded — "" when unset / invalid / no-match /
+        //     blank result), which outranks the classic "(handover)" naming; whichever wins, the
+        //     uniqueness bump below applies;
         //   * delete-after — remove a HANDOVER md once its successor exists and the delivery is
         //     SECURED (content tier: the document rides the launch commandline; paste tier: parked
         //     durably at the front of the successor's queue). The POINTER tier never deletes (the
@@ -349,16 +350,26 @@ namespace winrt::TerminalApp::implementation
         std::wstring successorModel = standby ? _appSettings.commandHandoverStandbySuccessorModel :
                                       inPlace ? _appSettings.commandHandoverHereSuccessorModel :
                                                 _appSettings.commandHandoverSuccessorModel;
-        // §6b per-MESSAGE model hint: the typed command's leading words may name a model —
-        // "/handover [fable] do a b c", "/handover fable 5: fix x" — matched partially/caselessly
-        // (characters-only) against BOTH sides of every launchModels entry (display name + id,
-        // PickModelFromArgsHint). A hit overrides the per-command combo for THIS handover alone
-        // (every file of the fan-out — one command, one pick); no hit changes nothing. The hint
+        // §6b per-MESSAGE hints: the typed command's leading words may name a model and/or pin an
+        // explicit successor TITLE — "/handover [fable] do a b c", "/handover fable 5: fix x",
+        // "/handover [fable] [my title] do x", "/handover-standby [my title] fix x" (a first
+        // bracket matching NO model FALLS BACK to the title slot). The model is matched
+        // partially/caselessly (characters-only) against BOTH sides of every launchModels entry
+        // (display name + id, ParseHandoverArgsHints); a hit overrides the per-command combo for
+        // THIS handover alone (every file of the fan-out — one command, one pick). The bracketed
+        // title is VERBATIM and outranks the find/replace rewrite AND the classic "(handover)"
+        // naming (the per-file uniqueness bump below still applies, so a fan-out's later files
+        // walk "<title> (handover)" / "(handover 2)" …). No hit changes nothing, and the hint
         // text itself stays in the origin's context verbatim (nothing is stripped anywhere).
-        if (const std::wstring hinted = ::Agentmaster::PickModelFromArgsHint(commandArgs, _appSettings.launchModels); !hinted.empty())
+        const auto argsHints = ::Agentmaster::ParseHandoverArgsHints(commandArgs, _appSettings.launchModels);
+        if (!argsHints.modelId.empty())
         {
-            successorModel = hinted;
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" successor model from the message hint: " + hinted + L"\n");
+            successorModel = argsHints.modelId;
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" successor model from the message hint: " + argsHints.modelId + L"\n");
+        }
+        if (!argsHints.title.empty())
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(sessionId) + L" successor title from the message hint: " + argsHints.title + L"\n");
         }
         std::wstring doneIds; // the -done nav line's parallel per-file lists (position i == file i)
         std::wstring doneModes;
@@ -368,7 +379,13 @@ namespace winrt::TerminalApp::implementation
             const std::wstring& mdPath = mdPaths[fileIdx];
             // Per-file successor title — re-snapshot each iteration: the previous file's
             // successor is already Upserted, so the bump walks the chain instead of colliding.
-            std::wstring successorTitle = ::Agentmaster::DeriveHandoverSuccessorTitle(s->title, _appSettings.commandHandoverTitleFindRegex, _appSettings.commandHandoverTitleReplace);
+            // Precedence: the per-MESSAGE bracketed title (most specific — the user typed it into
+            // THIS command) > the §6b find/replace rewrite > the classic "<origin> (handover)".
+            std::wstring successorTitle = argsHints.title;
+            if (successorTitle.empty())
+            {
+                successorTitle = ::Agentmaster::DeriveHandoverSuccessorTitle(s->title, _appSettings.commandHandoverTitleFindRegex, _appSettings.commandHandoverTitleReplace);
+            }
             if (successorTitle.empty())
             {
                 successorTitle = ::Agentmaster::DeriveSuffixedTitle(s->title, L"handover");

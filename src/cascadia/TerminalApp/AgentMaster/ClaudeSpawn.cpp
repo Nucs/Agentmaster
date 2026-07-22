@@ -2134,13 +2134,10 @@ send - nothing is submitted until the user presses Enter in that tab.
         return out;
     }
 
-    std::wstring PickModelFromArgsHint(std::wstring_view args, std::wstring_view launchModelsSpec)
+    HandoverArgsHints ParseHandoverArgsHints(std::wstring_view args, std::wstring_view launchModelsSpec)
     {
+        HandoverArgsHints hints;
         const auto models = ParseLaunchModels(launchModelsSpec);
-        if (models.empty())
-        {
-            return {};
-        }
         // The characters-only fold both sides of the comparison go through: lowercase [a-z0-9],
         // everything else dropped — "Fable 5" == "fable5", "claude-fable-5" == "claudefable5",
         // "[fable]" == "fable". Caseless + separator-blind by construction.
@@ -2162,6 +2159,8 @@ send - nothing is submitted until the user presses Enter in that tab.
         };
         // First matching entry in LIST ORDER wins (the user's own ordering is the tie-break —
         // same rule the launch-model submenus render by). Returns the model ID to launch with.
+        // An EMPTY launchModels list simply never matches — the TITLE slot must still parse
+        // (with no models configured, every leading bracket is a title).
         const auto matchHint = [&](const std::wstring& hint) -> const std::wstring* {
             if (hint.empty())
             {
@@ -2176,10 +2175,32 @@ send - nothing is submitted until the user presses Enter in that tab.
             }
             return nullptr;
         };
-        // Only the FIRST LINE's leading portion is a hint position — a model word deep inside a
-        // multi-line briefing context must never hijack the successor's model. (substr clamps an
-        // npos count natively — no-newline args read whole; std::min is a windows.h macro hazard
-        // in this TU.)
+        // A bracket body -> the explicit successor TITLE: VERBATIM (any characters — the title is
+        // the user's to spell, "[my asd \n !!_ title]" keeps its literal backslash-n), edge-trimmed,
+        // "" when blank (no usable title — Rule #11's never-empty invariant), degenerate-capped at
+        // 255 (252 + "...") like every other title path (DeriveHandoverSuccessorTitle).
+        const auto titleFromBody = [](std::wstring_view body) -> std::wstring {
+            size_t b = 0;
+            size_t e = body.size();
+            while (b < e && (body[b] == L' ' || body[b] == L'\t' || body[b] == L'\r' || body[b] == L'\n'))
+            {
+                ++b;
+            }
+            while (e > b && (body[e - 1] == L' ' || body[e - 1] == L'\t' || body[e - 1] == L'\r' || body[e - 1] == L'\n'))
+            {
+                --e;
+            }
+            std::wstring t{ body.substr(b, e - b) };
+            if (t.size() > 255)
+            {
+                t = t.substr(0, 252) + L"...";
+            }
+            return t;
+        };
+        // Only the FIRST LINE's leading portion is a hint position — a model word (or a bracket)
+        // deep inside a multi-line briefing context must never hijack the successor. (substr
+        // clamps an npos count natively — no-newline args read whole; std::min is a windows.h
+        // macro hazard in this TU.)
         std::wstring_view line = args.substr(0, args.find(L'\n'));
         size_t pos = 0;
         while (pos < line.size() && (line[pos] == L' ' || line[pos] == L'\t' || line[pos] == L'\r'))
@@ -2189,27 +2210,62 @@ send - nothing is submitted until the user presses Enter in that tab.
         line.remove_prefix(pos);
         if (line.empty())
         {
-            return {};
+            return hints;
         }
-        if (line.front() == L'[')
-        {
-            // The explicit bracketed form: the bracket body is the hint, whole. Unterminated or
-            // absurdly long (nobody types a 64+-char model hint) reads as "not a hint" — the text
-            // is just part of the user's context, never an error.
-            const size_t close = line.find(L']', 1);
-            if (close == std::wstring_view::npos || close > 65)
+        // The optional SECOND slot: a bracketed title right after a recognized model hint —
+        // "[fable] [my title] do x", "fable 5 [my title] fix x". Only the VERY NEXT token is
+        // consulted (skip whitespace, require '['); absent/unterminated -> no title, the text is
+        // just context ("[x]" deeper in the sentence never becomes a title).
+        const auto titleBracketAfter = [&](size_t from) -> std::wstring {
+            size_t p = from;
+            while (p < line.size() && (line[p] == L' ' || line[p] == L'\t' || line[p] == L'\r'))
+            {
+                ++p;
+            }
+            if (p >= line.size() || line[p] != L'[')
             {
                 return {};
             }
-            const auto* id = matchHint(fold(line.substr(1, close - 1)));
-            return id ? *id : std::wstring{};
+            const size_t close = line.find(L']', p + 1);
+            if (close == std::wstring_view::npos)
+            {
+                return {};
+            }
+            return titleFromBody(line.substr(p + 1, close - p - 1));
+        };
+        if (line.front() == L'[')
+        {
+            const size_t close = line.find(L']', 1);
+            if (close == std::wstring_view::npos)
+            {
+                return hints; // unterminated — plain context, no hints, never an error
+            }
+            // The explicit bracketed MODEL form: the bracket body is the hint, whole. An absurdly
+            // long body (nobody types a 64+-char model hint — no folded entry could contain it) is
+            // never even tried as a model; like a no-match it falls THROUGH to the title slot.
+            if (close <= 65)
+            {
+                if (const auto* id = matchHint(fold(line.substr(1, close - 1))))
+                {
+                    hints.modelId = *id;
+                    hints.title = titleBracketAfter(close + 1);
+                    return hints;
+                }
+            }
+            // The first bracket matched NO model -> it IS the explicit successor title (the
+            // fallback semantics: "/handover-standby [my title] …" titles without picking).
+            hints.title = titleFromBody(line.substr(1, close - 1));
+            return hints;
         }
-        // The bare form: the FIRST word must hit on its own (folded >= 3 chars, so a stray short
-        // word can never accidentally pick a model), then greedily extend a word at a time (up to
-        // 4) while the longer fold still matches — longest match wins, so "fable 5 fix x" resolves
-        // "fable5" and stops at "fable5fix".
+        // The bare MODEL form: the FIRST word must hit on its own (folded >= 3 chars, so a stray
+        // short word can never accidentally pick a model), then greedily extend a word at a time
+        // (up to 4) while the longer fold still matches — longest match wins, so "fable 5 fix x"
+        // resolves "fable5" and stops at "fable5fix". bestEnd tracks where the MATCHED words end
+        // (NOT the probe word that broke the extension) — the title slot starts there, so
+        // "fable 5 [my title] fix x" finds its bracket right after the "5".
         std::wstring concat;
         std::wstring best;
+        size_t bestEnd = 0;
         size_t at = 0;
         for (int words = 1; words <= 4; ++words)
         {
@@ -2226,22 +2282,34 @@ send - nothing is submitted until the user presses Enter in that tab.
             at = wordEnd == std::wstring_view::npos ? line.size() : wordEnd;
             if (words == 1 && concat.size() < 3)
             {
-                return {}; // too short to be a deliberate bare hint ("a", "do", "5")
+                return hints; // too short to be a deliberate bare hint ("a", "do", "5")
             }
             if (const auto* id = matchHint(concat))
             {
                 best = *id;
+                bestEnd = at;
             }
             else if (words == 1)
             {
-                return {}; // the FIRST word must match — no scanning deeper into the sentence
+                return hints; // the FIRST word must match — no scanning deeper into the sentence
             }
             else
             {
                 break; // the extension stopped matching — keep the longest hit
             }
         }
-        return best;
+        if (!best.empty())
+        {
+            hints.modelId = best;
+            hints.title = titleBracketAfter(bestEnd);
+        }
+        return hints;
+    }
+
+    std::wstring PickModelFromArgsHint(std::wstring_view args, std::wstring_view launchModelsSpec)
+    {
+        // The model-only view — ONE parser (ParseHandoverArgsHints), so the two can never drift.
+        return ParseHandoverArgsHints(args, launchModelsSpec).modelId;
     }
 
     std::wstring ReadHandoverDocumentPrompt(const std::wstring& mdPath)
