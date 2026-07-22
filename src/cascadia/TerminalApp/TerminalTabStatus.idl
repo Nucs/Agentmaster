@@ -81,6 +81,24 @@ namespace TerminalApp
         // Fill="#E0A92B".
         Windows.UI.Xaml.Media.Brush AgentPendingBrush { get; set; };
 
+        // Agentmaster (the SPARK CROWN — the tab-strip twin of the Triage-Board card's amber "still
+        // cached" glyph): true while this session's Claude server-side prompt cache is still warm, i.e.
+        // ServerCacheStillWarm() — the SAME pure predicate the card reads, so the two surfaces can never
+        // disagree. TabHeaderControl.xaml then shows a soft amber glow behind the status dot plus three
+        // embers rising and fading above it; the dot itself is untouched, so the Triage state colour still
+        // reads exactly as before. Driven by TerminalPage::_ScanCacheWarmTabs -> _SetTabCacheWarm via
+        // Tab.TabStatus() on the scanner's ~2.5s liveness tick (warmth lapses on a CLOCK, with no event to
+        // push it, so it must be re-evaluated periodically). False (the default) once the window lapses.
+        Boolean AgentCacheWarmVisible { get; set; };
+
+        // Agentmaster: the brush the embers + glow are painted with — contrast-picked FIRE (a bright amber
+        // on a dark tab, a deep ember on a light one) from the tab's CURRENTLY RENDERED background via
+        // CacheWarmSparkColorFor, so they are never invisible against a per-directory tab colour (the
+        // pending-dots problem, same fix). TerminalPage::_SetTabCacheWarm points it just before
+        // AgentCacheWarmVisible flips true, so the sparks are never momentarily shown with a null/stale
+        // brush. Null until the tab first goes warm (they are collapsed until then).
+        Windows.UI.Xaml.Media.Brush AgentCacheWarmBrush { get; set; };
+
         // Agentmaster (bookmark tags): the session's tag list for the tab-strip BOOKMARK badges —
         // '\n'-joined "name\t#AARRGGBB" lines (NormalizeTagName strips control chars from names, so
         // both separators are unambiguous; "" == no tags). The COLOR rides the spec: the producer

@@ -61,6 +61,13 @@ namespace winrt::TerminalApp::implementation
         void _HookTabStatusForPending();
         void _UpdatePendingAnimation();
         winrt::Windows::UI::Xaml::Media::Animation::Storyboard _pendingDotsStoryboard{ nullptr };
+        // Agentmaster (SPARK CROWN — the cache-warm hint): the glow breath + the three rising embers,
+        // built imperatively in the constructor beside the pending-dots pulse and run ONLY while
+        // TabStatus.AgentCacheWarmVisible is true. Same start/stop discipline, and for the same reason: a
+        // cache stays warm for MINUTES, so an always-on storyboard would hold the compositor awake across
+        // every recently-used tab in the fleet. Fed by the one _HookTabStatusForPending subscription.
+        void _UpdateCacheWarmAnimation();
+        winrt::Windows::UI::Xaml::Media::Animation::Storyboard _cacheWarmStoryboard{ nullptr };
         winrt::TerminalApp::TerminalTabStatus _pendingHookedStatus{ nullptr };
         winrt::Windows::UI::Xaml::Data::INotifyPropertyChanged::PropertyChanged_revoker _pendingStatusRevoker{};
 

@@ -700,6 +700,48 @@ namespace winrt::TerminalApp::implementation
         return PendingDotsColorFor(bg, _appSettings.pendingDotsLightColor, _appSettings.pendingDotsDarkColor);
     }
 
+    // Agentmaster (SPARK CROWN — the cache-warm hint): show/hide a tab's amber glow + rising embers. The
+    // status dot is never touched, so the Triage state color reads exactly as before. Idempotent: the
+    // observable no-ops on an unchanged bool, and the brush is re-pointed only on a genuine color change,
+    // so re-asserting the same warmth every 2.5s costs nothing. UI thread.
+    void TerminalPage::_SetTabCacheWarm(const TerminalApp::Tab& tab, bool on, const std::optional<winrt::Windows::UI::Color>& sparkColor)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        try
+        {
+            const auto status = tab.TabStatus();
+            if (!status)
+            {
+                return;
+            }
+            if (on && sparkColor)
+            {
+                const auto cur = status.AgentCacheWarmBrush().try_as<Media::SolidColorBrush>();
+                if (!(cur && cur.Color() == *sparkColor))
+                {
+                    status.AgentCacheWarmBrush(Media::SolidColorBrush{ *sparkColor });
+                }
+            }
+            status.AgentCacheWarmVisible(on);
+        }
+        CATCH_LOG();
+    }
+
+    // Agentmaster (SPARK CROWN): the ember/glow color for a tab — the SAME recipe the pending "3 dots"
+    // use (the session's mode-aware tab color, resolved to how the header is CURRENTLY rendered, since an
+    // unfocused colored tab draws much darker than its full color), fed through the fire palette instead
+    // of the pending pair. UI thread.
+    winrt::Windows::UI::Color TerminalPage::_CacheWarmSparkColorForTab(const TerminalApp::Tab& tab, const ::Agentmaster::SessionInfo& info)
+    {
+        const std::wstring hex = ::Agentmaster::ResolveSessionColorHex(_appSettings.tabColorMode, info);
+        const auto dirColor = ParseArgbHexColor(hex, winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x2E, 0x2E, 0x2E));
+        const auto bg = winrt::get_self<Tab>(tab)->CurrentEffectiveTabBackground(dirColor);
+        return CacheWarmSparkColorFor(bg);
+    }
+
     // Agentmaster (PENDING_INPUT.md): re-pick the "3 dots" color for every tab currently showing a draft,
     // WITHOUT a buffer re-read. A tab's effective background — and so the dots' best-contrast color — SHIFTS
     // when it goes selected<->unselected (WT renders a deselected colored tab at 30% over the dark tab row),
@@ -5167,6 +5209,81 @@ namespace winrt::TerminalApp::implementation
     // dots immediately; an empty read only CLEARS after kPendingClearConfirmTicks consecutive empty
     // scans, so a single mid-repaint frame (Claude's Ink TUI redraws the box constantly) can't flicker
     // the indicator off. UI thread (the only place a control's buffer is readable).
+    // Agentmaster (SPARK CROWN — the cache-warm hint): re-evaluate ServerCacheStillWarm for every session
+    // this window hosts and drive its tab-strip glow + embers. This has to be POLLED rather than pushed:
+    // warmth BEGINS on an event (a turn's hook / the observer's transcript enrichment) but ENDS on a
+    // CLOCK — nothing fires when the ~5-minute window lapses — so a push-only indicator would stay lit
+    // forever on an abandoned tab. The scanner's ~2.5s tick is far finer than a minutes-long window, so
+    // the hint appears within one tick of a prompt and clears within one tick of going cold.
+    // Deliberately its own sweep rather than a rider on _ScanPendingInput: that scan's early-outs are
+    // draft-specific (it skips a Codex session and any tab whose control hasn't STARTED), whereas warmth
+    // is pure registry + clock and is meaningful for a dormant window-restored tab too — resuming such a
+    // conversation inside the window genuinely does reuse the cached prefix.
+    winrt::fire_and_forget TerminalPage::_ScanCacheWarmTabs()
+    {
+        // Agentmaster (terminate-net): an exception escaping a fire_and_forget is std::terminate, so the
+        // body is an awaitable IAsyncAction whose exceptions propagate to this co_await (see
+        // _SweepClaudeLiveness).
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await _ScanCacheWarmTabsImpl();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ScanCacheWarmTabs");
+        }
+    }
+
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_ScanCacheWarmTabsImpl()
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
+        if (!_sessionRegistry || _claudeTabs.empty())
+        {
+            co_return;
+        }
+        // The SAME normalization the Triage-Board card applies (0 -> 5), so the tab strip and the card can
+        // never disagree about how long a cache stays warm.
+        const uint32_t cacheMin = _appSettings.serverCacheMinutes ? _appSettings.serverCacheMinutes : 5;
+        const int64_t now = TtNowMs();
+        // Snapshot the ids first — never resolve tabs/controls while iterating _claudeTabs.
+        std::vector<std::wstring> ids;
+        ids.reserve(_claudeTabs.size());
+        for (const auto& [id, weakTab] : _claudeTabs)
+        {
+            ids.push_back(id);
+        }
+        for (const auto& id : ids)
+        {
+            const auto info = _sessionRegistry->Get(id);
+            if (!info)
+            {
+                continue;
+            }
+            TerminalApp::Tab hostTab{ nullptr };
+            if (const auto it = _claudeTabs.find(id); it != _claudeTabs.end())
+            {
+                hostTab = it->second.get();
+            }
+            if (!hostTab)
+            {
+                continue;
+            }
+            // ServerCacheStillWarm itself gates on live + Claude + a real API-turn signal, so a Codex tab,
+            // an archived session and a never-prompted launch all fall out here as "cold" with no extra
+            // check — the one predicate owns the whole decision (SessionModels.h).
+            const bool warm = ::Agentmaster::ServerCacheStillWarm(*info, cacheMin, now);
+            std::optional<winrt::Windows::UI::Color> sparkColor;
+            if (warm)
+            {
+                sparkColor = _CacheWarmSparkColorForTab(hostTab, *info);
+            }
+            _SetTabCacheWarm(hostTab, warm, sparkColor);
+        }
+        co_return;
+    }
+
     winrt::fire_and_forget TerminalPage::_ScanPendingInput()
     {
         // Agentmaster (terminate-net): the inner per-control ReadPendingInputDraft is already try/caught,

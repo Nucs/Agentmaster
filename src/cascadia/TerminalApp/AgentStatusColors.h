@@ -150,6 +150,22 @@ namespace winrt::TerminalApp::implementation
         return BackgroundIsLight(bg) ? dark : light;
     }
 
+    // Agentmaster (the cache-warm SPARK CROWN — TabHeaderControl.xaml): the color the rising embers and
+    // their glow are painted while ServerCacheStillWarm() holds for a session (the tab-strip twin of the
+    // Triage-Board card's amber "still cached" glyph). Same contrast discipline as the pending "3 dots"
+    // above, and for the same reason: the sparks sit on the tab header, whose background is the session's
+    // per-directory color (Rule #12), so a fixed amber would VANISH on an amber/gold folder. Both ends of
+    // the pair stay FIRE — a bright amber on a DARK background, a deep ember on a LIGHT one — so the hint
+    // reads as heat either way. Deliberately NOT user-configurable (unlike the pending pair): the cache
+    // hint is a cosmetic nicety and one more color pair in the cog earns nothing.
+    inline constexpr uint8_t kCacheWarmSparkLight[3]{ 0xFF, 0xC1, 0x07 }; // bright amber — reads on a DARK tab
+    inline constexpr uint8_t kCacheWarmSparkDark[3]{ 0xB0, 0x2A, 0x00 }; // deep ember — reads on a LIGHT tab
+    inline winrt::Windows::UI::Color CacheWarmSparkColorFor(winrt::Windows::UI::Color bg)
+    {
+        const auto* const c = BackgroundIsLight(bg) ? kCacheWarmSparkDark : kCacheWarmSparkLight;
+        return winrt::Windows::UI::ColorHelper::FromArgb(0xFF, c[0], c[1], c[2]);
+    }
+
     // Agentmaster (bookmark tags): the fixed tag mini-palette. Hoisted out of TagColorFor so the tag
     // editor's color PICKER offers exactly these swatches (and its random pre-pick draws from them),
     // keeping hash-colored and picker-colored tags in one distinguishable family. Deliberately avoids

@@ -442,7 +442,29 @@ mid-cycle adopts the current phase); an archived (`!live`) session forgets its l
 background restore can't spuriously flash. A **selection pill** rides the header too — a translucent
 accent pill behind the tab (`HeaderAgentSelectionPill`, driven by `TerminalTabStatus.AgentSelectionVisible`/
 `AgentSelectionBrush` at ~40% alpha via `_SetTabSelectionPill`) shown while the **Manager tab is active**
-and this session is hovered/selected there: the tab-strip half of the Linked-Lenses selection sync. A
+and this session is hovered/selected there: the tab-strip half of the Linked-Lenses selection sync. The
+**SPARK CROWN** rides the dot too — the tab-strip twin of the Triage-Board card's amber ⚡ "still
+server-cached" glyph, shown while the SAME pure `ServerCacheStillWarm` predicate holds (so the two
+surfaces can never disagree): a soft amber **glow** behind the dot (`HeaderCacheWarmGlow` — two concentric
+flat discs at different opacities in ONE Grid, faking a falloff because `RadialGradientBrush` appears
+nowhere in this codebase, and one Opacity animation then breathes the whole halo) plus three **embers**
+(`HeaderCacheSpark0..2`, a `Canvas`) that rise out of the dot and fade, staggered 380 ms. The status dot
+itself is **deliberately untouched**, so the Triage state color reads exactly as before — the reason this
+shape was chosen over a flame that replaces the dot. Drawn LAST (over the favorite crown, which owns the
+cell's top-left: the center ember would otherwise flicker *behind* it; over it they read as sparks coming
+off the crown), while the glow is drawn FIRST so the louder red flash ring is never tinted by a cosmetic
+hint. Base `Opacity="0"` on each ember + a bounded 3 px rise keep a stopped storyboard invisible and the
+visible arc inside the 18 px cell (the clip trap that once truncated the flash ring into a square). Color
+is a contrast-picked FIRE pair (`AgentStatusColors.h` `CacheWarmSparkColorFor` — bright amber `#FFC107`
+on a dark tab, deep ember `#B02A00` on a light one, off the tab's CURRENTLY RENDERED background) so the
+sparks never vanish on an amber/gold per-dir tab; unlike the pending-dots pair it is NOT cog-configurable.
+Driven by `TerminalPage::_ScanCacheWarmTabs` → `_SetTabCacheWarm` →
+`TerminalTabStatus.AgentCacheWarmVisible`/`AgentCacheWarmBrush`, **POLLED** on the scanner's ~2.5 s
+liveness tick rather than pushed: warmth BEGINS on an event but ENDS on a **clock** — nothing fires when
+the ~5 min window lapses — so a push-only indicator would stay lit forever on an abandoned tab. It is its
+own sweep (not a rider on `_ScanPendingInput`, whose early-outs are draft-specific) and the storyboard is
+started/stopped on the flag through the same one `TabStatus` subscription as the pending pulse, so a fleet
+whose caches are all cold animates nothing. A
 **FAVORITE marker** also rides the dot (FAVORITES.md §5a) in one of **two user-selectable glyphs** (the
 Settings cog's **TABS ▸ Favorite marker** dropdown — a GLOBAL `AppSettings::favoriteIcon`, default
 **Crown**): **Crown** = a small **gold `Path` crown** (`#F5C242`, the Sessions ★ color) perched at the

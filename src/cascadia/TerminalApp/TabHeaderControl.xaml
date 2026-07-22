@@ -150,6 +150,34 @@
                   to fully-opaque red so the look is unchanged until the user picks another color. The
                   brush is set just before AgentFlashRingVisible flips true (single chokepoint
                   _SetTabFlashRing), so the ring is never momentarily shown with a null brush.  -->
+            <!--  Agentmaster (SPARK CROWN — the cache-warm hint): the GLOW half. A soft amber halo behind
+                  the status dot, shown while TabStatus.AgentCacheWarmVisible (ServerCacheStillWarm — the
+                  same predicate behind the Triage-Board card's amber glyph). Drawn FIRST so it sits behind
+                  EVERY other glyph: the red flash ring is the louder "needs you" alert and must never be
+                  tinted or hidden by a cosmetic cache hint. No gradient brush is used — RadialGradientBrush
+                  appears nowhere in this codebase, so the falloff is faked the portable way: TWO concentric
+                  flat discs at different opacities (the inner one brighter), giving an outward step-down
+                  from the dot's edge that reads as a glow rather than a second hard outline. Both are
+                  wrapped in ONE Grid so a SINGLE Opacity animation breathes the whole halo (nested opacity
+                  multiplies) instead of one animation per disc. 16px stays inside the 18px cell, so nothing
+                  is clipped by the tab header. IsHitTestVisible=False: decorative. Tune knobs: the two
+                  Widths/Heights (halo spread), their Opacity ratio (falloff steepness), and the storyboard's
+                  Opacity range in TabHeaderControl.cpp (breath depth).  -->
+            <Grid x:Name="HeaderCacheWarmGlow"
+                  HorizontalAlignment="Center"
+                  VerticalAlignment="Center"
+                  IsHitTestVisible="False"
+                  Opacity="0.45"
+                  Visibility="{x:Bind TabStatus.AgentCacheWarmVisible, Mode=OneWay}">
+                <Ellipse Width="16"
+                         Height="16"
+                         Opacity="0.5"
+                         Fill="{x:Bind TabStatus.AgentCacheWarmBrush, Mode=OneWay}" />
+                <Ellipse Width="12.5"
+                         Height="12.5"
+                         Opacity="0.55"
+                         Fill="{x:Bind TabStatus.AgentCacheWarmBrush, Mode=OneWay}" />
+            </Grid>
             <Ellipse x:Name="HeaderAgentStatusFlashRing"
                      Width="13"
                      Height="13"
@@ -262,6 +290,64 @@
                                      CenterY="3" />
                 </Path.RenderTransform>
             </Path>
+            <!--  Agentmaster (SPARK CROWN — the cache-warm hint): the EMBERS half. Three small sparks that
+                  rise out of the status dot and fade, staggered, while TabStatus.AgentCacheWarmVisible. The
+                  status dot itself is deliberately UNTOUCHED (unlike a flame that would replace it), so the
+                  Triage state colour reads exactly as before — the whole point of this design.
+                  Drawn LAST, i.e. ON TOP of every other glyph INCLUDING the favourite crown: the crown owns
+                  the cell's top-left and the centre spark would otherwise flicker behind it; over it, the
+                  embers simply read as sparks coming off the crown. A Canvas (not margins on a Grid) so each
+                  spark's position is stated as plain Left/Top instead of an alignment-plus-margin puzzle.
+                  Each carries its own TranslateTransform, which the storyboard drives (Y) alongside an
+                  opacity keyframe — built + started/stopped in code-behind (_UpdateCacheWarmAnimation), so a
+                  fleet whose caches are all cold animates NOTHING. Base Opacity="0" so a spark is invisible
+                  until the storyboard actually runs it (a warm tab whose storyboard failed to start shows
+                  the glow alone, never three frozen dots). The rise is bounded to keep the visible part
+                  inside the 18px cell — anything above it is CLIPPED by the tab header (the same trap that
+                  once truncated the 13px flash ring into a square). IsHitTestVisible=False: decorative.
+                  Tune knobs: Canvas.Left/Top (the cluster's shape), Width/Height (ember size), and the
+                  storyboard's Y range / duration / stagger in TabHeaderControl.cpp.  -->
+            <Canvas x:Name="HeaderCacheWarmSparks"
+                    Width="18"
+                    Height="18"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Top"
+                    IsHitTestVisible="False"
+                    Visibility="{x:Bind TabStatus.AgentCacheWarmVisible, Mode=OneWay}">
+                <Ellipse x:Name="HeaderCacheSpark0"
+                         Canvas.Left="3.8"
+                         Canvas.Top="2.8"
+                         Width="2.4"
+                         Height="2.4"
+                         Opacity="0"
+                         Fill="{x:Bind TabStatus.AgentCacheWarmBrush, Mode=OneWay}">
+                    <Ellipse.RenderTransform>
+                        <TranslateTransform />
+                    </Ellipse.RenderTransform>
+                </Ellipse>
+                <Ellipse x:Name="HeaderCacheSpark1"
+                         Canvas.Left="7.6"
+                         Canvas.Top="1.6"
+                         Width="2.8"
+                         Height="2.8"
+                         Opacity="0"
+                         Fill="{x:Bind TabStatus.AgentCacheWarmBrush, Mode=OneWay}">
+                    <Ellipse.RenderTransform>
+                        <TranslateTransform />
+                    </Ellipse.RenderTransform>
+                </Ellipse>
+                <Ellipse x:Name="HeaderCacheSpark2"
+                         Canvas.Left="11.8"
+                         Canvas.Top="2.8"
+                         Width="2.4"
+                         Height="2.4"
+                         Opacity="0"
+                         Fill="{x:Bind TabStatus.AgentCacheWarmBrush, Mode=OneWay}">
+                    <Ellipse.RenderTransform>
+                        <TranslateTransform />
+                    </Ellipse.RenderTransform>
+                </Ellipse>
+            </Canvas>
             <!--  Agentmaster (PENDING_INPUT.md): the UNSENT-DRAFT "3 dots" indicator. When the observer
                   detects text typed but NOT yet submitted in this tab's Claude input box (the debounced
                   SessionInfo.pendingInput -> TabStatus.AgentPendingVisible), a tiny 3-dot cluster pulses

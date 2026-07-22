@@ -83,6 +83,76 @@ namespace winrt::TerminalApp::implementation
                 _pendingDotsStoryboard.Children().Append(a);
             }
         }
+
+        // Agentmaster (SPARK CROWN — the cache-warm hint): build the glow breath + the three rising
+        // embers, wired (like the pending pulse above) to run ONLY while TabStatus.AgentCacheWarmVisible.
+        // Seven animations total: one Opacity breath on the glow Grid (which drives BOTH its discs at once
+        // — nested opacity multiplies), plus a rise + a fade per ember. Each ember uses a KEYFRAME opacity
+        // (0 -> 1 -> 0) rather than an AutoReverse: a spark must restart at the BOTTOM of its arc, not sail
+        // back down it. The stagger is a positive BeginTime (0 / 380 / 760ms) — XAML has no negative delay,
+        // so the first cycle ramps in one-by-one and every later cycle is evenly phased, exactly as the
+        // pending dots do with their 160ms offsets.
+        {
+            namespace MA = winrt::Windows::UI::Xaml::Media::Animation;
+            using winrt::Windows::Foundation::TimeSpan;
+            using winrt::Windows::UI::Xaml::Duration;
+
+            MA::RepeatBehavior forever;
+            forever.Type = MA::RepeatBehaviorType::Forever; // a value struct — members are fields, not setters
+
+            _cacheWarmStoryboard = MA::Storyboard{};
+
+            // The halo's slow breath. Range is deliberately gentle: the glow must read as heat behind the
+            // dot, never as a second status indicator competing with it.
+            {
+                MA::DoubleAnimation g{};
+                g.From(0.28);
+                g.To(0.62);
+                g.Duration(Duration{ TimeSpan{ std::chrono::milliseconds(1400) } });
+                g.AutoReverse(true);
+                g.RepeatBehavior(forever);
+                MA::Storyboard::SetTarget(g, HeaderCacheWarmGlow());
+                MA::Storyboard::SetTargetProperty(g, L"Opacity");
+                _cacheWarmStoryboard.Children().Append(g);
+            }
+
+            // The embers. Y runs +1.4 -> -1.6 (a 3px rise): the sparks sit at Canvas.Top 1.6/2.8, so the
+            // TOP of the highest one lands at 0 — flush with the 18px cell, never clipped by the header.
+            constexpr int64_t kCycleMs = 1150;
+            const winrt::Windows::UI::Xaml::UIElement sparks[3]{ HeaderCacheSpark0(), HeaderCacheSpark1(), HeaderCacheSpark2() };
+            constexpr int64_t kStaggerMs[3]{ 0, 380, 760 };
+            for (int i = 0; i < 3; ++i)
+            {
+                const TimeSpan begin{ std::chrono::milliseconds(kStaggerMs[i]) };
+
+                MA::DoubleAnimation rise{};
+                rise.From(1.4);
+                rise.To(-1.6);
+                rise.Duration(Duration{ TimeSpan{ std::chrono::milliseconds(kCycleMs) } });
+                rise.BeginTime(begin);
+                rise.RepeatBehavior(forever);
+                MA::Storyboard::SetTarget(rise, sparks[i]);
+                MA::Storyboard::SetTargetProperty(rise, L"(UIElement.RenderTransform).(TranslateTransform.Y)");
+                _cacheWarmStoryboard.Children().Append(rise);
+
+                // Fade in fast (an ember appears already glowing), then out over the rest of the arc.
+                MA::DoubleAnimationUsingKeyFrames fade{};
+                const auto key = [](int64_t ms, double v) {
+                    MA::LinearDoubleKeyFrame k{};
+                    k.KeyTime(MA::KeyTime{ TimeSpan{ std::chrono::milliseconds(ms) } });
+                    k.Value(v);
+                    return k;
+                };
+                fade.KeyFrames().Append(key(0, 0.0));
+                fade.KeyFrames().Append(key(kCycleMs / 4, 1.0));
+                fade.KeyFrames().Append(key(kCycleMs, 0.0));
+                fade.BeginTime(begin);
+                fade.RepeatBehavior(forever);
+                MA::Storyboard::SetTarget(fade, sparks[i]);
+                MA::Storyboard::SetTargetProperty(fade, L"Opacity");
+                _cacheWarmStoryboard.Children().Append(fade);
+            }
+        }
         PropertyChanged([weakThis = get_weak()](auto&&, const winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs& args) {
             if (auto self = weakThis.get())
             {
@@ -310,6 +380,7 @@ namespace winrt::TerminalApp::implementation
         if (status == _pendingHookedStatus)
         {
             _UpdatePendingAnimation();
+            _UpdateCacheWarmAnimation();
             _UpdateTagBadges();
             return; // already hooked to this exact status (or both null)
         }
@@ -325,6 +396,12 @@ namespace winrt::TerminalApp::implementation
                     {
                         self->_UpdatePendingAnimation();
                     }
+                    // Agentmaster (SPARK CROWN): the same one subscription starts/stops the cache-warm
+                    // glow + embers — no second revoker to juggle (the bookmark badges ride it too).
+                    if (n.empty() || n == L"AgentCacheWarmVisible")
+                    {
+                        self->_UpdateCacheWarmAnimation();
+                    }
                     // Agentmaster (bookmark tags): the same one subscription also rebuilds the
                     // bookmark badges when the tag spec changes (no second revoker to juggle).
                     if (n.empty() || n == L"AgentTagsSpec")
@@ -335,6 +412,7 @@ namespace winrt::TerminalApp::implementation
             });
         }
         _UpdatePendingAnimation();
+        _UpdateCacheWarmAnimation();
         _UpdateTagBadges();
     }
 
@@ -361,6 +439,36 @@ namespace winrt::TerminalApp::implementation
         catch (...)
         {
             ::Agentmaster::AgentLogCaughtException(L"tab-header pending-dots storyboard");
+        }
+    }
+
+    // Agentmaster (SPARK CROWN): run the cache-warm glow + embers iff this tab's session is still inside
+    // Claude's server-side prompt-cache window. Stopping matters more here than for most indicators: a warm
+    // cache lasts MINUTES and a busy fleet can have many warm tabs at once, so leaving these running would
+    // hold the compositor awake long after the hint stopped being true. Stop() also returns each ember to
+    // its base Opacity="0", so a stopped storyboard leaves nothing frozen on screen.
+    void TabHeaderControl::_UpdateCacheWarmAnimation()
+    {
+        if (!_cacheWarmStoryboard)
+        {
+            return;
+        }
+        const auto status = TabStatus();
+        const bool on = status && status.AgentCacheWarmVisible();
+        try
+        {
+            if (on)
+            {
+                _cacheWarmStoryboard.Begin();
+            }
+            else
+            {
+                _cacheWarmStoryboard.Stop();
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"tab-header cache-warm storyboard");
         }
     }
 
