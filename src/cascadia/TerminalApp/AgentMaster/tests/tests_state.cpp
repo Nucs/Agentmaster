@@ -294,8 +294,27 @@ void TestOrderedStateMachine()
         reg.OnHookEvent(ups);
         g = reg.Get(L"cache-1");
         CHECK(g && g->lastTurnUnixMs == 2000, "cache: UserPromptSubmit stamps turn evidence (the API request fires on submit)");
-        CHECK(g && ServerCacheStillWarm(*g, 5, 2000 + 4 * 60000), "cache: warm inside the serverCacheMinutes window");
-        CHECK(g && !ServerCacheStillWarm(*g, 5, 2000 + 5 * 60000), "cache: lapses once the window elapses");
+        // ... but the hint stays DARK while that turn runs: UserPromptSubmit -> Running, and the hint is
+        // AT-REST-only. Mid-turn it would be both uninformative (nothing to decide) and permanently lit
+        // (a running turn keeps refreshing the very timestamps the window is measured from).
+        CHECK(g && g->state == SessionState::Running, "cache: (UserPromptSubmit left the session Running — the precondition for the next check)");
+        CHECK(g && !ServerCacheStillWarm(*g, 5, 2000 + 4 * 60000), "cache: NEVER warm while Running, even with fresh turn evidence inside the window");
+        // The SAME evidence, once the session comes to rest, DOES light it — i.e. the gate above is the
+        // state, not the timestamp.
+        {
+            auto atRest = *g;
+            atRest.state = SessionState::WaitingForInput;
+            CHECK(ServerCacheStillWarm(atRest, 5, 2000 + 4 * 60000), "cache: warm inside the serverCacheMinutes window once at rest");
+            CHECK(!ServerCacheStillWarm(atRest, 5, 2000 + 5 * 60000), "cache: lapses once the window elapses");
+            // Every other at-rest state qualifies too (the user-visible rule: Waiting-for-you /
+            // Needs-approval / Error / Idle / Done — everything except Running).
+            for (const auto st : { SessionState::WaitingForInput, SessionState::NeedsApproval, SessionState::Error, SessionState::Idle, SessionState::Done })
+            {
+                auto v = *g;
+                v.state = st;
+                CHECK(ServerCacheStillWarm(v, 5, 2000 + 60000), "cache: warm in every AT-REST state");
+            }
+        }
 
         auto qstop = at(HookEvent::Stop, 300000);
         qstop.sessionId = L"cache-1";

@@ -456,8 +456,12 @@ namespace winrt::TerminalApp::implementation
             // Agentmaster (Waiting-for-you "unread" model): a ⚡ "still server-cached" hint. Claude's
             // server-side prompt cache stays warm for ~serverCacheMinutes after the last REAL API
             // turn, so a follow-up within the window reuses the cached prefix (cheaper & faster).
-            // Purely cosmetic; shown only while the card is inside that window. The board's periodic
+            // Purely cosmetic; shown only while the card is inside that window AND the session is AT
+            // REST (Waiting-for-you / Needs-approval / Error / Idle / Done — never Running: mid-turn
+            // there is nothing to decide, and the hint would be permanently lit because a running turn
+            // keeps refreshing the timestamps the window is measured from). The board's periodic
             // refresh (a 30s timer + every registry event) clears it once the window lapses.
+            // The tab strip's SPARK CROWN reads the SAME predicate, so the two can never disagree.
             // Keyed on the TWO API-turn signals via the pure ServerCacheStillWarm (SessionModels.h)
             // — the transcript's line-derived conv activity + the hook-side IsApiTurnEvidence stamp —
             // deliberately NOT the lastActivityUnixMs decay anchor, which a launch/adopt/resume

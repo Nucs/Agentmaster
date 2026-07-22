@@ -445,7 +445,9 @@ accent pill behind the tab (`HeaderAgentSelectionPill`, driven by `TerminalTabSt
 and this session is hovered/selected there: the tab-strip half of the Linked-Lenses selection sync. The
 **SPARK CROWN** rides the dot too — the tab-strip twin of the Triage-Board card's amber ⚡ "still
 server-cached" glyph, shown while the SAME pure `ServerCacheStillWarm` predicate holds (so the two
-surfaces can never disagree): a soft amber **glow** behind the dot (`HeaderCacheWarmGlow` — two concentric
+surfaces can never disagree) — i.e. only while the session is **AT REST** (Waiting-for-you ·
+Needs-approval · Error · Idle · Done; **never Running**, where the hint is both uninformative and
+permanently lit): a soft amber **glow** behind the dot (`HeaderCacheWarmGlow` — two concentric
 flat discs at different opacities in ONE Grid, faking a falloff because `RadialGradientBrush` appears
 nowhere in this codebase, and one Opacity animation then breathes the whole halo) plus three **embers**
 (`HeaderCacheSpark0..2`, a `Canvas`) that rise out of the dot and fade, staggered 380 ms. The status dot
@@ -1833,8 +1835,12 @@ What works, by area:
   default **60 = 1h**. **Renamed from the legacy `waitingDecayMinutes`** so a pre-existing settings.json's
   value [tuned for the old 5-min cache window] is **invalidated** → existing installs fall back to the 1h
   default; the old key is ignored + dropped on next save), `serverCacheMinutes` (Claude's server-side
-  prompt-cache lifetime, default **5**, drives ONLY the Triage-Board card's **⚡ "still cached"** hint shown to
-  the right of `⚙ sent/total` — keyed on **REAL API-turn evidence of THIS conversation** via the pure
+  prompt-cache lifetime, default **5**, drives the Triage-Board card's **⚡ "still cached"** hint shown to
+  the right of `⚙ sent/total` **and the tab strip's SPARK CROWN** (both read the SAME predicate, so they can
+  never disagree) — shown only for a session **AT REST** (Waiting-for-you · Needs-approval · Error · Idle ·
+  Done — **never Running**: mid-turn there is nothing to decide, and the hint would be PERMANENTLY LIT
+  because a running turn keeps refreshing the very timestamps the window is measured from) and
+  keyed on **REAL API-turn evidence of THIS conversation** via the pure
   `ServerCacheStillWarm` (SessionModels.h): the transcript's PARENT-line-derived API activity
   (`convApiActivityUnixMs` — the fold-free sibling of the display value `convLastActivityUnixMs`, which rides
   subagent/TEAMMATE side-file writes and would keep ⚡ lit for a background team's whole minutes–hours run

@@ -790,10 +790,12 @@ namespace Agentmaster
         AutorunnerState autorunner{};
     };
 
-    // Agentmaster (the Triage-Board ⚡ "still server-cached" hint) — PURE + unit-tested. Claude's
-    // server-side prompt cache stays warm ~cacheMinutes after the last REAL API request, so a
-    // follow-up inside the window reuses the cached prefix (cheaper & faster). "Real API request"
-    // is the operative phrase — the hint reads ONLY the two API-turn signals:
+    // Agentmaster (the ⚡ "still server-cached" hint — the Triage-Board card AND the tab strip's SPARK
+    // CROWN, which share THIS ONE predicate so the two surfaces can never disagree) — PURE + unit-tested.
+    // Claude's server-side prompt cache stays warm ~cacheMinutes after the last REAL API request, so a
+    // follow-up inside the window reuses the cached prefix (cheaper & faster). Shown only for a session
+    // AT REST (never Running — see the gate below). "Real API request" is the operative phrase — the hint
+    // reads ONLY the two API-turn signals:
     //   • convApiActivityUnixMs — the transcript's PARENT-line-derived last activity (real
     //     user/assistant line timestamps of THIS conversation; a `--resume`'s untimestamped trailer
     //     appends never move it, and — unlike the folded display value convLastActivityUnixMs — a
@@ -815,7 +817,14 @@ namespace Agentmaster
     // never fed), and before this gate a Codex card could ⚡ off a bare triage-move stamp.
     inline bool ServerCacheStillWarm(const SessionInfo& s, uint32_t cacheMinutes, int64_t nowMs) noexcept
     {
-        if (!s.live || s.kind != AgentKind::Claude || cacheMinutes == 0)
+        // AT REST ONLY — never while Running. The hint answers "if I follow up NOW, is it cheap?", which
+        // is a question only a session that is WAITING ON YOU can pose: WaitingForInput / NeedsApproval /
+        // Error / Idle / Done. Mid-turn there is nothing to decide, and worse, the hint would be
+        // PERMANENTLY LIT there — a Running session refreshes convApiActivityUnixMs / lastTurnUnixMs
+        // continuously, so the window can never lapse while the turn is in flight. Excluding the one
+        // state in which it is both uninformative and always-on is what makes it read as a signal
+        // ("this one is still cheap to resume") instead of decoration.
+        if (!s.live || s.kind != AgentKind::Claude || cacheMinutes == 0 || s.state == SessionState::Running)
         {
             return false;
         }
