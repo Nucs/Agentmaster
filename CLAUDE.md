@@ -572,15 +572,34 @@ section is the manual twin — a "Check for updates" button, a "vX.Y.Z available
 pre-release versions" toggle (NOT startup-gated, available on any build; **INSTANT-APPLY** — flipping
 it persists immediately via a freshest-disk RMW + re-kicks the silent check, no Save needed — a flip
 followed by a backdrop-tap close used to be silently discarded, the "checkbox doesn't persist" report).
+**NIGHTLY channel — a tier BELOW pre-release:** a NIGHTLY is an unstable development build whose
+release TAG contains "nightly" (the naming contract, e.g. `v0.6.10-prerelease-nightly`; published as a
+GitHub prerelease — `release.yml` auto-marks a nightly-named version prerelease and its prep step
+strips the tag suffix to digits so the MSIX Identity Version stays numeric). Nightlies are **ALWAYS
+skipped by every check** (startup / hourly / cog — even with pre-releases allowed) unless the user
+opted in via the cog's **"Allow updating to nightly builds (unstable)"** switch, whose turn-ON is
+**gated behind a warning confirm** (memory leaks / CPU issues / crashes; "use it to contribute and
+help, but be willing to have your work suddenly interrupted") — the Toggled handler REVERTS the
+switch, asks, and re-applies only on accept (so every enable attempt re-asks; Cancel leaves it
+honestly OFF), then the same INSTANT-APPLY RMW (`_ApplyAllowNightly`). The TAG is the authoritative
+signal (`IsNightlyTag` — contains, case-insensitive; a mis-published nightly missing the prerelease
+flag is still nightly-gated, and a `/releases/latest` belt keeps one off the stable channel), the two
+opt-ins are ORTHOGONAL per-tier gates (`ReleaseAllowedOnChannel`: stable always · beta ⇔ prerelease
+opt-in · nightly ⇔ nightly opt-in — the list scan picks the newest ELIGIBLE release, so a
+prerelease-only user skips past a newer nightly to the next beta/stable), the update prompt restates
+the nightly warning inline, and `CompareVersion` stays numeric — a nightly must BUMP `X.Y.Z` past the
+installed version to be offered.
 State persists in `settings.json` — **INSIDE the engine's `{version, settings:{...}}` ENVELOPE**, the
 schema-mismatch fix: `Updater::ReadPrefs`/`WriteUpdateState` used to read/write the TOP level, so the
 startup + hourly checks NEVER saw the saved `allowUpdatePrerelease` (they queried `/releases/latest`,
 stable-only, forever — with every v0.6.4+ release marked pre-release, they compared against v0.6.1 and
 never prompted) and a top-level Skip/Postpone was WIPED by the next engine save (`SerializeAppSettings`
-rebuilds the whole envelope). Now all three keys — `allowUpdatePrerelease` (written by the toggle's own
+rebuilds the whole envelope). Now all four keys — `allowUpdatePrerelease` / **`allowUpdateNightly`**
+(each written by its toggle's own
 RMW) + `updateSkippedVersion` / `updatePostponedUntilUnixMs` (written by the prompt's RMW, EXE-safe, no
 engine link) — live nested where `AppSettings` round-trips them; BOTH cog-Save preserve blocks (content
-+ page sink) restore all three from disk, `ReadPrefs` falls back to a pre-fix top-level stray, and
++ page sink) restore all four from disk, `ReadPrefs` falls back to a pre-fix top-level stray (the three
+original keys; nightly postdates the fix and needs none), and
 `WriteUpdateState` MIGRATES strays into the envelope (never drops a made choice), refuses to rebuild an
 unparseable non-empty file (no clobber), and writes ATOMICALLY (temp + flush + `MoveFileExW`, the
 engine's `WriteAllUtf8` recipe — was a torn-file-prone trunc `ofstream`). **"Not now" silences the
@@ -617,7 +636,10 @@ un-loggable cases, each ANNOTATED in place: the logger itself (`LogUpdate`'s own
 logger-failed nested catch (the trace's argument construction threw). Covered by the harness's
 hardening suite (clamp, trust gate, synthetic-release parse, malformed/garbage/blocked-dir
 robustness, LogUpdate, decision→persist→read-back loop, declined-latch presence gate + the
-fresh-launch clear, full-fidelity envelope preservation).
+fresh-launch clear, full-fidelity envelope preservation, and the **nightly channel matrix** —
+`IsNightlyTag` cases, the `ReleaseAllowedOnChannel` tier grid incl. "prerelease opt-in alone never
+admits a nightly" + the mis-published-nightly tag-authority cases, `ParseReleaseObj` classification,
+and the `allowUpdateNightly` prefs/engine round-trip + engine-save survival).
 
 **Summary-panel JUMP ([`SUMMARY_JUMP.md`](doc/agentmaster/SUMMARY_JUMP.md)) — core complete, tested +
 benchmarked + optimized; full chain lib-compiles green (TerminalControlLib + TerminalAppLib); runtime

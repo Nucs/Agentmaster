@@ -4,7 +4,11 @@
 # (build/pipelines/ob-release.yml -> pipeline-onebranch-full-release-build.yml),
 # stripped of everything Microsoft-internal:
 #   - NO Azure / OneBranch / 1ES, NO ESRP signing, NO symbol publishing, NO vpack
-#   - NO nightly (tag/dispatch only), NO NuGet *publishing* (restore stays — it's a build dep)
+#   - NO scheduled cron (tag/dispatch only), NO NuGet *publishing* (restore stays — it's a build dep).
+#     A NIGHTLY release is still cut by tag/dispatch: tag it vX.Y.Z-prerelease-nightly (any tag
+#     containing "nightly") — prep strips the suffix for the numeric MSIX Identity Version and the
+#     release is auto-marked PRERELEASE. The in-app updater (Updater.h IsNightlyTag) matches the
+#     TAG's "nightly" and offers such a release ONLY to users who opted into nightly builds.
 #   - the Microsoft-internal "terminal-internal" Universal Package + WindowsTerminalOfficialBuild
 #     are NOT used; we build the Dev BRANDING with the RELEASE package identity
 #     (/p:AgentmasterPackageIdentity=Release -> Package-Rel.appxmanifest, Name=Agentmaster,
@@ -46,7 +50,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version X.Y.Z (no leading v)"
+        description: "Version X.Y.Z (no leading v; a -suffix is kept in the tag — e.g. 0.6.10-prerelease-nightly cuts a NIGHTLY)"
         required: true
         default: "0.1.0"
 
@@ -70,6 +74,8 @@ jobs:
     outputs:
       ver3: ${{ steps.v.outputs.ver3 }}
       ver4: ${{ steps.v.outputs.ver4 }}
+      rawver: ${{ steps.v.outputs.rawver }}
+      nightly: ${{ steps.v.outputs.nightly }}
     steps:
       - id: v
         shell: bash
@@ -79,12 +85,23 @@ jobs:
           else
             RAW="${GITHUB_REF_NAME#v}"
           fi
-          # Keep the first three numeric components; force a 4-part .0 for the manifest.
+          # Keep the first three numeric components; force a 4-part .0 for the manifest. Each
+          # component is stripped to its leading digits: a suffixed tag (v0.6.10-prerelease-nightly,
+          # v0.7.0-rc1) must stamp a purely-NUMERIC MSIX Identity Version (0.6.10.0) — the third
+          # IFS field would otherwise carry "10-prerelease-nightly" and break the manifest. The
+          # FULL version string (rawver) still names the tag + release, which is what the in-app
+          # updater matches "nightly" against (Updater.h IsNightlyTag — tag contains "nightly").
           IFS='.' read -r A B C _ <<< "$RAW"
-          A=${A:-0}; B=${B:-0}; C=${C:-0}
+          A=$(printf '%s' "${A:-0}" | sed 's/[^0-9].*$//'); A=${A:-0}
+          B=$(printf '%s' "${B:-0}" | sed 's/[^0-9].*$//'); B=${B:-0}
+          C=$(printf '%s' "${C:-0}" | sed 's/[^0-9].*$//'); C=${C:-0}
+          NIGHTLY=false
+          case "$(printf '%s' "$RAW" | tr '[:upper:]' '[:lower:]')" in *nightly*) NIGHTLY=true ;; esac
+          echo "rawver=${RAW}"         >> "$GITHUB_OUTPUT"
           echo "ver3=${A}.${B}.${C}"   >> "$GITHUB_OUTPUT"
           echo "ver4=${A}.${B}.${C}.0" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: ${A}.${B}.${C}.0 (from '${RAW}')"
+          echo "nightly=${NIGHTLY}"    >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${A}.${B}.${C}.0 (from '${RAW}', nightly=${NIGHTLY})"
 
   # ----------------------------------------------------------------------------
   build:
@@ -332,26 +349,34 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Agentmaster ${{ needs.prep.outputs.ver3 }}
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', needs.prep.outputs.ver3) || github.ref_name }}
+          name: Agentmaster ${{ needs.prep.outputs.rawver }}
+          # A dispatch tags the FULL raw version (v0.6.10-prerelease-nightly cuts a nightly tag);
+          # for a plain X.Y.Z input this is byte-identical to the old v<ver3> behavior.
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', needs.prep.outputs.rawver) || github.ref_name }}
           draft: true # flip to false once you've confirmed a run; lets you review assets first
+          # A "nightly"-named version is ALWAYS a GitHub prerelease (the naming contract the in-app
+          # updater keys on: nightlies never surface on the stable channel, and only reach users who
+          # opted into nightly builds — Updater.h IsNightlyTag/ReleaseAllowedOnChannel).
+          prerelease: ${{ needs.prep.outputs.nightly == 'true' }}
           files: |
             dist/*.msixbundle
             dist/*.cer
             dist/*.zip
           body: |
-            ## Agentmaster ${{ needs.prep.outputs.ver3 }}
+            ## Agentmaster ${{ needs.prep.outputs.rawver }}
+
+            ${{ needs.prep.outputs.nightly == 'true' && '> ⚠️ **NIGHTLY build** — an unstable development version. It may have memory leaks, CPU issues, and crashes. Install it only to help test; the in-app updater offers nightlies solely to users who enabled them in Settings → About → Updates.' || '' }}
 
             A fork of Windows Terminal that manages multiple Claude Code sessions.
 
             ### Install
-            Paste into PowerShell — installs **v${{ needs.prep.outputs.ver3 }}** (one UAC prompt, only to trust the signing cert):
+            Paste into PowerShell — installs **v${{ needs.prep.outputs.rawver }}** (one UAC prompt, only to trust the signing cert):
             ```powershell
-            & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version ${{ needs.prep.outputs.ver3 }}
+            & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version ${{ needs.prep.outputs.rawver }}
             ```
             Add `-Portable` for a cert-free, no-admin install, and/or `-Launch` to start it right after:
             ```powershell
-            & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version ${{ needs.prep.outputs.ver3 }} -Portable -Launch
+            & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version ${{ needs.prep.outputs.rawver }} -Portable -Launch
             ```
 
             **Portable (recommended, no cert):** download `Agentmaster_${{ needs.prep.outputs.ver4 }}_x64.zip` (or `_arm64`), unzip anywhere, run `agentmaster.exe`. Fully self-contained.

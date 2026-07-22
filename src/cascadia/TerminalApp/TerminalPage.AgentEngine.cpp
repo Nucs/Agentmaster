@@ -1156,10 +1156,11 @@ namespace winrt::TerminalApp::implementation
                     s.summaryPanelTruncate = disk.summaryPanelTruncate; // truncate toggle (panel times bar), out-of-cog UI action
                     // Updater (Updater.h): ALL update state is written outside the cog form —
                     // skip/postpone by the prompt's JSON RMW (possibly from another window or the
-                    // startup check), allowUpdatePrerelease by the switch's own INSTANT-APPLY RMW —
-                    // so preserve all three from disk on Save (a stale form copy must never regress
-                    // a flip/choice made since the modal was seeded).
+                    // startup check), the prerelease + nightly opt-ins by each switch's own
+                    // INSTANT-APPLY RMW — so preserve all four from disk on Save (a stale form copy
+                    // must never regress a flip/choice made since the modal was seeded).
                     s.allowUpdatePrerelease = disk.allowUpdatePrerelease;
+                    s.allowUpdateNightly = disk.allowUpdateNightly;
                     s.updateSkippedVersion = disk.updateSkippedVersion;
                     s.updatePostponedUntilUnixMs = disk.updatePostponedUntilUnixMs;
                     // Slash commands (COMMANDS.md §6a): the MATERIALIZED-name markers are engine

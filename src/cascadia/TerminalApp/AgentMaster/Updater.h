@@ -21,17 +21,23 @@
 // settings helpers — but it CAN include this header (and Json.h, which is itself header-only) just
 // as it includes ProfileBootstrap.h.
 //
-// Persisted update state lives as three keys INSIDE settings.json (the active profile) — and
+// Persisted update state lives as four keys INSIDE settings.json (the active profile) — and
 // settings.json is the engine's ENVELOPE `{version: 1, settings: {...}}` (Persistence.cpp
 // SerializeAppSettings), so the keys live NESTED under "settings", never at the top level (a
 // top-level key is silently DROPPED by the next engine save, which rebuilds the envelope from the
 // AppSettings struct — the original schema-mismatch bug that blinded the startup/hourly checks):
 //   allowUpdatePrerelease (bool)        — the cog's "Allow updating to pre-release versions" toggle
 //                                         (INSTANT-APPLY: the switch itself RMWs it on flip — no Save).
+//   allowUpdateNightly (bool)           — the cog's NIGHTLY opt-in (warning-gated). A nightly is an
+//                                         unstable development build whose tag CONTAINS "nightly"
+//                                         (e.g. v0.6.10-prerelease-nightly, published as a GitHub
+//                                         prerelease); it is ALWAYS skipped — even with the
+//                                         pre-release toggle on — unless this is set (IsNightlyTag /
+//                                         ReleaseAllowedOnChannel). Same INSTANT-APPLY RMW.
 //   updateSkippedVersion (string tag)   — "Skip this version" -> never re-prompt for that exact tag.
 //   updatePostponedUntilUnixMs (number) — "Postpone N days" -> no check / no prompt until this time.
 // skip/postpone are written by THIS module via a freshest-disk JSON read-modify-write INTO the
-// envelope (so the EXE can write them too without linking the engine); AppSettings carries all three
+// envelope (so the EXE can write them too without linking the engine); AppSettings carries all four
 // fields, so the engine round-trips them and the cog's Save preserves them from disk (the
 // summaryPanel idiom). "Not now" persists NOTHING durable — it latches a process-scoped
 // declined-this-run marker (kDeclinedEnvVar) that silences the startup + hourly checks ENTIRELY
@@ -543,6 +549,59 @@ namespace Agentmaster::Updater
 
     // ============================ GitHub check ============================
 
+    // A NIGHTLY is an unstable development build — a tier BELOW pre-release: published as a GitHub
+    // prerelease, but its TAG carries "nightly" (the naming contract, e.g. "v0.6.10-prerelease-nightly";
+    // matched case-insensitively by CONTAINS). The TAG is the authoritative signal — the prerelease
+    // flag only says "not stable", the tag says "nightly" — so a nightly is recognized even if a
+    // publish forgot the prerelease checkbox. Nightlies are ALWAYS skipped by every check (startup /
+    // hourly / cog) unless the user opted in via the cog's warning-gated nightly switch
+    // (allowUpdateNightly), which is ORTHOGONAL to the pre-release opt-in: nightly ON alone offers
+    // nightlies + stable, pre-release ON alone offers betas + stable, both ON offers everything.
+    // NOTE for publishers: CompareVersion is numeric major.minor.patch — a nightly must BUMP the
+    // patch past the installed version to ever be offered (v0.6.10-…-nightly reads as 0.6.10).
+    inline bool IsNightlyTag(std::wstring_view tag)
+    {
+        constexpr std::wstring_view needle = L"nightly";
+        if (tag.size() < needle.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i + needle.size() <= tag.size(); ++i)
+        {
+            size_t j = 0;
+            for (; j < needle.size(); ++j)
+            {
+                wchar_t c = tag[i + j];
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a');
+                }
+                if (c != needle[j])
+                {
+                    break;
+                }
+            }
+            if (j == needle.size())
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Channel eligibility for ONE release: stable is always offered; a NIGHTLY (by tag — see
+    // IsNightlyTag) only under the nightly opt-in, REGARDLESS of the prerelease flag/opt-in; any
+    // other prerelease only under the pre-release opt-in. Drafts are excluded by the callers (the
+    // list scan skips them; /releases/latest never returns one). Pure — unit-tested in the harness.
+    inline bool ReleaseAllowedOnChannel(std::wstring_view tag, bool isPrerelease, bool allowPrerelease, bool allowNightly)
+    {
+        if (IsNightlyTag(tag))
+        {
+            return allowNightly;
+        }
+        return !isPrerelease || allowPrerelease;
+    }
+
     struct UpdateInfo
     {
         bool checked{ false }; // the network round-trip completed + parsed (regardless of result)
@@ -554,6 +613,7 @@ namespace Agentmaster::Updater
         std::wstring latestVersionStr; // "0.4.3" (tag without a leading v)
         Version latest;
         bool isPrerelease{ false };
+        bool isNightly{ false }; // tag contains "nightly" (IsNightlyTag) — an unstable development build; offered only under the nightly opt-in
         std::wstring bundleUrl; // .msixbundle browser_download_url
         std::wstring bundleSha256; // the bundle asset's "sha256:<hex>" digest (when GitHub provides it) — verified by am-update.ps1
         std::wstring cerUrl; // .cer browser_download_url
@@ -734,6 +794,7 @@ namespace Agentmaster::Updater
     {
         info.latestTag = rel.StrAt(L"tag_name");
         info.isPrerelease = rel.BoolAt(L"prerelease", false);
+        info.isNightly = IsNightlyTag(info.latestTag); // by TAG, not the prerelease flag (see IsNightlyTag)
         info.notes = rel.StrAt(L"body");
         info.htmlUrl = rel.StrAt(L"html_url");
         info.latest = ParseVersion(info.latestTag);
@@ -771,10 +832,15 @@ namespace Agentmaster::Updater
         info.available = CompareVersion(info.latest, cur) > 0;
     }
 
-    // Query GitHub for the newest release. allowPrerelease -> the list endpoint, first non-draft
-    // (== newest published, pre or stable); otherwise /releases/latest (excludes drafts AND
-    // prereleases). Synchronous, bounded by timeoutMs per phase. Never throws.
-    inline UpdateInfo CheckForUpdate(const Version& cur, bool allowPrerelease, DWORD timeoutMs = 6000)
+    // Query GitHub for the newest release ON THE USER'S CHANNEL. Either opt-in -> the list endpoint,
+    // first non-draft release that ReleaseAllowedOnChannel admits (nightlies gated on allowNightly,
+    // other prereleases on allowPrerelease — so a nightly at the top of the list is SKIPPED for a
+    // prerelease-only user and the next eligible release is offered instead); neither opt-in ->
+    // /releases/latest (excludes drafts AND prereleases). Synchronous, bounded by timeoutMs per
+    // phase. Never throws. allowNightly deliberately has NO default: a defaulted bool before the
+    // defaulted timeout would let a legacy 3-arg call's numeric timeout silently convert into the
+    // flag — every caller must say what channel it wants.
+    inline UpdateInfo CheckForUpdate(const Version& cur, bool allowPrerelease, bool allowNightly, DWORD timeoutMs = 6000)
     {
         UpdateInfo info;
         info.currentVersionStr = VersionToString(cur);
@@ -782,7 +848,7 @@ namespace Agentmaster::Updater
         std::wstring err;
         try
         {
-            if (allowPrerelease)
+            if (allowPrerelease || allowNightly)
             {
                 const std::string raw = HttpsGet(kApiHost, base + L"?per_page=30", timeoutMs, err);
                 if (raw.empty())
@@ -803,8 +869,12 @@ namespace Agentmaster::Updater
                     {
                         continue;
                     }
+                    if (!ReleaseAllowedOnChannel(rel.StrAt(L"tag_name"), rel.BoolAt(L"prerelease", false), allowPrerelease, allowNightly))
+                    {
+                        continue; // off-channel (e.g. a nightly without the nightly opt-in) — keep scanning
+                    }
                     ParseReleaseObj(rel, cur, info);
-                    break; // first non-draft is the newest published release
+                    break; // first eligible non-draft is the newest release on this channel
                 }
                 if (info.latestTag.empty())
                 {
@@ -829,6 +899,14 @@ namespace Agentmaster::Updater
                 if (parsed->Find(L"tag_name"))
                 {
                     ParseReleaseObj(*parsed, cur, info);
+                    if (info.isNightly)
+                    {
+                        // Belt: a nightly should NEVER surface from /releases/latest (it's published
+                        // as a prerelease, which /latest excludes) — but a mis-published one must not
+                        // reach the stable channel. Reads as up-to-date; the trail shows the tag.
+                        info.available = false;
+                        info.installable = false;
+                    }
                 }
                 else
                 {
@@ -848,6 +926,7 @@ namespace Agentmaster::Updater
     struct UpdatePrefs
     {
         bool allowPrerelease{ false };
+        bool allowNightly{ false }; // NIGHTLY opt-in (warning-gated in the cog) — without it a nightly-tagged release is always skipped
         std::wstring skippedVersion; // a tag the user chose to skip (e.g. "v0.4.3")
         long long postponedUntilUnixMs{ 0 };
     };
@@ -878,6 +957,9 @@ namespace Agentmaster::Updater
             const bool haveNested = nested && nested->type == json::Value::Type::Obj;
             const json::Value& o = haveNested ? *nested : *parsed;
             p.allowPrerelease = o.BoolAt(L"allowUpdatePrerelease", false);
+            // Nightly postdates the envelope fix, so it has NO pre-fix top-level stray era — the
+            // nested-or-flat read through `o` is the whole story (no legacy fallback below).
+            p.allowNightly = o.BoolAt(L"allowUpdateNightly", false);
             p.skippedVersion = o.StrAt(L"updateSkippedVersion");
             p.postponedUntilUnixMs = o.I64At(L"updatePostponedUntilUnixMs", 0);
             if (haveNested)
@@ -1130,6 +1212,12 @@ namespace Agentmaster::Updater
         {
             instruction = L"Agentmaster " + DisplayVersion(info) + L" is available";
             content = L"You're on v" + info.currentVersionStr + L".\n\n";
+            if (info.isNightly)
+            {
+                // The nightly opt-in already warned once (the cog's confirm), but the prompt is where
+                // the install decision happens — restate what a nightly IS right where it's chosen.
+                content += L"\x26A0 This is a NIGHTLY build \x2014 an unstable development version. It may have memory leaks, CPU issues, and crashes.\n\n";
+            }
             content += info.installable ?
                            L"Choose \x201CUpdate now\x201D and Agentmaster will close and reopen automatically once the new version is installed, or pick when to be reminded." :
                            L"Choose \x201CUpdate now\x201D to open the download page, or pick when to be reminded.";
@@ -1531,7 +1619,7 @@ namespace Agentmaster::Updater
                 return false;
             }
             const Version cur = CurrentPackageVersion();
-            LogUpdate(stateDir, tag + L" begin: cur=" + VersionToString(cur) + L" prerelease=" + (prefs.allowPrerelease ? L"on" : L"off"));
+            LogUpdate(stateDir, tag + L" begin: cur=" + VersionToString(cur) + L" prerelease=" + (prefs.allowPrerelease ? L"on" : L"off") + L" nightly=" + (prefs.allowNightly ? L"on" : L"off"));
 
             // Bound the TOTAL network wait so a slow-but-present network can't wedge launch: WinHTTP's
             // per-phase timeouts (resolve/connect/send/receive) could otherwise sum to ~4x, and this
@@ -1545,8 +1633,8 @@ namespace Agentmaster::Updater
                 std::atomic<bool> done{ false };
             };
             auto shared = std::make_shared<CheckResult>();
-            std::thread([shared, cur, pre = prefs.allowPrerelease]() {
-                shared->info = CheckForUpdate(cur, pre, 4000);
+            std::thread([shared, cur, pre = prefs.allowPrerelease, night = prefs.allowNightly]() {
+                shared->info = CheckForUpdate(cur, pre, night, 4000);
                 shared->done.store(true, std::memory_order_release);
             }).detach();
 
@@ -1578,7 +1666,7 @@ namespace Agentmaster::Updater
                 return false; // the user skipped exactly this version
             }
             // (A this-run decline never reaches here — the presence gate above skips pre-network.)
-            LogUpdate(stateDir, tag + L" done: " + DisplayVersion(info) + L" available (" + (info.isPrerelease ? L"pre-release" : L"stable") + (info.installable ? L", installable) \x2014 prompting" : L", NO installable assets) \x2014 prompting"));
+            LogUpdate(stateDir, tag + L" done: " + DisplayVersion(info) + L" available (" + (info.isNightly ? L"NIGHTLY" : info.isPrerelease ? L"pre-release" : L"stable") + (info.installable ? L", installable) \x2014 prompting" : L", NO installable assets) \x2014 prompting"));
             const Decision d = ShowUpdatePrompt(owner, info);
             return ApplyDecision(stateDir, info, d, owner);
         }

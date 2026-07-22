@@ -1401,6 +1401,7 @@ void TestUpdaterVersionLogic()
         const auto missing = U::ReadPrefs(dir);
         CHECK(!missing.allowPrerelease && missing.skippedVersion.empty() && missing.postponedUntilUnixMs == 0,
               "prefs: missing settings.json -> defaults");
+        CHECK(!missing.allowNightly, "prefs: missing settings.json -> nightly OFF (nightlies always skipped by default)");
 
         // An RMW on a MISSING file mints the engine envelope (version + nested settings), never a
         // flat doc a later engine save would half-ignore.
@@ -1420,8 +1421,10 @@ void TestUpdaterVersionLogic()
         AppSettings cogSaved;
         cogSaved.model = L"opus";
         cogSaved.allowUpdatePrerelease = true;
+        cogSaved.allowUpdateNightly = true; // the warning-gated nightly opt-in rides the same envelope
         CHECK(U::detail::WriteFileUtf8(sj, SerializeAppSettings(cogSaved)), "atomic: engine-shaped seed lands");
         CHECK(U::ReadPrefs(dir).allowPrerelease, "prefs: cog-saved (nested) prerelease opt-in is READ (bug-1 regression)");
+        CHECK(U::ReadPrefs(dir).allowNightly, "prefs: cog-saved (nested) NIGHTLY opt-in is READ");
 
         U::WriteSkip(dir, L"v1.0.0");
         U::WritePostpone(dir, 1234567890123LL);
@@ -1429,9 +1432,11 @@ void TestUpdaterVersionLogic()
         CHECK(p.skippedVersion == L"v1.0.0", "prefs: WriteSkip round-trips");
         CHECK(p.postponedUntilUnixMs == 1234567890123LL, "prefs: WritePostpone round-trips (int64 survives the double)");
         CHECK(p.allowPrerelease, "prefs: the RMW preserves the cog's nested prerelease");
+        CHECK(p.allowNightly, "prefs: the RMW preserves the cog's nested nightly opt-in");
         {
             const AppSettings loaded = DeserializeAppSettings(U::detail::ReadFileWide(sj));
             CHECK(loaded.model == L"opus", "prefs: the cog's model survives the updater RMW");
+            CHECK(loaded.allowUpdateNightly, "prefs: the ENGINE reads the nightly opt-in through the RMW'd file");
             CHECK(loaded.updateSkippedVersion == L"v1.0.0" && loaded.updatePostponedUntilUnixMs == 1234567890123LL,
                   "prefs: the ENGINE reads the updater's skip/postpone (same nested fields)");
             // The engine-save cycle (bug-2 regression): rebuild the envelope from the struct — the
@@ -1440,6 +1445,17 @@ void TestUpdaterVersionLogic()
             const auto after = U::ReadPrefs(dir);
             CHECK(after.skippedVersion == L"v1.0.0" && after.postponedUntilUnixMs == 1234567890123LL && after.allowPrerelease,
                   "prefs: skip/postpone/prerelease SURVIVE an engine save (bug-2 regression)");
+            CHECK(after.allowNightly, "prefs: the nightly opt-in SURVIVES an engine save");
+        }
+        // A settings.json WITHOUT the nightly key (every pre-feature install) reads OFF — the
+        // engine deserialize AND the updater's prefs read agree on the safe default.
+        {
+            AppSettings noNightly;
+            noNightly.allowUpdatePrerelease = true;
+            CHECK(U::detail::WriteFileUtf8(sj, SerializeAppSettings(noNightly)), "atomic: nightly-off seed lands");
+            CHECK(!DeserializeAppSettings(U::detail::ReadFileWide(sj)).allowUpdateNightly, "prefs: engine default for a present-but-false nightly key is OFF");
+            CHECK(U::ReadPrefs(dir).allowPrerelease && !U::ReadPrefs(dir).allowNightly,
+                  "prefs: prerelease ON never implies nightly (orthogonal opt-ins)");
         }
 
         // SetMember must REPLACE, not append: a second skip leaves exactly ONE (nested) key.
@@ -1610,6 +1626,64 @@ void TestUpdaterVersionLogic()
         U::UpdateInfo einfo;
         U::ParseReleaseObj(*evil, cur, einfo);
         CHECK(einfo.available && !einfo.installable && einfo.bundleUrl.empty(), "release: foreign asset URLs rejected (not installable)");
+    }
+
+    // NIGHTLY channel (IsNightlyTag / ReleaseAllowedOnChannel): a nightly is an unstable dev build
+    // whose TAG contains "nightly" (e.g. v0.6.10-prerelease-nightly, published as a GitHub
+    // prerelease). It is a tier BELOW pre-release: ALWAYS skipped — even with the pre-release
+    // opt-in ON — unless the user accepted the warning-gated nightly opt-in; the two opt-ins are
+    // ORTHOGONAL (each admits only its own tier, stable is always offered).
+    {
+        // Tag detection: case-insensitive CONTAINS, per the naming contract.
+        CHECK(U::IsNightlyTag(L"v0.6.10-prerelease-nightly"), "nightly: canonical tag matches");
+        CHECK(U::IsNightlyTag(L"v0.6.10-NIGHTLY"), "nightly: case-insensitive");
+        CHECK(U::IsNightlyTag(L"Nightly-2026-07-22"), "nightly: prefix position matches (contains, not suffix)");
+        CHECK(U::IsNightlyTag(L"nightly"), "nightly: the bare word matches");
+        CHECK(!U::IsNightlyTag(L"v0.6.10"), "nightly: a plain tag is not nightly");
+        CHECK(!U::IsNightlyTag(L"v0.7.0-beta.2"), "nightly: a beta prerelease tag is not nightly");
+        CHECK(!U::IsNightlyTag(L"v0.6.10-night"), "nightly: 'night' alone is not 'nightly'");
+        CHECK(!U::IsNightlyTag(L""), "nightly: empty tag is not nightly");
+
+        // Channel matrix — P = allowPrerelease, N = allowNightly.
+        const auto allowed = [](const wchar_t* tag, bool pre, bool P, bool N) {
+            return U::ReleaseAllowedOnChannel(tag, pre, P, N);
+        };
+        // Stable: always offered, whatever the opt-ins.
+        CHECK(allowed(L"v1.0.0", false, false, false), "channel: stable on the default channel");
+        CHECK(allowed(L"v1.0.0", false, true, false), "channel: stable with prerelease on");
+        CHECK(allowed(L"v1.0.0", false, false, true), "channel: stable with nightly on");
+        CHECK(allowed(L"v1.0.0", false, true, true), "channel: stable with both on");
+        // A plain (non-nightly) prerelease: gated on P only.
+        CHECK(!allowed(L"v1.1.0-beta", true, false, false), "channel: beta skipped by default");
+        CHECK(allowed(L"v1.1.0-beta", true, true, false), "channel: beta offered under the prerelease opt-in");
+        CHECK(!allowed(L"v1.1.0-beta", true, false, true), "channel: nightly opt-in alone never admits a beta (orthogonal)");
+        CHECK(allowed(L"v1.1.0-beta", true, true, true), "channel: beta offered with both on");
+        // A NIGHTLY (marked prerelease, as published): gated on N only — the core requirement:
+        // "always skipped unless the user checked the nightly box".
+        CHECK(!allowed(L"v0.6.10-prerelease-nightly", true, false, false), "channel: nightly skipped by default");
+        CHECK(!allowed(L"v0.6.10-prerelease-nightly", true, true, false), "channel: prerelease opt-in alone NEVER admits a nightly");
+        CHECK(allowed(L"v0.6.10-prerelease-nightly", true, false, true), "channel: nightly opt-in admits a nightly");
+        CHECK(allowed(L"v0.6.10-prerelease-nightly", true, true, true), "channel: nightly offered with both on");
+        // A nightly whose publish FORGOT the prerelease checkbox: the TAG is authoritative — still
+        // nightly-gated, so it can never leak onto the stable or prerelease channels.
+        CHECK(!allowed(L"v0.6.11-nightly", false, false, false), "channel: mis-published nightly still skipped by default");
+        CHECK(!allowed(L"v0.6.11-nightly", false, true, false), "channel: mis-published nightly still skipped under prerelease-only");
+        CHECK(allowed(L"v0.6.11-nightly", false, false, true), "channel: mis-published nightly still needs the nightly opt-in");
+
+        // ParseReleaseObj carries the classification (the prompt's warning + the [update] trail's
+        // NIGHTLY word key on it) and the version math is unchanged: the numeric part orders.
+        const auto rel = json::Parse(
+            L"{\"tag_name\":\"v0.6.10-prerelease-nightly\",\"prerelease\":true,"
+            L"\"html_url\":\"https://github.com/Nucs/Agentmaster/releases/tag/v0.6.10-prerelease-nightly\"}");
+        CHECK(rel && rel->type == json::Value::Type::Obj, "nightly: synthetic release parses");
+        U::UpdateInfo ni;
+        U::ParseReleaseObj(*rel, U::ParseVersion(L"0.6.9"), ni);
+        CHECK(ni.isNightly && ni.isPrerelease, "nightly: ParseReleaseObj classifies by tag");
+        CHECK(ni.available, "nightly: numeric version (0.6.10 > 0.6.9) still orders");
+        CHECK(ni.latest.major == 0 && ni.latest.minor == 6 && ni.latest.patch == 10, "nightly: suffix never corrupts the parsed version");
+        U::UpdateInfo same;
+        U::ParseReleaseObj(*rel, U::ParseVersion(L"0.6.10"), same);
+        CHECK(!same.available, "nightly: same numeric version as installed is not an update (publishers must bump)");
     }
 
     // Display/link/format helpers (each feeds a user-visible surface — a regression here corrupts

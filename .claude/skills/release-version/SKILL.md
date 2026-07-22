@@ -253,6 +253,14 @@ gh release edit vX.Y.Z -R Nucs/Agentmaster --draft=false --latest --prerelease=f
 # PRE-RELEASE — the current stable stays Latest:
 gh release edit vX.Y.Z -R Nucs/Agentmaster --draft=false --prerelease --latest=false
 ```
+**NIGHTLY** — a third framing BELOW pre-release (unstable development build): tag it
+`vX.Y.Z-prerelease-nightly` (any tag containing `nightly` counts — the in-app updater's
+`IsNightlyTag` matches the TAG by contains, case-insensitive). `release.yml` strips the suffix
+to digits for the MSIX Identity Version and **auto-marks the release prerelease**; publish it
+with the PRE-RELEASE flags above (never `--latest`). The updater offers a nightly ONLY to users
+who enabled the cog's warning-gated "Allow updating to nightly builds" switch — even
+prerelease-opted users skip it — and `X.Y.Z` must be bumped past the current release or the
+numeric compare never offers it.
 Confirm the state + badge:
 ```bash
 gh release view vX.Y.Z -R Nucs/Agentmaster | grep -iE '^draft:|^prerelease:'

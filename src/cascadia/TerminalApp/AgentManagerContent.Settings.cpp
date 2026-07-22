@@ -821,6 +821,63 @@ namespace winrt::TerminalApp::implementation
         });
         panel.Children().Append(_setAllowPrerelease);
 
+        // NIGHTLY opt-in — a tier BELOW pre-release (Updater.h IsNightlyTag/ReleaseAllowedOnChannel):
+        // a nightly is an unstable DEVELOPMENT build whose tag contains "nightly" (e.g.
+        // v0.6.10-prerelease-nightly, published as a GitHub prerelease). It is ALWAYS skipped — by
+        // the startup/hourly checks AND "Check for updates", even with pre-releases allowed — unless
+        // this switch is on. Turning it ON is gated behind an explicit warning confirm: the Toggled
+        // handler REVERTS the switch first (behind the seeding latch — it must never show ON while
+        // nothing is accepted/persisted), asks, and re-applies programmatically only on "I
+        // understand" — so EVERY attempt to enable re-asks, and a Cancel/backdrop dismiss leaves the
+        // switch honestly OFF with no state written. OFF needs no warning. Same INSTANT-APPLY
+        // freshest-disk RMW as the pre-release switch above (_ApplyAllowNightly).
+        _setAllowNightly = ToggleSwitch{};
+        _setAllowNightly.Header(winrt::box_value(L"Allow updating to nightly builds (unstable)"));
+        AgentSetTip(_setAllowNightly, L"When on, update checks also consider NIGHTLY builds \x2014 unstable development versions (release tags containing \x201Cnightly\x201D) that may have memory leaks, CPU issues, and crashes. Nightlies are otherwise ALWAYS skipped, even with pre-releases allowed. Turning this on asks for confirmation first. Applies immediately \x2014 no Save needed.");
+        _setAllowNightly.Toggled([this](const IInspectable&, const RoutedEventArgs&) {
+            if (_seedingAllowNightly)
+            {
+                return; // a cog-open seed / our own revert-then-ask + confirm-apply writes, not a user flip
+            }
+            // Guarded like the pre-release switch: this runs straight off a XAML event — an escape
+            // would fail-fast the app. A failed flip is logged and harmless (the switch re-seeds
+            // from disk at the next cog open, so UI and truth re-converge).
+            try
+            {
+                if (_setAllowNightly.IsOn())
+                {
+                    // Revert FIRST, then warn — the requested opt-in gate: nightly may cost the
+                    // user their work, so it lands only on an explicit, informed accept.
+                    _seedingAllowNightly = true;
+                    _setAllowNightly.IsOn(false);
+                    _seedingAllowNightly = false;
+                    _Confirm(L"Enable nightly updates?",
+                             L"Nightly builds are unstable development versions. They may have memory leaks, CPU issues, and crashes.\n\nUse them if you wish to contribute and help testing \x2014 but be willing to have your work suddenly interrupted.",
+                             L"I understand \x2014 enable nightly",
+                             [this]() {
+                                 _seedingAllowNightly = true;
+                                 _setAllowNightly.IsOn(true);
+                                 _seedingAllowNightly = false;
+                                 _ApplyAllowNightly(true);
+                             });
+                    return;
+                }
+                _ApplyAllowNightly(false); // turning OFF needs no warning
+            }
+            catch (...)
+            {
+                try
+                {
+                    ::Agentmaster::LogNav(L"update-nightly toggle FAILED (exception swallowed)");
+                }
+                catch (...)
+                {
+                    // logger-failed: nothing left to report through
+                }
+            }
+        });
+        panel.Children().Append(_setAllowNightly);
+
         // (The "Uninstall Agentmaster…" button is built at the END of the About tab, after the Profile row.)
 
         // === SESSIONS tab ===
@@ -2666,6 +2723,33 @@ namespace winrt::TerminalApp::implementation
             }
             _seedingAllowPrerelease = false;
         }
+        if (_setAllowNightly)
+        {
+            // Same disk-truth seed as the pre-release switch above (the nightly switch instant-applies
+            // via its own freshest-disk RMW, possibly flipped from another window). The latch keeps the
+            // programmatic IsOn from re-firing the Toggled handler — which for THIS switch would raise
+            // the warning confirm out of nowhere on every cog open; the clear is unconditional so a
+            // stuck latch can never silently eat every future flip.
+            try
+            {
+                const bool diskOn = ::Agentmaster::LoadAppSettings().allowUpdateNightly;
+                _appSettings.allowUpdateNightly = diskOn;
+                _seedingAllowNightly = true;
+                _setAllowNightly.IsOn(diskOn);
+            }
+            catch (...)
+            {
+                try
+                {
+                    ::Agentmaster::LogNav(L"update-nightly seed FAILED (exception \x2014 switch shows a stale state until reopen)");
+                }
+                catch (...)
+                {
+                    // logger-failed: nothing left to report through
+                }
+            }
+            _seedingAllowNightly = false;
+        }
         if (_setDebugMode)
         {
             // DEVELOPER (debug escape hatch): reflect the persisted setting, EXCEPT on a Dev build where the
@@ -3166,6 +3250,7 @@ namespace winrt::TerminalApp::implementation
             _appSettings.summaryPanelHeightFraction = disk.summaryPanelHeightFraction;
             _appSettings.summaryPanelWrapNewlines = disk.summaryPanelWrapNewlines; // wrap-line toggle (panel times bar), out-of-cog UI action
             _appSettings.allowUpdatePrerelease = disk.allowUpdatePrerelease; // updater pre-release opt-in (instant-applied by the switch itself)
+            _appSettings.allowUpdateNightly = disk.allowUpdateNightly; // updater NIGHTLY opt-in (instant-applied by its warning-gated switch)
             _appSettings.updateSkippedVersion = disk.updateSkippedVersion; // updater "Skip this version" (out-of-cog JSON RMW)
             _appSettings.updatePostponedUntilUnixMs = disk.updatePostponedUntilUnixMs; // updater "Postpone N days" (out-of-cog JSON RMW)
             _appSettings.envDefaultsVersion = disk.envDefaultsVersion; // shipped-default seed marker (engine-init, out-of-cog) — a Save must never reset it (would re-add a deleted default)
@@ -3911,6 +3996,22 @@ namespace winrt::TerminalApp::implementation
         _quitForUpdateHandler = std::move(handler);
     }
 
+    // The nightly switch's INSTANT-APPLY commit — the pre-release switch's recipe verbatim: a
+    // freshest-disk RMW of just this field (a form Save preserves it from disk), then re-run the
+    // silent check so the "vX.Y.Z available!" label + changelog link reflect the new channel right
+    // away. Reached only through accepted paths: the warning confirm's "I understand" (ON) and a
+    // plain OFF flip — never straight from an ON click. Callers guard (the Toggled try / _Confirm's
+    // CATCH_LOG), so this stays plain.
+    void AgentManagerContent::_ApplyAllowNightly(bool on)
+    {
+        _appSettings.allowUpdateNightly = on;
+        auto disk = ::Agentmaster::LoadAppSettings();
+        disk.allowUpdateNightly = on;
+        ::Agentmaster::SaveAppSettings(disk);
+        ::Agentmaster::LogNav(std::wstring{ L"update-nightly -> " } + (on ? L"on (warning accepted)" : L"off"));
+        _CheckForUpdates(false);
+    }
+
     void AgentManagerContent::_CheckForUpdates(bool interactive)
     {
         // A double-click of the button must not stack two prompts; a silent on-open check is allowed
@@ -3948,18 +4049,24 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // Prefer the LIVE pre-release toggle (so toggling it, then clicking Check, uses the new value
-        // before a Save) over the saved setting.
+        // Prefer the LIVE toggles (so flipping one, then clicking Check, uses the new value before a
+        // Save) over the saved settings. The nightly switch can only BE on through the accepted
+        // warning path, so reading it live never smuggles an unaccepted opt-in into the check.
         bool prerelease = _appSettings.allowUpdatePrerelease;
         if (_setAllowPrerelease)
         {
             prerelease = _setAllowPrerelease.IsOn();
         }
+        bool nightly = _appSettings.allowUpdateNightly;
+        if (_setAllowNightly)
+        {
+            nightly = _setAllowNightly.IsOn();
+        }
         // Nav audit: the user clicked "Check for updates" (interactive only — the silent on-cog-open check
         // is automatic, never logged). The result lands in the cog label, not the trail.
         if (interactive)
         {
-            ::Agentmaster::LogNav(std::wstring{ L"check-for-updates (allowPrerelease=" } + (prerelease ? L"1" : L"0") + L")");
+            ::Agentmaster::LogNav(std::wstring{ L"check-for-updates (allowPrerelease=" } + (prerelease ? L"1" : L"0") + L" allowNightly=" + (nightly ? L"1" : L"0") + L")");
         }
 
         const std::wstring stateDir = ::Agentmaster::Profiles::ResolveProfileDir();
@@ -3970,13 +4077,13 @@ namespace winrt::TerminalApp::implementation
         // The worker body is FULLY guarded: an exception escaping a DETACHED thread is
         // std::terminate — instant process death over a background version check. The catch also
         // marshals a UI reset so the button/flag never stay latched ("Checking…" forever).
-        const auto worker = [weak, disp, interactive, prerelease, stateDir, cur]() {
+        const auto worker = [weak, disp, interactive, prerelease, nightly, stateDir, cur]() {
             try
             {
                 // The network round-trip (Updater.h uses WinHTTP) — bounded; a longer budget for the
                 // explicit button than the silent on-open check.
                 const ::Agentmaster::Updater::UpdateInfo info =
-                    ::Agentmaster::Updater::CheckForUpdate(cur, prerelease, interactive ? 8000 : 5000);
+                    ::Agentmaster::Updater::CheckForUpdate(cur, prerelease, nightly, interactive ? 8000 : 5000);
                 // The cog leg of the [update] observability trail (the startup/hourly legs log inside
                 // RunUpdateCheckAndPrompt; this path calls CheckForUpdate directly, so log here).
                 {
@@ -3988,13 +4095,13 @@ namespace winrt::TerminalApp::implementation
                     }
                     else if (info.available)
                     {
-                        line = tag + L" done: " + ::Agentmaster::Updater::DisplayVersion(info) + L" available (" + (info.isPrerelease ? L"pre-release" : L"stable") + (info.installable ? L", installable)" : L", NO installable assets)");
+                        line = tag + L" done: " + ::Agentmaster::Updater::DisplayVersion(info) + L" available (" + (info.isNightly ? L"NIGHTLY" : info.isPrerelease ? L"pre-release" : L"stable") + (info.installable ? L", installable)" : L", NO installable assets)");
                     }
                     else
                     {
                         line = tag + L" done: up to date (latest=" + (info.latestTag.empty() ? std::wstring{ L"none" } : info.latestTag) + L")";
                     }
-                    ::Agentmaster::Updater::LogUpdate(stateDir, line + L" cur=" + info.currentVersionStr + L" prerelease=" + (prerelease ? L"on" : L"off"));
+                    ::Agentmaster::Updater::LogUpdate(stateDir, line + L" cur=" + info.currentVersionStr + L" prerelease=" + (prerelease ? L"on" : L"off") + L" nightly=" + (nightly ? L"on" : L"off"));
                 }
                 if (!disp)
                 {

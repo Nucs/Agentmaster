@@ -488,6 +488,7 @@ namespace winrt::TerminalApp::implementation
         // via _quitForUpdateHandler so the package isn't in use while it upgrades + relaunches.
         void _CheckForUpdates(bool interactive);
         void _ApplyUpdateCheckResult(bool interactive, const std::wstring& stateDir, const ::Agentmaster::Updater::UpdateInfo& info); // the check's UI completion (label/changelog/prompt+apply); split out so the worker's recovery catch stays small
+        void _ApplyAllowNightly(bool on); // the nightly switch's INSTANT-APPLY commit (freshest-disk RMW + re-kick the silent check) — ON is reached only through the accepted warning confirm
 
         // Agentmaster (native-exe-only policy): the "Claude not detected" modal — shown when a
         // launch/fork is attempted with no native claude.exe (::Agentmaster::ClaudeAvailable() false).
@@ -970,6 +971,8 @@ namespace winrt::TerminalApp::implementation
         // ---- UPDATES (Agentmaster updater; Updater.h) ----
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAllowPrerelease{ nullptr }; // include GitHub pre-releases in the update check (default OFF; INSTANT-APPLY — the switch RMWs settings.json on flip, no Save needed)
         bool _seedingAllowPrerelease{ false }; // latch: a cog-open programmatic IsOn seed must not re-fire the switch's instant-apply RMW
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAllowNightly{ nullptr }; // include NIGHTLY builds (tag contains "nightly" — unstable dev versions, a tier below pre-release); turning ON is gated behind a warning confirm, then the same INSTANT-APPLY RMW
+        bool _seedingAllowNightly{ false }; // latch: programmatic IsOn writes (cog-open seed / the handler's revert-then-ask / the confirm's re-apply) must not re-fire the Toggled handler
         winrt::Windows::UI::Xaml::Controls::Button _setCheckUpdates{ nullptr }; // "Check for updates" -> the same prompt the startup check shows
         winrt::Windows::UI::Xaml::Controls::TextBlock _setUpdateStatus{ nullptr }; // status label ("vX.Y.Z available!" dark green / "up to date" / "Checking…")
         bool _interactiveUpdateInFlight{ false }; // guard so a double-click of "Check for updates" can't fire two prompts

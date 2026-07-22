@@ -1436,15 +1436,23 @@ namespace Agentmaster
         // Agentmaster (updater; Updater.h): the in-app GitHub-release updater's state. allowUpdatePrerelease
         // is the Settings cog's "Allow updating to pre-release versions" toggle (default OFF — the check
         // uses /releases/latest, which excludes prereleases; ON uses the list endpoint, newest published).
-        // ALL THREE are written OUTSIDE the cog form — allowUpdatePrerelease by the switch's own
-        // INSTANT-APPLY freshest-disk RMW (flipping it persists immediately, no Save), skip/postpone by the
+        // allowUpdateNightly is the NIGHTLY opt-in (default OFF): a nightly is an unstable DEVELOPMENT
+        // build whose tag CONTAINS "nightly" (e.g. v0.6.10-prerelease-nightly; published as a GitHub
+        // prerelease) — a tier BELOW pre-release, ALWAYS skipped by every check (even with the
+        // pre-release toggle on) unless this is set. The cog gates turning it ON behind an explicit
+        // warning confirm (memory leaks / CPU issues / crashes — Updater.h IsNightlyTag /
+        // ReleaseAllowedOnChannel); the two opt-ins are ORTHOGONAL (each admits only its own tier).
+        // ALL FOUR are written OUTSIDE the cog form — the two opt-ins by each switch's own
+        // INSTANT-APPLY freshest-disk RMW (flipping persists immediately, no Save), skip/postpone by the
         // updater prompt's JSON RMW (which the WindowsTerminal EXE can do without linking the engine — see
         // Updater.h; it writes INSIDE the {version, settings:{...}} envelope, where these fields round-trip)
-        // — so the cog's Save PRESERVES all three from disk like the summary-panel fields:
+        // — so the cog's Save PRESERVES all four from disk like the summary-panel fields:
         // skip == the exact tag the user chose to "Skip this version" (never re-prompt for it); postpone ==
-        // the epoch-ms before which no check/prompt fires ("Remind me in 3/7/30 days"). All three default to
-        // a no-op (prompt normally, nothing skipped, not postponed) so a missing settings.json changes nothing.
+        // the epoch-ms before which no check/prompt fires ("Remind me in 3/7/30 days"). All four default to
+        // a no-op (stable-only check, prompt normally, nothing skipped, not postponed) so a missing
+        // settings.json changes nothing.
         bool allowUpdatePrerelease{ false };
+        bool allowUpdateNightly{ false };
         std::wstring updateSkippedVersion{};
         int64_t updatePostponedUntilUnixMs{ 0 };
         // Agentmaster (debug escape hatch; ProfileBootstrap.h IsDebugPackage): the Settings cog's

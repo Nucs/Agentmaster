@@ -696,6 +696,7 @@ namespace Agentmaster
         o.Set(L"summaryPanelWidthFraction", json::Value::MkNum(s.summaryPanelWidthFraction));
         o.Set(L"summaryPanelHeightFraction", json::Value::MkNum(s.summaryPanelHeightFraction));
         o.Set(L"allowUpdatePrerelease", json::Value::MkBool(s.allowUpdatePrerelease));
+        o.Set(L"allowUpdateNightly", json::Value::MkBool(s.allowUpdateNightly)); // NIGHTLY opt-in (warning-gated; tag contains "nightly" — Updater.h)
         o.Set(L"debugMode", json::Value::MkBool(s.debugMode)); // About-tab "Enable Debug Mode" — the durable --debug twin (ProfileBootstrap.h IsDebugPackage)
         o.Set(L"updateSkippedVersion", json::Value::MkStr(s.updateSkippedVersion));
         o.Set(L"updatePostponedUntilUnixMs", json::Value::MkNum(static_cast<double>(s.updatePostponedUntilUnixMs)));
@@ -864,9 +865,10 @@ namespace Agentmaster
             const double hf = v.NumAt(L"summaryPanelHeightFraction", 0.0);
             s.summaryPanelHeightFraction = (hf >= 0.06 && hf <= 0.75) ? hf : 0.0;
         }
-        // Updater (Updater.h): the prerelease opt-in + the skip/postpone state (the latter two are
-        // written OUTSIDE the cog form by the updater's JSON RMW; the cog's Save preserves them).
+        // Updater (Updater.h): the prerelease + nightly opt-ins + the skip/postpone state (the latter
+        // two are written OUTSIDE the cog form by the updater's JSON RMW; the cog's Save preserves them).
         s.allowUpdatePrerelease = v.BoolAt(L"allowUpdatePrerelease", false);
+        s.allowUpdateNightly = v.BoolAt(L"allowUpdateNightly", false); // NIGHTLY opt-in — default OFF: nightlies are always skipped unless explicitly accepted
         // Agentmaster (debug escape hatch; ProfileBootstrap.h): the About-tab "Enable Debug Mode" toggle —
         // the durable twin of --debug. Applied at startup via Profiles::ApplyPersistedDebugMode; default OFF.
         s.debugMode = v.BoolAt(L"debugMode", false);
@@ -949,7 +951,11 @@ namespace Agentmaster
         // Delete-after: an ABSENT key (a FRESH install, or one predating this key) takes the struct
         // default ON, which pairs with the scratchpad write location above — a briefing written to a
         // temp folder has no reason to linger. An install that already stored `false` keeps it.
-        s.commandHandoverDeleteFileAfterLaunch = v.BoolAt(L"commandHandoverDeleteFileAfterLaunch", AppSettings{}.commandHandoverDeleteFileAfterLaunch);
+        // NB: the fallback is the literal struct default (see AppSettings::commandHandoverDeleteFileAfterLaunch)
+        // rather than an `AppSettings{}` temporary — constructing a full temporary of this large
+        // struct mid-parse (every field, including the other command regex/model strings) crashed
+        // on startup (STL debug container-proxy fault destructing it inside this same function).
+        s.commandHandoverDeleteFileAfterLaunch = v.BoolAt(L"commandHandoverDeleteFileAfterLaunch", true);
         // Shipped-default seeding markers (ENV_VARS.md §8). Absent => 0 / false, so a pre-feature
         // settings.json runs the one-time seed once (new installs + updaters alike get the defaults).
         s.envDefaultsVersion = v.U32At(L"envDefaultsVersion", 0);
