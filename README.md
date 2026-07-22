@@ -60,13 +60,13 @@ In active use, shipping regular [**releases**](https://github.com/Nucs/Agentmast
 
 ## ⬇️ Install
 
-**One line, no download** — paste into PowerShell. It grabs the latest release, verifies the signature, and trusts the cert behind a single UAC prompt (skipped on upgrades once trusted):
+**One line, no download** — paste into PowerShell (admin **not** required). It grabs the latest release, verifies the signature, and trusts the signing cert — silently when run as admin; otherwise it asks: **Administrator install** (one UAC prompt, machine-level trust — preferred), **User install** (no admin at all: the cert-free portable build), or **Cancel**:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1)))
 ```
 
-Flags: `-Version <x.y.z>` · `-Portable` (cert-free, no admin) · `-Launch` · `-Prerelease` · `-Nightly` (also consider unstable nightly builds) · `-Force` · `-Uninstall`.
+Flags: `-Version <x.y.z>` · `-Portable` (cert-free, no admin) · `-Elevate` (skip the question, straight to UAC) · `-Launch` · `-Prerelease` · `-Nightly` (also consider unstable nightly builds) · `-Force` · `-Uninstall`.
 
 Prefer the files? Grab them from [**Releases**](https://github.com/Nucs/Agentmaster/releases): the **portable zip** (unzip, run `agentmaster.exe` — fully self-contained, no cert) or the self-signed **`.msixbundle`** (trust `Agentmaster.cer` once, then `Add-AppxPackage`).
 

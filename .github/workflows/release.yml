@@ -370,7 +370,7 @@ jobs:
             A fork of Windows Terminal that manages multiple Claude Code sessions.
 
             ### Install
-            Paste into PowerShell — installs **v${{ needs.prep.outputs.rawver }}** (one UAC prompt, only to trust the signing cert):
+            Paste into PowerShell — installs **v${{ needs.prep.outputs.rawver }}** (admin not required: as admin it trusts the signing cert silently; otherwise it asks — elevate once (UAC), a no-admin per-user portable install, or cancel):
             ```powershell
             & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version ${{ needs.prep.outputs.rawver }}
             ```

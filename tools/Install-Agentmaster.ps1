@@ -13,8 +13,18 @@
         or -Nightly for unstable development builds).
       * Compares it with what is already installed and SKIPS if you are current (unless -Force).
       * Downloads the signed .msixbundle + Agentmaster.cer (cached + SHA-256 verified).
-      * Trusts the self-signed certificate (LocalMachine\TrustedPeople) - elevating ONLY for
-        that one step, and ONLY when the cert is not already trusted (so upgrades are prompt-free).
+      * Trusts the self-signed certificate (LocalMachine\TrustedPeople) - the ONE step that
+        needs administrator rights, and only when the cert is not already machine-trusted
+        (re-runs of the same release, or releases signed with the same cert, are prompt-free).
+        As administrator it is silent. NOT running as administrator, the script ASKS first:
+          [A] Administrator install - elevate: one UAC prompt trusts the cert machine-wide,
+              then the MSIX still installs for the CURRENT user (preferred; the default).
+          [U] User install - no admin at all: falls back to the cert-free, self-contained
+              PORTABLE build (exactly what -Portable installs).
+          [C] Cancel - install nothing.
+        A declined UAC re-offers the question instead of failing. -Elevate pre-answers [A]
+        and -Portable pre-answers [U]; a non-interactive session behaves like -Elevate (the
+        classic straight-to-UAC behavior, so automation never hangs on a prompt).
       * Installs / upgrades the package, auto-resolving the VCLibs framework dependency if missing.
       * If a conflicting earlier install (e.g. a registered / "loose layout" unpackaged dev install)
         blocks deployment, offers to uninstall it and then continues. Your data is preserved.
@@ -43,6 +53,12 @@
 
 .PARAMETER Portable
     Install/upgrade the portable build (no cert, no admin) instead of the MSIX package.
+    This is also what the non-admin install-mode question's "User install" choice lands on.
+
+.PARAMETER Elevate
+    When the MSIX certificate needs machine-wide trust and the session is not elevated, skip
+    the install-mode question and go straight to the UAC elevation (the classic behavior).
+    The opposite pre-answer is -Portable (the no-admin user install).
 
 .PARAMETER Force
     Reinstall even if the installed version is the same or newer. For MSIX this also force-closes
@@ -85,6 +101,10 @@
     may have memory leaks, CPU issues, and crashes).
 
 .EXAMPLE
+    .\Install-Agentmaster.ps1 -Elevate
+    Non-admin shell, no questions asked: go straight to the one UAC prompt and install the MSIX.
+
+.EXAMPLE
     # Run straight from the web (latest, MSIX):
     irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1 | iex
 
@@ -102,6 +122,7 @@ param(
     [switch]   $Prerelease,
     [switch]   $Nightly,
     [switch]   $Portable,
+    [switch]   $Elevate,
     [switch]   $Force,
     [switch]   $Launch,
     [switch]   $Uninstall,
@@ -133,6 +154,15 @@ function Test-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     (New-Object Security.Principal.WindowsPrincipal $id).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Test-CanPrompt {
+    # Only ask questions where a human can answer them: an interactive user session whose host
+    # was not started -NonInteractive ('-non' is the shortest unambiguous prefix PowerShell
+    # itself accepts for that switch, so match any spelling of it).
+    if (-not [Environment]::UserInteractive) { return $false }
+    if ([Environment]::GetCommandLineArgs() -match '(?i)^[-/]non') { return $false }
+    return $true
 }
 
 function Get-OSArch {
@@ -227,13 +257,25 @@ function Get-AssetVersion {
 }
 
 # ---- downloading -----------------------------------------------------------------------------
+function Get-FileSha256 {
+    param($Path)
+    # Raw .NET, NOT Get-FileHash: that cmdlet lives in a MODULE (Microsoft.PowerShell.Utility's
+    # script surface) whose auto-load can fail in Windows PowerShell 5.1 under a PS7-polluted
+    # PSModulePath (observed live: "The term 'Get-FileHash' is not recognized" killed the whole
+    # install) - the same failure class as the Cert:\ drive. .NET needs no module in any host.
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $fs  = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $Path).Path)
+    try     { return ([BitConverter]::ToString($sha.ComputeHash($fs)) -replace '-', '') }
+    finally { $fs.Dispose(); $sha.Dispose() }
+}
+
 function Test-Digest {
     param($Path, $Asset)
     $digest = $null
     if ($Asset.PSObject.Properties.Name -contains 'digest') { $digest = $Asset.digest }
     if (-not $digest) { return $true }   # nothing to verify against
     if ($digest -match '^sha256:(?<h>[0-9a-fA-F]{64})$') {
-        $have = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
+        $have = Get-FileSha256 $Path
         return ($have -ieq $Matches.h)
     }
     return $true
@@ -263,34 +305,121 @@ function Find-Asset {
 }
 
 # ---- certificate trust (the only step that needs admin) --------------------------------------
+# AppX deployment validates the package signature in SYSTEM context, so the cert must be trusted
+# MACHINE-wide (LocalMachine TrustedPeople or Root) - a CurrentUser store never satisfies it.
+# That is WHY there is no admin-free way to trust it, and why the no-admin fallback is portable.
+# All store access is raw .NET X509Store, NOT the Cert:\ drive / Import-Certificate: the drive
+# needs Microsoft.PowerShell.Security, whose load can FAIL in Windows PowerShell 5.1 when a
+# PS7-polluted PSModulePath shadows it (observed live: the 7.0.0.0 module resolves first and
+# dies on duplicate TypeData, leaving no Cert:\ drive - a trusted cert then silently reads as
+# untrusted and the post-import verification false-fails). .NET needs no module in any host.
+function Test-CertInMachineStore {
+    param($Thumbprint, $StoreName)
+    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($StoreName, 'LocalMachine')
+    try {
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+        return ($store.Certificates.Find('FindByThumbprint', $Thumbprint, $false).Count -gt 0)
+    } catch {
+        return $false
+    } finally {
+        $store.Close()
+    }
+}
+
+function Test-CertTrustedMachine {
+    param($CerPath)
+    $full = (Resolve-Path -LiteralPath $CerPath).Path
+    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $full
+    foreach ($store in 'TrustedPeople', 'Root') {
+        if (Test-CertInMachineStore $cert.Thumbprint $store) { return $true }
+    }
+    return $false
+}
+
 function Approve-SigningCert {
     param($CerPath)
     $full = (Resolve-Path -LiteralPath $CerPath).Path
     $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $full
     $thumb = $cert.Thumbprint
-    if (Test-Path "Cert:\LocalMachine\TrustedPeople\$thumb") {
+    if (Test-CertTrustedMachine $full) {
         Write-Ok "signing cert already trusted ($thumb)"
         return
     }
     Write-Step "Trusting the signing certificate (one-time, requires administrator)"
     if (Test-Admin) {
-        Import-Certificate -FilePath $full -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
+        $st = New-Object System.Security.Cryptography.X509Certificates.X509Store('TrustedPeople', 'LocalMachine')
+        try { $st.Open('ReadWrite'); $st.Add($cert) } finally { $st.Close() }
     } else {
         $p = $full.Replace("'", "''")
-        $inner = "try { Import-Certificate -FilePath '$p' -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' -ErrorAction Stop | Out-Null; exit 0 } catch { exit 7 }"
+        # Pure .NET in the elevated child too - it must work on whatever powershell.exe module
+        # state the machine has (see the section note above).
+        $inner = "try { " +
+                 "`$c = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 '$p'; " +
+                 "`$s = New-Object System.Security.Cryptography.X509Certificates.X509Store('TrustedPeople', 'LocalMachine'); " +
+                 "`$s.Open('ReadWrite'); `$s.Add(`$c); `$s.Close(); exit 0 } catch { exit 7 }"
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
         try {
             $proc = Start-Process -FilePath 'powershell.exe' -Verb RunAs -PassThru -Wait -WindowStyle Hidden `
                         -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc
         } catch {
-            throw "Administrator elevation was cancelled. The signing certificate must be trusted to install the MSIX. Tip: re-run with -Portable for a cert-free, no-admin install."
+            throw "Administrator elevation was cancelled; the signing certificate must be trusted (machine-wide) to install the MSIX."
         }
         if ($proc.ExitCode -ne 0) { throw "Failed to import the signing certificate (elevated import returned $($proc.ExitCode))." }
     }
-    if (-not (Test-Path "Cert:\LocalMachine\TrustedPeople\$thumb")) {
+    if (-not (Test-CertInMachineStore $thumb 'TrustedPeople')) {
         throw "Certificate import did not take effect."
     }
     Write-Ok "trusted ($thumb)"
+}
+
+# ---- the non-admin install-mode question -----------------------------------------------------
+# The happy design: machine-level (administrator) install is PREFERRED, user-level (portable)
+# is the safe fallback that must always exist, cancel changes nothing. Only asked when it
+# actually matters: MSIX path + not admin + this release's cert not yet machine-trusted.
+function Read-InstallModeChoice {
+    param($PortableDir)
+    Write-Host ""
+    Write-Host "    You are not running as administrator." -ForegroundColor Yellow
+    Write-Host "    The MSIX package is self-signed: its certificate must be trusted MACHINE-wide once," -ForegroundColor Yellow
+    Write-Host "    which needs admin rights. (The app itself installs per-user either way.)" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "      [A] Administrator install " -NoNewline -ForegroundColor White
+    Write-Host "- elevate now: one UAC prompt trusts the certificate,"
+    Write-Host "          then the MSIX package installs for this user.  (preferred; default)"
+    Write-Host "      [U] User install " -NoNewline -ForegroundColor White
+    Write-Host "- no admin, no certificate: the self-contained PORTABLE build"
+    Write-Host "          into `"$PortableDir`" + a Start-menu shortcut."
+    Write-Host "      [C] Cancel " -NoNewline -ForegroundColor White
+    Write-Host "- install nothing."
+    Write-Host ""
+    while ($true) {
+        try { $ans = Read-Host "    Choice [A]dmin / [U]ser / [C]ancel  (Enter = A)" }
+        catch { return 'admin' }   # the host can't prompt after all -> the pre-question behavior
+        switch -Regex (("$ans").Trim()) {
+            '^$|^(a|admin|e|elevate)$' { return 'admin' }
+            '^(u|user|p|portable)$'    { return 'user' }
+            '^(c|cancel|n|no|q|quit)$' { return 'cancel' }
+        }
+        Write-Warn "unrecognized answer '$ans' - type A, U, or C"
+    }
+}
+
+# Ask + act. Returns 'admin' (caller proceeds with the elevating MSIX path), 'done' (the
+# portable fallback was installed - caller stops), or 'cancel' (caller stops, nothing changed).
+function Invoke-InstallModeChoice {
+    param($Release, $Cache, $PortableDir)
+    switch (Read-InstallModeChoice -PortableDir $PortableDir) {
+        'user' {
+            Write-Step "User install - installing the cert-free portable build instead of the MSIX"
+            Invoke-PortableFlow -Release $Release -Cache $Cache -Dir $PortableDir
+            return 'done'
+        }
+        'cancel' {
+            Write-Warn "Cancelled - nothing was installed."
+            return 'cancel'
+        }
+        default { return 'admin' }
+    }
 }
 
 # ---- framework dependency fallback (offline / Store-less machines) ----------------------------
@@ -454,6 +583,24 @@ function Install-Portable {
     return $true
 }
 
+# The whole portable journey (asset -> install -> how-to-launch epilogue) - shared by -Portable
+# and by the non-admin install-mode question's "User install" fallback.
+function Invoke-PortableFlow {
+    param($Release, $Cache, $Dir)
+    $zipAsset = Find-Asset $Release "_$([regex]::Escape((Get-OSArch)))\.zip$"
+    if (-not $zipAsset) { throw "Release $($Release.tag_name) has no portable $(Get-OSArch) zip." }
+    $relVer = Get-AssetVersion -AssetName $zipAsset.name -TagName $Release.tag_name
+    $null = Install-Portable -Release $Release -RelVer $relVer -Dir $Dir -Cache $Cache
+    Write-Host ""
+    Write-Host "Done." -ForegroundColor White
+    Write-Info "Launch: `"$Dir\WindowsTerminal.exe`"  (or the 'Agentmaster (Portable)' Start-menu entry)"
+    Write-Info "Upgrade: re-run this script (add -Portable to skip the install-mode question)."
+    if ($Launch -and (Test-Path (Join-Path $Dir 'WindowsTerminal.exe'))) {
+        Write-Step "Launching Agentmaster"
+        Start-Process (Join-Path $Dir 'WindowsTerminal.exe')
+    }
+}
+
 # ---- uninstall -------------------------------------------------------------------------------
 function Uninstall-All {
     param($Dir)
@@ -502,16 +649,9 @@ try {
 
     if ($Portable) {
         $zipAsset = Find-Asset $release "_$([regex]::Escape((Get-OSArch)))\.zip$"
-        $relVer   = Get-AssetVersion -AssetName ($zipAsset.name) -TagName $tag
-        Write-Ok "release $tag  (version $relVer)"
-        $changed = Install-Portable -Release $release -RelVer $relVer -Dir $InstallDir -Cache $DownloadDir
-        Write-Host ""
-        Write-Host "Done." -ForegroundColor White
-        Write-Info "Launch: `"$InstallDir\WindowsTerminal.exe`"  (or the 'Agentmaster (Portable)' Start-menu entry)"
-        if ($Launch -and (Test-Path (Join-Path $InstallDir 'WindowsTerminal.exe'))) {
-            Write-Step "Launching Agentmaster"
-            Start-Process (Join-Path $InstallDir 'WindowsTerminal.exe')
-        }
+        if (-not $zipAsset) { throw "Release $tag has no portable $(Get-OSArch) zip." }
+        Write-Ok "release $tag  (version $(Get-AssetVersion -AssetName $zipAsset.name -TagName $tag))"
+        Invoke-PortableFlow -Release $release -Cache $DownloadDir -Dir $InstallDir
         return
     }
 
@@ -537,10 +677,31 @@ try {
         Write-Step "Installing $relVer"
     }
 
-    $cerPath    = Save-Asset $cerAsset    $DownloadDir
+    # The .cer is tiny - fetched first, so the non-admin question is asked only when it actually
+    # matters (this release's cert not yet machine-trusted) and BEFORE the big bundle download.
+    $cerPath = Save-Asset $cerAsset $DownloadDir
+
+    # Not admin + the cert needs machine-wide trust -> ask how to proceed (administrator install
+    # preferred; user-level portable the safe fallback; cancel). -Elevate pre-answers admin, and
+    # a non-interactive session keeps the classic straight-to-UAC behavior (never hangs).
+    if (-not (Test-Admin) -and -not $Elevate -and (Test-CanPrompt) -and -not (Test-CertTrustedMachine $cerPath)) {
+        if ((Invoke-InstallModeChoice -Release $release -Cache $DownloadDir -PortableDir $InstallDir) -ne 'admin') { return }
+    }
+
     $bundlePath = Save-Asset $bundleAsset $DownloadDir
 
-    Approve-SigningCert -CerPath $cerPath
+    # Trust the cert (may elevate). Interactively, a declined/failed elevation re-offers the
+    # install-mode question instead of dying - the user can still land the no-admin fallback.
+    while ($true) {
+        try {
+            Approve-SigningCert -CerPath $cerPath
+            break
+        } catch {
+            if ((Test-Admin) -or $Elevate -or -not (Test-CanPrompt)) { throw }
+            Write-Warn $_.Exception.Message
+            if ((Invoke-InstallModeChoice -Release $release -Cache $DownloadDir -PortableDir $InstallDir) -ne 'admin') { return }
+        }
+    }
 
     Write-Step "Installing the package"
     Install-Bundle -BundlePath $bundlePath -Dir $DownloadDir -ForceFlag ([bool]$Force)

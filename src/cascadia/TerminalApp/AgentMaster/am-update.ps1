@@ -92,12 +92,22 @@ function Stop-PackageProcesses {
 }
 
 # ---- downloading ----------------------------------------------------------------------------
+function Get-FileSha256 {
+    param($Path)
+    # Raw .NET, NOT Get-FileHash (kept in sync with tools\Install-Agentmaster.ps1): that cmdlet
+    # lives in a module whose auto-load can fail in Windows PowerShell 5.1 under a PS7-polluted
+    # PSModulePath - the same failure class as the Cert:\ drive. .NET needs no module.
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $fs  = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $Path).Path)
+    try     { return ([BitConverter]::ToString($sha.ComputeHash($fs)) -replace '-', '') }
+    finally { $fs.Dispose(); $sha.Dispose() }
+}
 function Test-Hash {
     param($Path, $Sha256)
     if (-not $Sha256) { return $true }                          # nothing to verify against
     $want = ($Sha256 -replace '^sha256:', '').Trim()
     if ($want -notmatch '^[0-9a-fA-F]{64}$') { return $true }   # not a usable sha256
-    $have = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
+    $have = Get-FileSha256 $Path
     return ($have -ieq $want)
 }
 function Save-File {
@@ -117,18 +127,43 @@ function Save-File {
 }
 
 # ---- certificate trust (the only step that may need admin) ----------------------------------
+# All store access is raw .NET X509Store, NOT the Cert:\ drive / Import-Certificate (kept in
+# sync with tools\Install-Agentmaster.ps1): the drive needs Microsoft.PowerShell.Security,
+# whose load can FAIL in Windows PowerShell 5.1 when a PS7-polluted PSModulePath shadows it
+# (the 7.0.0.0 module resolves first and dies on duplicate TypeData, leaving no Cert:\ drive -
+# a trusted cert then silently reads as untrusted). .NET needs no module in any host.
+function Test-CertInMachineStore {
+    param($Thumbprint, $StoreName)
+    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($StoreName, 'LocalMachine')
+    try {
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+        return ($store.Certificates.Find('FindByThumbprint', $Thumbprint, $false).Count -gt 0)
+    } catch {
+        return $false
+    } finally {
+        $store.Close()
+    }
+}
 function Approve-SigningCert {
     param($CerPath)
     $full  = (Resolve-Path -LiteralPath $CerPath).Path
     $cert  = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $full
     $thumb = $cert.Thumbprint
-    if (Test-Path "Cert:\LocalMachine\TrustedPeople\$thumb") { Ok 'signing cert already trusted'; return }
+    foreach ($s in 'TrustedPeople', 'Root') {
+        if (Test-CertInMachineStore $thumb $s) { Ok 'signing cert already trusted'; return }
+    }
     Step 'Trusting the signing certificate (one-time; may prompt for administrator)'
     if (Test-Admin) {
-        Import-Certificate -FilePath $full -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
+        $st = New-Object System.Security.Cryptography.X509Certificates.X509Store('TrustedPeople', 'LocalMachine')
+        try { $st.Open('ReadWrite'); $st.Add($cert) } finally { $st.Close() }
     } else {
         $p = $full.Replace("'", "''")
-        $inner = "try { Import-Certificate -FilePath '$p' -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' -ErrorAction Stop | Out-Null; exit 0 } catch { exit 7 }"
+        # Pure .NET in the elevated child too - it must work on whatever powershell.exe module
+        # state the machine has (see the section note above).
+        $inner = "try { " +
+                 "`$c = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 '$p'; " +
+                 "`$s = New-Object System.Security.Cryptography.X509Certificates.X509Store('TrustedPeople', 'LocalMachine'); " +
+                 "`$s.Open('ReadWrite'); `$s.Add(`$c); `$s.Close(); exit 0 } catch { exit 7 }"
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
         $proc = Start-Process -FilePath 'powershell.exe' -Verb RunAs -PassThru -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$enc
         if ($proc.ExitCode -ne 0) { throw 'Administrator elevation was cancelled or failed; the signing certificate must be trusted to install the update.' }

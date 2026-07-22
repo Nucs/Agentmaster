@@ -119,7 +119,7 @@ automatically, or install from the assets below. The stable **<prevstable>** rem
 < PRE-RELEASE only: >> **This is a pre-release.** It is **not** offered as an automatic update
 unless you enable **Settings → Updates → "Allow pre-release versions."** The stable **<prevstable>** stays the default Latest.
 
-**One command (PowerShell)** — installs X.Y.Z (trusts the self-signed cert with a single UAC prompt):
+**One command (PowerShell)** — installs X.Y.Z (admin not required: as admin it trusts the self-signed cert silently; otherwise it asks — elevate once (UAC), a no-admin per-user portable install, or cancel):
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version X.Y.Z
 ```
