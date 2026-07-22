@@ -454,6 +454,7 @@ function Resolve-MissingDeps {
 # or any install of the same identity that can't be replaced in place) makes Add-AppxPackage fail
 # with 0x80073CFB. Offer to uninstall it, then let the caller retry. Per-user removal needs no admin,
 # and Agentmaster's data lives OUTSIDE the package (e.g. %USERPROFILE%\.agentmaster), so it survives.
+# (am-update.ps1's twin deliberately diverges: it never asks - see the note there.)
 function Remove-BlockingInstall {
     param([bool]$AutoYes)
     $pkg = Get-InstalledMsix
@@ -478,6 +479,8 @@ function Remove-BlockingInstall {
     return $true
 }
 
+# (am-update.ps1's twin deliberately diverges: always force-applies + auto-removes a blocker -
+# it runs after the user clicked "Update now" in-app. Same two-failure recovery shape.)
 function Install-Bundle {
     param($BundlePath, $Dir, [bool]$ForceFlag)
     $splat = @{ Path = $BundlePath; ErrorAction = 'Stop' }

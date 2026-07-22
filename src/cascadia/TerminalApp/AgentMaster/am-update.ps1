@@ -11,11 +11,17 @@
     profile dir, and invoked by the generated am-update.cmd / am-uninstall.cmd launchers.
 
     It is a trimmed sibling of tools\Install-Agentmaster.ps1 and shares that script's install CORE
-    and failure recovery -- keep the two in sync:
+    and failure recovery -- KEEP THE TWO IN SYNC. The shared functions (console UI, env helpers,
+    Get-FileSha256, the certificate-trust trio, Get-VCLibs) are copied VERBATIM from the installer;
+    only Install-Bundle and Remove-BlockingInstall deliberately diverge (marked inline): this script
+    runs AFTER the user clicked "Update now" in-app, so it never asks questions -- it force-applies
+    and auto-removes a blocking install, where the standalone installer confirms interactively and
+    offers the non-admin install-mode menu (which has no meaning here: a packaged install has no
+    portable fallback to switch to mid-update).
       * Downloads the signed .msixbundle + Agentmaster.cer (cached; SHA-256 verified when a digest
         is supplied) into %TEMP%\Agentmaster-update.
-      * Trusts the self-signed certificate (LocalMachine\TrustedPeople), elevating ONLY when it is
-        not already trusted.
+      * Trusts the self-signed certificate (LocalMachine\TrustedPeople; an already-trusted cert --
+        TrustedPeople or Root -- skips straight through), elevating ONLY when it is not trusted yet.
       * Add-AppxPackages it, auto-resolving the VCLibs framework dependency if missing (0x80073CF3)
         AND removing a conflicting existing install that blocks deployment (0x80073CFB -- e.g. a
         registered "loose layout" unpackaged dev install a packaged build cannot replace in place),
@@ -47,37 +53,55 @@ $ErrorActionPreference = 'Stop'
 $Aumid = "$Family!App"
 $Dir   = Join-Path $env:TEMP 'Agentmaster-update'
 
-# ---- tiny console UI ------------------------------------------------------------------------
-function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
-function Ok($m)   { Write-Host "    $m" -ForegroundColor Green }
-function Warn($m) { Write-Host "    $m" -ForegroundColor Yellow }
-function Info($m) { Write-Host "    $m" -ForegroundColor DarkGray }
+# ---- tiny console UI (verbatim from Install-Agentmaster.ps1) --------------------------------
+function Write-Step { param($m) Write-Host "==> $m" -ForegroundColor Cyan }
+function Write-Ok   { param($m) Write-Host "    $m" -ForegroundColor Green }
+function Write-Warn { param($m) Write-Host "    $m" -ForegroundColor Yellow }
+function Write-Info { param($m) Write-Host "    $m" -ForegroundColor DarkGray }
 
-# ---- environment helpers --------------------------------------------------------------------
+# ---- environment helpers (verbatim from Install-Agentmaster.ps1) ----------------------------
 function Initialize-Net {
     # GitHub requires TLS 1.2+; Windows PowerShell 5.1 may default to older protocols.
-    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+    try {
+        [Net.ServicePointManager]::SecurityProtocol =
+            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    } catch { }
 }
+
 function Import-AppxModule {
     # PowerShell 7 reaches the Appx cmdlets through the Windows PowerShell compatibility session.
-    if ($PSVersionTable.PSVersion.Major -ge 7) { Import-Module Appx -UseWindowsPowerShell -WarningAction SilentlyContinue -ErrorAction SilentlyContinue }
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        Import-Module Appx -UseWindowsPowerShell -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+    }
 }
+
 function Get-OSArch {
-    switch ($env:PROCESSOR_ARCHITECTURE) { 'ARM64' { 'arm64' } 'AMD64' { 'x64' } 'x86' { 'x86' } default { 'x64' } }
+    switch ($env:PROCESSOR_ARCHITECTURE) {
+        'ARM64' { 'arm64' }
+        'AMD64' { 'x64' }
+        'x86'   { 'x86' }
+        default { 'x64' }
+    }
 }
+
 function Test-Admin {
-    (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    (New-Object Security.Principal.WindowsPrincipal $id).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
+
 function Get-InstalledPackage {
     param($FamilyName)
     Get-AppxPackage | Where-Object { $_.PackageFamilyName -eq $FamilyName } | Select-Object -First 1
 }
+
 function Wait-ForExit {
     if ($WaitPid -gt 0) {
-        Step 'Waiting for Agentmaster to close'
+        Write-Step 'Waiting for Agentmaster to close'
         try { Wait-Process -Id $WaitPid -Timeout 20 -ErrorAction SilentlyContinue } catch {}
     }
 }
+
 # Close any still-running instances of $pkg so its registration releases cleanly. Filtered strictly
 # by the package's own InstallLocation, so the Store Windows Terminal and any other-identity install
 # (a different path) are never touched.
@@ -91,17 +115,19 @@ function Stop-PackageProcesses {
     } catch {}
 }
 
-# ---- downloading ----------------------------------------------------------------------------
+# ---- downloading (Get-FileSha256 verbatim from Install-Agentmaster.ps1) ---------------------
 function Get-FileSha256 {
     param($Path)
-    # Raw .NET, NOT Get-FileHash (kept in sync with tools\Install-Agentmaster.ps1): that cmdlet
-    # lives in a module whose auto-load can fail in Windows PowerShell 5.1 under a PS7-polluted
-    # PSModulePath - the same failure class as the Cert:\ drive. .NET needs no module.
+    # Raw .NET, NOT Get-FileHash: that cmdlet lives in a MODULE (Microsoft.PowerShell.Utility's
+    # script surface) whose auto-load can fail in Windows PowerShell 5.1 under a PS7-polluted
+    # PSModulePath (observed live: "The term 'Get-FileHash' is not recognized" killed the whole
+    # install) - the same failure class as the Cert:\ drive. .NET needs no module in any host.
     $sha = [System.Security.Cryptography.SHA256]::Create()
     $fs  = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $Path).Path)
     try     { return ([BitConverter]::ToString($sha.ComputeHash($fs)) -replace '-', '') }
     finally { $fs.Dispose(); $sha.Dispose() }
 }
+
 function Test-Hash {
     param($Path, $Sha256)
     if (-not $Sha256) { return $true }                          # nothing to verify against
@@ -110,10 +136,11 @@ function Test-Hash {
     $have = Get-FileSha256 $Path
     return ($have -ieq $want)
 }
+
 function Save-File {
     param($Url, $Dest, $Sha256)
     if ((Test-Path $Dest) -and $Sha256 -and (Test-Hash $Dest $Sha256)) {
-        Ok ("cached  " + [IO.Path]::GetFileName($Dest))
+        Write-Ok ("cached  " + [IO.Path]::GetFileName($Dest))
         return
     }
     $old = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
@@ -123,15 +150,17 @@ function Save-File {
     if ($Sha256 -and -not (Test-Hash $Dest $Sha256)) {
         throw "Checksum mismatch for $([IO.Path]::GetFileName($Dest)) - download corrupt; re-run the update."
     }
-    Ok ("downloaded  " + [IO.Path]::GetFileName($Dest))
+    Write-Ok ("downloaded  " + [IO.Path]::GetFileName($Dest))
 }
 
-# ---- certificate trust (the only step that may need admin) ----------------------------------
-# All store access is raw .NET X509Store, NOT the Cert:\ drive / Import-Certificate (kept in
-# sync with tools\Install-Agentmaster.ps1): the drive needs Microsoft.PowerShell.Security,
-# whose load can FAIL in Windows PowerShell 5.1 when a PS7-polluted PSModulePath shadows it
-# (the 7.0.0.0 module resolves first and dies on duplicate TypeData, leaving no Cert:\ drive -
-# a trusted cert then silently reads as untrusted). .NET needs no module in any host.
+# ---- certificate trust (verbatim from Install-Agentmaster.ps1 - the only step needing admin) --
+# AppX deployment validates the package signature in SYSTEM context, so the cert must be trusted
+# MACHINE-wide (LocalMachine TrustedPeople or Root) - a CurrentUser store never satisfies it.
+# All store access is raw .NET X509Store, NOT the Cert:\ drive / Import-Certificate: the drive
+# needs Microsoft.PowerShell.Security, whose load can FAIL in Windows PowerShell 5.1 when a
+# PS7-polluted PSModulePath shadows it (observed live: the 7.0.0.0 module resolves first and
+# dies on duplicate TypeData, leaving no Cert:\ drive - a trusted cert then silently reads as
+# untrusted and the post-import verification false-fails). .NET needs no module in any host.
 function Test-CertInMachineStore {
     param($Thumbprint, $StoreName)
     $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($StoreName, 'LocalMachine')
@@ -144,15 +173,27 @@ function Test-CertInMachineStore {
         $store.Close()
     }
 }
+
+function Test-CertTrustedMachine {
+    param($CerPath)
+    $full = (Resolve-Path -LiteralPath $CerPath).Path
+    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $full
+    foreach ($store in 'TrustedPeople', 'Root') {
+        if (Test-CertInMachineStore $cert.Thumbprint $store) { return $true }
+    }
+    return $false
+}
+
 function Approve-SigningCert {
     param($CerPath)
-    $full  = (Resolve-Path -LiteralPath $CerPath).Path
-    $cert  = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $full
+    $full = (Resolve-Path -LiteralPath $CerPath).Path
+    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $full
     $thumb = $cert.Thumbprint
-    foreach ($s in 'TrustedPeople', 'Root') {
-        if (Test-CertInMachineStore $thumb $s) { Ok 'signing cert already trusted'; return }
+    if (Test-CertTrustedMachine $full) {
+        Write-Ok "signing cert already trusted ($thumb)"
+        return
     }
-    Step 'Trusting the signing certificate (one-time; may prompt for administrator)'
+    Write-Step "Trusting the signing certificate (one-time, requires administrator)"
     if (Test-Admin) {
         $st = New-Object System.Security.Cryptography.X509Certificates.X509Store('TrustedPeople', 'LocalMachine')
         try { $st.Open('ReadWrite'); $st.Add($cert) } finally { $st.Close() }
@@ -165,40 +206,56 @@ function Approve-SigningCert {
                  "`$s = New-Object System.Security.Cryptography.X509Certificates.X509Store('TrustedPeople', 'LocalMachine'); " +
                  "`$s.Open('ReadWrite'); `$s.Add(`$c); `$s.Close(); exit 0 } catch { exit 7 }"
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
-        $proc = Start-Process -FilePath 'powershell.exe' -Verb RunAs -PassThru -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$enc
-        if ($proc.ExitCode -ne 0) { throw 'Administrator elevation was cancelled or failed; the signing certificate must be trusted to install the update.' }
+        try {
+            $proc = Start-Process -FilePath 'powershell.exe' -Verb RunAs -PassThru -Wait -WindowStyle Hidden `
+                        -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc
+        } catch {
+            throw "Administrator elevation was cancelled; the signing certificate must be trusted (machine-wide) to install the MSIX."
+        }
+        if ($proc.ExitCode -ne 0) { throw "Failed to import the signing certificate (elevated import returned $($proc.ExitCode))." }
     }
-    Ok 'trusted'
+    if (-not (Test-CertInMachineStore $thumb 'TrustedPeople')) {
+        throw "Certificate import did not take effect."
+    }
+    Write-Ok "trusted ($thumb)"
 }
 
-# ---- framework dependency fallback (offline / Store-less machines) --------------------------
+# ---- framework dependency fallback (verbatim from Install-Agentmaster.ps1) ------------------
 function Get-VCLibs {
+    param($Dir)
     $arch = Get-OSArch
     $dest = Join-Path $Dir "Microsoft.VCLibs.$arch.14.00.Desktop.appx"
     if (-not (Test-Path $dest)) {
-        Info "fetching dependency Microsoft.VCLibs ($arch)"
+        Write-Info "fetching dependency Microsoft.VCLibs ($arch)"
         $old = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
-        try { Invoke-WebRequest -Uri "https://aka.ms/Microsoft.VCLibs.$arch.14.00.Desktop.appx" -OutFile $dest -UseBasicParsing } finally { $ProgressPreference = $old }
+        try {
+            Invoke-WebRequest -Uri "https://aka.ms/Microsoft.VCLibs.$arch.14.00.Desktop.appx" -OutFile $dest -UseBasicParsing
+        } finally { $ProgressPreference = $old }
     }
     return $dest
 }
 
-# A conflicting existing registration (an unpackaged / "registered loose layout" dev install, or any
-# install of the same identity that can't be replaced in place) makes Add-AppxPackage fail with
-# 0x80073CFB. Remove it, then let the caller retry. Per-user removal needs no admin, and Agentmaster's
-# data lives OUTSIDE the package (e.g. %USERPROFILE%\.agentmaster), so it survives.
+# ⚠ DESIGNED DIVERGENCE from Install-Agentmaster.ps1's Remove-BlockingInstall: no Y/n confirm -
+# the user already clicked "Update now" in-app, so a blocking install (an unpackaged / "registered
+# loose layout" dev install, or any same-identity install that can't be replaced in place ->
+# Add-AppxPackage 0x80073CFB) is removed WITHOUT asking, and its processes are stopped first so the
+# registration releases cleanly. Per-user removal needs no admin, and Agentmaster's data lives
+# OUTSIDE the package (e.g. %USERPROFILE%\.agentmaster), so it survives.
 function Remove-BlockingInstall {
     $pkg = Get-InstalledPackage $Family
     if (-not $pkg) {
         throw "A conflicting Agentmaster install is blocking the update but could not be found to remove automatically. Remove it manually and re-run:  Get-AppxPackage Agentmaster | Remove-AppxPackage"
     }
     $kind = if ($pkg.IsDevelopmentMode) { 'a registered (unpackaged) layout' } else { 'a packaged install' }
-    Warn "removing a conflicting existing install ($kind, version $($pkg.Version)); your data is kept"
+    Write-Warn "removing a conflicting existing install ($kind, version $($pkg.Version)); your data is kept"
     Stop-PackageProcesses $pkg
     Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction Stop
-    Ok ("removed " + $pkg.PackageFullName)
+    Write-Ok ("removed " + $pkg.PackageFullName)
 }
 
+# ⚠ DESIGNED DIVERGENCE from Install-Agentmaster.ps1's Install-Bundle: ALWAYS force-applies
+# (-ForceUpdateFromAnyVersion -ForceApplicationShutdown - this IS an update the user asked for)
+# and auto-removes a blocker (above) instead of confirming. Same two-failure recovery shape.
 function Install-Bundle {
     param($BundlePath)
     function Add-It($deps) {
@@ -211,8 +268,8 @@ function Install-Bundle {
         $msg = $_.Exception.Message
         # (a) Missing framework dependency (VCLibs) -> fetch it and retry.
         if ($msg -match '0x80073CF3' -or $msg -match 'dependency') {
-            Warn 'resolving the framework dependency (VCLibs)...'
-            Add-It (Get-VCLibs)
+            Write-Warn 'resolving the framework dependency (VCLibs)...'
+            Add-It (Get-VCLibs $Dir)
         }
         # (b) A conflicting existing install blocks deployment -> remove it and retry.
         elseif ($msg -match '0x80073CFB' -or $msg -match 'already installed' -or $msg -match 'cannot replace' -or $msg -match 'unpackaged') {
@@ -234,7 +291,7 @@ function Invoke-Install {
     $bundle = Join-Path $Dir ([IO.Path]::GetFileName(([Uri]$BundleUrl).AbsolutePath))
     $cer    = Join-Path $Dir 'Agentmaster.cer'
 
-    Step 'Downloading the update'
+    Write-Step 'Downloading the update'
     Save-File $CerUrl    $cer    ''
     Save-File $BundleUrl $bundle $BundleSha256
 
@@ -242,14 +299,14 @@ function Invoke-Install {
 
     Wait-ForExit
 
-    Step "Installing $Version"
+    Write-Step "Installing $Version"
     Install-Bundle -BundlePath $bundle
-    Ok 'installed'
+    Write-Ok 'installed'
 
     $now = Get-InstalledPackage $Family
     if (-not $now) { throw 'Install reported success but the package is not registered. See the error above.' }
 
-    Step 'Relaunching Agentmaster'
+    Write-Step 'Relaunching Agentmaster'
     Start-Process "shell:appsFolder\$Aumid"
     $shown = if ($Version) { $Version } else { "$($now.Version)" }
     Write-Host ''
@@ -265,15 +322,15 @@ function Invoke-Uninstall {
     Wait-ForExit
     $pkg = Get-InstalledPackage $Family
     if (-not $pkg) {
-        Warn "Agentmaster ($Family) is not installed - nothing to remove."
+        Write-Warn "Agentmaster ($Family) is not installed - nothing to remove."
         Start-Sleep -Seconds 2
         return
     }
-    Step "Removing $($pkg.PackageFullName)"
+    Write-Step "Removing $($pkg.PackageFullName)"
     Stop-PackageProcesses $pkg
     Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction Stop
-    Ok 'uninstalled'
-    Info 'Your profile data (e.g. %USERPROFILE%\.agentmaster) was left untouched.'
+    Write-Ok 'uninstalled'
+    Write-Info 'Your profile data (e.g. %USERPROFILE%\.agentmaster) was left untouched.'
     Start-Sleep -Seconds 2
 }
 
