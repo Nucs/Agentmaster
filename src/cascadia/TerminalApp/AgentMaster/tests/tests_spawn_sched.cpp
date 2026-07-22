@@ -765,6 +765,82 @@ void TestProfileBootstrap()
             put(prevBody);
         }
     }
+
+    // ApplyPersistedDebugMode PROPAGATES the verdict process-wide (the cross-module fix). The
+    // DebugForced latch is MODULE-local — a function-local static inside an inline header function
+    // is one PRIVATE copy per linked binary, never crossing the DLL boundary — so the EXE-side
+    // startup apply used to leave TerminalApp.dll (the Engine scheduler gate + every Auto Testing
+    // UI gate) reading FALSE: the About-tab toggle enabled debug in the EXE only and the Tests
+    // Autorunner stayed dead in a release install ("did not get enabled across the entire app",
+    // proven live by the `[engine] release build (no --debug)` line landing in hooks.log with
+    // settings.debugMode:true on disk). The fix rides the per-PROCESS env block —
+    // AGENTMASTER_DEBUG=1, the same cross-module channel AGENTMASTER_PROFILE uses — which every
+    // module's IsDebugPackage() first-use scan reads. settings.json + the ambient env var are
+    // saved/restored (the AGENTMASTER_PROFILE idiom above).
+    //
+    // ⚠ ORDERING: the ON-case apply LATCHES this module's DebugForced() for the REST OF THE
+    // PROCESS (one-way by design — there is no un-force), so this block must stay the LAST in
+    // this function, and no later check in the harness RUN may assume IsDevOrDebugPackage() is
+    // false (nothing does today: the only engine consumer is SharedEngine()'s wiring, which the
+    // harness never calls — tests_persistence.cpp works on local Engine instances for that reason).
+    {
+        namespace fs = std::filesystem;
+        const std::wstring dir = P::ResolveProfileDir();
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        const fs::path sj = fs::path{ dir } / L"settings.json";
+        std::string prevBody;
+        bool hadPrev = false;
+        {
+            std::ifstream f{ sj, std::ios::binary };
+            if (f)
+            {
+                hadPrev = true;
+                prevBody.assign(std::istreambuf_iterator<char>{ f }, std::istreambuf_iterator<char>{});
+            }
+        }
+        auto put = [&](const std::string& bytes) {
+            std::ofstream f{ sj, std::ios::binary | std::ios::trunc };
+            f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        };
+        // Save + clear the ambient var so the assertions read OUR effects only (a developer shell
+        // with AGENTMASTER_DEBUG set must not fail the OFF case).
+        wchar_t prevEnvBuf[64];
+        const DWORD prevEnvLen = ::GetEnvironmentVariableW(L"AGENTMASTER_DEBUG", prevEnvBuf, 64);
+        const bool hadEnv = prevEnvLen > 0 && prevEnvLen < 64;
+        const std::wstring prevEnv = hadEnv ? std::wstring{ prevEnvBuf, prevEnvLen } : std::wstring{};
+        ::SetEnvironmentVariableW(L"AGENTMASTER_DEBUG", nullptr);
+        const auto envIsOne = []() {
+            wchar_t buf[8];
+            const DWORD n = ::GetEnvironmentVariableW(L"AGENTMASTER_DEBUG", buf, 8);
+            return n == 1 && buf[0] == L'1';
+        };
+
+        // OFF: the apply must neither latch this module nor export the env var.
+        put("{\"version\":1,\"settings\":{\"debugMode\":false}}");
+        P::ApplyPersistedDebugMode();
+        CHECK(!P::detail::DebugForced().load(), "debug apply: OFF setting latches nothing");
+        CHECK(!envIsOne(), "debug apply: OFF setting exports no env var");
+
+        // ON: latch THIS module AND export process-wide — the channel every OTHER module reads.
+        put("{\"version\":1,\"settings\":{\"debugMode\":true}}");
+        P::ApplyPersistedDebugMode();
+        CHECK(P::detail::DebugForced().load(), "debug apply: ON setting latches this module");
+        CHECK(envIsOne(), "debug apply: ON setting exports AGENTMASTER_DEBUG=1 (cross-module channel)");
+        CHECK(P::IsDebugPackage(), "debug apply: gate reads true via the live latch (pre-cache callers heal on next call)");
+        CHECK(P::IsDevOrDebugPackage(), "debug apply: the Auto Testing feature-gate predicate is unlocked");
+
+        // Restore ambient state (the latch itself is one-way — see the block comment above).
+        ::SetEnvironmentVariableW(L"AGENTMASTER_DEBUG", hadEnv ? prevEnv.c_str() : nullptr);
+        if (hadPrev)
+        {
+            put(prevBody);
+        }
+        else
+        {
+            fs::remove(sj, ec);
+        }
+    }
 }
 
 static bool WriteLineToPipe(const std::wstring& pipeName, const std::string& utf8Line)

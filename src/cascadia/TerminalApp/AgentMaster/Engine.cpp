@@ -250,6 +250,16 @@ namespace Agentmaster
             // queue/compose, the board badge, the overlay queue rows, the cog tab, the Pause button)
             // is hidden to match, so there is no way to queue a prompt either. Send-now is a direct
             // registry->Inject (it does not go through the scheduler), gated the same way in the UI.
+            // Agentmaster (Enable Debug Mode — the cross-module BELT): re-apply the persisted About-tab
+            // toggle IN THIS MODULE before the gate below reads it. The EXE prelude already applied it
+            // (WindowEmperor::HandleCommandlineArgs), but the DebugForced latch is MODULE-local — one
+            // private copy per linked binary (ProfileBootstrap.h) — so the EXE's apply reaches this DLL
+            // only via its AGENTMASTER_DEBUG env export. This belt makes the DLL derive the verdict from
+            // settings.json ITSELF, covering any host/ordering that skipped the EXE prelude. One-way +
+            // idempotent (double application is harmless); inert in the engine test harness, which never
+            // calls SharedEngine().
+            ::Agentmaster::Profiles::ApplyPersistedDebugMode();
+
             e->scheduler = std::make_shared<Scheduler>(e->registry);
             if (::Agentmaster::Profiles::IsDevOrDebugPackage())
             {

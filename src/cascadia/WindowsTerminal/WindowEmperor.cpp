@@ -570,9 +570,16 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     // Agentmaster (Enable Debug Mode; ProfileBootstrap.h): with the profile resolved — and BEFORE engine
     // init or any UI reads IsDebugPackage() — apply the persisted "Enable Debug Mode" setting (the
     // Settings cog's About toggle). It is the durable twin of the --debug / AGENTMASTER_DEBUG launch flag:
-    // when settings.json turns it on, this forces the same escape hatch (a process-local one-way override)
-    // that unlocks the DEV-only Auto Testing / Tests Autorunner surfaces in a Release install. A no-op when
-    // off / on first launch (no settings.json yet). Kept off the env block, so nothing leaks to child shells.
+    // when settings.json turns it on, this forces the same escape hatch that unlocks the DEV-only Auto
+    // Testing / Tests Autorunner surfaces in a Release install. A no-op when off / on first launch (no
+    // settings.json yet). The latch is MODULE-local (one copy per linked binary — an inline header
+    // function's static never crosses the DLL boundary), so this call alone once enabled debug in the EXE
+    // ONLY while TerminalApp.dll — the Engine scheduler gate + every Auto Testing UI gate — still read
+    // false ("did not get enabled across the entire app"): the apply therefore ALSO exports
+    // AGENTMASTER_DEBUG=1 into the process env block (the AGENTMASTER_PROFILE propagation idiom), which
+    // every other module's IsDebugPackage() first-use scan reads; Engine.cpp re-applies as a belt. The
+    // export can reach child shells like a user-set AGENTMASTER_DEBUG would — accepted: WT's env
+    // regeneration drops it for tab children, and a same-profile relaunch re-derives from settings.json.
     ::Agentmaster::Profiles::ApplyPersistedDebugMode();
 
     // Agentmaster ([startup] timing): the profile is resolved — safe to log now. This anchors the

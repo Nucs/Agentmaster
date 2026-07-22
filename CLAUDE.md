@@ -30,14 +30,24 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   - **Auto Testing** (bottom-right) — a per-session prompt queue + **Tests Autorunner**.
 - **Auto Testing / Tests Autorunner:** queue prompts; on **turn-complete** (`Stop` hook) the next
   prompt is auto-sent. Approvals and clarifying-questions are handled separately.
-- **⚠ Auto Testing / Tests Autorunner is a DEV-ONLY feature** (gated on
-  `Profiles::IsDevPackage()` — the `AgentmasterDev` package). In a **release** install the whole
+- **⚠ Auto Testing / Tests Autorunner is a DEV-OR-DEBUG feature** (gated on
+  `Profiles::IsDevOrDebugPackage()` — the `AgentmasterDev` package, OR a **release** unlocked by the
+  DEBUG escape hatch: the `--debug` launch flag / the `AGENTMASTER_DEBUG` env var / the Settings cog's
+  **About → "Enable Debug Mode"** toggle, the durable twin applied at the NEXT start). In an ordinary
+  **release** install the whole
   subsystem is **hidden and inert**: the Manager's bottom-right pane shows the read-only **Summary**
   view only (no `[Summary | Auto Testing]` toggle), the autorunner `Scheduler` is **never started**
-  (`Engine.cpp`) so nothing auto-sends, and every autorunner surface — the toolbar **Pause Tests
+  (`Engine.cpp`, which logs `[engine] release build (no --debug): … autorunner disabled`) so nothing
+  auto-sends, and every autorunner surface — the toolbar **Pause Tests
   Autorunning** button, the Settings cog **Tests Autorunner** tab, the Triage-Board ⚙ queue badge, the
   per-tab overlay autorunner button + queued rows, and the tab-strip tooltip's autorunner line — is
-  not shown. (Formerly "Flight Plan" / "Autopilot", renamed + gated in one commit; persisted
+  not shown. ⚠ The persisted toggle's startup apply (`ApplyPersistedDebugMode`, run in the EXE prelude)
+  must propagate **process-wide**: the `DebugForced` latch is MODULE-local (one private copy per linked
+  binary — an inline header function's static never crosses the DLL boundary), so the apply also
+  exports **`AGENTMASTER_DEBUG=1`** into the process env block (the `AGENTMASTER_PROFILE` idiom) for
+  `TerminalApp.dll`'s gates, and `Engine.cpp` re-applies as a belt — without that, the toggle enabled
+  debug in the EXE only and the autorunner stayed dead ("did not get enabled across the entire app").
+  (Formerly "Flight Plan" / "Autopilot", renamed + gated in one commit; persisted
   `autopilot`/`flightPlanShowsSummary`/`defaultAutopilotMode` keys still read back for back-compat.)
 - **Per-tab link badge (overlay) — built ([`TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md)):**
   **every terminal tab the Fleet Observer classifies** carries a small **top-right terminal HUD**
@@ -894,15 +904,23 @@ applies to the NEXT handover right after Save (no restart) except where noted: a
 successor MODEL** (`commandHandoverSuccessorModel`/`…Here…`; `""` == Default, else this launch's
 `--model <id>` through the existing launch-model seam — `_LaunchClaudeSession`'s `modelOverride` and
 `_RestartTabIntoFreshSession`'s new one; the cog lists Default + `launchModels`, an unlisted stored id
-shown `(custom) <id>` — **overridable PER MESSAGE by a leading model word in the typed command**:
-`/handover [fable] do a b c` / `/handover fable 5: fix x` — `PickModelFromArgsHint`, pure + tested:
+shown `(custom) <id>` — **overridable PER MESSAGE by a leading model word in the typed command, with
+an optional BRACKETED successor TITLE beside it**:
+`/handover [fable] do a b c` / `/handover fable 5: fix x` / `/handover [fable] [my title] do x` /
+`/handover-standby [my title] fix x` — `ParseHandoverArgsHints` (pure + tested;
+`PickModelFromArgsHint` is its model-only view — ONE parser, the two can never drift): the model is a
 partial + caseless + characters-only fold matched as a SUBSTRING of EITHER side of every launchModels
 entry (display name / model id), first entry wins; brackets optional — bare form needs the FIRST word
 to hit alone (≥3 folded chars, so a stray "a"/"do" never picks) then greedily extends ≤4 words while
-still matching, longest wins; only the args' first line's leading words are consulted, nothing is
-stripped from the text; the echo's `<command-args>` now rides the whole fan-out — `CommandActionSink`/
+still matching, longest wins; the TITLE is bracketed ONLY — the FIRST bracket **when it matches no
+model falls back to being the title**, or the NEXT token after a recognized model hint (bracketed or
+bare), body VERBATIM (`[my asd \n !!_ title]` keeps its literal backslash-n) + edge-trimmed +
+255-capped, outranking the TITLE REWRITE below and the classic `"(handover)"` naming while the
+per-file uniqueness bump still applies; only the args' first line's leading portion is consulted,
+nothing is stripped from the text; the echo's `<command-args>` now rides the whole fan-out —
+`CommandActionSink`/
 `RaiseCommandActionInWindows`/the per-window sink/`_HandleCommandHandover` gained an `args` leg —
-logged `[handover] <sid8> successor model from the message hint: <id>`), a family **TITLE REWRITE** (`commandHandoverTitleFindRegex`/`…TitleReplace` →
+logged `[handover] <sid8> successor model|title from the message hint: <v>`), a family **TITLE REWRITE** (`commandHandoverTitleFindRegex`/`…TitleReplace` →
 the pure `DeriveHandoverSuccessorTitle`, which returns `""` on unset/invalid/no-match/blank-result so
 the classic `"(handover)"` naming is the fallback — the rewrite can only IMPROVE a title, never lose
 one; `$1` backrefs, trimmed, 255-capped, still uniqueness-bumped), a family **FILE-MATCH regex**
@@ -1865,7 +1883,10 @@ What works, by area:
   Default + the `launchModels` list, rebuilt each cog open, an unlisted stored id shown `(custom)
   <id>`; a LEADING model word in the typed command — `/handover [fable] …` / `/handover fable 5: …`,
   partial/caseless/characters-only against either side of a launchModels entry — overrides the combo
-  for that one handover, `PickModelFromArgsHint`), **`commandHandoverTitleFindRegex`/`…TitleReplace`** (a find/replace pair rewriting successor
+  for that one handover, and an optional BRACKETED successor TITLE beside it — `/handover [fable]
+  [my title] …`, or `/handover [my title] …` when the first bracket matches no model (the fallback
+  slot) — overrides the title naming for that one handover, `ParseHandoverArgsHints`),
+  **`commandHandoverTitleFindRegex`/`…TitleReplace`** (a find/replace pair rewriting successor
   titles off the origin title — `$1` backrefs; unset/invalid/no-match/blank falls back to the classic
   `"(handover)"` naming), **`commandHandoverFileMatchRegex`** (which markdown files a handover
   collects, matched case-insensitively against the file NAME; seeded `HANDOVER\-` == the

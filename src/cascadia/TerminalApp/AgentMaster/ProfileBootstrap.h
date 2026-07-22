@@ -189,10 +189,17 @@ namespace Agentmaster::Profiles
             return w;
         }
 
-        // Process-local, one-way DEBUG override. Set once at startup from the persisted "Enable Debug Mode"
-        // setting (Profiles::ApplyPersistedDebugMode), BEFORE any gate reads IsDebugPackage(). Additive — it
-        // can only turn debug ON, so it never clobbers an ad-hoc --debug / AGENTMASTER_DEBUG enable. Atomic
-        // because the startup write is later read from the engine/UI threads (write happens-before all reads).
+        // ⚠ MODULE-local, one-way DEBUG override — NOT process-wide. A function-local static inside an
+        // inline HEADER function is one PRIVATE copy per linked binary (WindowsTerminal.exe,
+        // TerminalApp.dll, the engine harness, the CLI — nothing exports the symbol across the DLL
+        // boundary; the same per-module trap AgentCatchLog.h documents for wil's logging state). Cross-
+        // module agreement therefore rides the per-PROCESS env block instead: ApplyPersistedDebugMode
+        // latches the module it runs in AND exports AGENTMASTER_DEBUG=1, which every OTHER module's
+        // IsDebugPackage() first-use scan reads (the AGENTMASTER_PROFILE propagation idiom). Set once at
+        // startup from the persisted "Enable Debug Mode" setting, BEFORE any gate reads IsDebugPackage().
+        // Additive — it can only turn debug ON, so it never clobbers an ad-hoc --debug / AGENTMASTER_DEBUG
+        // enable. Atomic because the startup write is later read from the engine/UI threads (write
+        // happens-before all reads).
         inline std::atomic<bool>& DebugForced()
         {
             static std::atomic<bool> forced{ false };
@@ -342,6 +349,10 @@ namespace Agentmaster::Profiles
         }
         // Process-lifetime constant (env + commandline never change mid-run) — cache so the hot gate
         // sites (per-card board rebuilds, per-settings-push) don't rescan the commandline every call.
+        // The cache is per-MODULE too (an inline function's static — see detail::DebugForced), but env
+        // + commandline are per-PROCESS facts, so every module's first-use scan converges on the same
+        // verdict as long as the AGENTMASTER_DEBUG export (ApplyPersistedDebugMode, EXE prelude) runs
+        // before that module's first read — which startup ordering guarantees.
         static const bool debug = []() {
             if (!detail::GetEnvVar(L"AGENTMASTER_DEBUG").empty())
             {
@@ -393,14 +404,30 @@ namespace Agentmaster::Profiles
     }
 
     // Apply the persisted "Enable Debug Mode" setting: if settings.json turns it on, force the escape
-    // hatch for this process. Call ONCE at startup — AFTER the profile is resolved and BEFORE engine init
-    // or any UI reads IsDebugPackage() (WindowEmperor::HandleCommandlineArgs is the single caller). This
-    // is what makes the cog toggle take effect on the NEXT start, exactly like relaunching with --debug.
+    // hatch for THIS module AND export AGENTMASTER_DEBUG=1 into the process env block so EVERY module
+    // resolves identically. The latch alone is NOT enough: detail::DebugForced() is one PRIVATE copy per
+    // linked binary (see its comment), and the startup caller runs in WindowsTerminal.EXE — which left
+    // TerminalApp.DLL (the Engine's scheduler gate + every Auto Testing UI gate) reading FALSE: the cog
+    // toggle enabled debug in the EXE only, and the Tests Autorunner stayed dead in a release install
+    // ("enabled debug mode and restarted, the test runner did not get enabled across the entire app").
+    // The env block IS per-process — the same cross-module channel AGENTMASTER_PROFILE already rides
+    // (ResolveProfileDir exports it so every module resolves identically) — and IsDebugPackage()'s
+    // first-use scan picks it up in any module whose first gate read happens after this runs. Child-
+    // process note: a child CAN inherit the exported var (exactly as if the user had set the documented
+    // AGENTMASTER_DEBUG knob themselves) — benign in practice: WT regenerates a tab child's env from the
+    // registry (dropping it) unless reloadEnvironmentVariables is off, and a same-profile relaunch
+    // re-derives the verdict from settings.json anyway (toggle OFF ⇒ no export ⇒ debug off).
+    // Call at startup — AFTER the profile is resolved and BEFORE engine init or any UI reads
+    // IsDebugPackage() (WindowEmperor::HandleCommandlineArgs), and idempotently again from the DLL's own
+    // process-once engine wiring (Engine.cpp — the cross-module belt). One-way + idempotent, so the
+    // double application is harmless. This is what makes the cog toggle take effect on the NEXT start,
+    // exactly like relaunching with --debug.
     inline void ApplyPersistedDebugMode()
     {
         if (PersistedDebugModeEnabled())
         {
             ForceDebugMode();
+            ::SetEnvironmentVariableW(L"AGENTMASTER_DEBUG", L"1");
         }
     }
 
