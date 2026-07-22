@@ -2760,8 +2760,15 @@ Two GitHub Actions workflows are the repo's only CI:
   x64 Release. No packaging / signing / release. **No path filter**, so a docs-only push still
   triggers a full ~20-min build (add `paths-ignore: ['**.md','doc/**','LICENSE']` if that matters).
 - **`.github/workflows/release.yml`** — the public-release pipeline: triggers on a **tag `v*`**
-  push OR **`workflow_dispatch`** (a `version` input). No nightly, no Azure, no NuGet *publish*
-  (NuGet *restore* stays — it's a build dependency).
+  push OR **`workflow_dispatch`** (a `version` input). No scheduled cron, no Azure, no NuGet
+  *publish* (NuGet *restore* stays — it's a build dependency). A **NIGHTLY release** is still cut
+  by tag/dispatch: tag `vX.Y.Z-prerelease-nightly` (any tag containing `nightly`; bump `X.Y.Z` —
+  the updater compares numerically) — prep strips each version component to digits so the MSIX
+  `Identity Version` stays numeric while the tag/release name/installer `-Version` keep the full
+  suffix (`rawver`), and the release is **auto-marked prerelease** with a ⚠ NIGHTLY warning in its
+  body; the in-app updater offers it ONLY to users who accepted the cog's warning-gated nightly
+  opt-in (see the *In-app auto-updater* Status block), and `Install-Agentmaster.ps1` mirrors the
+  tiers (`-Nightly`; `-Prerelease` alone never installs a nightly).
 
 **To cut a release (happy path):**
 ```bash

@@ -9,7 +9,8 @@
     One script that does everything the manual "download the .cer + .msixbundle, trust the
     cert, Add-AppxPackage" dance does, and makes UPGRADES a no-op to run:
 
-      * Resolves the release to install (latest by default, or -Version X.Y.Z, or -Prerelease).
+      * Resolves the release to install (latest by default, or -Version X.Y.Z, or -Prerelease,
+        or -Nightly for unstable development builds).
       * Compares it with what is already installed and SKIPS if you are current (unless -Force).
       * Downloads the signed .msixbundle + Agentmaster.cer (cached + SHA-256 verified).
       * Trusts the self-signed certificate (LocalMachine\TrustedPeople) - elevating ONLY for
@@ -26,9 +27,19 @@
 
 .PARAMETER Version
     Specific version to install, e.g. "0.4.0" (a leading "v" is fine). Default: the latest release.
+    A nightly is named by its FULL suffixed version (e.g. "0.6.10-prerelease-nightly" - the tag
+    minus the leading v); an explicit -Version always wins, no channel switch needed.
 
 .PARAMETER Prerelease
     Consider pre-releases when picking the newest version (ignored when -Version is given).
+    NIGHTLY builds are NOT considered - they are a tier below pre-release (see -Nightly).
+
+.PARAMETER Nightly
+    Also consider NIGHTLY builds when picking the newest version (ignored when -Version is given).
+    A nightly is an UNSTABLE development build (release tag contains "nightly", published as a
+    GitHub prerelease) that may have memory leaks, CPU issues, and crashes - install one only to
+    help test. Mirrors the in-app updater's channel model: each switch admits only its own tier
+    (-Nightly alone = nightlies + stable; -Prerelease alone = betas + stable; both = everything).
 
 .PARAMETER Portable
     Install/upgrade the portable build (no cert, no admin) instead of the MSIX package.
@@ -69,6 +80,11 @@
     Install/upgrade the cert-free portable build and run it.
 
 .EXAMPLE
+    .\Install-Agentmaster.ps1 -Nightly
+    Install/upgrade to the newest build INCLUDING unstable nightlies (the testing channel -
+    may have memory leaks, CPU issues, and crashes).
+
+.EXAMPLE
     # Run straight from the web (latest, MSIX):
     irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1 | iex
 
@@ -84,6 +100,7 @@
 param(
     [string]   $Version,
     [switch]   $Prerelease,
+    [switch]   $Nightly,
     [switch]   $Portable,
     [switch]   $Force,
     [switch]   $Launch,
@@ -149,10 +166,19 @@ function Get-GitHubHeaders {
     return $h
 }
 
+# A NIGHTLY is an unstable development build whose release TAG contains "nightly"
+# (e.g. v0.6.10-prerelease-nightly; published as a GitHub prerelease). The TAG is the
+# authoritative signal - same contract as the in-app updater (Updater.h IsNightlyTag).
+function Test-NightlyTag {
+    param($TagName)
+    return ("$TagName" -match '(?i)nightly')
+}
+
 function Get-Release {
     param($Headers)
     $base = "https://api.github.com/repos/$Repo/releases"
     if ($Version) {
+        # Explicit ask wins - naming a nightly version installs that nightly, no switch needed.
         $tag = if ($Version -match '^v') { $Version } else { "v$Version" }
         Write-Step "Resolving release $tag from $Repo"
         try {
@@ -161,15 +187,37 @@ function Get-Release {
             throw "Release '$tag' not found in $Repo. Check the version, or list with: gh release list -R $Repo"
         }
     }
-    if ($Prerelease) {
-        Write-Step "Resolving newest release (incl. pre-releases) from $Repo"
+    if ($Prerelease -or $Nightly) {
+        $incl = if ($Prerelease -and $Nightly) { 'pre-releases + nightlies' }
+                elseif ($Nightly)              { 'nightlies' }
+                else                           { 'pre-releases' }
+        Write-Step "Resolving newest release (incl. $incl) from $Repo"
         $all = Invoke-RestMethod -Uri "$base`?per_page=20" -Headers $Headers
-        $r = $all | Where-Object { -not $_.draft } | Select-Object -First 1
-        if (-not $r) { throw "No releases found in $Repo." }
+        # The in-app updater's channel model (Updater.h ReleaseAllowedOnChannel): stable is always
+        # eligible; a NIGHTLY (by tag) only under -Nightly - regardless of the prerelease flag, so
+        # -Prerelease alone NEVER installs a nightly; any other prerelease only under -Prerelease.
+        # First eligible non-draft = the newest release on the requested channel.
+        $r = $all | Where-Object {
+            if ($_.draft) { return $false }
+            if (Test-NightlyTag $_.tag_name) { return [bool]$Nightly }
+            if ($_.prerelease) { return [bool]$Prerelease }
+            return $true
+        } | Select-Object -First 1
+        if (-not $r) { throw "No releases found in $Repo on the requested channel." }
         return $r
     }
     Write-Step "Resolving latest release from $Repo"
-    return Invoke-RestMethod -Uri "$base/latest" -Headers $Headers
+    $r = Invoke-RestMethod -Uri "$base/latest" -Headers $Headers
+    if ($r -and (Test-NightlyTag $r.tag_name)) {
+        # Belt (mirrors the in-app updater's /latest guard): nightlies ship as prereleases, which
+        # /latest excludes - one surfacing here is a mis-published release and must not land on the
+        # default channel. Fall back to the newest genuinely-stable release.
+        Write-Warn "latest ($($r.tag_name)) is a NIGHTLY (unstable dev build) - skipped on the default channel (use -Nightly to opt in)"
+        $all = Invoke-RestMethod -Uri "$base`?per_page=20" -Headers $Headers
+        $r = $all | Where-Object { -not $_.draft -and -not $_.prerelease -and -not (Test-NightlyTag $_.tag_name) } | Select-Object -First 1
+        if (-not $r) { throw "No stable (non-nightly) release found in $Repo. Use -Version <x.y.z>, -Prerelease, or -Nightly." }
+    }
+    return $r
 }
 
 function Get-AssetVersion {

@@ -40,7 +40,7 @@ You never have to open the Manager to read a session. Every classified tab wears
 #### Additional features
 - **Tests Autorunner** — auto-sends the next queued prompt on turn-complete (Full / Semi / Manual), with stop-on-error · max-sends · pause-on-input · question-guard · Enter-retry, and savable plan templates.
 - **`agentmaster` CLI** — query the fleet from any shell, app up or down (`show` / `list` / `sessions` / `tabs` / `windows` / `external`, `--self`, `--json`).
-- **In-app updater** — checks GitHub on launch and from Settings → Updates; one-click update, pre-release opt-in, and uninstall.
+- **In-app updater** — checks GitHub on launch and from Settings → Updates; one-click update, pre-release and (warning-gated) nightly opt-ins, and uninstall. Nightly builds — unstable dev versions, tag contains `nightly` — are always skipped unless you accept the nightly opt-in.
 - **Keep Awake** — toolbar toggle (Off / Always / While-Running) so the machine won't sleep mid-run.
 - **Context-window usage** — every card shows how full the conversation's context is (e.g. `ctx 182K`).
 - **Never dead-ends** — quit an agent and you land on a live shell prompt at its cwd, not a dead pane.
@@ -66,7 +66,7 @@ In active use, shipping regular [**releases**](https://github.com/Nucs/Agentmast
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1)))
 ```
 
-Flags: `-Version <x.y.z>` · `-Portable` (cert-free, no admin) · `-Launch` · `-Prerelease` · `-Force` · `-Uninstall`.
+Flags: `-Version <x.y.z>` · `-Portable` (cert-free, no admin) · `-Launch` · `-Prerelease` · `-Nightly` (also consider unstable nightly builds) · `-Force` · `-Uninstall`.
 
 Prefer the files? Grab them from [**Releases**](https://github.com/Nucs/Agentmaster/releases): the **portable zip** (unzip, run `agentmaster.exe` — fully self-contained, no cert) or the self-signed **`.msixbundle`** (trust `Agentmaster.cer` once, then `Add-AppxPackage`).
 

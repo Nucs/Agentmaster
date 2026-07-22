@@ -3,16 +3,17 @@ name: release-notes
 description: |
   Author and assemble Agentmaster GitHub release notes — the house format (tight intro +
   "New"/"Fixes" + "Install" with the exact asset names), turning a commit delta into dense
-  themed bullets, and the two framings: PRE-RELEASE vs STABLE. Encodes the mechanics done
-  repeatedly: derive the changelog since the right baseline, the copy-paste Install block,
-  the "comprehensive changelog since last stable" ASSEMBLY (a stable release folds every
-  intervening pre-release's notes in full), stripping the draft's HTML-comment header before
-  publishing, applying via `gh release edit --notes-file`, and CONVERTING a live release
-  between stable and pre-release — including the gotcha that `--latest=false` does NOT move
-  the Latest badge (you must explicitly `--latest` the release you want as Latest). Use when
-  writing or updating a release's notes, choosing stable vs pre-release framing, assembling
+  themed bullets, and the three framings: NIGHTLY vs PRE-RELEASE vs STABLE. Encodes the
+  mechanics done repeatedly: derive the changelog since the right baseline (nightlies are
+  INVISIBLE to baselines), the copy-paste Install block, the "comprehensive changelog since
+  last stable" ASSEMBLY (a stable release folds every intervening pre-release's notes in
+  full — never nightlies), stripping the draft's HTML-comment header before publishing,
+  applying via `gh release edit --notes-file`, and CONVERTING a live release between stable
+  and pre-release — including the gotcha that `--latest=false` does NOT move the Latest
+  badge (you must explicitly `--latest` the release you want as Latest). Use when writing
+  or updating a release's notes, choosing nightly/stable/pre-release framing, assembling
   the full changelog for a version, or flipping a published release's stable/pre-release status.
-keywords: release notes, changelog, notes-file, gh release edit, pre-release, stable, latest badge, New in, Fixes, Install, asset names, msixbundle, portable zip, since last stable, draft notes, Agentmaster
+keywords: release notes, changelog, notes-file, gh release edit, pre-release, stable, nightly, latest badge, New in, Fixes, Install, asset names, msixbundle, portable zip, since last stable, draft notes, Agentmaster
 ---
 
 # Agentmaster — authoring & assembling release notes
@@ -59,6 +60,15 @@ The `<NNN>` file name and the committed archive are the convention — match it.
   the STABLE fold — **NOT** for a prerelease. A **prerelease baselines off the PREVIOUS release**,
   whatever version that was (e.g. a reunification prerelease that ships a previously-abandoned batch
   lists only that batch as ITS delta, minus anything already shipped in an intervening hotfix).
+- **NIGHTLIES are INVISIBLE to baselining, in BOTH directions.** A nightly (tag contains `nightly`,
+  e.g. `v0.6.10-prerelease-nightly` — an unstable dev snapshot only nightly-opted users ever see):
+  - Its OWN notes may be terse — a short delta vs the previous release of ANY kind (or even the
+    workflow's default body): nightlies exist to be installed by testers, not read.
+  - A later **pre-release/stable NEVER baselines off a nightly** — its delta is measured against the
+    previous NON-nightly release, so commits that first shipped in a nightly still appear in the next
+    real release's notes (almost nobody installed the nightly; "already shipped" doesn't apply).
+  - The **STABLE fold (§6) folds pre-releases only, never nightlies** — a nightly's content reaches
+    the fold through the pre-release/stable that re-ships it.
 
 Get the delta and omit-list — `<prev>` is the release RIGHT BEFORE `<target>` (prerelease: the prior
 prerelease/stable; stable: the last stable, then fold each intervening prerelease's body per §6):
@@ -125,6 +135,16 @@ Runs as **`agentmaster`** / Start menu **Agentmaster**. Upgrading keeps your dat
 Notes: assets are always `Agentmaster_<X.Y.Z>.0.*` (**ver4** = X.Y.Z.0) + a single `Agentmaster.cer`.
 The `< … >` markers above are placeholders, not literal — keep the STABLE **or** PRE-RELEASE variant.
 
+**NIGHTLY variant** (see §5 for the framing block): title `## Agentmaster X.Y.Z-prerelease-nightly
+(nightly)`; the intro/Install blockquote becomes the NIGHTLY warning (`> ⚠️ **NIGHTLY build** — an
+unstable development version. It may have memory leaks, CPU issues, and crashes. Install it only to
+help test.`) and the enable path is **Settings → Updates → "Allow updating to nightly builds
+(unstable)"** (a warning confirm gates it; even pre-release-opted users skip nightlies otherwise).
+Asset names STAY numeric (`Agentmaster_X.Y.Z.0.*` — prep strips the tag suffix for ver4), but the
+one-command installer must pass the **FULL suffixed version**: `-Version X.Y.Z-prerelease-nightly`
+(`-Version` maps to the tag, which carries the suffix). `release.yml` already writes a serviceable
+nightly body (warning blockquote + install block) — curated notes are OPTIONAL for a nightly.
+
 ---
 
 ## 5. Stable vs pre-release — framing AND mechanics
@@ -135,6 +155,17 @@ The `< … >` markers above are placeholders, not literal — keep the STABLE **
 | Intro | "**X.Y.Z is a pre-release** … The stable **<prev>** remains the default." | "**X.Y.Z is a stable release** … the new default **Latest**." |
 | Install | keeps the `> **This is a pre-release.**` blockquote + `## Install (pre-release)` | drops the blockquote; `## Install`; adds "now the default Latest" |
 | Publish | `gh release edit vX.Y.Z -R Nucs/Agentmaster --draft=false --prerelease --latest=false` | `gh release edit vX.Y.Z -R Nucs/Agentmaster --draft=false --latest --prerelease=false` |
+
+**NIGHTLY framing (the third tier, BELOW pre-release):** a nightly is cut by TAG NAME
+(`vX.Y.Z-prerelease-nightly` — anything containing `nightly`; release-version B0/B3) and
+`release.yml` **auto-marks it prerelease** with a warning blockquote already in the body. Mechanics:
+same publish flags as a pre-release (`--draft=false --prerelease --latest=false`, NEVER `--latest`);
+title suffix `(nightly)`; the enable path in any text is the cog's warning-gated nightly switch, not
+the pre-release toggle (the in-app updater offers a nightly ONLY to nightly-opted users — even
+pre-release-opted users skip it). Notes may stay terse/default (§2 — nightlies are invisible to
+baselines, so nothing downstream depends on their bodies). **Never CONVERT a nightly to
+stable/pre-release**: the nightly gating keys on the TAG, which `gh release edit` can't rename — a
+build worth promoting is re-tagged and re-released as a real `vX.Y.Z`.
 
 **CONVERTING a live release (the flip):** change **both** the notes framing (title/intro/Install)
 and the flags. **Gotcha proven today:** on a pre-release→stable→pre-release flip, `--latest=false`
@@ -212,10 +243,16 @@ Finally, commit the draft archive (single `git add` + `git commit`, extensive me
 - A **STABLE** release's notes must carry the **whole** changelog since the last stable — fold in the
   intervening pre-releases (§6), don't just condense them to a recap. This fold is the ONLY place
   accumulation happens (the prerelease→stable moment).
+- A **NIGHTLY** is invisible to baselining in both directions (§2): its own notes may be terse, the
+  next real release baselines off the previous NON-nightly release (re-listing nightly-shipped work
+  is CORRECT), and the stable fold never includes it. Same publish flags as a pre-release, never
+  `--latest`, never convert-in-place (the gating is the TAG).
 - Flip framing **and** flags together; `--latest=false` alone won't move the badge — `--latest` the
   release you want (§5).
 - Strip the `<!-- … -->` draft header before `--notes-file`.
 - Asset names are `Agentmaster_X.Y.Z.0.*` (ver4) + `Agentmaster.cer`; the one-command installer uses
-  `-Version X.Y.Z` (ver3).
+  `-Version X.Y.Z` (ver3) — **except a nightly, whose `-Version` is the FULL suffixed
+  `X.Y.Z-prerelease-nightly`** (it maps to the tag; the assets stay numeric ver4).
 - The `> **This is a pre-release.**` blockquote + `(pre-release)` title suffix belong to pre-releases
-  ONLY — a "0.6.2 is now the default Latest" line on a pre-release is the classic reframe-miss.
+  ONLY — a "0.6.2 is now the default Latest" line on a pre-release is the classic reframe-miss; a
+  nightly wears the ⚠️ NIGHTLY blockquote instead (§4).

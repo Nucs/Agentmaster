@@ -8,10 +8,12 @@ description: |
   upstream microsoft/terminal remote), confirm the version with the user first, build the
   RELEASE identity, and ALWAYS pre-validate with a clean local Release build (incremental
   Debug builds mask clean-build errors the runner WILL hit). Use when the user asks to
-  release a new version, cut/publish a release, ship vX.Y.Z, or deploy the dev instance.
-keywords: release, deploy, version, publish, ship, vX.Y.Z, release.yml, ci.yml, msixbundle, gh release, git tag, AgentmasterDev, agentmaster.exe, draft release, build mutex
-keywords-sparse: cut a release, release a new version, publish vX.Y.Z, ship it, deploy the app, redeploy
-keywords-regex: \brelease\b|\bdeploy\b|\bpublish\b|v\d+\.\d+\.\d+|release\.yml|\.msixbundle
+  release a new version, cut/publish a release, ship vX.Y.Z, cut a NIGHTLY
+  (vX.Y.Z-prerelease-nightly — auto-marked prerelease, offered only to nightly-opted users),
+  or deploy the dev instance.
+keywords: release, deploy, version, publish, ship, vX.Y.Z, release.yml, ci.yml, msixbundle, gh release, git tag, AgentmasterDev, agentmaster.exe, draft release, build mutex, nightly, prerelease-nightly
+keywords-sparse: cut a release, release a new version, publish vX.Y.Z, ship it, deploy the app, redeploy, cut a nightly, nightly build
+keywords-regex: \brelease\b|\bdeploy\b|\bpublish\b|\bnightly\b|v\d+\.\d+\.\d+|release\.yml|\.msixbundle
 ---
 
 # Agentmaster — deploy & release a version
@@ -118,6 +120,12 @@ bash tools/am-lock.sh release --token "$TOKEN"
 It's outward-facing — never decide the version yourself. Default scheme: a tag `vX.Y.Z` →
 `ver3 = X.Y.Z`, `ver4 = X.Y.Z.0` (the manifest `Identity Version`). Decide whether to release
 HEAD as-is or commit pending WIP first.
+**NIGHTLY scheme:** tag `vX.Y.Z-prerelease-nightly` (any tag containing `nightly` is a nightly —
+the in-app updater's `IsNightlyTag` matches by contains, case-insensitive). `release.yml`'s prep
+strips each component to digits, so `ver3`/`ver4` stay numeric (`X.Y.Z` / `X.Y.Z.0`) while the
+TAG + release name + installer `-Version` keep the full suffix (`rawver`). **`X.Y.Z` must be
+bumped past the newest release** — the updater's compare is numeric `major.minor.patch`
+(suffixes ignored), so a nightly reusing the current version is never offered to anyone.
 
 ### B0.5. Map the topology — diverged tags & "reunification" releases
 A version's tag is a **snapshot**, not necessarily a point on mainline. Prereleases and hotfixes
@@ -150,6 +158,10 @@ git rev-parse HEAD origin/agentmaster          # is local ahead of origin? (push
   = the newest **non**-prerelease; intervening prereleases do NOT advance it. That last-stable is the
   baseline for the STABLE fold (§6) only — a prerelease's delta is measured against whatever release
   came right before it, not off the last stable or the highest version number (release-notes §2).
+  **NIGHTLIES are INVISIBLE to baselining** (release-notes §2): a pre-release/stable's delta is
+  measured against the previous NON-nightly release — a nightly is a throwaway snapshot almost nobody
+  installed, so its commits must still appear in the next real release's notes, and the stable fold
+  (§6) folds pre-releases only, never nightlies.
 - **Push mainline before tagging** so `origin/agentmaster` reflects the released tree (the install
   one-liner pulls `tools/*.ps1` from the branch). A clean fast-forward (`git merge-base --is-ancestor
   origin/agentmaster HEAD`) is a plain `git push origin agentmaster`.
@@ -210,10 +222,14 @@ git push --force-with-lease origin agentmaster   # or plain push if fast-forward
 ```bash
 # real release (tag-push):
 git tag -a vX.Y.Z -m "Agentmaster X.Y.Z" <commit> && git push --force origin vX.Y.Z
+# NIGHTLY (auto-marked prerelease by the workflow; numeric X.Y.Z bumped per B0):
+git tag -a vX.Y.Z-prerelease-nightly -m "Agentmaster X.Y.Z nightly" <commit> && git push --force origin vX.Y.Z-prerelease-nightly
 # re-pointing an existing tag: git tag -d vX.Y.Z; git tag -a ...; git push --force origin vX.Y.Z
 #   (a force-update of a v* tag DOES re-trigger release.yml)
 # OR a draft dry-run without a tag:
 gh workflow run release.yml -R Nucs/Agentmaster -f version=X.Y.Z
+#   (a dispatch KEEPS a version suffix in the tag it mints — `-f version=X.Y.Z-prerelease-nightly`
+#    cuts a nightly draft exactly like the tag-push would)
 ```
 
 ### B4. Monitor (background it)
@@ -235,6 +251,10 @@ Expect exactly these, non-empty (rough sizes from v0.1.1):
 - `Agentmaster.cer`                (~768 bytes — DER cert; "0 MB" is just rounding, confirm it's > 0)
 - `Agentmaster_<ver4>_x64.zip`     (~11 MB)
 - `Agentmaster_<ver4>_arm64.zip`   (~11 MB)
+
+**Nightly note:** `<ver4>` is always the NUMERIC `X.Y.Z.0` — for a nightly the TAG/release name
+carry the `-prerelease-nightly` suffix but the asset names do NOT (prep strips components to
+digits), so verify assets by the numeric ver4, not the tag.
 
 ### B6. Apply curated release notes
 Write dense, capability-focused notes to a temp `.md` (sections: a one-line intro · **New in
@@ -288,3 +308,8 @@ repos/<owner>/<repo>/actions/permissions -F enabled=true -f allowed_actions=all`
 - Force-updating a tag re-triggers `release.yml`; a draft has no public effect until you publish.
 - Local deploy relaunches **`AgentmasterDev`**/`agentmasterdev`, NOT `Agentmaster`/`agentmaster`.
 - Always release the build mutex, even when a step fails.
+- **NIGHTLY**: bump `X.Y.Z` (numeric compare; a suffix alone is never "newer"); the workflow
+  auto-marks it prerelease — still publish with the PRE-RELEASE flags, never `--latest`; asset
+  names stay numeric `<ver4>` while the tag carries the suffix; the one-command installer needs
+  the FULL suffixed version (`-Version X.Y.Z-prerelease-nightly` — it maps `-Version` → tag);
+  nightlies are invisible to notes baselines (release-notes §2).
