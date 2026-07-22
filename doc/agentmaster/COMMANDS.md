@@ -455,11 +455,21 @@ briefing to a DIFFERENT session ("never write 'continue in file B'" — the live
 test's origin wrote exactly that cross-reference under the join semantics, which the fan-out
 text now prevents); handover-here's first file replaces the origin tab, additional files open
 beside it.
-**V7 / handover-here V5 (the CONFIGURABLE WRITE LOCATION — the current texts)** lift the target
+**V7 / handover-here V5 (the CONFIGURABLE WRITE LOCATION)** lift the target
 folder out of the prose onto its own rendered `WRITE IT IN: <phrase>` line, defaulting to the
 session scratchpad instead of the working directory — see §6c, which also documents the marker
 contract every future version must keep and the identity inverse that keeps the digest history
 valid.
+**V8 / handover-here V6 / handover-standby V2 (the ARGUMENT-HINT — the current texts)** add the
+official Claude Code **`argument-hint:` frontmatter field** (shown beside the command in the `/`
+autocomplete menu; `.claude/commands/*.md` files take the same frontmatter as skills) spelling the
+§6b per-message syntax right where the user types it:
+`[model] [title] <context-or-filepath> - brackets optional + typed literally, e.g. /handover
+[fable] [my title] finish the tests; a [x] naming no model becomes the title` (each command's
+example names ITS OWN token — rename-render-safe, and standby's example deliberately shows the
+TITLE-ONLY fallback form). The value is **single-QUOTED YAML** — a plain scalar starting `[`
+parses as a flow sequence and would break the whole frontmatter block — and the harness pins the
+quoted prefix as a sentinel, so a future edit can't silently unquote it.
 **V5 / handover-here V3 (the SELF-INVOCATION guard — found by a live skill-creator review):**
 Claude Code lists the commands as invocable SKILLS, but a MODEL-initiated Skill invocation
 writes **no `<command-name>` transcript echo** (proven empirically against a live transcript —
@@ -598,6 +608,9 @@ state; the cog surfaces invalidity to the user instead of flooding hooks.log).
   (harmless context) and the successor's first message is the FILE content. Logged
   `[handover] <sid8> successor model from the message hint: <id>` /
   `[handover] <sid8> successor title from the message hint: <title>`.
+  **The syntax is SURFACED in the `/` autocomplete** by the definitions' `argument-hint:`
+  frontmatter (V8 / here V6 / standby V2 — see §6's version narrative), so the user sees
+  `[model] [title] <context-or-filepath>` while typing the command instead of having to know it.
 **The defaults are REAL VALUES, not hidden code paths.** All three regex settings ship
 **seeded** (`kDefaultCommandTitleFindRegex` / `…TitleReplace` / `…FileMatchRegex` in
 SessionModels.h) and **presence-gated** on load (the `launchModels` idiom): an absent key seeds

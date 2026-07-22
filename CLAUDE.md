@@ -826,10 +826,11 @@ tag no session carries lists at **·0** (sorts last).
 ([`COMMANDS.md`](doc/agentmaster/COMMANDS.md)) — implemented +
 HARDENED, delivery = FULL CONTENT INJECTION (never truncated), RESTART-RESILIENT (durable
 per-session progress) + MULTI-FILE (one command's several HANDOVER files consumed as one):
-engine-tested (2601/2601 — the
+engine-tested (2604/2604 — the
 `TestCommandWatch` units + safeguard belts + the content-injection/tier units + the per-MESSAGE
 `ParseHandoverArgsHints` model+TITLE hint units (the bracket slots, the no-model→title fallback,
-verbatim/trim/cap, the `PickModelFromArgsHint` delegation identity) + the /handover-here
+verbatim/trim/cap, the `PickModelFromArgsHint` delegation identity) + the three definitions'
+argument-hint sentinels + the /handover-here
 twin units (hyphen echo, name-exact binding isolation, its own definition file) + the
 /handover-standby units (§5b — its own definition file + digest gate + fill-not-send sentinels +
 no-bare-sibling-token render check, the THREE-way binding isolation ["handover" is a PREFIX of
@@ -1004,14 +1005,18 @@ shipped, unmodified" is a content-IDENTITY question, so a superseded version cos
 frozen 2–3 KB literal (retired texts live in git history), and the harness's
 `last == sha256(current text)` gate — whose failure message PRINTS the digest to append — makes the
 history self-maintaining: a text edit that forgot its digest fails the suite instead of silently
-orphaning the upgrade rule. The current V6 instructs
+orphaning the upgrade rule. The current V8 instructs
 Claude to Write each `HANDOVER-<topic>.md` AS a SELF-CONTAINED direct briefing TO its successor —
 because EACH file's content becomes a DIFFERENT successor's first message (the FAN-OUT: N files in
 one turn = N parallel successor tabs, in write order; "never write 'continue in file B'") — then
-end the turn, and carries
+end the turn, carries
 the SELF-INVOCATION guard (a MODEL-invoked Skill call writes no `<command-name>` echo, so the watch
 never arms — the guard makes a self-invoked model write nothing and redirect the user to TYPE the
-command; handover-here V3 same)) and binds
+command; handover-here V3 same), and (V8 / here V6 / standby V2) an **`argument-hint:` frontmatter
+line** — the official Claude Code autocomplete field — spelling the §6b per-message syntax
+`[model] [title] <context-or-filepath>` right in the `/` menu (single-QUOTED YAML — a plain scalar
+starting `[` parses as a flow sequence; the `/handover` token inside it rides the §6a rename render;
+standby's example shows the TITLE-ONLY fallback form)) and binds
 `handover` → the new per-window **command-action
 sinks** (`Engine::CommandActionSink`, the activateSinks idiom — registered at page init,
 token-detached in `~TerminalPage`). The hosting window's `_HandleCommandHandover` spawns the

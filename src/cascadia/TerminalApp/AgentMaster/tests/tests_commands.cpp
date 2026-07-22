@@ -1504,6 +1504,7 @@ void TestCommandWatch()
             CHECK(current.find(L"MORE THAN ONE") != std::wstring_view::npos, "current definition permits writing several HANDOVER files in one turn");
             CHECK(current.find(L"YOU invoked the skill yourself") != std::wstring_view::npos, "current definition carries the SELF-INVOCATION guard (V5 — a model-invoked skill writes no command echo, so nothing watches; redirect the user to TYPE the command)");
             CHECK(current.find(L"its OWN successor") != std::wstring_view::npos, "current definition briefs the FAN-OUT semantics (V6 — each file starts its OWN successor tab; files must be self-contained)");
+            CHECK(current.find(L"argument-hint: '[model] [title] <context-or-filepath>") != std::wstring_view::npos, "current definition carries the autocomplete argument-hint frontmatter (V8 — the §6b [model] [title] syntax; single-QUOTED YAML, a plain scalar starting '[' would parse as a flow sequence)");
             // Well-formed + unique digests: a typo'd entry silently disables that version's upgrade
             // path forever (its installs would read as user-owned), a duplicated one hides a version.
             bool wellFormed = true;
@@ -1566,6 +1567,7 @@ void TestCommandWatch()
             CHECK(current.find(L"MORE THAN ONE") != std::wstring_view::npos, "current handover-here definition permits writing several HANDOVER files in one turn");
             CHECK(current.find(L"YOU invoked the skill yourself") != std::wstring_view::npos, "current handover-here definition carries the SELF-INVOCATION guard (V3)");
             CHECK(current.find(L"its OWN successor") != std::wstring_view::npos && current.find(L"FIRST file's successor REPLACES this tab") != std::wstring_view::npos, "current handover-here definition briefs the FAN-OUT semantics (V4 — first file replaces this tab, additional files open beside it)");
+            CHECK(current.find(L"argument-hint: '[model] [title] <context-or-filepath>") != std::wstring_view::npos, "current handover-here definition carries the autocomplete argument-hint frontmatter (V6 — the §6b [model] [title] syntax, single-quoted YAML)");
             bool wellFormed = true;
             for (const auto& h : hashes)
             {
@@ -1632,6 +1634,7 @@ void TestCommandWatch()
             CHECK(current.find(L"MORE THAN ONE") != std::wstring_view::npos, "current handover-standby definition permits writing several HANDOVER files in one turn");
             CHECK(current.find(L"YOU invoked the skill yourself") != std::wstring_view::npos, "current handover-standby definition carries the SELF-INVOCATION guard");
             CHECK(current.find(L"its OWN successor") != std::wstring_view::npos, "current handover-standby definition briefs the FAN-OUT semantics (each file starts its own successor tab)");
+            CHECK(current.find(L"argument-hint: '[model] [title] <context-or-filepath>") != std::wstring_view::npos, "current handover-standby definition carries the autocomplete argument-hint frontmatter (V2 — its example shows the TITLE-ONLY fallback form, single-quoted YAML)");
             // NO bare sibling-command token: each definition renders only ITS OWN "/<name>", so a
             // "/handover"-at-a-word-boundary mention would go stale under a sibling rename. (Every
             // "/handover" here is the "/handover-standby" token — '-' extends the slug.)

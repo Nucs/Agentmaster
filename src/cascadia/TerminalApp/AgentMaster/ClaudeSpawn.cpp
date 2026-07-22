@@ -1145,26 +1145,31 @@ try {
             "581aad0004fae77a28bb215415e949e3d84f164eea2496ec0eb2520c6121136e", // v4 — multi-file: several HANDOVER-*.md in one turn, delivered JOINED into one successor
             "f4f1b98250822e018db0dbae0eb75d503078d1b45be99167715e11eb94f604b7", // v5 — self-invocation guard: a MODEL-invoked skill writes no echo, so it must write nothing and redirect the user to TYPE the command
             "f3c88984e10a9d8689c4f0ac70eab3f19d4aac1001c08bb9a04480d6850fbce5", // v6 — FAN-OUT: each file starts its OWN successor tab, so every file must be self-contained
-            "e03874c5997929a37f923059e7e2e1ef3b61baa34869b28fe38b2cafc5c54e40", // v7 — CONFIGURABLE WRITE LOCATION (current): the folder moved to a rendered "WRITE IT IN:" line, defaulting to the session scratchpad
+            "e03874c5997929a37f923059e7e2e1ef3b61baa34869b28fe38b2cafc5c54e40", // v7 — CONFIGURABLE WRITE LOCATION: the folder moved to a rendered "WRITE IT IN:" line, defaulting to the session scratchpad
+            "cf3ca81256a36a5f2a90cbdc113011682acf41beee77b49f64d3c0f4549ee91c", // v8 — ARGUMENT-HINT (current): the autocomplete frontmatter spelling the §6b "[model] [title] <context-or-filepath>" syntax
         };
         return kHashes;
     }
 
-    // V7 (configurable write location) — the CURRENT text. The file's DIRECTORY moved out of the
-    // prose and onto its own "WRITE IT IN: <phrase>" line, rendered from the
-    // AppSettings::commandHandoverWritePath setting (COMMANDS.md §6c) — shipped default: the
-    // session SCRATCHPAD, because a briefing is a transient hand-off document whose CONTENT is
-    // injected into the successor anyway, so the file has no business landing in the user's repo
-    // (the HANDOVER-*.md litter). The line's marker + one-line span are what make the location
-    // reversible for the digest identity (RenderShippedCommandWritePath / its inverse below), so
-    // KEEP THE MARKER AND KEEP THE PHRASE ON ONE LINE in every future version.
-    // V6 (superseded) was the fan-out text: each HANDOVER-*.md starts its OWN successor tab (one
-    // command writing N files == N parallel successors, in write order) instead of all files
-    // joining into one successor's message — hence "never write 'continue in file B'", which V7
-    // keeps verbatim.
-    static constexpr std::wstring_view kHandoverCommandV7 =
+    // V8 (argument-hint) — the CURRENT text. Adds the `argument-hint:` frontmatter line — the
+    // official Claude Code autocomplete field (shown beside the command in the / menu) — spelling
+    // the family syntax the §6b per-message hints parse: `[model] [title] <context-or-filepath>`
+    // (both brackets OPTIONAL + typed LITERALLY; a [x] naming no model falls back to the title).
+    // The value is single-QUOTED YAML deliberately: a plain scalar starting `[` parses as a flow
+    // sequence and would break the whole frontmatter block. The "/handover" token inside the hint
+    // rides the §6a rename render like every other mention, so a renamed command's hint shows the
+    // renamed example.
+    // V7 (superseded) moved the file's DIRECTORY out of the prose onto its own rendered
+    // "WRITE IT IN: <phrase>" line (AppSettings::commandHandoverWritePath, COMMANDS.md §6c) —
+    // shipped default: the session SCRATCHPAD (a briefing is a transient hand-off courier whose
+    // CONTENT is injected into the successor anyway — the HANDOVER-*.md litter fix). The line's
+    // marker + one-line span are what make the location reversible for the digest identity
+    // (RenderShippedCommandWritePath / its inverse below), so KEEP THE MARKER AND KEEP THE PHRASE
+    // ON ONE LINE in every future version — V8 keeps it verbatim.
+    static constexpr std::wstring_view kHandoverCommandV8 =
         LR"md(---
 description: Hand this session's work over to a fresh successor session (Agentmaster opens it automatically)
+argument-hint: '[model] [title] <context-or-filepath> - brackets optional + typed literally, e.g. /handover [fable] [my title] finish the tests; a [x] naming no model becomes the title'
 ---
 The user wants to HAND OVER this session's work to a fresh successor Claude session.
 Handover context from the user (inline context, or a path to a file you should read and fold in):
@@ -1205,7 +1210,7 @@ a successor session tab PER FILE (named like this one, ending in "(handover)", "
 
     std::wstring_view ShippedHandoverCommandText()
     {
-        return kHandoverCommandV7;
+        return kHandoverCommandV8;
     }
 
     // ---- the /handover-here command DEFINITION (COMMANDS.md — the IN-PLACE twin) ----
@@ -1223,17 +1228,21 @@ a successor session tab PER FILE (named like this one, ending in "(handover)", "
             "af205daa5ee0a81cf04355b87840a8aab28a0054023d8806da9085b729a63ae8", // v2 — multi-file: the /handover v4 split-permission line, delivered JOINED
             "7b8ecdc8599a8ad4621121e1cf6ff467bc477a355d019241878a9d0440188f32", // v3 — self-invocation guard (the /handover v5 guard, doubly important for the REPLACE-this-tab variant)
             "27fa954882260765c2348255aa026e1beb88332f8b590aef431f484c51d81c30", // v4 — FAN-OUT: the FIRST file's successor REPLACES this tab, each additional file opens its own beside it
-            "fe96f6676fd80a61230bf38265461f331e4c94ec78b184644354d44d88009812", // v5 — CONFIGURABLE WRITE LOCATION (current): the /handover v7 "WRITE IT IN:" line, same family-wide setting
+            "fe96f6676fd80a61230bf38265461f331e4c94ec78b184644354d44d88009812", // v5 — CONFIGURABLE WRITE LOCATION: the /handover v7 "WRITE IT IN:" line, same family-wide setting
+            "a4ea6a53bb04b954931b6f810ac9b3e1ac96ad73299f9f9aef5037be621f4b82", // v6 — ARGUMENT-HINT (current): the /handover v8 autocomplete syntax hint, in-place example
         };
         return kHashes;
     }
 
-    // V5 (configurable write location) — the CURRENT text: the /handover V7 semantics for the
-    // in-place twin (the same "WRITE IT IN: <phrase>" line, rendered from the SAME family-wide
-    // setting — the location is one rule for both commands, like the file-match pattern).
-    static constexpr std::wstring_view kHandoverHereCommandV5 =
+    // V6 (argument-hint) — the CURRENT text: the /handover V8 autocomplete syntax hint for the
+    // in-place twin (same single-quoted-YAML rationale; the example names ITS OWN command).
+    // V5 (superseded) was the configurable write location: the /handover V7 semantics — the same
+    // "WRITE IT IN: <phrase>" line, rendered from the SAME family-wide setting (the location is
+    // one rule for the whole family, like the file-match pattern).
+    static constexpr std::wstring_view kHandoverHereCommandV6 =
         LR"md(---
 description: Hand this session's work over to a fresh session that REPLACES this one in this same tab (Agentmaster restarts the tab automatically)
+argument-hint: '[model] [title] <context-or-filepath> - brackets optional + typed literally, e.g. /handover-here [fable] [my title] take over in this tab; a [x] naming no model becomes the title'
 ---
 The user wants to HAND OVER this session's work to a fresh successor Claude session that
 REPLACES this conversation IN THIS SAME TAB - Agentmaster restarts the tab into the
@@ -1277,7 +1286,7 @@ file) in this working directory, injecting each document as its session's openin
 
     std::wstring_view ShippedHandoverHereCommandText()
     {
-        return kHandoverHereCommandV5;
+        return kHandoverHereCommandV6;
     }
 
     // ---- the /handover-standby command DEFINITION (COMMANDS.md §5b — the FILL-NOT-SEND member) ----
@@ -1294,19 +1303,25 @@ file) in this working directory, injecting each document as its session's openin
     const std::vector<std::string_view>& ShippedHandoverStandbyCommandHashes()
     {
         static const std::vector<std::string_view> kHashes{
-            "2d48a7b6d1024a472ea39bb4bf90cb01db8da75b275b78f29774b6571d4e9c16", // v1 (current) — the original standby: fan-out successors whose briefings are PRE-TYPED into the input box, never submitted
+            "2d48a7b6d1024a472ea39bb4bf90cb01db8da75b275b78f29774b6571d4e9c16", // v1 — the original standby: fan-out successors whose briefings are PRE-TYPED into the input box, never submitted
+            "66d13b169a66d09b4ee5ab74a2e25ff94dc96dc04ad0521b0e7425d54d3f2376", // v2 — ARGUMENT-HINT (current): the /handover v8 autocomplete syntax hint; its example shows the TITLE-ONLY fallback form
         };
         return kHashes;
     }
 
-    // V1 (current) — the standby text: the /handover V7 mechanics (fan-out, self-contained files,
-    // the rendered "WRITE IT IN:" line, the self-invocation guard) with the delivery description
-    // swapped for the fill-not-send contract. KEEP THE MARKER AND KEEP THE PHRASE ON ONE LINE in
-    // every future version (the §6c identity fold), and keep the "Write tool" + "HANDOVER-"
-    // phrases the markdown await keys on.
-    static constexpr std::wstring_view kHandoverStandbyCommandV1 =
+    // V2 (argument-hint) — the CURRENT text: the /handover V8 autocomplete syntax hint (same
+    // single-quoted-YAML rationale); its example deliberately shows the TITLE-ONLY form — the
+    // first bracket naming no model falling back to the title slot — the shape standby is most
+    // typed with.
+    // V1 (superseded) was the original standby text: the /handover V7 mechanics (fan-out,
+    // self-contained files, the rendered "WRITE IT IN:" line, the self-invocation guard) with the
+    // delivery description swapped for the fill-not-send contract. KEEP THE MARKER AND KEEP THE
+    // PHRASE ON ONE LINE in every future version (the §6c identity fold), and keep the
+    // "Write tool" + "HANDOVER-" phrases the markdown await keys on — V2 keeps all of it verbatim.
+    static constexpr std::wstring_view kHandoverStandbyCommandV2 =
         LR"md(---
 description: Hand this session's work over to fresh successor session(s) whose first message is PRE-TYPED but NOT sent - you review it and press Enter (a handover in standby)
+argument-hint: '[model] [title] <context-or-filepath> - brackets optional + typed literally, e.g. /handover-standby [my title] review then press Enter; a [x] naming no model becomes the title'
 ---
 The user wants to HAND OVER this session's work to a fresh successor Claude session IN
 STANDBY: Agentmaster opens the successor tab(s) automatically and TYPES each briefing into
@@ -1352,7 +1367,7 @@ send - nothing is submitted until the user presses Enter in that tab.
 
     std::wstring_view ShippedHandoverStandbyCommandText()
     {
-        return kHandoverStandbyCommandV1;
+        return kHandoverStandbyCommandV2;
     }
 
     // ---- customizable command names (COMMANDS.md §6a) — the render / identity pair ----
