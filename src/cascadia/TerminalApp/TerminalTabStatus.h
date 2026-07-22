@@ -64,8 +64,18 @@ namespace winrt::TerminalApp::implementation
         // pointed here by TerminalPage::_SetTabPending just before AgentPendingVisible flips true; null
         // until the tab first shows a draft (the dots are collapsed until then). Replaces Fill="#E0A92B".
         WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::Media::Brush, AgentPendingBrush, PropertyChanged.raise, nullptr);
-        // Agentmaster (the SPARK CROWN — the tab-strip twin of the board card's "still cached" glyph; see
-        // the idl note): true while ServerCacheStillWarm() holds for this session, driven by
+        // Agentmaster (bookmark tags): the '\n'-joined "name\t#AARRGGBB" spec behind the tab-header
+        // BOOKMARK badges (see the idl note) — written by TerminalPage::_SetTabAgentTags (which
+        // resolves each tag's color: user-picked tag-colors.json > the name-hash), consumed by
+        // TabHeaderControl's code-behind (_UpdateTagBadges) AND the rich tab tooltip's tag-chip row
+        // via the same PropertyChanged pipeline as the pending-dots animation. "" == no tags.
+        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, AgentTagsSpec, PropertyChanged.raise);
+
+        // Kept in the SAME order as the idl (append-only — see the "APPEND NEW MEMBERS BELOW THIS LINE"
+        // note there for why the idl order is load-bearing; this file's order is only readability, but a
+        // reader diffing the two should not have to reconcile them).
+        // Agentmaster (the SPARK CROWN — the tab-strip twin of the board card's "still cached" glyph):
+        // true while ServerCacheStillWarm() holds for this session, driven by
         // TerminalPage::_SetTabCacheWarm off the scanner's ~2.5s tick (warmth lapses on a clock, so nothing
         // pushes its end). The status dot is NOT touched — the glow + embers are drawn around it.
         WINRT_OBSERVABLE_PROPERTY(bool, AgentCacheWarmVisible, PropertyChanged.raise);
@@ -73,12 +83,6 @@ namespace winrt::TerminalApp::implementation
         // deep ember on a light one) from the tab's rendered background via CacheWarmSparkColorFor, pointed
         // here by _SetTabCacheWarm just before AgentCacheWarmVisible flips true; null until first warm.
         WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::Media::Brush, AgentCacheWarmBrush, PropertyChanged.raise, nullptr);
-        // Agentmaster (bookmark tags): the '\n'-joined "name\t#AARRGGBB" spec behind the tab-header
-        // BOOKMARK badges (see the idl note) — written by TerminalPage::_SetTabAgentTags (which
-        // resolves each tag's color: user-picked tag-colors.json > the name-hash), consumed by
-        // TabHeaderControl's code-behind (_UpdateTagBadges) AND the rich tab tooltip's tag-chip row
-        // via the same PropertyChanged pipeline as the pending-dots animation. "" == no tags.
-        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, AgentTagsSpec, PropertyChanged.raise);
     };
 }
 

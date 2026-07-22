@@ -81,6 +81,33 @@ namespace TerminalApp
         // Fill="#E0A92B".
         Windows.UI.Xaml.Media.Brush AgentPendingBrush { get; set; };
 
+        // Agentmaster (bookmark tags): the session's tag list for the tab-strip BOOKMARK badges —
+        // '\n'-joined "name\t#AARRGGBB" lines (NormalizeTagName strips control chars from names, so
+        // both separators are unambiguous; "" == no tags). The COLOR rides the spec: the producer
+        // (TerminalPage::_SetTabAgentTags) resolves each tag's display color ONCE (the user-picked
+        // tag-colors.json entry, else the stable name-hash TagColorFor), so every consumer renders
+        // the same resolution with no store I/O. A SPEC STRING rather than a vector so it rides the
+        // same ONE observable-property pipeline the pending-dots animation uses: the producer writes
+        // it (idempotent — the observable no-ops when unchanged), TabHeaderControl's code-behind
+        // rebuilds one small bookmark ribbon per tag, and the rich tab tooltip renders its tag-chip
+        // row (name over a colored underscore) from the same string.
+        String AgentTagsSpec { get; set; };
+
+        // ---------------------------------------------------------------------------------------------
+        // APPEND NEW MEMBERS BELOW THIS LINE, NEVER IN THE MIDDLE.
+        // A WinRT interface's vtable slots are its DECLARATION ORDER, so inserting a member mid-interface
+        // renumbers every member after it. That is harmless in one fully-consistent build and BRUTAL the
+        // moment a single stale .obj survives an incremental build: the fresh consumer calls slot N while
+        // the stale implementation still has the OLD method there, so an unrelated call is dispatched with
+        // the wrong signature. Learned the hard way — the SPARK CROWN properties below were first declared
+        // just after AgentPendingBrush, which renumbered AgentTagsSpec; a poisoned incremental build (a
+        // mid-compile C3859/C1076 out-of-memory run left TerminalTabStatus.obj stale while its consumers
+        // rebuilt) then linked a mismatched pair and the app hard-crashed on startup with
+        // 0x80000003/_RTC_CheckStackVars — a Boolean out-param written through the wrong vtable slot,
+        // smashing the caller's stack guard. Appending keeps every EXISTING slot fixed, so the same
+        // accident can only ever break the NEW member instead of silently mis-dispatching old ones.
+        // ---------------------------------------------------------------------------------------------
+
         // Agentmaster (the SPARK CROWN — the tab-strip twin of the Triage-Board card's amber "still
         // cached" glyph): true while this session's Claude server-side prompt cache is still warm, i.e.
         // ServerCacheStillWarm() — the SAME pure predicate the card reads, so the two surfaces can never
@@ -98,17 +125,5 @@ namespace TerminalApp
         // AgentCacheWarmVisible flips true, so the sparks are never momentarily shown with a null/stale
         // brush. Null until the tab first goes warm (they are collapsed until then).
         Windows.UI.Xaml.Media.Brush AgentCacheWarmBrush { get; set; };
-
-        // Agentmaster (bookmark tags): the session's tag list for the tab-strip BOOKMARK badges —
-        // '\n'-joined "name\t#AARRGGBB" lines (NormalizeTagName strips control chars from names, so
-        // both separators are unambiguous; "" == no tags). The COLOR rides the spec: the producer
-        // (TerminalPage::_SetTabAgentTags) resolves each tag's display color ONCE (the user-picked
-        // tag-colors.json entry, else the stable name-hash TagColorFor), so every consumer renders
-        // the same resolution with no store I/O. A SPEC STRING rather than a vector so it rides the
-        // same ONE observable-property pipeline the pending-dots animation uses: the producer writes
-        // it (idempotent — the observable no-ops when unchanged), TabHeaderControl's code-behind
-        // rebuilds one small bookmark ribbon per tag, and the rich tab tooltip renders its tag-chip
-        // row (name over a colored underscore) from the same string.
-        String AgentTagsSpec { get; set; };
     }
 }
