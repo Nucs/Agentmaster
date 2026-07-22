@@ -2615,29 +2615,35 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        // HOLD instead of fire for a SUSPECTED SPURIOUS completion — the liveness-ticked sweep
-        // (_SweepAgentPendingToasts) then DROPS the hold when the session re-lights Running (the
-        // completion proved spurious) or FIRES it with the CURRENT state once it settles (signal
-        // cleared / moved to a hard needs-you state / the kNotifyExternalHoldCapMs backstop). Two hold
-        // reasons, both flavors of "confirm before the pop", both restricted to Idle/WaitingForInput
-        // (the only states a re-light can veto — a NeedsApproval question / an Error / an exit needs you
-        // now, work or flicker notwithstanding):
-        //   (a) SHORT SPAN — the observed Running span is under kNotifySpuriousSpanMs, i.e. a "0s"/"1s"
-        //       FLICKER: a slow-path Stop lands ~20ms after the next turn's UserPromptSubmit and the
-        //       session re-lights Running right after (the reported "0 seconds complete but still
-        //       running" bug — 6e2d0b48 / 532dc9ac / e7fa7fcc / 09e226cb). Needs only the edge's span +
-        //       state, so it holds even when the registry lookup below would miss.
-        //   (b) EXTERNAL WORK LIVE — a shell / background agent / teammate the outlived-turn promotion
-        //       re-lights Running ~20s later (the 513d1366 case). Reads the registry's live signal.
-        const int64_t runningSpan = (runningSince > 0) ? (TtNowMs() - runningSince) : 0; // 0 == entry unseen (adopted mid-turn) -> UNKNOWN span, not short
-        bool hold = false;
-        std::wstring holdWhat;
-        if (::Agentmaster::ShouldHoldShortCompletionToast(newState, runningSpan))
+        // MINIMUM COMPLETION SPAN (SessionScanner's ShouldSuppressShortCompletionToast): a Running span
+        // under kNotifyMinCompletionSpanMs yields NO toast at all — it is either the "0 seconds complete
+        // but still running" flicker (a slow-path Stop landing ~20ms after the NEXT turn's prompt, then
+        // an immediate re-light: 6e2d0b48 / 532dc9ac / e7fa7fcc / 09e226cb) or a turn too brief to be
+        // worth interrupting for. Deliberately checked BEFORE the hold below, for two reasons: a doomed
+        // toast is never parked, and — decisively — a HELD toast's span keeps growing, so parking a
+        // short one would let it cross the floor and fire late, turning "no notification" into "a
+        // delayed notification". Idle/Waiting only: NeedsApproval / Error / Done need you regardless of
+        // how briefly the turn ran (an approval request routinely blocks seconds in). A span of 0 is an
+        // UNOBSERVED entry (adopted mid-turn), not a short one — it is never floored.
+        const int64_t runningSpan = (runningSince > 0) ? (TtNowMs() - runningSince) : 0;
+        if (::Agentmaster::ShouldSuppressShortCompletionToast(newState, runningSpan))
         {
-            hold = true;
-            holdWhat = L"short span " + TtSpan(runningSpan, true) + L", confirming re-light";
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[notify-skip] " + ::Agentmaster::ShortId(sessionId) + L" running -> " + TtStateLabel(newState) +
+                                              L" after " + TtSpan(runningSpan, true) + L" (under the " +
+                                              std::to_wstring(::Agentmaster::kNotifyMinCompletionSpanMs / 1000) + L"s minimum)\n");
+            return;
         }
-        else if (_sessionRegistry)
+
+        // HOLD instead of fire while external work is live (SessionScanner's ShouldHoldCompletionToast):
+        // only Idle/WaitingForInput ever hold — exactly the two states the outlived-turn promotion can
+        // veto (a NeedsApproval question / an Error / an exit needs you regardless of background work).
+        // The liveness-ticked sweep (_SweepAgentPendingToasts) later DROPS the hold (session re-lit
+        // Running — the 513d1366 spurious "waiting for you" toast) or FIRES it with the CURRENT state
+        // (signal cleared / moved to a hard needs-you state / the kNotifyExternalHoldCapMs backstop).
+        // Every held toast is already past the minimum-span floor above and a hold only GROWS the span,
+        // so the sweep's deferred fire can never dip back under the floor.
+        if (_sessionRegistry)
         {
             if (const auto info = _sessionRegistry->Get(sessionId); info && info->live)
             {
@@ -2647,18 +2653,13 @@ namespace winrt::TerminalApp::implementation
                 AgentExternalWorkSignal(*info, presenceWorking, subagentFresh, what);
                 if (::Agentmaster::ShouldHoldCompletionToast(newState, presenceWorking, subagentFresh))
                 {
-                    hold = true;
-                    holdWhat = L"external work live: " + what;
+                    _agentToastHeld[sessionId] = AgentHeldToast{ newState, runningSince, TtNowMs() };
+                    ::Agentmaster::AppendStateLog(L"hooks.log",
+                                                  L"[notify-hold] " + ::Agentmaster::ShortId(sessionId) + L" running -> " + TtStateLabel(newState) +
+                                                      L" (external work live: " + what + L")\n");
+                    return;
                 }
             }
-        }
-        if (hold)
-        {
-            _agentToastHeld[sessionId] = AgentHeldToast{ newState, runningSince, TtNowMs() };
-            ::Agentmaster::AppendStateLog(L"hooks.log",
-                                          L"[notify-hold] " + ::Agentmaster::ShortId(sessionId) + L" running -> " + TtStateLabel(newState) +
-                                              L" (" + holdWhat + L")\n");
-            return;
         }
 
         _FireAgentCompletionToast(sessionId, tab, newState, runningSince, 0);

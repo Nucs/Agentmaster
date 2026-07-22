@@ -617,32 +617,37 @@ namespace Agentmaster
         return presenceWorking || subagentFresh;
     }
 
-    // Agentmaster (System notifications — the SHORT-SPAN twin of the external-work hold): the OTHER
-    // spurious-completion class. A completion whose observed Running span is implausibly short is a
-    // rapid Running -> Idle/Waiting -> Running FLICKER: a slow-path Stop hook lands ~20ms after the
-    // NEXT turn's UserPromptSubmit (the same slow-Stop race NextSessionStateOrdered's stale guard
-    // targets, but seen here as a genuine sub-second registry dip because the guard let it through),
-    // and the session re-lights Running right after. The toast would read "Has completed after 0s ..."
-    // while the session is in fact still running -- the reported bug, proven live on 6e2d0b48 /
-    // 532dc9ac / e7fa7fcc / 09e226cb (UPS->Running, a Stop 16-42ms later ->Waiting, then another
-    // UPS->Running within ~0.2-1.1s, all well inside one kScanSweepMs tick). Such a completion is HELD
-    // exactly like an external-work hold: the sweep DROPs it on the Running re-light (the primary drop
-    // is the push edge, the sweep the belt) or FIREs it with a now-plausible span once it settles (a
-    // genuinely fast turn -- rare, and a ~one-tick delay on a background toast is a fair price).
-    inline constexpr int64_t kNotifySpuriousSpanMs = 2000; // a Running span under this renders "0s"/"1s"; the completion is a suspected flicker and is HELD for confirmation rather than toasted immediately
-    // PURE: should a Running -> `target` completion be HELD purely because its observed Running span was
-    // implausibly short? Only Idle / WaitingForInput hold -- the DecideHeldToast-Keepable states, and the
-    // only ones a re-light can veto (a NeedsApproval question / an Error / an exit needs you regardless).
-    // runningSpanMs == 0 means the Running ENTRY edge was never observed (adopted mid-turn) -> the span is
-    // UNKNOWN, not short: never held on this basis (its toast omits the "after <span>" clause entirely,
-    // so it can never read "0s" and is never the reported bug).
-    inline bool ShouldHoldShortCompletionToast(SessionState target, int64_t runningSpanMs) noexcept
+    // Agentmaster (System notifications — MINIMUM COMPLETION SPAN): a completion whose observed Running
+    // span is SHORT yields NO toast at all. One threshold covers two motivations:
+    //   (1) the "0 seconds complete but still running" BUG — a slow-path Stop hook lands ~20ms after the
+    //       NEXT turn's UserPromptSubmit (the same slow-Stop race NextSessionStateOrdered's stale guard
+    //       targets, seen here as a genuine sub-second registry dip because the guard let it through) and
+    //       the session re-lights Running right after, so the toast claimed a completion that never
+    //       happened. Proven live on 6e2d0b48 / 532dc9ac / e7fa7fcc / 09e226cb: UPS->Running, a Stop
+    //       16-42ms later ->Waiting, then another UPS->Running within ~0.2-1.3s.
+    //   (2) SIGNAL over noise — a turn that finished in a few seconds never needed an interruption; you
+    //       were almost certainly still looking at it. The toast earns its interruption on LONG work.
+    // This is deliberately a HARD FLOOR, not the deferred/confirming hold it started as: below it there
+    // is no toast EVER, not a late one. (A hold cannot express this — a held toast's span keeps growing,
+    // so it would eventually cross any threshold and fire, and "no notification" must never decay into
+    // "a delayed notification".)
+    inline constexpr int64_t kNotifyMinCompletionSpanMs = 10000; // a Running span under this yields NO completion toast at all — bug (1) + noise (2)
+    // PURE: should a Running -> `target` completion be SUPPRESSED outright because its observed Running
+    // span was too short to be trustworthy as (or worth) an interruption? Only Idle / WaitingForInput are
+    // floored — the two SOFT "the turn ended" states, and the only ones a re-light can veto.
+    // NeedsApproval / Error / Done are NEVER suppressed: an approval request routinely blocks seconds
+    // into a turn (flooring it would silently hide the one state most needing you), and a failure or an
+    // exited claude needs you regardless of how briefly it ran. runningSpanMs == 0 means the Running
+    // ENTRY edge was never observed (adopted / moved in mid-turn) -> the span is UNKNOWN, not short:
+    // never suppressed on this basis (it may have run for hours, and its toast honestly omits the
+    // "after <span>" clause rather than claiming a duration).
+    inline bool ShouldSuppressShortCompletionToast(SessionState target, int64_t runningSpanMs) noexcept
     {
         if (target != SessionState::Idle && target != SessionState::WaitingForInput)
         {
             return false;
         }
-        return runningSpanMs > 0 && runningSpanMs < kNotifySpuriousSpanMs;
+        return runningSpanMs > 0 && runningSpanMs < kNotifyMinCompletionSpanMs;
     }
 
     // PURE: the per-sweep ruling on one HELD toast. Drop == the completion proved spurious (the
