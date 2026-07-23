@@ -65,6 +65,9 @@ void TestPersistence()
         s.forkParentId = L"src-conv-7"; // a never-messaged fork remembers its source across restart (PERSISTED)
         s.tabColorHex = L"#61AFEF"; // tab color modes (Individual): the session's own color survives close/restore (PERSISTED)
         s.inferredWorkingDir = L"K:/api/src/deep"; // tab color modes (Inferred): the inferred-workdir cache survives restart (PERSISTED)
+        s.pendingInput = L"an unsent draft\nwith a second line"; // PENDING_INPUT.md §5: the draft memory survives restart (PERSISTED)
+        s.pendingInputUnixMs = 1784800000123; // the observation stamp keeps the staleness display honest
+        s.pendingPasteRefs = L"paste #1 (+273 lines) -> bf8eefafa3e80676.txt"; // the paste-cache resolution annotation
         QueuedPrompt a;
         a.id = L"p1";
         a.label = L"add tests";
@@ -99,6 +102,9 @@ void TestPersistence()
             CHECK(r.forkParentId == L"src-conv-7", "forkParentId preserved (PERSISTED: restores a never-messaged fork)");
             CHECK(r.tabColorHex == L"#61AFEF", "tabColorHex preserved (PERSISTED: an Individual-mode session keeps ITS color across restore)");
             CHECK(r.inferredWorkingDir == L"K:/api/src/deep", "inferredWorkingDir preserved (PERSISTED: a reopened session wears its inferred color immediately)");
+            CHECK(r.pendingInput == L"an unsent draft\nwith a second line", "pendingInput preserved (PENDING_INPUT.md §5: the unsent-draft memory survives restart)");
+            CHECK(r.pendingInputUnixMs == 1784800000123, "pendingInputUnixMs preserved (the staleness stamp)");
+            CHECK(r.pendingPasteRefs == L"paste #1 (+273 lines) -> bf8eefafa3e80676.txt", "pendingPasteRefs preserved (the paste-cache annotation)");
             CHECK(r.queue.size() == 2, "queue size");
             CHECK(r.queue.size() == 2 && r.queue[0].status == PromptStatus::Sent && r.queue[0].sentAtUnixMs == 999, "Sent status preserved (no replay)");
             CHECK(r.queue.size() == 2 && r.queue[0].origin == PromptOrigin::Typed && r.queue[1].origin == PromptOrigin::Autorun, "prompt origin preserved (Typed vs Flight)");
@@ -135,6 +141,9 @@ void TestPersistence()
         // byte-unchanged (the forkParentId/codexSessionId omission contract).
         CHECK(text.find(L"tabColorHex") == std::wstring::npos && text.find(L"inferredWorkingDir") == std::wstring::npos,
               "empty tabColorHex/inferredWorkingDir keys omitted from the serialized document");
+        // PENDING_INPUT.md §5: the draft trio is likewise omitted when there is no draft.
+        CHECK(text.find(L"pendingInput") == std::wstring::npos && text.find(L"pendingPasteRefs") == std::wstring::npos,
+              "draft-free sessions carry no pendingInput/pendingInputUnixMs/pendingPasteRefs keys");
     }
 
     // Templates: capture-from-queue resets ids/status; apply assigns fresh ids + Pending.

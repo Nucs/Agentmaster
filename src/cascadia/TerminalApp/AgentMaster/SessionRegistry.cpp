@@ -787,13 +787,30 @@ namespace Agentmaster
         {
             std::lock_guard guard{ _mtx };
             const auto it = _sessions.find(id);
-            if (it == _sessions.end() || it->second.pendingInput == text)
+            if (it == _sessions.end())
             {
-                return false; // unknown id, or no change at all
+                return false; // unknown id
+            }
+            if (it->second.pendingInput == text)
+            {
+                // No text change — but a non-empty re-observation still REFRESHES the observation
+                // stamp (quietly): "now - pendingInputUnixMs stays within a few ticks" is exactly how
+                // consumers tell a LIVE draft from a carried MEMORY (a restored/dormant session whose
+                // stamp froze at the last real read). PENDING_INPUT.md §5.
+                if (!text.empty())
+                {
+                    it->second.pendingInputUnixMs = NowMs();
+                }
+                return false;
             }
             const bool wasPending = !it->second.pendingInput.empty();
             const bool nowPending = !text.empty();
             it->second.pendingInput = text;
+            it->second.pendingInputUnixMs = nowPending ? NowMs() : 0;
+            if (!nowPending)
+            {
+                it->second.pendingPasteRefs.clear(); // the draft is gone — its paste annotation goes with it
+            }
             flipped = (wasPending != nowPending);
             if (flipped)
             {
@@ -805,6 +822,23 @@ namespace Agentmaster
             _notify(snapshot, HookEvent::Unknown);
         }
         return flipped;
+    }
+
+    // Agentmaster (PENDING_INPUT.md §2b): record the paste-cache resolver's verdict for the current
+    // draft. QUIET by design (no _notify): the annotation is display-only and always rides a draft the
+    // flip notify already announced; resolving happens off-thread AFTER the draft was committed, so a
+    // notify here would just re-run the persist/board cascade for a tooltip line. Change-gated. No-op
+    // for an unknown id or a session whose draft has meanwhile cleared (a late resolve must not
+    // resurrect an annotation for a sent message).
+    void SessionRegistry::SetPendingPasteRefs(const std::wstring& id, const std::wstring& refs)
+    {
+        std::lock_guard guard{ _mtx };
+        const auto it = _sessions.find(id);
+        if (it == _sessions.end() || it->second.pendingInput.empty() || it->second.pendingPasteRefs == refs)
+        {
+            return;
+        }
+        it->second.pendingPasteRefs = refs;
     }
 
     void SessionRegistry::NoteExternalPrompt(const std::wstring& id, const std::wstring& text)

@@ -108,8 +108,17 @@ namespace Agentmaster
         // "yes pending / no pending" transition the tab-strip + Triage-Board animations key on — at
         // presence-heartbeat (turn) cadence, never per-keystroke (a text-only edit stays QUIET so it
         // can't thrash the persist / board / scheduler cascade). Returns true iff the boolean flipped
-        // (== whether it notified). Transient (never persisted). No-op for an unknown id. Thread-safe.
+        // (== whether it notified). Every non-empty set (changed or not) quietly re-stamps
+        // pendingInputUnixMs — the "last actually observed" clock the staleness display keys on; a
+        // clear zeroes the stamp + drops pendingPasteRefs. The draft trio persists with the record
+        // (PENDING_INPUT.md §5), riding the flip notify / any later save — never a save of its own.
+        // No-op for an unknown id. Thread-safe.
         bool SetPendingInput(const std::wstring& id, const std::wstring& text);
+
+        // Agentmaster (PENDING_INPUT.md §2b): record the paste-cache resolver's verdict for the current
+        // draft (ResolvePendingPasteRefs' annotation — display only). QUIET (no notify) + change-gated;
+        // dropped when the draft has meanwhile cleared. Thread-safe.
+        void SetPendingPasteRefs(const std::wstring& id, const std::wstring& refs);
 
         // Record a human message the interval reconciler (SessionScanner) found in the transcript
         // that the UserPromptSubmit hook dropped. IDEMPOTENT by text: if an identical message is

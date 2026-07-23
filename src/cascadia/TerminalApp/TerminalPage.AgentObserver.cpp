@@ -41,8 +41,9 @@
 #include "AgentTabOverlay.h" // build + own the per-tab overlays (complete com_ptr type)
 #include "Tab.h" // get_self<Tab> -> CurrentEffectiveTabBackground (pending-dots contrast)
 #include "TabHeaderControl.h" // get_self<TabHeaderControl> -> ReserveTitleLines (consistent multi-line tab-row height)
-#include "AgentMaster/ClaudeSpawn.h" // AppendStateLog
+#include "AgentMaster/ClaudeSpawn.h" // AppendStateLog; ResolvePendingPasteRefs (the paste-cache adapter)
 #include "AgentMaster/Engine.h" // ActivateSessionInOtherWindows — a toast click's cross-window jump (System notifications)
+#include "AgentMaster/PendingPaste.h" // FindPasteMarkers — the cheap pure pre-check before the off-thread resolve (PENDING_INPUT.md §2b)
 #include "AgentToastActivator.h" // ToastActivator::IsRegistered — is the COM activator live (wire the in-process click fallback only if not)?
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions (bind tail)
 #include "AgentMaster/ProcessInspect.h" // ResolveClaudeTranscriptPath + AnalyzeSessionTranscript (prompt-nav)
@@ -5181,7 +5182,11 @@ namespace winrt::TerminalApp::implementation
             _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
                 s.live = false;
                 s.pendingConfirmPromptId.clear();
-                s.pendingInput.clear(); // a dead session holds no live draft (PENDING_INPUT.md)
+                // PENDING_INPUT.md §5: the draft is deliberately KEPT. The dead claude's input box is
+                // gone, so this record is the ONLY copy of an unsent message — archiving must not be
+                // the erasure ("persist and load on startup the message"; Rule #16's never-lose
+                // spirit). The frozen pendingInputUnixMs marks it a stale MEMORY for display, and a
+                // later resume revalidates: the new claude's empty box debounce-clears it honestly.
             });
             _sessionRegistry->SetInjector(id, nullptr);
             _claudeTabs.erase(id);
@@ -5334,11 +5339,25 @@ namespace winrt::TerminalApp::implementation
             }
             const auto control = _ControlForSession(id);
             // The buffer exists only once the control has STARTED (left NotConnected). A dormant
-            // window-restored tab has no claude running -> no draft possible (and ControlCore guards the
-            // null buffer internally, but skip the no-op cross-ABI call here). Leave the stored draft +
-            // streak untouched so a momentarily-unreadable tab doesn't drop a real pending state.
+            // window-restored tab has no claude running -> no LIVE draft readable. Leave the stored
+            // draft + streak untouched so a momentarily-unreadable tab doesn't drop a real pending
+            // state — but DO drive the tab-strip dots from the stored value: a RESTORED record may
+            // carry a persisted draft MEMORY (PENDING_INPUT.md §5), and this branch is the only one
+            // that runs before the tab first starts. Once the tab starts, the live read below either
+            // confirms it or the clear debounce honestly erases it (claude never restores its own
+            // input box across a restart).
             if (!control || control.ConnectionState() == TerminalConnection::ConnectionState::NotConnected)
             {
+                if (hostTab)
+                {
+                    const bool restoredPending = !info->pendingInput.empty();
+                    std::optional<winrt::Windows::UI::Color> dotsColor;
+                    if (restoredPending)
+                    {
+                        dotsColor = _PendingDotsColorForTab(hostTab, *info);
+                    }
+                    _SetTabPending(hostTab, restoredPending, dotsColor);
+                }
                 continue;
             }
             std::wstring draft;
@@ -5376,8 +5395,43 @@ namespace winrt::TerminalApp::implementation
 
             // Commit (SetPendingInput notifies only on the boolean flip — appear/clear) + drive the
             // local tab-strip pulse every tick (idempotent).
+            const bool textChanged = info->pendingInput != effectiveDraft; // pre-set snapshot vs committed
             const bool flipped = _sessionRegistry->SetPendingInput(id, effectiveDraft);
             const bool hasPending = !effectiveDraft.empty();
+            if (textChanged && hasPending)
+            {
+                // Paste placeholders ("[Pasted text #N +M lines]" / "[...Truncated ...]") resolve to
+                // their real paste-cache file OFF-THREAD (content-anchored + arithmetic-verified,
+                // PendingPaste.h) and land quietly on the record; no markers clears a stale annotation
+                // synchronously (cheap pure scan).
+                if (::Agentmaster::FindPasteMarkers(effectiveDraft).empty())
+                {
+                    _sessionRegistry->SetPendingPasteRefs(id, L"");
+                }
+                else
+                {
+                    _ResolvePendingPasteRefsFor(id, effectiveDraft);
+                }
+            }
+            if (textChanged && hasPending && !flipped)
+            {
+                // A text-only edit is QUIET (no notify → no autosave), so the PERSISTED draft would
+                // otherwise freeze at its appear-flip snapshot — the staleness the [pending] log
+                // already exhibits must not leak into the on-disk memory (PENDING_INPUT.md §5). A
+                // throttled direct save keeps the durable copy within ~10s of the live box; the
+                // teardown/close archive persists once more, so a graceful exit always lands the
+                // final text (a crash loses at most the last throttle window).
+                const int64_t nowMs = TtNowMs();
+                if (nowMs - _pendingDraftSaveMs >= 10000)
+                {
+                    _pendingDraftSaveMs = nowMs;
+                    ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+                }
+            }
+            else if (flipped)
+            {
+                _pendingDraftSaveMs = TtNowMs(); // the flip notify just autosaved — restart the window
+            }
             if (hostTab)
             {
                 // Contrast-pick the "3 dots" color from the tab's CURRENT effective header background
@@ -5422,6 +5476,44 @@ namespace winrt::TerminalApp::implementation
             }
         }
         co_return;
+    }
+
+    // Agentmaster (PENDING_INPUT.md §2b): resolve a draft's paste placeholders to their real
+    // paste-cache file. DETACHED background work — the whole cache read (~hundreds of small files)
+    // must never ride the UI thread, and nothing after the hop touches UI state: the registry
+    // (thread-safe, captured by value) takes the annotation QUIETLY (SetPendingPasteRefs drops it if
+    // the draft meanwhile cleared, so a late resolve can't resurrect a sent message's annotation),
+    // and the log line is the observability. Terminate-net: the whole body is inside the try.
+    winrt::fire_and_forget TerminalPage::_ResolvePendingPasteRefsFor(std::wstring sessionId, std::wstring draft)
+    {
+        const auto registry = _sessionRegistry; // by-value shared_ptr — safe past page teardown
+        try
+        {
+            co_await winrt::resume_background();
+            if (!registry)
+            {
+                co_return;
+            }
+            auto refs = ::Agentmaster::ResolvePendingPasteRefs(draft);
+            if (refs.empty())
+            {
+                co_return; // no markers (raced an edit) — nothing to record
+            }
+            registry->SetPendingPasteRefs(sessionId, refs);
+            std::wstring oneLine = refs;
+            for (auto& c : oneLine)
+            {
+                if (c == L'\n')
+                {
+                    c = L';';
+                }
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(sessionId) + L" paste-refs: " + oneLine + L"\n");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ResolvePendingPasteRefsFor");
+        }
     }
 
     // Agentmaster (COMMANDS.md §5 — the over-budget /handover delivery): inject a spawned

@@ -376,6 +376,25 @@ namespace Agentmaster
     // detection signal that no shell function / alias / PATH quirk can shadow. [Agentmaster]
     std::wstring ClaudeProjectsDir();
 
+    // The Claude PASTE-CACHE root: <claude-config>/paste-cache (same resolution as ClaudeProjectsDir).
+    // Claude Code spills a large paste there AT PASTE TIME (content-addressed <16-hex>.txt leaves), so
+    // a pending draft's "[Pasted text #N +M lines]" / "[...Truncated text #N +M lines...]" placeholder
+    // has a durable on-disk source the PendingPaste.h resolver can anchor to (PENDING_INPUT.md §2b).
+    // Empty if the config dir is unresolvable. [Agentmaster]
+    std::wstring ClaudePasteCacheDir();
+
+    // The IMPURE half of the paste resolver (PendingPaste.h is the pure brain): detect the markers in
+    // `draft`, read the cache files under `cacheDir` (per-file + total size caps; missing dir => no
+    // resolution), run the content-anchored validation, and render ONE compact human/loggable
+    // annotation — one line per marker:
+    //   "paste #1 (+273 lines) -> bf8eefafa3e80676.txt"
+    //   "truncated #2 (+258 lines) -> bf8eefafa3e80676.txt"
+    //   "paste #3 (+99 lines) -> unresolved"
+    // "" when the draft carries no markers at all. Never throws (I/O failures read as unresolved).
+    // The no-suffix overload resolves against ClaudePasteCacheDir(). [Agentmaster]
+    std::wstring ResolvePendingPasteRefsIn(const std::wstring& draft, const std::wstring& cacheDir);
+    std::wstring ResolvePendingPasteRefs(const std::wstring& draft);
+
     // Given a tab's shell process id, find a `claude.exe` running under it (direct child, or deeper:
     // shell -> cmd-shim -> claude) and return that claude's REAL current directory, read from its PEB.
     // Empty if there is no claude descendant or the read fails. This is how the manager correlates a

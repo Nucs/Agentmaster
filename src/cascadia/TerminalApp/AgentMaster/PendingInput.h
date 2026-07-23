@@ -37,13 +37,32 @@
 //     ----------------------------------------------------------   (bottom rule)
 //
 // Two facts pin it down (both required, per the user's guidance):
-//   1. it is the BOTTOM-MOST line whose first non-space glyph is the prompt marker U+276F, and
+//   1. it is the BOTTOM-MOST line whose first non-space glyph is the prompt marker U+276F that ALSO
+//      satisfies fact 2 (candidates failing fact 2 -- e.g. a U+276F line the user PASTED into the
+//      draft body, or a menu cursor -- are skipped and the scan continues UPWARD), and
 //   2. it is WRAPPED by rule rows (a plain rule directly above the prompt line, and one below the
-//      body).
+//      body). A box rule is ANCHORED: it starts at/near column 0 and spans the width -- which is what
+//      separates it from a floating right-column pane border (see the menu note below).
 // Fact 2 is what separates the input box from (a) a SENT prompt -- also U+276F-prefixed, but rendered
 // INLINE in the scrollback with no surrounding box -- and (b) a MENU selection cursor (Claude marks
 // the highlighted choice with U+276F too, e.g. "> 1. Yes", but a menu is not rule-wrapped; the line
 // above it is the question text, not a rule). Without fact 2 both would false-positive.
+//
+// CROSS-VERSION FACTS (measured live, 2026-07-23 -- see PENDING_INPUT.md section 2a):
+//   * The separator after the marker is U+00A0 NBSP, not a plain space ("❯ text"). Verified
+//     on Claude Code 2.1.217 + 2.1.218 live buffers and on 1,088 historical [pending] log lines
+//     spanning both profiles -- 100% NBSP. The post-marker strip therefore accepts ANY single
+//     whitespace (IsWs), never just L' '.
+//   * The box rules are FULL-WIDTH and FLUSH-LEFT (column 0) in every observed render. The
+//     AskUserQuestion side-by-side PREVIEW menu, by contrast, floats its preview pane's border
+//     (e.g. "╭─..╮") mid-row in the right column -- which satisfies the box-drawing
+//     density test but NOT the column anchor. Six live false positives ("❯ 2. <option label>
+//     <pad> │ <preview>" extracted as a 3,474-char "draft") came from exactly that; the anchor
+//     requirement + the menu-shape rejector below kill the class.
+//   * A menu OPTION row reads "N. <label>" right after the marker and carries the U+2502 column
+//     separator with content after it. A row shaped like that is rejected as a candidate even when
+//     rule-wrapped (a real draft starting "2. " is only rejected if it ALSO carries a mid-row U+2502
+//     column separator on its FIRST line -- deliberately narrow, documented in the tests).
 
 #pragma once
 
@@ -130,6 +149,77 @@ namespace Agentmaster
             return i;
         }
 
+        // Leading run of ANY whitespace (space, NBSP, ...). The caret/rule scans use this rather than
+        // LeadingSpaces so a render that pads with a non-ASCII space (the NBSP separator is already
+        // proven live) can never hide the marker or un-anchor a rule.
+        inline size_t LeadingWs(std::wstring_view s) noexcept
+        {
+            size_t i = 0;
+            while (i < s.size() && IsWs(s[i]))
+            {
+                ++i;
+            }
+            return i;
+        }
+
+        // A VERTICAL border/frame glyph (U+2502 light, U+2503 heavy, U+2551 double). Two uses:
+        //   * a future FRAMED input box ("│ ❯ text │") -- the caret scan skips ONE leading vertical
+        //     border so the marker is still found (extraction of the side borders stays best-effort);
+        //   * the AskUserQuestion PREVIEW menu's column separator ("❯ 1. label  │ preview") -- the
+        //     menu-shape rejector keys on a U+2502 with content after it (IsMenuOptionCaret).
+        inline constexpr bool IsVerticalBorder(wchar_t c) noexcept
+        {
+            return c == 0x2502 || c == 0x2503 || c == 0x2551;
+        }
+
+        // Menu-shape rejector (the live false-positive class, PENDING_INPUT.md section 2a): a caret
+        // candidate whose post-marker text reads like a NUMBERED OPTION ("N. label") AND whose raw row
+        // carries a U+2502 COLUMN SEPARATOR (a vertical border with at least one non-whitespace char
+        // after it) is an AskUserQuestion side-by-side preview menu's selection cursor, not the input
+        // box. Both cues are required: a real draft may start "2. fix the tests" (no separator), and a
+        // framed box's TRAILING "│" has nothing after it (not a column separator).
+        //   postMarker = the candidate row's text AFTER the marker glyph (separator not yet stripped)
+        //   rawRow     = the full (right-trimmed) row
+        inline bool IsMenuOptionCaret(std::wstring_view rawRow, std::wstring_view postMarker) noexcept
+        {
+            // "N. " (1-3 digits, a dot, then whitespace-or-end) right after the marker + separator.
+            size_t p = 0;
+            while (p < postMarker.size() && IsWs(postMarker[p]))
+            {
+                ++p;
+            }
+            size_t digits = 0;
+            while (p < postMarker.size() && postMarker[p] >= L'0' && postMarker[p] <= L'9' && digits < 4)
+            {
+                ++p;
+                ++digits;
+            }
+            if (digits == 0 || digits > 3 || p >= postMarker.size() || postMarker[p] != L'.')
+            {
+                return false;
+            }
+            ++p;
+            if (p < postMarker.size() && !IsWs(postMarker[p]))
+            {
+                return false; // "2.5x" etc. -- not an option number
+            }
+            // A column-separator U+2502-family glyph with real content after it on the same row.
+            for (size_t i = 0; i < rawRow.size(); ++i)
+            {
+                if (IsVerticalBorder(rawRow[i]))
+                {
+                    for (size_t j = i + 1; j < rawRow.size(); ++j)
+                    {
+                        if (!IsWs(rawRow[j]))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
         inline bool AllWhitespace(std::wstring_view s) noexcept
         {
             for (const auto c : s)
@@ -169,6 +259,19 @@ namespace Agentmaster
         return box >= kMinRuleRun && nonSpace > 0 && box * 5 >= nonSpace * 4; // box >= 0.8 * nonSpace
     }
 
+    // Is `row` one of the INPUT BOX's rule borders specifically? The box's rules are FLUSH-LEFT
+    // (column 0 in every observed render, 2.1.217/2.1.218 + the whole [pending] log history); a small
+    // indent tolerance absorbs a future padded render. The anchor is what rejects a FLOATING rule
+    // fragment -- the AskUserQuestion preview pane's border ("<~30 columns of spaces>╭─..╮")
+    // is box-drawing-dominated, so IsPendingRuleRow alone reads it as a rule and the option row below
+    // it as the caret (the live 3,474-char false-draft class). A floating fragment starts mid-row;
+    // the box's rules never do.
+    inline constexpr size_t kPendingRuleAnchorMaxIndent = 4;
+    inline bool IsAnchoredPendingRuleRow(std::wstring_view row) noexcept
+    {
+        return pending_detail::LeadingWs(row) <= kPendingRuleAnchorMaxIndent && IsPendingRuleRow(row);
+    }
+
     // Detect the UNSENT draft in Claude Code's input box, given the BOTTOM region of the terminal
     // buffer (`rows`, top-to-bottom -- each entry is one buffer row's text). The adapter passes a
     // bounded window of the last rows (the box always sits at the buffer bottom, independent of the
@@ -183,75 +286,103 @@ namespace Agentmaster
             return out;
         }
 
-        // (1) The BOTTOM-MOST line whose first non-space glyph is the prompt marker U+276F / U+203A.
+        // (1) The BOTTOM-MOST line whose first non-whitespace glyph (after at most ONE leading
+        // vertical border char, for a future framed render) is the prompt marker U+276F / U+203A --
+        // that ALSO passes the box checks below. A candidate that fails (a menu cursor, a U+276F line
+        // the user PASTED into the draft body, a sent prompt in scrollback) does NOT abort detection:
+        // the scan CONTINUES UPWARD to the next marker row, so a draft whose body itself contains a
+        // "❯"-leading line (a pasted transcript snippet) still resolves to the true caret above it.
+        constexpr int kMaxBodyRows = 200;
         int caret = -1;
+        int bottom = -1;
+        size_t markerPos = 0; // index of the marker glyph within the caret row (after ws/border skip)
         for (int i = n - 1; i >= 0; --i)
         {
             const auto t = RTrim(rows[i]);
-            const auto lead = LeadingSpaces(t);
-            if (lead < t.size())
+            size_t pos = LeadingWs(t);
+            if (pos < t.size() && IsVerticalBorder(t[pos]))
             {
-                const auto c = t[lead];
-                if (c == kPendingPromptMarkerA || c == kPendingPromptMarkerB)
+                ++pos; // a framed box's left border ("│ ❯ ..."); one ws after it may pad
+                if (pos < t.size() && IsWs(t[pos]))
                 {
-                    caret = i;
+                    ++pos;
+                }
+            }
+            if (pos >= t.size())
+            {
+                continue;
+            }
+            const auto c = t[pos];
+            if (c != kPendingPromptMarkerA && c != kPendingPromptMarkerB)
+            {
+                continue;
+            }
+
+            // (2a) A rule DIRECTLY above the prompt line (within 2 rows, tolerating one intervening
+            // blank row). Bail on a NON-blank, NON-rule line above -- that is a menu's question text
+            // (or the draft body above a pasted "❯" line), not a box top. The rule must be ANCHORED
+            // (flush-left): a preview pane's floating border fragment does not count.
+            bool hasTop = false;
+            for (int j = i - 1; j >= 0 && j >= i - 2; --j)
+            {
+                if (IsAnchoredPendingRuleRow(rows[j]))
+                {
+                    hasTop = true;
+                    break;
+                }
+                if (!RTrim(rows[j]).empty())
+                {
+                    break; // a real line (not a rule, not blank) above => not the input box
+                }
+            }
+            if (!hasTop)
+            {
+                continue; // not the box -- keep scanning upward
+            }
+
+            // The menu-shape rejector: "❯ N. label │ preview" is an AskUserQuestion side-by-side
+            // preview menu's selection cursor even when a (mis-)anchored rule sits above it.
+            if (IsMenuOptionCaret(t, t.substr(pos + 1)))
+            {
+                continue;
+            }
+
+            // (2b) A rule BELOW the body (scan down from the prompt line, capped so a pathological
+            // buffer can't run away -- the visible box is at most a viewport tall anyway).
+            int b = -1;
+            for (int j = i + 1; j < n && j <= i + kMaxBodyRows; ++j)
+            {
+                if (IsAnchoredPendingRuleRow(rows[j]))
+                {
+                    b = j;
                     break;
                 }
             }
+            if (b < 0)
+            {
+                continue; // an open prompt line with no closing rule => not the input box
+            }
+
+            caret = i;
+            bottom = b;
+            markerPos = pos;
+            break;
         }
         if (caret < 0)
         {
-            return out; // no input/prompt line visible at all
-        }
-
-        // (2a) A rule DIRECTLY above the prompt line (within 2 rows, tolerating one intervening blank
-        // row). Bail the moment a NON-blank, NON-rule line appears above -- that is a menu's question
-        // text, not a box top (the guard that keeps "> 1. Yes" menu selections from being mistaken for
-        // the box).
-        bool hasTop = false;
-        for (int j = caret - 1; j >= 0 && j >= caret - 2; --j)
-        {
-            if (IsPendingRuleRow(rows[j]))
-            {
-                hasTop = true;
-                break;
-            }
-            if (!RTrim(rows[j]).empty())
-            {
-                break; // a real line (not a rule, not blank) above => not the input box
-            }
-        }
-        if (!hasTop)
-        {
-            return out;
-        }
-
-        // (2b) A rule BELOW the body (scan down from the prompt line, capped so a pathological buffer
-        // can't run away -- the visible box is at most a viewport tall anyway).
-        constexpr int kMaxBodyRows = 200;
-        int bottom = -1;
-        for (int j = caret + 1; j < n && j <= caret + kMaxBodyRows; ++j)
-        {
-            if (IsPendingRuleRow(rows[j]))
-            {
-                bottom = j;
-                break;
-            }
-        }
-        if (bottom < 0)
-        {
-            return out; // an open prompt line with no closing rule => not the input box
+            return out; // no rule-wrapped input box visible at all
         }
 
         out.boxFound = true;
         out.caretRow = caret;
         out.bottomRuleRow = bottom;
 
-        // (3) Extract the body rows [caret, bottom): strip the marker (+ one following space) from the
-        // first line and the 2-space continuation indent from the rest, then join with '\n'. The indent
-        // is the alignment Claude adds under "> "; a line with fewer than 2 leading spaces strips what
-        // it has. (This is a best-effort reconstruction for display/preview -- exact fidelity is not
-        // load-bearing; the load-bearing output is "is there any non-whitespace content".)
+        // (3) Extract the body rows [caret, bottom): strip the marker (+ ONE following whitespace --
+        // Claude 2.1.x renders U+00A0 NBSP there, not a plain space; accepting any single IsWs char is
+        // the cross-version-safe form of "the single space after the marker") from the first line and
+        // the 2-char continuation indent (space or NBSP) from the rest, then join with '\n'. (This is
+        // a best-effort reconstruction for display/preview -- exact fidelity is not load-bearing; the
+        // load-bearing output is "is there any non-whitespace content".)
         std::vector<std::wstring> lines;
         lines.reserve(static_cast<size_t>(bottom - caret));
         for (int k = caret; k < bottom; ++k)
@@ -259,19 +390,19 @@ namespace Agentmaster
             const auto t = RTrim(rows[k]);
             if (k == caret)
             {
-                size_t p = LeadingSpaces(t) + 1; // past leading ws + the marker glyph
-                if (p < t.size() && t[p] == L' ')
+                size_t p = markerPos + 1; // past leading ws (+ a framed border) + the marker glyph
+                if (p < t.size() && IsWs(t[p]))
                 {
-                    ++p; // the single space Claude puts after the marker
+                    ++p; // the single separator Claude puts after the marker (NBSP on 2.1.x)
                 }
                 lines.emplace_back(t.substr(p));
             }
             else
             {
                 size_t p = 0;
-                while (p < 2 && p < t.size() && t[p] == L' ')
+                while (p < 2 && p < t.size() && (t[p] == L' ' || t[p] == 0x00A0))
                 {
-                    ++p; // the 2-space continuation indent
+                    ++p; // the 2-char continuation indent (space; NBSP-tolerant)
                 }
                 lines.emplace_back(t.substr(p));
             }

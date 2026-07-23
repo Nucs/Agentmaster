@@ -572,6 +572,21 @@ namespace Agentmaster
         {
             o.Set(L"forkParentId", json::Value::MkStr(s.forkParentId));
         }
+        // Agentmaster (PENDING_INPUT.md §5 — persist the unsent draft): the input-box draft trio, so
+        // an unsent message SURVIVES an Agentmaster restart/crash as a staleness-labeled MEMORY (claude
+        // itself never restores its input box — this record is the only durable copy). The observation
+        // stamp is what keeps the display honest ("last seen <ago>"); the paste refs name the
+        // content-anchored paste-cache file(s) behind any "[Pasted text …]" placeholder. All omitted
+        // when there is no draft, so a draft-free sessions.json is byte-unchanged.
+        if (!s.pendingInput.empty())
+        {
+            o.Set(L"pendingInput", json::Value::MkStr(s.pendingInput));
+            o.Set(L"pendingInputUnixMs", json::Value::MkNum(static_cast<double>(s.pendingInputUnixMs)));
+            if (!s.pendingPasteRefs.empty())
+            {
+                o.Set(L"pendingPasteRefs", json::Value::MkStr(s.pendingPasteRefs));
+            }
+        }
         auto q = json::Value::MkArr();
         for (const auto& p : s.queue)
         {
@@ -598,6 +613,9 @@ namespace Agentmaster
         s.kind = (v.StrAt(L"kind", L"Claude") == L"Codex") ? AgentKind::Codex : AgentKind::Claude; // absent => Claude (back-compat)
         s.codexSessionId = v.StrAt(L"codexSessionId");
         s.forkParentId = v.StrAt(L"forkParentId"); // PERSISTED: the fork SOURCE, for re-forking a never-messaged fork on restore (absent => "")
+        s.pendingInput = v.StrAt(L"pendingInput"); // PERSISTED (PENDING_INPUT.md §5): the unsent input-box draft memory (absent => "")
+        s.pendingInputUnixMs = v.I64At(L"pendingInputUnixMs"); // when it was last actually observed (absent => 0)
+        s.pendingPasteRefs = v.StrAt(L"pendingPasteRefs"); // the paste-cache resolver's annotation (absent => "")
         if (const auto* q = v.Find(L"queue"); q && q->type == json::Value::Type::Arr)
         {
             for (const auto& pv : q->arr)

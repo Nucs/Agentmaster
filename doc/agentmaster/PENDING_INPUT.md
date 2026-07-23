@@ -1,12 +1,18 @@
 # Pending-input monitor — detect an UNSENT draft in a Claude tab's input box
 
-> Status: **complete — detection + the "yes pending / no pending" observer NOTIFY + the visible "3 dots"
-> animation on BOTH the tab strip and the Triage-Board cards, with a user-configurable LIGHT/DARK dot color
-> auto-picked by the tab background so the dots are never invisible.** Pure detector + the registry
-> notify-on-flip + the dot-color settings round-trip are unit-tested (engine harness green); the full chain
-> lib-compiles green (TerminalControlLib + TerminalAppLib). The fact is recorded on the session, logged
-> (`[pending]`), and drives the indicator. Runtime verification (the live pulse + `[pending]` trace) needs a
-> deploy — gated on the user's build/deploy permission.
+> Status: **complete + BULLETPROOFED (2026-07-23) — detection + the "yes pending / no pending" observer
+> NOTIFY + the "3 dots" animation on BOTH surfaces, PLUS: the cross-version hardening pass (§2a — the NBSP
+> separator fix, the anchored-rule + menu-shape rejectors that killed the six live AskUserQuestion
+> false positives, the candidate upward-continue), the PASTE-CACHE resolver (§2b — a draft's
+> `[Pasted text #N +M lines]` placeholder resolves to its real on-disk content, content-anchored +
+> arithmetic-verified), and PERSISTENCE (§5 — the draft survives an Agentmaster restart/crash as a
+> staleness-labeled memory and revalidates against the live box on resume).** Pure detector + resolver +
+> the registry notify-on-flip/stamping + the persistence round-trip are unit-tested (engine harness
+> 2,671/2,671 incl. REAL-capture fixtures from live 2.1.217/2.1.218 buffers); the full chain lib-compiles
+> green (TerminalControlLib + TerminalAppLib); the fixed detector + the resolver are LIVE-VERIFIED
+> out-of-band against the running fixture session ('wow sess': 1,036 chars extracted clean, its truncated
+> paste resolved to `bf8eefafa3e80676.txt` and expanded to the full 18,647-char briefing). The in-app
+> deploy of this pass rides the next deploy cycle (build/deploy needs the user's permission).
 
 ## 1. What this is & why it can't be a hook
 
@@ -46,21 +52,29 @@ The input box renders as a `❯` prompt line **wrapped by `─` horizontal rules
 **Two facts pin it down** (both required — the user's guidance: *"the bottom-most ❯ … wrapped around
 ─────"*):
 
-1. it is the **BOTTOM-MOST** line whose first non-space glyph is the prompt marker `❯` (U+276F; `›`
-   U+203A is also accepted), and
-2. it is **WRAPPED by rule rows** — a plain `─` rule **directly above** the `❯` line (within 2 rows,
-   tolerating one intervening blank), and another rule **below** the body.
+1. it is the **BOTTOM-MOST** line whose first non-whitespace glyph (after at most ONE leading vertical
+   border char, for a future framed render) is the prompt marker `❯` (U+276F; `›` U+203A is also
+   accepted) **that also passes fact 2** — a candidate failing fact 2 does NOT abort detection; the
+   scan **continues upward** to the next marker row (so a `❯`-leading line the user PASTED into the
+   draft body can never hide the true caret above it), and
+2. it is **WRAPPED by ANCHORED rule rows** — a plain `─` rule **directly above** the `❯` line (within
+   2 rows, tolerating one intervening blank), and another rule **below** the body; both **flush-left**
+   (≤ 4 columns of indent — `IsAnchoredPendingRuleRow`; the box's rules start at column 0 in every
+   observed render, while a menu's floating pane border starts mid-row — see §2a).
 
-Fact 2 is what separates the live input box from the two other things that also start with `❯`:
+Fact 2 is what separates the live input box from the other things that also start with `❯`:
 
 | looks like | example | rejected because |
 |---|---|---|
 | a **SENT prompt** in scrollback | `❯ a message I sent earlier` | rendered INLINE, no surrounding box (no rule directly above + below) |
 | a **menu selection** cursor | `❯ 1. Yes` under "Do you want to proceed?" | the line directly above the `❯` is the question text, not a rule |
+| an **AskUserQuestion PREVIEW menu** row | `❯ 2. 2 · Three Floors  │ Any Python library, zero-copy…` | the pane border above it is rule-*like* but **not anchored**, and the row itself trips the **menu-shape rejector** (§2a) |
 
 A **rule row** is a row *dominated by* box-drawing characters (U+2500..U+257F): ≥ 6 of them AND ≥ 80% of
 the row's visible (non-space) chars. The 80% floor rejects a *labeled* divider (`── 3 files ──`, used
-elsewhere by Claude) while accepting a plain or corner-framed rule.
+elsewhere by Claude) while accepting a plain or corner-framed rule. A **box** rule must additionally be
+**anchored** (flush-left) — the discriminator that keeps a floating right-column pane border from
+counting.
 
 **Extraction**: the body rows `[caret, bottomRule)` — strip the `❯` marker (+ one following space) from the
 first line and the 2-space continuation indent from the rest, join with `\n`, drop trailing blank lines,
@@ -79,6 +93,92 @@ prints the draft's leading code points), so the strip set can be widened without
 The buffer position is independent of the user's **scroll**: Claude renders inline, so the box always sits
 at the bottom of the buffer (`GetLastNonSpaceCharacter`), and the adapter reads a bounded window of the
 **last rows** regardless of where the WT scrollback is scrolled.
+
+## 2a. Cross-version facts (measured live, 2026-07-23) — the hardening pass
+
+Every renderer assumption below was **measured**, not guessed, against (a) the whole recorded `[pending]`
+log history — **1,088 lines across both profiles' hooks.log**, every one printing the draft's leading
+code points — and (b) an out-of-band **live-fleet capture sweep**: `AttachConsole` +
+`ReadConsoleOutputCharacterW` over every reachable `claude.exe` on the machine (76 live processes
+spanning **2.1.211 → 2.1.218**; the 59 that failed to attach are console-less ORPHANS — their terminal
+hosts are gone — not render variants; all 17 attachable screens, 2.1.217 + 2.1.218, rendered the box and
+the detector found it 17/17).
+
+- **The post-marker separator is U+00A0 NBSP, not a space** — `❯ yooo` is `276F 00A0 79…`. 100% of the
+  1,088 historical lines + every live capture agree. The original extractor stripped only `L' '`, so
+  **every draft ever recorded leaked a leading NBSP** (`chars=2 cp: 00A0 0079` for a one-char draft —
+  the "Defect #1" this pass fixed: the strip now accepts any single whitespace, and the continuation
+  indent is NBSP-tolerant too). The trailing-cursor strip already handled the *empty*-box NBSP, so the
+  load-bearing boolean was never wrong — the leak was display/precision only.
+- **The box rules are full-width and flush-left (column 0)** in every observed render — the basis for
+  the **anchor** requirement in §2.
+- **The one real false-positive class was the AskUserQuestion side-by-side PREVIEW menu** (options left,
+  `│` U+2502, preview right). Six live `[pending]` lines — e.g. `2. 2 · Three Floors │ Any Python
+  library, zero-copy — via np.frombuf…`, one a 3,474-char "draft" — were selected OPTION rows extracted
+  as drafts: the preview pane's floating border (`╭──…──╮` mid-row) satisfies the box-drawing density
+  test, so the option row below it read as a rule-topped caret. Killed twice over: the border fails the
+  **column anchor**, and the row itself trips the **menu-shape rejector** (`IsMenuOptionCaret`: post-
+  marker text `N. ` + a `│` column separator with content after it). Deliberately narrow: a real draft
+  starting `2. fix the tests` (no `│`) is NOT rejected; a real draft whose *first line* both starts
+  `N. ` and carries a mid-line `│` with text after it would be — the documented, vanishingly-rare
+  trade-off (pinned by tests).
+- **The candidate scan continues upward** past a failed candidate instead of aborting — a `❯`-leading
+  line pasted *inside* the draft body (a quoted transcript snippet) used to make detection return
+  nothing; now the true caret above it wins and the pasted line rides the body.
+- **Failure posture**: a future render change degrades to *no box found* (missed dots — loud in the
+  fixture suite, silent-but-safe live), never to a false "pending". The `[pending] … cp:` log names any
+  new leading glyph without a deploy, and the REAL-capture fixtures in `TestPendingInput` (rows lifted
+  byte-for-byte from the 2.1.217/2.1.218 sweeps, NBSP and all) fail the harness the moment extraction
+  drifts.
+
+## 2b. The PASTE-CACHE resolver — what a `[Pasted text …]` placeholder really holds
+
+Claude Code spills a large paste to **`<CLAUDE_CONFIG_DIR | ~/.claude>/paste-cache/<16-hex>.txt`** *at
+paste time* (content-addressed leaf — an identical re-paste reuses the same file; observed stable since
+2026-01, ~268 files on the fixture machine). The input box then renders a **placeholder**, in one of two
+forms backed by the SAME cache file (both observed live on one draft):
+
+```
+❯ yooo
+  [Pasted text #1 +273 lines]                          <- COLLAPSED (whole paste hidden)
+
+❯ yooo
+  #  Fix: "Enable Debug Mode" + restart does NOT …     <- EXPANDED, middle elided:
+  ## The user[...Truncated text #2 +258 lines...]es).
+```
+
+So the detector extracts a draft whose text *names* content it does not contain. **`PendingPaste.h`**
+(pure, header-only — the `PendingInput.h` idiom) resolves the markers back to the real file,
+**content-anchored, never by mtime** (the cache is global across sessions — a time window races), and
+**refuses rather than guesses**:
+
+- **TRUNCATED** (strong tier): the draft carries real paste content around the marker. The text before
+  the marker is a **prefix of file segment `i`** (the head-cut line), the text after is a **suffix of
+  segment `j`**, and **`j − i == M` exactly**. Proven on the live fixture: head `## The user` = prefix
+  of segment 8, tail `es).` = suffix of segment 266, 266 − 8 = 258 = the marker's `+258`. Two content
+  anchors + an exact offset ⇒ practically collision-proof.
+- **COLLAPSED** (weaker tier, labeled): nothing of the paste is visible, so the only signal is the
+  **line count** — `M` matches the file's newline count **or** segment count (both conventions
+  observed: the live 274-segment unterminated file carried `+273`), and the match must be **unique**
+  across the cache. The annotation carries **`(by line count)`** so a count-coincident stale file is
+  never presented as verified content (live example: a `+341` collapsed marker resolves to a Feb-15
+  file with exactly 341 segments — plausibly correct via content-addressed dedup, unprovable from
+  outside).
+- **Ambiguity refuses** (two candidate files ⇒ unresolved), and `ExpandPasteMarker` additionally
+  refuses to expand a collapsed marker that shares its line with typed text (never eat the user's
+  words). Expansion of a truncated marker substitutes segments `i..j` verbatim (they subsume the
+  visible fragments) — live-verified: the 1,036-char wow-sess draft expanded to the full 18,647-char
+  briefing.
+
+The impure half lives in `ClaudeSpawn.cpp`: `ClaudePasteCacheDir()` (the `ClaudeProjectsDir` resolution)
++ `ResolvePendingPasteRefs(draft)` — enumerate + read the cache (2 MiB/file, 64 MiB, 4096-file caps),
+run the pure resolver, render one annotation line per marker
+(`truncated #2 (+258 lines) -> bf8eefafa3e80676.txt` / `paste #3 (+99 lines) -> unresolved`). The UI
+lane resolves **off-thread** on a draft-text change (`_ResolvePendingPasteRefsFor` — detached
+fire_and_forget; the registry takes the verdict QUIETLY via `SetPendingPasteRefs`, which drops a late
+resolve whose draft meanwhile cleared), logs it (`[pending] <sid8> paste-refs: …`), and the board card's
+hover tip appends it. The annotation persists with the draft (§5) — the cache file itself is the durable
+content copy, so no blob is ever duplicated into our records.
 
 ## 3. Architecture (one pure brain, a thin adapter, a UI-lane poll)
 
@@ -107,23 +207,43 @@ TerminalPage::_ScanPendingInput()      (TerminalApp; UI thread, ticked by the sh
   `_initializedTerminal` (a restored-but-never-shown tab has a null `TextBuffer`; same guard as
   `ResolveConversationPromptRows`), locks for reading, copies the last `kPendingScanRows` (120) row texts,
   and runs the pure detector. Returns the draft (`""` = empty box / no box / not-yet-initialized).
+  **Mutation-id cache gate** (`_pendingInputScanValid` / `_pendingInputScanMutationId` /
+  `_pendingInputScanResult`): the poll is keyed on `TextBuffer::GetLastMutationId()` — an unchanged
+  buffer returns the cached answer without the 120-row read + parse. Sound because a draft being typed
+  IS buffer output (the TUI echoes it), so any draft change bumps the id — the same invariant the
+  summary-jump epoch cache rides.
 - **`TermControl::ReadPendingInputDraft()`** (`TermControl.{idl,h,cpp}`) — a pure passthrough to the core.
-- **`SessionInfo::pendingInput`** (`SessionModels.h`) — the transient draft fact. **Never persisted**
-  (`Persistence.cpp` writes an explicit field list that omits it; cleared when a session is archived).
+- **`SessionInfo::pendingInput` (+ `pendingInputUnixMs`, `pendingPasteRefs`)** (`SessionModels.h`) — the
+  draft fact trio. **PERSISTED since the §5 pass** (omitted from `sessions.json` when there is no draft,
+  so a draft-free file is byte-unchanged): the draft is a transient fact *of the live box*, but its
+  persisted copy is the only durable record of an unsent message (claude never restores its own input
+  box), so it survives restart as a staleness-labeled MEMORY — see §5 for the archive-keep decision and
+  the revalidation story.
 - **`SessionRegistry::SetPendingInput(id, text)`** — the field updates every change, but `_notify` fires
   **only on the BOOLEAN hasPending FLIP** (empty↔non-empty) — the "yes pending / no pending" transition.
   This is the **presence-heartbeat cadence**: a draft moves as the user types, so a per-keystroke notify
   would needlessly run the persist / board-rebuild / scheduler cascade, but the appear/clear transitions
   are infrequent (turn-cadence) and are exactly what the animations key on. A text-only edit (still
   non-empty) updates the field **quietly**. Returns true iff the boolean flipped (== whether it notified).
-  Unit-tested (`TestRegistry`): appear notifies, a text-only edit is quiet, clear notifies.
+  **Every non-empty set — changed or not — quietly re-stamps `pendingInputUnixMs`** (the "last actually
+  observed" clock: age within a few ticks ⇔ a live read; a frozen stamp ⇔ a carried memory), and a clear
+  zeroes the stamp + drops `pendingPasteRefs`. `SetPendingPasteRefs` is the quiet, change-gated,
+  draft-guarded sibling for the §2b annotation. Unit-tested (`TestRegistry`): appear notifies, a
+  text-only edit is quiet, clear notifies, the stamp refreshes quietly, a late paste-resolve can't land
+  on a cleared draft.
 - **`TerminalPage::_ScanPendingInput()`** (`TerminalPage.AgentObserver.cpp`) — the **UI lane** (the only
   place a control's buffer is readable). Ticked once per scanner liveness pass. For each **bound, started,
   Claude** session it reads the draft, applies the **clear debounce** (below), commits it via
   `SetPendingInput`, and drives **this window's tab-strip pulse directly** (`_SetTabPending` — it holds the
   tab) every tick + idempotently. **Background (unfocused) tabs are scanned too** — the whole point is to
-  notice a draft left in a tab the user switched away from. The flip is logged as `[pending] <id> draft
-  (chars=N): <first line>` / `[pending] <id> cleared`.
+  notice a draft left in a tab the user switched away from. A **NotConnected/dormant tab** (window-restored,
+  not yet started) is not readable — the branch leaves the stored draft + streak untouched AND drives the
+  dots **from the persisted memory** so a restored draft is visible before its claude ever starts (§5).
+  On a draft-text change the scan also kicks the **off-thread §2b paste resolve**, and a QUIET text drift
+  (no flip ⇒ no autosave) triggers a **~10s-throttled direct `SaveSessions`** so the persisted memory
+  tracks the live box instead of freezing at its appear-flip snapshot (the staleness the `[pending]` log
+  deliberately exhibits must not leak into the durable copy). The flip is logged as `[pending] <id> draft
+  (chars=N cp: …): <first line>` / `[pending] <id> cleared`.
 - **The "3 dots" animation** (the visible indicator) rides two surfaces, both a phase-shifted opacity
   pulse whose **color is a user-configurable LIGHT/DARK contrast PAIR** (see *Dots color* below) so the
   dots are never invisible against the tab/card they sit on:
@@ -192,28 +312,86 @@ tab/board pulse storyboards run **only while a tab is actually pending** — an 
 - **Split panes.** `_ControlForSession` returns the first terminal control in a tab's pane tree; a Claude
   pane split beside a shell could read the wrong pane (a missed detection, never a false positive). The
   single-pane case (the norm) is correct.
-- **Side borders.** v1 targets the current horizontal-rule-only box style (no `│` sides / corners, as the
-  user's Claude renders). A future framed style would need the caret/rule detection to skip a leading
-  vertical border char.
+- **Side borders.** The caret scan now **skips ONE leading vertical border char** (U+2502/2503/2551), so
+  a future framed style (`│ ❯ text │`) still *detects*; body-line side borders would ride the extracted
+  text un-stripped until a real sighting motivates full framed extraction (degraded-not-dark, by design).
+- **A draft first-line shaped exactly like a preview-menu option** (`N. …` AND a mid-line `│` with text
+  after it) is rejected as a menu — the deliberate, vanishingly-rare §2a trade-off.
 
-## 5. Verification
+## 5. Persist + reload on startup — the draft as a durable MEMORY
 
-- ✅ **Detector**: `TestPendingInput` (engine harness) — single-line, multi-line (continuation indent +
-  internal blank line), empty box, no box, a sent prompt in scrollback + an empty box below (only the box
-  is taken), menu rejection (bare + rule-wrapped-with-a-question-above), the rule classifier (pure rule
-  vs labeled divider vs text vs too-short), marker-without-space, the secondary `›` marker, trailing-blank
-  trim, a blank row between the top rule and the marker.
-- ✅ **Registry notify**: `SetPendingInput` — appear **notifies** (the boolean flip), a text-only edit is
-  **quiet**, clear **notifies**, unknown-id no-op (`TestRegistry`). 1354/1354 checks pass.
-- ✅ **Full chain compiles**: `TerminalControlLib` (IDL projection + `ControlCore` + `TermControl`) and
-  `TerminalAppLib` (the registry + `TerminalPage._ScanPendingInput` + `TerminalTabStatus.AgentPendingVisible`
-  + the `TabHeaderControl` pulse + the `AgentManagerContent` card pulse) both build green.
-- ⏳ **Runtime**: the live pulse + `[pending]` trace need a deploy (close → build → relaunch). Once
-  deployed, verify: type a multi-line draft in tab A → the tab-strip dots pulse + its board card shows the
-  pulse; switch to tab B → `[pending] <A> draft …` logged and the pulse persists (background tab); send it
-  → both pulses clear within ~2 ticks and `[pending] <A> cleared` is logged.
+The user's ask: *"persist and load on startup the message."* Claude Code itself **never restores its
+input box** across a restart, and Phase-0 forensics proved it persists no draft state anywhere on disk
+(the exhaustive `~/.claude` sweep — `state/` holds titles, `sessions/<pid>.json` carries no draft field;
+only the §2b paste-cache exists, and only for pastes). So **our record is the only durable copy** of an
+unsent message, and the design embraces that honestly:
 
-## 6. The "3 dots" indicator (built)
+- **Schema** — the trio `pendingInput` + `pendingInputUnixMs` + `pendingPasteRefs` persists on the
+  session record (`Persistence.cpp`; all omitted when there is no draft, so a draft-free
+  `sessions.json` is byte-unchanged). The **observation stamp** is the load-bearing honesty device:
+  re-stamped quietly on every live read, so its age tells a LIVE draft (≤ a few ticks) from a carried
+  MEMORY (frozen at the last real observation before shutdown/close/death).
+- **Freshness** — the flip notify rides the normal autosave; a QUIET text drift additionally triggers a
+  ~10s-throttled direct save (`_pendingDraftSaveMs`), and the teardown/close archive persists once more
+  — so a graceful exit always lands the final text and a crash loses at most the throttle window.
+- **Archive KEEPS the draft** (the decision the user should know about, with its trade-off): the
+  liveness sweep's "dead → archived" path **no longer clears `pendingInput`** — a claude that died with
+  an unsent message on screen is exactly the case worth remembering, and clearing there would defeat
+  the whole feature on every app restart (teardown archives the fleet). The trade-off: a **resumed**
+  session's fresh claude has an EMPTY box, so the memory briefly shows for a tab whose live box no
+  longer holds it — accepted because (a) the tooltip labels it (*"last seen \<ago\> — remembered from
+  before …"*), and (b) **revalidation erases it honestly**: once the tab starts, the first live reads
+  either confirm the draft or the 2-tick clear debounce removes it (+ the flip persist wipes the disk
+  copy). The ONE eager clear kept is the **restart-tab swap** (`_RestartTabIntoFreshSession`) — the
+  user watches that screen be destroyed, so a 5-second dots flash for a box that visibly no longer
+  exists would be noise, not memory.
+- **Restore display** — a restored record's draft shows the dots **before its tab ever starts**: the
+  scan's NotConnected branch drives `_SetTabPending` from the stored value (the board card reads the
+  registry directly and needs nothing). The board tip appends *"last seen \<ago\> — remembered from
+  before this session's tab (re)started; it clears automatically once the live input box reads empty"*
+  once the stamp's age passes ~15s (a live draft's stamp never ages that far), plus the §2b paste-refs
+  annotation naming the cached content file(s).
+- **What reload gives the user**: reopen Agentmaster → the tab/card show the dots + the labeled draft
+  text (copyable from the tip) *before* focusing the tab; focusing it starts claude, whose empty box
+  then clears the memory within ~5s. The draft's paste content stays recoverable forever via the named
+  paste-cache file. (A future re-fill — typing the memory back into the resumed box via the standby
+  lane's `BuildPromptFill` + `ReadPendingInputDraft` verify — is the natural next step; deliberately
+  NOT in this pass, since writing to a session's stdin on restore is a behavior change the user should
+  opt into. See Follow-ups.)
+
+## 6. Verification
+
+- ✅ **Detector**: `TestPendingInput` (engine harness) — the original 14 cases (single/multi-line, empty
+  box, no box, sent-prompt-vs-box, menu rejection, rule classifier, marker-without-space, `›`,
+  trailing-blank trim, blank-after-top-rule, cursor artifacts) **plus the §2a hardening suite**: the
+  NBSP separator (draft + empty box), REAL-capture fixtures lifted byte-for-byte from live buffers
+  (2.1.217 empty box; 2.1.218 collapsed-paste-only, multi-line, truncated-marker drafts — NBSP bytes
+  and all), the preview-menu false positive (floating-border AND anchored-rule variants both rejected),
+  the numbered-draft non-rejection, the pasted-marker upward-continue, the anchor discriminator, and
+  the framed-future border skip.
+- ✅ **Paste resolver**: `TestPendingPaste` — marker grammar (both forms, fragments, singular "line",
+  non-markers ignored, two-per-line), both counting conventions against the live 274-segment
+  unterminated shape, the REAL truncated arithmetic (head seg 8 + tail seg 266 + offset 258),
+  off-by-one refusal, thin-anchor refusal, unique-match resolution, two-file ambiguity refusal,
+  expansion (collapsed whole-line, typed-text refusal, truncated segment-substitution, wrong-file
+  refusal), and the impure adapter against a temp cache dir (annotation format incl. the
+  `(by line count)` tier label; missing dir ⇒ unresolved, never a throw).
+- ✅ **Registry**: appear notifies / text-edit quiet / clear notifies / unknown-id no-op + the stamp
+  lifecycle + the quiet paste-refs guard (`TestRegistry`). **Persistence**: the trio round-trips and is
+  omitted when empty (`tests_persistence`). **2,671/2,671 checks pass.**
+- ✅ **Full chain compiles**: `TerminalControlLib` + `TerminalAppLib` both green.
+- ✅ **LIVE (out-of-band, 2026-07-23)**: the fixed detector run against the running fixture session
+  ('wow sess', Claude 2.1.218, pid-resolved via the presence heartbeat) extracts the draft **clean**
+  (1,036 chars, leading cp `0079` — the NBSP gone), and the resolver run against the real 268-file
+  paste-cache resolves its `[...Truncated text #2 +258 lines...]` to **`bf8eefafa3e80676.txt`**
+  (unique match) and expands the 1,036-char draft to the full **18,647-char** briefing. The fleet sweep
+  (17 attachable screens, 2.1.217+218) detected the box **17/17** with zero false pendings.
+- ⏳ **In-app runtime** (the deployed pulse + persistence round-trip through a real restart) rides the
+  next deploy cycle — gated on the user's build/deploy permission. Once deployed, verify: type a draft
+  in tab A → dots; close the app → `sessions.json` carries the trio; relaunch → the reopened tab shows
+  the dots + the staleness tip pre-start; focus it → the memory clears within ~5s of claude starting.
+
+## 7. The "3 dots" indicator (built)
 
 The detection NOTIFIES reliably on both transitions (§3 "Reliability"), so the indicator is a
 **3-dot opacity pulse** ("typing"/waiting cue) on two surfaces, both driven by the observer's detection.
@@ -255,6 +433,14 @@ never invisible (see *Dots color* in §3):
 - **Off-switch**: an `AppSettings` flag to disable the pulse (like `showTabOverlay`); v1 is always-on.
 - **Placeholder/dim filtering** (§4) — read the cells' faint attribute so a dim placeholder never reads as
   a draft.
+- **Re-fill on resume** (§5): offer to TYPE a restored draft memory back into the resumed session's
+  empty box — the /handover-standby lane already owns the exact machinery (`BuildPromptFill` paste with
+  no submit CR + the `ReadPendingInputDraft` verify + the taken-over guard). Deliberately not in the
+  persistence pass: writing to a session's stdin on restore is a behavior change the user should opt
+  into (a cog switch, or a per-toast/tooltip action).
+- **The out-of-band probe** (`tests/pending_probe.cpp` + `tests/_run-pending-probe.bat`): the
+  AttachConsole ground-truth oracle used for the live verification + the fleet capture sweeps — run it
+  against any live claude pid to see exactly what the shipped detector would extract, without the app.
 - **Tests Autorunner tie-in**: `pauseOnHumanInput` could consult "has a pending draft" to suspend an auto-send
   while the user is mid-compose — the draft fact is exactly the signal `pauseOnHumanInput` was waiting for.
 - **Explorer-tree row** + the per-tab overlay HUD could carry the same pulse (the board + tab cover the

@@ -717,10 +717,27 @@ namespace Agentmaster
         // ever fires for it — so it is the lone screen-READ fact (analogous to the presence heartbeat;
         // never authoritative for SessionState, Rule #7/#13). Updated via the registry's QUIET,
         // change-gated SetPendingInput (the draft changes as the user types — like lastAssistantText it
-        // must never trigger the persist / UI / scheduler cascade). Empty => no pending draft. Transient
-        // (NOT persisted — Persistence.cpp must not write it). The future tab "unsent message" indicator
-        // reads this.
+        // must never trigger the persist / UI / scheduler cascade). Empty => no pending draft.
+        // PERSISTED (PENDING_INPUT.md §5 — the user's "persist and load on startup the message"):
+        // Persistence.cpp writes it (omitted when empty) so an unsent draft SURVIVES an Agentmaster
+        // restart/crash as a MEMORY — shown staleness-labeled on the reopened tab until its claude
+        // starts, then REVALIDATED against the live box (an empty read debounce-clears it; claude
+        // itself never restores its input box, so the memory is the only copy). The pendingInputUnixMs
+        // stamp below is what makes the staleness honest.
         std::wstring pendingInput;
+        // PERSISTED alongside pendingInput (0 when no draft): when the draft was last actually OBSERVED
+        // in the live box — re-stamped on EVERY observed non-empty scan tick (quietly, like the text),
+        // so "now - pendingInputUnixMs" > a few ticks ⇔ the value is a carried MEMORY (a restored /
+        // dormant / archived session), not a live read. The board tip derives its "last seen <ago>"
+        // from exactly this.
+        int64_t pendingInputUnixMs{ 0 };
+        // PERSISTED alongside pendingInput ("" when none): the PendingPaste.h resolver's verdict for
+        // the draft's "[Pasted text #N +M lines]" / "[...Truncated ...]" placeholders — one line per
+        // marker, naming the content-anchored, arithmetic-VERIFIED paste-cache file (or "unresolved";
+        // ResolvePendingPasteRefs). Display/annotation only — resolved off-thread on a draft change,
+        // recorded via the registry's QUIET SetPendingPasteRefs (no notify: it rides the same flip the
+        // draft itself already raised).
+        std::wstring pendingPasteRefs;
 
         // --- Fleet Observer live enrichment (OBSERVER.md §5c) ---
         // ALL transient (NOT persisted — Persistence.cpp must not write them; PIDs / WT_SESSION /

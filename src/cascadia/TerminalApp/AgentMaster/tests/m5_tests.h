@@ -54,6 +54,7 @@
 #include "../Json.h"
 #include "../Persistence.h"
 #include "../PendingInput.h" // the unsent-draft detector (PENDING_INPUT.md) - pure, header-only
+#include "../PendingPaste.h" // the paste-cache marker resolver (PENDING_INPUT.md §2b) - pure, header-only
 #include "../ProcessInspect.h" // SnapshotProcesses / ReadClaudeFacts / ResolveSessionId (Observer O1)
 #include "../PromptAnchor.h" // the summary-panel JUMP resolver (SUMMARY_JUMP.md) - pure, benchmarked here
 #include "../ProfileBootstrap.h" // the per-install state PROFILE (choice file / resolution / migrate)
@@ -176,6 +177,7 @@ void TestPromptAnchorFloorIndex();
 void TestPromptAnchorRealCorpus();
 void TestSummaryUserMsgNoise();
 void TestPendingInput();
+void TestPendingPaste();
 
 // tests_commands.cpp — COMMANDS.md: slash-command bindings (ParseCommandEcho + the parser's
 // Command/fileWritePaths events + the CommandWatch state machine incl. MULTI-FILE collect +

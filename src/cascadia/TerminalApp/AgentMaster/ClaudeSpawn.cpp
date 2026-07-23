@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "PendingPaste.h" // PENDING_INPUT.md §2b — the pure paste-cache marker resolver (adapter below)
 #include "Persistence.h" // GetDirEnv (the per-directory env overrides; ResolveSessionEnv reads it)
 #include "ProcessInspect.h" // SnapshotProcesses / FindDescendantByImage / ReadProcessCwd (moved here)
 #include "ProfileBootstrap.h" // the per-install state PROFILE (AgentmasterStateDir now resolves through it)
@@ -671,6 +672,120 @@ try {
             base = home + L"\\.claude";
         }
         return base + L"\\projects";
+    }
+
+    std::wstring ClaudePasteCacheDir()
+    {
+        // <CLAUDE_CONFIG_DIR | ~/.claude>\paste-cache — the same base resolution as
+        // ClaudeProjectsDir (its sibling). Claude spills a large paste here AT PASTE TIME
+        // (content-addressed <16-hex>.txt), which is what makes a draft's paste placeholder
+        // resolvable to real content out-of-band (PENDING_INPUT.md §2b).
+        std::wstring base = GetEnvW(L"CLAUDE_CONFIG_DIR");
+        if (base.empty())
+        {
+            const std::wstring home = GetEnvW(L"USERPROFILE");
+            if (home.empty())
+            {
+                return {};
+            }
+            base = home + L"\\.claude";
+        }
+        return base + L"\\paste-cache";
+    }
+
+    std::wstring ResolvePendingPasteRefsIn(const std::wstring& draft, const std::wstring& cacheDir)
+    try
+    {
+        const auto markers = FindPasteMarkers(draft);
+        if (markers.empty())
+        {
+            return {};
+        }
+        // Read the cache. The files are small pasted texts; the caps are sanity ceilings so a
+        // pathological cache can never wedge the (background) resolve: 2 MiB per file (larger is
+        // skipped — Claude's own placeholder threshold is far below), 64 MiB total, 4096 files.
+        constexpr size_t kPerFileCap = 2 * 1024 * 1024;
+        constexpr size_t kTotalCap = 64 * 1024 * 1024;
+        constexpr size_t kMaxFiles = 4096;
+        std::vector<PasteFileText> files;
+        size_t total = 0;
+        if (!cacheDir.empty())
+        {
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = ::FindFirstFileW((cacheDir + L"\\*.txt").c_str(), &fd);
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                do
+                {
+                    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                    {
+                        continue;
+                    }
+                    const ULONGLONG sz = (static_cast<ULONGLONG>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+                    if (sz == 0 || sz > kPerFileCap || total + sz > kTotalCap || files.size() >= kMaxFiles)
+                    {
+                        continue;
+                    }
+                    std::string bytes;
+                    {
+                        std::ifstream f(std::filesystem::path{ cacheDir + L"\\" + fd.cFileName }, std::ios::binary);
+                        if (!f)
+                        {
+                            continue;
+                        }
+                        bytes.resize(static_cast<size_t>(sz));
+                        f.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+                        bytes.resize(static_cast<size_t>(f.gcount()));
+                    }
+                    if (bytes.empty())
+                    {
+                        continue;
+                    }
+                    total += bytes.size();
+                    const int need = ::MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
+                    if (need <= 0)
+                    {
+                        continue;
+                    }
+                    std::wstring wide(static_cast<size_t>(need), L'\0');
+                    ::MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), wide.data(), need);
+                    files.push_back(PasteFileText{ fd.cFileName, std::move(wide) });
+                } while (::FindNextFileW(h, &fd));
+                ::FindClose(h);
+            }
+        }
+        const auto res = ResolvePasteMarkers(markers, files);
+        std::wstring out;
+        for (size_t i = 0; i < markers.size() && i < res.size(); ++i)
+        {
+            if (!out.empty())
+            {
+                out.push_back(L'\n');
+            }
+            out += markers[i].truncated ? L"truncated #" : L"paste #";
+            out += std::to_wstring(markers[i].index);
+            out += L" (+" + std::to_wstring(markers[i].lines) + L" lines) -> ";
+            out += res[i].resolved ? res[i].fileName : L"unresolved";
+            // Honesty tier: a TRUNCATED marker is CONTENT-anchored (head prefix + tail suffix + the
+            // exact segment offset — practically collision-proof), while a COLLAPSED one can only be
+            // matched by its unique LINE COUNT (nothing of the paste is visible) — a real, weaker
+            // tier the annotation names, since a count-coincident stale cache file is conceivable.
+            if (res[i].resolved && !markers[i].truncated)
+            {
+                out += L" (by line count)";
+            }
+        }
+        return out;
+    }
+    catch (...)
+    {
+        LogSwallowedException(L"ResolvePendingPasteRefsIn");
+        return {}; // unresolved reads as "no annotation", never a wrong claim
+    }
+
+    std::wstring ResolvePendingPasteRefs(const std::wstring& draft)
+    {
+        return ResolvePendingPasteRefsIn(draft, ClaudePasteCacheDir());
     }
 
     std::wstring ClaudeCwdForShell(uint32_t shellPid)

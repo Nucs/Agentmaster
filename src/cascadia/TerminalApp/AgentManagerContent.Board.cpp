@@ -299,6 +299,26 @@ namespace winrt::TerminalApp::implementation
                 firstLine = firstLine.substr(0, 120) + L"\x2026";
             }
             tip += L"\n\n\x201C" + firstLine + L"\x201D";
+            // STALENESS (PENDING_INPUT.md §5): the observation stamp refreshes every live scan tick,
+            // so an age past a few ticks means this is a carried MEMORY — a restored/dormant/archived
+            // session's persisted draft, not a live read. Label it honestly instead of presenting it
+            // as current truth: it revalidates (confirm or clear) once the tab's claude runs.
+            constexpr int64_t kPendingStaleAfterMs = 15000;
+            if (s.pendingInputUnixMs > 0)
+            {
+                const int64_t age = NowMs() - s.pendingInputUnixMs;
+                if (age > kPendingStaleAfterMs)
+                {
+                    tip += L"\n\nlast seen " + FormatSpan(age, true) + L" ago \x2014 remembered from before this session's tab (re)started; it clears automatically once the live input box reads empty.";
+                }
+            }
+            // The paste-cache resolution (PENDING_INPUT.md §2b): name the verified file(s) behind any
+            // "[Pasted text \x2026]" placeholder the draft carries, so the content is findable even
+            // though the box only shows the marker.
+            if (!s.pendingPasteRefs.empty())
+            {
+                tip += L"\n\n" + s.pendingPasteRefs + L"\n(paste-cache \x2014 <claude home>\\paste-cache)";
+            }
             AgentSetTitledTip(dots, L"Unsent draft", winrt::hstring{ tip }, kCardTipDelay);
             stack.Children().Append(dots);
         }

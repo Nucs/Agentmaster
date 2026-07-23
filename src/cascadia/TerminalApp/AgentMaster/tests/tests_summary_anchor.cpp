@@ -21,6 +21,8 @@
 // live in m5_tests.h; the runner (m5_tests.cpp) calls each entry point. See run-m5-tests.bat.
 #include "m5_tests.h"
 
+#include <fstream> // TestPendingPaste: write the temp paste-cache fixture files
+
 void TestSummaryTableTrim()
 {
     std::wprintf(L"[TestSummaryTableTrim]\n");
@@ -1215,5 +1217,255 @@ void TestPendingInput()
         // the rule classifier must NOT treat a block cursor as a rule (it is not a U+2500-range char... it
         // IS in 2580-259F which IS box-drawing) — but a single block on the caret line isn't a rule row
         // (it has < kMinRuleRun box chars), so the box detection above still holds.
+    }
+
+    // ================= CROSS-VERSION HARDENING (measured live 2026-07-23) =================
+    // Fixture rows below reproduce REAL Claude Code ConPTY buffers (AttachConsole +
+    // ReadConsoleOutputCharacterW, the out-of-band probe) — versions 2.1.217 + 2.1.218. Homogeneous
+    // rule rows are runs (the captures show pure U+2500 runs); VISIBLE glyphs ride as raw UTF-8
+    // literals (this TU compiles under the bat's /utf-8), while every INVISIBLE byte — above all the
+    // load-bearing U+00A0 NBSP separator — is built from its code point so a reviewer can see it.
+    const std::wstring NBSPs(1, static_cast<wchar_t>(0x00A0));
+
+    // 15. THE NBSP SEPARATOR (Defect #1, fixed): Claude 2.1.x renders "❯" + U+00A0 + text — no plain
+    // space. 1,088 historical [pending] lines + every live capture agree (100% NBSP). The old strip
+    // accepted only L' ', so every draft leaked a leading NBSP (chars off by one, display polluted).
+    {
+        const auto d = DetectPendingInput(V({ rule, std::wstring(1, MARK) + NBSPs + L"yooo", rule }));
+        CHECK(d.boxFound, "pending nbsp: box found");
+        CHECK(d.text == L"yooo", "pending nbsp: the NBSP separator is stripped (no leading U+00A0)");
+        // the empty box on 2.1.217/218 is exactly "❯" + NBSP (no block glyph in the out-of-band read)
+        const auto e = DetectPendingInput(V({ rule, std::wstring(1, MARK) + NBSPs, rule }));
+        CHECK(e.boxFound && e.text.empty(), "pending nbsp: the bare marker+NBSP empty box stays empty");
+    }
+    // 16. REAL CAPTURE — 2.1.217 empty box (pid 100072; caret row + status line verbatim).
+    {
+        const std::wstring rule209(209, DASH);
+        const auto d = DetectPendingInput(V({ L"", rule209, L"❯ ", rule209,
+                                              L"  ⏵⏵ bypass permissions on (shift+tab to cycle)                                    175289 tokens" }));
+        CHECK(d.boxFound && d.text.empty(), "pending capture 2.1.217: empty box detected, no draft");
+    }
+    // 17. REAL CAPTURE — 2.1.218 collapsed-paste-only draft (pid 104924): the ENTIRE draft is the
+    // placeholder. Exact extraction matters — the paste resolver anchors on these bytes.
+    {
+        const std::wstring rule200(200, DASH);
+        const auto d = DetectPendingInput(V({ rule200, L"❯ [Pasted text #1 +341 lines]", rule200 }));
+        CHECK(d.boxFound, "pending capture collapsed: box found");
+        CHECK(d.text == L"[Pasted text #1 +341 lines]", "pending capture collapsed: placeholder extracted EXACTLY");
+    }
+    // 18. REAL CAPTURE — 2.1.218 multi-line draft (pid 97776; caret + continuation rows verbatim —
+    // the user's own live note about this very feature).
+    {
+        const std::wstring rule200(200, DASH);
+        const auto d = DetectPendingInput(V({ rule200,
+                                              L"❯ I want you to learn all about grist,",
+                                              L"  TODO: can we know the prompt written here and not just know that there is a prompt? in memory? in disk?",
+                                              rule200,
+                                              L"  ⏵⏵ bypass permissions on (shift+tab to cycle)                                                  0 tokens" }));
+        CHECK(d.boxFound, "pending capture multiline: box found");
+        CHECK(d.text == L"I want you to learn all about grist,\nTODO: can we know the prompt written here and not just know that there is a prompt? in memory? in disk?",
+              "pending capture multiline: NBSP stripped + continuation indent stripped");
+    }
+    // 19. REAL CAPTURE — the truncated-paste marker line (wow-sess R38, verbatim) survives extraction
+    // inside a box body (the resolver parses it downstream).
+    {
+        const std::wstring rule200(200, DASH);
+        const auto d = DetectPendingInput(V({ rule200,
+                                              std::wstring(1, MARK) + NBSPs + L"yooo",
+                                              L"  ## The user[...Truncated text #2 +258 lines...]es).",
+                                              rule200 }));
+        CHECK(d.boxFound, "pending capture truncated: box found");
+        CHECK(d.text == L"yooo\n## The user[...Truncated text #2 +258 lines...]es).",
+              "pending capture truncated: marker line extracted verbatim");
+    }
+    // 20. THE MENU FALSE POSITIVE (Defect #2, fixed): the AskUserQuestion side-by-side PREVIEW menu.
+    // Reconstructed from the six live false positives ([pending] "2. 2 · Three Floors │ Any Python
+    // library, zero-copy — via np.frombuf...", chars=3474) + the real transcript payload: the selected
+    // option row reads "❯ N. label │ preview", and the preview pane's FLOATING border row above it is
+    // box-drawing-dominated, so the old detector took it for the box's top rule and extracted the
+    // whole menu+preview as a "draft". Killed twice over: the floating border fails the COLUMN ANCHOR,
+    // and the option row itself trips the menu-shape rejector.
+    {
+        const std::wstring pad(28, L' ');
+        const std::wstring border = pad + L"╭" + std::wstring(60, DASH) + L"╮";
+        const std::wstring opt2 = L"❯ 2. 2 · Three Floors             │ Any Python library, zero-copy — via np.frombuf";
+        const std::wstring opt3 = L"  3. 3 · Question-Headed             │ ---";
+        const std::wstring borderBot = pad + L"╰" + std::wstring(60, DASH) + L"╯";
+        const auto d = DetectPendingInput(V({ L"Which template shapes all four interop pages?", border, opt2, opt3, borderBot }));
+        CHECK(!d.boxFound, "pending preview-menu: floating pane border is NOT a box rule (anchor)");
+        // Even under a hypothetical layout whose rule IS full-width + anchored, the option row's shape
+        // ("N. " + a │ column separator with content after it) rejects the candidate.
+        const auto d2 = DetectPendingInput(V({ rule, opt2, opt3, rule }));
+        CHECK(!d2.boxFound, "pending preview-menu: anchored-rule variant still rejected (menu shape)");
+    }
+    // 21. ...but a REAL draft that merely starts with "N. " (no column separator) is NOT a menu.
+    {
+        const auto d = DetectPendingInput(V({ rule, std::wstring(1, MARK) + NBSPs + L"2. fix the tests first", rule }));
+        CHECK(d.boxFound && d.text == L"2. fix the tests first", "pending numbered draft: kept (no separator, not a menu)");
+    }
+    // 22. UPWARD-CONTINUE: a "❯"-leading line PASTED INSIDE the draft body used to abort detection
+    // outright (the bottom-most marker failed the rule checks and the scan returned). The candidate
+    // scan now continues upward to the true caret, and the pasted line rides the body.
+    {
+        const auto d = DetectPendingInput(V({ rule,
+                                              std::wstring(1, MARK) + NBSPs + L"look at this transcript snippet:",
+                                              L"  " + std::wstring(1, MARK) + L" the old prompt I pasted",
+                                              rule }));
+        CHECK(d.boxFound, "pending pasted-marker: box still found (candidate scan continues upward)");
+        CHECK(d.caretRow == 1, "pending pasted-marker: the TRUE caret wins, not the pasted line");
+        CHECK(d.text == (L"look at this transcript snippet:" + NL + std::wstring(1, MARK) + L" the old prompt I pasted"),
+              "pending pasted-marker: the pasted line stays in the body");
+    }
+    // 23. THE COLUMN ANCHOR predicate itself.
+    {
+        CHECK(IsAnchoredPendingRuleRow(rule), "pending anchor: a flush-left rule is anchored");
+        CHECK(IsAnchoredPendingRuleRow(L"  " + rule), "pending anchor: a 2-space indent is within tolerance");
+        const std::wstring floating = std::wstring(28, L' ') + L"╭" + std::wstring(40, DASH) + L"╮";
+        CHECK(IsPendingRuleRow(floating), "pending anchor: the floating border IS rule-like by density");
+        CHECK(!IsAnchoredPendingRuleRow(floating), "pending anchor: ...but NOT anchored (the discriminator)");
+    }
+    // 24. FRAMED-FUTURE tolerance: a caret row behind ONE leading vertical border still detects (the
+    // side borders' extraction stays best-effort — PENDING_INPUT.md §4).
+    {
+        const auto d = DetectPendingInput(V({ rule, L"│ " + std::wstring(1, MARK) + NBSPs + L"framed draft", rule }));
+        CHECK(d.boxFound && d.text == L"framed draft", "pending framed: leading vertical border skipped");
+    }
+}
+
+// Agentmaster (PENDING_INPUT.md §2b): the paste-cache resolver — marker grammar, the two counting
+// conventions, content-anchored validation arithmetic (the REAL wow-sess numbers), ambiguity refusal,
+// expansion, and the impure ClaudeSpawn adapter against a temp dir.
+void TestPendingPaste()
+{
+    std::wprintf(L"-- PendingPaste (paste-cache resolver) --\n");
+    const std::wstring NL(1, static_cast<wchar_t>(10));
+
+    // Build a synthetic 274-SEGMENT file shaped like the live fixture (bf8eefafa3e80676.txt):
+    // segment 8 = the head-cut line, segment 266 = the tail-resume line, last segment UNTERMINATED
+    // (273 newlines / 274 segments — the exact shape whose collapsed marker read "+273 lines").
+    std::wstring paste;
+    for (int i = 1; i <= 274; ++i)
+    {
+        if (i == 8)
+        {
+            paste += L"## The user's report (verbatim)";
+        }
+        else if (i == 266)
+        {
+            paste += L"  shells, or if the About-tab toggle's \"applies at next start\" story changes).";
+        }
+        else
+        {
+            paste += L"line " + std::to_wstring(i);
+        }
+        if (i != 274)
+        {
+            paste += NL; // no trailing newline — the live file ends mid-segment
+        }
+    }
+
+    // 1. Marker grammar.
+    {
+        const auto ms = FindPasteMarkers(L"yooo" + NL + L"[Pasted text #1 +273 lines]" + NL + L"tail");
+        CHECK(ms.size() == 1, "paste grammar: one collapsed marker");
+        CHECK(!ms[0].truncated && ms[0].index == 1 && ms[0].lines == 273, "paste grammar: collapsed N/M parsed");
+        CHECK(ms[0].draftLine == 1 && ms[0].headFragment.empty() && ms[0].tailFragment.empty(), "paste grammar: whole-line collapsed has no fragments");
+
+        const auto mt = FindPasteMarkers(L"## The user[...Truncated text #2 +258 lines...]es).");
+        CHECK(mt.size() == 1, "paste grammar: one truncated marker");
+        CHECK(mt[0].truncated && mt[0].index == 2 && mt[0].lines == 258, "paste grammar: truncated N/M parsed");
+        CHECK(mt[0].headFragment == L"## The user" && mt[0].tailFragment == L"es).", "paste grammar: fragments captured");
+
+        CHECK(FindPasteMarkers(L"[Pasted text #1 +2 line]").size() == 1, "paste grammar: singular 'line' accepted");
+        CHECK(FindPasteMarkers(L"[Pasted text]").empty(), "paste grammar: countless bracket ignored");
+        CHECK(FindPasteMarkers(L"[Image #3]").empty(), "paste grammar: image marker ignored");
+        CHECK(FindPasteMarkers(L"[Pasted text #1 +5 linesX]").empty(), "paste grammar: unterminated marker ignored");
+        CHECK(FindPasteMarkers(L"a [Pasted text #1 +5 lines] b [Pasted text #2 +9 lines]").size() == 2, "paste grammar: two markers on one line");
+    }
+    // 2. Counting conventions + collapsed validation. The live file proved M == the NEWLINE count of
+    // an unterminated 274-segment file; a terminated file's M == its segment count. Both accepted.
+    {
+        PasteMarker m;
+        m.truncated = false;
+        m.lines = 273;
+        CHECK(ValidatePasteFile(m, paste), "paste collapsed: M == newline count of the unterminated live shape");
+        m.lines = 274;
+        CHECK(ValidatePasteFile(m, paste), "paste collapsed: M == segment count also accepted");
+        m.lines = 272;
+        CHECK(!ValidatePasteFile(m, paste), "paste collapsed: off-by-two refused");
+        m.lines = 3;
+        CHECK(ValidatePasteFile(m, L"a" + NL + L"b" + NL + L"c" + NL), "paste collapsed: terminated 3-liner matches +3");
+    }
+    // 3. Truncated validation — the REAL arithmetic: head "## The user" prefixes segment 8, tail
+    // "es)." suffixes segment 266, and 266 - 8 == 258 == M. Refusals: wrong M, thin anchors.
+    {
+        PasteMarker m;
+        m.truncated = true;
+        m.lines = 258;
+        m.headFragment = L"## The user";
+        m.tailFragment = L"es).";
+        size_t headSeg = 0;
+        CHECK(ValidatePasteFile(m, paste, &headSeg), "paste truncated: the live arithmetic validates");
+        CHECK(headSeg == 8, "paste truncated: head-cut segment located");
+        m.lines = 257;
+        CHECK(!ValidatePasteFile(m, paste), "paste truncated: off-by-one M refused");
+        m.lines = 258;
+        m.headFragment = L"##";
+        m.tailFragment = L"x";
+        CHECK(!ValidatePasteFile(m, paste), "paste truncated: thin anchors refused (never guess)");
+    }
+    // 4. Resolution: unique match wins; two count-identical files are AMBIGUOUS -> refused.
+    {
+        PasteMarker m;
+        m.truncated = false;
+        m.lines = 273;
+        std::vector<PasteFileText> files{ { L"real.txt", paste }, { L"other.txt", L"just one line" } };
+        auto res = ResolvePasteMarkers({ m }, files);
+        CHECK(res.size() == 1 && res[0].resolved && res[0].fileName == L"real.txt", "paste resolve: unique match resolves");
+        files.push_back({ L"twin.txt", paste });
+        res = ResolvePasteMarkers({ m }, files);
+        CHECK(res.size() == 1 && !res[0].resolved, "paste resolve: two matching files -> refused (ambiguous)");
+    }
+    // 5. Expansion: a whole-line collapsed marker expands to the file; typed text around a collapsed
+    // marker refuses; the truncated form substitutes segments i..i+M (subsuming the fragments).
+    {
+        PasteMarker m = FindPasteMarkers(L"before" + NL + L"[Pasted text #1 +273 lines]" + NL + L"after")[0];
+        const auto expanded = ExpandPasteMarker(L"before" + NL + L"[Pasted text #1 +273 lines]" + NL + L"after", m, paste);
+        CHECK(!expanded.empty(), "paste expand: collapsed whole-line expands");
+        CHECK(expanded.find(L"before" + NL + L"line 1" + NL) == 0, "paste expand: head stitched");
+        CHECK(expanded.find(NL + L"after") == expanded.size() - 6, "paste expand: tail stitched");
+        CHECK(expanded.find(L"## The user's report (verbatim)") != std::wstring::npos, "paste expand: real content present");
+
+        const std::wstring inlineDraft = L"typed [Pasted text #1 +273 lines] more";
+        const auto im = FindPasteMarkers(inlineDraft);
+        CHECK(im.size() == 1 && ExpandPasteMarker(inlineDraft, im[0], paste).empty(), "paste expand: typed text around a collapsed marker refuses (never eat the user's words)");
+
+        const std::wstring truncDraft = L"yooo" + NL + L"## The user[...Truncated text #2 +258 lines...]es).";
+        const auto tm = FindPasteMarkers(truncDraft);
+        const auto texp = ExpandPasteMarker(truncDraft, tm[0], paste);
+        CHECK(!texp.empty(), "paste expand: truncated expands");
+        CHECK(texp.find(L"yooo" + NL + L"## The user's report (verbatim)" + NL) == 0, "paste expand: head-cut segment restored in full");
+        CHECK(texp.find(L"story changes).") != std::wstring::npos, "paste expand: tail-resume segment restored in full");
+        CHECK(ExpandPasteMarker(truncDraft, tm[0], L"wrong file").empty(), "paste expand: failed validation refuses");
+    }
+    // 6. The impure adapter (ClaudeSpawn): a temp cache dir round-trip + the annotation format.
+    {
+        namespace fs = std::filesystem;
+        const auto dir = fs::temp_directory_path() / L"am-paste-test";
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        fs::create_directories(dir, ec);
+        {
+            std::ofstream f(dir / L"aabbccdd00112233.txt", std::ios::binary);
+            const std::string utf8 = "alpha\nbeta\ngamma"; // 2 newlines / 3 segments
+            f.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+        }
+        const auto refs = ResolvePendingPasteRefsIn(L"x" + NL + L"[Pasted text #1 +3 lines]" + NL + L"[Pasted text #2 +99 lines]", dir.wstring());
+        CHECK(refs == L"paste #1 (+3 lines) -> aabbccdd00112233.txt (by line count)" + NL + L"paste #2 (+99 lines) -> unresolved",
+              "paste adapter: annotation lines (resolved [count tier labeled] + unresolved)");
+        CHECK(ResolvePendingPasteRefsIn(L"no markers here", dir.wstring()).empty(), "paste adapter: no markers -> empty");
+        CHECK(ResolvePendingPasteRefsIn(L"[Pasted text #1 +3 lines]", (dir / L"missing").wstring()) == L"paste #1 (+3 lines) -> unresolved",
+              "paste adapter: missing cache dir -> unresolved, never a throw");
+        fs::remove_all(dir, ec);
     }
 }

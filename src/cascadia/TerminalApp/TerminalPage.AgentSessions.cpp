@@ -2099,7 +2099,9 @@ namespace winrt::TerminalApp::implementation
             s.state = ::Agentmaster::RestoredSessionState(s.state);
             s.lastMessageWasQuestion = ::Agentmaster::RestoredQuestionFlag(s.state, s.lastMessageWasQuestion);
             s.pendingConfirmPromptId.clear();
-            s.pendingInput.clear(); // the old screen (and any unsent draft on it) is gone
+            s.pendingInput.clear(); // the old screen (and any unsent draft on it) is gone — the user
+            s.pendingInputUnixMs = 0; // watched this tab restart, so an eager clear beats a 2-tick
+            s.pendingPasteRefs.clear(); // revalidation flash of dots for a box that no longer exists
             if (reforked)
             {
                 s.forkEchoConsumed = false; // re-arm: the re-forked process will echo the source id once

@@ -727,30 +727,65 @@ switch nor a viewport scroll mutates the buffer). Deferred (non-blocking): a fla
 highlight on landing, "end of turn" jumps (neighbor-derived), Codex prompts, moving the eligibility
 resolve off the UI thread entirely, and a context-sensitive Ctrl+F reusing the same resolve+center path.
 
-**Pending-input monitor ([`PENDING_INPUT.md`](doc/agentmaster/PENDING_INPUT.md)) — complete: detection +
-the "yes pending / no pending" observer NOTIFY + a "3 dots" animation on BOTH the tab strip and the
-Triage-Board cards. Pure detector + the registry notify-on-flip unit-tested (engine harness 1354/1354);
-full chain lib-compiles green (TerminalControlLib + TerminalAppLib); runtime pulse/trace pend a deploy.**
+**Pending-input monitor ([`PENDING_INPUT.md`](doc/agentmaster/PENDING_INPUT.md)) — complete +
+BULLETPROOFED (the 2026-07-23 cross-version pass): detection + the "yes pending / no pending" observer
+NOTIFY + a "3 dots" animation on BOTH the tab strip and the Triage-Board cards, PLUS the paste-cache
+resolver + draft persistence. Pure detector + resolver + registry + persistence unit-tested (engine
+harness 2671/2671 incl. REAL-capture fixtures); full chain lib-compiles green (TerminalControlLib +
+TerminalAppLib); the hardened detector + resolver LIVE-VERIFIED out-of-band against the running fleet
+(the `tests/pending_probe.cpp` + `_run-pending-probe.bat` AttachConsole oracle — a 76-pid sweep spanning
+2.1.211–218: every attachable screen detected 17/17); the in-app deploy rides the next cycle.**
 Detects an **UNSENT draft** in a Claude tab's input box — text the user typed but hasn't
 submitted. This is the **ONE session fact hooks can never carry** (they fire on SUBMIT; a draft is by
-definition not yet submitted), so it is the lone screen-**READ** fact: a transient draft FACT, analogous to
+definition not yet submitted), so it is the lone screen-**READ** fact: a draft FACT, analogous to
 the presence heartbeat, **never** `SessionState` (Rule #7/#13) and strictly read-only. A **pure, header-only
 detector** (`AgentMaster/PendingInput.h`, the `PromptAnchor.h` idiom — pure-ASCII source, `\u` escapes)
-finds the input box by the user's two cues — the **bottom-most `❯` prompt line** that is **wrapped by `─`
-rules** (a rule directly above + below) — which separates the live box from a SENT prompt (inline, no box)
-and a menu selection `❯` (the line above it is the question, not a rule); it extracts the single/multi-line
-draft (marker + 2-space continuation indent stripped, trailing blanks trimmed; empty box ⇒ no draft). A
+finds the input box by the user's two cues — the **bottom-most `❯` prompt line** that is **wrapped by
+ANCHORED (flush-left) `─` rules** (a rule directly above + below) — which separates the live box from a
+SENT prompt (inline, no box), a menu selection `❯` (the line above it is the question, not a rule), AND
+the **AskUserQuestion side-by-side PREVIEW menu** (the six live false positives the pass killed: the
+preview pane's FLOATING mid-row border read as a rule and a selected `❯ N. label │ preview` option row
+was extracted as a 3,474-char "draft" — now rejected twice over, by the rule COLUMN ANCHOR + the
+menu-shape rejector `IsMenuOptionCaret`, while a real draft starting `N.` without a `│` separator is
+kept); a candidate failing the checks no longer aborts detection — the scan **continues upward** (a `❯`
+line PASTED inside the draft body can't hide the true caret). Extraction strips the marker + **its
+U+00A0 NBSP separator** (measured: 2.1.x renders `❯`+NBSP, not `❯`+space — 1,088 historical `[pending]`
+lines + every live capture 100% NBSP; the old space-only strip leaked a leading NBSP into every draft) +
+the NBSP-tolerant 2-char continuation indent, and tolerates ONE leading vertical border (a future framed
+box detects, degraded-not-dark). A **paste placeholder resolves to its REAL content**
+(`AgentMaster/PendingPaste.h`, pure + header-only + `ClaudeSpawn`'s `ClaudePasteCacheDir`/
+`ResolvePendingPasteRefs` adapter): Claude spills a large paste to `<claude home>\paste-cache\<16-hex>.txt`
+AT PASTE TIME, and the draft's `[Pasted text #N +M lines]` / `head[...Truncated text #N +M lines...]tail`
+markers are resolved **content-anchored, never by mtime** (the cache is global — a time window races):
+truncated = head-fragment prefixes file segment i + tail-fragment suffixes segment j + `j−i == M` exactly
+(live-proven: seg 8 + seg 266 + 258); collapsed = a UNIQUE line-count match, honestly labeled
+`(by line count)`; ambiguity/thin-anchor/arithmetic-mismatch REFUSE (never a wrong expansion), and
+`ExpandPasteMarker` restores the full content (live: a 1,036-char draft → the full 18,647-char briefing).
+Resolution runs OFF-THREAD on a draft change (`_ResolvePendingPasteRefsFor`), lands quietly
+(`SetPendingPasteRefs`), logs `[pending] <sid8> paste-refs: …`, and annotates the board tip. A
 read-only `ControlCore::ReadPendingInputDraft()` (guarded on `_initializedTerminal`, reads the last ~120
-buffer rows under the read-lock — the box always sits at the buffer bottom regardless of scroll) →
-`TermControl` passthrough; the UI lane `TerminalPage::_ScanPendingInput()` (ticked by the scanner's liveness
-probe alongside `_SweepClaudeLiveness`/`_ObserverProbe`) reads each **bound, started, Claude** tab —
-**background tabs too** (the point is to notice a draft in a tab you switched away from) — and, after an
-**eager-show/lazy-hide clear DEBOUNCE** (2 consecutive empty reads to clear, so a mid-repaint frame can't
-flicker it off), records it via `SetPendingInput` (transient `SessionInfo::pendingInput`; never persisted).
+buffer rows under the read-lock — the box always sits at the buffer bottom regardless of scroll; a
+**mutation-id cache gate** keyed on `TextBuffer::GetLastMutationId()` skips the read entirely on an
+unchanged buffer) → `TermControl` passthrough; the UI lane `TerminalPage::_ScanPendingInput()` (ticked by
+the scanner's liveness probe alongside `_SweepClaudeLiveness`/`_ObserverProbe`) reads each **bound,
+started, Claude** tab — **background tabs too** (the point is to notice a draft in a tab you switched
+away from) — and, after an **eager-show/lazy-hide clear DEBOUNCE** (2 consecutive empty reads to clear,
+so a mid-repaint frame can't flicker it off), records it via `SetPendingInput`
+(`SessionInfo::pendingInput`). **The draft trio is PERSISTED** (PENDING_INPUT.md §5 — the user's "persist
+and load on startup the message"): `pendingInput` + `pendingInputUnixMs` (the observation stamp,
+re-stamped quietly every live read — its age is what tells a LIVE draft from a carried MEMORY) +
+`pendingPasteRefs` ride `sessions.json` (omitted when no draft), a QUIET text drift triggers a
+~10s-throttled direct save (a text-only edit raises no notify → no autosave), **archive KEEPS the draft**
+(a claude that died holding an unsent message is exactly the case worth remembering; the restart-tab swap
+stays an eager clear — the user watched that screen die), a restored/dormant tab **shows the dots from
+the memory before its claude ever starts** (the scan's NotConnected branch) with the board tip labeling
+staleness ("last seen <ago> — remembered from before…"), and **revalidation is honest**: once the tab
+starts, the live read confirms the draft or the debounce clears it (claude never restores its own box —
+Phase-0 forensics proved no draft persists anywhere in `~/.claude`).
 `SetPendingInput` updates the field every change but **`_notify`s ONLY on the boolean hasPending FLIP**
 (empty↔non-empty — the "yes/no pending" transition; a text-only edit stays quiet, so no per-keystroke
-persist/board/scheduler cascade — presence-heartbeat cadence). The flip logs `[pending] <id> draft (chars=N):
-<first line>` / `[pending] <id> cleared`. **The indicator** is a **3-dot opacity pulse**: on the
+persist/board/scheduler cascade — presence-heartbeat cadence). The flip logs `[pending] <id> draft
+(chars=N cp: …): <first line>` / `[pending] <id> cleared`. **The indicator** is a **3-dot opacity pulse**: on the
 **tab strip** below the status dot (`TerminalTabStatus::AgentPendingVisible` ← `_SetTabPending` directly from
 the UI lane; `TabHeaderControl.xaml` `HeaderPendingDots`, its pulse storyboard started/stopped on the flag so
 idle tabs animate nothing), and on the **Triage-Board cards** (`AgentManagerContent::_MakeCard` →

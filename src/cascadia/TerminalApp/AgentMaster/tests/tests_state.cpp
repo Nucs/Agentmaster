@@ -570,11 +570,28 @@ void TestRegistry()
         CHECK(observed.load() == base + 1, "pending: text-only edit is QUIET (no notify)");
         CHECK(!reg.SetPendingInput(L"s1", L"hello world"), "pending: identical set is a no-op");
         CHECK(observed.load() == base + 1, "pending: no-op does not notify");
+        // The OBSERVATION stamp (PENDING_INPUT.md §5): stamped on appear, quietly REFRESHED on a
+        // re-observation of unchanged non-empty text (that is how consumers tell a live draft — age
+        // within a few ticks — from a carried restored MEMORY), zeroed on clear.
+        CHECK(reg.Get(L"s1")->pendingInputUnixMs > 0, "pending: observation stamp set on appear");
+        reg.Update(L"s1", [](SessionInfo& s) { s.pendingInputUnixMs = 42; }); // plant an old stamp (Update notifies — re-baseline below)
+        const int base2 = observed.load();
+        CHECK(!reg.SetPendingInput(L"s1", L"hello world"), "pending: unchanged re-observation is a no-op return");
+        CHECK(reg.Get(L"s1")->pendingInputUnixMs > 42, "pending: unchanged re-observation REFRESHES the stamp");
+        CHECK(observed.load() == base2, "pending: the stamp refresh is QUIET (no notify)");
+        // Paste-refs (PENDING_INPUT.md §2b): quiet, change-gated, draft-guarded.
+        reg.SetPendingPasteRefs(L"s1", L"paste #1 (+273 lines) -> abc.txt");
+        CHECK(reg.Get(L"s1")->pendingPasteRefs == L"paste #1 (+273 lines) -> abc.txt", "pending: paste refs recorded");
+        CHECK(observed.load() == base2, "pending: paste refs are QUIET (no notify)");
         CHECK(reg.SetPendingInput(L"s1", L""), "pending: clear flips (non-empty -> empty)");
         CHECK(reg.Get(L"s1")->pendingInput.empty(), "pending: cleared");
-        CHECK(observed.load() == base + 2, "pending: clear NOTIFIES (boolean flip)");
+        CHECK(reg.Get(L"s1")->pendingInputUnixMs == 0, "pending: clear zeroes the observation stamp");
+        CHECK(reg.Get(L"s1")->pendingPasteRefs.empty(), "pending: clear drops the paste refs");
+        reg.SetPendingPasteRefs(L"s1", L"late resolve");
+        CHECK(reg.Get(L"s1")->pendingPasteRefs.empty(), "pending: a late resolve can't land on a cleared draft");
+        CHECK(observed.load() == base2 + 1, "pending: clear NOTIFIES (boolean flip)");
         CHECK(!reg.SetPendingInput(L"nope", L"x"), "pending: unknown id no-op");
-        CHECK(observed.load() == base + 2, "pending: unknown id does not notify");
+        CHECK(observed.load() == base2 + 1, "pending: unknown id does not notify");
     }
 
     reg.Remove(L"s1");

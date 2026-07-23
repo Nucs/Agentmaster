@@ -52,6 +52,7 @@ int wmain()
 
     std::wprintf(L"=== Agentmaster engine tests ===\n");
     TestPendingInput();
+    TestPendingPaste();
     TestPromptAnchor();
     TestPromptAnchorEdgeCases();
     TestPromptAnchorCollisions();
