@@ -889,7 +889,11 @@ namespace Agentmaster
             // was retired at consumption time above the moment any turn event moved the conversation
             // (and a fresh Error entry clears it in OnHookEvent), so a genuinely NEW error re-fires
             // here normally. Still early-return: the (acknowledged) errored tail owns this pass.
-            if (fresh && !fresh->errorDismissed && fresh->state != SessionState::Error && fresh->state != SessionState::Done)
+            // NOTE the dismissal ack lands in **Idle**, not Done — so errorDismissed (not a Done arm) is
+            // what protects it, which is why Done is no longer excluded here or in ShouldSynthesizeError:
+            // a live session in Done with an unrecovered API-error tail is an ABORTED session whose claude
+            // is still up, and it must read Error (see the DONE FIRES TOO note on the predicate).
+            if (fresh && !fresh->errorDismissed && fresh->state != SessionState::Error)
             {
                 HookMessage err;
                 err.event = HookEvent::Notification; // neutral carrier; the apiError flag drives the transition

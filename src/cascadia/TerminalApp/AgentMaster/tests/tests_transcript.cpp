@@ -317,9 +317,10 @@ void TestTranscriptScan()
     }
     // Agentmaster (API-error reconciliation — ShouldSynthesizeError): the tail is an unrecovered API
     // error (lastWasApiError) and the transcript has settled -> Error. Idempotent (never re-fires from
-    // Error), never from Done, never without the error tail, and gated on the same quiescence as the
-    // missed-Stop (a fast retry clears the tail first). Fires defensively from Waiting/Idle too (the
-    // real Stop hook for the errored turn, or an earlier pass, may already have moved it there).
+    // Error), never without the error tail, and gated on the same quiescence as the missed-Stop (a fast
+    // retry clears the tail first). Fires defensively from Waiting/Idle too (the real Stop hook for the
+    // errored turn, or an earlier pass, may already have moved it there) — AND from Done, which is the
+    // model-404 regression below.
     {
         CHECK(ShouldSynthesizeError(SessionState::Running, true, kScanStopQuiescenceMs), "api-error: Running + error tail + quiet -> Error");
         CHECK(ShouldSynthesizeError(SessionState::WaitingForInput, true, kScanStopQuiescenceMs), "api-error: Waiting (push Stop landed) + error tail -> Error");
@@ -328,7 +329,22 @@ void TestTranscriptScan()
         CHECK(!ShouldSynthesizeError(SessionState::Running, true, kScanStopQuiescenceMs - 1), "api-error: not quiet long enough -> wait (a fast retry clears the tail first)");
         CHECK(!ShouldSynthesizeError(SessionState::Running, false, kScanStopQuiescenceMs), "api-error: not the active leaf -> no Error");
         CHECK(!ShouldSynthesizeError(SessionState::Error, true, kScanStopQuiescenceMs), "api-error: already Error -> idempotent (never re-fires)");
-        CHECK(!ShouldSynthesizeError(SessionState::Done, true, kScanStopQuiescenceMs), "api-error: a cleanly-ended (Done) session never flips to Error");
+    }
+    // Agentmaster (REGRESSION — a live Done session with an errored tail must read Error; session
+    // 33f54bdd, 2026-07-25 "why is this idle/done while it is clearly still running"). A bogus
+    // `--model` 404s: Claude Code writes the isApiErrorMessage line, fires SessionEnd (-> Done) 1.5s
+    // after the prompt, and STAYS UP telling you to run /model. SessionEnd beat this synth's 2s
+    // quiescence by ~1.2s, so the old `state == Done` arm let the label win over the evidence and the
+    // failure showed as a green "Done" card on a live tab — unrecoverable, since Done is the one state
+    // no pull path accepts. An unrecovered API-error tail outranks the SessionEnd label. Only LIVE
+    // sessions reach here (the caller skips !live), and the error tail is still strictly required.
+    {
+        CHECK(ShouldSynthesizeError(SessionState::Done, true, kScanStopQuiescenceMs),
+              "api-error: Done + error tail -> Error (SessionEnd means aborted, not clean — the 33f54bdd model-404)");
+        CHECK(!ShouldSynthesizeError(SessionState::Done, false, kScanStopQuiescenceMs),
+              "api-error: Done WITHOUT an error tail -> stays Done (a genuinely clean end is untouched)");
+        CHECK(!ShouldSynthesizeError(SessionState::Done, true, kScanStopQuiescenceMs - 1),
+              "api-error: Done + error tail but unsettled -> wait (same quiescence as every other source state)");
     }
     // Agentmaster (active-leaf distinction — ApiErrorIsActiveLeaf): the error is "the last message" while it
     // is positionally newest (lastWasApiError) AND the active leaf is the error, its UNMOVED anchor

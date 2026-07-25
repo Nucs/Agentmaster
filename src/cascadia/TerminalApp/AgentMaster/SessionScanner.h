@@ -311,21 +311,37 @@ namespace Agentmaster
     // so a fast retry (whose new prompt clears the positional flag) OR a double-ESC rewind PAST the error
     // (which moves the leaf) never reaches Error. Fires from any live non-Error state — Running is the
     // usual one; WaitingForInput/Idle defensively (the real Stop hook for the errored turn, or an earlier
-    // pass, may already have moved it there) — while Done is left alone and Error is idempotent (never
-    // re-fires). Requires the SAME quiescence as the missed-Stop (a settle window). The session LEAVES
-    // Error on the first new turn event: a real UserPromptSubmit (push) lands Running, and
-    // ShouldSynthesizeRunning (which now includes Error among its recoverable states) is the pull
-    // backstop — together the "come out of Error on the first change" edge — while a rewind-and-SIT
-    // (no turn event) leaves via ShouldReleaseErrorOnLeafMove below.
+    // pass, may already have moved it there) — and Error is idempotent (never re-fires). Requires the
+    // SAME quiescence as the missed-Stop (a settle window). The session LEAVES Error on the first new
+    // turn event: a real UserPromptSubmit (push) lands Running, and ShouldSynthesizeRunning (which now
+    // includes Error among its recoverable states) is the pull backstop — together the "come out of
+    // Error on the first change" edge — while a rewind-and-SIT (no turn event) leaves via
+    // ShouldReleaseErrorOnLeafMove below.
+    //
+    // DONE FIRES TOO (it did not, until the model-404 report — session 33f54bdd, 2026-07-25). "Done"
+    // means the SessionEnd hook fired, NOT that the session ended cleanly: Claude Code emits SessionEnd
+    // when it ABORTS a conversation fatally — a bogus `--model` 404s, it writes the API-error line, ends
+    // the session, and STAYS UP telling you to run /model. SessionEnd (t+1.5s) beat this synth's 2s
+    // quiescence window by ~1.2s, so `Done` latched first and then permanently vetoed the Error — the
+    // failure read as a green "Done" card on a live, alive tab, and NOTHING could correct it (Done is the
+    // one state no pull path accepts: recon-run, recon-subagent, recon-stop, recon-idle, recon-block and
+    // recon-resume all exclude it, so only a push UserPromptSubmit could ever leave). An unrecovered
+    // API-error tail is POSITIVE PROOF the session did not end cleanly, so it outranks the SessionEnd
+    // label. Safe by construction: an ARCHIVED session is never reconciled at all (the caller's
+    // `if (!s.live) continue;`), so this only ever reaches a LIVE session sitting in Done — exactly the
+    // pathological case; and the triage "Move to Idle/Done" ack on an Error card lands in **Idle** with
+    // errorDismissed set, so THAT path was never what this arm protected (errorDismissed is, at the call
+    // site). Flipping to Error also restores the recovery edge, since ShouldSynthesizeRunning accepts
+    // Error but not Done.
     inline bool ShouldSynthesizeError(SessionState state, bool errorIsActiveLeaf, int64_t quietForMs) noexcept
     {
         if (!errorIsActiveLeaf)
         {
             return false; // the active branch's last message is not an (unrecovered) API error
         }
-        if (state == SessionState::Error || state == SessionState::Done)
+        if (state == SessionState::Error)
         {
-            return false; // already Error (idempotent) / a cleanly-ended session never flips to Error
+            return false; // already Error — idempotent, never re-fires off the unchanged tail
         }
         return quietForMs >= kScanStopQuiescenceMs;
     }

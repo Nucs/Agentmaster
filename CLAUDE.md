@@ -1258,9 +1258,29 @@ What works, by area:
   `[recon-error-release]`). Validated by replaying the NEW pipeline over all on-disk transcripts:
   **503/503** API errors flag Error at their live-tail instant (was 498 — the leaf bug silently suppressed
   5 across 3 projects), **0 false positives** (any turn event clears `lastWasApiError` + the frontier), **0
-  genuine rewinds** in 2906 transcripts. **NOT flagged Error (by design / structural):** a *tool* failure
-  (`tool_result.is_error`) stays Running (Claude usually continues); a process crash → `Done`
-  (clean-vs-crash is not yet distinguished); a managed **Codex** has NO Error — its rollout records no
+  genuine rewinds** in 2906 transcripts. **`Done` no longer vetoes it — the fix for a fatal API error that
+  showed as a green "Done" card on a live tab (reported on `33f54bdd`, "why is this session idle/done while
+  it is clearly still running").** `ShouldSynthesizeError` used to bail on `state == Done` ("a cleanly-ended
+  session never flips to Error"), but **`Done` only means the `SessionEnd` hook fired — NOT that the session
+  ended cleanly**: Claude Code emits `SessionEnd` when it ABORTS a conversation fatally and then STAYS UP. A
+  bogus `--model` 404s → it writes the `isApiErrorMessage` line (13:07:53.031), fires `SessionEnd` →
+  `Done` (13:07:53.798), and sits at a live input box telling you to run `/model`. `SessionEnd` beat the
+  synth's `kScanStopQuiescenceMs` (2s) settle window by ~1.2s, so the LABEL latched before the EVIDENCE and
+  then permanently vetoed it — and `Done` is **the one state no pull path accepts** (recon-run,
+  recon-subagent, recon-stop, recon-idle, recon-block, recon-resume all exclude it; it appeared in the whole
+  scanner only as an exclusion), so nothing could ever correct it: the tab kept firing hooks and holding a
+  live draft box for 7.5 min while the board read Done. An unrecovered API-error tail is POSITIVE PROOF the
+  session did not end cleanly, so it now **outranks the `SessionEnd` label** (the `Error` arm stays —
+  idempotence). Safe by construction: an ARCHIVED session is never reconciled (`if (!s.live) continue;`), so
+  this only reaches a LIVE session in `Done` — exactly the pathological case; the triage "Move to Idle/Done"
+  ack lands in **`Idle`** with `errorDismissed` set, so that path was never protected by the `Done` arm
+  (`errorDismissed` is, at the call site); no toast fires (the notify edge is `Running → X` only, and this is
+  `Done → Error`) and no flash ring (it never targets Error); and the flip **restores the recovery edge**,
+  since `ShouldSynthesizeRunning` accepts `Error` but not `Done`. One intended consequence: a `Done → Error`
+  session with `stopOnError` now has its autorunner paused to Off (`[stop-on-error]`) instead of silently
+  sitting at mode Full with a queue that could never advance. **NOT flagged Error (by design / structural):**
+  a *tool* failure (`tool_result.is_error`) stays Running (Claude usually continues); a process crash →
+  `Done` (clean-vs-crash is not yet distinguished); a managed **Codex** has NO Error — its rollout records no
   error event (the 3-state floor, OBSERVER §11f / `Activity.h`). **Subagent / fork activity — the out-of-band `Running` mirror
   (`recon-subagent`).** A turn that delegates to a Task/Agent **subagent** leaves the tailed parent
   `<id>.jsonl` **quiescent** while the work streams to a SIDE file
