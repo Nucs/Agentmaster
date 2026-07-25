@@ -655,6 +655,12 @@ namespace winrt::TerminalApp::implementation
         const AutorunnerMode next = (cur == AutorunnerMode::Off)      ? AutorunnerMode::SemiAuto :
                                    (cur == AutorunnerMode::SemiAuto) ? AutorunnerMode::Full :
                                                                       AutorunnerMode::Off;
+        // Nav audit (the Manager's _OnAutorunnerChanged line, tagged with THIS surface): the overlay
+        // cycle used to be the ONE mode-change path that logged nothing — the 2026-07-25 freeze
+        // forensics had to infer the click from the [await-confirm] flood's start time.
+        ::Agentmaster::LogNav(L"autorunner " + ::Agentmaster::ShortId(_sessionId) + L" -> " +
+                              (next == AutorunnerMode::Full ? L"Full" : next == AutorunnerMode::SemiAuto ? L"Semi" : L"Off") +
+                              L" (overlay)");
         _registry->Update(_sessionId, [&](SessionInfo& s) {
             s.autorunner.mode = next;
             if (next != AutorunnerMode::Off)

@@ -264,21 +264,38 @@ namespace Agentmaster
 
         // The question-guard is transient: once a turn ends WITHOUT a trailing question,
         // un-hold anything the guard parked so the plan resumes.
+        //
+        // ⚠ Change-gated on the SNAPSHOT (the notify-loop guard, 2026-07-25 release freeze):
+        // SessionRegistry::Update _notify's UNCONDITIONALLY — it cannot diff an opaque mutate — so
+        // calling it here with a no-op lambda (no Held prompt exists, the overwhelming steady state)
+        // re-notified every observer on EVERY _process pass. OnObserved re-requests an advance for
+        // any idle session with Pending work, so that no-op notify alone closed a
+        // notify -> OnObserved -> RequestAdvance -> _process cycle (it even ignores the global
+        // pause, whose DecideAdvance early-return sits AFTER this block). Only touch the registry
+        // when a Held prompt is actually there to rehabilitate — the codebase's callers-gate-on-
+        // change discipline (SetStarted / SetPendingInput / ObserveClaude).
         if (!s->lastMessageWasQuestion)
         {
-            bool changed = false;
-            _registry->Update(id, [&](SessionInfo& ss) {
-                for (auto& p : ss.queue)
-                {
-                    if (p.status == PromptStatus::Held)
-                    {
-                        p.status = PromptStatus::Pending;
-                        changed = true;
-                    }
-                }
-            });
-            if (changed)
+            bool anyHeld = false;
+            for (const auto& p : s->queue)
             {
+                if (p.status == PromptStatus::Held)
+                {
+                    anyHeld = true;
+                    break;
+                }
+            }
+            if (anyHeld)
+            {
+                _registry->Update(id, [&](SessionInfo& ss) {
+                    for (auto& p : ss.queue)
+                    {
+                        if (p.status == PromptStatus::Held)
+                        {
+                            p.status = PromptStatus::Pending;
+                        }
+                    }
+                });
                 s = _registry->Get(id);
                 if (!s)
                 {
@@ -369,7 +386,9 @@ namespace Agentmaster
                 }
                 return;
             }
-            // fall through to handle the re-decided plan
+            // fall through to handle the re-decided plan — and carry ITS snapshot with it, so the
+            // AwaitConfirm change-gate below compares against the state the plan was decided from.
+            s = std::move(s2);
             plan = plan2;
         }
 
@@ -389,15 +408,33 @@ namespace Agentmaster
             AppendStateLog(L"autorunner.log", L"[hold] " + id + L" (" + plan.reason + L")\n");
             break;
         case AdvanceAction::AwaitConfirm:
-            _registry->Update(id, [&](SessionInfo& ss) {
-                if (plan.promptIndex < ss.queue.size())
-                {
-                    ss.pendingConfirmPromptId = ss.queue[plan.promptIndex].id;
-                }
-            });
-            AppendStateLog(L"autorunner.log", L"[await-confirm] " + id + L"\n");
+        {
+            // Arm the SemiAuto one-click confirm — ONLY when it actually changes the armed id.
+            //
+            // ⚠ The notify-loop guard (the 2026-07-25 release freeze). Update _notify's
+            // unconditionally, OnObserved re-requests an advance for a SemiAuto session whose prompt
+            // is (by design) still Pending, and this arm is reached on every such pass — so the old
+            // unconditional re-write of the SAME pendingConfirmPromptId closed a self-sustaining
+            // notify -> OnObserved -> RequestAdvance -> re-arm cycle at ~3ms/turn (observed live:
+            // 137k+ [await-confirm] lines in 5 minutes; the per-notify observer fan-out starved the
+            // UI dispatcher into the "half-frozen app"). A no-change pass now touches nothing — no
+            // Update, no notify, no log — so the cycle terminates on its settle pass, while a REAL
+            // re-aim (the armed prompt was deleted / re-ordered / skipped) still writes + notifies.
+            const std::wstring armId =
+                (plan.promptIndex < s->queue.size()) ? s->queue[plan.promptIndex].id : std::wstring{};
+            if (!armId.empty() && s->pendingConfirmPromptId != armId)
+            {
+                _registry->Update(id, [&](SessionInfo& ss) {
+                    if (plan.promptIndex < ss.queue.size())
+                    {
+                        ss.pendingConfirmPromptId = ss.queue[plan.promptIndex].id;
+                    }
+                });
+                AppendStateLog(L"autorunner.log", L"[await-confirm] " + id + L"\n");
+            }
             _clearAdvanceSkip(id); // progress: the next prompt is armed for confirm
             break;
+        }
         case AdvanceAction::PlanDone:
             AppendStateLog(L"autorunner.log", L"[plan-done] " + id + L"\n");
             _clearAdvanceSkip(id); // progress: the queue drained

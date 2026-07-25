@@ -1613,6 +1613,150 @@ void TestSchedulerIntegration()
         reg->RemoveObserver(obsTok);
         sched.Stop();
     }
+
+    // --- The SemiAuto arm must SETTLE, not spin (the 2026-07-25 release freeze). Arming the
+    //     one-click confirm writes pendingConfirmPromptId; SessionRegistry::Update _notify's
+    //     unconditionally, OnObserved re-requests an advance for a SemiAuto session whose prompt is
+    //     (by design) still Pending, and _process re-reached the arm — so the old unconditional
+    //     re-write of the SAME armed id closed a notify -> OnObserved -> RequestAdvance -> re-arm
+    //     cycle at ~3ms/turn, forever (137k+ [await-confirm] lines live; the per-notify observer
+    //     fan-out starved the UI dispatcher into a half-frozen app). With the change-gate the cycle
+    //     ends on its settle pass: the confirm arms once, the prompt stays Pending, and the notify
+    //     stream goes QUIET. This drives the real worker + the Engine.cpp wiring and counts
+    //     notifies — pre-fix this measured hundreds in the settle window. ---
+    {
+        auto reg = std::make_shared<SessionRegistry>();
+        Scheduler sched{ reg };
+        sched.Start();
+        reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
+        const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
+        std::atomic<int> notifies{ 0 };
+        const auto cntTok = reg->AddObserver([&notifies](const SessionInfo&, HookEvent) { notifies.fetch_add(1); });
+
+        const std::wstring id = L"semi-sess";
+        {
+            SessionInfo s;
+            s.id = id;
+            s.workingDir = L"K:\\tmp";
+            s.state = SessionState::WaitingForInput; // at rest — exactly the state the spin lived in
+            s.live = true;
+            s.started = true;
+            s.autorunner.mode = AutorunnerMode::Off; // the stop-on-error backstop just paused it
+            s.autorunner.throttleMs = 0;
+            QueuedPrompt p;
+            p.id = L"p1";
+            p.text = L"the pending prompt";
+            p.status = PromptStatus::Pending;
+            p.origin = PromptOrigin::Autorun;
+            s.queue.push_back(p);
+            reg->Upsert(std::move(s));
+        }
+        reg->SetInjector(id, [](const std::wstring&) {});
+
+        // The per-tab overlay's cycle click, Off -> Semi (AgentTabOverlay::_CycleAutorunner's write).
+        reg->Update(id, [](SessionInfo& s) {
+            s.autorunner.mode = AutorunnerMode::SemiAuto;
+            s.autorunner.autoSendsThisRun = 0;
+            s.pendingConfirmPromptId.clear();
+        });
+
+        // Wait for the confirm to arm...
+        bool armed = false;
+        for (int i = 0; i < 200 && !armed; ++i)
+        {
+            const auto snap = reg->Get(id);
+            armed = snap && snap->pendingConfirmPromptId == L"p1";
+            if (!armed)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+        CHECK(armed, "semi-auto arm: pendingConfirmPromptId set for the first Pending prompt");
+        // ...then the stream must go QUIET: no further Update/notify while the confirm awaits the
+        // user. Pre-fix the re-arm cycle produced ~2 notifies every ~3ms (hundreds in this window).
+        const int atArm = notifies.load();
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        const int drift = notifies.load() - atArm;
+        CHECK(drift <= 2, "semi-auto arm SETTLES: no notify feedback spin while awaiting the confirm");
+        {
+            const auto snap = reg->Get(id);
+            CHECK(snap && snap->queue[0].status == PromptStatus::Pending, "semi-auto: the armed prompt stays Pending (nothing auto-sent)");
+        }
+        reg->RemoveObserver(cntTok);
+        reg->RemoveObserver(obsTok);
+        sched.Stop();
+    }
+
+    // --- The un-hold probe must not TOUCH the registry when nothing is Held (the spin's second
+    //     closer). _process opened with an UNCONDITIONAL Update whose lambda usually changed
+    //     nothing — but Update notifies regardless, so even a DecideAdvance that answers None (the
+    //     pickup guard, the question guard, global pause) re-notified and re-queued the advance.
+    //     Shape: mode Full, prompt #1 just Sent (awaiting pickup), prompt #2 Pending — pre-fix the
+    //     4s pickup window was a silent ~3ms spin (hidden by the [advance-skip] dedup). Now the
+    //     no-Held pass is registry-silent and the window settles. ---
+    {
+        auto reg = std::make_shared<SessionRegistry>();
+        Scheduler sched{ reg };
+        sched.Start();
+        reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
+        const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
+        std::atomic<int> notifies{ 0 };
+        const auto cntTok = reg->AddObserver([&notifies](const SessionInfo&, HookEvent) { notifies.fetch_add(1); });
+
+        const std::wstring id = L"pickup-sess";
+        {
+            SessionInfo s;
+            s.id = id;
+            s.workingDir = L"K:\\tmp";
+            s.state = SessionState::WaitingForInput;
+            s.live = true;
+            s.started = true;
+            s.autorunner.mode = AutorunnerMode::Full;
+            s.autorunner.throttleMs = 0;
+            QueuedPrompt p1;
+            p1.id = L"p1";
+            p1.text = L"first";
+            p1.status = PromptStatus::Pending;
+            p1.origin = PromptOrigin::Autorun;
+            s.queue.push_back(p1);
+            QueuedPrompt p2;
+            p2.id = L"p2";
+            p2.text = L"second";
+            p2.status = PromptStatus::Pending;
+            p2.origin = PromptOrigin::Autorun;
+            s.queue.push_back(p2);
+            reg->Upsert(std::move(s));
+        }
+        reg->SetInjector(id, [](const std::wstring&) {});
+
+        // Kick the plan: #1 sends, #2 sits Pending behind the 4s pickup guard.
+        reg->Update(id, [](SessionInfo& s) { s.autorunner.autoSendsThisRun = 0; });
+        bool sent = false;
+        for (int i = 0; i < 200 && !sent; ++i)
+        {
+            const auto snap = reg->Get(id);
+            sent = snap && snap->queue[0].status == PromptStatus::Sent;
+            if (!sent)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+        CHECK(sent, "pickup window: the first prompt sends");
+        const auto atSent = notifies.load();
+        // Inside the pickup window (well under kPickupGuardMs and the 3s first Enter-retry) the
+        // registry must stay untouched: DecideAdvance answers None (awaiting pickup) WITHOUT the
+        // un-hold probe's no-op Update re-notifying. Pre-fix: hundreds of notifies here.
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        const int drift = notifies.load() - atSent;
+        CHECK(drift <= 2, "pickup window SETTLES: the no-Held un-hold probe is registry-silent");
+        {
+            const auto snap = reg->Get(id);
+            CHECK(snap && snap->queue[1].status == PromptStatus::Pending, "pickup window: the second prompt stays Pending (queue not drained)");
+        }
+        reg->RemoveObserver(cntTok);
+        reg->RemoveObserver(obsTok);
+        sched.Stop();
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

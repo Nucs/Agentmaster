@@ -807,26 +807,87 @@ namespace winrt::TerminalApp::implementation
             // an Explorer-tree/board rename in ANOTHER window writes the shared registry; only the
             // window holding the tab can retitle it — _SyncClaudeTabTitleFromRegistry reads the
             // title FRESH and pins it through the latch, so the two sync directions converge and
-            // never ping-pong). The RunAsync coalesces bursts; the title MUST be re-read on the UI
-            // thread, NOT captured here, or a stale snapshot races a concurrent rename and the
-            // directions oscillate (the /clear re-home title-swap + [Unknown] flood). Token detached
-            // in ~TerminalPage (Rule #10 — a closed window's observer must not linger on the registry).
+            // never ping-pong). Token detached in ~TerminalPage (Rule #10 — a closed window's
+            // observer must not linger on the registry).
+            //
+            // ⚠ COALESCED (the AgentManagerContent lens-observer discipline; 2026-07-25 release
+            // freeze). The old shape enqueued ONE RunAsync PER NOTIFY, so a notify storm — a hook
+            // burst across a big fleet, or a misbehaving engine loop (the SemiAuto arm spin: ~300
+            // notifies/s sustained for minutes) — grew this window's dispatcher queue faster than
+            // the UI thread drained it, and input starved for good ("half-frozen app"; the engine
+            // threads kept running, which is exactly what the logs showed). Now the observer only
+            // FOLDS the changed id into a shared pending set; a single Low-priority hop drains the
+            // WHOLE set, reading each session FRESH from the registry on the UI thread (the same
+            // no-stale-capture rule the title re-read has always followed — a batched dot can only
+            // be MORE current than the snapshot the notify carried). A notify landing mid-drain
+            // re-queues the next hop, so the trailing state is never lost; sub-hop state blips are
+            // deliberately foldable (the flash/toast edge detectors already suppress exactly those
+            // via ShouldSuppressAnswerBlipFlash / the toast HOLD + dedupe guards).
             const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
-            _agentDotObserverToken = _sessionRegistry->AddObserver([weakThis, dispatcher](const ::Agentmaster::SessionInfo& s, ::Agentmaster::HookEvent) {
-                const std::wstring id = s.id;
-                const auto state = s.state;
-                const bool live = s.live;
-                // Agentmaster (eager-init): a live MANAGED session whose ConPTY hasn't started yet (a
-                // window-restored / re-homed tab the user never clicked) shows the half-hollow dot. An
-                // external (observe-only) session has no control of ours, so it is never "dormant".
-                const bool dormant = live && !s.started && !s.external;
-                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [weakThis, id, state, live, dormant]() {
-                    if (auto self = weakThis.get())
+            struct AgentDotBatch
+            {
+                std::mutex mtx;
+                std::unordered_set<std::wstring> ids; // sessions with an un-drained change
+                bool hopQueued{ false }; // one drain hop in flight at a time
+            };
+            auto batch = std::make_shared<AgentDotBatch>();
+            const auto registry = _sessionRegistry; // the drain re-reads FRESH state (never the notify snapshot)
+            _agentDotObserverToken = _sessionRegistry->AddObserver([weakThis, dispatcher, batch, registry](const ::Agentmaster::SessionInfo& s, ::Agentmaster::HookEvent) {
+                {
+                    std::lock_guard lk{ batch->mtx };
+                    batch->ids.insert(s.id);
+                    if (batch->hopQueued)
                     {
-                        self->_UpdateTabAgentDot(id, state, live, dormant);
-                        self->_SyncClaudeTabTitleFromRegistry(id); // reads the CURRENT registry title (no stale capture)
+                        return; // a drain hop is already queued — this change folds into it
                     }
-                });
+                    batch->hopQueued = true;
+                }
+                try
+                {
+                    dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [weakThis, batch, registry]() {
+                        std::unordered_set<std::wstring> ids;
+                        {
+                            std::lock_guard lk{ batch->mtx };
+                            ids.swap(batch->ids);
+                            batch->hopQueued = false; // cleared WITH the swap: a notify after this queues the next hop
+                        }
+                        const auto self = weakThis.get();
+                        if (!self)
+                        {
+                            return;
+                        }
+                        for (const auto& id : ids)
+                        {
+                            if (const auto cur = registry->Get(id))
+                            {
+                                // Agentmaster (eager-init): a live MANAGED session whose ConPTY hasn't
+                                // started yet (a window-restored / re-homed tab the user never clicked)
+                                // shows the half-hollow dot. An external (observe-only) session has no
+                                // control of ours, so it is never "dormant".
+                                const bool dormant = cur->live && !cur->started && !cur->external;
+                                self->_UpdateTabAgentDot(id, cur->state, cur->live, dormant);
+                            }
+                            else
+                            {
+                                // Removed from the registry between the notify and this drain (the
+                                // resume-fresh stale-drop). The per-notify shape delivered that final
+                                // snapshot; a fresh read can only miss — so synthesize the !live update
+                                // the flash/toast trackers key their per-session cleanup on.
+                                self->_UpdateTabAgentDot(id, ::Agentmaster::SessionState::Idle, /*live*/ false, /*dormant*/ false);
+                            }
+                            self->_SyncClaudeTabTitleFromRegistry(id); // reads the CURRENT registry title (no stale capture)
+                        }
+                    });
+                }
+                catch (...)
+                {
+                    // Dispatcher gone (window tearing down) — never leave the drain latched off.
+                    {
+                        std::lock_guard lk{ batch->mtx };
+                        batch->hopQueued = false;
+                    }
+                    ::Agentmaster::AgentLogCaughtException(L"agent tab-dot observer dispatch");
+                }
             });
         }
 
