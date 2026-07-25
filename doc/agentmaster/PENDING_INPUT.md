@@ -485,6 +485,47 @@ happen?" is answerable straight from hooks.log rather than being a silent dead c
 placeholder included — the §2b resolver identifies the backing cache file (and the board tip names it),
 but substituting content into a copy is a separate, deliberate step (see Follow-ups).
 
+### 8a. Pull it into the Auto-Testing compose box (built)
+
+The Manager's **Auto Testing** compose box (the textarea you queue the next prompt in) takes the same
+draft **on click**. The case it serves: you typed a prompt into a Claude tab's input box, never sent it
+(its "3 dots" are pulsing), and came to the Manager to **queue** it instead — retyping it would be absurd.
+
+**Trigger — click / tab into the box, with EDIT INTENT, while it is EMPTY.** `GotFocus` gated on
+`FocusState::Pointer | Keyboard` (the path-picker idiom: the box is *also* focused **programmatically**
+after every queue / Send-now — `_FocusPromptBox` — and pulling a draft in there would fight the user),
+plus a `Tapped` handler for the "already focused, clicked again" case that raises no `GotFocus`. Both
+**defer to a clean dispatcher tick**: inserting mid-click would let the pointer's release re-place the
+caret inside the text just written (the box was empty when the press landed); one tick later the caret
+parks at the end, ready to keep typing. Every guard is re-checked in the deferred body.
+
+**Source — identical to §8**, through the same pure `PickCurrentPromptText`: the LIVE buffer read via
+the content's `_liveDraftProvider` (→ `TerminalPage::_ReadLiveDraftForSession`, wrapped; `""` when the
+tab is hosted in another window, dormant or unreadable), else the observer's `SessionInfo::pendingInput`
+— which is also exactly what the "3 dots" the user is looking at are showing. So the compose box and the
+copy menus can never disagree about what "the current prompt" is.
+
+**Guards — every one is "never fight the user":**
+- **managed CLAUDE only** (Codex renders no input box, so it never has a draft);
+- **only an EMPTY box** (whitespace-only counts as empty, via `pending_detail::AllWhitespace`) — text
+  already composed is never clobbered;
+- **ONE-SHOT per (session, draft text)** (`_promptPrefillSessionId` / `_promptPrefillText`): after the
+  user **queues** the pulled-in prompt (which clears the box) or deletes it, clicking back in must NOT
+  silently re-insert it — that would **double-queue** the same prompt. A CHANGED draft, or another
+  session, offers itself normally.
+
+**It is a COPY, not a move** — reading the buffer never writes to it (Rule #13), so the draft stays in the
+tab's input box; nothing is lost if you decide to send it there after all (and the dots keep pulsing until
+you do).
+
+**Discoverability** is the box's own **placeholder**, which is visible exactly when the feature applies
+(an empty box): while the selected session holds a pullable draft it reads *"click to pull in this
+session's unsent prompt…"*, otherwise the plain *"queue a prompt for the selected session…"*. It is
+suppressed once that draft has already been pulled in (the latch would refuse the click), so the
+placeholder never promises something the click won't do. Driven from `_RebuildPlan` off the **remembered**
+value (a rebuild must never do a live buffer read) and change-gated. The box's tooltip spells the
+behaviour out; a pull logs `[nav] compose pull-draft <sid8> src=live|remembered chars=N`.
+
 ### Follow-ups (non-blocking)
 
 - **Off-switch**: an `AppSettings` flag to disable the pulse (like `showTabOverlay`); v1 is always-on.

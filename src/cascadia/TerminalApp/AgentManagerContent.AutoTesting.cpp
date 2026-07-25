@@ -22,7 +22,9 @@
 #include "AgentManagerContent.h"
 
 #include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
+#include "AgentCatchLog.h" // AgentLogCaughtException — swallowed-exception forensics (the wrapped live-draft read)
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
+#include "AgentMaster/PendingInput.h" // PickCurrentPromptText — the live-vs-remembered draft rule ("pull in the unsent prompt")
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
@@ -90,8 +92,13 @@ namespace winrt::TerminalApp::implementation
         // EXTERNAL scope: the Auto Testing is READ-ONLY (externals are observe-only — we host no
         // ConPTY, so nothing to drive). With an external selected, show its conversation's prompts;
         // with none selected, the nothing-selected hint.
+        // The compose box's placeholder advertises the "pull in the unsent prompt" click (§8a) only
+        // while the SELECTED session actually holds one; every path that isn't a managed Claude session
+        // with a draft falls back to the plain wording. Set from the remembered draft (the same value
+        // the "3 dots" show) — a rebuild must never do a live buffer read.
         if (_treeScope == TreeScope::External)
         {
+            _UpdateComposePlaceholder(false); // externals are observe-only — nothing to pull in
             _UpdateAutorunnerButton(AutorunnerMode::Off, false); // not drivable
             if (!_selectedExternalTitle.empty())
             {
@@ -109,6 +116,7 @@ namespace winrt::TerminalApp::implementation
         if (!sel || !sel->live) // an archived (closed) session isn't planned here — restore it first
         {
             _planHeaderHost.Children().Append(Text(L"Select a session to plan its prompts.", 13, false, 0.6));
+            _UpdateComposePlaceholder(false); // nothing selected -> nothing to pull in
             _UpdateAutorunnerButton(AutorunnerMode::Off, false); // no live session: dim the header toggle
             _PinPlanToBottomOnSubjectChange(L""); // re-arm so re-selecting a session pins to bottom again
             return;
@@ -126,6 +134,14 @@ namespace winrt::TerminalApp::implementation
         }
         _planHeaderHost.Children().Append(titleRow);
         _planHeaderHost.Children().Append(Text(winrt::hstring{ _WorkDirOf(*sel) }, 12, false, 0.6)); // the EFFECTIVE work dir — matches the tree group / board card / tab color
+
+        // The pull-in hint: this session is holding an UNSENT prompt (the same `pendingInput` its "3
+        // dots" are pulsing for), so the empty compose box says clicking it brings that text here.
+        // Suppressed once that exact draft has ALREADY been pulled in for this session (the one-shot
+        // latch would silently refuse the click), so the placeholder never promises something the
+        // click won't do — a NEW draft in the session clears the match and the hint returns.
+        _UpdateComposePlaceholder(sel->kind == ::Agentmaster::AgentKind::Claude && !sel->pendingInput.empty() &&
+                                  !(_promptPrefillSessionId == sel->id && _promptPrefillText == sel->pendingInput));
 
         // reflect autorunner mode on the header toggle. A managed CODEX session is lifecycle+state
         // only — no stdin injector, no hooks, so the Tests Autorunner can never drive it (C4 is the
@@ -978,6 +994,110 @@ namespace winrt::TerminalApp::implementation
         {
         }
         _promptHistoryNavigating = false;
+    }
+
+    // Agentmaster (PENDING_INPUT.md §8a): PULL IN THE UNSENT PROMPT. The user typed a prompt into a
+    // Claude tab's input box but never sent it (the "3 dots" are pulsing on its tab + board card), then
+    // came to the Manager to QUEUE it here instead. Retyping it would be absurd, so clicking (or
+    // tabbing) into the EMPTY compose box with edit intent drops that exact draft in, ready to queue /
+    // Send now / edit.
+    //
+    // Same two sources — and the same pure rule — as the copy menus' "Copy Current Prompt" (§8):
+    //   1. LIVE  — _liveDraftProvider (the page's wrapped _ReadLiveDraftForSession -> the tab's buffer),
+    //              which answers "" whenever the tab isn't readable from THIS window (hosted in another
+    //              window, dormant, torn down) — the ordinary cases, not errors;
+    //   2. REMEMBERED — the observer's SessionInfo::pendingInput (≤ one scan tick old, or the persisted
+    //              memory), which is also exactly what the "3 dots" the user is looking at are showing.
+    // PickCurrentPromptText picks between them, so the compose box and the copy menus can never
+    // disagree about what "the current prompt" is.
+    //
+    // Guards, in order — every one of them is "never fight the user":
+    //   * only a MANAGED CLAUDE session (Codex renders no input box, so it never has a draft);
+    //   * only an EMPTY box (whitespace-only counts as empty) — text already composed is never clobbered;
+    //   * only ONCE per (session, draft text): after the user queues the pulled-in prompt (which clears
+    //     the box) or deletes it, clicking back in must NOT silently re-insert it — that would
+    //     double-queue the same prompt. A CHANGED draft, or another session, offers itself normally.
+    // Reading the session's terminal buffer never writes to it (Rule #13): the draft stays in the tab's
+    // input box too — this is a COPY, so nothing is lost if the user decides to send it there after all.
+    void AgentManagerContent::_MaybePrefillPromptFromDraft()
+    {
+        if (!_addPromptBox || !_registry || _selectedId.empty())
+        {
+            return;
+        }
+        // "Empty" == nothing but whitespace: a stray space must not block the pull, and replacing
+        // it loses nothing. Uses PendingInput.h's own AllWhitespace so "empty" here means exactly
+        // what it means for the draft itself — it also counts NBSP and the other invisible Unicode
+        // spaces, which Claude's input box really does render.
+        if (!::Agentmaster::pending_detail::AllWhitespace(std::wstring_view{ _addPromptBox.Text() }))
+        {
+            return; // the user has composed something — leave it alone
+        }
+        const auto info = _registry->Get(_selectedId);
+        if (!info || info->kind != ::Agentmaster::AgentKind::Claude)
+        {
+            return;
+        }
+        std::wstring live;
+        if (_liveDraftProvider)
+        {
+            try
+            {
+                live = _liveDraftProvider(_selectedId);
+            }
+            catch (...)
+            {
+                // Rule #18: record what threw; the recovery (fall back to the remembered draft) stands.
+                ::Agentmaster::AgentLogCaughtException(L"_MaybePrefillPromptFromDraft live read");
+            }
+        }
+        const auto pick = ::Agentmaster::PickCurrentPromptText(live, info->pendingInput);
+        if (pick.text.empty())
+        {
+            return; // nothing pending anywhere — the box stays empty, exactly as before
+        }
+        if (_promptPrefillSessionId == _selectedId && _promptPrefillText == pick.text)
+        {
+            return; // already offered this very draft for this session (queued or dismissed) — don't nag
+        }
+        _promptPrefillSessionId = _selectedId;
+        _promptPrefillText = pick.text;
+        // Write it as a normal user draft: the TextChanged this raises resets prompt-history navigation
+        // (it IS a new draft), and the caret parks at the end so typing continues the prompt.
+        try
+        {
+            _addPromptBox.Text(winrt::hstring{ pick.text });
+            const int32_t len = static_cast<int32_t>(pick.text.size());
+            _addPromptBox.SelectionStart(len);
+            _addPromptBox.SelectionLength(0);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_MaybePrefillPromptFromDraft write");
+            return;
+        }
+        ::Agentmaster::LogNav(L"compose pull-draft " + ::Agentmaster::ShortId(_selectedId) + L" src=" +
+                              (pick.fromLive ? L"live" : L"remembered") + L" chars=" + std::to_wstring(pick.text.size()));
+    }
+
+    // Agentmaster (PENDING_INPUT.md §8a): the compose box's placeholder doubles as the ONLY hint that
+    // clicking an empty box will pull in the session's unsent prompt — so it says so exactly when that
+    // is true (the placeholder is visible precisely when the box is empty, i.e. when the pull applies).
+    // Change-gated: _RebuildPlan runs on every registry notify, and rewriting an unchanged string would
+    // be pointless churn on a hot path.
+    void AgentManagerContent::_UpdateComposePlaceholder(bool sessionHasDraft)
+    {
+        if (!_addPromptBox)
+        {
+            return;
+        }
+        const wchar_t* const want = sessionHasDraft ?
+                                        L"click to pull in this session's unsent prompt\x2026" :
+                                        L"queue a prompt for the selected session\x2026";
+        if (std::wstring{ _addPromptBox.PlaceholderText() } != want)
+        {
+            _addPromptBox.PlaceholderText(want);
+        }
     }
 
     // Agentmaster (prompt history): leave navigation — drop the snapshot/draft and return to the

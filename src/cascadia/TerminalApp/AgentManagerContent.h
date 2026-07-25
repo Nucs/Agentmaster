@@ -310,6 +310,19 @@ namespace winrt::TerminalApp::implementation
         void _ApplyPromptHistoryText(const std::wstring& text);
         void _ResetPromptHistory();
         bool _PromptCaretOnFirstRow() const;
+        // Agentmaster (PENDING_INPUT.md §8a — "pull in the unsent prompt"): when the user clicks / tabs
+        // into the compose box WITH EDIT INTENT and the box is EMPTY, prefill it with the selected
+        // session's UNSENT input-box draft (the "3 dots" text) so a prompt typed into the terminal but
+        // not sent can be queued here without retyping it. Same two sources as "Copy Current Prompt":
+        // the LIVE buffer read via _liveDraftProvider, falling back to the observer's
+        // SessionInfo::pendingInput. Never clobbers text already in the box, and a ONE-SHOT latch
+        // (_promptPrefill*) keeps the same draft from being re-inserted after the user cleared or
+        // queued it — a fresh draft in the session offers itself again. Claude sessions only.
+        void _MaybePrefillPromptFromDraft();
+        // The compose box's placeholder is the feature's only discoverability: while the selected
+        // session HAS an unsent draft and the box is empty, it says so ("click to pull in…"). Called
+        // from _RebuildPlan (which knows the selection), guarded so an unchanged string isn't rewritten.
+        void _UpdateComposePlaceholder(bool sessionHasDraft);
         void _OnMovePrompt(int delta);
         void _OnDeletePrompt();
         void _OnAutorunnerChanged(int index);
@@ -764,6 +777,13 @@ namespace winrt::TerminalApp::implementation
         std::vector<std::wstring> _promptHistory;
         std::wstring _promptHistoryDraft;
         bool _promptHistoryNavigating{ false };
+        // Agentmaster (PENDING_INPUT.md §8a): the ONE-SHOT latch behind _MaybePrefillPromptFromDraft —
+        // the (session, draft text) pair last pulled into the compose box. Re-focusing an empty box
+        // offers that same draft only ONCE: after the user queues it (the box clears) or deletes it,
+        // clicking back in must NOT silently re-insert it (which would double-queue the prompt). A
+        // CHANGED draft (or a different session) doesn't match the latch, so it is offered normally.
+        std::wstring _promptPrefillSessionId;
+        std::wstring _promptPrefillText;
         winrt::Windows::UI::Xaml::Controls::Button _autorunnerBtn{ nullptr }; // Agentmaster: Autorunner mode toggle, now in a thin strip atop the Auto Testing TAB body (was the old FLIGHT PLAN header)
         // Agentmaster: the Auto-Testing pane's two-state [Summary | Auto Testing] segmented tab toggle
         // (its top line) + the two swappable tab bodies. _summaryHost holds the Summary tab; _autoTestBody

@@ -813,7 +813,10 @@ falling to the remembered value; an EMPTY live read deliberately does NOT erase 
 are still showing it through the clear debounce, so the copy must hand over what the indicator promises).
 Neither source ⇒ no clipboard write + no chime, logged (`[pending] … copy current prompt: nothing`) so it is
 never a silent dead click; a successful copy logs which source answered. A `[Pasted text #N]` placeholder
-copies AS RENDERED (expansion is a follow-up). **Follow-ups:** an off-switch setting,
+copies AS RENDERED (expansion is a follow-up). **The Manager's Auto-Testing compose box takes the same
+draft on CLICK** (§8a — see the *C1 UI* Auto Testing bullet): clicking/tabbing into the EMPTY box with edit
+intent pulls the unsent prompt in, ready to queue, through the same rule + fallback, one-shot per
+(session, draft). **Follow-ups:** an off-switch setting,
 placeholder/dim-attribute filtering, expanding pastes on copy, and a `pauseOnHumanInput`
 autorunner tie-in (PENDING_INPUT.md §4/§6/§8).
 
@@ -1702,7 +1705,22 @@ What works, by area:
   behind a `_promptHistoryNavigating` latch so a recall write doesn't reset the index), and **focus
   snaps back to the compose box after a queue/send** (deferred PAST the Send-now confirm so it can't steal
   the dialog's focus) so you can keep typing. Only a **plain** Up/Down browses history — a **modified**
-  arrow (Shift/Ctrl+arrow) passes through for caret/selection, never hijacked. **Tests Autorunner** is now a **toggle in the AUTO TESTING header** (mirrors the Explorer Tree
+  arrow (Shift/Ctrl+arrow) passes through for caret/selection, never hijacked. **Clicking / tabbing into
+  the EMPTY compose box PULLS IN the selected session's UNSENT input-box draft** (PENDING_INPUT.md §8a —
+  the prompt you typed into the terminal but never sent, the one its "3 dots" are pulsing for), so it can
+  be queued here without retyping: `_MaybePrefillPromptFromDraft` resolves it through the SAME
+  live-read-else-observer rule as "Copy Current Prompt" (`PickCurrentPromptText` over the content's
+  `_liveDraftProvider` → `TerminalPage::_ReadLiveDraftForSession`, falling back to
+  `SessionInfo::pendingInput`). Gated on **edit intent** (`GotFocus` with `FocusState::Pointer|Keyboard`
+  — never the programmatic focus-snap-back after a queue/send — plus a `Tapped` for the already-focused
+  click) and **deferred one dispatcher tick** (an insert mid-click would let the pointer release re-place
+  the caret inside the new text). Guards: managed **Claude** only, an **empty** box only (never clobbers
+  composed text), and **ONE-SHOT per (session, draft)** (`_promptPrefill*`) so a prompt already pulled in
+  and queued is never silently re-inserted (double-queue); a CHANGED draft offers itself again. It's a
+  **copy** — the draft stays in the tab (Rule #13: the read never writes). The compose box's
+  **placeholder** is the discoverability ("click to pull in this session's unsent prompt…", from
+  `_RebuildPlan` off the remembered value, suppressed once the latch would refuse); a pull logs
+  `[nav] compose pull-draft <sid8> src=live|remembered chars=N`. **Tests Autorunner** is now a **toggle in the AUTO TESTING header** (mirrors the Explorer Tree
   LOCAL/GLOBAL/EXTERNAL toggle) — a colored state dot, gray ○ Off / amber ◐ Semi / green ● Full, that
   **cycles** Off → Semi-auto → Full on click (`_CycleAutorunner` / `_UpdateAutorunnerButton`,
   replacing the old combo); the **Templates** row (save / apply / apply-to-dir) is collapsed

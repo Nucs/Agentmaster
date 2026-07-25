@@ -1461,8 +1461,64 @@ namespace winrt::TerminalApp::implementation
                         _ResetPromptHistory();
                     }
                 });
+                // Agentmaster (PENDING_INPUT.md §8a): clicking / tabbing into the EMPTY compose box PULLS
+                // IN the selected session's UNSENT input-box draft (the "3 dots" text), so a prompt typed
+                // into the terminal but never sent can be queued here without retyping it. Gated on USER
+                // focus (Pointer/Keyboard) exactly like the path picker: the box is also focused
+                // PROGRAMMATICALLY after every queue/send (_FocusPromptBox), and pulling a draft in there
+                // would fight the user instead of helping. _MaybePrefillPromptFromDraft owns the rest of
+                // the guards (empty box, Claude only, the one-shot latch).
+                //
+                // DEFERRED to a clean dispatcher tick: the insert happens mid-click otherwise, and the
+                // pointer's release would then re-place the caret inside the text we just wrote (the box
+                // was empty when the press landed). One tick later the click is over, so the caret parks
+                // at the end where the handler puts it. Every guard is re-checked in the deferred body.
+                _addPromptBox.GotFocus([this](const IInspectable&, const RoutedEventArgs&) {
+                    if (!_addPromptBox)
+                    {
+                        return;
+                    }
+                    const auto fs = _addPromptBox.FocusState();
+                    if (fs != FocusState::Pointer && fs != FocusState::Keyboard)
+                    {
+                        return; // programmatic focus (the post-queue/send snap-back) is not edit intent
+                    }
+                    if (_dispatcher)
+                    {
+                        auto weak = get_weak();
+                        _dispatcher.TryEnqueue([weak]() {
+                            if (auto self = weak.get())
+                            {
+                                self->_MaybePrefillPromptFromDraft();
+                            }
+                        });
+                    }
+                    else
+                    {
+                        _MaybePrefillPromptFromDraft();
+                    }
+                });
+                // Clicking into an ALREADY-focused box raises no GotFocus (the path picker's lesson), so a
+                // tap covers "I clicked the empty box" when focus never moved. Harmless to repeat: the
+                // one-shot latch means a draft already offered is not re-inserted.
+                _addPromptBox.Tapped([this](const IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs&) {
+                    if (_dispatcher)
+                    {
+                        auto weak = get_weak();
+                        _dispatcher.TryEnqueue([weak]() {
+                            if (auto self = weak.get())
+                            {
+                                self->_MaybePrefillPromptFromDraft();
+                            }
+                        });
+                    }
+                    else
+                    {
+                        _MaybePrefillPromptFromDraft();
+                    }
+                });
                 // Discoverability: surface the keyboard affordances (they have no on-screen control).
-                AgentSetTitledTip(_addPromptBox, L"Compose a prompt", L"Write a prompt for the selected session, then queue it (envelope) or send it straight away (!).\n\nEnter inserts a line break \x2014 prompts can be multi-line.\n\x2191 / \x2193 recall prompts this session already got, once the caret is on the first line; Esc goes back to what you were typing.");
+                AgentSetTitledTip(_addPromptBox, L"Compose a prompt", L"Write a prompt for the selected session, then queue it (envelope) or send it straight away (!).\n\nEnter inserts a line break \x2014 prompts can be multi-line.\n\x2191 / \x2193 recall prompts this session already got, once the caret is on the first line; Esc goes back to what you were typing.\n\nIf the session is holding an UNSENT prompt in its own input box (the pulsing 3 dots), clicking this box while it is empty pulls that text in here, ready to queue \x2014 it is a copy, so the prompt stays in the terminal too.");
                 Grid::SetColumn(_addPromptBox, 1);
                 composeRow.Children().Append(_addPromptBox);
 
