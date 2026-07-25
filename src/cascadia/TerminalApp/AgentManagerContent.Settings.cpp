@@ -2478,7 +2478,7 @@ namespace winrt::TerminalApp::implementation
                 // including one no list mentions. Selecting it opens the shared prompt and lands the
                 // typed id as a "(custom) <id>" row (_WireSuccessorModelCombo); the sentinel itself
                 // is never a storable value (comboPick maps it to "" == Default).
-                combo.Items().Append(winrt::box_value(L"Specify 26"));
+                combo.Items().Append(winrt::box_value(L"Specify\x2026"));
                 ids.push_back(std::wstring{ kSpecifyModelSentinel });
                 int sel = 0;
                 for (const auto& [display, id] : models)
