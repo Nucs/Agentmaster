@@ -3,7 +3,7 @@
 
 // Agentmaster — the in-app auto-updater (header-only, plain Win32; no WinRT, no engine-lib deps,
 // exactly like ProfileBootstrap.h). It checks the GitHub Releases of Nucs/Agentmaster for a newer
-// version, prompts the user (Update now / Postpone [3·7·30 days / skip this version] / Not now)
+// version, prompts the user (Update now / Postpone [tomorrow / 3·7·30 days / skip this version] / Not now)
 // with a Win32 TaskDialog, and — on Update — materializes the installer script into the active
 // profile dir (am-update.ps1 + a tiny am-update.cmd launcher) and runs it detached to download +
 // cert-trust + Add-AppxPackage the new .msixbundle and relaunch. The script (am-update.ps1) is the
@@ -1207,6 +1207,7 @@ namespace Agentmaster::Updater
     {
         NotNow, // ask again next launch (also the Cancel / X outcome)
         UpdateNow,
+        Postpone1, // "Remind me tomorrow" — the shortest postpone (24h)
         Postpone3,
         Postpone7,
         Postpone30,
@@ -1214,7 +1215,7 @@ namespace Agentmaster::Updater
     };
 
     // The "same question" shown at startup AND from the cog: Update now / Postpone / Not now, with
-    // the postpone DURATION chosen via a radio group (3 / 7 / 30 days / skip this version) — the
+    // the postpone DURATION chosen via a radio group (tomorrow / 3 / 7 / 30 days / skip this version) — the
     // TaskDialog analog of the requested dropdown (a TaskDialog can't host a combobox; radios are
     // the idiomatic in-dialog choice). Cancel / X == Not now (the least-destructive default) — and
     // ALSO the answer on any exception: a broken prompt must never crash the caller (the cog path
@@ -1257,7 +1258,7 @@ namespace Agentmaster::Updater
         }
 
         constexpr int idUpdate = 2001, idPostpone = 2002, idNotNow = 2003;
-        constexpr int rid3 = 3001, rid7 = 3002, rid30 = 3003, ridSkip = 3004;
+        constexpr int rid1 = 3000, rid3 = 3001, rid7 = 3002, rid30 = 3003, ridSkip = 3004;
 
         const TASKDIALOG_BUTTON buttons[] = {
             { idUpdate, L"Update now" },
@@ -1265,6 +1266,7 @@ namespace Agentmaster::Updater
             { idNotNow, L"Not now" },
         };
         const TASKDIALOG_BUTTON radios[] = {
+            { rid1, L"Remind me tomorrow" },
             { rid3, L"Remind me in 3 days" },
             { rid7, L"Remind me in 7 days" },
             { rid30, L"Remind me in 30 days" },
@@ -1299,7 +1301,8 @@ namespace Agentmaster::Updater
         case idUpdate:
             return Decision::UpdateNow;
         case idPostpone:
-            return radio == rid3 ? Decision::Postpone3 :
+            return radio == rid1 ? Decision::Postpone1 :
+                   radio == rid3 ? Decision::Postpone3 :
                    radio == rid30 ? Decision::Postpone30 :
                    radio == ridSkip ? Decision::Skip :
                                       Decision::Postpone7;
@@ -1512,6 +1515,9 @@ namespace Agentmaster::Updater
                 LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Update now (no installable assets \x2014 opening releases page)");
                 ::ShellExecuteW(owner, L"open", info.htmlUrl.empty() ? kReleasesPage : info.htmlUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 return false;
+            case Decision::Postpone1:
+                logChoice(L"Postpone 1d (tomorrow)", WritePostpone(stateDir, now + 1 * kDayMs));
+                return false;
             case Decision::Postpone3:
                 logChoice(L"Postpone 3d", WritePostpone(stateDir, now + 3 * kDayMs));
                 return false;
@@ -1595,7 +1601,7 @@ namespace Agentmaster::Updater
 
     // The shared check core, used by BOTH the startup check and the periodic (hourly) autocheck:
     // reads prefs, gates on identity + postpone + skip, checks GitHub (bounded so a slow-but-present
-    // network can't wedge the caller), prompts (Update now / Postpone 3·7·30 / Skip / Not now), and
+    // network can't wedge the caller), prompts (Update now / Postpone 1·3·7·30 / Skip / Not now), and
     // applies the choice. Returns true IFF the installer was launched — the caller must then exit the
     // process (TerminateProcess, like the single-instance handoff) so the package isn't in use while
     // it upgrades + relaunches.

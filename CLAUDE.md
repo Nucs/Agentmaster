@@ -585,7 +585,7 @@ GitHub-release self-updater for our side-by-side packaged app, header-only pure-
 N windows?" prompt** — a bounded (≤6 s, on a worker so a slow network can't wedge launch) GitHub-API
 query for the newest release, gated to **packaged RELEASE installs** (dev/unpackaged skip unless
 `AGENTMASTER_UPDATE_STARTUP` is set). When a strictly-newer version exists it shows a TaskDialog —
-**Update now / Postpone (3·7·30 days) / Skip this version / Not now** (Cancel == Not now). **The same
+**Update now / Postpone (tomorrow·3·7·30 days) / Skip this version / Not now** (Cancel == Not now). **The same
 check re-runs every 1 h while the app is running** (`RunPeriodicUpdateCheck`, the shared
 `RunUpdateCheckAndPrompt` core): the `WindowEmperor` arms a plain Win32 **`WM_TIMER`** on its message
 window (`_setupUpdateAutocheck`, armed during window-setup — a `WM_TIMER`, NOT the XAML
@@ -2674,7 +2674,7 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     Terminal-settings seeding, and the one-instance-per-profile kernel mutex; included by the
     engine, AgentManagerContent, TerminalPage AND the WindowsTerminal EXE — PROFILES.md),
     `Updater.h` (header-only, pure Win32 like `ProfileBootstrap.h` — the in-app GitHub-release
-    **auto-updater**: a bounded GitHub-API version check, the Update / Postpone (3·7·30 days) / Skip /
+    **auto-updater**: a bounded GitHub-API version check, the Update / Postpone (tomorrow·3·7·30 days) / Skip /
     Not-now TaskDialog, and the BAKED-IN `am-update.cmd` + `am-update.ps1` installer it writes into the
     active profile; included by the WindowsTerminal EXE [startup check] AND `TerminalApp.dll`'s Settings
     cog — see the *In-app auto-updater* Status block),

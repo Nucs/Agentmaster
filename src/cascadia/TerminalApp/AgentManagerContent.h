@@ -500,7 +500,7 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster (updater; Updater.h): the Settings cog's UPDATES section. Runs a GitHub
         // release check OFF the UI thread (WinHTTP), then marshals back. interactive==true (the
-        // "Check for updates" button): show the prompt (Update now / Postpone 3·7·30 days / Skip
+        // "Check for updates" button): show the prompt (Update now / Postpone tomorrow·3·7·30 days / Skip
         // this version / Not now) on a found update, else report "up to date" / "couldn't reach
         // GitHub". interactive==false (the silent check kicked when the cog opens): only set the
         // "vX.Y.Z available!" label (dark green) when a newer release exists; stay quiet otherwise.
