@@ -3,7 +3,7 @@
 
 // Agentmaster — the in-app auto-updater (header-only, plain Win32; no WinRT, no engine-lib deps,
 // exactly like ProfileBootstrap.h). It checks the GitHub Releases of Nucs/Agentmaster for a newer
-// version, prompts the user (Update now / Postpone [tomorrow / 3·7·30 days / skip this version] / Not now)
+// version, prompts the user (Update now / Postpone [tomorrow 08:00 / 3·7·30 days / skip this version] / Not now)
 // with a Win32 TaskDialog, and — on Update — materializes the installer script into the active
 // profile dir (am-update.ps1 + a tiny am-update.cmd launcher) and runs it detached to download +
 // cert-trust + Add-AppxPackage the new .msixbundle and relaunch. The script (am-update.ps1) is the
@@ -485,6 +485,95 @@ namespace Agentmaster::Updater
         constexpr unsigned long long kEpochDiff100ns = 116444736000000000ULL;
         const unsigned long long t = u.QuadPart - kEpochDiff100ns;
         return static_cast<long long>(t / 10000ULL);
+    }
+
+    // The hour "Remind me tomorrow" lands on: the start of the next working day, local time.
+    constexpr int kPostponeMorningHour = 8;
+
+    // A LOCAL wall-clock SYSTEMTIME -> epoch ms (the inverse of the GetLocalTime path). Returns
+    // false when the timezone conversion is unavailable, so callers can degrade honestly rather
+    // than persist a garbage instant.
+    inline bool LocalSystemTimeToUnixMs(const SYSTEMTIME& local, long long& outMs)
+    {
+        SYSTEMTIME utc{};
+        FILETIME ft{};
+        if (!::TzSpecificLocalTimeToSystemTime(nullptr, &local, &utc) || !::SystemTimeToFileTime(&utc, &ft))
+        {
+            return false;
+        }
+        ULARGE_INTEGER u{};
+        u.LowPart = ft.dwLowDateTime;
+        u.HighPart = ft.dwHighDateTime;
+        constexpr unsigned long long kEpochDiff100ns = 116444736000000000ULL;
+        outMs = static_cast<long long>((u.QuadPart - kEpochDiff100ns) / 10000ULL);
+        return true;
+    }
+
+    // "Tomorrow" == the NEXT local `hour`:00, NOT now + 24h. A rolling 24h window re-asks at
+    // whatever hour you happened to click — press it at 23:40 and it interrupts you at 23:40
+    // tomorrow, the worst moment of the day — whereas "the next 08:00" lands where the decision
+    // actually belongs: the start of the next working day. The next-OCCURRENCE rule also does the
+    // right thing in the small hours (click it at 02:00 and the coming 08:00 IS the morning you
+    // meant), so the span is always within (0, 24h].
+    //
+    // DST-safe by construction: the +1 day step is taken on the LOCAL wall clock (08:00 stays
+    // 08:00 across a shift) and local -> UTC is applied AFTER, at that date's real offset. If the
+    // timezone conversion is unavailable at either step it falls back to now + 24h, and a final
+    // belt guarantees a strictly-future instant — a postpone must never resolve to "now" (which
+    // would re-prompt on the next hourly tick, reading as if the choice was ignored).
+    // outLocalMorning (optional) receives the resolved LOCAL wall-clock time; it stays zeroed on
+    // the fallback path.
+    inline long long NextLocalMorningUnixMs(int hour = kPostponeMorningHour, SYSTEMTIME* outLocalMorning = nullptr)
+    {
+        constexpr long long kDayMs = 24LL * 60 * 60 * 1000;
+        const long long now = NowUnixMs();
+        if (outLocalMorning)
+        {
+            *outLocalMorning = SYSTEMTIME{};
+        }
+
+        SYSTEMTIME target{};
+        ::GetLocalTime(&target);
+        target.wHour = static_cast<WORD>(hour);
+        target.wMinute = 0;
+        target.wSecond = 0;
+        target.wMilliseconds = 0;
+
+        long long ms = 0;
+        if (!LocalSystemTimeToUnixMs(target, ms))
+        {
+            return now + kDayMs;
+        }
+        if (ms <= now)
+        {
+            // Already past today's hour: step the LOCAL date forward one day. SYSTEMTIME has no
+            // arithmetic, so round-trip through FILETIME ticks — legal here precisely because both
+            // ends are the same local wall clock (no UTC conversion is involved in the step).
+            FILETIME localTicks{};
+            if (!::SystemTimeToFileTime(&target, &localTicks))
+            {
+                return now + kDayMs;
+            }
+            ULARGE_INTEGER u{};
+            u.LowPart = localTicks.dwLowDateTime;
+            u.HighPart = localTicks.dwHighDateTime;
+            u.QuadPart += 24ULL * 60 * 60 * 10000000ULL; // one day in 100ns ticks
+            localTicks.dwLowDateTime = u.LowPart;
+            localTicks.dwHighDateTime = u.HighPart;
+            if (!::FileTimeToSystemTime(&localTicks, &target) || !LocalSystemTimeToUnixMs(target, ms))
+            {
+                return now + kDayMs;
+            }
+        }
+        if (ms <= now)
+        {
+            return now + kDayMs; // belt: never postpone to the past/present
+        }
+        if (outLocalMorning)
+        {
+            *outLocalMorning = target;
+        }
+        return ms;
     }
 
     // ============================ observability ============================
@@ -1207,7 +1296,7 @@ namespace Agentmaster::Updater
     {
         NotNow, // ask again next launch (also the Cancel / X outcome)
         UpdateNow,
-        Postpone1, // "Remind me tomorrow" — the shortest postpone (24h)
+        PostponeTomorrow, // "Remind me tomorrow" — the next local 08:00 (NOT a rolling 24h)
         Postpone3,
         Postpone7,
         Postpone30,
@@ -1215,7 +1304,7 @@ namespace Agentmaster::Updater
     };
 
     // The "same question" shown at startup AND from the cog: Update now / Postpone / Not now, with
-    // the postpone DURATION chosen via a radio group (tomorrow / 3 / 7 / 30 days / skip this version) — the
+    // the postpone DURATION chosen via a radio group (tomorrow 08:00 / 3 / 7 / 30 days / skip this version) — the
     // TaskDialog analog of the requested dropdown (a TaskDialog can't host a combobox; radios are
     // the idiomatic in-dialog choice). Cancel / X == Not now (the least-destructive default) — and
     // ALSO the answer on any exception: a broken prompt must never crash the caller (the cog path
@@ -1224,9 +1313,25 @@ namespace Agentmaster::Updater
     {
         // The allocating part (string building) under guard; the remainder is plain structs + one
         // Win32 call, which do not throw.
-        std::wstring instruction, content, footer;
+        std::wstring instruction, content, footer, tomorrowLabel{ L"Remind me tomorrow" };
         try
         {
+            // The tomorrow radio names the instant it actually resolves to ("Remind me tomorrow
+            // (Sat, 8:00 AM)"), because that instant is NOT "now + a day" — and in the small hours
+            // it isn't even the next calendar day. The weekday + locale-formatted time remove both
+            // ambiguities; a formatting failure silently keeps the plain label.
+            SYSTEMTIME morning{};
+            NextLocalMorningUnixMs(kPostponeMorningHour, &morning);
+            if (morning.wYear != 0) // zeroed == the timezone-conversion fallback -> plain label
+            {
+                wchar_t day[64]{}, clock[64]{};
+                if (::GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &morning, L"ddd", day, ARRAYSIZE(day), nullptr) > 0 &&
+                    ::GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &morning, nullptr, clock, ARRAYSIZE(clock)) > 0)
+                {
+                    tomorrowLabel += L" (" + std::wstring{ day } + L", " + clock + L")";
+                }
+            }
+
             instruction = L"Agentmaster " + DisplayVersion(info) + L" is available";
             content = L"You're on v" + info.currentVersionStr + L".\n\n";
             if (info.isNightly)
@@ -1266,7 +1371,7 @@ namespace Agentmaster::Updater
             { idNotNow, L"Not now" },
         };
         const TASKDIALOG_BUTTON radios[] = {
-            { rid1, L"Remind me tomorrow" },
+            { rid1, tomorrowLabel.c_str() },
             { rid3, L"Remind me in 3 days" },
             { rid7, L"Remind me in 7 days" },
             { rid30, L"Remind me in 30 days" },
@@ -1301,7 +1406,7 @@ namespace Agentmaster::Updater
         case idUpdate:
             return Decision::UpdateNow;
         case idPostpone:
-            return radio == rid1 ? Decision::Postpone1 :
+            return radio == rid1 ? Decision::PostponeTomorrow :
                    radio == rid3 ? Decision::Postpone3 :
                    radio == rid30 ? Decision::Postpone30 :
                    radio == ridSkip ? Decision::Skip :
@@ -1515,9 +1620,15 @@ namespace Agentmaster::Updater
                 LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Update now (no installable assets \x2014 opening releases page)");
                 ::ShellExecuteW(owner, L"open", info.htmlUrl.empty() ? kReleasesPage : info.htmlUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 return false;
-            case Decision::Postpone1:
-                logChoice(L"Postpone 1d (tomorrow)", WritePostpone(stateDir, now + 1 * kDayMs));
+            case Decision::PostponeTomorrow:
+            {
+                // The next local 08:00, not now + 24h (NextLocalMorningUnixMs). Logged with the
+                // resolved span so the log alone answers "when will it ask again?".
+                const long long until = NextLocalMorningUnixMs();
+                const std::wstring what = L"Postpone until tomorrow " + std::to_wstring(kPostponeMorningHour) + L":00 local (in " + FormatSpanShort(until - now) + L")";
+                logChoice(what.c_str(), WritePostpone(stateDir, until));
                 return false;
+            }
             case Decision::Postpone3:
                 logChoice(L"Postpone 3d", WritePostpone(stateDir, now + 3 * kDayMs));
                 return false;
@@ -1601,7 +1712,7 @@ namespace Agentmaster::Updater
 
     // The shared check core, used by BOTH the startup check and the periodic (hourly) autocheck:
     // reads prefs, gates on identity + postpone + skip, checks GitHub (bounded so a slow-but-present
-    // network can't wedge the caller), prompts (Update now / Postpone 1·3·7·30 / Skip / Not now), and
+    // network can't wedge the caller), prompts (Update now / Postpone tomorrow·3·7·30 / Skip / Not now), and
     // applies the choice. Returns true IFF the installer was launched — the caller must then exit the
     // process (TerminateProcess, like the single-instance handoff) so the package isn't in use while
     // it upgrades + relaunches.

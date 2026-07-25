@@ -2114,13 +2114,21 @@ void TestUpdaterVersionLogic()
 
         constexpr long long kDay = 24LL * 60 * 60 * 1000;
         const long long t0 = U::NowUnixMs();
-        CHECK(!U::ApplyDecision(dir, info, U::Decision::Postpone1, nullptr), "decide: postpone1 (tomorrow) returns not-launched");
+        // "Remind me tomorrow" = the NEXT LOCAL 08:00, not now + 24h: strictly future, never more
+        // than a day out, and it really IS 08:00 on the local wall clock (the wHour/wMinute check
+        // is what would catch a UTC-vs-local mixup, which a span check alone cannot see).
+        SYSTEMTIME morning{};
+        const long long next8 = U::NextLocalMorningUnixMs(U::kPostponeMorningHour, &morning);
+        CHECK(next8 > t0 && next8 <= t0 + kDay + 60000, "decide: next-08:00 is strictly future and within 24h");
+        CHECK(morning.wHour == 8 && morning.wMinute == 0 && morning.wSecond == 0 && morning.wMilliseconds == 0,
+              "decide: next-08:00 resolves to 08:00:00.000 on the LOCAL wall clock");
+        CHECK(!U::ApplyDecision(dir, info, U::Decision::PostponeTomorrow, nullptr), "decide: postpone-tomorrow returns not-launched");
         const auto p1 = U::ReadPrefs(dir).postponedUntilUnixMs;
-        CHECK(p1 >= t0 + kDay - 60000 && p1 <= U::NowUnixMs() + kDay + 60000, "decide: postpone1 lands ~1 day (tomorrow) out");
+        CHECK(p1 > t0 && p1 <= t0 + kDay + 60000, "decide: postpone-tomorrow persists the next 08:00 (not a rolling 24h)");
         CHECK(!U::ApplyDecision(dir, info, U::Decision::Postpone3, nullptr), "decide: postpone3 returns not-launched");
         const auto p3 = U::ReadPrefs(dir).postponedUntilUnixMs;
         CHECK(p3 >= t0 + 3 * kDay - 60000 && p3 <= U::NowUnixMs() + 3 * kDay + 60000, "decide: postpone3 lands ~3 days out");
-        CHECK(p3 > p1, "decide: postpone3 replaces the shorter postpone1");
+        CHECK(p3 > p1, "decide: postpone3 replaces the shorter postpone-tomorrow");
         CHECK(!U::ApplyDecision(dir, info, U::Decision::Postpone30, nullptr), "decide: postpone30 returns not-launched");
         const auto p30 = U::ReadPrefs(dir).postponedUntilUnixMs;
         CHECK(p30 > p3 && p30 >= t0 + 30 * kDay - 60000, "decide: postpone30 replaces with ~30 days");
