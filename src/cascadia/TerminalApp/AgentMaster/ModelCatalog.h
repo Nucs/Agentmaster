@@ -158,17 +158,20 @@ namespace Agentmaster
 
     // Merge ordered id GROUPS into the one list the "Specify a model..." drop-down shows: group
     // order is preserved, first occurrence of an id wins, and a repeat is dropped case-INsensitively
-    // ("Opus" and "opus" are one model, matching PushRecentModel's rule).
+    // ("Opus" and "opus" are one model, matching PushModelListEntry's rule).
     //
-    // Group order IS the product decision, so it lives here where a test can pin it:
+    // Group order IS the product decision, so it lives here where a test can pin it. At DISPLAY time
+    // the prompt merges:
     //   1. the CONFIGURED models (Settings -> Launch models)  — always present, whatever else happens
-    //   2. the recently-typed MRU
-    //   3. the fetched ANTHROPIC catalog
-    //   4. the fetched CODEX catalog
+    //   2. the durable MODEL LIST (model-list.json: everything specified in the prompt, plus the
+    //      last fetch's catalogs)
+    // and a FETCH merges what it downloaded, in this order, before saving it as the new list:
+    //   1. the fetched ANTHROPIC catalog
+    //   2. the fetched CODEX catalog
     // Anthropic before Codex because this picker launches Claude sessions (a Codex id is the
     // occasional cross-reference, not the common case), and the configured list first because it is
-    // the user's own curated set — it must never be pushed out by a fetch that returns hundreds of
-    // ids, nor replaced by one that (with no ANTHROPIC_API_KEY) can only return Codex's.
+    // the user's own curated set — it is never stored in the model list, so a fetch that returns
+    // hundreds of ids (or, with no ANTHROPIC_API_KEY, only Codex's) can never displace it.
     inline std::vector<std::wstring> MergeModelIdGroups(const std::vector<std::vector<std::wstring>>& groups)
     {
         const auto fold = [](const std::wstring& s) {

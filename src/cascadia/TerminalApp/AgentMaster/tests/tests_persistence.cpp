@@ -27,35 +27,76 @@ void TestPersistence()
 {
     std::wprintf(L"Persistence (JSON + sessions + templates):\n");
 
-    // Agentmaster (launch-model picker -> "Specify..."): the recent-models MRU. It is what fills the
-    // prompt's drop-down, so its rules ARE the feature — a model you typed once must come back, in
-    // the order you last used it, spelled the way you last typed it.
+    // Agentmaster (launch-model picker -> "Specify..."): the durable MODEL LIST. It is what fills
+    // the prompt's drop-down, so its rules ARE the feature — a model you specified once must come
+    // back, in the order you last used it, spelled the way you last typed it.
     {
-        auto m = PushRecentModel({}, L"claude-opus-4-8");
-        CHECK(m.size() == 1 && m[0] == L"claude-opus-4-8", "recent models: first push lands at the front");
-        m = PushRecentModel(m, L"gpt-5.6-sol");
-        CHECK(m.size() == 2 && m[0] == L"gpt-5.6-sol" && m[1] == L"claude-opus-4-8", "recent models: newest first");
+        auto m = PushModelListEntry({}, L"claude-opus-4-8");
+        CHECK(m.size() == 1 && m[0] == L"claude-opus-4-8", "model list: first push lands at the front");
+        m = PushModelListEntry(m, L"gpt-5.6-sol");
+        CHECK(m.size() == 2 && m[0] == L"gpt-5.6-sol" && m[1] == L"claude-opus-4-8", "model list: newest first");
         // Re-using an old model MOVES it (never duplicates), and the NEW spelling wins — the list
         // should read back what the user last typed, not an older casing of the same id.
-        m = PushRecentModel(m, L"Claude-Opus-4-8");
-        CHECK(m.size() == 2 && m[0] == L"Claude-Opus-4-8" && m[1] == L"gpt-5.6-sol", "recent models: re-use moves to front, case-insensitively, keeping the new spelling");
+        m = PushModelListEntry(m, L"Claude-Opus-4-8");
+        CHECK(m.size() == 2 && m[0] == L"Claude-Opus-4-8" && m[1] == L"gpt-5.6-sol", "model list: re-use moves to front, case-insensitively, keeping the new spelling");
         // Surrounding whitespace comes free with a pasted id.
-        m = PushRecentModel(m, L"  opus  ");
-        CHECK(m.size() == 3 && m[0] == L"opus", "recent models: a pasted id is trimmed");
+        m = PushModelListEntry(m, L"  opus  ");
+        CHECK(m.size() == 3 && m[0] == L"opus", "model list: a pasted id is trimmed");
         // "" is Default — never an MRU entry.
-        CHECK(PushRecentModel(m, L"").size() == 3 && PushRecentModel(m, L"   \t ").size() == 3, "recent models: empty/blank is a no-op (Default is not a model)");
+        CHECK(PushModelListEntry(m, L"").size() == 3 && PushModelListEntry(m, L"   \t ").size() == 3, "model list: empty/blank is a no-op (Default is not a model)");
         // The cap drops the OLDEST, never the newest.
         std::vector<std::wstring> big;
         for (int i = 0; i < 40; ++i)
         {
-            big = PushRecentModel(big, L"m" + std::to_wstring(i), 5);
+            big = PushModelListEntry(big, L"m" + std::to_wstring(i), 5);
         }
-        CHECK(big.size() == 5 && big[0] == L"m39" && big[4] == L"m35", "recent models: capped, oldest dropped");
+        CHECK(big.size() == 5 && big[0] == L"m39" && big[4] == L"m35", "model list: capped, oldest dropped");
         // Disk round-trip (the file the prompt reads on every open).
-        const auto text = SerializeRecentModels({ L"opus", L"claude-fable-5" });
-        const auto back = DeserializeRecentModels(text);
-        CHECK(back.size() == 2 && back[0] == L"opus" && back[1] == L"claude-fable-5", "recent models: JSON round-trip preserves order");
-        CHECK(DeserializeRecentModels(L"").empty() && DeserializeRecentModels(L"{ not json").empty(), "recent models: a missing/corrupt file reads as none (the prompt still works)");
+        const auto text = SerializeModelList({ L"opus", L"claude-fable-5" });
+        const auto back = DeserializeModelList(text);
+        CHECK(back.size() == 2 && back[0] == L"opus" && back[1] == L"claude-fable-5", "model list: JSON round-trip preserves order");
+        CHECK(DeserializeModelList(L"").empty() && DeserializeModelList(L"{ not json").empty(), "model list: a missing/corrupt file reads as none (the prompt still works)");
+    }
+
+    // The "Fetch models" RESET semantics, on disk: the list is REPLACED by what came back (order
+    // kept), not merged into. Runs against a scratch profile so the live one is never touched.
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring dir = std::wstring{ tmp } + L"am-modellist-" + NewSessionId();
+        std::filesystem::create_directories(std::filesystem::path{ dir });
+        std::wstring prevEnv;
+        {
+            wchar_t buf[1024]{};
+            const DWORD got = ::GetEnvironmentVariableW(L"AGENTMASTER_PROFILE", buf, 1024);
+            prevEnv.assign(buf, got);
+        }
+        ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", dir.c_str());
+
+        CHECK(LoadModelList().empty(), "model list: a fresh profile starts with no saved models");
+        RememberSpecifiedModel(L"my-custom-model");
+        RememberSpecifiedModel(L"another-one");
+        CHECK(LoadModelList() == std::vector<std::wstring>({ L"another-one", L"my-custom-model" }), "model list: a SPECIFIED model is saved, newest first");
+        // ...and it persists: a second read (a reopened prompt / another window) sees it.
+        CHECK(LoadModelList().size() == 2, "model list: the saved list persists across reads");
+        // Fetch RESETS: the specified ids are gone, replaced by the catalog in the given order.
+        ResetModelList({ L"claude-opus-4-8", L"claude-sonnet-5", L"gpt-5.6-sol" });
+        CHECK(LoadModelList() == std::vector<std::wstring>({ L"claude-opus-4-8", L"claude-sonnet-5", L"gpt-5.6-sol" }),
+              "model list: Fetch REPLACES the list (order preserved), dropping earlier entries");
+        // Specifying after a reset prepends to the fetched list rather than starting over.
+        RememberSpecifiedModel(L"typed-after-fetch");
+        CHECK(LoadModelList().size() == 4 && LoadModelList()[0] == L"typed-after-fetch", "model list: a model specified after a Fetch joins the rebuilt list");
+        // A reset that dedupes / drops blanks still lands a clean list.
+        ResetModelList({ L"a", L"", L"A", L"b" });
+        CHECK(LoadModelList() == std::vector<std::wstring>({ L"a", L"b" }), "model list: reset dedupes case-insensitively (first spelling) and drops blanks");
+        // An EMPTY reset is legal - it clears the list (the configured models still show, they are
+        // merged in from settings at display time).
+        ResetModelList({});
+        CHECK(LoadModelList().empty(), "model list: an empty reset clears the saved list");
+
+        ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", prevEnv.empty() ? nullptr : prevEnv.c_str());
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
     }
 
     // Agentmaster: the published model-list parsers (ModelCatalog.h) behind the prompt's "Fetch
@@ -92,7 +133,7 @@ void TestPersistence()
     }
 
     // Agentmaster: the drop-down's ORDER — the product rule, pinned. Groups in order:
-    // [configured Launch models] [recent MRU] [fetched Anthropic] [fetched Codex]. The configured
+    // [configured Launch models] [saved model list] [fetched Anthropic] [fetched Codex]. The configured
     // list is ALWAYS present (a fetch adds, never replaces) and Anthropic outranks Codex, because
     // this picker launches Claude sessions.
     {

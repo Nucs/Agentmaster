@@ -77,21 +77,29 @@ namespace Agentmaster
     // Recent working directories (MRU) for the Launch path-picker. Front == most recent.
     std::wstring SerializeRecentDirs(const std::vector<std::wstring>& dirs);
     std::vector<std::wstring> DeserializeRecentDirs(std::wstring_view text);
-    // Agentmaster (launch-model picker -> "Specify..."): recently TYPED model ids (MRU), the
-    // recent-dirs twin — front == most recent. This is what the Specify prompt's dropdown lists,
-    // so a model you had to look up once is one click away forever after. Deliberately its own
-    // file (recent-models.json), NOT an AppSettings field: it is written from any window on any
-    // pick, and settings.json is a read-modify-write document several surfaces already contend
-    // for (the updater's RMW, the cog's Save) — an MRU append must never risk clobbering it.
-    inline constexpr size_t kMaxRecentModels = 20;
-    std::wstring SerializeRecentModels(const std::vector<std::wstring>& models);
-    std::vector<std::wstring> DeserializeRecentModels(std::wstring_view text);
-    // Push `id` to the FRONT of an MRU (pure; the caller persists the result). Trims; an empty /
+    // Agentmaster (launch-model picker -> "Specify..."): the MODEL LIST — the durable set of model
+    // ids the Specify prompt's drop-down offers, so a model you looked up once is one click away
+    // forever after. It accumulates two ways and is reset one way:
+    //   * SPECIFYING a model (typing one into the prompt and committing) ADDS it, newest first;
+    //   * FETCHING replaces the whole list with the freshly downloaded catalogs (ResetModelList) —
+    //     the deliberate "rebuild this from the published lists" action, so a list that has grown
+    //     stale or cluttered has an obvious way back.
+    // The CONFIGURED launch models (AppSettings.launchModels) are NOT stored here: they are merged
+    // in front at display time (MergeModelIdGroups), so they always appear and always track the
+    // settings — storing a copy would go stale the moment the cog is edited.
+    //
+    // Its own file (model-list.json), NOT an AppSettings field: it is written from any window on
+    // any pick, and settings.json is a read-modify-write document several surfaces already contend
+    // for (the updater's RMW, the cog's Save) — an append must never risk clobbering it.
+    inline constexpr size_t kMaxModelListEntries = 100; // a fetched catalog is tens of ids; this bounds a runaway file, not normal use
+    std::wstring SerializeModelList(const std::vector<std::wstring>& models);
+    std::vector<std::wstring> DeserializeModelList(std::wstring_view text);
+    // Push `id` to the FRONT of the list (pure; the caller persists the result). Trims; an empty /
     // whitespace-only id is a no-op; an id already present is MOVED to the front rather than
     // duplicated (matched case-INsensitively — "Opus" and "opus" are one model — while the NEW
     // spelling is what gets stored, so the list shows what you last typed); capped at `cap`
     // (oldest dropped). PURE + unit-tested.
-    std::vector<std::wstring> PushRecentModel(std::vector<std::wstring> models, std::wstring_view id, size_t cap = kMaxRecentModels);
+    std::vector<std::wstring> PushModelListEntry(std::vector<std::wstring> models, std::wstring_view id, size_t cap = kMaxModelListEntries);
     // Open-at-exit window manifest (M10 Increment 3 refinement; PERSISTENCE.md §13.5): the set of
     // windowIds that were OPEN when the app last exited — distinct from "every record ever," so the
     // startup auto-reopen offers exactly the last-open windows (a window closed mid-session is pruned
@@ -122,11 +130,16 @@ namespace Agentmaster
     std::vector<PlanTemplate> LoadTemplates();
     void SaveRecentDirs(const std::vector<std::wstring>& dirs);
     std::vector<std::wstring> LoadRecentDirs();
-    void SaveRecentModels(const std::vector<std::wstring>& models);
-    std::vector<std::wstring> LoadRecentModels();
-    // Load -> PushRecentModel -> Save, the one call every "Specify..." commit makes (each window
+    void SaveModelList(const std::vector<std::wstring>& models);
+    std::vector<std::wstring> LoadModelList();
+    // Load -> PushModelListEntry -> Save, the one call every "Specify..." commit makes (each window
     // re-reads the freshest file first, so two windows adding models can't lose each other's).
-    void RememberRecentModel(std::wstring_view id);
+    void RememberSpecifiedModel(std::wstring_view id);
+    // The "Fetch models" RESET: replace the whole list with `ids` (order kept, deduped, capped).
+    // Destructive by design — Fetch is how a user says "rebuild this from the published lists", so
+    // ids they specified earlier are cleared along with a previous fetch's. The configured launch
+    // models are unaffected (they live in settings and are merged in at display time).
+    void ResetModelList(const std::vector<std::wstring>& ids);
     void SaveLayout(const ManagerLayout& layout);
     ManagerLayout LoadLayout();
     void SaveAppSettings(const AppSettings& settings);

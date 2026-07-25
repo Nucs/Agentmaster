@@ -1955,15 +1955,18 @@ What works, by area:
   session" (for it that's WT's duplicate-tab), and the launch bar's Launch/Fork + the double-click
   Resume/Fork dialog stay Default]. **`Specify…` sits directly under Default** in EVERY one of those
   submenus (and as a row in the Commands tab's three **Successor model** combos): it opens the shared
-  **"Specify a model" prompt** — an **editable ComboBox** whose drop-down is built by the pure,
-  tested `MergeModelIdGroups` in group order **[configured `launchModels`] → [the `recent-models.json`
-  MRU] → [fetched Anthropic] → [fetched Codex]** (each id once, case-insensitively deduped, first
-  spelling kept). Two guarantees ride that rule: **the configured Launch models are ALWAYS offered**
-  (a Fetch can only ADD — it never replaces the list, which previously wiped the box down to whatever
-  came back, i.e. Codex-only without an API key) and **Anthropic's ids always precede Codex's** (this
-  picker launches Claude sessions). The MRU is `PushRecentModel`/`RememberRecentModel` — newest first,
-  a re-used id moved not duplicated, cap 20. Plus **links to the two
-  published lists** (Anthropic's [model overview](https://platform.claude.com/docs/en/about-claude/models/overview)
+  **"Specify a model" prompt** — an **editable ComboBox** whose drop-down is
+  **[configured `launchModels`] → [the durable MODEL LIST]**, merged by the pure, tested
+  `MergeModelIdGroups` (each id once, case-insensitively deduped, first spelling kept). The
+  **model list** (`model-list.json`) is the persisted droplist: **every model SPECIFIED here is
+  added to it** (`RememberSpecifiedModel` → `PushModelListEntry`, newest first, a re-used id moved
+  not duplicated, cap 100) so it is offered from then on, in every window and across restarts — and
+  **"Fetch models" RESETS it** (`ResetModelList`), replacing it wholesale with the freshly downloaded
+  catalogs, **Anthropic's ids before Codex's** (this picker launches Claude sessions). The reset is
+  destructive by design — Fetch is the "rebuild this from the published lists" verb, so ids specified
+  earlier go with a previous fetch's. The **configured Launch models are NEVER stored** in it: they
+  are merged in FRONT at display time, so they always appear, always track the cog, and survive every
+  reset. Plus **links to the two published lists** (Anthropic's [model overview](https://platform.claude.com/docs/en/about-claude/models/overview)
   — the table of ids + aliases, NOT the `/v1/models` API reference the *fetch* calls ·
   the Codex [models.json](https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json))
   and a **Fetch list** button that downloads + parses them straight into the drop-down
@@ -2616,8 +2619,8 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     It is what makes the shell activate the RUNNING instance in-process instead of launching a second
     process (whose no-arg startup the Emperor turned into a stray window).
   - `src/cascadia/TerminalApp/AgentModelPrompt.h` — the shared **"Specify a model" prompt** card
-    (`AgentBuildSpecifyModelCard`): an editable-ComboBox id box seeded from the `recent-models.json`
-    MRU + the configured list, links to the two published model lists, and a bounded off-thread
+    (`AgentBuildSpecifyModelCard`): an editable-ComboBox id box seeded from the configured list +
+    the durable `model-list.json` droplist, links to the two published model lists, and a bounded off-thread
     **Fetch** (Updater.h's `HttpsGet` + `AgentMaster/ModelCatalog.h`'s pure parsers). Deliberately
     SPLIT from `AgentModelMenu.h`: that header is included by `Tab.cpp` (core WT code) and this one
     drags winhttp/comctl32 in through Updater.h's `#pragma comment(lib)`. Included by exactly the two
@@ -2729,8 +2732,10 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   local silent-drop trace — a delivery that never reached the bridge: no sid / no pipe / a dead
   pipe's connect timeout; the bridge-side hooks.log only sees lines that ARRIVED), `sessions.json` (persisted fleet),
   `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU),
-  `recent-models.json` (the "Specify a model..." MRU — the model ids you typed, newest first, what the
-  prompt's drop-down lists), `dir-colors.json`
+  `model-list.json` (the "Specify a model..." droplist — every model id specified in that prompt,
+  newest first, plus whatever its "Fetch models" last loaded; that button REPLACES the file, and the
+  configured `launchModels` are never in it — they are merged in from settings at display time),
+  `dir-colors.json`
   (the **permanent** per-working-directory tab color map, schema **v2** — both user picks and
   auto-assigned colors, so a folder keeps its color across restarts), `session-store/<sid>.json`
   (the durable per-session KV — the `title` / `favorite` / `tags` keys), `tags.json` (the **bookmark-tag

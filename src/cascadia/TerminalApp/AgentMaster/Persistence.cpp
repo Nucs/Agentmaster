@@ -1266,7 +1266,7 @@ namespace Agentmaster
         return out;
     }
 
-    std::wstring SerializeRecentModels(const std::vector<std::wstring>& models)
+    std::wstring SerializeModelList(const std::vector<std::wstring>& models)
     {
         auto root = json::Value::MkObj();
         root.Set(L"version", json::Value::MkNum(1));
@@ -1279,7 +1279,7 @@ namespace Agentmaster
         return json::Dump(root);
     }
 
-    std::vector<std::wstring> DeserializeRecentModels(std::wstring_view text)
+    std::vector<std::wstring> DeserializeModelList(std::wstring_view text)
     {
         std::vector<std::wstring> out;
         const auto parsed = json::Parse(text);
@@ -1300,7 +1300,7 @@ namespace Agentmaster
         return out;
     }
 
-    std::vector<std::wstring> PushRecentModel(std::vector<std::wstring> models, std::wstring_view id, size_t cap)
+    std::vector<std::wstring> PushModelListEntry(std::vector<std::wstring> models, std::wstring_view id, size_t cap)
     {
         // Trim (a pasted id often carries surrounding whitespace).
         size_t b = 0, e = id.size();
@@ -1495,19 +1495,31 @@ namespace Agentmaster
         return DeserializeRecentDirs(ReadAllUtf8(AgentmasterStateDir() + L"\\recent-dirs.json"));
     }
 
-    void SaveRecentModels(const std::vector<std::wstring>& models)
+    void SaveModelList(const std::vector<std::wstring>& models)
     {
-        WriteAllUtf8(AgentmasterStateDir() + L"\\recent-models.json", SerializeRecentModels(models));
+        WriteAllUtf8(AgentmasterStateDir() + L"\\model-list.json", SerializeModelList(models));
     }
-    std::vector<std::wstring> LoadRecentModels()
+    std::vector<std::wstring> LoadModelList()
     {
-        return DeserializeRecentModels(ReadAllUtf8(AgentmasterStateDir() + L"\\recent-models.json"));
+        return DeserializeModelList(ReadAllUtf8(AgentmasterStateDir() + L"\\model-list.json"));
     }
-    void RememberRecentModel(std::wstring_view id)
+    void RememberSpecifiedModel(std::wstring_view id)
     {
         // Re-read the FRESHEST file rather than trusting an in-memory copy: any window can add a
-        // model at any time, and this MRU is small enough that the read is free.
-        SaveRecentModels(PushRecentModel(LoadRecentModels(), id));
+        // model at any time, and this list is small enough that the read is free.
+        SaveModelList(PushModelListEntry(LoadModelList(), id));
+    }
+    void ResetModelList(const std::vector<std::wstring>& ids)
+    {
+        // Replace, don't merge — this IS the reset. Built by re-pushing in REVERSE so the shared
+        // dedupe/trim/cap rules apply exactly once and the given order survives (push puts each at
+        // the front, so walking backwards reproduces the input order).
+        std::vector<std::wstring> out;
+        for (auto it = ids.rbegin(); it != ids.rend(); ++it)
+        {
+            out = PushModelListEntry(std::move(out), *it);
+        }
+        SaveModelList(out);
     }
     void SaveOpenWindows(const std::vector<std::wstring>& windowIds)
     {

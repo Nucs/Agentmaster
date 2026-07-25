@@ -2863,7 +2863,7 @@ namespace winrt::TerminalApp::implementation
     // window. The POPUP is built once and parented into Root() (the tag editor's recipe — a popup
     // child renders in the island's popup root, and a ContentDialog text box would take no
     // keypresses at all); its CHILD is rebuilt per open because it carries this invocation's
-    // callback and re-reads the recent-models MRU, which another window may have just extended.
+    // callback and re-reads the durable model list, which another window may have just extended.
     void TerminalPage::_PromptForModel(std::function<void(winrt::hstring)> onPicked, const std::wstring& seed)
     {
         // Defer past the invoking flyout's close: a MenuFlyout closes asynchronously and restores

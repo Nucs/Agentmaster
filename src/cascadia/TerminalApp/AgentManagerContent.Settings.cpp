@@ -4495,7 +4495,7 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster (launch-model picker -> "Specify..."): show the type-any-model-id prompt over the
     // Manager. The dimmed LAYER is built once and reused (the claude-missing/settings idiom); the
     // CARD inside is rebuilt per open because it carries this invocation's callback and re-reads the
-    // recent-models MRU — a prompt opened after another window added a model must list it.
+    // durable model list — a prompt opened after another window specified a model must list it.
     void AgentManagerContent::_PromptForModel(std::function<void(winrt::hstring)> onPicked, const std::wstring& seed)
     {
         if (!_root || !_dispatcher)
