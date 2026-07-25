@@ -669,6 +669,7 @@ namespace Agentmaster
     {
         auto o = json::Value::MkObj();
         o.Set(L"skipPermissions", json::Value::MkBool(s.skipPermissions));
+        o.Set(L"trustWorkspaceOnLaunch", json::Value::MkBool(s.trustWorkspaceOnLaunch));
         o.Set(L"model", json::Value::MkStr(s.model));
         o.Set(L"launchModels", json::Value::MkStr(s.launchModels));
         o.Set(L"modelFamilies", json::Value::MkStr(s.modelFamilies));
@@ -765,6 +766,10 @@ namespace Agentmaster
     {
         AppSettings s; // any missing field keeps the struct default (== prior hardcoded behavior)
         s.skipPermissions = v.BoolAt(L"skipPermissions", true);
+        // Absent => true: pre-trusting the workspace is what keeps an unattended tab off Claude's
+        // startup trust modal, so an existing settings.json adopts it (there is nothing to preserve —
+        // the dialog was never a feature anyone chose).
+        s.trustWorkspaceOnLaunch = v.BoolAt(L"trustWorkspaceOnLaunch", true);
         s.model = v.StrAt(L"model");
         // Launch-model picker: gate the default on key PRESENCE, not emptiness — an ABSENT key
         // (a pre-picker settings.json) seeds the shipped kDefaultLaunchModels (the struct default),

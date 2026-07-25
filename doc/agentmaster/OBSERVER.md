@@ -583,6 +583,17 @@ A correlated claude with **no transcript yet** (never prompted) has `sessionId==
   prompt), `sessionId` fills, `ObserveClaude` creates the record, and the next probe binds.
 - If hooks fire first (`SessionStart`), the id arrives via the push path immediately — same record.
 
+⚠ **This state is also what a claude blocked on a startup MODAL looks like** — and that is the one
+case where "still starting…" is not transient but *permanent*. Claude's workspace-**trust** dialog
+("Quick safety check: Is this a project you created or one you trust?") blocks every interactive
+session in an untrusted directory; an unattended ConPTY tab cannot answer it, so the session never
+prompts, never writes a transcript, and parks here forever wearing the dim `○ claude · unlinked`
+badge. Diagnosing it from the observer's side is impossible by construction (there is nothing to
+correlate), so the fix lives at the spawn seam: `EnsureClaudeWorkspaceTrusted` pre-seeds the
+workspace's `hasTrustDialogAccepted` key before launch — see [`HOOKS.md`](HOOKS.md) *Workspace
+trust*. If a tab ever sits at `(starting…)` indefinitely, look at its screen before suspecting
+correlation.
+
 ### 11e. `Persistence` — no change
 Only the durable `SessionInfo` subset persists (`Persistence.cpp` ToJson/FromJson untouched for the
 new transient fields). On restart the observer re-derives everything.

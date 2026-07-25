@@ -16,12 +16,14 @@
 #include <unordered_map>
 #include <vector>
 
+#include "Json.h" // the workspace-trust splice validates ~/.claude.json through this (never reprints it)
 #include "PendingPaste.h" // PENDING_INPUT.md §2b — the pure paste-cache marker resolver (adapter below)
 #include "Persistence.h" // GetDirEnv (the per-directory env overrides; ResolveSessionEnv reads it)
 #include "ProcessInspect.h" // SnapshotProcesses / FindDescendantByImage / ReadProcessCwd (moved here)
 #include "ProfileBootstrap.h" // the per-install state PROFILE (AgentmasterStateDir now resolves through it)
 #include "RegexUtil.h" // COMMANDS.md §6b — the successor-title regex rewrite (DeriveHandoverSuccessorTitle)
 #include "Sha256.h" // the shipped-command-definition version history is a list of SHA-256 digests
+#include "TranscriptStore.h" // FindGitRootForDir (the workspace-trust key is the enclosing repo)
 
 namespace
 {
@@ -57,6 +59,39 @@ namespace
         std::string out(static_cast<size_t>(needed), '\0');
         ::WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), needed, nullptr, nullptr);
         return out;
+    }
+
+    // Read a whole UTF-8 file as UTF-16. "" for a missing/unreadable/empty file — every caller here
+    // treats "no text" as "nothing to do", never as "rebuild it" (Rule #16 / the no-clobber rule).
+    std::wstring ReadFileUtf8(const std::wstring& path)
+    {
+        try
+        {
+            std::ifstream f(std::filesystem::path{ path }, std::ios::binary);
+            if (!f)
+            {
+                return {};
+            }
+            const std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            if (bytes.empty())
+            {
+                return {};
+            }
+            const int needed = ::MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
+            if (needed <= 0)
+            {
+                return {};
+            }
+            std::wstring out(static_cast<size_t>(needed), L'\0');
+            ::MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), out.data(), needed);
+            return out;
+        }
+        catch (...)
+        {
+            // Same non-recursion argument as WriteFileUtf8 below (this helper is off the logging path).
+            Agentmaster::LogSwallowedException(L"ReadFileUtf8"); // qualified: file-scope anonymous namespace
+            return {};
+        }
     }
 
     bool WriteFileUtf8(const std::wstring& path, std::wstring_view content)
@@ -483,13 +518,17 @@ try {
         // When skipPermissions is ON (the cog default), spawn with --dangerously-skip-permissions:
         // the app drives claude programmatically (Autorunner + injected prompts) and gates risky
         // actions through its own Approval Policy, so the per-tool permission prompts are
-        // redundant. Critically, permission mode `bypassPermissions` ALSO skips the per-folder
-        // "Do you trust the files in this folder?" trust dialog at startup (the dialog block is
-        // gated on `mode !== "bypassPermissions"`), which would otherwise wedge an unattended
-        // ConPTY session waiting on a keypress. It does NOT suppress the one-time GLOBAL "Bypass
-        // Permissions mode" acceptance (~/.claude.json `bypassPermissionsModeAccepted`).
+        // redundant. It does NOT suppress the one-time GLOBAL "Bypass Permissions mode" acceptance
+        // (~/.claude.json `bypassPermissionsModeAccepted`).
+        // ⚠ Nor does it suppress the startup WORKSPACE-TRUST dialog. This comment used to claim the
+        // opposite ("the dialog block is gated on mode !== bypassPermissions") — that is WRONG on
+        // 2.1.x and was proven false by launching claude with the flag in an untrusted directory on
+        // a real PTY: the dialog appeared. Claude's trust gate reads only CLAUDE_CODE_SANDBOXED, the
+        // in-memory session flag, background-agent mode, and the persisted per-project
+        // hasTrustDialogAccepted — never the permission mode. EnsureClaudeWorkspaceTrusted (called
+        // from the spawn prelude) is what keeps that dialog off an unattended ConPTY session.
         // When OFF, the flag is omitted and BuildHooksSettingsJson pins permissions.defaultMode
-        // instead (normal prompts + trust apply).
+        // instead (normal prompts apply).
         const std::wstring flag = skipPermissions ? L"--dangerously-skip-permissions " : L"";
 
         // How to invoke claude. The programmatic spawn runs through ConPTY's CreateProcessW, which —
@@ -691,6 +730,426 @@ try {
             base = home + L"\\.claude";
         }
         return base + L"\\paste-cache";
+    }
+
+    // ---- Workspace trust (ClaudeSpawn.h) ----------------------------------------------------
+    //
+    // A small JSON-aware TEXT scanner, not a re-serializer: we must set one boolean inside the
+    // user's real ~/.claude.json (their oauth account, 60+ project entries, float cost/fps stats)
+    // without disturbing a single other byte. Json.h is used only to VALIDATE (before and after)
+    // and to escape the key — never to reprint the file.
+
+    // `i` sits on the opening quote of a JSON string; returns the index just past its closing
+    // quote (honoring \\ escapes), or npos if unterminated.
+    static size_t JsonSkipString(const std::wstring& t, size_t i)
+    {
+        if (i >= t.size() || t[i] != L'"')
+        {
+            return std::wstring::npos;
+        }
+        for (++i; i < t.size(); ++i)
+        {
+            if (t[i] == L'\\')
+            {
+                ++i; // the escaped char is consumed with it (a trailing '\' falls out of the loop)
+                continue;
+            }
+            if (t[i] == L'"')
+            {
+                return i + 1;
+            }
+        }
+        return std::wstring::npos;
+    }
+
+    static size_t JsonSkipWs(const std::wstring& t, size_t i)
+    {
+        while (i < t.size() && (t[i] == L' ' || t[i] == L'\t' || t[i] == L'\r' || t[i] == L'\n'))
+        {
+            ++i;
+        }
+        return i;
+    }
+
+    // `i` sits on the first char of a JSON value; returns the index just past it. Strings are
+    // skipped as a unit (so braces/brackets INSIDE a string can never unbalance the walk).
+    static size_t JsonSkipValue(const std::wstring& t, size_t i)
+    {
+        i = JsonSkipWs(t, i);
+        if (i >= t.size())
+        {
+            return std::wstring::npos;
+        }
+        if (t[i] == L'"')
+        {
+            return JsonSkipString(t, i);
+        }
+        if (t[i] == L'{' || t[i] == L'[')
+        {
+            int depth = 0;
+            for (; i < t.size(); ++i)
+            {
+                if (t[i] == L'"')
+                {
+                    const size_t after = JsonSkipString(t, i);
+                    if (after == std::wstring::npos)
+                    {
+                        return std::wstring::npos;
+                    }
+                    i = after - 1;
+                    continue;
+                }
+                if (t[i] == L'{' || t[i] == L'[')
+                {
+                    ++depth;
+                }
+                else if (t[i] == L'}' || t[i] == L']')
+                {
+                    if (--depth == 0)
+                    {
+                        return i + 1;
+                    }
+                }
+            }
+            return std::wstring::npos;
+        }
+        // A literal (true/false/null) or a number: run to the next structural character.
+        const size_t end = t.find_first_of(L",}] \t\r\n", i);
+        return end == std::wstring::npos ? t.size() : end;
+    }
+
+    struct JsonMemberSpan
+    {
+        bool found{ false };
+        size_t valueBegin{ 0 }; // first char of the member's VALUE
+        size_t valueEnd{ 0 }; // one past the value
+    };
+
+    // Find member `key` in the object whose '{' is at `braceIdx`. Only that object's OWN members
+    // are considered (nested objects are skipped as values).
+    static JsonMemberSpan JsonFindMember(const std::wstring& t, size_t braceIdx, const std::wstring& key)
+    {
+        JsonMemberSpan r;
+        if (braceIdx >= t.size() || t[braceIdx] != L'{')
+        {
+            return r;
+        }
+        size_t i = JsonSkipWs(t, braceIdx + 1);
+        if (i < t.size() && t[i] == L'}')
+        {
+            return r; // empty object
+        }
+        while (i < t.size())
+        {
+            if (t[i] != L'"')
+            {
+                return {}; // malformed — refuse rather than guess
+            }
+            const size_t keyEnd = JsonSkipString(t, i);
+            if (keyEnd == std::wstring::npos)
+            {
+                return {};
+            }
+            // The member name as PARSED (so an escaped key still compares correctly).
+            const auto parsedKey = json::Parse(t.substr(i, keyEnd - i));
+            i = JsonSkipWs(t, keyEnd);
+            if (i >= t.size() || t[i] != L':')
+            {
+                return {};
+            }
+            const size_t valueBegin = JsonSkipWs(t, i + 1);
+            const size_t valueEnd = JsonSkipValue(t, valueBegin);
+            if (valueEnd == std::wstring::npos)
+            {
+                return {};
+            }
+            if (parsedKey && parsedKey->type == json::Value::Type::Str && parsedKey->str == key)
+            {
+                r.found = true;
+                r.valueBegin = valueBegin;
+                r.valueEnd = valueEnd;
+                return r;
+            }
+            i = JsonSkipWs(t, valueEnd);
+            if (i < t.size() && t[i] == L',')
+            {
+                i = JsonSkipWs(t, i + 1);
+                continue;
+            }
+            return r; // '}' or malformed — the key is simply absent
+        }
+        return r;
+    }
+
+    // The whitespace run that separates an object's '{' from its first member — reused verbatim as
+    // the prefix of an inserted member so a pretty-printed file stays pretty. Empty for a compact
+    // or empty object (the insert is then compact too).
+    static std::wstring JsonMemberIndent(const std::wstring& t, size_t braceIdx)
+    {
+        const size_t first = JsonSkipWs(t, braceIdx + 1);
+        if (first >= t.size() || t[first] == L'}')
+        {
+            return {};
+        }
+        return t.substr(braceIdx + 1, first - (braceIdx + 1));
+    }
+
+    static bool JsonObjectIsEmpty(const std::wstring& t, size_t braceIdx)
+    {
+        const size_t first = JsonSkipWs(t, braceIdx + 1);
+        return first < t.size() && t[first] == L'}';
+    }
+
+    constexpr const wchar_t* kTrustFlagKey = L"hasTrustDialogAccepted";
+
+    std::wstring ClaudeGlobalConfigPath()
+    {
+        // <CLAUDE_CONFIG_DIR | %USERPROFILE%>\.claude.json. Deliberately NOT ClaudeProjectsDir's
+        // base: with CLAUDE_CONFIG_DIR unset the global config is ~/.claude.json (a FILE beside the
+        // ~/.claude directory), not ~/.claude/.claude.json.
+        std::wstring base = GetEnvW(L"CLAUDE_CONFIG_DIR");
+        if (base.empty())
+        {
+            base = GetEnvW(L"USERPROFILE");
+        }
+        if (base.empty())
+        {
+            return {};
+        }
+        while (!base.empty() && (base.back() == L'\\' || base.back() == L'/'))
+        {
+            base.pop_back();
+        }
+        return base + L"\\.claude.json";
+    }
+
+    std::wstring ClaudeWorkspaceTrustKey(std::wstring_view dir)
+    {
+        if (dir.empty())
+        {
+            return {};
+        }
+        std::wstring d{ dir };
+        // The nearest enclosing repo IS the workspace for Claude's purposes (it keys trust on the
+        // git toplevel), so one entry per repo covers every subdirectory. A worktree answers itself
+        // here while Claude's own canonical key answers the MAIN repo root — harmless: the worktree
+        // dir is still an ancestor of the cwd, which is the second thing Claude's gate checks, so
+        // the seed is found either way (and a mismatch merely shows the dialog once, never worse).
+        if (std::wstring root = FindGitRootForDir(d); !root.empty())
+        {
+            d = std::move(root);
+        }
+        for (auto& ch : d)
+        {
+            if (ch == L'\\')
+            {
+                ch = L'/';
+            }
+        }
+        // Strip a trailing separator ("K:/foo/" -> "K:/foo"), but never turn a root into "K:".
+        while (d.size() > 1 && d.back() == L'/' && !(d.size() == 3 && d[1] == L':'))
+        {
+            d.pop_back();
+        }
+        return d;
+    }
+
+    std::optional<std::wstring> SpliceWorkspaceTrust(const std::wstring& configText, const std::wstring& key)
+    {
+        if (key.empty())
+        {
+            return std::nullopt;
+        }
+        // Refuse to touch a config we cannot read (Updater.h's no-clobber rule). An EMPTY file is
+        // included: rebuilding one from scratch would race Claude's own first write.
+        const auto parsed = json::Parse(configText);
+        if (!parsed || parsed->type != json::Value::Type::Obj)
+        {
+            return std::nullopt;
+        }
+        // Already trusted? Then the steady state costs one read and zero writes.
+        if (const auto* projects = parsed->Find(L"projects"); projects && projects->type == json::Value::Type::Obj)
+        {
+            if (const auto* entry = projects->Find(key); entry && entry->type == json::Value::Type::Obj && entry->BoolAt(kTrustFlagKey, false))
+            {
+                return std::nullopt;
+            }
+        }
+
+        const size_t rootBrace = configText.find(L'{');
+        if (rootBrace == std::wstring::npos)
+        {
+            return std::nullopt;
+        }
+        const std::wstring quotedKey = json::Dump(json::Value::MkStr(key));
+        const std::wstring quotedFlag = json::Dump(json::Value::MkStr(kTrustFlagKey));
+
+        std::wstring out;
+        const auto projectsSpan = JsonFindMember(configText, rootBrace, L"projects");
+        if (!projectsSpan.found || configText[projectsSpan.valueBegin] != L'{')
+        {
+            // No "projects" object at all (a brand-new config): add one as the root's first member.
+            const std::wstring indent = JsonMemberIndent(configText, rootBrace);
+            const std::wstring inner = indent.empty() ? L"" : indent + L"  ";
+            std::wstring ins = indent + L"\"projects\": {" + inner + quotedKey + L": {" + inner + L"  " + quotedFlag + L": true" + inner + L"}" + indent + L"}";
+            if (!JsonObjectIsEmpty(configText, rootBrace))
+            {
+                ins += L",";
+            }
+            out = configText.substr(0, rootBrace + 1) + ins + configText.substr(rootBrace + 1);
+        }
+        else
+        {
+            const size_t projectsBrace = projectsSpan.valueBegin;
+            const auto entrySpan = JsonFindMember(configText, projectsBrace, key);
+            if (!entrySpan.found || configText[entrySpan.valueBegin] != L'{')
+            {
+                // No entry for this workspace: add a minimal one. Claude merges its own defaults
+                // over a partial entry on the next write, so only the flag needs to be present.
+                const std::wstring indent = JsonMemberIndent(configText, projectsBrace);
+                const std::wstring inner = indent.empty() ? L"" : indent + L"  ";
+                std::wstring ins = indent + quotedKey + L": {" + inner + quotedFlag + L": true" + indent + L"}";
+                if (!JsonObjectIsEmpty(configText, projectsBrace))
+                {
+                    ins += L",";
+                }
+                out = configText.substr(0, projectsBrace + 1) + ins + configText.substr(projectsBrace + 1);
+            }
+            else
+            {
+                const size_t entryBrace = entrySpan.valueBegin;
+                const auto flagSpan = JsonFindMember(configText, entryBrace, kTrustFlagKey);
+                if (flagSpan.found)
+                {
+                    // Flip the existing value token in place (it is false / null / anything else —
+                    // the true case returned above).
+                    out = configText.substr(0, flagSpan.valueBegin) + L"true" + configText.substr(flagSpan.valueEnd);
+                }
+                else
+                {
+                    const std::wstring indent = JsonMemberIndent(configText, entryBrace);
+                    std::wstring ins = indent + quotedFlag + L": true";
+                    if (!JsonObjectIsEmpty(configText, entryBrace))
+                    {
+                        ins += L",";
+                    }
+                    out = configText.substr(0, entryBrace + 1) + ins + configText.substr(entryBrace + 1);
+                }
+            }
+        }
+
+        // Belt: the splice must still parse AND read back as trusted, or we write nothing.
+        const auto check = json::Parse(out);
+        if (!check || check->type != json::Value::Type::Obj)
+        {
+            return std::nullopt;
+        }
+        const auto* checkProjects = check->Find(L"projects");
+        if (!checkProjects || checkProjects->type != json::Value::Type::Obj)
+        {
+            return std::nullopt;
+        }
+        const auto* checkEntry = checkProjects->Find(key);
+        if (!checkEntry || checkEntry->type != json::Value::Type::Obj || !checkEntry->BoolAt(kTrustFlagKey, false))
+        {
+            return std::nullopt;
+        }
+        return out;
+    }
+
+    bool EnsureClaudeWorkspaceTrusted(std::wstring_view dir)
+    try
+    {
+        const std::wstring key = ClaudeWorkspaceTrustKey(dir);
+        const std::wstring path = ClaudeGlobalConfigPath();
+        if (key.empty() || path.empty())
+        {
+            return false;
+        }
+
+        // Fast path: read once, and if the key (or any ancestor of the launch dir) is already
+        // trusted there is nothing to do — no lock, no write. This is every launch after the first.
+        {
+            const std::wstring text = ReadFileUtf8(path);
+            if (!SpliceWorkspaceTrust(text, key).has_value())
+            {
+                // Either already trusted, or the config is unreadable/unspliceable. Distinguish, so
+                // an unreadable config is reported (and logged) rather than read as success.
+                const auto parsed = json::Parse(text);
+                const auto* projects = parsed && parsed->type == json::Value::Type::Obj ? parsed->Find(L"projects") : nullptr;
+                const auto* entry = projects && projects->type == json::Value::Type::Obj ? projects->Find(key) : nullptr;
+                const bool trusted = entry && entry->type == json::Value::Type::Obj && entry->BoolAt(kTrustFlagKey, false);
+                if (!trusted)
+                {
+                    AppendStateLog(L"hooks.log", L"[trust] skipped " + key + L" (config unreadable or unspliceable: " + path + L")\n");
+                }
+                return trusted;
+            }
+        }
+
+        // A write is needed. Take Claude's OWN config lock so we can't interleave with its writer:
+        // proper-lockfile's primitive is an atomic mkdir of "<path>.lock".
+        const std::wstring lockPath = path + L".lock";
+        bool held = false;
+        for (int attempt = 0; attempt < 12 && !held; ++attempt)
+        {
+            if (::CreateDirectoryW(lockPath.c_str(), nullptr))
+            {
+                held = true;
+                break;
+            }
+            if (::GetLastError() != ERROR_ALREADY_EXISTS)
+            {
+                break; // no permission / bad path — fail open, the dialog just shows once more
+            }
+            // Break a lock far past proper-lockfile's own 10 s staleness horizon (a killed claude).
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (::GetFileAttributesExW(lockPath.c_str(), GetFileExInfoStandard, &fad))
+            {
+                ULARGE_INTEGER then{}, now{};
+                FILETIME nowFt{};
+                ::GetSystemTimeAsFileTime(&nowFt);
+                then.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+                then.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+                now.LowPart = nowFt.dwLowDateTime;
+                now.HighPart = nowFt.dwHighDateTime;
+                if (now.QuadPart > then.QuadPart && (now.QuadPart - then.QuadPart) > 60ULL * 10'000'000ULL)
+                {
+                    ::RemoveDirectoryW(lockPath.c_str());
+                    continue;
+                }
+            }
+            ::Sleep(25);
+        }
+        if (!held)
+        {
+            AppendStateLog(L"hooks.log", L"[trust] skipped " + key + L" (claude holds the config lock)\n");
+            return false;
+        }
+
+        bool ok = false;
+        {
+            // Re-read INSIDE the lock — the freshest-disk RMW (another claude may have just written).
+            const std::wstring text = ReadFileUtf8(path);
+            if (const auto spliced = SpliceWorkspaceTrust(text, key))
+            {
+                ok = WriteFileUtf8Atomic(path, *spliced);
+                AppendStateLog(L"hooks.log", ok ? (L"[trust] pre-trusted " + key + L"\n") : (L"[trust] FAILED to write " + path + L" (" + key + L")\n"));
+            }
+            else
+            {
+                ok = true; // someone trusted it while we waited for the lock
+            }
+        }
+        ::RemoveDirectoryW(lockPath.c_str());
+        return ok;
+    }
+    catch (...)
+    {
+        // Rule #18: never lose a swallowed exception. Recovery = "not trusted", so the launch still
+        // proceeds and the user answers the dialog once.
+        Agentmaster::LogSwallowedException(L"EnsureClaudeWorkspaceTrusted");
+        return false;
     }
 
     std::wstring ResolvePendingPasteRefsIn(const std::wstring& draft, const std::wstring& cacheDir)
@@ -3529,6 +3988,18 @@ send - nothing is submitted until the user presses Enter in that tab.
     // correlation; the cog's global env is layered on top but can NEVER clobber the CCMGR_* vars (a stray
     // user entry that begins CCMGR_ is skipped). Factored out so the launch and restart specs produce a
     // byte-identical env.
+    // Shared spawn PRELUDE: everything that must be true of the world before a managed claude is
+    // started in `spec.workingDir`. Today that is only the workspace-trust seed — the one thing
+    // that, left undone, parks the new tab on a modal nobody is there to answer (ClaudeSpawn.h).
+    // Best-effort by construction: a failure here costs one manual click, never the launch.
+    static void PrepareManagedClaudeWorkspace(const ClaudeSpawnSpec& spec, const AppSettings& settings)
+    {
+        if (settings.trustWorkspaceOnLaunch)
+        {
+            EnsureClaudeWorkspaceTrusted(spec.workingDir);
+        }
+    }
+
     static void AppendManagedClaudeEnv(ClaudeSpawnSpec& spec, const AppSettings& settings)
     {
         spec.env.emplace_back(L"CCMGR_SESSION_ID", spec.sessionId);
@@ -3570,6 +4041,7 @@ send - nothing is submitted until the user presses Enter in that tab.
         const auto settingsFwd = ToForwardSlashes(settingsPath);
         spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFromSessionId, claudeLauncher, modelOverride, initialPrompt);
 
+        PrepareManagedClaudeWorkspace(spec, settings);
         // The cog's global env + the hook-correlation vars, applied to every session (CCMGR_* always win).
         AppendManagedClaudeEnv(spec, settings);
         return spec;
@@ -3618,6 +4090,7 @@ send - nothing is submitted until the user presses Enter in that tab.
         const auto settingsFwd = ToForwardSlashes(settingsPath);
         spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFrom, claudeLauncher);
 
+        PrepareManagedClaudeWorkspace(spec, settings);
         AppendManagedClaudeEnv(spec, settings);
         return spec;
     }

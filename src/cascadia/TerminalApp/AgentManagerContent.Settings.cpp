@@ -891,8 +891,14 @@ namespace winrt::TerminalApp::implementation
         panel.Children().Append(SettingsSeparator(L"CLAUDE SESSIONS", true)); // leading section
         _setSkipPermissions = ToggleSwitch{};
         _setSkipPermissions.Header(winrt::box_value(L"Skip permission prompts (bypass)"));
-        AgentSetTip(_setSkipPermissions, L"Launch new sessions with --dangerously-skip-permissions \x2014 auto-accepts tool prompts and the per-folder trust dialog so an unattended session never wedges. Off pins normal prompts instead.");
+        AgentSetTip(_setSkipPermissions, L"Launch new sessions with --dangerously-skip-permissions \x2014 auto-accepts tool prompts so an unattended session never wedges on one. Off pins normal prompts instead. (It does NOT skip Claude's workspace-trust dialog \x2014 that is the setting below.)");
         panel.Children().Append(_setSkipPermissions);
+        // Agentmaster: pre-trust the working directory so Claude's startup "Is this a project you
+        // trust?" modal can never park an unattended tab (SessionModels.h / ClaudeSpawn.h).
+        _setTrustWorkspace = ToggleSwitch{};
+        _setTrustWorkspace.Header(winrt::box_value(L"Trust the working directory automatically"));
+        AgentSetTip(_setTrustWorkspace, L"Before launching, mark the session's folder (its git repo, if any) as trusted in ~/.claude.json \x2014 the fix Claude Code itself suggests. Without it every session in a new folder stops on Claude's \"Is this a project you trust?\" prompt, which an unattended tab cannot answer: no prompt is ever submitted, the Tests Autorunner can't drive it, and a /handover briefing is eaten by the menu. Worst in your home folder, which Claude refuses to remember \x2014 it asks again every single launch. Off = never touch ~/.claude.json and answer the prompt yourself.");
+        panel.Children().Append(_setTrustWorkspace);
         _setModel = TextBox{};
         _setModel.Header(winrt::box_value(L"Model"));
         _setModel.PlaceholderText(L"As Is \x2014 blank keeps Claude's default (e.g. opus / sonnet)");
@@ -2292,6 +2298,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setSkipPermissions.IsOn(_appSettings.skipPermissions);
         }
+        if (_setTrustWorkspace)
+        {
+            _setTrustWorkspace.IsOn(_appSettings.trustWorkspaceOnLaunch);
+        }
         if (_setModel)
         {
             _setModel.Text(winrt::hstring{ _appSettings.model });
@@ -2867,6 +2877,10 @@ namespace winrt::TerminalApp::implementation
         {
             _appSettings.skipPermissions = _setSkipPermissions.IsOn();
         }
+        if (_setTrustWorkspace)
+        {
+            _appSettings.trustWorkspaceOnLaunch = _setTrustWorkspace.IsOn();
+        }
         if (_setModel)
         {
             std::wstring m{ _setModel.Text() };
@@ -3287,6 +3301,7 @@ namespace winrt::TerminalApp::implementation
             // governs every future session. Record the most behavior-impacting fields (the rest persist to
             // settings.json, the durable record).
             ::Agentmaster::LogNav(std::wstring{ L"settings-save skipPerms=" } + (_appSettings.skipPermissions ? L"1" : L"0") +
+                                  L" trustWorkspace=" + (_appSettings.trustWorkspaceOnLaunch ? L"1" : L"0") +
                                   L" model=" + (_appSettings.model.empty() ? std::wstring{ L"(default)" } : _appSettings.model) +
                                   L" autorunner=" + (_appSettings.defaultAutorunnerMode == AutorunnerMode::Full ? L"Full" : _appSettings.defaultAutorunnerMode == AutorunnerMode::SemiAuto ? L"Semi" : L"Off") +
                                   L" claudeExe=" + (_appSettings.claudeExePath.empty() ? std::wstring{ L"(auto)" } : _appSettings.claudeExePath) +

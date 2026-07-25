@@ -166,6 +166,12 @@ events to sessions and drives the Triage Board + Tests Autorunner.
   SessionScanner reconciles dropped / out-of-order hooks (interrupt, blocked-on-question,
   presence-idle, subagent activity, `/clear`·`/compact`·`/resume` divergence) on top of the ordered
   hook state machine.
+- **Workspace-trust seed** ([`HOOKS.md`](./HOOKS.md) *Workspace trust*) — a managed launch pre-trusts
+  its working directory (a surgical, cog-gated `hasTrustDialogAccepted` splice into `~/.claude.json`),
+  because claude's startup trust modal blocks every interactive session in an untrusted folder and an
+  unattended ConPTY tab cannot answer it — the tab would park as a §11d unlinked observe badge with no
+  id, no card and no autorunner. `--dangerously-skip-permissions` does **not** cover this (a
+  long-standing wrong comment in our own source, since corrected).
 
 ## Build & run
 

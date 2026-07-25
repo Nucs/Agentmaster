@@ -137,6 +137,26 @@ PER-DIR ▸ [ type to filter directories…        ]  ← filters the list below
 3-warn / ignored, worst + firstIssueLine), and a `SerializeDirEnv`/`DeserializeDirEnv` round-trip
 (multi-line survives, blank dropped).
 
+## 6a. Deliberately NOT set — `CLAUDE_CODE_SANDBOXED`
+
+Claude's startup **workspace-trust** modal is bypassed by four things, one of which is the env var
+`CLAUDE_CODE_SANDBOXED` (bool-coerced). It would be the cheapest possible fix — one line in
+`AppendManagedClaudeEnv`, zero filesystem writes — and it verifiably works (PTY-probed: the same
+untrusted directory that prompts without it goes straight to the prompt box with it, bypass-permissions
+still on). In claude **2.1.220** its *only two consumers in the entire CLI* are the two trust
+functions, so it has no other observable effect today.
+
+We still don't set it. It is **undocumented and internal**, and its NAME asserts something untrue of
+us — that the session is sandboxed. A future version that starts reading it as "this environment is
+sandboxed, so relax X" would silently change behavior for every managed session, and env vars are
+exactly the layer where such a change is invisible. The durable, officially-suggested mechanism is
+the per-workspace `hasTrustDialogAccepted` flag (the remedy Claude Code prints in its own error
+text), which is what `EnsureClaudeWorkspaceTrusted` seeds — see [`HOOKS.md`](HOOKS.md) *Workspace
+trust*. The same reasoning rules out the internal `CLAUBBIT` var, which skips the trust step
+entirely.
+
+If a future claude ever removes the persisted-flag path, this is the documented fallback.
+
 ## 7. Not done / deferred
 
 - **Per-session** env (a third, most-specific layer keyed by conversation id) — deferred; the

@@ -395,7 +395,13 @@ cross-thread `unordered_map` race (narrow, never observed, real). Both are now
 `_ScanPendingInput` idiom, terminate-nets included) — which is also what makes the standby
 lane's `ReadPendingInputDraft` (a UI-affine TermControl call) legal.
 
-## 6. The shipped command definition — the ONE write outside the profile
+## 6. The shipped command definition — one of only TWO writes outside the profile
+
+> The other is the workspace-**trust** seed — one `hasTrustDialogAccepted` flag spliced into
+> `~/.claude.json` so Claude's startup trust modal can't park an unattended tab
+> ([`HOOKS.md`](HOOKS.md) *Workspace trust*). Both follow the same discipline: **additive only**,
+> gated, and never rewriting anything a user authored.
+
 
 A typed `/handover` must BE a command (Claude Code rejects unknown slash commands client-side —
 nothing would ever reach the transcript), so engine init materializes

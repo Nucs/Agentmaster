@@ -232,6 +232,136 @@ Two fields are computed in the forwarder, not just relayed:
   **when** it inherits our process env. See the degradation caveat above; the Fleet Observer is the
   reliable detection/bind path that needs none of this.
 
+## Workspace trust — how a session gets past the startup modal
+
+Before any of the above can happen, claude has to actually **reach its prompt**. On an untrusted
+working directory it doesn't: it blocks on a modal —
+
+```
+ Accessing workspace:  C:\Users\ELI
+ Quick safety check: Is this a project you created or one you trust? ...
+ ❯ 1. Yes, I trust this folder
+   2. No, exit
+```
+
+**An unattended ConPTY tab cannot answer that**, and the failure is silent-by-design in our UI: the
+session submits no prompt ⇒ fires no `UserPromptSubmit` ⇒ writes no transcript ⇒ has **no
+conversation id**. The Fleet Observer can therefore only classify it as a
+[§11d](OBSERVER.md) *correlated-but-no-transcript* claude — the dim `○ claude · unlinked` observe
+badge. No Triage card, no state dot, no Tests Autorunner, and a `/handover` content injection is
+typed straight into the menu. It reads like "tabs don't auto-activate; every one needs a manual
+click", which is why it looks like an Agentmaster bug and is not one.
+
+### What claude actually gates on (2.1.220, read from its own bundle + PTY-verified)
+
+```
+trusted  =  env CLAUDE_CODE_SANDBOXED (bool-coerced: 1/true/yes/on)
+         || sessionTrustAccepted            // IN-MEMORY only: non-interactive -p, background-agent
+                                            //   mode, or accepting the dialog this run
+         || backgroundAgentMode
+         || ~/.claude.json  projects[<key>].hasTrustDialogAccepted === true
+                                            //   for the cwd's key OR ANY ANCESTOR of the cwd
+```
+
+`<key>` = the **git toplevel** of the cwd (else the cwd), `path.normalize`d, `\` → `/`, no trailing
+separator, **case-sensitive**. The whole step is additionally skipped by the internal **`CLAUBBIT`**
+env var. Even when trusted the dialog *re-appears* if the workspace has project-scoped allow-rules /
+`additionalDirectories` that are still un-granted — unless that **exact** key is trusted.
+
+Three things that are **not** true, each of which cost time to establish:
+
+- ⚠ **`--dangerously-skip-permissions` does NOT skip it.** The permission mode is never consulted by
+  the trust gate. Our own comments claimed the opposite for a long time (`the dialog block is gated
+  on mode !== "bypassPermissions"`); launching the flag in an untrusted dir on a real PTY shows the
+  dialog. Corrected in `ClaudeSpawn.cpp`, `SessionModels.h` and `CLAUDE.md`.
+- There is **no `settings.json` / managed-policy knob** — the CLI's entire trust-related string table
+  was enumerated. Seeding the key is what Claude Code itself prints as the remedy.
+- Accepting in your **home directory never persists**: the accept handler branches
+  `if (isHomeDir) setSessionTrustAccepted(true) /* memory */ else persistProjectFlag()`. Since an
+  empty `defaultLaunchDir` falls back to `%USERPROFILE%`, that is our worst case — it re-asks on
+  *every* launch, forever.
+
+### What we do — `EnsureClaudeWorkspaceTrusted` (`ClaudeSpawn.{h,cpp}`)
+
+A shared spawn **prelude** (`PrepareManagedClaudeWorkspace`) runs from **both** builders
+(`BuildClaudeSpawn` + `BuildClaudeRestartSpec`), so fresh launch / resume / fork / restore /
+window-restore / restart / handover all seed the workspace *before* the process starts. Gated on
+`AppSettings::trustWorkspaceOnLaunch` (Settings cog → Sessions → **"Trust the working directory
+automatically"**, default **ON**; OFF ⇒ `~/.claude.json` is never touched).
+
+It writes `projects[<repo-or-dir>].hasTrustDialogAccepted = true` — and it is a **surgical splice,
+never a re-serialize**. That is a hard requirement, not a preference: this file holds the user's
+oauth account, ~60 project entries and float stats, and `Json.h` prints numbers through `%g`
+(6 significant digits), so a parse/reprint round-trip would silently truncate `lastCost` /
+`lastFpsAverage`. `SpliceWorkspaceTrust` (pure + unit-tested) uses `Json.h` only to **validate** and
+to escape the key, and edits the raw text with a string/brace-aware scanner (strings skipped as
+units, so a brace inside a member *name* can't unbalance the walk):
+
+| on disk | action |
+| --- | --- |
+| flag present, `true` | **no write at all** — the steady state after the first launch |
+| flag present, `false` | replace that value token in place |
+| entry present, no flag | insert after the entry's `{`, reusing the surrounding indentation |
+| no entry | insert one under `projects` |
+| no `projects` at all | add it as the root's first member |
+
+Guarantees, in the order they matter: an empty / unparseable / non-object config is **refused, never
+rebuilt** (the `Updater.h` no-clobber rule — an empty file would race claude's own first write); the
+spliced text is **re-parsed and re-read as trusted** before anything is written; it writes **only**
+when the flag is missing or false (once per workspace, ever); it takes **claude's OWN config lock**
+(`~/.claude.json.lock` — proper-lockfile's atomic-`mkdir` primitive, so `CreateDirectoryW` is the
+same lock), re-reads **inside** it, and writes atomically; contention is bounded at 12 × 25 ms and
+**skips** the seed if claude holds the lock (fail-open — the dialog shows once more, next launch
+retries); a lock abandoned by a killed process is broken only far past proper-lockfile's own 10 s
+staleness horizon; and the whole entry point is `try`-wrapped to `LogSwallowedException` (Rule #18)
+with "not trusted" as the recovery, so a failure costs one click and never the launch. Steady-state
+cost at the launch seam is one ~1 ms read; only the first launch in a workspace can wait at all.
+
+Keying the **repo** (nearest `FindGitRootForDir`, else the dir) is what claude does natively, so one
+entry covers every subdirectory. A git *worktree* answers itself here while claude's canonical key
+answers the main repo root — harmless, because the worktree is still an **ancestor** of the cwd,
+which is the second thing claude's gate checks.
+
+Traces: `[trust] pre-trusted <key>` / `[trust] skipped <key> (claude holds the config lock)` /
+`[trust] skipped <key> (config unreadable or unspliceable: <path>)` / `[trust] FAILED to write …`.
+
+### Verifying it (the PTY probe)
+
+The dialog is interactive-only, so a piped run can never reproduce it (`-p` and a non-TTY stdout
+both mark the session non-interactive, which trusts it outright). Drive a **real** pty:
+
+```python
+from winpty import PtyProcess          # pip install pywinpty
+p = PtyProcess.spawn([r"%USERPROFILE%\.local\bin\claude.exe", "--model", "sonnet"],
+                     cwd=r"<a directory with no trusted ancestor>", dimensions=(45, 160))
+# read for ~15 s, then look for "Quick safety check" in the output
+```
+
+Use a directory whose **ancestors** are untrusted too (check `~/.claude.json` — e.g. `K:/source` is
+trusted, so nothing under it will ever prompt).
+
+**In the deployed app**, the check is: Launch a session into a folder that has never been trusted
+(the fastest is a brand-new folder under `%TEMP%`, or simply the **home dir** — the historical worst
+case). Expect:
+
+1. the tab goes straight to claude's prompt — no "Quick safety check" screen, no keypress needed;
+2. `hooks.log` gains `[trust] pre-trusted <key>` **once** (subsequent launches in that workspace log
+   nothing — the already-trusted path writes nothing and takes no lock);
+3. `~/.claude.json` gains exactly `projects["<repo-or-dir>"] = { "hasTrustDialogAccepted": true }`,
+   with every other entry byte-identical;
+4. the session binds normally — Triage card, state dot, autorunner — instead of sitting as
+   `○ claude · unlinked`.
+
+Toggling **Settings → Sessions → "Trust the working directory automatically"** OFF must restore the
+old behavior exactly (no write, dialog returns). A `[trust] skipped …` line is not a failure — it
+means claude held its config lock, or the config could not be parsed; the seed retries next launch.
+
+⚠ If you isolate the test with `CLAUDE_CONFIG_DIR`,
+be aware it also relocates the **user-memory root**, which reclassifies `~/.claude/CLAUDE.md`'s
+`@imports` as *project* external includes and raises a second, unrelated dialog ("Allow external
+CLAUDE.md file imports?"). That is a harness artifact — with the real config all live project entries
+have both of its keys `false` and it never fires.
+
 ## Scheduler trigger (see IMPLEMENTATION.md / M7, `Scheduler.cpp`)
 
 ```
@@ -271,3 +401,11 @@ they must agree — see Gotchas in `CLAUDE.md`:
 | `forwarder-errors.log` | the forwarder | local trace of a hook delivery that never reached the bridge (no sid / no pipe / a dead-pipe connect timeout) — otherwise invisible, since the bridge-side `hooks.log` only sees lines that arrived |
 | `shim/claude.cmd`, `shim/claude` | `MaterializeClaudeShim` | the transparent `claude` PATH shim |
 | `hooks.log` | engine | runtime traces (`[engine] bridge listening …`, `[SessionStart]`, `[Stop]`, …) |
+
+**Outside the profile** — the only two files we ever touch, both under Claude's own config, both
+additive and both gated:
+
+| File | Written by | Purpose |
+| --- | --- | --- |
+| `<claude-config>/commands/handover*.md` | `EnsureShippedCommandFileIn` | the shipped `/handover` family definitions (create-if-absent + SHA-256-gated upgrade; a user-edited file is never touched) — see [`COMMANDS.md`](COMMANDS.md) §6 |
+| `~/.claude.json` (one flag) | `EnsureClaudeWorkspaceTrusted` | `projects[<repo-or-dir>].hasTrustDialogAccepted = true`, so the startup trust modal never parks a managed tab — see *Workspace trust* above; surgical splice, once per workspace, cog-gated |

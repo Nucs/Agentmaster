@@ -1214,10 +1214,26 @@ namespace Agentmaster
     struct AppSettings
     {
         // --- Claude sessions (spawn recipe; see ClaudeSpawn) ---
-        // ON  => spawn with --dangerously-skip-permissions (also skips the startup trust
-        //        dialog). OFF => no flag; the settings file instead carries the "other
-        //        variation" permissions.defaultMode:"default" (normal prompts + trust apply).
+        // ON  => spawn with --dangerously-skip-permissions (auto-accepts tool prompts). OFF => no
+        //        flag; the settings file instead carries the "other variation"
+        //        permissions.defaultMode:"default" (normal prompts apply).
+        //        ⚠ This does NOT skip the startup WORKSPACE-TRUST dialog — an older comment here
+        //        said it did, and that was wrong (Claude's trust gate never consults the permission
+        //        mode; PTY-probed false on 2.1.220). trustWorkspaceOnLaunch below is what suppresses
+        //        that dialog.
         bool skipPermissions{ true };
+        // Agentmaster: pre-trust a session's working directory before launching claude there, by
+        // seeding ~/.claude.json projects[<repo-or-dir>].hasTrustDialogAccepted = true (the remedy
+        // Claude Code itself prints; see ClaudeSpawn.h's workspace-trust block for the full gate).
+        // ON (default) because an unattended ConPTY session CANNOT answer Claude's modal "Is this a
+        // project you trust?" prompt: the tab parks on the dialog, fires no UserPromptSubmit, mints
+        // no transcript id (so it can only ever show the unlinked observe badge), the Tests
+        // Autorunner can't drive it, and a /handover injection is eaten by the menu — one manual
+        // click per tab, which does not scale to a fleet. Worst hit is a session launched in the
+        // HOME directory (the empty-defaultLaunchDir fallback), which Claude deliberately refuses to
+        // remember: accepting there sets an in-memory flag only, so it re-prompts forever.
+        // OFF => we never touch ~/.claude.json and Claude's normal trust flow applies.
+        bool trustWorkspaceOnLaunch{ true };
         // "" (As Is) => don't override the model. Else == what you'd type after `/model `
         //  (e.g. "opus" / "sonnet" / a full id) -> emitted as the settings `model` key.
         std::wstring model{};

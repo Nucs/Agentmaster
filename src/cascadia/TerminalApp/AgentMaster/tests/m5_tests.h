@@ -137,6 +137,7 @@ void TestSupersedeStaleTabSiblings();
 // tests_spawn_sched.cpp
 void TestSpawnBuilders();
 void TestProfileBootstrap();
+void TestWorkspaceTrust(); // workspace-trust seed: ClaudeWorkspaceTrustKey normalization + the SURGICAL SpliceWorkspaceTrust (already-trusted no-op, flip-in-place, insert-member, insert-projects, byte-preservation, no-clobber refusals)
 void TestBridgeRoundTrip();
 void TestScheduler();
 void TestEnterRetry();

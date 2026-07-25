@@ -836,6 +836,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ScrollViewer _settingsScroll{ nullptr }; // single scroller; its Content is the active tab's panel
         int _settingsActiveTab{ 0 }; // index of the showing tab (reset to 0 on each _ShowSettings)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setSkipPermissions{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setTrustWorkspace{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setModel{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchModels{ nullptr }; // launch-model picker: multi-line "Display name | model-id" list (one per line) feeding every "Open New Session Here" / "Fork session" submenu
         winrt::Windows::UI::Xaml::Controls::Border _setLaunchModelsBorder{ nullptr }; // wraps _setLaunchModels; recolored by the lexer (the _setEnvBorder idiom)

@@ -75,7 +75,7 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
 
 Full design: [`doc/agentmaster/DESIGN.md`](doc/agentmaster/DESIGN.md).
 Milestones & build: [`doc/agentmaster/IMPLEMENTATION.md`](doc/agentmaster/IMPLEMENTATION.md).
-Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
+Hooks bridge + workspace trust (why a managed launch pre-trusts its folder): [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
 Workspace persistence (window layer): [`doc/agentmaster/PERSISTENCE.md`](doc/agentmaster/PERSISTENCE.md).
 Release/dev identities + per-install state profiles: [`doc/agentmaster/PROFILES.md`](doc/agentmaster/PROFILES.md).
 Per-tab link badge (overlay): [`doc/agentmaster/TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md).
@@ -1028,7 +1028,8 @@ overwrites regardless of digest. ⚠ Every FUTURE definition version must keep t
 marker with its phrase on ONE line, or it silently stops honoring the setting.
 **The `/handover <context-or-filepath>` integration:** engine init materializes the command DEFINITION
 `<claude-config>/commands/handover.md` (**create-if-absent + a VERSION-AWARE UPGRADE gated on SHA-256 —
-the ONE write outside the profile**: the shipped history is a list of **DIGESTS**
+one of only TWO writes outside the profile** (the other being the workspace-trust
+seed's `hasTrustDialogAccepted` flag — Settings cog): the shipped history is a list of **DIGESTS**
 (`ShippedHandoverCommandHashes` — the SHA-256 of each version's UTF-8 bytes as written to disk, oldest
 first, the LAST entry being the digest of the CURRENT text `ShippedHandoverCommandText()`; append-only,
 frozen forever), so the on-disk file is hashed (`AgentMaster/Sha256.h`, pure + header-only, hand-rolled
@@ -1877,7 +1878,24 @@ What works, by area:
   global-settings surface — an **in-content modal overlay** (a dimmed `Grid` over `_root`),
   NOT a `ContentDialog` (a text box inside one gets no keypresses in XAML Islands — see
   Gotchas). Exposes **Claude-session** config — `skipPermissions` (the spawn's
-  `--dangerously-skip-permissions`), `model` (== `/model <v>`), **`launchModels`** (the
+  `--dangerously-skip-permissions`), **`trustWorkspaceOnLaunch`** (the **"Trust the working
+  directory automatically"** toggle, GLOBAL, **default ON**: before launching, seed
+  `~/.claude.json` `projects.<git-root-or-dir>.hasTrustDialogAccepted = true` so claude's startup
+  **workspace-trust modal** never parks the new tab — `EnsureClaudeWorkspaceTrusted`, called from
+  the shared spawn prelude so fresh launch / resume / fork / restore / restart / handover all get it.
+  ⚠ `--dangerously-skip-permissions` does **NOT** cover this (Gotchas), and the worst case is a
+  session in `%USERPROFILE%` — the empty-`defaultLaunchDir` fallback — which claude deliberately
+  refuses to remember, so it asks on *every* launch. The write is a **SURGICAL SPLICE**, never a
+  re-serialize: `SpliceWorkspaceTrust` (pure + unit-tested) edits one flag and preserves every other
+  byte, because Json.h prints numbers via `%g` and a round-trip would silently truncate the user's
+  float stats (`lastCost`, `lastFpsAverage`). It writes **only when the flag is missing or false**
+  (once per workspace, ever — the steady state is one read, zero writes), refuses a config it can't
+  parse (the Updater.h no-clobber rule — this file holds the user's oauth account), re-validates its
+  own output before writing, writes atomically, and takes **claude's OWN config lock**
+  (`~/.claude.json.lock`, proper-lockfile's atomic-`mkdir` primitive) so it can't interleave with
+  claude's writer — skipping the seed entirely if claude holds it (fail-open: the dialog shows once
+  more, next launch retries). Logs `[trust]`. OFF ⇒ `~/.claude.json` is never touched), `model`
+  (== `/model <v>`), **`launchModels`** (the
   **launch-model picker**: a multi-line `Display name | model-id` list — default `Fable | fable` /
   `Opus | opus` / `Sonnet | sonnet`, deliberately **version-LESS**: the ids are Claude Code's
   "alias for the LATEST model" (`claude --help`), so the shipped list follows Anthropic's next
@@ -2221,7 +2239,7 @@ What works, by area:
   (`ClaudeSpawn.cpp`, thread-safe + best-effort). Three layers: (1) the **hook event stream**
   (`[SessionStart]`/`[UserPromptSubmit]`/`[Stop]`/…) — the push state machine; (2) **engine-mechanism
   tags** — `[fork]`/`[resume]`/`[restore-fresh]`/`[rehome]`/`[spawn]`/`[launch-fail]`/`[archive]`/`[teardown-archive]`/
-  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[pending]`/`[notify]`/`[update]`/`[cmd]`/`[cmd-fire]`/`[cmd-expire]`/`[persist-fail]`/`[observer]`/`[activity]`/… (each
+  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[pending]`/`[notify]`/`[update]`/`[trust]`/`[cmd]`/`[cmd-fire]`/`[cmd-expire]`/`[persist-fail]`/`[observer]`/`[activity]`/… (each
   carries the resulting ids), plus the **window-restore story** — one coherent trace per `windowId`:
   `[window-claim]`/`[window-fresh]` (claim a saved record or start fresh, at engine init) → `[rehome-begin]`
   (every tab ref listed BY SESSION ID + the focus target) → per-tab `[rehome] window <id> resume|skip <sid>`
@@ -3067,17 +3085,44 @@ build **binlog uploads as an artifact** to diagnose the first run.
   Using `%LOCALAPPDATA%` here silently breaks hooks for spawned sessions (the app writes to
   LocalCache; Claude reads the empty real path). Verified live: with the fix, a spawned
   session's `SessionStart`/`UserPromptSubmit` reach the registry (`<profile>\hooks.log`).
-- **`--dangerously-skip-permissions` also skips the startup "trust this folder" dialog.**
-  Spawned sessions run with the flag by default (`AppSettings.skipPermissions`): besides
-  auto-accepting tool prompts, permission mode `bypassPermissions` makes claude skip the
-  per-folder trust dialog at startup (claude's block is gated on `mode !== "bypassPermissions"`),
-  which would otherwise wedge an unattended ConPTY session waiting on a keypress. It does NOT
-  suppress the one-time **global** "Bypass Permissions mode" acceptance (`~/.claude.json`
-  `bypassPermissionsModeAccepted` — shown once, ever, until accepted). Toggling skipPermissions
-  OFF drops the flag and instead pins `permissions.defaultMode:"default"` in the hooks-settings
-  file (normal prompts + trust apply). The trust decision itself keys on the **git toplevel**
-  of the cwd (forward-slash) under `~/.claude.json` `projects.<dir>.hasTrustDialogAccepted` — a
-  trusted ancestor counts; accepting at your **home dir never persists** (so it re-prompts).
+- **⚠ `--dangerously-skip-permissions` does NOT skip the startup workspace-TRUST dialog — this
+  bullet used to claim it did, and that was WRONG.** The old text ("permission mode
+  `bypassPermissions` makes claude skip the per-folder trust dialog; the block is gated on
+  `mode !== "bypassPermissions"`") was disproved on claude **2.1.220** by launching the flag in an
+  untrusted directory on a real PTY: the dialog appeared. Reading claude's own gate, **the
+  permission mode is never consulted** — the workspace is trusted iff (a) env
+  **`CLAUDE_CODE_SANDBOXED`** is truthy [its ONLY two consumers in the whole CLI are the two trust
+  functions], (b) an **in-memory** session flag is set — which non-interactive `-p`, background-agent
+  mode, and accepting the dialog all do, (c) background-agent mode, or (d) `~/.claude.json`
+  `projects.<key>.hasTrustDialogAccepted === true` for the cwd's key **or ANY ANCESTOR** of the cwd.
+  The key is the **git toplevel** of the cwd (else the cwd), `path.normalize`d with `\` → `/`, no
+  trailing separator, **case-sensitive**. The whole step is also skipped by the internal
+  **`CLAUBBIT`** env var. There is **NO settings.json / managed-policy knob** (the CLI's entire
+  trust-related string table was enumerated). Accepting at your **home dir never persists** — the
+  accept handler branches `if (isHomeDir) setSessionTrustAccepted(true); else persistProjectFlag()`,
+  so `%USERPROFILE%` (our empty-`defaultLaunchDir` fallback!) re-prompts on **every** launch, forever.
+  What the flag DOES do is auto-accept tool prompts; it still does NOT suppress the one-time
+  **global** "Bypass Permissions mode" acceptance (`~/.claude.json` `bypassPermissionsModeAccepted`
+  — shown once, ever, until accepted). Toggling skipPermissions OFF drops the flag and instead pins
+  `permissions.defaultMode:"default"` in the hooks-settings file (normal prompts apply).
+  **Agentmaster's actual fix** is `EnsureClaudeWorkspaceTrusted` — an unattended ConPTY tab cannot
+  answer a modal, so it must never be asked. Full write-up + the deployed-app verification checklist:
+  [`HOOKS.md`](doc/agentmaster/HOOKS.md) *Workspace trust*.
+- **An unanswerable startup modal is invisible-by-design in our UI — budget for that when adding
+  spawn flags.** A tab parked on claude's trust dialog fires no `UserPromptSubmit`, so it mints no
+  transcript id: the Fleet Observer can only classify it as a §11d *started-but-not-yet-prompted*
+  claude and it wears the dim `○ claude · unlinked` observe badge. No card, no state dot, no
+  autorunner, and a `/handover` content injection is typed straight into the menu. The symptom
+  ("tabs don't auto-activate, every one needs a manual click") reads like an Agentmaster bug and is
+  not one. Any future claude flag/version bump that reintroduces a startup prompt lands here again —
+  the cheap check is a PTY probe (`pywinpty`, 45×160, ~18 s) in a throwaway directory — recipe in
+  [`HOOKS.md`](doc/agentmaster/HOOKS.md) *Workspace trust → Verifying it*.
+  ⚠ When probing with an isolated **`CLAUDE_CONFIG_DIR`**, note it also relocates the USER-memory
+  root, which reclassifies `~/.claude/CLAUDE.md`'s `@imports` as *project* external includes and
+  raises a second dialog ("Allow external CLAUDE.md file imports?", gated on the per-project
+  `hasClaudeMdExternalIncludesApproved` / `…WarningShown`). That is an **artifact of the harness,
+  not a real-config behavior** — verified: all 64 live project entries have both keys `false` and no
+  such dialog appears. Don't "fix" it.
 - **`claude --resume <id>` dies if there's no conversation.** A session that was opened but
   never prompted has no saved transcript; resuming it exits code 1 ("No conversation found")
   and the tab is dead. **Don't gate resume-vs-fresh on the persisted `SessionState`** — a

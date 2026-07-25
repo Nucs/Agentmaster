@@ -73,6 +73,7 @@ int wmain()
     TestSupersedeStaleTabSiblings();
     TestSpawnBuilders();
     TestProfileBootstrap();
+    TestWorkspaceTrust();
     TestScheduler();
     TestEnterRetry();
     TestBuildPromptSubmission();

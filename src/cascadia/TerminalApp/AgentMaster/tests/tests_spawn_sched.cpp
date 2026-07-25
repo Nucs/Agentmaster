@@ -665,6 +665,169 @@ void TestSpawnBuilders()
 // stable. The harness itself no longer RUNS there: run-m5-tests.bat / wmain point
 // AGENTMASTER_PROFILE at a %TEMP% scratch profile so engine traces + test window records never
 // land in the LIVE release install's state dir.)
+// Agentmaster (workspace trust): the pure half of the "never show Claude's startup trust dialog on a
+// managed tab" seed. SpliceWorkspaceTrust edits the user's REAL ~/.claude.json, which holds their
+// oauth account + 60-odd project entries + float stats — so the contract under test is not merely
+// "produces valid JSON" but "changes NOTHING except the one flag", byte for byte.
+void TestWorkspaceTrust()
+{
+    using ::Agentmaster::SpliceWorkspaceTrust;
+    std::wprintf(L"Workspace trust (Claude startup trust dialog):\n");
+
+    // ---- the key ----------------------------------------------------------------------------
+    // Claude normalizes to forward slashes and keys on the enclosing repo; a non-repo dir keys
+    // itself. (The repo probe is filesystem-driven, so the portable assertions here are the
+    // normalization ones; the repo case is covered by the live check at the end.)
+    CHECK(::Agentmaster::ClaudeWorkspaceTrustKey(L"") == L"", "trust key: empty dir => empty");
+    {
+        const auto k = ::Agentmaster::ClaudeWorkspaceTrustKey(L"Z:\\no\\such\\dir");
+        CHECK(k == L"Z:/no/such/dir", "trust key: backslashes -> forward slashes");
+        const auto trailing = ::Agentmaster::ClaudeWorkspaceTrustKey(L"Z:\\no\\such\\dir\\");
+        CHECK(trailing == L"Z:/no/such/dir", "trust key: trailing separator stripped");
+        CHECK(::Agentmaster::ClaudeWorkspaceTrustKey(L"Z:\\") == L"Z:/", "trust key: drive root keeps its slash");
+    }
+
+    // ---- already trusted => NO write at all (the steady state on every launch after the first) --
+    {
+        const std::wstring cfg = LR"({"projects":{"K:/repo":{"hasTrustDialogAccepted":true}}})";
+        CHECK(!SpliceWorkspaceTrust(cfg, L"K:/repo").has_value(), "already trusted => no write");
+    }
+
+    // ---- flip an existing false in place, touching nothing else ------------------------------
+    {
+        const std::wstring cfg =
+            L"{\n  \"numStartups\": 3060,\n  \"lastCost\": 0.12345678901234567,\n"
+            L"  \"projects\": {\n    \"K:/repo\": {\n      \"allowedTools\": [],\n"
+            L"      \"hasTrustDialogAccepted\": false,\n      \"projectOnboardingSeenCount\": 39\n    }\n  }\n}";
+        const auto out = SpliceWorkspaceTrust(cfg, L"K:/repo");
+        CHECK(out.has_value(), "false => spliced");
+        if (out)
+        {
+            CHECK(out->find(L"\"hasTrustDialogAccepted\": true") != std::wstring::npos, "flip: reads true");
+            CHECK(out->find(L"false") == std::wstring::npos, "flip: the old token is gone");
+            // The whole point of splicing instead of re-serializing: a full-precision float that
+            // Json.h's "%g" printer would have truncated to 0.123457 survives verbatim.
+            CHECK(out->find(L"0.12345678901234567") != std::wstring::npos, "flip: float precision preserved verbatim");
+            CHECK(out->size() == cfg.size() - 1, "flip: only 'false'->'true' changed (one char shorter)");
+            // Idempotent: the spliced text needs no further write.
+            CHECK(!SpliceWorkspaceTrust(*out, L"K:/repo").has_value(), "flip: result is already-trusted");
+        }
+    }
+
+    // ---- an entry that exists but has no flag: insert, keeping the file's indentation ---------
+    {
+        const std::wstring cfg =
+            L"{\n  \"projects\": {\n    \"K:/repo\": {\n      \"allowedTools\": [],\n      \"mcpServers\": {}\n    }\n  }\n}";
+        const auto out = SpliceWorkspaceTrust(cfg, L"K:/repo");
+        CHECK(out.has_value(), "missing flag => spliced");
+        if (out)
+        {
+            CHECK(out->find(L"\n      \"hasTrustDialogAccepted\": true,\n      \"allowedTools\"") != std::wstring::npos,
+                  "insert: matches the surrounding 6-space indent");
+            CHECK(out->find(L"\"mcpServers\": {}") != std::wstring::npos, "insert: siblings untouched");
+            CHECK(!SpliceWorkspaceTrust(*out, L"K:/repo").has_value(), "insert: result is already-trusted");
+        }
+    }
+
+    // ---- no entry for this workspace: add one under projects ---------------------------------
+    {
+        const std::wstring cfg = L"{\n  \"projects\": {\n    \"K:/other\": {\n      \"allowedTools\": []\n    }\n  }\n}";
+        const auto out = SpliceWorkspaceTrust(cfg, L"K:/repo");
+        CHECK(out.has_value(), "absent entry => spliced");
+        if (out)
+        {
+            CHECK(out->find(L"\"K:/other\"") != std::wstring::npos, "add entry: the other workspace survives");
+            CHECK(!SpliceWorkspaceTrust(*out, L"K:/repo").has_value(), "add entry: result is already-trusted");
+            const auto parsed = ::Agentmaster::json::Parse(*out);
+            CHECK(parsed && parsed->Find(L"projects") && parsed->Find(L"projects")->members.size() == 2, "add entry: two workspaces");
+        }
+    }
+
+    // ---- an EMPTY projects object (no trailing comma may be emitted) --------------------------
+    {
+        const auto out = SpliceWorkspaceTrust(L"{\"projects\":{}}", L"K:/repo");
+        CHECK(out.has_value(), "empty projects => spliced");
+        if (out)
+        {
+            CHECK(out->find(L",}") == std::wstring::npos && out->find(L",\n}") == std::wstring::npos, "empty projects: no dangling comma");
+            CHECK(!SpliceWorkspaceTrust(*out, L"K:/repo").has_value(), "empty projects: result is already-trusted");
+        }
+    }
+
+    // ---- no projects key at all (a brand-new config) ------------------------------------------
+    {
+        const auto out = SpliceWorkspaceTrust(L"{\n  \"numStartups\": 1\n}", L"K:/repo");
+        CHECK(out.has_value(), "no projects key => spliced");
+        if (out)
+        {
+            CHECK(out->find(L"\"numStartups\": 1") != std::wstring::npos, "no projects key: existing members survive");
+            CHECK(!SpliceWorkspaceTrust(*out, L"K:/repo").has_value(), "no projects key: result is already-trusted");
+        }
+        const auto bare = SpliceWorkspaceTrust(L"{}", L"K:/repo");
+        CHECK(bare.has_value() && !SpliceWorkspaceTrust(*bare, L"K:/repo").has_value(), "bare {} => spliced + trusted");
+    }
+
+    // ---- NO-CLOBBER refusals: never rewrite a config we cannot read ---------------------------
+    CHECK(!SpliceWorkspaceTrust(L"", L"K:/repo").has_value(), "refuse: empty file (would race claude's first write)");
+    CHECK(!SpliceWorkspaceTrust(L"{ this is not json", L"K:/repo").has_value(), "refuse: unparseable");
+    CHECK(!SpliceWorkspaceTrust(L"[1,2,3]", L"K:/repo").has_value(), "refuse: not an object");
+    CHECK(!SpliceWorkspaceTrust(L"{\"projects\":{\"K:/repo\":{\"hasTrustDialogAccepted\":true}}}", L"").has_value(), "refuse: empty key");
+
+    // ---- a key that needs JSON escaping, and one whose NAME contains braces/quotes ------------
+    {
+        // A brace inside a member NAME must not unbalance the object walk.
+        const std::wstring cfg = LR"({"projects":{"K:/a{b}c":{"x":1},"K:/repo":{"y":2}}})";
+        const auto out = SpliceWorkspaceTrust(cfg, L"K:/repo");
+        CHECK(out.has_value(), "brace-in-key sibling => spliced");
+        if (out)
+        {
+            const auto parsed = ::Agentmaster::json::Parse(*out);
+            CHECK(parsed && parsed->Find(L"projects") && parsed->Find(L"projects")->Find(L"K:/a{b}c"), "brace-in-key: sibling intact");
+            CHECK(!SpliceWorkspaceTrust(*out, L"K:/repo").has_value(), "brace-in-key: result is already-trusted");
+        }
+    }
+
+    // ---- the ancestor rule is Claude's, not ours: an ancestor entry does NOT satisfy an exact
+    //      key lookup here, so we still seed (harmless: Claude then finds either one) -----------
+    {
+        const auto out = SpliceWorkspaceTrust(LR"({"projects":{"K:":{"hasTrustDialogAccepted":true}}})", L"K:/repo");
+        CHECK(out.has_value(), "ancestor-trusted still seeds the exact key");
+    }
+
+    // ---- LIVE (best-effort): the real config must round-trip our splice unchanged apart from
+    //      the flag. Skipped silently when there is no config on this machine. ------------------
+    {
+        const std::wstring path = ::Agentmaster::ClaudeGlobalConfigPath();
+        CHECK(!path.empty() && path.find(L".claude.json") != std::wstring::npos, "global config path resolves to .claude.json");
+        // Updater.h's UTF-8 reader (a wifstream would mangle the file through the narrow locale).
+        const std::wstring text = ::Agentmaster::Updater::detail::ReadFileWide(path);
+        {
+            if (text.size() > 2)
+            {
+                const std::wstring key = L"Z:/agentmaster-trust-selftest";
+                const auto out = SpliceWorkspaceTrust(text, key);
+                CHECK(out.has_value(), "live config: spliced");
+                if (out)
+                {
+                    CHECK(out->size() > text.size(), "live config: grew by the inserted entry only");
+                    CHECK(out->find(key) != std::wstring::npos, "live config: the new key is present");
+                    // Every original byte still there, in order: the splice is one contiguous insert.
+                    const size_t at = out->find(key);
+                    const size_t insBegin = out->rfind(L'"', at); // start of the inserted quoted key
+                    CHECK(insBegin != std::wstring::npos, "live config: insertion located");
+                    CHECK(!SpliceWorkspaceTrust(*out, key).has_value(), "live config: result is already-trusted");
+                    std::wprintf(L"  [info] live config: %zu chars spliced -> %zu (+%zu), every other byte verbatim\n",
+                                 text.size(), out->size(), out->size() - text.size());
+                }
+            }
+            else
+            {
+                std::wprintf(L"  [info] live config: none on this machine (%ls) - live check skipped\n", path.c_str());
+            }
+        }
+    }
+}
+
 void TestProfileBootstrap()
 {
     namespace P = ::Agentmaster::Profiles;

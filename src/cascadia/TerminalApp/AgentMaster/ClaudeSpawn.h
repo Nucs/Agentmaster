@@ -20,6 +20,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -404,6 +405,69 @@ namespace Agentmaster
     // The no-suffix overload resolves against ClaudePasteCacheDir(). [Agentmaster]
     std::wstring ResolvePendingPasteRefsIn(const std::wstring& draft, const std::wstring& cacheDir);
     std::wstring ResolvePendingPasteRefs(const std::wstring& draft);
+
+    // ---- Workspace trust (Agentmaster: never let the startup trust dialog wedge a managed tab) ----
+    //
+    // Claude Code blocks EVERY interactive session on a modal "Accessing workspace: … Is this a
+    // project you created or one you trust?" until the workspace is trusted. An unattended ConPTY
+    // session can't answer it: no `UserPromptSubmit` ever fires, no transcript id is minted (so the
+    // tab shows only the §11d unlinked observe badge), the Tests Autorunner can't drive it, and a
+    // /handover content injection is eaten by the menu. Verified against claude 2.1.220 (its own JS
+    // gate), the workspace is trusted iff ANY of:
+    //   * env CLAUDE_CODE_SANDBOXED is truthy,
+    //   * this run already accepted (in-memory only), or the session is a background agent,
+    //   * ~/.claude.json projects[<key>].hasTrustDialogAccepted === true, for the cwd's key OR ANY
+    //     ANCESTOR directory of the cwd.
+    // ⚠ `--dangerously-skip-permissions` / `--permission-mode bypassPermissions` do NOT skip it (the
+    // trust gate never consults the permission mode) — an older comment here claimed they did; live
+    // PTY-probed false on 2.1.220. Non-interactive `-p` skips it, which is why hooks/print calls
+    // never hit this. There is NO settings.json / managed-policy knob (the whole string table was
+    // enumerated) — seeding the key below is the remedy Claude Code itself prints.
+    //
+    // The ~/.claude.json project key for `dir`: its nearest enclosing git root (FindGitRootForDir —
+    // a worktree is its own root) else `dir` itself, absolute, with '\' -> '/' and no trailing
+    // separator — matching Claude's own key normalization. Keying the REPO (not the exact cwd) is
+    // what Claude does natively and means one entry per repo covers every subdirectory. Empty when
+    // `dir` is empty/relative. [Agentmaster]
+    std::wstring ClaudeWorkspaceTrustKey(std::wstring_view dir);
+
+    // The Claude GLOBAL config file: <CLAUDE_CONFIG_DIR | %USERPROFILE%>\.claude.json. NOTE the base
+    // differs from ClaudeProjectsDir's (which falls back to ~/.claude, a DIRECTORY): this file sits
+    // beside it at ~/.claude.json. Empty if unresolvable. [Agentmaster]
+    std::wstring ClaudeGlobalConfigPath();
+
+    // PURE (unit-tested): given the RAW text of a .claude.json and a trust key, return the text with
+    // projects[<key>].hasTrustDialogAccepted set to true — or nullopt when NO write is needed/safe:
+    //   * the key is already trusted (the steady state after the first launch — so a spawn costs one
+    //     read and zero writes),
+    //   * the text is empty / not parseable / not a JSON object (never rebuild a config we can't
+    //     read — the Updater.h "refuse to clobber" rule; this file holds the user's oauth account),
+    //   * the splice would produce text that no longer parses, or that doesn't read back as trusted.
+    // It is a SURGICAL SPLICE, never a re-serialize: every byte outside the inserted run is
+    // preserved verbatim. That is deliberate — Json.h prints numbers through "%g" (6 significant
+    // digits), so round-tripping the user's real 130 KB config would silently truncate float fields
+    // (lastCost, lastFpsAverage, …). The insertion copies the surrounding indentation so the
+    // pretty-printed file stays pretty. [Agentmaster]
+    std::optional<std::wstring> SpliceWorkspaceTrust(const std::wstring& configText, const std::wstring& key);
+
+    // Pre-trust the workspace containing `dir` by seeding its ~/.claude.json key, so the next claude
+    // launched there never shows the trust dialog. Best-effort + no-throw: returns true only when the
+    // workspace is trusted on return (already-trusted counts). Writes ONLY when the flag is missing
+    // or false — i.e. once per workspace, ever.
+    //
+    // Interlocks with Claude's OWN config writer: it guards ~/.claude.json with a proper-lockfile
+    // lock at "<path>.lock", whose primitive is an atomic mkdir — so we take the same lock the same
+    // way (CreateDirectoryW), briefly, and skip the seed entirely if Claude holds it (fail-open: the
+    // dialog shows once more and the next launch retries). A lock left behind by a killed process is
+    // broken only once it is far past proper-lockfile's own 10 s staleness horizon. Contention waits
+    // are bounded at 12 x 25 ms, and only the first launch in a workspace can wait at all — the
+    // already-trusted path never takes the lock — so the launch seam adds one ~1 ms read in steady
+    // state and at most ~300 ms once per workspace.
+    //
+    // This is a deliberate, additive mutation of ~/.claude.json — the second write outside the
+    // profile (after the /handover command definitions), gated on AppSettings::trustWorkspaceOnLaunch
+    // (default ON). It only ever sets a flag to true; nothing is removed or rewritten. [Agentmaster]
+    bool EnsureClaudeWorkspaceTrusted(std::wstring_view dir);
 
     // Given a tab's shell process id, find a `claude.exe` running under it (direct child, or deeper:
     // shell -> cmd-shim -> claude) and return that claude's REAL current directory, read from its PEB.
