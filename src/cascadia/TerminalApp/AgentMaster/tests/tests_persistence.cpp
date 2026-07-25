@@ -88,6 +88,41 @@ void TestPersistence()
         CHECK(ParseAnthropicModelsJson(L"<html>401</html>").empty(), "catalog: an HTML error page -> no rows");
         CHECK(ParseAnthropicModelsJson(LR"j({"type":"error","error":{"type":"authentication_error"}})j").empty(), "catalog: an API error envelope -> no rows (a 401 offers nothing)");
         CHECK(ParseCodexModelsJson(LR"j({"models":"not-an-array"})j").empty(), "catalog: a wrong-typed models key -> no rows");
+        CHECK(CatalogModelIds(claude) == std::vector<std::wstring>({ L"claude-opus-4-5-20251101", L"claude-sonnet-5" }), "catalog: ids extracted in order");
+    }
+
+    // Agentmaster: the drop-down's ORDER — the product rule, pinned. Groups in order:
+    // [configured Launch models] [recent MRU] [fetched Anthropic] [fetched Codex]. The configured
+    // list is ALWAYS present (a fetch adds, never replaces) and Anthropic outranks Codex, because
+    // this picker launches Claude sessions.
+    {
+        const std::vector<std::wstring> configured{ L"fable", L"opus", L"sonnet" };
+        const std::vector<std::wstring> recent{ L"claude-opus-4-8", L"opus" }; // "opus" repeats the configured one
+        const std::vector<std::wstring> anthropic{ L"claude-sonnet-5", L"claude-opus-4-8" }; // the 2nd repeats the MRU
+        const std::vector<std::wstring> codex{ L"gpt-5.6-sol", L"gpt-5.4" };
+        const auto merged = MergeModelIdGroups({ configured, recent, anthropic, codex });
+        CHECK(merged == std::vector<std::wstring>({ L"fable", L"opus", L"sonnet", L"claude-opus-4-8", L"claude-sonnet-5", L"gpt-5.6-sol", L"gpt-5.4" }),
+              "merge: configured -> recent -> Anthropic -> Codex, each id once, first occurrence wins");
+        // The two guarantees the user asked for, stated as their own checks so a future reorder
+        // trips on the RULE rather than on an incidental list.
+        for (const auto& c : configured)
+        {
+            CHECK(std::find(merged.begin(), merged.end(), c) != merged.end(), "merge: every configured model is ALWAYS offered");
+        }
+        const auto firstCodex = std::find(merged.begin(), merged.end(), L"gpt-5.6-sol") - merged.begin();
+        const auto lastClaude = std::find(merged.begin(), merged.end(), L"claude-sonnet-5") - merged.begin();
+        CHECK(lastClaude < firstCodex, "merge: Anthropic ids come before Codex ids");
+        // A fetch that returns NOTHING (no key, no network) must leave the base list intact.
+        CHECK(MergeModelIdGroups({ configured, recent, {}, {} }) == std::vector<std::wstring>({ L"fable", L"opus", L"sonnet", L"claude-opus-4-8" }),
+              "merge: an empty fetch leaves configured + recent exactly as they were");
+        // Codex-ONLY (the no-API-key case that used to WIPE the box down to Codex ids).
+        const auto codexOnly = MergeModelIdGroups({ configured, {}, {}, codex });
+        CHECK(codexOnly.size() == 5 && codexOnly[0] == L"fable" && codexOnly[3] == L"gpt-5.6-sol",
+              "merge: a Codex-only fetch APPENDS (the configured models keep the top)");
+        // Case-insensitive dedupe, keeping the FIRST spelling (the configured list is the reference).
+        const auto cased = MergeModelIdGroups({ { L"Opus" }, { L"opus", L"OPUS" } });
+        CHECK(cased == std::vector<std::wstring>({ L"Opus" }), "merge: one model, one entry (case-insensitive, first spelling kept)");
+        CHECK(MergeModelIdGroups({}).empty() && MergeModelIdGroups({ { L"", L"x", L"" } }) == std::vector<std::wstring>({ L"x" }), "merge: no groups / blank ids -> dropped");
     }
 
     // JSON round-trip of a small document.

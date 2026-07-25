@@ -1955,9 +1955,14 @@ What works, by area:
   session" (for it that's WT's duplicate-tab), and the launch bar's Launch/Fork + the double-click
   Resume/Fork dialog stay Default]. **`Specify…` sits directly under Default** in EVERY one of those
   submenus (and as a row in the Commands tab's three **Successor model** combos): it opens the shared
-  **"Specify a model" prompt** — an **editable ComboBox** whose drop-down lists the ids you used
-  before (the `recent-models.json` MRU, newest first — `PushRecentModel`/`RememberRecentModel`,
-  case-insensitively deduped, cap 20) followed by your configured ids, plus **links to the two
+  **"Specify a model" prompt** — an **editable ComboBox** whose drop-down is built by the pure,
+  tested `MergeModelIdGroups` in group order **[configured `launchModels`] → [the `recent-models.json`
+  MRU] → [fetched Anthropic] → [fetched Codex]** (each id once, case-insensitively deduped, first
+  spelling kept). Two guarantees ride that rule: **the configured Launch models are ALWAYS offered**
+  (a Fetch can only ADD — it never replaces the list, which previously wiped the box down to whatever
+  came back, i.e. Codex-only without an API key) and **Anthropic's ids always precede Codex's** (this
+  picker launches Claude sessions). The MRU is `PushRecentModel`/`RememberRecentModel` — newest first,
+  a re-used id moved not duplicated, cap 20. Plus **links to the two
   published lists** (Anthropic's [models API](https://platform.claude.com/docs/en/api/go/models/list) ·
   the Codex [models.json](https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json))
   and a **Fetch list** button that downloads + parses them straight into the drop-down
@@ -2561,7 +2566,9 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     `ModelCatalog.h` (header-only, pure — the **published model-list parsers** behind the launch-model
     picker's "Specify a model..." Fetch: Anthropic's `/v1/models` `{"data":[{id, display_name}]}` and
     the Codex CLI's `models.json` `{"models":[{slug, display_name}]}`, plus the endpoint + docs-URL
-    constants both the fetch and the prompt's links read. TOTAL — an error page / wrong shape / empty
+    constants both the fetch and the prompt's links read, and **`MergeModelIdGroups`** — the drop-down's
+    ORDERING rule (configured → recent → Anthropic → Codex, deduped case-insensitively) kept here
+    precisely so a test can pin it. TOTAL — an error page / wrong shape / empty
     body yields NO rows rather than a partial guess. Pure so the harness covers it with no network and
     no new link libs; the HTTP itself lives in the UI layer. Unit-tested in `tests/`),
     `RegexUtil.h` (header-only, pure — the ONE **guarded regex component** every user-typed pattern

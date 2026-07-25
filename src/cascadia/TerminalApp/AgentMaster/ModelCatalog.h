@@ -142,6 +142,58 @@ namespace Agentmaster
         return source == ModelCatalogSource::Claude ? ParseAnthropicModelsJson(json) : ParseCodexModelsJson(json);
     }
 
+    // Just the ids, in order — what a drop-down actually lists.
+    inline std::vector<std::wstring> CatalogModelIds(const std::vector<CatalogModel>& rows)
+    {
+        std::vector<std::wstring> out;
+        out.reserve(rows.size());
+        for (const auto& r : rows)
+        {
+            out.push_back(r.id);
+        }
+        return out;
+    }
+
+    // Merge ordered id GROUPS into the one list the "Specify a model..." drop-down shows: group
+    // order is preserved, first occurrence of an id wins, and a repeat is dropped case-INsensitively
+    // ("Opus" and "opus" are one model, matching PushRecentModel's rule).
+    //
+    // Group order IS the product decision, so it lives here where a test can pin it:
+    //   1. the CONFIGURED models (Settings -> Launch models)  — always present, whatever else happens
+    //   2. the recently-typed MRU
+    //   3. the fetched ANTHROPIC catalog
+    //   4. the fetched CODEX catalog
+    // Anthropic before Codex because this picker launches Claude sessions (a Codex id is the
+    // occasional cross-reference, not the common case), and the configured list first because it is
+    // the user's own curated set — it must never be pushed out by a fetch that returns hundreds of
+    // ids, nor replaced by one that (with no ANTHROPIC_API_KEY) can only return Codex's.
+    inline std::vector<std::wstring> MergeModelIdGroups(const std::vector<std::vector<std::wstring>>& groups)
+    {
+        const auto fold = [](const std::wstring& s) {
+            std::wstring f;
+            f.reserve(s.size());
+            for (wchar_t c : s)
+            {
+                f.push_back(c >= L'A' && c <= L'Z' ? static_cast<wchar_t>(c - L'A' + L'a') : c);
+            }
+            return f;
+        };
+        std::unordered_set<std::wstring> seen;
+        std::vector<std::wstring> out;
+        for (const auto& g : groups)
+        {
+            for (const auto& id : g)
+            {
+                if (id.empty() || !seen.insert(fold(id)).second)
+                {
+                    continue;
+                }
+                out.push_back(id);
+            }
+        }
+        return out;
+    }
+
     // ---- the endpoints (constants here so the fetch site and the docs link can never disagree) ----
 
     // Claude's model list is an AUTHENTICATED API: `GET https://api.anthropic.com/v1/models` with

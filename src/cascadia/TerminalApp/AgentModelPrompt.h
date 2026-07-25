@@ -51,29 +51,18 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ComboBox box{ nullptr }; // focus THIS after showing
     };
 
-    // The drop-down contents: the MRU first (what you actually used), then any configured
-    // launch-model id not already listed. Deduped case-insensitively, order preserved.
+    // The drop-down's BASE contents, present on every open and NEVER dropped afterwards: the
+    // CONFIGURED launch models (Settings -> Launch models) first, then the recently-typed MRU.
+    // Ordering + dedupe rules live in MergeModelIdGroups (ModelCatalog.h), where they are tested.
     inline std::vector<std::wstring> AgentSpecifyModelSuggestions(const std::vector<std::pair<std::wstring, std::wstring>>& configured)
     {
-        std::vector<std::wstring> out = ::Agentmaster::LoadRecentModels();
+        std::vector<std::wstring> configuredIds;
+        configuredIds.reserve(configured.size());
         for (const auto& [name, id] : configured)
         {
-            // PushRecentModel's fold, reused by hand (it is the same "one model, one entry" rule).
-            bool have = false;
-            for (const auto& m : out)
-            {
-                if (m.size() == id.size() && std::equal(m.begin(), m.end(), id.begin(), [](wchar_t a, wchar_t b) { return std::towlower(a) == std::towlower(b); }))
-                {
-                    have = true;
-                    break;
-                }
-            }
-            if (!have)
-            {
-                out.push_back(id);
-            }
+            configuredIds.push_back(id);
         }
-        return out;
+        return ::Agentmaster::MergeModelIdGroups({ configuredIds, ::Agentmaster::LoadRecentModels() });
     }
 
     // Build the prompt. `onDone` fires EXACTLY once: with the trimmed id on Use, or with "" on
@@ -103,7 +92,7 @@ namespace winrt::TerminalApp::implementation
         body.Children().Append(title);
 
         WUXC::TextBlock sub;
-        sub.Text(L"Launched as --model <id> for this one session. Type an id, or pick one you used before.");
+        sub.Text(L"Launched as --model <id> for this one session. Type an id, or pick one from the list \x2014 your Launch models, then the ones you used before.");
         sub.FontSize(12);
         sub.Opacity(0.75);
         sub.TextWrapping(WUX::TextWrapping::Wrap);
@@ -111,16 +100,21 @@ namespace winrt::TerminalApp::implementation
 
         // The editable drop-down. IsEditable is what makes a ComboBox a "type OR pick" control; its
         // Text property carries the typed value (SelectedItem alone would only ever return a listed id).
+        //
+        // `base` — your configured Launch models followed by the recently-typed MRU — is the list the
+        // drop-down ALWAYS shows. It is captured here and re-applied by the fetch handler, so a fetch
+        // can only ever ADD to it (the settings models can never be pushed out or replaced).
+        const std::vector<std::wstring> base = AgentSpecifyModelSuggestions(configured);
         WUXC::ComboBox box;
         box.IsEditable(true);
         box.HorizontalAlignment(WUX::HorizontalAlignment::Stretch);
         box.PlaceholderText(L"e.g. opus, claude-opus-4-8, gpt-5.6-sol");
-        for (const auto& s : AgentSpecifyModelSuggestions(configured))
+        for (const auto& s : base)
         {
             box.Items().Append(winrt::box_value(winrt::hstring{ s }));
         }
         box.Text(winrt::hstring{ seed });
-        AgentSetTip(box, L"The exact value passed to --model. Anything the CLI accepts works: an ALIAS (opus / sonnet / fable) always launches the latest model of that family, a full id (claude-opus-4-8) pins that exact version. The list remembers what you have typed before.");
+        AgentSetTip(box, L"The exact value passed to --model. Anything the CLI accepts works: an ALIAS (opus / sonnet / fable) always launches the latest model of that family, a full id (claude-opus-4-8) pins that exact version. The drop-down always lists your Launch models (Settings \x2192 Sessions) first, then the ids you typed before, then anything Fetch loaded \x2014 Claude before Codex.");
         body.Children().Append(box);
 
         // Status line — the fetch result, or why a commit did nothing. Kept between the box and the
@@ -166,7 +160,7 @@ namespace winrt::TerminalApp::implementation
 
         WUXC::Button fetchBtn;
         fetchBtn.Content(winrt::box_value(winrt::hstring{ L"Fetch list" }));
-        AgentSetTip(fetchBtn, L"Download the published model lists and put them in the drop-down above. The Codex catalog is public; the Claude list needs an ANTHROPIC_API_KEY in your environment (a Claude subscription login does not issue one) \x2014 the status line says which half arrived.");
+        AgentSetTip(fetchBtn, L"Download the published model lists and ADD them to the drop-down above \x2014 Claude ids first, then Codex; your Launch models and recent ids always stay on top. The Codex catalog is public; the Claude list needs an ANTHROPIC_API_KEY in your environment (a Claude subscription login does not issue one) \x2014 the status line says which half arrived.");
         actions.Children().Append(fetchBtn);
 
         WUXC::Button useBtn;
@@ -265,7 +259,7 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
-        fetchBtn.Click([box, status, fetchBtn](const winrt::Windows::Foundation::IInspectable&, const WUX::RoutedEventArgs&) {
+        fetchBtn.Click([box, status, fetchBtn, base](const winrt::Windows::Foundation::IInspectable&, const WUX::RoutedEventArgs&) {
             fetchBtn.IsEnabled(false);
             status.Text(L"Fetching model lists\x2026");
             status.Visibility(WUX::Visibility::Visible);
@@ -277,20 +271,23 @@ namespace winrt::TerminalApp::implementation
             // thread touches is captured BY VALUE; the only UI contact is the marshalled tail below.
             try
             {
-                std::thread([box, status, fetchBtn, dispatcher]() {
-                    std::vector<::Agentmaster::CatalogModel> found;
+                std::thread([box, status, fetchBtn, dispatcher, base]() {
+                    // Kept SEPARATE (not one merged pile) so the drop-down can order them
+                    // Anthropic-before-Codex regardless of which arrived first on the wire.
+                    std::vector<std::wstring> claudeIds, codexIds;
+                    size_t fetched = 0;
                     std::wstring note;
                     try
                     {
-                        // Codex first: public, so it is the half that reliably arrives.
+                        // Codex first on the WIRE (it is public, so it is the half that reliably
+                        // arrives) - but it lists LAST in the drop-down; see the merge below.
                         std::wstring err;
                         const auto codexBody = ::Agentmaster::Updater::HttpsGet(std::wstring{ ::Agentmaster::kCodexModelsHost },
                                                                                 std::wstring{ ::Agentmaster::kCodexModelsPath },
                                                                                 8000,
                                                                                 err,
                                                                                 L"User-Agent: Agentmaster\r\n");
-                        const auto codex = ::Agentmaster::ParseCodexModelsJson(::Agentmaster::Updater::detail::Utf8ToWide(codexBody));
-                        found.insert(found.end(), codex.begin(), codex.end());
+                        codexIds = ::Agentmaster::CatalogModelIds(::Agentmaster::ParseCodexModelsJson(::Agentmaster::Updater::detail::Utf8ToWide(codexBody)));
 
                         // Claude: only when the environment carries a key. ANTHROPIC_API_KEY is the
                         // SDK's own variable; ANTHROPIC_AUTH_TOKEN is the bearer form used with a
@@ -311,18 +308,17 @@ namespace winrt::TerminalApp::implementation
                                                                                8000,
                                                                                aerr,
                                                                                headers);
-                            const auto claude = ::Agentmaster::ParseAnthropicModelsJson(std::wstring{ winrt::to_hstring(body) });
-                            if (claude.empty())
+                            claudeIds = ::Agentmaster::CatalogModelIds(::Agentmaster::ParseAnthropicModelsJson(::Agentmaster::Updater::detail::Utf8ToWide(body)));
+                            if (claudeIds.empty())
                             {
                                 note = aerr.empty() ? std::wstring{ L"the Claude list came back empty" } : (L"Claude list: " + aerr);
                             }
-                            // Claude ids lead — this picker launches Claude sessions.
-                            found.insert(found.begin(), claude.begin(), claude.end());
                         }
                         else
                         {
                             note = L"no ANTHROPIC_API_KEY set, so only the Codex list could be fetched \x2014 open the Claude link above for that one";
                         }
+                        fetched = claudeIds.size() + codexIds.size();
                     }
                     catch (...)
                     {
@@ -336,20 +332,26 @@ namespace winrt::TerminalApp::implementation
                         {
                             return; // no UI lane to come back on (never observed on a UI thread)
                         }
-                        dispatcher.TryEnqueue([box, status, fetchBtn, found, note]() {
+                        dispatcher.TryEnqueue([box, status, fetchBtn, base, claudeIds, codexIds, fetched, note]() {
                             try
                             {
                                 fetchBtn.IsEnabled(true);
-                                if (!found.empty())
+                                if (fetched > 0)
                                 {
+                                    // REBUILD, never replace: the configured Launch models + the MRU
+                                    // (base) stay at the top no matter what a fetch returns, then
+                                    // Anthropic ids, then Codex ids. Without this the box was cleared
+                                    // to only the FETCHED list - which, with no ANTHROPIC_API_KEY,
+                                    // means only Codex, hiding the configured models entirely.
                                     const std::wstring keep{ box.Text() }; // repopulating Items() clears the typed text
                                     box.Items().Clear();
-                                    for (const auto& m : found)
+                                    for (const auto& id : ::Agentmaster::MergeModelIdGroups({ base, claudeIds, codexIds }))
                                     {
-                                        box.Items().Append(winrt::box_value(winrt::hstring{ m.id }));
+                                        box.Items().Append(winrt::box_value(winrt::hstring{ id }));
                                     }
                                     box.Text(winrt::hstring{ keep });
-                                    std::wstring msg = std::to_wstring(found.size()) + L" models loaded \x2014 open the drop-down.";
+                                    std::wstring msg = std::to_wstring(fetched) + L" models fetched (Claude " + std::to_wstring(claudeIds.size()) +
+                                                       L", Codex " + std::to_wstring(codexIds.size()) + L") \x2014 open the drop-down; your Launch models stay on top.";
                                     if (!note.empty())
                                     {
                                         msg += L" (" + note + L")";
