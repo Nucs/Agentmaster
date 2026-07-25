@@ -974,6 +974,15 @@ namespace winrt::TerminalApp::implementation
             const auto* begin = reinterpret_cast<const char16_t*>(text.data());
             connection.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
         });
+        // Agentmaster (PENDING_INPUT.md §9 — the DRAFT SWAP): bound in lockstep with the injector, and
+        // by THIS window, because only the window hosting the control can read its input box or block
+        // its keyboard. Every prompt-submit path reaches it through SessionRegistry::SubmitPrompt.
+        // weak_ref, not `this`: a send can arrive from the scheduler thread long after the page went
+        // away, and the registry outlives every window (it is process-wide, M9).
+        _sessionRegistry->SetPromptSubmitter(spec.sessionId, [weakThis{ get_weak() }](const ::Agentmaster::PromptSubmission& submission) -> bool {
+            const auto self = weakThis.get();
+            return self ? self->_AcceptPromptSubmission(submission) : false; // gone => not accepted; the caller rolls back (Rule #4)
+        });
 
         // Agentmaster: a session's title is ONE value — the Explorer-tree name, the persisted
         // SessionInfo.title, and the WT tab title are the same thing. Pin the tab to it now
@@ -1233,6 +1242,7 @@ namespace winrt::TerminalApp::implementation
                 s.pendingConfirmPromptId.clear();
             });
             _sessionRegistry->SetInjector(id, nullptr);
+            _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
             ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
         }
     }
@@ -1424,6 +1434,7 @@ namespace winrt::TerminalApp::implementation
                 s.pendingConfirmPromptId.clear();
             });
             _sessionRegistry->SetInjector(sessionId, nullptr);
+            _sessionRegistry->SetPromptSubmitter(sessionId, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
             ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
         }
         _claudeTabs.erase(sessionId);
@@ -1485,6 +1496,7 @@ namespace winrt::TerminalApp::implementation
                 s.pendingConfirmPromptId.clear();
             });
             _sessionRegistry->SetInjector(id, nullptr);
+            _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[teardown-archive] " + id + L"\n");
         }
         _claudeTabs.clear();

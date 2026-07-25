@@ -1034,6 +1034,13 @@ namespace winrt::TerminalApp::implementation
         // Say so rather than describe a behavior that doesn't happen; drop this caveat when it lands.
         AgentSetTip(_setPauseOnHuman, L"Meant to hold a session's queue while you are typing into its terminal yourself, so an auto-send can't land mid-sentence.\n\nNot wired up yet: nothing reports your keystrokes to the Tests Autorunner, so this toggle has no effect today. Your choice is saved and takes effect once it is connected.\n\nA prompt you actually SEND does stop the queue \x2014 the session goes Running, and nothing is ever auto-sent mid-turn.");
         panel.Children().Append(_setPauseOnHuman);
+        // Agentmaster (PENDING_INPUT.md §9 — the DRAFT SWAP). Unlike the toggle above, this one is
+        // live: it governs every prompt-submit path at once (auto-send, SemiAuto confirm, Send-now,
+        // the /handover paste pump), which all share SessionRegistry::SubmitPrompt.
+        _setPreserveDraft = ToggleSwitch{};
+        _setPreserveDraft.Header(winrt::box_value(L"Preserve my unsent draft when a prompt is sent"));
+        AgentSetTip(_setPreserveDraft, L"When a prompt is sent to a session whose input box already holds text you typed but have NOT sent, take your draft out of the way first and put it straight back afterwards \x2014 instead of pasting the prompt on top of it, which submitted your words and the prompt together as one message you never wrote.\n\nWhile it works (about a second) that tab's keyboard is locked so your typing cannot land mid-swap; you still see everything happening. Your draft is put back with the terminal's own undo buffer, so it comes back exactly as you typed it \x2014 unsent, one Enter away.\n\nIf the box cannot be cleared, NOTHING is sent: the prompt stays queued and your draft is left alone. Off restores the old behavior (the prompt is pasted into your draft).");
+        panel.Children().Append(_setPreserveDraft);
 
         // === BEHAVIOR tab ===
         panel = behaviorPanel;
@@ -2372,6 +2379,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setPauseOnHuman.IsOn(_appSettings.pauseOnHumanInput);
         }
+        if (_setPreserveDraft)
+        {
+            _setPreserveDraft.IsOn(_appSettings.preserveDraftOnSend);
+        }
         if (_setConfirmKill)
         {
             _setConfirmKill.IsOn(_appSettings.confirmBeforeKill);
@@ -2982,6 +2993,10 @@ namespace winrt::TerminalApp::implementation
         if (_setPauseOnHuman)
         {
             _appSettings.pauseOnHumanInput = _setPauseOnHuman.IsOn();
+        }
+        if (_setPreserveDraft)
+        {
+            _appSettings.preserveDraftOnSend = _setPreserveDraft.IsOn();
         }
         if (_setConfirmKill)
         {

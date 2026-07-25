@@ -480,4 +480,118 @@ namespace Agentmaster
         }
         return pick;
     }
+
+    // ---- The DRAFT SWAP (PENDING_INPUT.md sect. 9) -------------------------------------------
+    //
+    // Submitting a queued prompt into a box that already holds the user's UNSENT draft used to
+    // MERGE the two: a bracketed paste lands at the cursor and the submit CR then sends draft +
+    // prompt as one message the user never wrote (and never pressed Enter on). The swap empties
+    // the box first, sends, and puts the draft back -- driven by Claude's own line-editor
+    // kill-ring, so the restore is the user's EXACT bytes round-tripped by the TUI rather than
+    // re-typed by us:
+    //
+    //   Ctrl+U (0x15) -- kill the input box INTO the kill-ring.
+    //   Ctrl+Y (0x19) -- yank the kill-ring back into the (now empty) box.
+    //   DEL    (0x7F) -- the fallback erase, one per remaining character, used only when a kill
+    //                    press does not empty the box.
+    //
+    // 0x7F rather than 0x08: xterm-family terminals send DEL for the Backspace KEY, which is what
+    // a TUI line editor binds; 0x08 is Ctrl+H and is commonly bound elsewhere. The restore has its
+    // own fallback in the UI lane -- if the yank does not put text back, the draft we READ is
+    // re-pasted with BuildPromptFill (no submit CR) -- so both halves degrade.
+    //
+    // NOTHING here is assumed to have worked: every rung is VERIFIED by re-reading the box through
+    // DetectPendingInput, and a swap that cannot confirm an EMPTY box ABORTS without sending. An
+    // unsupported keybinding therefore costs a deferred prompt, never a mangled message. PURE --
+    // these only build the bytes and decide the next rung; the injecting, the re-reads and the
+    // read-only window live in the UI lane (TerminalPage::_SubmitPromptWithDraftSwap).
+    inline constexpr wchar_t kInputKillLineChar = L'\x15'; // Ctrl+U -- kill the line into the kill-ring
+    inline constexpr wchar_t kInputYankChar = L'\x19'; // Ctrl+Y -- yank it back
+    inline constexpr wchar_t kInputBackspaceChar = L'\x7f'; // DEL -- the fallback erase
+
+    inline std::wstring BuildInputKill()
+    {
+        return std::wstring(1, kInputKillLineChar);
+    }
+
+    inline std::wstring BuildInputYank()
+    {
+        return std::wstring(1, kInputYankChar);
+    }
+
+    // A bounded run of backspaces. Capped so a mis-measured box (or a detector reporting a pasted
+    // PLACEHOLDER far shorter than the content behind it) can never spray unbounded erases at a
+    // live TUI; the ladder re-reads and re-decides between rounds anyway.
+    inline constexpr size_t kMaxBackspacesPerRound = 4096;
+
+    inline std::wstring BuildBackspaces(size_t count)
+    {
+        return std::wstring((count < kMaxBackspacesPerRound ? count : kMaxBackspacesPerRound), kInputBackspaceChar);
+    }
+
+    // How many times each rung may be tried before the swap gives up. Small by design: Ctrl+U
+    // empties the box in ONE press on a supported build, so needing more already means the binding
+    // is not doing what we expect and the backspace rung should take over; two backspace rounds
+    // then cover a box whose length the first round under-measured.
+    inline constexpr uint32_t kMaxDraftKillPresses = 3;
+    inline constexpr uint32_t kMaxDraftBackspaceRounds = 2;
+
+    enum class DraftClearAction
+    {
+        Done, // the box reads empty -- the swap may send
+        Kill, // press Ctrl+U (again)
+        Backspace, // erase `backspaces` characters, then re-read
+        GiveUp, // the box will not empty -- ABORT the swap (send nothing, leave the draft alone)
+    };
+
+    struct DraftClearPlan
+    {
+        DraftClearAction action{ DraftClearAction::Done };
+        size_t backspaces{ 0 }; // valid for Backspace
+    };
+
+    // PURE decision (the DecideAdvance pattern) for ONE step of the clear ladder. Its inputs are
+    // the box as RE-READ right now plus how many rungs have already been spent, so the caller is a
+    // plain "read -> decide -> act -> read again" loop holding no hidden state:
+    //
+    //   * empty box                     -> Done. Whitespace-only counts as empty (a focused empty
+    //                                      box can render as padding alone), the same rule
+    //                                      PickCurrentPromptText applies.
+    //   * kill presses left, and either
+    //     none pressed yet or the last
+    //     press SHRANK the box          -> Kill. A multi-line draft can take a press per line.
+    //   * a press that did NOT shrink   -> fall through to the backspace rung: the binding is not
+    //                                      the one we assumed, so stop pressing it.
+    //   * backspace rounds left         -> Backspace, one per remaining character plus a small
+    //                                      margin for a trailing cursor cell in the read.
+    //   * otherwise                     -> GiveUp.
+    //
+    // `shrank` is the caller's comparison of this read against the previous one (false on the
+    // first call). Kill is never returned once the ladder has moved on -- `backspaceRounds > 0`
+    // pins it -- so the two rungs cannot alternate forever.
+    inline DraftClearPlan DecideDraftClear(std::wstring_view box,
+                                           uint32_t killPresses,
+                                           uint32_t backspaceRounds,
+                                           bool shrank)
+    {
+        DraftClearPlan plan;
+        if (pending_detail::AllWhitespace(box))
+        {
+            plan.action = DraftClearAction::Done;
+            return plan;
+        }
+        if (backspaceRounds == 0 && killPresses < kMaxDraftKillPresses && (killPresses == 0 || shrank))
+        {
+            plan.action = DraftClearAction::Kill;
+            return plan;
+        }
+        if (backspaceRounds < kMaxDraftBackspaceRounds)
+        {
+            plan.action = DraftClearAction::Backspace;
+            plan.backspaces = box.size() + 8; // + margin: a trailing cursor cell / a wide glyph
+            return plan;
+        }
+        plan.action = DraftClearAction::GiveUp;
+        return plan;
+    }
 }

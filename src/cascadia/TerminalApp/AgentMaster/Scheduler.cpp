@@ -307,11 +307,13 @@ namespace Agentmaster
             if (plan2.action == AdvanceAction::Send)
             {
                 std::wstring text;
+                std::wstring promptId; // PENDING_INPUT.md §9: what an aborted draft swap rolls back
                 _registry->Update(id, [&](SessionInfo& ss) {
                     if (plan2.promptIndex < ss.queue.size() && ss.queue[plan2.promptIndex].status == PromptStatus::Pending)
                     {
                         auto& p = ss.queue[plan2.promptIndex];
                         text = p.text;
+                        promptId = p.id;
                         p.status = PromptStatus::Sent;
                         p.sentAtUnixMs = NowMs();
                         p.attempts += 1;
@@ -329,7 +331,13 @@ namespace Agentmaster
                     // Inject + submit via a bracketed paste so a multi-line body lands as ONE message
                     // (BuildPromptSubmission, #6) instead of submitting on the first embedded line break.
                     // Idempotent: the prompt is already marked Sent above, so a duplicate advance won't resend.
-                    const bool delivered = _registry->Inject(id, BuildPromptSubmission(text));
+                    // Agentmaster (PENDING_INPUT.md §9): through SubmitPrompt, the ONE send seam — with a
+                    // hosting window bound it performs the DRAFT SWAP first (take the user's unsent draft
+                    // out of the box, send, put it back) instead of pasting this prompt on top of it; with
+                    // none bound it IS the Inject(BuildPromptSubmission(...)) call this replaced. `true`
+                    // here means "accepted": an asynchronous swap that later aborts rolls the prompt back
+                    // itself (RollbackPromptToPending), so the queue stays honest either way.
+                    const bool delivered = _registry->SubmitPrompt({ id, promptId, text, true });
                     if (delivered)
                     {
                         AppendStateLog(L"autorunner.log", L"[send] " + id + L" #" + std::to_wstring(plan2.promptIndex) + L"\n");
@@ -540,7 +548,9 @@ namespace Agentmaster
             // stranded as a phantom Sent that was never delivered AND never re-fires (the re-fire keys
             // on Pending), violating Correctness Rule #4. Mirror _process: revert to Pending; the next
             // advance re-decides AwaitConfirm and re-arms the confirm once the injector binds.
-            const bool delivered = _registry->Inject(sessionId, BuildPromptSubmission(text));
+            // Agentmaster (PENDING_INPUT.md §9): the shared send seam — the draft swap applies to a
+            // confirmed SemiAuto send exactly as it does to an auto-send.
+            const bool delivered = _registry->SubmitPrompt({ sessionId, confirmedId, text, true });
             if (delivered)
             {
                 AppendStateLog(L"autorunner.log", L"[confirm-send] " + sessionId + L"\n");

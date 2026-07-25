@@ -958,6 +958,7 @@ namespace winrt::TerminalApp::implementation
                     s.pendingConfirmPromptId.clear();
                 });
                 _sessionRegistry->SetInjector(id, nullptr);
+                _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
                 _claudeTabs.erase(id);
                 _claudeOverlays.erase(id);
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[pane-close] archived " + id + L"\n");

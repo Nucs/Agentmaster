@@ -896,6 +896,22 @@ namespace winrt::TerminalApp::implementation
         std::vector<int> _JumpEligibilityInSession(const std::wstring& sessionId, const std::vector<std::wstring>& msgs); // Agentmaster (SUMMARY_JUMP.md): a row per prompt (-1 == not on screen) for icon dimming
         winrt::Microsoft::Terminal::Control::TermControl _ControlForSession(const std::wstring& sessionId); // Agentmaster (SUMMARY_JUMP.md): the live control hosting a session's tab, or null
         std::wstring _ReadLiveDraftForSession(const std::wstring& sessionId); // Agentmaster (PENDING_INPUT.md §8): the session's UNSENT input-box draft read from its LIVE buffer for "Copy Current Prompt" — fully wrapped: not hosted here / dormant / torn down / threw all read as "" (the caller then falls back to the observer's SessionInfo::pendingInput); UI thread
+        // Agentmaster (PENDING_INPUT.md §9 — the DRAFT SWAP). _AcceptPromptSubmission is the
+        // SessionRegistry::PromptSubmitter this window registers next to its injector; it is called on
+        // whatever thread wants to send (the scheduler worker, or another window's Manager), so it does
+        // nothing but the thread-safe HasInjector accept test before handing off to the coroutine below.
+        // Everything the swap needs — the live box read, the read-only window, the injections — is UI
+        // thread + this window, hence the split.
+        bool _AcceptPromptSubmission(const ::Agentmaster::PromptSubmission& submission);
+        winrt::fire_and_forget _SubmitPromptWithDraftSwap(::Agentmaster::PromptSubmission submission); // terminate-net wrapper (an escaped exception in a fire_and_forget is std::terminate)
+        winrt::Windows::Foundation::IAsyncAction _SubmitPromptWithDraftSwapImpl(::Agentmaster::PromptSubmission submission); // read draft -> lock input -> Ctrl+U until VERIFIED empty (else abort) -> send -> await pickup -> Ctrl+Y (paste fallback) -> unlock
+        std::wstring _ReadDraftForSwap(const std::wstring& sessionId, const std::wstring& remembered); // one verified box read: the live buffer, re-read on a thin/empty result, with the observer's remembered draft as the payload fallback
+        winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> _RestoreDraftAfterSwap(std::wstring sessionId, std::wstring draft, bool allowPaste); // put the draft back and VERIFY it against that ground truth: kill-ring yank first (it preserves a paste placeholder's binding), else clear + re-paste verbatim; returns what the box finally reads
+        void _EndDraftSwap(const std::wstring& sessionId, bool restoreInteractive); // release the read-only window (only if WE took it) + drop the in-flight latch; UI thread, called on EVERY exit path
+        // Sessions whose swap is running right now. Read by _ScanPendingInput, which SKIPS them: mid-swap
+        // the box is deliberately empty, and letting the scan's clear debounce see that would erase the
+        // very draft we are holding for the user. UI-thread-only state.
+        std::unordered_map<std::wstring, bool> _draftSwapsInFlight; // sessionId -> "the control was ALREADY read-only before we took it" (so we never clear a read-only the user set)
         std::wstring _FocusedPromptNavSession(); // Agentmaster (alt+up/down): the focused tab's managed CLAUDE sessionId, or empty (=> the handler falls back to MoveFocus)
         winrt::fire_and_forget _ScrollAdjacentPrompt(std::wstring sessionId, bool up); // Agentmaster (alt+up/down): re-read the sent prompts (mtime-gated), then center the view on the nearest OFF-SCREEN sent prompt up/down (fresh resolve every press); boundary sound at the ends
         winrt::fire_and_forget _RefreshPromptNavCache(std::wstring sessionId); // Agentmaster (alt+up/down, SUMMARY_JUMP.md §7): the 30s focused refresh — re-read sent prompts (mtime-gated) into _promptNavCache + re-resolve the overlay's jump eligibility, WITHOUT navigating

@@ -43,6 +43,18 @@ namespace Agentmaster
     // Per-session stdin writer, bound to that session's ConptyConnection by the app layer.
     using Injector = std::function<void(const std::wstring& text)>;
 
+    // Agentmaster (PENDING_INPUT.md §9 — the DRAFT SWAP): the hosting window's hook for SENDING a
+    // queued prompt, as opposed to the raw stdin Injector above. Registered next to SetInjector by
+    // the ONE window that owns the session's control, because everything the swap needs — reading
+    // the live input box, blocking the user's keystrokes while it works — is UI-thread + this-window
+    // only. Returns "accepted for delivery" SYNCHRONOUSLY (the swap itself is asynchronous): false
+    // means nothing was or will be sent, and the caller performs its usual Rule-#4 rollback right
+    // away; true means the window owns the outcome and will roll the prompt back ITSELF
+    // (RollbackPromptToPending) if the swap later aborts. With no submitter bound, SubmitPrompt
+    // falls back to the historical raw inject, so a session in a window that never registered one
+    // behaves exactly as it always did.
+    using PromptSubmitter = std::function<bool(const PromptSubmission& submission)>;
+
     // Opaque handles returned by AddObserver / AddAdoptionHandler; pass the same value to the
     // matching Remove* to detach. Agentmaster M9: the engine is a process-wide singleton shared
     // by every window's Manager lens, so a closing window MUST drop its observer (it captures a
@@ -163,6 +175,29 @@ namespace Agentmaster
         // the per-tab overlay's link state (⛓ linked vs observe-only) without exposing the injector.
         bool HasInjector(const std::wstring& id) const;
 
+        // Agentmaster (PENDING_INPUT.md §9): bind / clear the hosting window's prompt submitter.
+        // Set and cleared in lockstep with SetInjector — the same window, the same lifetime.
+        void SetPromptSubmitter(const std::wstring& id, PromptSubmitter submitter);
+
+        // SEND a queued prompt — the ONE seam every submit path goes through (the autorunner's
+        // auto-send, its SemiAuto confirm, the Manager's Send-now, the /handover paste pump), so
+        // the draft swap can never apply to some of them and not others. With a submitter bound
+        // the hosting window owns the delivery (and any later rollback); otherwise this is exactly
+        // the historical Inject(BuildPromptSubmission(text)). Returns "accepted for delivery";
+        // false keeps every existing caller's rollback behavior byte-identical. Thread-safe: the
+        // submitter is copied under the lock and invoked outside it (the Inject recipe), so a
+        // submitter that hops to its UI thread cannot deadlock the caller.
+        bool SubmitPrompt(const PromptSubmission& submission) const;
+
+        // Return a Sent prompt to Pending — the shared body of the Rule-#4 rollback every send path
+        // already performed inline, now also reachable from the hosting window when an accepted
+        // submission aborts asynchronously (a draft swap that could not clear the input box).
+        // `refundAutoSend` also gives back the autorunner's autoSendsThisRun budget slot; it must be
+        // false for a Send-now, which never spent one. No-op for an unknown id / prompt, or a prompt
+        // that is no longer Sent (something else already handled it). Notifies (it is an Update), so
+        // the queue UI and the idle-start re-trigger both see the prompt become Pending again.
+        void RollbackPromptToPending(const std::wstring& id, const std::wstring& promptId, bool refundAutoSend);
+
         // pauseOnHumanInput support: record the last time the human typed into a session.
         void NoteHumanInput(const std::wstring& id, int64_t unixMs);
         int64_t LastHumanInputUnixMs(const std::wstring& id) const;
@@ -192,6 +227,7 @@ namespace Agentmaster
         std::vector<std::wstring> _order;
         std::unordered_map<std::wstring, SessionInfo> _sessions;
         std::unordered_map<std::wstring, Injector> _injectors;
+        std::unordered_map<std::wstring, PromptSubmitter> _submitters; // PENDING_INPUT.md §9
         std::unordered_map<std::wstring, int64_t> _lastHumanInput;
         std::vector<std::pair<ObserverToken, RegistryObserver>> _observers;
         uint64_t _nextObserverId{ 1 };

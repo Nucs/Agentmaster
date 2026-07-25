@@ -498,6 +498,7 @@ void TestAppSettings()
         in.maxAutoSends = 7;
         in.stopOnError = false;
         in.pauseOnHumanInput = false;
+        in.preserveDraftOnSend = false; // non-default (default true = the DRAFT SWAP is on) — PENDING_INPUT.md §9
         in.confirmBeforeKill = false;
         in.tabRenameCommitMode = TabRenameCommitMode::ClickAwayOrEnter; // non-default (default is ClickAwayOrShiftEnter)
         in.favoriteIcon = FavoriteIcon::Star; // non-default (default is Crown)
@@ -541,6 +542,7 @@ void TestAppSettings()
         CHECK(out.maxAutoSends == 7u, "settings maxAutoSends round-trip");
         CHECK(out.stopOnError == false, "settings stopOnError round-trip");
         CHECK(out.pauseOnHumanInput == false, "settings pauseOnHumanInput round-trip");
+        CHECK(out.preserveDraftOnSend == false, "settings preserveDraftOnSend round-trip (draft swap OFF)");
         CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter, "settings tabRenameCommitMode round-trip");
         CHECK(out.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon round-trip");

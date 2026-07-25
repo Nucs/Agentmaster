@@ -127,6 +127,7 @@ namespace Agentmaster
             }
             _sessions.erase(id);
             _injectors.erase(id);
+            _submitters.erase(id); // PENDING_INPUT.md §9 — same lifetime as the injector
             _lastHumanInput.erase(id);
             _order.erase(std::remove(_order.begin(), _order.end(), id), _order.end());
         }
@@ -986,6 +987,83 @@ namespace Agentmaster
     {
         std::lock_guard guard{ _mtx };
         return _injectors.find(id) != _injectors.end();
+    }
+
+    void SessionRegistry::SetPromptSubmitter(const std::wstring& id, PromptSubmitter submitter)
+    {
+        std::lock_guard guard{ _mtx };
+        if (submitter)
+        {
+            _submitters[id] = std::move(submitter);
+        }
+        else
+        {
+            _submitters.erase(id);
+        }
+    }
+
+    // Agentmaster (PENDING_INPUT.md §9): the ONE send seam. See the header for the contract.
+    bool SessionRegistry::SubmitPrompt(const PromptSubmission& submission) const
+    {
+        PromptSubmitter fn;
+        {
+            std::lock_guard guard{ _mtx };
+            const auto it = _submitters.find(submission.sessionId);
+            if (it != _submitters.end())
+            {
+                fn = it->second; // copy so we call it outside the lock (it may hop to a UI thread)
+            }
+        }
+        if (!fn)
+        {
+            // No hosting window registered one (an older window, a test/CLI host, a session bound
+            // by something other than the launch seam): the historical path, verbatim.
+            return Inject(submission.sessionId, BuildPromptSubmission(submission.text));
+        }
+        try
+        {
+            return fn(submission);
+        }
+        catch (...)
+        {
+            // Same contract + reasoning as Inject's guard above: `false` makes the caller roll the
+            // prompt back to Pending, so the queue stays honest, but the throw itself must not be
+            // lost (Rule #18) — a submitter that dies looks identical to a torn-down window here.
+            LogSwallowedException(L"SessionRegistry::SubmitPrompt");
+            return false;
+        }
+    }
+
+    void SessionRegistry::RollbackPromptToPending(const std::wstring& id, const std::wstring& promptId, bool refundAutoSend)
+    {
+        if (promptId.empty())
+        {
+            return;
+        }
+        Update(id, [&](SessionInfo& ss) {
+            for (auto& p : ss.queue)
+            {
+                if (p.id != promptId)
+                {
+                    continue;
+                }
+                if (p.status != PromptStatus::Sent)
+                {
+                    break; // already handled elsewhere — never resurrect a resolved prompt
+                }
+                p.status = PromptStatus::Pending;
+                p.echoed = false;
+                if (p.attempts > 0)
+                {
+                    p.attempts -= 1;
+                }
+                if (refundAutoSend && ss.autorunner.autoSendsThisRun > 0)
+                {
+                    ss.autorunner.autoSendsThisRun -= 1;
+                }
+                break;
+            }
+        });
     }
 
     void SessionRegistry::NoteHumanInput(const std::wstring& id, int64_t unixMs)

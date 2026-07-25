@@ -526,6 +526,71 @@ placeholder never promises something the click won't do. Driven from `_RebuildPl
 value (a rebuild must never do a live buffer read) and change-gated. The box's tooltip spells the
 behaviour out; a pull logs `[nav] compose pull-draft <sid8> src=live|remembered chars=N`.
 
+## 9. The DRAFT SWAP — sending a prompt without eating your unsent draft (built)
+
+**The bug.** A queued prompt is delivered as a bracketed paste plus a submit CR
+(`BuildPromptSubmission`). A paste lands **at the cursor**, so if the input box already held an unsent
+draft, the CR submitted **draft + prompt as one message** — one the user never wrote and never pressed
+Enter on — and the draft was gone with it. Nothing in the state machine could prevent this: a draft is
+deliberately a transient **fact**, never `SessionState` (Rule #7/#13), so a session holding one still
+reads `Idle` / `WaitingForInput` — exactly the "ready to send" set `DecideAdvance` fires on. (The
+`pauseOnHumanInput` toggle that looks like it should have covered this has never been wired: its
+`lastHumanInputUnixMs` gate has zero feeders, which the cog says out loud in its own label.)
+
+**The fix.** Take the draft out of the way, send, put it back. Every step is **verified by re-reading
+the box** — nothing is assumed to have worked — and the whole sequence is bracketed by a read-only
+window so the user's own keystrokes cannot interleave with it.
+
+| # | Step | What it does |
+|---|------|--------------|
+| 1 | **READ** | `PickCurrentPromptText(live, remembered)` — the §8 rule: the live buffer read wins, the observer's remembered draft is the fallback. An empty result is re-read once (the TUI repaints constantly; a single missed frame must not read as "no draft"). |
+| 2 | **LOCK** | `TermControl::SetReadOnly(true)`. The user still **sees** everything happening in the tab; they just cannot type into it for the ~1 s it takes. Silent — WT short-circuits the read-only check for key events, so there is no warning dialog per keystroke. Only released if **we** took it (a read-only the user set themselves is left alone). |
+| 3 | **CLEAR** | `Ctrl+U` (0x15) — kill the box **into the TUI's kill-ring** — then re-read until the box is *confirmed* empty. `DecideDraftClear` escalates: keep pressing while the box shrinks, fall through to `DEL` (0x7F) backspaces when a press changes nothing, then give up. Each rung gets a **settle** (300 ms) before it is judged, so a slow repaint is never mistaken for an unbound key. |
+| 4 | **ABORT** | If the box never confirms empty: **send nothing**, roll the prompt back to `Pending`, restore the box, unlock. A prompt sent late is recoverable; a mangled message is not. |
+| 5 | **SEND** | The unchanged `BuildPromptSubmission` recipe — so the echo dedup, the pickup guard and the Enter-retry watchdog all still apply to it. |
+| 6 | **AWAIT** | Wait for the prompt to actually *leave* the box: a turn-started signal (the three `DecideEnterRetry` trusts) **and** an empty box. If it is still sitting there un-submitted we do **not** restore — yanking then would merge into it, the very bug this exists to prevent — and the draft stays in the kill-ring (one manual `Ctrl+Y`) and in the registry's memory, both logged. |
+| 7 | **RESTORE** | `Ctrl+Y` yanks the kill-ring back, and the result is **compared against the draft we read**. A yank is only as good as the ring (a multi-press clear, a mixed kill+backspace clear, or a submit that flushed it can all hand back the wrong text), so on a mismatch the box is emptied again and the draft is re-pasted verbatim with `BuildPromptFill` — the /handover-standby channel: a bracketed paste with **no** submit CR. Never both: the paste only runs on a box verified still empty. |
+| 8 | **UNLOCK** | Release the read-only window and re-record the draft (`SetPendingInput`), so the "3 dots" stay honest throughout. |
+
+**Why the yank is tried first.** It returns the TUI's *own* internal state, so a draft holding a
+`[Pasted text #N +M lines]` placeholder still refers to the real paste-cache content afterwards. That is
+also why the paste fallback is **refused** when the draft contains a placeholder (`FindPasteMarkers`):
+re-typing `[Pasted text #1 +50 lines]` would put that label in the box as literal text and silently drop
+the content behind it. In that case the box is left empty and the draft kept in memory, loudly logged —
+worse than a perfect restore, much better than a corrupted one.
+
+**One seam, four callers.** The swap lives behind `SessionRegistry::SubmitPrompt`, and **every** path
+that sends a queued prompt goes through it, so they can never disagree: the autorunner's auto-send
+(`Scheduler::_process`), its SemiAuto `Confirm`, the Manager's **Send-now**, and the /handover paste
+pump. The hosting window registers a `PromptSubmitter` next to its injector (only that window can read
+the control's box or block its keyboard); with none bound `SubmitPrompt` *is* the historical
+`Inject(BuildPromptSubmission(...))`, so a host that never registers one behaves exactly as before.
+`_AcceptPromptSubmission` returns "accepted" synchronously — the swap is asynchronous, and an accepted
+submission that later aborts rolls the prompt back **itself** (`RollbackPromptToPending`), so Rule #4
+holds on every path. `refundAutoSend` is true only for the autorunner paths, which spent an
+`autoSendsThisRun` slot; a Send-now never did.
+
+**Interaction with the scan lane.** `_ScanPendingInput` **skips** a session whose swap is in flight:
+mid-swap the box is deliberately empty, and letting the clear debounce see that would erase the very
+draft the swap is carrying (and drop the dots for a second). The swap re-records the draft when it
+finishes.
+
+**Off-switch.** `AppSettings::preserveDraftOnSend` (cog → **Tests Autorunner** → *"Preserve my unsent
+draft when a prompt is sent"*), **default ON**. Off restores the historical merge behavior verbatim. A
+session with an empty box takes the same fast path either way — there is nothing a paste could merge
+into, so the injection is byte-identical to before.
+
+**Logging** (`hooks.log`, `[draft-swap] <sid8> …`): the hold + lock, an ABORT with the rung counts, a
+declined overlapping swap, the deferred restore, and the outcome (`restored by KILL-RING yank` /
+`by PASTE` / `could NOT be put back verbatim`). So "why did my draft change?" is answerable off the log.
+
+**Coverage.** The pure half is unit-tested in the engine harness (`TestPendingInput`, §26): the three
+control-code builders + the round cap, the emptiness rule, the shrink-driven kill rung, the fall-through
+to backspaces when a press changes nothing, both rung caps, "never returns to Kill once past it", and a
+**termination** proof — an unresponsive TUI reaches `GiveUp` in a bounded number of steps. The
+`preserveDraftOnSend` round-trip rides the `AppSettings` persistence test. The in-app behaviour rides
+the next deploy cycle.
+
 ### Follow-ups (non-blocking)
 
 - **Off-switch**: an `AppSettings` flag to disable the pulse (like `showTabOverlay`); v1 is always-on.
@@ -539,8 +604,11 @@ behaviour out; a pull logs `[nav] compose pull-draft <sid8> src=live|remembered 
 - **The out-of-band probe** (`tests/pending_probe.cpp` + `tests/_run-pending-probe.bat`): the
   AttachConsole ground-truth oracle used for the live verification + the fleet capture sweeps — run it
   against any live claude pid to see exactly what the shipped detector would extract, without the app.
-- **Tests Autorunner tie-in**: `pauseOnHumanInput` could consult "has a pending draft" to suspend an auto-send
-  while the user is mid-compose — the draft fact is exactly the signal `pauseOnHumanInput` was waiting for.
+- **Tests Autorunner tie-in**: largely **superseded by §9** — a send no longer eats a draft, so the
+  original motivation is gone. What remains optional is the *politeness* half: `pauseOnHumanInput` could
+  still consult "has a pending draft" to **defer** an auto-send while the user is visibly mid-compose,
+  rather than swapping around them. (It would also finally give that dead toggle a feeder — its
+  `lastHumanInputUnixMs` gate has none.)
 - **Expand pastes on copy** (§8): "Copy Current Prompt" copies the draft as rendered, so a
   `[Pasted text #N +M lines]` placeholder rides along as a placeholder. The §2b brain can already
   substitute the real content (`ExpandPasteMarker`, verified-only), but it needs an impure adapter that

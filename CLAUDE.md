@@ -816,9 +816,40 @@ never a silent dead click; a successful copy logs which source answered. A `[Pas
 copies AS RENDERED (expansion is a follow-up). **The Manager's Auto-Testing compose box takes the same
 draft on CLICK** (§8a — see the *C1 UI* Auto Testing bullet): clicking/tabbing into the EMPTY box with edit
 intent pulls the unsent prompt in, ready to queue, through the same rule + fallback, one-shot per
-(session, draft). **Follow-ups:** an off-switch setting,
-placeholder/dim-attribute filtering, expanding pastes on copy, and a `pauseOnHumanInput`
-autorunner tie-in (PENDING_INPUT.md §4/§6/§8).
+(session, draft). **The DRAFT SWAP — a prompt can no longer eat your unsent draft** (§9; lib-compiled green
++ engine-tested 2840/2840, rides the next deploy cycle). Delivering a prompt is a bracketed paste + a submit
+CR, and a paste lands AT THE CURSOR — so a send into a box that already held your draft submitted
+**draft + prompt as ONE message you never wrote**, losing the draft with it (the state machine can't
+prevent it: a draft is a FACT, never `SessionState`, so such a session still reads Idle/Waiting == "ready
+to send"; the `pauseOnHumanInput` toggle that looks like it covers this has never had a feeder). Now the
+draft is taken out of the way and put straight back, every step **VERIFIED by re-reading the box**: READ
+(`PickCurrentPromptText` — live wins, remembered falls back) → **LOCK** the control `SetReadOnly(true)` so
+your keystrokes can't interleave (you still SEE everything; WT short-circuits the read-only check for key
+events, so it's silent, and only a read-only WE took is released) → **CLEAR** with **Ctrl+U** (0x15 — kill
+into the TUI's kill-ring), re-reading until CONFIRMED empty, `DecideDraftClear` escalating kill→`DEL`
+backspaces→give up with a 300ms **settle** per rung so a slow repaint is never mistaken for an unbound key
+→ **ABORT** if it never confirms empty (send NOTHING, prompt back to `Pending`, box restored — a late
+prompt is recoverable, a mangled message isn't) → **SEND** through the unchanged recipe (so echo dedup,
+pickup guard and the Enter-retry watchdog still apply) → **AWAIT** the prompt actually LEAVING the box (a
+turn-started signal AND an empty box; still sitting there ⇒ do NOT restore — that would merge — the draft
+staying in the kill-ring + memory, logged) → **RESTORE** with **Ctrl+Y**, the yank COMPARED against the
+draft we read (a ring can hand back the wrong text after a multi-press/mixed clear or a submit that flushed
+it), falling back to a verbatim `BuildPromptFill` re-paste (no submit CR) on a box verified still empty —
+never both; the yank goes FIRST because it returns the TUI's own state, so a `[Pasted text #N]` placeholder
+keeps its paste-cache binding, and the paste fallback is REFUSED when one is present (re-typing the label
+would silently drop the content behind it) → **UNLOCK** + re-record the draft. **ONE seam, four callers** —
+`SessionRegistry::SubmitPrompt` (+ `SetPromptSubmitter` / `RollbackPromptToPending`) now carries the
+autorunner auto-send, its SemiAuto Confirm, the Manager's Send-now, AND the /handover paste pump, so they
+can never disagree; the HOSTING window registers the submitter next to its injector (only it can read the
+box or block the keyboard), an unbound one falls back to the historical `Inject(BuildPromptSubmission(...))`
+verbatim, and an accepted-then-aborted swap rolls the prompt back ITSELF (Rule #4 on every path;
+`refundAutoSend` true only for the autorunner paths, which spent a budget slot). `_ScanPendingInput` SKIPS
+an in-flight swap (mid-swap the box is deliberately empty — the clear debounce would erase the very draft
+being carried). Off-switch `AppSettings::preserveDraftOnSend` (cog → TESTS AUTORUNNER, **default ON**);
+an empty box takes the same fast path either way. Logged `[draft-swap] <sid8> …`. **Follow-ups:** an
+off-switch for the dots, placeholder/dim-attribute filtering, expanding pastes on copy, and the remaining
+*politeness* half of the `pauseOnHumanInput` tie-in — DEFER an auto-send while you are visibly mid-compose
+rather than swapping around you (PENDING_INPUT.md §4/§6/§8/§9).
 
 **Bookmark TAGS — user-named, colored labels on a session, shown as little BOOKMARK RIBBONS on its tab +
 everywhere the session appears; lib-compiled green + engine-tested (1523/1523 incl. tag CRUD, the tag-colors
@@ -2037,7 +2068,9 @@ What works, by area:
   `ParseEnvAssignments`→`spec.env`, `CCMGR_*` filtered) — plus a **CLAUDE BINARY** row (the
   native-exe-only policy): the auto-detected `claude.exe` (read-only) + an **`.exe`-only override**
   (`claudeExePath`) with **Browse…**, re-resolved live on Save via `RefreshClaudeExe` — plus **Tests Autorunner defaults** stamped
-  onto NEW sessions (mode / maxAutoSends / stopOnError / pauseOnHumanInput) and **behavior**
+  onto NEW sessions (mode / maxAutoSends / stopOnError / pauseOnHumanInput) plus the GLOBAL
+  **`preserveDraftOnSend`** (the **DRAFT SWAP** — PENDING_INPUT.md §9; default ON, live on every submit
+  path at once) and **behavior**
   (`confirmBeforeKill` — relabeled "Confirm before closing" — routes the Close action
   (tab X / Manager **Close** / tree `Del`) through the confirm dialog;
   `defaultLaunchDir` seeds the cwd box — empty ⇒ `%USERPROFILE%`). It also exposes `tabRenameCommitMode` (the rename box's
@@ -2322,7 +2355,7 @@ What works, by area:
   (`ClaudeSpawn.cpp`, thread-safe + best-effort). Three layers: (1) the **hook event stream**
   (`[SessionStart]`/`[UserPromptSubmit]`/`[Stop]`/…) — the push state machine; (2) **engine-mechanism
   tags** — `[fork]`/`[resume]`/`[restore-fresh]`/`[rehome]`/`[spawn]`/`[launch-fail]`/`[archive]`/`[teardown-archive]`/
-  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[pending]`/`[notify]`/`[update]`/`[trust]`/`[cmd]`/`[cmd-fire]`/`[cmd-expire]`/`[persist-fail]`/`[observer]`/`[activity]`/… (each
+  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[pending]`/`[notify]`/`[update]`/`[trust]`/`[cmd]`/`[cmd-fire]`/`[cmd-expire]`/`[persist-fail]`/`[draft-swap]`/`[observer]`/`[activity]`/… (each
   carries the resulting ids), plus the **window-restore story** — one coherent trace per `windowId`:
   `[window-claim]`/`[window-fresh]` (claim a saved record or start fresh, at engine init) → `[rehome-begin]`
   (every tab ref listed BY SESSION ID + the focus target) → per-tab `[rehome] window <id> resume|skip <sid>`
@@ -2439,7 +2472,9 @@ What works, by area:
 
 Follow-ups (not blocking): the PROFILES.md §5 set (per-identity defterm/shellext CLSIDs — the one
 shared seam left between the release and dev packages; distinct dev iconography; profile
-export/import); feed `pauseOnHumanInput` from a TermControl input tap;
+export/import); feed `pauseOnHumanInput` from a TermControl input tap (its "don't eat my draft"
+motivation is now covered by the DRAFT SWAP — what is left is DEFERRING a send while you are visibly
+mid-compose);
 bracketed-paste for true multi-line prompt bodies; a live buffer "peek" in the Auto Testing;
 **bulk open** (the Sessions page's background Resume/Fork) re-opens tabs lazily (a non-foreground tab starts its `claude` only
 when first focused — WT's lazy-background-tab behavior; open one at a time to force start);
@@ -2606,7 +2641,12 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     by `─` rules and extracts the UNSENT draft; the `PromptAnchor.h` idiom — pure-ASCII source, header-
     only so `ControlCore` + `tests/` share it. Also `PickCurrentPromptText` (§8) — the ONE rule every
     "Copy Current Prompt" menu resolves through: a non-empty LIVE buffer read wins, else the observer's
-    remembered/persisted draft. Unit-tested in `tests/`),
+    remembered/persisted draft — and the **DRAFT SWAP** brain (§9): the control-code builders
+    `BuildInputKill` (Ctrl+U, kill into the TUI's kill-ring) / `BuildInputYank` (Ctrl+Y, yank it back) /
+    `BuildBackspaces` (the capped `DEL` fallback) plus the pure `DecideDraftClear` escalation ladder
+    (kill while it shrinks → backspaces once a press changes nothing → GiveUp ⇒ the swap ABORTS and
+    sends nothing), which is what lets a queued prompt be submitted into a session WITHOUT merging into
+    the user's unsent draft. Unit-tested in `tests/`),
     `Sha256.h` (header-only, pure — FIPS 180-4 SHA-256, hand-rolled like `Base64Encode` so no
     bcrypt/crypt32 has to be threaded through the lib + harness + CLI builds; the content-IDENTITY
     primitive behind the shipped `/handover`+`/handover-here` definitions' digest version history —

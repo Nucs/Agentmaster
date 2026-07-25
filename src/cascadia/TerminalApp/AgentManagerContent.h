@@ -875,6 +875,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _setMaxAutoSends{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setStopOnError{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setPauseOnHuman{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setPreserveDraft{ nullptr }; // PENDING_INPUT.md §9 — the DRAFT SWAP
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setConfirmKill{ nullptr };
         // NOTIFICATIONS tab (System notifications): the Running -> X Windows-toast switches. The master
         // toggle gates the rest (the dependents grey out while it's off); the five checkboxes pick WHICH

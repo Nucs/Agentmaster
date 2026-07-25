@@ -870,7 +870,11 @@ namespace winrt::TerminalApp::implementation
             // injector bound (not a live/bound tab yet, or an observe-only external), injecting fails
             // and the prompt would otherwise be a stranded phantom Sent that was never delivered
             // (Correctness Rule #4). Reverting to Pending keeps it in the queue to retry.
-            const bool delivered = _registry->Inject(_selectedId, ::Agentmaster::BuildPromptSubmission(textToSend));
+            // Agentmaster (PENDING_INPUT.md §9): through SubmitPrompt, the ONE send seam shared with the
+            // autorunner — so a Send-now into a session that is holding an UNSENT draft swaps the draft
+            // out and back instead of pasting this prompt on top of it. refundAutoSend is FALSE: a
+            // Send-now never spent an autoSendsThisRun slot, so an aborted swap must not hand one back.
+            const bool delivered = _registry->SubmitPrompt({ _selectedId, sentPromptId, textToSend, false });
             // Nav audit: the user hit Send-now (the !) for this session — the prompt's first line +
             // whether it actually reached a bound injector (an unbound/observe-only target rolls back).
             std::wstring snLabel = textToSend.substr(0, 56);

@@ -43,6 +43,7 @@
 #include "TabHeaderControl.h" // get_self<TabHeaderControl> -> ReserveTitleLines (consistent multi-line tab-row height)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog; ResolvePendingPasteRefs (the paste-cache adapter)
 #include "AgentMaster/Engine.h" // ActivateSessionInOtherWindows — a toast click's cross-window jump (System notifications)
+#include "AgentMaster/PendingInput.h" // PickCurrentPromptText + the DRAFT SWAP ladder (DecideDraftClear / BuildInputKill / BuildInputYank / BuildBackspaces) — PENDING_INPUT.md §9
 #include "AgentMaster/PendingPaste.h" // FindPasteMarkers — the cheap pure pre-check before the off-thread resolve (PENDING_INPUT.md §2b)
 #include "AgentToastActivator.h" // ToastActivator::IsRegistered — is the COM activator live (wire the in-process click fallback only if not)?
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions (bind tail)
@@ -4046,6 +4047,465 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // ---- The DRAFT SWAP (PENDING_INPUT.md §9) ------------------------------------------------
+    //
+    // THE PROBLEM. A prompt is delivered as a bracketed paste plus a submit CR. A paste lands AT THE
+    // CURSOR, so if the box already holds the user's UNSENT draft, the CR submits draft + prompt as
+    // ONE message the user never wrote and never pressed Enter on — and the draft is gone. The state
+    // machine cannot prevent this on its own: a draft is deliberately a transient FACT, never
+    // SessionState (Rule #7/#13), so a session holding one still reads Idle / WaitingForInput, which
+    // is exactly the "ready to send" set.
+    //
+    // THE SWAP. Take the draft out of the way, send, put it back — every step VERIFIED by re-reading
+    // the box, never assumed:
+    //
+    //   1. READ    the box (live buffer; the observer's remembered draft is the payload fallback —
+    //              PickCurrentPromptText, the same rule "Copy Current Prompt" uses, §8).
+    //   2. LOCK    the control read-only, so the user's own keystrokes cannot interleave with the
+    //              swap. They still SEE everything happening in the tab; they just cannot type into
+    //              it for the ~1s it takes. WT short-circuits the read-only check for key events, so
+    //              this is silent (no warning dialog per keystroke).
+    //   3. CLEAR   with Ctrl+U (into the TUI's kill-ring), re-reading until the box is CONFIRMED
+    //              empty; DecideDraftClear escalates to backspaces and finally gives up.
+    //   4. ABORT   if it never confirms empty: send NOTHING, roll the prompt back to Pending, restore
+    //              whatever is in the box, unlock. A prompt sent late is recoverable; a mangled
+    //              message is not (Rule #16's spirit — never lose what the user wrote).
+    //   5. SEND    the prompt through the unchanged recipe, so the echo dedup, the pickup guard and
+    //              the Enter-retry watchdog all still apply to it.
+    //   6. AWAIT   the prompt actually LEAVING the box (a turn-started signal + an empty box). If it
+    //              is still sitting there un-submitted we do NOT restore — yanking then would merge
+    //              into it, the very bug this exists to prevent — and the draft stays in the kill-ring
+    //              (a manual Ctrl+Y recovers it) and in the registry's memory, both logged.
+    //   7. RESTORE with Ctrl+Y — the kill-ring hands back the user's EXACT bytes, round-tripped by the
+    //              TUI rather than re-typed by us — verified; if the yank puts nothing back, the draft
+    //              we READ is re-pasted with BuildPromptFill (no submit CR). Never both: the paste
+    //              runs only on a box VERIFIED still empty after the yank.
+    //   8. UNLOCK  (only the read-only WE took) and re-record the draft so the "3 dots" stay honest.
+    //
+    // Off => step 2 onward is skipped and the injection is byte-identical to the historical behavior
+    // (AppSettings::preserveDraftOnSend). A session with an EMPTY box takes the same fast path: there
+    // is nothing a paste could merge into.
+
+    // Pacing. The poll is what makes every step VERIFIED rather than assumed: inject, wait one beat
+    // for Claude's TUI to repaint, re-read the box. 60ms is well under a frame budget yet far above
+    // the ConPTY round-trip, so a normal swap costs ~2-4 polls end to end. The budgets bound each
+    // phase independently: clearing is quick or it is broken; the SUBMIT wait is long because it must
+    // outlast the Enter-retry watchdog's presses (3s + 6s + 6s) before we conclude the prompt is
+    // stuck in the box; restoring is quick again.
+    static constexpr int64_t kDraftSwapPollMs = 60;
+    static constexpr int64_t kDraftSwapActionSettleMs = 300; // how long one keystroke gets to land + repaint before we judge it
+    static constexpr int64_t kDraftSwapClearBudgetMs = 2400;
+    static constexpr int64_t kDraftSwapSubmitBudgetMs = 18000;
+    static constexpr int64_t kDraftSwapRestoreBudgetMs = 1200;
+
+    // Do two box reads describe the same draft? Both sides come out of the SAME detector on the same
+    // box, so a plain comparison is fair; only trailing whitespace is normalized away (the box
+    // reserves vertical slack, and a focused empty line can render as padding).
+    static std::wstring DraftSwapNormalize(std::wstring_view s)
+    {
+        size_t end = s.size();
+        while (end > 0 && (s[end - 1] == L' ' || s[end - 1] == L'\t' || s[end - 1] == L'\n' || s[end - 1] == L'\r'))
+        {
+            --end;
+        }
+        return std::wstring{ s.substr(0, end) };
+    }
+
+    // The submitter this window registers next to its injector. Called on the SENDING thread — the
+    // scheduler worker, or another window's Manager UI thread for a Send-now — so it must stay cheap
+    // and thread-safe: nothing here touches _appSettings, the controls, or the in-flight map (all
+    // UI-thread state). HasInjector is the honest accept test; false reproduces exactly the old
+    // "no injector bound yet" contract, and the caller performs its usual Rule-#4 rollback.
+    bool TerminalPage::_AcceptPromptSubmission(const ::Agentmaster::PromptSubmission& submission)
+    {
+        if (!_sessionRegistry || !_sessionRegistry->HasInjector(submission.sessionId))
+        {
+            return false;
+        }
+        _SubmitPromptWithDraftSwap(submission); // self-marshals; owns the outcome (incl. any rollback)
+        return true;
+    }
+
+    winrt::fire_and_forget TerminalPage::_SubmitPromptWithDraftSwap(::Agentmaster::PromptSubmission submission)
+    {
+        // Terminate-net (the _SweepClaudeLiveness idiom): an exception escaping a fire_and_forget is
+        // std::terminate, so the body is an awaitable IAsyncAction whose exceptions land on this
+        // co_await. The Impl additionally unlocks the control on its own failure paths — releasing
+        // read-only is UI-thread-affine, so it can never ride a scope_exit that a pool-thread frame
+        // teardown could run (the documented ~TerminalPage destructor-cascade crash class).
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await _SubmitPromptWithDraftSwapImpl(submission);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SubmitPromptWithDraftSwap");
+        }
+    }
+
+    // One VERIFIED read of a session's input box. The live buffer read is authoritative, but the
+    // detector can miss a single mid-repaint frame (Claude's Ink TUI redraws constantly — the same
+    // reason _ScanPendingInput debounces its CLEAR over two ticks), so an empty result is re-read
+    // once before it is believed. `remembered` (the observer's SessionInfo::pendingInput) is the
+    // payload FALLBACK for a read that cannot see the box at all, per PickCurrentPromptText (§8).
+    // NOT a coroutine on purpose: the caller controls the pacing between reads.
+    std::wstring TerminalPage::_ReadDraftForSwap(const std::wstring& sessionId, const std::wstring& remembered)
+    {
+        const auto live = _ReadLiveDraftForSession(sessionId);
+        return ::Agentmaster::PickCurrentPromptText(live, remembered).text;
+    }
+
+    // Release the read-only window (ONLY when we were the ones who took it — a user who had toggled
+    // read-only themselves keeps it) and drop the in-flight latch. Called on EVERY exit path, never
+    // from a destructor or a scope_exit, so it always runs on the UI thread. Idempotent.
+    void TerminalPage::_EndDraftSwap(const std::wstring& sessionId, bool restoreInteractive)
+    {
+        const auto it = _draftSwapsInFlight.find(sessionId);
+        const bool wasAlreadyReadOnly = it != _draftSwapsInFlight.end() ? it->second : true;
+        _draftSwapsInFlight.erase(sessionId);
+        if (!restoreInteractive || wasAlreadyReadOnly)
+        {
+            return;
+        }
+        try
+        {
+            if (const auto control = _ControlForSession(sessionId))
+            {
+                control.SetReadOnly(false);
+            }
+        }
+        catch (...)
+        {
+            // Rule #18: the recovery (leave it as-is) is unchanged, but a control that throws while
+            // being handed back to the user is exactly the kind of thing that must not vanish — the
+            // symptom would be a permanently un-typeable tab with no explanation anywhere.
+            ::Agentmaster::AgentLogCaughtException(L"_EndDraftSwap unlock");
+        }
+    }
+
+    // Put `draft` back in the box and VERIFY it against that ground truth, returning what the box
+    // finally reads. This is the one place the restore is decided, so the abort path and the normal
+    // path cannot drift.
+    //
+    // The kill-ring yank is tried FIRST because it is the only channel that returns the TUI's own
+    // internal state — crucially, a draft holding a "[Pasted text #N +M lines]" placeholder still
+    // refers to the real paste-cache content afterwards. But a yank is only as good as the ring: a
+    // multi-press clear, a mixed kill+backspace clear, or a submit that flushed the ring can all hand
+    // back the WRONG text, so the result is compared against what we read before clearing.
+    //
+    // If the yank does not reproduce the draft, the box is emptied again and the draft is re-pasted
+    // verbatim (BuildPromptFill — the /handover-standby channel: a bracketed paste with NO submit CR,
+    // so a multi-line draft lands as one multi-line draft and nothing runs). `allowPaste` is false
+    // when the draft contains a paste PLACEHOLDER: re-typing "[Pasted text #1 +50 lines]" would put
+    // that label in the box as literal text and silently lose the content behind it, which is worse
+    // than leaving the box empty with the draft preserved in memory (and logged).
+    winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> TerminalPage::_RestoreDraftAfterSwap(std::wstring sessionId, std::wstring draft, bool allowPaste)
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
+        if (!_sessionRegistry)
+        {
+            co_return winrt::hstring{};
+        }
+        const auto wanted = DraftSwapNormalize(draft);
+
+        // A small verified read loop: poll until the box settles or the budget runs out.
+        const auto settle = [&](auto&& predicate) -> winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> {
+            std::wstring seen;
+            for (int64_t waited = 0; waited <= kDraftSwapRestoreBudgetMs; waited += kDraftSwapPollMs)
+            {
+                co_await winrt::resume_after(std::chrono::milliseconds(kDraftSwapPollMs));
+                co_await wil::resume_foreground(Dispatcher());
+                if (!_sessionRegistry)
+                {
+                    co_return winrt::hstring{};
+                }
+                seen = _ReadLiveDraftForSession(sessionId);
+                if (predicate(seen))
+                {
+                    break;
+                }
+            }
+            co_return winrt::hstring{ seen };
+        };
+
+        // 1. yank the kill-ring back.
+        _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildInputYank());
+        const auto afterYank = co_await settle([&](const std::wstring& s) { return DraftSwapNormalize(s) == wanted; });
+        std::wstring box{ afterYank.c_str(), afterYank.size() };
+        if (DraftSwapNormalize(box) == wanted)
+        {
+            co_return winrt::hstring{ box }; // exact — the user's own bytes, TUI-round-tripped
+        }
+
+        // 2. the yank was empty, partial, or wrong. Clear whatever it left before re-pasting, so the
+        //    fallback can never CONCATENATE onto a bad restore.
+        if (!box.empty())
+        {
+            _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildInputKill());
+            const auto afterKill = co_await settle([](const std::wstring& s) { return s.empty(); });
+            box.assign(afterKill.c_str(), afterKill.size());
+        }
+        if (!allowPaste || !box.empty())
+        {
+            // Either re-typing would corrupt a paste placeholder, or we could not get the box back to
+            // a known state. Stop touching it and report what is actually there; the caller keeps the
+            // draft in memory (and the kill-ring still holds it for a manual Ctrl+Y).
+            co_return winrt::hstring{ box };
+        }
+        _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildPromptFill(draft));
+        const auto afterPaste = co_await settle([&](const std::wstring& s) { return DraftSwapNormalize(s) == wanted; });
+        co_return afterPaste;
+    }
+
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_SubmitPromptWithDraftSwapImpl(::Agentmaster::PromptSubmission submission)
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
+
+        const auto& id = submission.sessionId;
+        const auto sid8 = ::Agentmaster::ShortId(id);
+        if (!_sessionRegistry)
+        {
+            co_return;
+        }
+
+        // ---- the fast paths: no swap needed, inject exactly as before ----
+        const auto plainSend = [&]() -> bool {
+            return _sessionRegistry->Inject(id, ::Agentmaster::BuildPromptSubmission(submission.text));
+        };
+        const auto info = _sessionRegistry->Get(id);
+        const auto control = _ControlForSession(id);
+        if (!info || !_appSettings.preserveDraftOnSend || !control ||
+            control.ConnectionState() == TerminalConnection::ConnectionState::NotConnected)
+        {
+            // Setting off, session gone, or no readable buffer (dormant / not hosted here) — there is
+            // no box to protect, so this is the historical injection verbatim.
+            if (!plainSend())
+            {
+                _sessionRegistry->RollbackPromptToPending(id, submission.promptId, submission.refundAutoSend);
+            }
+            co_return;
+        }
+        if (_draftSwapsInFlight.count(id) != 0)
+        {
+            // A swap is already holding this session's box. Two concurrent sends into one session
+            // should not happen (the pickup guard keeps the queue to one prompt per turn), and
+            // injecting alongside a swap is precisely the merge we are preventing — so decline and
+            // let the prompt re-fire on the next advance.
+            _sessionRegistry->RollbackPromptToPending(id, submission.promptId, submission.refundAutoSend);
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + L" declined: a swap is already in flight (prompt stays Pending)\n");
+            co_return;
+        }
+
+        // ---- 1. READ ----
+        std::wstring draft = _ReadDraftForSwap(id, info->pendingInput);
+        if (draft.empty())
+        {
+            // The box may simply be repainting. One short re-read before we believe "nothing to
+            // protect" — cheap, and the alternative (a missed draft) is the whole bug.
+            co_await winrt::resume_after(std::chrono::milliseconds(kDraftSwapPollMs));
+            co_await wil::resume_foreground(Dispatcher());
+            if (!_sessionRegistry)
+            {
+                co_return;
+            }
+            draft = _ReadDraftForSwap(id, info->pendingInput);
+        }
+        if (draft.empty())
+        {
+            if (!plainSend()) // empty box — a paste cannot merge into anything
+            {
+                _sessionRegistry->RollbackPromptToPending(id, submission.promptId, submission.refundAutoSend);
+            }
+            co_return;
+        }
+
+        // A draft holding a "[Pasted text #N +M lines]" placeholder can only be restored by the TUI's
+        // own kill-ring: the placeholder is a LABEL for content living in Claude's paste-cache, so
+        // re-typing those characters would put the label in the box as literal text and silently drop
+        // the content behind it. When one is present the paste fallback is therefore refused, and a
+        // failed yank leaves the box empty with the draft preserved in memory + the ring (both logged)
+        // rather than corrupted in place. (PENDING_INPUT.md §2b owns the placeholder format.)
+        const bool allowPasteRestore = ::Agentmaster::FindPasteMarkers(draft).empty();
+
+        // ---- 2. LOCK ----
+        bool wasAlreadyReadOnly = true;
+        try
+        {
+            wasAlreadyReadOnly = control.ReadOnly();
+            if (!wasAlreadyReadOnly)
+            {
+                control.SetReadOnly(true);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SubmitPromptWithDraftSwap lock");
+            wasAlreadyReadOnly = true; // never try to hand back a read-only we did not take
+        }
+        _draftSwapsInFlight[id] = wasAlreadyReadOnly;
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + L" holding an unsent draft (chars=" + std::to_wstring(draft.size()) + L") - input locked, clearing the box\n");
+
+        // ---- 3. CLEAR (verified) ----
+        // Each rung is followed by a SETTLE, not a single poll: one 60ms read can easily outrun the
+        // TUI's repaint, and reading the pre-repaint box would look like "the keystroke changed
+        // nothing" — which DecideDraftClear rightly treats as "this binding is not ours" and would
+        // abandon a Ctrl+U that was in fact about to work. So after every injection we wait for the
+        // box to actually CHANGE (bounded by kDraftSwapActionSettleMs) before judging the rung.
+        uint32_t killPresses = 0;
+        uint32_t backspaceRounds = 0;
+        bool shrank = false;
+        std::wstring box = draft;
+        bool cleared = false;
+        const int64_t clearDeadline = TtNowMs() + kDraftSwapClearBudgetMs;
+        while (TtNowMs() < clearDeadline)
+        {
+            const auto plan = ::Agentmaster::DecideDraftClear(box, killPresses, backspaceRounds, shrank);
+            if (plan.action == ::Agentmaster::DraftClearAction::Done)
+            {
+                cleared = true;
+                break;
+            }
+            if (plan.action == ::Agentmaster::DraftClearAction::GiveUp)
+            {
+                break;
+            }
+            if (plan.action == ::Agentmaster::DraftClearAction::Kill)
+            {
+                _sessionRegistry->Inject(id, ::Agentmaster::BuildInputKill());
+                ++killPresses;
+            }
+            else
+            {
+                _sessionRegistry->Inject(id, ::Agentmaster::BuildBackspaces(plan.backspaces));
+                ++backspaceRounds;
+            }
+            const std::wstring before = box;
+            for (int64_t settled = 0; settled <= kDraftSwapActionSettleMs; settled += kDraftSwapPollMs)
+            {
+                co_await winrt::resume_after(std::chrono::milliseconds(kDraftSwapPollMs));
+                co_await wil::resume_foreground(Dispatcher());
+                if (!_sessionRegistry)
+                {
+                    // Defensive only (_sessionRegistry is assigned once at engine init and never cleared), but a
+                    // bail after the latch MUST still hand the tab back — a stranded read-only control is an
+                    // un-typeable terminal with nothing on screen to explain it.
+                    _EndDraftSwap(id, true);
+                    co_return;
+                }
+                // Deliberately NOT PickCurrentPromptText here: mid-swap the remembered value is the draft
+                // we are trying to erase, so falling back to it would report the box as never-empty.
+                box = _ReadLiveDraftForSession(id);
+                if (box != before)
+                {
+                    break; // the keystroke landed and repainted — judge the rung on this
+                }
+            }
+            shrank = box.size() < before.size();
+        }
+
+        // ---- 4. ABORT ----
+        if (!cleared)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + L" ABORTED: the input box would not clear after " + std::to_wstring(killPresses) + L" kill press(es) + " + std::to_wstring(backspaceRounds) + L" backspace round(s) - nothing sent, prompt stays Pending\n");
+            _sessionRegistry->RollbackPromptToPending(id, submission.promptId, submission.refundAutoSend);
+            // An abort must be a no-op for the USER too. The ladder may have erased PART of the draft
+            // (a backspace round that ran out of budget), so put it back through the same verified
+            // restore the success path uses rather than assuming the box was left untouched.
+            if (DraftSwapNormalize(box) != DraftSwapNormalize(draft))
+            {
+                const auto recovered = co_await _RestoreDraftAfterSwap(id, draft, allowPasteRestore);
+                if (!_sessionRegistry)
+                {
+                    _EndDraftSwap(id, true);
+                    co_return;
+                }
+                box.assign(recovered.c_str(), recovered.size());
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + (DraftSwapNormalize(box) == DraftSwapNormalize(draft) ? L" draft recovered after the aborted clear\n" : L" draft only PARTLY recovered after the aborted clear - the full text is kept in memory (Copy Current Prompt)\n"));
+            }
+            _sessionRegistry->SetPendingInput(id, box.empty() ? draft : box);
+            _EndDraftSwap(id, true);
+            co_return;
+        }
+
+        // ---- 5. SEND ----
+        const int64_t sentAtMs = TtNowMs();
+        if (!plainSend())
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + L" send failed after clearing - restoring the draft, prompt stays Pending\n");
+            _sessionRegistry->RollbackPromptToPending(id, submission.promptId, submission.refundAutoSend);
+            const auto recovered = co_await _RestoreDraftAfterSwap(id, draft, allowPasteRestore);
+            if (!_sessionRegistry)
+            {
+                _EndDraftSwap(id, true);
+                co_return;
+            }
+            _sessionRegistry->SetPendingInput(id, recovered.empty() ? draft : std::wstring{ recovered.c_str(), recovered.size() });
+            _EndDraftSwap(id, true);
+            co_return;
+        }
+
+        // ---- 6. AWAIT the prompt leaving the box ----
+        // "Submitted" is a turn-started signal (the same three DecideEnterRetry trusts: the state left
+        // the ready set, a UserPromptSubmit stamped turns.lastPromptUnixMs, or the transcript advanced)
+        // AND a box that reads empty. The box gate is the hard one: restoring into a box that still
+        // holds the un-submitted prompt would merge exactly the way this feature exists to prevent.
+        bool submitted = false;
+        for (int64_t waited = 0; waited <= kDraftSwapSubmitBudgetMs; waited += kDraftSwapPollMs)
+        {
+            co_await winrt::resume_after(std::chrono::milliseconds(kDraftSwapPollMs));
+            co_await wil::resume_foreground(Dispatcher());
+            if (!_sessionRegistry)
+            {
+                _EndDraftSwap(id, true);
+                co_return;
+            }
+            box = _ReadLiveDraftForSession(id);
+            const auto now = _sessionRegistry->Get(id);
+            const bool turnStarted = now &&
+                                     ((now->state != ::Agentmaster::SessionState::Idle && now->state != ::Agentmaster::SessionState::WaitingForInput) ||
+                                      now->turns.lastPromptUnixMs > sentAtMs ||
+                                      now->convLastActivityUnixMs > sentAtMs);
+            if (box.empty() && turnStarted)
+            {
+                submitted = true;
+                break;
+            }
+        }
+        if (!submitted && !box.empty())
+        {
+            // The prompt is still sitting in the box (the classic eaten submit CR). The Enter-retry
+            // watchdog owns that; we must not add to the box. The draft is NOT lost: it is in the
+            // TUI's kill-ring (one Ctrl+Y away) and stays in the registry's memory below.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + L" restore DEFERRED: the prompt has not left the input box - draft kept in the kill-ring (Ctrl+Y) and in memory, not re-typed\n");
+            _sessionRegistry->SetPendingInput(id, draft);
+            _EndDraftSwap(id, true);
+            co_return;
+        }
+
+        // ---- 7. RESTORE (yank, verified against the draft we read; paste fallback) ----
+        const auto restoredH = co_await _RestoreDraftAfterSwap(id, draft, allowPasteRestore);
+        if (!_sessionRegistry)
+        {
+            _EndDraftSwap(id, true);
+            co_return;
+        }
+        const std::wstring restored{ restoredH.c_str(), restoredH.size() };
+        const bool exact = DraftSwapNormalize(restored) == DraftSwapNormalize(draft);
+        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                      L"[draft-swap] " + sid8 +
+                                          (exact ? L" prompt sent and the draft is back in the box, unsent (chars=" + std::to_wstring(restored.size()) + L")\n" :
+                                                   L" prompt sent but the draft could NOT be put back verbatim" + std::wstring(allowPasteRestore ? L"" : L" (it holds a paste placeholder, which must never be re-typed as literal text)") + L" - kept in memory (Copy Current Prompt) and in the kill-ring (Ctrl+Y)\n"));
+
+        // ---- 8. UNLOCK + keep the "3 dots" honest ----
+        // Record what the box ACTUALLY reads now, falling back to what we took — so even a failed
+        // restore leaves the draft remembered, shown by the pending indicator, and copyable.
+        _sessionRegistry->SetPendingInput(id, restored.empty() ? draft : restored);
+        _EndDraftSwap(id, true);
+    }
+
     // Agentmaster (eager-init / "Activate Tab"): start a DORMANT session's claude IN PLACE — without
     // switching to its tab. A WT background/restored tab spawns its child lazily, only on the
     // SwapChainPanel's first non-zero layout (when first SHOWN), so a window-restored / re-homed managed
@@ -5261,6 +5721,7 @@ namespace winrt::TerminalApp::implementation
                 // later resume revalidates: the new claude's empty box debounce-clears it honestly.
             });
             _sessionRegistry->SetInjector(id, nullptr);
+            _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
             _claudeTabs.erase(id);
             _claudeOverlays.erase(id); // drop the per-tab overlay (detaches its registry observer)
             _pendingClearStreak.erase(id); // PENDING_INPUT.md: drop the debounce counter with the tab
@@ -5402,6 +5863,15 @@ namespace winrt::TerminalApp::implementation
             {
                 _pendingClearStreak.erase(id);
                 continue; // Codex's TUI has no ❯ input box — only Claude is monitored in v1
+            }
+            // Agentmaster (PENDING_INPUT.md §9): a DRAFT SWAP is holding this session's box right now.
+            // Mid-swap the box is deliberately empty — that is the whole point — so letting this scan
+            // observe it would run the clear debounce down and ERASE the very draft the swap is
+            // carrying for the user (and drop the "3 dots" for a second). The swap re-records the
+            // draft itself when it finishes; until then, leave every pending-input fact alone.
+            if (_draftSwapsInFlight.count(id) != 0)
+            {
+                continue;
             }
             // This session's tab (for the local tab-strip pulse) — a weak_ref in _claudeTabs.
             TerminalApp::Tab hostTab{ nullptr };
@@ -5860,7 +6330,10 @@ namespace winrt::TerminalApp::implementation
                 ++it; // raced a concurrent deliverer — re-evaluated (and likely dropped) next tick
                 continue;
             }
-            const bool delivered = _sessionRegistry->Inject(id, ::Agentmaster::BuildPromptSubmission(text));
+            // Agentmaster (PENDING_INPUT.md §9): the shared send seam. A successor is normally a fresh
+            // tab with an empty box, so the swap is a no-op here — but a user who started typing into
+            // the new tab during the pump's settle must not have their words folded into the briefing.
+            const bool delivered = _sessionRegistry->SubmitPrompt({ id, entry.promptId, text, false });
             if (delivered)
             {
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-inject] " + ::Agentmaster::ShortId(id) + L" FULL document pasted (" + std::to_wstring(text.size()) + L" chars) + submit\n");
@@ -5869,21 +6342,7 @@ namespace winrt::TerminalApp::implementation
             }
             // Injector vanished mid-flight (tab closing): roll back to Pending (Rule #4) and retry
             // next tick until the deadline; the entry-liveness check above drops a dead session.
-            _sessionRegistry->Update(id, [&](::Agentmaster::SessionInfo& ss) {
-                for (auto& p : ss.queue)
-                {
-                    if (p.id == entry.promptId && p.status == ::Agentmaster::PromptStatus::Sent)
-                    {
-                        p.status = ::Agentmaster::PromptStatus::Pending;
-                        p.echoed = false;
-                        if (p.attempts > 0)
-                        {
-                            p.attempts -= 1;
-                        }
-                        break;
-                    }
-                }
-            });
+            _sessionRegistry->RollbackPromptToPending(id, entry.promptId, false);
             ++it;
         }
     }

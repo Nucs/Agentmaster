@@ -1355,6 +1355,63 @@ void TestPendingInput()
         const std::wstring multi = L"deploy dev please," + NL + L"then run the harness";
         CHECK(PickCurrentPromptText(multi, L"x").text == multi, "current-prompt pick: multi-line draft copied verbatim");
     }
+    // 26. The DRAFT SWAP control codes + the clear ladder (PENDING_INPUT.md §9). The swap empties the
+    // input box before a queued prompt is submitted into it, then puts the draft back — so the ladder
+    // must terminate on every path, and must NEVER report "cleared" for a box that still has text
+    // (the whole abort contract hangs on that: no confirmed-empty box => nothing is sent).
+    {
+        CHECK(BuildInputKill() == std::wstring(1, static_cast<wchar_t>(0x15)), "draft swap: kill is a lone Ctrl+U (0x15)");
+        CHECK(BuildInputYank() == std::wstring(1, static_cast<wchar_t>(0x19)), "draft swap: yank is a lone Ctrl+Y (0x19)");
+        CHECK(BuildBackspaces(3) == std::wstring(3, static_cast<wchar_t>(0x7f)), "draft swap: backspaces are DEL (0x7f), one per char");
+        CHECK(BuildBackspaces(0).empty(), "draft swap: zero backspaces is empty");
+        CHECK(BuildBackspaces(kMaxBackspacesPerRound + 500).size() == kMaxBackspacesPerRound, "draft swap: a backspace round is capped");
+
+        // An empty (or whitespace-only) box is Done — the same emptiness rule the pick above uses.
+        CHECK(DecideDraftClear(L"", 0, 0, false).action == DraftClearAction::Done, "draft clear: empty box -> Done");
+        CHECK(DecideDraftClear(L"   " + NL, 1, 0, true).action == DraftClearAction::Done, "draft clear: whitespace-only box -> Done");
+
+        // The happy path: press Ctrl+U once, and the next read is empty.
+        CHECK(DecideDraftClear(L"my draft", 0, 0, false).action == DraftClearAction::Kill, "draft clear: first look at a filled box -> Kill");
+
+        // A multi-line draft can take a press per line: keep pressing WHILE it is shrinking.
+        CHECK(DecideDraftClear(L"line 2", 1, 0, true).action == DraftClearAction::Kill, "draft clear: still shrinking -> Kill again");
+
+        // A press that changed NOTHING means the binding is not the one we assumed: stop pressing it
+        // and fall through to the erase rung rather than burning the remaining presses.
+        {
+            const auto p = DecideDraftClear(L"unchanged", 1, 0, false);
+            CHECK(p.action == DraftClearAction::Backspace, "draft clear: a kill that did not shrink -> Backspace");
+            CHECK(p.backspaces > 9, "draft clear: backspaces cover the box plus a margin");
+        }
+
+        // The kill rung is bounded even while it keeps shrinking...
+        CHECK(DecideDraftClear(L"still here", kMaxDraftKillPresses, 0, true).action == DraftClearAction::Backspace, "draft clear: kill presses are capped -> Backspace");
+        // ...and once the ladder has moved on it never goes BACK to Kill (so the two cannot alternate).
+        CHECK(DecideDraftClear(L"still here", 0, 1, true).action == DraftClearAction::Backspace, "draft clear: past the kill rung, a shrinking box stays on Backspace");
+        // The erase rung is bounded too, and then the swap gives up -> ABORT (nothing is sent).
+        CHECK(DecideDraftClear(L"stubborn", kMaxDraftKillPresses, kMaxDraftBackspaceRounds, false).action == DraftClearAction::GiveUp, "draft clear: exhausted ladder -> GiveUp");
+        CHECK(DecideDraftClear(L"stubborn", 0, kMaxDraftBackspaceRounds, true).action == DraftClearAction::GiveUp, "draft clear: exhausted backspaces -> GiveUp even while shrinking");
+
+        // TERMINATION: from any starting box, driving the ladder with a worst-case TUI that ignores
+        // every keystroke must reach GiveUp in a bounded number of steps — never loop forever.
+        {
+            uint32_t kills = 0, rounds = 0;
+            int steps = 0;
+            DraftClearAction last = DraftClearAction::Kill;
+            while (steps++ < 64)
+            {
+                const auto p = DecideDraftClear(L"never changes", kills, rounds, false);
+                last = p.action;
+                if (p.action == DraftClearAction::GiveUp || p.action == DraftClearAction::Done)
+                {
+                    break;
+                }
+                (p.action == DraftClearAction::Kill ? kills : rounds) += 1;
+            }
+            CHECK(last == DraftClearAction::GiveUp, "draft clear: an unresponsive TUI terminates at GiveUp");
+            CHECK(steps <= static_cast<int>(kMaxDraftKillPresses + kMaxDraftBackspaceRounds) + 2, "draft clear: termination is bounded by the two rung caps");
+        }
+    }
 }
 
 // Agentmaster (PENDING_INPUT.md §2b): the paste-cache resolver — marker grammar, the two counting

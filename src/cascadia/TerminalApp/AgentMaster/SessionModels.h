@@ -451,6 +451,21 @@ namespace Agentmaster
         return BuildPromptFill(text) + L"\r";
     }
 
+    // Agentmaster (PENDING_INPUT.md §9): ONE prompt submission, as handed to the hosting window's
+    // submitter (SessionRegistry::SetPromptSubmitter). Every path that SENDS a queued prompt —
+    // the autorunner's auto-send, its SemiAuto confirm, the Manager's Send-now, and the /handover
+    // paste pump — goes through that one seam, so the draft swap can never apply to some of them
+    // and not others. `promptId` is what an aborted swap rolls back; `refundAutoSend` is set only
+    // by the autorunner paths, which incremented autoSendsThisRun before injecting (a Send-now
+    // never touches that budget, so refunding it there would silently hand back a send).
+    struct PromptSubmission
+    {
+        std::wstring sessionId;
+        std::wstring promptId;
+        std::wstring text;
+        bool refundAutoSend{ false };
+    };
+
     struct ApprovalPolicy
     {
         bool pauseForHuman{ true }; // default: do not auto-approve tool permissions
@@ -1295,6 +1310,16 @@ namespace Agentmaster
         uint32_t maxAutoSends{ 100 }; // runaway backstop
         bool stopOnError{ true }; // pause a plan when a turn ends in error
         bool pauseOnHumanInput{ true }; // suspend auto-send while the human is typing
+        // Agentmaster (PENDING_INPUT.md §9 — the DRAFT SWAP): when a prompt is submitted into a
+        // session whose input box already holds the user's UNSENT draft, take the draft out of the
+        // way first and put it straight back afterwards, instead of pasting the prompt ON TOP of it
+        // (which submitted draft + prompt as one message the user never wrote — the merge bug).
+        // GLOBAL, and it governs EVERY submit path at once (the autorunner's auto-send, its SemiAuto
+        // confirm, the Manager's Send-now, and the /handover paste pump all share one seam —
+        // SessionRegistry::SubmitPrompt), so the four can never disagree about it. A session with no
+        // draft is unaffected either way: the swap is skipped and the injection is byte-identical to
+        // before. OFF restores the historical merge behavior verbatim.
+        bool preserveDraftOnSend{ true };
 
         // --- Behavior sugar ---
         bool confirmBeforeKill{ true }; // confirm before killing a session from the Manager
