@@ -828,19 +828,29 @@ to send"; the `pauseOnHumanInput` toggle that looks like it covers this has neve
 draft is taken out of the way and put straight back, every step **VERIFIED by re-reading the box**: READ
 (`PickCurrentPromptText` — live wins, remembered falls back) → **LOCK** the control `SetReadOnly(true)` so
 your keystrokes can't interleave (you still SEE everything; WT short-circuits the read-only check for key
-events, so it's silent, and only a read-only WE took is released) → **CLEAR** with **Ctrl+U** (0x15 — kill
-into the TUI's kill-ring), re-reading until CONFIRMED empty, `DecideDraftClear` escalating kill→`DEL`
+events, so it's silent, and only a read-only WE took is released) → **CLEAR** with **Ctrl+S — Claude's own
+STASH**, re-reading until CONFIRMED empty, `DecideDraftClear` escalating stash→`Ctrl+U` kill-ring→`DEL`
 backspaces→give up with a 300ms **settle** per rung so a slow repaint is never mistaken for an unbound key
 → **ABORT** if it never confirms empty (send NOTHING, prompt back to `Pending`, box restored — a late
 prompt is recoverable, a mangled message isn't) → **SEND** through the unchanged recipe (so echo dedup,
 pickup guard and the Enter-retry watchdog still apply) → **AWAIT** the prompt actually LEAVING the box (a
 turn-started signal AND an empty box; still sitting there ⇒ do NOT restore — that would merge — the draft
-staying in the kill-ring + memory, logged) → **RESTORE** with **Ctrl+Y**, the yank COMPARED against the
-draft we read (a ring can hand back the wrong text after a multi-press/mixed clear or a submit that flushed
-it), falling back to a verbatim `BuildPromptFill` re-paste (no submit CR) on a box verified still empty —
-never both; the yank goes FIRST because it returns the TUI's own state, so a `[Pasted text #N]` placeholder
-keeps its paste-cache binding, and the paste fallback is REFUSED when one is present (re-typing the label
-would silently drop the content behind it) → **UNLOCK** + re-record the draft. **ONE seam, four callers** —
+staying stashed + in memory, logged) → **RESTORE** through WHICHEVER rung emptied the box (**Ctrl+S** again
+for a stash · **Ctrl+Y** for a kill), COMPARED against the draft we read (neither channel is guaranteed —
+a multi-press/mixed clear or a submit that flushed the ring can hand back the wrong text), falling back to
+a verbatim `BuildPromptFill` re-paste (no submit CR) on a box verified still empty — never both; the TUI's
+own channel goes FIRST because it returns Claude's internal state, so a `[Pasted text #N]` placeholder keeps
+its paste-cache binding, and the paste fallback is REFUSED when one is present (re-typing the label would
+silently drop the content behind it) → **UNLOCK** + re-record the draft. **Ctrl+S is the default rung
+because it is a WHOLE-BOX, cursor-independent TOGGLE** (text in the box ⇒ stash + empty it; empty box ⇒
+restore — and both our presses land on the right side by construction), where `Ctrl+U` only killed the
+current LINE and restored badly with the cursor mid-text; it is now the fallback, selected by the cog's
+**`draftSwapUseCtrlS`** ("Use Ctrl+S to stash my draft aside while it sends", default ON). ⚠ The toggle is
+never pressed blind — on a non-empty box it would STASH instead of restoring, so the restore re-reads and
+skips the press unless the box is VERIFIED empty, the mismatch path clears with `Ctrl+U` (a stash there
+would push the leftover into the one slot that may still hold the user's original), and
+`kMaxDraftStashPresses` is **1** and must stay 1 (a second press un-stashes). ⚠ ONE slot, so a stash the
+USER had made is discarded by ours — unavoidable (it isn't inspectable); their LIVE draft is never at risk. **ONE seam, four callers** —
 `SessionRegistry::SubmitPrompt` (+ `SetPromptSubmitter` / `RollbackPromptToPending`) now carries the
 autorunner auto-send, its SemiAuto Confirm, the Manager's Send-now, AND the /handover paste pump, so they
 can never disagree; the HOSTING window registers the submitter next to its injector (only it can read the
@@ -848,7 +858,7 @@ box or block the keyboard), an unbound one falls back to the historical `Inject(
 verbatim, and an accepted-then-aborted swap rolls the prompt back ITSELF (Rule #4 on every path;
 `refundAutoSend` true only for the autorunner paths, which spent a budget slot). `_ScanPendingInput` SKIPS
 an in-flight swap (mid-swap the box is deliberately empty — the clear debounce would erase the very draft
-being carried). Off-switch `AppSettings::preserveDraftOnSend` (cog → TESTS AUTORUNNER, **default ON**);
+being carried). Off-switches `AppSettings::preserveDraftOnSend` + `draftSwapUseCtrlS` (cog → TESTS AUTORUNNER, both **default ON**);
 an empty box takes the same fast path either way. Logged `[draft-swap] <sid8> …`. **Follow-ups:** an
 off-switch for the dots, placeholder/dim-attribute filtering, expanding pastes on copy, and the remaining
 *politeness* half of the `pauseOnHumanInput` tie-in — DEFER an auto-send while you are visibly mid-compose
@@ -2072,8 +2082,9 @@ What works, by area:
   native-exe-only policy): the auto-detected `claude.exe` (read-only) + an **`.exe`-only override**
   (`claudeExePath`) with **Browse…**, re-resolved live on Save via `RefreshClaudeExe` — plus **Tests Autorunner defaults** stamped
   onto NEW sessions (mode / maxAutoSends / stopOnError / pauseOnHumanInput) plus the GLOBAL
-  **`preserveDraftOnSend`** (the **DRAFT SWAP** — PENDING_INPUT.md §9; default ON, live on every submit
-  path at once) and **behavior**
+  **`preserveDraftOnSend`** + **`draftSwapUseCtrlS`** (the **DRAFT SWAP** — PENDING_INPUT.md §9; both
+  default ON, live on every submit path at once; the second picks Claude's **Ctrl+S stash** over the
+  Ctrl+U kill-ring fallback) and **behavior**
   (`confirmBeforeKill` — relabeled "Confirm before closing" — routes the Close action
   (tab X / Manager **Close** / tree `Del`) through the confirm dialog;
   `defaultLaunchDir` seeds the cwd box — empty ⇒ `%USERPROFILE%`). It also exposes `tabRenameCommitMode` (the rename box's
@@ -2645,11 +2656,12 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     only so `ControlCore` + `tests/` share it. Also `PickCurrentPromptText` (§8) — the ONE rule every
     "Copy Current Prompt" menu resolves through: a non-empty LIVE buffer read wins, else the observer's
     remembered/persisted draft — and the **DRAFT SWAP** brain (§9): the control-code builders
+    `BuildInputStash` (**Ctrl+S**, Claude's whole-box stash/unstash TOGGLE — the default rung) /
     `BuildInputKill` (Ctrl+U, kill into the TUI's kill-ring) / `BuildInputYank` (Ctrl+Y, yank it back) /
-    `BuildBackspaces` (the capped `DEL` fallback) plus the pure `DecideDraftClear` escalation ladder
-    (kill while it shrinks → backspaces once a press changes nothing → GiveUp ⇒ the swap ABORTS and
-    sends nothing), which is what lets a queued prompt be submitted into a session WITHOUT merging into
-    the user's unsent draft. Unit-tested in `tests/`),
+    `BuildBackspaces` (the capped `DEL` fallback) plus the pure `DecideDraftClear` escalation ladder over
+    a `DraftClearProgress` (stash ONCE — a second press would un-stash → kill while it shrinks →
+    backspaces once a press changes nothing → GiveUp ⇒ the swap ABORTS and sends nothing), which is what
+    lets a queued prompt be submitted into a session WITHOUT merging into the user's unsent draft. Unit-tested in `tests/`),
     `Sha256.h` (header-only, pure — FIPS 180-4 SHA-256, hand-rolled like `Base64Encode` so no
     bcrypt/crypt32 has to be threaded through the lib + harness + CLI builds; the content-IDENTITY
     primitive behind the shipped `/handover`+`/handover-here` definitions' digest version history —

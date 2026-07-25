@@ -1320,6 +1320,14 @@ namespace Agentmaster
         // draft is unaffected either way: the swap is skipped and the injection is byte-identical to
         // before. OFF restores the historical merge behavior verbatim.
         bool preserveDraftOnSend{ true };
+        // Agentmaster (PENDING_INPUT.md §9): use Claude's own STASH toggle — Ctrl+S — as the swap's
+        // first rung. It is a single keystroke over ONE slot: pressed with text in the box it stashes
+        // the WHOLE box aside and empties it; pressed on an empty box it restores. Both of our presses
+        // land on the correct side by construction (we clear only when the box has text, restore only
+        // when it is verified empty). Whole-box and cursor-position independent, which is exactly why
+        // it beats the line-scoped Ctrl+U kill-ring pair that remains the fallback. OFF ⇒ the swap
+        // starts at that fallback instead; either way an unresponsive rung ends in a clean ABORT.
+        bool draftSwapUseCtrlS{ true };
 
         // --- Behavior sugar ---
         bool confirmBeforeKill{ true }; // confirm before killing a session from the Manager

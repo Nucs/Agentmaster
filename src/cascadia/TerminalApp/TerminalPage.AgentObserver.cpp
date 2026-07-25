@@ -4188,19 +4188,29 @@ namespace winrt::TerminalApp::implementation
     // finally reads. This is the one place the restore is decided, so the abort path and the normal
     // path cannot drift.
     //
-    // The kill-ring yank is tried FIRST because it is the only channel that returns the TUI's own
-    // internal state — crucially, a draft holding a "[Pasted text #N +M lines]" placeholder still
-    // refers to the real paste-cache content afterwards. But a yank is only as good as the ring: a
-    // multi-press clear, a mixed kill+backspace clear, or a submit that flushed the ring can all hand
-    // back the WRONG text, so the result is compared against what we read before clearing.
+    // The TUI's OWN channel is tried first, because it is the only one that returns Claude's internal
+    // state rather than re-typed characters — crucially, a draft holding a "[Pasted text #N +M lines]"
+    // placeholder still refers to the real paste-cache content afterwards. Which channel that is
+    // depends on how the box was emptied, which is what `viaStash` carries:
     //
-    // If the yank does not reproduce the draft, the box is emptied again and the draft is re-pasted
-    // verbatim (BuildPromptFill — the /handover-standby channel: a bracketed paste with NO submit CR,
-    // so a multi-line draft lands as one multi-line draft and nothing runs). `allowPaste` is false
-    // when the draft contains a paste PLACEHOLDER: re-typing "[Pasted text #1 +50 lines]" would put
-    // that label in the box as literal text and silently lose the content behind it, which is worse
-    // than leaving the box empty with the draft preserved in memory (and logged).
-    winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> TerminalPage::_RestoreDraftAfterSwap(std::wstring sessionId, std::wstring draft, bool allowPaste)
+    //   viaStash == true   -> Ctrl+S again. The stash is a TOGGLE over one slot: pressed on an EMPTY
+    //                         box it restores. That empty-box precondition is not an optimization but
+    //                         a correctness gate — pressing it on a box with text would STASH that
+    //                         text instead, so the box is re-read and the press is skipped unless it
+    //                         is verified empty.
+    //   viaStash == false  -> Ctrl+Y, yanking the kill-ring back.
+    //
+    // Either way the result is COMPARED against what we read before clearing, because neither channel
+    // is guaranteed: a multi-press or mixed clear, or a submit that flushed the ring, can hand back
+    // the wrong text. On a mismatch the box is emptied again and the draft is re-pasted verbatim
+    // (BuildPromptFill — the /handover-standby channel: a bracketed paste with NO submit CR, so a
+    // multi-line draft lands as one multi-line draft and nothing runs).
+    //
+    // `allowPaste` is false when the draft contains a paste PLACEHOLDER: re-typing
+    // "[Pasted text #1 +50 lines]" would put that label in the box as literal text and silently lose
+    // the content behind it — worse than leaving the box empty with the draft preserved in memory
+    // (and logged).
+    winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> TerminalPage::_RestoreDraftAfterSwap(std::wstring sessionId, std::wstring draft, bool allowPaste, bool viaStash)
     {
         auto strongThis{ get_strong() };
         co_await wil::resume_foreground(Dispatcher());
@@ -4230,17 +4240,32 @@ namespace winrt::TerminalApp::implementation
             co_return winrt::hstring{ seen };
         };
 
-        // 1. yank the kill-ring back.
-        _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildInputYank());
-        const auto afterYank = co_await settle([&](const std::wstring& s) { return DraftSwapNormalize(s) == wanted; });
-        std::wstring box{ afterYank.c_str(), afterYank.size() };
+        // 1. ask the TUI for it back. The stash press is GATED on the box being verified empty (see
+        //    the header comment: on a non-empty box that same key stashes instead of restoring, which
+        //    would hide the text rather than return it).
+        std::wstring box = _ReadLiveDraftForSession(sessionId);
+        if (viaStash)
+        {
+            if (box.empty())
+            {
+                _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildInputStash());
+            }
+        }
+        else
+        {
+            _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildInputYank());
+        }
+        const auto afterUndo = co_await settle([&](const std::wstring& s) { return DraftSwapNormalize(s) == wanted; });
+        box.assign(afterUndo.c_str(), afterUndo.size());
         if (DraftSwapNormalize(box) == wanted)
         {
             co_return winrt::hstring{ box }; // exact — the user's own bytes, TUI-round-tripped
         }
 
-        // 2. the yank was empty, partial, or wrong. Clear whatever it left before re-pasting, so the
-        //    fallback can never CONCATENATE onto a bad restore.
+        // 2. it came back empty, partial, or wrong. Clear whatever it left before re-pasting, so the
+        //    fallback can never CONCATENATE onto a bad restore. Ctrl+U (not Ctrl+S) even in the stash
+        //    case: a stash press here would put this leftover into the slot, and the slot is the one
+        //    place the user's original may still be sitting.
         if (!box.empty())
         {
             _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildInputKill());
@@ -4346,7 +4371,7 @@ namespace winrt::TerminalApp::implementation
             wasAlreadyReadOnly = true; // never try to hand back a read-only we did not take
         }
         _draftSwapsInFlight[id] = wasAlreadyReadOnly;
-        ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + L" holding an unsent draft (chars=" + std::to_wstring(draft.size()) + L") - input locked, clearing the box\n");
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + L" holding an unsent draft (chars=" + std::to_wstring(draft.size()) + L") - input locked, clearing the box via " + std::wstring(_appSettings.draftSwapUseCtrlS ? L"Ctrl+S stash" : L"the kill-ring") + L"\n");
 
         // ---- 3. CLEAR (verified) ----
         // Each rung is followed by a SETTLE, not a single poll: one 60ms read can easily outrun the
@@ -4354,15 +4379,14 @@ namespace winrt::TerminalApp::implementation
         // nothing" — which DecideDraftClear rightly treats as "this binding is not ours" and would
         // abandon a Ctrl+U that was in fact about to work. So after every injection we wait for the
         // box to actually CHANGE (bounded by kDraftSwapActionSettleMs) before judging the rung.
-        uint32_t killPresses = 0;
-        uint32_t backspaceRounds = 0;
-        bool shrank = false;
+        ::Agentmaster::DraftClearProgress spent;
+        spent.useStash = _appSettings.draftSwapUseCtrlS;
         std::wstring box = draft;
         bool cleared = false;
         const int64_t clearDeadline = TtNowMs() + kDraftSwapClearBudgetMs;
         while (TtNowMs() < clearDeadline)
         {
-            const auto plan = ::Agentmaster::DecideDraftClear(box, killPresses, backspaceRounds, shrank);
+            const auto plan = ::Agentmaster::DecideDraftClear(box, spent);
             if (plan.action == ::Agentmaster::DraftClearAction::Done)
             {
                 cleared = true;
@@ -4372,15 +4396,20 @@ namespace winrt::TerminalApp::implementation
             {
                 break;
             }
-            if (plan.action == ::Agentmaster::DraftClearAction::Kill)
+            if (plan.action == ::Agentmaster::DraftClearAction::Stash)
+            {
+                _sessionRegistry->Inject(id, ::Agentmaster::BuildInputStash());
+                ++spent.stashPresses;
+            }
+            else if (plan.action == ::Agentmaster::DraftClearAction::Kill)
             {
                 _sessionRegistry->Inject(id, ::Agentmaster::BuildInputKill());
-                ++killPresses;
+                ++spent.killPresses;
             }
             else
             {
                 _sessionRegistry->Inject(id, ::Agentmaster::BuildBackspaces(plan.backspaces));
-                ++backspaceRounds;
+                ++spent.backspaceRounds;
             }
             const std::wstring before = box;
             for (int64_t settled = 0; settled <= kDraftSwapActionSettleMs; settled += kDraftSwapPollMs)
@@ -4403,20 +4432,24 @@ namespace winrt::TerminalApp::implementation
                     break; // the keystroke landed and repainted — judge the rung on this
                 }
             }
-            shrank = box.size() < before.size();
+            spent.shrank = box.size() < before.size();
         }
+        // Which rung actually emptied the box decides how it is put back: a stash is restored by the
+        // SAME Ctrl+S toggle, a kill by Ctrl+Y. Getting this wrong is not a cosmetic mistake — pressing
+        // Ctrl+S on a box that was never stashed would STASH whatever is in it.
+        const bool clearedByStash = cleared && spent.stashPresses > 0 && spent.killPresses == 0 && spent.backspaceRounds == 0;
 
         // ---- 4. ABORT ----
         if (!cleared)
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + L" ABORTED: the input box would not clear after " + std::to_wstring(killPresses) + L" kill press(es) + " + std::to_wstring(backspaceRounds) + L" backspace round(s) - nothing sent, prompt stays Pending\n");
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + L" ABORTED: the input box would not clear after " + std::to_wstring(spent.stashPresses) + L" stash + " + std::to_wstring(spent.killPresses) + L" kill press(es) + " + std::to_wstring(spent.backspaceRounds) + L" backspace round(s) - nothing sent, prompt stays Pending\n");
             _sessionRegistry->RollbackPromptToPending(id, submission.promptId, submission.refundAutoSend);
             // An abort must be a no-op for the USER too. The ladder may have erased PART of the draft
             // (a backspace round that ran out of budget), so put it back through the same verified
             // restore the success path uses rather than assuming the box was left untouched.
             if (DraftSwapNormalize(box) != DraftSwapNormalize(draft))
             {
-                const auto recovered = co_await _RestoreDraftAfterSwap(id, draft, allowPasteRestore);
+                const auto recovered = co_await _RestoreDraftAfterSwap(id, draft, allowPasteRestore, clearedByStash);
                 if (!_sessionRegistry)
                 {
                     _EndDraftSwap(id, true);
@@ -4436,7 +4469,7 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + L" send failed after clearing - restoring the draft, prompt stays Pending\n");
             _sessionRegistry->RollbackPromptToPending(id, submission.promptId, submission.refundAutoSend);
-            const auto recovered = co_await _RestoreDraftAfterSwap(id, draft, allowPasteRestore);
+            const auto recovered = co_await _RestoreDraftAfterSwap(id, draft, allowPasteRestore, clearedByStash);
             if (!_sessionRegistry)
             {
                 _EndDraftSwap(id, true);
@@ -4486,7 +4519,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         // ---- 7. RESTORE (yank, verified against the draft we read; paste fallback) ----
-        const auto restoredH = co_await _RestoreDraftAfterSwap(id, draft, allowPasteRestore);
+        const auto restoredH = co_await _RestoreDraftAfterSwap(id, draft, allowPasteRestore, clearedByStash);
         if (!_sessionRegistry)
         {
             _EndDraftSwap(id, true);
@@ -4496,7 +4529,7 @@ namespace winrt::TerminalApp::implementation
         const bool exact = DraftSwapNormalize(restored) == DraftSwapNormalize(draft);
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[draft-swap] " + sid8 +
-                                          (exact ? L" prompt sent and the draft is back in the box, unsent (chars=" + std::to_wstring(restored.size()) + L")\n" :
+                                          (exact ? L" prompt sent and the draft is back in the box, unsent (via " + std::wstring(clearedByStash ? L"Ctrl+S stash" : L"the kill-ring") + L", chars=" + std::to_wstring(restored.size()) + L")\n" :
                                                    L" prompt sent but the draft could NOT be put back verbatim" + std::wstring(allowPasteRestore ? L"" : L" (it holds a paste placeholder, which must never be re-typed as literal text)") + L" - kept in memory (Copy Current Prompt) and in the kill-ring (Ctrl+Y)\n"));
 
         // ---- 8. UNLOCK + keep the "3 dots" honest ----

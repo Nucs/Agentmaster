@@ -498,6 +498,7 @@ void TestAppSettings()
         in.maxAutoSends = 7;
         in.stopOnError = false;
         in.pauseOnHumanInput = false;
+        in.draftSwapUseCtrlS = false; // non-default (default true = Ctrl+S stash is the swap's first rung)
         in.preserveDraftOnSend = false; // non-default (default true = the DRAFT SWAP is on) — PENDING_INPUT.md §9
         in.confirmBeforeKill = false;
         in.tabRenameCommitMode = TabRenameCommitMode::ClickAwayOrEnter; // non-default (default is ClickAwayOrShiftEnter)
@@ -543,6 +544,7 @@ void TestAppSettings()
         CHECK(out.stopOnError == false, "settings stopOnError round-trip");
         CHECK(out.pauseOnHumanInput == false, "settings pauseOnHumanInput round-trip");
         CHECK(out.preserveDraftOnSend == false, "settings preserveDraftOnSend round-trip (draft swap OFF)");
+        CHECK(out.draftSwapUseCtrlS == false, "settings draftSwapUseCtrlS round-trip (Ctrl+S stash rung OFF)");
         CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter, "settings tabRenameCommitMode round-trip");
         CHECK(out.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon round-trip");

@@ -681,6 +681,7 @@ namespace Agentmaster
         o.Set(L"stopOnError", json::Value::MkBool(s.stopOnError));
         o.Set(L"pauseOnHumanInput", json::Value::MkBool(s.pauseOnHumanInput));
         o.Set(L"preserveDraftOnSend", json::Value::MkBool(s.preserveDraftOnSend));
+        o.Set(L"draftSwapUseCtrlS", json::Value::MkBool(s.draftSwapUseCtrlS));
         o.Set(L"confirmBeforeKill", json::Value::MkBool(s.confirmBeforeKill));
         o.Set(L"tabRenameCommitMode", json::Value::MkStr(ToString(s.tabRenameCommitMode)));
         o.Set(L"defaultLaunchDir", json::Value::MkStr(s.defaultLaunchDir));
@@ -810,6 +811,7 @@ namespace Agentmaster
         s.stopOnError = v.BoolAt(L"stopOnError", true);
         s.pauseOnHumanInput = v.BoolAt(L"pauseOnHumanInput", true);
         s.preserveDraftOnSend = v.BoolAt(L"preserveDraftOnSend", true);
+        s.draftSwapUseCtrlS = v.BoolAt(L"draftSwapUseCtrlS", true);
         s.confirmBeforeKill = v.BoolAt(L"confirmBeforeKill", true);
         s.tabRenameCommitMode = TabRenameCommitModeFromString(v.StrAt(L"tabRenameCommitMode", L"shiftEnter"));
         s.defaultLaunchDir = v.StrAt(L"defaultLaunchDir");

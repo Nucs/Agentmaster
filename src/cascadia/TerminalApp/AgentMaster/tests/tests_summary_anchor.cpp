@@ -1360,56 +1360,91 @@ void TestPendingInput()
     // must terminate on every path, and must NEVER report "cleared" for a box that still has text
     // (the whole abort contract hangs on that: no confirmed-empty box => nothing is sent).
     {
+        CHECK(BuildInputStash() == std::wstring(1, static_cast<wchar_t>(0x13)), "draft swap: stash is a lone Ctrl+S (0x13)");
         CHECK(BuildInputKill() == std::wstring(1, static_cast<wchar_t>(0x15)), "draft swap: kill is a lone Ctrl+U (0x15)");
         CHECK(BuildInputYank() == std::wstring(1, static_cast<wchar_t>(0x19)), "draft swap: yank is a lone Ctrl+Y (0x19)");
         CHECK(BuildBackspaces(3) == std::wstring(3, static_cast<wchar_t>(0x7f)), "draft swap: backspaces are DEL (0x7f), one per char");
         CHECK(BuildBackspaces(0).empty(), "draft swap: zero backspaces is empty");
         CHECK(BuildBackspaces(kMaxBackspacesPerRound + 500).size() == kMaxBackspacesPerRound, "draft swap: a backspace round is capped");
 
+        const auto spent = [](uint32_t stashes, uint32_t kills, uint32_t rounds, bool shrank, bool useStash = true) {
+            DraftClearProgress p;
+            p.stashPresses = stashes;
+            p.killPresses = kills;
+            p.backspaceRounds = rounds;
+            p.shrank = shrank;
+            p.useStash = useStash;
+            return p;
+        };
+
         // An empty (or whitespace-only) box is Done — the same emptiness rule the pick above uses.
-        CHECK(DecideDraftClear(L"", 0, 0, false).action == DraftClearAction::Done, "draft clear: empty box -> Done");
-        CHECK(DecideDraftClear(L"   " + NL, 1, 0, true).action == DraftClearAction::Done, "draft clear: whitespace-only box -> Done");
+        CHECK(DecideDraftClear(L"", spent(0, 0, 0, false)).action == DraftClearAction::Done, "draft clear: empty box -> Done");
+        CHECK(DecideDraftClear(L"   " + NL, spent(1, 0, 0, true)).action == DraftClearAction::Done, "draft clear: whitespace-only box -> Done");
 
-        // The happy path: press Ctrl+U once, and the next read is empty.
-        CHECK(DecideDraftClear(L"my draft", 0, 0, false).action == DraftClearAction::Kill, "draft clear: first look at a filled box -> Kill");
+        // The happy path: ONE Ctrl+S stashes the whole box aside, and the next read is empty.
+        CHECK(DecideDraftClear(L"my draft", spent(0, 0, 0, false)).action == DraftClearAction::Stash, "draft clear: first look at a filled box -> Stash (Ctrl+S)");
 
-        // A multi-line draft can take a press per line: keep pressing WHILE it is shrinking.
-        CHECK(DecideDraftClear(L"line 2", 1, 0, true).action == DraftClearAction::Kill, "draft clear: still shrinking -> Kill again");
+        // THE CRITICAL CAP: Ctrl+S is a TOGGLE, so a second press would un-stash the draft straight
+        // back into the box. The ladder must never press it twice — it hands over to Ctrl+U instead.
+        CHECK(kMaxDraftStashPresses == 1u, "draft clear: the stash rung is exactly ONE press (it is a toggle)");
+        CHECK(DecideDraftClear(L"still there", spent(1, 0, 0, false)).action == DraftClearAction::Kill, "draft clear: a stash that did nothing -> Kill, never a second Ctrl+S");
+        CHECK(DecideDraftClear(L"still there", spent(1, 0, 0, true)).action == DraftClearAction::Kill, "draft clear: even a stash that SHRANK the box never presses Ctrl+S twice");
+
+        // With the setting off the stash rung is skipped entirely and the ladder starts at Ctrl+U.
+        CHECK(DecideDraftClear(L"my draft", spent(0, 0, 0, false, false)).action == DraftClearAction::Kill, "draft clear: Ctrl+S disabled -> start at the kill rung");
+
+        // A multi-line draft can take a kill press per line: keep pressing WHILE it is shrinking.
+        CHECK(DecideDraftClear(L"line 2", spent(1, 1, 0, true)).action == DraftClearAction::Kill, "draft clear: still shrinking -> Kill again");
 
         // A press that changed NOTHING means the binding is not the one we assumed: stop pressing it
         // and fall through to the erase rung rather than burning the remaining presses.
         {
-            const auto p = DecideDraftClear(L"unchanged", 1, 0, false);
+            const auto p = DecideDraftClear(L"unchanged", spent(1, 1, 0, false));
             CHECK(p.action == DraftClearAction::Backspace, "draft clear: a kill that did not shrink -> Backspace");
             CHECK(p.backspaces > 9, "draft clear: backspaces cover the box plus a margin");
         }
 
         // The kill rung is bounded even while it keeps shrinking...
-        CHECK(DecideDraftClear(L"still here", kMaxDraftKillPresses, 0, true).action == DraftClearAction::Backspace, "draft clear: kill presses are capped -> Backspace");
-        // ...and once the ladder has moved on it never goes BACK to Kill (so the two cannot alternate).
-        CHECK(DecideDraftClear(L"still here", 0, 1, true).action == DraftClearAction::Backspace, "draft clear: past the kill rung, a shrinking box stays on Backspace");
+        CHECK(DecideDraftClear(L"still here", spent(1, kMaxDraftKillPresses, 0, true)).action == DraftClearAction::Backspace, "draft clear: kill presses are capped -> Backspace");
+        // ...and once the ladder has moved on it never goes BACK to Stash or Kill (no alternating).
+        CHECK(DecideDraftClear(L"still here", spent(0, 0, 1, true)).action == DraftClearAction::Backspace, "draft clear: past the earlier rungs, a shrinking box stays on Backspace");
         // The erase rung is bounded too, and then the swap gives up -> ABORT (nothing is sent).
-        CHECK(DecideDraftClear(L"stubborn", kMaxDraftKillPresses, kMaxDraftBackspaceRounds, false).action == DraftClearAction::GiveUp, "draft clear: exhausted ladder -> GiveUp");
-        CHECK(DecideDraftClear(L"stubborn", 0, kMaxDraftBackspaceRounds, true).action == DraftClearAction::GiveUp, "draft clear: exhausted backspaces -> GiveUp even while shrinking");
+        CHECK(DecideDraftClear(L"stubborn", spent(1, kMaxDraftKillPresses, kMaxDraftBackspaceRounds, false)).action == DraftClearAction::GiveUp, "draft clear: exhausted ladder -> GiveUp");
+        CHECK(DecideDraftClear(L"stubborn", spent(0, 0, kMaxDraftBackspaceRounds, true)).action == DraftClearAction::GiveUp, "draft clear: exhausted backspaces -> GiveUp even while shrinking");
 
-        // TERMINATION: from any starting box, driving the ladder with a worst-case TUI that ignores
-        // every keystroke must reach GiveUp in a bounded number of steps — never loop forever.
+        // TERMINATION: driving the ladder with a worst-case TUI that ignores every keystroke must
+        // reach GiveUp in a bounded number of steps — never loop forever — with or without the stash
+        // rung, and pressing Ctrl+S AT MOST ONCE along the way.
+        for (const bool useStash : { true, false })
         {
-            uint32_t kills = 0, rounds = 0;
+            DraftClearProgress p;
+            p.useStash = useStash;
             int steps = 0;
-            DraftClearAction last = DraftClearAction::Kill;
+            auto last = DraftClearAction::Kill;
             while (steps++ < 64)
             {
-                const auto p = DecideDraftClear(L"never changes", kills, rounds, false);
-                last = p.action;
-                if (p.action == DraftClearAction::GiveUp || p.action == DraftClearAction::Done)
+                const auto plan = DecideDraftClear(L"never changes", p);
+                last = plan.action;
+                if (plan.action == DraftClearAction::GiveUp || plan.action == DraftClearAction::Done)
                 {
                     break;
                 }
-                (p.action == DraftClearAction::Kill ? kills : rounds) += 1;
+                if (plan.action == DraftClearAction::Stash)
+                {
+                    ++p.stashPresses;
+                }
+                else if (plan.action == DraftClearAction::Kill)
+                {
+                    ++p.killPresses;
+                }
+                else
+                {
+                    ++p.backspaceRounds;
+                }
             }
             CHECK(last == DraftClearAction::GiveUp, "draft clear: an unresponsive TUI terminates at GiveUp");
-            CHECK(steps <= static_cast<int>(kMaxDraftKillPresses + kMaxDraftBackspaceRounds) + 2, "draft clear: termination is bounded by the two rung caps");
+            CHECK(p.stashPresses <= kMaxDraftStashPresses, "draft clear: Ctrl+S is pressed at most once across a whole run");
+            CHECK(steps <= static_cast<int>(kMaxDraftStashPresses + kMaxDraftKillPresses + kMaxDraftBackspaceRounds) + 2, "draft clear: termination is bounded by the rung caps");
         }
     }
 }

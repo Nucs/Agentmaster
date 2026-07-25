@@ -1041,6 +1041,10 @@ namespace winrt::TerminalApp::implementation
         _setPreserveDraft.Header(winrt::box_value(L"Preserve my unsent draft when a prompt is sent"));
         AgentSetTip(_setPreserveDraft, L"When a prompt is sent to a session whose input box already holds text you typed but have NOT sent, take your draft out of the way first and put it straight back afterwards \x2014 instead of pasting the prompt on top of it, which submitted your words and the prompt together as one message you never wrote.\n\nWhile it works (about a second) that tab's keyboard is locked so your typing cannot land mid-swap; you still see everything happening. Your draft is put back with the terminal's own undo buffer, so it comes back exactly as you typed it \x2014 unsent, one Enter away.\n\nIf the box cannot be cleared, NOTHING is sent: the prompt stays queued and your draft is left alone. Off restores the old behavior (the prompt is pasted into your draft).");
         panel.Children().Append(_setPreserveDraft);
+        _setDraftSwapCtrlS = ToggleSwitch{};
+        _setDraftSwapCtrlS.Header(winrt::box_value(L"Use Ctrl+S to stash my draft aside while it sends"));
+        AgentSetTip(_setDraftSwapCtrlS, L"How the setting above moves your draft out of the way: with Claude's own stash (Ctrl+S), which lifts the WHOLE input box aside in one keystroke and puts it back exactly as it was \x2014 wherever your cursor happened to be.\n\nRecommended, and on by default. Turn it off only if Ctrl+S misbehaves in your build: the swap then falls back to the terminal's line-editor undo, which works a line at a time and can restore poorly when the cursor sits mid-text.\n\nNote Claude keeps ONE stash slot, so a swap replaces anything you had stashed yourself earlier. Your live draft is never at risk either way \x2014 if the box cannot be cleared, nothing is sent.");
+        panel.Children().Append(_setDraftSwapCtrlS);
 
         // === BEHAVIOR tab ===
         panel = behaviorPanel;
@@ -2383,6 +2387,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setPreserveDraft.IsOn(_appSettings.preserveDraftOnSend);
         }
+        if (_setDraftSwapCtrlS)
+        {
+            _setDraftSwapCtrlS.IsOn(_appSettings.draftSwapUseCtrlS);
+        }
         if (_setConfirmKill)
         {
             _setConfirmKill.IsOn(_appSettings.confirmBeforeKill);
@@ -2997,6 +3005,10 @@ namespace winrt::TerminalApp::implementation
         if (_setPreserveDraft)
         {
             _appSettings.preserveDraftOnSend = _setPreserveDraft.IsOn();
+        }
+        if (_setDraftSwapCtrlS)
+        {
+            _appSettings.draftSwapUseCtrlS = _setDraftSwapCtrlS.IsOn();
         }
         if (_setConfirmKill)
         {

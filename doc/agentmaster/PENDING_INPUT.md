@@ -545,14 +545,33 @@ window so the user's own keystrokes cannot interleave with it.
 |---|------|--------------|
 | 1 | **READ** | `PickCurrentPromptText(live, remembered)` — the §8 rule: the live buffer read wins, the observer's remembered draft is the fallback. An empty result is re-read once (the TUI repaints constantly; a single missed frame must not read as "no draft"). |
 | 2 | **LOCK** | `TermControl::SetReadOnly(true)`. The user still **sees** everything happening in the tab; they just cannot type into it for the ~1 s it takes. Silent — WT short-circuits the read-only check for key events, so there is no warning dialog per keystroke. Only released if **we** took it (a read-only the user set themselves is left alone). |
-| 3 | **CLEAR** | `Ctrl+U` (0x15) — kill the box **into the TUI's kill-ring** — then re-read until the box is *confirmed* empty. `DecideDraftClear` escalates: keep pressing while the box shrinks, fall through to `DEL` (0x7F) backspaces when a press changes nothing, then give up. Each rung gets a **settle** (300 ms) before it is judged, so a slow repaint is never mistaken for an unbound key. |
+| 3 | **CLEAR** | `Ctrl+S` — **Claude's own stash** — then re-read until the box is *confirmed* empty. `DecideDraftClear` escalates: stash → `Ctrl+U` kill-ring → `DEL` (0x7F) backspaces → give up. Each rung gets a **settle** (300 ms) before it is judged, so a slow repaint is never mistaken for an unbound key. |
 | 4 | **ABORT** | If the box never confirms empty: **send nothing**, roll the prompt back to `Pending`, restore the box, unlock. A prompt sent late is recoverable; a mangled message is not. |
 | 5 | **SEND** | The unchanged `BuildPromptSubmission` recipe — so the echo dedup, the pickup guard and the Enter-retry watchdog all still apply to it. |
 | 6 | **AWAIT** | Wait for the prompt to actually *leave* the box: a turn-started signal (the three `DecideEnterRetry` trusts) **and** an empty box. If it is still sitting there un-submitted we do **not** restore — yanking then would merge into it, the very bug this exists to prevent — and the draft stays in the kill-ring (one manual `Ctrl+Y`) and in the registry's memory, both logged. |
-| 7 | **RESTORE** | `Ctrl+Y` yanks the kill-ring back, and the result is **compared against the draft we read**. A yank is only as good as the ring (a multi-press clear, a mixed kill+backspace clear, or a submit that flushed it can all hand back the wrong text), so on a mismatch the box is emptied again and the draft is re-pasted verbatim with `BuildPromptFill` — the /handover-standby channel: a bracketed paste with **no** submit CR. Never both: the paste only runs on a box verified still empty. |
+| 7 | **RESTORE** | Through **whichever rung emptied the box** — `Ctrl+S` again for a stash, `Ctrl+Y` for a kill — and the result is **compared against the draft we read**. Neither channel is guaranteed (a multi-press or mixed clear, or a submit that flushed the ring, can hand back the wrong text), so on a mismatch the box is emptied again and the draft is re-pasted verbatim with `BuildPromptFill` — the /handover-standby channel: a bracketed paste with **no** submit CR. Never both: the paste only runs on a box verified still empty. |
 | 8 | **UNLOCK** | Release the read-only window and re-record the draft (`SetPendingInput`), so the "3 dots" stay honest throughout. |
 
-**Why the yank is tried first.** It returns the TUI's *own* internal state, so a draft holding a
+**Why `Ctrl+S` is the default rung.** It is Claude's **stash** — a toggle over one slot: pressed with
+text in the box it lifts the **whole box** aside and empties it; pressed on an empty box it restores.
+Both of our presses land on the right side of that toggle by construction (we clear only when the box
+has text, restore only when it is *verified* empty), and unlike `Ctrl+U` it is **not line-scoped and not
+cursor-relative** — which is exactly why it replaced the kill-ring pair as the default. `Ctrl+U` only
+killed the current line and restored badly when the cursor sat mid-text, so it is now the fallback
+(`AppSettings::draftSwapUseCtrlS`, the cog's *"Use Ctrl+S to stash my draft aside while it sends"*,
+**checked by default**).
+
+⚠ **One slot.** A stash the *user* had already made is discarded by ours. That is unavoidable — the
+slot is not inspectable — and worth knowing; their **live** draft is never at risk, only a previously
+stashed one.
+
+⚠ **Never press the toggle blind.** `Ctrl+S` on a box that still has text *stashes* it rather than
+restoring, so `_RestoreDraftAfterSwap` re-reads and **skips the press unless the box is verified empty**,
+and the mismatch path clears with `Ctrl+U` rather than `Ctrl+S` (a stash press there would push the
+leftover into the slot — the one place the user's original may still be sitting). `kMaxDraftStashPresses`
+is **1** and must stay 1: a second press un-stashes.
+
+**Why the TUI's own channel is tried first.** It returns Claude's *internal* state, so a draft holding a
 `[Pasted text #N +M lines]` placeholder still refers to the real paste-cache content afterwards. That is
 also why the paste fallback is **refused** when the draft contains a placeholder (`FindPasteMarkers`):
 re-typing `[Pasted text #1 +50 lines]` would put that label in the box as literal text and silently drop
@@ -575,8 +594,10 @@ mid-swap the box is deliberately empty, and letting the clear debounce see that 
 draft the swap is carrying (and drop the dots for a second). The swap re-records the draft when it
 finishes.
 
-**Off-switch.** `AppSettings::preserveDraftOnSend` (cog → **Tests Autorunner** → *"Preserve my unsent
-draft when a prompt is sent"*), **default ON**. Off restores the historical merge behavior verbatim. A
+**Off-switches.** `AppSettings::preserveDraftOnSend` (cog → **Tests Autorunner** → *"Preserve my unsent
+draft when a prompt is sent"*), **default ON**, and beneath it `AppSettings::draftSwapUseCtrlS`
+(*"Use Ctrl+S to stash my draft aside while it sends"*), **also default ON**, which picks the stash rung
+over the kill-ring fallback. Off restores the historical merge behavior verbatim. A
 session with an empty box takes the same fast path either way — there is nothing a paste could merge
 into, so the injection is byte-identical to before.
 
@@ -584,11 +605,13 @@ into, so the injection is byte-identical to before.
 declined overlapping swap, the deferred restore, and the outcome (`restored by KILL-RING yank` /
 `by PASTE` / `could NOT be put back verbatim`). So "why did my draft change?" is answerable off the log.
 
-**Coverage.** The pure half is unit-tested in the engine harness (`TestPendingInput`, §26): the three
-control-code builders + the round cap, the emptiness rule, the shrink-driven kill rung, the fall-through
-to backspaces when a press changes nothing, both rung caps, "never returns to Kill once past it", and a
-**termination** proof — an unresponsive TUI reaches `GiveUp` in a bounded number of steps. The
-`preserveDraftOnSend` round-trip rides the `AppSettings` persistence test. The in-app behaviour rides
+**Coverage.** The pure half is unit-tested in the engine harness (`TestPendingInput`, §26): the four
+control-code builders + the round cap, the emptiness rule, **`Ctrl+S` is pressed at most once** (it is a
+toggle — a second press would un-stash), the hand-over to `Ctrl+U` when a stash changes nothing, the
+setting-off path starting at the kill rung, the shrink-driven kill rung, the fall-through to backspaces,
+every rung cap, "never goes back to an earlier rung", and a **termination** proof under both settings —
+an unresponsive TUI reaches `GiveUp` in a bounded number of steps having pressed `Ctrl+S` at most once.
+Both settings round-trip in the `AppSettings` persistence test. The in-app behaviour rides
 the next deploy cycle.
 
 ### Follow-ups (non-blocking)

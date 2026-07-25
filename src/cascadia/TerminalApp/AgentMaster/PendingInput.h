@@ -486,28 +486,55 @@ namespace Agentmaster
     // Submitting a queued prompt into a box that already holds the user's UNSENT draft used to
     // MERGE the two: a bracketed paste lands at the cursor and the submit CR then sends draft +
     // prompt as one message the user never wrote (and never pressed Enter on). The swap empties
-    // the box first, sends, and puts the draft back -- driven by Claude's own line-editor
-    // kill-ring, so the restore is the user's EXACT bytes round-tripped by the TUI rather than
-    // re-typed by us:
+    // the box first, sends, and puts the draft back.
     //
-    //   Ctrl+U (0x15) -- kill the input box INTO the kill-ring.
+    // THE PRIMARY CHANNEL IS CLAUDE'S OWN STASH -- Ctrl+S (0x13), a TOGGLE over one stash slot:
+    //
+    //   box has text  ->  Ctrl+S STASHES it and empties the box (replacing any earlier stash)
+    //   box is empty  ->  Ctrl+S RESTORES the stash back into the box
+    //
+    // That is exactly the shape the swap needs, and both of our presses land on the right side of
+    // it by construction: we only ever press to clear when the box HAS text, and only ever press to
+    // restore when the box has been VERIFIED empty. It handles the whole box (not one line) and is
+    // cursor-position independent, which is why it replaced the kill-ring pair as the default.
+    //
+    //   ! ONE SLOT, so a stash the USER had already made is discarded by ours. Unavoidable (the
+    //     slot is not inspectable) and worth knowing; their live draft is never at risk, only a
+    //     previously stashed one.
+    //
+    // THE FALLBACK CHANNEL is the line-editor kill-ring, used when the Ctrl+S rung is switched off
+    // (AppSettings::draftSwapUseCtrlS) or does not empty the box:
+    //
+    //   Ctrl+U (0x15) -- kill INTO the kill-ring. Line-scoped and cursor-relative, so it can need a
+    //                    press per line and may kill only part of a draft -- the reason it is no
+    //                    longer the default.
     //   Ctrl+Y (0x19) -- yank the kill-ring back into the (now empty) box.
-    //   DEL    (0x7F) -- the fallback erase, one per remaining character, used only when a kill
-    //                    press does not empty the box.
+    //   DEL    (0x7F) -- the last-resort erase, one per remaining character, used only when a kill
+    //                    press does not shrink the box at all. 0x7F rather than 0x08: xterm-family
+    //                    terminals send DEL for the Backspace KEY, which is what a TUI line editor
+    //                    binds; 0x08 is Ctrl+H and is commonly bound elsewhere.
     //
-    // 0x7F rather than 0x08: xterm-family terminals send DEL for the Backspace KEY, which is what
-    // a TUI line editor binds; 0x08 is Ctrl+H and is commonly bound elsewhere. The restore has its
-    // own fallback in the UI lane -- if the yank does not put text back, the draft we READ is
-    // re-pasted with BuildPromptFill (no submit CR) -- so both halves degrade.
+    // Whichever rung cleared the box is the one the UI lane restores through, and the restore is
+    // VERIFIED against the draft that was read before clearing; a mismatch falls back to re-pasting
+    // that text with BuildPromptFill (no submit CR). So every half degrades.
     //
     // NOTHING here is assumed to have worked: every rung is VERIFIED by re-reading the box through
     // DetectPendingInput, and a swap that cannot confirm an EMPTY box ABORTS without sending. An
     // unsupported keybinding therefore costs a deferred prompt, never a mangled message. PURE --
     // these only build the bytes and decide the next rung; the injecting, the re-reads and the
     // read-only window live in the UI lane (TerminalPage::_SubmitPromptWithDraftSwap).
+    inline constexpr wchar_t kInputStashChar = L'\x13'; // Ctrl+S -- Claude's stash/unstash toggle
     inline constexpr wchar_t kInputKillLineChar = L'\x15'; // Ctrl+U -- kill the line into the kill-ring
     inline constexpr wchar_t kInputYankChar = L'\x19'; // Ctrl+Y -- yank it back
     inline constexpr wchar_t kInputBackspaceChar = L'\x7f'; // DEL -- the fallback erase
+
+    // The SAME byte both stashes and restores -- it is one toggle, and which way it goes is decided
+    // by whether the box has text. Callers must therefore never press it "just in case": pressing it
+    // on an empty box un-stashes, and pressing it on a full box discards the stash.
+    inline std::wstring BuildInputStash()
+    {
+        return std::wstring(1, kInputStashChar);
+    }
 
     inline std::wstring BuildInputKill()
     {
@@ -529,17 +556,25 @@ namespace Agentmaster
         return std::wstring((count < kMaxBackspacesPerRound ? count : kMaxBackspacesPerRound), kInputBackspaceChar);
     }
 
-    // How many times each rung may be tried before the swap gives up. Small by design: Ctrl+U
-    // empties the box in ONE press on a supported build, so needing more already means the binding
-    // is not doing what we expect and the backspace rung should take over; two backspace rounds
-    // then cover a box whose length the first round under-measured.
+    // How many times each rung may be tried before the swap gives up.
+    //
+    // The stash cap is 1 and MUST STAY 1: Ctrl+S is a toggle, so a second press on a box the first
+    // press emptied would UN-stash and put the draft straight back. One press either works or the
+    // ladder moves on.
+    //
+    // The kill cap is 3 because Ctrl+U is line-scoped -- a multi-line draft can need a press per
+    // line -- while needing more than that already means the binding is not doing what we expect
+    // and the erase rung should take over; two backspace rounds then cover a box whose length the
+    // first round under-measured.
+    inline constexpr uint32_t kMaxDraftStashPresses = 1;
     inline constexpr uint32_t kMaxDraftKillPresses = 3;
     inline constexpr uint32_t kMaxDraftBackspaceRounds = 2;
 
     enum class DraftClearAction
     {
         Done, // the box reads empty -- the swap may send
-        Kill, // press Ctrl+U (again)
+        Stash, // press Ctrl+S (stash the whole box aside) -- the default first rung
+        Kill, // press Ctrl+U (kill into the kill-ring)
         Backspace, // erase `backspaces` characters, then re-read
         GiveUp, // the box will not empty -- ABORT the swap (send nothing, leave the draft alone)
     };
@@ -550,29 +585,37 @@ namespace Agentmaster
         size_t backspaces{ 0 }; // valid for Backspace
     };
 
+    // What the caller has spent on this box so far. A struct rather than a parameter list so a new
+    // rung cannot silently reorder an existing call site.
+    struct DraftClearProgress
+    {
+        uint32_t stashPresses{ 0 };
+        uint32_t killPresses{ 0 };
+        uint32_t backspaceRounds{ 0 };
+        bool shrank{ false }; // did the LAST action shrink the box? (false on the first call)
+        bool useStash{ true }; // AppSettings::draftSwapUseCtrlS -- off => start at the kill rung
+    };
+
     // PURE decision (the DecideAdvance pattern) for ONE step of the clear ladder. Its inputs are
-    // the box as RE-READ right now plus how many rungs have already been spent, so the caller is a
-    // plain "read -> decide -> act -> read again" loop holding no hidden state:
+    // the box as RE-READ right now plus what has already been spent, so the caller is a plain
+    // "read -> decide -> act -> read again" loop holding no hidden state:
     //
     //   * empty box                     -> Done. Whitespace-only counts as empty (a focused empty
     //                                      box can render as padding alone), the same rule
     //                                      PickCurrentPromptText applies.
+    //   * stash rung enabled + unspent  -> Stash. One press, whole box, cursor-independent.
     //   * kill presses left, and either
     //     none pressed yet or the last
-    //     press SHRANK the box          -> Kill. A multi-line draft can take a press per line.
-    //   * a press that did NOT shrink   -> fall through to the backspace rung: the binding is not
-    //                                      the one we assumed, so stop pressing it.
+    //     action SHRANK the box         -> Kill. A multi-line draft can take a press per line.
+    //   * an action that did NOT shrink -> fall through to the erase rung: that binding is not
+    //                                      doing what we assumed, so stop pressing it.
     //   * backspace rounds left         -> Backspace, one per remaining character plus a small
     //                                      margin for a trailing cursor cell in the read.
     //   * otherwise                     -> GiveUp.
     //
-    // `shrank` is the caller's comparison of this read against the previous one (false on the
-    // first call). Kill is never returned once the ladder has moved on -- `backspaceRounds > 0`
-    // pins it -- so the two rungs cannot alternate forever.
-    inline DraftClearPlan DecideDraftClear(std::wstring_view box,
-                                           uint32_t killPresses,
-                                           uint32_t backspaceRounds,
-                                           bool shrank)
+    // The ladder only ever moves FORWARD -- a spent rung is pinned by its own counter -- so no two
+    // rungs can alternate and the loop always terminates.
+    inline DraftClearPlan DecideDraftClear(std::wstring_view box, const DraftClearProgress& spent)
     {
         DraftClearPlan plan;
         if (pending_detail::AllWhitespace(box))
@@ -580,12 +623,23 @@ namespace Agentmaster
             plan.action = DraftClearAction::Done;
             return plan;
         }
-        if (backspaceRounds == 0 && killPresses < kMaxDraftKillPresses && (killPresses == 0 || shrank))
+        if (spent.useStash && spent.stashPresses < kMaxDraftStashPresses &&
+            spent.killPresses == 0 && spent.backspaceRounds == 0)
         {
+            plan.action = DraftClearAction::Stash;
+            return plan;
+        }
+        if (spent.backspaceRounds == 0 && spent.killPresses < kMaxDraftKillPresses &&
+            (spent.killPresses == 0 || spent.shrank))
+        {
+            // The FIRST kill press is always allowed, whatever the stash rung did: a Ctrl+S that
+            // changed nothing just means the binding is absent here, and Ctrl+U is the fair next
+            // thing to try. `shrank` gates only the REPEAT presses (a multi-line draft), so a kill
+            // that does nothing hands over to the erase rung instead of burning its budget.
             plan.action = DraftClearAction::Kill;
             return plan;
         }
-        if (backspaceRounds < kMaxDraftBackspaceRounds)
+        if (spent.backspaceRounds < kMaxDraftBackspaceRounds)
         {
             plan.action = DraftClearAction::Backspace;
             plan.backspaces = box.size() + 8; // + margin: a trailing cursor cell / a wide glyph
