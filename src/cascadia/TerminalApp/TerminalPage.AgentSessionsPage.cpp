@@ -2001,7 +2001,8 @@ namespace winrt::TerminalApp::implementation
                             self->_ForkSessionFromDisk(rid, rdir, forkTitle, std::wstring{ model });
                         }
                     });
-                });
+                },
+                                        _ModelSpecifyOpener());
                 rowMenu.Items().Append(forkBtn);
 
                 // Launch-model picker: a SUBMENU — "Default" (the plain behavior) + one item per
@@ -2019,7 +2020,8 @@ namespace winrt::TerminalApp::implementation
                             self->_SpawnClaudeSession(winrt::hstring{ rdir }, winrt::hstring{ L"" }, static_cast<uint32_t>(-1), model);
                         }
                     });
-                });
+                },
+                                        _ModelSpecifyOpener());
                 rowMenu.Items().Append(fresh);
 
                 // --- Filter \xBB : narrow the list to sessions LIKE this one. Each facet ANDs with the
@@ -2335,7 +2337,7 @@ namespace winrt::TerminalApp::implementation
             });
             {
                 MenuFlyout modelMenu;
-                AgentFillModelPickItems(modelMenu.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), forkHere);
+                AgentFillModelPickItems(modelMenu.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), forkHere, _ModelSpecifyOpener());
                 forkBtn.Flyout(modelMenu);
             }
             actions.Children().Append(forkBtn);
@@ -2360,7 +2362,7 @@ namespace winrt::TerminalApp::implementation
         });
         {
             MenuFlyout modelMenu;
-            AgentFillModelPickItems(modelMenu.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), spawnFreshHere);
+            AgentFillModelPickItems(modelMenu.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), spawnFreshHere, _ModelSpecifyOpener());
             fresh.Flyout(modelMenu);
         }
         actions.Children().Append(fresh);

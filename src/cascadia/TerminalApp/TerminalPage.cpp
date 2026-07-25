@@ -2759,8 +2759,11 @@ namespace winrt::TerminalApp::implementation
                     // is really WT's duplicate-tab). The Tab change-gates the rebuilds, so an
                     // unchanged list costs only the one parse.
                     const auto launchModels = ::Agentmaster::ParseLaunchModels(page->_appSettings.launchModels);
-                    tab->SetNewSessionModels(launchModels, isCodex);
-                    tab->SetForkSessionModels(launchModels, isSession && !isCodex);
+                    // The "Specify..." item's opener is the PAGE's prompt (a Tab has no visual root
+                    // of its own to host a modal in) — handed over here so the tab menu's submenus
+                    // show the very same card the Manager and Sessions surfaces do.
+                    tab->SetNewSessionModels(launchModels, isCodex, page->_ModelSpecifyOpener());
+                    tab->SetForkSessionModels(launchModels, isSession && !isCodex, page->_ModelSpecifyOpener());
                     tab->SetAgentMarkUnreadVisible(isSession); // Agentmaster: "Mark Unread" is session-only too
                     tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star
                     tab->SetAgentTagVisible(isSession); // Agentmaster (bookmark tags): "Tag" is session-only too

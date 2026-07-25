@@ -1070,7 +1070,8 @@ namespace winrt::TerminalApp::implementation
                     self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}, model);
                 };
                 if (disp) { disp.TryEnqueue(act); } else { act(); }
-            });
+            },
+                                    _ModelSpecifyOpener());
             menu.Items().Append(openHere);
 
             // Copy Session Id — the resolved conversation id. Empty for a never-prompted external
@@ -1688,7 +1689,8 @@ namespace winrt::TerminalApp::implementation
                     self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}, model);
                 };
                 if (disp) { disp.TryEnqueue(act); } else { act(); }
-            });
+            },
+                                    _ModelSpecifyOpener());
             menu.Items().Append(openHere);
         }
 
@@ -1758,7 +1760,8 @@ namespace winrt::TerminalApp::implementation
                     }
                 };
                 if (disp) { disp.TryEnqueue(act); } else { act(); }
-            });
+            },
+                                    _ModelSpecifyOpener());
             menu.Items().Append(fork);
         }
 

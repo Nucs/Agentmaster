@@ -77,6 +77,21 @@ namespace Agentmaster
     // Recent working directories (MRU) for the Launch path-picker. Front == most recent.
     std::wstring SerializeRecentDirs(const std::vector<std::wstring>& dirs);
     std::vector<std::wstring> DeserializeRecentDirs(std::wstring_view text);
+    // Agentmaster (launch-model picker -> "Specify..."): recently TYPED model ids (MRU), the
+    // recent-dirs twin — front == most recent. This is what the Specify prompt's dropdown lists,
+    // so a model you had to look up once is one click away forever after. Deliberately its own
+    // file (recent-models.json), NOT an AppSettings field: it is written from any window on any
+    // pick, and settings.json is a read-modify-write document several surfaces already contend
+    // for (the updater's RMW, the cog's Save) — an MRU append must never risk clobbering it.
+    inline constexpr size_t kMaxRecentModels = 20;
+    std::wstring SerializeRecentModels(const std::vector<std::wstring>& models);
+    std::vector<std::wstring> DeserializeRecentModels(std::wstring_view text);
+    // Push `id` to the FRONT of an MRU (pure; the caller persists the result). Trims; an empty /
+    // whitespace-only id is a no-op; an id already present is MOVED to the front rather than
+    // duplicated (matched case-INsensitively — "Opus" and "opus" are one model — while the NEW
+    // spelling is what gets stored, so the list shows what you last typed); capped at `cap`
+    // (oldest dropped). PURE + unit-tested.
+    std::vector<std::wstring> PushRecentModel(std::vector<std::wstring> models, std::wstring_view id, size_t cap = kMaxRecentModels);
     // Open-at-exit window manifest (M10 Increment 3 refinement; PERSISTENCE.md §13.5): the set of
     // windowIds that were OPEN when the app last exited — distinct from "every record ever," so the
     // startup auto-reopen offers exactly the last-open windows (a window closed mid-session is pruned
@@ -107,6 +122,11 @@ namespace Agentmaster
     std::vector<PlanTemplate> LoadTemplates();
     void SaveRecentDirs(const std::vector<std::wstring>& dirs);
     std::vector<std::wstring> LoadRecentDirs();
+    void SaveRecentModels(const std::vector<std::wstring>& models);
+    std::vector<std::wstring> LoadRecentModels();
+    // Load -> PushRecentModel -> Save, the one call every "Specify..." commit makes (each window
+    // re-reads the freshest file first, so two windows adding models can't lose each other's).
+    void RememberRecentModel(std::wstring_view id);
     void SaveLayout(const ManagerLayout& layout);
     ManagerLayout LoadLayout();
     void SaveAppSettings(const AppSettings& settings);

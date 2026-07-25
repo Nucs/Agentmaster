@@ -969,6 +969,15 @@ namespace winrt::TerminalApp::implementation
         void _OpenTagEditorForElement(const std::wstring& sessionId, const winrt::Windows::UI::Xaml::FrameworkElement& anchor); // the Sessions-row / Triage-Board-card / Explorer-tree-row "Tags" items: open for ANY session id, anchored under the clicked element
         void _OpenTagEditorAt(const std::wstring& sessionId, double x, double y); // the shared open: place + show at root-relative (x, y), deferred past the invoking flyout's close (its refocus must not fight the name box); re-randomizes the color pre-pick
         void _EnsureTagEditorPopup(); // lazily build the panel ONCE (card + [name box | +] row + color-picker swatches + hint + tag list) and parent it into Root(); wires Esc / Enter / outside-press dismissal
+        // Agentmaster (launch-model picker -> "Specify..."): the type-any-model-id prompt, hosted in a
+        // Root()-parented Popup (a ContentDialog text box gets no keypresses under XAML Islands). The
+        // CARD comes from the shared AgentBuildSpecifyModelCard, so this and the Manager's prompt are
+        // the same control. Serves the Sessions page's row menu + detail SplitButtons AND the WT tab
+        // menu's "New Session Here"/"Fork session" submenus (Tab raises nothing — the page hands Tab
+        // the opener at flyout-open). `onPicked` fires ONLY on commit; cancel launches nothing.
+        void _PromptForModel(std::function<void(winrt::hstring)> onPicked, const std::wstring& seed = {});
+        void _HideSpecifyModel();
+        std::function<void(std::function<void(winrt::hstring)>)> _ModelSpecifyOpener(); // ONE opener, shared by every model submenu this page builds or feeds
         void _RebuildTagEditorList(); // re-list the GLOBAL tag universe (CollectGlobalTags over sessions ∪ the tags.json registry — max session activity desc, 0-carrier known tags last) with this session's on/off state per row, a right-aligned ✕ delete on 0-carrier rows, + the "K of N tags" footer
         void _CommitTagEditorAdd(); // the "+" button / Enter: normalize the typed name; an existing tag just applies to this session, a NEW name is cap-gated (AppSettings::maxTags) + takes the picker's color (an explicit pick also recolors an existing tag); re-randomizes the pick after a successful add
         void _UpdateTagEditorAddState(); // TextChanged: show the "+" only when the box holds a usable name; disable + hint when a NEW name would exceed the cap
@@ -977,6 +986,7 @@ namespace winrt::TerminalApp::implementation
         void _ToggleSessionTag(const std::wstring& sessionId, const std::wstring& tag); // add/remove one tag on a session (SessionStore) + refresh its tab badges + re-render the panel list; an untag first registers the tag (tags.json) so losing its last carrier can't vanish it
         void _RemoveGlobalTag(const std::wstring& tag); // the tag-list row's ✕ (0-carrier rows only): explicitly delete the tag from the durable registry — the ONE tag-removal path (a carried tag stays alive via the derived union; the color entry is kept)
         void _CloseTagEditorPopup(); // dismiss the panel (Esc / outside press / tab switch)
+        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _specifyModelPopup{ nullptr }; // the "Specify a model..." prompt — built once, parented into Root(); its CHILD is rebuilt per open (fresh MRU + this invocation's callback)
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _tagEditorPopup{ nullptr }; // the Tags panel (bookmark tags) — built once, parented into Root()
         winrt::Windows::UI::Xaml::Controls::Border _tagEditorCard{ nullptr }; // the panel card (the outside-press dismissal's inside/outside boundary)
         winrt::Windows::UI::Xaml::Controls::TextBox _tagEditorBox{ nullptr }; // row 1: the focusable "name the tag" box

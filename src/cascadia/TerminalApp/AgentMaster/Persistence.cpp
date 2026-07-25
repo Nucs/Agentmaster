@@ -1261,6 +1261,77 @@ namespace Agentmaster
         return out;
     }
 
+    std::wstring SerializeRecentModels(const std::vector<std::wstring>& models)
+    {
+        auto root = json::Value::MkObj();
+        root.Set(L"version", json::Value::MkNum(1));
+        auto arr = json::Value::MkArr();
+        for (const auto& m : models)
+        {
+            arr.Push(json::Value::MkStr(m));
+        }
+        root.Set(L"models", std::move(arr));
+        return json::Dump(root);
+    }
+
+    std::vector<std::wstring> DeserializeRecentModels(std::wstring_view text)
+    {
+        std::vector<std::wstring> out;
+        const auto parsed = json::Parse(text);
+        if (!parsed)
+        {
+            return out;
+        }
+        if (const auto* arr = parsed->Find(L"models"); arr && arr->type == json::Value::Type::Arr)
+        {
+            for (const auto& mv : arr->arr)
+            {
+                if (mv.type == json::Value::Type::Str && !mv.AsStr().empty())
+                {
+                    out.push_back(mv.AsStr());
+                }
+            }
+        }
+        return out;
+    }
+
+    std::vector<std::wstring> PushRecentModel(std::vector<std::wstring> models, std::wstring_view id, size_t cap)
+    {
+        // Trim (a pasted id often carries surrounding whitespace).
+        size_t b = 0, e = id.size();
+        while (b < e && (id[b] == L' ' || id[b] == L'\t' || id[b] == L'\r' || id[b] == L'\n'))
+        {
+            ++b;
+        }
+        while (e > b && (id[e - 1] == L' ' || id[e - 1] == L'\t' || id[e - 1] == L'\r' || id[e - 1] == L'\n'))
+        {
+            --e;
+        }
+        const std::wstring trimmed{ id.substr(b, e - b) };
+        if (trimmed.empty())
+        {
+            return models; // "" is "Default" — never an MRU entry
+        }
+        const auto fold = [](std::wstring_view s) {
+            std::wstring f;
+            f.reserve(s.size());
+            for (wchar_t c : s)
+            {
+                f.push_back(static_cast<wchar_t>(std::towlower(c)));
+            }
+            return f;
+        };
+        const std::wstring key = fold(trimmed);
+        // Drop any prior spelling of the same id, then re-insert at the front with the NEW spelling.
+        models.erase(std::remove_if(models.begin(), models.end(), [&](const std::wstring& m) { return fold(m) == key; }), models.end());
+        models.insert(models.begin(), trimmed);
+        if (cap > 0 && models.size() > cap)
+        {
+            models.resize(cap);
+        }
+        return models;
+    }
+
     std::wstring SerializeOpenWindows(const std::vector<std::wstring>& windowIds)
     {
         auto root = json::Value::MkObj();
@@ -1417,6 +1488,21 @@ namespace Agentmaster
     std::vector<std::wstring> LoadRecentDirs()
     {
         return DeserializeRecentDirs(ReadAllUtf8(AgentmasterStateDir() + L"\\recent-dirs.json"));
+    }
+
+    void SaveRecentModels(const std::vector<std::wstring>& models)
+    {
+        WriteAllUtf8(AgentmasterStateDir() + L"\\recent-models.json", SerializeRecentModels(models));
+    }
+    std::vector<std::wstring> LoadRecentModels()
+    {
+        return DeserializeRecentModels(ReadAllUtf8(AgentmasterStateDir() + L"\\recent-models.json"));
+    }
+    void RememberRecentModel(std::wstring_view id)
+    {
+        // Re-read the FRESHEST file rather than trusting an in-memory copy: any window can add a
+        // model at any time, and this MRU is small enough that the read is free.
+        SaveRecentModels(PushRecentModel(LoadRecentModels(), id));
     }
     void SaveOpenWindows(const std::vector<std::wstring>& windowIds)
     {

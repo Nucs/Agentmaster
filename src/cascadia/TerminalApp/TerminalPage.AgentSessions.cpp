@@ -37,6 +37,7 @@
 #include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
 #include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot)
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
+#include "AgentModelPrompt.h" // AgentBuildSpecifyModelCard — the shared "Specify a model..." prompt this page hosts
 #include "AgentMaster/ClaudeSpawn.h" // BuildClaudeSpawn / ClaudeConversationExists / AppendStateLog
 #include "AgentMaster/CommandWatch.h" // IsSaneWatchPath — the /handover action's path re-assert (COMMANDS.md)
 #include "AgentMaster/Engine.h" // SharedEngine (AM_SESSION stamp; restoreMutex barrier)
@@ -2856,5 +2857,100 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::SetDirColor(dir, newHex); // upsert the color, or drop it on reset
         _ApplyDirColorToTabs(dir, newHex); // every live tab sharing this color key tracks the change
         _ScheduleWindowRecordSave(); // M10: the per-tab color rides in the window record
+    }
+
+    // Agentmaster (launch-model picker -> "Specify..."): show the type-any-model-id prompt over this
+    // window. The POPUP is built once and parented into Root() (the tag editor's recipe — a popup
+    // child renders in the island's popup root, and a ContentDialog text box would take no
+    // keypresses at all); its CHILD is rebuilt per open because it carries this invocation's
+    // callback and re-reads the recent-models MRU, which another window may have just extended.
+    void TerminalPage::_PromptForModel(std::function<void(winrt::hstring)> onPicked, const std::wstring& seed)
+    {
+        // Defer past the invoking flyout's close: a MenuFlyout closes asynchronously and restores
+        // focus on the way out, which would take it straight back off the prompt's text box.
+        Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), onPicked, seed]() {
+            const auto page = weak.get();
+            if (!page || !page->Root())
+            {
+                return;
+            }
+            try
+            {
+                if (!page->_specifyModelPopup)
+                {
+                    page->_specifyModelPopup = WUX::Controls::Primitives::Popup{};
+                    // Top/left aligned so the host Grid below lands at the window origin.
+                    page->_specifyModelPopup.HorizontalAlignment(HorizontalAlignment::Left);
+                    page->_specifyModelPopup.VerticalAlignment(VerticalAlignment::Top);
+                    WUX::Controls::Grid::SetRow(page->_specifyModelPopup, 0);
+                    WUX::Controls::Grid::SetRowSpan(page->_specifyModelPopup, 3); // the whole Root grid (tab row + infobars + content)
+                    page->Root().Children().Append(page->_specifyModelPopup);
+                }
+                // A window-sized dimmed backdrop with the card centered on it — the same modal look
+                // the Manager's overlays have. Sized at OPEN time (a popup child gets no layout slot
+                // to stretch into), which is also when the window size is known to be current.
+                WUX::Controls::Grid host;
+                host.Width(std::max(320.0, page->Root().ActualWidth()));
+                host.Height(std::max(240.0, page->Root().ActualHeight()));
+                host.Background(WUX::Media::SolidColorBrush{ winrt::Windows::UI::ColorHelper::FromArgb(0xA0, 0x00, 0x00, 0x00) });
+                // Backdrop press == cancel: close, and deliberately DON'T call onPicked (nothing
+                // launches unless a model was committed).
+                host.Tapped([weak](const IInspectable&, const WUX::Input::TappedRoutedEventArgs&) {
+                    if (const auto p = weak.get())
+                    {
+                        p->_HideSpecifyModel();
+                    }
+                });
+
+                auto built = AgentBuildSpecifyModelCard(seed, ::Agentmaster::ParseLaunchModels(page->_appSettings.launchModels), [weak, onPicked](winrt::hstring id) {
+                    if (const auto p = weak.get())
+                    {
+                        p->_HideSpecifyModel();
+                    }
+                    if (!id.empty())
+                    {
+                        onPicked(id);
+                    }
+                });
+                host.Children().Append(built.card);
+                page->_specifyModelPopup.Child(host);
+                page->_specifyModelPopup.IsOpen(true);
+                // Focus the box one tick AFTER the open — on a first open the child has only just
+                // been realized and a same-tick Focus on an unlaid-out control no-ops.
+                auto box = built.box;
+                page->Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [box]() {
+                    if (box)
+                    {
+                        box.Focus(FocusState::Programmatic);
+                    }
+                });
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"TerminalPage::_PromptForModel");
+            }
+        });
+    }
+
+    void TerminalPage::_HideSpecifyModel()
+    {
+        if (_specifyModelPopup)
+        {
+            _specifyModelPopup.IsOpen(false);
+            _specifyModelPopup.Child(nullptr); // release the card (and its captured callback)
+        }
+    }
+
+    // ONE opener for every model submenu this page builds (the Sessions browser) or feeds (the WT
+    // tab menu, whose Tab is handed this at flyout-open) — so no surface can wire it differently.
+    std::function<void(std::function<void(winrt::hstring)>)> TerminalPage::_ModelSpecifyOpener()
+    {
+        auto weak = get_weak();
+        return [weak](std::function<void(winrt::hstring)> pick) {
+            if (const auto page = weak.get())
+            {
+                page->_PromptForModel(pick);
+            }
+        };
     }
 }

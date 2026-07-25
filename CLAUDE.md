@@ -1873,7 +1873,7 @@ What works, by area:
   **"Open New Session Here"** AND **"Fork session"/"Fork here"** into a submenu [board/tree session
   menu + External menu + the Sessions page's row menu + its detail-pane SplitButtons (Open-New AND
   Fork) + the WT tab menu's "New Session Here" and "Fork session", the shared `AgentModelMenu.h`
-  recipe]: **Default** (the plain behavior — the settings `model`) + one item per
+  recipe]: **Default** (the plain behavior — the settings `model`) + **`Specify…`** + one item per
   configured model, each starting that ONE session with `--model <id>` [`ParseLaunchModels` →
   `BuildClaudeCommandline`; a fork IS a launch — the pick rides `_ForkManagedSessionById` /
   `_ForkSessionFromDisk` onto the forked session's commandline (the WT tab's fork submenu raises
@@ -1881,7 +1881,29 @@ What works, by area:
   never persisted — resume follows the settings model again; a Codex row keeps the plain items
   (neither a codex spawn nor `codex fork` takes `--model`), a shell tab keeps the plain "Fork
   session" (for it that's WT's duplicate-tab), and the launch bar's Launch/Fork + the double-click
-  Resume/Fork dialog stay Default]; every tooltip points here, an ABSENT key seeds the
+  Resume/Fork dialog stay Default]. **`Specify…` sits directly under Default** in EVERY one of those
+  submenus (and as a row in the Commands tab's three **Successor model** combos): it opens the shared
+  **"Specify a model" prompt** — an **editable ComboBox** whose drop-down lists the ids you used
+  before (the `recent-models.json` MRU, newest first — `PushRecentModel`/`RememberRecentModel`,
+  case-insensitively deduped, cap 20) followed by your configured ids, plus **links to the two
+  published lists** (Anthropic's [models API](https://platform.claude.com/docs/en/api/go/models/list) ·
+  the Codex [models.json](https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json))
+  and a **Fetch list** button that downloads + parses them straight into the drop-down
+  (`AgentMaster/ModelCatalog.h` — PURE header-only parsers + the endpoints, so the harness tests them
+  with no network and no new libs; the bounded WinHTTP GET is the updater's own `HttpsGet`, generalized
+  with an `extraHeaders` param rather than hand-rolling a second one). ⚠ **The Codex catalog is a
+  PUBLIC file so that half always works; Anthropic's `/v1/models` needs an `x-api-key`** — which a
+  Claude **subscription/OAuth** login never issues (verified: the endpoint answers **401**
+  unauthenticated), so the fetch reads `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` from the env and,
+  finding neither, says so in the status line instead of failing blind. The prompt is NOT a
+  `ContentDialog` (its text box would get no keypresses under XAML Islands): ONE card
+  (`AgentBuildSpecifyModelCard`, **`AgentModelPrompt.h`** — split from `AgentModelMenu.h` so
+  Updater.h's winhttp/comctl32 pragmas don't fan out into `Tab.cpp`) shown by the TWO hosts —
+  `AgentManagerContent::_PromptForModel` (a dimmed modal over `_root`, the claude-missing idiom) and
+  `TerminalPage::_PromptForModel` (a `Root()`-parented Popup, the tag-editor idiom, also serving the
+  WT tab menu, which has no visual root of its own — the page hands `Tab` the opener at flyout-open).
+  Committing remembers the id; Cancel/Escape/backdrop launch **nothing** (a blank commit is refused
+  with a hint, never silently treated as Default); every tooltip points here, an ABSENT key seeds the
   defaults while a cleared box stays empty ["just Default"], the tab menu repopulates at
   flyout-open so a cog edit applies live, and the cog editor is **LIVE-LEXED like the env
   editors** — `LexLaunchModelsText` (the `LexEnvText` twin, reusing `EnvLexResult`) recolors the
@@ -2464,6 +2486,12 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     bcrypt/crypt32 has to be threaded through the lib + harness + CLI builds; the content-IDENTITY
     primitive behind the shipped `/handover`+`/handover-here` definitions' digest version history —
     COMMANDS.md §6. NIST-vector + padding-edge tested in `tests/`),
+    `ModelCatalog.h` (header-only, pure — the **published model-list parsers** behind the launch-model
+    picker's "Specify a model..." Fetch: Anthropic's `/v1/models` `{"data":[{id, display_name}]}` and
+    the Codex CLI's `models.json` `{"models":[{slug, display_name}]}`, plus the endpoint + docs-URL
+    constants both the fetch and the prompt's links read. TOTAL — an error page / wrong shape / empty
+    body yields NO rows rather than a partial guess. Pure so the harness covers it with no network and
+    no new link libs; the HTTP itself lives in the UI layer. Unit-tested in `tests/`),
     `RegexUtil.h` (header-only, pure — the ONE **guarded regex component** every user-typed pattern
     goes through, COMMANDS.md §6b: `RegexIsValid`/`RegexSearch`/`RegexReplace` never throw (an
     invalid pattern reads as no-match / input-unchanged — the state a box being EDITED is in most
@@ -2507,6 +2535,14 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     which `std::call_once`s `Register()` at engine init) — the `PromptAnchor.h` idiom, so no vcxproj entry.
     It is what makes the shell activate the RUNNING instance in-process instead of launching a second
     process (whose no-arg startup the Emperor turned into a stray window).
+  - `src/cascadia/TerminalApp/AgentModelPrompt.h` — the shared **"Specify a model" prompt** card
+    (`AgentBuildSpecifyModelCard`): an editable-ComboBox id box seeded from the `recent-models.json`
+    MRU + the configured list, links to the two published model lists, and a bounded off-thread
+    **Fetch** (Updater.h's `HttpsGet` + `AgentMaster/ModelCatalog.h`'s pure parsers). Deliberately
+    SPLIT from `AgentModelMenu.h`: that header is included by `Tab.cpp` (core WT code) and this one
+    drags winhttp/comctl32 in through Updater.h's `#pragma comment(lib)`. Included by exactly the two
+    HOSTS that show it — `AgentManagerContent` (modal over `_root`) and `TerminalPage` (Root() popup,
+    which also serves the WT tab menu's submenus).
   - `src/cascadia/TerminalApp/AgentStatusColors.h` — the ONE shared `SessionState` → color table
     (Triage-Board dot, per-tab overlay, and the tab-strip status dot all read it; replaced the
     overlay's hand-synced palette copy). Also the shared `#AARRGGBB` color parse/format
@@ -2612,7 +2648,9 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   `forwarder-errors.log` (the hook forwarder's
   local silent-drop trace — a delivery that never reached the bridge: no sid / no pipe / a dead
   pipe's connect timeout; the bridge-side hooks.log only sees lines that ARRIVED), `sessions.json` (persisted fleet),
-  `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU), `dir-colors.json`
+  `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU),
+  `recent-models.json` (the "Specify a model..." MRU — the model ids you typed, newest first, what the
+  prompt's drop-down lists), `dir-colors.json`
   (the **permanent** per-working-directory tab color map, schema **v2** — both user picks and
   auto-assigned colors, so a folder keeps its color across restarts), `session-store/<sid>.json`
   (the durable per-session KV — the `title` / `favorite` / `tags` keys), `tags.json` (the **bookmark-tag

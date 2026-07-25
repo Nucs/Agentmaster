@@ -2660,7 +2660,7 @@ namespace winrt::TerminalApp::implementation
     // click raising NewSessionHereRequested with its model id ("" for Default) — the page spawns.
     // The rebuild is change-gated on the joined list (_newSessionModelsKey) so the usual flyout-open
     // with an unchanged settings list touches nothing.
-    void Tab::SetNewSessionModels(const std::vector<std::pair<std::wstring, std::wstring>>& models, bool isCodex)
+    void Tab::SetNewSessionModels(const std::vector<std::pair<std::wstring, std::wstring>>& models, bool isCodex, std::function<void(std::function<void(winrt::hstring)>)> specify)
     {
         ASSERT_UI_THREAD();
 
@@ -2686,12 +2686,14 @@ namespace winrt::TerminalApp::implementation
         _newSessionModelsKey = key;
         _newSessionHereSubMenu.Items().Clear();
         auto weakThis{ get_weak() };
-        AgentFillModelPickItems(_newSessionHereSubMenu.Items(), models, [weakThis](winrt::hstring model) {
-            if (auto tab{ weakThis.get() })
-            {
-                tab->NewSessionHereRequested.raise(model);
-            }
-        });
+        AgentFillModelPickItems(
+            _newSessionHereSubMenu.Items(), models, [weakThis](winrt::hstring model) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->NewSessionHereRequested.raise(model);
+                }
+            },
+            specify);
     }
 
     // Agentmaster (launch-model picker): the "Fork session" twin of SetNewSessionModels — swap the
@@ -2703,7 +2705,7 @@ namespace winrt::TerminalApp::implementation
     // routes to _ForkManagedSessionById with the clicked tab's placement); the plain item keeps its
     // action dispatch, which reaches the same fork seam with model = Default. Change-gated like
     // SetNewSessionModels so an unchanged settings list costs nothing at flyout-open.
-    void Tab::SetForkSessionModels(const std::vector<std::pair<std::wstring, std::wstring>>& models, bool isManagedClaude)
+    void Tab::SetForkSessionModels(const std::vector<std::pair<std::wstring, std::wstring>>& models, bool isManagedClaude, std::function<void(std::function<void(winrt::hstring)>)> specify)
     {
         ASSERT_UI_THREAD();
 
@@ -2729,12 +2731,14 @@ namespace winrt::TerminalApp::implementation
         _forkModelsKey = key;
         _forkSessionSubMenu.Items().Clear();
         auto weakThis{ get_weak() };
-        AgentFillModelPickItems(_forkSessionSubMenu.Items(), models, [weakThis](winrt::hstring model) {
-            if (auto tab{ weakThis.get() })
-            {
-                tab->ForkSessionRequested.raise(model);
-            }
-        });
+        AgentFillModelPickItems(
+            _forkSessionSubMenu.Items(), models, [weakThis](winrt::hstring model) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->ForkSessionRequested.raise(model);
+                }
+            },
+            specify);
     }
 
     // Agentmaster (FAVORITES.md): show/hide the "★ Favorite & close all tabs" close-submenu item. Unlike

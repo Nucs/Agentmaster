@@ -498,6 +498,23 @@ namespace winrt::TerminalApp::implementation
         void _BuildClaudeMissingOverlay();
         void _ShowClaudeMissing();
         void _HideClaudeMissing();
+        // Agentmaster (launch-model picker -> "Specify..."): the type-any-model-id prompt, shown as a
+        // dimmed modal over _root like the two overlays above (a ContentDialog text box gets no
+        // keypresses under XAML Islands). The CARD is built by the shared AgentBuildSpecifyModelCard
+        // so this prompt, the Sessions page's, and the WT tab menu's are literally the same control.
+        // `onPicked` fires ONLY on commit, with the trimmed id; cancel/backdrop/Escape launch nothing.
+        // Opened by every "Open New Session Here"/"Fork session" submenu here and by the Settings
+        // tab's successor-model combos.
+        void _PromptForModel(std::function<void(winrt::hstring)> onPicked, const std::wstring& seed = {});
+        void _HideSpecifyModel();
+        // The opener every model submenu on this surface passes to AgentFillModelPickItems — ONE
+        // definition, so the board/tree/External menus can't wire it three different ways. Spelled
+        // out rather than using AgentModelMenu.h's AgentSpecifyModelOpener alias because that header
+        // (and the prompt's) must not fan out through this one — see the UpdateInfo note above.
+        std::function<void(std::function<void(winrt::hstring)>)> _ModelSpecifyOpener();
+        // COMMANDS.md §6b: give a successor-model combo its "Specify..." behavior (the row itself is
+        // seeded by seedModelCombo). Wired ONCE at build time — reseeding only refills Items().
+        void _WireSuccessorModelCombo(const winrt::Windows::UI::Xaml::Controls::ComboBox& combo, std::vector<std::wstring>* ids);
         // Browse for claude.exe (IFileOpenDialog, .exe filter) -> persist it as the claudeExePath
         // override (through _settingsSink) + ::Agentmaster::RefreshClaudeExe; hides the missing-overlay
         // and re-validates the launch box if claude is now available. Runs the Win32 modal OFF the click
@@ -786,6 +803,7 @@ namespace winrt::TerminalApp::implementation
         bool _keepAwakeRendered{ false };
         // ---- "Claude not detected" overlay (native-exe-only policy gate) ----
         winrt::Windows::UI::Xaml::Controls::Grid _claudeMissingOverlay{ nullptr }; // dimmed modal layer; shown when launch/fork is blocked by no native claude.exe
+        winrt::Windows::UI::Xaml::Controls::Grid _specifyModelOverlay{ nullptr }; // dimmed modal layer for the "Specify a model..." prompt (the card is rebuilt per open — fresh MRU + per-invocation callback)
         winrt::Windows::UI::Xaml::Controls::TextBlock _claudeMissingStatus{ nullptr }; // the live detection status line (updated by Browse / Re-check)
         winrt::Windows::UI::Xaml::Controls::Button _claudeMissingInstallBtn{ nullptr }; // one-click install: `claude install` (npm-legacy) or the claude.ai native bootstrap (none); label/visibility set in _ShowClaudeMissing from ClaudeInstallKind()
         // ---- Settings overlay (the cog dialog) ----

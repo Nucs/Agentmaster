@@ -46,16 +46,28 @@ namespace winrt::TerminalApp::implementation
         return winrt::hstring{ L"Edit this list in the Manager's Settings (\x2699) \x2192 Sessions \x2192 Launch models." };
     }
 
+    // How a surface opens the "Specify a model..." prompt: it is handed the SAME `pick` callback
+    // the menu items use and calls it with the typed id once the user commits ("" / never calling
+    // it == cancelled, in which case nothing launches). It is a caller-supplied functor because
+    // the prompt must live in a real visual tree — a text box inside a ContentDialog gets no
+    // keypresses under XAML Islands (Gotchas) — so each host shows the shared card
+    // (AgentBuildSpecifyModelCard, AgentModelPrompt.h) in ITS own modal layer. Passing nothing
+    // omits the item entirely, so an un-wired caller still compiles and behaves as before.
+    using AgentSpecifyModelOpener = std::function<void(std::function<void(winrt::hstring)>)>;
+
     // Fill `items` — a MenuFlyoutSubItem's Items() or a MenuFlyout's Items(), same collection
     // type — with the picker:
     //     Default            → pick(L"")     (the plain "Open New Session Here" behavior)
+    //     Specify…           → prompt, then pick(<typed id>)   (only when `specify` is supplied)
     //     ─────────────
     //     <Display name>     → pick(<id>)    (one per configured model, top-to-bottom as typed)
-    // With no models configured only "Default" is offered (no separator) — the submenu still
-    // works, it just has nothing extra to pick. `pick` is copied into every item's Click.
+    // With no models configured only Default (+ Specify…) is offered (no separator) — the submenu
+    // still works, it just has nothing extra to pick. `pick` is copied into every item's Click.
+
     inline void AgentFillModelPickItems(const winrt::Windows::Foundation::Collections::IVector<winrt::Windows::UI::Xaml::Controls::MenuFlyoutItemBase>& items,
                                         const std::vector<std::pair<std::wstring, std::wstring>>& models,
-                                        std::function<void(winrt::hstring)> pick)
+                                        std::function<void(winrt::hstring)> pick,
+                                        AgentSpecifyModelOpener specify = nullptr)
     {
         namespace WUXC = winrt::Windows::UI::Xaml::Controls;
 
@@ -66,6 +78,22 @@ namespace winrt::TerminalApp::implementation
             pick(winrt::hstring{});
         });
         items.Append(def);
+
+        // "Specify..." sits directly BELOW Default (before the configured list): the two of them are
+        // the "not from the list" choices, and a user reaching for a one-off model should not have to
+        // scan past N configured entries to find it.
+        if (specify)
+        {
+            WUXC::MenuFlyoutItem spec;
+            spec.Text(L"Specify\x2026");
+            AgentSetTip(spec, winrt::hstring{ L"Type any model id for this ONE session \x2014 e.g. a model newer than your list, or a pinned version like claude-opus-4-8. The prompt remembers what you type and links the published model lists. " } + AgentModelEditHint());
+            spec.Click([pick, specify](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::RoutedEventArgs&) {
+                // The opener is responsible for deferring past this flyout's close (its refocus must
+                // not fight the prompt's text box) — the same discipline the tag editor's open uses.
+                specify(pick);
+            });
+            items.Append(spec);
+        }
 
         if (models.empty())
         {

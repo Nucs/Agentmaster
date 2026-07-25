@@ -52,6 +52,7 @@
 #include "../HookWire.h"
 #include "../HooksBridge.h"
 #include "../Json.h"
+#include "../ModelCatalog.h" // the published model-list parsers behind "Specify a model..." - pure, header-only
 #include "../Persistence.h"
 #include "../PendingInput.h" // the unsent-draft detector (PENDING_INPUT.md) - pure, header-only
 #include "../PendingPaste.h" // the paste-cache marker resolver (PENDING_INPUT.md §2b) - pure, header-only

@@ -681,7 +681,19 @@ namespace Agentmaster::Updater
     // A single HTTPS GET; returns the UTF-8 body bytes ("" on any failure), with a short note in
     // errOut. One timeout value governs each WinHTTP phase (resolve/connect/send/receive), so the
     // worst-case wall time is bounded — the startup caller relies on this to never wedge launch.
-    inline std::string HttpsGet(const std::wstring& host, const std::wstring& path, DWORD timeoutMs, std::wstring& errOut)
+    //
+    // `extraHeaders` defaults to the GitHub-API set this was written for (a User-Agent GitHub
+    // REQUIRES, plus the v3 Accept), so every existing caller is byte-identical. It is a parameter
+    // because the launch-model picker's "Specify a model..." prompt fetches the published model
+    // catalogs through this SAME function (ModelCatalog.h) — Anthropic's needs `x-api-key` +
+    // `anthropic-version` — and a second hand-rolled WinHTTP GET elsewhere in the tree would be one
+    // more place to get the handle-leak and bounded-timeout discipline below subtly wrong. Must be
+    // CRLF-terminated per header, WinHTTP's format.
+    inline std::string HttpsGet(const std::wstring& host,
+                                const std::wstring& path,
+                                DWORD timeoutMs,
+                                std::wstring& errOut,
+                                const std::wstring& extraHeaders = L"User-Agent: Agentmaster-Updater\r\nAccept: application/vnd.github+json\r\n")
     {
         std::string body;
         HINTERNET hSession = ::WinHttpOpen(L"Agentmaster-Updater/1.0",
@@ -717,9 +729,13 @@ namespace Agentmaster::Updater
         // truncated JSON must never parse as a real answer) and the closes still run.
         try
         {
-            // GitHub requires a User-Agent; the v3 Accept header is good manners.
-            const std::wstring headers = L"User-Agent: Agentmaster-Updater\r\nAccept: application/vnd.github+json\r\n";
-            BOOL ok = ::WinHttpSendRequest(hRequest, headers.c_str(), static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+            // GitHub requires a User-Agent; the v3 Accept header is good manners. (Both live in the
+            // extraHeaders default above, so a caller that passes nothing behaves exactly as before.)
+            const std::wstring headers = extraHeaders;
+            BOOL ok = ::WinHttpSendRequest(hRequest,
+                                           headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+                                           headers.empty() ? 0 : static_cast<DWORD>(-1),
+                                           WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
             if (ok)
             {
                 ok = ::WinHttpReceiveResponse(hRequest, nullptr);

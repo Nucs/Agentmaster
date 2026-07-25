@@ -27,6 +27,69 @@ void TestPersistence()
 {
     std::wprintf(L"Persistence (JSON + sessions + templates):\n");
 
+    // Agentmaster (launch-model picker -> "Specify..."): the recent-models MRU. It is what fills the
+    // prompt's drop-down, so its rules ARE the feature — a model you typed once must come back, in
+    // the order you last used it, spelled the way you last typed it.
+    {
+        auto m = PushRecentModel({}, L"claude-opus-4-8");
+        CHECK(m.size() == 1 && m[0] == L"claude-opus-4-8", "recent models: first push lands at the front");
+        m = PushRecentModel(m, L"gpt-5.6-sol");
+        CHECK(m.size() == 2 && m[0] == L"gpt-5.6-sol" && m[1] == L"claude-opus-4-8", "recent models: newest first");
+        // Re-using an old model MOVES it (never duplicates), and the NEW spelling wins — the list
+        // should read back what the user last typed, not an older casing of the same id.
+        m = PushRecentModel(m, L"Claude-Opus-4-8");
+        CHECK(m.size() == 2 && m[0] == L"Claude-Opus-4-8" && m[1] == L"gpt-5.6-sol", "recent models: re-use moves to front, case-insensitively, keeping the new spelling");
+        // Surrounding whitespace comes free with a pasted id.
+        m = PushRecentModel(m, L"  opus  ");
+        CHECK(m.size() == 3 && m[0] == L"opus", "recent models: a pasted id is trimmed");
+        // "" is Default — never an MRU entry.
+        CHECK(PushRecentModel(m, L"").size() == 3 && PushRecentModel(m, L"   \t ").size() == 3, "recent models: empty/blank is a no-op (Default is not a model)");
+        // The cap drops the OLDEST, never the newest.
+        std::vector<std::wstring> big;
+        for (int i = 0; i < 40; ++i)
+        {
+            big = PushRecentModel(big, L"m" + std::to_wstring(i), 5);
+        }
+        CHECK(big.size() == 5 && big[0] == L"m39" && big[4] == L"m35", "recent models: capped, oldest dropped");
+        // Disk round-trip (the file the prompt reads on every open).
+        const auto text = SerializeRecentModels({ L"opus", L"claude-fable-5" });
+        const auto back = DeserializeRecentModels(text);
+        CHECK(back.size() == 2 && back[0] == L"opus" && back[1] == L"claude-fable-5", "recent models: JSON round-trip preserves order");
+        CHECK(DeserializeRecentModels(L"").empty() && DeserializeRecentModels(L"{ not json").empty(), "recent models: a missing/corrupt file reads as none (the prompt still works)");
+    }
+
+    // Agentmaster: the published model-list parsers (ModelCatalog.h) behind the prompt's "Fetch
+    // list". Both are TOTAL — anything unrecognized yields NO rows rather than a partial guess,
+    // because a wrong id in the drop-down would launch a session that dies on an unknown model.
+    {
+        // Claude: the Models API's {"data":[{id, display_name}]} envelope.
+        const auto claude = ParseAnthropicModelsJson(
+            LR"j({"data":[{"type":"model","id":"claude-opus-4-5-20251101","display_name":"Claude Opus 4.5","created_at":"2025-11-01T00:00:00Z"},)j"
+            LR"j({"type":"model","id":"claude-sonnet-5","display_name":"Claude Sonnet 5"}],"has_more":false,"first_id":"a","last_id":"b"})j");
+        CHECK(claude.size() == 2, "catalog(claude): both models parse");
+        CHECK(claude[0].id == L"claude-opus-4-5-20251101" && claude[0].displayName == L"Claude Opus 4.5", "catalog(claude): id + display_name, order preserved");
+        CHECK(claude[1].id == L"claude-sonnet-5", "catalog(claude): second row");
+        // Codex: the models-manager catalog — the id is `slug`, buried among ~40 tuning fields.
+        const auto codex = ParseCodexModelsJson(
+            LR"j({"models":[{"slug":"gpt-5.6-sol","display_name":"GPT-5.6 Sol","context_window":400000,"truncation_policy":{"mode":"tokens","limit":10000}},)j"
+            LR"j({"slug":"gpt-5.4-mini","display_name":"GPT-5.4 mini"}]})j");
+        CHECK(codex.size() == 2 && codex[0].id == L"gpt-5.6-sol" && codex[0].displayName == L"GPT-5.6 Sol", "catalog(codex): slug is the id, display_name the label");
+        CHECK(codex[1].id == L"gpt-5.4-mini", "catalog(codex): later rows parse past the nested objects");
+        // The dispatcher can't confuse the two shapes.
+        CHECK(ParseModelCatalog(ModelCatalogSource::Claude, LR"j({"data":[{"id":"x"}]})j").size() == 1, "catalog: dispatch -> Claude shape");
+        CHECK(ParseModelCatalog(ModelCatalogSource::Codex, LR"j({"models":[{"slug":"y"}]})j").size() == 1, "catalog: dispatch -> Codex shape");
+        CHECK(ParseAnthropicModelsJson(LR"j({"models":[{"slug":"y"}]})j").empty(), "catalog: the WRONG shape yields nothing (never a partial guess)");
+        // Rows with no usable id are dropped; a repeated id (paginated fetch) lists once.
+        CHECK(ParseAnthropicModelsJson(LR"j({"data":[{"display_name":"no id"},{"id":"","display_name":"blank"},{"id":"ok"}]})j").size() == 1, "catalog: id-less rows dropped");
+        const auto dup = ParseAnthropicModelsJson(LR"j({"data":[{"id":"dup","display_name":"first"},{"id":"dup","display_name":"second"}]})j");
+        CHECK(dup.size() == 1 && dup[0].displayName == L"first", "catalog: a duplicate id lists once (first wins)");
+        // Garbage / an error body / an empty response must never throw or invent rows.
+        CHECK(ParseAnthropicModelsJson(L"").empty() && ParseCodexModelsJson(L"").empty(), "catalog: empty body -> no rows");
+        CHECK(ParseAnthropicModelsJson(L"<html>401</html>").empty(), "catalog: an HTML error page -> no rows");
+        CHECK(ParseAnthropicModelsJson(LR"j({"type":"error","error":{"type":"authentication_error"}})j").empty(), "catalog: an API error envelope -> no rows (a 401 offers nothing)");
+        CHECK(ParseCodexModelsJson(LR"j({"models":"not-an-array"})j").empty(), "catalog: a wrong-typed models key -> no rows");
+    }
+
     // JSON round-trip of a small document.
     {
         auto o = json::Value::MkObj();

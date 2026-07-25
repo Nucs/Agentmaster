@@ -24,6 +24,12 @@
 #include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
+#include "AgentModelPrompt.h" // AgentBuildSpecifyModelCard — the shared "Specify a model..." prompt this content hosts
+
+// Agentmaster (launch-model picker -> "Specify..."): the successor-model combos' sentinel id for
+// their "Specify..." row. A control character prefix keeps it disjoint from every real model id
+// (settings-typed ids are printable), so it can never collide with something a user configured.
+static constexpr std::wstring_view kSpecifyModelSentinel = L"" "specify-model";
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/RegexUtil.h" // COMMANDS.md §6b — live validation of the Commands tab's regex boxes
@@ -1313,6 +1319,7 @@ namespace winrt::TerminalApp::implementation
         _setCmdModelHandover = ComboBox{};
         _setCmdModelHandover.Header(winrt::box_value(L"Successor model"));
         AgentSetTip(_setCmdModelHandover, L"The model this command's successor session(s) launch with. Default keeps the Sessions tab's Model box (the shipped behavior); the other entries come from the Launch models list and add --model <id> to just the successor's launch. You can also pick per MESSAGE \x2014 start the command with a model word, \x201C/handover [fable] do a b c\x201D or \x201C/handover fable 5: \x2026\x201D (partial, case-blind, matches either the display name or the model id) \x2014 which overrides this for that one handover. Applies to the next handover \x2014 no restart needed.");
+        _WireSuccessorModelCombo(_setCmdModelHandover, &_cmdModelIdsHandover);
         panel.Children().Append(_setCmdModelHandover);
         panel.Children().Append(SettingsSeparator(L"HAND OVER IN PLACE (REPLACE THIS TAB)"));
         _setCmdHandoverHereEnabled = ToggleSwitch{};
@@ -1332,6 +1339,7 @@ namespace winrt::TerminalApp::implementation
         _setCmdModelHandoverHere = ComboBox{};
         _setCmdModelHandoverHere.Header(winrt::box_value(L"Successor model"));
         AgentSetTip(_setCmdModelHandoverHere, L"The model the in-place successor (and any additional-file tabs) launches with. Default keeps the Sessions tab's Model box; the other entries come from the Launch models list and add --model <id> to just the successor's launch. A model word at the START of the typed command (\x201C/handover-here [fable] \x2026\x201D \x2014 partial, case-blind, display name or id) overrides this for that one handover. Applies to the next handover \x2014 no restart needed.");
+        _WireSuccessorModelCombo(_setCmdModelHandoverHere, &_cmdModelIdsHandoverHere);
         panel.Children().Append(_setCmdModelHandoverHere);
         // §5b — the STANDBY member: successors open like /handover, but the briefing is TYPED
         // into each session's input box WITHOUT being submitted (one Enter away).
@@ -1353,6 +1361,7 @@ namespace winrt::TerminalApp::implementation
         _setCmdModelStandby = ComboBox{};
         _setCmdModelStandby.Header(winrt::box_value(L"Successor model"));
         AgentSetTip(_setCmdModelStandby, L"The model this command's standby successor session(s) launch with. Default keeps the Sessions tab's Model box; the other entries come from the Launch models list and add --model <id> to just the successor's launch. A model word at the START of the typed command (\x201C/handover-standby [fable] \x2026\x201D \x2014 partial, case-blind, display name or id) overrides this for that one handover. Applies to the next handover \x2014 no restart needed.");
+        _WireSuccessorModelCombo(_setCmdModelStandby, &_cmdModelIdsStandby);
         panel.Children().Append(_setCmdModelStandby);
 
         // §6b SUCCESSOR SHAPING — family-wide (all three commands), built on the ONE reusable regex
@@ -2455,6 +2464,12 @@ namespace winrt::TerminalApp::implementation
                 ids.clear();
                 combo.Items().Append(winrt::box_value(L"Default"));
                 ids.push_back(L"");
+                // "Specify..." — the same escape hatch the launch submenus grew: pick any model id,
+                // including one no list mentions. Selecting it opens the shared prompt and lands the
+                // typed id as a "(custom) <id>" row (_WireSuccessorModelCombo); the sentinel itself
+                // is never a storable value (comboPick maps it to "" == Default).
+                combo.Items().Append(winrt::box_value(L"Specify 26"));
+                ids.push_back(std::wstring{ kSpecifyModelSentinel });
                 int sel = 0;
                 for (const auto& [display, id] : models)
                 {
@@ -3027,7 +3042,14 @@ namespace winrt::TerminalApp::implementation
         {
             const auto comboPick = [](const winrt::Windows::UI::Xaml::Controls::ComboBox& combo, const std::vector<std::wstring>& ids) -> std::wstring {
                 const int idx = combo ? combo.SelectedIndex() : -1;
-                return (idx > 0 && idx < static_cast<int>(ids.size())) ? ids[static_cast<size_t>(idx)] : std::wstring{};
+                if (idx <= 0 || idx >= static_cast<int>(ids.size()))
+                {
+                    return {};
+                }
+                const auto& picked = ids[static_cast<size_t>(idx)];
+                // The "Specify..." row is a VERB, not a value — if it is somehow still selected (a
+                // prompt dismissed at just the wrong moment), that means "no pick", i.e. Default.
+                return picked == kSpecifyModelSentinel ? std::wstring{} : picked;
             };
             if (_setCmdModelHandover)
             {
@@ -4453,6 +4475,129 @@ namespace winrt::TerminalApp::implementation
         {
             _claudeMissingOverlay.Visibility(Visibility::Collapsed);
         }
+    }
+
+    // Agentmaster (launch-model picker -> "Specify..."): show the type-any-model-id prompt over the
+    // Manager. The dimmed LAYER is built once and reused (the claude-missing/settings idiom); the
+    // CARD inside is rebuilt per open because it carries this invocation's callback and re-reads the
+    // recent-models MRU — a prompt opened after another window added a model must list it.
+    void AgentManagerContent::_PromptForModel(std::function<void(winrt::hstring)> onPicked, const std::wstring& seed)
+    {
+        if (!_root || !_dispatcher)
+        {
+            return;
+        }
+        // Defer off the invoking flyout's click: a MenuFlyout closes asynchronously and its close
+        // restores focus, which would fight the prompt's text box for it (the tag editor's rule).
+        _dispatcher.TryEnqueue([this, onPicked, seed]() {
+            try
+            {
+                if (!_specifyModelOverlay)
+                {
+                    _specifyModelOverlay = Grid{};
+                    _specifyModelOverlay.Background(SolidColorBrush{ ColorHelper::FromArgb(0xA0, 0x00, 0x00, 0x00) });
+                    Grid::SetRow(_specifyModelOverlay, 0);
+                    Grid::SetRowSpan(_specifyModelOverlay, 99);
+                    Grid::SetColumnSpan(_specifyModelOverlay, 99);
+                    // Backdrop press == cancel: hide, and deliberately DON'T call onPicked (nothing
+                    // launches unless the user committed a model).
+                    _specifyModelOverlay.Tapped([this](const IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs&) {
+                        _HideSpecifyModel();
+                    });
+                    _root.Children().Append(_specifyModelOverlay);
+                }
+                auto built = AgentBuildSpecifyModelCard(seed, ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), [this, onPicked](winrt::hstring id) {
+                    _HideSpecifyModel();
+                    if (!id.empty())
+                    {
+                        onPicked(id);
+                    }
+                });
+                _specifyModelOverlay.Children().Clear();
+                _specifyModelOverlay.Children().Append(built.card);
+                _specifyModelOverlay.Visibility(Visibility::Visible);
+                // Focus the box one tick AFTER the show — a same-tick Focus on a not-yet-laid-out
+                // control no-ops (the tag editor learned this on its first open).
+                auto box = built.box;
+                _dispatcher.TryEnqueue([box]() {
+                    if (box)
+                    {
+                        box.Focus(FocusState::Programmatic);
+                    }
+                });
+            }
+            catch (...)
+            {
+                ::Agentmaster::LogSwallowedException(L"AgentManagerContent::_PromptForModel");
+            }
+        });
+    }
+
+    void AgentManagerContent::_HideSpecifyModel()
+    {
+        if (_specifyModelOverlay)
+        {
+            _specifyModelOverlay.Visibility(Visibility::Collapsed);
+            _specifyModelOverlay.Children().Clear(); // release the card (and its captured callback)
+        }
+    }
+
+    // Wire a successor-model combo's "Specify..." row (seeded at index 1 by seedModelCombo). Chosen
+    // once at BUILD time — seedModelCombo only refills Items(), so the handler survives every reseed.
+    void AgentManagerContent::_WireSuccessorModelCombo(const winrt::Windows::UI::Xaml::Controls::ComboBox& combo, std::vector<std::wstring>* ids)
+    {
+        if (!combo || !ids)
+        {
+            return;
+        }
+        // The last REAL pick, so a dismissed prompt can put the selection back exactly where it was
+        // (a combo whose "Specify..." row stayed selected would read as a model nobody chose).
+        auto prev = std::make_shared<int>(0);
+        combo.SelectionChanged([this, combo, ids, prev](const IInspectable&, const winrt::Windows::UI::Xaml::Controls::SelectionChangedEventArgs&) {
+            const int idx = combo.SelectedIndex();
+            const bool isSentinel = idx > 0 && idx < static_cast<int>(ids->size()) && (*ids)[static_cast<size_t>(idx)] == kSpecifyModelSentinel;
+            if (!isSentinel)
+            {
+                *prev = idx < 0 ? 0 : idx;
+                return;
+            }
+            // Restore the previous pick FIRST (this re-enters this handler, harmlessly — `back` is
+            // never the sentinel), so cancelling the prompt simply leaves the combo as it was.
+            const int back = *prev;
+            combo.SelectedIndex(back);
+            _PromptForModel([combo, ids](winrt::hstring picked) {
+                const std::wstring id{ picked };
+                if (id.empty())
+                {
+                    return;
+                }
+                // Already offered (a configured model typed by hand, or a second visit to the same
+                // custom id)? Select that row rather than growing a duplicate.
+                for (size_t k = 0; k < ids->size(); ++k)
+                {
+                    const auto& have = (*ids)[k];
+                    if (have.size() == id.size() && std::equal(have.begin(), have.end(), id.begin(), [](wchar_t x, wchar_t y) { return std::towlower(x) == std::towlower(y); }))
+                    {
+                        combo.SelectedIndex(static_cast<int>(k));
+                        return;
+                    }
+                }
+                combo.Items().Append(winrt::box_value(winrt::hstring{ L"(custom) " + id }));
+                ids->push_back(id);
+                combo.SelectedIndex(static_cast<int>(ids->size()) - 1);
+            });
+        });
+    }
+
+    std::function<void(std::function<void(winrt::hstring)>)> AgentManagerContent::_ModelSpecifyOpener()
+    {
+        auto weak = get_weak();
+        return [weak](std::function<void(winrt::hstring)> pick) {
+            if (auto self = weak.get())
+            {
+                self->_PromptForModel(pick);
+            }
+        };
     }
 
     void AgentManagerContent::_BrowseForClaudeExe(bool fromSettings)
