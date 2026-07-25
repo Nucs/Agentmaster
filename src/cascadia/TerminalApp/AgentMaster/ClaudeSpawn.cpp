@@ -3989,14 +3989,23 @@ send - nothing is submitted until the user presses Enter in that tab.
     // user entry that begins CCMGR_ is skipped). Factored out so the launch and restart specs produce a
     // byte-identical env.
     // Shared spawn PRELUDE: everything that must be true of the world before a managed claude is
-    // started in `spec.workingDir`. Today that is only the workspace-trust seed — the one thing
-    // that, left undone, parks the new tab on a modal nobody is there to answer (ClaudeSpawn.h).
+    // started in `workingDir`. Today that is only the workspace-trust seed — the one thing that,
+    // left undone, parks the new tab on a modal nobody is there to answer (ClaudeSpawn.h).
     // Best-effort by construction: a failure here costs one manual click, never the launch.
-    static void PrepareManagedClaudeWorkspace(const ClaudeSpawnSpec& spec, const AppSettings& settings)
+    //
+    // ⚠ This is a WRITE to ~/.claude.json — one of only two mutations we make outside the profile —
+    // so it belongs to the LAUNCH SEAM, never to a spec BUILDER. It used to be called from inside
+    // BuildClaudeSpawn/BuildClaudeRestartSpec, which silently made "describe a launch" mean "mutate
+    // the user's global config": the standalone test harness builds specs for FAKE dirs with a
+    // default-constructed AppSettings (trustWorkspaceOnLaunch defaults ON), so every run seeded a
+    // phantom trusted project into the developer's REAL ~/.claude.json and took Claude's config lock
+    // while a live claude might be writing. Keep the builders PURE — the three real launch seams in
+    // TerminalPage.AgentSessions.cpp call this explicitly. [Agentmaster]
+    void PrepareManagedClaudeWorkspace(std::wstring_view workingDir, const AppSettings& settings)
     {
         if (settings.trustWorkspaceOnLaunch)
         {
-            EnsureClaudeWorkspaceTrusted(spec.workingDir);
+            EnsureClaudeWorkspaceTrusted(workingDir);
         }
     }
 
@@ -4041,7 +4050,8 @@ send - nothing is submitted until the user presses Enter in that tab.
         const auto settingsFwd = ToForwardSlashes(settingsPath);
         spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFromSessionId, claudeLauncher, modelOverride, initialPrompt);
 
-        PrepareManagedClaudeWorkspace(spec, settings);
+        // NOTE: no workspace-trust seed here — building a spec must stay PURE (no writes to
+        // ~/.claude.json). The launch seam calls PrepareManagedClaudeWorkspace before spawning.
         // The cog's global env + the hook-correlation vars, applied to every session (CCMGR_* always win).
         AppendManagedClaudeEnv(spec, settings);
         return spec;
@@ -4090,7 +4100,8 @@ send - nothing is submitted until the user presses Enter in that tab.
         const auto settingsFwd = ToForwardSlashes(settingsPath);
         spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFrom, claudeLauncher);
 
-        PrepareManagedClaudeWorkspace(spec, settings);
+        // NOTE: no workspace-trust seed here — see BuildClaudeSpawn. The restart seam calls
+        // PrepareManagedClaudeWorkspace before rebuilding the connection.
         AppendManagedClaudeEnv(spec, settings);
         return spec;
     }

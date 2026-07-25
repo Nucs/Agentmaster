@@ -631,7 +631,12 @@ namespace winrt::TerminalApp::implementation
         // prompt when the commandline tier fits (else "" here — the caller parks the full
         // document on the successor's queue). The model is Default (the settings model) unless
         // the §6b per-command successor model overrides THIS launch.
-        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, title, _hooksBridge->PipeName(), {}, ::Agentmaster::LoadAppSettings(), {}, ::Agentmaster::SharedEngine().claudeExePath, {}, modelOverride, initialPrompt);
+        const auto appSettings = ::Agentmaster::LoadAppSettings();
+        // Seed workspace trust HERE, at the launch seam — the spec builders are pure and never
+        // touch ~/.claude.json (ClaudeSpawn.h). Must precede the spawn so claude's startup
+        // trust modal can't park the swapped-in successor.
+        ::Agentmaster::PrepareManagedClaudeWorkspace(dir, appSettings);
+        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, title, _hooksBridge->PipeName(), {}, appSettings, {}, ::Agentmaster::SharedEngine().claudeExePath, {}, modelOverride, initialPrompt);
         const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline);
         auto newConn = _BuildAgentConnection(hostedCmd, dir, title, spec.env, /*inheritCursor*/ true);
         if (!newConn)
@@ -797,7 +802,12 @@ namespace winrt::TerminalApp::implementation
         // must never re-submit it (its turn already ran and lives in the transcript), and no restore
         // path passes one; the guard makes that structural rather than conventional.
         const std::wstring launchPrompt = (restored || !resumeId.empty()) ? std::wstring{} : initialPrompt;
-        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, ::Agentmaster::LoadAppSettings(), effectiveForkFrom, ::Agentmaster::SharedEngine().claudeExePath, forkIntoId, modelOverride, launchPrompt);
+        const auto appSettings = ::Agentmaster::LoadAppSettings();
+        // Seed workspace trust HERE, at the launch seam — the spec builders are pure and never
+        // touch ~/.claude.json (ClaudeSpawn.h). This is the shared seam for fresh launch / resume /
+        // fork / restore / handover, so all of them get the seed exactly as before.
+        ::Agentmaster::PrepareManagedClaudeWorkspace(dir, appSettings);
+        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, appSettings, effectiveForkFrom, ::Agentmaster::SharedEngine().claudeExePath, forkIntoId, modelOverride, launchPrompt);
 
         // Build the ConPTY connection (commandline = claude + our hooks settings; child env = spec.env
         // [CCMGR_SESSION_ID + CCMGR_HOOK_PIPE + the cog's global env] plus this window's AM_SESSION
@@ -2065,7 +2075,11 @@ namespace winrt::TerminalApp::implementation
             // Threading forkParentId lets the spec RE-FORK a never-messaged fork from its source into the
             // SAME id (the [restore->refork] recipe) instead of replacing the forked branch with an empty
             // fresh conversation — the reported "restart a fork -> loads a new claude session" loss.
-            const auto spec = ::Agentmaster::BuildClaudeRestartSpec(dir, title, _hooksBridge->PipeName(), managedId, ::Agentmaster::LoadAppSettings(), ::Agentmaster::SharedEngine().claudeExePath, info->forkParentId);
+            const auto appSettings = ::Agentmaster::LoadAppSettings();
+            // Seed workspace trust HERE, at the launch seam — the spec builders are pure and never
+            // touch ~/.claude.json (ClaudeSpawn.h).
+            ::Agentmaster::PrepareManagedClaudeWorkspace(dir, appSettings);
+            const auto spec = ::Agentmaster::BuildClaudeRestartSpec(dir, title, _hooksBridge->PipeName(), managedId, appSettings, ::Agentmaster::SharedEngine().claudeExePath, info->forkParentId);
             // Re-host in pwsh (as the launch path does) so the relaunched session keeps the same
             // quit-to-pwsh-prompt behavior rather than dying into a dead pane.
             const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline);

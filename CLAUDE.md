@@ -1915,8 +1915,15 @@ What works, by area:
   `--dangerously-skip-permissions`), **`trustWorkspaceOnLaunch`** (the **"Trust the working
   directory automatically"** toggle, GLOBAL, **default ON**: before launching, seed
   `~/.claude.json` `projects.<git-root-or-dir>.hasTrustDialogAccepted = true` so claude's startup
-  **workspace-trust modal** never parks the new tab — `EnsureClaudeWorkspaceTrusted`, called from
-  the shared spawn prelude so fresh launch / resume / fork / restore / restart / handover all get it.
+  **workspace-trust modal** never parks the new tab — `EnsureClaudeWorkspaceTrusted`, called via the
+  shared spawn prelude `PrepareManagedClaudeWorkspace` from the three **launch seams** in
+  `TerminalPage.AgentSessions.cpp`, so fresh launch / resume / fork / restore / restart / handover all
+  get it. ⚠ Deliberately NOT called from the spec builders (`BuildClaudeSpawn` /
+  `BuildClaudeRestartSpec`) — a builder must stay PURE, since it only *describes* a launch: while the
+  seed lived there, merely building a spec wrote to `~/.claude.json`, so the standalone test harness
+  (fake dirs, default `AppSettings` ⇒ the toggle defaults ON) seeded a phantom trusted project into
+  the developer's REAL config on every run and took Claude's config lock while a live claude might be
+  writing. Seed at the seam, never in a builder.
   ⚠ `--dangerously-skip-permissions` does **NOT** cover this (Gotchas), and the worst case is a
   session in `%USERPROFILE%` — the empty-`defaultLaunchDir` fallback — which claude deliberately
   refuses to remember, so it asks on *every* launch. The write is a **SURGICAL SPLICE**, never a

@@ -469,6 +469,17 @@ namespace Agentmaster
     // (default ON). It only ever sets a flag to true; nothing is removed or rewritten. [Agentmaster]
     bool EnsureClaudeWorkspaceTrusted(std::wstring_view dir);
 
+    // Shared spawn PRELUDE — everything that must be true of the world before a managed claude is
+    // started in `workingDir` (today: the workspace-trust seed above, gated on the cog's
+    // trustWorkspaceOnLaunch). Best-effort: a failure costs one manual click, never the launch.
+    //
+    // ⚠ Call this from the LAUNCH SEAM, immediately before spawning — NEVER from a spec builder.
+    // It WRITES to ~/.claude.json, so folding it into BuildClaudeSpawn/BuildClaudeRestartSpec made
+    // merely *describing* a launch mutate the user's global config; the standalone test harness
+    // builds specs for fake dirs with trustWorkspaceOnLaunch defaulting ON, so every run seeded a
+    // phantom trusted project into the real config. The builders are pure; this is the seam. [Agentmaster]
+    void PrepareManagedClaudeWorkspace(std::wstring_view workingDir, const AppSettings& settings);
+
     // Given a tab's shell process id, find a `claude.exe` running under it (direct child, or deeper:
     // shell -> cmd-shim -> claude) and return that claude's REAL current directory, read from its PEB.
     // Empty if there is no claude descendant or the read fails. This is how the manager correlates a

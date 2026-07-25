@@ -283,11 +283,21 @@ Three things that are **not** true, each of which cost time to establish:
 
 ### What we do — `EnsureClaudeWorkspaceTrusted` (`ClaudeSpawn.{h,cpp}`)
 
-A shared spawn **prelude** (`PrepareManagedClaudeWorkspace`) runs from **both** builders
-(`BuildClaudeSpawn` + `BuildClaudeRestartSpec`), so fresh launch / resume / fork / restore /
-window-restore / restart / handover all seed the workspace *before* the process starts. Gated on
+A shared spawn **prelude** (`PrepareManagedClaudeWorkspace`) runs from the three **launch seams**
+in `TerminalPage.AgentSessions.cpp` — `_LaunchClaudeSession` (fresh launch / resume / fork /
+restore / window-restore / handover), the `/handover-here` in-place spawn, and the in-place
+restart — so every path seeds the workspace *before* the process starts. Gated on
 `AppSettings::trustWorkspaceOnLaunch` (Settings cog → Sessions → **"Trust the working directory
 automatically"**, default **ON**; OFF ⇒ `~/.claude.json` is never touched).
+
+⚠ It is deliberately **NOT** called from the spec builders (`BuildClaudeSpawn` /
+`BuildClaudeRestartSpec`), where it originally lived. Those are pure: they *describe* a launch and
+must never write to `~/.claude.json`. Folding a config write into a builder meant anything that
+merely built a spec mutated the user's global config — the standalone test harness builds specs for
+FAKE directories with a default-constructed `AppSettings` (`trustWorkspaceOnLaunch` defaults **ON**),
+so every `run-m5-tests.bat` seeded a phantom trusted project (`K:/work/api`) into the developer's
+REAL `~/.claude.json` and took Claude's config lock while a live claude might be writing. Keep the
+builders pure; seed at the seam.
 
 It writes `projects[<repo-or-dir>].hasTrustDialogAccepted = true` — and it is a **surgical splice,
 never a re-serialize**. That is a hard requirement, not a preference: this file holds the user's
