@@ -361,6 +361,18 @@ namespace Agentmaster
         std::wstring version; // claude version that wrote the file
         int64_t startedAtMs{};
         int64_t updatedAtMs{};
+        // Agentmaster: the BLOCKED-ON-USER detail + the exact transition instant. claude rewrites
+        // this file ON EVERY STATUS CHANGE (measured: mtime == statusUpdatedAt to the millisecond),
+        // so the pair is effectively a status-transition log, not a sampled heartbeat.
+        //   waitingFor      — present only while status=="waiting"; e.g. "input needed" for a pending
+        //                     AskUserQuestion. claude's OWN first-class "I am blocked on the user"
+        //                     declaration — earlier AND more reliable than either the Notification
+        //                     hook (measured 6.4s later, and droppable — forwarder-errors.log) or the
+        //                     transcript (measured: a pending AskUserQuestion tool_use line can go
+        //                     10+ minutes unflushed, so recon-block never sees it).
+        //   statusUpdatedAt — ms epoch of the last status transition (0 when absent).
+        std::wstring waitingFor;
+        int64_t statusUpdatedAtMs{};
     };
     std::vector<SessionPresenceRow> ReadSessionPresenceIn(std::wstring_view sessionsDir);
     // Against the live `<claude home>/sessions` (the sibling of ClaudeProjectsDir()).

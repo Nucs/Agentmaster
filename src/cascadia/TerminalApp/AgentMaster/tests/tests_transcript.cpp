@@ -695,6 +695,77 @@ void TestBlockedAndInterruptedStates()
     CHECK(!ShouldSynthesizeResumed(SessionState::Idle, true, true, L"", L"tool_use", false, 500), "resume: Idle is recon-run's domain, not resume");
     CHECK(!ShouldSynthesizeResumed(SessionState::WaitingForInput, true, true, L"", L"tool_use", false, 500), "resume: Waiting is recon-run's domain, not resume");
 
+    // --- The ANSWER itself as resume evidence (answeredPendingQuestion, the 8th arg) -------------
+    // The reported bug: a ToolResult is deliberately NOT a turn event, so the answering tool_result —
+    // the one line that PROVES the user answered — could not release NeedsApproval; the release waited
+    // for the agent's next assistant append (measured 19.8s on ed5a48a4, 45.3s on d2e77e90 while the
+    // agent was demonstrably working). Accepted as an ALTERNATIVE to consumedTurnEvent, NeedsApproval-only.
+    CHECK(ShouldSynthesizeResumed(SessionState::NeedsApproval, false, true, L"", L"tool_use", false, 500, true), "resume-answer: the answering tool_result alone (no turn event) -> Running");
+    CHECK(ShouldSynthesizeResumed(SessionState::NeedsApproval, true, true, L"", L"tool_use", false, 500, true), "resume-answer: answer + a turn event in the same pass -> Running");
+    // Every OTHER guard still applies to the answer path — it relaxes one condition, not the gate:
+    CHECK(!ShouldSynthesizeResumed(SessionState::NeedsApproval, false, false, L"", L"tool_use", false, 500, true), "resume-answer: unprimed cursor (history replay of an OLD answer) -> no synthesis");
+    CHECK(!ShouldSynthesizeResumed(SessionState::NeedsApproval, false, true, L"", L"end_turn", false, 500, true), "resume-answer: answered but the turn ENDED (terminal tail) -> recon-stop's Waiting, not Running");
+    CHECK(!ShouldSynthesizeResumed(SessionState::NeedsApproval, false, true, L"", L"tool_use", true, 500, true), "resume-answer: answered but interrupted -> recon-stop, not a resume");
+    CHECK(!ShouldSynthesizeResumed(SessionState::NeedsApproval, false, true, L"AskUserQuestion", L"tool_use", false, 500, true), "resume-answer: a SECOND question already pending -> stay NeedsApproval");
+    CHECK(!ShouldSynthesizeResumed(SessionState::NeedsApproval, false, true, L"", L"tool_use", false, kScanRunRepairFreshMs + 1, true), "resume-answer: stale write (late scan) -> no synthesis");
+    CHECK(!ShouldSynthesizeResumed(SessionState::Idle, false, true, L"", L"tool_use", false, 500, true), "resume-answer: NeedsApproval-only — a bare tool_result must NEVER light Idle -> Running (ShouldSynthesizeRunning's invariant)");
+    CHECK(!ShouldSynthesizeResumed(SessionState::WaitingForInput, false, true, L"", L"tool_use", false, 500, true), "resume-answer: NeedsApproval-only — Waiting is untouched by a tool_result");
+    // Default-arg compatibility: the 7-arg form behaves exactly as before (no answer evidence).
+    CHECK(!ShouldSynthesizeResumed(SessionState::NeedsApproval, false, true, L"", L"tool_use", false, 500), "resume-answer: omitting the arg == no answer evidence (unchanged legacy behavior)");
+
+    // --- Presence-driven blocked-on-user: the third belt (ShouldSynthesize*FromPresence) ----------
+    // claude's OWN heartbeat writes "waiting" (+ waitingFor, e.g. "input needed") at the instant it
+    // parks a turn on the user, and rewrites at the instant that clears. Measured: 6.4s EARLIER than
+    // the Notification hook (7b40d6cf), and it needs no transcript — that session's AskUserQuestion
+    // tool_use line was still unwritten 10+ minutes into the question, so recon-block never fired.
+    CHECK(PresenceIsAwaitingUser(L"waiting"), "presence: 'waiting' == blocked on the user");
+    CHECK(!PresenceIsAwaitingUser(L"busy"), "presence: 'busy' is working, not blocked");
+    CHECK(!PresenceIsAwaitingUser(L"idle"), "presence: 'idle' is at rest, not blocked");
+    CHECK(!PresenceIsAwaitingUser(L"shell"), "presence: 'shell' is a live shell job, not blocked");
+    CHECK(!PresenceIsAwaitingUser(L""), "presence: no heartbeat is not blocked");
+    // ENTRY — the transcript-free twin of recon-block. Fires from the states a pending question is
+    // misread as; never from NeedsApproval (idempotent), Error or Done.
+    CHECK(ShouldSynthesizeBlockedFromPresence(SessionState::Running, L"waiting", false), "block-presence: Running + heartbeat waiting -> needs you");
+    CHECK(ShouldSynthesizeBlockedFromPresence(SessionState::Idle, L"waiting", false), "block-presence: a question raised on a settled (Idle) tail -> needs you");
+    // WaitingForInput is EXCLUDED on purpose — it is the termination argument, not a preference:
+    // recon-stop can fire from NeedsApproval on a (stale) terminal tail and land Waiting, so including
+    // Waiting here would flap NeedsApproval <-> Waiting every pass while the heartbeat stays "waiting".
+    CHECK(!ShouldSynthesizeBlockedFromPresence(SessionState::WaitingForInput, L"waiting", false), "block-presence: Waiting is EXCLUDED (already a needs-you state; including it would oscillate against recon-stop)");
+    CHECK(!ShouldSynthesizeBlockedFromPresence(SessionState::NeedsApproval, L"waiting", false), "block-presence: already NeedsApproval -> no-op (idempotent)");
+    CHECK(!ShouldSynthesizeBlockedFromPresence(SessionState::Error, L"waiting", false), "block-presence: Error is not overwritten by a question");
+    CHECK(!ShouldSynthesizeBlockedFromPresence(SessionState::Done, L"waiting", false), "block-presence: Done (claude exited) is never re-parked");
+    CHECK(!ShouldSynthesizeBlockedFromPresence(SessionState::Running, L"busy", false), "block-presence: a working heartbeat never parks the session");
+    CHECK(!ShouldSynthesizeBlockedFromPresence(SessionState::Running, L"", false), "block-presence: no heartbeat (old claude / no file) -> fall back to the other belts");
+    CHECK(!ShouldSynthesizeBlockedFromPresence(SessionState::Running, L"waiting", true), "block-presence: an INTERRUPTED turn is recon-stop's Waiting, never 'needs you'");
+    // EXIT — the waiting->working EDGE. sawWaiting is the latch; without it a bare 'busy' would undo
+    // any NeedsApproval whose block does not set "waiting" (unverifiable here: skipPermissions:true
+    // means a real permission prompt is auto-approved and never surfaces one to sample).
+    CHECK(ShouldSynthesizeResumedFromPresence(SessionState::NeedsApproval, L"busy", true, L"tool_use", false), "resume-presence: waiting -> busy == the user answered and work resumed -> Running");
+    CHECK(ShouldSynthesizeResumedFromPresence(SessionState::NeedsApproval, L"shell", true, L"", false), "resume-presence: waiting -> shell (a live shell job) is also working -> Running");
+    CHECK(!ShouldSynthesizeResumedFromPresence(SessionState::NeedsApproval, L"busy", false, L"tool_use", false), "resume-presence: LATCH — never saw 'waiting', so this block is not ours to release (protects a permission-prompt NeedsApproval)");
+    CHECK(!ShouldSynthesizeResumedFromPresence(SessionState::NeedsApproval, L"waiting", true, L"tool_use", false), "resume-presence: still 'waiting' == still unanswered -> stay NeedsApproval");
+    CHECK(!ShouldSynthesizeResumedFromPresence(SessionState::NeedsApproval, L"idle", true, L"tool_use", false), "resume-presence: waiting -> idle is at REST -> recon-stop's Waiting, not Running");
+    CHECK(!ShouldSynthesizeResumedFromPresence(SessionState::NeedsApproval, L"", true, L"tool_use", false), "resume-presence: heartbeat gone -> no release on this basis");
+    CHECK(!ShouldSynthesizeResumedFromPresence(SessionState::NeedsApproval, L"busy", true, L"end_turn", false), "resume-presence: terminal tail = the turn ENDED -> Waiting, never Running (mutually exclusive with recon-stop)");
+    CHECK(!ShouldSynthesizeResumedFromPresence(SessionState::NeedsApproval, L"busy", true, L"tool_use", true), "resume-presence: interrupted -> recon-stop owns it");
+    CHECK(!ShouldSynthesizeResumedFromPresence(SessionState::Running, L"busy", true, L"tool_use", false), "resume-presence: already Running -> no-op");
+    CHECK(!ShouldSynthesizeResumedFromPresence(SessionState::Idle, L"busy", true, L"tool_use", false), "resume-presence: Idle is ShouldSynthesizeRunningFromExternalWork's domain, not this");
+    CHECK(!ShouldSynthesizeResumedFromPresence(SessionState::Error, L"busy", true, L"tool_use", false), "resume-presence: Error is not cleared by a heartbeat");
+
+    // --- The answer-blip flash floor (ShouldSuppressAnswerBlipFlash) ------------------------------
+    // Releasing NeedsApproval -> Running on the answer means "answered, brief reply, turn ends"
+    // (measured 1.06s on bee54051, 1.55s on 98d6805f) now passes THROUGH Running, converting a
+    // target->target non-edge into a flash EDGE. Floor exactly that blip; touch nothing else.
+    CHECK(ShouldSuppressAnswerBlipFlash(SessionState::WaitingForInput, true, 1060), "flash-floor: the bee54051 blip (1.06s post-answer) does not flash");
+    CHECK(ShouldSuppressAnswerBlipFlash(SessionState::Idle, true, 1550), "flash-floor: the 98d6805f blip (1.55s post-answer) does not flash");
+    CHECK(!ShouldSuppressAnswerBlipFlash(SessionState::WaitingForInput, true, kFlashMinRunSpanAfterAnswerMs), "flash-floor: exactly at the floor DOES flash (boundary is inclusive)");
+    CHECK(!ShouldSuppressAnswerBlipFlash(SessionState::WaitingForInput, true, 60000), "flash-floor: answered, then worked a minute -> it genuinely needs you again, so flash");
+    CHECK(!ShouldSuppressAnswerBlipFlash(SessionState::WaitingForInput, false, 500), "flash-floor: an ordinary SHORT turn (not entered from NeedsApproval) flashes exactly as it always did");
+    CHECK(!ShouldSuppressAnswerBlipFlash(SessionState::NeedsApproval, true, 500), "flash-floor: the agent asked a SECOND question -> always flash, however brief");
+    CHECK(!ShouldSuppressAnswerBlipFlash(SessionState::Error, true, 500), "flash-floor: Error always flashes");
+    CHECK(!ShouldSuppressAnswerBlipFlash(SessionState::Done, true, 500), "flash-floor: Done always flashes");
+    CHECK(!ShouldSuppressAnswerBlipFlash(SessionState::WaitingForInput, true, 0), "flash-floor: an UNOBSERVED entry edge (span 0) is unknown, not short -> never suppressed");
+
     // --- Subagent/fork activity: presence "busy" + external-work Running promotion (the recon-subagent gate) ---
     CHECK(PresenceIsBusy(L"busy"), "presence: 'busy' == working");
     CHECK(!PresenceIsBusy(L"idle"), "presence: 'idle' is not working");

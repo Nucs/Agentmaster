@@ -414,13 +414,22 @@ namespace Agentmaster
     // mirror of ShouldSynthesizeRunning (which stays Idle/Waiting-ONLY — Running needs no repair); the
     // caller synthesizes it as tool ACTIVITY (PostToolUse), NOT a UserPromptSubmit, because a
     // UserPromptSubmit from NeedsApproval would wrongly ++queuedPrompts (the type-ahead accounting).
-    inline bool ShouldSynthesizeResumed(SessionState state, bool consumedTurnEvent, bool primedBeforePass, std::wstring_view pendingInteractiveTool, std::wstring_view lastStopReason, bool interrupted, int64_t sinceWriteMs) noexcept
+    // `answeredPendingQuestion` (Agentmaster): this pass consumed the tool_result that ANSWERED the
+    // pending interactive tool_use — i.e. the literal "the user answered" line. It is accepted as an
+    // ALTERNATIVE to consumedTurnEvent because a ToolResult deliberately never sets that flag (a bare
+    // tool_result must never synthesize Running from Idle/Waiting — ShouldSynthesizeRunning's
+    // invariant, which is untouched: this belt is NeedsApproval-only). Without it the release waited
+    // for the agent's NEXT assistant append, measured 19.8s / 45.3s later, even though the answer was
+    // already on disk (ed5a48a4: the answering tool_result was readable ~0.8s after it was written).
+    // The pendingInteractiveTool check below still passes — the ToolResult branch cleared it — so the
+    // two conditions are consistent, not contradictory.
+    inline bool ShouldSynthesizeResumed(SessionState state, bool consumedTurnEvent, bool primedBeforePass, std::wstring_view pendingInteractiveTool, std::wstring_view lastStopReason, bool interrupted, int64_t sinceWriteMs, bool answeredPendingQuestion = false) noexcept
     {
         if (state != SessionState::NeedsApproval)
         {
             return false; // only NeedsApproval lacks a resume edge; Idle/Waiting -> ShouldSynthesizeRunning
         }
-        if (!consumedTurnEvent || !primedBeforePass)
+        if ((!consumedTurnEvent && !answeredPendingQuestion) || !primedBeforePass)
         {
             return false; // no live append this pass (or still replaying history) -> not a resume
         }
@@ -472,9 +481,99 @@ namespace Agentmaster
     // semantics and is left to those paths; "shell" / "" are not at-rest claude-turn signals (a shell
     // job, or no live presence file at all). The S-lane validates the backing pid is a live claude.exe
     // before publishing this onto SessionInfo.presenceStatus (Rule #13: a FACT the scanner may consume).
+    // PURE: is Claude's presence heartbeat reporting this session BLOCKED ON THE USER? claude sets
+    // status "waiting" (with a `waitingFor` detail, e.g. "input needed") the instant it parks a turn
+    // on the user — a pending AskUserQuestion — and rewrites the file again the instant that clears.
+    // This is claude's OWN first-class declaration, and measurement says it is the EARLIEST and most
+    // reliable of the three signals we have for the blocked-on-user lifecycle:
+    //   * vs the Notification HOOK — presence flipped to "waiting" 6.4s BEFORE the hook arrived
+    //     (14:04:47.872 vs 14:04:54.260, session 7b40d6cf), and the hook is fire-and-forget
+    //     (forwarder-errors.log has recorded drops); a dropped one leaves NOTHING behind.
+    //   * vs the TRANSCRIPT — a pending AskUserQuestion tool_use line was measured STILL UNWRITTEN
+    //     10+ minutes into the question (7b40d6cf), so recon-block/recon-resume, which key on that
+    //     line, can be arbitrarily late or never fire at all.
+    // Consumed by the scanner as a state INPUT under the same Rule #13 licence PresenceIsAtRest
+    // already uses (the S-lane validates the backing pid is a live claude.exe before publishing it).
+    inline bool PresenceIsAwaitingUser(std::wstring_view presenceStatus) noexcept
+    {
+        return presenceStatus == L"waiting";
+    }
+
     inline bool PresenceIsAtRest(std::wstring_view presenceStatus) noexcept
     {
         return presenceStatus == L"idle";
+    }
+
+    // PURE + total: should the reconciler mark this session BLOCKED ON THE USER purely from claude's
+    // heartbeat? The presence-driven ENTRY — the transcript-free twin of ShouldSynthesizeBlockedOnUser.
+    // recon-block needs the AskUserQuestion tool_use LINE, which was measured still unwritten 10+ minutes
+    // into a live question; the Notification hook covers that case today but is droppable, and when BOTH
+    // miss, the session shows Running forever with a question on screen and nothing ever recovers it.
+    // claude's own "waiting" is the third, independent belt that closes that hole.
+    // Fires from the states a pending question can be MISREAD as: Running (the usual — the turn looks
+    // in flight) and Idle/WaitingForInput (a question raised on a session the tail had already settled).
+    // NOT from NeedsApproval (already there — idempotent), Error, or Done. `interrupted` blocks it: an
+    // Esc'd turn is recon-stop's -> Waiting, and a lingering "waiting" must not re-park it.
+    inline bool ShouldSynthesizeBlockedFromPresence(SessionState state, std::wstring_view presenceStatus, bool interrupted) noexcept
+    {
+        if (interrupted)
+        {
+            return false; // the user ABORTED the turn -> recon-stop's job, never "needs you"
+        }
+        if (!PresenceIsAwaitingUser(presenceStatus))
+        {
+            return false;
+        }
+        // Running (the usual — the turn LOOKS in flight, which is the misread this fixes) and Idle
+        // (a question raised on a tail we had already settled). DELIBERATELY NOT WaitingForInput,
+        // and that exclusion is a TERMINATION argument, not a preference: recon-stop can fire from
+        // NeedsApproval on a TERMINAL tail (a stale one, since the whole premise here is that the
+        // transcript may be minutes behind) and lands WaitingForInput. Were Waiting in this set, a
+        // persistent "waiting" heartbeat would drive NeedsApproval -> (recon-stop) -> Waiting ->
+        // (here) -> NeedsApproval forever — a per-pass state flap, the exact oscillation class the
+        // externalOutlivesTurn hold exists to prevent elsewhere. Excluding it makes every path settle
+        // in at most one transition, and costs nothing real: Waiting is ALREADY a "needs you" state,
+        // so the card is on the right side of the board either way.
+        return state == SessionState::Running || state == SessionState::Idle;
+    }
+
+    // PURE + total: should the reconciler release a NeedsApproval session back to Running because
+    // claude's heartbeat LEFT "waiting" for actual work? The presence-driven EXIT, and the fix for the
+    // one genuinely broken transition in this area: the user ANSWERS and the agent KEEPS WORKING.
+    // (The other three exits already work off a real Stop hook — cancel 112ms, "Chat about this" 2.2s,
+    // answer-then-end-turn 1.5s, all measured.) That shape has NO push event — PostToolUse is
+    // deliberately not hooked (a forwarder per tool call) and Stop won't fire until the turn truly ends
+    // — so ShouldSynthesizeResumed was the only exit, and it cannot fire off the ANSWER itself (a
+    // ToolResult is not a turn event). Measured cost: 19.8s (ed5a48a4) and 45.3s (d2e77e90) of a card
+    // showing orange "needs you" while the agent was demonstrably working.
+    //
+    // `sawWaiting` is an EDGE latch (ScanState::presenceWasWaiting), and it is load-bearing, not
+    // decoration: releasing on a bare `presence==busy` while NeedsApproval would instantly undo any
+    // NeedsApproval whose underlying block does NOT set "waiting" — a real permission prompt being the
+    // open question (unverifiable on this machine: skipPermissions:true means permission prompts are
+    // auto-approved and never surface, so `cfa0daa7` produced no "waiting" to sample). Requiring that
+    // we OBSERVED "waiting" first makes the predicate correct under BOTH answers: if permission prompts
+    // do set "waiting" they are covered free; if they don't, the latch never arms and this path simply
+    // stays out of the way — it can never fight them.
+    inline bool ShouldSynthesizeResumedFromPresence(SessionState state, std::wstring_view presenceStatus, bool sawWaiting, std::wstring_view lastStopReason, bool interrupted) noexcept
+    {
+        if (state != SessionState::NeedsApproval)
+        {
+            return false; // only NeedsApproval lacks a resume edge (mirrors ShouldSynthesizeResumed)
+        }
+        if (!sawWaiting)
+        {
+            return false; // we never saw claude declare "waiting" -> this block is not ours to release
+        }
+        if (!PresenceIsWorking(presenceStatus))
+        {
+            return false; // still "waiting" (unanswered), or "idle"/"" — at rest, which is recon-stop's -> Waiting
+        }
+        if (interrupted || IsTerminalStopReason(lastStopReason))
+        {
+            return false; // the turn ENDED/aborted -> ShouldSynthesizeStop's -> Waiting, never Running
+        }
+        return true;
     }
 
     // PURE + total: should the reconciler synthesize a missed Stop because Claude's OWN presence
@@ -666,6 +765,39 @@ namespace Agentmaster
         return runningSpanMs > 0 && runningSpanMs < kNotifyMinCompletionSpanMs;
     }
 
+    // Agentmaster (the presence/answer resume synth's one side effect). Releasing NeedsApproval ->
+    // Running the instant the user ANSWERS means the "answered, agent replies briefly, turn ends"
+    // shape — measured 1.06s of work on bee54051, 1.55s on 98d6805f ("Chat about this") — now passes
+    // THROUGH Running instead of going NeedsApproval -> WaitingForInput directly. That is honest (the
+    // agent really did run), but it converts a non-edge into a flash-ring EDGE: Running -> needs-you
+    // flashes, target -> target does not. Left alone, EVERY answered question would newly flash its
+    // tab. This floor suppresses exactly that blip and nothing else.
+    inline constexpr int64_t kFlashMinRunSpanAfterAnswerMs = 3000; // a post-answer Running span under this does not flash
+    // PURE: should the unvisited-tab flash be suppressed for a Running -> `target` edge whose Running
+    // span was just the post-answer blip above? DELIBERATELY NARROW on three axes, so no pre-existing
+    // edge changes behavior at all:
+    //   * runEnteredFromNeedsApproval — only a Running entered FROM NeedsApproval (i.e. the answer
+    //     release) is floored. An ordinary short turn (Waiting -> Running -> Waiting) still flashes
+    //     exactly as it always did.
+    //   * target — only the SOFT "turn ended" states. A post-answer NeedsApproval (the agent asked a
+    //     SECOND question) / Error / Done always flashes, however brief the run.
+    //   * runningSpanMs > 0 — an UNOBSERVED entry edge (span unknown, e.g. adopted mid-turn) is never
+    //     suppressed on this basis, mirroring ShouldSuppressShortCompletionToast's reasoning.
+    // Above the floor the flash is CORRECT and wanted: you answered, walked away, it worked, it now
+    // needs you again — exactly what the ring is for.
+    inline bool ShouldSuppressAnswerBlipFlash(SessionState target, bool runEnteredFromNeedsApproval, int64_t runningSpanMs) noexcept
+    {
+        if (!runEnteredFromNeedsApproval)
+        {
+            return false;
+        }
+        if (target != SessionState::Idle && target != SessionState::WaitingForInput)
+        {
+            return false;
+        }
+        return runningSpanMs > 0 && runningSpanMs < kFlashMinRunSpanAfterAnswerMs;
+    }
+
     // PURE: the per-sweep ruling on one HELD toast. Drop == the completion proved spurious (the
     // session re-lit Running — the outlived-turn promotion or a real new turn) or the session left
     // the fleet (archived); Fire == the completion stands (signal cleared, or the session moved to a
@@ -814,6 +946,18 @@ namespace Agentmaster
             // the missed-Stop backstop can't read either from stop_reason alone (HookEvents.h notes).
             std::wstring pendingInteractiveTool; // an UNANSWERED interactive tool_use (AskUserQuestion) is the latest assistant block; "" once answered / moved on
             bool interrupted{ false }; // the latest user line is a turn-abort marker (Esc) — treat as a turn-ender
+            // Agentmaster (presence-driven blocked-on-user, SessionScanner.h ShouldSynthesize*FromPresence):
+            // have we OBSERVED claude's heartbeat report "waiting" (blocked on the user) for this
+            // session, and not yet acted on its release? Armed by a "waiting" read, disarmed the moment
+            // the heartbeat leaves it (either by the resume synth -> Running, or silently when it goes
+            // to "idle", which is recon-stop's -> Waiting). This is what makes the release a genuine
+            // waiting->working EDGE rather than a "busy while NeedsApproval" LEVEL — see the predicate
+            // for why that distinction is load-bearing. Purely in-memory, like the rest of ScanState.
+            bool presenceWasWaiting{ false };
+            // Agentmaster: did THIS pass consume the tool_result that answered a pending interactive
+            // tool_use (AskUserQuestion)? Per-pass scratch — reset before each _readDelta, read by the
+            // recon-resume gate as the "the user just answered" signal. See ShouldSynthesizeResumed.
+            bool answeredInteractive{ false };
             // The latest consumed turn event was the synthetic API-error message (isApiErrorMessage),
             // i.e. the transcript tail is CURRENTLY an UNRECOVERED API error. Set by an apiError
             // assistant line; CLEARED by any later turn event (a new user prompt, a non-error assistant

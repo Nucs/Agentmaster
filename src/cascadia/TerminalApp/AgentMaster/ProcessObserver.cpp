@@ -545,7 +545,15 @@ namespace Agentmaster
         std::vector<SessionPresenceRow> presence = ReadSessionPresence();
         presence.erase(std::remove_if(presence.begin(), presence.end(), [&factsByPid](const SessionPresenceRow& r) { return factsByPid.find(r.pid) == factsByPid.end(); }),
                        presence.end());
-        std::unordered_map<std::wstring, std::wstring> presenceBySid;
+        // Agentmaster: sid -> (status, waitingFor). The waitingFor half is what the SCANNER's
+        // blocked-on-user edge keys on (SessionScanner.h) — it needs neither a transcript line
+        // (measured 10+ min unflushed for a pending AskUserQuestion) nor a hook (droppable).
+        struct PresenceFact
+        {
+            std::wstring status;
+            std::wstring waitingFor;
+        };
+        std::unordered_map<std::wstring, PresenceFact> presenceBySid;
         // pid -> the conversation id Claude is CURRENTLY on (its own heartbeat). Used to BIND a
         // correlated tab to the live conversation rather than the launch-time --session-id on the
         // cmdline, which goes stale when the user /resume / /clear / /compact-s a managed session
@@ -558,7 +566,7 @@ namespace Agentmaster
         std::unordered_map<uint32_t, std::wstring> presenceByPid;
         for (const auto& r : presence)
         {
-            presenceBySid[r.sessionId] = r.status;
+            presenceBySid[r.sessionId] = PresenceFact{ r.status, r.waitingFor };
             if (r.sessionId.empty())
             {
                 continue;
@@ -703,7 +711,8 @@ namespace Agentmaster
                     o.gitBranch = ReadGitBranchForDir(f.cwd);
                     if (const auto pit = presenceBySid.find(sid); pit != presenceBySid.end())
                     {
-                        o.presenceStatus = pit->second; // claude's own heartbeat (busy/idle/waiting/shell)
+                        o.presenceStatus = pit->second.status; // claude's own heartbeat (busy/idle/waiting/shell)
+                        o.presenceWaitingFor = pit->second.waitingFor; // why it is blocked, when "waiting"
                     }
                     o.observedUnixMs = now;
                     o.createdUnixMs = convCreated;

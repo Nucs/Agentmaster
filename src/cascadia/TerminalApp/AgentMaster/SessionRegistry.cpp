@@ -618,6 +618,10 @@ namespace Agentmaster
             // (Rule #13). A flip notifies (turn-cadence, not per-survey noise) so a hook-less
             // session's status chip updates live.
             assign(s.presenceStatus, o.presenceStatus);
+            // The "waiting" detail rides the same flip. Deliberately assigned UNCONDITIONALLY
+            // (assign writes empties): it must CLEAR the moment claude leaves "waiting", or a
+            // stale "input needed" would outlive the question it described.
+            assign(s.presenceWaitingFor, o.presenceWaitingFor);
             // Agentmaster: do NOT bounce a session we INTENTIONALLY archived back to live while
             // its claude.exe is still winding down. A tab-close / window-teardown archive flips live=false,
             // but the process lingers (and may still sit in a window's published roster) for up to ~1

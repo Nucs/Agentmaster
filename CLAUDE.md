@@ -1229,7 +1229,41 @@ What works, by area:
   (Rule #13: a pid-validated FACT) — the IDLE counterpart to the same `busy` reading that elsewhere only
   ever HELD Running; proved live (session `d271a31f`). `ParseTranscriptDelta` now also emits
   a `ToolResult` marker (a tool completed → it answers the pending question) that does NOT count as a
-  run-repair turn event. **API-error turn → `Error` — the out-of-band failure capture (`recon-error`).**
+  run-repair turn event. **(f) blocked-on-user — THREE independent belts, because each single one was
+  measured to fail.** A session parked on an `AskUserQuestion` must enter `NeedsApproval` and LEAVE it the
+  moment you answer. Measured across 5 purpose-built sessions + a 400-transcript corpus sweep: the ENTRY
+  had two belts and the EXIT effectively one, and the one broken transition — **you answer and the agent
+  KEEPS WORKING** — took **19.8 s** (`ed5a48a4`) and **45.3 s** (`d2e77e90`) to leave the orange card
+  (corpus median 38.8 s, p90 119 s, and that is a LOWER bound — it measures transcript timestamps, while
+  the scanner sees disk writes, which lag). The other three exit shapes were already correct off a real
+  `Stop` hook (cancel 112 ms, "Chat about this" 2.2 s, answer-then-end-turn 1.5 s), so the fix is narrow.
+  The belts, in order of speed: **(1) claude's own presence heartbeat** — `~/.claude/sessions/<pid>.json`
+  is rewritten AT EVERY STATUS TRANSITION (mtime == `statusUpdatedAt` to the ms), carrying
+  `status:"waiting"` + a **`waitingFor`** detail (e.g. `"input needed"`); it flipped **6.4 s BEFORE** the
+  Notification hook (`7b40d6cf`) and needs NO transcript. `ShouldSynthesizeBlockedFromPresence` (entry,
+  `[recon-block-presence]`) and `ShouldSynthesizeResumedFromPresence` (exit, `[recon-resume-presence]`)
+  ride it; the exit is a genuine `waiting`→`busy`/`shell` **EDGE** (`ScanState::presenceWasWaiting`), NOT
+  a "busy while NeedsApproval" level — the latch is what keeps it from undoing a `NeedsApproval` whose
+  block does not set `waiting` (a real permission prompt is the open question: unverifiable here because
+  `skipPermissions:true` auto-approves them, so `cfa0daa7` produced no `waiting` to sample; the latch is
+  correct under either answer). The entry fires from Running/Idle but **deliberately NOT
+  WaitingForInput** — a termination argument: recon-stop can fire from `NeedsApproval` on a (stale)
+  terminal tail and land Waiting, so including it would flap every pass. **(2) the ANSWER line** —
+  a `ToolResult` that clears a NON-EMPTY `pendingInteractiveTool` is literally "the user answered", so it
+  now satisfies `ShouldSynthesizeResumed`'s new `answeredPendingQuestion` (**NeedsApproval-only**, so
+  `ShouldSynthesizeRunning`'s "a bare tool_result never lights Running" invariant is untouched). **(3) the
+  pre-existing** `recon-block` + the real `Notification`/`Stop` hooks. They fail INDEPENDENTLY — hooks
+  drop (295 in `forwarder-errors.log`), and a pending question's `tool_use` line was measured **still
+  unwritten 10+ minutes** into a live question (`7b40d6cf`), which is why `recon-block` never fired for 2
+  of the 5 and why, with the hook ALSO dropped, that session would have shown Running forever with a
+  question on screen — the hole belt (1) closes. Whichever belt is first wins; the losers are no-ops
+  through the ONE state machine. **UI side effect, floored:** releasing on the answer means
+  "answered → brief reply → turn ends" now passes THROUGH Running (1.06 s on `bee54051`, 1.55 s on
+  `98d6805f`), converting a target→target non-edge into a flash-ring EDGE. `ShouldSuppressAnswerBlipFlash`
+  (`kFlashMinRunSpanAfterAnswerMs` 3 s) suppresses exactly that blip — only a Running ENTERED FROM
+  NeedsApproval, only → Idle/Waiting, only with an OBSERVED span — so no pre-existing edge changes, while
+  a longer post-answer run still flashes (it genuinely needs you again).
+  **API-error turn → `Error` — the out-of-band failure capture (`recon-error`).**
   A turn can DIE with an API failure: Claude Code writes a SYNTHETIC assistant line (`model:"<synthetic>"`,
   top-level **`isApiErrorMessage:true`** + an `apiErrorStatus` HTTP code) for a rate/usage limit,
   `"Prompt is too long"`, a 4xx/5xx, a dropped/overloaded connection, a model-not-found, an auth failure,

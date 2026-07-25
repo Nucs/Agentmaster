@@ -709,6 +709,7 @@ namespace Agentmaster
         // as the live append the run-repair keys on (no matter how fresh the file mtime is).
         const bool wasPrimed = st.primed;
         bool consumedTurnEvent = false;
+        st.answeredInteractive = false; // per-pass scratch (see ScanState) — only THIS pass's reads count
         if (size != st.lastSize)
         {
             consumedTurnEvent = _readDelta(st, s, size); // advances st.offset past the complete lines it consumed
@@ -774,7 +775,7 @@ namespace Agentmaster
         // type-ahead queue accounting (++queuedPrompts) and could strand the next real Stop as Running.
         // The re-Get mirrors the other synths' freshest-state re-check, so a real hook that landed
         // mid-pass wins.
-        if (ShouldSynthesizeResumed(s.state, consumedTurnEvent, wasPrimed, st.pendingInteractiveTool, st.lastStopReason, st.interrupted, NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime)))
+        if (ShouldSynthesizeResumed(s.state, consumedTurnEvent, wasPrimed, st.pendingInteractiveTool, st.lastStopReason, st.interrupted, NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime), st.answeredInteractive))
         {
             const auto fresh = _registry->Get(s.id);
             if (fresh && fresh->state == SessionState::NeedsApproval)
@@ -788,6 +789,67 @@ namespace Agentmaster
                 AppendStateLog(L"scanner.log", L"[recon-resume] " + s.id + L" (answered -> working again, NeedsApproval -> Running)\n");
             }
         }
+
+        // Agentmaster (presence-driven blocked-on-user EXIT — the third belt). The transcript-based
+        // recon-resume above cannot fire off the ANSWER itself (a ToolResult is not a turn event), so
+        // it waits for the agent's NEXT assistant append — measured 19.8s (ed5a48a4) / 45.3s
+        // (d2e77e90) of a card reading orange "needs you" while the agent was demonstrably working,
+        // and that is the ONLY exit for the answer-and-keep-working shape (the other three exits ride
+        // a real Stop hook). claude's own heartbeat leaving "waiting" for "busy"/"shell" IS the
+        // answer, is written at the transition instant, and needs neither the transcript nor a hook.
+        // Runs BEFORE the latch is refreshed below so it reads the PREVIOUS pass's "waiting".
+        // Same synthesis as recon-resume (PostToolUse -> Running through the ONE state machine, never
+        // a UserPromptSubmit which would inflate ++queuedPrompts), same freshest-state re-Get, so
+        // whichever belt is first wins and the loser is a no-op.
+        if (ShouldSynthesizeResumedFromPresence(s.state, s.presenceStatus, st.presenceWasWaiting, st.lastStopReason, st.interrupted))
+        {
+            const auto fresh = _registry->Get(s.id);
+            if (fresh && fresh->state == SessionState::NeedsApproval)
+            {
+                HookMessage resume;
+                resume.event = HookEvent::PostToolUse;
+                resume.sessionId = s.id;
+                resume.cwd = s.workingDir;
+                resume.ts = NowMs();
+                _registry->OnHookEvent(resume);
+                AppendStateLog(L"scanner.log",
+                               L"[recon-resume-presence] " + s.id + L" (heartbeat waiting -> " + s.presenceStatus +
+                                   L", NeedsApproval -> Running)\n");
+            }
+        }
+
+        // Agentmaster (presence-driven blocked-on-user ENTRY — the third belt). recon-block below
+        // needs the AskUserQuestion tool_use LINE, measured still unwritten 10+ minutes into a live
+        // question (7b40d6cf); the Notification hook covers that today but is droppable, and with
+        // BOTH missed the session shows Running forever with a question on screen. claude's own
+        // "waiting" closes that hole and lands ~6.4s earlier than the hook besides. Synthesizes the
+        // SAME permission-style Notification recon-block does, so the two are interchangeable and a
+        // duplicate is a no-op through the one state machine.
+        const bool presenceAwaitingUser = PresenceIsAwaitingUser(s.presenceStatus);
+        if (ShouldSynthesizeBlockedFromPresence(s.state, s.presenceStatus, st.interrupted))
+        {
+            const auto fresh = _registry->Get(s.id);
+            // Re-run the SAME predicate against the freshest state (a real hook may have landed
+            // mid-pass), rather than a hand-written subset that could drift from it.
+            if (fresh && ShouldSynthesizeBlockedFromPresence(fresh->state, s.presenceStatus, st.interrupted))
+            {
+                HookMessage block;
+                block.event = HookEvent::Notification;
+                block.permissionRequest = true; // -> NeedsApproval via the one state machine
+                block.sessionId = s.id;
+                block.cwd = s.workingDir;
+                block.ts = NowMs();
+                _registry->OnHookEvent(block);
+                AppendStateLog(L"scanner.log",
+                               L"[recon-block-presence] " + s.id + L" (heartbeat waiting" +
+                                   (s.presenceWaitingFor.empty() ? std::wstring{} : (L": " + s.presenceWaitingFor)) +
+                                   L" -> needs you)\n");
+            }
+        }
+        // Refresh the EDGE latch for the next pass: armed while claude reports "waiting", dropped the
+        // moment it leaves (the resume synth above already consumed the transition; a move to "idle"
+        // needs no release here — that is recon-stop's -> Waiting).
+        st.presenceWasWaiting = presenceAwaitingUser;
 
         // Agentmaster (subagent/fork activity): the parent <id>.jsonl can sit QUIESCENT while the
         // turn's real work happens elsewhere — a Task/Agent SUBAGENT writing <id>/subagents/*.jsonl
@@ -1226,6 +1288,16 @@ namespace Agentmaster
                 // A tool produced a result -> a pending interactive tool_use (the question) was
                 // ANSWERED. (Deliberately NOT a turn event for the run-repair: a bare tool_result
                 // never synthesized Running before — preserve that.)
+                // Agentmaster: but a tool_result that clears a NON-EMPTY pendingInteractiveTool is
+                // exactly "the user answered the question" — the one line that proves it — so record
+                // it for the NeedsApproval-only resume gate (ShouldSynthesizeResumed's
+                // answeredPendingQuestion). The empty->empty case (an ordinary Bash/Read result) is
+                // NOT recorded, which is what keeps ShouldSynthesizeRunning's "a bare tool_result
+                // never lights Running" invariant exactly as it was.
+                if (!st.pendingInteractiveTool.empty())
+                {
+                    st.answeredInteractive = true;
+                }
                 st.pendingInteractiveTool.clear();
                 st.lastWasApiError = false; // activity past any error -> the tail is no longer that error
                 st.errorUuid.clear();

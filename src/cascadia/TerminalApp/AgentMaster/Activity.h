@@ -189,6 +189,13 @@ namespace Agentmaster
         // ~/.claude/sessions/<pid>.json, pid-liveness-validated by the S-lane. A display FACT,
         // never SessionState (Rule #13). Empty when no live presence file matches this claude.
         std::wstring presenceStatus;
+        // Agentmaster: the "waiting" detail — claude's own reason it is blocked on the user
+        // (e.g. "input needed" for a pending AskUserQuestion). Non-empty only while
+        // presenceStatus=="waiting". Carried alongside the status so the SCANNER can consume the
+        // blocked-on-user EDGE (SessionScanner.h ShouldSynthesizeBlockedFromPresence /
+        // ...ResumedFromPresence) without any transcript or hook. Still a FACT — Rule #13 stands:
+        // the OBSERVER never sets SessionState, it only publishes what claude reported.
+        std::wstring presenceWaitingFor;
         int64_t observedUnixMs{};
         int64_t createdUnixMs{}; // transcript ctime (≈ conversation start) — per-session timing
         int64_t lastActivityUnixMs{}; // transcript mtime (≈ last activity) — per-session timing

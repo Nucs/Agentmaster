@@ -760,6 +760,13 @@ namespace Agentmaster
         // NOT SessionState (push hooks + the transcript tail own state, Rule #13; STATE.md owns
         // any future promotion). Empty when no live presence file backs this session.
         std::wstring presenceStatus;
+        // The "waiting" DETAIL from that same heartbeat ("waitingFor", e.g. "input needed" for a
+        // pending AskUserQuestion) — non-empty only while presenceStatus=="waiting". Same
+        // provenance + same rules as presenceStatus: a transient display FACT, never persisted.
+        // It is what lets the scanner recognize "blocked on the user" with NO transcript line and
+        // NO hook — the two signals that were measured to be, respectively, minutes-late and
+        // droppable (see TranscriptStore.h SessionPresenceRow::waitingFor).
+        std::wstring presenceWaitingFor;
         bool hookWired{}; // have we received ANY hook for this id this run? (provenance)
         int64_t lastHookUnixMs{}; // last authoritative push (hook) — provenance vs the pull
         int64_t lastObservedUnixMs{}; // last pull observation (the S-lane survey)

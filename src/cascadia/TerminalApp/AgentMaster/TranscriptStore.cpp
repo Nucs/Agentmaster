@@ -1751,6 +1751,11 @@ namespace Agentmaster
             r.version = parsed->StrAt(L"version");
             r.startedAtMs = parsed->I64At(L"startedAt");
             r.updatedAtMs = parsed->I64At(L"updatedAt");
+            // Agentmaster: the blocked-on-user detail + the transition instant (see the header).
+            // Both absent on older claude builds -> "" / 0, which every consumer treats as
+            // "no such signal" and falls back to the transcript/hook belts.
+            r.waitingFor = parsed->StrAt(L"waitingFor");
+            r.statusUpdatedAtMs = parsed->I64At(L"statusUpdatedAt");
             if (r.pid != 0 && !r.sessionId.empty())
             {
                 out.push_back(std::move(r));

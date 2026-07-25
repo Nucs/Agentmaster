@@ -2507,6 +2507,7 @@ namespace winrt::TerminalApp::implementation
             _StopAgentFlash(sessionId);
             _ClearSessionUnread(sessionId);
             _agentFlashLastState.erase(sessionId);
+            _agentFlashRunSpan.erase(sessionId); // forget the Running span with the state (same rule)
             return;
         }
 
@@ -2523,6 +2524,17 @@ namespace winrt::TerminalApp::implementation
         const bool hadPrev = (prevIt != _agentFlashLastState.end());
         const auto prev = hadPrev ? prevIt->second : SessionState::Idle;
         _agentFlashLastState[sessionId] = newState;
+
+        // Agentmaster: track the CURRENT Running span for the answer-blip flash floor below. Stamped on
+        // the ENTRY edge only (X -> Running), so the span measures this run, and remembering whether it
+        // came from NeedsApproval (the answer release) is what keeps the floor off every other edge.
+        if (newState == SessionState::Running)
+        {
+            if (prev != SessionState::Running)
+            {
+                _agentFlashRunSpan[sessionId] = AgentRunSpan{ TtNowMs(), hadPrev && prev == SessionState::NeedsApproval };
+            }
+        }
 
         // We flash ONLY for the "now it's on you / at rest" states: Idle, WaitingForInput
         // (waiting-for-you), NeedsApproval (approval-required). Any other state — Running (working
@@ -2542,6 +2554,24 @@ namespace winrt::TerminalApp::implementation
         // leaves an existing flash alone — still on you until you visit the tab.
         if (hadPrev && prev == SessionState::Running)
         {
+            // Agentmaster: suppress ONLY the post-answer blip — a Running that was entered from
+            // NeedsApproval (the user answered) and ended within kFlashMinRunSpanAfterAnswerMs. Before
+            // the answer-release synths this shape was NeedsApproval -> WaitingForInput, a target ->
+            // target move that never flashed; without this floor every answered question would newly
+            // flash its tab. A longer post-answer run still flashes (it genuinely needs you again), and
+            // no other edge is touched. See ShouldSuppressAnswerBlipFlash.
+            int64_t runSpanMs = 0;
+            bool fromNeedsApproval = false;
+            if (const auto rit = _agentFlashRunSpan.find(sessionId); rit != _agentFlashRunSpan.end())
+            {
+                runSpanMs = TtNowMs() - rit->second.sinceMs;
+                fromNeedsApproval = rit->second.fromNeedsApproval;
+            }
+            _agentFlashRunSpan.erase(sessionId); // the run ended; the next entry edge re-stamps it
+            if (::Agentmaster::ShouldSuppressAnswerBlipFlash(newState, fromNeedsApproval, runSpanMs))
+            {
+                return; // leave any existing flash as-is, exactly like the old target -> target path
+            }
             if (tab == _GetFocusedTab())
             {
                 _StopAgentFlash(sessionId); // the current tab is always considered visited

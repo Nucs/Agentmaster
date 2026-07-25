@@ -431,6 +431,17 @@ namespace winrt::TerminalApp::implementation
         // multiple flashing tabs blink in lockstep (the synchronization requirement) — and a tab that
         // starts flashing mid-cycle joins at the current phase. UI thread only.
         std::unordered_map<std::wstring, ::Agentmaster::SessionState> _agentFlashLastState;
+        // Agentmaster: per-session record of the CURRENT Running span — when it started, and whether it
+        // was entered from NeedsApproval (i.e. the user answering a question released it). Feeds the
+        // pure ShouldSuppressAnswerBlipFlash floor so the brief "answered -> agent replies -> turn ends"
+        // pass-through Running (~1-1.5s, measured) does not newly flash every answered question's tab.
+        // Erased with _agentFlashLastState on !live so a restore re-tracks fresh.
+        struct AgentRunSpan
+        {
+            int64_t sinceMs{};
+            bool fromNeedsApproval{};
+        };
+        std::unordered_map<std::wstring, AgentRunSpan> _agentFlashRunSpan;
         std::unordered_set<std::wstring> _flashingSessions;
         // Agentmaster (Mark Unread): sessions MANUALLY marked unread via the tab context menu. Drives the
         // SAME red ring on the SAME shared timer (a session's tab flashes if it is in EITHER set), but is
