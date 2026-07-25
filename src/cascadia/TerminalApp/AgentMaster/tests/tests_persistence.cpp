@@ -445,13 +445,21 @@ void TestAppSettings()
         CHECK(absent.model == L"opus" && absent.launchModels == std::wstring{ kDefaultLaunchModels }, "settings launchModels ABSENT key -> the shipped defaults");
         const auto cleared = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"launchModels\":\"\"}}");
         CHECK(cleared.launchModels.empty(), "settings launchModels PRESENT-but-empty stays empty (deliberate 'just Default')");
+        // ...and a PRESENT value that is still a RETIRED shipped default (the pinned
+        // "Opus 4.8 | claude-opus-4-8" era) upgrades to the current one — otherwise presence-gating
+        // alone would pin every existing install to the stale versioned ids forever.
+        const auto stale = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"launchModels\":\"Fable 5 | claude-fable-5\\nOpus 4.8 | claude-opus-4-8\\nSonnet 5 | claude-sonnet-5\"}}");
+        CHECK(stale.launchModels == std::wstring{ kDefaultLaunchModels }, "settings launchModels: a pristine RETIRED default upgrades to the current aliases");
+        // A list the user actually edited is theirs — read back VERBATIM, never upgraded.
+        const auto mine = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"launchModels\":\"Opus 4.8 | claude-opus-4-8\"}}");
+        CHECK(mine.launchModels == L"Opus 4.8 | claude-opus-4-8", "settings launchModels: a USER-edited list (even pinned ids) is kept verbatim");
     }
 
     // Empty / garbage -> all defaults (a missing settings.json must change nothing).
     {
         const auto out = DeserializeAppSettings(L"");
         CHECK(out.skipPermissions == true && out.includeCoAuthoredBy == true, "settings defaults on empty");
-        CHECK(out.launchModels == std::wstring{ kDefaultLaunchModels }, "settings launchModels defaults (Fable 5 / Opus 4.8 / Sonnet 5) on empty");
+        CHECK(out.launchModels == std::wstring{ kDefaultLaunchModels }, "settings launchModels defaults (Fable / Opus / Sonnet aliases) on empty");
         CHECK(out.defaultAutorunnerMode == AutorunnerMode::Full && out.maxAutoSends == 100u, "settings autorunner default Full on empty");
         CHECK(out.archiveSplitFraction > 0.499 && out.archiveSplitFraction < 0.501, "settings archiveSplitFraction default 0.5 on empty");
         CHECK(out.summaryPanelWidthFraction == 0.0 && out.summaryPanelHeightFraction == 0.0, "settings summaryPanel size fractions default 0 (auto) on empty");

@@ -206,6 +206,16 @@ namespace Agentmaster
     inline constexpr size_t kMaxLaunchModels = 32;
     std::vector<std::pair<std::wstring, std::wstring>> ParseLaunchModels(std::wstring_view spec);
 
+    // Agentmaster (launch-model picker): is `spec` still one of the launch-model lists we USED to
+    // ship as the default (kSupersededLaunchModels, SessionModels.h) — i.e. a list the user never
+    // edited? The settings load upgrades such a spec to kDefaultLaunchModels, so an existing
+    // install follows a default change instead of being pinned to it forever by the key's mere
+    // presence; an edited list (any rename/reorder/added/removed entry) and a deliberately EMPTY
+    // one ("no models — just Default") are never touched. Compares the PARSED {name, id} pairs,
+    // not the bytes, so the cog TextBox's '\r' line endings, a trailing blank line, and spacing
+    // around the '|' don't hide a pristine list. PURE + unit-tested.
+    bool LaunchModelsAreSupersededDefault(std::wstring_view spec);
+
     // Merge a GLOBAL env block (AppSettings.env) with a working-directory's PER-DIR overrides
     // (dir-env.json) into the final ordered NAME=VALUE pairs. Per-dir entries OVERRIDE global ones
     // with the same name (Windows env names are case-INsensitive, so the match is too); within one
@@ -737,8 +747,9 @@ namespace Agentmaster
     // MODEL matching is PARTIAL + CASELESS + CHARACTERS-ONLY: both the typed hint and each entry's
     // TWO sides (the display name AND the model id, ParseLaunchModels) fold to lowercase [a-z0-9]
     // (spaces/dots/hyphens/brackets dropped), and the hint matches an entry when it is a SUBSTRING
-    // of either folded side — "fable" hits "Fable 5"/"claude-fable-5", "sonnet" hits
-    // "claude-sonnet-5". First matching entry in list order wins. Only the args' FIRST LINE's
+    // of either folded side — "fable" hits the shipped "Fable"/"fable" and equally a user's pinned
+    // "Fable 5"/"claude-fable-5"; "sonnet" hits "claude-sonnet-5". First matching entry in list
+    // order wins. Only the args' FIRST LINE's
     // LEADING portion is consulted:
     //   * `[hint]` — the explicit bracketed form: the bracket body is the hint (any non-empty fold;
     //     an absurdly long bracket or a no-match is not a model — it FALLS BACK to the TITLE slot

@@ -773,6 +773,14 @@ namespace Agentmaster
         if (v.Find(L"launchModels"))
         {
             s.launchModels = v.StrAt(L"launchModels");
+            // ...but a PRESENT value that is still one of the lists we USED to ship as the default
+            // (kSupersededLaunchModels — the pinned "Opus 4.8 | claude-opus-4-8" era) was never
+            // edited by the user, so it upgrades to the current default. Presence-gating alone
+            // would otherwise pin every existing install to the stale versioned ids forever.
+            if (LaunchModelsAreSupersededDefault(s.launchModels))
+            {
+                s.launchModels = std::wstring{ kDefaultLaunchModels };
+            }
         }
         // Current-model adornment: presence-gated like launchModels — an ABSENT key (an older
         // settings.json) seeds the shipped kDefaultModelFamilies (the struct default) so the cog

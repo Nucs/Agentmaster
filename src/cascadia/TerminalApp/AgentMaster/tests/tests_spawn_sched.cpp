@@ -289,11 +289,20 @@ void TestSpawnBuilders()
     // ordered {name, id} pairs feeding every "Open New Session Here" submenu.
     {
         // The SHIPPED defaults (AppSettings.launchModels seed) parse to the three advertised models.
+        // Version-LESS by design: the ids are Claude Code's "latest of this family" aliases, so the
+        // list never rots the way the pinned "claude-opus-4-8" era did (SessionModels.h).
         const auto d = ParseLaunchModels(kDefaultLaunchModels);
         CHECK(d.size() == 3, "launch models: shipped defaults -> 3 entries");
-        CHECK(d[0].first == L"Fable 5" && d[0].second == L"claude-fable-5", "launch models: default #1 Fable 5 | claude-fable-5");
-        CHECK(d[1].first == L"Opus 4.8" && d[1].second == L"claude-opus-4-8", "launch models: default #2 Opus 4.8 | claude-opus-4-8");
-        CHECK(d[2].first == L"Sonnet 5" && d[2].second == L"claude-sonnet-5", "launch models: default #3 Sonnet 5 | claude-sonnet-5");
+        CHECK(d[0].first == L"Fable" && d[0].second == L"fable", "launch models: default #1 Fable | fable (alias, not claude-fable-5)");
+        CHECK(d[1].first == L"Opus" && d[1].second == L"opus", "launch models: default #2 Opus | opus (alias, not claude-opus-4-8)");
+        CHECK(d[2].first == L"Sonnet" && d[2].second == L"sonnet", "launch models: default #3 Sonnet | sonnet (alias, not claude-sonnet-5)");
+        for (const auto& [name, id] : d)
+        {
+            CHECK(id.find(L'-') == std::wstring::npos && id.find_first_of(L"0123456789") == std::wstring::npos,
+                  "launch models: every shipped id is a bare version-LESS alias");
+            CHECK(!name.empty() && name.find_first_of(L"0123456789") == std::wstring::npos,
+                  "launch models: every shipped label is version-LESS too");
+        }
         // '|' splits on the FIRST bar, both sides trimmed; entries split on newline OR ';'; a
         // TextBox's \r-normalized text (the cog editor round-trip) parses identically.
         const auto e = ParseLaunchModels(L"  Opus 4.6 | claude-opus-4-6  ;Custom|my|model\rHaiku 4.5 | claude-haiku-4-5-20251001");
@@ -314,6 +323,52 @@ void TestSpawnBuilders()
             big += L"M" + std::to_wstring(i) + L" | id-" + std::to_wstring(i) + L"\n";
         }
         CHECK(ParseLaunchModels(big).size() == kMaxLaunchModels, "launch models: capped at kMaxLaunchModels");
+    }
+
+    // LaunchModelsAreSupersededDefault (Agentmaster, launch-model picker): the "ours, unmodified =>
+    // upgrade" gate that keeps an EXISTING install from being pinned to a stale shipped default by
+    // the settings key's mere presence. Matches the PARSED pairs, so line endings / trailing blank
+    // lines / spacing never hide a pristine list; anything the user actually edited is left alone.
+    {
+        for (const auto& superseded : kSupersededLaunchModels)
+        {
+            CHECK(LaunchModelsAreSupersededDefault(superseded), "superseded models: a verbatim retired default is recognized");
+        }
+        const std::wstring v1 = L"Fable 5 | claude-fable-5\nOpus 4.8 | claude-opus-4-8\nSonnet 5 | claude-sonnet-5";
+        // The cog TextBox rewrites newlines to '\r' on the first open+Save, so the REAL on-disk
+        // shape of an untouched list is \r-separated — the case a byte compare would miss.
+        std::wstring cr = v1;
+        for (auto& c : cr)
+        {
+            if (c == L'\n')
+            {
+                c = L'\r';
+            }
+        }
+        CHECK(LaunchModelsAreSupersededDefault(cr), "superseded models: '\\r' line endings (the cog TextBox round-trip) still match");
+        CHECK(LaunchModelsAreSupersededDefault(v1 + L"\n"), "superseded models: a trailing newline still matches");
+        CHECK(LaunchModelsAreSupersededDefault(L"Fable 5|claude-fable-5\nOpus 4.8|claude-opus-4-8\nSonnet 5|claude-sonnet-5"),
+              "superseded models: spacing around '|' still matches (parsed pairs, not bytes)");
+        // Anything the user touched — a drop, an addition, a rename, a reorder — is THEIRS.
+        CHECK(!LaunchModelsAreSupersededDefault(L"Fable 5 | claude-fable-5\nOpus 4.8 | claude-opus-4-8"),
+              "superseded models: a REMOVED entry is a user edit — left alone");
+        CHECK(!LaunchModelsAreSupersededDefault(v1 + L"\nHaiku 4.5 | claude-haiku-4-5-20251001"),
+              "superseded models: an ADDED entry is a user edit — left alone");
+        CHECK(!LaunchModelsAreSupersededDefault(L"Opus 4.8 | claude-opus-4-8\nFable 5 | claude-fable-5\nSonnet 5 | claude-sonnet-5"),
+              "superseded models: a REORDERED list is a user edit — left alone");
+        CHECK(!LaunchModelsAreSupersededDefault(L"Fable | claude-fable-5\nOpus 4.8 | claude-opus-4-8\nSonnet 5 | claude-sonnet-5"),
+              "superseded models: a RENAMED label is a user edit — left alone");
+        // The CURRENT default is not superseded (no upgrade loop), and an empty/no-models spec is a
+        // deliberate choice, never replaced.
+        CHECK(!LaunchModelsAreSupersededDefault(kDefaultLaunchModels), "superseded models: the CURRENT default is not superseded");
+        CHECK(!LaunchModelsAreSupersededDefault(L""), "superseded models: \"\" is the deliberate no-models choice — never upgraded");
+        CHECK(!LaunchModelsAreSupersededDefault(L"# all commented out\n\n  "), "superseded models: a spec parsing to nothing is never upgraded");
+        // The histories must stay disjoint from the current text, or a load would flip-flop.
+        for (const auto& superseded : kSupersededLaunchModels)
+        {
+            CHECK(ParseLaunchModels(superseded) != ParseLaunchModels(kDefaultLaunchModels),
+                  "superseded models: no retired default equals the current one");
+        }
     }
 
     // BuildClaudeCommandline modelOverride (Agentmaster, launch-model picker): the per-LAUNCH

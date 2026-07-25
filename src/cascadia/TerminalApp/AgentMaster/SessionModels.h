@@ -1110,10 +1110,38 @@ namespace Agentmaster
     // "Open New Session Here" model submenu offers until the user edits the list in the Settings
     // cog. One entry per line, "Display name | model-id": the left side is the submenu label, the
     // right is what the spawn passes as `--model <id>` (see ParseLaunchModels in ClaudeSpawn.h).
+    //
+    // The ids are Claude Code's ALIASES ("fable" / "opus" / "sonnet"), NOT pinned version ids
+    // ("claude-opus-4-8"), and the labels drop the version with them. `claude --help` defines an
+    // alias as "an alias for the LATEST model" ("Provide an alias for the latest model (e.g.
+    // 'fable', 'opus', or 'sonnet') or a model's full name (e.g. 'claude-fable-5')"), so an alias
+    // FOLLOWS Anthropic's next release on its own, while a pinned id silently rots — this list
+    // still named Opus 4.8 long after Opus 5 shipped — and eventually fails to launch when that
+    // version retires. A user who WANTS a pinned version just types the full id in the cog box;
+    // the picker passes whatever is on the right side through to `--model` verbatim.
     inline constexpr std::wstring_view kDefaultLaunchModels =
-        L"Fable 5 | claude-fable-5\n"
-        L"Opus 4.8 | claude-opus-4-8\n"
-        L"Sonnet 5 | claude-sonnet-5";
+        L"Fable | fable\n"
+        L"Opus | opus\n"
+        L"Sonnet | sonnet";
+
+    // Agentmaster (launch-model picker): the launch-model lists we shipped as the default BEFORE
+    // the alias switch above. A stored settings.json value that still equals one of these is a
+    // list the user never edited, so it is UPGRADED to the current default on load
+    // (LaunchModelsAreSupersededDefault / AppSettingsFromJson) — the /handover definition files'
+    // "ours, unmodified => upgrade; user-edited => never touch" policy, applied to a setting.
+    // Without it the presence-gated key would pin every EXISTING install to the stale versioned
+    // ids forever, which is exactly the rot the switch is meant to end.
+    //
+    // The comparison is SEMANTIC (the parsed {name, id} pairs, not the bytes): the cog's TextBox
+    // rewrites newlines to '\r' the first time the user opens and saves settings, so a byte
+    // compare would miss most real installs. A user who deliberately TYPED the old list verbatim
+    // is indistinguishable from one who never touched it and upgrades too — the accepted
+    // trade-off of this policy (re-typing pinned ids restores them, and any reorder/rename/extra
+    // entry already fails the match). Append-only, oldest first; never remove an entry — that
+    // would strand the installs still carrying it.
+    inline constexpr std::wstring_view kSupersededLaunchModels[] = {
+        L"Fable 5 | claude-fable-5\nOpus 4.8 | claude-opus-4-8\nSonnet 5 | claude-sonnet-5",
+    };
 
     // Global app settings — the Manager toolbar's Settings cog (next to "Pause Autorunner").
     // Every default reproduces the prior hardcoded behavior EXCEPT defaultAutorunnerMode (now

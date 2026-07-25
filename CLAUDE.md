@@ -1858,8 +1858,18 @@ What works, by area:
   NOT a `ContentDialog` (a text box inside one gets no keypresses in XAML Islands — see
   Gotchas). Exposes **Claude-session** config — `skipPermissions` (the spawn's
   `--dangerously-skip-permissions`), `model` (== `/model <v>`), **`launchModels`** (the
-  **launch-model picker**: a multi-line `Display name | model-id` list — default `Fable 5 |
-  claude-fable-5` / `Opus 4.8 | claude-opus-4-8` / `Sonnet 5 | claude-sonnet-5` — that turns EVERY
+  **launch-model picker**: a multi-line `Display name | model-id` list — default `Fable | fable` /
+  `Opus | opus` / `Sonnet | sonnet`, deliberately **version-LESS**: the ids are Claude Code's
+  "alias for the LATEST model" (`claude --help`), so the shipped list follows Anthropic's next
+  release on its own instead of rotting the way the pinned `claude-opus-4-8` era did (a user who
+  wants a pinned version types the full id — the right side rides to `--model` verbatim). Because
+  the key is presence-gated, an EXISTING install would otherwise stay pinned to the old list
+  forever, so a stored value that still equals a **retired shipped default**
+  (`kSupersededLaunchModels`, matched on the PARSED pairs so the cog TextBox's `\r` line endings
+  can't hide it) is **upgraded on load** (`LaunchModelsAreSupersededDefault` → `AppSettingsFromJson`)
+  — the /handover definition files' "ours, unmodified ⇒ upgrade; user-edited ⇒ never touch" policy
+  applied to a setting; any edited list (rename/reorder/add/remove) and a deliberately empty one are
+  left alone. It turns EVERY
   **"Open New Session Here"** AND **"Fork session"/"Fork here"** into a submenu [board/tree session
   menu + External menu + the Sessions page's row menu + its detail-pane SplitButtons (Open-New AND
   Fork) + the WT tab menu's "New Session Here" and "Fork session", the shared `AgentModelMenu.h`

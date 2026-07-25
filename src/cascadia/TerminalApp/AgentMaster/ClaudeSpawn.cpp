@@ -3168,6 +3168,26 @@ send - nothing is submitted until the user presses Enter in that tab.
         return out;
     }
 
+    bool LaunchModelsAreSupersededDefault(std::wstring_view spec)
+    {
+        const auto entries = ParseLaunchModels(spec);
+        if (entries.empty())
+        {
+            // "" (or an all-comment/blank spec) is the deliberate "no models — the submenus offer
+            // just Default". Never ours to replace, and it must not match a superseded list that
+            // happened to parse to nothing either.
+            return false;
+        }
+        for (const auto& superseded : kSupersededLaunchModels)
+        {
+            if (entries == ParseLaunchModels(superseded))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::vector<std::pair<std::wstring, std::wstring>> MergeSessionEnv(std::wstring_view globalEnv, std::wstring_view perDirEnv)
     {
         std::vector<std::pair<std::wstring, std::wstring>> out;

@@ -909,8 +909,8 @@ namespace winrt::TerminalApp::implementation
         _setLaunchModels.MaxHeight(140);
         _setLaunchModels.BorderThickness(Thickness{ 0, 0, 0, 0 });
         ScrollViewer::SetVerticalScrollBarVisibility(_setLaunchModels, ScrollBarVisibility::Auto);
-        _setLaunchModels.PlaceholderText(L"Display name | model-id \x2014 one per line (e.g. Opus 4.8 | claude-opus-4-8)");
-        AgentSetTip(_setLaunchModels, L"The models every \x201COpen New Session Here\x201D and \x201C" L"Fork session\x201D submenu offers \x2014 on the Manager's board/tree and External menus, the Sessions page, and a tab's right-click menu. One \x201C" L"Display name | model-id\x201D per line: the left side is the menu label, the right is launched as --model <id> (that session only \x2014 \x201C" L"Default\x201D keeps the Model box above). '#' comments a line; clear the box to offer just Default.");
+        _setLaunchModels.PlaceholderText(L"Display name | model-id \x2014 one per line (e.g. Opus | opus)");
+        AgentSetTip(_setLaunchModels, L"The models every \x201COpen New Session Here\x201D and \x201C" L"Fork session\x201D submenu offers \x2014 on the Manager's board/tree and External menus, the Sessions page, and a tab's right-click menu. One \x201C" L"Display name | model-id\x201D per line: the left side is the menu label, the right is launched as --model <id> (that session only \x2014 \x201C" L"Default\x201D keeps the Model box above). An ALIAS (opus / sonnet / fable) always launches the LATEST model of that family; a full id (claude-opus-4-8) pins that exact version. '#' comments a line; clear the box to offer just Default.");
         _setLaunchModels.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _RefreshLaunchModelsLex(); });
         _setLaunchModelsBorder = Border{};
         _setLaunchModelsBorder.BorderThickness(Thickness{ 1, 1, 1, 1 });
