@@ -153,6 +153,13 @@ namespace winrt::TerminalApp::implementation
         // Fleet Observer to re-survey now (re-enrich the registry + recompute the External census)
         // instead of waiting for the next tick. Optional — unwired, the button is a plain redraw.
         void SetRefreshHandler(std::function<void()> handler);
+        // Agentmaster (PENDING_INPUT.md §8): the session menu's "Copy Current Prompt" wants the UNSENT
+        // draft as the input box holds it right now. Only the window that HOSTS a session's tab can read
+        // its buffer, and the board/tree show the WHOLE fleet — so this provider (wired by the page,
+        // TerminalPage::_ReadLiveDraftForSession) answers "" for a session hosted elsewhere, dormant, or
+        // unreadable, and the copy then falls back to the observer's recorded SessionInfo::pendingInput.
+        // Optional — unwired, every copy simply uses the remembered draft.
+        void SetLiveDraftProvider(std::function<std::wstring(const std::wstring&)> provider);
         // Agentmaster: force a UI redraw (board/tree/plan) from the current data — the page calls this
         // after an out-of-band reload (the observer survey lands asynchronously) so fresh data shows.
         void RefreshNow();
@@ -615,6 +622,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(uint32_t, winrt::hstring, bool)> _adoptExternalHandler; // Agentmaster: EXTERNAL-tree Adopt (pid, cwd, fork) -> page forks/resumes the external's conversation into a managed tab
         std::function<void(uint32_t, winrt::hstring, bool, bool)> _codexLaunchHandler; // Agentmaster (Codex-launch): EXTERNAL-codex (pid, cwd, adopt, fork): Adopt (adopt=true; fork picks fork/resume) / Open-New-Codex (adopt=false)
         std::function<std::unordered_set<std::wstring>()> _localScopeProvider; // Agentmaster: this window's hosted session ids (for the Explorer Tree LOCAL scope)
+        std::function<std::wstring(const std::wstring&)> _liveDraftProvider; // Agentmaster (PENDING_INPUT.md §8): read a session's unsent input-box draft from its LIVE buffer for "Copy Current Prompt" ("" when the tab isn't hosted/readable here — the remembered draft then wins)
         std::function<bool()> _windowForegroundProvider; // Agentmaster (focus-steal fix): is this Manager's window the OS foreground window? Gates _Refresh's focus-restore so a background rebuild can't steal foreground.
         std::function<void(bool)> _pauseHandler;
         std::function<void(winrt::hstring, bool)> _confirmHandler;

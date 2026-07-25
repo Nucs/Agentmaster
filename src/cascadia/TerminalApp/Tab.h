@@ -254,8 +254,8 @@ namespace winrt::TerminalApp::implementation
         // AttachColorPicker() so the openTabColorPicker action / command-palette path is blocked too.
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _chooseColorMenuItem{};
         bool _colorPickerDisabled{ false };
-        // Agentmaster: the "Copy >" submenu (session id / path / branch / Claude & Codex launch CLI /
-        // summary / transcript) mirroring the per-tab overlay's copy button. Kept as a member so the page
+        // Agentmaster: the "Copy >" submenu (session id / path / branch / current prompt / Claude & Codex
+        // launch CLI / summary / transcript) mirroring the per-tab overlay's copy button. Kept as a member so the page
         // can show/hide it (SetAgentCopyMenuVisible) per whether this tab currently hosts a managed agent
         // session; built collapsed in _CreateContextMenu, its items raise CopySessionFieldRequested.
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem _copySessionSubMenu{};
@@ -263,6 +263,9 @@ namespace winrt::TerminalApp::implementation
         // SetAgentCopyMenuVisible can reveal ONLY the one matching the session's agent (Claude vs Codex).
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _copyClaudeCliItem{ nullptr };
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _copyCodexCliItem{ nullptr };
+        // Agentmaster (PENDING_INPUT.md): "Copy Current Prompt" — the unsent-draft item, a member for the
+        // same reason: SetAgentCopyMenuVisible shows it only for a CLAUDE session (Codex has no input box).
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _copyCurrentPromptItem{ nullptr };
         uint32_t _reservedLeadingTabs{ 0 }; // Agentmaster: count of pinned, non-bulk-closable leading tabs (the Manager tab); fed by UpdateTabViewIndex, read by _EnableMenuItems
         winrt::TerminalApp::ShortcutActionDispatch _dispatch;
         Microsoft::Terminal::Settings::Model::IActionMapView _actionMap{ nullptr };

@@ -436,4 +436,48 @@ namespace Agentmaster
         out.text = std::move(text);
         return out;
     }
+
+    // ---- The "current prompt" PICK: a live read vs the remembered draft (PENDING_INPUT.md sect. 8) ----
+    //
+    // Every "Copy Current Prompt" menu item has TWO possible sources for a session's unsent draft, and
+    // this is the ONE rule that chooses between them, so the three copy menus (the per-tab overlay's,
+    // the Triage Board / Explorer-tree Copy submenu, the WT tab menu's "Copy >") can never drift:
+    //
+    //   * LIVE -- DetectPendingInput run against that tab's terminal buffer RIGHT NOW
+    //     (ControlCore::ReadPendingInputDraft, via the hosting window's TermControl). Authoritative
+    //     whenever it yields text: it is the box exactly as rendered this instant, with none of the
+    //     scan lane's tick lag. It is simply UNAVAILABLE in several ordinary cases -- a session whose
+    //     tab lives in ANOTHER window (a different UI thread), a dormant window-restored tab whose
+    //     claude has not started (no buffer), a closed session, or a read that threw -- and the caller
+    //     passes "" for all of them (the read is wrapped; a failure is never fatal, just empty).
+    //   * REMEMBERED -- SessionInfo::pendingInput: what the observer's scan lane last recorded (at most
+    //     one liveness tick old) or, across a restart, the PERSISTED staleness-labeled memory (sect. 5).
+    //
+    // The rule: a non-empty LIVE read wins; otherwise fall back to the remembered value. A live read
+    // that comes back EMPTY deliberately does NOT erase the fallback -- the "3 dots" indicator is
+    // driven by the remembered value through the 2-tick clear debounce, so for as long as the tab/card
+    // still says "this session holds an unsent message" the copy must hand over that message instead
+    // of silently copying nothing. Whitespace-only counts as empty on both sides (a focused empty box
+    // can render as padding alone; DetectPendingInput already strips its cursor).
+    struct CurrentPromptPick
+    {
+        std::wstring text; // the chosen draft ("" => neither source had one; the copy is then a no-op)
+        bool fromLive{ false }; // true => text came from the live buffer read (else remembered/persisted)
+    };
+
+    inline CurrentPromptPick PickCurrentPromptText(std::wstring_view live, std::wstring_view remembered)
+    {
+        CurrentPromptPick pick;
+        if (!pending_detail::AllWhitespace(live))
+        {
+            pick.text.assign(live);
+            pick.fromLive = true;
+            return pick;
+        }
+        if (!pending_detail::AllWhitespace(remembered))
+        {
+            pick.text.assign(remembered);
+        }
+        return pick;
+    }
 }

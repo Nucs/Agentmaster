@@ -1053,6 +1053,11 @@ namespace winrt::TerminalApp::implementation
         _onAdjacentPrompt = std::move(handler);
     }
 
+    void AgentTabOverlay::SetLiveDraftHandler(std::function<std::wstring()> handler)
+    {
+        _onReadLiveDraft = std::move(handler);
+    }
+
     // Agentmaster (SUMMARY_JUMP.md): resolve every numbered prompt against the live buffer in one pass and
     // DIM the jump buttons whose prompt currently won't resolve (scrolled off / not rendered), so the dead
     // icons are visually distinct from the working ones. Called on (re)build, on the 5 s times-line tick

@@ -18,9 +18,11 @@
 #include "pch.h"
 #include "AgentTabOverlay.h"
 
+#include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (the wrapped live-draft read, case 7)
 #include "AgentCopyActions.h" // the shared CopySessionField (reused by the Triage Board's Copy submenu)
 #include "AgentStatusColors.h" // the ONE shared state->color palette (board / overlay / tab dot)
 #include "AgentTipHelpers.h" // AgentSetTip — the Dark-pinned, fast-open, stuck-proof hover tooltip recipe (vs raw ToolTipService)
+#include "AgentMaster/PendingInput.h" // PickCurrentPromptText — the pure live-vs-remembered draft rule ("Copy Current Prompt")
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / BuildClaude|CodexCommandline (row 3 CLI + transcript)
 #include "AgentMaster/ProcessInspect.h" // ReadProcessCommandLine / ReadConversationText / Codex rollout resolve (row 3)
@@ -163,7 +165,7 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
-        Button copyBtn = mkIconBtn(L"\xE8C8", L"Copy session details\x2026 (id, path, branch, launch CLI, summary, transcript)"); // Copy
+        Button copyBtn = mkIconBtn(L"\xE8C8", L"Copy session details\x2026 (id, path, branch, current prompt, launch CLI, summary, transcript)"); // Copy
         MenuFlyout flyout{};
         // Each menu item carries a tooltip that says exactly WHAT gets copied (the labels are terse;
         // the tip spells out the value), mirroring _CopyField's per-case behavior.
@@ -182,6 +184,13 @@ namespace winrt::TerminalApp::implementation
         addItem(L"Session Id", L"Copy the resumable conversation id (Codex: its rollout uuid)", 0);
         addItem(L"Copy Path", L"Copy the session's working-directory path", 1);
         addItem(L"Copy Branch Name", L"Copy the session's current git branch name", 2);
+        // Copy Current Prompt (PENDING_INPUT.md) — the UNSENT draft in the input box, read LIVE from
+        // the terminal buffer with the observer's recorded draft as the fallback. Claude only: Codex's
+        // TUI has no ❯ rule-wrapped input box, so there is no draft to read for it.
+        if (!isCodexSession)
+        {
+            addItem(L"Copy Current Prompt", L"Copy what is typed into this session's input box but NOT yet sent \x2014 read live from the terminal, falling back to the last observed draft (nothing is copied when the box is empty)", 7);
+        }
         // Offer ONLY the launch-CLI that matches this session's agent — a Claude session gets "Claude Launch
         // CLI", a Codex session "Codex Launch CLI" (never the other, which would synthesize a command for an
         // agent this session isn't running).
@@ -291,9 +300,11 @@ namespace winrt::TerminalApp::implementation
     // Explorer-tree session menu's Copy submenu (AgentManagerContent::_MakeSessionMenu). It lives here
     // because the launch-CLI / transcript / summary helpers it leans on are this file's anon-namespace
     // helpers; both menus call it so they can never drift apart. `which` is the copy-menu code (see the
-    // header). Synchronous clipboard writes (cases 0-4) run on the calling UI thread; the transcript /
-    // summary cases (5/6) read off-thread and hop back via `dispatcher`.
-    void CopySessionField(SessionRegistry& registry, const std::wstring& sessionId, int which, const DispatcherQueue& dispatcher, bool wrapNewlines, bool truncate, int tabColorMode)
+    // header). Synchronous clipboard writes (cases 0-4 + 7) run on the calling UI thread; the transcript /
+    // summary cases (5/6) read off-thread and hop back via `dispatcher`. `liveDraft` is the optional
+    // live input-box reader used by case 7 alone (see the header) — absent/failing degrades to the
+    // observer's remembered draft, never to nothing.
+    void CopySessionField(SessionRegistry& registry, const std::wstring& sessionId, int which, const DispatcherQueue& dispatcher, bool wrapNewlines, bool truncate, int tabColorMode, const std::function<std::wstring()>& liveDraft)
     {
         if (sessionId.empty())
         {
@@ -309,8 +320,8 @@ namespace winrt::TerminalApp::implementation
         // Nav audit: the user copied a session field to the clipboard. This ONE shared action backs BOTH
         // copy menus (the per-tab overlay's + the Triage Board / Explorer-tree Copy submenu), so logging
         // here covers "what was picked" for every copy site at once.
-        static const wchar_t* const kCopyFieldNames[] = { L"session-id", L"path", L"branch", L"claude-cli", L"codex-cli", L"transcript", L"summary" };
-        ::Agentmaster::LogNav(std::wstring{ L"copy " } + ((which >= 0 && which < 7) ? kCopyFieldNames[which] : L"?") + L" " + ::Agentmaster::ShortId(sessionId));
+        static const wchar_t* const kCopyFieldNames[] = { L"session-id", L"path", L"branch", L"claude-cli", L"codex-cli", L"transcript", L"summary", L"current-prompt" };
+        ::Agentmaster::LogNav(std::wstring{ L"copy " } + ((which >= 0 && which < 8) ? kCopyFieldNames[which] : L"?") + L" " + ::Agentmaster::ShortId(sessionId));
         switch (which)
         {
         case 0: // Session Id — the resumable conversation id (Codex: its rollout uuid)
@@ -357,6 +368,54 @@ namespace winrt::TerminalApp::implementation
                              std::wstring{ StateGlyph(s.state) }, std::wstring{ StateLabel(s.state) }, wrapNewlines, truncate);
             break;
         }
+        case 7: // Current Prompt — the UNSENT draft sitting in this session's input box (PENDING_INPUT.md)
+        {
+            if (codex)
+            {
+                // Codex's TUI has no U+276F rule-wrapped input box, so nothing monitors (or could read)
+                // a draft for it — the menus omit this item for a Codex session; this is the backstop.
+                break;
+            }
+            // (1) The LIVE read, WRAPPED: the hosting window hands us a provider that reads the input
+            // box straight out of the terminal buffer this instant. It is absent by design whenever the
+            // tab isn't reachable from the calling window (another window's UI thread, a dormant
+            // restored tab, a closed session), and its own failures (a control torn down mid-click, a
+            // buffer not yet initialized) must never cost the user the copy — hence the catch, which
+            // simply leaves `live` empty and falls through to (2).
+            std::wstring live;
+            if (liveDraft)
+            {
+                try
+                {
+                    live = liveDraft();
+                }
+                catch (...)
+                {
+                    // Rule #18: never lose a swallowed exception. Recovery is unchanged (fall back to
+                    // the remembered draft) — this only records what threw + where.
+                    ::Agentmaster::AgentLogCaughtException(L"CopySessionField live draft read");
+                }
+            }
+            // (2) The pick: a non-empty live read wins, else the observer's recorded draft (which may be
+            // the persisted memory of a session that is no longer running). ONE pure rule, shared by
+            // every copy menu (PendingInput.h).
+            const auto pick = ::Agentmaster::PickCurrentPromptText(live, s.pendingInput);
+            if (pick.text.empty())
+            {
+                // Nothing typed anywhere: no clipboard write, no chime — and a log line, so a "why did
+                // nothing happen?" is answerable from hooks.log instead of being a silent dead click.
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(sessionId) + L" copy current prompt: nothing (box empty, no remembered draft)\n");
+                break;
+            }
+            CopyTextToClipboard(pick.text); // verbatim + whole (multi-line drafts included); chimes on success
+            // The SOURCE belongs in the mechanism layer next to the other [pending] traces: `live` == read
+            // from the box this instant, `remembered` == the scan lane's value (possibly a restored memory,
+            // which the age of pendingInputUnixMs is what makes honest).
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[pending] " + ::Agentmaster::ShortId(sessionId) + L" copy current prompt: " +
+                                              (pick.fromLive ? L"live" : L"remembered") + L" chars=" + std::to_wstring(pick.text.size()) + L"\n");
+            break;
+        }
         default:
             break;
         }
@@ -371,7 +430,10 @@ namespace winrt::TerminalApp::implementation
         // Delegate to the shared action (reused by the Triage Board's Copy submenu); the overlay's
         // mirrored GLOBAL flags drive the Summary case so its render matches the displayed panel,
         // and the mirrored tab-color mode drives the Path case's effective-work-dir resolution.
-        CopySessionField(*_registry, _sessionId, which, _dispatcher, _summaryWrapNewlines, _summaryTruncate, _tabColorMode);
+        // The live-draft provider ("Copy Current Prompt", case 7) is the page's — this overlay sits
+        // INSIDE the session's own pane, so its window always hosts the tab and the live read is the
+        // one that applies; a missing handler (never wired / page gone) degrades to the remembered draft.
+        CopySessionField(*_registry, _sessionId, which, _dispatcher, _summaryWrapNewlines, _summaryTruncate, _tabColorMode, _onReadLiveDraft);
     }
 
 }

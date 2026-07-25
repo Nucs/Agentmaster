@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <functional> // the optional live-draft provider (case 7)
 #include <string>
 #include <winrt/Windows.System.h> // DispatcherQueue
 
@@ -29,6 +30,7 @@ namespace winrt::TerminalApp::implementation
     //   4 = Codex Launch CLI      (the REAL full command line)
     //   5 = Transcript            (the whole conversation as text — user + assistant only — read off-thread)
     //   6 = Summary               (the FULL session-end.js box — analyzed off-thread)
+    //   7 = Current Prompt        (the UNSENT draft in the session's input box — PENDING_INPUT.md; Claude only)
     // wrapNewlines / truncate are the GLOBAL summary-panel flags (AppSettings::summaryPanelWrapNewlines /
     // summaryPanelTruncate) that govern how the Summary (case 6) renders its messages; they are
     // ignored by the other cases. tabColorMode is the GLOBAL AppSettings::tabColorMode as an int
@@ -36,14 +38,25 @@ namespace winrt::TerminalApp::implementation
     // dir through it (EffectiveWorkingDir — the INFERRED dir under InferredWorkingDirectory, else
     // the launch cwd), matching the overlay subline / board card / tree group; the default 0
     // (WorkingDirectory) reproduces the prior launch-cwd copy. A no-op for an unknown session id or
-    // an empty field. The clipboard write happens on the UI thread (cases 0-4 synchronously; 5/6
+    // an empty field. The clipboard write happens on the UI thread (cases 0-4/7 synchronously; 5/6
     // hop back via `dispatcher`), so call this from the UI thread and pass that thread's
     // DispatcherQueue.
+    //
+    // `liveDraft` is the OPTIONAL live-read provider for case 7 (ignored by every other case): a
+    // caller that can reach this session's TermControl — i.e. the window that HOSTS its tab — passes a
+    // callable that reads the input box out of the terminal buffer right now
+    // (TerminalPage::_ReadLiveDraftForSession → ControlCore::ReadPendingInputDraft), wrapped so any
+    // failure is just "". Omitted / empty / a throwing provider all degrade to the SAME fallback: the
+    // observer's recorded SessionInfo::pendingInput (one scan tick old, or the persisted memory across
+    // a restart). The choice itself is the pure, unit-tested PickCurrentPromptText (PendingInput.h), so
+    // every copy menu resolves it identically — the Manager board can reference a session hosted in
+    // ANOTHER window, where no live read is possible and the remembered value is the whole answer.
     void CopySessionField(::Agentmaster::SessionRegistry& registry,
                           const std::wstring& sessionId,
                           int which,
                           const winrt::Windows::System::DispatcherQueue& dispatcher,
                           bool wrapNewlines,
                           bool truncate,
-                          int tabColorMode = 0);
+                          int tabColorMode = 0,
+                          const std::function<std::wstring()>& liveDraft = {});
 }

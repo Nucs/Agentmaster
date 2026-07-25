@@ -64,7 +64,8 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   claude (no transcript id yet) is never invisible. Dim until hover; hover/click **expands** controls
   (Tests Autorunner cycle · Send-now · queue peek · Jump-to-Manager) + a contextual SemiAuto confirm.
   Off-switchable (`AppSettings.showTabOverlay`). Hover also reveals a **row of actions** — a folder
-  button (Open Path) + a copy menu (Session Id · working dir · branch · the REAL Claude/Codex launch
+  button (Open Path) + a copy menu (Session Id · working dir · branch · the **Current Prompt** [the
+  UNSENT input-box draft — PENDING_INPUT.md §8] · the REAL Claude/Codex launch
   CLI · the full session **Summary** · the **Transcript**) + a **pencil** that toggles a **SUMMARY
   PANEL**: a second overlay below the badge (≤20% pane width) rendering the `session-end.js` box
   (messages/files/tasks/plan) analyzed from the transcript, its show/hide a GLOBAL setting
@@ -799,8 +800,22 @@ the session's per-directory tab color (`AgentStatusColors.h` `BackgroundIsLight`
 tab/card. The tab strip carries the picked brush on `TerminalTabStatus::AgentPendingBrush` (set by
 `_SetTabPending`, contrast-picked from the per-dir color each scan tick); the board card body is the always-
 dark Manager fill, so cards use the LIGHT color. Applied live + cross-window via the `flashRingColor` settings
-idiom. **Follow-ups:** an off-switch setting, placeholder/dim-attribute filtering, and a `pauseOnHumanInput`
-autorunner tie-in (PENDING_INPUT.md §4/§6).
+idiom. **The draft is also COPYABLE** (PENDING_INPUT.md §8): every session copy menu — the per-tab overlay's
+copy button, the Triage Board / Explorer-tree **Copy ▸** submenu, and the WT tab menu's **Copy ▸** — carries
+**`Copy Current Prompt`** (the shared `CopySessionField` code **7**; Claude only, since Codex has no `❯` box),
+which copies the unsent draft VERBATIM + whole. TWO sources, one pure rule (`PickCurrentPromptText`,
+`PendingInput.h`): a **LIVE** read of the input box off the terminal buffer at click time
+(`TerminalPage::_ReadLiveDraftForSession` → `ControlCore::ReadPendingInputDraft`) wins when it yields text,
+else the **observer's** `SessionInfo::pendingInput` (≤ one scan tick, or the persisted memory). The live read
+is **WRAPPED** because all its failure modes are ORDINARY — a tab hosted in ANOTHER window (the board/tree
+span the whole fleet), a dormant restored tab, a control torn down mid-click — each reading as `""` and
+falling to the remembered value; an EMPTY live read deliberately does NOT erase the fallback (the "3 dots"
+are still showing it through the clear debounce, so the copy must hand over what the indicator promises).
+Neither source ⇒ no clipboard write + no chime, logged (`[pending] … copy current prompt: nothing`) so it is
+never a silent dead click; a successful copy logs which source answered. A `[Pasted text #N]` placeholder
+copies AS RENDERED (expansion is a follow-up). **Follow-ups:** an off-switch setting,
+placeholder/dim-attribute filtering, expanding pastes on copy, and a `pauseOnHumanInput`
+autorunner tie-in (PENDING_INPUT.md §4/§6/§8).
 
 **Bookmark TAGS — user-named, colored labels on a session, shown as little BOOKMARK RIBBONS on its tab +
 everywhere the session appears; lib-compiled green + engine-tested (1523/1523 incl. tag CRUD, the tag-colors
@@ -1533,8 +1548,8 @@ What works, by area:
   discoverable twin for users who never right-click)
   (`_MakeSessionMenu` — **Jump to Tab** / Rename (F2) / **Close** (always archives, keeps it resumable in
   Sessions; FAVORITES.md) / Open New
-  Session Here / a **Copy** submenu [Session Id · Path · Branch · Launch CLI · Transcript · Summary, via
-  the shared `CopySessionField`]; a board-invoked Rename first
+  Session Here / a **Copy** submenu [Session Id · Path · Branch · Current Prompt · Launch CLI · Transcript ·
+  Summary, via the shared `CopySessionField`]; a board-invoked Rename first
   makes the tree row renderable — un-collapses its dir, widens a LOCAL scope to GLOBAL for a
   session hosted elsewhere — since the in-place editor lives in the tree). **Activate is
   cross-window**: the board and the tree's GLOBAL scope show the WHOLE fleet, but a session's tab
@@ -2354,8 +2369,10 @@ What works, by area:
   (a genuine user pick/reset — the equality guards filter our own paints), `tag recolor "<name>" <#hex>`
   (the explicit swatch recolor of an existing tag, beside the existing `tag add`/`tag remove`/`tag delete`);
   **clipboard/shell** — `copy <field>` (the ONE `CopySessionField` chokepoint behind EVERY copy
-  menu — the per-tab overlay's AND the board/tree Copy submenu — `field` ∈
-  session-id/path/branch/claude-cli/codex-cli/transcript/summary), `open-path` (the overlay folder button →
+  menu — the per-tab overlay's AND the board/tree Copy submenu AND the WT tab menu's `Copy >` — `field` ∈
+  session-id/path/branch/claude-cli/codex-cli/transcript/summary/**current-prompt**; the last one also
+  logs a `[pending] <sid8> copy current prompt: live|remembered chars=N` mechanism line naming which
+  source answered — or `nothing` when neither did), `open-path` (the overlay folder button →
   explorer); **cog/settings** — `settings-save` (the cog Save — logs the behavior-impacting fields
   skipPerms/model/autorunner/claudeExe), `profile-change <from> -> <to>` (re-point the install's profile
   folder, applies on restart), `check-for-updates` (the interactive button only — not the silent on-open
@@ -2569,7 +2586,9 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     `PendingInput.h` (header-only, pure — the **pending-input detector**, PENDING_INPUT.md: given the
     bottom region of the terminal buffer, finds Claude's input box by the bottom-most `❯` line wrapped
     by `─` rules and extracts the UNSENT draft; the `PromptAnchor.h` idiom — pure-ASCII source, header-
-    only so `ControlCore` + `tests/` share it. Unit-tested in `tests/`),
+    only so `ControlCore` + `tests/` share it. Also `PickCurrentPromptText` (§8) — the ONE rule every
+    "Copy Current Prompt" menu resolves through: a non-empty LIVE buffer read wins, else the observer's
+    remembered/persisted draft. Unit-tested in `tests/`),
     `Sha256.h` (header-only, pure — FIPS 180-4 SHA-256, hand-rolled like `Base64Encode` so no
     bcrypt/crypt32 has to be threaded through the lib + harness + CLI builds; the content-IDENTITY
     primitive behind the shipped `/handover`+`/handover-here` definitions' digest version history —
@@ -2673,9 +2692,16 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     surfaces feed the panels UNCHANGED; a window too narrow to host a panel falls back to the
     classic floating tips automatically.
   - `src/cascadia/TerminalApp/AgentCopyActions.h` — the ONE shared `CopySessionField` action
-    (Session Id · working-dir Path · Branch · Claude/Codex Launch CLI · Transcript · Summary) behind
-    BOTH the per-tab overlay's copy menu (`AgentTabOverlay`) AND the Triage Board / Explorer-tree
-    session menu's Copy submenu (`AgentManagerContent`), so the two copy menus can never drift apart.
+    (Session Id · working-dir Path · Branch · **Current Prompt** · Claude/Codex Launch CLI · Transcript ·
+    Summary) behind the per-tab overlay's copy menu (`AgentTabOverlay`), the Triage Board / Explorer-tree
+    session menu's Copy submenu (`AgentManagerContent`), AND the WT tab menu's `Copy >` (`Tab` →
+    `TerminalPage`), so the three copy menus can never drift apart. **Current Prompt** (code 7,
+    PENDING_INPUT.md §8) is the one case with two sources: an OPTIONAL `liveDraft` provider — the
+    hosting window's wrapped live input-box read (`TerminalPage::_ReadLiveDraftForSession` →
+    `ControlCore::ReadPendingInputDraft`), absent/failing/`""` for a session hosted in another window, a
+    dormant tab or a torn-down control — falling back to the observer's recorded
+    `SessionInfo::pendingInput` (possibly the persisted memory), chosen by the pure, unit-tested
+    `PickCurrentPromptText` (`PendingInput.h`). Claude only (Codex has no `❯` input box).
   - `src/cascadia/TerminalApp/TerminalPage.Agent{Engine,Sessions,Observer,WindowRecord,SessionsPage}.cpp`
     — the TerminalPage-side Agentmaster *implementation* in five same-class TUs (the upstream
     `TabManagement.cpp` pattern). (**`TerminalPage.AgentArchivePage.cpp` was DELETED** — the full-window

@@ -177,6 +177,13 @@ namespace winrt::TerminalApp::implementation
         // the ends). Set by _AttachClaudeOverlay.
         void SetAdjacentPromptHandler(std::function<void(bool)> handler);
 
+        // Agentmaster (PENDING_INPUT.md §8): the copy menu's "Copy Current Prompt" needs the UNSENT
+        // draft as the input box holds it RIGHT NOW, and the overlay can't reach the TermControl — so
+        // the page wires this reader (TerminalPage::_ReadLiveDraftForSession, itself fully wrapped:
+        // any failure reads as ""). Unwired / empty simply falls back to the observer's recorded
+        // SessionInfo::pendingInput inside CopySessionField. Set by _AttachClaudeOverlay.
+        void SetLiveDraftHandler(std::function<std::wstring()> handler);
+
         // Agentmaster (SUMMARY_JUMP.md): highlight the summary row for the message we just jumped to —
         // via the ▸ button OR alt+up / alt+down nav (the page passes the landed 0-based message index). A
         // translucent band behind the row; it persists across panel re-renders and moves to the new
@@ -341,6 +348,7 @@ namespace winrt::TerminalApp::implementation
         std::function<int(const std::vector<std::wstring>&, int)> _onJumpToPrompt; // jump button -> page (resolve control + center the view); returns the row or -1
         std::function<std::vector<int>(const std::vector<std::wstring>&)> _onResolveEligibility; // -> page: a row per prompt (-1 == not on screen), for icon dimming
         std::function<void(bool)> _onAdjacentPrompt; // row-2 ↑/↓ buttons -> page (_ScrollAdjacentPrompt: scroll to prev/next off-screen prompt + highlight + boundary sound)
+        std::function<std::wstring()> _onReadLiveDraft; // copy menu "Copy Current Prompt" -> page (read this session's input box out of the live buffer; "" when unreadable — the remembered draft then wins)
         // The jump buttons of the currently-rendered panel, paired with their 0-based prompt index, so
         // _RefreshJumpEligibility can dim the ones whose prompt no longer resolves. Rebuilt each _SetSummaryContent.
         std::vector<std::pair<int, winrt::Windows::UI::Xaml::Controls::Button>> _jumpButtons;

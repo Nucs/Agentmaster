@@ -17,7 +17,8 @@
 > originally said); its **row 1** now reads `status · actions · autorunner · queue`, with **link state
 > surfaced only when *not* linked** (a linked tab's badge already implies the link), over a dim **second
 > `<workdir>/<branch>` row** and a **third `⏳ <next queued prompt, ≤300 chars>` row** (§13i); the always-shown row-1 **action cluster** is a **folder Open-Path + a copy
-> menu** (Session Id / Path / Branch / the real Claude·Codex launch CLI / Summary / Transcript, with a
+> menu** (Session Id / Path / Branch / the current unsent prompt / the real Claude·Codex launch CLI /
+> Summary / Transcript, with a
 > chime) **+ a pencil** that toggles a **second overlay, the SUMMARY PANEL**. The Observer's `model ·
 > effort · kind` enrichment feeds the Manager cards / summary panel / observe badge (no longer the
 > linked badge's strip). A matching **tab-strip status dot**
@@ -316,12 +317,24 @@ A linked badge's action buttons are **always visible** (no longer hover-only): t
 immediately right of the status part** (so the strip reads `status → folder · copy · pencil → autorunner
 · queue`): a **folder** button (Open Path → the working dir via `explorer.exe`, off-thread) + a **copy
 menu** + a **pencil**. The copy menu yields `Session Id` ·
-`Copy Path` · `Copy Branch Name` · `Claude Launch CLI` · `Codex Launch CLI` (each the **REAL** full
+`Copy Path` · `Copy Branch Name` · **`Copy Current Prompt`** (the UNSENT draft in the input box —
+Claude only; read LIVE from the buffer, falling back to the observer's recorded draft, see below) ·
+`Claude Launch CLI` · `Codex Launch CLI` (each the **REAL** full
 command — the live process commandline from the PEB, or the builder Launch/Restore would use, *not*
 a toy `--resume <id>`) · `Summary` (the full textual session box) · `Transcript` (the whole
 conversation, user + assistant TEXT only via `ReadConversationText`). Every copy / Open Path plays a
 short confirmation chime (`PlaySoundW`). Built only for a LINKED session (never an observe badge); the
 buttons stay laid out, while the whole badge is dim at rest and brightens on hover.
+
+**`Copy Current Prompt`** (PENDING_INPUT.md §8) is the one item with two sources, resolved by the pure
+`PickCurrentPromptText`: a **LIVE** read of the input box off the terminal buffer this instant
+(`TerminalPage::_ReadLiveDraftForSession` → `ControlCore::ReadPendingInputDraft`, wired into the overlay
+as `SetLiveDraftHandler`, fully wrapped so *not hosted here / dormant / torn down / threw* all read as
+`""`), else the **observer's** recorded `SessionInfo::pendingInput` (one scan tick old, or the persisted
+memory across a restart). It copies the draft **verbatim and whole** (multi-line included); with neither
+source it copies nothing and does not chime, logging `[pending] <sid8> copy current prompt: nothing`.
+The same item, code `7`, is offered by all three copy menus (this one, the Manager's Copy submenu, the WT
+tab menu's `Copy >`) through the one shared `CopySessionField`.
 
 ### 13e. The SUMMARY PANEL (the pencil → a second overlay)
 The pencil toggles a **second overlay** stacked **below the badge** (`TerminalPaneContent::SetAgentSummaryOverlay`,

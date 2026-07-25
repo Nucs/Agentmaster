@@ -392,6 +392,12 @@ namespace winrt::TerminalApp::implementation
     {
         _refreshHandler = std::move(handler);
     }
+    void AgentManagerContent::SetLiveDraftProvider(std::function<std::wstring(const std::wstring&)> provider)
+    {
+        // Read-only + on-demand (only a "Copy Current Prompt" click calls it), so — unlike
+        // SetLocalScopeProvider — installing it changes nothing on screen and needs no re-render.
+        _liveDraftProvider = std::move(provider);
+    }
     // Agentmaster: force a UI redraw from the current data sources (registry snapshot + the last
     // pushed external census). Called by the page after an out-of-band reload (the observer survey
     // lands asynchronously) so the freshly enriched / re-surveyed data shows. Marshal to the UI

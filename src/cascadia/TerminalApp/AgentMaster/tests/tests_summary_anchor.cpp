@@ -1330,6 +1330,31 @@ void TestPendingInput()
         const auto d = DetectPendingInput(V({ rule, L"│ " + std::wstring(1, MARK) + NBSPs + L"framed draft", rule }));
         CHECK(d.boxFound && d.text == L"framed draft", "pending framed: leading vertical border skipped");
     }
+    // 25. The "Copy Current Prompt" SOURCE PICK (PENDING_INPUT.md §8) — the one rule behind all three
+    // copy menus: a non-empty LIVE buffer read wins; anything else falls back to the observer's
+    // remembered (possibly persisted) draft; an empty live read must NOT erase that fallback, since
+    // the "3 dots" are still showing it through the clear debounce.
+    {
+        const auto live = PickCurrentPromptText(L"typed just now", L"one tick old");
+        CHECK(live.text == L"typed just now" && live.fromLive, "current-prompt pick: a live read wins over the remembered draft");
+
+        const auto fell = PickCurrentPromptText(L"", L"remembered draft");
+        CHECK(fell.text == L"remembered draft" && !fell.fromLive, "current-prompt pick: no live read -> the observer's value");
+
+        // A control that couldn't be read (other window / dormant tab / threw) hands us "" — same path.
+        const auto blank = PickCurrentPromptText(L"   " + NL + L"\t", L"remembered draft");
+        CHECK(blank.text == L"remembered draft" && !blank.fromLive, "current-prompt pick: a whitespace-only live read counts as empty");
+
+        const auto wsMem = PickCurrentPromptText(L"", L"  ");
+        CHECK(wsMem.text.empty() && !wsMem.fromLive, "current-prompt pick: a whitespace-only memory yields nothing (copy no-ops)");
+
+        const auto none = PickCurrentPromptText(L"", L"");
+        CHECK(none.text.empty() && !none.fromLive, "current-prompt pick: neither source -> empty, flagged not-live");
+
+        // The live text is handed back VERBATIM — multi-line drafts are copied whole, never first-line.
+        const std::wstring multi = L"deploy dev please," + NL + L"then run the harness";
+        CHECK(PickCurrentPromptText(multi, L"x").text == multi, "current-prompt pick: multi-line draft copied verbatim");
+    }
 }
 
 // Agentmaster (PENDING_INPUT.md §2b): the paste-cache resolver — marker grammar, the two counting

@@ -3926,6 +3926,15 @@ namespace winrt::TerminalApp::implementation
                     self->_ScrollAdjacentPrompt(sessionId, up);
                 }
             });
+            // Agentmaster (PENDING_INPUT.md §8): the copy menu's "Copy Current Prompt" reads the UNSENT
+            // draft LIVE out of this session's buffer. The overlay has no control reference (same reason
+            // as the jump handler), so the page does the read — resolved by sessionId at click time, so a
+            // pane restart can't strand a captured stale control — and hands back "" if it isn't
+            // readable, which makes the copy fall back to the observer's recorded draft.
+            overlay->SetLiveDraftHandler([weakThis, sessionId]() -> std::wstring {
+                auto self = weakThis.get();
+                return self ? self->_ReadLiveDraftForSession(sessionId) : std::wstring{};
+            });
         }
         if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(termContent))
         {
@@ -4002,6 +4011,39 @@ namespace winrt::TerminalApp::implementation
             });
         }
         return control;
+    }
+
+    // Agentmaster (PENDING_INPUT.md §8): read a session's UNSENT input-box draft out of its LIVE
+    // terminal buffer, right now — the primary source behind every copy menu's "Copy Current Prompt".
+    // This is the same read the scan lane performs each liveness tick (ControlCore::ReadPendingInputDraft
+    // → the pure DetectPendingInput), just on demand, so the copy is the box as rendered at click time
+    // rather than up to one tick stale.
+    //
+    // WRAPPED, because every one of its failure modes is ORDINARY and none may cost the user a copy:
+    // the session's tab may live in ANOTHER window (a different UI thread — _ControlForSession answers
+    // null, which is exactly why the caller has a fallback), the tab may be dormant (window-restored,
+    // its claude never started — no buffer to read), the control may be torn down mid-click, or the
+    // buffer may not be initialized yet. All of those return "" here, and CopySessionField then falls
+    // back to the observer's recorded SessionInfo::pendingInput. UI thread only.
+    std::wstring TerminalPage::_ReadLiveDraftForSession(const std::wstring& sessionId)
+    {
+        try
+        {
+            const auto control = _ControlForSession(sessionId);
+            if (!control || control.ConnectionState() == TerminalConnection::ConnectionState::NotConnected)
+            {
+                return {}; // not hosted here, or dormant (no started buffer) — the remembered draft answers
+            }
+            const auto h = control.ReadPendingInputDraft();
+            return std::wstring{ h.c_str(), h.size() };
+        }
+        catch (...)
+        {
+            // Rule #18: log what threw + where; the recovery (an empty read → the remembered draft)
+            // is unchanged. Same shape as the scan lane's per-control guard.
+            ::Agentmaster::AgentLogCaughtException(L"_ReadLiveDraftForSession");
+            return {};
+        }
     }
 
     // Agentmaster (eager-init / "Activate Tab"): start a DORMANT session's claude IN PLACE — without

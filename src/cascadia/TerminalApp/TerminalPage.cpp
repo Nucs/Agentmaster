@@ -2716,7 +2716,14 @@ namespace winrt::TerminalApp::implementation
             }
             CopySessionField(*page->_sessionRegistry, sid, which, DispatcherQueue::GetForCurrentThread(),
                              page->_appSettings.summaryPanelWrapNewlines, page->_appSettings.summaryPanelTruncate,
-                             static_cast<int>(page->_appSettings.tabColorMode));
+                             static_cast<int>(page->_appSettings.tabColorMode),
+                             // "Copy Current Prompt" (case 7): THIS window hosts the tab, so it can read
+                             // the unsent draft out of the live buffer (wrapped — an unreadable control
+                             // just yields "", and the copy falls back to the observer's recorded draft).
+                             [weakThis, sid]() -> std::wstring {
+                                 auto p{ weakThis.get() };
+                                 return p ? p->_ReadLiveDraftForSession(sid) : std::wstring{};
+                             });
         });
 
         // Agentmaster (tab color modes — NoColor/"Remove colors"): seed the picker state the moment

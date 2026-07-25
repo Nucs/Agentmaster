@@ -1093,6 +1093,15 @@ namespace winrt::TerminalApp::implementation
                 self->_RefreshObserverData();
             }
         });
+        // Agentmaster (PENDING_INPUT.md §8): the session menu's "Copy Current Prompt" reads the UNSENT
+        // draft LIVE off the session's buffer. Only the hosting window can do that, and the board/tree
+        // list the WHOLE fleet — _ReadLiveDraftForSession answers "" for anything not readable HERE
+        // (another window's tab, a dormant one, a torn-down control), which makes the copy fall back to
+        // the observer's recorded draft. Read-only, on-demand (per click), UI thread.
+        content->SetLiveDraftProvider([weakThis](const std::wstring& sessionId) -> std::wstring {
+            auto self = weakThis.get();
+            return self ? self->_ReadLiveDraftForSession(sessionId) : std::wstring{};
+        });
         // Agentmaster: surface THIS window's hosted session ids for the Explorer Tree's LOCAL
         // scope. The shared (process-wide) registry holds every window's sessions; _claudeTabs is
         // the per-window subset. Expired weak tabs (torn-down) are skipped so the set is live.

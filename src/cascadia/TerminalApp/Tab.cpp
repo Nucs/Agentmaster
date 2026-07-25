@@ -2108,7 +2108,7 @@ namespace winrt::TerminalApp::implementation
             _copySessionSubMenu.Text(L"Copy");
             _copySessionSubMenu.Icon(copySymbol);
             _copySessionSubMenu.Visibility(WUX::Visibility::Collapsed); // shown only on a managed agent-session tab (page-driven)
-            WUX::Controls::ToolTipService::SetToolTip(_copySessionSubMenu, box_value(winrt::hstring{ L"Copy this session's id, path, branch, launch command line, transcript, or full summary" }));
+            WUX::Controls::ToolTipService::SetToolTip(_copySessionSubMenu, box_value(winrt::hstring{ L"Copy this session's id, path, branch, current (unsent) prompt, launch command line, transcript, or full summary" }));
 
             const auto addCopyItem = [this, weakThis](const wchar_t* text, const wchar_t* tip, int32_t which) {
                 Controls::MenuFlyoutItem item;
@@ -2124,10 +2124,15 @@ namespace winrt::TerminalApp::implementation
                 return item;
             };
             // The `which` codes + labels are the per-tab overlay copy menu's, verbatim (AgentCopyActions.h):
-            // 0 Session Id, 1 Path, 2 Branch, 3 Claude CLI, 4 Codex CLI, 6 Summary, 5 Transcript.
+            // 0 Session Id, 1 Path, 2 Branch, 7 Current Prompt, 3 Claude CLI, 4 Codex CLI, 6 Summary, 5 Transcript.
             addCopyItem(L"Session Id", L"Copy the resumable conversation id (Codex: its rollout uuid)", 0);
             addCopyItem(L"Copy Path", L"Copy the session's working-directory path", 1);
             addCopyItem(L"Copy Branch Name", L"Copy the session's current git branch name", 2);
+            // Copy Current Prompt (PENDING_INPUT.md) — the UNSENT draft in the session's input box, read
+            // LIVE from this tab's buffer with the observer's recorded draft as the fallback. Built here
+            // but revealed by SetAgentCopyMenuVisible only for a CLAUDE session: Codex's TUI has no ❯
+            // rule-wrapped input box, so no draft is ever monitored (or readable) for it.
+            _copyCurrentPromptItem = addCopyItem(L"Copy Current Prompt", L"Copy what is typed into this session's input box but NOT yet sent \x2014 read live from the terminal, falling back to the last observed draft (nothing is copied when the box is empty)", 7);
             // Both launch-CLI items are built; SetAgentCopyMenuVisible (page-driven at flyout-open) reveals
             // ONLY the one matching the session's agent — a Claude tab shows "Claude Launch CLI", a Codex tab
             // "Codex Launch CLI", never both (copying the other would synthesize a command for the wrong agent).
@@ -2568,6 +2573,12 @@ namespace winrt::TerminalApp::implementation
             if (_copyCodexCliItem)
             {
                 _copyCodexCliItem.Visibility(isCodex ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+            }
+            // "Copy Current Prompt" is CLAUDE-only (PENDING_INPUT.md): only Claude renders the ❯
+            // rule-wrapped input box the draft is read from, so a Codex tab never offers it.
+            if (_copyCurrentPromptItem)
+            {
+                _copyCurrentPromptItem.Visibility(isCodex ? WUX::Visibility::Collapsed : WUX::Visibility::Visible);
             }
         }
     }

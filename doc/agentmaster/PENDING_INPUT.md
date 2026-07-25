@@ -6,7 +6,9 @@
 > false positives, the candidate upward-continue), the PASTE-CACHE resolver (§2b — a draft's
 > `[Pasted text #N +M lines]` placeholder resolves to its real on-disk content, content-anchored +
 > arithmetic-verified), and PERSISTENCE (§5 — the draft survives an Agentmaster restart/crash as a
-> staleness-labeled memory and revalidates against the live box on resume).** Pure detector + resolver +
+> staleness-labeled memory and revalidates against the live box on resume), and the draft as a COPYABLE
+> value (§8 — a **`Copy Current Prompt`** item in all three session copy menus: a LIVE buffer read where
+> the window hosts the tab, falling back to the observer's remembered draft).** Pure detector + resolver +
 > the registry notify-on-flip/stamping + the persistence round-trip are unit-tested (engine harness
 > 2,671/2,671 incl. REAL-capture fixtures from live 2.1.217/2.1.218 buffers); the full chain lib-compiles
 > green (TerminalControlLib + TerminalAppLib); the fixed detector + the resolver are LIVE-VERIFIED
@@ -428,6 +430,61 @@ never invisible (see *Dots color* in §3):
   works **cross-window** (a draft in window A shows on window B's GLOBAL board). The storyboard begins on
   `Loaded` (runs only while carded).
 
+## 8. "Copy Current Prompt" — the draft as a COPYABLE value (built)
+
+The draft is not only an indicator: **every copy menu can hand it to you**. All three session copy menus
+— the per-tab overlay's copy button (`AgentTabOverlay::_BuildActionsRow`), the Triage Board /
+Explorer-tree **Copy ▸** submenu (`AgentManagerContent::_MakeSessionMenu`), and the WT tab menu's
+**Copy ▸** (`Tab::_CreateContextMenu`) — carry a **`Copy Current Prompt`** item that puts the session's
+UNSENT input-box text on the clipboard, **verbatim and whole** (multi-line drafts included; no
+truncation, no annotation — you paste exactly what was typed).
+
+All three route through the ONE shared `CopySessionField` (`AgentCopyActions.h`, code **7**), so the
+menus can never drift. **Claude only** — Codex's TUI has no `❯` rule-wrapped box, so no draft is ever
+monitored for it; the item is omitted for a Codex session in all three menus (and `CopySessionField`
+has a kind backstop).
+
+**Two sources, one pure rule.** The item resolves through `PickCurrentPromptText` (`PendingInput.h`,
+unit-tested), whose whole job is choosing between:
+
+| | source | freshness | available when |
+|---|---|---|---|
+| 1 | **LIVE** — the input box read off the terminal buffer at click time (`TerminalPage::_ReadLiveDraftForSession` → `ControlCore::ReadPendingInputDraft` → `DetectPendingInput`) | this instant | the **calling window HOSTS the tab** and its claude has started |
+| 2 | **REMEMBERED** — the observer's `SessionInfo::pendingInput` (§3) | ≤ one liveness tick, or a persisted MEMORY (§5) | always (it is registry state, shared process-wide) |
+
+The rule: **a non-empty LIVE read wins; anything else falls back to the remembered value.** Deliberately,
+an *empty* live read does **not** erase the fallback — the "3 dots" are driven by the remembered value
+through the 2-tick clear debounce, so while the tab/card still says "this session holds an unsent
+message" the copy must hand over that message rather than silently copying nothing.
+
+**The live read is WRAPPED, because all of its failure modes are ordinary** and none may cost the user a
+copy: the session's tab may live in **another window** (a different UI thread — the Manager board and
+tree span the whole fleet, so this is the common case there), the tab may be **dormant** (window-restored,
+claude never started — no buffer), the control may be **torn down mid-click**, or the buffer may not be
+initialized. `_ReadLiveDraftForSession` catches everything (`AgentLogCaughtException`, Rule #18) and
+returns `""`; the provider itself is optional, and `CopySessionField` guards the call too. Every one of
+those paths lands on source 2 — the fallback is the *design*, not an error path.
+
+**Wiring** (the provider is per-caller, because only the hosting window can read a buffer):
+
+```
+overlay copy menu  -> AgentTabOverlay::_onReadLiveDraft   (SetLiveDraftHandler,  _AttachClaudeOverlay)
+Manager Copy >     -> AgentManagerContent::_liveDraftProvider (SetLiveDraftProvider, _WireAgentManagerContent)
+WT tab Copy >      -> the CopySessionFieldRequested handler's lambda (TerminalPage.cpp)
+                        \_ all three -> TerminalPage::_ReadLiveDraftForSession(sessionId)
+```
+
+**Observability** — the `[nav]` line is the intent (`copy current-prompt <sid8>`, from the shared action's
+existing nav log), and a `[pending]` mechanism line names the source that answered:
+`[pending] <sid8> copy current prompt: live|remembered chars=N`. With neither source there is **no
+clipboard write and no chime** (an honest no-op, like copying an empty branch) plus
+`[pending] <sid8> copy current prompt: nothing (box empty, no remembered draft)` — so a "why did nothing
+happen?" is answerable straight from hooks.log rather than being a silent dead click.
+
+**Not expanded (v1).** A draft containing a `[Pasted text #N +M lines]` placeholder copies **as rendered**,
+placeholder included — the §2b resolver identifies the backing cache file (and the board tip names it),
+but substituting content into a copy is a separate, deliberate step (see Follow-ups).
+
 ### Follow-ups (non-blocking)
 
 - **Off-switch**: an `AppSettings` flag to disable the pulse (like `showTabOverlay`); v1 is always-on.
@@ -443,5 +500,11 @@ never invisible (see *Dots color* in §3):
   against any live claude pid to see exactly what the shipped detector would extract, without the app.
 - **Tests Autorunner tie-in**: `pauseOnHumanInput` could consult "has a pending draft" to suspend an auto-send
   while the user is mid-compose — the draft fact is exactly the signal `pauseOnHumanInput` was waiting for.
+- **Expand pastes on copy** (§8): "Copy Current Prompt" copies the draft as rendered, so a
+  `[Pasted text #N +M lines]` placeholder rides along as a placeholder. The §2b brain can already
+  substitute the real content (`ExpandPasteMarker`, verified-only), but it needs an impure adapter that
+  expands a whole draft (today `ClaudeSpawn` only exposes the annotation form `ResolvePendingPasteRefs`)
+  and an off-thread copy path like the Transcript/Summary cases — worth doing, deliberately not in this
+  pass. A refusal must keep the placeholder (never a wrong expansion).
 - **Explorer-tree row** + the per-tab overlay HUD could carry the same pulse (the board + tab cover the
   primary surfaces).

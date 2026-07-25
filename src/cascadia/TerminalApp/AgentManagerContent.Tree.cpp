@@ -1592,7 +1592,7 @@ namespace winrt::TerminalApp::implementation
         MenuFlyoutSubItem copySub;
         copySub.Text(L"Copy");
         copySub.Icon(glyphIcon(L"\xE8C8")); // Copy (matches the WT tab menu's "Copy >")
-        AgentSetTip(copySub, L"Copy this session's id, path, branch, launch command line, transcript, or full summary");
+        AgentSetTip(copySub, L"Copy this session's id, path, branch, current (unsent) prompt, launch command line, transcript, or full summary");
         const auto addCopyItem = [&copySub, weak, id](const wchar_t* text, const wchar_t* tip, int which) {
             MenuFlyoutItem item;
             item.Text(text);
@@ -1602,12 +1602,21 @@ namespace winrt::TerminalApp::implementation
                 {
                     if (self->_registry)
                     {
+                        // "Copy Current Prompt" (case 7) reads the unsent draft LIVE off the session's
+                        // buffer when THIS window hosts its tab; the board/tree span the whole fleet, so
+                        // for a session hosted elsewhere the provider answers "" and the copy falls back
+                        // to the observer's recorded draft (ignored by every other case).
+                        std::function<std::wstring()> liveDraft;
+                        if (self->_liveDraftProvider)
+                        {
+                            liveDraft = [provider = self->_liveDraftProvider, id]() { return provider(id); };
+                        }
                         // The Summary case renders with this window's GLOBAL summary-panel flags, so a
                         // copied Summary matches what the panels show (wrap/truncate); the tab-color
                         // mode drives the Path case's effective-work-dir resolution.
                         CopySessionField(*self->_registry, id, which, self->_dispatcher,
                                          self->_appSettings.summaryPanelWrapNewlines, self->_appSettings.summaryPanelTruncate,
-                                         static_cast<int>(self->_appSettings.tabColorMode));
+                                         static_cast<int>(self->_appSettings.tabColorMode), liveDraft);
                     }
                 }
             });
@@ -1616,6 +1625,12 @@ namespace winrt::TerminalApp::implementation
         addCopyItem(L"Session Id", L"Copy the resumable conversation id (Codex: its rollout uuid)", 0);
         addCopyItem(L"Copy Path", L"Copy the session's working-directory path", 1);
         addCopyItem(L"Copy Branch Name", L"Copy the session's current git branch name", 2);
+        // Copy Current Prompt (PENDING_INPUT.md) — the UNSENT draft in the session's input box. Claude
+        // only: Codex's TUI has no ❯ rule-wrapped input box, so no draft is ever monitored for it.
+        if (!isCodex)
+        {
+            addCopyItem(L"Copy Current Prompt", L"Copy what is typed into this session's input box but NOT yet sent \x2014 read live from the terminal when this window hosts the tab, else the last observed draft (nothing is copied when there is none)", 7);
+        }
         // Offer ONLY the launch-CLI matching this session's agent (isCodex resolved above) — a Claude
         // session gets "Claude Launch CLI", a Codex session "Codex Launch CLI", never both.
         if (isCodex)
