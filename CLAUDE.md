@@ -1963,7 +1963,8 @@ What works, by area:
   came back, i.e. Codex-only without an API key) and **Anthropic's ids always precede Codex's** (this
   picker launches Claude sessions). The MRU is `PushRecentModel`/`RememberRecentModel` — newest first,
   a re-used id moved not duplicated, cap 20. Plus **links to the two
-  published lists** (Anthropic's [models API](https://platform.claude.com/docs/en/api/go/models/list) ·
+  published lists** (Anthropic's [model overview](https://platform.claude.com/docs/en/about-claude/models/overview)
+  — the table of ids + aliases, NOT the `/v1/models` API reference the *fetch* calls ·
   the Codex [models.json](https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json))
   and a **Fetch list** button that downloads + parses them straight into the drop-down
   (`AgentMaster/ModelCatalog.h` — PURE header-only parsers + the endpoints, so the harness tests them

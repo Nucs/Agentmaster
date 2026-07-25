@@ -146,7 +146,7 @@ namespace winrt::TerminalApp::implementation
             AgentSetTip(lnk, winrt::hstring{ tip });
             links.Children().Append(lnk);
         };
-        addLink(L"Claude models \x2197", ::Agentmaster::kAnthropicModelsDocsUrl, L"Anthropic's Models API reference \x2014 GET /v1/models lists every model id your account can use.");
+        addLink(L"Claude models \x2197", ::Agentmaster::kAnthropicModelsDocsUrl, L"Anthropic's model overview \x2014 every Claude model with its full id (claude-opus-4-8) and its alias (opus), plus what each one is good at.");
         addLink(L"Codex models \x2197", ::Agentmaster::kCodexModelsDocsUrl, L"The OpenAI Codex CLI's own model catalog (models.json in the codex repo) \x2014 the slug field is the id.");
         body.Children().Append(links);
 

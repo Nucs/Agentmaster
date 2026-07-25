@@ -5,7 +5,9 @@
 // {id, display name} rows the launch-model picker's "Specify a model..." prompt offers.
 //
 // The prompt links the two authoritative lists a user would otherwise have to hunt for:
-//   * Claude — https://platform.claude.com/docs/en/api/go/models/list  (GET /v1/models)
+//   * Claude — https://platform.claude.com/docs/en/about-claude/models/overview  (the model table:
+//              every Claude model with its full id AND its alias — what you came here to read; the
+//              FETCH below calls the separate /v1/models API instead)
 //   * Codex  — https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json
 // and can also FETCH them, so the id lands in the box instead of being typed from a browser tab.
 //
@@ -204,8 +206,12 @@ namespace Agentmaster
     inline constexpr std::wstring_view kAnthropicModelsHost = L"api.anthropic.com";
     inline constexpr std::wstring_view kAnthropicModelsPath = L"/v1/models?limit=100";
     inline constexpr std::wstring_view kAnthropicVersionHeader = L"2023-06-01";
-    // The human-readable page the prompt links (what the user opens to read the list themselves).
-    inline constexpr std::wstring_view kAnthropicModelsDocsUrl = L"https://platform.claude.com/docs/en/api/go/models/list";
+    // The human-readable page the prompt LINKS — deliberately the models OVERVIEW, not the
+    // /v1/models API reference (https://platform.claude.com/docs/en/api/go/models/list, which is
+    // what the fetch above calls). Someone who opened this link is looking up a model NAME to type,
+    // and the overview is the page that tabulates them with their full ids; the API reference
+    // documents the endpoint's request/response shape, which answers a question they did not ask.
+    inline constexpr std::wstring_view kAnthropicModelsDocsUrl = L"https://platform.claude.com/docs/en/about-claude/models/overview";
 
     // Codex's catalog is a PUBLIC file in the codex repo — no credentials, so this fetch works for
     // everyone. raw.githubusercontent.com serves the file bytes (the /blob/ URL below is the HTML
