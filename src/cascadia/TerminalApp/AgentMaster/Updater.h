@@ -3,7 +3,7 @@
 
 // Agentmaster — the in-app auto-updater (header-only, plain Win32; no WinRT, no engine-lib deps,
 // exactly like ProfileBootstrap.h). It checks the GitHub Releases of Nucs/Agentmaster for a newer
-// version, prompts the user (Update now / Postpone [tomorrow 08:00 / 3·7·30 days / skip this version] / Not now)
+// version, prompts the user (Update now / Postpone [next restart · tomorrow 08:00 · 3·7·30 days · skip])
 // with a Win32 TaskDialog, and — on Update — materializes the installer script into the active
 // profile dir (am-update.ps1 + a tiny am-update.cmd launcher) and runs it detached to download +
 // cert-trust + Add-AppxPackage the new .msixbundle and relaunch. The script (am-update.ps1) is the
@@ -39,7 +39,7 @@
 // skip/postpone are written by THIS module via a freshest-disk JSON read-modify-write INTO the
 // envelope (so the EXE can write them too without linking the engine); AppSettings carries all four
 // fields, so the engine round-trips them and the cog's Save preserves them from disk (the
-// summaryPanel idiom). "Not now" persists NOTHING durable — it latches a process-scoped
+// summaryPanel idiom). "Remind me next restart" persists NOTHING durable — it latches a process-scoped
 // declined-this-run marker (kDeclinedEnvVar) that silences the startup + hourly checks ENTIRELY
 // (pre-network presence gate: no query, no prompt, even for a newer release published mid-run)
 // until the NEXT LAUNCH, which always asks again (RunStartupUpdateCheck clears an inherited latch);
@@ -1241,16 +1241,16 @@ namespace Agentmaster::Updater
         return WriteUpdateState(stateDir, nullptr, &untilUnixMs);
     }
 
-    // ============================ "Not now" (declined this run) ============================
+    // ==================== "Remind me next restart" (declined this run) ====================
 
-    // "Not now" means "leave me alone until the NEXT LAUNCH" — a decline silences the startup +
-    // hourly checks ENTIRELY (gated BEFORE the network round-trip in RunUpdateCheckAndPrompt: no
+    // "Remind me next restart" means "leave me alone until the NEXT LAUNCH" — a decline silences the
+    // startup + hourly checks ENTIRELY (gated BEFORE the network round-trip in RunUpdateCheckAndPrompt: no
     // query, no prompt — even a NEWER release published mid-run waits for the next launch; the
     // cog's explicit "Check for updates" stays fully live, it's user-initiated). The latch is
     // PROCESS-scoped and deliberately an ENVIRONMENT VARIABLE: Updater.h is compiled into BOTH
     // WindowsTerminal.exe (the startup + hourly checks) and TerminalApp.dll (the cog's prompt) — an
-    // inline/static would exist once PER MODULE, but the env block is one per PROCESS, so a "Not
-    // now" clicked on the cog's prompt also silences the EXE's hourly timer. It dies with the
+    // inline/static would exist once PER MODULE, but the env block is one per PROCESS, so a decline
+    // taken on the cog's prompt also silences the EXE's hourly timer. It dies with the
     // process; child processes inherit it (harmless — RunStartupUpdateCheck CLEARS it at every
     // fresh launch, so an installer-relaunched / child-spawned instance still asks). The tag is
     // stored for the log trail; the gate is PRESENCE-based.
@@ -1294,7 +1294,11 @@ namespace Agentmaster::Updater
 
     enum class Decision
     {
-        NotNow, // ask again next launch (also the Cancel / X outcome)
+        // "Remind me next restart" — the default radio, and the Cancel / X / any-failure outcome.
+        // Persists NOTHING: it latches the process-scoped declined-this-run marker, so the startup
+        // + hourly checks are off until the next LAUNCH (which clears it). Named for what actually
+        // happens, unlike the "Not now" BUTTON it replaces, whose wording promised nothing.
+        RemindNextRestart,
         UpdateNow,
         PostponeTomorrow, // "Remind me tomorrow" — the next local 08:00 (NOT a rolling 24h)
         Postpone3,
@@ -1303,10 +1307,10 @@ namespace Agentmaster::Updater
         Skip
     };
 
-    // The "same question" shown at startup AND from the cog: Update now / Postpone / Not now, with
+    // The "same question" shown at startup AND from the cog: TWO buttons (Update now / Postpone), with
     // the postpone DURATION chosen via a radio group (tomorrow 08:00 / 3 / 7 / 30 days / skip this version) — the
     // TaskDialog analog of the requested dropdown (a TaskDialog can't host a combobox; radios are
-    // the idiomatic in-dialog choice). Cancel / X == Not now (the least-destructive default) — and
+    // the idiomatic in-dialog choice). Cancel / X == the default radio, "Remind me next restart" — and
     // ALSO the answer on any exception: a broken prompt must never crash the caller (the cog path
     // calls this straight off a UI lambda) nor fabricate a consequential choice.
     inline Decision ShowUpdatePrompt(HWND owner, const UpdateInfo& info)
@@ -1353,25 +1357,32 @@ namespace Agentmaster::Updater
         {
             try
             {
-                LogUpdate(Profiles::ResolveProfileDir(), L"prompt build CRASHED (exception \x2014 treated as Not now, no dialog shown)");
+                LogUpdate(Profiles::ResolveProfileDir(), L"prompt build CRASHED (exception \x2014 treated as remind-next-restart, no dialog shown)");
             }
             catch (...)
             {
                 // logger-failed: nothing left to report through
             }
-            return Decision::NotNow;
+            return Decision::RemindNextRestart;
         }
 
-        constexpr int idUpdate = 2001, idPostpone = 2002, idNotNow = 2003;
-        constexpr int rid1 = 3000, rid3 = 3001, rid7 = 3002, rid30 = 3003, ridSkip = 3004;
+        constexpr int idUpdate = 2001, idPostpone = 2002;
+        // Declared in DISPLAY order (the array below is what the user reads top-to-bottom); the ids
+        // are dialog-local and never persisted, so they exist only to be matched back below.
+        constexpr int ridRestart = 3000, ridTomorrow = 3001, rid3 = 3002, rid7 = 3003, rid30 = 3004, ridSkip = 3005;
 
         const TASKDIALOG_BUTTON buttons[] = {
             { idUpdate, L"Update now" },
             { idPostpone, L"Postpone" },
-            { idNotNow, L"Not now" },
         };
+        // "Remind me next restart" is FIRST + default: every other radio commits something durable
+        // (a postpone instant, or a skipped tag), so the pre-selected one must be the choice that
+        // writes nothing — the same outcome Cancel / X gives. It replaced the old "Not now" BUTTON:
+        // as a button it was a third way to dismiss with no stated consequence, and it sat beside
+        // "Postpone" implying it was NOT one, when it is exactly that — the shortest one.
         const TASKDIALOG_BUTTON radios[] = {
-            { rid1, tomorrowLabel.c_str() },
+            { ridRestart, L"Remind me next restart" },
+            { ridTomorrow, tomorrowLabel.c_str() },
             { rid3, L"Remind me in 3 days" },
             { rid7, L"Remind me in 7 days" },
             { rid30, L"Remind me in 30 days" },
@@ -1391,28 +1402,31 @@ namespace Agentmaster::Updater
         cfg.nDefaultButton = idUpdate;
         cfg.cRadioButtons = ARRAYSIZE(radios);
         cfg.pRadioButtons = radios;
-        cfg.nDefaultRadioButton = rid7;
+        cfg.nDefaultRadioButton = ridRestart;
         cfg.pszFooter = footer.c_str();
         cfg.pszFooterIcon = TD_INFORMATION_ICON;
         cfg.pfCallback = UpdatePromptCallback;
 
-        int pressed = 0, radio = rid7;
+        int pressed = 0, radio = ridRestart;
         if (FAILED(::TaskDialogIndirect(&cfg, &pressed, &radio, nullptr)))
         {
-            return Decision::NotNow; // comctl v6 unavailable / unexpected failure -> least-destructive
+            return Decision::RemindNextRestart; // comctl v6 unavailable / unexpected failure -> least-destructive
         }
         switch (pressed)
         {
         case idUpdate:
             return Decision::UpdateNow;
         case idPostpone:
-            return radio == rid1 ? Decision::PostponeTomorrow :
+            // Every arm is matched EXPLICITLY and the fall-through is the write-nothing choice: an
+            // unknown/absent radio must land on the default's outcome, never on a durable one.
+            return radio == ridTomorrow ? Decision::PostponeTomorrow :
                    radio == rid3 ? Decision::Postpone3 :
+                   radio == rid7 ? Decision::Postpone7 :
                    radio == rid30 ? Decision::Postpone30 :
                    radio == ridSkip ? Decision::Skip :
-                                      Decision::Postpone7;
+                                      Decision::RemindNextRestart;
         default:
-            return Decision::NotNow; // Not now / Cancel / X
+            return Decision::RemindNextRestart; // Cancel / X / Esc
         }
     }
 
@@ -1592,7 +1606,7 @@ namespace Agentmaster::Updater
 
     // Apply the user's choice. Returns true IFF the installer was launched (UpdateNow + installable)
     // — the caller then exits/quits. Postpone/Skip persist to settings.json (inside the envelope);
-    // Not now latches the declined-this-run marker (no durable state — the next launch asks again);
+    // Remind-next-restart latches the declined-this-run marker (no durable state — the next launch asks again);
     // UpdateNow with no installable asset opens the releases page instead. Every outcome logs an
     // [update] line — this is the ONE chokepoint every prompt (startup / hourly / cog) applies
     // through, so the decision trail is complete regardless of which surface asked.
@@ -1641,23 +1655,23 @@ namespace Agentmaster::Updater
             case Decision::Skip:
                 logChoice(L"Skip this version", WriteSkip(stateDir, info.latestTag));
                 return false;
-            case Decision::NotNow:
+            case Decision::RemindNextRestart:
             default:
                 MarkDeclinedThisRun(info.latestTag); // startup + hourly checks fully off until the next launch
-                LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Not now (startup + hourly checks off until the next launch)");
+                LogUpdate(stateDir, L"prompt " + DisplayVersion(info) + L" -> Remind me next restart (startup + hourly checks off until the next launch; the cog's manual check stays live)");
                 return false;
             }
         }
         catch (...)
         {
             // Never let a decision crash the caller (the cog invokes this straight off a UI
-            // lambda). Latch the tag like Not-now so a persistently-failing path can't decay into
+            // lambda). Latch the tag like a decline so a persistently-failing path can't decay into
             // an hourly nag loop; the next LAUNCH asks again. false == installer not launched, so
             // the caller keeps the app open.
             MarkDeclinedThisRun(info.latestTag);
             try
             {
-                LogUpdate(stateDir, L"decision apply CRASHED (exception \x2014 treated as Not now)");
+                LogUpdate(stateDir, L"decision apply CRASHED (exception \x2014 treated as remind-next-restart)");
             }
             catch (...)
             {
@@ -1712,7 +1726,7 @@ namespace Agentmaster::Updater
 
     // The shared check core, used by BOTH the startup check and the periodic (hourly) autocheck:
     // reads prefs, gates on identity + postpone + skip, checks GitHub (bounded so a slow-but-present
-    // network can't wedge the caller), prompts (Update now / Postpone tomorrow·3·7·30 / Skip / Not now), and
+    // network can't wedge the caller), prompts (Update now / Postpone next-restart·tomorrow·3·7·30 / Skip), and
     // applies the choice. Returns true IFF the installer was launched — the caller must then exit the
     // process (TerminateProcess, like the single-instance handoff) so the package isn't in use while
     // it upgrades + relaunches.
@@ -1743,7 +1757,7 @@ namespace Agentmaster::Updater
             }
             if (const std::wstring declined = DeclinedThisRunTag(); !declined.empty())
             {
-                // "Not now" was clicked THIS RUN (startup prompt, an earlier hourly tick, or the
+                // A decline was taken THIS RUN (startup prompt, an earlier hourly tick, or the
                 // cog's prompt) — the WHOLE check is off until the next launch: no network query,
                 // no prompt, even for a newer release published mid-run. Gated BEFORE the network
                 // so a decline truly quiets the hourly tick, not just its prompt. The cog's

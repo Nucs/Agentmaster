@@ -2259,13 +2259,37 @@ void TestUpdaterVersionLogic()
         constexpr long long kDay = 24LL * 60 * 60 * 1000;
         const long long t0 = U::NowUnixMs();
         // "Remind me tomorrow" = the NEXT LOCAL 08:00, not now + 24h: strictly future, never more
-        // than a day out, and it really IS 08:00 on the local wall clock (the wHour/wMinute check
-        // is what would catch a UTC-vs-local mixup, which a span check alone cannot see).
+        // than a day out, and 08:00 on the LOCAL clock.
         SYSTEMTIME morning{};
         const long long next8 = U::NextLocalMorningUnixMs(U::kPostponeMorningHour, &morning);
         CHECK(next8 > t0 && next8 <= t0 + kDay + 60000, "decide: next-08:00 is strictly future and within 24h");
         CHECK(morning.wHour == 8 && morning.wMinute == 0 && morning.wSecond == 0 && morning.wMilliseconds == 0,
               "decide: next-08:00 resolves to 08:00:00.000 on the LOCAL wall clock");
+        // ...and the RETURNED INSTANT really lands there. The out-param above proves nothing on its
+        // own — it is the struct we asked to be built — so round-trip the persisted epoch ms back
+        // through the INDEPENDENT inverse (ms -> UTC FILETIME -> SystemTimeToTzSpecificLocalTime).
+        // An inverted local<->UTC conversion sails past every check but this one, landing the
+        // postpone 2x the UTC offset away (here: 06:00 or 10:00 instead of 08:00).
+        {
+            ULARGE_INTEGER u{};
+            u.QuadPart = static_cast<unsigned long long>(next8) * 10000ULL + 116444736000000000ULL;
+            FILETIME ft{ u.LowPart, u.HighPart };
+            SYSTEMTIME utc{}, back{};
+            const bool converted = ::FileTimeToSystemTime(&ft, &utc) && ::SystemTimeToTzSpecificLocalTime(nullptr, &utc, &back);
+            CHECK(converted, "decide: the next-08:00 instant converts back to local time");
+            CHECK(converted && back.wHour == 8 && back.wMinute == 0 && back.wSecond == 0,
+                  "decide: the INSTANT reads 08:00 on the LOCAL clock (round-trip: local, not UTC)");
+            CHECK(converted && back.wYear == morning.wYear && back.wMonth == morning.wMonth && back.wDay == morning.wDay,
+                  "decide: ...on the resolved DATE (today's or tomorrow's 08:00, whichever is next)");
+            if (converted)
+            {
+                // Printed so the resolved instant is eyeball-verifiable against this machine's clock
+                // (a self-consistent round-trip on a UTC machine would have no teeth otherwise).
+                std::wprintf(L"  [info] next-08:00 local: %04u-%02u-%02u %02u:%02u (in %ls)\n",
+                             back.wYear, back.wMonth, back.wDay, back.wHour, back.wMinute,
+                             U::FormatSpanShort(next8 - t0).c_str());
+            }
+        }
         CHECK(!U::ApplyDecision(dir, info, U::Decision::PostponeTomorrow, nullptr), "decide: postpone-tomorrow returns not-launched");
         const auto p1 = U::ReadPrefs(dir).postponedUntilUnixMs;
         CHECK(p1 > t0 && p1 <= t0 + kDay + 60000, "decide: postpone-tomorrow persists the next 08:00 (not a rolling 24h)");
@@ -2280,10 +2304,18 @@ void TestUpdaterVersionLogic()
         CHECK(!U::ApplyDecision(dir, info, U::Decision::Skip, nullptr), "decide: skip returns not-launched");
         CHECK(U::ReadPrefs(dir).skippedVersion == L"v9.9.9", "decide: skip persists the exact tag");
 
+        // "Remind me next restart" (the default radio, and Cancel/X): the ONE choice that writes
+        // nothing durable — it only latches the process-scoped marker the startup + hourly checks
+        // gate on PRE-network, which the next launch clears (asserted in the declined-latch block
+        // above, incl. RunStartupUpdateCheck's fresh-launch clear). So "next restart" is literally
+        // what happens: no automatic prompt for the rest of THIS process, always asked again after
+        // a restart, and the cog's manual "Check for updates" never passes through that gate.
         const std::wstring before = U::detail::ReadFileWide(dir + L"\\settings.json");
-        CHECK(!U::ApplyDecision(dir, info, U::Decision::NotNow, nullptr), "decide: not-now returns not-launched");
-        CHECK(U::WasDeclinedThisRun(L"v9.9.9"), "decide: not-now latches the declined marker (no hourly nag)");
-        CHECK(U::detail::ReadFileWide(dir + L"\\settings.json") == before, "decide: not-now persists NOTHING to settings.json");
+        CHECK(!U::ApplyDecision(dir, info, U::Decision::RemindNextRestart, nullptr), "decide: remind-next-restart returns not-launched");
+        CHECK(U::WasDeclinedThisRun(L"v9.9.9"), "decide: remind-next-restart latches the declined marker (no hourly nag this run)");
+        CHECK(U::detail::ReadFileWide(dir + L"\\settings.json") == before, "decide: remind-next-restart persists NOTHING to settings.json");
+        U::MarkDeclinedThisRun(L""); // what a fresh launch does (RunStartupUpdateCheck)
+        CHECK(U::DeclinedThisRunTag().empty(), "decide: ...and the NEXT RESTART clears it -> the prompt returns");
 
         ::SetEnvironmentVariableW(U::kDeclinedEnvVar, hadPrev ? prev.c_str() : nullptr);
         std::error_code ec;

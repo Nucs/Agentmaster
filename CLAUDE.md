@@ -585,10 +585,19 @@ GitHub-release self-updater for our side-by-side packaged app, header-only pure-
 N windows?" prompt** — a bounded (≤6 s, on a worker so a slow network can't wedge launch) GitHub-API
 query for the newest release, gated to **packaged RELEASE installs** (dev/unpackaged skip unless
 `AGENTMASTER_UPDATE_STARTUP` is set). When a strictly-newer version exists it shows a TaskDialog —
-**Update now / Postpone (tomorrow [the next local **08:00**, NOT a rolling 24h — a deferral lands at the
-start of the next working day instead of re-interrupting at whatever hour you clicked; DST-safe, always
-within (0,24h], and the radio NAMES the resolved instant, e.g. "Remind me tomorrow (Sun, 8:00 AM)"] ·
-3·7·30 days) / Skip this version / Not now** (Cancel == Not now). **The same
+**TWO buttons — Update now / Postpone — over a SIX-radio group** picking what Postpone means:
+**Remind me next restart** (the **default**, and what Cancel / X / Esc / any failure resolves to — the
+only choice that writes NOTHING durable: it latches the process-scoped declined-this-run marker, so the
+startup + hourly checks are off — pre-network — until the next LAUNCH clears it, while the cog's manual
+"Check for updates" stays fully live) · **Remind me tomorrow** [the next local **08:00**, NOT a rolling
+24h — a deferral lands at the start of the next working day instead of re-interrupting at whatever hour
+you clicked; next-OCCURRENCE, so clicked at 00:06 it resolves to that same morning's 08:00 (measured:
+7h54m out), always within (0,24h]; DST-safe because the +1-day step is taken on the LOCAL wall clock and
+local→UTC applied after, with a now+24h fallback if the timezone conversion is unavailable; the radio
+NAMES the resolved instant, e.g. "Remind me tomorrow (Sun, 8:00 AM)"] · **3 · 7 · 30 days** · **Skip this
+version**. The old **"Not now" BUTTON is GONE** — it was a third dismissal whose wording promised nothing
+and which sat beside "Postpone" implying it was not one, when it is exactly that: the shortest postpone,
+now named for what it does. **The same
 check re-runs every 1 h while the app is running** (`RunPeriodicUpdateCheck`, the shared
 `RunUpdateCheckAndPrompt` core): the `WindowEmperor` arms a plain Win32 **`WM_TIMER`** on its message
 window (`_setupUpdateAutocheck`, armed during window-setup — a `WM_TIMER`, NOT the XAML
@@ -640,7 +649,7 @@ engine link) — live nested where `AppSettings` round-trips them; BOTH cog-Save
 original keys; nightly postdates the fix and needs none), and
 `WriteUpdateState` MIGRATES strays into the envelope (never drops a made choice), refuses to rebuild an
 unparseable non-empty file (no clobber), and writes ATOMICALLY (temp + flush + `MoveFileExW`, the
-engine's `WriteAllUtf8` recipe — was a torn-file-prone trunc `ofstream`). **"Not now" silences the
+engine's `WriteAllUtf8` recipe — was a torn-file-prone trunc `ofstream`). **"Remind me next restart" (the default radio) silences the
 updater until the NEXT LAUNCH**: it latches a process-scoped declined-this-run marker
 (`AGENTMASTER_UPDATE_DECLINED=<tag>` env var — one env block per PROCESS, unlike a per-module inline,
 so the cog's DLL prompt silences the EXE's hourly timer too) that gates the startup/hourly checks
@@ -656,7 +665,7 @@ postponed-skip with time left, up-to-date, available, skipped/declined suppressi
 decision, installer/uninstaller launch + failures — so the hourly cadence is verifiable straight off
 the log (previously fully silent). Toggle flips log `[nav] update-prerelease -> on/off`. **The whole
 surface is HARDENED no-throw**: every Updater.h entry point is try/catch-logged with a safe default
-(channel gate ⇒ not-channel, prompt ⇒ Not now, decision-apply ⇒ latched Not-now, installer/uninstaller
+(channel gate ⇒ not-channel, prompt ⇒ remind-next-restart, decision-apply ⇒ latched remind-next-restart, installer/uninstaller
 ⇒ not-launched so the app never quits with nothing running, prefs ⇒ pristine defaults; the comctl
 hyperlink callback and `HttpsGet`'s read loop are guarded too — the latter closed its 3 WinHTTP handles
 on the throw path, a per-tick leak), `ParseVersion` clamps components (no signed-overflow UB on a
@@ -2689,9 +2698,9 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     Terminal-settings seeding, and the one-instance-per-profile kernel mutex; included by the
     engine, AgentManagerContent, TerminalPage AND the WindowsTerminal EXE — PROFILES.md),
     `Updater.h` (header-only, pure Win32 like `ProfileBootstrap.h` — the in-app GitHub-release
-    **auto-updater**: a bounded GitHub-API version check, the Update / Postpone (tomorrow == the next local
-    08:00 · 3·7·30 days) / Skip /
-    Not-now TaskDialog, and the BAKED-IN `am-update.cmd` + `am-update.ps1` installer it writes into the
+    **auto-updater**: a bounded GitHub-API version check, the two-button (Update now / Postpone)
+    TaskDialog over its six-radio group (next restart [default] · tomorrow == the next local 08:00 ·
+    3·7·30 days · skip this version), and the BAKED-IN `am-update.cmd` + `am-update.ps1` installer it writes into the
     active profile; included by the WindowsTerminal EXE [startup check] AND `TerminalApp.dll`'s Settings
     cog — see the *In-app auto-updater* Status block),
     `tests/` (standalone harness, not in the msbuild — run `tests/run-m5-tests.bat`), and

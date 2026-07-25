@@ -4322,7 +4322,7 @@ namespace winrt::TerminalApp::implementation
         }
         // Interactive only: prompt + apply on a found update (the silent on-open check just labels).
         // ShowUpdatePrompt/ApplyDecision are themselves no-throw (Updater.h) — a broken prompt reads
-        // as Not now, a failed decision-apply never quits the app with no installer running.
+        // as remind-next-restart, a failed decision-apply never quits the app with no installer running.
         if (interactive && info.available)
         {
             const HWND owner = ::GetActiveWindow();
