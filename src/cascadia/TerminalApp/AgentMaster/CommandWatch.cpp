@@ -710,7 +710,7 @@ namespace Agentmaster
         LogSwallowedException(L"CommandWatch::OnTurnEnd"); // self-contained: the scanner pass survives any watch failure
     }
 
-    void CommandWatch::Tick(int64_t nowMs)
+    void CommandWatch::Tick(int64_t nowMs, const TurnInFlightProbe& turnInFlight)
     try
     {
         std::vector<std::pair<Pending, MarkdownReadyHandler>> ready;
@@ -724,10 +724,42 @@ namespace Agentmaster
             // Settle-seal fallback (multi-file): a matched pending whose turn end never arrived
             // (the session died mid-turn / a truncated tail) seals after kCommandMatchSettleMs of
             // write-silence, so it can still fire without waiting out the whole deadline.
+            // ⚠ HELD while the turn that produced the match is demonstrably still IN FLIGHT
+            // (kCommandMatchSettleMs header note — the 2026-07-26 mid-generation clip): the
+            // transcript is byte-silent while Claude streams the NEXT briefing's content, so
+            // write-silence inside an open turn proves nothing. The probe is consulted lazily
+            // (only here, window already elapsed — near-zero steady-state cost) and re-checked
+            // every tick, so the hold releases the moment the session dies / the turn ends;
+            // OnTurnEnd still seals instantly when the real boundary arrives, and the 15-min
+            // deadline bounds a pending whose turn never resolves either way.
             for (auto& p : _pending)
             {
                 if (!p.sealed && !p.matchedPaths.empty() && p.lastMatchMs > 0 && nowMs - p.lastMatchMs >= kCommandMatchSettleMs)
                 {
+                    bool inFlight = false;
+                    if (turnInFlight)
+                    {
+                        // Safeguard: a throwing probe reads as "not in flight" — the classic
+                        // settle proceeds — rather than unwinding the sweep.
+                        try
+                        {
+                            inFlight = turnInFlight(p.sessionId);
+                        }
+                        catch (...)
+                        {
+                            LogSwallowedException(L"CommandWatch::Tick turnInFlight");
+                            inFlight = false;
+                        }
+                    }
+                    if (inFlight)
+                    {
+                        if (!p.settleHeldLogged)
+                        {
+                            p.settleHeldLogged = true; // one line per pending, not one per 2.5s tick
+                            lines.push_back(L"[cmd] /" + p.command + L" settle held " + ShortId(p.sessionId) + L" files=" + std::to_wstring(p.matchedPaths.size()) + L" (turn still in flight - collection stays open)\n");
+                        }
+                        continue;
+                    }
                     p.sealed = true;
                     lines.push_back(L"[cmd] /" + p.command + L" sealed " + ShortId(p.sessionId) + L" files=" + std::to_wstring(p.matchedPaths.size()) + L" (settle - no turn end seen)\n");
                 }

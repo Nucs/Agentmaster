@@ -101,7 +101,26 @@ right after writing, so everything belonging to one command lands in ONE turn �
 what keeps a SECOND command's writes from bleeding into the first, and what makes the
 /handover-here swap happen only after the origin's turn completed), with a
 `kCommandMatchSettleMs` (20s) write-silence fallback when no turn end ever arrives (a session
-killed mid-turn). **The tool_use lines only prove the REQUEST** — a write may still be pending
+killed mid-turn). ⚠ **The settle is HELD while the turn that produced the match is demonstrably
+still IN FLIGHT** (`Tick`'s `turnInFlight` probe, consulted lazily only once the window
+elapsed): write-silence is NOT evidence the command is done writing — the transcript is
+byte-SILENT while Claude streams a large file's content, so one command's several writes are
+routinely MINUTES apart (proven live 2026-07-26, session `75113a52`: a two-file `/handover`
+with **2m09s** between its Writes was settle-sealed at 20s with only file 1 — one successor
+spawned, file 2's write had no owner, the user pasted it by hand). The scanner supplies the
+probe from its own pass facts — the tracked tail neither terminal nor interrupted (else that
+boundary already fed `OnTurnEnd`) AND live-process evidence (a known pid answers
+`ProcessAlive` kernel ground truth, so a dead claude settles exactly as before and stale
+presence enrichment can never outvote a dead pid; an unknown pid falls back to
+`PresenceIsWorking` on claude's own heartbeat) — re-checked every tick, so the hold releases
+within one scanner cadence of the session dying, and the 15-min deadline still bounds
+everything. The hold logs once per pending (`[cmd] /handover settle held … (turn still in
+flight - collection stays open)`). A presence-idle release (`[recon-stop-idle]` — a turn that
+ended with NO terminal/interrupt line in the transcript) now also feeds `OnTurnEnd`, so a
+matched await whose turn ended THAT way seals on the scanner's settled judgment instead of
+riding to the deadline (the tail-derived recon-stop deliberately does NOT feed — its
+terminal/interrupt line already did at parse; a second feed would double-age unmatched
+pendings). **The tool_use lines only prove the REQUEST** — a write may still be pending
 a permission approval — so the fire is gated on the DISK: a sealed pending fires once EVERY
 collected file exists non-empty (probed at seal, then per `Tick`), delivering the whole path
 set to the handler. The file probe is injectable (`SetFileProbe`) so the whole machine

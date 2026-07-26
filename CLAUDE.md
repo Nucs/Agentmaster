@@ -943,7 +943,10 @@ no-bare-sibling-token render check, the THREE-way binding isolation ["handover" 
 "handover-standby" — the exact aliasing hazard], the family-supersede pivot onto the standby path,
 `BuildPromptFill` [bracketed paste, NO trailing CR ever; `BuildPromptSubmission == fill + "\r"` so
 the channels can't drift], the standby settings round-trip) + the multi-file
-collect/seal/settle units + the durable-progress units (watermark / marker revival / prune /
+collect/seal/settle units (now incl. the settle turn-in-flight HOLD: the 75113a52 incident replay —
+held through a 2m09s generation gap, ONE fire with both files at the real turn end — + the
+release-on-death and throwing-probe belts, and E2E scenario F2, the same clip through the real
+parser at scanner cadence; suite 2873/2873) + the durable-progress units (watermark / marker revival / prune /
 encode-decode) + the family-supersede race-guard units + the SHA-256 definition-history units
 (NIST vectors + padding edges; the create/upgrade/never-overwrite policy over a synthetic command;
 the `last digest == sha256(current text)` version gate; the three histories pairwise disjoint) + the §6a
@@ -953,7 +956,8 @@ texts, the named ensure/remove + rename/disable reconcile policy, the AppSetting
 marker semantics) + the §6b SHAPING units (RegexUtil's never-throw/caps/backrefs contract, the
 successor-title rewrite's five fallback paths, the authoritative-vs-invalid leaf-match regex, the
 shaping settings round-trip), the FABRICATED
-end-to-end `/handover` session `TestCommandHandoverE2E` (incl. the multi-file scenario F, the
+end-to-end `/handover` session `TestCommandHandoverE2E` (incl. the multi-file scenario F + the
+mid-generation settle-hold scenario F2, the
 restart-persistence scenario G + the family-race pivot scenario H), and the REAL-corpus echo replay
 `TestCommandEchoRealCorpus`) + lib-compiled green; rides the next deploy cycle.** Bind to `/commands`
 the user TYPES into a managed Claude session and AWAIT the session's
@@ -969,7 +973,16 @@ byte-identical, pinned by test), alongside assistant **`fileWritePaths`** (Write
 **MULTI-FILE**: every hint-matching `.md` Write/Edit after the command is COLLECTED in write order
 (deduped; a batch's first md only as the nothing-collected-yet fallback — an incidental doc edit
 never rides along), the collection **SEALS at the first turn end after a match** (+ a 20s
-write-silence settle fallback — `kCommandMatchSettleMs` — when no turn end ever arrives), and the
+write-silence settle fallback — `kCommandMatchSettleMs` — when no turn end ever arrives; ⚠ the
+settle is **HELD while the turn is demonstrably still IN FLIGHT** — `Tick`'s lazily-consulted
+`turnInFlight` probe, fed by the scanner from its pass facts [tail non-terminal/non-interrupted +
+`ProcessAlive` pid ground truth, presence-heartbeat fallback] — because the transcript is
+byte-SILENT while Claude streams the next briefing, so one command's writes are routinely MINUTES
+apart: proven live 2026-07-26 on `75113a52`, a two-file /handover with 2m09s between Writes was
+settle-sealed at 20s with only file 1 and its second successor never spawned; a dead claude still
+settles as before [pid ground truth], the deadline still caps everything, and the recon-stop-idle
+synth now also feeds `OnTurnEnd` so a turn that ended with no terminal line in the transcript
+seals on the scanner's judgment), and the
 fire is gated on EVERY collected file actually existing on disk (a tool_use only proves the request;
 a write may sit behind an approval) — ONE fire carrying the whole path set ('|'-joined through the
 fan-out, `Join/SplitWatchPaths`; `IsSaneWatchPath` rejects `|` per-path so the separator is

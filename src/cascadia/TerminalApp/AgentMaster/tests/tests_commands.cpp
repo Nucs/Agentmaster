@@ -6,7 +6,8 @@
 //   * ParseTranscriptDelta's Command events + assistant fileWritePaths (both echo strata, real
 //     corpus shapes) — and that a command echo stays a NON-event for the state machine
 //   * the CommandWatch state machine (arm / MULTI-FILE collect + seal-at-turn-end + settle
-//     fallback / disk-await / FIFO / turn-end + deadline expiry / freshness replay guard /
+//     fallback incl. the turn-in-flight settle HOLD — the 2026-07-26 mid-generation clip — /
+//     disk-await / FIFO / turn-end + deadline expiry / freshness replay guard /
 //     per-session cap / same-echo idempotence / DropSession), injected file probe
 //   * durable per-session progress (COMMANDS.md §3a): Encode/DecodeCommandProgress, the fired
 //     watermark (no re-fire across a restart/replay), armed-marker revival (a mid-await command
@@ -753,6 +754,66 @@ void TestCommandWatch()
         CHECK(fired == 0 && w.PendingCount() == 1, "before the settle window: still collecting (no turn end seen)");
         w.Tick(now + kCommandMatchSettleMs);
         CHECK(fired == 1 && w.PendingCount() == 0, "the settle fallback seals + fires without a turn end");
+    }
+    {
+        // The settle-seal must NOT fire MID-TURN (the 2026-07-26 clip, session 75113a52): one
+        // /handover wrote TWO briefings with a 2m09s GENERATION GAP between the Writes — the
+        // transcript is byte-silent while the second file's content streams, so the 20s
+        // write-silence settle sealed with only file 1 (one successor spawned; file 2's write
+        // arrived with no owner and the user pasted it by hand). With the turn-in-flight probe
+        // reporting the turn OPEN, the settle HOLDS; the real turn end then seals with BOTH
+        // files and ONE fire carries them.
+        CommandWatch w;
+        std::vector<FiredHandover> fired;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& sid, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            fired.push_back(MakeFired(sid, mds, args));
+        });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        int probed = 0;
+        const auto probe = [&](const std::wstring& sid) { ++probed; return sid == L"s"; };
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"two successors" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-matmul-zerodim.md" }, L"K:\\r", now);
+        w.Tick(now + 5'000, probe);
+        CHECK(probed == 0, "inside the settle window the probe is never consulted (lazy — zero steady-state cost)");
+        w.Tick(now + kCommandMatchSettleMs, probe); // 20s of write-silence — mid-generation
+        w.Tick(now + 129'000, probe); // the incident's measured 2m09s gap
+        CHECK(fired.empty() && w.PendingCount() == 1 && probed == 2,
+              "the settle HOLDS while the turn is in flight (a minutes-long generation gap no longer clips the collection)");
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-blas-nuget-native.md" }, L"K:\\r", now + 129'000); // Write #2 lands
+        w.OnTurnEnd(L"s"); // the real end_turn
+        CHECK(fired.size() == 1 && !fired.empty() && (fired[0].mdPaths == std::vector<std::wstring>{ L"K:\\r\\HANDOVER-matmul-zerodim.md", L"K:\\r\\HANDOVER-blas-nuget-native.md" }),
+              "the real turn end seals + fires ONCE with BOTH briefings (the incident's expected behavior)");
+    }
+    {
+        // …and the hold RELEASES the moment the probe reads not-in-flight (the session died
+        // mid-turn — the settle's real case): the classic settle seals + fires what was
+        // collected. Re-checked every tick, so a dead claude costs one scanner cadence, never
+        // the 15-min deadline.
+        CommandWatch w;
+        int fired = 0;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired; });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        bool inFlight = true;
+        const auto probe = [&](const std::wstring&) { return inFlight; };
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-a.md" }, L"K:\\r", now);
+        w.Tick(now + kCommandMatchSettleMs, probe);
+        CHECK(fired == 0 && w.PendingCount() == 1, "held while the turn is in flight");
+        inFlight = false; // claude died / the tail settled
+        w.Tick(now + kCommandMatchSettleMs + 2'500, probe);
+        CHECK(fired == 1 && w.PendingCount() == 0, "the hold releases on the next tick once the turn is no longer in flight — the settle then fires");
+    }
+    {
+        // A THROWING probe degrades to the classic settle (logged + swallowed, never unwinds
+        // the sweep) — the exception-containment policy.
+        CommandWatch w;
+        int fired = 0;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring&, const std::vector<std::wstring>&, const std::wstring&) { ++fired; });
+        w.SetFileProbe([](const std::wstring&) { return true; });
+        w.OnCommandSighting(L"s", SlashCommand{ L"handover", L"" }, freshTs, now);
+        w.OnFileToolWrite(L"s", { L"K:\\r\\HANDOVER-a.md" }, L"K:\\r", now);
+        w.Tick(now + kCommandMatchSettleMs, [](const std::wstring&) -> bool { throw std::runtime_error("probe boom"); });
+        CHECK(fired == 1, "a throwing turn-in-flight probe reads as not-in-flight: the classic settle seals + fires");
     }
 
     // ---- DeriveSuffixedTitle (the generalized fork-title derivation) ----
@@ -2013,6 +2074,36 @@ void TestCommandHandoverE2E()
             CHECK(ReadHandoverDocumentPrompt(fired[0].mdPaths[0]).find(L"# Handover") == 0, "scenario F: file A's content is successor 1's first message");
             CHECK(ReadHandoverDocumentPrompt(fired[0].mdPaths[1]).rfind(L"Appendix: the gotchas.") != std::wstring::npos, "scenario F: file B's content is successor 2's first message");
         }
+    }
+
+    // ---- scenario F2 (the 2026-07-26 incident, session 75113a52): the SAME two-file command
+    //      with the REAL timing shape — Write #1 lands, then a MINUTES-long byte-silent gap while
+    //      briefing #2's content streams, the scanner's 2.5s ticks pounding the elapsed settle
+    //      window the whole time. The turn-in-flight probe HOLDS the seal (pre-fix, tick #8
+    //      sealed with only file 1 and file 2's write had no owner); the real end_turn then
+    //      fires ONE handover carrying BOTH files. ----
+    {
+        CommandWatch w; // DEFAULT disk probe — both files really on disk
+        std::vector<FiredHandover> fired;
+        w.BindMarkdownAwait(L"handover", L"handover", [&](const std::wstring& s, const std::vector<std::wstring>& mds, const std::wstring& args) {
+            fired.push_back(MakeFired(s, mds, args));
+        });
+        FeedParsedEvents(w, sid, dir,
+                         ParseTranscriptDelta(FabUserEcho(sid, L"split handover, slow generation", now - 3000) +
+                                              FabAssistantWrite(mdPath, now - 2000, L"a-wf2a")),
+                         now);
+        const auto stillGenerating = [](const std::wstring&) { return true; }; // the scanner's probe: non-terminal tail + live pid
+        for (int t = 1; t <= 60; ++t) // 2m30s of scanner cadence, all inside the open turn
+        {
+            w.Tick(now + t * 2'500, stillGenerating);
+        }
+        CHECK(fired.empty() && w.PendingCount() == 1, "scenario F2: minutes of mid-turn write-silence no longer clip the collection (settle held)");
+        FeedParsedEvents(w, sid, dir,
+                         ParseTranscriptDelta(FabAssistantWrite(mdPathB, now + 150'000, L"a-wf2b") +
+                                              FabAssistantEnd(L"Both parts written.", now + 151'000, L"a-ef2")),
+                         now + 151'000);
+        CHECK(fired.size() == 1 && !fired.empty() && (fired[0].mdPaths == std::vector<std::wstring>{ mdPath, mdPathB }),
+              "scenario F2: the real turn end fires ONE handover with BOTH briefings");
     }
 
     // ---- scenario G (RESTART PERSISTENCE, the full fabricated session over a durable store):

@@ -73,8 +73,15 @@ namespace Agentmaster
     // after its match (the command's definition ends the turn right after writing, so every file
     // of one command lands in ONE turn). When no turn end ever arrives (the session died mid-turn,
     // a truncated tail), this much write-silence after the LAST collected path seals it instead,
-    // so a matched await can still fire without waiting out the full deadline. Comfortably above
-    // the scanner cadence (<=2.5s) and any realistic gap between one command's several writes.
+    // so a matched await can still fire without waiting out the full deadline.
+    // ⚠ Write-silence is NOT evidence the command is done writing — the settle is trusted only
+    // while the turn is NOT demonstrably in flight (Tick's turnInFlight probe): the transcript is
+    // byte-SILENT while Claude streams a large file's content, so the gap between one command's
+    // several writes is routinely MINUTES, not seconds (measured live 2026-07-26, session
+    // 75113a52: 2m09s between the two HANDOVER writes of one /handover — the 20s settle sealed
+    // mid-turn with only file 1, spawned one successor, and file 2's write had no owner). While
+    // the probe reports the turn open, the seal HOLDS (the real turn end will arrive and seal
+    // properly); a session that died mid-turn reads not-in-flight and settles exactly as before.
     inline constexpr int64_t kCommandMatchSettleMs = 20'000;
 
     // A typed slash command extracted from its transcript echo. `name` is the bare command word —
@@ -229,9 +236,18 @@ namespace Agentmaster
         // collection is complete — fires as soon as every file is on disk, often immediately
         // here); unmatched pendings age one turn and expire past kCommandAwaitMaxTurnEnds.
         void OnTurnEnd(const std::wstring& sessionId);
-        // Periodic sweep (every scanner pass): deadline expiry, the settle-seal fallback, + the
-        // disk poll that fires a sealed await the moment its last file lands.
-        void Tick(int64_t nowMs);
+        // Is this session's turn still demonstrably IN FLIGHT? Consulted by the settle-seal
+        // fallback ONLY (lazily — a matched-unsealed pending whose settle window elapsed), so
+        // the settle can never seal a collection MID-TURN: the transcript is byte-silent while
+        // Claude streams a large second briefing (minutes of "write-silence" inside one turn —
+        // the 2026-07-26 incident, kCommandMatchSettleMs above). True => hold the seal this tick
+        // (the turn's real end will arrive via OnTurnEnd); false/absent/throwing => the classic
+        // settle behavior. The scanner supplies it from its own pass facts (tail + liveness).
+        using TurnInFlightProbe = std::function<bool(const std::wstring& sessionId)>;
+        // Periodic sweep (every scanner pass): deadline expiry, the settle-seal fallback (held
+        // while `turnInFlight` reports the turn open), + the disk poll that fires a sealed await
+        // the moment its last file lands.
+        void Tick(int64_t nowMs, const TurnInFlightProbe& turnInFlight = {});
         // The session left the live set (archived/removed) — drop its in-memory pendings + cached
         // progress. The PERSISTED progress (watermark + armed markers) deliberately survives:
         // it is what makes a later resume/replay of this session safe (no re-fire) and able to
@@ -267,6 +283,7 @@ namespace Agentmaster
             std::vector<std::wstring> matchedPaths; // collected in write order; empty until the first match
             bool sealed{ false }; // collection complete (turn end / settle) — fire once all paths present
             int64_t lastMatchMs{ 0 }; // when the newest path was collected (the settle fallback's anchor)
+            bool settleHeldLogged{ false }; // one-shot: the settle-hold ([cmd] … settle held) logged once, not per tick
         };
 
         // Locked helpers (callers hold _mtx). _takeReady pops every SEALED pending whose files are

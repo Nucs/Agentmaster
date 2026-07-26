@@ -658,7 +658,38 @@ namespace Agentmaster
         // between ticks). Steady state (no pendings) is one empty-check, no I/O.
         if (_commandWatch)
         {
-            _commandWatch->Tick(now);
+            // TURN-IN-FLIGHT probe for the settle-seal (CommandWatch.h kCommandMatchSettleMs):
+            // the settle must not seal a matched collection MID-TURN — the transcript is
+            // byte-SILENT while Claude streams the next briefing's content, so one /handover's
+            // several writes are routinely MINUTES apart (the 2026-07-26 clip: 2m09s between two
+            // HANDOVER writes sealed at 20s with only file 1). The turn is still in flight when
+            // this pass's own facts say so: the tracked tail is neither terminal nor interrupted
+            // (else the boundary already fed OnTurnEnd) AND the process is live — a known pid
+            // answers with kernel ground truth (a dead claude must settle exactly as before, and
+            // stale presence enrichment must not outvote a dead pid), an unknown pid falls back
+            // to claude's own heartbeat as positive work evidence. Consulted lazily (only for a
+            // matched-unsealed pending whose settle window elapsed), µs when it runs at all.
+            const auto turnInFlight = [&](const std::wstring& sid) -> bool {
+                const auto sc = _scan.find(sid);
+                if (sc == _scan.end() || !sc->second.primed)
+                {
+                    return false; // no caught-up cursor -> no tail judgment -> classic settle
+                }
+                const ScanState& st = sc->second;
+                if (st.interrupted || IsTerminalStopReason(st.lastStopReason))
+                {
+                    return false; // the turn is over (the boundary itself fed OnTurnEnd)
+                }
+                for (const auto& s : sessions)
+                {
+                    if (s.live && s.id == sid)
+                    {
+                        return s.pid != 0 ? ProcessAlive(s.pid) : PresenceIsWorking(s.presenceStatus);
+                    }
+                }
+                return false; // gone/archived -> DropSession territory, settle freely
+            };
+            _commandWatch->Tick(now, turnInFlight);
         }
 
         // Run the app-layer probes when armed even with nothing live, so each window's probe can
@@ -1057,6 +1088,17 @@ namespace Agentmaster
                 // release ends a turn that produced no assistant output, so it carries no question.
                 stop.lastMessageIsQuestion = stopFromTail && !st.interrupted && EndsWithQuestion(st.lastAssistantText);
                 _registry->OnHookEvent(stop);
+                // COMMANDS.md: a presence-idle release ends a turn the TRANSCRIPT never showed
+                // ending (no terminal tail / no interrupt line -> the parser fed no OnTurnEnd for
+                // it), so feed the boundary here: a matched command await SEALS on the scanner's
+                // own settled judgment instead of riding to its deadline now that the settle-seal
+                // holds while the tail still reads mid-turn. The TAIL-derived stop must NOT feed —
+                // its terminal/interrupt line already fed OnTurnEnd at parse, and a second feed
+                // would double-age unmatched pendings (halving their clarification window).
+                if (stopFromPresenceIdle && _commandWatch && st.primed)
+                {
+                    _commandWatch->OnTurnEnd(s.id);
+                }
                 AppendStateLog(L"scanner.log",
                                (stopFromPresenceIdle ? L"[recon-stop-idle] " : L"[recon-stop] ") + s.id +
                                    L" q=" + (stop.lastMessageIsQuestion ? L"1" : L"0") +
