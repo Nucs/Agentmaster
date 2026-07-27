@@ -72,6 +72,21 @@ namespace Agentmaster
     // seam; an empty value removes the key (the store stays sparse).
     inline constexpr const wchar_t* kSessionStoreCommandProgressKey = L"cmdProgress";
 
+    // The DRAFT field keys (PENDING_INPUT.md §8c): the durable per-session cache of the session's
+    // UNSENT input-box draft + the unix-ms stamp of when it was last observed. The draft already
+    // persists on the fleet record (sessions.json), and THAT stays the authoritative copy — this is
+    // the per-session mirror the user asked for: it is keyed by session id alone, so it survives the
+    // fleet record being dropped (a resume-fresh stale-drop) and is an O(1) read for any surface /
+    // tool that knows only the id. `draftAtUnixMs` is the same honesty device as
+    // SessionInfo::pendingInputUnixMs — its AGE is what distinguishes a live draft from a carried
+    // memory. Written by exactly ONE seam (TerminalPage::_ScanPendingInputImpl -> _PersistSessionDraft)
+    // so the two copies cannot disagree, and the draft's paste placeholders are EXPANDED against the
+    // paste-cache before storing when they resolve (so the stored value is the whole prompt, not a
+    // "[Pasted text #N +M lines]" label); an unresolvable marker falls back to the rendered text
+    // rather than losing the memory. An empty draft removes BOTH keys, keeping the store sparse.
+    inline constexpr const wchar_t* kSessionStoreDraftKey = L"draft";
+    inline constexpr const wchar_t* kSessionStoreDraftAtKey = L"draftAtUnixMs";
+
     // ===== testable core (explicit store dir) ================================================
 
     // The whole record for `sessionId` (empty map if it has no stored file / unreadable / bad id).
@@ -86,6 +101,13 @@ namespace Agentmaster
     // write (so a steady-state re-publish from the registry observer costs one small read). Creates
     // the store dir on demand. Returns true on success or a no-op; false on a bad id / write error.
     bool SetSessionStoreFieldIn(const std::wstring& storeDir, const std::wstring& sessionId, const std::wstring& key, const std::wstring& value);
+
+    // Set SEVERAL fields in ONE read-modify-write (the single-field setter's semantics per entry: an
+    // empty value removes that key; the file is deleted when the record becomes empty). Use this when
+    // two keys are ONE fact — the draft and its observation stamp — so a crash between two separate
+    // writes can never leave a draft carrying the wrong (or no) timestamp. Deduped like the single
+    // setter: when every entry already holds its value there is no disk write.
+    bool SetSessionStoreFieldsIn(const std::wstring& storeDir, const std::wstring& sessionId, const SessionStoreRecord& fields);
 
     // Every session that has a NON-empty value for `key`, gathered in ONE directory scan
     // (sid -> value). Sparse: only sessions with a stored file are visited.
@@ -113,6 +135,19 @@ namespace Agentmaster
     // The set of every favorited session id, in ONE sparse directory scan (only favorited/titled
     // sessions have a file). The Sessions page reads this off-thread to drive the star + filter.
     std::unordered_set<std::wstring> LoadAllFavoriteSessions();
+
+    // ===== typed convenience: the DRAFT (PENDING_INPUT.md §8c) ===============================
+    //
+    // The unsent input-box draft + when it was last observed. Set an EMPTY text to clear (both keys
+    // are removed in one write, so a draft can never outlive its stamp or vice versa); `atUnixMs` is
+    // ignored for a clear. Getting a draft that was never stored yields "" / 0.
+    std::wstring GetStoredSessionDraftIn(const std::wstring& storeDir, const std::wstring& sessionId);
+    int64_t GetStoredSessionDraftAtIn(const std::wstring& storeDir, const std::wstring& sessionId);
+    bool SetStoredSessionDraftIn(const std::wstring& storeDir, const std::wstring& sessionId, const std::wstring& text, int64_t atUnixMs);
+
+    std::wstring GetStoredSessionDraft(const std::wstring& sessionId);
+    int64_t GetStoredSessionDraftAt(const std::wstring& sessionId);
+    bool SetStoredSessionDraft(const std::wstring& sessionId, const std::wstring& text, int64_t atUnixMs);
 
     // ===== typed convenience: the TAGS (bookmark tags on a session's tab) ===================
     //

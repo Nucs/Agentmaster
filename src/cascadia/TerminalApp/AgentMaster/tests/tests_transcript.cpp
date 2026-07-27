@@ -1441,6 +1441,47 @@ void TestTranscriptResolve()
         CHECK(favs2.size() == 1 && favs2.count(b) == 1 && favs2.count(a) == 0, "store: only b remains favorited");
         CHECK(LoadSessionStoreIn(store, a).size() == 1, "store: un-favorite left the title intact");
 
+        // --- the DRAFT keys (PENDING_INPUT.md §8c): the durable per-session cache of the session's
+        // UNSENT input-box draft + its observation stamp. Both keys are ONE fact, so they are written
+        // (and cleared) in ONE read-modify-write — a crash between two separate writes must never be
+        // able to leave a draft carrying no stamp, or a stamp with no draft.
+        CHECK(std::wstring{ kSessionStoreDraftKey } == L"draft" && std::wstring{ kSessionStoreDraftAtKey } == L"draftAtUnixMs", "store: the draft key names");
+        CHECK(GetStoredSessionDraftIn(store, a).empty() && GetStoredSessionDraftAtIn(store, a) == 0, "draft-store: nothing stored by default");
+        const std::wstring draftText = L"fix the failing tests\nthen update the docs";
+        CHECK(SetStoredSessionDraftIn(store, a, draftText, 1770000000123LL), "draft-store: upsert a draft");
+        CHECK(GetStoredSessionDraftIn(store, a) == draftText, "draft-store: a MULTI-LINE draft round-trips verbatim");
+        CHECK(GetStoredSessionDraftAtIn(store, a) == 1770000000123LL, "draft-store: the observation stamp round-trips");
+        {
+            // It rides the SAME record as the title (one file per session) and does not disturb it.
+            const auto rec = LoadSessionStoreIn(store, a);
+            CHECK(rec.size() == 3 && rec.at(L"title") == L"My Renamed Session", "draft-store: coexists with the title on one record");
+        }
+        // An UPSERT replaces both halves together.
+        CHECK(SetStoredSessionDraftIn(store, a, L"changed my mind", 1770000009999LL), "draft-store: upsert again (the draft drifted)");
+        CHECK(GetStoredSessionDraftIn(store, a) == L"changed my mind" && GetStoredSessionDraftAtIn(store, a) == 1770000009999LL, "draft-store: upsert replaced text AND stamp");
+        // A redundant upsert is a no-op success (the dedup that keeps a per-scan-tick re-publish cheap).
+        CHECK(SetStoredSessionDraftIn(store, a, L"changed my mind", 1770000009999LL), "draft-store: a redundant upsert is a no-op success");
+        // CLEARING ("empty the cache") removes BOTH keys and leaves the rest of the record alone.
+        CHECK(SetStoredSessionDraftIn(store, a, L"", 0), "draft-store: clear");
+        CHECK(GetStoredSessionDraftIn(store, a).empty() && GetStoredSessionDraftAtIn(store, a) == 0, "draft-store: cleared draft AND stamp");
+        CHECK(LoadSessionStoreIn(store, a).size() == 1, "draft-store: the clear left the title intact");
+        // A draft with no usable stamp stores the text alone (the stamp is a hint, never a gate), and a
+        // session whose ONLY datum was a draft loses its file entirely when cleared (the store stays sparse).
+        const std::wstring c = L"cccccccc-cccc-cccc-cccc-cccccccccccc";
+        CHECK(SetStoredSessionDraftIn(store, c, L"stampless draft", 0), "draft-store: a draft with no stamp is storable");
+        CHECK(GetStoredSessionDraftIn(store, c) == L"stampless draft" && GetStoredSessionDraftAtIn(store, c) == 0, "draft-store: text kept, stamp absent");
+        CHECK(SetStoredSessionDraftIn(store, c, L"", 0), "draft-store: clear the draft-only session");
+        CHECK(LoadSessionStoreIn(store, c).empty(), "draft-store: an emptied record is deleted (sparse)");
+        // The batch setter's own contract: mixed set + remove in ONE write, and an all-unchanged batch
+        // writes nothing.
+        CHECK(SetSessionStoreFieldsIn(store, b, SessionStoreRecord{ { L"draft", L"d" }, { L"note", L"n" } }), "store: batch set two fields");
+        CHECK(GetSessionStoreFieldIn(store, b, L"draft") == L"d" && GetSessionStoreFieldIn(store, b, L"note") == L"n", "store: batch wrote both");
+        CHECK(SetSessionStoreFieldsIn(store, b, SessionStoreRecord{ { L"draft", L"" }, { L"note", L"n2" } }), "store: batch removes one and updates the other");
+        CHECK(GetSessionStoreFieldIn(store, b, L"draft").empty() && GetSessionStoreFieldIn(store, b, L"note") == L"n2", "store: batch remove + update applied together");
+        CHECK(SetSessionStoreFieldsIn(store, b, SessionStoreRecord{ { L"note", L"n2" } }), "store: an all-unchanged batch is a no-op success");
+        CHECK(!SetSessionStoreFieldsIn(store, L"..\\evil", SessionStoreRecord{ { L"draft", L"x" } }), "store: batch rejects a path-bearing id");
+        CHECK(!SetSessionStoreFieldsIn(store, b, SessionStoreRecord{}), "store: an empty batch is rejected");
+
         std::filesystem::remove_all(std::filesystem::path{ store }, ec);
     }
 

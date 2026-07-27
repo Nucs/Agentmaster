@@ -1515,6 +1515,13 @@ namespace winrt::TerminalApp::implementation
                     {
                         _ResetPromptHistory();
                     }
+                    // Agentmaster (PENDING_INPUT.md §8b): the box just changed, so the box-vs-draft
+                    // relation did too — re-evaluate whether the "pull it in" button still applies
+                    // (typing the draft out by hand makes it Same and hides the button; deleting back to
+                    // a prefix makes it a Continuation again). VISIBILITY ONLY, and deliberately without
+                    // a live buffer read: this runs once per keystroke, where the remembered draft (at
+                    // most one scan tick old) is the affordable source.
+                    _UpdateDraftPullButton();
                 });
                 // Agentmaster (PENDING_INPUT.md §8a): clicking / tabbing into the EMPTY compose box PULLS
                 // IN the selected session's UNSENT input-box draft (the "3 dots" text), so a prompt typed
@@ -1587,9 +1594,33 @@ namespace winrt::TerminalApp::implementation
                         _templatesRow.Visibility(_templatesRow.Visibility() == Visibility::Visible ? Visibility::Collapsed : Visibility::Visible);
                     }
                 });
-                paperBtn.Margin(Thickness{ 6, 0, 0, 0 });
-                Grid::SetColumn(paperBtn, 2);
-                composeRow.Children().Append(paperBtn);
+
+                // Agentmaster (PENDING_INPUT.md §8b): the CONDITIONAL "pull in the unsent prompt"
+                // button. Hidden almost always; it appears only while the selected session's input box
+                // holds a draft that DIFFERS from what is composed here and taking it wouldn't destroy
+                // composed text (_UpdateDraftPullButton -> the pure EvaluateDraftPull). The download
+                // glyph reads as "bring it down here"; the tip is explicit that it REPLACES the box,
+                // because the Divergent case does.
+                //
+                // WHY IT SHARES COLUMN 2 WITH THE PAPER ICON, side by side: a control that appears and
+                // disappears must not resize the compose row, and the row's height is set by its
+                // TALLEST child — the icon strip in column 0 is HORIZONTAL (~one button tall),
+                // so stacking a second button UNDER the paper icon would grow the whole row by a button
+                // every time this one showed up. Beside it, column 2 stays one button tall and only its
+                // WIDTH changes: the textarea's right edge moves, its left edge (where the caret and the
+                // text live) never does, and the paper icon keeps its place at the far right.
+                _pullDraftBtn = mkIconBtn(L"Pull in the unsent prompt", L"The selected session's input box is holding an unsent prompt that differs from what is in this box \x2014 click to bring it in here (it REPLACES what you have composed; the prompt also stays in the terminal).", fluentGlyph(L"\xE896"), [this]() { _OnPullDraftClicked(); });
+                _pullDraftBtn.Visibility(Visibility::Collapsed); // shown only when there is something worth offering
+
+                auto rightIcons = StackPanel{};
+                rightIcons.Orientation(Orientation::Horizontal);
+                rightIcons.Spacing(4);
+                rightIcons.VerticalAlignment(VerticalAlignment::Top); // stay at the top as the box grows
+                rightIcons.Margin(Thickness{ 6, 0, 0, 0 });
+                rightIcons.Children().Append(_pullDraftBtn);
+                rightIcons.Children().Append(paperBtn);
+                Grid::SetColumn(rightIcons, 2);
+                composeRow.Children().Append(rightIcons);
 
                 actions.Children().Append(composeRow);
 

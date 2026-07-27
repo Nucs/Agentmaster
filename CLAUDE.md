@@ -846,7 +846,54 @@ never a silent dead click; a successful copy logs which source answered. A `[Pas
 copies AS RENDERED (expansion is a follow-up). **The Manager's Auto-Testing compose box takes the same
 draft on CLICK** (§8a — see the *C1 UI* Auto Testing bullet): clicking/tabbing into the EMPTY box with edit
 intent pulls the unsent prompt in, ready to queue, through the same rule + fallback, one-shot per
-(session, draft). **The DRAFT SWAP — a prompt can no longer eat your unsent draft** (§9; lib-compiled green
+(session, draft). **The CONTINUATION CHECK + a conditional PULL BUTTON close the non-empty-box half**
+(§8b; lib-compiled green + engine-tested 2954/2954, rides the next deploy cycle): once you've pulled a
+prompt in here, gone back to the tab and kept editing it THERE, the two texts must be reconciled without
+ever destroying what you composed — so the pure `EvaluateDraftPull` (`PendingInput.h`, beside
+`PickCurrentPromptText`) classifies them 6 ways over newline-folded, trailing-trimmed text (a UWP
+`TextBox` reports a typed newline as `\r` while the detector emits `\n`, so without the fold EVERY
+multi-line draft would read as unrelated): **BoxEmpty** ⇒ the §8a fill · **Continuation** (the draft
+starts with the box) ⇒ **EXTEND in place**, the only auto-write besides a fill since a strict prefix
+loses nothing · **BoxAhead** (the box starts with the draft) ⇒ **NEVER offered**, taking it would DELETE
+your addition · **Same** / **NoDraft** ⇒ nothing · **Divergent** ⇒ the **button** only. The button
+(`_pullDraftBtn`, glyph `\xE896`, tooltip says it REPLACES the box) appears only while taking the draft
+wouldn't destroy text: the box **contained verbatim** in the draft (no length floor — nothing is lost), or
+both texts >50 chars AND >=80% similar by `DraftSimilarityPercent` — deliberately **not** an edit distance
+but the share the two agree on at their EDGES (common prefix + the common suffix of the remainder), which
+is O(n) (this runs on the box's `TextChanged`, per keystroke) and is a **lower bound** on the
+edit-distance ratio (`distance <= max - (prefix+suffix)`), so it can only ever UNDER-report ⇒ hide the
+button — the conservative direction. Evaluated on focus/tap (the one place a LIVE read is affordable;
+applies the two safe relations), on `TextChanged` (visibility only, off the REMEMBERED draft — never a
+buffer or disk read per keystroke), and in `_RebuildPlan`. It shares **column 2 with the templates paper
+icon, side by side**: the compose row's icon strip in column 0 is HORIZONTAL (one button tall), so
+stacking under the paper icon would GROW the row by a button whenever the button appeared; beside it only
+column 2's WIDTH changes, so the textarea's left edge — where the caret is — never moves. The one-shot
+latch still blocks a SILENT re-insert; the button bypasses it (user-initiated) and re-arms it. ⚠ Because
+`SetPendingInput` notifies only on the FLIP, a text-only edit in the terminal is quiet — the button
+appears when you next touch the Manager, not on its own (a page→content drift nudge is the noted
+follow-up). **The draft CACHE — a durable PER-SESSION mirror** (§8c, same build/test state): the user's
+"cache the prompt … empty the cache or upsert the cache in the per session persistence" — two new
+`SessionStore` keys (`session-store/<sid>.json` `draft` + `draftAtUnixMs`, the observation stamp whose
+AGE separates a live draft from a carried memory) written by exactly ONE seam (`_ScanPendingInputImpl`,
+which already knows a change happened) so the fleet copy and the per-session copy can't disagree:
+**flip→empty ⇒ CLEAR (never throttled** — a stale stored draft would describe an already-sent message**)**,
+**textChanged ⇒ UPSERT (~10s throttled PER SESSION**, so one busy session can't starve another's**)**.
+Both keys are ONE fact, so they are written/removed in ONE read-modify-write (the new batched
+`SetSessionStoreFieldsIn`) — a crash can't leave a draft with no stamp; an empty draft removes both keys
+(and the file, if that was its only datum). The writer `_PersistSessionDraft` is DETACHED + off-thread
+(the expansion reads the whole paste-cache) and carries the `SetPendingPasteRefs` **ordering guard** —
+the registry, not the coroutine's argument, is the authority, so a late upsert can't resurrect a sent
+draft. **The stored value is paste-EXPANDED** (the user's pick: store the whole prompt, not a
+`[Pasted text #N +M lines]` label) via `ExpandPendingDraftPastes`; a REFUSED expansion stores the rendered
+text rather than losing the memory (§9's never-re-type-a-placeholder rule governs FILLING a box, not
+remembering a draft). Lifecycle follows §5: **archive KEEPS the draft**, and the ONE eager clear is the
+restart-tab swap. ⚠ **Precedence — the registry is AUTHORITATIVE and the store is NOT wired as a fallback
+tier** (a deliberate deviation from the design sketch): every current consumer resolves a session the
+registry KNOWS (the copy action returns early on an unknown id; the compose box only acts on a live
+selection), where an empty `pendingInput` means "there is no draft", not "don't know" — so a store
+fallback could only ever surface a STALE draft. The read accessors exist + are tested but unread; their
+sound consumers are the surfaces the registry can't answer for (a Sessions-page row, the `agentmaster`
+CLI). **The DRAFT SWAP — a prompt can no longer eat your unsent draft** (§9; lib-compiled green
 + engine-tested 2840/2840, rides the next deploy cycle). Delivering a prompt is a bracketed paste + a submit
 CR, and a paste lands AT THE CURSOR — so a send into a box that already held your draft submitted
 **draft + prompt as ONE message you never wrote**, losing the draft with it (the state machine can't
@@ -1837,13 +1884,20 @@ What works, by area:
   `SessionInfo::pendingInput`). Gated on **edit intent** (`GotFocus` with `FocusState::Pointer|Keyboard`
   — never the programmatic focus-snap-back after a queue/send — plus a `Tapped` for the already-focused
   click) and **deferred one dispatcher tick** (an insert mid-click would let the pointer release re-place
-  the caret inside the new text). Guards: managed **Claude** only, an **empty** box only (never clobbers
-  composed text), and **ONE-SHOT per (session, draft)** (`_promptPrefill*`) so a prompt already pulled in
+  the caret inside the new text). Guards: managed **Claude** only, **ONE-SHOT per (session, draft)**
+  (`_promptPrefill*`) so a prompt already pulled in
   and queued is never silently re-inserted (double-queue); a CHANGED draft offers itself again. It's a
-  **copy** — the draft stays in the tab (Rule #13: the read never writes). The compose box's
+  **copy** — the draft stays in the tab (Rule #13: the read never writes). **A NON-EMPTY box is
+  reconciled, not skipped** (PENDING_INPUT.md §8b): the pure `EvaluateDraftPull` compares the box against
+  the draft and only the two relations that can't lose composed text are applied on a focus — an **empty**
+  box is filled, and a box the draft **strictly extends** (you kept typing in the terminal) is EXTENDED in
+  place; a box that is AHEAD of the draft is never touched, and a genuinely DIFFERENT draft is offered by
+  the **conditional pull button** beside the templates paper icon (shown only when the box is contained
+  verbatim in the draft, or the two are >50 chars and >=80% similar — the destructive replace made
+  explicit, its tooltip saying so; it bypasses the one-shot latch since it is user-initiated). The compose box's
   **placeholder** is the discoverability ("click to pull in this session's unsent prompt…", from
   `_RebuildPlan` off the remembered value, suppressed once the latch would refuse); a pull logs
-  `[nav] compose pull-draft <sid8> src=live|remembered chars=N`. **Tests Autorunner** is now a **toggle in the AUTO TESTING header** (mirrors the Explorer Tree
+  `[nav] compose pull-draft <sid8> src=live|remembered how=fill|extend|button chars=N`. **Tests Autorunner** is now a **toggle in the AUTO TESTING header** (mirrors the Explorer Tree
   LOCAL/GLOBAL/EXTERNAL toggle) — a colored state dot, gray ○ Off / amber ◐ Semi / green ● Full, that
   **cycles** Off → Semi-auto → Full on click (`_CycleAutorunner` / `_UpdateAutorunnerButton`,
   replacing the old combo); the **Templates** row (save / apply / apply-to-dir) is collapsed
@@ -2721,7 +2775,9 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     history.jsonl accelerator + the rg-prefiltered, scope-attributed content scan with in-process
     fallback),
     `SessionStore.{h,cpp}` (the generalized DURABLE per-session KV — `session-store/<sid>.json`,
-    one file per session: the `title` / `favorite` / `tags` keys; plus the **bookmark-tag**
+    one file per session: the `title` / `favorite` / `tags` / **`draft`+`draftAtUnixMs`**
+    (PENDING_INPUT.md §8c — the unsent draft + its observation stamp, written/cleared together by the
+    batched `SetSessionStoreFieldsIn`) keys; plus the **bookmark-tag**
     primitives — `NormalizeTagName`/`FoldTagName`, list encode/decode, per-session tag CRUD, the
     profile-level **known-tag registry** `tags.json` (Load/Register/UnregisterKnownTag — keeps a
     0-carrier tag alive) + `tag-colors.json` color map (Load/Get/SetTagColor), and `CollectGlobalTags`
@@ -2740,7 +2796,14 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     by `─` rules and extracts the UNSENT draft; the `PromptAnchor.h` idiom — pure-ASCII source, header-
     only so `ControlCore` + `tests/` share it. Also `PickCurrentPromptText` (§8) — the ONE rule every
     "Copy Current Prompt" menu resolves through: a non-empty LIVE buffer read wins, else the observer's
-    remembered/persisted draft — and the **DRAFT SWAP** brain (§9): the control-code builders
+    remembered/persisted draft — and `ClassifyDraftAgainstBox` / `DraftSimilarityPercent` /
+    `EvaluateDraftPull` (§8b) — the DRAFT-vs-COMPOSE-BOX rule: the 6-way relation over newline-folded,
+    trailing-trimmed text (NoDraft / BoxEmpty / Same / Continuation / BoxAhead / Divergent), which of
+    them may be taken AUTOMATICALLY (only an empty box or a strict prefix — nothing composed can be
+    lost), and whether the conditional pull button should offer a Divergent one (the box contained
+    verbatim in the draft, or an edge-share ratio >=80% over 50 chars — an O(n) LOWER BOUND on the
+    edit-distance ratio, so it can only under-report ⇒ hide the button)
+    — and the **DRAFT SWAP** brain (§9): the control-code builders
     `BuildInputStash` (**Ctrl+S**, Claude's whole-box stash/unstash TOGGLE — the default rung) /
     `BuildInputKill` (Ctrl+U, kill into the TUI's kill-ring) / `BuildInputYank` (Ctrl+Y, yank it back) /
     `BuildBackspaces` (the capped `DEL` fallback) plus the pure `DecideDraftClear` escalation ladder over
@@ -2930,7 +2993,8 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   `dir-colors.json`
   (the **permanent** per-working-directory tab color map, schema **v2** — both user picks and
   auto-assigned colors, so a folder keeps its color across restarts), `session-store/<sid>.json`
-  (the durable per-session KV — the `title` / `favorite` / `tags` keys), `tags.json` (the **bookmark-tag
+  (the durable per-session KV — the `title` / `favorite` / `tags` / `draft`+`draftAtUnixMs` keys, the last
+  pair being the unsent input-box draft + when it was last seen — PENDING_INPUT.md §8c), `tags.json` (the **bookmark-tag
   registry** — the durable CI-deduped name list that keeps a 0-carrier tag alive until its ✕ deletes it),
   `tag-colors.json` (the tag color picker's folded-name → `#AARRGGBB` map), `sessions-index/<sid>.json` (the Sessions browser's
   per-session search/stats sidecar cache — `(size,mtime)`-keyed, incrementally re-accumulated

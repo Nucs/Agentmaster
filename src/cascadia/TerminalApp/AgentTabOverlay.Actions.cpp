@@ -400,6 +400,14 @@ namespace winrt::TerminalApp::implementation
             // the persisted memory of a session that is no longer running). ONE pure rule, shared by
             // every copy menu (PendingInput.h).
             const auto pick = ::Agentmaster::PickCurrentPromptText(live, s.pendingInput);
+            // NOT a third tier on the durable per-session store (PENDING_INPUT.md §8c), deliberately:
+            // this function has already returned for an unknown session id, so reaching here means the
+            // registry KNOWS this session — and a known session with an empty `pendingInput` is an
+            // authoritative "there is no draft", not a "don't know". Falling back to the stored copy
+            // there could only ever hand over a STALE draft (the one the user just sent, in the window
+            // before the async store clear lands). The store's read tier belongs to a caller the
+            // registry CANNOT answer for (a closed / never-managed session on the Sessions page, the
+            // agentmaster CLI) — see §8c.
             if (pick.text.empty())
             {
                 // Nothing typed anywhere: no clipboard write, no chime — and a log line, so a "why did

@@ -481,6 +481,208 @@ namespace Agentmaster
         return pick;
     }
 
+    // ---- The DRAFT vs THE COMPOSE BOX (PENDING_INPUT.md sect. 8b) -----------------------------
+    //
+    // Sect. 8a pulls a session's unsent draft into the Manager's Auto-Testing compose box when that
+    // box is EMPTY. The follow-on case is what happens once it ISN'T: the user pulls a prompt in
+    // here, goes BACK to the terminal tab, keeps editing it THERE, then refocuses this box. Now two
+    // texts exist and the UI has to decide -- without ever destroying something the user typed --
+    // which of them is "the prompt", so this is the pure rule for comparing them.
+    //
+    // Both sides are normalized for the comparison ONLY (NormalizeForCompare): newline flavors are
+    // folded (a UWP TextBox stores '\r' for a typed newline while the detector emits '\n', so a
+    // multi-line draft would otherwise NEVER compare equal to the same text in the box) and trailing
+    // whitespace is dropped (render slack / a trailing cursor cell is never intent). Interior text is
+    // untouched -- leading indentation IS content.
+    //
+    //   NoDraft       the session holds nothing unsent            -> no offer
+    //   BoxEmpty      the box is empty (whitespace-only counts)   -> the sect. 8a pull
+    //   Same          the two are the same text                   -> nothing to do
+    //   Continuation  the draft STARTS WITH the box, and is longer -> the box is a strict PREFIX of
+    //                 the draft: the user kept typing in the terminal, so extending the box to the
+    //                 full draft is NON-DESTRUCTIVE (nothing in the box is lost). The one relation
+    //                 that may be applied automatically (autoExtend).
+    //   BoxAhead      the box STARTS WITH the draft, and is longer -> the box already contains
+    //                 everything the draft has plus the user's own addition. NEVER offered: taking
+    //                 the draft here would DELETE that addition, and gain nothing.
+    //   Divergent     anything else                               -> offered only when the two are
+    //                 demonstrably the same prompt evolved (below).
+    //
+    // OFFERING A DIVERGENT DRAFT IS DESTRUCTIVE (it replaces composed text), so it is gated on the
+    // two being RELATED, per the user's rule -- "only if it [is] contained within the new prompt or
+    // similar by at least 80% (and >50 chars)":
+    //   * the box appears VERBATIM somewhere inside the draft (containment, not just a prefix --
+    //     e.g. the user prepended "please " in the terminal): nothing in the box is lost, so this
+    //     needs no length floor; or
+    //   * both texts are longer than kDraftSimilarityMinChars AND score at least
+    //     kDraftSimilarityPercent similar. The length floor is what keeps a short string's ratio
+    //     from being noise ("fix it" vs "fix up" would score high on nothing but shortness).
+    // Everything else stays hidden: an UNRELATED draft is not an alternative version of what is in
+    // the box, so silently offering to overwrite it would be the wrong question to ask.
+    enum class DraftVsBox
+    {
+        NoDraft, // the session holds no unsent draft at all
+        BoxEmpty, // the compose box is empty (whitespace-only counts as empty)
+        Same, // the box already holds exactly the draft
+        Continuation, // the draft starts with the box and is longer (a strict prefix -> safe to extend)
+        BoxAhead, // the box starts with the draft and is longer (the box is ahead -> never overwrite)
+        Divergent, // neither is a prefix of the other
+    };
+
+    namespace pending_detail
+    {
+        // Normalize for COMPARISON only: fold every newline flavor (\r\n, a lone \r, \n) to '\n' and
+        // drop trailing whitespace. The newline fold is load-bearing, not cosmetic: a UWP TextBox
+        // reports a typed newline as '\r' while DetectPendingInput joins body rows with '\n', so
+        // without it every multi-line draft would read as Divergent from an identical box.
+        inline std::wstring NormalizeForCompare(std::wstring_view s)
+        {
+            std::wstring out;
+            out.reserve(s.size());
+            for (size_t i = 0; i < s.size(); ++i)
+            {
+                if (s[i] == L'\r')
+                {
+                    if (i + 1 < s.size() && s[i + 1] == L'\n')
+                    {
+                        ++i; // a CRLF pair is ONE newline
+                    }
+                    out.push_back(L'\n');
+                }
+                else
+                {
+                    out.push_back(s[i]);
+                }
+            }
+            out.resize(RTrim(out).size()); // (the view is consumed before the resize)
+            return out;
+        }
+
+        // The relation, over ALREADY-NORMALIZED texts (so a caller that normalized once for the
+        // similarity/containment tests does not pay for it twice).
+        inline DraftVsBox RelationOfNormalized(std::wstring_view box, std::wstring_view draft)
+        {
+            if (AllWhitespace(draft))
+            {
+                return DraftVsBox::NoDraft; // "no draft" outranks "empty box": there is nothing to offer
+            }
+            if (AllWhitespace(box))
+            {
+                return DraftVsBox::BoxEmpty;
+            }
+            if (box == draft)
+            {
+                return DraftVsBox::Same;
+            }
+            if (draft.size() > box.size() && draft.compare(0, box.size(), box) == 0)
+            {
+                return DraftVsBox::Continuation;
+            }
+            if (box.size() > draft.size() && box.compare(0, draft.size(), draft) == 0)
+            {
+                return DraftVsBox::BoxAhead;
+            }
+            return DraftVsBox::Divergent;
+        }
+    }
+
+    // The similarity floor for offering a DIVERGENT draft, and the minimum length either text must
+    // exceed before a ratio is even consulted (the user's "similar by at least 80% (and >50 chars)").
+    inline constexpr size_t kDraftSimilarityMinChars = 50;
+    inline constexpr int kDraftSimilarityPercent = 80;
+
+    // How similar are two texts, as a percentage of the LONGER one: the share they agree on at their
+    // EDGES -- their common prefix plus the common suffix of what is left after it.
+    //
+    // Deliberately NOT an edit distance, for two reasons that both matter here:
+    //   * COST. This runs on the compose box's TextChanged, i.e. once per keystroke, and a
+    //     Levenshtein matrix over two multi-KB prompts is milliseconds of UI-thread work per key.
+    //     This is one linear pass, no allocation.
+    //   * DIRECTION OF ERROR. Editing only the middle of a text costs (prefix + suffix) exactly, so
+    //     this value is a LOWER BOUND on the edit-distance ratio: distance <= max - (prefix + suffix),
+    //     hence edge-share >= 80% IMPLIES 80% similar by edit distance. It can therefore never
+    //     over-report, only under-report -- and under-reporting merely HIDES the button (the
+    //     conservative direction: we never silently offer to overwrite composed text on a weak
+    //     signal). The case it under-reports is an edit at BOTH ends of the text.
+    // Two empty texts score 100; one empty scores 0. prefix + suffix can never exceed the shorter
+    // text by construction (the suffix scan stops at the prefix), so the result is always 0..100.
+    inline int DraftSimilarityPercent(std::wstring_view a, std::wstring_view b)
+    {
+        const size_t la = a.size();
+        const size_t lb = b.size();
+        if (la == 0 || lb == 0)
+        {
+            return (la == 0 && lb == 0) ? 100 : 0;
+        }
+        const size_t maxLen = la > lb ? la : lb;
+        const size_t minLen = la > lb ? lb : la;
+        size_t pre = 0;
+        while (pre < minLen && a[pre] == b[pre])
+        {
+            ++pre;
+        }
+        size_t suf = 0;
+        while (suf < minLen - pre && a[la - 1 - suf] == b[lb - 1 - suf])
+        {
+            ++suf;
+        }
+        return static_cast<int>(((pre + suf) * 100) / maxLen);
+    }
+
+    struct DraftPullVerdict
+    {
+        DraftVsBox relation{ DraftVsBox::NoDraft };
+        bool offer{ false }; // show the "pull it in" button (the draft is worth offering AND safe-ish to take)
+        bool autoExtend{ false }; // the box is a strict PREFIX of the draft -> extending in place loses nothing
+        int similarityPercent{ 0 }; // only computed (and only meaningful) when the Divergent ratio gate was consulted
+    };
+
+    // The ONE decision behind both compose-box behaviours (sect. 8b): the relation, whether to offer
+    // the draft at all, and whether it may be taken AUTOMATICALLY. PURE. `box` is the compose box's
+    // text and `draft` the session's unsent input-box draft (already picked by PickCurrentPromptText).
+    inline DraftPullVerdict EvaluateDraftPull(std::wstring_view box, std::wstring_view draft)
+    {
+        DraftPullVerdict v;
+        const auto nb = pending_detail::NormalizeForCompare(box);
+        const auto nd = pending_detail::NormalizeForCompare(draft);
+        v.relation = pending_detail::RelationOfNormalized(nb, nd);
+        switch (v.relation)
+        {
+        case DraftVsBox::NoDraft: // nothing to offer
+        case DraftVsBox::Same: // already in sync
+        case DraftVsBox::BoxAhead: // the box is ahead -- taking the draft would delete the user's addition
+            return v;
+        case DraftVsBox::BoxEmpty:
+            v.offer = true; // an empty box loses nothing (this is the sect. 8a click-pull, made explicit)
+            return v;
+        case DraftVsBox::Continuation:
+            v.offer = true;
+            v.autoExtend = true; // a strict prefix: the draft is the box plus what was typed in the terminal
+            return v;
+        default:
+            break; // Divergent -- the gated case below
+        }
+        if (nd.find(nb) != std::wstring::npos)
+        {
+            v.offer = true; // the box appears verbatim INSIDE the draft: nothing in it would be lost
+            return v;
+        }
+        if (nb.size() > kDraftSimilarityMinChars && nd.size() > kDraftSimilarityMinChars)
+        {
+            v.similarityPercent = DraftSimilarityPercent(nb, nd);
+            v.offer = v.similarityPercent >= kDraftSimilarityPercent;
+        }
+        return v;
+    }
+
+    // The 6-way relation on its own (the same rule EvaluateDraftPull classifies with), for callers /
+    // tests that only need "how do these two texts relate".
+    inline DraftVsBox ClassifyDraftAgainstBox(std::wstring_view box, std::wstring_view draft)
+    {
+        return pending_detail::RelationOfNormalized(pending_detail::NormalizeForCompare(box),
+                                                    pending_detail::NormalizeForCompare(draft));
+    }
+
     // ---- The DRAFT SWAP (PENDING_INPUT.md sect. 9) -------------------------------------------
     //
     // Submitting a queued prompt into a box that already holds the user's UNSENT draft used to

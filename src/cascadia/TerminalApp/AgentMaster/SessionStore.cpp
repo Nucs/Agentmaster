@@ -309,6 +309,46 @@ namespace Agentmaster
         return WriteRecord(storeDir, sessionId, rec);
     }
 
+    bool SetSessionStoreFieldsIn(const std::wstring& storeDir, const std::wstring& sessionId, const SessionStoreRecord& fields)
+    {
+        if (storeDir.empty() || !ValidSid(sessionId) || fields.empty())
+        {
+            return false;
+        }
+        SessionStoreRecord rec = ParseRecord(storeDir, sessionId); // freshest-disk RMW (as the single-field setter)
+        bool changed = false;
+        for (const auto& [key, value] : fields)
+        {
+            if (key.empty())
+            {
+                continue; // an unnamed field is not storable; the rest of the batch still applies
+            }
+            const auto it = rec.find(key);
+            const bool present = it != rec.end();
+            if (value.empty())
+            {
+                if (present)
+                {
+                    rec.erase(it);
+                    changed = true;
+                }
+                continue; // absent already — nothing to remove
+            }
+            if (present && it->second == value)
+            {
+                continue; // unchanged
+            }
+            rec[key] = value;
+            changed = true;
+        }
+        if (!changed)
+        {
+            return true; // every field already held its value — dedup the write entirely
+        }
+        ::CreateDirectoryW(storeDir.c_str(), nullptr); // idempotent; only when we actually write
+        return WriteRecord(storeDir, sessionId, rec);
+    }
+
     std::unordered_map<std::wstring, std::wstring> LoadAllSessionStoreFieldIn(const std::wstring& storeDir, const std::wstring& key)
     {
         std::unordered_map<std::wstring, std::wstring> out;
@@ -404,6 +444,54 @@ namespace Agentmaster
             out.insert(sid);
         }
         return out;
+    }
+
+    // ===== typed convenience: the DRAFT (PENDING_INPUT.md §8c) ===============================
+
+    std::wstring GetStoredSessionDraftIn(const std::wstring& storeDir, const std::wstring& sessionId)
+    {
+        return GetSessionStoreFieldIn(storeDir, sessionId, kSessionStoreDraftKey);
+    }
+    int64_t GetStoredSessionDraftAtIn(const std::wstring& storeDir, const std::wstring& sessionId)
+    {
+        const auto raw = GetSessionStoreFieldIn(storeDir, sessionId, kSessionStoreDraftAtKey);
+        if (raw.empty())
+        {
+            return 0;
+        }
+        // Hand-mangled / non-numeric content reads as "no stamp" rather than throwing: the stamp is an
+        // honesty hint (how old is this memory), never a correctness input.
+        try
+        {
+            return std::stoll(raw);
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"GetStoredSessionDraftAtIn");
+            return 0;
+        }
+    }
+    bool SetStoredSessionDraftIn(const std::wstring& storeDir, const std::wstring& sessionId, const std::wstring& text, int64_t atUnixMs)
+    {
+        // ONE write for both keys, so the draft and its observation stamp can never disagree (and a
+        // clear can never leave a stamp behind pointing at a draft that is gone).
+        SessionStoreRecord fields;
+        fields[kSessionStoreDraftKey] = text;
+        fields[kSessionStoreDraftAtKey] = (text.empty() || atUnixMs <= 0) ? std::wstring{} : std::to_wstring(atUnixMs);
+        return SetSessionStoreFieldsIn(storeDir, sessionId, fields);
+    }
+
+    std::wstring GetStoredSessionDraft(const std::wstring& sessionId)
+    {
+        return GetStoredSessionDraftIn(StoreDir(), sessionId);
+    }
+    int64_t GetStoredSessionDraftAt(const std::wstring& sessionId)
+    {
+        return GetStoredSessionDraftAtIn(StoreDir(), sessionId);
+    }
+    bool SetStoredSessionDraft(const std::wstring& sessionId, const std::wstring& text, int64_t atUnixMs)
+    {
+        return SetStoredSessionDraftIn(StoreDir(), sessionId, text, atUnixMs);
     }
 
     // ===== typed convenience: the TAGS (bookmark tags on a session's tab) ====================

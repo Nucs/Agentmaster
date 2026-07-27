@@ -13,10 +13,18 @@
 > input box** — the /handover-standby fill channel (bracketed paste, NO submit CR, read-back verified;
 > paste placeholders expanded against the cache or the fill refused), gated by the cog's
 > `restoreDraftOnResume` (default ON) — so an unsent message survives a restart as a real box draft, one
-> Enter away, instead of a display-only memory.** Pure detector + resolver +
+> Enter away, instead of a display-only memory. **The CONTINUATION CHECK + the conditional pull button
+> (§8b) and the durable per-session draft CACHE (§8c, 2026-07-27) complete the compose-box half:** the
+> Manager's Auto-Testing box now compares what you composed here against the session's live draft
+> (`EvaluateDraftPull` — fill an empty box, EXTEND a strict prefix, never overwrite a box that is ahead)
+> and offers a **pull button** for a genuinely different draft only when taking it wouldn't destroy your
+> text (contained in it, or >=80% similar over 50 chars); and every draft change is mirrored into the
+> durable per-session store (`session-store/<sid>.json` `draft` + `draftAtUnixMs`, paste-EXPANDED,
+> upsert-throttled per session, cleared un-throttled, one off-thread writer with an ordering guard).**
+> Pure detector + resolver +
 > the registry notify-on-flip/stamping + the persistence round-trip are unit-tested (engine harness
-> 2,898/2,898 incl. REAL-capture fixtures from live 2.1.217/2.1.218 buffers + the §10 latch/expansion
-> suites); the full chain lib-compiles
+> 2,954/2,954 incl. REAL-capture fixtures from live 2.1.217/2.1.218 buffers + the §10 latch/expansion
+> suites + the §8b relation/offer/similarity table + the §8c store round-trip); the full chain lib-compiles
 > green (TerminalControlLib + TerminalAppLib); the fixed detector + the resolver are LIVE-VERIFIED
 > out-of-band against the running fixture session ('wow sess': 1,036 chars extracted clean, its truncated
 > paste resolved to `bf8eefafa3e80676.txt` and expanded to the full 18,647-char briefing). The in-app
@@ -393,7 +401,17 @@ unsent message, and the design embraces that honestly:
   the NeedsApproval seed), the pure `ExpandDraftPasteMarkers` all-or-refuse suite (multi-marker
   stitch, unresolved/ambiguous/same-line/fragment refusals, the live truncated arithmetic), the
   `ExpandPendingDraftPastesIn` temp-cache adapter (+ missing-dir no-throw), and the
-  `restoreDraftOnResume` settings round-trip. **2,898/2,898 checks pass.**
+  `restoreDraftOnResume` settings round-trip.
+- ✅ **Compose-box rule (§8b)**: the full 6-way relation table (incl. both newline-flavor folds, the
+  trailing-slack trim, interior whitespace as content, contained-but-not-a-prefix ⇒ Divergent) + the
+  offer policy (empty box / continuation auto-take; **box-ahead never offered**; Divergent offered on
+  containment or on the 80%-over-50-chars ratio and NOT otherwise) + the similarity metric itself
+  (identical / disjoint / one-char-of-ten / prefix share / no double-counting of an overlapping run).
+- ✅ **Draft cache (§8c)**: the store keys' names, a multi-line draft + its stamp round-tripping, the
+  upsert replacing both halves, the redundant-upsert dedup, the clear removing BOTH keys while leaving
+  the title intact, a stampless draft, a draft-only record being deleted when emptied, and the new
+  batched `SetSessionStoreFieldsIn` (set + remove in one write, all-unchanged no-op, bad-id / empty-batch
+  rejection). **2,954/2,954 checks pass.**
 - ✅ **Full chain compiles**: `TerminalControlLib` + `TerminalAppLib` both green.
 - ✅ **LIVE (out-of-band, 2026-07-23)**: the fixed detector run against the running fixture session
   ('wow sess', Claude 2.1.218, pid-resolved via the presence heartbeat) extracts the draft **clean**
@@ -405,6 +423,11 @@ unsent message, and the design embraces that honestly:
   next deploy cycle — gated on the user's build/deploy permission. Once deployed, verify: type a draft
   in tab A → dots; close the app → `sessions.json` carries the trio; relaunch → the reopened tab shows
   the dots + the staleness tip pre-start; focus it → the memory clears within ~5s of claude starting.
+  For **§8b/§8c** additionally verify: pull a draft into the compose box → edit it further **in the tab**
+  → refocus the box ⇒ it **extends** to the full draft (no button); rewrite the prompt differently in the
+  tab ⇒ the **pull button appears** (and does NOT for an unrelated draft, nor when the box is ahead);
+  and `session-store/<sid>.json` grows a `draft` + `draftAtUnixMs` within ~10s of typing, loses both the
+  moment the draft is sent, and holds the **expanded** text for a draft carrying a paste placeholder.
 
 ## 7. The "3 dots" indicator (built)
 
@@ -537,7 +560,150 @@ session's unsent prompt…"*, otherwise the plain *"queue a prompt for the selec
 suppressed once that draft has already been pulled in (the latch would refuse the click), so the
 placeholder never promises something the click won't do. Driven from `_RebuildPlan` off the **remembered**
 value (a rebuild must never do a live buffer read) and change-gated. The box's tooltip spells the
-behaviour out; a pull logs `[nav] compose pull-draft <sid8> src=live|remembered chars=N`.
+behaviour out; a pull logs `[nav] compose pull-draft <sid8> src=live|remembered how=fill|extend|button chars=N`.
+
+### 8b. Continuation check + the conditional pull button (built)
+
+§8a only fires into an **empty** compose box. The case that follows immediately: you pull a prompt in
+here, go **back to the tab**, keep editing it **there**, then refocus this box. Two texts now exist and
+the UI must decide which is "the prompt" — **without ever destroying something you typed**.
+
+**The pure rule** is `EvaluateDraftPull(box, draft)` (`AgentMaster/PendingInput.h`, beside the detector +
+`PickCurrentPromptText`; `ClassifyDraftAgainstBox` is the relation alone). Both sides are normalized for
+the comparison only: **newline flavors are folded** (a UWP `TextBox` reports a typed newline as `\r`
+while `DetectPendingInput` joins body rows with `\n` — without folding, *every* multi-line draft would
+read as unrelated to the same text in the box) and **trailing** whitespace is dropped (render slack /
+a trailing cursor cell is never intent). Interior text, leading indent included, is content.
+
+| relation | condition | meaning | what happens |
+|---|---|---|---|
+| `NoDraft` | the draft is empty/whitespace | nothing unsent | button hidden |
+| `BoxEmpty` | the box is empty/whitespace | the §8a case | **filled** on focus/tap |
+| `Same` | equal after normalizing | in sync | button hidden |
+| `Continuation` | the draft **starts with** the box, and is longer | you kept typing in the terminal | **extended in place** on focus/tap — non-destructive, the box is a strict prefix |
+| `BoxAhead` | the **box** starts with the draft, and is longer | the box already holds everything the draft has, plus your addition | **never offered** — taking it would DELETE that addition and gain nothing |
+| `Divergent` | neither is a prefix of the other | possibly a different prompt entirely | button shown **only if related** (below) |
+
+**Only the two relations that cannot lose composed text are applied automatically** (`BoxEmpty`,
+`Continuation`) — overwriting composed text has to be an explicit act, which is what the button is for.
+
+**The button** (`_pullDraftBtn`, glyph `\xE896` "download" = *bring it down here*) appears **only while
+there is something worth offering that taking would not destroy**, and its tooltip says outright that it
+**replaces** what is in the box. For a `Divergent` draft that means the two must be demonstrably the
+*same prompt evolved* — the user's rule, *"only if it [is] contained within the new prompt or similar by
+at least 80% (and >50 chars)"*:
+
+- the box appears **verbatim inside** the draft (containment, not merely a prefix — e.g. a word prepended
+  in the terminal): nothing in the box is lost, so no length floor applies; **or**
+- both texts exceed `kDraftSimilarityMinChars` (50) **and** score `kDraftSimilarityPercent` (80) or more
+  on `DraftSimilarityPercent`.
+
+`DraftSimilarityPercent` is deliberately **not** an edit distance: it is the share of the longer text the
+two agree on at their **edges** (common prefix + the common suffix of what is left). Two reasons, both
+load-bearing. **Cost** — this runs on the box's `TextChanged`, i.e. once per keystroke, where a
+Levenshtein matrix over multi-KB prompts would be milliseconds of UI-thread work per key; this is one
+linear pass, no allocation. **Direction of error** — editing only the middle costs exactly
+`prefix + suffix`, so `distance <= max - (prefix + suffix)`: the value is a **lower bound** on the
+edit-distance ratio, hence "edges >= 80%" *implies* ">= 80% similar". It can never over-report, only
+under-report (an edit at *both* ends), and under-reporting merely **hides** the button — the conservative
+direction, since the alternative is silently offering to overwrite composed text on a weak signal.
+
+**Where it is evaluated.** Three triggers, only one of which may read a buffer:
+- **focus / tap** (`_MaybePrefillPromptFromDraft`) — the user's actual flow (edit in the tab, come back),
+  and the one place a **live** read is affordable. Applies `BoxEmpty` / `Continuation`, then refreshes
+  the button.
+- **the box's `TextChanged`** — button **visibility only**, against the **remembered** draft. Never a
+  live buffer read (and never a disk read) per keystroke.
+- **`_RebuildPlan`** — beside the §8a placeholder update, so a NEW draft (the appear/clear flip notify)
+  reaches the pane.
+
+**Known staleness limit:** `SetPendingInput` notifies only on the empty↔non-empty **flip** (§3), so a
+*text-only* edit in the terminal is quiet — the button cannot appear on its own while you are editing
+over there. The focus/tap live read is what makes the flow work; a page→content nudge on a selected
+session's quiet text drift would close that gap and is a deliberate non-goal for now (it is
+same-window-only, since the board spans the whole fleet).
+
+**Placement — why it shares column 2 with the templates (paper) icon, side by side.** A control that
+appears and disappears must not resize the compose row. The row's height is set by its tallest child, and
+the icon strip in column 0 is **horizontal** (one button tall) — so stacking a second button *under* the
+paper icon would grow the whole row by a button every time this one showed up. Beside it, column 2 stays
+one button tall and only its **width** changes: the textarea's right edge moves, its left edge (where the
+caret and the text are) never does, and the paper icon keeps its place at the far right.
+
+**Guards** are §8a's, restated for the non-empty box: managed **Claude** only; the EXTERNAL scope never
+offers (observe-only); the **one-shot latch** still blocks a *silent* re-insert of a draft already pulled
+in (which would double-queue it), while the **button bypasses the latch** — it is user-initiated, and
+re-arms it. A click re-reads live (the box may have moved on since the button was painted) and focuses
+the box afterwards. It is still a **copy**: the draft stays in the terminal.
+
+### 8c. The draft CACHE — a durable per-session mirror (built)
+
+*"Cache the prompt in memory and if the observer finds out there was a change then empty the cache or
+upsert the cache in the per session persistence."*
+
+The in-memory cache is `SessionInfo::pendingInput` (§3) — already per-session, already observer-written,
+and already persisted on the **fleet record** (§5). §8c adds the **per-session** mirror: two keys on the
+durable `SessionStore` KV (`<profile>/session-store/<sid>.json`, the same file that carries the session's
+title / favorite / tags):
+
+| key | value |
+|---|---|
+| `draft` | the unsent draft, paste-**expanded** where the cache resolves it (below) |
+| `draftAtUnixMs` | when it was last observed — the same honesty device as `pendingInputUnixMs`: its **age** is what separates a live draft from a carried memory |
+
+Both are ONE fact, so they are written and cleared in **one** read-modify-write
+(`SetStoredSessionDraftIn` → the new batched `SetSessionStoreFieldsIn`): a crash between two separate
+writes can never leave a draft with no stamp, or a stamp with no draft. An empty draft **removes both
+keys**, and a session whose only datum was a draft loses its file — the store stays sparse.
+
+**One writer, at the seam that already knows** (`TerminalPage::_ScanPendingInputImpl`, beside the
+existing throttled `SaveSessions`), so the fleet copy and the per-session copy cannot disagree:
+
+```
+flip -> empty              => _PersistSessionDraft(id, "")            // "empty the cache" (never throttled)
+textChanged && hasPending  => _PersistSessionDraft(id, effectiveDraft) // "upsert" (~10s, PER SESSION)
+```
+
+The upsert throttle mirrors the §5 sessions.json drift save (the draft moves per keystroke; the durable
+copy only has to stay within a throttle window of the live box) but is **per session**, so one busy
+session cannot starve another's. The first observation of a new draft is never throttled (the counter
+starts at 0), and the **clear is not throttled at all** — it is the correctness-relevant half, since a
+stale stored draft would keep describing a message that was already sent. **Known limit:** unlike
+sessions.json, which the teardown/close archive flushes one last time, nothing re-writes the store after
+the final throttled edit — so a draft the user stops editing can sit up to one throttle window (~10s of
+typing) behind. The authoritative copy on the fleet record is complete either way; a teardown flush for
+the mirror is a cheap future addition if a reader ever depends on the last keystroke.
+
+`_PersistSessionDraft` is **detached + off-thread** (the expansion reads the whole paste-cache directory,
+and no state write belongs on the UI thread) and carries the `SetPendingPasteRefs` **ordering guard**: the
+registry, not the coroutine's argument, is the authority on what the draft IS, so each write re-reads it
+and proceeds only while it still agrees. Two in-flight writes for one session (a drift, then a clear a tick
+later) therefore cannot land out of order and resurrect a sent draft.
+
+**Paste expansion — the stored value is the WHOLE prompt.** A draft reading `[Pasted text #3 +258 lines]`
+on screen is not the full message, so the markers are resolved against the paste cache before storing
+(`ExpandPendingDraftPastes` — content-anchored, all-or-refuse, §2b). A **refused** expansion stores the
+**rendered** text instead: the store's job is to not lose the memory, and the placeholder form is still an
+honest record of what was typed. (§9's "never re-type a placeholder" rule governs *filling a box*, not
+*remembering a draft*.) A marker-free draft costs one scan and no cache IO. An expansion that actually
+substituted content logs `[pending] <sid8> stored draft: expanded N paste(s), chars=… (rendered …)`; a
+routine upsert is deliberately silent (it rides the scan cadence and would be noise), and a failed write
+logs `[persist-fail]` — the state-loss case.
+
+**Lifecycle** follows §5 exactly: **archive KEEPS the draft** (a claude that died holding an unsent
+message is the case worth remembering), and the **one eager clear** is the restart-tab swap
+(`_RestartTabIntoFreshSession`), which now clears the store alongside the record.
+
+**Precedence — the registry is AUTHORITATIVE; the store is not a fallback tier for today's callers.**
+This is a deliberate deviation from the original design sketch. Every current consumer of "the current
+prompt" (§8's three copy menus, §8a/§8b's compose box) resolves a session the **registry knows** — the
+copy action returns early for an unknown id, and the compose box only acts on a live selected session.
+For such a session an empty `pendingInput` is an authoritative **"there is no draft"**, never a
+"don't know", so falling back to the stored copy could only ever surface a **stale** draft (the one just
+sent, in the window before the async clear lands). The read accessors (`GetStoredSessionDraft` /
+`GetStoredSessionDraftAt`) therefore exist and are tested, but nothing reads them yet: their payoff is a
+caller the registry **cannot** answer for — a closed / never-managed session row on the Sessions page, or
+the `agentmaster` CLI — which is where they should be wired next.
 
 ## 9. The DRAFT SWAP — sending a prompt without eating your unsent draft (built)
 
@@ -710,10 +876,19 @@ arithmetic, temp-cache adapter round + missing-dir no-throw — TestPendingPaste
   rather than swapping around them. (It would also finally give that dead toggle a feeder — its
   `lastHumanInputUnixMs` gate has none.)
 - **Expand pastes on copy** (§8): "Copy Current Prompt" copies the draft as rendered, so a
-  `[Pasted text #N +M lines]` placeholder rides along as a placeholder. The §2b brain can already
-  substitute the real content (`ExpandPasteMarker`, verified-only), but it needs an impure adapter that
-  expands a whole draft (today `ClaudeSpawn` only exposes the annotation form `ResolvePendingPasteRefs`)
-  and an off-thread copy path like the Transcript/Summary cases — worth doing, deliberately not in this
-  pass. A refusal must keep the placeholder (never a wrong expansion).
+  `[Pasted text #N +M lines]` placeholder rides along as a placeholder. The whole-draft adapter the
+  earlier note asked for now **exists** (`ExpandPendingDraftPastes`, added for the §10 re-fill and used
+  by the §8c store), so what is left is an off-thread copy path like the Transcript/Summary cases plus
+  the decision of whether a *copy* should differ from what is on screen. A refusal must keep the
+  placeholder (never a wrong expansion).
+- **Wire the §8c store's READ side** — the accessors (`GetStoredSessionDraft` / `GetStoredSessionDraftAt`)
+  are built + tested but unread, deliberately: for a registry-known session the registry is
+  authoritative, so a fallback there could only surface a stale draft (§8c *Precedence*). The sound
+  consumers are the ones the registry cannot answer for: a **Sessions-page** row (show that a closed /
+  never-managed session was left holding an unsent message — it is the one surface that lists sessions
+  with no record) and the **`agentmaster` CLI** (`show` could report the draft + its age offline).
+- **A quiet-drift nudge for §8b** — a text-only draft edit raises no notify (§3), so the pull button only
+  re-evaluates when the user touches the Manager. A single page→content call on the SELECTED session's
+  drift would make it appear on its own; same-window only, since the board spans the whole fleet.
 - **Explorer-tree row** + the per-tab overlay HUD could carry the same pulse (the board + tab cover the
   primary surfaces).

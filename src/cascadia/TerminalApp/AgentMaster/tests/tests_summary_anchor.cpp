@@ -1355,6 +1355,81 @@ void TestPendingInput()
         const std::wstring multi = L"deploy dev please," + NL + L"then run the harness";
         CHECK(PickCurrentPromptText(multi, L"x").text == multi, "current-prompt pick: multi-line draft copied verbatim");
     }
+    // 25a. The DRAFT vs COMPOSE BOX relation + the pull-offer policy (PENDING_INPUT.md §8b) — the rule
+    // behind "edit the prompt in the tab, refocus the compose box": which of the two texts is THE
+    // prompt, and may we take the draft without destroying what the user composed here.
+    {
+        using DV = DraftVsBox;
+        // ---- the 6-way relation table ----
+        CHECK(ClassifyDraftAgainstBox(L"", L"") == DV::NoDraft, "draft-vs-box: no draft at all");
+        CHECK(ClassifyDraftAgainstBox(L"composed here", L"   \t ") == DV::NoDraft, "draft-vs-box: a whitespace-only draft is no draft (outranks a full box)");
+        CHECK(ClassifyDraftAgainstBox(L"  ", L"the unsent draft") == DV::BoxEmpty, "draft-vs-box: a whitespace-only box is EMPTY (the §8a pull)");
+        CHECK(ClassifyDraftAgainstBox(L"same text", L"same text") == DV::Same, "draft-vs-box: identical");
+        CHECK(ClassifyDraftAgainstBox(L"same text  ", L"same text") == DV::Same, "draft-vs-box: trailing whitespace is render slack, not intent");
+        CHECK(ClassifyDraftAgainstBox(L"fix the tests", L"fix the tests and the docs") == DV::Continuation, "draft-vs-box: the draft EXTENDS the box (a strict prefix)");
+        CHECK(ClassifyDraftAgainstBox(L"fix the tests and the docs", L"fix the tests") == DV::BoxAhead, "draft-vs-box: the BOX is ahead of the draft");
+        CHECK(ClassifyDraftAgainstBox(L"fix the tests", L"please fix the tests") == DV::Divergent, "draft-vs-box: contained but NOT a prefix is Divergent");
+        CHECK(ClassifyDraftAgainstBox(L"fix the tests", L"write release notes") == DV::Divergent, "draft-vs-box: unrelated");
+        // The NEWLINE FOLD is load-bearing: a UWP TextBox reports a typed newline as '\r' while the
+        // detector emits '\n' — without folding, EVERY multi-line draft would read as Divergent.
+        CHECK(ClassifyDraftAgainstBox(L"line one\rline two", L"line one\nline two") == DV::Same, "draft-vs-box: CR box == LF draft (the newline fold)");
+        CHECK(ClassifyDraftAgainstBox(L"line one\r\nline two", L"line one\nline two") == DV::Same, "draft-vs-box: CRLF box == LF draft");
+        CHECK(ClassifyDraftAgainstBox(L"line one\r", L"line one\nline two") == DV::Continuation, "draft-vs-box: multi-line continuation across newline flavors");
+        // Interior whitespace is CONTENT (only trailing slack is dropped) — leading indent included.
+        CHECK(ClassifyDraftAgainstBox(L"  indented", L"  indented") == DV::Same, "draft-vs-box: leading indent preserved on both sides");
+        CHECK(ClassifyDraftAgainstBox(L"a b", L"a  b") == DV::Divergent, "draft-vs-box: an interior space change is a real difference");
+
+        // ---- the offer policy ----
+        CHECK(!EvaluateDraftPull(L"anything", L"").offer, "pull-offer: no draft -> no button");
+        CHECK(!EvaluateDraftPull(L"same", L"same").offer, "pull-offer: in sync -> no button");
+        CHECK(EvaluateDraftPull(L"", L"the unsent draft").offer, "pull-offer: empty box -> offered");
+        CHECK(!EvaluateDraftPull(L"", L"the unsent draft").autoExtend, "pull-offer: an empty box is not an 'extend' (the §8a pull writes it)");
+        {
+            const auto v = EvaluateDraftPull(L"fix the tests", L"fix the tests and the docs");
+            CHECK(v.offer && v.autoExtend, "pull-offer: a continuation may be taken AUTOMATICALLY (nothing is lost)");
+        }
+        {
+            // The one that must NEVER be offered: taking the shorter draft would delete the user's addition.
+            const auto v = EvaluateDraftPull(L"fix the tests and the docs", L"fix the tests");
+            CHECK(!v.offer && !v.autoExtend, "pull-offer: the box is ahead -> NEVER offered (it would delete text)");
+        }
+        {
+            // Divergent + CONTAINMENT: the box appears verbatim inside the draft (a word prepended in
+            // the terminal), so taking it loses nothing — offered at any length, but never automatically.
+            const auto v = EvaluateDraftPull(L"fix the tests", L"please fix the tests now");
+            CHECK(v.offer && !v.autoExtend, "pull-offer: box contained INSIDE the draft -> offered, not auto");
+        }
+        {
+            // Divergent + UNRELATED: replacing the box would destroy composed text for nothing.
+            const auto v = EvaluateDraftPull(L"please review the login flow for a race condition here",
+                                             L"write the release notes for version five of the tool");
+            CHECK(!v.offer, "pull-offer: an unrelated draft is never offered (it would clobber the box)");
+        }
+        {
+            // Divergent + SIMILAR (a word changed in the middle) over the >50-char floor -> offered.
+            const std::wstring boxT = L"please fix the failing tests and then update the documentation";
+            const std::wstring drfT = L"please fix the failing tests and later update the documentation";
+            const auto v = EvaluateDraftPull(boxT, drfT);
+            CHECK(v.similarityPercent >= kDraftSimilarityPercent, "pull-offer: a mid-text edit scores >= the 80% floor");
+            CHECK(v.offer && !v.autoExtend, "pull-offer: a similar (same-prompt-evolved) draft is offered, not auto");
+        }
+        {
+            // The LENGTH FLOOR: the same shape below 50 chars must NOT be offered (a short string's
+            // ratio is noise) — the user's "(and >50 chars)".
+            const auto v = EvaluateDraftPull(L"fix the tests now", L"fix the tests soon");
+            CHECK(!v.offer && v.similarityPercent == 0, "pull-offer: under the 50-char floor no ratio is consulted");
+        }
+        // ---- the similarity metric itself ----
+        CHECK(DraftSimilarityPercent(L"", L"") == 100, "similarity: two empty texts are identical");
+        CHECK(DraftSimilarityPercent(L"", L"x") == 0, "similarity: one empty text shares nothing");
+        CHECK(DraftSimilarityPercent(L"abcdefghij", L"abcdefghij") == 100, "similarity: identical texts score 100");
+        CHECK(DraftSimilarityPercent(L"abcdefghij", L"abcXefghij") == 90, "similarity: one changed char of ten -> 90 (prefix 3 + suffix 6)");
+        CHECK(DraftSimilarityPercent(L"abcdefghij", L"klmnopqrst") == 0, "similarity: nothing shared at either edge -> 0");
+        CHECK(DraftSimilarityPercent(L"abcde", L"abcdefghij") == 50, "similarity: a prefix scores its share of the LONGER text");
+        // It can never over-report (prefix + suffix can never exceed the shorter text): the scan for the
+        // suffix stops where the prefix ended, so an overlapping run is counted once.
+        CHECK(DraftSimilarityPercent(L"aaaa", L"aaaaaaaa") == 50, "similarity: prefix/suffix runs never double-count");
+    }
     // 26. The DRAFT SWAP control codes + the clear ladder (PENDING_INPUT.md §9). The swap empties the
     // input box before a queued prompt is submitted into it, then puts the draft back — so the ladder
     // must terminate on every path, and must NEVER report "cleared" for a box that still has text

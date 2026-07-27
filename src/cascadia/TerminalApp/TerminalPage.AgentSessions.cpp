@@ -2154,6 +2154,12 @@ namespace winrt::TerminalApp::implementation
                 s.forkEchoConsumed = false; // re-arm: the re-forked process will echo the source id once
             }
         });
+        // ...and the DURABLE per-session copy with it (PENDING_INPUT.md §8c). The restart-tab swap is
+        // the ONE eager clear in the whole feature (a close/archive deliberately KEEPS the draft — a
+        // claude that died holding an unsent message is exactly the case worth remembering), so the
+        // store must not be the place the destroyed screen's draft lives on: the registry's authority
+        // is already empty, which is also what makes this write's ordering guard pass.
+        _PersistSessionDraft(managedId, std::wstring{});
 
         // Swap the connection — upstream's restart order. Deliberately NO explicit oldConn.Close() first:
         // control.Connection() (ControlCore::_closeConnection) revokes the output/state handlers and THEN

@@ -6010,6 +6010,38 @@ namespace winrt::TerminalApp::implementation
                     _ResolvePendingPasteRefsFor(id, effectiveDraft);
                 }
             }
+            // Agentmaster (PENDING_INPUT.md §8c): mirror the draft into the DURABLE PER-SESSION store
+            // — "if the observer finds out there was a change then empty the cache or upsert the cache
+            // in the per session persistence". This is the ONE seam that writes it (the same seam that
+            // already knows a change happened), so the fleet record and the per-session file can never
+            // disagree about what a session's unsent message is. The registry stays AUTHORITATIVE; the
+            // store is the copy that survives the fleet record being dropped and is readable by id
+            // alone. The write (and the paste EXPANSION it does first) happens off-thread.
+            if (textChanged)
+            {
+                if (!hasPending)
+                {
+                    // "Empty the cache." Deliberately NOT throttled: a clear is rare (turn cadence) and
+                    // it is the correctness-relevant half — a stale stored draft would keep being
+                    // offered for a message the user already sent.
+                    _pendingDraftStoreMs.erase(id);
+                    _PersistSessionDraft(id, std::wstring{});
+                }
+                else
+                {
+                    // "Upsert the cache." Throttled PER SESSION at the same ~10s as the sessions.json
+                    // drift save above (the draft moves per keystroke; the durable copy only has to stay
+                    // within a throttle window of the live box), so one busy session cannot starve
+                    // another's.
+                    const int64_t nowMs = TtNowMs();
+                    auto& lastStoreMs = _pendingDraftStoreMs[id];
+                    if (nowMs - lastStoreMs >= 10000)
+                    {
+                        lastStoreMs = nowMs;
+                        _PersistSessionDraft(id, effectiveDraft);
+                    }
+                }
+            }
             if (textChanged && hasPending && !flipped)
             {
                 // A text-only edit is QUIET (no notify → no autosave), so the PERSISTED draft would
@@ -6110,6 +6142,81 @@ namespace winrt::TerminalApp::implementation
         catch (...)
         {
             ::Agentmaster::AgentLogCaughtException(L"_ResolvePendingPasteRefsFor");
+        }
+    }
+
+    // Agentmaster (PENDING_INPUT.md §8c): write a session's unsent draft into the DURABLE PER-SESSION
+    // store (session-store/<sid>.json), or CLEAR it when `draft` is empty. DETACHED background work
+    // for two reasons: the paste expansion below reads the whole paste-cache directory, and no state
+    // write belongs on the UI thread. Nothing after the hop touches UI state — the registry is
+    // thread-safe (captured by value, so this is safe past page teardown) and the store is an atomic
+    // per-file write.
+    //
+    // ORDERING GUARD (the SetPendingPasteRefs idiom): the registry — not this coroutine's argument —
+    // is the authority on what the session's draft IS. Two writes for one session can be in flight
+    // (a drift, then a clear a tick later), and the background hops give no ordering, so a late upsert
+    // could otherwise resurrect a draft the user already sent. Each write therefore re-reads the
+    // registry and proceeds ONLY while it still agrees with what we were asked to persist; the loser
+    // drops, and the winner's own write is already queued.
+    //
+    // PASTE EXPANSION (the user's choice: store the FULL content): a draft that reads
+    // "[Pasted text #3 +258 lines]" on screen is not the whole prompt, so before storing, the markers
+    // are resolved against the paste-cache (ExpandPendingDraftPastes — content-anchored,
+    // all-or-refuse). A REFUSED expansion stores the rendered text instead: the store's job is to not
+    // lose the memory, and a placeholder-bearing draft is still the honest record of what was typed
+    // (§9's "never re-type a placeholder" rule governs FILLING a box, not remembering a draft). A
+    // marker-free draft costs one scan and no cache IO.
+    winrt::fire_and_forget TerminalPage::_PersistSessionDraft(std::wstring sessionId, std::wstring draft)
+    {
+        const auto registry = _sessionRegistry; // by-value shared_ptr — safe past page teardown
+        try
+        {
+            co_await winrt::resume_background();
+            if (!registry || sessionId.empty())
+            {
+                co_return;
+            }
+            const auto current = registry->Get(sessionId);
+            if (!current || current->pendingInput != draft)
+            {
+                co_return; // superseded (or the record is gone) — the newer write owns the store
+            }
+            if (draft.empty())
+            {
+                if (!::Agentmaster::SetStoredSessionDraft(sessionId, L"", 0))
+                {
+                    // A failed CLEAR is the one that matters: a stale draft would keep being offered.
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[persist-fail] " + ::Agentmaster::ShortId(sessionId) + L" stored draft clear failed\n");
+                }
+                co_return;
+            }
+            std::wstring text = draft;
+            int expanded = 0;
+            const auto ex = ::Agentmaster::ExpandPendingDraftPastes(draft);
+            if (ex.complete && !ex.text.empty() && ex.expandedCount > 0)
+            {
+                text = ex.text;
+                expanded = ex.expandedCount;
+            }
+            if (!::Agentmaster::SetStoredSessionDraft(sessionId, text, TtNowMs()))
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[persist-fail] " + ::Agentmaster::ShortId(sessionId) + L" stored draft write failed\n");
+                co_return;
+            }
+            if (expanded > 0)
+            {
+                // Only the INTERESTING write is logged (a routine upsert rides the scan cadence and
+                // would be noise): the stored value materially differs from what is on screen, so say
+                // so — this is why the persisted draft is longer than the box's.
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[pending] " + ::Agentmaster::ShortId(sessionId) + L" stored draft: expanded " +
+                                                  std::to_wstring(expanded) + L" paste(s), chars=" + std::to_wstring(text.size()) +
+                                                  L" (rendered " + std::to_wstring(draft.size()) + L")\n");
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_PersistSessionDraft");
         }
     }
 

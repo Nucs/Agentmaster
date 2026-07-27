@@ -336,6 +336,28 @@ namespace winrt::TerminalApp::implementation
         // session HAS an unsent draft and the box is empty, it says so ("click to pull in…"). Called
         // from _RebuildPlan (which knows the selection), guarded so an unchanged string isn't rewritten.
         void _UpdateComposePlaceholder(bool sessionHasDraft);
+        // Agentmaster (PENDING_INPUT.md §8b — the CONTINUATION check + the conditional pull button):
+        // resolve "the current prompt" for the SELECTED session exactly the way the copy menus do —
+        // the LIVE buffer read (_liveDraftProvider) if this window can reach the tab, else the
+        // observer's remembered SessionInfo::pendingInput (which is authoritative for a live session,
+        // so there is deliberately no fallback onto the durable store — see the .cpp).
+        // `allowLive` is false on the per-keystroke path, where a buffer read is not affordable.
+        // (Returns the text + optionally which source answered; deliberately not the engine's
+        // CurrentPromptPick, so this widely-included header stays free of PendingInput.h.)
+        std::wstring _ResolveSelectedSessionDraft(bool allowLive, bool* fromLive = nullptr);
+        // Show/hide the compose box's "pull it in" button by comparing the box against that draft
+        // (EvaluateDraftPull): offered only when there IS a draft, it DIFFERS from the box, and taking
+        // it would not destroy composed text (the box is empty / contained in the draft / at least 80%
+        // similar over 50 chars). Called from _RebuildPlan, the box's TextChanged, and after every pull.
+        void _UpdateDraftPullButton();
+        // The button's click: take the draft into the compose box (replacing what is there — the
+        // explicit, user-initiated version of the §8a pull, so it bypasses the one-shot latch but
+        // re-arms it).
+        void _OnPullDraftClicked();
+        // Write a resolved draft into the compose box (caret at the end) + arm the one-shot latch on
+        // it, and log the pull. `how` is the nav verb: fill (an empty box) / extend (a continuation) /
+        // button (the explicit click). False == the .Text() write threw (nothing was changed).
+        bool _TakeDraftIntoPromptBox(const std::wstring& draft, bool fromLive, const wchar_t* how);
         void _OnMovePrompt(int delta);
         void _OnDeletePrompt();
         void _OnAutorunnerChanged(int index);
@@ -812,6 +834,12 @@ namespace winrt::TerminalApp::implementation
         // CHANGED draft (or a different session) doesn't match the latch, so it is offered normally.
         std::wstring _promptPrefillSessionId;
         std::wstring _promptPrefillText;
+        // Agentmaster (PENDING_INPUT.md §8b): the compose box's conditional "pull in the unsent
+        // prompt" button — shown only while the selected session's draft differs from the box AND
+        // taking it would not destroy composed text (_UpdateDraftPullButton / EvaluateDraftPull). It
+        // shares column 2 with the templates (paper) icon, so appearing/disappearing never changes the
+        // compose row's HEIGHT (see the build site for why it is not a fourth icon on the left).
+        winrt::Windows::UI::Xaml::Controls::Button _pullDraftBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _autorunnerBtn{ nullptr }; // Agentmaster: Autorunner mode toggle, now in a thin strip atop the Auto Testing TAB body (was the old FLIGHT PLAN header)
         // Agentmaster: the Auto-Testing pane's two-state [Summary | Auto Testing] segmented tab toggle
         // (its top line) + the two swappable tab bodies. _summaryHost holds the Summary tab; _autoTestBody

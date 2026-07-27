@@ -99,6 +99,7 @@ namespace winrt::TerminalApp::implementation
         if (_treeScope == TreeScope::External)
         {
             _UpdateComposePlaceholder(false); // externals are observe-only — nothing to pull in
+            _UpdateDraftPullButton(); // (§8b) same reason: hide the pull button in the EXTERNAL scope
             _UpdateAutorunnerButton(AutorunnerMode::Off, false); // not drivable
             if (!_selectedExternalTitle.empty())
             {
@@ -117,6 +118,7 @@ namespace winrt::TerminalApp::implementation
         {
             _planHeaderHost.Children().Append(Text(L"Select a session to plan its prompts.", 13, false, 0.6));
             _UpdateComposePlaceholder(false); // nothing selected -> nothing to pull in
+            _UpdateDraftPullButton(); // (§8b) ...and nothing to offer either
             _UpdateAutorunnerButton(AutorunnerMode::Off, false); // no live session: dim the header toggle
             _PinPlanToBottomOnSubjectChange(L""); // re-arm so re-selecting a session pins to bottom again
             return;
@@ -142,6 +144,11 @@ namespace winrt::TerminalApp::implementation
         // click won't do — a NEW draft in the session clears the match and the hint returns.
         _UpdateComposePlaceholder(sel->kind == ::Agentmaster::AgentKind::Claude && !sel->pendingInput.empty() &&
                                   !(_promptPrefillSessionId == sel->id && _promptPrefillText == sel->pendingInput));
+        // (§8b) ...and the conditional pull button, for the case the placeholder can't cover: the box is
+        // NOT empty, so there is no placeholder to read — the draft and the composed text differ and the
+        // button is what offers the swap. Re-evaluated here because a rebuild is also how a NEW draft
+        // (the appear/clear flip notify) reaches this pane.
+        _UpdateDraftPullButton();
 
         // reflect autorunner mode on the header toggle. A managed CODEX session is lifecycle+state
         // only — no stdin injector, no hooks, so the Tests Autorunner can never drive it (C4 is the
@@ -1015,12 +1022,25 @@ namespace winrt::TerminalApp::implementation
     // PickCurrentPromptText picks between them, so the compose box and the copy menus can never
     // disagree about what "the current prompt" is.
     //
+    // §8b — THE BOX IS NOT ALWAYS EMPTY ANY MORE. The follow-on case: the user pulls a prompt in here,
+    // goes BACK to the tab, keeps editing it THERE, then refocuses this box. Two texts now exist, so the
+    // decision is delegated to the pure EvaluateDraftPull and only the two relations that CANNOT lose
+    // composed text are applied on a focus:
+    //   * BoxEmpty     — the original §8a pull (fill);
+    //   * Continuation — the box is a strict PREFIX of the draft, i.e. the user kept typing in the
+    //                    terminal: extend the box to the full draft (nothing in it is lost).
+    // Everything else (Same / BoxAhead / a Divergent draft) is left ALONE here: overwriting composed text
+    // must be an explicit act, which is what the conditional pull button next to the box is for
+    // (_UpdateDraftPullButton / _OnPullDraftClicked).
+    //
     // Guards, in order — every one of them is "never fight the user":
     //   * only a MANAGED CLAUDE session (Codex renders no input box, so it never has a draft);
-    //   * only an EMPTY box (whitespace-only counts as empty) — text already composed is never clobbered;
+    //   * only a relation that cannot destroy composed text (above) — a Divergent draft never
+    //     auto-writes, and a box that is AHEAD of the draft is never touched at all;
     //   * only ONCE per (session, draft text): after the user queues the pulled-in prompt (which clears
-    //     the box) or deletes it, clicking back in must NOT silently re-insert it — that would
-    //     double-queue the same prompt. A CHANGED draft, or another session, offers itself normally.
+    //     the box), deletes it, or deliberately shortens it back to a prefix, refocusing must NOT
+    //     silently re-insert it — that would double-queue the same prompt. A CHANGED draft, or another
+    //     session, offers itself normally; and the button offers it explicitly whenever the latch holds.
     // Reading the session's terminal buffer never writes to it (Rule #13): the draft stays in the tab's
     // input box too — this is a COPY, so nothing is lost if the user decides to send it there after all.
     void AgentManagerContent::_MaybePrefillPromptFromDraft()
@@ -1029,21 +1049,78 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        // "Empty" == nothing but whitespace: a stray space must not block the pull, and replacing
-        // it loses nothing. Uses PendingInput.h's own AllWhitespace so "empty" here means exactly
-        // what it means for the draft itself — it also counts NBSP and the other invisible Unicode
-        // spaces, which Claude's input box really does render.
-        if (!::Agentmaster::pending_detail::AllWhitespace(std::wstring_view{ _addPromptBox.Text() }))
+        const auto info = _registry->Get(_selectedId);
+        if (!info || info->kind != ::Agentmaster::AgentKind::Claude)
         {
-            return; // the user has composed something — leave it alone
+            _UpdateDraftPullButton(); // hides it (a Codex / unknown session never has a draft)
+            return;
+        }
+        bool fromLive = false;
+        const auto draft = _ResolveSelectedSessionDraft(/*allowLive*/ true, &fromLive);
+        if (draft.empty())
+        {
+            _UpdateDraftPullButton(); // nothing pending anywhere — the box stays as it is, exactly as before
+            return;
+        }
+        // §8b: how does that draft relate to what is composed here? The pure rule decides both halves —
+        // whether the draft may be taken AUTOMATICALLY (only an empty box or a strict PREFIX, where
+        // nothing composed can be lost) and whether the button should offer it instead.
+        const auto verdict = ::Agentmaster::EvaluateDraftPull(std::wstring_view{ _addPromptBox.Text() }, draft);
+        const bool autoTake = verdict.relation == ::Agentmaster::DraftVsBox::BoxEmpty || verdict.autoExtend;
+        if (!autoTake)
+        {
+            // Same / BoxAhead / a Divergent draft: never write over composed text on a mere focus — that
+            // is exactly what the (explicit, clickable) button is for.
+            _UpdateDraftPullButton();
+            return;
+        }
+        if (_promptPrefillSessionId == _selectedId && _promptPrefillText == draft)
+        {
+            // Already offered this very draft for this session (queued, dismissed, or deliberately
+            // shortened back to a prefix of it) — don't nag. The button still offers it explicitly.
+            _UpdateDraftPullButton();
+            return;
+        }
+        const wchar_t* const how = verdict.autoExtend ? L"extend" : L"fill";
+        if (!_TakeDraftIntoPromptBox(draft, fromLive, how))
+        {
+            return;
+        }
+        _UpdateDraftPullButton(); // now in sync -> the button hides
+    }
+
+    // Agentmaster (PENDING_INPUT.md §8b): resolve "the current prompt" for the SELECTED session the
+    // same way every copy menu does, so the compose box and the menus can never disagree about what
+    // that phrase means. TWO tiers, chosen by the pure PickCurrentPromptText:
+    //   1. LIVE       — the tab's terminal buffer read this instant (_liveDraftProvider -> the page's
+    //                   wrapped _ReadLiveDraftForSession). Only possible when THIS window hosts the
+    //                   tab and its claude has started; "" in every other ordinary case.
+    //   2. REMEMBERED — the observer's SessionInfo::pendingInput (at most one scan tick old, or the
+    //                   persisted memory across a restart) — the value the "3 dots" are showing.
+    // Deliberately NOT a third tier on the durable per-session store (§8c): the compose box only ever
+    // acts on a LIVE, registry-known session, so an empty `pendingInput` here means "there is no
+    // draft" — authoritatively — and never "we don't know". Reading the store then could only
+    // resurrect a STALE draft (the one just sent, in the window before the async store clear lands).
+    //
+    // `allowLive` is what the per-keystroke caller clears: a buffer read per keystroke is not
+    // affordable, and the remembered value is fresh enough to decide a button's visibility.
+    std::wstring AgentManagerContent::_ResolveSelectedSessionDraft(bool allowLive, bool* fromLive)
+    {
+        if (fromLive)
+        {
+            *fromLive = false;
+        }
+        if (!_registry || _selectedId.empty())
+        {
+            return {};
         }
         const auto info = _registry->Get(_selectedId);
         if (!info || info->kind != ::Agentmaster::AgentKind::Claude)
         {
-            return;
+            return {}; // Codex renders no input box, so it never has a draft
         }
         std::wstring live;
-        if (_liveDraftProvider)
+        if (allowLive && _liveDraftProvider)
         {
             try
             {
@@ -1052,36 +1129,97 @@ namespace winrt::TerminalApp::implementation
             catch (...)
             {
                 // Rule #18: record what threw; the recovery (fall back to the remembered draft) stands.
-                ::Agentmaster::AgentLogCaughtException(L"_MaybePrefillPromptFromDraft live read");
+                ::Agentmaster::AgentLogCaughtException(L"_ResolveSelectedSessionDraft live read");
             }
         }
         const auto pick = ::Agentmaster::PickCurrentPromptText(live, info->pendingInput);
-        if (pick.text.empty())
+        if (fromLive)
         {
-            return; // nothing pending anywhere — the box stays empty, exactly as before
+            *fromLive = pick.fromLive;
         }
-        if (_promptPrefillSessionId == _selectedId && _promptPrefillText == pick.text)
+        return pick.text;
+    }
+
+    // Agentmaster (PENDING_INPUT.md §8b): write `draft` into the compose box as if the user had typed
+    // it, and arm the one-shot latch on it. `how` is the nav-log verb (fill / extend / button).
+    // Returns false when the write itself threw (the caller then leaves everything alone).
+    bool AgentManagerContent::_TakeDraftIntoPromptBox(const std::wstring& draft, bool fromLive, const wchar_t* how)
+    {
+        if (!_addPromptBox)
         {
-            return; // already offered this very draft for this session (queued or dismissed) — don't nag
+            return false;
         }
         _promptPrefillSessionId = _selectedId;
-        _promptPrefillText = pick.text;
+        _promptPrefillText = draft;
         // Write it as a normal user draft: the TextChanged this raises resets prompt-history navigation
         // (it IS a new draft), and the caret parks at the end so typing continues the prompt.
         try
         {
-            _addPromptBox.Text(winrt::hstring{ pick.text });
-            const int32_t len = static_cast<int32_t>(pick.text.size());
+            _addPromptBox.Text(winrt::hstring{ draft });
+            const int32_t len = static_cast<int32_t>(draft.size());
             _addPromptBox.SelectionStart(len);
             _addPromptBox.SelectionLength(0);
         }
         catch (...)
         {
-            ::Agentmaster::AgentLogCaughtException(L"_MaybePrefillPromptFromDraft write");
-            return;
+            ::Agentmaster::AgentLogCaughtException(L"_TakeDraftIntoPromptBox write");
+            return false;
         }
         ::Agentmaster::LogNav(L"compose pull-draft " + ::Agentmaster::ShortId(_selectedId) + L" src=" +
-                              (pick.fromLive ? L"live" : L"remembered") + L" chars=" + std::to_wstring(pick.text.size()));
+                              (fromLive ? L"live" : L"remembered") + L" how=" + how +
+                              L" chars=" + std::to_wstring(draft.size()));
+        return true;
+    }
+
+    // Agentmaster (PENDING_INPUT.md §8b): the conditional pull button's visibility. The button is the
+    // answer to "the draft and the box differ — which one do you want?", so it is shown ONLY when the
+    // pure policy says there is something worth offering that taking would not destroy (an empty box, a
+    // draft that CONTAINS the box, or one at least kDraftSimilarityPercent similar over the length
+    // floor). No live buffer read and no disk read: this runs per keystroke and on every registry
+    // notify, so it decides off the REMEMBERED draft (which is also exactly what the "3 dots" show).
+    void AgentManagerContent::_UpdateDraftPullButton()
+    {
+        if (!_pullDraftBtn)
+        {
+            return;
+        }
+        bool offer = false;
+        // An EXTERNAL selection is observe-only (no queue, no compose), so nothing is ever offered there.
+        if (_addPromptBox && _treeScope != TreeScope::External)
+        {
+            const auto draft = _ResolveSelectedSessionDraft(/*allowLive*/ false);
+            if (!draft.empty())
+            {
+                offer = ::Agentmaster::EvaluateDraftPull(std::wstring_view{ _addPromptBox.Text() }, draft).offer;
+            }
+        }
+        const auto want = offer ? Visibility::Visible : Visibility::Collapsed;
+        if (_pullDraftBtn.Visibility() != want)
+        {
+            _pullDraftBtn.Visibility(want); // change-gated: this runs on a hot path
+        }
+    }
+
+    // Agentmaster (PENDING_INPUT.md §8b): the pull button was clicked. Unlike the focus path this is an
+    // EXPLICIT, user-initiated request, so it (a) does a fresh LIVE read (the box may have moved on
+    // since the button appeared), (b) takes the draft even when doing so REPLACES composed text — that
+    // is what the button says it does — and (c) bypasses the one-shot latch (which exists only to stop
+    // SILENT re-insertion) while re-arming it.
+    void AgentManagerContent::_OnPullDraftClicked()
+    {
+        bool fromLive = false;
+        const auto draft = _ResolveSelectedSessionDraft(/*allowLive*/ true, &fromLive);
+        if (draft.empty())
+        {
+            _UpdateDraftPullButton(); // the draft went away between the paint and the click — just hide it
+            return;
+        }
+        if (!_TakeDraftIntoPromptBox(draft, fromLive, L"button"))
+        {
+            return;
+        }
+        _FocusPromptBox(); // the caret belongs in the box the user is now editing, not on the button
+        _UpdateDraftPullButton(); // now in sync -> hide
     }
 
     // Agentmaster (PENDING_INPUT.md §8a): the compose box's placeholder doubles as the ONLY hint that
