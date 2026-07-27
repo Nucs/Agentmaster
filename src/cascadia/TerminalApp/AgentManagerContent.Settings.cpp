@@ -3381,6 +3381,8 @@ namespace winrt::TerminalApp::implementation
             _appSettings.summaryPanelWidthFraction = disk.summaryPanelWidthFraction;
             _appSettings.summaryPanelHeightFraction = disk.summaryPanelHeightFraction;
             _appSettings.summaryPanelWrapNewlines = disk.summaryPanelWrapNewlines; // wrap-line toggle (panel times bar), out-of-cog UI action
+            _appSettings.tabColorPickerCustomOpen = disk.tabColorPickerCustomOpen; // tab color picker Custom-panel expansion, written by the flyout's own RMW
+            _appSettings.tabColorPickerAdvancedOpen = disk.tabColorPickerAdvancedOpen; // ditto for the picker's More/Less "advanced" inputs
             _appSettings.allowUpdatePrerelease = disk.allowUpdatePrerelease; // updater pre-release opt-in (instant-applied by the switch itself)
             _appSettings.allowUpdateNightly = disk.allowUpdateNightly; // updater NIGHTLY opt-in (instant-applied by its warning-gated switch)
             _appSettings.updateSkippedVersion = disk.updateSkippedVersion; // updater "Skip this version" (out-of-cog JSON RMW)

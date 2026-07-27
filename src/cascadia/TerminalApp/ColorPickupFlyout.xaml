@@ -5,6 +5,7 @@
         xmlns:local="using:TerminalApp"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
+        Opening="Flyout_Opening"
         Placement="Bottom"
         ShouldConstrainToRootBounds="False"
         mc:Ignorable="d">
@@ -125,6 +126,7 @@
                               Grid.Row="0"
                               ColorChanged="ColorPicker_ColorChanged"
                               FontSize="10"
+                              Loaded="ColorPicker_Loaded"
                               IsAlphaEnabled="False"
                               IsAlphaSliderVisible="False"
                               IsAlphaTextInputVisible="False"
