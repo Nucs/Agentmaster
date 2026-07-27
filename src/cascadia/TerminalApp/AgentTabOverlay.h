@@ -236,6 +236,7 @@ namespace winrt::TerminalApp::implementation
         void _ToggleSummaryTruncate(); // truncate button: invoke the page handler (flips the GLOBAL summaryPanelTruncate)
         void _UpdateSummaryTruncateButtonVisual(); // recolor the truncate icon: dim (off) / lighter (on), per _summaryTruncate
         std::wstring _SummarySelectedText(); // the text the user selected in the summary panel (title / times / body runs) — feeds + gates the context menu's "Copy Selected Text"
+        void _WireSummaryContextMenu(const winrt::Windows::UI::Xaml::FrameworkElement& el, int promptIndex); // attach the shared summary context menu to one panel element, remembering WHICH numbered prompt (-1 == none) a right-click there is about — gates + feeds the menu's "Copy Prompt"
         void _ToggleSummaryPrevious(); // previous-session button: invoke the page handler (flips the GLOBAL summaryPanelShowPrevious)
         void _UpdateSummaryPrevButtonVisual(); // recolor the previous-session icon: dim (off) / lighter (on), per _summaryShowPrevious
         void _UpdateSummaryPencilVisual(); // recolor the badge PENCIL: dim (panel off) / lighter (on), per _summaryEnabled — the pencil always visibly answers its click, even on a tab whose panel has nothing to render
@@ -284,8 +285,13 @@ namespace winrt::TerminalApp::implementation
         // Right-click "Copy Summary" context menu — built once (_BuildSummaryPanel) and shared as the
         // ContextFlyout of the panel root AND every selectable text block it renders (title / times line /
         // body runs), so a right-click anywhere on the panel offers the full-box copy (== _CopyField(6),
-        // the same action as the badge copy menu's "Summary" item).
+        // the same action as the badge copy menu's "Summary" item). Right-clicking a NUMBERED message row
+        // additionally offers "Copy Prompt" (that one prompt, verbatim) — see _WireSummaryContextMenu.
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _summaryContextMenu{ nullptr };
+        // The 0-based prompt index the LAST context-menu request landed on (-1 == the right-click wasn't on
+        // a numbered message row), written by _WireSummaryContextMenu's per-element handler BEFORE it shows
+        // the menu, read by the menu's Opening to gate + fill "Copy Prompt".
+        int _ctxPromptIndex{ -1 };
         winrt::Windows::UI::Xaml::DispatcherTimer _summaryTimer{ nullptr }; // drives the live times line; self-stops when the overlay is gone
         std::wstring _summaryPath; // cached resolved transcript path (resolve once)
         int64_t _summaryMtime{ 0 }; // last-loaded transcript mtime — reload only when it grows

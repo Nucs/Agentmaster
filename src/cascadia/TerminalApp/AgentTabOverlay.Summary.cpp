@@ -467,12 +467,16 @@ namespace winrt::TerminalApp::implementation
         // Right-click anywhere on the summary panel => a "Copy Summary" context menu, the SAME action as
         // the badge copy menu's "Summary" item (_CopyField(6) -> the FULL session-end.js box, rendered
         // with this overlay's mirrored wrap/truncate flags so it matches the displayed panel). Built once
-        // as a shared MenuFlyout and assigned as the ContextFlyout of the panel root (covers the title /
-        // times bar / padding / separators / scroll gaps) AND of every selectable text block the panel
+        // as a shared MenuFlyout and wired (_WireSummaryContextMenu) onto the panel root (covers the title /
+        // times bar / padding / separators / scroll gaps) AND every selectable text block the panel
         // renders (the title, the times line, and each body run in _SetSummaryContent) — the panel is
         // text-heavy, and a selectable TextBlock shadows the parent's context menu, so without this a
         // right-click landing on text would offer nothing. Text selection + Ctrl+C still work (only the
         // right-click menu is overridden, not SelectionFlyout).
+        //
+        // ONE menu serves every element, so the items that are about WHERE the click landed gate + fill
+        // themselves in Opening from state stamped by the wiring: the live text selection ("Copy Selected
+        // Text") and the right-clicked numbered message ("Copy Prompt", _ctxPromptIndex).
         _summaryContextMenu = MenuFlyout{};
         {
             // Copy Selected Text — shown ONLY when text is selected in the panel. This context menu
@@ -495,6 +499,37 @@ namespace winrt::TerminalApp::implementation
             copySelSep.Visibility(Visibility::Collapsed);
             _summaryContextMenu.Items().Append(copySelItem);
             _summaryContextMenu.Items().Append(copySelSep);
+
+            // Copy Prompt — right-click a NUMBERED message => copy THAT prompt, whole and EXACT: the raw
+            // text as it was typed (_summaryUserMsgs, straight off the transcript), never the panel's
+            // RENDERING of it, which escapes newlines to a literal "\n" while wrap is off and caps the
+            // message while truncate is on. Sits directly ABOVE "Copy Summary": both are copies, this the
+            // narrower/more specific one, so it reads first. Shown ONLY when the right-click landed on a
+            // numbered message row (_ctxPromptIndex, set by _WireSummaryContextMenu before the menu opens);
+            // like the selection above, the text is CAPTURED in Opening so the click copies exactly the
+            // prompt the menu was opened for even if the panel reloads underneath it.
+            auto pendingPrompt = std::make_shared<std::wstring>();
+            auto pendingPromptNo = std::make_shared<int>(0); // its 1-based number, captured with the text (log only)
+            MenuFlyoutItem copyPromptItem{};
+            copyPromptItem.Text(L"Copy Prompt");
+            copyPromptItem.Visibility(Visibility::Collapsed);
+            AgentSetTip(copyPromptItem, winrt::hstring{ L"Copy this prompt verbatim \x2014 the FULL exact text you typed." });
+            copyPromptItem.Click([weak, pendingPrompt, pendingPromptNo](const IInspectable&, const RoutedEventArgs&) {
+                if (pendingPrompt->empty())
+                {
+                    return;
+                }
+                CopyTextToClipboard(*pendingPrompt);
+                if (const auto self = weak.get())
+                {
+                    // Nav audit: the same "what did the user copy" trail CopySessionField writes for the
+                    // copy menus (this item is panel-local, so it doesn't route through that chokepoint).
+                    ::Agentmaster::LogNav(L"copy summary-prompt " + ::Agentmaster::ShortId(self->_sessionId) +
+                                          L" #" + std::to_wstring(*pendingPromptNo) +
+                                          L" chars=" + std::to_wstring(pendingPrompt->size()));
+                }
+            });
+            _summaryContextMenu.Items().Append(copyPromptItem);
 
             MenuFlyoutItem copyItem{};
             copyItem.Text(L"Copy Summary");
@@ -549,11 +584,29 @@ namespace winrt::TerminalApp::implementation
             // Refresh the dynamic bits each time the menu opens: gate + CAPTURE the live selection, and set
             // the toggle Enable/Disable labels from the live mirror flags. (FlyoutBase::Opening fires before
             // the menu lays out; it's distinct from Opened below, which handles the dim/bright opacity.)
-            _summaryContextMenu.Opening([weak, copySelItem, copySelSep, truncItem, wrapItem, pendingSel](const IInspectable&, const IInspectable&) {
+            _summaryContextMenu.Opening([weak, copySelItem, copySelSep, copyPromptItem, truncItem, wrapItem, pendingSel, pendingPrompt, pendingPromptNo](const IInspectable&, const IInspectable&) {
                 auto self = weak.get();
                 if (!self)
                 {
                     return;
+                }
+                // "Copy Prompt": resolve the right-clicked row's prompt (_ctxPromptIndex, stamped by the
+                // element handler that showed this menu) and CAPTURE its exact text. Re-validated against
+                // the live prompt list, so a stale index from an earlier render can never copy anything.
+                pendingPrompt->clear();
+                const int promptIdx = self->_ctxPromptIndex;
+                if (promptIdx >= 0 && promptIdx < static_cast<int>(self->_summaryUserMsgs.size()))
+                {
+                    *pendingPrompt = self->_summaryUserMsgs[promptIdx];
+                    *pendingPromptNo = promptIdx + 1;
+                }
+                const bool hasPrompt = !pendingPrompt->empty();
+                copyPromptItem.Visibility(hasPrompt ? Visibility::Visible : Visibility::Collapsed);
+                if (hasPrompt)
+                {
+                    // Name the message the click landed on, so the item is unambiguous on a long list.
+                    AgentSetTip(copyPromptItem, winrt::hstring{ L"Copy prompt " + std::to_wstring(promptIdx + 1) +
+                                                                L" verbatim \x2014 the FULL exact text you typed (not this panel's shortened/escaped rendering)." });
                 }
                 *pendingSel = self->_SummarySelectedText();
                 const bool hasSel = !pendingSel->empty();
@@ -578,15 +631,9 @@ namespace winrt::TerminalApp::implementation
                 }
             });
         }
-        _summaryRoot.ContextFlyout(_summaryContextMenu);
-        if (_summaryTitleText)
-        {
-            _summaryTitleText.ContextFlyout(_summaryContextMenu); // the title is selectable too
-        }
-        if (_summaryTimesText)
-        {
-            _summaryTimesText.ContextFlyout(_summaryContextMenu); // the times line is selectable too
-        }
+        _WireSummaryContextMenu(_summaryRoot, -1);
+        _WireSummaryContextMenu(_summaryTitleText, -1); // the title is selectable too
+        _WireSummaryContextMenu(_summaryTimesText, -1); // the times line is selectable too
 
         _ApplySummarySize(); // seed MaxWidth/scroll-MaxHeight from the (default/seeded) fractions
 
@@ -619,6 +666,55 @@ namespace winrt::TerminalApp::implementation
             {
                 t.Stop(); // overlay destroyed — stop ticking (UI thread, safe)
             }
+        });
+    }
+
+    // Attach the SHARED summary context menu to one element of the panel, remembering WHICH numbered
+    // prompt a right-click there is about (`promptIndex`, 0-based; -1 for the chrome — root / title /
+    // times line / a plain body run). That stamp is what lets the one shared menu offer a row-specific
+    // "Copy Prompt" without a per-row MenuFlyout.
+    //
+    // The menu is shown EXPLICITLY here (and the event marked handled) instead of leaving it to the
+    // ContextFlyout default, because ORDER is the whole correctness argument: routed events bubble
+    // innermost-first, so stamping + showing at the element under the pointer is the one sequence that
+    // GUARANTEES _ctxPromptIndex is already right when Opening reads it — a message row's stamp can
+    // never be overwritten by an ancestor's, and the chrome's -1 can never arrive after the menu opened
+    // over a stale row index (which would copy a DIFFERENT prompt than the one clicked). ContextFlyout
+    // stays set as a belt for any child that has no handler of its own; a handled event never opens it,
+    // so the two can't double-show. Position-from-pointer mirrors the default's placement; a
+    // keyboard-invoked request (Shift+F10 / the menu key) has no position and anchors to the element.
+    void AgentTabOverlay::_WireSummaryContextMenu(const FrameworkElement& el, int promptIndex)
+    {
+        if (!el || !_summaryContextMenu)
+        {
+            return;
+        }
+        el.ContextFlyout(_summaryContextMenu);
+        const auto weak = get_weak();
+        el.ContextRequested([weak, promptIndex](const UIElement& sender, const ContextRequestedEventArgs& e) {
+            const auto self = weak.get();
+            if (!self || !self->_summaryContextMenu)
+            {
+                return;
+            }
+            self->_ctxPromptIndex = promptIndex;
+            const auto target = sender.try_as<FrameworkElement>();
+            if (!target)
+            {
+                return; // no anchor to show at — let the default path have it (index is stamped either way)
+            }
+            Point pos{};
+            if (e.TryGetPosition(target, pos))
+            {
+                winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutShowOptions opts{};
+                opts.Position(pos);
+                self->_summaryContextMenu.ShowAt(target, opts);
+            }
+            else
+            {
+                self->_summaryContextMenu.ShowAt(target);
+            }
+            e.Handled(true);
         });
     }
 
@@ -902,10 +998,7 @@ namespace winrt::TerminalApp::implementation
             tb.IsTextSelectionEnabled(true);
             tb.Foreground(Fill(0xFF, 0xDC, 0xDC, 0xDC));
             tb.Text(winrt::hstring{ seg });
-            if (_summaryContextMenu)
-            {
-                tb.ContextFlyout(_summaryContextMenu); // right-click a body line => the shared "Copy Summary" menu (a selectable TextBlock shadows the parent's)
-            }
+            _WireSummaryContextMenu(tb, -1); // right-click a body line => the shared "Copy Summary" menu (a selectable TextBlock shadows the parent's); not a numbered message, so no "Copy Prompt"
             _summaryStack.Children().Append(tb);
             seg.clear();
         };
@@ -973,12 +1066,14 @@ namespace winrt::TerminalApp::implementation
             tb.IsTextSelectionEnabled(true);
             tb.Foreground(Fill(0xFF, 0xDC, 0xDC, 0xDC));
             tb.Text(winrt::hstring{ lineStr });
-            if (_summaryContextMenu)
-            {
-                tb.ContextFlyout(_summaryContextMenu);
-            }
             Grid::SetColumn(tb, 1);
             g.Children().Append(tb);
+            // Right-click anywhere on THIS row (its text, its gutter, or the ▸ button, which bubbles to
+            // the row) => the shared menu WITH "Copy Prompt" bound to this row's prompt. Wire the text
+            // block explicitly: a selectable TextBlock shadows its parent's menu, so the row Grid alone
+            // would never see the request.
+            _WireSummaryContextMenu(tb, idx);
+            _WireSummaryContextMenu(g, idx);
             _summaryMsgRows.emplace_back(idx, g); // register the row so HighlightSummaryMessage can band it
             return g;
         };
@@ -988,12 +1083,31 @@ namespace winrt::TerminalApp::implementation
         // multi-line prompt's continuation line that merely LOOKS like "2. foo" isn't mis-detected as a
         // numbered message (and mis-mapped to the wrong prompt). expectedMsg is the next 0-based index.
         int expectedMsg = 0;
+        // Agentmaster: with the previous-session toggle ON, the renderer puts each pre-compaction /
+        // cross-file segment ABOVE the current conversation, under its own "Previous session N" header,
+        // and numbers ITS prompts 1.. independently. Those numbers do NOT index _summaryUserMsgs (the
+        // CURRENT segment's prompts only), so such a line must never become a jump / Copy-Prompt row — it
+        // would resolve to a different prompt entirely (and, by consuming expectedMsg, would also strip
+        // the real messages below of their buttons). The section's KIND is decided by the FIRST line after
+        // each separator — every section starts with one — so a wrapped message's continuation lines can
+        // never flip it, and a prompt whose text happens to start with "Previous session " is never a
+        // section's first line (the current messages' first line is always " 1. ...").
+        bool sectionIsPrevious = false;
+        bool sectionKindPending = true; // the box's first section starts at the top, with no leading separator
         while (i <= text.size())
         {
             const size_t nl = text.find(L'\n', i);
             const size_t end = (nl == std::wstring::npos) ? text.size() : nl;
             const std::wstring lineStr = text.substr(i, end - i);
-            if (lineStr.size() == 1 && lineStr[0] == kSepMark)
+            const bool isSep = (lineStr.size() == 1 && lineStr[0] == kSepMark);
+            if (!isSep && sectionKindPending)
+            {
+                // A section's FIRST line names its kind: a "Previous session N · <label>" header opens a
+                // previous segment (its numbered prompts index ITS list); anything else is a normal section.
+                sectionIsPrevious = (lineStr.rfind(L"Previous session ", 0) == 0);
+                sectionKindPending = false;
+            }
+            if (isSep)
             {
                 flushSeg(); // close the run above the rule
                 Border rule{};
@@ -1002,8 +1116,10 @@ namespace winrt::TerminalApp::implementation
                 rule.Background(Fill(0x40, 0xFF, 0xFF, 0xFF));
                 rule.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4));
                 _summaryStack.Children().Append(rule);
+                sectionIsPrevious = false; // a new section opens below this rule; the next line names its kind
+                sectionKindPending = true;
             }
-            else if (const int mi = ParseSummaryMsgIndex(lineStr); _onJumpToPrompt && mi == expectedMsg && mi < static_cast<int>(_summaryUserMsgs.size()))
+            else if (const int mi = ParseSummaryMsgIndex(lineStr); _onJumpToPrompt && !sectionIsPrevious && mi == expectedMsg && mi < static_cast<int>(_summaryUserMsgs.size()))
             {
                 flushSeg(); // close the run above this numbered message; render it with a jump button
                 _summaryStack.Children().Append(makeJumpRow(lineStr, mi));

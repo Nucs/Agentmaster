@@ -56,7 +56,25 @@ AgentTabOverlay (summary panel UI)                     TerminalApp
   Message-start detection is **sequence-number-guarded** (the renderer numbers prompts strictly 1..N, so a
   line is a real message only when its number is the next expected one) — so in **wrap-ON** mode a
   multi-line prompt's continuation line that merely looks like `2. foo` is not mis-detected as a numbered
-  message and mis-mapped to the wrong prompt.
+  message and mis-mapped to the wrong prompt. It is also **section-guarded**: with the previous-session
+  toggle ON the renderer puts each pre-compaction / cross-file segment ABOVE the current conversation under
+  a `Previous session N` header and numbers **its** prompts 1.. independently — those numbers do NOT index
+  `_summaryUserMsgs` (the current segment only), so a numbered line inside such a section is rendered as
+  plain text (no ▸, no Copy Prompt) instead of resolving to a different prompt entirely. The section's kind
+  is read off the FIRST line after each separator (every section starts with one), so a wrapped message's
+  continuation lines can never flip it.
+- **Right-click a numbered prompt → `Copy Prompt`** (`AgentTabOverlay.Summary.cpp`) — copies THAT prompt
+  **verbatim and whole**: the raw text off the transcript (`_summaryUserMsgs[i]`), never the panel's
+  rendering of it (which escapes newlines to a literal `\n` while wrap is off, and caps the message while
+  truncate is on). It sits directly ABOVE `Copy Summary` in the panel's shared context menu and is shown
+  only when the right-click landed on a numbered message row. The ONE shared menu learns WHERE the click
+  landed from `_WireSummaryContextMenu`, which stamps the row's prompt index (`_ctxPromptIndex`, `-1` for
+  the chrome) and then shows the menu **explicitly**, marking the event handled: routed events bubble
+  innermost-first, so stamping at the element under the pointer is the one ordering that guarantees the
+  index is already right when `Opening` reads it (an ancestor can never overwrite a row's stamp, and the
+  chrome's `-1` can never land after the menu opened over a stale index). `Opening` re-validates the index
+  against the live prompt list and CAPTURES the text, so the click copies exactly the prompt the menu was
+  opened for even if the panel reloads underneath it.
 
 ## 3. The resolver (PromptAnchor.h)
 
