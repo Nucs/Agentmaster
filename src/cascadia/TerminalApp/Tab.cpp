@@ -8,6 +8,7 @@
 #include "SettingsPaneContent.h"
 #include "Tab.g.cpp"
 #include "TabHeaderControl.h" // Agentmaster (bookmark tags): get_self — the badge-hover til::events aren't projected
+#include "AgentCatchLog.h" // Agentmaster: AgentLogCaughtException — the tooltip hover/wheel hooks swallow, so they must still report (Rule #18)
 #include "AgentModelMenu.h" // Agentmaster (launch-model picker): AgentFillModelPickItems — the shared "New Session Here ▸ <model>" submenu recipe
 #include "Utils.h"
 #include "AppLogic.h"
@@ -465,12 +466,12 @@ namespace winrt::TerminalApp::implementation
     // the handler lives on the tab's own TabViewItem (stable across MUX recycles) and weak-captures the
     // Tab, so teardown order is safe; the callback itself weak-captures the page (set once, cleared on
     // Shutdown so a dead window's page is never invoked).
-    bool Tab::EnsureAgentToolTipHoverHook(std::function<void()> onHoverBuild)
+    bool Tab::EnsureAgentToolTipHoverHook(std::function<void()> onHoverBuild, std::function<bool(int)> onWheel)
     {
         ASSERT_UI_THREAD();
         if (_agentToolTipHoverWired)
         {
-            return false; // already armed — keep the existing (identical-shape) callback
+            return false; // already armed — keep the existing (identical-shape) callbacks
         }
         const auto tvi = TabViewItem();
         if (!tvi)
@@ -478,6 +479,7 @@ namespace winrt::TerminalApp::implementation
             return false; // no owner yet — a later arm attempt (bind tail / liveness tick) wires it
         }
         _agentToolTipHoverCb = std::move(onHoverBuild);
+        _agentToolTipWheelCb = std::move(onWheel);
         _agentToolTipHoverWired = true;
         const auto weakThis = get_weak();
         tvi.PointerEntered([weakThis](auto&&, auto&&) {
@@ -492,11 +494,65 @@ namespace winrt::TerminalApp::implementation
                     catch (...)
                     {
                         // a tooltip must never take the tab down — swallow (the card simply stays stale)
+                        ::Agentmaster::AgentLogCaughtException(L"Tab agent tooltip hover build");
                     }
                 }
             }
         });
+
+        // Agentmaster (tab tooltip — WHEEL SCROLL): the rich card is TALLER than it can show for a long
+        // conversation, so the wheel scrolls its body. The wheel has to be read HERE, on the tab header,
+        // because the card itself is IsHitTestVisible(false) and must stay that way — it is a popup, and
+        // making popup content input-capable (a ScrollViewer, DirectManipulation) is the proven
+        // 0xC000027B fail-fast class this whole feature was rebuilt around (HANDOVER_tab-tooltip.md
+        // crash #7 / invariant 6a). The header is under the cursor for the tip's entire life anyway, so
+        // "hover a tab, spin the wheel" needs no input on the card at all.
+        //
+        // We only ever READ IsOpen (never drive it — invariant 2), and we mark the notch Handled ONLY
+        // when the page reports it actually scrolled something: otherwise the tab strip keeps its own
+        // wheel behavior, which is what a card that fits on screen should never steal.
+        tvi.PointerWheelChanged([weakThis](const IInspectable&, const WUX::Input::PointerRoutedEventArgs& e) {
+            const auto self = weakThis.get();
+            if (!self || !self->_agentToolTipWheelCb || !self->_agentToolTipActive || !self->_agentToolTip)
+            {
+                return;
+            }
+            try
+            {
+                if (!self->_agentToolTip.IsOpen())
+                {
+                    return; // no card on screen — nothing to scroll
+                }
+                if (const auto delta = e.GetCurrentPoint(nullptr).Properties().MouseWheelDelta(); delta != 0 && self->_agentToolTipWheelCb(delta))
+                {
+                    e.Handled(true);
+                }
+            }
+            catch (...)
+            {
+                // a tooltip must never take the tab down — swallow (the notch is simply lost)
+                ::Agentmaster::AgentLogCaughtException(L"Tab agent tooltip wheel scroll");
+            }
+        });
         return true;
+    }
+
+    // Agentmaster (tab tooltip): is the rich card on screen right now? Reading IsOpen is safe and always
+    // was — it is DRIVING it that caused crashes #1/#5/#6, and invariant 2 forbids exactly that. The page
+    // uses this for the WHEEL SCROLL bookkeeping: a card built while the tip is open can NOT be hosted
+    // (invariant 3 — Content is swapped only while closed), so the page must neither adopt its scroll
+    // pieces (it would drive an off-screen tree) nor reset the reader's scroll position under them.
+    bool Tab::AgentToolTipOpen() const noexcept
+    {
+        try
+        {
+            return _agentToolTipActive && _agentToolTip && _agentToolTip.IsOpen();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"Tab::AgentToolTipOpen");
+            return false;
+        }
     }
 
     // Agentmaster (tab tooltip): detach the framework-managed tooltip from its owner and drop our strong
@@ -1274,6 +1330,7 @@ namespace winrt::TerminalApp::implementation
         // holding the last lambda (and a late PointerEntered on a dying strip invokes nothing).
         _DetachAgentToolTip();
         _agentToolTipHoverCb = nullptr;
+        _agentToolTipWheelCb = nullptr; // WHEEL SCROLL: same reasoning — a late notch on a dying strip invokes nothing
 
         // NOTE: `TerminalPage::_HandleCloseTabRequested` relies on the content being null after this call.
         Content(nullptr);

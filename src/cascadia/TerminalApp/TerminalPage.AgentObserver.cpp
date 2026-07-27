@@ -292,13 +292,48 @@ namespace
     constexpr double kTtChromeReserve = 170.0;
     constexpr double kTtMinBodyHeight = 120.0; // a tiny window still shows a few body lines
 
+    // ---- WHEEL SCROLL: the body is one screenful of a much taller document (Agentmaster) ----------
+    // A long conversation's Summary body is taller than the card's height budget, and everything past
+    // the cap used to be simply unreachable (the "+K more" marker was the whole story). The body is now
+    // a scrollable VIEWPORT driven by the mouse wheel alone -- no ScrollViewer, no drag, no keyboard:
+    // see TtBuildTooltipCard's viewport block for how (and HANDOVER_tab-tooltip.md invariant 6a for
+    // why a ScrollViewer is permanently off the table here).
+    constexpr double kTtScrollStepPx = 48.0; // per wheel notch (120 units) ~= the platform's 3 lines
+    constexpr double kTtScrollBarWidth = 3.0; // the slim, collapsed-ScrollBar look
+    constexpr double kTtScrollBarGutterPx = 5.0; // parked THIS far into the card's right padding, so it never covers text
+    constexpr double kTtScrollThumbMinPx = 24.0; // a very deep body still leaves a visible thumb
+    constexpr double kTtScrollBarIdleOpacity = 0.45; // at rest: the dim "there is more below" hint
+    constexpr int kTtScrollBarHoldMs = 1800; // ... then, after the last notch, it fades out entirely
+    constexpr int kTtScrollBarFadeStepMs = 40;
+    constexpr double kTtScrollBarFadeStep = 0.15;
+    // With the body SCROLLABLE the line cap changes meaning: it is no longer "one screenful" (the clip
+    // is that) but how much of the summary we are willing to host in the card AT ALL -- the element /
+    // text-measure backstop. TtBuildSummaryBody coalesces each contiguous run into ONE wrapping
+    // TextBlock, so depth costs measure, not element count; this many screenfuls is the reach, and
+    // anything past it still reports itself in the "+K more" marker (the summary panel has the rest).
+    constexpr size_t kTtScrollBodyScreenfuls = 8;
+    constexpr size_t kTtBodyMaxLinesFloor = 192;
+    constexpr size_t kTtBodyMaxLinesCeil = 1000;
+
+    // The scrollable pieces of a freshly built card, handed back to the page (which keeps WEAK refs to
+    // them, so a wheel notch over the tab header can shift the body -- TerminalPage::_ScrollTabAgentToolTip).
+    struct TtCardScrollParts
+    {
+        winrt::Windows::UI::Xaml::FrameworkElement viewport{ nullptr }; // the clipping host (one screenful)
+        winrt::Windows::UI::Xaml::FrameworkElement content{ nullptr }; // the FULL body (render-shifted by contentShift)
+        winrt::Windows::UI::Xaml::FrameworkElement thumb{ nullptr }; // the slim auto-hiding scrollbar
+        winrt::Windows::UI::Xaml::Media::TranslateTransform contentShift{ nullptr };
+        winrt::Windows::UI::Xaml::Media::ScaleTransform thumbScale{ nullptr }; // thumb LENGTH (viewport/content share)
+        winrt::Windows::UI::Xaml::Media::TranslateTransform thumbShift{ nullptr }; // thumb POSITION (scrolled fraction)
+    };
+
     // Build the whole tab-tooltip card: a dark, rounded Border (summary-panel chrome) holding the header
     // (state dot + a wrapping title, which owns the full card width), then one dim line each for the
     // folder/branch and the state (colored to match the tab dot) and the kind/model/effort/perm, and --
-    // once the Summary body has loaded -- a divider + the numbered Summary box, height-capped by LINE
-    // TRUNCATION + a plain clipping Grid (the full, scrollable view is the pencil-toggled summary panel).
-    // maxCardHeight is the caller's window-derived budget for the WHOLE card (see the constants above);
-    // <= 0 means "not measured" -> the historical fixed size.
+    // once the Summary body has loaded -- a divider + the numbered Summary box inside a WHEEL-SCROLLABLE
+    // viewport (a clipping Grid + a render-transformed body + a slim auto-hiding bar; `scrollOut` hands
+    // the page the pieces it drives). maxCardHeight is the caller's window-derived budget for the WHOLE
+    // card (see the constants above); <= 0 means "not measured" -> the historical fixed size.
     //
     // NO ScrollViewer -- this is a hard rule, learned from a proven fail-fast (2026-07-02, full-dump stowed
     // backtrace): when the ToolTip popup opens, its content tree ENTERs the live tree, and a ScrollViewer's
@@ -306,9 +341,13 @@ namespace
     // CInputServices::UpdateDirectManipulationManagerActivation -> CDirectManipulationService::
     // ActivateDirectManipulationManager), which under XAML Islands can fail E_INVALIDARG -> a stowed
     // exception -> the 0xC000027B fail-fast that repeatedly crashed the app (see
-    // doc/agentmaster/HANDOVER_tab-tooltip.md crash #7). The ScrollViewer was dead weight anyway: the
-    // tooltip is IsHitTestVisible(false), so it could NEVER be scrolled -- content past the height cap was
-    // already unreachable. Truncating the text loses nothing and removes the DManip surface entirely.
+    // doc/agentmaster/HANDOVER_tab-tooltip.md crash #7 + invariant 6a). That rule STILL STANDS, and the
+    // scrolling below deliberately does not bend it: the card stays inert (panels, TextBlocks, Borders,
+    // transforms -- nothing manipulation-capable) and stays IsHitTestVisible(false). The wheel is read on
+    // the TAB HEADER instead -- a real pointer target that is under the cursor the whole time the tip is
+    // up -- and the page merely shifts a RenderTransform (Tab::EnsureAgentToolTipHoverHook ->
+    // TerminalPage::_ScrollTabAgentToolTip). Wheel-only is also the whole interaction budget: no drag, no
+    // keyboard, no manipulation.
     winrt::Windows::UI::Xaml::Controls::Border TtBuildTooltipCard(winrt::Windows::UI::Color accent,
                                                                   const std::wstring& title,
                                                                   const std::wstring& folderBranch,
@@ -318,7 +357,8 @@ namespace
                                                                   const std::vector<std::pair<std::wstring, winrt::Windows::UI::Color>>& tagChips,
                                                                   double tagsOpacity,
                                                                   const winrt::hstring& bodyText,
-                                                                  double maxCardHeight)
+                                                                  double maxCardHeight,
+                                                                  TtCardScrollParts& scrollOut)
     {
         using namespace winrt::Windows::UI::Xaml;
         using namespace winrt::Windows::UI::Xaml::Controls;
@@ -496,10 +536,10 @@ namespace
 
             // Truncate the body to a sane line count: a BACKSTOP that bounds the XAML element count, not
             // the visual cut (the clipping Grid below is that). Derived from the height budget with a
-            // deliberately UNDER-estimated per-line height, so it always sits above what the clip can
-            // actually show -- the same relationship the old hardcoded pair had, which this reproduces
-            // exactly at the old budget (360px body / 11 = 32 lines).
-            const size_t kTtBodyMaxLines = std::clamp<size_t>(static_cast<size_t>(bodyMaxHeight / 11.0), 24, 160);
+            // deliberately UNDER-estimated per-line height -- but now times kTtScrollBodyScreenfuls,
+            // because the viewport SCROLLS: the cap has to reach well past one screenful or the wheel
+            // would run out of document immediately (the whole point is getting to the bottom).
+            const size_t kTtBodyMaxLines = std::clamp<size_t>(static_cast<size_t>(bodyMaxHeight / 11.0) * kTtScrollBodyScreenfuls, kTtBodyMaxLinesFloor, kTtBodyMaxLinesCeil);
             std::wstring bodyStr{ bodyText };
             size_t hiddenLines = 0;
             {
@@ -523,14 +563,69 @@ namespace
                 }
             }
 
-            // A plain Grid as the height cap: UWP layout-clips a child arranged smaller than it wants, so
-            // pathological wrapping still can't make a screen-tall tooltip -- WITHOUT a ScrollViewer (whose
-            // DirectManipulation activation on popup-enter is the proven 0xC000027B fail-fast; see the
-            // function comment). A Grid carries no manipulation machinery.
+            // The body VIEWPORT -- one screenful of a taller document, scrolled by the wheel. Three
+            // nested elements, each load-bearing (and all of them inert: Grids, a StackPanel, a Border
+            // and transforms -- no manipulation machinery, see the function comment):
+            //
+            //   bodyArea (Grid)          hosts the viewport AND the overlay scrollbar. The bar is a
+            //                            SIBLING of the clip, so its negative right margin can park it in
+            //                            the card's padding gutter instead of being cut by the clip.
+            //   bodyClip (Grid)          the height cap and the visual cut. MaxHeight bounds it; the page
+            //                            wires its SizeChanged to set an explicit Clip rect once the popup
+            //                            actually lays it out (nothing is measured at build time).
+            //   measureHost (StackPanel) measures its child with INFINITE height. That is what makes the
+            //                            body's ActualHeight the true scroll extent, and -- more subtly --
+            //                            what keeps the body free of a LAYOUT clip of its own: a layout
+            //                            clip lives in the element's own coordinate space, so it would
+            //                            travel WITH the render transform below and reveal nothing. The
+            //                            clips that matter therefore sit on elements we never transform.
+            //
+            // Scrolling is a RenderTransform on the body, so a wheel notch costs no layout pass and can
+            // never resize or move the popup the user is reading.
+            Grid bodyArea;
             Grid bodyClip;
             bodyClip.MaxHeight(bodyMaxHeight);
-            bodyClip.Children().Append(TtBuildSummaryBody(bodyStr));
-            col.Children().Append(bodyClip);
+            StackPanel measureHost;
+            measureHost.Orientation(Orientation::Vertical);
+            measureHost.VerticalAlignment(VerticalAlignment::Top);
+            auto bodyStack = TtBuildSummaryBody(bodyStr);
+            Media::TranslateTransform bodyShift;
+            bodyStack.RenderTransform(bodyShift);
+            measureHost.Children().Append(bodyStack);
+            bodyClip.Children().Append(measureHost);
+            bodyArea.Children().Append(bodyClip);
+
+            // The slim overlay scrollbar (the collapsed-ScrollBar look): a 3px rounded bar in the card's
+            // right padding gutter. Hidden until there is something to scroll, then dim at rest and fully
+            // lit while you scroll -- the page owns that (see _SyncTabTooltipScrollBar / the fade timer).
+            // Its LENGTH and POSITION are a ScaleTransform + a TranslateTransform rather than Height and
+            // Margin, so every update stays render-only (a layout write from the SizeChanged path would
+            // be the popup layout-cycle hazard the tag badges hit).
+            Border thumb;
+            thumb.Width(kTtScrollBarWidth);
+            thumb.HorizontalAlignment(HorizontalAlignment::Right);
+            thumb.VerticalAlignment(VerticalAlignment::Stretch);
+            thumb.Margin(ThicknessHelper::FromLengths(0, 1, -kTtScrollBarGutterPx, 1));
+            thumb.CornerRadius(CornerRadiusHelper::FromUniformRadius(kTtScrollBarWidth / 2.0));
+            thumb.Background(TtFill(0xFF, 0xC8, 0xC8, 0xC8));
+            thumb.Opacity(0.0); // the first layout decides: dim hint if it overflows, stay hidden if not
+            Media::ScaleTransform thumbScale;
+            thumbScale.ScaleY(1.0);
+            Media::TranslateTransform thumbShift;
+            Media::TransformGroup thumbXform;
+            thumbXform.Children().Append(thumbScale); // scale from the top (CenterY 0) ...
+            thumbXform.Children().Append(thumbShift); // ... then slide, in unscaled pixels
+            thumb.RenderTransform(thumbXform);
+            bodyArea.Children().Append(thumb);
+
+            col.Children().Append(bodyArea);
+
+            scrollOut.viewport = bodyClip;
+            scrollOut.content = bodyStack;
+            scrollOut.thumb = thumb;
+            scrollOut.contentShift = bodyShift;
+            scrollOut.thumbScale = thumbScale;
+            scrollOut.thumbShift = thumbShift;
 
             if (hiddenLines > 0)
             {
@@ -2102,6 +2197,7 @@ namespace winrt::TerminalApp::implementation
             impl->ClearAgentToolTip(); // archived / gone -> the default title+keychord tooltip
             _tabTooltipSummary.erase(sessionId); // drop the cached summary + sig so a later relaunch reloads fresh
             _tabTooltipSig.erase(sessionId);
+            _tabTooltipScroll.erase(sessionId); // and the (now dangling) scroll pieces of the card we just dropped
             return;
         }
         const auto& s = *info;
@@ -2289,10 +2385,75 @@ namespace winrt::TerminalApp::implementation
         CATCH_LOG();
         sig += L'\x1f';
         sig += std::to_wstring(static_cast<int>(cardMaxHeight / 50.0));
-        if (const auto sit = _tabTooltipSig.find(sessionId); sit == _tabTooltipSig.end() || sit->second != sig)
+        // WHEEL SCROLL: a card built while the tip is OPEN cannot be hosted (Tab::_UpdateAgentToolTip
+        // swaps Content only while closed — invariant 3), and adopting its scroll pieces would leave the
+        // wheel driving an off-screen tree while the reader stares at the hosted one. So skip the whole
+        // rebuild in that window; nothing is lost, because the next PointerEntered rebuilds it fresh
+        // anyway (the card is hover-built, and its "ago" line would have gone stale by then regardless).
+        // The one exception is the push that IS allowed to swap while open: the async summary arrival.
+        const auto sit = _tabTooltipSig.find(sessionId);
+        const bool sigChanged = (sit == _tabTooltipSig.end() || sit->second != sig);
+        if (sigChanged && (!impl->AgentToolTipOpen() || swapWhileOpen))
         {
-            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, dirDetailLine, tagChips, tagsOpacity, bodyText, cardMaxHeight), winrt::hstring{ sig }, swapWhileOpen);
+            TtCardScrollParts scrollParts{};
+            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, dirDetailLine, tagChips, tagsOpacity, bodyText, cardMaxHeight, scrollParts), winrt::hstring{ sig }, swapWhileOpen);
             _tabTooltipSig[sessionId] = sig;
+
+            // Agentmaster (tab tooltip -- WHEEL SCROLL): adopt the fresh card's scroll pieces, replacing
+            // the previous card's (a rebuild is a whole new tree, so the old refs are dead). WEAK refs to
+            // the elements + strong refs to the three transforms: a transform is a leaf DependencyObject
+            // that holds nothing back, while a strong element ref here would pin every superseded card
+            // for as long as the session lives (the per-element-handler leak class AgentTipHelpers
+            // exists to avoid). A card with no body has no viewport -- the entry then simply reports
+            // "nothing to scroll".
+            auto& st = _tabTooltipScroll[sessionId];
+            st = {};
+            if (scrollParts.viewport && scrollParts.content)
+            {
+                st.viewport = winrt::make_weak(scrollParts.viewport);
+                st.content = winrt::make_weak(scrollParts.content);
+                if (scrollParts.thumb)
+                {
+                    st.thumb = winrt::make_weak(scrollParts.thumb);
+                }
+                st.contentShift = scrollParts.contentShift;
+                st.thumbScale = scrollParts.thumbScale;
+                st.thumbShift = scrollParts.thumbShift;
+
+                // The card is built BEFORE it is ever shown (ToolTipService needs it hosted before the
+                // first hover), so nothing is measured yet. Its own first layout INSIDE the popup is
+                // therefore where the viewport clips itself and the bar decides whether to show the dim
+                // "there is more" hint. Both writes are render-only (Clip / transforms / Opacity) -- a
+                // layout write from inside a layout pass is the popup layout-cycle fail-fast the tag
+                // badges hit. The handler captures only a WEAK page + the session id, never an element,
+                // so this per-change-rebuilt tree can't leak through its own handler.
+                scrollParts.viewport.SizeChanged([weak = get_weak(), sid = sessionId](const IInspectable& sender, const auto&) {
+                    const auto self = weak.get();
+                    if (!self)
+                    {
+                        return;
+                    }
+                    try
+                    {
+                        if (const auto fe = sender.try_as<FrameworkElement>())
+                        {
+                            // An explicit Clip on the (never-transformed) viewport is what cuts the
+                            // shifted body at the viewport edge — belt to the layout clip that already
+                            // bounds the unscrolled case.
+                            RectangleGeometry clip;
+                            clip.Rect(winrt::Windows::Foundation::Rect{ 0, 0, static_cast<float>(fe.ActualWidth()), static_cast<float>(fe.ActualHeight()) });
+                            fe.Clip(clip);
+                        }
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"tab tooltip scroll viewport clip");
+                    }
+                    // Keep whatever offset the reader is at (a resize mid-read must not yank them back
+                    // to the top); a fresh card is at 0 anyway.
+                    self->_SyncTabTooltipScrollBar(sid, std::nullopt, ::kTtScrollBarIdleOpacity);
+                });
+            }
         }
 
         // Keep the Summary body fresh off-thread (throttled + mtime-gated). First sight has no body yet, so
@@ -2309,6 +2470,183 @@ namespace winrt::TerminalApp::implementation
             slot.lastCheckMs = now;
             const bool codex = (s.kind == ::Agentmaster::AgentKind::Codex);
             _EnsureTabTooltipSummary(tab, winrt::hstring{ sessionId }, codex, winrt::hstring{ s.codexSessionId }, winrt::hstring{ dir });
+        }
+    }
+
+    // Agentmaster (tab tooltip — WHEEL SCROLL): push `offset` (nullopt = keep the current one) onto the
+    // hovered card's body and re-fit the slim scrollbar to it, painting the bar at `opacity`. Returns the
+    // MAXIMUM scrollable offset — 0 means the body fits, so there is nothing to scroll and the bar stays
+    // hidden (which is also how the wheel handler decides whether it consumed the notch).
+    //
+    // Every write here is RENDER-only — a transform value or Opacity — never a layout property. That is
+    // deliberate and load-bearing: this also runs from the viewport's own SizeChanged, i.e. from inside a
+    // layout pass, and mutating layout from a layout-driven handler inside a popup is exactly the
+    // E_LAYOUTCYCLE fail-fast the tag badges had to be rewritten around (TabHeaderControl's
+    // _PositionTagBadges coalescing scheduler). Sizing the thumb by ScaleY instead of Height, and moving
+    // it by a TranslateTransform instead of Margin, keeps this path structurally incapable of it.
+    double TerminalPage::_SyncTabTooltipScrollBar(const std::wstring& sessionId, std::optional<double> offset, double opacity)
+    {
+        const auto it = _tabTooltipScroll.find(sessionId);
+        if (it == _tabTooltipScroll.end())
+        {
+            return 0.0;
+        }
+        auto& st = it->second;
+        try
+        {
+            const auto viewport = st.viewport.get();
+            const auto content = st.content.get();
+            if (!viewport || !content)
+            {
+                return 0.0; // no body on this card (or the card is gone) — nothing to scroll
+            }
+            const double viewH = viewport.ActualHeight();
+            const double contentH = content.ActualHeight();
+            // +1px of slack: a sub-pixel overshoot is not "scrollable", it is rounding.
+            const double maxOff = (viewH > 0.0 && contentH > viewH + 1.0) ? (contentH - viewH) : 0.0;
+            st.offset = std::clamp(offset.value_or(st.offset), 0.0, maxOff);
+            if (st.contentShift)
+            {
+                st.contentShift.Y(-st.offset); // scroll DOWN = shift the body UP
+            }
+            if (const auto thumb = st.thumb.get())
+            {
+                const double barH = thumb.ActualHeight();
+                if (maxOff > 0.0 && barH > 0.0 && st.thumbScale && st.thumbShift)
+                {
+                    // Thumb length = the visible share of the document (floored, so a very deep body
+                    // still leaves a readable thumb); position = the scrolled fraction of the travel.
+                    const double scale = std::clamp(std::max(viewH / contentH, ::kTtScrollThumbMinPx / barH), 0.05, 1.0);
+                    st.thumbScale.ScaleY(scale);
+                    st.thumbShift.Y((barH - barH * scale) * (st.offset / maxOff));
+                }
+                thumb.Opacity(maxOff > 0.0 ? std::clamp(opacity, 0.0, 1.0) : 0.0);
+            }
+            return maxOff;
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SyncTabTooltipScrollBar");
+            return 0.0;
+        }
+    }
+
+    // Agentmaster (tab tooltip — WHEEL SCROLL): a wheel notch arrived on a tab whose rich card is OPEN
+    // (Tab's PointerWheelChanged already checked that, and only ever READS IsOpen). Move the body and
+    // report whether we consumed the notch — false leaves it to the tab strip's own horizontal scroll,
+    // which is the right answer whenever this card has nothing to scroll.
+    //
+    // The tab's CURRENT session is resolved here rather than captured at wiring time, exactly like the
+    // hover-build hook: a /resume re-home or a fork re-bind swaps the tab's session underneath us.
+    bool TerminalPage::_ScrollTabAgentToolTip(const TerminalApp::Tab& tab, int wheelDelta)
+    {
+        if (!tab || wheelDelta == 0)
+        {
+            return false;
+        }
+        const auto sessionId = _ClaudeSessionForTab(tab);
+        if (sessionId.empty())
+        {
+            return false;
+        }
+        const auto it = _tabTooltipScroll.find(sessionId);
+        if (it == _tabTooltipScroll.end())
+        {
+            return false;
+        }
+        // A notch is 120 units; wheel DOWN is negative and moves us further down the document.
+        const double next = it->second.offset - (static_cast<double>(wheelDelta) / 120.0) * ::kTtScrollStepPx;
+        if (_SyncTabTooltipScrollBar(sessionId, next, 1.0) <= 0.0)
+        {
+            return false; // the whole body already fits — don't steal the wheel from the strip
+        }
+        _ArmTabTooltipScrollBarFade(sessionId);
+        return true; // consumed even at an end stop: this card IS the scroller under the pointer
+    }
+
+    // Agentmaster (tab tooltip — WHEEL SCROLL): a fresh hover starts at the top of the body. Called from
+    // the PointerEntered build hook, so it covers the case the rebuild does not: an UNCHANGED signature
+    // re-hosts nothing, so the very same card element (still shifted where you left it last time) is what
+    // the next hover would show.
+    void TerminalPage::_ResetTabAgentToolTipScroll(const std::wstring& sessionId)
+    {
+        if (_tabTooltipScroll.find(sessionId) == _tabTooltipScroll.end())
+        {
+            return;
+        }
+        if (_tabTooltipScrollFadeTimer)
+        {
+            _tabTooltipScrollFadeTimer.Stop(); // a pending fade would erase the hint we are about to show
+        }
+        _tabTooltipScrollFadeSession.clear();
+        _SyncTabTooltipScrollBar(sessionId, 0.0, ::kTtScrollBarIdleOpacity);
+    }
+
+    // Agentmaster (tab tooltip — WHEEL SCROLL): (re)start the scrollbar's auto-hide. Every notch restarts
+    // the hold, so the bar stays lit while you are scrolling and only fades once you stop — the modern
+    // overlay-scrollbar behavior, hand-rolled because the card can host no ScrollViewer to get it for free.
+    // ONE timer per window is enough: exactly one tooltip is ever on screen.
+    void TerminalPage::_ArmTabTooltipScrollBarFade(const std::wstring& sessionId)
+    {
+        _tabTooltipScrollFadeSession = sessionId;
+        _tabTooltipScrollFadeHolding = true;
+        if (!_tabTooltipScrollFadeTimer)
+        {
+            _tabTooltipScrollFadeTimer = WUX::DispatcherTimer{};
+            _tabTooltipScrollFadeTimer.Tick([weak = get_weak()](const IInspectable& sender, const IInspectable&) {
+                if (auto self = weak.get())
+                {
+                    self->_OnTabTooltipScrollBarFadeTick();
+                }
+                else if (const auto t = sender.try_as<WUX::DispatcherTimer>())
+                {
+                    t.Stop(); // page destroyed — stop ticking (UI thread, safe)
+                }
+            });
+        }
+        _tabTooltipScrollFadeTimer.Stop();
+        _tabTooltipScrollFadeTimer.Interval(std::chrono::milliseconds(::kTtScrollBarHoldMs));
+        _tabTooltipScrollFadeTimer.Start();
+    }
+
+    // Agentmaster (tab tooltip — WHEEL SCROLL): the auto-hide tick, in two phases on one timer — first
+    // the long hold after the last notch, then a short step-down fade to fully invisible (a hand-rolled
+    // fade: an animation inside ToolTip content is more moving parts than this surface has earned).
+    void TerminalPage::_OnTabTooltipScrollBarFadeTick()
+    {
+        if (!_tabTooltipScrollFadeTimer)
+        {
+            return;
+        }
+        if (_tabTooltipScrollFadeHolding)
+        {
+            _tabTooltipScrollFadeHolding = false; // the hold elapsed — switch to the fade cadence
+            _tabTooltipScrollFadeTimer.Stop();
+            _tabTooltipScrollFadeTimer.Interval(std::chrono::milliseconds(::kTtScrollBarFadeStepMs));
+            _tabTooltipScrollFadeTimer.Start();
+            return;
+        }
+        double left = 0.0;
+        try
+        {
+            if (const auto it = _tabTooltipScroll.find(_tabTooltipScrollFadeSession); it != _tabTooltipScroll.end())
+            {
+                if (const auto thumb = it->second.thumb.get())
+                {
+                    left = std::max(0.0, thumb.Opacity() - ::kTtScrollBarFadeStep);
+                    thumb.Opacity(left);
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_OnTabTooltipScrollBarFadeTick");
+            left = 0.0; // give up on this bar rather than tick forever
+        }
+        if (left <= 0.0)
+        {
+            _tabTooltipScrollFadeTimer.Stop();
+            _tabTooltipScrollFadeSession.clear();
         }
     }
 
@@ -2337,17 +2675,37 @@ namespace winrt::TerminalApp::implementation
         {
             return; // steady-state per-tick cost: this bool probe, nothing else
         }
-        const bool justWired = impl->EnsureAgentToolTipHoverHook([weakThis = get_weak(), weakTab = winrt::make_weak(tab)]() {
-            const auto self = weakThis.get();
-            const auto t = weakTab.get();
-            if (self && t)
-            {
-                if (const auto sid = self->_ClaudeSessionForTab(t); !sid.empty())
+        const bool justWired = impl->EnsureAgentToolTipHoverHook(
+            [weakThis = get_weak(), weakTab = winrt::make_weak(tab)]() {
+                const auto self = weakThis.get();
+                const auto t = weakTab.get();
+                if (self && t)
                 {
-                    self->_UpdateTabAgentToolTip(t, sid); // hover-time build: fresh state + fresh "ago", kicks the mtime-gated summary load
+                    if (const auto sid = self->_ClaudeSessionForTab(t); !sid.empty())
+                    {
+                        // PointerEntered BUBBLES, so it re-fires as the pointer crosses the header's own
+                        // inner elements (icon -> title -> close button) — i.e. repeatedly, mid-hover,
+                        // while the tip is already up. The build is sig-gated and harmless there, but the
+                        // scroll reset is NOT: it would snap a reader back to the top of the body every
+                        // time they nudged the mouse. So reset only on a hover that starts CLOSED.
+                        const auto impl = self->_GetTabImpl(t);
+                        const bool tipOpen = impl && impl->AgentToolTipOpen();
+                        self->_UpdateTabAgentToolTip(t, sid); // hover-time build: fresh state + fresh "ago", kicks the mtime-gated summary load
+                        if (!tipOpen)
+                        {
+                            self->_ResetTabAgentToolTipScroll(sid); // WHEEL SCROLL: a fresh hover starts at the top of the body
+                        }
+                    }
                 }
-            }
-        });
+            },
+            // WHEEL SCROLL: the same hook wires the tab header's PointerWheelChanged, because the header
+            // is the only real pointer target in this whole feature — the card is hit-test-invisible by
+            // design and can never receive input itself.
+            [weakThis = get_weak(), weakTab = winrt::make_weak(tab)](int delta) -> bool {
+                const auto self = weakThis.get();
+                const auto t = weakTab.get();
+                return (self && t) ? self->_ScrollTabAgentToolTip(t, delta) : false;
+            });
         if (justWired)
         {
             if (const auto sid = _ClaudeSessionForTab(tab); !sid.empty())

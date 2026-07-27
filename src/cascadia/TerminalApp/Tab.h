@@ -84,8 +84,9 @@ namespace winrt::TerminalApp::implementation
         void SetAgentToolTip(winrt::Windows::UI::Xaml::UIElement content, winrt::hstring signature, bool swapWhileOpen = false);
         void ClearAgentToolTip();
         winrt::hstring AgentToolTipSig() const noexcept { return _agentToolTipSig; } // Agentmaster (lazy tooltip): the hosted content's fingerprint — lets a per-tick producer SKIP building a card that would only be sig-discarded
+        bool AgentToolTipOpen() const noexcept; // Agentmaster: is the rich card CURRENTLY on screen? A safe READ of IsOpen (invariant 2 forbids WRITING it) — the page needs it to keep its wheel-scroll state in lockstep with the card that is actually hosted, and to not yank a reader back to the top when PointerEntered re-fires mid-hover
         bool AgentToolTipHoverWired() const noexcept { return _agentToolTipHoverWired; } // Agentmaster (lazy tooltip): cheap already-armed probe so per-tick callers skip even the callback construction
-        bool EnsureAgentToolTipHoverHook(std::function<void()> onHoverBuild); // Agentmaster (lazy tooltip): wire (once) the owner TabViewItem's PointerEntered -> the page's build-now callback; returns true only the ONE time it wires (the caller's arm-build cue)
+        bool EnsureAgentToolTipHoverHook(std::function<void()> onHoverBuild, std::function<bool(int)> onWheel = nullptr); // Agentmaster (lazy tooltip): wire (once) the owner TabViewItem's PointerEntered -> the page's build-now callback, and its PointerWheelChanged -> the page's card-scroll callback (WHEEL SCROLL — the header is the only real pointer target: the card is hit-test-invisible); returns true only the ONE time it wires (the caller's arm-build cue)
 
         std::optional<winrt::Windows::UI::Color> GetTabColor();
         std::optional<winrt::Windows::UI::Color> GetRuntimeTabColor() const noexcept { return _runtimeTabColor; } // Agentmaster: the user-chosen override (drives per-dir color sync)
@@ -294,6 +295,7 @@ namespace winrt::TerminalApp::implementation
         // tip is closed (the safe path). One hook per tab, wired once; the callback resolves the tab's
         // CURRENT session at hover time, so a /resume re-home never leaves it stale.
         std::function<void()> _agentToolTipHoverCb{ nullptr };
+        std::function<bool(int)> _agentToolTipWheelCb{ nullptr }; // Agentmaster (WHEEL SCROLL): the page scrolls the OPEN card's body by this many wheel units; returns true when it consumed the notch
         bool _agentToolTipHoverWired{ false }; // the PointerEntered hook is wired once per tab
         bool _agentToolTipSwapOpenOnce{ false }; // one-shot: let the NEXT _UpdateAgentToolTip swap Content while OPEN (the async summary-body arrival)
 

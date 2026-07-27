@@ -109,6 +109,11 @@ post-rewrite — the old manual-open members/methods listed in §9's history are
     swap `Content` only when `!IsOpen()` (a safe READ; we never SET IsOpen).
   - `_WireAgentToolTipUnload()` — wire (once) the owner `TabViewItem.Unloaded` → `_DetachAgentToolTip`.
   - `_DetachAgentToolTip()` — `SetToolTip(tvi, nullptr)` + null the ref (no `IsOpen`, no timers, no cooldown).
+  - `EnsureAgentToolTipHoverHook(onHoverBuild, onWheel)` — public; wire (once per tab) the owner's
+    `PointerEntered` → the page's build-now callback **and** its `PointerWheelChanged` → the page's
+    card-scroll callback (§4b-bis; `_agentToolTipWheelCb`, cleared in `Shutdown` beside the hover one).
+    Returns true only the ONE time it wires (the caller's arm-build cue). The wheel handler READS
+    `IsOpen()` to gate, and marks the notch `Handled` only when the page reports it scrolled.
   - *(DELETED: `_WireAgentToolTipHover`, `_SafeSetAgentToolTipOpen`, `_ForceCloseAgentToolTip`, `_ArmAgentToolTipDismiss`.)*
 
 **`src/cascadia/TerminalApp/TerminalPage.AgentObserver.cpp`** — the content:
@@ -122,6 +127,14 @@ post-rewrite — the old manual-open members/methods listed in §9's history are
 - `_EnsureTabTooltipSummary(...)` (~787) — `fire_and_forget`: off-thread resolve+stat+analyze of the
   transcript → render the Summary box → cache → re-host.
 - `_SetTabActivityBadge(tab, wt, kind)` (~2295) — pushes the observe-badge tooltip on a non-managed tab.
+- `_ArmTabAgentToolTipHover(tab)` — arms the lazy hover build **and** the wheel hook (one
+  `EnsureAgentToolTipHoverHook` call, two callbacks); the hover callback also resets the scroll to the
+  top of the body.
+- **Body scrolling** (§4b-bis): `_ScrollTabAgentToolTip(tab, delta)` (the wheel entry) →
+  `_SyncTabTooltipScrollBar(sid, offset, opacity)` (the render-only apply) +
+  `_ResetTabAgentToolTipScroll(sid)` / `_ArmTabTooltipScrollBarFade(sid)` /
+  `_OnTabTooltipScrollBarFadeTick()` (the auto-hide). The card's pieces come back from
+  `TtBuildTooltipCard`'s `TtCardScrollParts& scrollOut`.
 
 **`src/cascadia/TerminalApp/TerminalPage.h`** — the content cache (~730–744):
 - `struct _AgentTooltipSummary { std::wstring path; int64_t mtime; int64_t lastCheckMs; winrt::hstring body; }`
@@ -129,6 +142,11 @@ post-rewrite — the old manual-open members/methods listed in §9's history are
 - `std::unordered_set<std::wstring> _tabTooltipSummaryInFlight` — one background load per session.
 - `std::unordered_map<std::wstring,std::wstring> _tabTooltipSig` — last signature per session.
 - `winrt::fire_and_forget _EnsureTabTooltipSummary(...)`.
+- `struct _AgentTooltipScroll { weak viewport/content/thumb; contentShift; thumbScale; thumbShift; offset; }`
+  + `std::unordered_map<std::wstring,_AgentTooltipScroll> _tabTooltipScroll` — the hovered card's scroll
+  state (§4b-bis), re-adopted on every rebuild; **weak** element refs so a superseded card is never pinned.
+- `_tabTooltipScrollFadeTimer` / `_tabTooltipScrollFadeSession` / `_tabTooltipScrollFadeHolding` — the ONE
+  per-window scrollbar auto-hide (hold, then step-down fade).
 
 ---
 
@@ -163,6 +181,50 @@ post-rewrite — the old manual-open members/methods listed in §9's history are
      to the **pointer**, so `Placement(Bottom)` alone read "below the cursor" — the explicit rect anchors
      the card centered under the TAB; re-asserted each refresh since tab widths drift), then
      `_agentToolTip.Content(_agentToolTipContent)`.
+
+### 4b-bis. Input = the WHEEL, read on the TAB HEADER (the body scrolls)
+
+The card's Summary body is a **viewport** onto a much taller document, scrolled by the **mouse wheel
+only** (no drag, no keyboard, no touch/manipulation). The card itself takes **no input at all** — it
+stays `IsHitTestVisible(false)` and inert, per invariant 6a — so the wheel is read on the owner
+`TabViewItem`, which is under the cursor for the tooltip's entire life anyway:
+
+1. `Tab::EnsureAgentToolTipHoverHook` wires `PointerWheelChanged` beside the `PointerEntered`
+   build hook (one wiring, once per tab). The handler only ever **reads** `IsOpen()` (invariant 2) and
+   forwards the notch to the page callback.
+2. `TerminalPage::_ScrollTabAgentToolTip(tab, delta)` resolves the tab's **current** session (re-home
+   safe, like the hover hook), advances the stored offset by `kTtScrollStepPx` per 120 units, and calls
+   `_SyncTabTooltipScrollBar`.
+3. `TerminalPage::_SyncTabTooltipScrollBar(sid, offset, opacity)` shifts the body's
+   `TranslateTransform`, re-fits the slim scrollbar (`ScaleTransform` length + `TranslateTransform`
+   position), paints it, and returns the max scrollable offset. **Every write is render-only** — never
+   `Height`/`Margin` — because this also runs from the viewport's own `SizeChanged` (i.e. from inside a
+   layout pass), where a layout write is the popup `E_LAYOUTCYCLE` fail-fast the tag badges had to be
+   rewritten around (`TabHeaderControl::_PositionTagBadgesNow`).
+4. The notch is marked `Handled` **only when something actually scrolled**, so a card that fits leaves
+   the wheel to the tab strip's own horizontal scroll.
+5. The bar auto-hides: one per-window `DispatcherTimer` holds `kTtScrollBarHoldMs` after the last notch,
+   then steps the opacity down to 0 (`_ArmTabTooltipScrollBarFade` / `_OnTabTooltipScrollBarFadeTick`).
+   At rest (first layout of a scrollable card, and on every fresh hover via
+   `_ResetTabAgentToolTipScroll`) it shows dim — the "there is more below" hint.
+
+The per-card pieces live in `TerminalPage::_tabTooltipScroll[sessionId]` (**weak** element refs + the
+three transforms), re-adopted on every card rebuild. Weak, because the card is rebuilt on every content
+change — strong refs would pin every superseded tree (the leak class `AgentTipHelpers` exists to avoid).
+
+**Two non-obvious rules keep the state and the screen in lockstep** — both fall out of `PointerEntered`
+being a BUBBLING event, so it re-fires as the pointer crosses the header's own inner elements (icon →
+title → close button), i.e. repeatedly *while the tip is already open*:
+
+- **`_UpdateTabAgentToolTip` does not rebuild while the tip is open** (unless this push is the
+  `swapWhileOpen` grant). `Tab::_UpdateAgentToolTip` would refuse to host it anyway (invariant 3), so
+  the page would end up adopting the scroll pieces of a card that is NOT on screen and the wheel would
+  silently drive an unhosted tree. Nothing is lost by skipping: the next `PointerEntered` rebuilds
+  fresh, and the staged card's "ago" line would have gone stale by then regardless.
+- **The scroll reset only runs on a hover that starts CLOSED.** Otherwise every mouse nudge inside the
+  tab header would snap the reader back to the top of the body.
+
+Both gate on `Tab::AgentToolTipOpen()` — a safe **read** of `IsOpen` (invariant 2 forbids writing it).
 
 ### 4c. Open / close = the FRAMEWORK
 There are no open/dismiss timers, no pointer-loss handlers, no manual `IsOpen`, and no cross-tab
@@ -225,11 +287,26 @@ tooltip code off the UI thread.
     11, dim `#B0B0B0`, ellipsized).
   - **State line** (Cascadia Mono 11, colored `accent`): `<state> · <ago> · <why> · ⚠ unread`.
   - **Meta line** (Cascadia Mono 11, dim): `claude|codex · model · effort · <mode/⚡ bypass>`.
-  - **Divider** (full-width 1px `Border`) + the Summary body, **line-truncated** (`kTtBodyMaxLines` +
-    a dim `"… +K more (see the summary panel)"` marker) inside a plain **clipping `Grid`**
-    (UWP layout-clips overflow). **Deliberately NOT a ScrollViewer** — a ScrollViewer entering the ToolTip
-    popup activates DirectManipulation, which fail-fasted the app (crash #7, §9); and the tooltip is
-    hit-test-invisible, so it could never scroll anyway.
+  - **Divider** (full-width 1px `Border`) + the Summary body in a **wheel-scrollable viewport**,
+    line-truncated at `kTtBodyMaxLines` (now `kTtScrollBodyScreenfuls` × a screenful, floored/capped
+    192…1000 — the element/text-measure backstop, no longer the visual cut) with the dim
+    `"… +K more (see the summary panel)"` marker for anything past it. **Deliberately NOT a
+    ScrollViewer** (crash #7, §9 — its DirectManipulation activation on popup-enter is the proven
+    fail-fast); the scrolling is hand-rolled out of inert parts:
+    - `bodyArea` (`Grid`) — hosts the viewport **and** the overlay scrollbar as siblings, so the bar's
+      negative right margin can park it in the card's padding gutter (never over text) instead of being
+      cut by the clip.
+    - `bodyClip` (`Grid`, `MaxHeight` = the body budget) — the height cap **and** the visual cut; the
+      page wires its `SizeChanged` to set an explicit `Clip` rect (nothing is measured at build time,
+      since a card is built before it is ever shown).
+    - `measureHost` (`StackPanel`) — measures the body with **infinite** height. That is what makes the
+      body's `ActualHeight` the true scroll extent and, more subtly, what keeps the body free of a
+      **layout clip of its own**: a layout clip lives in the element's own coordinate space, so it would
+      travel WITH the render transform and reveal nothing. The clips that matter therefore sit on
+      elements we never transform.
+    - the body carries a `TranslateTransform` (scroll = a render shift: no layout pass, so a notch can
+      never resize or move the open popup), and the slim bar is sized by a `ScaleTransform` + positioned
+      by a `TranslateTransform` (same reason — see §4b-bis).
 
 ### Sizing — width is flat, height is a WINDOW FRACTION
 
@@ -407,8 +484,17 @@ escape hatch is the §12 **off-switch**.
 6a. **NO ScrollViewer — no manipulation-capable element — inside ToolTip content. Ever.** The popup-open
    Enter walk activates a ScrollViewer's DirectManipulation, which can fail `E_INVALIDARG` under XAML
    Islands → stowed → `0xC000027B` fail-fast (crash #7, the only PROVEN stow stack of the saga). Tooltip
-   content must be inert: TextBlocks, panels, shapes, Borders. Height is capped by line truncation + a
-   plain `MaxHeight` Grid. This applies to ANY future popup-hosted content we build, not just this card.
+   content must be inert: TextBlocks, panels, shapes, Borders, transforms. Height is capped by line
+   truncation + a plain `MaxHeight` Grid. This applies to ANY future popup-hosted content we build, not
+   just this card. **The body's wheel scrolling (§4b-bis) does not bend this** — it adds no
+   manipulation-capable element and no input on the card at all: the wheel is read on the tab HEADER and
+   applied as a `RenderTransform`. If the card ever needs another interaction, that is the pattern to
+   copy — drive it from the header, keep the popup inert.
+6b. **Card content is mutated only through render-only properties while the tip is open.** Transform
+   values, `Opacity` and `Clip` are fine (they cannot re-enter layout); `Height`/`Margin`/`Width` from a
+   layout-driven handler (`SizeChanged`/`LayoutUpdated`) inside a popup is the `E_LAYOUTCYCLE`
+   (`0x88000FA8`) fail-fast — see `TabHeaderControl::_PositionTagBadgesNow`, which had to become a
+   coalescing scheduler for exactly this. This is why the scrollbar is scaled, not resized.
 7. **`fire_and_forget`s must contain exceptions.** `_EnsureTabTooltipSummary` (and the 5 observer
    lanes) must keep their terminate-nets. An escaping exception = `std::terminate`.
 8. **Builders return FRESH element trees.** Never cache/share a XAML element as `Content` across
@@ -502,6 +588,11 @@ retired (§9 RESOLUTION).
 - Hosted + lifecycle (framework-managed): `Tab::SetAgentToolTip` / `_UpdateAgentToolTip` /
   `_WireAgentToolTipUnload` / `_DetachAgentToolTip` (`Tab.cpp`).
 - The one rule: `ToolTipService` owns open/close — we never drive `IsOpen`; swap `Content` only while closed.
+- Body scrolling (§4b-bis): wheel-only, read on the tab HEADER (`Tab::EnsureAgentToolTipHoverHook`'s
+  `PointerWheelChanged`) → `TerminalPage::_ScrollTabAgentToolTip` → `_SyncTabTooltipScrollBar`
+  (render-only writes: a `TranslateTransform` on the body, a `ScaleTransform`+`TranslateTransform` on the
+  slim bar, which auto-hides a couple of seconds after the last notch). The card stays inert and
+  hit-test-invisible — still NO ScrollViewer (invariants 6a/6b).
 - Owner-recycle safety: the `TabViewItem().Unloaded → _DetachAgentToolTip` handler + the `_UpdateAgentToolTip`
   owner-loaded guard.
 - Off-thread body: `_EnsureTabTooltipSummary` + `_tabTooltipSummary`/`_tabTooltipSig`/`_tabTooltipSummaryInFlight`.

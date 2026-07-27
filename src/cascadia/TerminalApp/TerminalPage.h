@@ -982,6 +982,33 @@ namespace winrt::TerminalApp::implementation
         std::unordered_set<std::wstring> _tabTooltipSummaryInFlight;
         std::unordered_map<std::wstring, std::wstring> _tabTooltipSig;
         winrt::fire_and_forget _EnsureTabTooltipSummary(winrt::TerminalApp::Tab tab, winrt::hstring sessionId, bool codex, winrt::hstring codexId, winrt::hstring cwd); // Agentmaster (tab tooltip): off-thread resolve+stat+analyze the transcript; on mtime growth render the Summary box + re-host the card; mtime-cached + in-flight-guarded
+        // Agentmaster (tab tooltip — WHEEL SCROLL): a long conversation's Summary body is taller than the
+        // card's height budget, so the body is a VIEWPORT the mouse wheel scrolls, with a slim overlay
+        // scrollbar that fades out a couple of seconds after the last notch. The card itself stays inert +
+        // hit-test-invisible (HANDOVER_tab-tooltip.md invariant 6a: no ScrollViewer, ever — its
+        // DirectManipulation activation inside a ToolTip popup is the proven 0xC000027B fail-fast), so the
+        // wheel is read on the TAB HEADER (Tab::EnsureAgentToolTipHoverHook) and scrolling is nothing but
+        // a RenderTransform shift. These are WEAK element refs (a strong one would pin every superseded
+        // card — the card is rebuilt on every content change) plus the three leaf transforms we drive.
+        struct _AgentTooltipScroll
+        {
+            winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement> viewport; // the clipping host (one screenful)
+            winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement> content; // the FULL body (its ActualHeight is the extent)
+            winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement> thumb; // the slim auto-hiding bar
+            winrt::Windows::UI::Xaml::Media::TranslateTransform contentShift{ nullptr }; // scroll = shift the body up
+            winrt::Windows::UI::Xaml::Media::ScaleTransform thumbScale{ nullptr }; // thumb LENGTH (visible share)
+            winrt::Windows::UI::Xaml::Media::TranslateTransform thumbShift{ nullptr }; // thumb POSITION (scrolled fraction)
+            double offset{ 0.0 }; // current scroll offset, px from the top of the body
+        };
+        std::unordered_map<std::wstring, _AgentTooltipScroll> _tabTooltipScroll;
+        winrt::Windows::UI::Xaml::DispatcherTimer _tabTooltipScrollFadeTimer{ nullptr }; // ONE per window: only one tooltip is ever on screen
+        std::wstring _tabTooltipScrollFadeSession; // whose bar the timer is currently holding/fading
+        bool _tabTooltipScrollFadeHolding{ false }; // phase 1 (hold after the last notch) vs phase 2 (step-down fade)
+        double _SyncTabTooltipScrollBar(const std::wstring& sessionId, std::optional<double> offset, double opacity); // Agentmaster (tab tooltip WHEEL SCROLL): apply offset (nullopt = keep current) + re-fit/paint the slim bar; returns the max scrollable offset (0 = the body fits); RENDER-only writes (it also runs from the viewport's SizeChanged, where a layout write would be the popup layout-cycle fail-fast); UI thread
+        bool _ScrollTabAgentToolTip(const TerminalApp::Tab& tab, int wheelDelta); // Agentmaster (tab tooltip WHEEL SCROLL): a wheel notch over a tab whose rich card is OPEN — scroll the body; false = nothing to scroll here, leave the notch to the tab strip; resolves the tab's CURRENT session (re-home safe); UI thread
+        void _ResetTabAgentToolTipScroll(const std::wstring& sessionId); // Agentmaster (tab tooltip WHEEL SCROLL): a fresh hover starts at the top of the body (covers the unchanged-signature case, where the very same card element is re-shown); UI thread
+        void _ArmTabTooltipScrollBarFade(const std::wstring& sessionId); // Agentmaster (tab tooltip WHEEL SCROLL): (re)start the scrollbar's auto-hide — every notch restarts the hold, so it fades only once you stop scrolling; UI thread
+        void _OnTabTooltipScrollBarFadeTick(); // Agentmaster (tab tooltip WHEEL SCROLL): the two-phase auto-hide tick (hold, then a short step-down fade to invisible); UI thread
         // Agentmaster (tab status-dot RED FLASH): a hosted session that goes from Running to a resting
         // state (Idle / WaitingForInput / NeedsApproval — NOT Done or Error) on an UNVISITED tab blinks a
         // RED RING around that tab's status dot (a separate ellipse behind the dot, peeking out around
