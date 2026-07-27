@@ -18,6 +18,7 @@
 #include "pch.h"
 #include "AgentTabOverlay.h"
 
+#include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (the context-menu ShowAt / Copy Prompt handlers)
 #include "AgentCopyActions.h" // the shared CopySessionField (reused by the Triage Board's Copy submenu)
 #include "AgentStatusColors.h" // the ONE shared state->color palette (board / overlay / tab dot)
 #include "AgentTipHelpers.h" // AgentSetTip — the Dark-pinned, fast-open, stuck-proof hover tooltip recipe (vs raw ToolTipService)
@@ -519,14 +520,25 @@ namespace winrt::TerminalApp::implementation
                 {
                     return;
                 }
-                CopyTextToClipboard(*pendingPrompt);
-                if (const auto self = weak.get())
+                // CONTAINED for the same reason as the ShowAt above: this runs as a XAML event handler, so
+                // an escape (a bad_alloc building the log line off a huge prompt is the realistic one) is a
+                // process fail-fast, not a failed copy. The clipboard write comes FIRST so a throw in the
+                // audit line can never cost the user the copy they asked for.
+                try
                 {
-                    // Nav audit: the same "what did the user copy" trail CopySessionField writes for the
-                    // copy menus (this item is panel-local, so it doesn't route through that chokepoint).
-                    ::Agentmaster::LogNav(L"copy summary-prompt " + ::Agentmaster::ShortId(self->_sessionId) +
-                                          L" #" + std::to_wstring(*pendingPromptNo) +
-                                          L" chars=" + std::to_wstring(pendingPrompt->size()));
+                    CopyTextToClipboard(*pendingPrompt);
+                    if (const auto self = weak.get())
+                    {
+                        // Nav audit: the same "what did the user copy" trail CopySessionField writes for the
+                        // copy menus (this item is panel-local, so it doesn't route through that chokepoint).
+                        ::Agentmaster::LogNav(L"copy summary-prompt " + ::Agentmaster::ShortId(self->_sessionId) +
+                                              L" #" + std::to_wstring(*pendingPromptNo) +
+                                              L" chars=" + std::to_wstring(pendingPrompt->size()));
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"AgentTabOverlay summary Copy Prompt");
                 }
             });
             _summaryContextMenu.Items().Append(copyPromptItem);
@@ -590,30 +602,44 @@ namespace winrt::TerminalApp::implementation
                 {
                     return;
                 }
-                // "Copy Prompt": resolve the right-clicked row's prompt (_ctxPromptIndex, stamped by the
-                // element handler that showed this menu) and CAPTURE its exact text. Re-validated against
-                // the live prompt list, so a stale index from an earlier render can never copy anything.
-                pendingPrompt->clear();
-                const int promptIdx = self->_ctxPromptIndex;
-                if (promptIdx >= 0 && promptIdx < static_cast<int>(self->_summaryUserMsgs.size()))
+                // CONTAINED (this is a XAML event handler — an escape is a 0xC000027B fail-fast, and this
+                // body copies a whole prompt + walks the panel collecting the selection, so bad_alloc is
+                // the realistic escape on a huge conversation). Each capture is CLEARED before it is
+                // refilled and every item is filled BEFORE it is shown, so a contained throw can only
+                // leave an item under-offered (hidden, or shown-but-inert => a dead click) — never
+                // offering one prompt while holding another.
+                try
                 {
-                    *pendingPrompt = self->_summaryUserMsgs[promptIdx];
-                    *pendingPromptNo = promptIdx + 1;
+                    // "Copy Prompt": resolve the right-clicked row's prompt (_ctxPromptIndex, stamped by the
+                    // element handler that showed this menu) and CAPTURE its exact text. Re-validated against
+                    // the live prompt list, so a stale index from an earlier render can never copy anything.
+                    pendingPrompt->clear();
+                    const int promptIdx = self->_ctxPromptIndex;
+                    if (promptIdx >= 0 && promptIdx < static_cast<int>(self->_summaryUserMsgs.size()))
+                    {
+                        *pendingPrompt = self->_summaryUserMsgs[promptIdx];
+                        *pendingPromptNo = promptIdx + 1;
+                    }
+                    const bool hasPrompt = !pendingPrompt->empty();
+                    copyPromptItem.Visibility(hasPrompt ? Visibility::Visible : Visibility::Collapsed);
+                    if (hasPrompt)
+                    {
+                        // Name the message the click landed on, so the item is unambiguous on a long list.
+                        AgentSetTip(copyPromptItem, winrt::hstring{ L"Copy prompt " + std::to_wstring(promptIdx + 1) +
+                                                                    L" verbatim \x2014 the FULL exact text you typed (not this panel's shortened/escaped rendering)." });
+                    }
+                    pendingSel->clear();
+                    *pendingSel = self->_SummarySelectedText();
+                    const bool hasSel = !pendingSel->empty();
+                    copySelItem.Visibility(hasSel ? Visibility::Visible : Visibility::Collapsed);
+                    copySelSep.Visibility(hasSel ? Visibility::Visible : Visibility::Collapsed);
+                    truncItem.Text(self->_summaryTruncate ? winrt::hstring{ L"Disable Truncate Long Messages" } : winrt::hstring{ L"Enable Truncate Long Messages" });
+                    wrapItem.Text(self->_summaryWrapNewlines ? winrt::hstring{ L"Disable Wrap Messages" } : winrt::hstring{ L"Enable Wrap Messages" });
                 }
-                const bool hasPrompt = !pendingPrompt->empty();
-                copyPromptItem.Visibility(hasPrompt ? Visibility::Visible : Visibility::Collapsed);
-                if (hasPrompt)
+                catch (...)
                 {
-                    // Name the message the click landed on, so the item is unambiguous on a long list.
-                    AgentSetTip(copyPromptItem, winrt::hstring{ L"Copy prompt " + std::to_wstring(promptIdx + 1) +
-                                                                L" verbatim \x2014 the FULL exact text you typed (not this panel's shortened/escaped rendering)." });
+                    ::Agentmaster::AgentLogCaughtException(L"AgentTabOverlay summary context menu Opening");
                 }
-                *pendingSel = self->_SummarySelectedText();
-                const bool hasSel = !pendingSel->empty();
-                copySelItem.Visibility(hasSel ? Visibility::Visible : Visibility::Collapsed);
-                copySelSep.Visibility(hasSel ? Visibility::Visible : Visibility::Collapsed);
-                truncItem.Text(self->_summaryTruncate ? winrt::hstring{ L"Disable Truncate Long Messages" } : winrt::hstring{ L"Enable Truncate Long Messages" });
-                wrapItem.Text(self->_summaryWrapNewlines ? winrt::hstring{ L"Disable Wrap Messages" } : winrt::hstring{ L"Enable Wrap Messages" });
             });
             // Keep the panel bright while the menu is up: the right-tap moves the pointer onto the popup,
             // which fires the panel's PointerExited and would otherwise dim it (mirrors the badge copy
@@ -703,18 +729,31 @@ namespace winrt::TerminalApp::implementation
             {
                 return; // no anchor to show at — let the default path have it (index is stamped either way)
             }
-            Point pos{};
-            if (e.TryGetPosition(target, pos))
+            // CONTAINED: ShowAt is the throwing kind of XAML call (the tag-badge popup's E_UNEXPECTED /
+            // E_LAYOUTCYCLE class — see the CLAUDE.md gotcha), and an exception escaping a routed-event
+            // handler comes back as a STOWED-exception fail-fast (0xC000027B), i.e. the whole process for
+            // a context menu. Losing the menu on that gesture is the right degradation. Handled is set
+            // only once the menu is actually up, so a throw falls back to the ContextFlyout default path
+            // instead of eating the gesture entirely.
+            try
             {
-                winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutShowOptions opts{};
-                opts.Position(pos);
-                self->_summaryContextMenu.ShowAt(target, opts);
+                Point pos{};
+                if (e.TryGetPosition(target, pos))
+                {
+                    winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutShowOptions opts{};
+                    opts.Position(pos);
+                    self->_summaryContextMenu.ShowAt(target, opts);
+                }
+                else
+                {
+                    self->_summaryContextMenu.ShowAt(target); // keyboard-invoked (Shift+F10 / the menu key): no pointer position
+                }
+                e.Handled(true);
             }
-            else
+            catch (...)
             {
-                self->_summaryContextMenu.ShowAt(target);
+                ::Agentmaster::AgentLogCaughtException(L"AgentTabOverlay summary context menu ShowAt");
             }
-            e.Handled(true);
         });
     }
 
