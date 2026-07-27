@@ -716,6 +716,15 @@ namespace Agentmaster
     // "busy" linger after a real Stop costs exactly one ~2.5s sweep of toast latency).
     inline constexpr int64_t kNotifyExternalHoldCapMs = 30000; // fire a HELD toast at latest here — the backstop for a signal that never clears while the promotion never lands (a starved scanner / flapping heartbeat); must OUTLAST the promotion's worst-case latency (grace + scanner ticks), or the backstop fires the spurious toast right before the promotion would have dropped it
     inline constexpr int64_t kNotifyDuplicateToastMs = 20000; // per-session double-toast guard: at most one shown toast per session per this window — a Waiting -> Running -> Waiting flap otherwise toasts on EVERY Waiting entry (the Action Center Tag+Group replace dedupes the pile, not the interruptions)
+    // The completion toast's LINE 3 — how much of the just-finished prompt to carry (NOTIFICATIONS.md
+    // §3; the text goes through ::Agentmaster::PromptPreviewLine, so it is the FIRST line + "..." when
+    // there is more). Deliberately well ABOVE what a toast BANNER renders (~1 line, which the shell
+    // ellipsizes itself at whatever width/DPI it has — guessing that width here would truncate twice
+    // and lose text on a wide screen) and well BELOW the prompt bodies that actually occur, so the
+    // ACTION CENTER entry — which shows considerably more, and is where you read a toast you missed —
+    // carries a genuinely useful amount. The overlay's row 3 caps at 300 for a HUD row that WRAPS;
+    // this line cannot wrap, hence the tighter number.
+    inline constexpr size_t kNotifyPromptPreviewChars = 120;
     static_assert(kNotifyExternalHoldCapMs > kScanExternalWorkGraceMs + 2 * kScanSweepMs,
                   "the hold cap must outlast the outlived-turn promotion latency (grace + sweep ticks), else the backstop fires the spurious toast right before the promotion re-lights Running");
 

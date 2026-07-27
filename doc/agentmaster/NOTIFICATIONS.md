@@ -21,6 +21,7 @@ changes **from Running to anything else** (the default rule — configurable per
 ```
 <session title>
 Has completed after 2h30m and is waiting for you
+“rebase onto agentmaster and fix the three conflicts in TabHeaderControl...”
 ```
 
 - **Line 1** — the session's title (the ONE title value, Rule #11: Explorer name == tab title ==
@@ -31,6 +32,20 @@ Has completed after 2h30m and is waiting for you
   `done` / `error` — the tooltip's `TtStateLabel` vocabulary). When the Running **entry** edge was never
   observed (a session adopted or moved into the window mid-turn), the `after <duration>` clause is
   **omitted** — an honest "no duration" over an under-reported one.
+- **Line 3 — WHICH request just came back**: a quoted, one-line truncation of the prompt whose turn just
+  finished. Lines 1+2 say *which session* and *what outcome*, but never what it was **doing** — and a
+  title names a folder, not a task, which is the missing half when three sessions finish while you are
+  elsewhere. Sourced from the registry queue's **newest `Sent` entry**
+  (`LastDeliveredPrompt`, SessionModels.h) — the same record the Auto Testing's SENT summary renders, so
+  it covers a prompt **typed straight into the ConPTY** as well as one the autorunner injected. **Both
+  origins count**: an `Autorun` prompt is no less the user's message than a `Typed` one (they queued
+  it), and filtering by origin would blank the line for exactly the autorunner-driven sessions whose
+  completions you are least likely to be watching. Shortened by `PromptPreviewLine` — **first line only**,
+  ≤ `kNotifyPromptPreviewChars` (**120**) chars, `...` whenever there is more than what's shown. The
+  line is **omitted entirely** when there is no delivered prompt (a never-prompted launch, a managed
+  **Codex** — which records no prompts — or a session adopted after its last turn); the toast then reads
+  exactly as it did before, two lines. Safe even for a **held** toast fired seconds later: a new prompt
+  would have put the session back in Running, which `DecideHeldToast` **drops** on.
 - **Clicking the toast surfaces the session**: the hosting window is brought to the **front**
   (restore-if-minimized + foreground) and the session's **tab is selected** — see §4.
 - Both managed agents ride it: **Claude** (all six states) and **Codex** at its 3-state floor
@@ -109,9 +124,15 @@ SessionRegistry::_notify (any session change; bridge/scanner/UI thread)
 
 ## 4. The toast itself (`_ShowAgentSessionToast`)
 
-- **ToastGeneric** XML with two `<text>` lines; the title/body go in as **DOM text nodes**
-  (`XmlDocument::CreateTextNode`), so XML-special characters in a session title (`&`, `<`, quotes …)
-  are escaped by the DOM — never hand-built markup.
+- **ToastGeneric** XML with two or three `<text>` lines; every line goes in as a **DOM text node**
+  (`XmlDocument::CreateTextNode`), so XML-special characters (`&`, `<`, quotes …) are escaped by the
+  DOM — never hand-built markup. That matters most for **line 3**, which is arbitrary user prompt text
+  and by far the likeliest source of them.
+- **The template is composed, not picked from literals.** Two independent options — the silent audio
+  element and whether line 3 exists at all — would otherwise need four hand-maintained strings. An
+  empty `detail` emits only two `<text>` elements, so a session with no delivered prompt produces
+  byte-for-byte the toast it always did. (ToastGeneric caps at 4 text elements, and a **banner**
+  renders the title + ~2 body lines, so three is the most that shows without expanding it.)
 - **Tag + Group replacement.** `Tag = ShortId(sessionId)` (first 8 chars — fits the legacy 16-char Tag
   cap) + `Group = "agentmaster"`: a session's **newer** toast REPLACES its older one in the Action
   Center instead of piling up. Distinct sessions keep distinct toasts.
@@ -255,7 +276,9 @@ the track leak-proof:
   `Has completed after <span> and is waiting for you`, and `[notify] <id8> running -> waiting for you
   (after <span>)` lands in hooks.log; the cog's checkboxes mute per state; the master OFF silences
   everything; `notifySound` OFF shows a silent toast; a second completion replaces the first in Action
-  Center; the banner stays up the **long** ~25 s rather than the short default. **Click path (the fix):** startup logs `[notify] toast activator registered …`, and clicking a
+  Center; the banner stays up the **long** ~25 s rather than the short default; **line 3** quotes the
+  truncated prompt that just finished (and a never-prompted / Codex session shows a two-line toast
+  instead, not an empty quote). **Click path (the fix):** startup logs `[notify] toast activator registered …`, and clicking a
   toast restores/foregrounds the hosting window + selects the tab (+ `[nav] notify-click …`) **with NO
   stray window** — the regression this section exists for. **Hold path:** a completion that leaves a
   background shell/agent running logs `[notify-hold]` → `[notify-drop]` with NO pop (the session

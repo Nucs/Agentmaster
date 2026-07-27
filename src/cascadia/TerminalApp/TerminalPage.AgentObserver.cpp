@@ -2831,12 +2831,40 @@ namespace winrt::TerminalApp::implementation
         body += L" and is ";
         body += TtStateLabel(state);
 
+        // Line 3: WHICH request just came back — a one-line truncation of the prompt whose turn just
+        // finished, quoted. Lines 1+2 identify the session and its outcome but never what it was
+        // DOING, which is the missing half when several sessions finish while you are elsewhere: a
+        // title tells you the folder, not the task. Sourced from the registry queue's newest Sent
+        // entry (::Agentmaster::LastDeliveredPrompt — the same record the Auto Testing's SENT summary
+        // renders, so it covers a prompt typed straight into the ConPTY as well as one we injected).
+        // OMITTED ENTIRELY when there is no delivered prompt (a never-prompted launch, a managed
+        // Codex — no prompt records — or a session adopted after its last turn): the toast then reads
+        // exactly as it did before, two lines. Prefer the prompt BODY, falling back to its short
+        // label, mirroring the overlay's row-3 choice.
+        std::wstring prompt;
+        if (_sessionRegistry)
+        {
+            if (const auto info = _sessionRegistry->Get(sessionId))
+            {
+                if (const auto* p = ::Agentmaster::LastDeliveredPrompt(info->queue))
+                {
+                    prompt = ::Agentmaster::PromptPreviewLine(!p->text.empty() ? p->text : p->label,
+                                                              ::Agentmaster::kNotifyPromptPreviewChars);
+                }
+            }
+        }
+        // Typographic quotes mark it as the user's own words rather than more status prose (the same
+        // convention the cog's tooltip uses when it quotes a toast). PromptPreviewLine already
+        // returned "" for an all-whitespace prompt, so an empty quote can never render.
+        const std::wstring line3 = prompt.empty() ? std::wstring{} : (L"\x201C" + prompt + L"\x201D");
+
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[notify] " + ::Agentmaster::ShortId(sessionId) + L" running -> " + TtStateLabel(state) +
                                           (span.empty() ? std::wstring{} : (L" (after " + span + L")")) +
-                                          (heldForMs > 0 ? (L" (held " + std::to_wstring(heldForMs / 1000) + L"s)") : std::wstring{}) + L"\n");
+                                          (heldForMs > 0 ? (L" (held " + std::to_wstring(heldForMs / 1000) + L"s)") : std::wstring{}) +
+                                          (line3.empty() ? L" (no prompt line)" : L"") + L"\n");
         _agentToastLastShownMs[sessionId] = now;
-        _ShowAgentSessionToast(sessionId, title, body, !_appSettings.notifySound);
+        _ShowAgentSessionToast(sessionId, title, body, line3, !_appSettings.notifySound);
     }
 
     // Agentmaster (System notifications): sweep the HELD completion toasts on the liveness tick
@@ -2912,10 +2940,11 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster (System notifications): raise ONE Windows toast for a session — line 1 the title,
-    // line 2 the completion body. The strings go in as DOM TEXT NODES (CreateTextNode), so XML-special
-    // characters in a session title are escaped by the DOM, never hand-built markup. Tag+Group make a
-    // session's newer toast REPLACE its older one in the Action Center instead of piling up (ShortId
-    // fits the legacy 16-char Tag cap).
+    // line 2 the completion body, and OPTIONAL line 3 the just-finished prompt (`detail`, omitted when
+    // empty). The strings go in as DOM TEXT NODES (CreateTextNode), so XML-special characters in a
+    // session title — or in a PROMPT, which is arbitrary user text and the likeliest source of them —
+    // are escaped by the DOM, never hand-built markup. Tag+Group make a session's newer toast REPLACE
+    // its older one in the Action Center instead of piling up (ShortId fits the legacy 16-char Tag cap).
     //
     // ON-SCREEN TIME: `duration="long"` (~25s) rather than the default short (~5-7s, whatever the user's
     // "Show notifications for" ease-of-access setting says). The Windows toast schema has NO arbitrary
@@ -2944,17 +2973,37 @@ namespace winrt::TerminalApp::implementation
     // Best-effort by design: CreateToastNotifier throws on a build with no package identity (no AUMID,
     // e.g. unpackaged test hosts) and Show can fail when notifications are disabled system-wide —
     // swallowed, logged once.
-    void TerminalPage::_ShowAgentSessionToast(const std::wstring& sessionId, const std::wstring& title, const std::wstring& body, bool silent)
+    void TerminalPage::_ShowAgentSessionToast(const std::wstring& sessionId, const std::wstring& title, const std::wstring& body, const std::wstring& detail, bool silent)
     {
         try
         {
+            // The template is COMPOSED rather than picked from literals: two independent options (the
+            // silent audio element, and whether there is a 3rd line at all) would otherwise need four
+            // hand-maintained strings. `detail` empty => only two <text> elements are emitted, so a
+            // session with no delivered prompt produces byte-for-byte the toast it always did. Note
+            // ToastGeneric caps at 4 text elements and a BANNER renders title + ~2 body lines, so
+            // three is the most that shows without the user expanding it.
+            std::wstring xml = LR"(<toast duration="long"><visual><binding template="ToastGeneric"><text></text><text></text>)";
+            if (!detail.empty())
+            {
+                xml += L"<text></text>";
+            }
+            xml += L"</binding></visual>";
+            if (silent)
+            {
+                xml += LR"(<audio silent="true"/>)";
+            }
+            xml += L"</toast>";
+
             winrt::Windows::Data::Xml::Dom::XmlDocument doc;
-            doc.LoadXml(silent ?
-                            LR"(<toast duration="long"><visual><binding template="ToastGeneric"><text></text><text></text></binding></visual><audio silent="true"/></toast>)" :
-                            LR"(<toast duration="long"><visual><binding template="ToastGeneric"><text></text><text></text></binding></visual></toast>)");
+            doc.LoadXml(winrt::hstring{ xml });
             const auto texts = doc.GetElementsByTagName(L"text");
             texts.Item(0).AppendChild(doc.CreateTextNode(winrt::hstring{ title }));
             texts.Item(1).AppendChild(doc.CreateTextNode(winrt::hstring{ body }));
+            if (!detail.empty())
+            {
+                texts.Item(2).AppendChild(doc.CreateTextNode(winrt::hstring{ detail }));
+            }
             // The activation payload: which session to surface. Set as an ATTRIBUTE VALUE via the DOM
             // (like the text nodes) so a session id can never break the markup. It comes back verbatim
             // as Activate()'s invokedArgs — a session id is a plain GUID, so no encoding is needed.

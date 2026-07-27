@@ -166,36 +166,14 @@ namespace
     }
 
     // Agentmaster (TAB_OVERLAY row 3): a one-line preview of a queued prompt — its FIRST line, capped
-    // at `maxChars` characters. The displayed text content is at most `maxChars` chars; a trailing
-    // "..." is appended when EITHER the first line is longer than the cap (so it was truncated) OR
-    // there is real content after the first line (further lines), so "..." always signals "there is
-    // more than what's shown". Leading blank lines / whitespace are skipped so a prompt that opens
-    // with a newline still previews real text; trailing spaces on the line are trimmed. Returns ""
-    // for an all-whitespace prompt (the caller then hides the row).
+    // at `maxChars` characters, a trailing "..." whenever there is more than what's shown. The rule
+    // itself now lives in the engine as ::Agentmaster::PromptPreviewLine (SessionModels.h, PURE +
+    // unit-tested), because the completion TOAST's line 3 previews a prompt the same way (its own
+    // cap, same semantics — NOTIFICATIONS.md §3) and two hand-kept copies would drift. Kept as a
+    // named local so this TU's call sites read unchanged.
     std::wstring FirstLinePreview(const std::wstring& text, size_t maxChars)
     {
-        const size_t start = text.find_first_not_of(L" \t\r\n");
-        if (start == std::wstring::npos)
-        {
-            return {}; // nothing but whitespace
-        }
-        const size_t nl = text.find_first_of(L"\r\n", start);
-        std::wstring line = (nl == std::wstring::npos) ? text.substr(start) : text.substr(start, nl - start);
-        while (!line.empty() && (line.back() == L' ' || line.back() == L'\t'))
-        {
-            line.pop_back();
-        }
-        // Is there real (non-whitespace) content beyond the first line? If so, signal it with "..." too.
-        const bool more = (nl != std::wstring::npos) && (text.find_first_not_of(L" \t\r\n", nl) != std::wstring::npos);
-        if (line.size() > maxChars)
-        {
-            line = line.substr(0, maxChars) + L"..."; // surpassed the cap -> truncate + ellipsis
-        }
-        else if (more)
-        {
-            line += L"..."; // first line fits, but there's more below it
-        }
-        return line;
+        return ::Agentmaster::PromptPreviewLine(text, maxChars);
     }
 
     // A short confirmation chime for a completed row-3 action (copy / open). Async so it never blocks

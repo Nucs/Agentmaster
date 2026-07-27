@@ -864,6 +864,70 @@ void TestBlockedAndInterruptedStates()
     CHECK(!ShouldSuppressDuplicateToast(100000, 0), "toast-dedupe: never-shown fires");
     static_assert(kNotifyExternalHoldCapMs > kScanExternalWorkGraceMs + 2 * kScanSweepMs, "the hold cap must outlast the outlived-turn promotion latency (grace + sweep ticks), else the backstop fires the spurious toast right before the promotion drops it");
 
+    // --- the completion toast's LINE 3: a truncation of the prompt whose turn just finished
+    //     (NOTIFICATIONS.md §3). Two pure rules — WHICH prompt (LastDeliveredPrompt) and HOW it is
+    //     shortened (PromptPreviewLine, THE one preview rule, shared with the overlay's row 3).
+    CHECK(PromptPreviewLine(L"fix the flaky test", 120) == L"fix the flaky test", "toast-line3: a short single-line prompt previews verbatim, no ellipsis");
+    CHECK(PromptPreviewLine(L"", 120).empty(), "toast-line3: an empty prompt previews empty (the caller omits the line)");
+    CHECK(PromptPreviewLine(L"   \t\r\n  ", 120).empty(), "toast-line3: an all-whitespace prompt previews empty — never a blank quote");
+    CHECK(PromptPreviewLine(L"\n\n  real text", 120) == L"real text", "toast-line3: leading blank lines are skipped so a prompt opening with a newline still previews real text");
+    CHECK(PromptPreviewLine(L"first line\nsecond line", 120) == L"first line...", "toast-line3: content below the first line => '...' even though the line itself fits");
+    CHECK(PromptPreviewLine(L"only line\n\n  \t ", 120) == L"only line", "toast-line3: trailing whitespace-only lines are NOT 'more' — no misleading ellipsis");
+    CHECK(PromptPreviewLine(L"trailing spaces here   ", 120) == L"trailing spaces here", "toast-line3: trailing spaces/tabs are trimmed off the line");
+    CHECK(PromptPreviewLine(L"abcdefghij", 4) == L"abcd...", "toast-line3: a line past the cap truncates AT the cap and marks it (text content == the cap)");
+    CHECK(PromptPreviewLine(L"abcd", 4) == L"abcd", "toast-line3: exactly at the cap is not truncated (the boundary is inclusive)");
+    // A real prompt at the real cap: 120 chars of content + the ellipsis marker.
+    {
+        const std::wstring longPrompt(400, L'x');
+        const auto preview = PromptPreviewLine(longPrompt, kNotifyPromptPreviewChars);
+        CHECK(preview.size() == kNotifyPromptPreviewChars + 3, "toast-line3: a 400-char prompt yields exactly kNotifyPromptPreviewChars + '...'");
+    }
+    // WHICH prompt: the newest DELIVERED (Sent) entry, either origin — Pending/Failed/Skipped never win.
+    {
+        std::vector<QueuedPrompt> q;
+        CHECK(LastDeliveredPrompt(q) == nullptr, "toast-line3: an empty queue has no just-finished prompt (never-prompted launch / managed Codex) -> line omitted");
+        QueuedPrompt pending;
+        pending.text = L"not sent yet";
+        pending.status = PromptStatus::Pending;
+        q.push_back(pending);
+        CHECK(LastDeliveredPrompt(q) == nullptr, "toast-line3: a queue of only PENDING work has no delivered prompt — the toast must not quote a prompt that never ran");
+        QueuedPrompt older;
+        older.text = L"the older turn";
+        older.status = PromptStatus::Sent;
+        older.sentAtUnixMs = 1000;
+        older.origin = PromptOrigin::Autorun;
+        q.push_back(older);
+        CHECK(LastDeliveredPrompt(q) && LastDeliveredPrompt(q)->text == L"the older turn", "toast-line3: an AUTORUN prompt counts — the user queued it, and autorunner sessions are the least-watched");
+        QueuedPrompt newer;
+        newer.text = L"the turn that just finished";
+        newer.status = PromptStatus::Sent;
+        newer.sentAtUnixMs = 2000;
+        newer.origin = PromptOrigin::Typed;
+        q.push_back(newer);
+        CHECK(LastDeliveredPrompt(q)->text == L"the turn that just finished", "toast-line3: the NEWEST Sent entry wins (a TYPED capture counts equally)");
+        // Failure/skip after it must not become "what just finished".
+        QueuedPrompt failed;
+        failed.text = L"never landed";
+        failed.status = PromptStatus::Failed;
+        failed.sentAtUnixMs = 3000;
+        q.push_back(failed);
+        CHECK(LastDeliveredPrompt(q)->text == L"the turn that just finished", "toast-line3: a FAILED (never-delivered) entry is skipped even though it is newer");
+        // Reordered in the Auto Testing / persisted by an older build: the STAMP decides, not position.
+        std::vector<QueuedPrompt> reordered{ q[3], q[2], q[1] };
+        CHECK(LastDeliveredPrompt(reordered)->text == L"the turn that just finished", "toast-line3: out-of-order entries rank by sentAtUnixMs, not position");
+        // Legacy entries with no stamp at all fall back to position (append order IS chronological).
+        std::vector<QueuedPrompt> unstamped;
+        QueuedPrompt a;
+        a.text = L"first";
+        a.status = PromptStatus::Sent;
+        QueuedPrompt b;
+        b.text = L"last";
+        b.status = PromptStatus::Sent;
+        unstamped.push_back(a);
+        unstamped.push_back(b);
+        CHECK(LastDeliveredPrompt(unstamped)->text == L"last", "toast-line3: zero-stamp legacy entries tie-break by POSITION (later wins)");
+    }
+
     // --- presence-IDLE release: claude's OWN heartbeat says "idle" while we are stuck Running on a
     //     NON-terminal tail (a trailing user prompt that produced no assistant output + a dropped/absent
     //     Stop). The IDLE mirror of PresenceIsBusy; it covers the exact gap ShouldSynthesizeStop cannot

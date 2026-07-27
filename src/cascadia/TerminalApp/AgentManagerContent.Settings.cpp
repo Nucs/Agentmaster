@@ -1271,6 +1271,7 @@ namespace winrt::TerminalApp::implementation
         // needs you" cue for tabs (and windows) you're not looking at:
         //     <session title>
         //     Has completed after <2h30m> and is <status>
+        //     "<the truncated prompt whose turn just finished>"   (omitted when there is none)
         // The DEFAULT rule is "Running -> anything else" (master ON + every target state checked); the
         // checkboxes mute individual target states. Fired by the window hosting the session's tab on the
         // registry-observer push (TerminalPage::_EvaluateAgentNotification), so exactly one toast per
@@ -1279,7 +1280,7 @@ namespace winrt::TerminalApp::implementation
         panel.Children().Append(SettingsSeparator(L"SYSTEM NOTIFICATIONS", true)); // leading section
         _setNotifyEnabled = ToggleSwitch{};
         _setNotifyEnabled.Header(winrt::box_value(L"Show Windows notifications"));
-        AgentSetTip(_setNotifyEnabled, L"Raise a Windows notification when a session's status changes from Running to another state \x2014 \x201C<title>: Has completed after 2h30m and is waiting for you\x201D. The checkboxes below pick which states notify. Default on.");
+        AgentSetTip(_setNotifyEnabled, L"Raise a Windows notification when a session's status changes from Running to another state \x2014 \x201C<title>: Has completed after 2h30m and is waiting for you\x201D, plus a third line quoting the prompt that just finished (so you can tell WHICH request came back). The checkboxes below pick which states notify. Default on.");
         // The master gates the rest: greying the dependents while OFF makes "nothing will fire" legible
         // at a glance (the _setWaitingNever slider-enable idiom).
         _setNotifyEnabled.Toggled([this](const IInspectable&, const RoutedEventArgs&) {

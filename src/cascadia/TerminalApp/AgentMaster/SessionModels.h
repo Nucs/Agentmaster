@@ -385,6 +385,83 @@ namespace Agentmaster
         }
     }
 
+    // Agentmaster: a ONE-LINE, capped preview of a prompt body — its FIRST line, at most `maxChars`
+    // characters of text content. A trailing "..." is appended when EITHER the first line surpassed
+    // the cap (truncated) OR there is real content after it (further lines), so "..." ALWAYS means
+    // "there is more than what's shown". Leading blank lines / whitespace are skipped (a prompt that
+    // opens with a newline still previews real text); trailing spaces are trimmed. Returns "" for an
+    // all-whitespace (or empty) prompt — every caller reads that as "nothing to show" and omits its
+    // row/line rather than rendering an empty quote.
+    //
+    // THE one preview rule, shared by the two surfaces that show a prompt in a single line: the
+    // per-tab overlay's row 3 (the NEXT queued prompt — TAB_OVERLAY.md, whose FirstLinePreview now
+    // delegates here) and the completion toast's line 3 (the prompt that JUST FINISHED —
+    // NOTIFICATIONS.md §3). They pass different caps because the media differ (a wrapping HUD row vs
+    // a toast line the shell hard-ellipsizes), but the truncation SEMANTICS must not drift — the
+    // AgentStatusColors.h precedent: the second consumer is the cue to factor it. PURE.
+    inline std::wstring PromptPreviewLine(const std::wstring& text, size_t maxChars)
+    {
+        const size_t start = text.find_first_not_of(L" \t\r\n");
+        if (start == std::wstring::npos)
+        {
+            return {}; // nothing but whitespace
+        }
+        const size_t nl = text.find_first_of(L"\r\n", start);
+        std::wstring line = (nl == std::wstring::npos) ? text.substr(start) : text.substr(start, nl - start);
+        while (!line.empty() && (line.back() == L' ' || line.back() == L'\t'))
+        {
+            line.pop_back();
+        }
+        // Is there real (non-whitespace) content beyond the first line? If so, signal it with "..." too.
+        const bool more = (nl != std::wstring::npos) && (text.find_first_not_of(L" \t\r\n", nl) != std::wstring::npos);
+        if (line.size() > maxChars)
+        {
+            line = line.substr(0, maxChars) + L"..."; // surpassed the cap -> truncate + ellipsis
+        }
+        else if (more)
+        {
+            line += L"..."; // first line fits, but there's more below it
+        }
+        return line;
+    }
+
+    // Agentmaster (NOTIFICATIONS.md §3 — the completion toast's line 3): the prompt whose turn JUST
+    // FINISHED, i.e. the NEWEST message the session actually received. Returns nullptr when the
+    // session has no delivered message at all (a never-prompted launch, a managed Codex — which
+    // records no prompts — or a session adopted after its last turn), and every caller then simply
+    // omits the line rather than inventing one.
+    //
+    // "Delivered" == status Sent, which is exactly the set the Auto Testing's SENT summary shows:
+    // BOTH origins count. An Autorun prompt is no less the user's message than a Typed one — they
+    // queued it — and the toast answers "which of my requests just came back", so filtering by
+    // origin would blank the line precisely for the autorunner-driven sessions whose completions you
+    // are least likely to be watching.
+    //
+    // Newest = the greatest sentAtUnixMs, ties broken by POSITION (later wins). Position alone would
+    // do for a live queue (both record seams — SessionRegistry's UserPromptSubmit capture and the
+    // scanner's NoteExternalPrompt back-fill — stamp `now` and push_back, so append order IS
+    // chronological), but the stamp is what keeps a queue REORDERED in the Auto Testing, or persisted
+    // by an older build, honest; the positional tiebreak then covers legacy entries whose stamp is 0.
+    //
+    // Safe at toast-fire time, including a HELD toast fired seconds later: a new prompt would have
+    // put the session back in Running, and DecideHeldToast DROPS a held toast on exactly that. PURE.
+    inline const QueuedPrompt* LastDeliveredPrompt(const std::vector<QueuedPrompt>& queue) noexcept
+    {
+        const QueuedPrompt* best = nullptr;
+        for (const auto& p : queue)
+        {
+            if (p.status != PromptStatus::Sent)
+            {
+                continue;
+            }
+            if (!best || p.sentAtUnixMs >= best->sentAtUnixMs) // >= : equal/zero stamps fall back to position
+            {
+                best = &p;
+            }
+        }
+        return best;
+    }
+
     // Agentmaster (COMMANDS.md §5b — the /handover-standby FILL): build the ConPTY input that
     // TYPES `text` into Claude's Ink TUI input box WITHOUT submitting it — BuildPromptSubmission's
     // bracketed paste minus the trailing submit CR, so the draft sits in the box exactly one Enter
@@ -1627,8 +1704,11 @@ namespace Agentmaster
         // another state (the "your agent finished / needs you" cue). The toast reads:
         //     <session title>
         //     Has completed after <2h30m> and is <status>
+        //     "<the truncated prompt whose turn just finished>"
         // ("after <duration>" is the Running span — how long the turn worked; omitted when the
-        // Running entry wasn't observed, e.g. a session adopted mid-turn). Fired by the ONE window
+        // Running entry wasn't observed, e.g. a session adopted mid-turn. The third line is
+        // LastDeliveredPrompt through PromptPreviewLine — which request came back — and is omitted
+        // entirely when the session has no delivered prompt, e.g. a managed Codex.) Fired by the ONE window
         // hosting the session's tab (TerminalPage::_EvaluateAgentNotification, riding the same
         // registry-observer push as the tab status dot), so exactly one toast per transition
         // regardless of how many windows are open. Clicking the toast jumps to the session's tab
