@@ -382,4 +382,83 @@ namespace Agentmaster
         }
         return outText;
     }
+
+    // Agentmaster (PENDING_INPUT.md §10 -- the restore RE-FILL): a whole-draft expansion verdict.
+    // complete == true means `text` holds the draft with EVERY marker expanded to its verified cache
+    // content (a marker-free draft is trivially complete, text == draft verbatim); complete == false
+    // means the expansion was REFUSED as a whole and `text` is empty -- the caller must NOT re-type
+    // the draft (a literal "[Pasted text #N +M lines]" label pasted back into a fresh session is
+    // indistinguishable from a real placeholder on screen but submits as junk text, silently dropping
+    // the content behind it -- the DRAFT SWAP's §9 refusal rule, applied here for the same reason).
+    struct DraftPasteExpansion
+    {
+        bool complete{ false };
+        int expandedCount{ 0 }; // markers actually substituted (0 for a marker-free draft)
+        std::wstring text; // the fill text ("" when refused)
+    };
+
+    // Expand EVERY marker in a draft against the supplied cache file set, ALL-OR-REFUSE:
+    //   * no markers            -> complete, text == draft (the common case costs one scan);
+    //   * any marker unresolved / ambiguous (ResolvePasteMarkers refused)      -> refuse the whole;
+    //   * two markers sharing ONE draft line (expansion is line-replacing, so expanding either
+    //     would eat the other -- vanishingly rare, honest to keep the placeholders)  -> refuse;
+    //   * any single expansion refused (ExpandPasteMarker's own rules)         -> refuse the whole.
+    // Markers are substituted LAST-first: replacing draft line k rewrites lines >= k only, so every
+    // EARLIER marker's recorded draftLine/fragments stay valid against the partially-expanded text
+    // (FindPasteMarkers emits them in ascending line order). A degenerate expansion whose result is
+    // the empty string (a one-line draft whose paste is a single empty line) reads as a refusal --
+    // safe, the placeholder form is kept. PURE (the impure adapter feeds the cache files in).
+    inline DraftPasteExpansion ExpandDraftPasteMarkers(std::wstring_view draft, const std::vector<PasteFileText>& files)
+    {
+        DraftPasteExpansion out;
+        const auto markers = FindPasteMarkers(draft);
+        if (markers.empty())
+        {
+            out.complete = true;
+            out.text.assign(draft);
+            return out;
+        }
+        const auto res = ResolvePasteMarkers(markers, files);
+        for (size_t i = 0; i < markers.size(); ++i)
+        {
+            if (i >= res.size() || !res[i].resolved)
+            {
+                return DraftPasteExpansion{}; // any unresolved marker refuses the whole draft
+            }
+            for (size_t j = i + 1; j < markers.size(); ++j)
+            {
+                if (markers[j].draftLine == markers[i].draftLine)
+                {
+                    return DraftPasteExpansion{}; // two markers on one line: expanding either eats the other
+                }
+            }
+        }
+        std::wstring cur{ draft };
+        for (size_t k = markers.size(); k-- > 0;)
+        {
+            const PasteFileText* file = nullptr;
+            for (const auto& f : files)
+            {
+                if (f.name == res[k].fileName)
+                {
+                    file = &f;
+                    break;
+                }
+            }
+            if (!file)
+            {
+                return DraftPasteExpansion{}; // resolution named a file the set no longer carries
+            }
+            auto expanded = ExpandPasteMarker(cur, markers[k], file->text);
+            if (expanded.empty())
+            {
+                return DraftPasteExpansion{}; // this marker's expansion refused -> refuse the whole
+            }
+            cur = std::move(expanded);
+            ++out.expandedCount;
+        }
+        out.complete = true;
+        out.text = std::move(cur);
+        return out;
+    }
 }

@@ -889,6 +889,40 @@ namespace winrt::TerminalApp::implementation
         std::unordered_map<std::wstring, PendingHandoverDelete> _pendingHandoverDeletes;
         winrt::Windows::Foundation::IAsyncAction _SweepHandoverDeletesImpl(); // Agentmaster (terminate-net): the body, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
         winrt::fire_and_forget _SweepHandoverDeletes(); // ticked beside _PumpHandoverInjections (TerminalPage.AgentObserver.cpp); self-marshals to the UI thread
+        // Agentmaster (PENDING_INPUT.md §10 — the restore RE-FILL): a REOPENED session whose record
+        // carries a persisted unsent-draft MEMORY gets that draft TYPED BACK into its fresh claude's
+        // input box once the tab actually starts — the /handover-standby channel verbatim
+        // (Inject(BuildPromptFill) — a bracketed paste with NO submit CR — then VERIFY by reading the
+        // box back via ReadPendingInputDraft, re-fill on an eaten paste, at most 2 attempts), so an
+        // unsent message survives an app restart / close→resume as a REAL box draft instead of a
+        // display-only memory that revalidation clears ~5s after the tab starts (claude never
+        // restores its own input box). {sessionId -> the fill}. draftText is the FILL text — paste
+        // placeholders already EXPANDED by the arm's off-thread cache resolve (claude re-collapses +
+        // re-binds them at paste time); an unresolvable placeholder REFUSED the arm entirely (the §9
+        // rule: re-typing a literal "[Pasted text #N]" label silently drops the content behind it on
+        // submit). armedUnixMs (system clock, the resume-launch instant) is the HANDS-OFF baseline:
+        // a prompt submitted at/after it means the user / the autorunner owns the session
+        // (RestoredDraftSessionTakenOver — the resume twin of the standby latch, whose bare "!= 0"
+        // test a resumed session's history would always trip). While an entry is armed,
+        // _ScanPendingInput HOLDS that session's clear debounce (the freshly resumed box is empty
+        // until the pump fills it — those first empty reads must not erase the very memory being
+        // delivered) and drives the dots from the memory. UI-thread-only state: the arm
+        // (fire_and_forget off _LaunchClaudeSession) and the pump both land on the dispatcher.
+        // Gated by AppSettings::restoreDraftOnResume (cog, default ON); OFF = the classic
+        // display-only memory. Not restart-durable ITSELF — the registry memory is the durable copy,
+        // and the next resume re-arms from it.
+        struct PendingDraftRestore
+        {
+            std::wstring draftText; // the fill (markers expanded); the registry memory keeps the rendered form
+            int64_t armedUnixMs{ 0 }; // system-clock arm instant — RestoredDraftSessionTakenOver's baseline
+            int64_t startedSeenMs{ 0 }; // tick clock: first pump tick that saw SessionInfo.started (settle + started-deadline anchor)
+            int64_t injectedAtMs{ 0 }; // tick clock: when the last fill was injected (0 == not yet; drives the verify window)
+            int32_t fillAttempts{ 0 }; // fills injected so far (capped)
+        };
+        std::unordered_map<std::wstring, PendingDraftRestore> _pendingDraftRestores;
+        winrt::fire_and_forget _ArmDraftRestore(std::wstring sessionId, std::wstring draft); // Agentmaster (PENDING_INPUT.md §10): expand the memory's paste placeholders OFF-THREAD, then arm (or refuse) on the dispatcher; called from _LaunchClaudeSession for a restored record with a non-empty pendingInput
+        winrt::Windows::Foundation::IAsyncAction _PumpDraftRestoresImpl(); // Agentmaster (terminate-net): the body, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
+        winrt::fire_and_forget _PumpDraftRestores(); // ticked beside _PumpHandoverInjections (TerminalPage.AgentObserver.cpp); self-marshals to the UI thread
         winrt::fire_and_forget _RestoreClaudeSessions(); // Agentmaster: load persisted sessions as ARCHIVED (restorable) — does NOT auto-launch (Rule #6)
         void _RestoreWindowTabs(); // Agentmaster (M10 window-grouped restore): re-home THIS window's persisted tabs — resume each Claude session + replay each Other (shell) tab from its WindowRecord, in order. Only a claimed record (a reopened window) restores.
         void _AttachClaudeOverlay(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster: build + install the per-tab link badge (gated on AppSettings.showTabOverlay)

@@ -986,6 +986,24 @@ namespace winrt::TerminalApp::implementation
             return self ? self->_AcceptPromptSubmission(submission) : false; // gone => not accepted; the caller rolls back (Rule #4)
         });
 
+        // Agentmaster (PENDING_INPUT.md §10 — the restore RE-FILL): a REOPENED record carrying a
+        // persisted unsent-draft memory gets it typed back into the fresh claude's input box once the
+        // tab actually starts — the /handover-standby fill (bracketed paste, NO submit CR), so the
+        // draft survives the restart as a real box draft instead of a display-only memory that
+        // revalidation clears ~5s after the tab starts. Armed HERE because this is the one seam every
+        // reopen path funnels through (Sessions-browser resume, window-restore rehome, re-fork,
+        // restore-fresh — the fresh conversation keeps the dir + queue, and an unsent draft was never
+        // part of any conversation, so it carries too); a fresh spawn / fork has no memory, making
+        // this a restored-record no-op. The arm instant is the takeover baseline: any prompt
+        // submitted at/after it (user, autorunner, /handover) means the session is owned and the
+        // pump hands off (RestoredDraftSessionTakenOver). _ArmDraftRestore expands the memory's
+        // paste placeholders off-thread first (or refuses — never a lossy literal re-type, the §9
+        // rule) and only then arms the pump's map on the dispatcher.
+        if (_appSettings.restoreDraftOnResume && !info.pendingInput.empty())
+        {
+            _ArmDraftRestore(spec.sessionId, info.pendingInput);
+        }
+
         // Agentmaster: a session's title is ONE value — the Explorer-tree name, the persisted
         // SessionInfo.title, and the WT tab title are the same thing. Pin the tab to it now
         // (SetTabText) so the tab strip shows the managed name instead of floating with claude's

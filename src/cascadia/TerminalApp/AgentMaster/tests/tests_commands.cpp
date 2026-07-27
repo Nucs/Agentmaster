@@ -1793,6 +1793,27 @@ void TestCommandWatch()
         CHECK(StandbySessionTakenOver(SessionState::WaitingForInput, 1'752'900'000'000, 0), "latch: back at rest but a UserPromptSubmit was seen = hands off (the fast-completed-turn hole)");
         CHECK(StandbySessionTakenOver(SessionState::Idle, 0, 1'752'900'000'000), "latch: back at rest but the transcript has activity = hands off (the pull-side belt, no-hook turns)");
     }
+
+    // ---- RestoredDraftSessionTakenOver (PENDING_INPUT.md §10 — the restore RE-FILL's latch) ----
+    // The RESUME twin of the standby latch above. A reopened session carries HISTORY (a same-run
+    // close→resume keeps turns.lastPromptUnixMs in the registry record; the observer refills
+    // convLastActivityUnixMs with the conversation's whole past), so the standby "!= 0" test would
+    // read EVERY restored session as taken over and the re-fill could never run. The baseline is
+    // the ARM instant: only Running-now, or a prompt/activity AT or AFTER arming, hands off;
+    // historical values never do — and an at-rest NeedsApproval seed (RestoredSessionState keeps
+    // it across a crash) deliberately doesn't either: "you were answering this when the app died"
+    // is exactly a box worth re-filling, and a GENUINE new blocked turn implies a new prompt,
+    // which the timing channels catch.
+    {
+        constexpr int64_t armed = 1'753'000'000'000;
+        CHECK(!RestoredDraftSessionTakenOver(SessionState::Idle, 0, 0, armed), "restore latch: a quiet resumed session is fillable");
+        CHECK(!RestoredDraftSessionTakenOver(SessionState::WaitingForInput, armed - 60'000, armed - 5'000, armed), "restore latch: HISTORICAL prompt + activity (before arming) never block — the reason the standby latch can't serve here");
+        CHECK(!RestoredDraftSessionTakenOver(SessionState::NeedsApproval, armed - 60'000, 0, armed), "restore latch: a crash-preserved at-rest NeedsApproval seed is fillable");
+        CHECK(RestoredDraftSessionTakenOver(SessionState::Running, 0, 0, armed), "restore latch: a turn in flight now = hands off");
+        CHECK(RestoredDraftSessionTakenOver(SessionState::Idle, armed + 3'000, 0, armed), "restore latch: a prompt submitted after arming = hands off (push channel)");
+        CHECK(RestoredDraftSessionTakenOver(SessionState::WaitingForInput, 0, armed + 3'000, armed), "restore latch: transcript activity after arming = hands off (pull channel, no-hook turns)");
+        CHECK(RestoredDraftSessionTakenOver(SessionState::Idle, armed, 0, armed), "restore latch: a prompt AT the arm instant = hands off (>= — a racing submit is theirs)");
+    }
 }
 
 namespace

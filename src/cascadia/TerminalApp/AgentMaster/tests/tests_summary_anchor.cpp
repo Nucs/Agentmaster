@@ -1583,6 +1583,72 @@ void TestPendingPaste()
         CHECK(ResolvePendingPasteRefsIn(L"no markers here", dir.wstring()).empty(), "paste adapter: no markers -> empty");
         CHECK(ResolvePendingPasteRefsIn(L"[Pasted text #1 +3 lines]", (dir / L"missing").wstring()) == L"paste #1 (+3 lines) -> unresolved",
               "paste adapter: missing cache dir -> unresolved, never a throw");
+        // The §10 whole-draft expansion adapter against the same temp cache (the restore re-fill's
+        // fill-text source): all-resolvable expands, any unresolvable refuses the WHOLE draft, a
+        // marker-free draft passes through verbatim, a missing dir refuses rather than throws.
+        {
+            const auto ex = ExpandPendingDraftPastesIn(L"x" + NL + L"[Pasted text #1 +3 lines]", dir.wstring());
+            CHECK(ex.complete && ex.expandedCount == 1 && ex.text == L"x" + NL + L"alpha" + NL + L"beta" + NL + L"gamma",
+                  "expand adapter: a resolvable draft expands whole (fill text carries the real content)");
+        }
+        {
+            const auto ex = ExpandPendingDraftPastesIn(L"x" + NL + L"[Pasted text #1 +3 lines]" + NL + L"[Pasted text #2 +99 lines]", dir.wstring());
+            CHECK(!ex.complete && ex.text.empty(), "expand adapter: one unresolvable marker refuses the WHOLE draft (never a lossy literal re-type)");
+        }
+        {
+            const auto ex = ExpandPendingDraftPastesIn(L"plain draft, no markers", dir.wstring());
+            CHECK(ex.complete && ex.expandedCount == 0 && ex.text == L"plain draft, no markers", "expand adapter: marker-free draft passes through verbatim");
+        }
+        {
+            const auto ex = ExpandPendingDraftPastesIn(L"[Pasted text #1 +3 lines]", (dir / L"missing").wstring());
+            CHECK(!ex.complete && ex.text.empty(), "expand adapter: missing cache dir -> refused, never a throw");
+        }
         fs::remove_all(dir, ec);
+    }
+    // 7. The PURE whole-draft expansion (PENDING_INPUT.md §10 — ExpandDraftPasteMarkers): the
+    // all-or-refuse brain the restore re-fill's fill text comes from. Refusal cases mirror the §9
+    // draft-swap rule: a placeholder that cannot be verified is never re-typed as a literal label.
+    {
+        // Two distinct cache files whose counts can't cross-match (file A: 2 newlines / 3 segments;
+        // file B: 4 newlines / 5 segments — "+3" hits only A, "+5" hits only B).
+        const std::vector<PasteFileText> files{
+            { L"a.txt", L"alpha" + NL + L"beta" + NL + L"gamma" },
+            { L"b.txt", L"uno" + NL + L"dos" + NL + L"tres" + NL + L"quatro" + NL + L"cinco" },
+        };
+        {
+            const auto ex = ExpandDraftPasteMarkers(L"no markers at all", files);
+            CHECK(ex.complete && ex.expandedCount == 0 && ex.text == L"no markers at all", "expand pure: marker-free draft is trivially complete");
+        }
+        {
+            const auto ex = ExpandDraftPasteMarkers(L"head" + NL + L"[Pasted text #1 +3 lines]" + NL + L"mid" + NL + L"[Pasted text #2 +5 lines]" + NL + L"tail", files);
+            CHECK(ex.complete && ex.expandedCount == 2, "expand pure: every marker on its own line expands");
+            CHECK(ex.text == L"head" + NL + L"alpha" + NL + L"beta" + NL + L"gamma" + NL + L"mid" + NL + L"uno" + NL + L"dos" + NL + L"tres" + NL + L"quatro" + NL + L"cinco" + NL + L"tail",
+                  "expand pure: LAST-first substitution keeps earlier markers' recorded lines valid (order + stitching exact)");
+        }
+        {
+            const auto ex = ExpandDraftPasteMarkers(L"[Pasted text #1 +3 lines]" + NL + L"[Pasted text #2 +99 lines]", files);
+            CHECK(!ex.complete && ex.text.empty(), "expand pure: any unresolved marker refuses the whole draft");
+        }
+        {
+            const auto ex = ExpandDraftPasteMarkers(L"[Pasted text #1 +3 lines]", { files[0], { L"twin.txt", files[0].text } });
+            CHECK(!ex.complete, "expand pure: an ambiguous marker (two count-identical files) refuses");
+        }
+        {
+            const auto ex = ExpandDraftPasteMarkers(L"a [Pasted text #1 +3 lines] b [Pasted text #2 +5 lines]", files);
+            CHECK(!ex.complete, "expand pure: two markers sharing one draft line refuse (expansion is line-replacing — either would eat the other)");
+        }
+        {
+            const auto ex = ExpandDraftPasteMarkers(L"typed [Pasted text #1 +3 lines] more", files);
+            CHECK(!ex.complete, "expand pure: typed text around a collapsed marker refuses the whole (ExpandPasteMarker's never-eat-the-user's-words rule)");
+        }
+        {
+            // The REAL truncated fixture (the 274-segment live shape from the top of this test):
+            // the restore re-fill's flagship case — the wow-sess draft expanding to the briefing.
+            const std::wstring truncDraft = L"yooo" + NL + L"## The user[...Truncated text #2 +258 lines...]es).";
+            const auto ex = ExpandDraftPasteMarkers(truncDraft, { { L"real.txt", paste } });
+            CHECK(ex.complete && ex.expandedCount == 1, "expand pure: the live truncated arithmetic expands whole-draft");
+            CHECK(ex.text.find(L"yooo" + NL + L"## The user's report (verbatim)" + NL) == 0 && ex.text.find(L"story changes).") != std::wstring::npos,
+                  "expand pure: truncated head-cut + tail-resume segments restored in full");
+        }
     }
 }

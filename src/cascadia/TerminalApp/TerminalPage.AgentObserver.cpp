@@ -5912,6 +5912,28 @@ namespace winrt::TerminalApp::implementation
             {
                 hostTab = it->second.get();
             }
+            // Agentmaster (PENDING_INPUT.md §10): a restore RE-FILL is armed/in flight for this
+            // session. The freshly resumed box is EMPTY until the pump types the remembered draft
+            // back in — letting the clear debounce observe those first empty reads would erase the
+            // very memory the re-fill is about to deliver (and a read landing mid-paste could commit
+            // a half-filled body as the draft). Drive the dots from the memory (the NotConnected
+            // branch's rule below) and leave every stored fact + the streak alone until the pump
+            // resolves the entry (verified / refused / abandoned); the next tick then revalidates
+            // against the live box as usual.
+            if (_pendingDraftRestores.count(id) != 0)
+            {
+                if (hostTab)
+                {
+                    const bool restoredPending = !info->pendingInput.empty();
+                    std::optional<winrt::Windows::UI::Color> dotsColor;
+                    if (restoredPending)
+                    {
+                        dotsColor = _PendingDotsColorForTab(hostTab, *info);
+                    }
+                    _SetTabPending(hostTab, restoredPending, dotsColor);
+                }
+                continue;
+            }
             const auto control = _ControlForSession(id);
             // The buffer exists only once the control has STARTED (left NotConnected). A dormant
             // window-restored tab has no claude running -> no LIVE draft readable. Leave the stored
@@ -6461,6 +6483,271 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] delete-after-hand-off FAILED (le=" + std::to_wstring(::GetLastError()) + L"), file left in place: " + entry.mdPath + L"\n");
             }
             it = _pendingHandoverDeletes.erase(it);
+        }
+    }
+
+    // Agentmaster (PENDING_INPUT.md §10 — the restore RE-FILL, arm half): prepare a reopened
+    // session's remembered unsent draft for the pump. The registry memory keeps the RENDERED form
+    // (paste placeholders as Claude showed them); the FILL must not re-type a placeholder literally
+    // (a "[Pasted text #N +M lines]" label pasted back is indistinguishable on screen from a real
+    // placeholder but submits as junk, silently dropping the content behind it — the §9 draft-swap
+    // rule), so a marker-carrying memory is EXPANDED against the paste-cache first —
+    // content-anchored + all-or-refuse (ExpandPendingDraftPastes) — and a refusal never arms:
+    // the memory then behaves exactly as before this feature (display-only until revalidation).
+    // The cache read is real IO (~hundreds of small files), so it runs OFF-THREAD like the §2b
+    // annotation resolve; the map write lands back on the dispatcher (UI-thread-only state). The
+    // takeover baseline (armedUnixMs) is captured BEFORE any await — it must be the resume-launch
+    // instant, not the post-expansion one, so a prompt racing the expansion still reads as "after
+    // arming" and hands the session off. Marker-free drafts (the common case) never leave the UI
+    // thread: no suspension point executes, the arm completes synchronously inside the launch.
+    winrt::fire_and_forget TerminalPage::_ArmDraftRestore(std::wstring sessionId, std::wstring draft)
+    {
+        // Terminate-net (the _ResolvePendingPasteRefsFor idiom): the whole body is inside the try.
+        auto strongThis{ get_strong() };
+        try
+        {
+            const int64_t armedUnixMs = TtNowMs();
+            std::wstring fillText;
+            int expandedCount = 0;
+            if (::Agentmaster::FindPasteMarkers(draft).empty())
+            {
+                fillText = std::move(draft);
+            }
+            else
+            {
+                std::wstring rendered = draft; // keep the rendered form for the refusal log
+                co_await winrt::resume_background();
+                auto expansion = ::Agentmaster::ExpandPendingDraftPastes(rendered);
+                co_await wil::resume_foreground(Dispatcher());
+                if (!expansion.complete)
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(sessionId) + L" re-fill REFUSED: a paste placeholder did not resolve against the paste-cache (chars=" + std::to_wstring(rendered.size()) + L") - never a lossy literal re-type; the memory stays display-only (the cached paste content itself is preserved on disk)\n");
+                    co_return;
+                }
+                fillText = std::move(expansion.text);
+                expandedCount = expansion.expandedCount;
+                // The expanded content came from FILES (the paste-cache), not the rendered buffer —
+                // unlike a buffer-read draft it can carry C0 controls, and an embedded ESC would
+                // terminate BuildPromptFill's bracketed paste early with the remainder interpreted
+                // as keystrokes. Strip C0 except \n and \t (CR dropped ⇒ CRLF→LF), the same
+                // normalization ReadHandoverDocumentPrompt applies for exactly this reason.
+                std::wstring clean;
+                clean.reserve(fillText.size());
+                for (const wchar_t c : fillText)
+                {
+                    if (c >= 0x20 || c == L'\n' || c == L'\t')
+                    {
+                        clean.push_back(c);
+                    }
+                }
+                fillText = std::move(clean);
+                if (fillText.find_first_not_of(L" \t\n") == std::wstring::npos)
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(sessionId) + L" re-fill REFUSED: expansion yielded no printable content - memory stays display-only\n");
+                    co_return;
+                }
+            }
+            _pendingDraftRestores[sessionId] = PendingDraftRestore{ std::move(fillText), armedUnixMs, 0, 0, 0 };
+            const auto& armed = _pendingDraftRestores[sessionId];
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(sessionId) + L" armed: remembered unsent draft will be typed back once the tab starts (chars=" + std::to_wstring(armed.draftText.size()) + (expandedCount ? (L", " + std::to_wstring(expandedCount) + L" paste placeholder(s) expanded") : std::wstring{}) + L")\n");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ArmDraftRestore");
+        }
+    }
+
+    // Agentmaster (PENDING_INPUT.md §10 — the restore RE-FILL, pump half): TYPE a reopened
+    // session's remembered unsent draft back into its fresh claude's input box once the tab
+    // actually starts — the /handover-standby lane's recipe verbatim (fill, never send):
+    //   * session gone/archived/not-Claude, or the setting turned off, or the memory itself was
+    //     cleared elsewhere (the restart-swap's deliberate eager clear) -> drop the entry (an
+    //     archived record KEEPS its memory, so a later resume re-arms from it);
+    //   * not yet started (a background-restored tab starts lazily — possibly hours later; the
+    //     entry is a few bytes, so unlike the standby lane there is NO pre-start deadline: the
+    //     wait is on a HUMAN visiting the tab, the _SweepHandoverDeletes lesson) -> wait;
+    //   * started -> a short settle (the TUI's raw-mode init), then the HANDS-OFF latch
+    //     (RestoredDraftSessionTakenOver — a turn in flight now, or any prompt submitted at/after
+    //     the arm instant: user, autorunner, /handover; a resumed session's HISTORY never trips
+    //     it) -> hands off permanently, the memory left to honest revalidation;
+    //   * pre-fill, box already holding ANY text -> the user typed their own draft into the
+    //     resumed session — theirs wins, drop (the scan records the live text as the new memory);
+    //   * fill = Inject(BuildPromptFill(text)) — the bracketed paste with NO submit CR — then
+    //     VERIFY by reading the box back (no echo ever confirms a fill): non-empty == verified
+    //     (the scan's next tick re-reads the live box and re-stamps the memory); still empty past
+    //     the verify window == the TUI ate the paste pre-raw-mode -> re-fill, at most
+    //     kRestoreFillMaxAttempts, then give up (memory left to revalidation, logged);
+    //   * a STARTED session that never resolves (box unreadable forever) is capped by a deadline
+    //     anchored at startedSeenMs, so a wedged entry can't hold the scan's revalidation off
+    //     forever.
+    // While an entry exists, _ScanPendingInput HOLDS the session's clear debounce (the freshly
+    // resumed box is empty until this pump fills it) and drives the dots from the memory — so the
+    // indicator never flickers across the restart→fill hand-off. SELF-MARSHALS to the UI thread
+    // (the map is UI-thread-only state; the verify reads the tab's TermControl, which is UI-affine).
+    winrt::fire_and_forget TerminalPage::_PumpDraftRestores()
+    {
+        // Terminate-net (the _SweepClaudeLiveness idiom).
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await _PumpDraftRestoresImpl();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_PumpDraftRestores");
+        }
+    }
+
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_PumpDraftRestoresImpl()
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
+        if (_pendingDraftRestores.empty() || !_sessionRegistry)
+        {
+            co_return;
+        }
+        constexpr int64_t kRestoreFillSettleMs = 1500; // post-started settle before the paste (the standby lane's value)
+        constexpr int64_t kRestoreFillVerifyMs = 12 * 1000; // a filled draft must show in the input box within this, else re-fill
+        constexpr int32_t kRestoreFillMaxAttempts = 2; // fills injected before giving up (memory left to revalidation)
+        constexpr int64_t kRestoreFillStartedDeadlineMs = 10 * 60 * 1000; // post-STARTED wedge cap (box unreadable forever); pre-start waits unbounded
+        const int64_t now = static_cast<int64_t>(::GetTickCount64());
+        for (auto it = _pendingDraftRestores.begin(); it != _pendingDraftRestores.end();)
+        {
+            const std::wstring& id = it->first;
+            auto& entry = it->second;
+            const auto s = _sessionRegistry->Get(id);
+            if (!s || !s->live || s->kind != ::Agentmaster::AgentKind::Claude)
+            {
+                // Closed/archived before its claude ever came up (or re-keyed away). The archived
+                // record KEEPS its pendingInput, so a later resume simply re-arms — nothing lost.
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" session gone before the re-fill - memory kept on the record\n");
+                it = _pendingDraftRestores.erase(it);
+                continue;
+            }
+            if (!_appSettings.restoreDraftOnResume)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" re-fill disabled in settings while waiting - dropped (memory stays display-only)\n");
+                it = _pendingDraftRestores.erase(it);
+                continue;
+            }
+            if (s->pendingInput.empty())
+            {
+                // The memory was cleared OUTSIDE this pump while armed — the restart-tab swap's
+                // deliberate eager clear is the one path (the scan holds while armed). Honor it.
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" memory cleared while waiting - re-fill dropped\n");
+                it = _pendingDraftRestores.erase(it);
+                continue;
+            }
+            if (!s->started || !_sessionRegistry->HasInjector(id))
+            {
+                ++it; // claude not launched yet (a pre-Connected WriteInput silently drops) — wait, unbounded (a background tab starts on a HUMAN's first visit)
+                continue;
+            }
+            if (entry.startedSeenMs == 0)
+            {
+                entry.startedSeenMs = now; // first tick with the session started — begin the settle
+                ++it;
+                continue;
+            }
+            if (now - entry.startedSeenMs >= kRestoreFillStartedDeadlineMs)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" gave up 10 min after start " + (entry.injectedAtMs == 0 ? L"(box never readable)" : L"(fill never verified)") + L" - memory left to revalidation\n");
+                it = _pendingDraftRestores.erase(it);
+                continue;
+            }
+            if (now - entry.startedSeenMs < kRestoreFillSettleMs)
+            {
+                ++it;
+                continue;
+            }
+            // HANDS-OFF latch (RestoredDraftSessionTakenOver — pure, unit-tested): a turn in flight
+            // NOW, or any prompt submitted at/after the ARM instant (the user typed+sent their own,
+            // the autorunner consumed a queued plan on the reopened session, a /handover fired).
+            // Either way the session is owned: hands off permanently — re-typing an old draft into
+            // a session someone is driving is exactly the intrusion the standby contract forbids.
+            // The memory is left to the scan's honest revalidation (it clears within ~5s unless the
+            // live box actually holds text).
+            if (::Agentmaster::RestoredDraftSessionTakenOver(s->state, s->turns.lastPromptUnixMs, s->convLastActivityUnixMs, entry.armedUnixMs))
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + (entry.injectedAtMs == 0 ? L" session in use before the re-fill" : L" session took over before verification") + L" (a prompt ran since the resume) - hands off, memory left to revalidation\n");
+                it = _pendingDraftRestores.erase(it);
+                continue;
+            }
+            // Read the session's live input box (the verification channel — UI thread).
+            std::wstring draft;
+            bool draftKnown = false;
+            if (const auto control = _ControlForSession(id))
+            {
+                if (control.ConnectionState() != TerminalConnection::ConnectionState::NotConnected)
+                {
+                    try
+                    {
+                        const auto h = control.ReadPendingInputDraft();
+                        draft.assign(h.c_str(), h.size());
+                        draftKnown = true;
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"_PumpDraftRestores draft read"); // torn down mid-tick — treat as unknown, wait
+                    }
+                }
+            }
+            if (entry.injectedAtMs != 0)
+            {
+                // Verify phase — a fill was injected; is it visible in the box? (The latch above
+                // already excluded every "the user drove it" case, so a non-empty box is OUR fill.)
+                if (draftKnown && !draft.empty())
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" draft RESTORED + VERIFIED in the input box (chars=" + std::to_wstring(draft.size()) + L") - one Enter away, exactly as before the restart\n");
+                    it = _pendingDraftRestores.erase(it);
+                    continue; // the scan re-reads the live box next tick and re-stamps the memory
+                }
+                if (now - entry.injectedAtMs < kRestoreFillVerifyMs)
+                {
+                    ++it; // inside the verify window — the pending-input read lags a fill by design
+                    continue;
+                }
+                if (entry.fillAttempts >= kRestoreFillMaxAttempts)
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" draft never appeared after " + std::to_wstring(entry.fillAttempts) + L" fill(s) - giving up, memory left to revalidation\n");
+                    it = _pendingDraftRestores.erase(it);
+                    continue;
+                }
+                if (!draftKnown)
+                {
+                    ++it; // box unreadable — never re-fill blind (a duplicate paste is worse than a late one)
+                    continue;
+                }
+                // Box VERIFIED empty past the window: the paste was eaten (TUI raw-mode race).
+                // Safe to re-fill — nothing of ours is in the box to duplicate.
+            }
+            else
+            {
+                if (!draftKnown)
+                {
+                    ++it; // just-started control still settling — wait (the started-deadline caps)
+                    continue;
+                }
+                if (!draft.empty())
+                {
+                    // The user already typed their OWN draft into the resumed session — theirs
+                    // wins, permanently (unlike the standby lane we don't wait for the box to
+                    // clear: the live text supersedes the memory, and the scan records it as the
+                    // new memory on its next tick).
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" box already holds text - the live draft wins, re-fill dropped\n");
+                    it = _pendingDraftRestores.erase(it);
+                    continue;
+                }
+            }
+            const bool delivered = _sessionRegistry->Inject(id, ::Agentmaster::BuildPromptFill(entry.draftText));
+            if (delivered)
+            {
+                entry.injectedAtMs = now;
+                entry.fillAttempts += 1;
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" remembered draft typed back into the input box (chars=" + std::to_wstring(entry.draftText.size()) + L", attempt " + std::to_wstring(entry.fillAttempts) + L"/" + std::to_wstring(kRestoreFillMaxAttempts) + L") - NOT submitted, verifying\n");
+            }
+            // Injector vanished mid-flight: nothing was typed — retry next tick (the deadline caps).
+            ++it;
         }
     }
 

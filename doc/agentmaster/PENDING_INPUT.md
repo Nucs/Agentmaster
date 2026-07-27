@@ -8,9 +8,15 @@
 > arithmetic-verified), and PERSISTENCE (§5 — the draft survives an Agentmaster restart/crash as a
 > staleness-labeled memory and revalidates against the live box on resume), and the draft as a COPYABLE
 > value (§8 — a **`Copy Current Prompt`** item in all three session copy menus: a LIVE buffer read where
-> the window hosts the tab, falling back to the observer's remembered draft).** Pure detector + resolver +
+> the window hosts the tab, falling back to the observer's remembered draft). **The RE-FILL ON RESUME
+> (§10, 2026-07-27) closes the loop: a reopened session's remembered draft is TYPED BACK into its fresh
+> input box** — the /handover-standby fill channel (bracketed paste, NO submit CR, read-back verified;
+> paste placeholders expanded against the cache or the fill refused), gated by the cog's
+> `restoreDraftOnResume` (default ON) — so an unsent message survives a restart as a real box draft, one
+> Enter away, instead of a display-only memory.** Pure detector + resolver +
 > the registry notify-on-flip/stamping + the persistence round-trip are unit-tested (engine harness
-> 2,671/2,671 incl. REAL-capture fixtures from live 2.1.217/2.1.218 buffers); the full chain lib-compiles
+> 2,898/2,898 incl. REAL-capture fixtures from live 2.1.217/2.1.218 buffers + the §10 latch/expansion
+> suites); the full chain lib-compiles
 > green (TerminalControlLib + TerminalAppLib); the fixed detector + the resolver are LIVE-VERIFIED
 > out-of-band against the running fixture session ('wow sess': 1,036 chars extracted clean, its truncated
 > paste resolved to `bf8eefafa3e80676.txt` and expanded to the full 18,647-char briefing). The in-app
@@ -344,7 +350,9 @@ unsent message, and the design embraces that honestly:
   longer holds it — accepted because (a) the tooltip labels it (*"last seen \<ago\> — remembered from
   before …"*), and (b) **revalidation erases it honestly**: once the tab starts, the first live reads
   either confirm the draft or the 2-tick clear debounce removes it (+ the flip persist wipes the disk
-  copy). The ONE eager clear kept is the **restart-tab swap** (`_RestartTabIntoFreshSession`) — the
+  copy). (The **§10 re-fill** now closes that window when enabled — the default: the pump types the
+  memory back in and the live reads then genuinely confirm it.) The ONE eager clear kept is the
+  **restart-tab swap** (`_RestartTabIntoFreshSession`) — the
   user watches that screen be destroyed, so a 5-second dots flash for a box that visibly no longer
   exists would be noise, not memory.
 - **Restore display** — a restored record's draft shows the dots **before its tab ever starts**: the
@@ -354,12 +362,12 @@ unsent message, and the design embraces that honestly:
   once the stamp's age passes ~15s (a live draft's stamp never ages that far), plus the §2b paste-refs
   annotation naming the cached content file(s).
 - **What reload gives the user**: reopen Agentmaster → the tab/card show the dots + the labeled draft
-  text (copyable from the tip) *before* focusing the tab; focusing it starts claude, whose empty box
-  then clears the memory within ~5s. The draft's paste content stays recoverable forever via the named
-  paste-cache file. (A future re-fill — typing the memory back into the resumed box via the standby
-  lane's `BuildPromptFill` + `ReadPendingInputDraft` verify — is the natural next step; deliberately
-  NOT in this pass, since writing to a session's stdin on restore is a behavior change the user should
-  opt into. See Follow-ups.)
+  text (copyable from the tip) *before* focusing the tab; focusing it starts claude — and the **§10
+  RE-FILL** (built, default ON) then **types the memory back into the fresh box** via the standby
+  lane's `BuildPromptFill` + `ReadPendingInputDraft` verify, so the draft is really there again, one
+  Enter away. With the cog's `restoreDraftOnResume` OFF (or on a refused/abandoned fill) the classic
+  behavior holds: the empty box clears the memory within ~5s, and the draft's paste content stays
+  recoverable forever via the named paste-cache file.
 
 ## 6. Verification
 
@@ -380,7 +388,12 @@ unsent message, and the design embraces that honestly:
   `(by line count)` tier label; missing dir ⇒ unresolved, never a throw).
 - ✅ **Registry**: appear notifies / text-edit quiet / clear notifies / unknown-id no-op + the stamp
   lifecycle + the quiet paste-refs guard (`TestRegistry`). **Persistence**: the trio round-trips and is
-  omitted when empty (`tests_persistence`). **2,671/2,671 checks pass.**
+  omitted when empty (`tests_persistence`). **Re-fill (§10)**: the `RestoredDraftSessionTakenOver`
+  latch matrix (historical-never-blocks / Running-now / at-after-arm push+pull / the `>=` race edge /
+  the NeedsApproval seed), the pure `ExpandDraftPasteMarkers` all-or-refuse suite (multi-marker
+  stitch, unresolved/ambiguous/same-line/fragment refusals, the live truncated arithmetic), the
+  `ExpandPendingDraftPastesIn` temp-cache adapter (+ missing-dir no-throw), and the
+  `restoreDraftOnResume` settings round-trip. **2,898/2,898 checks pass.**
 - ✅ **Full chain compiles**: `TerminalControlLib` + `TerminalAppLib` both green.
 - ✅ **LIVE (out-of-band, 2026-07-23)**: the fixed detector run against the running fixture session
   ('wow sess', Claude 2.1.218, pid-resolved via the presence heartbeat) extracts the draft **clean**
@@ -614,16 +627,80 @@ an unresponsive TUI reaches `GiveUp` in a bounded number of steps having pressed
 Both settings round-trip in the `AppSettings` persistence test. The in-app behaviour rides
 the next deploy cycle.
 
+## 10. RE-FILL ON RESUME — the remembered draft typed back into the box (built)
+
+The §5 memory made an unsent draft *survive* a restart; this makes it *come back*. Claude never
+restores its own input box (Phase-0 forensics, §5), so when a session whose record carries a
+non-empty `pendingInput` is REOPENED — a Sessions-browser **Resume here**, a window-restore rehome, a
+re-fork; every path funnels through `_LaunchClaudeSession` — Agentmaster types the remembered draft
+back into the fresh claude's box itself, through the machinery /handover-standby already proved:
+**`Inject(BuildPromptFill(text))`** (the bracketed paste with **NO submit CR** — nothing runs until
+the user presses Enter) followed by a **read-back verify** (`ReadPendingInputDraft`; no echo ever
+confirms a fill). Gated by the cog's **`restoreDraftOnResume`** (TESTS AUTORUNNER, beside the §9
+draft-swap toggles; **default ON** — OFF restores the display-only memory verbatim).
+
+**The pipeline** (`TerminalPage.AgentObserver.cpp`):
+
+- **ARM** (`_ArmDraftRestore`, fired from the launch seam when the reopened record's `pendingInput`
+  is non-empty): capture the **arm instant** (system clock — the takeover baseline, taken BEFORE any
+  await so a racing prompt always reads as *after* arming), then prepare the FILL text. A draft whose
+  text carries `[Pasted text #N +M lines]` / truncated markers must NOT be re-typed literally — the
+  label would render indistinguishably from a real placeholder but **submit as junk text**, silently
+  dropping the pasted content (the §9 draft-swap refusal rule) — so the memory is **EXPANDED** against
+  the paste-cache first (`ExpandPendingDraftPastes` → the pure all-or-refuse
+  `ExpandDraftPasteMarkers`, off-thread like the §2b resolve: any unresolved/ambiguous/refused marker
+  refuses the WHOLE draft and nothing arms; markers substitute LAST-first so earlier markers' recorded
+  lines stay valid). An expanded fill is *better* than the original render: claude re-collapses a
+  large paste at paste time and re-binds it in its own live state, so the restored draft is
+  submit-faithful. A refusal logs and leaves the classic §5 behavior (memory → revalidation clears).
+- **PUMP** (`_PumpDraftRestores`, ticked with the other lanes; self-marshals to the UI thread): waits
+  for `SessionInfo.started` + injector — **unbounded pre-start** (a background-restored tab starts on
+  a HUMAN's first visit, the `_SweepHandoverDeletes` lesson; the entry is a few bytes) — then a 1.5s
+  settle, then fills + verifies exactly like the standby lane: box non-empty ⇒ **VERIFIED** (the scan
+  re-reads it live next tick and re-stamps the memory); still empty past 12s ⇒ the TUI ate the paste
+  pre-raw-mode ⇒ re-fill, ≤2 attempts, then give up (memory left to revalidation, logged); a
+  started-but-never-readable box is capped at 10 min so a wedged entry can't hold the scan off
+  forever.
+- **HANDS-OFF latch** — `RestoredDraftSessionTakenOver` (SessionModels.h, pure + unit-tested), the
+  **resume twin** of `StandbySessionTakenOver`: that latch's `!= 0` test is only correct for a fresh
+  successor, while a resumed session carries HISTORY (a same-run close→resume keeps
+  `turns.lastPromptUnixMs` in the registry record; the observer refills `convLastActivityUnixMs` with
+  the conversation's whole past), so it would read *every* restored session as taken over. The restore
+  latch keys on the **arm instant** instead: hands off iff Running NOW, or a prompt / real transcript
+  line activity landed **at/after arming** (user, autorunner consuming a reopened queue, /handover) —
+  historical values are strictly before it and never block, and a crash-preserved at-rest
+  `NeedsApproval` seed deliberately doesn't either ("you were answering this when the app died" is
+  exactly a box worth re-filling). A pre-fill box already holding ANY text also drops the entry —
+  the user typed their own draft, theirs wins, and the scan records it as the new memory.
+- **SCAN HOLD** — while an entry is armed/in flight, `_ScanPendingInput` **skips** that session (the
+  §9 swap-skip idiom) and drives the dots from the memory: the freshly resumed box is empty until the
+  pump fills it, and letting the 2-tick clear debounce see those first empty reads would erase the
+  very memory being delivered. The hold releases the moment the entry resolves (verified / refused /
+  abandoned), and the next tick revalidates against the live box as usual — so the indicator never
+  flickers across the restart→fill hand-off, and every give-up path degrades to the honest §5 story.
+
+**Emergent win**: a /handover-standby briefing the user never sent, the scan recorded as a pending
+draft, and the app restart lost from the box — comes back through this same lane on resume (the
+memory doesn't care who typed the draft).
+
+**Logs** (`hooks.log`, `[draft-restore] <sid8> …`): armed (chars + expanded-placeholder count), the
+refusal, typed-back attempt k/2, RESTORED + VERIFIED, and every drop with its reason (session gone /
+setting off / memory cleared / taken over / live draft wins / gave up) — so "why did (or didn't) my
+draft come back?" is answerable straight off the log.
+
+**Coverage**: `RestoredDraftSessionTakenOver` (historical-never-blocks, Running-now, at/after-arm on
+both channels, the `>=` race edge, the NeedsApproval-seed case — tests_commands.cpp beside its
+standby twin) + `ExpandDraftPasteMarkers` / `ExpandPendingDraftPastesIn` (marker-free passthrough,
+multi-marker whole-draft stitch, unresolved/ambiguous/same-line/fragment refusals, the live truncated
+arithmetic, temp-cache adapter round + missing-dir no-throw — TestPendingPaste) + the
+`restoreDraftOnResume` settings round-trip. The pump itself is the standby lane's recipe verbatim
+(page-side, WinRT — exercised by that feature's live verification).
+
 ### Follow-ups (non-blocking)
 
 - **Off-switch**: an `AppSettings` flag to disable the pulse (like `showTabOverlay`); v1 is always-on.
 - **Placeholder/dim filtering** (§4) — read the cells' faint attribute so a dim placeholder never reads as
   a draft.
-- **Re-fill on resume** (§5): offer to TYPE a restored draft memory back into the resumed session's
-  empty box — the /handover-standby lane already owns the exact machinery (`BuildPromptFill` paste with
-  no submit CR + the `ReadPendingInputDraft` verify + the taken-over guard). Deliberately not in the
-  persistence pass: writing to a session's stdin on restore is a behavior change the user should opt
-  into (a cog switch, or a per-toast/tooltip action).
 - **The out-of-band probe** (`tests/pending_probe.cpp` + `tests/_run-pending-probe.bat`): the
   AttachConsole ground-truth oracle used for the live verification + the fleet capture sweeps — run it
   against any live claude pid to see exactly what the shipped detector would extract, without the app.

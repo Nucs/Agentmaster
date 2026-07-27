@@ -1075,6 +1075,12 @@ namespace winrt::TerminalApp::implementation
         _setDraftSwapCtrlS.Header(winrt::box_value(L"Use Ctrl+S to stash my draft aside while it sends"));
         AgentSetTip(_setDraftSwapCtrlS, L"How the setting above moves your draft out of the way: with Claude's own stash (Ctrl+S), which lifts the WHOLE input box aside in one keystroke and puts it back exactly as it was \x2014 wherever your cursor happened to be.\n\nRecommended, and on by default. Turn it off only if Ctrl+S misbehaves in your build: the swap then falls back to the terminal's line-editor undo, which works a line at a time and can restore poorly when the cursor sits mid-text.\n\nNote Claude keeps ONE stash slot, so a swap replaces anything you had stashed yourself earlier. Your live draft is never at risk either way \x2014 if the box cannot be cleared, nothing is sent.");
         panel.Children().Append(_setDraftSwapCtrlS);
+        // Agentmaster (PENDING_INPUT.md §10 — the restore RE-FILL). Claude never restores its own
+        // input box, so a remembered unsent draft is typed back by us when the session reopens.
+        _setRestoreDraft = ToggleSwitch{};
+        _setRestoreDraft.Header(winrt::box_value(L"Re-type a remembered unsent draft when a session reopens"));
+        AgentSetTip(_setRestoreDraft, L"A message you typed into a session's input box but never sent (its \"3 dots\" are pulsing) is remembered across an app restart or a close. When that session is resumed, this types the remembered draft back into the fresh input box \x2014 pasted WITHOUT pressing Enter, so it sits there exactly as you left it, one Enter away \x2014 and verifies it actually landed by reading the box back. Claude itself never restores its input box, so without this the memory only shows on the dots until the empty box clears it a few seconds after the tab starts.\n\nNever fights you: a session you (or the Tests Autorunner) already sent a prompt to is left alone, a box you started typing into keeps YOUR text, and a draft whose [Pasted text #N] placeholder cannot be matched to its cached content is not re-typed at all (a literal label would silently lose the pasted content when sent).");
+        panel.Children().Append(_setRestoreDraft);
 
         // === BEHAVIOR tab ===
         panel = behaviorPanel;
@@ -2436,6 +2442,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setDraftSwapCtrlS.IsOn(_appSettings.draftSwapUseCtrlS);
         }
+        if (_setRestoreDraft)
+        {
+            _setRestoreDraft.IsOn(_appSettings.restoreDraftOnResume);
+        }
         if (_setConfirmKill)
         {
             _setConfirmKill.IsOn(_appSettings.confirmBeforeKill);
@@ -3058,6 +3068,10 @@ namespace winrt::TerminalApp::implementation
         if (_setDraftSwapCtrlS)
         {
             _appSettings.draftSwapUseCtrlS = _setDraftSwapCtrlS.IsOn();
+        }
+        if (_setRestoreDraft)
+        {
+            _appSettings.restoreDraftOnResume = _setRestoreDraft.IsOn();
         }
         if (_setConfirmKill)
         {

@@ -743,8 +743,10 @@ resolve off the UI thread entirely, and a context-sensitive Ctrl+F reusing the s
 **Pending-input monitor ([`PENDING_INPUT.md`](doc/agentmaster/PENDING_INPUT.md)) — complete +
 BULLETPROOFED (the 2026-07-23 cross-version pass): detection + the "yes pending / no pending" observer
 NOTIFY + a "3 dots" animation on BOTH the tab strip and the Triage-Board cards, PLUS the paste-cache
-resolver + draft persistence. Pure detector + resolver + registry + persistence unit-tested (engine
-harness 2671/2671 incl. REAL-capture fixtures); full chain lib-compiles green (TerminalControlLib +
+resolver + draft persistence + the **§10 restore RE-FILL** (2026-07-27 — a reopened session's
+remembered draft is TYPED BACK into its fresh box). Pure detector + resolver + registry + persistence
++ the §10 latch/expansion unit-tested (engine
+harness 2898/2898 incl. REAL-capture fixtures); full chain lib-compiles green (TerminalControlLib +
 TerminalAppLib); the hardened detector + resolver LIVE-VERIFIED out-of-band against the running fleet
 (the `tests/pending_probe.cpp` + `_run-pending-probe.bat` AttachConsole oracle — a 76-pid sweep spanning
 2.1.211–218: every attachable screen detected 17/17); the in-app deploy rides the next cycle.**
@@ -794,7 +796,23 @@ stays an eager clear — the user watched that screen die), a restored/dormant t
 the memory before its claude ever starts** (the scan's NotConnected branch) with the board tip labeling
 staleness ("last seen <ago> — remembered from before…"), and **revalidation is honest**: once the tab
 starts, the live read confirms the draft or the debounce clears it (claude never restores its own box —
-Phase-0 forensics proved no draft persists anywhere in `~/.claude`).
+Phase-0 forensics proved no draft persists anywhere in `~/.claude`). **The §10 restore RE-FILL closes
+that loop (default ON, `AppSettings::restoreDraftOnResume` — cog → TESTS AUTORUNNER beside the §9
+toggles): a REOPENED session with a non-empty memory gets the draft TYPED BACK into the fresh box** via
+the /handover-standby channel — armed at the launch seam (`_ArmDraftRestore`, every resume path:
+Sessions resume / window-restore rehome / re-fork), pumped once `started` (`_PumpDraftRestores`,
+unbounded pre-start — a background tab starts on a human's first visit — then the standby recipe:
+1.5s settle → `Inject(BuildPromptFill)` (NO submit CR) → read-back verify, ≤2 re-fills, 10-min
+post-start wedge cap). A marker-carrying memory is EXPANDED against the paste-cache first — off-thread,
+all-or-refuse (`ExpandPendingDraftPastes` → the pure `ExpandDraftPasteMarkers`; an unresolvable
+`[Pasted text #N]` REFUSES the fill, never a lossy literal re-type — the §9 rule; an expanded fill is
+submit-faithful since claude re-collapses + re-binds the paste). Hands-off is the pure
+`RestoredDraftSessionTakenOver` (the STANDBY latch's resume twin — baseline = the ARM instant, since a
+resumed session's historical turns/activity would trip the `!= 0` test: Running now, or any
+prompt/line-activity at/after arming ⇒ theirs; a pre-fill box already holding text ⇒ the live draft
+wins), `_ScanPendingInput` HOLDS the session's clear debounce while armed (the empty resumed box must
+not erase the memory being delivered; dots ride the memory), and every refusal/give-up degrades to the
+classic display-only revalidation. Logged `[draft-restore] <sid8> …` end-to-end.**
 `SetPendingInput` updates the field every change but **`_notify`s ONLY on the boolean hasPending FLIP**
 (empty↔non-empty — the "yes/no pending" transition; a text-only edit stays quiet, so no per-keystroke
 persist/board/scheduler cascade — presence-heartbeat cadence). The flip logs `[pending] <id> draft
@@ -2119,7 +2137,9 @@ What works, by area:
   onto NEW sessions (mode / maxAutoSends / stopOnError / pauseOnHumanInput) plus the GLOBAL
   **`preserveDraftOnSend`** + **`draftSwapUseCtrlS`** (the **DRAFT SWAP** — PENDING_INPUT.md §9; both
   default ON, live on every submit path at once; the second picks Claude's **Ctrl+S stash** over the
-  Ctrl+U kill-ring fallback) and **behavior**
+  Ctrl+U kill-ring fallback) + **`restoreDraftOnResume`** (the **restore RE-FILL** — PENDING_INPUT.md
+  §10, default ON: a reopened session's remembered unsent draft is typed back into its fresh input
+  box, fill-not-send, read-back verified; OFF = the classic display-only memory) and **behavior**
   (`confirmBeforeKill` — relabeled "Confirm before closing" — routes the Close action
   (tab X / Manager **Close** / tree `Del`) through the confirm dialog;
   `defaultLaunchDir` seeds the cwd box — empty ⇒ `%USERPROFILE%`). It also exposes `tabRenameCommitMode` (the rename box's

@@ -435,6 +435,32 @@ namespace Agentmaster
         return lastPromptUnixMs != 0 || convLastActivityUnixMs != 0; // one ever ran (completed between ticks)
     }
 
+    // Agentmaster (PENDING_INPUT.md §10 — the restore RE-FILL's HANDS-OFF latch): the RESUME twin of
+    // StandbySessionTakenOver above. That latch's "!= 0" test is correct only for a FRESH standby
+    // successor (both signals are 0 until the first real submit); a RESUMED session carries HISTORY —
+    // turns.lastPromptUnixMs may hold a pre-close value (a same-run close→resume keeps the registry
+    // record in memory) and convLastActivityUnixMs is observer-refilled with the conversation's whole
+    // past — so "!= 0" would read every restored session as taken over and the re-fill could never
+    // run. The baseline is therefore the ARM instant (armedUnixMs, system clock, captured at the
+    // resume launch): hands off iff a turn is in flight RIGHT NOW (Running — including the
+    // recon-subagent/external-work promotion, where a fill would land mid-work), or a prompt was
+    // submitted AT/after arming (the push channel), or the transcript shows real line activity
+    // at/after arming (the pull channel — no-hook turns; a bare `--resume`'s untimestamped trailer
+    // lines never count as line activity, so a quiet resume can't trip it). Historical values are
+    // strictly BEFORE the arm instant, so they never block. A crash-preserved at-rest NeedsApproval
+    // seed (RestoredSessionState keeps it) deliberately does NOT block: that is exactly a box worth
+    // re-filling ("you were answering this when the app died"), and a GENUINE new blocked turn
+    // implies a new prompt, which the timing channels catch. PURE.
+    inline bool RestoredDraftSessionTakenOver(SessionState state, int64_t lastPromptUnixMs, int64_t convLastActivityUnixMs, int64_t armedUnixMs)
+    {
+        if (state == SessionState::Running)
+        {
+            return true; // a turn is in flight right now
+        }
+        return (lastPromptUnixMs != 0 && lastPromptUnixMs >= armedUnixMs) ||
+               (convLastActivityUnixMs != 0 && convLastActivityUnixMs >= armedUnixMs);
+    }
+
     // Agentmaster (#6 — multi-line submit): build the ConPTY input that types `text` into Claude's
     // Ink TUI and submits it as ONE message. A bare `text + CR` makes Ink submit on the FIRST embedded
     // line break (the WinUI compose TextBox emits CR per line), tearing a multi-line prompt across
@@ -1328,6 +1354,19 @@ namespace Agentmaster
         // it beats the line-scoped Ctrl+U kill-ring pair that remains the fallback. OFF ⇒ the swap
         // starts at that fallback instead; either way an unresponsive rung ends in a clean ABORT.
         bool draftSwapUseCtrlS{ true };
+        // Agentmaster (PENDING_INPUT.md §10 — the restore RE-FILL): when a session whose record
+        // carries a persisted unsent-draft MEMORY is reopened (Sessions-browser resume /
+        // window-restore rehome / re-fork), TYPE the remembered draft back into the fresh claude's
+        // EMPTY input box once it starts — the /handover-standby channel (BuildPromptFill: a
+        // bracketed paste with NO submit CR, verified by reading the box back), so the draft sits
+        // one Enter away exactly as it did before the restart. Claude itself never restores its own
+        // box, so without this the memory only DISPLAYS (dots + tip) until honest revalidation
+        // clears it ~5s after the tab starts. A draft whose paste placeholders all resolve is
+        // re-filled EXPANDED (claude re-collapses + re-binds the paste at paste time); an
+        // unresolvable placeholder REFUSES the whole fill (the §9 rule — a literal
+        // "[Pasted text #N]" label would silently drop the content behind it on submit). OFF
+        // restores the display-only memory behavior verbatim.
+        bool restoreDraftOnResume{ true };
 
         // --- Behavior sugar ---
         bool confirmBeforeKill{ true }; // confirm before killing a session from the Manager
