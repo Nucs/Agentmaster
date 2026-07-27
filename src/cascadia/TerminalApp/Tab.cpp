@@ -511,29 +511,54 @@ namespace winrt::TerminalApp::implementation
         // We only ever READ IsOpen (never drive it — invariant 2), and we mark the notch Handled ONLY
         // when the page reports it actually scrolled something: otherwise the tab strip keeps its own
         // wheel behavior, which is what a card that fits on screen should never steal.
-        tvi.PointerWheelChanged([weakThis](const IInspectable&, const WUX::Input::PointerRoutedEventArgs& e) {
-            const auto self = weakThis.get();
-            if (!self || !self->_agentToolTipWheelCb || !self->_agentToolTipActive || !self->_agentToolTip)
-            {
-                return;
-            }
-            try
-            {
-                if (!self->_agentToolTip.IsOpen())
+        //
+        // AddHandler(..., handledEventsToo: true) rather than the `.PointerWheelChanged(...)` convenience
+        // (which is handledEventsToo: FALSE): the tab strip is a nest of MUX controls, and anything inside
+        // the header marking the notch Handled on its way up would otherwise make this hook silently dead.
+        // The page keeps a second, whole-tab-row belt for the same reason (_WireTabStripTooltipWheel).
+        tvi.AddHandler(
+            WUX::UIElement::PointerWheelChangedEvent(),
+            winrt::box_value(WUX::Input::PointerEventHandler{ [weakThis](const IInspectable&, const WUX::Input::PointerRoutedEventArgs& e) {
+                const auto self = weakThis.get();
+                if (!self || !self->_agentToolTipActive)
                 {
-                    return; // no card on screen — nothing to scroll
+                    return; // not a managed tab — the strip keeps its wheel, and we say nothing about it
                 }
-                if (const auto delta = e.GetCurrentPoint(nullptr).Properties().MouseWheelDelta(); delta != 0 && self->_agentToolTipWheelCb(delta))
+                try
                 {
-                    e.Handled(true);
+                    // ONE throttled line per gesture. This handler is the first link in the chain that
+                    // cannot be observed from the outside, so without it "the scroll didn't register" is
+                    // indistinguishable between "the notch never arrived", "the card wasn't open" and
+                    // "the body had nothing to scroll" — three completely different bugs.
+                    const auto nowTick = ::GetTickCount64();
+                    const bool open = self->_agentToolTip && self->_agentToolTip.IsOpen();
+                    if (nowTick - self->_agentToolTipWheelLogTick > 400)
+                    {
+                        self->_agentToolTipWheelLogTick = nowTick;
+                        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                                      std::wstring{ L"[tooltip-wheel] item: cb=" } + (self->_agentToolTipWheelCb ? L"1" : L"0") +
+                                                          L" tip=" + (self->_agentToolTip ? L"1" : L"0") +
+                                                          L" open=" + (open ? L"1" : L"0"));
+                    }
+                    if (!self->_agentToolTipWheelCb || !open)
+                    {
+                        return; // no card on screen (or no page callback) — nothing to scroll
+                    }
+                    // Relative to the tab itself, not nullptr: the delta is placement-independent, and an
+                    // element we KNOW is alive can't be the thing that throws on this path.
+                    const auto pt = e.GetCurrentPoint(self->TabViewItem());
+                    if (const auto delta = pt ? pt.Properties().MouseWheelDelta() : 0; delta != 0 && self->_agentToolTipWheelCb(delta))
+                    {
+                        e.Handled(true);
+                    }
                 }
-            }
-            catch (...)
-            {
-                // a tooltip must never take the tab down — swallow (the notch is simply lost)
-                ::Agentmaster::AgentLogCaughtException(L"Tab agent tooltip wheel scroll");
-            }
-        });
+                catch (...)
+                {
+                    // a tooltip must never take the tab down — swallow (the notch is simply lost)
+                    ::Agentmaster::AgentLogCaughtException(L"Tab agent tooltip wheel scroll");
+                }
+            } }),
+            true /* handledEventsToo */);
         return true;
     }
 

@@ -302,7 +302,11 @@ namespace
     constexpr double kTtScrollBarWidth = 3.0; // the slim, collapsed-ScrollBar look
     constexpr double kTtScrollBarGutterPx = 5.0; // parked THIS far into the card's right padding, so it never covers text
     constexpr double kTtScrollThumbMinPx = 24.0; // a very deep body still leaves a visible thumb
-    constexpr double kTtScrollBarIdleOpacity = 0.45; // at rest: the dim "there is more below" hint
+    // The bar exists ONLY while you are scrolling: hidden at rest (a card that merely CAN scroll shows
+    // nothing), lit on the first notch, gone again a moment after the last one. It is feedback for the
+    // gesture, not chrome — an overlay bar sitting permanently on a hover card is just noise.
+    constexpr double kTtScrollBarRestOpacity = 0.0;
+    constexpr double kTtScrollBarActiveOpacity = 1.0;
     constexpr int kTtScrollBarHoldMs = 1800; // ... then, after the last notch, it fades out entirely
     constexpr int kTtScrollBarFadeStepMs = 40;
     constexpr double kTtScrollBarFadeStep = 0.15;
@@ -2450,8 +2454,9 @@ namespace winrt::TerminalApp::implementation
                         ::Agentmaster::AgentLogCaughtException(L"tab tooltip scroll viewport clip");
                     }
                     // Keep whatever offset the reader is at (a resize mid-read must not yank them back
-                    // to the top); a fresh card is at 0 anyway.
-                    self->_SyncTabTooltipScrollBar(sid, std::nullopt, ::kTtScrollBarIdleOpacity);
+                    // to the top); a fresh card is at 0 anyway. The bar is sized here but stays INVISIBLE
+                    // — it appears only under the wheel.
+                    self->_SyncTabTooltipScrollBar(sid, std::nullopt, ::kTtScrollBarRestOpacity);
                 });
             }
         }
@@ -2538,8 +2543,9 @@ namespace winrt::TerminalApp::implementation
     //
     // The tab's CURRENT session is resolved here rather than captured at wiring time, exactly like the
     // hover-build hook: a /resume re-home or a fork re-bind swaps the tab's session underneath us.
-    bool TerminalPage::_ScrollTabAgentToolTip(const TerminalApp::Tab& tab, int wheelDelta)
+    bool TerminalPage::_ScrollTabAgentToolTip(const TerminalApp::Tab& tab, int wheelDelta, bool fromTabItem)
     {
+        _tooltipWheelClaimed = true; // tell the tab-row belt below that this notch is already spoken for
         if (!tab || wheelDelta == 0)
         {
             return false;
@@ -2555,13 +2561,97 @@ namespace winrt::TerminalApp::implementation
             return false;
         }
         // A notch is 120 units; wheel DOWN is negative and moves us further down the document.
-        const double next = it->second.offset - (static_cast<double>(wheelDelta) / 120.0) * ::kTtScrollStepPx;
-        if (_SyncTabTooltipScrollBar(sessionId, next, 1.0) <= 0.0)
+        const double before = it->second.offset;
+        const double next = before - (static_cast<double>(wheelDelta) / 120.0) * ::kTtScrollStepPx;
+        const double maxOff = _SyncTabTooltipScrollBar(sessionId, next, ::kTtScrollBarActiveOpacity);
+        // One log line per notch, only for a session whose card is actually up: this is the ONE step of
+        // the chain that cannot be seen from the outside (the bar's own behavior proves the geometry).
+        // A hover+scroll that produces NO line here means the wheel never reached us at all.
+        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                      L"[tooltip-wheel] " + ::Agentmaster::ShortId(sessionId) + L" src=" + (fromTabItem ? L"item" : L"row") +
+                                          L" delta=" + std::to_wstring(wheelDelta) +
+                                          L" off=" + std::to_wstring(static_cast<int>(before)) + L"->" + std::to_wstring(static_cast<int>(it->second.offset)) +
+                                          L" max=" + std::to_wstring(static_cast<int>(maxOff)));
+        if (maxOff <= 0.0)
         {
             return false; // the whole body already fits — don't steal the wheel from the strip
         }
         _ArmTabTooltipScrollBarFade(sessionId);
         return true; // consumed even at an end stop: this card IS the scroller under the pointer
+    }
+
+    // Agentmaster (tab tooltip — WHEEL SCROLL): the BELT under the per-tab handler. The notch is supposed
+    // to arrive on the TabViewItem (the element the pointer is actually over), but that path depends on
+    // MUX's tab-strip internals not swallowing it first; this one sits on the whole tab ROW with
+    // handledEventsToo, so it sees the event no matter who handled it on the way up. It scrolls whichever
+    // tab currently has its card open — which, since the framework closes the tip the moment you leave the
+    // tab, is always the tab you are hovering.
+    //
+    // `_tooltipWheelClaimed` is the de-dupe: the per-tab handler runs FIRST (it is deeper in the bubble)
+    // and every attempt it makes sets the flag, so this one consumes-and-skips. Both handlers being ours
+    // makes that ordering guaranteed rather than hopeful.
+    void TerminalPage::_WireTabStripTooltipWheel()
+    {
+        if (_tabStripWheelWired)
+        {
+            return;
+        }
+        const auto row = TabRow();
+        if (!row)
+        {
+            return; // not laid out yet — the next arm tries again
+        }
+        _tabStripWheelWired = true;
+        row.AddHandler(
+            UIElement::PointerWheelChangedEvent(),
+            winrt::box_value(WUX::Input::PointerEventHandler{ [weak = get_weak()](const IInspectable&, const WUX::Input::PointerRoutedEventArgs& e) {
+                const auto page = weak.get();
+                if (!page)
+                {
+                    return;
+                }
+                if (std::exchange(page->_tooltipWheelClaimed, false))
+                {
+                    return; // the tab's own handler already had this notch
+                }
+                try
+                {
+                    // Whose card is up? Exactly one can be (the tip dies on pointer-exit).
+                    bool found = false;
+                    for (const auto& [sid, weakTab] : page->_claudeTabs)
+                    {
+                        const auto tab = weakTab.get();
+                        if (!tab)
+                        {
+                            continue;
+                        }
+                        const auto impl = page->_GetTabImpl(tab);
+                        if (!impl || !impl->AgentToolTipOpen())
+                        {
+                            continue;
+                        }
+                        found = true;
+                        const auto pt = e.GetCurrentPoint(nullptr);
+                        if (const auto delta = pt ? pt.Properties().MouseWheelDelta() : 0; delta != 0 && page->_ScrollTabAgentToolTip(tab, delta, /* fromTabItem */ false))
+                        {
+                            e.Handled(true);
+                        }
+                        break;
+                    }
+                    // The belt's own throttled trace: a notch that reached the ROW but found no open card
+                    // is a DIFFERENT failure from one that never arrived at all (see the item handler).
+                    if (const auto nowTick = ::GetTickCount64(); !found && nowTick - page->_tooltipWheelLogTick > 400)
+                    {
+                        page->_tooltipWheelLogTick = nowTick;
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[tooltip-wheel] row: no open card");
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"tab-strip tooltip wheel belt");
+                }
+            } }),
+            true /* handledEventsToo — the strip's own scroller may have taken it first */);
     }
 
     // Agentmaster (tab tooltip — WHEEL SCROLL): a fresh hover starts at the top of the body. Called from
@@ -2579,7 +2669,7 @@ namespace winrt::TerminalApp::implementation
             _tabTooltipScrollFadeTimer.Stop(); // a pending fade would erase the hint we are about to show
         }
         _tabTooltipScrollFadeSession.clear();
-        _SyncTabTooltipScrollBar(sessionId, 0.0, ::kTtScrollBarIdleOpacity);
+        _SyncTabTooltipScrollBar(sessionId, 0.0, ::kTtScrollBarRestOpacity);
     }
 
     // Agentmaster (tab tooltip — WHEEL SCROLL): (re)start the scrollbar's auto-hide. Every notch restarts
@@ -2670,6 +2760,7 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        _WireTabStripTooltipWheel(); // WHEEL SCROLL: the once-per-window belt (a bool probe once wired; retries while TabRow isn't up)
         const auto impl = _GetTabImpl(tab);
         if (!impl || impl->AgentToolTipHoverWired())
         {
@@ -2704,7 +2795,7 @@ namespace winrt::TerminalApp::implementation
             [weakThis = get_weak(), weakTab = winrt::make_weak(tab)](int delta) -> bool {
                 const auto self = weakThis.get();
                 const auto t = weakTab.get();
-                return (self && t) ? self->_ScrollTabAgentToolTip(t, delta) : false;
+                return (self && t) ? self->_ScrollTabAgentToolTip(t, delta, /* fromTabItem */ true) : false;
             });
         if (justWired)
         {

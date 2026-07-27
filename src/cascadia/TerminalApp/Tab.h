@@ -296,6 +296,7 @@ namespace winrt::TerminalApp::implementation
         // CURRENT session at hover time, so a /resume re-home never leaves it stale.
         std::function<void()> _agentToolTipHoverCb{ nullptr };
         std::function<bool(int)> _agentToolTipWheelCb{ nullptr }; // Agentmaster (WHEEL SCROLL): the page scrolls the OPEN card's body by this many wheel units; returns true when it consumed the notch
+        uint64_t _agentToolTipWheelLogTick{ 0 }; // Agentmaster (WHEEL SCROLL): throttle for the one-line-per-gesture [tooltip-wheel] trace (a spin is many events)
         bool _agentToolTipHoverWired{ false }; // the PointerEntered hook is wired once per tab
         bool _agentToolTipSwapOpenOnce{ false }; // one-shot: let the NEXT _UpdateAgentToolTip swap Content while OPEN (the async summary-body arrival)
 

@@ -203,10 +203,24 @@ stays `IsHitTestVisible(false)` and inert, per invariant 6a — so the wheel is 
    rewritten around (`TabHeaderControl::_PositionTagBadgesNow`).
 4. The notch is marked `Handled` **only when something actually scrolled**, so a card that fits leaves
    the wheel to the tab strip's own horizontal scroll.
-5. The bar auto-hides: one per-window `DispatcherTimer` holds `kTtScrollBarHoldMs` after the last notch,
-   then steps the opacity down to 0 (`_ArmTabTooltipScrollBarFade` / `_OnTabTooltipScrollBarFadeTick`).
-   At rest (first layout of a scrollable card, and on every fresh hover via
-   `_ResetTabAgentToolTipScroll`) it shows dim — the "there is more below" hint.
+5. The bar exists **only while you scroll**: invisible at rest (even on a card that *can* scroll), lit
+   on the first notch, then one per-window `DispatcherTimer` holds `kTtScrollBarHoldMs` and steps the
+   opacity back to 0 (`_ArmTabTooltipScrollBarFade` / `_OnTabTooltipScrollBarFadeTick`). It is feedback
+   for the gesture, not chrome — a bar sitting permanently on a hover card is just noise.
+
+**Two handlers, deliberately.** The per-tab one is the precise path; a **belt** on the whole tab ROW
+(`_WireTabStripTooltipWheel`) catches a notch that MUX's tab-strip internals swallowed before it reached
+the item, and scrolls whichever tab's card is open (only one can be — the tip dies on pointer-exit).
+Both use `AddHandler(..., handledEventsToo: true)`; `_tooltipWheelClaimed` de-dupes them (the per-tab
+handler is deeper in the bubble, so it always runs first and claims the notch).
+
+**Diagnostics — `[tooltip-wheel]` in `hooks.log`** (throttled to one line per ~400ms gesture, and only
+for a managed tab). This chain's first link is invisible from the outside, so "the scroll didn't
+register" would otherwise be indistinguishable between *the notch never arrived*, *the card wasn't
+open*, and *the body had nothing to scroll*. The lines separate exactly those:
+`item: cb=1 tip=1 open=0/1` (the notch reached the tab), `<sid> src=item|row delta=… off=A->B max=M`
+(it scrolled, and by how much), `row: no open card` (it reached the strip but no card was up). **No
+lines at all ⇒ the wheel never reached the tab strip.**
 
 The per-card pieces live in `TerminalPage::_tabTooltipScroll[sessionId]` (**weak** element refs + the
 three transforms), re-adopted on every card rebuild. Weak, because the card is rebuilt on every content
