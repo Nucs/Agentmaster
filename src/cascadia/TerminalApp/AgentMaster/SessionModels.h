@@ -1697,11 +1697,22 @@ namespace Agentmaster
         //     DURABLY at the front of the successor's queue (sessions.json — restart-safe,
         //     Send-now-able) — in both the file is no longer load-bearing. The POINTER tier never
         //     deletes (the successor must read the file), and a failed spawn leaves its file.
-        //     Default OFF (deleting user-visible files is opt-in); the answer to the
-        //     HANDOVER-*.md litter accumulating at repo roots. A FRESH install (no key on disk)
-        //     seeds it ON instead, because the shipped write location is now the scratchpad —
-        //     see commandHandoverWritePath + the Persistence load's absent-key default.
-        bool commandHandoverDeleteFileAfterLaunch{ true };
+        //     Default OFF — NEVER DELETE unless you asked for it: a briefing is a document the user
+        //     may still want to read, and losing one is unrecoverable, so keeping it is the safe
+        //     direction on EVERY install (a fresh one included — the earlier "fresh installs seed
+        //     it ON because the shipped location is the scratchpad" pairing is gone, and the cog's
+        //     Scratchpad preset now turns delete-after OFF rather than on).
+        bool commandHandoverDeleteFileAfterLaunch{ false };
+        //   * commandHandoverDeleteDeadlineMinutes — how long delete-after WAITS for the successor
+        //     to actually START before giving up and KEEPING the file (the delete itself fires the
+        //     moment the successor is up, so a prompt hand-off is unaffected by this value). It
+        //     matters because a successor opened in a BACKGROUND tab starts LAZILY — WT builds the
+        //     control on first layout, so its claude.exe may not run until the user visits the tab,
+        //     which can be hours. Default 1440 (24 h): the briefing is cleaned up whenever you get
+        //     around to opening it, and a successor never opened keeps its file forever. 0 == don't
+        //     wait at all (delete only if the successor is already up on the next sweep). Clamped
+        //     by ClampCommandHandoverDeleteDeadlineMinutes on load + Save.
+        uint32_t commandHandoverDeleteDeadlineMinutes{ 1440 };
         //   * commandHandoverWritePath — WHERE both commands tell Claude to write the briefing
         //     (COMMANDS.md §6c). FAMILY-WIDE and FOLDER-ONLY: the file NAME keeps the
         //     HANDOVER-<topic>.md contract the rest of the pipeline keys on (the file-match regex,
@@ -1738,6 +1749,17 @@ namespace Agentmaster
             return 20;
         }
         return v > 40 ? 40 : v;
+    }
+
+    // Agentmaster (COMMANDS.md §6b): clamp AppSettings::commandHandoverDeleteDeadlineMinutes into
+    // 0..30 days. 0 is MEANINGFUL here (don't wait for the successor at all), so — unlike ClampMaxTags
+    // — it is NOT folded back to the default; only a value past the ceiling is pinned. The ceiling
+    // exists so a hand-edited settings.json can't park an entry in the in-memory sweep map forever.
+    // Shared by the Persistence load and the cog Save so both self-heal identically.
+    inline uint32_t ClampCommandHandoverDeleteDeadlineMinutes(uint32_t v)
+    {
+        constexpr uint32_t kMax = 30u * 24u * 60u; // 30 days
+        return v > kMax ? kMax : v;
     }
 
     // Agentmaster (bookmark tags): clamp AppSettings::tooltipTagsOpacity into 0.1..1.0 — the cog

@@ -128,6 +128,36 @@ namespace
 
         return grid;
     }
+
+    // Agentmaster (COMMANDS.md §6b): read the Commands tab's "wait this many minutes for the
+    // successor to start" box. ONE rule, because TWO readers consume it — the cog's Save and the
+    // live status line — and a drift between them would show the user a sentence the Save doesn't
+    // honor. Digit-scrape (the ClampMaxTags idiom) with a wider accumulator guard so the 30-day
+    // ceiling fits, then clamped. A BLANK box means "the default"; a typed 0 is a REAL value
+    // ("don't wait for the successor at all"), so the two must never collapse onto one meaning —
+    // hence the anyDigit flag rather than leaning on the accumulator's 0.
+    uint32_t ReadDeleteDeadlineMinutesBox(const winrt::Windows::UI::Xaml::Controls::TextBox& box)
+    {
+        if (!box)
+        {
+            return 1440;
+        }
+        const std::wstring t{ box.Text() };
+        bool anyDigit = false;
+        uint32_t v = 0;
+        for (const wchar_t c : t)
+        {
+            if (c >= L'0' && c <= L'9')
+            {
+                anyDigit = true;
+                if (v < 10000000)
+                {
+                    v = v * 10 + static_cast<uint32_t>(c - L'0');
+                }
+            }
+        }
+        return anyDigit ? ::Agentmaster::ClampCommandHandoverDeleteDeadlineMinutes(v) : 1440;
+    }
 }
 
 namespace winrt::TerminalApp::implementation
@@ -1446,10 +1476,10 @@ namespace winrt::TerminalApp::implementation
             _setCmdWritePathPresets = Button{};
             _setCmdWritePathPresets.Content(winrt::box_value(L"Presets \x25BE"));
             _setCmdWritePathPresets.VerticalAlignment(VerticalAlignment::Bottom);
-            AgentSetTip(_setCmdWritePathPresets, L"Common locations. Picking \x201CScratchpad\x201D also turns on \x201C" L"Delete the handover file after a successful hand-off\x201D \x2014 a temp briefing has no reason to linger once its successor has the content.");
+            AgentSetTip(_setCmdWritePathPresets, L"Common locations. Picking \x201CScratchpad\x201D also turns OFF \x201C" L"Delete the handover file after a successful hand-off\x201D \x2014 a briefing in a temp folder is already out of your repo, so there is nothing to clean up, and keeping it means you can still go back and read it.");
             {
                 auto flyout = MenuFlyout{};
-                // { label, value, is-the-scratchpad } — the scratchpad entry also ticks delete-after.
+                // { label, value, is-the-scratchpad } — the scratchpad entry also UNticks delete-after.
                 const struct
                 {
                     const wchar_t* label;
@@ -1475,7 +1505,11 @@ namespace winrt::TerminalApp::implementation
                         }
                         if (scratchpad && _setCmdDeleteAfter)
                         {
-                            _setCmdDeleteAfter.IsOn(true); // the auto-pairing: temp file => clean it up
+                            // The auto-pairing, INVERTED: a briefing in the temp scratchpad is already
+                            // out of the user's repo, so there is no litter to clean up — and deleting
+                            // it is the one irreversible thing we could do to a document they may want
+                            // to re-read. Scratchpad therefore turns delete-after OFF.
+                            _setCmdDeleteAfter.IsOn(false);
                         }
                         _UpdateCommandsTabStatus();
                     });
@@ -1495,8 +1529,15 @@ namespace winrt::TerminalApp::implementation
         panel.Children().Append(_setCmdFileMatch);
         _setCmdDeleteAfter = ToggleSwitch{};
         _setCmdDeleteAfter.Header(winrt::box_value(L"Delete the handover file after a successful hand-off"));
-        AgentSetTip(_setCmdDeleteAfter, L"Once a HANDOVER-*.md's successor session is created and its briefing is secured (delivered on the launch commandline, or parked durably on the successor's queue for the paste injection), the file itself is deleted \x2014 no more HANDOVER-*.md litter in your repos. A file whose successor got only a POINTER to it is never deleted (the successor must read it), and a failed spawn leaves its file. Off by default; applies to the next handover.");
+        AgentSetTip(_setCmdDeleteAfter, L"OFF by default \x2014 a briefing is never deleted unless you ask for it here, because it is a document you may still want to read and deleting it cannot be undone.\n\nTurned ON: once a HANDOVER-*.md's successor session is created AND has actually started, and its briefing is secured (delivered on the launch commandline, or parked durably on the successor's queue for the paste injection), the file itself is deleted \x2014 no more HANDOVER-*.md litter in your repos. A file whose successor got only a POINTER to it is never deleted (the successor must read it), a failed spawn leaves its file, and a successor that dies before starting leaves its file. Applies to the next handover.");
+        _setCmdDeleteAfter.Toggled([this](const IInspectable&, const RoutedEventArgs&) { _UpdateCommandsTabStatus(); });
         panel.Children().Append(_setCmdDeleteAfter);
+        _setCmdDeleteDeadline = TextBox{};
+        _setCmdDeleteDeadline.Header(winrt::box_value(L"\x2026 waiting up to this many minutes for the successor to start"));
+        _setCmdDeleteDeadline.PlaceholderText(L"1440 \x2014 24 hours");
+        AgentSetTip(_setCmdDeleteDeadline, L"How long the delete WAITS for the successor session to actually start before giving up and KEEPING the file. It does not delay anything: a successor that comes straight up has its briefing deleted immediately.\n\nIt matters because a successor opened in a background tab starts LAZILY \x2014 its claude.exe only launches when you first visit the tab, which can be hours later. The default 1440 minutes (24 hours) means the briefing is cleaned up whenever you get around to opening it; a successor you never open keeps its file forever.\n\nA typed 0 = don't wait at all (delete only if the successor is already up); a BLANK box restores the 1440 default. Capped at 30 days.");
+        _setCmdDeleteDeadline.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _UpdateCommandsTabStatus(); });
+        panel.Children().Append(_setCmdDeleteDeadline);
         _setCmdShapingStatus = Text(L"", 11, false, 0.7);
         _setCmdShapingStatus.TextWrapping(TextWrapping::Wrap);
         panel.Children().Append(_setCmdShapingStatus);
@@ -2171,6 +2212,10 @@ namespace winrt::TerminalApp::implementation
             {
                 _setCmdDeleteAfter.IsOn(d.commandHandoverDeleteFileAfterLaunch);
             }
+            if (_setCmdDeleteDeadline)
+            {
+                _setCmdDeleteDeadline.Text(winrt::hstring{ std::to_wstring(d.commandHandoverDeleteDeadlineMinutes) });
+            }
             if (_setCmdWritePath)
             {
                 _setCmdWritePath.Text(winrt::hstring{ d.commandHandoverWritePath }); // §6c — back to the scratchpad
@@ -2536,6 +2581,10 @@ namespace winrt::TerminalApp::implementation
         if (_setCmdDeleteAfter)
         {
             _setCmdDeleteAfter.IsOn(_appSettings.commandHandoverDeleteFileAfterLaunch);
+        }
+        if (_setCmdDeleteDeadline)
+        {
+            _setCmdDeleteDeadline.Text(winrt::hstring{ std::to_wstring(_appSettings.commandHandoverDeleteDeadlineMinutes) });
         }
         if (_setCmdWritePath)
         {
@@ -3120,6 +3169,11 @@ namespace winrt::TerminalApp::implementation
         if (_setCmdDeleteAfter)
         {
             _appSettings.commandHandoverDeleteFileAfterLaunch = _setCmdDeleteAfter.IsOn();
+        }
+        if (_setCmdDeleteDeadline)
+        {
+            // The SAME parse the status line shows (blank -> the 24 h default, a typed 0 -> "don't wait").
+            _appSettings.commandHandoverDeleteDeadlineMinutes = ReadDeleteDeadlineMinutesBox(_setCmdDeleteDeadline);
         }
         if (_setCmdWritePath)
         {
@@ -3803,6 +3857,38 @@ namespace winrt::TerminalApp::implementation
             t += ::Agentmaster::CommandWritePathIsScratchpad(loc) ?
                      std::wstring{ L"the session scratchpad (temp) \x2014 the default." } :
                      (L"written to " + ::Agentmaster::CommandWritePathPhrase(loc) + L".");
+            // §6b delete-after, said out loud: deleting a briefing is the one irreversible thing on
+            // this tab, so the effective rule (and the wait budget behind it) is spelled out rather
+            // than left to a toggle label + a number box the user has to compose in their head.
+            t += L"  Briefings: ";
+            if (!_setCmdDeleteAfter || !_setCmdDeleteAfter.IsOn())
+            {
+                t += L"KEPT \x2014 never deleted (the default).";
+            }
+            else
+            {
+                const uint32_t mins = ReadDeleteDeadlineMinutesBox(_setCmdDeleteDeadline); // the SAME parse the Save applies
+                if (mins == 0)
+                {
+                    t += L"deleted only if the successor is already up (0 min wait) \x2014 otherwise kept.";
+                }
+                else
+                {
+                    // Minutes are what the box takes; hours/days are what 1440 actually MEANS.
+                    std::wstring human = std::to_wstring(mins) + L" min";
+                    if (mins % (24 * 60) == 0)
+                    {
+                        const uint32_t d = mins / (24 * 60);
+                        human += L" = " + std::to_wstring(d) + (d == 1 ? L" day" : L" days");
+                    }
+                    else if (mins % 60 == 0)
+                    {
+                        const uint32_t h = mins / 60;
+                        human += L" = " + std::to_wstring(h) + (h == 1 ? L" hour" : L" hours");
+                    }
+                    t += L"deleted once the successor starts, waiting up to " + human + L" for it \x2014 otherwise kept.";
+                }
+            }
             _setCmdShapingStatus.Text(winrt::hstring{ t });
         }
         // §6c: what the definition FILES on disk are (sampled at cog open / after a Reinstall).

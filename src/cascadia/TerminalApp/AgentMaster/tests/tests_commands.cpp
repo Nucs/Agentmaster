@@ -1357,6 +1357,7 @@ void TestCommandWatch()
         as.commandHandoverTitleReplace = L"$1 - next";
         as.commandHandoverFileMatchRegex = LR"(^BRIEF-.*\.md$)";
         as.commandHandoverDeleteFileAfterLaunch = true;
+        as.commandHandoverDeleteDeadlineMinutes = 90;
         as.commandHandoverStandbySuccessorModel = L"claude-sonnet-5";
         const auto back = AppSettingsFromJson(ToJson(as));
         CHECK(back.commandHandoverSuccessorModel == L"claude-opus-4-8" && back.commandHandoverHereSuccessorModel.empty() &&
@@ -1366,22 +1367,39 @@ void TestCommandWatch()
               "shaping: the title find/replace pair round-trips VERBATIM (regex chars + $ backrefs unmangled)");
         CHECK(back.commandHandoverFileMatchRegex == LR"(^BRIEF-.*\.md$)", "shaping: the file-match regex round-trips verbatim");
         CHECK(back.commandHandoverDeleteFileAfterLaunch, "shaping: the delete-after toggle round-trips");
+        CHECK(back.commandHandoverDeleteDeadlineMinutes == 90, "shaping: the delete-after WAIT (minutes) round-trips");
         // The three REGEX fields are PRESENCE-GATED (the launchModels idiom): an ABSENT key seeds
         // the SHIPPED DEFAULT — the boxes show the real rule instead of hiding a code fallback —
         // while a PRESENT empty string is a deliberate "fall back to the built-in behavior".
         const auto fresh = AppSettingsFromJson(json::Value::MkObj());
         CHECK(fresh.commandHandoverSuccessorModel.empty() && fresh.commandHandoverHereSuccessorModel.empty(),
               "shaping: absent model keys reproduce the shipped behavior (Default model)");
-        // §6c pairing: the shipped write location is the session SCRATCHPAD, so a FRESH install
-        // also gets delete-after ON (a temp briefing has no reason to linger once its successor
-        // holds the content). An install that already stored `false` keeps it — see below.
-        CHECK(fresh.commandHandoverDeleteFileAfterLaunch && CommandWritePathIsScratchpad(fresh.commandHandoverWritePath),
-              "shaping: an absent write-path/delete pair reads as the shipped scratchpad + delete-after ON");
+        // §6c: the shipped write location is the session SCRATCHPAD, and delete-after is OFF on
+        // EVERY install — a briefing is a document the user may still want to read and deleting it
+        // cannot be undone, so keeping it is the default everywhere (the earlier "a fresh install
+        // seeds it ON because the location is temp" pairing is gone; the cog's Scratchpad preset
+        // now UNticks the toggle). An install that already stored `true` keeps it — see below.
+        CHECK(!fresh.commandHandoverDeleteFileAfterLaunch && CommandWritePathIsScratchpad(fresh.commandHandoverWritePath),
+              "shaping: an absent write-path/delete pair reads as the shipped scratchpad + delete-after OFF (never delete by default)");
+        CHECK(fresh.commandHandoverDeleteDeadlineMinutes == 1440,
+              "shaping: an absent delete-deadline key seeds 1440 minutes (24 h) of waiting for the successor to start");
         {
             auto kept = json::Value::MkObj();
-            kept.Set(L"commandHandoverDeleteFileAfterLaunch", json::Value::MkBool(false));
-            CHECK(!AppSettingsFromJson(kept).commandHandoverDeleteFileAfterLaunch,
-                  "shaping: an install that stored delete-after OFF keeps it (the new default only seeds an ABSENT key)");
+            kept.Set(L"commandHandoverDeleteFileAfterLaunch", json::Value::MkBool(true));
+            CHECK(AppSettingsFromJson(kept).commandHandoverDeleteFileAfterLaunch,
+                  "shaping: an install that stored delete-after ON keeps it (the OFF default only seeds an ABSENT key)");
+        }
+        {
+            // The wait is clamped on load, so a hand-edited settings.json self-heals — and 0 is a
+            // REAL value here ("don't wait at all"), never folded back to the default.
+            auto huge = json::Value::MkObj();
+            huge.Set(L"commandHandoverDeleteDeadlineMinutes", json::Value::MkNum(999999999));
+            CHECK(AppSettingsFromJson(huge).commandHandoverDeleteDeadlineMinutes == 30u * 24u * 60u,
+                  "shaping: an absurd delete-deadline clamps to the 30-day ceiling");
+            auto zero = json::Value::MkObj();
+            zero.Set(L"commandHandoverDeleteDeadlineMinutes", json::Value::MkNum(0));
+            CHECK(AppSettingsFromJson(zero).commandHandoverDeleteDeadlineMinutes == 0,
+                  "shaping: a stored 0 survives (don't wait for the successor at all)");
         }
         CHECK(fresh.commandHandoverTitleFindRegex == kDefaultCommandTitleFindRegex &&
                   fresh.commandHandoverTitleReplace == kDefaultCommandTitleReplace &&

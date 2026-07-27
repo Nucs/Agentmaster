@@ -693,7 +693,21 @@ box back to it.
   now reads as CUSTOMIZED; clear the box or retype `HANDOVER\-` to adopt the new rule. Only
   unreleased builds can be in that state — the seeding never shipped in a tagged release.)
 * **Delete after launch AND successful start** — `commandHandoverDeleteFileAfterLaunch` (default
-  **OFF**; deleting user-visible files is opt-in). The delete is **DEFERRED, not fired at spawn**:
+  **OFF on every install** — a briefing is a document the user may still want to read and deleting
+  it cannot be undone, so *never delete unless you asked for it* is the default everywhere; the
+  earlier "a FRESH install seeds it ON because the shipped location is the scratchpad" pairing is
+  **gone**, and the cog's **Scratchpad** preset now turns the toggle **OFF** rather than on — §6c).
+  Its companion **`commandHandoverDeleteDeadlineMinutes`** (default **1440 == 24 h**, a free-typed
+  minutes box under the toggle, clamped 0..30 days on load AND Save by
+  `ClampCommandHandoverDeleteDeadlineMinutes`) is how long the delete **WAITS for the successor to
+  actually start** before giving up and KEEPING the file. It delays nothing — a successor that comes
+  straight up has its briefing deleted immediately — it is a patience budget, and it replaces the
+  hard-coded 10 min the sweep used to borrow from the paste pump. The two are measuring different
+  things: the pump races a **TUI** that is either up or not, while this waits on a **human** visiting
+  a lazily-started background tab, which can be hours. A typed **0** means don't wait at all (delete
+  only if the successor is already up); a **blank box** restores the 1440 default (so blank and 0
+  can never collapse onto one meaning). Read per sweep, so a Save applies to entries already armed.
+  The delete is **DEFERRED, not fired at spawn**:
   `_HandleCommandHandover` only ARMS an entry (successor id → md path) and
   `TerminalPage::_SweepHandoverDeletes` — ticked on the same liveness pass as the paste pump —
   removes the file once the successor has **actually STARTED** (`SessionInfo.started`, i.e. its
@@ -704,12 +718,12 @@ box back to it.
   launch commandline, the **paste** tier parked it durably at the FRONT of the successor's queue,
   `sessions.json`: restart-safe, Send-now-able); **gone/archived before starting** ⇒ drop the
   entry and **KEEP** the file (the successor died — the md is the only copy the user can act on);
-  **past the 10-min deadline** (the pump's) ⇒ give up, keep the file; **delete failed** (locked)
+  **past the deadline** (`commandHandoverDeleteDeadlineMinutes`) ⇒ give up, keep the file; **delete failed** (locked)
   ⇒ logged, file left in place. The **pointer** tier never arms an entry at all (its successor's
   first message NAMES the file), and a **failed spawn** never arms one. Logs:
   `[handover] deleted md after successful hand-off (successor=<sid8> started): …` ·
   `[handover] <sid8> successor gone before start - md KEPT: …` ·
-  `[handover] <sid8> successor never started within 10 min - md KEPT: …` ·
+  `[handover] <sid8> successor never started within <N> min - md KEPT: …` (N = the configured wait) ·
   `[handover] delete-after-hand-off FAILED (le=…), file left in place: …`.
   This is the answer to `HANDOVER-*.md` litter accumulating at repo roots (§gap-8).
 
@@ -789,11 +803,17 @@ why the rewrite rule is now *"ours **and** not already exactly what we would wri
 predicate covers a version upgrade, a name re-render and a location re-render, while a
 byte-identical file stays a no-op (no write, no log).
 
-**Delete-after pairs with it.** A briefing in a temp scratchpad has no reason to linger once its
-successor holds the content, so a **fresh install** now seeds `commandHandoverDeleteFileAfterLaunch`
-**ON** (the absent-key default; an install that already stored `false` keeps it), and picking the
-**Scratchpad** preset in the cog ticks the toggle for you. Everything else about delete-after is
-unchanged (§6b — deferred to a started successor, never the pointer tier, never a failed spawn).
+**Delete-after pairs with it — INVERTED.** The original pairing read "a briefing in a temp
+scratchpad has no reason to linger", and so seeded `commandHandoverDeleteFileAfterLaunch` **ON** for
+a fresh install and ticked it when you picked the **Scratchpad** preset. That is backwards on the
+axis that matters: the scratchpad already keeps the file **out of your repo** — the litter §6c
+exists to fix is gone the moment the location moves — so the delete buys nothing there, while it
+still costs the one irreversible thing (a briefing you wanted to re-read). So the pairing now runs
+the other way: the absent-key default is **OFF on every install** (an install that already stored
+`true` keeps it — a made choice is never revoked), and picking **Scratchpad** in the cog **unticks**
+the toggle. Delete-after is now purely opt-in, for people who keep briefings in `./` and want them
+swept. Everything else about it is unchanged (§6b — deferred to a started successor, waiting
+`commandHandoverDeleteDeadlineMinutes` for it, never the pointer tier, never a failed spawn).
 
 **The definition files, said out loud + the Reinstall escape hatch.** Everything on this tab is
 delivered by writing `<claude-config>\commands\<name>.md`, and Agentmaster **never overwrites a

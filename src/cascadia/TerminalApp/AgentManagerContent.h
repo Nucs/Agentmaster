@@ -926,7 +926,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _setCmdTitleFind{ nullptr }; // successor-title rewrite: the FIND regex ("" == default "(handover)" naming)
         winrt::Windows::UI::Xaml::Controls::TextBox _setCmdTitleReplace{ nullptr }; // …and its REPLACE text ($1 backrefs honored)
         winrt::Windows::UI::Xaml::Controls::TextBox _setCmdFileMatch{ nullptr }; // the HANDOVER file-match regex ("" == leaf contains "handover"; restart-applied)
-        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCmdDeleteAfter{ nullptr }; // delete a HANDOVER md after its successor spawned + delivery secured (never the pointer tier)
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCmdDeleteAfter{ nullptr }; // delete a HANDOVER md after its successor spawned + delivery secured (never the pointer tier); default OFF
+        winrt::Windows::UI::Xaml::Controls::TextBox _setCmdDeleteDeadline{ nullptr }; // …and how long (MINUTES, default 1440 == 24 h) it waits for that successor to actually start
         winrt::Windows::UI::Xaml::Controls::TextBlock _setCmdShapingStatus{ nullptr }; // the shaping summary/validation line (invalid regexes called out)
         // COMMANDS.md §6c — WHERE the briefings are written: a free-typed FOLDER with a preset
         // drop-down beside it ("scratchpad" == the shipped default). Rendered into both definition

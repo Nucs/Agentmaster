@@ -6393,7 +6393,11 @@ namespace winrt::TerminalApp::implementation
     //                          at the front of the successor's queue);
     //   * gone / archived    -> DROP the entry WITHOUT deleting (the successor died before running
     //                          — the file is the only copy the user can act on);
-    //   * past the deadline  -> give up, leave the file (logged) — same 10 min the pump uses;
+    //   * past the deadline  -> give up, leave the file (logged). The deadline is the user-set
+    //                          commandHandoverDeleteDeadlineMinutes (default 1440 == 24 h), NOT the
+    //                          pump's fixed 10 min: the pump is racing a TUI that is either up or
+    //                          not, while this waits on a HUMAN visiting a lazily-started background
+    //                          tab. 0 == don't wait at all;
     //   * delete failed      -> logged, file left in place (best-effort; never blocks anything).
     // The POINTER tier never arms an entry at all (its successor's first message NAMES the file),
     // and the STANDBY lane arms only after a VERIFIED fill (the pump above). SELF-MARSHALS to the
@@ -6420,7 +6424,10 @@ namespace winrt::TerminalApp::implementation
         {
             co_return;
         }
-        constexpr int64_t kHandoverDeleteDeadlineMs = 10 * 60 * 1000; // matches the paste pump's give-up
+        // The wait-for-the-successor budget, in the user's minutes (cog -> Commands; default 24 h).
+        // Read per sweep so a Save applies to entries already armed — no restart, no re-arm.
+        const uint32_t deadlineMinutes = ::Agentmaster::ClampCommandHandoverDeleteDeadlineMinutes(_appSettings.commandHandoverDeleteDeadlineMinutes);
+        const int64_t kHandoverDeleteDeadlineMs = static_cast<int64_t>(deadlineMinutes) * 60 * 1000;
         const int64_t now = static_cast<int64_t>(::GetTickCount64());
         for (auto it = _pendingHandoverDeletes.begin(); it != _pendingHandoverDeletes.end();)
         {
@@ -6438,7 +6445,7 @@ namespace winrt::TerminalApp::implementation
             {
                 if (now - entry.armedMs >= kHandoverDeleteDeadlineMs)
                 {
-                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(id) + L" successor never started within 10 min - md KEPT: " + entry.mdPath + L"\n");
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(id) + L" successor never started within " + std::to_wstring(deadlineMinutes) + L" min - md KEPT: " + entry.mdPath + L"\n");
                     it = _pendingHandoverDeletes.erase(it);
                     continue;
                 }

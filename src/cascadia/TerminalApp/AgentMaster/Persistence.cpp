@@ -758,6 +758,7 @@ namespace Agentmaster
         o.Set(L"commandHandoverTitleReplace", json::Value::MkStr(s.commandHandoverTitleReplace));
         o.Set(L"commandHandoverFileMatchRegex", json::Value::MkStr(s.commandHandoverFileMatchRegex));
         o.Set(L"commandHandoverDeleteFileAfterLaunch", json::Value::MkBool(s.commandHandoverDeleteFileAfterLaunch));
+        o.Set(L"commandHandoverDeleteDeadlineMinutes", json::Value::MkNum(s.commandHandoverDeleteDeadlineMinutes));
         o.Set(L"commandHandoverWritePath", json::Value::MkStr(s.commandHandoverWritePath));
         o.Set(L"envDefaultsVersion", json::Value::MkNum(s.envDefaultsVersion));
         o.Set(L"claudeCleanupDaysSeeded", json::Value::MkBool(s.claudeCleanupDaysSeeded));
@@ -984,13 +985,16 @@ namespace Agentmaster
             s.commandHandoverWritePath = NormalizeCommandWritePath(v.StrAt(L"commandHandoverWritePath"));
         }
         // Delete-after: an ABSENT key (a FRESH install, or one predating this key) takes the struct
-        // default ON, which pairs with the scratchpad write location above — a briefing written to a
-        // temp folder has no reason to linger. An install that already stored `false` keeps it.
-        // NB: the fallback is the literal struct default (see AppSettings::commandHandoverDeleteFileAfterLaunch)
-        // rather than an `AppSettings{}` temporary — constructing a full temporary of this large
-        // struct mid-parse (every field, including the other command regex/model strings) crashed
-        // on startup (STL debug container-proxy fault destructing it inside this same function).
-        s.commandHandoverDeleteFileAfterLaunch = v.BoolAt(L"commandHandoverDeleteFileAfterLaunch", true);
+        // default OFF — never delete a briefing unless the user asked for it. An install that
+        // already stored `true` keeps it (a made choice is never revoked). Its companion deadline is
+        // how long we WAIT for the successor to start before giving up and keeping the file
+        // (default 1440 == 24 h; a lazily-started background tab may not come up for hours).
+        // NB: both fallbacks are the literal struct defaults (see AppSettings) rather than an
+        // `AppSettings{}` temporary — constructing a full temporary of this large struct mid-parse
+        // (every field, including the other command regex/model strings) crashed on startup (STL
+        // debug container-proxy fault destructing it inside this same function).
+        s.commandHandoverDeleteFileAfterLaunch = v.BoolAt(L"commandHandoverDeleteFileAfterLaunch", false);
+        s.commandHandoverDeleteDeadlineMinutes = ClampCommandHandoverDeleteDeadlineMinutes(v.U32At(L"commandHandoverDeleteDeadlineMinutes", 1440));
         // Shipped-default seeding markers (ENV_VARS.md §8). Absent => 0 / false, so a pre-feature
         // settings.json runs the one-time seed once (new installs + updaters alike get the defaults).
         s.envDefaultsVersion = v.U32At(L"envDefaultsVersion", 0);

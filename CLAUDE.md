@@ -946,7 +946,7 @@ the channels can't drift], the standby settings round-trip) + the multi-file
 collect/seal/settle units (now incl. the settle turn-in-flight HOLD: the 75113a52 incident replay —
 held through a 2m09s generation gap, ONE fire with both files at the real turn end — + the
 release-on-death and throwing-probe belts, and E2E scenario F2, the same clip through the real
-parser at scanner cadence; suite 2873/2873) + the durable-progress units (watermark / marker revival / prune /
+parser at scanner cadence; suite 2877/2877) + the durable-progress units (watermark / marker revival / prune /
 encode-decode) + the family-supersede race-guard units + the SHA-256 definition-history units
 (NIST vectors + padding edges; the create/upgrade/never-overwrite policy over a synthetic command;
 the `last digest == sha256(current text)` version gate; the three histories pairwise disjoint) + the §6a
@@ -1051,14 +1051,25 @@ pattern is authoritative over the leaf hint — case-insensitive search on the f
 invalid one falls back to the shipped hint, belted at bind time (logged) AND per leaf; a VALID
 pattern also SUPPRESSES the legacy first-markdown fallback, so an unrelated `notes.md` can never
 become the briefing; **RESTART-applied**, bindings register once; the §3 supersede family key stays the leaf HINT so the two commands
-stay one family), and **DELETE-AFTER-HAND-OFF** (`commandHandoverDeleteFileAfterLaunch`, default ON on
-a FRESH install — the §6c scratchpad pairing below; an install that stored OFF keeps it)
+stay one family), and **DELETE-AFTER-HAND-OFF** (`commandHandoverDeleteFileAfterLaunch`, **default OFF
+on EVERY install** — *never delete a briefing unless you asked for it*: it is a document you may still
+want to re-read and the delete cannot be undone, so the earlier "a FRESH install seeds it ON because the
+shipped location is the scratchpad" pairing is **GONE** and the cog's Scratchpad preset now **unticks**
+the toggle — the scratchpad already keeps the file out of your repo, which is the whole litter problem,
+so deleting there buys nothing; an install that stored ON keeps it)
 — **DEFERRED to a successful START, not fired at spawn**: `_HandleCommandHandover` only ARMS
 (successor id → md path) and `_SweepHandoverDeletes` (same liveness tick as the paste pump) deletes
 once `SessionInfo.started` — because a successor in a BACKGROUND tab starts LAZILY and a launch that
 never comes up must keep its briefing on disk. Gone/archived-before-start ⇒ KEEP the file; past the
-10-min deadline ⇒ KEEP; delete failed ⇒ logged, kept. Never the POINTER tier (its first message NAMES
-the file), never a failed spawn — the answer to `HANDOVER-*.md` litter. All user-typed patterns
+**`commandHandoverDeleteDeadlineMinutes`** deadline ⇒ KEEP; delete failed ⇒ logged, kept. That deadline
+is the **patience budget** — how long the sweep waits for the successor to actually come up — a free-typed
+**minutes** box under the toggle, **default 1440 (24 h)**, clamped 0..30 days
+(`ClampCommandHandoverDeleteDeadlineMinutes`) on load AND Save, read per sweep so a Save applies to
+already-armed entries. It replaces the hard-coded 10 min the sweep borrowed from the paste pump: the pump
+races a **TUI** that is either up or not, this waits on a **human** visiting a lazily-started background
+tab (hours). A typed **0** = don't wait at all (delete only if already up); a **blank box** = the 1440
+default, so blank and 0 never collapse onto one meaning. Never the POINTER tier (its first message NAMES
+the file), never a failed spawn — the opt-in answer to `HANDOVER-*.md` litter. All user-typed patterns
 run through the ONE shared **`AgentMaster/RegexUtil.h`** (header-only + pure, the `PromptAnchor.h`
 idiom): `RegexIsValid`/`RegexSearch`/`RegexReplace` never throw (invalid ⇒ no-match/unchanged), cap
 pattern (512) + input (4096), and fix one flavor (ECMAScript, search semantics, optional
@@ -1102,7 +1113,9 @@ the TEXT changes (never a binding), the cog's Save **applies it immediately**
 MATERIALIZED names — a rename stays restart-applied so a file and its binding can never disagree
 mid-run), so the rewrite rule generalized to **"ours AND not already exactly what we would write"**
 (one predicate covering a version upgrade, a name re-render and a location re-render; a
-byte-identical file stays a no-op). Picking the **Scratchpad** preset also ticks delete-after. The
+byte-identical file stays a no-op). Picking the **Scratchpad** preset also **unticks** delete-after
+(the scratchpad already keeps the briefing out of your repo — deleting there costs a re-readable
+document and buys nothing; the pairing used to run the other way). The
 tab's new **COMMAND DEFINITION FILES** section states what each file on disk IS
 (`InspectHandoverCommandFiles` → up-to-date / managed / **EDITED BY YOU — left alone** / not
 installed, sampled at cog open, not per keystroke) — because a hand-edited definition is frozen
@@ -2157,11 +2170,15 @@ What works, by area:
   `HANDOVER-<topic>.md` contract, blank/invalid falling back to the looser built-in
   "name contains handover" hint — **the one restart-applied field here**), and
   **`commandHandoverDeleteFileAfterLaunch`** (delete the md once its successor exists + delivery is
-  secured; never the pointer tier — the `HANDOVER-*.md` litter fix), **plus the §6c WRITE LOCATION** —
+  secured; never the pointer tier — the opt-in `HANDOVER-*.md` litter fix, **default OFF everywhere**:
+  never delete a briefing unless asked) **+ `commandHandoverDeleteDeadlineMinutes`** (the minutes box
+  under it — how long that delete WAITS for the successor to actually start before giving up and
+  KEEPING the file; **default 1440 == 24 h** since a background tab starts lazily and may not be
+  visited for hours, typed **0** = don't wait, blank = the default, clamped 0..30 days), **plus the §6c WRITE LOCATION** —
   **`commandHandoverWritePath`** (the "Handover file location" box + a **Presets ▾** menu — Scratchpad
   (default, also what a blank box means) · `./` · `./docs` · `./docs/handovers` · `./handovers`, or any
   typed folder incl. an absolute one; FOLDER-only, the `HANDOVER-<topic>.md` name is untouched; picking
-  Scratchpad also ticks delete-after) and the **COMMAND DEFINITION FILES** section (a per-file state line
+  Scratchpad **unticks** delete-after) and the **COMMAND DEFINITION FILES** section (a per-file state line
   — up-to-date / managed / **EDITED BY YOU — left alone** / not installed — plus a confirmed **Reinstall
   definition files…**, the one overwrite that ignores the digest). Model/title/delete/**location** apply
   to the NEXT handover right after Save (the location by re-rendering the live definition files); a live

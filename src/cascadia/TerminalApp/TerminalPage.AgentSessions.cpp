@@ -498,8 +498,10 @@ namespace winrt::TerminalApp::implementation
             // restart-safe, Send-now-able). Deliberately NOT deleted here: a successor spawned in
             // a BACKGROUND tab starts lazily (its claude.exe only launches on first layout), and a
             // launch that never comes up must leave the briefing on disk for the user to re-run —
-            // so _SweepHandoverDeletes waits for SessionInfo.started, gives up after the same 10
-            // min, and drops WITHOUT deleting if the session dies/archives first. The POINTER tier
+            // so _SweepHandoverDeletes waits for SessionInfo.started, gives up after the configured
+            // commandHandoverDeleteDeadlineMinutes (default 24 h — a background tab may not be
+            // visited for hours), and drops WITHOUT deleting if the session dies/archives first.
+            // The POINTER tier
             // is excluded by construction (its successor's first message NAMES the file), as is a
             // failed spawn (newId empty ⇒ nothing consumed the file). STANDBY never arms HERE at
             // all — its delivery is secured only once the fill is VERIFIED in the input box, so
