@@ -987,8 +987,14 @@ tag no session carries lists at **·0** (sorts last).
   underscore). The **Sessions browser** gained a **Tags column** (col 5, after Branch) rendering the same
   hoverable ribbons + the same hover panel, plus a filter-chips row under the search toggles (gently-rounded
   rectangles, `_RebuildSessionsTagChips` — a tag facet that ANDs with the search/scope filters). The
-  **Triage Board** header carries the SAME chip row, right after the **Clear** button
-  (`_RebuildBoardTagChips` / `_ToggleBoardTagFilter` / `_BoardTagFilterAccepts`) — ⚠ but the picks combine
+  **Triage Board** header carries the same chip row, right after the **Clear** button
+  (`_RebuildBoardTagChips` / `_ToggleBoardTagFilter` / `_BoardTagFilterAccepts`) — same ribbon+name chip,
+  except an UNPICKED chip sets no Background/BorderBrush at all, so it wears the stock chrome of the
+  Clear/Show-all/scope buttons beside it (all but transparent on the board's dark fill) rather than the
+  Sessions page's translucent blue, which read as a foreign always-on highlight in a row of plain buttons;
+  a PICKED chip still reads instantly off the ToggleButton's own Checked accent fill (a VSM setter
+  outranks a local value, which is equally why the Sessions chips can override the rest state and keep the
+  checked one) — ⚠ and the picks combine
   with **OR**, not AND: the board is a triage surface you point at a few concerns at once ("anything tagged
   release or hotfix"), where ANDing would only ever shrink toward the one card carrying every tag. The chip
   universe is `CollectGlobalTags` over `_boardTags` — already narrowed by `_RebuildBoard` to the sessions the

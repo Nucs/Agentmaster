@@ -1215,9 +1215,10 @@ namespace winrt::TerminalApp::implementation
     // ===== the board header's TAG FILTER chips (bookmark tags) ===============================
     //
     // The Triage Board twin of the Sessions browser's chip row (_RebuildSessionsTagChips), in the
-    // board header right after "Clear": one blue, partially-transparent ToggleButton per tag —
-    // each carrying the tag's own bookmark ribbon, so a chip reads as exactly the ribbon the cards
-    // and tabs wear — plus a trailing ✕ that drops every pick at once.
+    // board header right after "Clear": one ToggleButton per tag — each carrying the tag's own
+    // bookmark ribbon, so a chip reads as exactly the ribbon the cards and tabs wear — plus a
+    // trailing ✕ that drops every pick at once. An unpicked chip wears the stock control chrome of
+    // the buttons beside it (see the Background note below); a picked one, the accent fill.
     //
     // ⚠ ONE deliberate difference from the Sessions page: the picks combine with **OR**, not AND.
     // The Sessions browser is a search tool, where narrowing to "carries all of these" is the useful
@@ -1277,10 +1278,14 @@ namespace winrt::TerminalApp::implementation
             chip.CornerRadius(CornerRadius{ 4, 4, 4, 4 }); // a gently-rounded rectangle, not a pill — matches the header's square-cornered buttons
             chip.FontSize(12);
             chip.BorderThickness(Thickness{ 1, 1, 1, 1 });
-            // Blue + partially transparent at rest; the CHECKED state keeps the ToggleButton's native
-            // solid-accent fill, so "picked" reads instantly. Same values as the Sessions page's chips.
-            chip.Background(Fill(0x42, 0x00, 0x78, 0xD4));
-            chip.BorderBrush(Fill(0x66, 0x4F, 0xA3, 0xE3));
+            // ⚠ Background/BorderBrush are deliberately NOT set, so an UNPICKED chip wears the stock
+            // control chrome — byte-for-byte the "Clear"/"Show all"/scope buttons sitting to its left,
+            // i.e. all but transparent over the board's dark fill. (The Sessions page's chips paint a
+            // translucent blue at rest; here that read as a foreign, always-on highlight next to a row
+            // of plain buttons.) A PICKED chip still reads instantly because the ToggleButton's own
+            // Checked visual state paints the solid accent fill — VSM setters outrank a local value in
+            // this framework, which is also why the Sessions chips can override the rest state and keep
+            // the checked one. So: off == the buttons beside it, on == accent.
             chip.IsChecked(on); // sets Checked/Unchecked, never Click — so this can't re-enter the handler below
             {
                 StackPanel chipContent;
