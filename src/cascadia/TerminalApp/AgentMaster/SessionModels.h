@@ -2053,6 +2053,15 @@ namespace Agentmaster
         // window in the lens so a reopened window keeps its scope; absent in an older record => 0
         // (LOCAL, the prior in-memory default).
         int treeScope{ 0 };
+        // Agentmaster (bookmark tags): the Triage Board's TAG FILTER — the tags whose chips are
+        // picked in the board header, display-cased, in click order. Empty (the default) == no tag
+        // filter, every card shows. Semantics are **OR**, deliberately unlike the Sessions browser's
+        // AND: the board is a triage surface you narrow to a few concerns at once ("show me anything
+        // tagged release or hotfix"), where ANDing tags would only ever shrink toward the one card
+        // carrying every tag. Matching is case-insensitive (FoldTagName), like everywhere else tags
+        // are compared. Persisted per window in the lens, so a reopened window comes back to the same
+        // narrowed board; absent in an older record => empty (no filter).
+        std::vector<std::wstring> boardTagFilter;
     };
 
     // Per-window UI state: geometry + lens + ordered tab refs. One file per window

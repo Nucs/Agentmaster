@@ -266,6 +266,19 @@ namespace winrt::TerminalApp::implementation
         // re-sorts the board; _UpdateBoardSortButton refreshes the toggle's label.
         void _CycleBoardSort();
         void _UpdateBoardSortButton();
+        // Agentmaster (bookmark tags): the Triage Board's TAG FILTER chips, in the board header right
+        // after the "Clear" button — one bookmark-ribbon chip per tag the board's currently-visible
+        // sessions carry, exactly the Sessions browser's chip look (_RebuildSessionsTagChips).
+        // _RebuildBoardTagChips re-lists them from _boardTags (filled per rebuild, already narrowed to
+        // the scope) each _RebuildBoard; _ToggleBoardTagFilter flips one and re-renders.
+        //
+        // ⚠ Semantics are **OR**, deliberately UNLIKE the Sessions page's AND: picking `release` and
+        // `hotfix` shows cards carrying EITHER. _BoardTagFilterAccepts is the one predicate the board's
+        // column loop asks (empty filter => everything passes). The picked set is part of the per-window
+        // lens (ManagerState::boardTagFilter), so it survives a reopen.
+        void _RebuildBoardTagChips(const std::unordered_map<std::wstring, int64_t>& activityBySession);
+        void _ToggleBoardTagFilter(const std::wstring& tag);
+        bool _BoardTagFilterAccepts(const std::wstring& sessionId) const;
 
         void _SelectSession(const std::wstring& id);
         void _ClearSelection(); // Agentmaster: the board header's "Clear" button — deselect the managed OR external selection
@@ -698,6 +711,13 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _boardSortBtn{ nullptr }; // Agentmaster: the board's MOST ACTIVE/NEWEST/OLDEST/A-Z sort toggle after the scope toggle (global, persisted; AppSettings::boardSort, separate from _treeSortBtn)
         winrt::Windows::UI::Xaml::Controls::Button _boardRefreshBtn{ nullptr }; // Agentmaster: the board's ↻ refresh button after the sort toggle (re-scan + redraw the whole tab; twin of _treeRefreshBtn)
         winrt::Windows::UI::Xaml::Controls::Button _clearSelBtn{ nullptr }; // Agentmaster: the board's "Clear" button next to LOCAL/GLOBAL — deselect the current card/row; hidden while nothing is selected (synced by _RebuildBoard, like _showAllBtn)
+        // Agentmaster (bookmark tags): the board header's TAG FILTER chips row, mounted in the header
+        // Grid's star column right AFTER the "Clear" button so it takes whatever width is left and
+        // horizontally scrolls past a screenful (the header can't wrap — the board's own ScrollViewer
+        // scrolls only the columns). The scroller collapses whole while no visible session is tagged
+        // and nothing is picked, so an untagged fleet's header looks exactly as it did before.
+        winrt::Windows::UI::Xaml::Controls::ScrollViewer _boardTagChipsScroll{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::StackPanel _boardTagChipsPanel{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _treeScopeBtn{ nullptr }; // Agentmaster: the LOCAL/GLOBAL/EXTERNAL toggle after the "EXPLORER TREE" title
         winrt::Windows::UI::Xaml::Controls::Button _treeSortBtn{ nullptr }; // Agentmaster: the NEWEST/OLDEST/MOST ACTIVE/A-Z sort toggle after the scope toggle (global, persisted)
         winrt::Windows::UI::Xaml::Controls::Button _treeRefreshBtn{ nullptr }; // Agentmaster: the ↻ refresh button after the sort toggle (reload the current scope's data)
@@ -719,6 +739,14 @@ namespace winrt::TerminalApp::implementation
         // accepted cross-window staleness.
         std::unordered_map<std::wstring, std::vector<std::wstring>> _boardTags;
         std::map<std::wstring, std::wstring> _boardTagColors; // folded tag name -> "#AARRGGBB" (empty when no live session is tagged)
+        // Agentmaster (bookmark tags): the board's picked TAG FILTER — display-cased names in click
+        // order; empty == no filter. OR semantics (a card passes when it carries ANY picked tag), the
+        // deliberate difference from the Sessions browser's AND — see _BoardTagFilterAccepts. Part of
+        // the per-window lens (ManagerState::boardTagFilter), so it is restored on reopen; a picked tag
+        // is NEVER silently dropped when its last carrier goes away (its chip stays, at 0, so it can
+        // always be clicked off) — the startup case where the fleet hasn't loaded yet would otherwise
+        // erase a restored filter.
+        std::vector<std::wstring> _boardTagFilter;
         // Agentmaster: column title (e.g. "Running", "External") -> that column's live card
         // ScrollViewer, repopulated on every _RebuildBoard. Used ONLY to PRESERVE each column's
         // vertical scroll offset across a rebuild: _RebuildBoard recreates the per-column ScrollViewers

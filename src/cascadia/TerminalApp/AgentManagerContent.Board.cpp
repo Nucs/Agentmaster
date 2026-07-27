@@ -25,7 +25,7 @@
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor (the cog's color pickers) + ResolveTagDisplayColor (the card's bookmark ribbons)
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
-#include "AgentMaster/SessionStore.h" // GetSessionTags / LoadAllTagColors — the card title band's bookmark ribbons
+#include "AgentMaster/SessionStore.h" // GetSessionTags / LoadAllTagColors — the card title band's bookmark ribbons; CollectGlobalTags / FoldTagName — the header's tag-filter chips
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
 #include "AgentMaster/SessionRegistry.h"
@@ -1054,19 +1054,41 @@ namespace winrt::TerminalApp::implementation
         // session-store file each, absent for most sessions) beats LoadAllSessionTags here — the
         // store holds every session EVER titled/starred/tagged while the board shows only the live
         // handful. The colors file loads only when something is actually tagged.
+        //
+        // The map is narrowed to the sessions this board actually SHOWS (live + the LOCAL/GLOBAL scope
+        // + the directory scope — the same three guards each state column applies below, minus the tag
+        // filter itself). That is what makes the header's tag chips honest: every chip has at least one
+        // card behind it and its count is the number of cards you will see, instead of advertising a
+        // tag whose only carrier lives in another window or another folder.
         _boardTags.clear();
+        std::unordered_map<std::wstring, int64_t> boardTagActivity; // sid -> last activity, for the chips' ordering
         for (const auto& s : sessions)
         {
             if (!s.live)
             {
                 continue;
             }
+            if (boardLocal && boardLocalIds.find(s.id) == boardLocalIds.end())
+            {
+                continue; // LOCAL scope: hosted by another window
+            }
+            if (!_scopeDir.empty() && !PathEq(_WorkDirOf(s), _scopeDir))
+            {
+                continue; // dir scope: another folder's session
+            }
             if (auto tags = ::Agentmaster::GetSessionTags(s.id); !tags.empty())
             {
                 _boardTags.emplace(s.id, std::move(tags));
+                // The transcript-derived recency, falling back to the hook-side stamp for a session
+                // whose transcript hasn't been read yet (a just-launched one) — same precedence the
+                // card timing uses, so the chips order matches "most recently active" intuition.
+                boardTagActivity.emplace(s.id, s.convLastActivityUnixMs != 0 ? s.convLastActivityUnixMs : s.lastActivityUnixMs);
             }
         }
-        _boardTagColors = _boardTags.empty() ? std::map<std::wstring, std::wstring>{} : ::Agentmaster::LoadAllTagColors();
+        // Colors are needed for the chips too, so load them whenever a chip could render — that
+        // includes a PICKED tag whose carriers have all gone (its chip stays, so it can be clicked off).
+        _boardTagColors = (_boardTags.empty() && _boardTagFilter.empty()) ? std::map<std::wstring, std::wstring>{} : ::Agentmaster::LoadAllTagColors();
+        _RebuildBoardTagChips(boardTagActivity);
 
         struct Col
         {
@@ -1101,6 +1123,10 @@ namespace winrt::TerminalApp::implementation
                 if (!_scopeDir.empty() && !PathEq(_WorkDirOf(s), _scopeDir))
                 {
                     continue; // dir scope keys on the EFFECTIVE work dir — the tree group the user clicked
+                }
+                if (!_BoardTagFilterAccepts(s.id))
+                {
+                    continue; // bookmark-tag chips: this session carries none of the picked tags (OR)
                 }
                 const bool isIdleDone = (s.state == SessionState::Idle || s.state == SessionState::Done);
                 const bool match = (col.state == SessionState::Idle) ? isIdleDone : (s.state == col.state);
@@ -1180,6 +1206,203 @@ namespace winrt::TerminalApp::implementation
             const auto extIt = _boardColumnOffsets.find(L"External");
             _boardHost.Children().Append(_MakeExternalColumn(extIt != _boardColumnOffsets.end() ? extIt->second : 0.0));
         }
+    }
+
+    // ===== the board header's TAG FILTER chips (bookmark tags) ===============================
+    //
+    // The Triage Board twin of the Sessions browser's chip row (_RebuildSessionsTagChips), in the
+    // board header right after "Clear": one blue, partially-transparent ToggleButton per tag —
+    // each carrying the tag's own bookmark ribbon, so a chip reads as exactly the ribbon the cards
+    // and tabs wear — plus a trailing ✕ that drops every pick at once.
+    //
+    // ⚠ ONE deliberate difference from the Sessions page: the picks combine with **OR**, not AND.
+    // The Sessions browser is a search tool, where narrowing to "carries all of these" is the useful
+    // question; the board is a triage surface you point at a few concerns at once ("show me anything
+    // tagged release or hotfix"), and ANDing there only ever shrinks toward the single card carrying
+    // every tag. _BoardTagFilterAccepts is the one predicate the column loop asks.
+    //
+    // The universe comes from _boardTags — already narrowed by _RebuildBoard to the sessions the
+    // board SHOWS — plus, via CollectGlobalTags' knownTags leg, whatever is currently PICKED. That
+    // second half is not cosmetic: it is what guarantees a picked tag always has a chip to click off
+    // even when nothing carries it any more (untagged elsewhere, its carrier closed, or — the case
+    // that matters most — a reopened window whose lens restored a filter before the fleet finished
+    // loading). Deliberately no pruning pass anywhere: a pick is dropped only by the user.
+    void AgentManagerContent::_RebuildBoardTagChips(const std::unordered_map<std::wstring, int64_t>& activityBySession)
+    {
+        if (!_boardTagChipsPanel || !_boardTagChipsScroll)
+        {
+            return; // header not built yet (mid-init)
+        }
+        _boardTagChipsPanel.Children().Clear();
+
+        const auto universe = ::Agentmaster::CollectGlobalTags(_boardTags, activityBySession, _boardTagFilter);
+        if (universe.empty())
+        {
+            // Nothing tagged and nothing picked — collapse the whole row so an untagged fleet's
+            // header looks exactly as it did before this feature.
+            _boardTagChipsScroll.Visibility(Visibility::Collapsed);
+            return;
+        }
+        _boardTagChipsScroll.Visibility(Visibility::Visible);
+
+        std::unordered_set<std::wstring> picked;
+        for (const auto& t : _boardTagFilter)
+        {
+            picked.insert(::Agentmaster::FoldTagName(t));
+        }
+
+        for (const auto& info : universe)
+        {
+            const bool on = picked.count(::Agentmaster::FoldTagName(info.name)) > 0;
+            Primitives::ToggleButton chip;
+            chip.MinWidth(0);
+            chip.MinHeight(0);
+            chip.Padding(Thickness{ 10, 2, 10, 3 });
+            chip.CornerRadius(CornerRadius{ 4, 4, 4, 4 }); // a gently-rounded rectangle, not a pill — matches the header's square-cornered buttons
+            chip.FontSize(12);
+            chip.BorderThickness(Thickness{ 1, 1, 1, 1 });
+            // Blue + partially transparent at rest; the CHECKED state keeps the ToggleButton's native
+            // solid-accent fill, so "picked" reads instantly. Same values as the Sessions page's chips.
+            chip.Background(Fill(0x42, 0x00, 0x78, 0xD4));
+            chip.BorderBrush(Fill(0x66, 0x4F, 0xA3, 0xE3));
+            chip.IsChecked(on); // sets Checked/Unchecked, never Click — so this can't re-enter the handler below
+            {
+                StackPanel chipContent;
+                chipContent.Orientation(Orientation::Horizontal);
+                chipContent.Spacing(6);
+                chipContent.VerticalAlignment(VerticalAlignment::Center);
+                winrt::Windows::UI::Xaml::Shapes::Polygon chipRibbon; // the 6.5x9.3 bookmark shape the cards + tab badges draw
+                chipRibbon.Points().Append(Point{ 0.0f, 0.0f });
+                chipRibbon.Points().Append(Point{ 6.5f, 0.0f });
+                chipRibbon.Points().Append(Point{ 6.5f, 9.3f });
+                chipRibbon.Points().Append(Point{ 3.25f, 6.5f });
+                chipRibbon.Points().Append(Point{ 0.0f, 9.3f });
+                chipRibbon.Fill(SolidColorBrush{ ResolveTagDisplayColor(info.name, _boardTagColors) });
+                chipRibbon.Stroke(SolidColorBrush{ Colors::Black() });
+                chipRibbon.StrokeThickness(0.75);
+                chipRibbon.VerticalAlignment(VerticalAlignment::Center);
+                // Nudge the ribbon DOWN 3px — its geometric center reads optically high beside the
+                // text's ink. A render transform shifts only the visual, so no layout math to break.
+                TranslateTransform chipRibbonNudge;
+                chipRibbonNudge.Y(3.0);
+                chipRibbon.RenderTransform(chipRibbonNudge);
+                chipContent.Children().Append(chipRibbon);
+                auto chipLabel = TextBlock{}; // no explicit Foreground — inherits the ToggleButton's, so it adapts to checked/hover
+                chipLabel.Text(winrt::hstring{ info.name });
+                chipLabel.VerticalAlignment(VerticalAlignment::Center);
+                chipContent.Children().Append(chipLabel);
+                chip.Content(chipContent);
+            }
+            AgentSetTitledTip(chip,
+                              winrt::hstring{ L"Tag \x201C" + info.name + L"\x201D" },
+                              winrt::hstring{ (on ? std::wstring{ L"Click to stop narrowing the board to this tag. " } :
+                                                    std::wstring{ L"Click to show only the cards carrying it. " }) +
+                                              (info.sessionCount == 0 ? std::wstring{ L"No card on the board carries it right now." } :
+                                               info.sessionCount == 1 ? std::wstring{ L"1 card carries it." } :
+                                                                        std::to_wstring(info.sessionCount) + L" cards carry it.") +
+                                              L"\n\nPicking several tags widens the board rather than narrowing it \x2014 a card shows if it carries ANY of them. The picked set is remembered for this window." });
+            const winrt::hstring tagName{ info.name };
+            chip.Click([this, tagName](const IInspectable&, const RoutedEventArgs&) {
+                // DEFER: the toggle rebuilds this very chips row, destroying the ToggleButton whose
+                // Click handler we are standing in (the Sessions page's chip discipline).
+                if (_dispatcher)
+                {
+                    _dispatcher.TryEnqueue([weak = get_weak(), tagName]() {
+                        if (const auto self = weak.get())
+                        {
+                            self->_ToggleBoardTagFilter(std::wstring{ tagName });
+                        }
+                    });
+                }
+            });
+            _boardTagChipsPanel.Children().Append(chip);
+        }
+
+        // A trailing ✕ that drops EVERY pick — the board's echo of the Sessions page's "✕ filter"
+        // chip. Shown only while something is picked, so it never adds noise to a resting header.
+        if (!_boardTagFilter.empty())
+        {
+            auto clearChip = Button{};
+            clearChip.MinWidth(0);
+            clearChip.MinHeight(0);
+            clearChip.Padding(Thickness{ 8, 2, 8, 3 });
+            clearChip.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
+            clearChip.FontSize(12);
+            clearChip.Content(winrt::box_value(winrt::hstring{ L"\x2715" }));
+            AgentSetTitledTip(clearChip, L"Clear tag filter", L"Unpick every tag \x2014 the board goes back to showing all its cards. (This clears only the tag chips; it doesn't change the card selection or the directory scope.)");
+            clearChip.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                if (_dispatcher)
+                {
+                    _dispatcher.TryEnqueue([weak = get_weak()]() {
+                        if (const auto self = weak.get())
+                        {
+                            if (self->_boardTagFilter.empty())
+                            {
+                                return;
+                            }
+                            self->_boardTagFilter.clear();
+                            self->_NotifyLensChanged(); // the picked set rides the per-window record
+                            self->_Refresh();
+                        }
+                    });
+                }
+            });
+            _boardTagChipsPanel.Children().Append(clearChip);
+        }
+    }
+
+    // Flip ONE tag in the board's filter (case-insensitive identity, like everywhere tags are
+    // compared), push the lens so the window's record picks it up, and re-render. Order in the
+    // vector is click order — it is what the lens round-trips, and nothing reads it as a priority.
+    // Deliberately UNLOGGED: a pure view filter, like the scope/sort toggles beside it.
+    void AgentManagerContent::_ToggleBoardTagFilter(const std::wstring& tag)
+    {
+        if (tag.empty())
+        {
+            return;
+        }
+        const auto folded = ::Agentmaster::FoldTagName(tag);
+        const auto it = std::find_if(_boardTagFilter.begin(), _boardTagFilter.end(), [&](const std::wstring& t) {
+            return ::Agentmaster::FoldTagName(t) == folded;
+        });
+        if (it != _boardTagFilter.end())
+        {
+            _boardTagFilter.erase(it);
+        }
+        else
+        {
+            _boardTagFilter.push_back(tag);
+        }
+        _NotifyLensChanged(); // the picked set is part of the per-window lens (ManagerState::boardTagFilter)
+        _Refresh(); // re-filter the columns + re-style the chips (both ride _RebuildBoard)
+    }
+
+    // Does this session pass the board's tag filter? **OR** semantics — carrying ANY picked tag is
+    // enough (see _RebuildBoardTagChips for why the board differs from the Sessions browser here).
+    // An empty filter is the default and passes everything, so the untouched board is unchanged.
+    bool AgentManagerContent::_BoardTagFilterAccepts(const std::wstring& sessionId) const
+    {
+        if (_boardTagFilter.empty())
+        {
+            return true; // no filter — every card shows
+        }
+        const auto it = _boardTags.find(sessionId);
+        if (it == _boardTags.end())
+        {
+            return false; // filtering BY tag: an untagged session carries none of them
+        }
+        for (const auto& want : _boardTagFilter)
+        {
+            const auto folded = ::Agentmaster::FoldTagName(want);
+            for (const auto& has : it->second)
+            {
+                if (::Agentmaster::FoldTagName(has) == folded)
+                {
+                    return true; // one match is enough
+                }
+            }
+        }
+        return false;
     }
 
     // Agentmaster: assemble one Triage Board column. When `fill` is true the column fills the board

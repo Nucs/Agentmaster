@@ -1100,6 +1100,14 @@ namespace Agentmaster
         o.Set(L"collapsedDirs", std::move(cd));
         o.Set(L"layout", ToJson(m.layout));
         o.Set(L"treeScope", json::Value::MkNum(static_cast<double>(m.treeScope)));
+        // Agentmaster (bookmark tags): the board's picked tag chips (OR filter), display-cased in
+        // click order. Written unconditionally (like collapsedDirs) so the record shape is stable.
+        auto bt = json::Value::MkArr();
+        for (const auto& t : m.boardTagFilter)
+        {
+            bt.Push(json::Value::MkStr(t));
+        }
+        o.Set(L"boardTagFilter", std::move(bt));
         return o;
     }
 
@@ -1122,6 +1130,18 @@ namespace Agentmaster
                 if (dv.type == json::Value::Type::Str)
                 {
                     m.collapsedDirs.push_back(dv.AsStr());
+                }
+            }
+        }
+        // Agentmaster (bookmark tags): the board's tag filter. Absent (a pre-feature record) => no
+        // filter, i.e. the prior behavior of showing every card.
+        if (const auto* bt = v.Find(L"boardTagFilter"); bt && bt->type == json::Value::Type::Arr)
+        {
+            for (const auto& tv : bt->arr)
+            {
+                if (tv.type == json::Value::Type::Str && !tv.AsStr().empty())
+                {
+                    m.boardTagFilter.push_back(tv.AsStr());
                 }
             }
         }

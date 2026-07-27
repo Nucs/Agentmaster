@@ -540,6 +540,7 @@ namespace winrt::TerminalApp::implementation
         st.collapsedDirs.assign(_collapsedDirs.begin(), _collapsedDirs.end());
         st.layout = _layout;
         st.treeScope = static_cast<int>(_treeScope); // the shared tree/board scope (persisted)
+        st.boardTagFilter = _boardTagFilter; // the board's picked bookmark-tag chips (OR filter)
         return st;
     }
 
@@ -561,6 +562,12 @@ namespace winrt::TerminalApp::implementation
         _treeScope = (state.treeScope == 1) ? TreeScope::Global : TreeScope::Local;
         _UpdateTreeScopeButton();
         _UpdateBoardScopeButton();
+        // The board's bookmark-tag filter (OR). Restored verbatim — deliberately WITHOUT validating it
+        // against the tags any session currently carries: at this point the fleet may not be loaded yet
+        // (a reopened window seeds its lens at engine init, before _RestoreClaudeSessions lands), so a
+        // "prune what nothing carries" pass here would quietly erase the very filter we are restoring.
+        // _RebuildBoardTagChips always renders a picked tag's chip, carrier or not, so it stays clickable.
+        _boardTagFilter = state.boardTagFilter;
         // A restored per-window layout overrides the global default loaded in the ctor; push the
         // fractions into the live tracks so the splitters land where the window left them.
         _layout = state.layout;
@@ -1087,6 +1094,10 @@ namespace winrt::TerminalApp::implementation
             auto header = StackPanel{};
             header.Orientation(Orientation::Horizontal);
             header.Spacing(8);
+            // Center, not the default stretch: this group now shares a Grid row with the tag-filter
+            // chips (below), which are a few px taller — stretched, the buttons would grow to match
+            // and the header would visibly change height the moment a session gets tagged.
+            header.VerticalAlignment(VerticalAlignment::Center);
             header.Children().Append(Text(L"TRIAGE BOARD", 12, true, 0.8));
             // Agentmaster: the board's LOCAL/GLOBAL scope toggle — ONE state with the Explorer
             // Tree's 3-way toggle (same style, same per-window lens persistence): LOCAL shows only
@@ -1146,12 +1157,51 @@ namespace winrt::TerminalApp::implementation
             AgentSetTitledTip(_clearSelBtn, L"Clear selection", L"Deselect the current card or row \x2014 nothing stays selected and the pane on the right goes back to reading nothing-selected. Shown only while something is selected.");
             _clearSelBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ClearSelection(); });
             header.Children().Append(_clearSelBtn);
+
+            // Agentmaster (bookmark tags): the board's TAG FILTER chips row — one bookmark-ribbon chip
+            // per tag the visible sessions carry, clicking one narrows the board to the cards carrying
+            // it (OR across several picks). Same chip look as the Sessions browser's filter chips.
+            //
+            // The header is laid out as a GRID rather than one horizontal StackPanel precisely because
+            // of this row: a StackPanel gives every child infinite width along its stacking axis, so a
+            // fleet with many tags would size the chips to their content and push the trailing
+            // dir-scope controls straight off the board's right edge (the header can't wrap, and the
+            // board's ScrollViewer scrolls the COLUMNS, not this row). Three tracks instead:
+            //   0 (Auto) the fixed controls above · 1 (Star) the chips, taking whatever is left and
+            //   scrolling horizontally past it · 2 (Auto) the dir-scope label + "Show all", pinned right.
+            // The chips sit in track 1 == immediately after "Clear", which is where they were asked for.
+            auto headerRow = Grid{};
+            headerRow.ColumnDefinitions().Append(autoCol()); // 0: title + scope/sort/refresh/Clear
+            headerRow.ColumnDefinitions().Append(starCol(1)); // 1: the tag chips (all remaining width)
+            headerRow.ColumnDefinitions().Append(autoCol()); // 2: "[scope: <dir>]" + "Show all"
+            Grid::SetColumn(header, 0);
+            headerRow.Children().Append(header);
+
+            _boardTagChipsScroll = ScrollViewer{};
+            _boardTagChipsScroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Auto);
+            _boardTagChipsScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Disabled);
+            _boardTagChipsScroll.HorizontalScrollMode(ScrollMode::Enabled);
+            _boardTagChipsScroll.VerticalScrollMode(ScrollMode::Disabled);
+            _boardTagChipsScroll.VerticalAlignment(VerticalAlignment::Center);
+            _boardTagChipsScroll.Margin(Thickness{ 8, 0, 8, 0 }); // the header StackPanel's own 8px rhythm (a Grid track has no Spacing)
+            _boardTagChipsScroll.Visibility(Visibility::Collapsed); // shown by _RebuildBoardTagChips once there is something to show
+            _boardTagChipsPanel = StackPanel{};
+            _boardTagChipsPanel.Orientation(Orientation::Horizontal);
+            _boardTagChipsPanel.Spacing(6);
+            _boardTagChipsScroll.Content(_boardTagChipsPanel);
+            Grid::SetColumn(_boardTagChipsScroll, 1);
+            headerRow.Children().Append(_boardTagChipsScroll);
+
             // The directory-scope label appears ONLY while a directory is scoped ("[scope: <dir>]"
             // next to the "Show all" clear button). The old unscoped "[all directories]"
             // placeholder is gone — it was display-only, restating the default.
+            auto scopeGroup = StackPanel{};
+            scopeGroup.Orientation(Orientation::Horizontal);
+            scopeGroup.Spacing(8);
+            scopeGroup.VerticalAlignment(VerticalAlignment::Center);
             _boardScope = Text(L"", 12, false, 0.6);
             _boardScope.Visibility(Visibility::Collapsed);
-            header.Children().Append(_boardScope);
+            scopeGroup.Children().Append(_boardScope);
             _showAllBtn = Button{};
             _showAllBtn.Content(winrt::box_value(L"Show all"));
             _showAllBtn.Padding(Thickness{ 6, 0, 6, 0 });
@@ -1160,9 +1210,12 @@ namespace winrt::TerminalApp::implementation
             // reappears once a directory is scoped. _RebuildBoard keeps this in sync on every refresh.
             _showAllBtn.Visibility(_scopeDir.empty() ? Visibility::Collapsed : Visibility::Visible);
             _showAllBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _SetScope(L""); });
-            header.Children().Append(_showAllBtn);
-            Grid::SetRow(header, 0);
-            outer.Children().Append(header);
+            scopeGroup.Children().Append(_showAllBtn);
+            Grid::SetColumn(scopeGroup, 2);
+            headerRow.Children().Append(scopeGroup);
+
+            Grid::SetRow(headerRow, 0);
+            outer.Children().Append(headerRow);
 
             _boardHost = StackPanel{};
             _boardHost.Orientation(Orientation::Horizontal);

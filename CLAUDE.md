@@ -932,7 +932,21 @@ tag no session carries lists at **·0** (sorts last).
   — XAML can't color a text-decoration underline separately, so a thin colored `Border` is the practical
   underscore). The **Sessions browser** gained a **Tags column** (col 5, after Branch) rendering the same
   hoverable ribbons + the same hover panel, plus a filter-chips row under the search toggles (gently-rounded
-  rectangles, `_RebuildSessionsTagChips` — a tag facet that ANDs with the search/scope filters). A global
+  rectangles, `_RebuildSessionsTagChips` — a tag facet that ANDs with the search/scope filters). The
+  **Triage Board** header carries the SAME chip row, right after the **Clear** button
+  (`_RebuildBoardTagChips` / `_ToggleBoardTagFilter` / `_BoardTagFilterAccepts`) — ⚠ but the picks combine
+  with **OR**, not AND: the board is a triage surface you point at a few concerns at once ("anything tagged
+  release or hotfix"), where ANDing would only ever shrink toward the one card carrying every tag. The chip
+  universe is `CollectGlobalTags` over `_boardTags` — already narrowed by `_RebuildBoard` to the sessions the
+  board SHOWS (live + LOCAL/GLOBAL + dir scope), so every chip has ≥1 card behind it and its count is what
+  you'll see — **plus the currently PICKED tags via the `knownTags` leg**, which is what keeps a pick
+  clickable-off when nothing carries it any more (its carrier closed, or a reopened window restored the
+  filter before the fleet finished loading — hence NO pruning pass anywhere: a pick is dropped only by the
+  user, or by the trailing **✕** that clears them all). The picked set is **per-window persisted in the
+  lens** (`ManagerState::boardTagFilter` → `windows/<id>.json`, absent ⇒ no filter). The board header became
+  a 3-track **Grid** for this (`Auto` controls · `Star` chips · `Auto` `[scope: …]`+`Show all`, now pinned
+  right): a horizontal StackPanel gives children infinite width, so many chips would push the dir-scope
+  controls off the board's edge. A global
   **`AppSettings::maxTags`** (default 20, ceiling 40; Settings cog → TABS) caps only NEW-name creation.
 - **Islands crash lessons (both in Gotchas).** The popup cost two `0xC000027B` fail-fasts, both now excluded by
   construction: **(1)** opening the popup on a not-yet-rooted header throws (`E_UNEXPECTED`, no `XamlRoot`) — a
@@ -1618,7 +1632,9 @@ What works, by area:
   when a directory IS scoped — it auto-hides (`_showAllBtn`, kept in sync by `_RebuildBoard`) while
   already showing all directories. Next to the LOCAL/GLOBAL twin a **"Clear"** button (`_clearSelBtn`,
   the same hide-when-idle idiom as "Show all") **deselects** the current card/row — managed OR external
-  (`_ClearSelection`) — so the Auto Testing reads nothing-selected. A managed card's **state-colored
+  (`_ClearSelection`) — so the Auto Testing reads nothing-selected. Right after Clear comes the
+  **bookmark-TAG filter chip row** (the Sessions browser's chips, but combining **OR** — see the *Bookmark
+  TAGS* block; per-window persisted in the lens). A managed card's **state-colored
   border shows only on hover or when selected** (thickness 0/1/2 at rest/hover/selected, the accent
   pushed onto the Button's PointerOver state) — borderless at rest to cut visual noise on a busy board.
   A managed card's **title sits in a colored band** across the card top, painted the session's

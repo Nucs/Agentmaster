@@ -408,6 +408,9 @@ void TestWindowRecord()
     in.manager.layout.boardFraction = 0.5;
     in.manager.layout.treeFraction = 0.45;
     in.manager.treeScope = 2; // EXTERNAL — non-default so a dropped field fails the round-trip
+    // The board's bookmark-tag filter (OR semantics), persisted per window. TWO tags in a
+    // deliberate non-alphabetical order, so both the multi-tag case and the click ORDER are pinned.
+    in.manager.boardTagFilter = { L"Release", L"bug" };
 
     const auto out = DeserializeWindowRecord(SerializeWindowRecord(in));
 
@@ -438,6 +441,10 @@ void TestWindowRecord()
     CHECK(out.manager.collapsedDirs.size() == 1 && out.manager.collapsedDirs[0] == L"K:/old", "lens collapsedDirs round-trip");
     CHECK(approx(out.manager.layout.boardFraction, 0.5) && approx(out.manager.layout.treeFraction, 0.45), "lens splitter fractions round-trip");
     CHECK(out.manager.treeScope == 2, "lens treeScope (shared tree/board scope) round-trip");
+    CHECK(out.manager.boardTagFilter.size() == 2 &&
+              out.manager.boardTagFilter[0] == L"Release" &&
+              out.manager.boardTagFilter[1] == L"bug",
+          "lens boardTagFilter (board bookmark-tag filter) round-trip, order + casing preserved");
 
     // Tolerant of a missing / corrupt document.
     {
