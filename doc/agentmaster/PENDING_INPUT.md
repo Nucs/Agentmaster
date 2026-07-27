@@ -723,6 +723,35 @@ sent, in the window before the async clear lands). The read accessors (`GetStore
 caller the registry **cannot** answer for — a closed / never-managed session row on the Sessions page, or
 the `agentmaster` CLI — which is where they should be wired next.
 
+### 8d. Queue it straight from the tab — the overlay's MAIL button (built)
+
+The third consumer of the same draft, and the one that needs no Manager visit at all: the per-tab
+badge's **mail** button (`AgentTabOverlay::_QueueCurrentPrompt`, row 1 between the folder and copy
+buttons — TAB_OVERLAY.md §13j) **queues the unsent draft into this session's own Auto-Testing queue**
+in one click. §8a answers "I want to queue this, but in the Manager"; this answers "I want to queue
+this, from right here".
+
+**Same source, same rule** — the wrapped LIVE read (`_onReadLiveDraft` →
+`TerminalPage::_ReadLiveDraftForSession`) else `SessionInfo::pendingInput`, chosen by the one pure
+`PickCurrentPromptText`. Unlike the Manager's copy of this decision, the **live** read is the one that
+normally answers here: the overlay sits inside the session's own pane, so its window always hosts the tab.
+
+**Same append as the envelope** — one `SessionRegistry::Update` pushing a default `QueuedPrompt`
+(`Pending` / `OnTurnComplete`, the 56-char flattened label) onto `s.queue`, byte-for-byte what
+`AgentManagerContent::_OnAddPrompt` builds, so the scheduler cannot tell them apart.
+
+**Shown only where the queue means something:** `Profiles::IsDevOrDebugPackage()` (the Tests Autorunner
+subsystem is dev-or-debug; in a release the `Scheduler` never starts, so the button would append prompts
+nothing would ever send) **and Claude only** (no `❯` box on Codex ⇒ never a draft), with a kind backstop
+in the handler.
+
+**Still a COPY, never a move** (Rule #13) — the draft stays in the input box, the "3 dots" keep pulsing,
+and §9's swap keeps the eventual send from merging the two. **No one-shot latch** (unlike §8a's silent
+focus-pull): the click is explicit, so clicking twice queues twice, like the Manager's envelope. Nothing
+to queue ⇒ nothing queued, **no chime**, and `[pending] <sid8> queue current prompt: nothing (box empty,
+no remembered draft)`; a success chimes and logs `[nav] queue <sid8> "<label>" (overlay draft)` plus
+`[pending] <sid8> queue current prompt: live|remembered chars=N`.
+
 ## 9. The DRAFT SWAP — sending a prompt without eating your unsent draft (built)
 
 **The bug.** A queued prompt is delivered as a bracketed paste plus a submit CR

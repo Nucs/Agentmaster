@@ -64,7 +64,12 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   claude (no transcript id yet) is never invisible. Dim until hover; hover/click **expands** controls
   (Tests Autorunner cycle · Send-now · queue peek · Jump-to-Manager) + a contextual SemiAuto confirm.
   Off-switchable (`AppSettings.showTabOverlay`). Hover also reveals a **row of actions** — a folder
-  button (Open Path) + a copy menu (Session Id · working dir · branch · the **Current Prompt** [the
+  button (Open Path) + a **mail** button (**queue the UNSENT input-box draft** into this session's
+  Auto-Testing queue — the Manager compose row's "Add to queue" envelope, on the badge: same `\xE715`
+  glyph, same registry append, the draft resolved by the same `PickCurrentPromptText` live-else-remembered
+  rule and left in the box [a COPY, Rule #13]; shown only on a **dev-or-debug** build, where the
+  autorunner actually runs, and only for **Claude**; explicit-click so no one-shot latch — TAB_OVERLAY.md
+  §13j / PENDING_INPUT.md §8d) + a copy menu (Session Id · working dir · branch · the **Current Prompt** [the
   UNSENT input-box draft — PENDING_INPUT.md §8] · the REAL Claude/Codex launch
   CLI · the full session **Summary** · the **Transcript**) + a **pencil** that toggles a **SUMMARY
   PANEL**: a second overlay below the badge (≤20% pane width) rendering the `session-end.js` box

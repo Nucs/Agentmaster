@@ -27,6 +27,7 @@
 #include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / BuildClaude|CodexCommandline (row 3 CLI + transcript)
 #include "AgentMaster/ProcessInspect.h" // ReadProcessCommandLine / ReadConversationText / Codex rollout resolve (row 3)
 #include "AgentMaster/Persistence.h" // LoadAppSettings (skipPermissions, for the would-use CLI builder)
+#include "AgentMaster/ProfileBootstrap.h" // Profiles::IsDevOrDebugPackage — the queue (mail) button is dev-or-debug, like the row-1 Autorunner control
 #include "AgentMaster/Engine.h" // SharedEngine (claudeExePath / codexExePath, for the real launch CLI)
 
 #include <winrt/Windows.UI.h> // Color / ColorHelper / Colors
@@ -165,6 +166,33 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster (PENDING_INPUT.md §8): MAIL — queue this session's UNSENT input-box draft straight
+        // into its Auto-Testing queue. The badge's twin of the Manager compose row's "Add to queue"
+        // envelope, down to the SAME \xE715 glyph and the same registry append (_OnAddPrompt), so the
+        // prompt you typed in the terminal but never sent can be handed to the Tests Autorunner without
+        // being retyped in the Manager.
+        //
+        // Gated exactly like row 1's Autorunner button + its ⏳N count: the whole Tests Autorunner
+        // subsystem is DEV-OR-DEBUG (in an ordinary release Engine.cpp never starts the Scheduler and
+        // every autorunner surface is hidden), so a queue button there would append prompts that nothing
+        // would ever send. Claude only, too — Codex renders no ❯ rule-wrapped input box, so it never has a
+        // draft to queue (and a managed codex has neither injector nor autorunner). Placed between the
+        // folder and copy buttons.
+        static const bool kDevAutoTesting = ::Agentmaster::Profiles::IsDevOrDebugPackage();
+        Button queueBtn{ nullptr };
+        if (kDevAutoTesting && !isCodexSession)
+        {
+            queueBtn = mkIconBtn(L"\xE715", // Mail — the same glyph the Manager's "Add to queue" envelope uses
+                                 L"Queue this session's unsent prompt \x2014 append what is typed into its input box but NOT yet sent to the Tests Autorunner queue.\n"
+                                 L"It is a copy: the prompt stays in the terminal box. Nothing is queued when the box is empty.");
+            queueBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    self->_QueueCurrentPrompt();
+                }
+            });
+        }
+
         Button copyBtn = mkIconBtn(L"\xE8C8", L"Copy session details\x2026 (id, path, branch, current prompt, launch CLI, summary, transcript)"); // Copy
         MenuFlyout flyout{};
         // Each menu item carries a tooltip that says exactly WHAT gets copied (the labels are terse;
@@ -262,6 +290,10 @@ namespace winrt::TerminalApp::implementation
             _actions.Children().Append(downBtn); // ↓ next off-screen prompt
         }
         _actions.Children().Append(folderBtn);
+        if (queueBtn)
+        {
+            _actions.Children().Append(queueBtn); // mail: queue the unsent draft (left of copy, right of the folder)
+        }
         _actions.Children().Append(copyBtn);
         _actions.Children().Append(pencilBtn);
         // ALWAYS shown (no longer hover-only). The buttons live in ROW 1 now, immediately to the RIGHT of
@@ -442,6 +474,98 @@ namespace winrt::TerminalApp::implementation
         // INSIDE the session's own pane, so its window always hosts the tab and the live read is the
         // one that applies; a missing handler (never wired / page gone) degrades to the remembered draft.
         CopySessionField(*_registry, _sessionId, which, _dispatcher, _summaryWrapNewlines, _summaryTruncate, _tabColorMode, _onReadLiveDraft);
+    }
+
+    // Agentmaster (PENDING_INPUT.md §8): the row-1 MAIL button — take this session's UNSENT input-box
+    // draft and QUEUE it into that session's own Auto-Testing queue, so a prompt typed in the terminal
+    // but never sent reaches the Tests Autorunner without being retyped in the Manager.
+    //
+    // It appends through the SAME registry seam as the Manager compose row's envelope
+    // (AgentManagerContent::_OnAddPrompt): one Update -> a default QueuedPrompt (Pending /
+    // OnTurnComplete) pushed onto s.queue. The scheduler therefore cannot tell the two apart, and the
+    // entry shows in Auto Testing / row 1's ⏳N / row 3's next-prompt preview like any other.
+    //
+    // The DRAFT is resolved by the SAME two-source rule as "Copy Current Prompt" (CopySessionField case
+    // 7) — a wrapped LIVE read of the box off this tab's buffer wins, else the observer's recorded
+    // SessionInfo::pendingInput — through the one pure PickCurrentPromptText, so the button, the copy
+    // menu and the compose-box pull can never disagree about what "the current prompt" is. Here the live
+    // read is the one that normally answers: this overlay sits INSIDE the session's own pane, so its
+    // window always hosts the tab (the Manager's copy of this decision is the one that routinely falls
+    // back, because the board spans windows).
+    //
+    // It is a COPY, not a move (Rule #13 — reading a buffer never writes to it): the draft stays in the
+    // terminal's input box exactly as typed and its "3 dots" keep pulsing until the user sends or clears
+    // it there. Sending the queued copy later cannot eat that draft either — the DRAFT SWAP (§9) takes it
+    // out of the way around every submit and puts it back.
+    //
+    // NO one-shot latch, deliberately: §8a's pull into the compose box is a SILENT insert on focus (hence
+    // its per-(session, draft) latch against double-queueing), while every append here is an explicit
+    // click — so a second click queues a second copy, exactly like clicking the Manager's envelope twice.
+    void AgentTabOverlay::_QueueCurrentPrompt()
+    {
+        if (!_registry || _sessionId.empty())
+        {
+            return;
+        }
+        const auto info = _registry->Get(_sessionId);
+        if (!info)
+        {
+            return;
+        }
+        if (info->kind == AgentKind::Codex)
+        {
+            return; // backstop: Codex has no U+276F input box to read (the button isn't built for it either)
+        }
+        // (1) The LIVE read, WRAPPED — the same contract as CopySessionField case 7: a control torn down
+        // mid-click, a not-yet-initialized buffer or a dormant restored tab all read as "" and the
+        // remembered draft answers instead. A failure must never cost the user the queue.
+        std::wstring live;
+        if (_onReadLiveDraft)
+        {
+            try
+            {
+                live = _onReadLiveDraft();
+            }
+            catch (...)
+            {
+                // Rule #18: never lose a swallowed exception. Recovery is unchanged (fall back to the
+                // remembered draft) — this only records what threw + where.
+                ::Agentmaster::AgentLogCaughtException(L"AgentTabOverlay::_QueueCurrentPrompt live draft read");
+            }
+        }
+        // (2) The pick: a non-empty live read wins, else the observer's recorded draft (possibly the
+        // persisted memory of a session that is not running). ONE pure rule (PendingInput.h).
+        const auto pick = ::Agentmaster::PickCurrentPromptText(live, info->pendingInput);
+        if (pick.text.empty())
+        {
+            // Nothing typed anywhere: queue nothing, chime nothing — and log it, so a "why did nothing
+            // happen?" is answerable from hooks.log instead of being a silent dead click (the same honest
+            // no-op the copy item makes).
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(_sessionId) + L" queue current prompt: nothing (box empty, no remembered draft)\n");
+            return;
+        }
+        // The short display label, mirroring _OnAddPrompt (first 56 chars, newlines flattened) so a prompt
+        // queued from here is indistinguishable in the Auto-Testing list from one queued in the Manager.
+        std::wstring label = pick.text.substr(0, 56);
+        std::replace(label.begin(), label.end(), L'\n', L' ');
+        std::replace(label.begin(), label.end(), L'\r', L' ');
+        _registry->Update(_sessionId, [&](SessionInfo& s) {
+            QueuedPrompt p;
+            p.id = NewSessionId();
+            p.label = label;
+            p.text = pick.text; // verbatim + whole (multi-line drafts included) — this is what gets SENT
+            s.queue.push_back(std::move(p));
+        });
+        // Nav audit: the SAME "queue" verb the Manager's envelope logs, tagged with this surface (the
+        // overlay's Autorunner cycle already carries "(overlay)" the same way) and with WHERE the text
+        // came from, since here the user never typed it into a compose box.
+        ::Agentmaster::LogNav(L"queue " + ::Agentmaster::ShortId(_sessionId) + L" \"" + label + L"\" (overlay draft)");
+        // ...and the [pending] mechanism line naming WHICH source answered, beside the copy item's.
+        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                      L"[pending] " + ::Agentmaster::ShortId(_sessionId) + L" queue current prompt: " +
+                                          (pick.fromLive ? L"live" : L"remembered") + L" chars=" + std::to_wstring(pick.text.size()) + L"\n");
+        PlayActionSound(); // same click feedback as the copy menu / Open Path
+        _Refresh(); // immediate repaint of row 1's ⏳N + row 3's next-prompt preview (the registry observer also refreshes, async)
     }
 
 }

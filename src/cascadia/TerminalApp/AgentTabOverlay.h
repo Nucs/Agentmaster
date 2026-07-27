@@ -11,7 +11,9 @@
 // Row 2: "<root workdir folder>/<branch>" (dim; e.g. myworkdir/feature/issue123) so the session's place +
 // branch read at a glance; the label is hidden when there's no dir/branch (and on observe badges). The
 // row-1 action buttons (a LINKED session only) are: a folder
-// button (Open Path — the working dir via explorer.exe) + a copy button whose menu copies the Session Id
+// button (Open Path — the working dir via explorer.exe) + a MAIL button (queue this session's UNSENT
+// input-box draft into its Auto-Testing queue — dev-or-debug + Claude only, the Manager envelope's twin)
+// + a copy button whose menu copies the Session Id
 // / Copy Path (working dir) / Copy Branch Name / Claude Launch CLI / Codex Launch CLI (each the REAL full
 // command — the live process commandline with hooks, or the builder Agentmaster would use) / Summary (the
 // FULL textual session box — everything, even what the displayed panel trims) / Transcript (the whole
@@ -216,10 +218,11 @@ namespace winrt::TerminalApp::implementation
         void _Refresh(); // rebuild the line from the registry snapshot (UI thread)
         void _Detach(); // drop the registry observer
         void _WireHover(); // attach the pointer-over brighten handlers (idempotent; weak-captured)
-        void _BuildActionsRow(); // lazily build the action buttons (folder + copy menu + pencil); placed in row 1 right after the status block by _Refresh, for a LINKED session
+        void _BuildActionsRow(); // lazily build the action buttons (folder + mail/queue + copy menu + pencil); placed in row 1 right after the status block by _Refresh, for a LINKED session
         void _SetExpanded(bool on); // dim<->bright the whole badge (driven by hover OR the copy-menu pinned state)
         void _CycleAutorunner(); // row-1 Autorunner button: cycle this session's mode Off -> Semi -> Full -> Off (mutates the shared registry; Rule #1)
         void _OpenFolder(); // row 3 folder button: open the session's working dir in Explorer (off-thread)
+        void _QueueCurrentPrompt(); // row-1 MAIL button (between folder and copy): queue this session's UNSENT input-box draft into its Auto-Testing queue — the badge twin of the Manager compose row's envelope. Dev-or-debug + Claude only; a COPY (the draft stays in the terminal, Rule #13)
         void _CopyField(int which); // row 3 copy menu: 0=Session Id 1=Copy Path 2=Copy Branch 3=Claude CLI 4=Codex CLI 5=Transcript 6=Summary (full textual box)
         void _BuildSummaryPanel(); // build the summary panel element (the 2nd slot), collapsed
         void _SetSummaryContent(const std::wstring& text); // fill the panel StackPanel: text runs -> TextBlocks, separator sentinels -> full-width Border rules

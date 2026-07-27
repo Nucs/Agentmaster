@@ -314,8 +314,9 @@ historical first-seen branch). Hidden when there is no dir/branch, and on observ
 
 ### 13d. **Action buttons** (row 1, after the status block) — Open Path + copy menu
 A linked badge's action buttons are **always visible** (no longer hover-only): they sit in **row 1,
-immediately right of the status part** (so the strip reads `status → folder · copy · pencil → autorunner
-· queue`): a **folder** button (Open Path → the working dir via `explorer.exe`, off-thread) + a **copy
+immediately right of the status part** (so the strip reads `status → folder · mail · copy · pencil →
+autorunner · queue`): a **folder** button (Open Path → the working dir via `explorer.exe`, off-thread) +
+a **mail** button (queue the unsent draft — §13j) + a **copy
 menu** + a **pencil**. The copy menu yields `Session Id` ·
 `Copy Path` · `Copy Branch Name` · **`Copy Current Prompt`** (the UNSENT draft in the input box —
 Claude only; read LIVE from the buffer, falling back to the observer's recorded draft, see below) ·
@@ -370,7 +371,7 @@ preserving them freshest-from-disk.
 
 ### 13h. Final row-1 layout + the link-state rule
 Row 1, left → right: **status** (the Triage-Board-colored dot + label) · the **action cluster** (folder
-· copy · pencil — §13d, a linked session only) · the **Tests Autorunner** button (§3b) · the **queue** count
+· mail · copy · pencil — §13d/§13j, a linked session only) · the **Tests Autorunner** button (§3b) · the **queue** count
 (when Pending > 0) · **link state**. Link state is surfaced **only when NOT linked** — `observe` for an
 external claude, `unlinked` otherwise; a **linked** badge shows *nothing* there, because the badge's mere
 presence on a managed tab already implies the link. `model · effort` is **not** on this strip — it lives
@@ -390,3 +391,35 @@ shown". Built (`AgentTabOverlay::_promptLine` + the anon-namespace `FirstLinePre
 full ≤300-char first line can show) but is `MaxWidth`-capped + right-anchored so a long prompt can't
 balloon the HUD. The hourglass run is goldenrod (matching the row-1 `⏳N`); a hover tooltip names the row
 and reveals the **full** prompt behind the preview.
+
+### 13j. The MAIL button — queue the unsent draft (row 1, between folder and copy)
+A **mail** button (`\xE715`, the SAME Segoe Fluent glyph the Manager compose row's "Add to queue" envelope
+uses) takes this session's **UNSENT input-box draft** and **queues it** into that session's own
+Auto-Testing queue — so a prompt you typed in the terminal and never sent reaches the Tests Autorunner
+without being retyped in the Manager. It is the badge's twin of that envelope, appending through the SAME
+registry seam as `AgentManagerContent::_OnAddPrompt` (one `Update` → a default `QueuedPrompt` — `Pending` /
+`OnTurnComplete`, label = the first 56 chars with newlines flattened — pushed onto `s.queue`), so the
+scheduler cannot tell the two apart and the entry shows in Auto Testing, row 1's `⏳N` and row 3's
+next-prompt preview like any other.
+
+**The draft is resolved by the SAME rule as `Copy Current Prompt`** — the pure `PickCurrentPromptText`
+over a wrapped LIVE buffer read (`_onReadLiveDraft` → `TerminalPage::_ReadLiveDraftForSession`) else the
+observer's `SessionInfo::pendingInput` — so the button, the copy menu and §8a's compose-box pull can never
+disagree about what "the current prompt" is. Here the **live** read is normally the one that answers: this
+overlay sits INSIDE the session's own pane, so its window always hosts the tab.
+
+**Shown only when it can do something:** gated on `Profiles::IsDevOrDebugPackage()` exactly like row 1's
+Autorunner button + `⏳N` count (in an ordinary release the Scheduler never starts and every autorunner
+surface is hidden — a queue button there would append prompts nothing would ever send), and **Claude only**
+(Codex renders no `❯` box, so it has no draft — and a managed codex has neither injector nor autorunner).
+`_QueueCurrentPrompt` keeps a kind backstop regardless.
+
+**It is a COPY, not a move** (Rule #13 — reading a buffer never writes to it): the draft stays in the
+terminal's input box and its "3 dots" keep pulsing until you send or clear it there; sending the queued
+copy later cannot eat it either, because the DRAFT SWAP (PENDING_INPUT.md §9) stashes the draft around
+every submit. **No one-shot latch**, unlike §8a's silent focus-pull: every append here is an explicit
+click, so a second click queues a second copy — exactly like clicking the Manager's envelope twice.
+An empty box + no remembered draft is an honest no-op: nothing queued, **no chime**, and a log line
+(`[pending] <sid8> queue current prompt: nothing …`) so it is never a silent dead click. A success chimes
+and logs `[nav] queue <sid8> "<label>" (overlay draft)` + `[pending] <sid8> queue current prompt:
+live|remembered chars=N`.
