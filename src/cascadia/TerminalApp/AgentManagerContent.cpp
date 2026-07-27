@@ -541,6 +541,7 @@ namespace winrt::TerminalApp::implementation
         st.layout = _layout;
         st.treeScope = static_cast<int>(_treeScope); // the shared tree/board scope (persisted)
         st.boardTagFilter = _boardTagFilter; // the board's picked bookmark-tag chips (OR filter)
+        st.boardShowUntagged = _boardShowUntagged; // ...and its leading "Untagged" chip
         return st;
     }
 
@@ -568,6 +569,7 @@ namespace winrt::TerminalApp::implementation
         // "prune what nothing carries" pass here would quietly erase the very filter we are restoring.
         // _RebuildBoardTagChips always renders a picked tag's chip, carrier or not, so it stays clickable.
         _boardTagFilter = state.boardTagFilter;
+        _boardShowUntagged = state.boardShowUntagged; // absent in an older record => true (untagged cards shown)
         // A restored per-window layout overrides the global default loaded in the ctor; push the
         // fractions into the live tracks so the splitters land where the window left them.
         _layout = state.layout;

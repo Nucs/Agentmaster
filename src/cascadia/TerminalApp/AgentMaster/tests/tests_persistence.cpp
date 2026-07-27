@@ -411,6 +411,7 @@ void TestWindowRecord()
     // The board's bookmark-tag filter (OR semantics), persisted per window. TWO tags in a
     // deliberate non-alphabetical order, so both the multi-tag case and the click ORDER are pinned.
     in.manager.boardTagFilter = { L"Release", L"bug" };
+    in.manager.boardShowUntagged = false; // non-default (it defaults ON) so a dropped field fails the round-trip
 
     const auto out = DeserializeWindowRecord(SerializeWindowRecord(in));
 
@@ -445,6 +446,7 @@ void TestWindowRecord()
               out.manager.boardTagFilter[0] == L"Release" &&
               out.manager.boardTagFilter[1] == L"bug",
           "lens boardTagFilter (board bookmark-tag filter) round-trip, order + casing preserved");
+    CHECK(out.manager.boardShowUntagged == false, "lens boardShowUntagged (the board's Untagged chip) round-trip");
 
     // Tolerant of a missing / corrupt document.
     {
@@ -456,6 +458,11 @@ void TestWindowRecord()
         const auto legacy = DeserializeWindowRecord(L"{\"windowId\":\"w\",\"manager\":{\"selectedId\":\"s\"}}");
         CHECK(legacy.manager.treeScope == 0, "missing treeScope -> LOCAL (older record)");
         CHECK(legacy.managerTabColor.empty(), "missing managerTabColor -> empty (older record, no Manager-tab color)");
+        // The board's tag chips: a record predating them must read "no filter, untagged SHOWN" —
+        // the untagged default matters as much as the round-trip above, since a false here would
+        // reopen every existing window with its untagged cards silently hidden.
+        CHECK(legacy.manager.boardTagFilter.empty(), "missing boardTagFilter -> no tag filter (older record)");
+        CHECK(legacy.manager.boardShowUntagged == true, "missing boardShowUntagged -> ON (older record still shows untagged cards)");
         const auto outOfRange = DeserializeWindowRecord(L"{\"windowId\":\"w\",\"manager\":{\"treeScope\":7}}");
         CHECK(outOfRange.manager.treeScope == 0, "out-of-range treeScope clamps to LOCAL");
     }
@@ -523,6 +530,8 @@ void TestAppSettings()
         in.summaryPanelHeightFraction = 0.6; // in-band (0.06..0.75)
         in.summaryPanelWrapNewlines = true; // non-default (default false = the literal-\n look)
         in.summaryPanelTruncate = false; // non-default (default true = truncate long messages)
+        in.tabColorPickerCustomOpen = false; // non-default (default true = the tab color picker opens with Custom expanded)
+        in.tabColorPickerAdvancedOpen = false; // non-default (default true = ... and its More/Less "advanced" inputs expanded)
         in.showTabCloseButton = false; // non-default (default true = show the X / theme-driven)
         in.closeTabOnMiddleClick = false; // non-default (default true = middle-click closes a tab)
         in.showTabIcon = true; // non-default (default false = tab icons HIDDEN)
@@ -568,6 +577,8 @@ void TestAppSettings()
         CHECK(out.summaryPanelHeightFraction > 0.599 && out.summaryPanelHeightFraction < 0.601, "settings summaryPanelHeightFraction round-trip");
         CHECK(out.summaryPanelWrapNewlines == true, "settings summaryPanelWrapNewlines round-trip");
         CHECK(out.summaryPanelTruncate == false, "settings summaryPanelTruncate round-trip");
+        CHECK(out.tabColorPickerCustomOpen == false, "settings tabColorPickerCustomOpen round-trip");
+        CHECK(out.tabColorPickerAdvancedOpen == false, "settings tabColorPickerAdvancedOpen round-trip");
         CHECK(out.showTabCloseButton == false, "settings showTabCloseButton round-trip");
         CHECK(out.closeTabOnMiddleClick == false, "settings closeTabOnMiddleClick round-trip");
         CHECK(out.showTabIcon == true, "settings showTabIcon round-trip");
@@ -617,6 +628,7 @@ void TestAppSettings()
         CHECK(out.summaryPanelWidthFraction == 0.0 && out.summaryPanelHeightFraction == 0.0, "settings summaryPanel size fractions default 0 (auto) on empty");
         CHECK(out.summaryPanelWrapNewlines == false, "settings summaryPanelWrapNewlines default false (literal-\\n look) on empty");
         CHECK(out.summaryPanelTruncate == true, "settings summaryPanelTruncate default true (truncate) on empty");
+        CHECK(out.tabColorPickerCustomOpen == true && out.tabColorPickerAdvancedOpen == true, "settings tab color picker opens with Custom + advanced expanded by default on empty");
         CHECK(out.showTabCloseButton == true, "settings showTabCloseButton default true (show X) on empty");
         CHECK(out.closeTabOnMiddleClick == true, "settings closeTabOnMiddleClick default true (middle-click closes) on empty");
         CHECK(out.showTabIcon == false, "settings showTabIcon default false (tab icons HIDDEN) on empty");

@@ -1634,6 +1634,17 @@ namespace Agentmaster
         // previous-session toggle in the panel's times bar, freshest-disk RMW, broadcast live). Default
         // false (hidden; the toggle only appears when the session actually has a previous segment).
         bool summaryPanelShowPrevious{ false };
+        // Agentmaster (tab color picker): how the "Change tab color..." flyout OPENS — whether its
+        // "Custom" panel (the muxc::ColorPicker) and that picker's own More/Less expander (the
+        // "advanced" RGB/HSV/Hex text inputs) start EXPANDED. Both default TRUE, so the picker opens
+        // ready to type an exact color instead of making you drill down two levels every single time.
+        // GLOBAL + persisted like the summary-panel toggles: each flip is a freshest-disk RMW written
+        // by the flyout itself (never the cog form — so both preserve blocks restore them on a cog
+        // Save), and the flyout re-reads them on every open, so a change in one window is picked up
+        // by the next open anywhere. Advanced degrades SOFT: it drives WinUI's own MoreButton
+        // template part, so if a future WinUI renames it the picker simply opens collapsed as before.
+        bool tabColorPickerCustomOpen{ true };
+        bool tabColorPickerAdvancedOpen{ true };
         // Agentmaster: Explorer Tree sort order (the toggle after the scope toggle). GLOBAL — it
         // applies to every window's tree and persists here. Default Newest. See ExplorerSort.
         ExplorerSort treeSort{ ExplorerSort::Newest };
@@ -2142,6 +2153,13 @@ namespace Agentmaster
         // are compared. Persisted per window in the lens, so a reopened window comes back to the same
         // narrowed board; absent in an older record => empty (no filter).
         std::vector<std::wstring> boardTagFilter;
+        // Agentmaster (bookmark tags): the board's "Untagged" chip — does the board show the cards
+        // carrying NO tag at all? It is the (N+1)th bucket beside the tag chips, and it is ON by
+        // default, which is what keeps an untouched board showing everything. It does NOT participate
+        // in boardTagFilter's OR: a tagged session is judged by the picks, an untagged one by this
+        // flag, so turning it off is how you say "only tagged cards" (see _BoardTagFilterAccepts).
+        // Absent in an older record => true (show them), i.e. the pre-feature behavior.
+        bool boardShowUntagged{ true };
     };
 
     // Per-window UI state: geometry + lens + ordered tab refs. One file per window

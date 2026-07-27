@@ -1253,14 +1253,33 @@ namespace winrt::TerminalApp::implementation
         std::sort(universe.begin(), universe.end(), [](const auto& a, const auto& b) {
             return ::Agentmaster::FoldTagName(a.name) < ::Agentmaster::FoldTagName(b.name);
         });
-        if (universe.empty())
+        if (universe.empty() && _boardShowUntagged)
         {
             // Nothing tagged and nothing picked — collapse the whole row so an untagged fleet's
-            // header looks exactly as it did before this feature.
+            // header looks exactly as it did before this feature. A lone "Untagged" chip on a fleet
+            // with no tags anywhere would filter nothing and only add noise. ⚠ The _boardShowUntagged
+            // half of the condition is what stops that from being a trap: if the chip is OFF, the row
+            // MUST render (its one chip) even with no tags left, or the untagged cards would stay
+            // hidden with nothing on screen to switch them back on.
             _boardTagChipsScroll.Visibility(Visibility::Collapsed);
             return;
         }
         _boardTagChipsScroll.Visibility(Visibility::Visible);
+
+        // The leading "Untagged" chip — the (N+1)th bucket, before the alphabetical tags and pinned
+        // there (it is not a tag, so it takes no part in their ordering). Same chip build as the tags,
+        // with a HOLLOW ribbon: an outlined bookmark with no fill is the natural glyph for "carries
+        // none", and it keeps the row's ribbon-then-name rhythm while telling the chip apart from a
+        // real tag that happens to be named "untagged".
+        _boardTagChipsPanel.Children().Append(_MakeBoardTagChip(
+            L"Untagged",
+            std::nullopt, // no color => the hollow outline
+            _boardShowUntagged,
+            L"Untagged",
+            winrt::hstring{ (_boardShowUntagged ? std::wstring{ L"Click to HIDE the cards that carry no tag at all. " } :
+                                                  std::wstring{ L"Click to show the cards that carry no tag at all. " }) +
+                            L"It is on by default, which is why an untouched board shows everything.\n\nIt stands on its own rather than joining the tags above: an untagged card is decided by this chip alone, a tagged one by the tags alone. So turning it off is how you narrow to tagged cards only." },
+            [this]() { _ToggleBoardUntagged(); }));
 
         std::unordered_set<std::wstring> picked;
         for (const auto& t : _boardTagFilter)
@@ -1271,77 +1290,25 @@ namespace winrt::TerminalApp::implementation
         for (const auto& info : universe)
         {
             const bool on = picked.count(::Agentmaster::FoldTagName(info.name)) > 0;
-            Primitives::ToggleButton chip;
-            chip.MinWidth(0);
-            chip.MinHeight(0);
-            chip.Padding(Thickness{ 10, 2, 10, 3 });
-            chip.CornerRadius(CornerRadius{ 4, 4, 4, 4 }); // a gently-rounded rectangle, not a pill — matches the header's square-cornered buttons
-            chip.FontSize(12);
-            chip.BorderThickness(Thickness{ 1, 1, 1, 1 });
-            // ⚠ Background/BorderBrush are deliberately NOT set, so an UNPICKED chip wears the stock
-            // control chrome — byte-for-byte the "Clear"/"Show all"/scope buttons sitting to its left,
-            // i.e. all but transparent over the board's dark fill. (The Sessions page's chips paint a
-            // translucent blue at rest; here that read as a foreign, always-on highlight next to a row
-            // of plain buttons.) A PICKED chip still reads instantly because the ToggleButton's own
-            // Checked visual state paints the solid accent fill — VSM setters outrank a local value in
-            // this framework, which is also why the Sessions chips can override the rest state and keep
-            // the checked one. So: off == the buttons beside it, on == accent.
-            chip.IsChecked(on); // sets Checked/Unchecked, never Click — so this can't re-enter the handler below
-            {
-                StackPanel chipContent;
-                chipContent.Orientation(Orientation::Horizontal);
-                chipContent.Spacing(6);
-                chipContent.VerticalAlignment(VerticalAlignment::Center);
-                winrt::Windows::UI::Xaml::Shapes::Polygon chipRibbon; // the 6.5x9.3 bookmark shape the cards + tab badges draw
-                chipRibbon.Points().Append(Point{ 0.0f, 0.0f });
-                chipRibbon.Points().Append(Point{ 6.5f, 0.0f });
-                chipRibbon.Points().Append(Point{ 6.5f, 9.3f });
-                chipRibbon.Points().Append(Point{ 3.25f, 6.5f });
-                chipRibbon.Points().Append(Point{ 0.0f, 9.3f });
-                chipRibbon.Fill(SolidColorBrush{ ResolveTagDisplayColor(info.name, _boardTagColors) });
-                chipRibbon.Stroke(SolidColorBrush{ Colors::Black() });
-                chipRibbon.StrokeThickness(0.75);
-                chipRibbon.VerticalAlignment(VerticalAlignment::Center);
-                // Nudge the ribbon DOWN 3px — its geometric center reads optically high beside the
-                // text's ink. A render transform shifts only the visual, so no layout math to break.
-                TranslateTransform chipRibbonNudge;
-                chipRibbonNudge.Y(3.0);
-                chipRibbon.RenderTransform(chipRibbonNudge);
-                chipContent.Children().Append(chipRibbon);
-                auto chipLabel = TextBlock{}; // no explicit Foreground — inherits the ToggleButton's, so it adapts to checked/hover
-                chipLabel.Text(winrt::hstring{ info.name });
-                chipLabel.VerticalAlignment(VerticalAlignment::Center);
-                chipContent.Children().Append(chipLabel);
-                chip.Content(chipContent);
-            }
-            AgentSetTitledTip(chip,
-                              winrt::hstring{ L"Tag \x201C" + info.name + L"\x201D" },
-                              winrt::hstring{ (on ? std::wstring{ L"Click to stop narrowing the board to this tag. " } :
-                                                    std::wstring{ L"Click to show only the cards carrying it. " }) +
-                                              (info.sessionCount == 0 ? std::wstring{ L"No card on the board carries it right now." } :
-                                               info.sessionCount == 1 ? std::wstring{ L"1 card carries it." } :
-                                                                        std::to_wstring(info.sessionCount) + L" cards carry it.") +
-                                              L"\n\nPicking several tags widens the board rather than narrowing it \x2014 a card shows if it carries ANY of them. The picked set is remembered for this window." });
-            const winrt::hstring tagName{ info.name };
-            chip.Click([this, tagName](const IInspectable&, const RoutedEventArgs&) {
-                // DEFER: the toggle rebuilds this very chips row, destroying the ToggleButton whose
-                // Click handler we are standing in (the Sessions page's chip discipline).
-                if (_dispatcher)
-                {
-                    _dispatcher.TryEnqueue([weak = get_weak(), tagName]() {
-                        if (const auto self = weak.get())
-                        {
-                            self->_ToggleBoardTagFilter(std::wstring{ tagName });
-                        }
-                    });
-                }
-            });
-            _boardTagChipsPanel.Children().Append(chip);
+            const std::wstring tagName = info.name;
+            _boardTagChipsPanel.Children().Append(_MakeBoardTagChip(
+                tagName,
+                ResolveTagDisplayColor(tagName, _boardTagColors),
+                on,
+                L"Tag \x201C" + tagName + L"\x201D",
+                winrt::hstring{ (on ? std::wstring{ L"Click to stop narrowing the board to this tag. " } :
+                                      std::wstring{ L"Click to show only the cards carrying it. " }) +
+                                (info.sessionCount == 0 ? std::wstring{ L"No card on the board carries it right now." } :
+                                 info.sessionCount == 1 ? std::wstring{ L"1 card carries it." } :
+                                                          std::to_wstring(info.sessionCount) + L" cards carry it.") +
+                                L"\n\nPicking several tags widens the board rather than narrowing it \x2014 a card shows if it carries ANY of them. The picked set is remembered for this window." },
+                [this, tagName]() { _ToggleBoardTagFilter(tagName); }));
         }
 
-        // A trailing ✕ that drops EVERY pick — the board's echo of the Sessions page's "✕ filter"
-        // chip. Shown only while something is picked, so it never adds noise to a resting header.
-        if (!_boardTagFilter.empty())
+        // A trailing ✕ that restores the DEFAULT view — every pick dropped AND "Untagged" back on.
+        // Shown whenever the board is filtered at all (a pick, or untagged hidden), so it never adds
+        // noise to a resting header and is always there when there is something to undo.
+        if (!_boardTagFilter.empty() || !_boardShowUntagged)
         {
             auto clearChip = Button{};
             clearChip.MinWidth(0);
@@ -1350,26 +1317,107 @@ namespace winrt::TerminalApp::implementation
             clearChip.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
             clearChip.FontSize(12);
             clearChip.Content(winrt::box_value(winrt::hstring{ L"\x2715" }));
-            AgentSetTitledTip(clearChip, L"Clear tag filter", L"Unpick every tag \x2014 the board goes back to showing all its cards. (This clears only the tag chips; it doesn't change the card selection or the directory scope.)");
+            AgentSetTitledTip(clearChip, L"Clear tag filter", L"Unpick every tag and put \x201CUntagged\x201D back on \x2014 the board goes back to showing all its cards. (This clears only the tag chips; it doesn't change the card selection or the directory scope.)");
             clearChip.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 if (_dispatcher)
                 {
                     _dispatcher.TryEnqueue([weak = get_weak()]() {
                         if (const auto self = weak.get())
                         {
-                            if (self->_boardTagFilter.empty())
-                            {
-                                return;
-                            }
-                            self->_boardTagFilter.clear();
-                            self->_NotifyLensChanged(); // the picked set rides the per-window record
-                            self->_Refresh();
+                            self->_ClearBoardTagFilter();
                         }
                     });
                 }
             });
             _boardTagChipsPanel.Children().Append(clearChip);
         }
+    }
+
+    // Build ONE chip for that row. The tag chips and the leading "Untagged" chip both come through
+    // here, which is what makes "styled the same as the tags" structurally true rather than a pair of
+    // literals someone has to keep in sync: the only thing that varies is the ribbon's fill.
+    //   ribbonColor set     => a tag: the ribbon in that tag's own resolved color.
+    //   ribbonColor nullopt => "Untagged": the same bookmark OUTLINED and empty — the natural glyph
+    //                          for "carries none", and what tells it apart from a real tag that
+    //                          happens to be named "untagged".
+    Primitives::ToggleButton AgentManagerContent::_MakeBoardTagChip(const std::wstring& label,
+                                                                    const std::optional<winrt::Windows::UI::Color>& ribbonColor,
+                                                                    bool isChecked,
+                                                                    const std::wstring& tipTitle,
+                                                                    const winrt::hstring& tipBody,
+                                                                    std::function<void()> onToggle)
+    {
+        Primitives::ToggleButton chip;
+        chip.MinWidth(0);
+        chip.MinHeight(0);
+        chip.Padding(Thickness{ 10, 2, 10, 3 });
+        chip.CornerRadius(CornerRadius{ 4, 4, 4, 4 }); // a gently-rounded rectangle, not a pill — matches the header's square-cornered buttons
+        chip.FontSize(12);
+        chip.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        // ⚠ Background/BorderBrush are deliberately NOT set, so an UNPICKED chip wears the stock
+        // control chrome — byte-for-byte the "Clear"/"Show all"/scope buttons sitting to its left,
+        // i.e. all but transparent over the board's dark fill. (The Sessions page's chips paint a
+        // translucent blue at rest; here that read as a foreign, always-on highlight next to a row
+        // of plain buttons.) A PICKED chip still reads instantly because the ToggleButton's own
+        // Checked visual state paints the solid accent fill — VSM setters outrank a local value in
+        // this framework, which is also why the Sessions chips can override the rest state and keep
+        // the checked one. So: off == the buttons beside it, on == accent.
+        chip.IsChecked(isChecked); // sets Checked/Unchecked, never Click — so this can't re-enter the handler below
+        {
+            StackPanel chipContent;
+            chipContent.Orientation(Orientation::Horizontal);
+            chipContent.Spacing(6);
+            chipContent.VerticalAlignment(VerticalAlignment::Center);
+            winrt::Windows::UI::Xaml::Shapes::Polygon chipRibbon; // the 6.5x9.3 bookmark shape the cards + tab badges draw
+            chipRibbon.Points().Append(Point{ 0.0f, 0.0f });
+            chipRibbon.Points().Append(Point{ 6.5f, 0.0f });
+            chipRibbon.Points().Append(Point{ 6.5f, 9.3f });
+            chipRibbon.Points().Append(Point{ 3.25f, 6.5f });
+            chipRibbon.Points().Append(Point{ 0.0f, 9.3f });
+            if (ribbonColor)
+            {
+                chipRibbon.Fill(SolidColorBrush{ *ribbonColor });
+                chipRibbon.Stroke(SolidColorBrush{ Colors::Black() });
+            }
+            else
+            {
+                // Hollow: no fill, and a light-gray stroke rather than the tags' black — an unfilled
+                // outline in black would all but vanish against this chrome, and the whole point of
+                // the glyph is to read as an EMPTY bookmark.
+                chipRibbon.Fill(SolidColorBrush{ Colors::Transparent() });
+                chipRibbon.Stroke(Fill(0xCC, 0xB0, 0xB0, 0xB0));
+            }
+            chipRibbon.StrokeThickness(0.75);
+            chipRibbon.VerticalAlignment(VerticalAlignment::Center);
+            // Nudge the ribbon DOWN 3px — its geometric center reads optically high beside the
+            // text's ink. A render transform shifts only the visual, so no layout math to break.
+            TranslateTransform chipRibbonNudge;
+            chipRibbonNudge.Y(3.0);
+            chipRibbon.RenderTransform(chipRibbonNudge);
+            chipContent.Children().Append(chipRibbon);
+            auto chipLabel = TextBlock{}; // no explicit Foreground — inherits the ToggleButton's, so it adapts to checked/hover
+            chipLabel.Text(winrt::hstring{ label });
+            chipLabel.VerticalAlignment(VerticalAlignment::Center);
+            chipContent.Children().Append(chipLabel);
+            chip.Content(chipContent);
+        }
+        AgentSetTitledTip(chip, winrt::hstring{ tipTitle }, tipBody);
+        chip.Click([this, onToggle = std::move(onToggle)](const IInspectable&, const RoutedEventArgs&) {
+            // DEFER: the toggle rebuilds this very chips row, destroying the ToggleButton whose Click
+            // handler we are standing in (the Sessions page's chip discipline). The action is captured
+            // by value, so a chip already torn down by the time it runs still applies the flip the
+            // user asked for; it captures `this`, hence the weak re-check before invoking it.
+            if (_dispatcher)
+            {
+                _dispatcher.TryEnqueue([weak = get_weak(), onToggle]() {
+                    if (const auto self = weak.get())
+                    {
+                        onToggle();
+                    }
+                });
+            }
+        });
+        return chip;
     }
 
     // Flip ONE tag in the board's filter (case-insensitive identity, like everywhere tags are
@@ -1398,19 +1446,55 @@ namespace winrt::TerminalApp::implementation
         _Refresh(); // re-filter the columns + re-style the chips (both ride _RebuildBoard)
     }
 
-    // Does this session pass the board's tag filter? **OR** semantics — carrying ANY picked tag is
-    // enough (see _RebuildBoardTagChips for why the board differs from the Sessions browser here).
-    // An empty filter is the default and passes everything, so the untouched board is unchanged.
+    // The leading "Untagged" chip: show/hide the cards carrying no tag at all. A bucket of its own,
+    // not a member of the tag OR (see _BoardTagFilterAccepts) — so it reads the same whether or not
+    // any tag is picked. Same lens push + rebuild as a tag pick; unlogged for the same reason.
+    void AgentManagerContent::_ToggleBoardUntagged()
+    {
+        _boardShowUntagged = !_boardShowUntagged;
+        _NotifyLensChanged(); // rides the per-window record (ManagerState::boardShowUntagged)
+        _Refresh();
+    }
+
+    // The trailing ✕: back to the DEFAULT view in one click — no tag picked AND untagged shown. It
+    // restores both halves, not just the picks, because "clear the filter" has to mean the board you
+    // get before you touch anything; leaving Untagged off would silently keep cards hidden.
+    void AgentManagerContent::_ClearBoardTagFilter()
+    {
+        if (_boardTagFilter.empty() && _boardShowUntagged)
+        {
+            return; // already the default view — nothing to undo
+        }
+        _boardTagFilter.clear();
+        _boardShowUntagged = true;
+        _NotifyLensChanged();
+        _Refresh();
+    }
+
+    // Does this session pass the board's tag filter? Two independent questions, by design — which is
+    // what lets "Untagged" default ON without hiding anything:
+    //
+    //   * an UNTAGGED session (absent from _boardTags, which only holds carriers) is judged by the
+    //     "Untagged" chip ALONE. It is not in the tag OR at all — folding it in would mean that with
+    //     Untagged on and nothing else picked, only untagged cards showed, i.e. the DEFAULT board
+    //     would hide every tagged session.
+    //   * a TAGGED session is judged by the picks ALONE: **OR** — carrying ANY picked tag is enough
+    //     (see _RebuildBoardTagChips for why the board differs from the Sessions browser here) — and
+    //     no picks at all means tags don't restrict, so it shows.
+    //
+    // Default state (Untagged on, nothing picked) therefore passes everything, exactly as before the
+    // chips existed; "only tagged cards" is Untagged off; "only release cards" is release picked AND
+    // Untagged off.
     bool AgentManagerContent::_BoardTagFilterAccepts(const std::wstring& sessionId) const
     {
+        const auto it = _boardTags.find(sessionId);
+        if (it == _boardTags.end() || it->second.empty())
+        {
+            return _boardShowUntagged; // carries no tag — the "Untagged" chip decides, on its own
+        }
         if (_boardTagFilter.empty())
         {
-            return true; // no filter — every card shows
-        }
-        const auto it = _boardTags.find(sessionId);
-        if (it == _boardTags.end())
-        {
-            return false; // filtering BY tag: an untagged session carries none of them
+            return true; // tagged, but nothing picked — tags aren't restricting anything
         }
         for (const auto& want : _boardTagFilter)
         {

@@ -711,6 +711,8 @@ namespace Agentmaster
         o.Set(L"summaryPanelWrapNewlines", json::Value::MkBool(s.summaryPanelWrapNewlines));
         o.Set(L"summaryPanelTruncate", json::Value::MkBool(s.summaryPanelTruncate));
         o.Set(L"summaryPanelShowPrevious", json::Value::MkBool(s.summaryPanelShowPrevious));
+        o.Set(L"tabColorPickerCustomOpen", json::Value::MkBool(s.tabColorPickerCustomOpen));
+        o.Set(L"tabColorPickerAdvancedOpen", json::Value::MkBool(s.tabColorPickerAdvancedOpen));
         o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
         o.Set(L"boardSort", json::Value::MkStr(ToString(s.boardSort)));
         o.Set(L"autoTestingShowsSummary", json::Value::MkBool(s.autoTestingShowsSummary));
@@ -876,6 +878,8 @@ namespace Agentmaster
         s.summaryPanelWrapNewlines = v.BoolAt(L"summaryPanelWrapNewlines", false); // TAB_OVERLAY.md: preserve message newlines (absent => OFF, the literal-\n look)
         s.summaryPanelTruncate = v.BoolAt(L"summaryPanelTruncate", true); // TAB_OVERLAY.md: truncate long messages (absent => ON by default, cap each message)
         s.summaryPanelShowPrevious = v.BoolAt(L"summaryPanelShowPrevious", false); // conversation lineage: show pre-compaction previous session(s) (absent => OFF)
+        s.tabColorPickerCustomOpen = v.BoolAt(L"tabColorPickerCustomOpen", true); // tab color picker: open with the "Custom" color-picker panel expanded (absent => ON)
+        s.tabColorPickerAdvancedOpen = v.BoolAt(L"tabColorPickerAdvancedOpen", true); // tab color picker: open with the picker's More/Less "advanced" RGB/HSV/Hex inputs expanded (absent => ON)
         s.treeSort = ExplorerSortFromString(v.StrAt(L"treeSort", L"newest"));
         // Triage Board sort (a separate global from treeSort). Absent => the board's MostActive default
         // (most-recently-active first). A stored "pid" would deserialize fine but the board never
@@ -1108,6 +1112,7 @@ namespace Agentmaster
             bt.Push(json::Value::MkStr(t));
         }
         o.Set(L"boardTagFilter", std::move(bt));
+        o.Set(L"boardShowUntagged", json::Value::MkBool(m.boardShowUntagged)); // the "Untagged" chip (default ON)
         return o;
     }
 
@@ -1133,6 +1138,9 @@ namespace Agentmaster
                 }
             }
         }
+        // Agentmaster (bookmark tags): the board's "Untagged" chip. Absent (a pre-feature record) =>
+        // TRUE — the untagged cards show, which is what every board did before the chip existed.
+        m.boardShowUntagged = v.BoolAt(L"boardShowUntagged", true);
         // Agentmaster (bookmark tags): the board's tag filter. Absent (a pre-feature record) => no
         // filter, i.e. the prior behavior of showing every card.
         if (const auto* bt = v.Find(L"boardTagFilter"); bt && bt->type == json::Value::Type::Arr)

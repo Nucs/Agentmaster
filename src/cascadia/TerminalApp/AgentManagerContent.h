@@ -25,6 +25,7 @@
 #include <functional>
 #include <map> // _boardTagColors (folded tag name -> "#AARRGGBB", the card ribbons' user-picked colors)
 #include <memory>
+#include <optional> // _MakeBoardTagChip's ribbon color (nullopt == the hollow "Untagged" outline)
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -277,7 +278,19 @@ namespace winrt::TerminalApp::implementation
         // column loop asks (empty filter => everything passes). The picked set is part of the per-window
         // lens (ManagerState::boardTagFilter), so it survives a reopen.
         void _RebuildBoardTagChips(const std::unordered_map<std::wstring, int64_t>& activityBySession);
+        // The ONE chip builder both the tag chips and the leading "Untagged" chip go through, so they
+        // cannot drift apart visually. A set ribbonColor paints that tag's bookmark; nullopt paints the
+        // hollow outline that means "carries none".
+        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _MakeBoardTagChip(
+            const std::wstring& label,
+            const std::optional<winrt::Windows::UI::Color>& ribbonColor,
+            bool isChecked,
+            const std::wstring& tipTitle,
+            const winrt::hstring& tipBody,
+            std::function<void()> onToggle);
         void _ToggleBoardTagFilter(const std::wstring& tag);
+        void _ToggleBoardUntagged(); // the leading "Untagged" chip — show/hide the cards carrying no tag
+        void _ClearBoardTagFilter(); // the trailing ✕ — drop every pick AND put "Untagged" back on (the default view)
         bool _BoardTagFilterAccepts(const std::wstring& sessionId) const;
 
         void _SelectSession(const std::wstring& id);
@@ -769,6 +782,12 @@ namespace winrt::TerminalApp::implementation
         // always be clicked off) — the startup case where the fleet hasn't loaded yet would otherwise
         // erase a restored filter.
         std::vector<std::wstring> _boardTagFilter;
+        // Agentmaster (bookmark tags): the "Untagged" chip — the (N+1)th bucket, leading the chips row,
+        // ON by default (which is what keeps an untouched board showing everything). It is NOT part of
+        // _boardTagFilter's OR: an untagged session is judged by THIS flag alone, a tagged one by the
+        // picks alone — so unchecking it is how you say "only tagged cards", and it stays meaningful
+        // whether or not any tag is picked. Also per-window persisted (ManagerState::boardShowUntagged).
+        bool _boardShowUntagged{ true };
         // Agentmaster: column title (e.g. "Running", "External") -> that column's live card
         // ScrollViewer, repopulated on every _RebuildBoard. Used ONLY to PRESERVE each column's
         // vertical scroll offset across a rebuild: _RebuildBoard recreates the per-column ScrollViewers

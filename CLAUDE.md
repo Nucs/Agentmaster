@@ -1002,13 +1002,25 @@ tag no session carries lists at **·0** (sorts last).
   you'll see — **plus the currently PICKED tags via the `knownTags` leg**, which is what keeps a pick
   clickable-off when nothing carries it any more (its carrier closed, or a reopened window restored the
   filter before the fleet finished loading — hence NO pruning pass anywhere: a pick is dropped only by the
-  user, or by the trailing **✕** that clears them all). Chips are ordered **alphabetically** (folded),
+  user, or by the trailing **✕**). Leading the row is an **`Untagged`** chip — the (N+1)th bucket, **ON by
+  default**, drawn by the SAME builder (`_MakeBoardTagChip`, so it can't drift from the tags) with a
+  **hollow** ribbon (outlined, unfilled — "carries none", and what tells it from a real tag named
+  "untagged"). It is deliberately **NOT** a member of the tag OR: an UNTAGGED card is judged by this chip
+  alone, a TAGGED one by the picks alone — folding it in would mean that with it on and nothing picked
+  only untagged cards showed, i.e. the DEFAULT board would hide every tagged session. So default (on,
+  nothing picked) = everything, exactly as before the chips existed; "only tagged" = it off; "only release"
+  = release picked AND it off. The row collapses when no tag exists **and** it is on (a lone chip filtering
+  nothing is noise) — the second half is the anti-trap: with it OFF the row must render even with no tags
+  left, or untagged cards stay hidden with nothing on screen to restore them. The trailing **✕** restores
+  the whole DEFAULT view (picks dropped AND untagged back on, `_ClearBoardTagFilter`), and is shown
+  whenever either half is filtering. Chips are ordered **alphabetically** (folded),
   deliberately dropping `CollectGlobalTags`' most-active-first order that the Sessions page + tag panel
   keep: those are built ON DEMAND, while this strip is rebuilt by `_RebuildBoard` on EVERY registry
   notification and re-reads carrier activity as it goes — so an activity order would reshuffle under the
   pointer as the fleet works, and a rebuild between aiming and clicking would swap the chip out from under
-  the click. The picked set is **per-window persisted in the
-  lens** (`ManagerState::boardTagFilter` → `windows/<id>.json`, absent ⇒ no filter). The board header became
+  the click. Both halves are **per-window persisted in the
+  lens** (`ManagerState::boardTagFilter` → `windows/<id>.json`, absent ⇒ no filter; `…::boardShowUntagged`,
+  absent ⇒ **true**, so an older record never reopens with its untagged cards hidden). The board header became
   a 2-track **Grid** for this (`Auto` = every fixed control in its original order · `Star` = the chips,
   taking what's left + scrolling): a horizontal StackPanel gives children infinite width, so many chips
   would push everything after them off the board's edge. ⚠ The fixed controls ALL stay in track 0 —
