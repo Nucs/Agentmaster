@@ -1049,13 +1049,10 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        const auto info = _registry->Get(_selectedId);
-        if (!info || info->kind != ::Agentmaster::AgentKind::Claude)
-        {
-            _UpdateDraftPullButton(); // hides it (a Codex / unknown session never has a draft)
-            return;
-        }
         bool fromLive = false;
+        // (The Claude-only / unknown-session guards live in the resolver, which answers "" for both —
+        // so this one lookup covers what a separate kind check would have, at one less registry copy
+        // per tap.)
         const auto draft = _ResolveSelectedSessionDraft(/*allowLive*/ true, &fromLive);
         if (draft.empty())
         {
@@ -1065,12 +1062,23 @@ namespace winrt::TerminalApp::implementation
         // §8b: how does that draft relate to what is composed here? The pure rule decides both halves —
         // whether the draft may be taken AUTOMATICALLY (only an empty box or a strict PREFIX, where
         // nothing composed can be lost) and whether the button should offer it instead.
-        const auto verdict = ::Agentmaster::EvaluateDraftPull(std::wstring_view{ _addPromptBox.Text() }, draft);
-        const bool autoTake = verdict.relation == ::Agentmaster::DraftVsBox::BoxEmpty || verdict.autoExtend;
+        const std::wstring boxText{ _addPromptBox.Text() };
+        const auto verdict = ::Agentmaster::EvaluateDraftPull(boxText, draft);
+        // PROVENANCE GUARD on the automatic extend: a strict prefix loses no CHARACTERS, but rewriting
+        // a box the user typed THEMSELVES is still a mutation they did not ask for — you type "fix the"
+        // by hand while the session's draft happens to read "fix the tests", click to place your caret,
+        // and the box grows under you. So an extend only ever CONTINUES text we ourselves put here (a
+        // previous pull for this same session, possibly with more typed onto it). Everything else is
+        // offered by the button instead — one explicit click, nothing lost.
+        const bool boxIsOurs = _promptPrefillSessionId == _selectedId &&
+                               ::Agentmaster::TextContinuesSeed(boxText, _promptPrefillText);
+        const bool autoTake = verdict.relation == ::Agentmaster::DraftVsBox::BoxEmpty ||
+                              (verdict.autoExtend && boxIsOurs);
         if (!autoTake)
         {
-            // Same / BoxAhead / a Divergent draft: never write over composed text on a mere focus — that
-            // is exactly what the (explicit, clickable) button is for.
+            // Same / BoxAhead / a Divergent draft / a continuation of the user's OWN text: never write
+            // over composed text on a mere focus — that is exactly what the (explicit, clickable)
+            // button is for.
             _UpdateDraftPullButton();
             return;
         }

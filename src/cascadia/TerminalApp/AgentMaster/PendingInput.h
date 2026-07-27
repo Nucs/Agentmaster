@@ -629,6 +629,16 @@ namespace Agentmaster
         return static_cast<int>(((pre + suf) * 100) / maxLen);
     }
 
+    // Cost bound for the CONTAINMENT probe (the Divergent gate's first half). std::wstring::find is a
+    // naive O(needle * haystack) scan, and EvaluateDraftPull runs on the compose box's TextChanged --
+    // once per KEYSTROKE. Two 20 KB texts would be ~4e8 character comparisons per key, i.e. a visible
+    // stall; unbounded per-tick work is precisely what froze the app once already (SUMMARY_JUMP.md
+    // sect. 4a). The product cap keeps the probe to a few ms at worst while still admitting every
+    // realistic case -- a short box inside a long draft (100 x 20,000 = 2e6) is exactly the shape
+    // containment is for. Over the cap the probe is SKIPPED and the (linear) similarity gate below
+    // decides alone, so the failure mode is the conservative one: the button is not offered.
+    inline constexpr size_t kDraftContainmentMaxProduct = 4000000;
+
     struct DraftPullVerdict
     {
         DraftVsBox relation{ DraftVsBox::NoDraft };
@@ -662,7 +672,7 @@ namespace Agentmaster
         default:
             break; // Divergent -- the gated case below
         }
-        if (nd.find(nb) != std::wstring::npos)
+        if (nb.size() * nd.size() <= kDraftContainmentMaxProduct && nd.find(nb) != std::wstring::npos)
         {
             v.offer = true; // the box appears verbatim INSIDE the draft: nothing in it would be lost
             return v;
@@ -673,6 +683,22 @@ namespace Agentmaster
             v.offer = v.similarityPercent >= kDraftSimilarityPercent;
         }
         return v;
+    }
+
+    // Does `text` still BEGIN WITH `seed` (under the same normalization)? The compose box uses this to
+    // ask "is what is in this box still the thing WE put there, possibly with more typed onto it" --
+    // the provenance guard on the automatic extend. Nothing seeded (an empty `seed`) is always false:
+    // text the user typed themselves is never something we may rewrite unasked, even when the draft
+    // happens to be a superset of it. Equality counts as continuing.
+    inline bool TextContinuesSeed(std::wstring_view text, std::wstring_view seed)
+    {
+        const auto ns = pending_detail::NormalizeForCompare(seed);
+        if (ns.empty())
+        {
+            return false;
+        }
+        const auto nt = pending_detail::NormalizeForCompare(text);
+        return nt.size() >= ns.size() && nt.compare(0, ns.size(), ns) == 0;
     }
 
     // The 6-way relation on its own (the same rule EvaluateDraftPull classifies with), for callers /

@@ -405,7 +405,10 @@ unsent message, and the design embraces that honestly:
 - ✅ **Compose-box rule (§8b)**: the full 6-way relation table (incl. both newline-flavor folds, the
   trailing-slack trim, interior whitespace as content, contained-but-not-a-prefix ⇒ Divergent) + the
   offer policy (empty box / continuation auto-take; **box-ahead never offered**; Divergent offered on
-  containment or on the 80%-over-50-chars ratio and NOT otherwise) + the similarity metric itself
+  containment or on the 80%-over-50-chars ratio and NOT otherwise) + the containment **cost cap** in
+  both directions (an oversized pair is skipped ⇒ no offer; a short box in a long draft still offered)
+  + the **provenance guard** (`TextContinuesSeed`: unchanged / extended / the user's own text / nothing
+  seeded / a box shortened below the seed / the newline fold) + the similarity metric itself
   (identical / disjoint / one-char-of-ten / prefix share / no double-counting of an overlapping run).
 - ✅ **Draft cache (§8c)**: the store keys' names, a multi-line draft + its stamp round-tripping, the
   upsert replacing both halves, the redundant-upsert dedup, the clear removing BOTH keys while leaving
@@ -580,12 +583,21 @@ a trailing cursor cell is never intent). Interior text, leading indent included,
 | `NoDraft` | the draft is empty/whitespace | nothing unsent | button hidden |
 | `BoxEmpty` | the box is empty/whitespace | the §8a case | **filled** on focus/tap |
 | `Same` | equal after normalizing | in sync | button hidden |
-| `Continuation` | the draft **starts with** the box, and is longer | you kept typing in the terminal | **extended in place** on focus/tap — non-destructive, the box is a strict prefix |
+| `Continuation` | the draft **starts with** the box, and is longer | you kept typing in the terminal | **extended in place** on focus/tap — non-destructive, the box is a strict prefix — **but only if the box is text WE put there** (below) |
 | `BoxAhead` | the **box** starts with the draft, and is longer | the box already holds everything the draft has, plus your addition | **never offered** — taking it would DELETE that addition and gain nothing |
 | `Divergent` | neither is a prefix of the other | possibly a different prompt entirely | button shown **only if related** (below) |
 
 **Only the two relations that cannot lose composed text are applied automatically** (`BoxEmpty`,
 `Continuation`) — overwriting composed text has to be an explicit act, which is what the button is for.
+
+**Provenance guard on the automatic extend** (found in self-review). A strict prefix loses no
+*characters*, but rewriting a box the user typed **themselves** is still a mutation they did not ask
+for: type `fix the` by hand while the session's draft happens to read `fix the tests`, click to place
+your caret, and the box grows under you with the caret jumping to the end. So an extend only ever
+**continues text we ourselves put there** — `TextContinuesSeed(box, _promptPrefillText)` plus a matching
+session id (the pure helper normalizes the same way, and an empty seed is never "ours"). A continuation
+of the user's own text is not applied; it is **offered by the button** instead, which costs one explicit
+click and loses nothing.
 
 **The button** (`_pullDraftBtn`, glyph `\xE896` "download" = *bring it down here*) appears **only while
 there is something worth offering that taking would not destroy**, and its tooltip says outright that it
@@ -594,7 +606,13 @@ there is something worth offering that taking would not destroy**, and its toolt
 at least 80% (and >50 chars)"*:
 
 - the box appears **verbatim inside** the draft (containment, not merely a prefix — e.g. a word prepended
-  in the terminal): nothing in the box is lost, so no length floor applies; **or**
+  in the terminal): nothing in the box is lost, so no length floor applies. ⚠ The probe is
+  **cost-capped** (`kDraftContainmentMaxProduct`, 4M): `std::wstring::find` is a naive
+  O(needle × haystack) scan and this runs **per keystroke**, so two 20 KB texts would be ~4e8 character
+  comparisons per key — a visible stall, and unbounded per-tick work is exactly what froze the app once
+  (SUMMARY_JUMP.md §4a). Over the cap the probe is skipped and the linear ratio below decides alone, so
+  the failure mode is the conservative one (no offer). Every realistic shape stays well under it — a
+  100-char box inside a 20 KB draft is 2e6; **or**
 - both texts exceed `kDraftSimilarityMinChars` (50) **and** score `kDraftSimilarityPercent` (80) or more
   on `DraftSimilarityPercent`.
 

@@ -1419,6 +1419,28 @@ void TestPendingInput()
             const auto v = EvaluateDraftPull(L"fix the tests now", L"fix the tests soon");
             CHECK(!v.offer && v.similarityPercent == 0, "pull-offer: under the 50-char floor no ratio is consulted");
         }
+        {
+            // The CONTAINMENT probe's COST CAP: find() is O(needle * haystack) and this runs per
+            // keystroke, so an oversized pair skips the probe and lets the (linear) similarity gate
+            // decide alone — the conservative direction (no offer), never a stall.
+            const std::wstring bigBox(2000, L'x');
+            const std::wstring bigDraft = std::wstring(2000, L'y') + bigBox; // contained, product 8e6 > cap
+            const auto over = EvaluateDraftPull(bigBox, bigDraft);
+            CHECK(over.relation == DV::Divergent && !over.offer, "pull-offer: an oversized containment probe is skipped (cost cap), so no offer");
+            // ...while the shape containment actually exists for — a SHORT box inside a long draft —
+            // stays well under the cap and is offered.
+            const std::wstring smallBox(100, L'x');
+            const std::wstring longDraft = std::wstring(2000, L'y') + smallBox;
+            const auto under = EvaluateDraftPull(smallBox, longDraft);
+            CHECK(under.relation == DV::Divergent && under.offer, "pull-offer: a short box inside a long draft is under the cap and IS offered");
+        }
+        // ---- the PROVENANCE guard on the automatic extend (never rewrite text the user typed) ----
+        CHECK(TextContinuesSeed(L"pulled draft", L"pulled draft"), "seed: an unchanged box still continues the seed");
+        CHECK(TextContinuesSeed(L"pulled draft and more", L"pulled draft"), "seed: the box extends the seed");
+        CHECK(!TextContinuesSeed(L"typed by hand", L"pulled draft"), "seed: the user's own text does not continue the seed");
+        CHECK(!TextContinuesSeed(L"anything at all", L""), "seed: NOTHING seeded is never 'ours' (the whole point of the guard)");
+        CHECK(!TextContinuesSeed(L"pulled", L"pulled draft"), "seed: a box shortened BELOW the seed no longer continues it");
+        CHECK(TextContinuesSeed(L"line one\rline two", L"line one\nline two"), "seed: the newline fold applies here too");
         // ---- the similarity metric itself ----
         CHECK(DraftSimilarityPercent(L"", L"") == 100, "similarity: two empty texts are identical");
         CHECK(DraftSimilarityPercent(L"", L"x") == 0, "similarity: one empty text shares nothing");

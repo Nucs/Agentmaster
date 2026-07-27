@@ -854,10 +854,17 @@ ever destroying what you composed — so the pure `EvaluateDraftPull` (`PendingI
 `TextBox` reports a typed newline as `\r` while the detector emits `\n`, so without the fold EVERY
 multi-line draft would read as unrelated): **BoxEmpty** ⇒ the §8a fill · **Continuation** (the draft
 starts with the box) ⇒ **EXTEND in place**, the only auto-write besides a fill since a strict prefix
-loses nothing · **BoxAhead** (the box starts with the draft) ⇒ **NEVER offered**, taking it would DELETE
+loses nothing — ⚠ but gated on a **provenance guard** (`TextContinuesSeed` + a matching session id):
+an extend only ever continues text WE put there, because rewriting a box the user typed THEMSELVES is
+a mutation they didn't ask for (type "fix the" by hand while the draft reads "fix the tests", click to
+place your caret, and the box grows under you); a continuation of their own text is offered by the
+button instead · **BoxAhead** (the box starts with the draft) ⇒ **NEVER offered**, taking it would DELETE
 your addition · **Same** / **NoDraft** ⇒ nothing · **Divergent** ⇒ the **button** only. The button
 (`_pullDraftBtn`, glyph `\xE896`, tooltip says it REPLACES the box) appears only while taking the draft
-wouldn't destroy text: the box **contained verbatim** in the draft (no length floor — nothing is lost), or
+wouldn't destroy text: the box **contained verbatim** in the draft (no length floor — nothing is lost;
+the `find` probe is COST-CAPPED at a 4M needle×haystack product because it is naive O(n·m) on a
+per-keystroke path — over the cap it's skipped and the linear ratio decides alone, the conservative
+direction), or
 both texts >50 chars AND >=80% similar by `DraftSimilarityPercent` — deliberately **not** an edit distance
 but the share the two agree on at their EDGES (common prefix + the common suffix of the remainder), which
 is O(n) (this runs on the box's `TextChanged`, per keystroke) and is a **lower bound** on the
@@ -1891,7 +1898,8 @@ What works, by area:
   reconciled, not skipped** (PENDING_INPUT.md §8b): the pure `EvaluateDraftPull` compares the box against
   the draft and only the two relations that can't lose composed text are applied on a focus — an **empty**
   box is filled, and a box the draft **strictly extends** (you kept typing in the terminal) is EXTENDED in
-  place; a box that is AHEAD of the draft is never touched, and a genuinely DIFFERENT draft is offered by
+  place — the latter only when the box holds text WE put there (the provenance guard: your own typing is
+  never rewritten unasked); a box that is AHEAD of the draft is never touched, and a genuinely DIFFERENT draft is offered by
   the **conditional pull button** beside the templates paper icon (shown only when the box is contained
   verbatim in the draft, or the two are >50 chars and >=80% similar — the destructive replace made
   explicit, its tooltip saying so; it bypasses the one-shot latch since it is user-initiated). The compose box's
