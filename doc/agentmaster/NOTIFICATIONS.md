@@ -117,6 +117,12 @@ SessionRegistry::_notify (any session change; bridge/scanner/UI thread)
   Center instead of piling up. Distinct sessions keep distinct toasts.
 - **Sound** — the default system notification sound; `notifySound` OFF swaps the template for one with
   `<audio silent="true"/>`.
+- **On-screen time — `duration="long"` (~25 s)**, not the default `short` (~5–7 s, set by the user's
+  "Show notifications for" ease-of-access setting). The toast schema exposes **only these two values** —
+  there is no arbitrary duration — so this is the single lever for "keep it up longer", and long is the
+  right end of it: a completion toast exists to be caught while you are looking at *another* window, and
+  the short default routinely expires before you glance over. It governs the **banner** only; the toast
+  lands in the Action Center either way (where Tag + Group still de-dupes it).
 - **`launch` = the session id.** Set as a DOM attribute on `<toast>` (same escaping rationale as the
   text nodes). It is the activation payload — the shell hands it back verbatim as the activator's
   `invokedArgs`, so a click knows exactly which session to surface.
@@ -249,7 +255,7 @@ the track leak-proof:
   `Has completed after <span> and is waiting for you`, and `[notify] <id8> running -> waiting for you
   (after <span>)` lands in hooks.log; the cog's checkboxes mute per state; the master OFF silences
   everything; `notifySound` OFF shows a silent toast; a second completion replaces the first in Action
-  Center. **Click path (the fix):** startup logs `[notify] toast activator registered …`, and clicking a
+  Center; the banner stays up the **long** ~25 s rather than the short default. **Click path (the fix):** startup logs `[notify] toast activator registered …`, and clicking a
   toast restores/foregrounds the hosting window + selects the tab (+ `[nav] notify-click …`) **with NO
   stray window** — the regression this section exists for. **Hold path:** a completion that leaves a
   background shell/agent running logs `[notify-hold]` → `[notify-drop]` with NO pop (the session

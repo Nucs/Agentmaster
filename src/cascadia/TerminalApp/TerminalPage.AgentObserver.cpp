@@ -2917,6 +2917,13 @@ namespace winrt::TerminalApp::implementation
     // session's newer toast REPLACE its older one in the Action Center instead of piling up (ShortId
     // fits the legacy 16-char Tag cap).
     //
+    // ON-SCREEN TIME: `duration="long"` (~25s) rather than the default short (~5-7s, whatever the user's
+    // "Show notifications for" ease-of-access setting says). The Windows toast schema has NO arbitrary
+    // duration -- short and long are the only two values -- so "keep it up longer" has exactly one lever.
+    // Long is the right one here: a completion toast exists to be caught while you are looking at ANOTHER
+    // window, and the short default routinely expires before you glance over. It also only affects the
+    // BANNER; the toast persists in the Action Center either way (and Tag+Group still de-dupes it there).
+    //
     // CLICKING IT (NOTIFICATIONS.md §4a) surfaces the session — foreground the hosting window + select
     // its tab — over ONE of two mutually exclusive paths:
     //   * the TOAST COM ACTIVATOR (AgentToastActivator.h), when its class object registered at engine
@@ -2943,8 +2950,8 @@ namespace winrt::TerminalApp::implementation
         {
             winrt::Windows::Data::Xml::Dom::XmlDocument doc;
             doc.LoadXml(silent ?
-                            LR"(<toast><visual><binding template="ToastGeneric"><text></text><text></text></binding></visual><audio silent="true"/></toast>)" :
-                            LR"(<toast><visual><binding template="ToastGeneric"><text></text><text></text></binding></visual></toast>)");
+                            LR"(<toast duration="long"><visual><binding template="ToastGeneric"><text></text><text></text></binding></visual><audio silent="true"/></toast>)" :
+                            LR"(<toast duration="long"><visual><binding template="ToastGeneric"><text></text><text></text></binding></visual></toast>)");
             const auto texts = doc.GetElementsByTagName(L"text");
             texts.Item(0).AppendChild(doc.CreateTextNode(winrt::hstring{ title }));
             texts.Item(1).AppendChild(doc.CreateTextNode(winrt::hstring{ body }));
