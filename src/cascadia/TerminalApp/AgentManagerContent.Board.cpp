@@ -1061,7 +1061,11 @@ namespace winrt::TerminalApp::implementation
         // card behind it and its count is the number of cards you will see, instead of advertising a
         // tag whose only carrier lives in another window or another folder.
         _boardTags.clear();
-        std::unordered_map<std::wstring, int64_t> boardTagActivity; // sid -> last activity, for the chips' ordering
+        // sid -> last activity. NOT the chips' ordering (that is alphabetical — see
+        // _RebuildBoardTagChips): CollectGlobalTags also uses it to pick which carrier's CASING a tag
+        // displays under, so feeding it real activity keeps a chip's spelling identical to the same
+        // tag's chip on the Sessions page.
+        std::unordered_map<std::wstring, int64_t> boardTagActivity;
         for (const auto& s : sessions)
         {
             if (!s.live)
@@ -1080,8 +1084,8 @@ namespace winrt::TerminalApp::implementation
             {
                 _boardTags.emplace(s.id, std::move(tags));
                 // The transcript-derived recency, falling back to the hook-side stamp for a session
-                // whose transcript hasn't been read yet (a just-launched one) — same precedence the
-                // card timing uses, so the chips order matches "most recently active" intuition.
+                // whose transcript hasn't been read yet (a just-launched one) — the same precedence
+                // the card timing uses.
                 boardTagActivity.emplace(s.id, s.convLastActivityUnixMs != 0 ? s.convLastActivityUnixMs : s.lastActivityUnixMs);
             }
         }
@@ -1235,7 +1239,19 @@ namespace winrt::TerminalApp::implementation
         }
         _boardTagChipsPanel.Children().Clear();
 
-        const auto universe = ::Agentmaster::CollectGlobalTags(_boardTags, activityBySession, _boardTagFilter);
+        auto universe = ::Agentmaster::CollectGlobalTags(_boardTags, activityBySession, _boardTagFilter);
+        // ⚠ Re-sorted ALPHABETICALLY, deliberately dropping CollectGlobalTags' most-active-first order
+        // (which the Sessions page and the tab menu's Tag panel both keep). Those two are built on
+        // demand — you open the page, the order holds while you use it. This strip is rebuilt by
+        // _RebuildBoard, which runs on EVERY registry notification (a state transition, a title change,
+        // a draft flip), and it re-reads each tag's max carrier activity as it goes — so an
+        // activity-ordered strip would visibly reshuffle under the pointer while the fleet works, and a
+        // rebuild landing between aiming and clicking would swap the chip out from under the click. A
+        // control strip must hold still: position is how you find a tag the second time. Folded so
+        // "Bug"/"bug" sort as one name, which is how they compare everywhere else.
+        std::sort(universe.begin(), universe.end(), [](const auto& a, const auto& b) {
+            return ::Agentmaster::FoldTagName(a.name) < ::Agentmaster::FoldTagName(b.name);
+        });
         if (universe.empty())
         {
             // Nothing tagged and nothing picked — collapse the whole row so an untagged fleet's

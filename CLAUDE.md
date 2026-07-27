@@ -942,11 +942,21 @@ tag no session carries lists at **·0** (sorts last).
   you'll see — **plus the currently PICKED tags via the `knownTags` leg**, which is what keeps a pick
   clickable-off when nothing carries it any more (its carrier closed, or a reopened window restored the
   filter before the fleet finished loading — hence NO pruning pass anywhere: a pick is dropped only by the
-  user, or by the trailing **✕** that clears them all). The picked set is **per-window persisted in the
+  user, or by the trailing **✕** that clears them all). Chips are ordered **alphabetically** (folded),
+  deliberately dropping `CollectGlobalTags`' most-active-first order that the Sessions page + tag panel
+  keep: those are built ON DEMAND, while this strip is rebuilt by `_RebuildBoard` on EVERY registry
+  notification and re-reads carrier activity as it goes — so an activity order would reshuffle under the
+  pointer as the fleet works, and a rebuild between aiming and clicking would swap the chip out from under
+  the click. The picked set is **per-window persisted in the
   lens** (`ManagerState::boardTagFilter` → `windows/<id>.json`, absent ⇒ no filter). The board header became
-  a 3-track **Grid** for this (`Auto` controls · `Star` chips · `Auto` `[scope: …]`+`Show all`, now pinned
-  right): a horizontal StackPanel gives children infinite width, so many chips would push the dir-scope
-  controls off the board's edge. A global
+  a 2-track **Grid** for this (`Auto` = every fixed control in its original order · `Star` = the chips,
+  taking what's left + scrolling): a horizontal StackPanel gives children infinite width, so many chips
+  would push everything after them off the board's edge. ⚠ The fixed controls ALL stay in track 0 —
+  `[scope: …]`+`Show all` included: pinning that pair right (an earlier cut) put it permanently under the
+  Manager's LocalTooltip panel, which is `AnchorTopRightInside(_root, boardSection)` — this section's own
+  top-right corner — so any tip would have hidden it (the panel is click-THROUGH, so it never steals the
+  click; the control was just invisible while you aimed). Only the chips' right TAIL can land there now.
+  A global
   **`AppSettings::maxTags`** (default 20, ceiling 40; Settings cog → TABS) caps only NEW-name creation.
 - **Islands crash lessons (both in Gotchas).** The popup cost two `0xC000027B` fail-fasts, both now excluded by
   construction: **(1)** opening the popup on a not-yet-rooted header throws (`E_UNEXPECTED`, no `XamlRoot`) — a

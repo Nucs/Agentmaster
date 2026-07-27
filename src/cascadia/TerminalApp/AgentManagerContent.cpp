@@ -1164,16 +1164,24 @@ namespace winrt::TerminalApp::implementation
             //
             // The header is laid out as a GRID rather than one horizontal StackPanel precisely because
             // of this row: a StackPanel gives every child infinite width along its stacking axis, so a
-            // fleet with many tags would size the chips to their content and push the trailing
-            // dir-scope controls straight off the board's right edge (the header can't wrap, and the
-            // board's ScrollViewer scrolls the COLUMNS, not this row). Three tracks instead:
-            //   0 (Auto) the fixed controls above · 1 (Star) the chips, taking whatever is left and
-            //   scrolling horizontally past it · 2 (Auto) the dir-scope label + "Show all", pinned right.
-            // The chips sit in track 1 == immediately after "Clear", which is where they were asked for.
+            // fleet with many tags would size the chips to their content and push everything after them
+            // straight off the board's right edge (the header can't wrap, and the board's ScrollViewer
+            // scrolls the COLUMNS, not this row). Two tracks: 0 (Auto) every fixed control, in exactly
+            // the order it had before · 1 (Star) the chips, taking whatever width is left and scrolling
+            // horizontally past it.
+            //
+            // ⚠ The fixed controls deliberately ALL stay in track 0, including the trailing
+            // "[scope: <dir>]" + "Show all". An earlier cut pinned that pair right in a third Auto
+            // track, which put it permanently under the Manager's LocalTooltip panel — that panel is
+            // AnchorTopRightInside(_root, boardSection), i.e. nested in this very section's top-right
+            // corner, so it would have covered "Show all" every time any tip showed. (It is
+            // SetClickThrough(true) => IsHitTestVisible(false), so it never STEALS the click — the
+            // control would just have been invisible while you aimed at it.) Only the chips' right
+            // TAIL can now fall under that corner, and only on a heavily-tagged fleet: the chips are
+            // still clickable through the panel, and moving the pointer away reveals them.
             auto headerRow = Grid{};
-            headerRow.ColumnDefinitions().Append(autoCol()); // 0: title + scope/sort/refresh/Clear
+            headerRow.ColumnDefinitions().Append(autoCol()); // 0: title + scope/sort/refresh/Clear + [scope]/Show all
             headerRow.ColumnDefinitions().Append(starCol(1)); // 1: the tag chips (all remaining width)
-            headerRow.ColumnDefinitions().Append(autoCol()); // 2: "[scope: <dir>]" + "Show all"
             Grid::SetColumn(header, 0);
             headerRow.Children().Append(header);
 
@@ -1195,13 +1203,9 @@ namespace winrt::TerminalApp::implementation
             // The directory-scope label appears ONLY while a directory is scoped ("[scope: <dir>]"
             // next to the "Show all" clear button). The old unscoped "[all directories]"
             // placeholder is gone — it was display-only, restating the default.
-            auto scopeGroup = StackPanel{};
-            scopeGroup.Orientation(Orientation::Horizontal);
-            scopeGroup.Spacing(8);
-            scopeGroup.VerticalAlignment(VerticalAlignment::Center);
             _boardScope = Text(L"", 12, false, 0.6);
             _boardScope.Visibility(Visibility::Collapsed);
-            scopeGroup.Children().Append(_boardScope);
+            header.Children().Append(_boardScope);
             _showAllBtn = Button{};
             _showAllBtn.Content(winrt::box_value(L"Show all"));
             _showAllBtn.Padding(Thickness{ 6, 0, 6, 0 });
@@ -1210,9 +1214,7 @@ namespace winrt::TerminalApp::implementation
             // reappears once a directory is scoped. _RebuildBoard keeps this in sync on every refresh.
             _showAllBtn.Visibility(_scopeDir.empty() ? Visibility::Collapsed : Visibility::Visible);
             _showAllBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _SetScope(L""); });
-            scopeGroup.Children().Append(_showAllBtn);
-            Grid::SetColumn(scopeGroup, 2);
-            headerRow.Children().Append(scopeGroup);
+            header.Children().Append(_showAllBtn);
 
             Grid::SetRow(headerRow, 0);
             outer.Children().Append(headerRow);
