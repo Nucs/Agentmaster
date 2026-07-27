@@ -258,6 +258,47 @@ It drives **no `IsOpen`** — the framework closes any open popup itself on exit
 can't fail-fast. Dropping the ref means the next `_UpdateAgentToolTip` rebuilds a FRESH tooltip bound to
 the live (reloaded) owner (the crash #4 lesson, kept without the manual machinery).
 
+### 4d-bis. The ATTACH-TIMING root cause (2026-07-27) — why the card "only showed sometimes"
+
+**Symptom:** the rich card appeared unreliably, and its wheel scrolling never worked — every single
+`[tooltip-wheel]` sample in hooks.log read `open=0`, most of them `tip=0` (our ToolTip object *null*).
+
+**Two plausible theories were both WRONG**, and the framework's own source refuted them
+(`microsoft-ui-xaml`, `dxaml/xcp/dxaml/lib/ToolTipService_Partial.cpp` — the same implementation
+lineage as the system XAML we run on):
+- *"the wheel dismisses the tooltip"* — there is **no wheel handling at all** in `ToolTipService` or
+  `ToolTip`. Nothing about scrolling closes a tooltip.
+- *"`IsOpen` lies for a service-opened tooltip"* — `OpenAutomaticToolTip` calls
+  **`put_IsOpen(TRUE)` on the app's own instance** (the one returned by `GetActualToolTipObjectStatic`
+  for the owner). `IsOpen` is truthful.
+
+**The actual cause is attachment timing.** `ToolTipService::RegisterToolTip` — which runs when the
+tooltip is **attached** — is what does `add_PointerEntered` on the owner. So:
+
+1. A tooltip attached **during** a dwell never sees that dwell's `PointerEntered` → its open timer
+   never starts → **it does not open for that hover**. (Our own code already knew this in passing: see
+   the arm-build comment in `_ArmTabAgentToolTipHover`.)
+2. `Unloaded → _DetachAgentToolTip` nulls our tooltip on **every MUX container recycle** — constant on
+   a many-tab strip, and required (crash #4).
+3. Re-attachment only happened on the next **content push**, which — since the card went lazy /
+   hover-built — is *mid-dwell*. Worse, `SetAgentToolTip`'s signature early-out could skip that push
+   entirely when nothing had changed, leaving the tab with **no tooltip attached at all**.
+
+Net effect: after a recycle, the next hover showed nothing (or a leftover popup from an earlier dwell,
+which is why the card *looked* present), while our object was null-or-freshly-created and honestly
+closed. The wheel gate was reporting reality.
+
+**The fix — attach before a pointer can arrive, never during:**
+- `TabViewItem().Loaded → _UpdateAgentToolTip()` when active-but-unattached (the missing other half of
+  the Unloaded detach), so a recycled tab is re-armed the moment it re-enters the tree.
+- `SetAgentToolTip`'s early-out now also requires `_agentToolTip` to exist, so a same-signature push
+  still re-attaches.
+- `_UpdateTabAgentToolTip` pushes when `!AgentToolTipAttached()` even if the signature is unchanged.
+
+**Lesson to keep:** for a service-owned tooltip, *attachment* — not content, not `IsOpen` — is the
+state that determines whether it can ever open. Anything that detaches (recycle, `ClearAgentToolTip`)
+must have a matching re-attach that runs **outside** a dwell.
+
 ### 4e. Owner-recycle safety (`_WireAgentToolTipUnload`, wired once per tab)
 MUX `TabView` virtualizes/recycles its item containers (heavy during a multi-tab window restore), which
 tears down the ToolTip's native peer while our WinRT strong ref keeps resolving non-null — a zombie. If
@@ -488,6 +529,10 @@ escape hatch is the §12 **off-switch**.
    pointer flickers, and re-`SetToolTip`ing every ~2s would replace the framework's open tip.
 4. **Never build/mutate the tooltip for a detached owner.** Keep the `IsLoaded()`+`XamlRoot()` guard at
    the top of `_UpdateAgentToolTip`.
+4a. **Every detach needs a re-attach that runs OUTSIDE a dwell.** A tooltip that is not attached cannot
+   open, and one attached mid-hover does not open for that hover (§4d-bis). Keep the
+   `TabViewItem().Loaded → _UpdateAgentToolTip` re-host, and keep `AgentToolTipAttached()` in the push
+   conditions — a signature-only gate will silently leave recycled tabs tooltip-less.
 5. **Detach + drop on owner recycle.** Keep the `TabViewItem().Unloaded → _DetachAgentToolTip` handler
    (`SetToolTip(tvi, nullptr)` + null the ref). Without it, a recycle→reload reuses a zombie ref on the
    next `.Content()` swap — exactly crash #4. `_DetachAgentToolTip` drives NO `IsOpen` (the framework

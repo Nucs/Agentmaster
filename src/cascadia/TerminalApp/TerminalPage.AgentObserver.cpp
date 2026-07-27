@@ -2397,7 +2397,11 @@ namespace winrt::TerminalApp::implementation
         // The one exception is the push that IS allowed to swap while open: the async summary arrival.
         const auto sit = _tabTooltipSig.find(sessionId);
         const bool sigChanged = (sit == _tabTooltipSig.end() || sit->second != sig);
-        if (sigChanged && (!impl->AgentToolTipOpen() || swapWhileOpen))
+        // ...or the tab has NO tooltip attached right now (an owner recycle detached it). Attachment is
+        // what lets the framework open the card at all — ToolTipService only starts watching the owner's
+        // hover when the tooltip is attached — so a same-signature tab with nothing attached must still
+        // push, or it stays permanently tooltip-less until some unrelated field changes.
+        if ((sigChanged || !impl->AgentToolTipAttached()) && (!impl->AgentToolTipOpen() || swapWhileOpen))
         {
             TtCardScrollParts scrollParts{};
             impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, dirDetailLine, tagChips, tagsOpacity, bodyText, cardMaxHeight, scrollParts), winrt::hstring{ sig }, swapWhileOpen);

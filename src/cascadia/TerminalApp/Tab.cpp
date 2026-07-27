@@ -310,10 +310,15 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        if (_agentToolTipActive && signature == _agentToolTipSig)
+        if (_agentToolTipActive && signature == _agentToolTipSig && _agentToolTip)
         {
             return; // identical content already shown — don't re-host the XAML
         }
+        // `&& _agentToolTip` is load-bearing, not defensive: an owner recycle DETACHES + nulls the
+        // tooltip (the crash #4 fix), and if the content signature happens to be unchanged since then,
+        // this early-out used to skip _UpdateToolTip and leave the tab with NO tooltip attached at all
+        // until some unrelated field changed. Attachment is the thing that matters — see the
+        // Loaded-rehost comment in _WireAgentToolTipUnload.
 
         _agentToolTipActive = true;
         _agentToolTipContent = std::move(content);
@@ -448,6 +453,31 @@ namespace winrt::TerminalApp::implementation
             if (const auto self = weakThis.get())
             {
                 self->_DetachAgentToolTip();
+            }
+        });
+
+        // ...and the other half of that trade, which was MISSING and is the root cause of "the tab
+        // tooltip only shows sometimes, and its wheel scrolling never works":
+        //
+        // ToolTipService subscribes to the OWNER's PointerEntered inside RegisterToolTip — i.e. at the
+        // moment the tooltip is ATTACHED (dxaml ToolTipService_Partial.cpp: RegisterToolTip ->
+        // add_PointerEntered). A tooltip attached DURING a dwell therefore never sees that dwell's
+        // PointerEntered, so its open timer never starts and it does not open for that hover. The
+        // Unloaded handler above nulls our tooltip on every MUX container recycle (which is constant on
+        // a 50-tab strip), and re-attachment only happened on the NEXT content push — which, since the
+        // card went lazy/hover-built, IS mid-dwell. Net effect: after any recycle, the next hover showed
+        // nothing (or a leftover popup from an earlier dwell), and our ToolTip's IsOpen was honestly
+        // false — which is exactly what the wheel gate reported (hooks.log "[tooltip-wheel] item: cb=1
+        // tip=0/1 open=0", every single sample).
+        //
+        // So re-attach as soon as the owner is back in the tree, BEFORE any pointer can enter it.
+        tvi.Loaded([weakThis](auto&&, auto&&) {
+            if (const auto self = weakThis.get())
+            {
+                if (self->_agentToolTipActive && !self->_agentToolTip && self->_agentToolTipContent)
+                {
+                    self->_UpdateAgentToolTip(); // re-create + SetToolTip with the content we already have
+                }
             }
         });
     }
