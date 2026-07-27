@@ -132,14 +132,25 @@
                               IsColorSliderVisible="True"
                               IsHexInputVisible="True"
                               IsMoreButtonVisible="True" />
-            <Button x:Name="OkButton"
-                    x:Uid="OkButton"
-                    Grid.Row="1"
-                    MinWidth="130"
-                    HorizontalAlignment="Right"
-                    Click="CustomColorButton_Click"
-                    Content="OK"
-                    Style="{ThemeResource AccentButtonStyle}" />
+            <!--
+                Agentmaster: "Use Tab Color" seeds the picker with the tab's CURRENT color, so a
+                tweak starts from what the tab already wears instead of the picker's default black.
+                It sits beside OK because it acts ON the picker (it commits nothing).
+            -->
+            <StackPanel HorizontalAlignment="Right"
+                        Orientation="Horizontal"
+                        Spacing="8">
+                <Button x:Name="UseTabColorButton"
+                        x:Uid="TabColorUseTabColorButton"
+                        Click="UseTabColorButton_Click"
+                        Content="Use Tab Color" />
+                <Button x:Name="OkButton"
+                        x:Uid="OkButton"
+                        MinWidth="130"
+                        Click="CustomColorButton_Click"
+                        Content="OK"
+                        Style="{ThemeResource AccentButtonStyle}" />
+            </StackPanel>
         </StackPanel>
     </StackPanel>
 </Flyout>

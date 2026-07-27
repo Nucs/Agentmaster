@@ -249,6 +249,10 @@
   <data name="TabColorClearButton.Content" xml:space="preserve">
     <value>Reset</value>
   </data>
+  <data name="TabColorUseTabColorButton.Content" xml:space="preserve">
+    <value>Use Tab Color</value>
+    <comment>Agentmaster: seeds the custom color picker with the tab's CURRENT color</comment>
+  </data>
   <data name="RenameTabText" xml:space="preserve">
     <value>Rename tab (F2)</value>
   </data>
@@ -890,6 +894,10 @@ Esc cancels; clicking away always commits.</value>
   <data name="TabColorClearButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.FullDescription" xml:space="preserve">
     <value>Reset tab color</value>
     <comment>Text used to identify the reset button</comment>
+  </data>
+  <data name="TabColorUseTabColorButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.FullDescription" xml:space="preserve">
+    <value>Load this tab's current color into the color picker</value>
+    <comment>Text used to identify the use-tab-color button</comment>
   </data>
   <data name="MoveTabToNewWindowText" xml:space="preserve">
     <value>Move tab to new window</value>

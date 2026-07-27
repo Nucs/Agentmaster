@@ -1093,6 +1093,24 @@ namespace winrt::TerminalApp::implementation
 
         _tabColorPickup = colorPicker;
 
+        // Agentmaster ("Use Tab Color"): hand the picker the color THIS tab currently wears, so its
+        // custom picker can be seeded with it instead of opening on black / the last tab's pick.
+        // This is the ONE seam every entry point funnels through (the "Change tab color..."
+        // context-menu item and the openTabColorPicker action both dispatch OpenTabColorPicker ->
+        // AttachColorPicker), and the flyout is a per-window SINGLETON, so it must be pushed on
+        // EVERY attach — pushing a null for a colorless tab is what stops the previously-picked
+        // tab's color being offered as "this tab's color".
+        // GetTabColor (not GetRuntimeTabColor): a profile-/content-colored tab is worth seeding from
+        // too. It stays a seed — nothing is committed until the user drags the picker or presses OK.
+        if (const auto current = GetTabColor())
+        {
+            _tabColorPickup.SetCurrentTabColor(*current);
+        }
+        else
+        {
+            _tabColorPickup.SetCurrentTabColor(nullptr);
+        }
+
         _colorSelectedToken = _tabColorPickup.ColorSelected([weakThis](auto newTabColor) {
             if (auto tab{ weakThis.get() })
             {

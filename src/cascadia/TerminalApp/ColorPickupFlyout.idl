@@ -6,6 +6,12 @@ namespace TerminalApp
     [default_interface] runtimeclass ColorPickupFlyout : Windows.UI.Xaml.Controls.Flyout
     {
         ColorPickupFlyout();
+
+        // Agentmaster: the color the tab we're about to be shown for is CURRENTLY wearing (null when
+        // it has none). Drives the "Use Tab Color" button, which seeds the custom picker with it.
+        // Must be (re)set on every attach — this flyout is a per-window singleton reused by every tab.
+        void SetCurrentTabColor(Windows.Foundation.IReference<Windows.UI.Color> color);
+
         event ColorSelectedArgs ColorSelected;
         event ColorClearedArgs ColorCleared;
     }
