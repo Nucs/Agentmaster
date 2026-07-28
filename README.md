@@ -1,6 +1,8 @@
 # Agentmaster
 _By developers, for developers - Never lose a session again - feel like Windows Terminal so you forget you are vibing_
 
+[![License](https://osscdn.nucs.workers.dev/agentmaster-license-WVQkXXYsGf.svg)](LICENSE)
+
 [Microsoft Windows Terminal](https://github.com/microsoft/terminal) but pumped up with observability, persistence and all the tools you need to scale up your parallel context management.<br/> Coding fast is no longer about typing faster but about holding and manuvering around and between 10 coding contextes.
 
 Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity terminal with a shared stdin (you and the orchestrator coexist), output tapped for the UI, and semantic state from **Claude Code hooks** and an **out-of-band observer** — never screen-scraping.
