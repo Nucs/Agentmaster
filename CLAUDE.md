@@ -2881,7 +2881,9 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   - `src/cascadia/TerminalApp/AgentTabOverlay.{h,cpp}` — the per-tab link badge (TAB_OVERLAY.md),
     enriched by the observer with `model · effort · kind`; also the registry-less `ShowActivity`
     **observe badge** (`○ <kind> · unlinked`: pwsh / cmd / unprompted-claude / codex) for every non-bound tab.
-    Carries the **hover action row** (folder Open Path + a copy menu — Session Id / Copy Path / Copy
+    Carries the **hover action row** (folder Open Path + a **mail** button [`_QueueCurrentPrompt` — queue
+    the tab's unsent draft into its Auto-Testing queue, dev-or-debug + Claude only] + a copy menu — Session
+    Id / Copy Path / Copy
     Branch / Claude·Codex Launch CLI / Summary / Transcript, with a chime — `BuildLaunchCli` /
     `CopyConversationAsync`) and the **pencil-toggled SUMMARY PANEL** (`SetAgentSummaryOverlay` 2nd slot;
     `RenderSummaryBox`/`RenderCodexSummary` with a `full` trim flag, `_SetSummaryContent`'s `StackPanel`
