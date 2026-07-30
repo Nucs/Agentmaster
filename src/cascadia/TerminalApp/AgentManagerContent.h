@@ -280,8 +280,11 @@ namespace winrt::TerminalApp::implementation
         void _RebuildBoardTagChips(const std::unordered_map<std::wstring, int64_t>& activityBySession);
         // The ONE chip builder both the tag chips and the leading "Untagged" chip go through, so they
         // cannot drift apart visually. A set ribbonColor paints that tag's bookmark; nullopt paints the
-        // hollow outline that means "carries none".
-        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _MakeBoardTagChip(
+        // hollow outline that means "carries none". A plain Button (not a ToggleButton): the SELECTED
+        // look is a 1px accent BORDER with no background change, driven from `isChecked` at build time
+        // (the row rebuilds on every click), which a ToggleButton's background-painting Checked VSM
+        // could not give without re-templating.
+        winrt::Windows::UI::Xaml::Controls::Button _MakeBoardTagChip(
             const std::wstring& label,
             const std::optional<winrt::Windows::UI::Color>& ribbonColor,
             bool isChecked,

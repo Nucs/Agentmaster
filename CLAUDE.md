@@ -998,13 +998,15 @@ tag no session carries lists at **·0** (sorts last).
   hoverable ribbons + the same hover panel, plus a filter-chips row under the search toggles (gently-rounded
   rectangles, `_RebuildSessionsTagChips` — a tag facet that ANDs with the search/scope filters). The
   **Triage Board** header carries the same chip row, right after the **Clear** button
-  (`_RebuildBoardTagChips` / `_ToggleBoardTagFilter` / `_BoardTagFilterAccepts`) — same ribbon+name chip,
-  except an UNPICKED chip sets no Background/BorderBrush at all, so it wears the stock chrome of the
-  Clear/Show-all/scope buttons beside it (all but transparent on the board's dark fill) rather than the
-  Sessions page's translucent blue, which read as a foreign always-on highlight in a row of plain buttons;
-  a PICKED chip still reads instantly off the ToggleButton's own Checked accent fill (a VSM setter
-  outranks a local value, which is equally why the Sessions chips can override the rest state and keep the
-  checked one) — ⚠ and the picks combine
+  (`_RebuildBoardTagChips` / `_MakeBoardTagChip` / `_ToggleBoardTagFilter` / `_BoardTagFilterAccepts`) —
+  same ribbon+name chip, but a plain **`Button`, not a `ToggleButton`**: a ToggleButton's Checked visual
+  state paints the accent as a **background fill** (and a VSM setter outranks a local value, so it can't be
+  suppressed without re-templating), whereas here **selection is a 1px accent BORDER and the background
+  NEVER changes** — an UNPICKED chip is byte-for-byte the Clear/Show-all/scope Buttons beside it (stock
+  chrome, no Background ever set), a PICKED chip adds only the accent border (`BorderBrush` local for the
+  rest state + `ButtonBorderBrush{PointerOver,Pressed}` resource overrides on the chip's own `Resources` so
+  hover/press can't swap the accent back to stock). The selected look is driven from `isChecked` at build
+  time — free, since the row rebuilds on every click. ⚠ The picks combine
   with **OR**, not AND: the board is a triage surface you point at a few concerns at once ("anything tagged
   release or hotfix"), where ANDing would only ever shrink toward the one card carrying every tag. The chip
   universe is `CollectGlobalTags` over `_boardTags` — already narrowed by `_RebuildBoard` to the sessions the

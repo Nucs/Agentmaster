@@ -1340,29 +1340,46 @@ namespace winrt::TerminalApp::implementation
     //   ribbonColor nullopt => "Untagged": the same bookmark OUTLINED and empty — the natural glyph
     //                          for "carries none", and what tells it apart from a real tag that
     //                          happens to be named "untagged".
-    Primitives::ToggleButton AgentManagerContent::_MakeBoardTagChip(const std::wstring& label,
-                                                                    const std::optional<winrt::Windows::UI::Color>& ribbonColor,
-                                                                    bool isChecked,
-                                                                    const std::wstring& tipTitle,
-                                                                    const winrt::hstring& tipBody,
-                                                                    std::function<void()> onToggle)
+    winrt::Windows::UI::Xaml::Controls::Button AgentManagerContent::_MakeBoardTagChip(const std::wstring& label,
+                                                                                      const std::optional<winrt::Windows::UI::Color>& ribbonColor,
+                                                                                      bool isChecked,
+                                                                                      const std::wstring& tipTitle,
+                                                                                      const winrt::hstring& tipBody,
+                                                                                      std::function<void()> onToggle)
     {
-        Primitives::ToggleButton chip;
+        // A plain Button, NOT a ToggleButton — deliberately. A ToggleButton's Checked visual state
+        // paints the accent as a BACKGROUND FILL, and a VSM setter outranks any local value, so that
+        // fill can't be suppressed without re-templating the control. The selection here is a 1px
+        // accent BORDER and no background change at all (the ask), so we drive the "selected" look
+        // ourselves from `isChecked` rather than from a toggle's checked state — free, because the
+        // whole chips row is rebuilt on every click, so `isChecked` is always current at build time.
+        Button chip;
         chip.MinWidth(0);
         chip.MinHeight(0);
         chip.Padding(Thickness{ 10, 2, 10, 3 });
         chip.CornerRadius(CornerRadius{ 4, 4, 4, 4 }); // a gently-rounded rectangle, not a pill — matches the header's square-cornered buttons
         chip.FontSize(12);
-        chip.BorderThickness(Thickness{ 1, 1, 1, 1 });
-        // ⚠ Background/BorderBrush are deliberately NOT set, so an UNPICKED chip wears the stock
-        // control chrome — byte-for-byte the "Clear"/"Show all"/scope buttons sitting to its left,
-        // i.e. all but transparent over the board's dark fill. (The Sessions page's chips paint a
-        // translucent blue at rest; here that read as a foreign, always-on highlight next to a row
-        // of plain buttons.) A PICKED chip still reads instantly because the ToggleButton's own
-        // Checked visual state paints the solid accent fill — VSM setters outrank a local value in
-        // this framework, which is also why the Sessions chips can override the rest state and keep
-        // the checked one. So: off == the buttons beside it, on == accent.
-        chip.IsChecked(isChecked); // sets Checked/Unchecked, never Click — so this can't re-enter the handler below
+        chip.BorderThickness(Thickness{ 1, 1, 1, 1 }); // constant in BOTH states, so selecting never reflows the row
+        // ⚠ Background is NEVER set here, nor is any *Background* theme resource overridden — so the
+        // fill is 100% stock Button chrome in every state (rest AND selected), byte-for-byte the
+        // "Clear"/"Show all"/scope Buttons beside it. Selection changes ONLY the border:
+        //   * OFF  => no BorderBrush set => the stock subtle button border (matches the neighbours).
+        //   * ON   => a 1px accent border. The rest-state brush is a local value; the two interaction
+        //             states get resource overrides too, because the Button template's PointerOver /
+        //             Pressed states set BorderBrush from ButtonBorderBrush{PointerOver,Pressed} and a
+        //             VSM setter outranks a local value — so without these, hovering a selected chip
+        //             would swap the accent back to the stock border. Overriding those two keys on the
+        //             chip's OWN Resources keeps the accent through hover/press. (Belt-and-suspenders:
+        //             if a future template doesn't animate BorderBrush, the overrides are simply
+        //             unused; if a key name ever drifts, the worst case is the accent flickering to
+        //             stock on hover — never a wrong fill.)
+        if (isChecked)
+        {
+            const auto accent = Fill(0xFF, 0x4F, 0xA3, 0xE3); // full-opacity of the chips' old border blue — reads as a highlight on the dark board
+            chip.BorderBrush(accent);
+            chip.Resources().Insert(winrt::box_value(winrt::hstring{ L"ButtonBorderBrushPointerOver" }), accent);
+            chip.Resources().Insert(winrt::box_value(winrt::hstring{ L"ButtonBorderBrushPressed" }), accent);
+        }
         {
             StackPanel chipContent;
             chipContent.Orientation(Orientation::Horizontal);
@@ -1395,7 +1412,7 @@ namespace winrt::TerminalApp::implementation
             chipRibbonNudge.Y(3.0);
             chipRibbon.RenderTransform(chipRibbonNudge);
             chipContent.Children().Append(chipRibbon);
-            auto chipLabel = TextBlock{}; // no explicit Foreground — inherits the ToggleButton's, so it adapts to checked/hover
+            auto chipLabel = TextBlock{}; // no explicit Foreground — inherits the Button's, so it adapts to hover/press like the neighbours
             chipLabel.Text(winrt::hstring{ label });
             chipLabel.VerticalAlignment(VerticalAlignment::Center);
             chipContent.Children().Append(chipLabel);
@@ -1403,7 +1420,7 @@ namespace winrt::TerminalApp::implementation
         }
         AgentSetTitledTip(chip, winrt::hstring{ tipTitle }, tipBody);
         chip.Click([this, onToggle = std::move(onToggle)](const IInspectable&, const RoutedEventArgs&) {
-            // DEFER: the toggle rebuilds this very chips row, destroying the ToggleButton whose Click
+            // DEFER: the toggle rebuilds this very chips row, destroying the Button whose Click
             // handler we are standing in (the Sessions page's chip discipline). The action is captured
             // by value, so a chip already torn down by the time it runs still applies the flip the
             // user asked for; it captures `this`, hence the weak re-check before invoking it.
