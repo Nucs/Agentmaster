@@ -3596,11 +3596,25 @@ build **binlog uploads as an artifact** to diagnose the first run.
   tabs froze for a bit [the suspended dump write], then every tab shows the dragged tab's content").
   So the same bug has TWO outcomes — the fatal `0xC000041D` death rattle AND this survived wedge — and
   an event-1000 AV does NOT imply the process died (check hooks.log for post-event liveness before
-  reading a "restart" as a crash). UNTESTED candidate (never tried): set each tab's BODGY Content
-  disambiguator to the `TabViewItem` ITSELF instead of a unique `Border` — `GetDraggedItems` would then
-  hand MUX the container, whose `ContainerFromItem` fast path resolves a realized container by identity
-  (the dragged tab is always realized), so the null-unsafe loop is never reached; unknown whether XAML
-  permits self-as-Content (association rules). The belts: **`_SettleTabStripLayout()`** — `UpdateLayout()` after EVERY `TabItems()`
+  reading a "restart" as a crash). **The 2026-07-30 crash also DISPROVED the two remaining
+  make-the-lookup-succeed candidates (source-verified against `winui2/main`, fetched that day — the
+  loop is STILL unguarded upstream, so a MUX package bump is no escape):** (1) the
+  **`_BoostTabStripCacheForDrag` CacheLength=60 candidate FAILED its drag-verification** — it was
+  ACTIVE in the crashed 0.6.8.1 instance (applied per-window at 16:42:40/16:42:41/19:46:26, commit
+  `c4d366460` well before the 07-25 build) and `ContainerFromIndex(0)` was STILL null at the 22:47:22
+  drop (`Rdi=0`), proving a large cache is a realization HINT the panel may not honor; and (2) every
+  **check-then-allow gate is structurally beaten** — the begin logged means the SAME loop walked
+  `[0..draggedIndex]` successfully at drag-START, and 2.5 s later the drop AVed, so mid-drag
+  derealization defeats any gate that can only veto the START (the drop cannot be vetoed). The
+  **Content-trick family is dead too**: the parent probe is a SINGLE-level
+  `VisualTreeHelper::GetParent(fe)` (no walk-up), and WT uses the STOCK TabView template (no
+  retemplate in-repo), whose `TabView::UpdateTabContent` re-parents `tvi.Content()` into the
+  template's `TabContentPresenter` on every selection change — so a Content that already has a parent
+  (self-as-Content / template-root-as-Content / a header-parented Border) is a guaranteed
+  "already child of another element" crash. ⟹ **The only flawless class left: make the lookup
+  UNREACHABLE — `CanReorderTabs(false)` + `CanDragTabs(false)` (the exact configuration WT itself
+  ships for elevated windows, `TerminalPage.cpp` `CanDragDrop()`) and re-implement reorder as an
+  Agentmaster-owned pointer gesture over the existing `_TryMoveTab` machinery.** The belts: **`_SettleTabStripLayout()`** — `UpdateLayout()` after EVERY `TabItems()`
   mutation (`_InitializeTab` / `_RemoveTab` / `_TryMoveTab` / `_PinManagerTabFirst` /
   `_TabDragCompleted`) so the pump never sees an unsettled strip (XAML dispatches queued input ahead of
   the pending layout pass) — plus **`_GuardTabDragUntilRegistered(tvi)`** — a (re)inserted tab stays
