@@ -2024,6 +2024,23 @@ namespace Agentmaster
         return true;
     }
 
+    // Agentmaster (COMMANDS.md §6b/§6c): the EFFECTIVE delete-after decision — the ONE predicate both
+    // arm sites (content/paste in _HandleCommandHandover + the standby verify), the cog, and the
+    // tests resolve through, so "does a briefing get swept?" can never be answered two ways. The
+    // toggle is the user's intent, but the SCRATCHPAD write location FORCES it off regardless: a
+    // briefing written to a temp scratchpad is already OUTSIDE the user's repo (the litter
+    // delete-after exists to prevent) AND the OS reclaims that folder on its own, so deleting there
+    // buys nothing while still costing the one irreversible thing (a document they may want to
+    // re-read). So the scratchpad — which is the SHIPPED DEFAULT — means delete-after is inert, and
+    // the cog reflects that by disabling + un-checking the toggle while the location is the
+    // scratchpad. Consulted at ARM time (where the file actually went), never in the sweep: an entry
+    // already armed for a real ./ file is not un-armed by a LATER switch of the setting to scratchpad
+    // (that file is still in ./). Pure so it stays testable next to CommandWritePathIsScratchpad.
+    inline bool CommandHandoverDeleteEffective(const AppSettings& s)
+    {
+        return s.commandHandoverDeleteFileAfterLaunch && !CommandWritePathIsScratchpad(s.commandHandoverWritePath);
+    }
+
     // Agentmaster (COMMANDS.md §6a): resolve the CONFIGURED /handover-family names into the set
     // actually USED — normalize each, fall back to its default on empty, and COLLISION-HEAL: the
     // CommandWatch binding lookup is name-EXACT, so two bindings under one name would make the

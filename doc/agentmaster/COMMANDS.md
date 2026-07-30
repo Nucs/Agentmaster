@@ -812,16 +812,30 @@ why the rewrite rule is now *"ours **and** not already exactly what we would wri
 predicate covers a version upgrade, a name re-render and a location re-render, while a
 byte-identical file stays a no-op (no write, no log).
 
-**Delete-after pairs with it — INVERTED.** The original pairing read "a briefing in a temp
-scratchpad has no reason to linger", and so seeded `commandHandoverDeleteFileAfterLaunch` **ON** for
-a fresh install and ticked it when you picked the **Scratchpad** preset. That is backwards on the
-axis that matters: the scratchpad already keeps the file **out of your repo** — the litter §6c
-exists to fix is gone the moment the location moves — so the delete buys nothing there, while it
-still costs the one irreversible thing (a briefing you wanted to re-read). So the pairing now runs
-the other way: the absent-key default is **OFF on every install** (an install that already stored
-`true` keeps it — a made choice is never revoked), and picking **Scratchpad** in the cog **unticks**
-the toggle. Delete-after is now purely opt-in, for people who keep briefings in `./` and want them
-swept. Everything else about it is unchanged (§6b — deferred to a started successor, waiting
+**Delete-after and the scratchpad — a HARD coupling, not a nudge.** The original pairing read "a
+briefing in a temp scratchpad has no reason to linger", and so seeded
+`commandHandoverDeleteFileAfterLaunch` **ON** for a fresh install and ticked it when you picked the
+**Scratchpad** preset. That is backwards on the axis that matters: the scratchpad already keeps the
+file **out of your repo** — the litter §6c exists to fix is gone the moment the location moves — so
+the delete buys nothing there, while it still costs the one irreversible thing (a briefing you
+wanted to re-read). So the relationship is inverted **and enforced**, on two fronts:
+* **The absent-key default is OFF on every install** (an install that already stored `true` keeps
+  it — a made choice is never revoked). Delete-after is purely opt-in, for people who keep briefings
+  in `./` and want them swept.
+* **The SCRATCHPAD forces delete-after off — regardless of the toggle.** The one predicate both arm
+  sites resolve through is `CommandHandoverDeleteEffective(settings)` =
+  `commandHandoverDeleteFileAfterLaunch && !CommandWritePathIsScratchpad(commandHandoverWritePath)`
+  (SessionModels.h, pure + tested). So a briefing written to the scratchpad — which is the shipped
+  DEFAULT — is never armed for deletion, even if a hand-edited `settings.json` sets the toggle on.
+  The cog makes the invariant visible rather than silent: while the location box is the scratchpad,
+  the **"Delete the handover file…" toggle is disabled and un-checked** (and its wait box greyed with
+  it), the presets' tooltip says so, and the status line reads *"Briefings: KEPT — not deleted (the
+  scratchpad is already outside your repo)."* Picking a real folder (`./`, `./docs`, …) re-enables
+  the toggle. The predicate is consulted at **ARM time** (where the file actually went), never in the
+  sweep — an entry already armed for a real `./` file is *not* un-armed by a later switch of the
+  setting to scratchpad (that file is still in `./`).
+
+Everything else about delete-after is unchanged (§6b — deferred to a started successor, waiting
 `commandHandoverDeleteDeadlineMinutes` for it, never the pointer tier, never a failed spawn).
 
 **The definition files, said out loud + the Reinstall escape hatch.** Everything on this tab is

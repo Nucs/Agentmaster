@@ -1401,6 +1401,27 @@ void TestCommandWatch()
             CHECK(AppSettingsFromJson(zero).commandHandoverDeleteDeadlineMinutes == 0,
                   "shaping: a stored 0 survives (don't wait for the successor at all)");
         }
+        {
+            // §6c the HARD scratchpad coupling: CommandHandoverDeleteEffective is the ONE predicate
+            // both arm sites resolve through, and the SCRATCHPAD forces delete-after off regardless
+            // of the toggle — a temp briefing is already outside the repo, so there is nothing to
+            // sweep (and the cog disables the toggle to match). Only a real folder + the toggle on
+            // actually deletes.
+            AppSettings e;
+            e.commandHandoverDeleteFileAfterLaunch = true;
+            e.commandHandoverWritePath = kCommandWritePathScratchpad; // the default
+            CHECK(!CommandHandoverDeleteEffective(e),
+                  "scratchpad coupling: toggle ON + scratchpad => effective OFF (never delete a temp briefing)");
+            e.commandHandoverWritePath = L""; // "" is the scratchpad too
+            CHECK(!CommandHandoverDeleteEffective(e),
+                  "scratchpad coupling: a cleared write-path box is the scratchpad => effective OFF");
+            e.commandHandoverWritePath = L"./"; // a real folder
+            CHECK(CommandHandoverDeleteEffective(e),
+                  "scratchpad coupling: toggle ON + a real folder => effective ON (deletes)");
+            e.commandHandoverDeleteFileAfterLaunch = false;
+            CHECK(!CommandHandoverDeleteEffective(e),
+                  "scratchpad coupling: toggle OFF + a real folder => effective OFF (the toggle still governs)");
+        }
         CHECK(fresh.commandHandoverTitleFindRegex == kDefaultCommandTitleFindRegex &&
                   fresh.commandHandoverTitleReplace == kDefaultCommandTitleReplace &&
                   fresh.commandHandoverFileMatchRegex == kDefaultCommandFileMatchRegex,

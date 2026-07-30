@@ -1180,9 +1180,15 @@ become the briefing; **RESTART-applied**, bindings register once; the §3 supers
 stay one family), and **DELETE-AFTER-HAND-OFF** (`commandHandoverDeleteFileAfterLaunch`, **default OFF
 on EVERY install** — *never delete a briefing unless you asked for it*: it is a document you may still
 want to re-read and the delete cannot be undone, so the earlier "a FRESH install seeds it ON because the
-shipped location is the scratchpad" pairing is **GONE** and the cog's Scratchpad preset now **unticks**
-the toggle — the scratchpad already keeps the file out of your repo, which is the whole litter problem,
-so deleting there buys nothing; an install that stored ON keeps it)
+shipped location is the scratchpad" pairing is **GONE**; an install that stored ON keeps it. **The
+SCRATCHPAD — the shipped default — HARD-FORCES delete-after off**, via the ONE predicate both arm sites
+resolve through, `CommandHandoverDeleteEffective` = `toggle && !CommandWritePathIsScratchpad(writePath)`
+(pure, tested): a temp briefing is already outside your repo, so it is never armed for deletion even if a
+hand-edited `settings.json` sets the toggle on; the cog makes it visible — while the location is the
+scratchpad the toggle is **disabled + un-checked** (wait box greyed with it), the status line reads *"KEPT
+— not deleted (the scratchpad is already outside your repo)"*, and picking a real folder re-enables it.
+The predicate is read at ARM time — where the file went — not the sweep, so a later switch to scratchpad
+never un-arms an already-armed `./` file)
 — **DEFERRED to a successful START, not fired at spawn**: `_HandleCommandHandover` only ARMS
 (successor id → md path) and `_SweepHandoverDeletes` (same liveness tick as the paste pump) deletes
 once `SessionInfo.started` — because a successor in a BACKGROUND tab starts LAZILY and a launch that
@@ -1239,9 +1245,10 @@ the TEXT changes (never a binding), the cog's Save **applies it immediately**
 MATERIALIZED names — a rename stays restart-applied so a file and its binding can never disagree
 mid-run), so the rewrite rule generalized to **"ours AND not already exactly what we would write"**
 (one predicate covering a version upgrade, a name re-render and a location re-render; a
-byte-identical file stays a no-op). Picking the **Scratchpad** preset also **unticks** delete-after
-(the scratchpad already keeps the briefing out of your repo — deleting there costs a re-readable
-document and buys nothing; the pairing used to run the other way). The
+byte-identical file stays a no-op). While the location is the **Scratchpad** (the default) the
+delete-after toggle is **disabled + un-checked** and the `CommandHandoverDeleteEffective` predicate
+force-forbids the delete at the arm site (the scratchpad already keeps the briefing out of your repo —
+deleting there costs a re-readable document and buys nothing); picking a real folder re-enables it. The
 tab's new **COMMAND DEFINITION FILES** section states what each file on disk IS
 (`InspectHandoverCommandFiles` → up-to-date / managed / **EDITED BY YOU — left alone** / not
 installed, sampled at cog open, not per keystroke) — because a hand-edited definition is frozen
@@ -2309,14 +2316,16 @@ What works, by area:
   "name contains handover" hint — **the one restart-applied field here**), and
   **`commandHandoverDeleteFileAfterLaunch`** (delete the md once its successor exists + delivery is
   secured; never the pointer tier — the opt-in `HANDOVER-*.md` litter fix, **default OFF everywhere**:
-  never delete a briefing unless asked) **+ `commandHandoverDeleteDeadlineMinutes`** (the minutes box
+  never delete a briefing unless asked; and the SCRATCHPAD **hard-forces it off** via
+  `CommandHandoverDeleteEffective` — the toggle is disabled + un-checked while the location is the
+  scratchpad, since a temp briefing is already outside the repo) **+ `commandHandoverDeleteDeadlineMinutes`** (the minutes box
   under it — how long that delete WAITS for the successor to actually start before giving up and
   KEEPING the file; **default 1440 == 24 h** since a background tab starts lazily and may not be
   visited for hours, typed **0** = don't wait, blank = the default, clamped 0..30 days), **plus the §6c WRITE LOCATION** —
   **`commandHandoverWritePath`** (the "Handover file location" box + a **Presets ▾** menu — Scratchpad
   (default, also what a blank box means) · `./` · `./docs` · `./docs/handovers` · `./handovers`, or any
-  typed folder incl. an absolute one; FOLDER-only, the `HANDOVER-<topic>.md` name is untouched; picking
-  Scratchpad **unticks** delete-after) and the **COMMAND DEFINITION FILES** section (a per-file state line
+  typed folder incl. an absolute one; FOLDER-only, the `HANDOVER-<topic>.md` name is untouched; while
+  Scratchpad is the location, delete-after is **disabled + forced off**) and the **COMMAND DEFINITION FILES** section (a per-file state line
   — up-to-date / managed / **EDITED BY YOU — left alone** / not installed — plus a confirmed **Reinstall
   definition files…**, the one overwrite that ignores the digest). Model/title/delete/**location** apply
   to the NEXT handover right after Save (the location by re-rendering the live definition files); a live

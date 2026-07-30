@@ -7050,7 +7050,9 @@ namespace winrt::TerminalApp::implementation
                         ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-standby] " + ::Agentmaster::ShortId(id) + L" draft VERIFIED in the input box (chars=" + std::to_wstring(draft.size()) + L") - one Enter away\n");
                         // The delivery is now secured, so the §6b delete may arm (content tier
                         // only — a pointer fill NAMES the file; setting read LIVE at verify time).
-                        if (!entry.standbyMdPath.empty() && _appSettings.commandHandoverDeleteFileAfterLaunch)
+                        // CommandHandoverDeleteEffective: the scratchpad (the default) forces it off
+                        // — a standby briefing written there is already outside the repo (§6c).
+                        if (!entry.standbyMdPath.empty() && ::Agentmaster::CommandHandoverDeleteEffective(_appSettings))
                         {
                             _pendingHandoverDeletes[id] = PendingHandoverDelete{ entry.standbyMdPath, now };
                         }

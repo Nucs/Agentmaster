@@ -507,7 +507,10 @@ namespace winrt::TerminalApp::implementation
             // all — its delivery is secured only once the fill is VERIFIED in the input box, so
             // the pump's standby lane arms the delete itself on a verified fill (an undelivered
             // draft always leaves its file on disk — the file is standby's only durable copy).
-            if (!newId.empty() && !standby && _appSettings.commandHandoverDeleteFileAfterLaunch &&
+            // CommandHandoverDeleteEffective, not the raw toggle: a briefing written to the session
+            // SCRATCHPAD (the default) is already outside the user's repo, so the scratchpad forces
+            // delete-after off regardless of the toggle (§6c) — nothing to clean up there.
+            if (!newId.empty() && !standby && ::Agentmaster::CommandHandoverDeleteEffective(_appSettings) &&
                 std::wstring_view{ injectMode } != L"pointer")
             {
                 _pendingHandoverDeletes[newId] = PendingHandoverDelete{ mdPath, static_cast<int64_t>(::GetTickCount64()) };

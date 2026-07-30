@@ -1483,41 +1483,38 @@ namespace winrt::TerminalApp::implementation
             _setCmdWritePathPresets = Button{};
             _setCmdWritePathPresets.Content(winrt::box_value(L"Presets \x25BE"));
             _setCmdWritePathPresets.VerticalAlignment(VerticalAlignment::Bottom);
-            AgentSetTip(_setCmdWritePathPresets, L"Common locations. Picking \x201CScratchpad\x201D also turns OFF \x201C" L"Delete the handover file after a successful hand-off\x201D \x2014 a briefing in a temp folder is already out of your repo, so there is nothing to clean up, and keeping it means you can still go back and read it.");
+            AgentSetTip(_setCmdWritePathPresets, L"Common locations. While \x201CScratchpad\x201D is picked, \x201C" L"Delete the handover file after a successful hand-off\x201D is DISABLED and off \x2014 a briefing in a temp folder is already out of your repo, so there is nothing to clean up, and keeping it means you can still go back and read it. Pick a real folder (./ , ./docs, \x2026) to enable deletion.");
             {
                 auto flyout = MenuFlyout{};
-                // { label, value, is-the-scratchpad } — the scratchpad entry also UNticks delete-after.
+                // { label, value } — the write-path presets. Whether a value disables delete-after
+                // is resolved by CommandWritePathIsScratchpad in _UpdateCommandsTabStatus, so the
+                // table doesn't need to carry an is-scratchpad flag.
                 const struct
                 {
                     const wchar_t* label;
                     const wchar_t* value;
-                    bool scratchpad;
                 } presets[] = {
-                    { L"Scratchpad (temp \x2014 recommended)", L"scratchpad", true },
-                    { L"Working directory (./)", L"./", false },
-                    { L"./docs", L"./docs", false },
-                    { L"./docs/handovers", L"./docs/handovers", false },
-                    { L"./handovers", L"./handovers", false },
+                    { L"Scratchpad (temp \x2014 recommended)", L"scratchpad" },
+                    { L"Working directory (./)", L"./" },
+                    { L"./docs", L"./docs" },
+                    { L"./docs/handovers", L"./docs/handovers" },
+                    { L"./handovers", L"./handovers" },
                 };
                 for (const auto& p : presets)
                 {
                     auto item = MenuFlyoutItem{};
                     item.Text(p.label);
                     const std::wstring value{ p.value };
-                    const bool scratchpad = p.scratchpad;
-                    item.Click([this, value, scratchpad](const IInspectable&, const RoutedEventArgs&) {
+                    item.Click([this, value](const IInspectable&, const RoutedEventArgs&) {
                         if (_setCmdWritePath)
                         {
                             _setCmdWritePath.Text(winrt::hstring{ value });
                         }
-                        if (scratchpad && _setCmdDeleteAfter)
-                        {
-                            // The auto-pairing, INVERTED: a briefing in the temp scratchpad is already
-                            // out of the user's repo, so there is no litter to clean up — and deleting
-                            // it is the one irreversible thing we could do to a document they may want
-                            // to re-read. Scratchpad therefore turns delete-after OFF.
-                            _setCmdDeleteAfter.IsOn(false);
-                        }
+                        // The delete-after toggle's enabled/off state follows the location: picking
+                        // Scratchpad disables + un-checks it (a temp briefing is already outside the
+                        // repo — nothing to clean up), picking a real folder re-enables it. Owned by
+                        // ONE place (the sync at the top of _UpdateCommandsTabStatus), so the preset,
+                        // a typed path, and the populate seeds all behave identically.
                         _UpdateCommandsTabStatus();
                     });
                     flyout.Items().Append(item);
@@ -1536,7 +1533,7 @@ namespace winrt::TerminalApp::implementation
         panel.Children().Append(_setCmdFileMatch);
         _setCmdDeleteAfter = ToggleSwitch{};
         _setCmdDeleteAfter.Header(winrt::box_value(L"Delete the handover file after a successful hand-off"));
-        AgentSetTip(_setCmdDeleteAfter, L"OFF by default \x2014 a briefing is never deleted unless you ask for it here, because it is a document you may still want to read and deleting it cannot be undone.\n\nTurned ON: once a HANDOVER-*.md's successor session is created AND has actually started, and its briefing is secured (delivered on the launch commandline, or parked durably on the successor's queue for the paste injection), the file itself is deleted \x2014 no more HANDOVER-*.md litter in your repos. A file whose successor got only a POINTER to it is never deleted (the successor must read it), a failed spawn leaves its file, and a successor that dies before starting leaves its file. Applies to the next handover.");
+        AgentSetTip(_setCmdDeleteAfter, L"OFF by default \x2014 a briefing is never deleted unless you ask for it here, because it is a document you may still want to read and deleting it cannot be undone.\n\nDISABLED while the handover file location above is the Scratchpad (the default): a briefing written to a temp folder is already outside your repo and the OS reclaims it, so there is nothing to clean up. Pick a real folder to enable this.\n\nTurned ON (for a real folder): once a HANDOVER-*.md's successor session is created AND has actually started, and its briefing is secured (delivered on the launch commandline, or parked durably on the successor's queue for the paste injection), the file itself is deleted \x2014 no more HANDOVER-*.md litter in your repos. A file whose successor got only a POINTER to it is never deleted (the successor must read it), a failed spawn leaves its file, and a successor that dies before starting leaves its file. Applies to the next handover.");
         _setCmdDeleteAfter.Toggled([this](const IInspectable&, const RoutedEventArgs&) { _UpdateCommandsTabStatus(); });
         panel.Children().Append(_setCmdDeleteAfter);
         _setCmdDeleteDeadline = TextBox{};
@@ -3771,6 +3768,31 @@ namespace winrt::TerminalApp::implementation
     // and a colliding here-name healing to its default.
     void AgentManagerContent::_UpdateCommandsTabStatus()
     {
+        // §6c: keep the delete-after controls in step with the write LOCATION. Delete-after is
+        // meaningful only for a real folder — a briefing written to the SCRATCHPAD (the default) is
+        // already outside the repo and the OS reclaims it — so while the location is the scratchpad
+        // the toggle is forced OFF + disabled (and its wait box with it). This is the UI half of the
+        // hard invariant; CommandHandoverDeleteEffective enforces the same at the arm site, so even a
+        // hand-edited settings.json with the toggle on + scratchpad never deletes. Runs on EVERY
+        // refresh — the preset click, a typed path, and the populate seeds all route through here —
+        // and BEFORE the early-return so it applies even when the status blocks aren't built.
+        if (_setCmdDeleteAfter)
+        {
+            const bool scratch = !_setCmdWritePath || // an absent box reads as the default (scratchpad)
+                ::Agentmaster::CommandWritePathIsScratchpad(std::wstring{ _setCmdWritePath.Text() });
+            _setCmdDeleteAfter.IsEnabled(!scratch);
+            if (scratch && _setCmdDeleteAfter.IsOn())
+            {
+                // Re-enters via Toggled -> _UpdateCommandsTabStatus, but IsOn is now false so the
+                // set is a no-op there (Toggled fires only on a real change) — no loop.
+                _setCmdDeleteAfter.IsOn(false);
+            }
+            if (_setCmdDeleteDeadline)
+            {
+                // The wait only matters if a delete can actually happen (a real folder + toggle on).
+                _setCmdDeleteDeadline.IsEnabled(!scratch && _setCmdDeleteAfter.IsOn());
+            }
+        }
         if (!_setCmdHandoverStatus && !_setCmdHandoverHereStatus && !_setCmdStandbyStatus)
         {
             return;
@@ -3878,7 +3900,12 @@ namespace winrt::TerminalApp::implementation
             // this tab, so the effective rule (and the wait budget behind it) is spelled out rather
             // than left to a toggle label + a number box the user has to compose in their head.
             t += L"  Briefings: ";
-            if (!_setCmdDeleteAfter || !_setCmdDeleteAfter.IsOn())
+            if (::Agentmaster::CommandWritePathIsScratchpad(loc))
+            {
+                // The scratchpad forces delete-after off (the toggle is disabled above) — say why.
+                t += L"KEPT \x2014 not deleted (the scratchpad is already outside your repo).";
+            }
+            else if (!_setCmdDeleteAfter || !_setCmdDeleteAfter.IsOn())
             {
                 t += L"KEPT \x2014 never deleted (the default).";
             }
