@@ -184,13 +184,20 @@ namespace winrt::TerminalApp::implementation
         {
             queueBtn = mkIconBtn(L"\xE715", // Mail — the same glyph the Manager's "Add to queue" envelope uses
                                  L"Queue this session's unsent prompt \x2014 append what is typed into its input box but NOT yet sent to the Tests Autorunner queue.\n"
-                                 L"It is a copy: the prompt stays in the terminal box. Nothing is queued when the box is empty.");
+                                 L"It is a copy: the prompt stays in the terminal box. Enabled only while the box holds an unsent draft (the pulsing 3 dots).");
+            // Enabled ONLY while a draft actually exists, so a prominent toolbar button never fires a
+            // silent no-op on an empty box (the "dead button" trap the pencil-icon comment records).
+            // Seeded disabled; _Refresh -> _RefreshQueueButtonEnabled flips it in lockstep with the "3
+            // dots" (both key on SessionInfo::pendingInput, whose empty<->non-empty FLIP is exactly what
+            // fires the notify that drives _Refresh — so the enabled state is reliably maintained).
+            queueBtn.IsEnabled(false);
             queueBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
                 if (auto self = weak.get())
                 {
                     self->_QueueCurrentPrompt();
                 }
             });
+            _queueBtn = queueBtn; // remembered so _RefreshQueueButtonEnabled can toggle it each refresh
         }
 
         Button copyBtn = mkIconBtn(L"\xE8C8", L"Copy session details\x2026 (id, path, branch, current prompt, launch CLI, summary, transcript)"); // Copy
@@ -566,6 +573,26 @@ namespace winrt::TerminalApp::implementation
                                           (pick.fromLive ? L"live" : L"remembered") + L" chars=" + std::to_wstring(pick.text.size()) + L"\n");
         PlayActionSound(); // same click feedback as the copy menu / Open Path
         _Refresh(); // immediate repaint of row 1's ⏳N + row 3's next-prompt preview (the registry observer also refreshes, async)
+    }
+
+    // Agentmaster (PENDING_INPUT.md §8): enable the row-1 MAIL button ONLY while an unsent draft exists,
+    // so a prominent, always-present toolbar button can never fire a silent no-op on an empty box (the
+    // "dead button" trap the pencil-icon comment records — a click that changes nothing visible reads as
+    // broken). Called from _Refresh with the live snapshot. It keys on the SAME signal as the "3 dots"
+    // indicator (SessionInfo::pendingInput), so the button is clickable EXACTLY when the dots are showing
+    // — one legible affordance. That signal is reliable here: SetPendingInput fires its notify (which
+    // drives _Refresh) on precisely the empty<->non-empty FLIP this predicate turns on, so the button can
+    // never latch stale in either the "appeared" or "cleared" direction. (A text-only draft edit does NOT
+    // notify, but it also can't change this boolean, so nothing is missed.) The click still does the
+    // authoritative live-else-remembered read via PickCurrentPromptText; this only governs the affordance.
+    // No-op when the button wasn't built (a release / Codex badge — _queueBtn stays null).
+    void AgentTabOverlay::_RefreshQueueButtonEnabled(const SessionInfo& s)
+    {
+        if (!_queueBtn)
+        {
+            return;
+        }
+        _queueBtn.IsEnabled(!::Agentmaster::pending_detail::AllWhitespace(s.pendingInput));
     }
 
 }

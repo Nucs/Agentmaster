@@ -745,12 +745,20 @@ subsystem is dev-or-debug; in a release the `Scheduler` never starts, so the but
 nothing would ever send) **and Claude only** (no `❯` box on Codex ⇒ never a draft), with a kind backstop
 in the handler.
 
+**Enabled only while a draft exists** (`AgentTabOverlay::_RefreshQueueButtonEnabled`, from `_Refresh`): the
+button is greyed **disabled** on an empty box and clickable exactly while the session holds an unsent draft,
+so a prominent always-present toolbar button never fires a *silent* no-op — it tracks the same
+`pendingInput` signal as the "3 dots", and reliably, because `SetPendingInput` notifies on precisely the
+empty↔non-empty flip this turns on (a text-only edit doesn't notify but can't change the boolean either).
+The empty-box handler branch below stays as the backstop.
+
 **Still a COPY, never a move** (Rule #13) — the draft stays in the input box, the "3 dots" keep pulsing,
 and §9's swap keeps the eventual send from merging the two. **No one-shot latch** (unlike §8a's silent
-focus-pull): the click is explicit, so clicking twice queues twice, like the Manager's envelope. Nothing
-to queue ⇒ nothing queued, **no chime**, and `[pending] <sid8> queue current prompt: nothing (box empty,
-no remembered draft)`; a success chimes and logs `[nav] queue <sid8> "<label>" (overlay draft)` plus
-`[pending] <sid8> queue current prompt: live|remembered chars=N`.
+focus-pull): the click is explicit, so clicking a present draft twice queues twice, like the Manager's
+envelope (a latch is also unblockable-in-practice, since a text-only draft change raises no notify to
+re-arm one). Nothing to queue ⇒ nothing queued, **no chime**, and `[pending] <sid8> queue current prompt:
+nothing (box empty, no remembered draft)`; a success chimes and logs `[nav] queue <sid8> "<label>"
+(overlay draft)` plus `[pending] <sid8> queue current prompt: live|remembered chars=N`.
 
 ## 9. The DRAFT SWAP — sending a prompt without eating your unsent draft (built)
 

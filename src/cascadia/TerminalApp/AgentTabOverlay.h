@@ -223,6 +223,7 @@ namespace winrt::TerminalApp::implementation
         void _CycleAutorunner(); // row-1 Autorunner button: cycle this session's mode Off -> Semi -> Full -> Off (mutates the shared registry; Rule #1)
         void _OpenFolder(); // row 3 folder button: open the session's working dir in Explorer (off-thread)
         void _QueueCurrentPrompt(); // row-1 MAIL button (between folder and copy): queue this session's UNSENT input-box draft into its Auto-Testing queue — the badge twin of the Manager compose row's envelope. Dev-or-debug + Claude only; a COPY (the draft stays in the terminal, Rule #13)
+        void _RefreshQueueButtonEnabled(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: enable the MAIL button only while a draft actually exists (mirrors the "3 dots" / pendingInput), so a prominent toolbar button never silently no-ops on an empty box (the "dead button" trap)
         void _CopyField(int which); // row 3 copy menu: 0=Session Id 1=Copy Path 2=Copy Branch 3=Claude CLI 4=Codex CLI 5=Transcript 6=Summary (full textual box)
         void _BuildSummaryPanel(); // build the summary panel element (the 2nd slot), collapsed
         void _SetSummaryContent(const std::wstring& text); // fill the panel StackPanel: text runs -> TextBlocks, separator sentinels -> full-width Border rules
@@ -267,7 +268,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::StackPanel _row1{ nullptr }; // row 1: a horizontal strip of DISCRETE, individually-tooltipped parts (status · [actions] · Autorunner[button] · queue · link)
         winrt::Windows::UI::Xaml::Controls::StackPanel _row2{ nullptr }; // row 2: the dir/branch label only ("<root workdir folder>/<branch>")
         winrt::Windows::UI::Xaml::Controls::TextBlock _subline{ nullptr }; // row 2 label: "<root workdir folder>/<branch>"
-        winrt::Windows::UI::Xaml::Controls::StackPanel _actions{ nullptr }; // row 1: folder + copy + pencil buttons — ALWAYS shown, just after the status block
+        winrt::Windows::UI::Xaml::Controls::StackPanel _actions{ nullptr }; // row 1: folder + mail + copy + pencil buttons — ALWAYS shown, just after the status block
+        winrt::Windows::UI::Xaml::Controls::Button _queueBtn{ nullptr }; // row 1: the MAIL button (queue the unsent draft); null on a release / Codex badge (never built). _Refresh enables it only while a draft exists (_RefreshQueueButtonEnabled)
         // Row 3 (Agentmaster): a preview of the NEXT queued prompt waiting to be sent — the hourglass +
         // the first line of the first Pending prompt (the one DecideAdvance would fire next), capped at
         // 300 chars (a longer first line, or any further lines, ends with "..."). Wraps + width-capped so

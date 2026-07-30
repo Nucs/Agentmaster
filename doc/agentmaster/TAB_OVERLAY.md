@@ -414,6 +414,18 @@ surface is hidden — a queue button there would append prompts nothing would ev
 (Codex renders no `❯` box, so it has no draft — and a managed codex has neither injector nor autorunner).
 `_QueueCurrentPrompt` keeps a kind backstop regardless.
 
+**Enabled only while a draft exists** (`_RefreshQueueButtonEnabled`, called from `_Refresh`): the button is
+greyed **disabled** whenever the box is empty and clickable exactly while the session holds an unsent draft —
+so an always-present, prominent toolbar button never fires a *silent* no-op on an empty box (the "dead
+button" trap the pencil-icon comment records). It keys on the SAME `SessionInfo::pendingInput` signal as the
+"3 dots", so the affordance and the indicator agree — clickable iff the dots show — and that signal is
+reliable here because `SetPendingInput` fires its notify (which drives `_Refresh`) on precisely the
+empty↔non-empty **flip** this predicate turns on. (A text-only draft edit doesn't notify, but it also can't
+change the boolean, so nothing is missed; the click still does the authoritative live-else-remembered read.)
+Deliberately **no re-queue latch**: clicking a present draft twice queues it twice (chime + `⏳N` increment +
+row-3 preview each time — the Manager envelope's "each click queues" model), which is both a legitimate act
+and unblockable-by-a-latch anyway, since a text-only draft change raises no notify to re-arm one.
+
 **It is a COPY, not a move** (Rule #13 — reading a buffer never writes to it): the draft stays in the
 terminal's input box and its "3 dots" keep pulsing until you send or clear it there; sending the queued
 copy later cannot eat it either, because the DRAFT SWAP (PENDING_INPUT.md §9) stashes the draft around

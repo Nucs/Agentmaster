@@ -351,6 +351,9 @@ namespace winrt::TerminalApp::implementation
         if (_actions)
         {
             _row1.Children().Append(_actions);
+            // Enable the MAIL button (if built) only while an unsent draft exists, so it never
+            // silently no-ops on an empty box — mirrors the "3 dots" (PENDING_INPUT.md §8).
+            _RefreshQueueButtonEnabled(s);
         }
 
         // Autorunner mode — DEV OR --debug: Auto Testing / Tests Autorunner is gated to the AgentmasterDev
