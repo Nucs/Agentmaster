@@ -57,6 +57,16 @@ The WER event's `Faulting application path` + `package full name` tell you WHICH
 `AgentmasterDev` vs Release `Agentmaster`), and its version. The dump filename is `<image>.<pid>.dmp`
 (pid in decimal; the WER event prints it in hex — convert to match).
 
+**⚠ Event 1000 + a LocalDumps dump does NOT prove the process DIED.** An AV raised inside a kernel→user /
+COM-stub callback (input dispatch, the OLE drag-drop delivery) can be WER-reported — event 1000 + the full
+dump — and then swallowed, the process continuing with corrupted framework state. Observed 2026-07-30: the
+MUX tab-drag AV wrote a 1.4 GB dump at 22:47:22, then the SAME pid ran on for 90 s (hooks bridge delivering,
+toast COM activation working, tab selection logging) in a wedged-UI state until the user quit. Before
+reading a "crash then restart" story off WER, check the app's own log for post-event liveness (for
+Agentmaster: hooks.log lines from that pid's engine AFTER the event-1000 timestamp — e.g. hook events, and
+the user's own `[nav] quit confirmed`). The dump is still fully valid forensics either way — it captured
+the exception in flight.
+
 ## 2. Match the PDB to the CRASHED binary — do this FIRST
 
 Symbolization is only correct if the PDB matches the exact binary that crashed. **Compare timestamps:**

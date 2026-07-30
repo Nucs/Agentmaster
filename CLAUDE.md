@@ -3577,7 +3577,30 @@ build **binlog uploads as an artifact** to diagnose the first run.
   by the belts below (which the root-cause analysis proves are *insufficient* — a by-CONTENT lookup no
   settling can map); the remaining real options are all product decisions (disable MUX tab-drag
   reorder/tear-out — `TabView.CanReorderTabs`/`CanDragTabs` — or replace the strip's reorder
-  mechanism). The belts: **`_SettleTabStripLayout()`** — `UpdateLayout()` after EVERY `TabItems()`
+  mechanism). **Fourth occurrence 2026-07-30 (Release 0.6.8.1, dump `WindowsTerminal.exe.133752.dmp`,
+  register-verified: `Rsi=0xA7` == 167 `TabItems` — the biggest strip yet — `Rdi=0` == died at index 0,
+  the scrolled-out pinned Manager tab, `Rcx=0`) added TWO new facts.** (1) **The DROP-side call is a
+  crash site too**: `[nav] tab-drag-begin` DID log (so the drag-START lookup inside
+  `OnListViewDragItemsStarting` succeeded — the AV is not always pre-`TabDragStarting`), and the AV came
+  ~2.5 s later at the SAME `+0xB605C` from the drag-COMPLETED path (`OnListViewDragItemsCompleted` → the
+  same `FindTabViewItemFromDragItem`; the faulting stack is the OLE/COM drop delivery —
+  combase/rpcrt4/OneCoreUAPCommonProxyStub, 0 our frames): during the 2.5 s drag WUX's live-reorder
+  recycled the early containers, so a lookup that passed at drag-start died at drop. (2) **The AV is NOT
+  always fatal — the SWALLOWED variant leaves a live-but-WEDGED app, which the user reports as a freeze,
+  not a crash**: WER logged event 1000 + wrote the full LocalDumps dump at 22:47:22 and the process
+  CONTINUED (hooks bridge, toast COM activation, and tab selection all demonstrably alive for the next
+  90 s of hooks.log) — but MUX died before raising `TabDragCompleted` (a `tab-drag-begin` with NO end;
+  `_PinManagerTabFirst` / `_SettleTabStripLayout` never ran), leaving the ListView latched mid-drag:
+  SELECTION still changes (`tab-focus` keeps logging) while the CONTENT AREA keeps presenting the
+  dragged tab's pixels regardless of the selected tab, until the user quits ("the drop completed, the
+  tabs froze for a bit [the suspended dump write], then every tab shows the dragged tab's content").
+  So the same bug has TWO outcomes — the fatal `0xC000041D` death rattle AND this survived wedge — and
+  an event-1000 AV does NOT imply the process died (check hooks.log for post-event liveness before
+  reading a "restart" as a crash). UNTESTED candidate (never tried): set each tab's BODGY Content
+  disambiguator to the `TabViewItem` ITSELF instead of a unique `Border` — `GetDraggedItems` would then
+  hand MUX the container, whose `ContainerFromItem` fast path resolves a realized container by identity
+  (the dragged tab is always realized), so the null-unsafe loop is never reached; unknown whether XAML
+  permits self-as-Content (association rules). The belts: **`_SettleTabStripLayout()`** — `UpdateLayout()` after EVERY `TabItems()`
   mutation (`_InitializeTab` / `_RemoveTab` / `_TryMoveTab` / `_PinManagerTabFirst` /
   `_TabDragCompleted`) so the pump never sees an unsettled strip (XAML dispatches queued input ahead of
   the pending layout pass) — plus **`_GuardTabDragUntilRegistered(tvi)`** — a (re)inserted tab stays
