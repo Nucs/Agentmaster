@@ -724,8 +724,17 @@ box back to it.
   `[handover] deleted md after successful hand-off (successor=<sid8> started): …` ·
   `[handover] <sid8> successor gone before start - md KEPT: …` ·
   `[handover] <sid8> successor never started within <N> min - md KEPT: …` (N = the configured wait) ·
+  `[handover] delete-after turned OFF before the successor started - md KEPT: …` ·
   `[handover] delete-after-hand-off FAILED (le=…), file left in place: …`.
   This is the answer to `HANDOVER-*.md` litter accumulating at repo roots (§gap-8).
+  ⚠ **Two limits of the arm, both erring toward KEEP** (never data loss): (1) the pending-delete is
+  the in-memory `_pendingHandoverDeletes` map, so the wait spans a single app **RUN** — a successor
+  still un-started when Agentmaster exits is not re-armed on the next launch and its briefing is
+  KEPT (a durable arm would be needed to sweep across a restart; with the 24 h default this is a
+  real window, though it only fires when the app is left running). (2) The sweep re-reads the
+  toggle, so turning delete-after **OFF** mid-flight **disarms** every pending entry (files kept) —
+  the current setting wins, in the never-delete direction; turning it back ON does *not* retro-arm
+  an already-spawned successor (that stays "applies to the next handover").
 
 **Per-tab Reset (the cog footer).** A **Reset** button sits LEFT of Cancel and is shown only
 while the active tab supplies a reset handler — today just **Commands**; every other tab passes

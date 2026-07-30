@@ -880,7 +880,11 @@ namespace winrt::TerminalApp::implementation
         // user can re-run. {successor sessionId -> the md path + arm time}; swept by
         // _SweepHandoverDeletes on the same liveness tick as the paste pump. Only the content +
         // paste tiers ever enter (the pointer tier's successor must READ the file), and a session
-        // that dies/archives before starting drops WITHOUT deleting.
+        // that dies/archives before starting drops WITHOUT deleting. IN-MEMORY only (not persisted),
+        // so the wait spans a single app RUN — a successor un-started at exit is not re-armed next
+        // launch and its briefing is KEPT (the safe direction); durable arming would be needed to
+        // sweep across a restart. The sweep also drops every entry (keeping files) if the user turns
+        // delete-after OFF mid-flight — the current setting wins, in the never-delete direction.
         struct PendingHandoverDelete
         {
             std::wstring mdPath;

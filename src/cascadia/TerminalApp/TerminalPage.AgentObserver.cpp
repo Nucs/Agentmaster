@@ -7223,8 +7223,27 @@ namespace winrt::TerminalApp::implementation
         {
             co_return;
         }
+        // Mid-flight OFF is AUTHORITATIVE: if delete-after was on when these entries armed but the
+        // user has since turned it off (e.g. changed their mind while a background successor sat
+        // un-started — a 24 h window gives plenty of time to), honor the CURRENT intent and drop
+        // every armed delete, KEEPING the files. Only the SAFE direction is applied retroactively:
+        // the reverse (turning it back ON) deliberately does NOT retro-arm already-spawned
+        // successors — that stays "applies to the next handover", the arm-time gate in
+        // _HandleCommandHandover / the standby pump. Read per sweep like the deadline below.
+        if (!_appSettings.commandHandoverDeleteFileAfterLaunch)
+        {
+            for (const auto& [id, entry] : _pendingHandoverDeletes)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover] " + ::Agentmaster::ShortId(id) + L" delete-after turned OFF before the successor started - md KEPT: " + entry.mdPath + L"\n");
+            }
+            _pendingHandoverDeletes.clear();
+            co_return;
+        }
         // The wait-for-the-successor budget, in the user's minutes (cog -> Commands; default 24 h).
-        // Read per sweep so a Save applies to entries already armed — no restart, no re-arm.
+        // Read per sweep so a Save applies to entries already armed — no restart, no re-arm. NB the
+        // arm is IN-MEMORY only (this map), so the wait spans a single app RUN: a successor still
+        // un-started when Agentmaster exits is NOT re-armed on the next launch, and its briefing is
+        // simply KEPT (the safe direction). Durable arming would be needed to sweep across a restart.
         const uint32_t deadlineMinutes = ::Agentmaster::ClampCommandHandoverDeleteDeadlineMinutes(_appSettings.commandHandoverDeleteDeadlineMinutes);
         const int64_t kHandoverDeleteDeadlineMs = static_cast<int64_t>(deadlineMinutes) * 60 * 1000;
         const int64_t now = static_cast<int64_t>(::GetTickCount64());
