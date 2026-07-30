@@ -46,6 +46,7 @@
 #include "AgentMaster/Scheduler.h" // SetGlobalPause / Confirm (Manager callbacks)
 #include "AgentMaster/SessionRegistry.h" // adoption-handler + registry-observer tokens
 #include "AgentMaster/SessionScanner.h" // liveness-probe token
+#include "AgentMaster/TabDragMath.h" // the pointer-owned tab reorder gesture's pure decision math (bands / slots / release / auto-scroll)
 
 using namespace winrt;
 using namespace winrt::Microsoft::Management::Deployment;
@@ -357,7 +358,6 @@ namespace winrt::TerminalApp::implementation
     {
         if (_tabStripScrollViewer || !_tabView)
         {
-            _BoostTabStripCacheForDrag(); // idempotent (latched) — retries until the ItemsStackPanel realizes
             return;
         }
 
@@ -368,7 +368,6 @@ namespace winrt::TerminalApp::implementation
         }
 
         _tabStripScrollViewer = sv;
-        _BoostTabStripCacheForDrag(); // MUX drag-AV candidate — keep every tab header realized (strip is realized NOW)
         _tabStripViewChangedRevoker = sv.ViewChanged(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
             if (auto page = weakThis.get())
             {
@@ -1547,7 +1546,7 @@ namespace winrt::TerminalApp::implementation
                     ::Agentmaster::AppendStateLog(L"hooks.log", L"[pin-manager] snap-back (manager was displaced to view idx=" + std::to_wstring(viewIdx) + L")\n");
                     _tabView.TabItems().RemoveAt(viewIdx);
                     _tabView.TabItems().InsertAt(0, tvi);
-                    _GuardTabDragUntilRegistered(tvi); // settle the map after the reinsert; keeps the Manager CanDrag(false)
+                    _ApplyTabDragPolicy(tvi); // settle the map after the reinsert; the Manager stays CanDrag(false) like every tab
                 }
             }
             CATCH_LOG();
@@ -1580,105 +1579,40 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: MUX TabView drag AV — the root cause + a DEAD-END fix attempt (do NOT retry it).
+    // Agentmaster: MUX TabView drag AV — the root cause, the disproven candidates, and the RESOLUTION.
     // Dragging ANY tab has WUX report the dragged ITEM as the pressed container's **Content**, not the
     // TabViewItem itself (ListViewBase::GetDraggedItems, ListViewBase_Partial_Reorder.cpp: for an
     // items-are-their-own-containers list — exactly WT's TabItems of TabViewItems — it appends
     // get_Content() to DragItemsStarting.Items). For WT that Content is the BODGY unique empty Border
     // every Tab plants at construction (Tab.cpp `TabViewItem().Content(Border{})` — upstream's
-    // disambiguator for EXACTLY this MUX lookup). So MUX's TabView::OnListViewDragItemsStarting ->
-    // FindTabViewItemFromDragItem can NEVER resolve the item up front: ContainerFromItem(border)
-    // misses (a Border is not an item of TabItems) and VisualTreeHelper::GetParent(border) is null
-    // (the Content is never rendered), which sends EVERY drag into the fallback loop
-    // `ContainerFromIndex(i).Content() == item` from index 0 — and that loop null-derefs on the FIRST
-    // virtualized-out container (0xC0000005 at Microsoft.UI.Xaml.dll+0xB605C, raised BEFORE
-    // TabDragStarting reaches any handler of ours, uncatchable under /EHsc). On an overflowed strip
-    // that is scrolled at all, the virtualizing ItemsStackPanel guarantees index 0 (the pinned
-    // Manager tab) is unrealized => dragging ANY tab is an instant crash. Dump-proven THREE times on
-    // release 0.6.7.x with full-dump forensics (Rsi=0x41/0x47 == TabItems().Size(), Rdi=0 == died at
-    // loop index 0, and the dragged-item memory walk resolving to a WUX Border — the original v0.6.7
-    // "fork then drag" crash was THIS all along, not an uncommitted item->container map: a fork
-    // appends+reveals the new tab at the far right, scrolling index 0 out). The settle/CanDrag belts
-    // below cannot prevent it — the lookup that fails is by CONTENT, which no amount of settling maps.
-    //
-    // ⚠ DEAD END (0.6.7.2, REMOVED): "make the tab strip non-virtualizing by swapping its ItemsPanel
-    // for a plain StackPanel" is NOT a legal move and made things far WORSE — a deterministic startup
-    // crash on EVERY launch (0xC0000005 read of a 0xD0 field in Windows.UI.Xaml.dll+0x591677, during a
-    // deferred render pass — 0 of our frames on the faulting thread). A system-XAML `ListView`
-    // (ListViewBase) REQUIRES its ItemsPanel to be a ModernCollectionBasePanel — an `ItemsStackPanel`
-    // or `ItemsWrapGrid`; a plain `StackPanel` is a legal host only for a bare ItemsControl, so the
-    // ListView's internal panel casts return null and the render pass null-derefs. (The claim "MUX has
-    // ZERO code dependency on ItemsStackPanel" ignored that the *system* ListViewBase — not MUX — owns
-    // that dependency.) SWAPPING the panel is therefore unreachable at our layer, and the swap fixed
-    // the drag AV only by replacing a user-triggered crash with a 100%-unlaunchable app (hence removed).
-    // The CANDIDATE that keeps BOTH drag AND a legal panel is _BoostTabStripCacheForDrag() below: leave
-    // the ItemsStackPanel in place (a legal ModernCollectionBasePanel — no render corruption) and only
-    // crank its CacheLength so every tab header stays realized, which makes ContainerFromIndex(i)
-    // non-null for all i and the MUX loop safe. It needs runtime drag-verification (a large cache is a
-    // realization HINT, not a hard guarantee); the belts below stay as the backstop.
-
-    // Agentmaster: MUX TabView drag-start AV mitigation (CANDIDATE, pending drag-verification) — keep
-    // every tab header REALIZED so MUX's FindTabViewItemFromDragItem fallback loop
-    // (`ContainerFromIndex(i).Content()`) never meets a null (derealized) container. Unlike the removed
-    // 0.6.7.2 swap, we do NOT replace the panel (a plain StackPanel is illegal for a ListView and
-    // crashed the render pass): we keep the ListView's OWN virtualizing ItemsStackPanel — a legal
-    // ModernCollectionBasePanel — and only raise its CacheLength (the count of viewports-worth of items
-    // kept realized on each side of the viewport). A cache large enough to span the whole strip means
-    // nothing recycles, so ContainerFromIndex(i) is non-null for every i. No panel swap => no
-    // re-parenting, no render-tree corruption; it's a pure property write on the EXISTING, live
-    // ItemsPanelRoot. Idempotent + latched once applied; retried by _EnsureTabStripScrollViewer's
-    // callers until the panel is realized (ItemsPanelRoot is null until the ListView first measures with
-    // items). If drag-testing shows the cache doesn't HARD-prevent the null (a recycle under a fast
-    // scroll, or ItemsPanelRoot not resolvable as an ItemsStackPanel), fall back to disabling MUX
-    // tab-drag reorder/tear-out.
-    void TerminalPage::_BoostTabStripCacheForDrag()
-    {
-        if (_tabStripCacheBoosted || !_tabStripScrollViewer)
-        {
-            return; // done, or the strip template isn't realized yet (callers retry)
-        }
-        try
-        {
-            // The TabViewListView is the strip ScrollViewer's nearest ListView ancestor (the
-            // _RevealTabInStrip recipe).
-            winrt::WUX::Controls::ListView tabListView{ nullptr };
-            auto node = winrt::WUX::Media::VisualTreeHelper::GetParent(_tabStripScrollViewer);
-            while (node && !tabListView)
-            {
-                tabListView = node.try_as<winrt::WUX::Controls::ListView>();
-                node = winrt::WUX::Media::VisualTreeHelper::GetParent(node);
-            }
-            if (!tabListView)
-            {
-                return; // not resolvable yet — retried from _EnsureTabStripScrollViewer's callers
-            }
-            const auto panel = tabListView.ItemsPanelRoot();
-            if (!panel)
-            {
-                return; // the ItemsStackPanel isn't realized yet — retry on a later call (tab add / scroll)
-            }
-            const auto isp = panel.try_as<winrt::WUX::Controls::ItemsStackPanel>();
-            if (!isp)
-            {
-                // Realized, but NOT an ItemsStackPanel — CacheLength can't apply. Log ONCE (with the
-                // actual type) so a failed drag-test is diagnosable rather than a silent no-op.
-                if (!_tabStripCacheDiagged)
-                {
-                    _tabStripCacheDiagged = true;
-                    ::Agentmaster::AppendStateLog(L"hooks.log", std::wstring{ L"[tabdrag-guard] cache-boost: strip ItemsPanelRoot is '" } + winrt::get_class_name(panel).c_str() + L"', not ItemsStackPanel — cannot boost CacheLength\n");
-                }
-                return;
-            }
-            // 60 viewports each side realizes the whole strip for any realistic tab count (a ~70-tab
-            // strip spans well under 10 viewports); capped at the actual item count, so it can't
-            // over-realize empty space.
-            const auto before = isp.CacheLength();
-            isp.CacheLength(60.0);
-            _tabStripCacheBoosted = true;
-            ::Agentmaster::AppendStateLog(L"hooks.log", std::wstring{ L"[tabdrag-guard] ItemsStackPanel.CacheLength " } + std::to_wstring(before) + L" -> 60 (keep tab headers realized for safe MUX drag)\n");
-        }
-        CATCH_LOG();
-    }
+    // disambiguator for EXACTLY this MUX lookup). So MUX's TabView::FindTabViewItemFromDragItem can
+    // NEVER resolve the item up front: ContainerFromItem(border) misses (a Border is not an item of
+    // TabItems) and the SINGLE-level VisualTreeHelper::GetParent(border) is null (the Content is never
+    // rendered), which sends EVERY drag into the fallback loop `ContainerFromIndex(i).Content() ==
+    // item` from index 0 — and that loop null-derefs on the FIRST virtualized-out container
+    // (0xC0000005 at Microsoft.UI.Xaml.dll+0xB605C, uncatchable under /EHsc). The lookup runs at
+    // drag-START (OnListViewDragItemsStarting) AND at the DROP (OnListViewDragItemsCompleted), and
+    // both are crash sites. Dump-proven FOUR times (3x 0.6.7.x on 2026-07-16; 0.6.8.1 on 2026-07-30
+    // with Rsi=0xA7 == 167 TabItems, Rdi=0 == died at loop index 0 — the DROP-side variant, whose AV
+    // was SWALLOWED at the callback boundary and left a live-but-wedged app). Every fix candidate is
+    // DISPROVEN — see the CLAUDE.md "MUX TabView drag-start null-deref" gotcha for the full verdicts:
+    //   - panel swap to StackPanel (0.6.7.2): ILLEGAL for a ListView — deterministic startup render
+    //     crash; removed. Do NOT retry.
+    //   - CacheLength boost (the former _BoostTabStripCacheForDrag, commit c4d366460): ACTIVE in the
+    //     crashed 0.6.8.1 instance and index 0 was STILL unrealized at the drop — a large cache is a
+    //     realization HINT the panel may not honor. Removed 2026-07-30.
+    //   - check-then-allow gates: the 2026-07-30 crash PASSED the start-side lookup and died at the
+    //     drop 2.5 s later — mid-drag derealization defeats any gate that can only veto the start.
+    //   - Content tricks (self/template-root/parented-Border): the stock TabView template's
+    //     UpdateTabContent re-parents tvi.Content() on every selection change — guaranteed
+    //     "already child of another element" crash.
+    // RESOLUTION: the lookup is made UNREACHABLE — CanReorderTabs(false) + CanDragTabs(false)
+    // (TerminalPage::Create + TabRowControl.xaml; the exact configuration WT ships for elevated
+    // windows), with reorder + tear-out re-implemented as the POINTER-OWNED gesture below
+    // (_WireTabReorderGesture / _TabReorder*): raw pointer events + the existing _TryMoveTab /
+    // _sendDraggedTabToWindow — no WUX/MUX drag pipeline, no OLE, nothing that consults an
+    // unrealized container. The settle/CanDrag belts below stay: cheap, and they keep the
+    // item->container map sane for OUR OWN ContainerFromIndex/ContainerFromItem probes.
 
     // Agentmaster: MUX TabView drag-start AV guard, layer 1 (a BELT — see the drag-AV note above) —
     // settle the strip's item->container mapping BEFORE
@@ -1706,16 +1640,16 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: MUX TabView drag-start AV guard, layer 2 (a BELT — see layers 0/1 above). A freshly
-    // (re)inserted TabViewItem stays CanDrag(false) until the TabView can actually resolve its
-    // container (ContainerFromItem != null — the strip's item->container registration, which MUX's
-    // drag machinery consults), so a drag can never begin from a tab the strip can't yet map.
-    // Re-enabled inline when the settle
-    // committed the mapping (the common case), else on the item's Loaded (realization == container
-    // prepare == mapped; an unrealized tab has no pixels to grab, so drag staying off until then is
-    // inert). The pinned Manager tab NEVER re-enables — the deferred path re-checks it, so a late
-    // Loaded can't undo _OpenAgentManagerTab's CanDrag(false).
-    void TerminalPage::_GuardTabDragUntilRegistered(const MUX::Controls::TabViewItem& tabViewItem)
+    // Agentmaster: per-tab native-drag policy (see the drag-AV resolution note above) + the settle.
+    // Native MUX tab drag is permanently OFF, so EVERY TabViewItem is pinned CanDrag(false),
+    // unconditionally — a UIElement with CanDrag(true) could still start a raw XAML drag even with
+    // the list-level CanDragTabs off, which would walk the same broken WUX GetDraggedItems path.
+    // (This function replaced _GuardTabDragUntilRegistered, whose settle-then-defer-to-Loaded
+    // re-ENABLE existed to restore native drag once the item->container map committed; with native
+    // drag gone the re-enable was not just moot but the one hole left in the disable — and its
+    // per-Loaded log line stormed at ~30 Hz during a big window-restore. The settle stays: our own
+    // reorder gesture + _RevealTabInStrip probe the same item->container map.)
+    void TerminalPage::_ApplyTabDragPolicy(const MUX::Controls::TabViewItem& tabViewItem)
     {
         if (!_tabView || !tabViewItem)
         {
@@ -1724,53 +1658,678 @@ namespace winrt::TerminalApp::implementation
         _SettleTabStripLayout();
         try
         {
-            if (_managerTab && _managerTab.TabViewItem() == tabViewItem)
-            {
-                tabViewItem.CanDrag(false); // stays pinned-undraggable
-                return;
-            }
-            if (_tabView.ContainerFromItem(tabViewItem))
-            {
-                tabViewItem.CanDrag(true); // mapped — the settled common case
-                return;
-            }
-            tabViewItem.CanDrag(false);
-            std::wstring ident{ L"?" };
-            if (const auto tab = _GetTabByTabViewItem(tabViewItem))
-            {
-                ident = _DescribeTabForLog(tab);
-            }
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[tabdrag-guard] " + ident + L" unmapped after settle; drag deferred to Loaded\n");
-            // The Loaded handler lives with the tvi and fires on every tree (re)enter (virtualization
-            // recycle) — the re-assert is harmless/idempotent, but log only the FIRST re-enable.
-            tabViewItem.Loaded([weakThis = get_weak(), ident, logged = std::make_shared<bool>(false)](const IInspectable& sender, const RoutedEventArgs&) {
-                try
+            tabViewItem.CanDrag(false); // native drag never starts — the pointer-owned gesture is the only drag
+        }
+        CATCH_LOG();
+    }
+
+    // ======================================================================================
+    // Agentmaster: the POINTER-OWNED tab reorder/tear-out gesture — the native-MUX-drag
+    // replacement (see the drag-AV resolution note above; pure decision math in
+    // AgentMaster/TabDragMath.h, unit-tested in the engine harness).
+    //
+    // Shape: press a tab header (mouse/pen, left button) -> a 6-DIP threshold activates the
+    // gesture and captures the pointer ON THE TABVIEW (not the item — item churn during the
+    // gesture must not disturb the capture) -> an accent INSERTION CARET tracks the midpoint
+    // rule over the REALIZED headers (a caret-commit design: nothing moves until release, so
+    // there is no per-crossing selection/content churn) -> edge auto-scroll (per-move + a
+    // hold-still timer) slides the strip -> release IN the strip band commits ONE _TryMoveTab
+    // (which already logs [nav] tab-move, announces for UIA, settles + respects the Manager
+    // floor); release CLEAR of the strip tears the tab out into a new window through the exact
+    // native downstream (_sendDraggedTabToWindow, which logs [nav] tab-send-to-window and
+    // detaches the managed session correctly); Esc cancels (nothing moved, nothing to revert).
+    // [nav] taxonomy preserved: tab-drag-begin at activation, tab-drag-end at every exit.
+    //
+    // Deliberate limits: TOUCH is left to the strip's native panning (a touch-drag threshold
+    // would fight the pan gesture); cross-window DOCKING (release over another Agentmaster
+    // window's strip) is not detected — it tears out into a new window like any outside release
+    // (the native OLE docking died with CanDragTabs=false; a same-process hit-test replacement
+    // is the noted follow-up).
+    // ======================================================================================
+
+    namespace
+    {
+        constexpr double kTabDragThresholdDips = 6.0; // press->drag arming distance (either axis)
+        constexpr double kTabDragEdgeBandDips = 36.0; // auto-scroll engages within this of a strip edge
+        constexpr double kTabDragScrollStepDips = 28.0; // per move/tick step (~560 DIPs/s on the 50 ms timer)
+        constexpr double kTabDragTearOutSlackDips = 32.0; // grace band around the strip before a release reads as tear-out
+        constexpr auto kTabDragAutoScrollTick = std::chrono::milliseconds{ 50 };
+    }
+
+    // Wire the gesture's pointer handlers onto the TabView — once, from Create(). AddHandler with
+    // handledEventsToo: the ListViewItem internals mark presses Handled (selection), and during our
+    // capture the routed events surface on the TabView itself. The lambdas hold get_weak() so a
+    // torn-down page no-ops; the handlers die with the TabView's tree, so no RemoveHandler pass.
+    void TerminalPage::_WireTabReorderGesture()
+    {
+        if (!_tabView)
+        {
+            return;
+        }
+        try
+        {
+            auto weak = get_weak();
+            _tabView.AddHandler(winrt::WUX::UIElement::PointerPressedEvent(),
+                                winrt::box_value(winrt::WUX::Input::PointerEventHandler{ [weak](const auto&, const winrt::WUX::Input::PointerRoutedEventArgs& e) {
+                                    if (auto page = weak.get())
+                                    {
+                                        page->_TabReorderOnPressed(e);
+                                    }
+                                } }),
+                                true);
+            _tabView.AddHandler(winrt::WUX::UIElement::PointerMovedEvent(),
+                                winrt::box_value(winrt::WUX::Input::PointerEventHandler{ [weak](const auto&, const winrt::WUX::Input::PointerRoutedEventArgs& e) {
+                                    if (auto page = weak.get())
+                                    {
+                                        page->_TabReorderOnMoved(e);
+                                    }
+                                } }),
+                                true);
+            _tabView.AddHandler(winrt::WUX::UIElement::PointerReleasedEvent(),
+                                winrt::box_value(winrt::WUX::Input::PointerEventHandler{ [weak](const auto&, const winrt::WUX::Input::PointerRoutedEventArgs& e) {
+                                    if (auto page = weak.get())
+                                    {
+                                        page->_TabReorderOnReleased(e);
+                                    }
+                                } }),
+                                true);
+            _tabView.AddHandler(winrt::WUX::UIElement::PointerCaptureLostEvent(),
+                                winrt::box_value(winrt::WUX::Input::PointerEventHandler{ [weak](const auto&, const winrt::WUX::Input::PointerRoutedEventArgs& e) {
+                                    if (auto page = weak.get())
+                                    {
+                                        page->_TabReorderOnCaptureLost(e);
+                                    }
+                                } }),
+                                true);
+            _tabView.AddHandler(winrt::WUX::UIElement::PointerCanceledEvent(),
+                                winrt::box_value(winrt::WUX::Input::PointerEventHandler{ [weak](const auto&, const winrt::WUX::Input::PointerRoutedEventArgs& e) {
+                                    if (auto page = weak.get())
+                                    {
+                                        page->_TabReorderOnCaptureLost(e);
+                                    }
+                                } }),
+                                true);
+            // The hold-still edge auto-scroll tick (started/stopped per gesture; SafeDispatcherTimer's
+            // guarded Destroy makes teardown safe on any thread).
+            _tabDragAutoScrollTimer.Interval(kTabDragAutoScrollTick);
+            _tabDragAutoScrollTimer.Tick([weak](const auto&, const auto&) {
+                if (auto page = weak.get())
                 {
-                    const auto tvi{ sender.try_as<MUX::Controls::TabViewItem>() };
-                    if (!tvi)
+                    if (page->_tabReorder.active)
                     {
-                        return;
-                    }
-                    const auto page{ weakThis.get() };
-                    if (page && page->_managerTab && page->_managerTab.TabViewItem() == tvi)
-                    {
-                        tvi.CanDrag(false); // the Manager tab's non-movable contract survives realization
-                        if (!*logged)
-                        {
-                            *logged = true;
-                            ::Agentmaster::AppendStateLog(L"hooks.log", L"[tabdrag-guard] manager tab kept undraggable (Loaded)\n");
-                        }
-                        return;
-                    }
-                    tvi.CanDrag(true); // realized => prepared/mapped: stock draggability restored
-                    if (!*logged)
-                    {
-                        *logged = true;
-                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[tabdrag-guard] " + ident + L" drag re-enabled on Loaded\n");
+                        page->_TabReorderUpdate(page->_tabReorder.lastPoint);
                     }
                 }
-                CATCH_LOG();
             });
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_WireTabReorderGesture"); // gesture unavailable; tabs still work (menu/keyboard moves)
+        }
+    }
+
+    // A left press over a draggable tab header ARMS the gesture (nothing visible yet — a plain
+    // click stays a plain click; the threshold in OnMoved is what activates).
+    void TerminalPage::_TabReorderOnPressed(const winrt::WUX::Input::PointerRoutedEventArgs& e)
+    {
+        try
+        {
+            if (_tabReorder.active)
+            {
+                return; // one gesture at a time — a second pointer never steals it
+            }
+            if (_tabReorder.armed)
+            {
+                // A stale arm: the release happened off-strip (no capture below threshold), so we
+                // never saw it. This press supersedes it.
+                _TabReorderReset();
+            }
+            if (!_tabView)
+            {
+                return;
+            }
+            // Touch pans the strip natively — a touch drag-threshold would fight it. Mouse + pen only.
+            if (e.Pointer().PointerDeviceType() == winrt::Windows::Devices::Input::PointerDeviceType::Touch)
+            {
+                return;
+            }
+            const auto pt = e.GetCurrentPoint(_tabView);
+            if (!pt.Properties().IsLeftButtonPressed())
+            {
+                return; // right = context menu, middle = close — not drags
+            }
+            // Resolve the pressed header: walk OriginalSource up to a TabViewItem, refusing when an
+            // interactive control (the close button, the strip's scroll RepeatButtons) sits between —
+            // those own their own press (and would capture the pointer themselves anyway).
+            winrt::MUX::Controls::TabViewItem tvi{ nullptr };
+            auto node = e.OriginalSource().try_as<winrt::WUX::DependencyObject>();
+            while (node)
+            {
+                if (node.try_as<winrt::WUX::Controls::Primitives::ButtonBase>())
+                {
+                    return;
+                }
+                if (auto asTvi = node.try_as<winrt::MUX::Controls::TabViewItem>())
+                {
+                    tvi = asTvi;
+                    break;
+                }
+                node = winrt::WUX::Media::VisualTreeHelper::GetParent(node);
+            }
+            if (!tvi)
+            {
+                return;
+            }
+            const auto tab = _GetTabByTabViewItem(tvi);
+            if (!tab)
+            {
+                return;
+            }
+            if (_managerTab && tab == _managerTab)
+            {
+                return; // the pinned Manager tab is non-movable — never even arms
+            }
+            _tabReorder.armed = true;
+            _tabReorder.pointerId = e.Pointer().PointerId();
+            _tabReorder.pressPoint = pt.Position();
+            _tabReorder.lastPoint = _tabReorder.pressPoint;
+            _tabReorder.tab = tab;
+            _tabReorder.tvi = tvi;
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_TabReorderOnPressed");
+            _TabReorderReset();
+        }
+    }
+
+    void TerminalPage::_TabReorderOnMoved(const winrt::WUX::Input::PointerRoutedEventArgs& e)
+    {
+        try
+        {
+            if ((!_tabReorder.armed && !_tabReorder.active) || e.Pointer().PointerId() != _tabReorder.pointerId)
+            {
+                return;
+            }
+            const auto pt = e.GetCurrentPoint(_tabView);
+            const auto pos = pt.Position();
+            _tabReorder.lastPoint = pos;
+            if (!_tabReorder.active)
+            {
+                if (!pt.Properties().IsLeftButtonPressed())
+                {
+                    // The button went up somewhere we never saw the release (below threshold there
+                    // is no capture) — the arm is stale.
+                    _TabReorderReset();
+                    return;
+                }
+                if (!Agentmaster::TabDragThresholdCrossed(pos.X - _tabReorder.pressPoint.X,
+                                                          pos.Y - _tabReorder.pressPoint.Y,
+                                                          kTabDragThresholdDips))
+                {
+                    return;
+                }
+                _TabReorderActivate(e);
+                if (!_tabReorder.active)
+                {
+                    return; // activation refused (tab vanished / capture failed)
+                }
+            }
+            _TabReorderUpdate(pos);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_TabReorderOnMoved");
+            _TabReorderCancel(L"exception");
+        }
+    }
+
+    // Threshold crossed: capture the pointer on the TabView, lift the tab, arm Esc + the
+    // auto-scroll tick, and log the gesture BEGIN.
+    void TerminalPage::_TabReorderActivate(const winrt::WUX::Input::PointerRoutedEventArgs& e)
+    {
+        const auto idx = _TabReorderIndexOf(_tabReorder.tab);
+        if (idx < 0)
+        {
+            _TabReorderReset(); // the tab was closed between press and threshold
+            return;
+        }
+        if (!_tabView.CapturePointer(e.Pointer()))
+        {
+            _TabReorderReset();
+            return;
+        }
+        _tabReorder.active = true;
+        _tabReorder.originalIndex = idx;
+        _tabReorder.lastSlot = -1;
+        // The native tear-out recipe's drag offset (position the new window under the cursor),
+        // captured at activation exactly like _onTabDragStarting does.
+        try
+        {
+            if (_hostingHwnd)
+            {
+                const auto inverseScale = 1.0f / static_cast<float>(_tabReorder.tvi.XamlRoot().RasterizationScale());
+                POINT cursorPos;
+                if (GetCursorPos(&cursorPos) && ScreenToClient(*_hostingHwnd, &cursorPos))
+                {
+                    _tabReorder.dragOffset = { cursorPos.x * inverseScale, cursorPos.y * inverseScale };
+                }
+            }
+        }
+        CATCH_LOG();
+        ::Agentmaster::LogNav(L"tab-drag-begin " + _DescribeTabForLog(_tabReorder.tab));
+        try
+        {
+            _tabReorder.tvi.Opacity(0.55); // the "lifted" cue; restored in _TabReorderReset
+        }
+        CATCH_LOG();
+        _EnsureTabStripScrollViewer();
+        // Esc cancels — a tunneling PreviewKeyDown on the page beats whichever control holds focus
+        // (and keeps the Esc out of the focused terminal — a mid-drag Esc must not reach claude).
+        _tabReorderKeyRevoker = Root().PreviewKeyDown(winrt::auto_revoke, [weak = get_weak()](const auto&, const winrt::WUX::Input::KeyRoutedEventArgs& k) {
+            if (k.Key() == winrt::Windows::System::VirtualKey::Escape)
+            {
+                if (auto page = weak.get())
+                {
+                    if (page->_tabReorder.active)
+                    {
+                        k.Handled(true);
+                        page->_TabReorderCancel(L"esc");
+                    }
+                }
+            }
+        });
+        _tabDragAutoScrollTimer.Start();
+    }
+
+    // The per-move (and per-tick) decision pass: bail if the dragged tab vanished, edge
+    // auto-scroll, then decide the insertion slot + place the caret (hidden in the tear-out zone —
+    // the caret only ever promises a reorder).
+    void TerminalPage::_TabReorderUpdate(const winrt::Windows::Foundation::Point& pos)
+    {
+        try
+        {
+            if (!_tabReorder.active || !_tabView)
+            {
+                return;
+            }
+            if (_TabReorderIndexOf(_tabReorder.tab) < 0)
+            {
+                _TabReorderCancel(L"tab closed mid-drag"); // e.g. the autorunner archived it under us
+                return;
+            }
+            const double stripW = _tabView.ActualWidth();
+            const double stripH = _tabView.ActualHeight();
+            if (_tabStripScrollViewer)
+            {
+                const double step = Agentmaster::TabDragAutoScrollStep(pos.X, stripW, kTabDragEdgeBandDips, kTabDragScrollStepDips);
+                if (step != 0.0)
+                {
+                    _tabStripScrollViewer.ChangeView(_tabStripScrollViewer.HorizontalOffset() + step, nullptr, nullptr, true);
+                }
+            }
+            if (Agentmaster::ClassifyTabDragRelease(pos.X, pos.Y, stripW, stripH, kTabDragTearOutSlackDips) == Agentmaster::TabDragRelease::TearOut)
+            {
+                _tabReorder.lastSlot = -1; // a release here is a tear-out, not a reorder
+                _HideTabDragIndicator();
+                return;
+            }
+            const auto bands = _TabReorderBands();
+            const int itemCount = static_cast<int>(_tabView.TabItems().Size());
+            int slot = Agentmaster::DecideTabInsertionSlot(bands, pos.X, itemCount);
+            if (slot < 0)
+            {
+                _HideTabDragIndicator(); // nothing realized to decide against — keep the previous slot
+                return;
+            }
+            const int minSlot = _managerTab ? 1 : 0; // nothing inserts ahead of the pinned Manager tab
+            slot = std::max(slot, minSlot);
+            _tabReorder.lastSlot = slot;
+            double boundaryX{};
+            if (Agentmaster::InsertionSlotBoundaryX(bands, slot, boundaryX))
+            {
+                _PositionTabDragIndicator(boundaryX);
+            }
+            else
+            {
+                _HideTabDragIndicator();
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_TabReorderUpdate");
+        }
+    }
+
+    void TerminalPage::_TabReorderOnReleased(const winrt::WUX::Input::PointerRoutedEventArgs& e)
+    {
+        try
+        {
+            if (e.Pointer().PointerId() != _tabReorder.pointerId)
+            {
+                return;
+            }
+            if (!_tabReorder.active)
+            {
+                if (_tabReorder.armed)
+                {
+                    _TabReorderReset(); // a plain click — selection already happened at press
+                }
+                return;
+            }
+            const auto pos = e.GetCurrentPoint(_tabView).Position();
+            _TabReorderCommitRelease(pos);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_TabReorderOnReleased");
+            _TabReorderCancel(L"exception");
+        }
+    }
+
+    // Commit the gesture: snapshot what the release needs, RESET FIRST (visuals/capture/flags —
+    // the strip mutations below rebuild containers and must run outside the gesture state), then
+    // reorder or tear out.
+    void TerminalPage::_TabReorderCommitRelease(const winrt::Windows::Foundation::Point& pos)
+    {
+        const auto tab = _tabReorder.tab;
+        const int slot = _tabReorder.lastSlot;
+        const int originalIndex = _tabReorder.originalIndex;
+        const auto dragOffset = _tabReorder.dragOffset;
+        double stripW = 0.0;
+        double stripH = 0.0;
+        try
+        {
+            stripW = _tabView ? _tabView.ActualWidth() : 0.0;
+            stripH = _tabView ? _tabView.ActualHeight() : 0.0;
+        }
+        CATCH_LOG();
+        _TabReorderReset();
+        if (!tab)
+        {
+            return;
+        }
+        const int cur = _TabReorderIndexOf(tab);
+        if (cur < 0)
+        {
+            ::Agentmaster::LogNav(L"tab-drag-end (tab closed mid-drag)");
+            return;
+        }
+        if (Agentmaster::ClassifyTabDragRelease(pos.X, pos.Y, stripW, stripH, kTabDragTearOutSlackDips) == Agentmaster::TabDragRelease::TearOut)
+        {
+            // Tear out into a NEW window through the exact native downstream. _sendDraggedTabToWindow
+            // consumes _stashed.draggedTab (BuildStartupActions + [nav] tab-send-to-window +
+            // _DetachClaudeTabForMove + _DetachTabFromWindow + _MoveContent + _RemoveTab, which nulls
+            // the stash again) — the same path the native TabDroppedOutside took.
+            winrt::com_ptr<Tab> tabImpl;
+            tabImpl.copy_from(winrt::get_self<Tab>(tab));
+            if (!tabImpl)
+            {
+                ::Agentmaster::LogNav(L"tab-drag-end (tear-out refused: not a terminal tab)");
+                return;
+            }
+            _stashed.draggedTab = tabImpl;
+            _stashed.dragOffset = dragOffset;
+            // The native release-point recipe (_onTabDroppedOutside): position the new window so the
+            // tab lands under the cursor; unavailable => default placement.
+            std::optional<winrt::Windows::Foundation::Point> adjusted;
+            try
+            {
+                if (const auto coreWindow = CoreWindow::GetForCurrentThread())
+                {
+                    const auto pointerPos = coreWindow.PointerPosition();
+                    adjusted = winrt::Windows::Foundation::Point{ pointerPos.X - dragOffset.X, pointerPos.Y - dragOffset.Y };
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_TabReorderCommitRelease pointer-position"); // fall through — default window placement
+            }
+            _sendDraggedTabToWindow(winrt::hstring{ L"-1" }, 0, adjusted);
+            ::Agentmaster::LogNav(L"tab-drag-end (torn out to a new window)");
+            return;
+        }
+        if (slot < 0)
+        {
+            ::Agentmaster::LogNav(L"tab-drag-end (no same-window reorder)");
+            return;
+        }
+        const int minIndex = _managerTab ? 1 : 0;
+        const int itemCount = static_cast<int>(_tabs.Size());
+        const int target = Agentmaster::InsertionSlotToMoveTarget(slot, cur, minIndex, itemCount);
+        if (target == cur)
+        {
+            ::Agentmaster::LogNav(L"tab-drag-end (no same-window reorder)");
+            return;
+        }
+        _TryMoveTab(static_cast<uint32_t>(cur), target); // logs [nav] tab-move + UIA-announces + settles
+        ::Agentmaster::LogNav(L"tab-drag-end from=" + std::to_wstring(originalIndex >= 0 ? originalIndex : cur) + L" to=" + std::to_wstring(target));
+    }
+
+    // External capture loss (alt-tab, a modal stealing the pointer, the window deactivating): the
+    // gesture cannot continue — cancel WITHOUT mutating (a half-seen drag must never guess a drop).
+    // Our own ReleasePointerCaptures in _TabReorderReset re-enters here, guarded by active==false
+    // (reset clears the flags first).
+    void TerminalPage::_TabReorderOnCaptureLost(const winrt::WUX::Input::PointerRoutedEventArgs& e)
+    {
+        try
+        {
+            if (!_tabReorder.active || e.Pointer().PointerId() != _tabReorder.pointerId)
+            {
+                return;
+            }
+            _TabReorderCancel(L"capture lost");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_TabReorderOnCaptureLost");
+        }
+    }
+
+    void TerminalPage::_TabReorderCancel(const wchar_t* reason)
+    {
+        if (!_tabReorder.armed && !_tabReorder.active)
+        {
+            return;
+        }
+        const bool wasActive = _tabReorder.active;
+        _TabReorderReset();
+        if (wasActive)
+        {
+            // Caret-commit design: nothing moved during the gesture, so cancel == simply no move.
+            ::Agentmaster::LogNav(std::wstring{ L"tab-drag-end (cancelled: " } + reason + L")");
+        }
+    }
+
+    // Common teardown. Flags drop FIRST so the CaptureLost our own ReleasePointerCaptures raises
+    // no-ops; every visual restore is individually guarded (a mid-teardown tree never blocks the
+    // state clear).
+    void TerminalPage::_TabReorderReset()
+    {
+        _tabReorder.armed = false;
+        _tabReorder.active = false;
+        _tabReorder.lastSlot = -1;
+        _tabReorder.originalIndex = -1;
+        _tabReorder.pointerId = 0;
+        _tabDragAutoScrollTimer.Stop();
+        _tabReorderKeyRevoker.revoke();
+        try
+        {
+            if (_tabReorder.tvi)
+            {
+                _tabReorder.tvi.Opacity(1.0);
+            }
+        }
+        CATCH_LOG();
+        _HideTabDragIndicator();
+        try
+        {
+            if (_tabView)
+            {
+                _tabView.ReleasePointerCaptures();
+            }
+        }
+        CATCH_LOG();
+        _tabReorder.tab = { nullptr };
+        _tabReorder.tvi = { nullptr };
+    }
+
+    // The tab's CURRENT index in _tabs (identity compare), -1 when it is gone — indexes are
+    // re-resolved at every decision point because tabs open/close/move under the gesture (the
+    // autorunner, another window's cross-window move, …).
+    int TerminalPage::_TabReorderIndexOf(const winrt::TerminalApp::Tab& tab) const
+    {
+        if (!tab || !_tabs)
+        {
+            return -1;
+        }
+        uint32_t idx{};
+        if (_tabs.IndexOf(tab, idx))
+        {
+            return static_cast<int>(idx);
+        }
+        return -1;
+    }
+
+    // The realized, on-strip header bands in TabView coordinates — the gesture's whole world.
+    // Virtualized-out tabs have no container and therefore NO band (never touched — the exact
+    // hazard that killed the native drag is structurally absent here).
+    std::vector<::Agentmaster::TabDragBand> TerminalPage::_TabReorderBands()
+    {
+        std::vector<::Agentmaster::TabDragBand> bands;
+        if (!_tabView)
+        {
+            return bands;
+        }
+        const double stripW = _tabView.ActualWidth();
+        const auto n = _tabView.TabItems().Size();
+        bands.reserve(32);
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            const auto container = _tabView.ContainerFromIndex(i).try_as<winrt::MUX::Controls::TabViewItem>();
+            if (!container)
+            {
+                continue; // virtualized out
+            }
+            const double w = container.ActualWidth();
+            if (w <= 0.0)
+            {
+                continue; // realized but not laid out yet
+            }
+            winrt::Windows::Foundation::Point origin{};
+            try
+            {
+                origin = container.TransformToVisual(_tabView).TransformPoint({ 0.0f, 0.0f });
+            }
+            catch (...)
+            {
+                continue; // expected control flow: a container detached mid-recycle has no transform (hot per-move loop — deliberately unlogged)
+            }
+            const double left = origin.X;
+            const double right = left + w;
+            if (right < 0.0 || left > stripW)
+            {
+                continue; // realized (cache buffer) but off the visible strip
+            }
+            bands.push_back({ static_cast<int>(i), left, right });
+        }
+        return bands; // ascending index == ascending x on the LTR strip
+    }
+
+    // The insertion caret: a thin accent bar parented into the TABVIEW'S TEMPLATE ROOT GRID —
+    // deliberately NOT Root(): with showTabsInTitlebar (the default) the tab row is REMOVED from
+    // Root() and re-homed into the titlebar (TerminalPage::Create -> SetTitleBarContent), so a
+    // Root()-hosted caret would position against a collapsed row in a different subtree. The
+    // template root travels WITH the TabView in both hosting modes, and coordinates stay local
+    // (the root fills the TabView, so TabView-x == host-x up to the identity transform, which we
+    // still apply for exactness). Root() is the fallback when the template isn't realized yet.
+    // Created lazily; positioned only from pointer/timer code — never from a layout callback (the
+    // E_LAYOUTCYCLE class). IsHitTestVisible(false) so it can never eat the release click.
+    void TerminalPage::_EnsureTabDragIndicator()
+    {
+        try
+        {
+            // Resolve the host panel (re-resolved if the previous host went away with a template
+            // reapply — the caret is re-parented rather than left dangling in a dead subtree).
+            winrt::WUX::Controls::Panel host{ nullptr };
+            if (_tabView && winrt::WUX::Media::VisualTreeHelper::GetChildrenCount(_tabView) > 0)
+            {
+                host = winrt::WUX::Media::VisualTreeHelper::GetChild(_tabView, 0).try_as<winrt::WUX::Controls::Panel>();
+            }
+            if (!host)
+            {
+                host = Root();
+            }
+            if (_tabDragIndicator && _tabDragIndicatorHost == host)
+            {
+                return; // already built + still parented right
+            }
+            if (_tabDragIndicator && _tabDragIndicatorHost)
+            {
+                // host changed (template reapplied) — move the caret
+                uint32_t idx{};
+                if (_tabDragIndicatorHost.Children().IndexOf(_tabDragIndicator, idx))
+                {
+                    _tabDragIndicatorHost.Children().RemoveAt(idx);
+                }
+                _tabDragIndicator = nullptr;
+            }
+            winrt::WUX::Controls::Border bar;
+            bar.Width(3.0);
+            bar.HorizontalAlignment(winrt::WUX::HorizontalAlignment::Left);
+            bar.VerticalAlignment(winrt::WUX::VerticalAlignment::Top);
+            bar.CornerRadius(winrt::WUX::CornerRadius{ 1.5, 1.5, 1.5, 1.5 });
+            bar.IsHitTestVisible(false);
+            bar.Visibility(winrt::WUX::Visibility::Collapsed);
+            auto accent = winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x3B, 0x82, 0xF6); // fallback blue
+            try
+            {
+                if (const auto res = winrt::WUX::Application::Current().Resources().TryLookup(winrt::box_value(L"SystemAccentColor")))
+                {
+                    accent = winrt::unbox_value_or<winrt::Windows::UI::Color>(res, accent);
+                }
+            }
+            CATCH_LOG();
+            bar.Background(winrt::WUX::Media::SolidColorBrush{ accent });
+            winrt::WUX::Controls::Canvas::SetZIndex(bar, 1000); // above the strip chrome
+            host.Children().Append(bar);
+            _tabDragIndicator = bar;
+            _tabDragIndicatorHost = host;
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_EnsureTabDragIndicator"); // gesture still works, just caret-less
+        }
+    }
+
+    void TerminalPage::_PositionTabDragIndicator(double xInTabView)
+    {
+        _EnsureTabDragIndicator();
+        if (!_tabDragIndicator || !_tabDragIndicatorHost || !_tabView)
+        {
+            return;
+        }
+        try
+        {
+            const auto origin = _tabView.TransformToVisual(_tabDragIndicatorHost).TransformPoint({ static_cast<float>(xInTabView), 0.0f });
+            _tabDragIndicator.Height(std::max(8.0, _tabView.ActualHeight()));
+            _tabDragIndicator.Margin(winrt::WUX::Thickness{ origin.X - 1.5, origin.Y, 0.0, 0.0 });
+            _tabDragIndicator.Visibility(winrt::WUX::Visibility::Visible);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_PositionTabDragIndicator");
+        }
+    }
+
+    void TerminalPage::_HideTabDragIndicator()
+    {
+        try
+        {
+            if (_tabDragIndicator)
+            {
+                _tabDragIndicator.Visibility(winrt::WUX::Visibility::Collapsed);
+            }
         }
         CATCH_LOG();
     }

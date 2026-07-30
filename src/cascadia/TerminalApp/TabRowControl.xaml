@@ -24,13 +24,20 @@
         tab row.
     -->
 
+    <!--
+        Agentmaster: CanDragTabs/CanReorderTabs are FALSE — native MUX tab drag is permanently
+        disabled (TabView::FindTabViewItemFromDragItem null-derefs on virtualized-out containers
+        at drag-start AND drop; see the CLAUDE.md "MUX TabView drag-start null-deref" gotcha).
+        TerminalPage::Create() re-asserts both; drag reorder/tear-out are re-implemented as the
+        pointer-owned gesture (TerminalPage::_WireTabReorderGesture).
+    -->
     <mux:TabView x:Name="TabView"
                  VerticalAlignment="Bottom"
                  HorizontalContentAlignment="Stretch"
                  AllowDropTabs="True"
                  Background="Transparent"
-                 CanDragTabs="True"
-                 CanReorderTabs="True"
+                 CanDragTabs="False"
+                 CanReorderTabs="False"
                  IsAddTabButtonVisible="false"
                  TabWidthMode="Equal">
 

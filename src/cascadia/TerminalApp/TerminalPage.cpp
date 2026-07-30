@@ -374,12 +374,22 @@ namespace winrt::TerminalApp::implementation
         _tabView = _tabRow.TabView();
         _rearranging = false;
 
-        const auto canDragDrop = CanDragDrop();
-
-        _tabView.CanReorderTabs(canDragDrop);
-        _tabView.CanDragTabs(canDragDrop);
+        // Agentmaster: native MUX tab drag is permanently OFF (was `CanDragDrop()` — the elevation
+        // knob, so both-false is the exact configuration WT itself ships for elevated windows, a
+        // supported TabView mode). MUX's TabView::FindTabViewItemFromDragItem null-derefs on the
+        // first virtualized-out container on BOTH the drag-start AND the drop path (0xC0000005 at
+        // Microsoft.UI.Xaml.dll+0xB605C, dump-proven x4, still unguarded upstream), and every
+        // make-the-lookup-succeed candidate is disproven — see the CLAUDE.md "MUX TabView
+        // drag-start null-deref" gotcha (2026-07-30 verdicts). Reorder + tear-out are re-implemented
+        // as the pointer-owned gesture below (_WireTabReorderGesture — no WUX/MUX drag pipeline, no
+        // OLE), so the crash class is unreachable by construction, not guarded.
+        _tabView.CanReorderTabs(false);
+        _tabView.CanDragTabs(false);
+        // The native drag handlers stay wired: they cost nothing while no native drag can start,
+        // and they'd matter again if the knobs above were ever re-enabled.
         _tabView.TabDragStarting({ get_weak(), &TerminalPage::_TabDragStarted });
         _tabView.TabDragCompleted({ get_weak(), &TerminalPage::_TabDragCompleted });
+        _WireTabReorderGesture(); // Agentmaster: the replacement — pointer-owned reorder/tear-out (TerminalPage.AgentEngine.cpp)
 
         auto tabRowImpl = winrt::get_self<implementation::TabRowControl>(_tabRow);
         _newTabButton = tabRowImpl->NewTabButton();

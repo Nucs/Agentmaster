@@ -107,6 +107,7 @@ int wmain()
     TestTeammateLiveCorpus();
     TestBringToFrontHeuristics();
     TestBridgeRoundTrip();
+    TestTabDragMath();
 
     BenchPromptAnchor();
     BenchPromptAnchorRealSession(); // SUMMARY_JUMP.md §4: full batch resolve on a real heavy session (AM_BENCH_SESSION)

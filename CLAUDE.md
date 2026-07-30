@@ -2592,17 +2592,19 @@ What works, by area:
   spam it), `tab-swap` (a tab's bound conversation changed in place — `/clear`/`/resume`/`/compact`, beside
   `[rehome]`), `manager select-external`, `jump-to-prompt` (a summary-panel ▸, SUMMARY_JUMP.md),
   `notify-click` (a session's Windows toast clicked → foreground its window + jump to its tab,
-  NOTIFICATIONS.md), and the **tab-strip drag pair** (the v0.6.7 MUX drag-start AV forensics — see the
-  Gotchas bullet): `tab-drag-begin <ident>` ↔ `tab-drag-end from=N to=M` (the gesture BEGIN/END — a begin
-  with no end == died mid-drag; end carries the same-window reorder result or `(no same-window reorder)`;
-  a Manager-tab attempt logs `tab-drag-begin refused`), `tab-move <ident> idx=N -> M` (moveTab action /
-  drop routing; `refused (manager tab is pinned)`), `tab-send-to-window <ident> win=<id|-1> idx=N` (the
-  tab left this window: `-1` = torn out into a NEW window, else a cross-window drop — beside the
-  managed-session `[move-out]`), with mechanism tags `[tab-new] idx=N tabs=M <ident>` (every strip
-  INSERTION timestamped — the insert→drag gap is the crash-window measurement), `[pin-manager]`
-  (a drop displaced the pinned tab; snapped back to 0), and `[tabdrag-guard]` (the AV guard's deferred
-  arm / re-enable / settle-threw; `<ident>` everywhere = `_DescribeTabForLog`: `<sid8> "<title>"`,
-  title-only for a shell tab);
+  NOTIFICATIONS.md), and the **tab-strip drag pair** — since 2026-07-30 emitted by the POINTER-OWNED
+  reorder gesture, native MUX drag being permanently disabled (see the Gotchas bullet):
+  `tab-drag-begin <ident>` at threshold-activation ↔ `tab-drag-end` with `from=N to=M` /
+  `(no same-window reorder)` / `(torn out to a new window)` / `(cancelled: esc|capture lost|tab closed
+  mid-drag)` / `(tear-out refused: not a terminal tab)` (a begin with no end == died mid-drag; the
+  Manager tab never arms, so there is no refused line any more), `tab-move <ident> idx=N -> M` (moveTab
+  action / the gesture's commit; `refused (manager tab is pinned)`), `tab-send-to-window <ident>
+  win=<id|-1> idx=N` (the tab left this window: `-1` = torn out into a NEW window — beside the
+  managed-session `[move-out]`; cross-window docking retired with the OLE pipeline), with mechanism
+  tags `[tab-new] idx=N tabs=M <ident>` (every strip INSERTION timestamped), `[pin-manager]`
+  (a displaced pinned tab snapped back to 0 — belts-only now), and `[tabdrag-guard]` (the settle-threw
+  belt; the deferred-arm/re-enable lines went with `_GuardTabDragUntilRegistered` → `_ApplyTabDragPolicy`;
+  `<ident>` everywhere = `_DescribeTabForLog`: `<sid8> "<title>"`, title-only for a shell tab);
   **lifecycle/window** — `mark-unread` (the tab "Mark Unread"; its clear twin is an automatic tab VISIT,
   already covered by `tab-focus`), `move-out` (a managed tab dragged to ANOTHER window — where the session
   went, beside `[move-out]`), `manager bring-to-front` (surface an external's hosting window),
@@ -3573,11 +3575,32 @@ build **binlog uploads as an artifact** to diagnose the first run.
   return null and the render pass null-derefs. (The removed comment's claim "MUX has ZERO code
   dependency on `ItemsStackPanel`" missed that the dependency is the *system* `ListViewBase`, not MUX.)
   There is **NO legal non-virtualizing `ItemsPanel` for a `ListView`**, so de-virtualization is
-  unreachable at our layer — don't retry it. **Current state: the drag AV is UNFIXED**, mitigated only
-  by the belts below (which the root-cause analysis proves are *insufficient* — a by-CONTENT lookup no
-  settling can map); the remaining real options are all product decisions (disable MUX tab-drag
-  reorder/tear-out — `TabView.CanReorderTabs`/`CanDragTabs` — or replace the strip's reorder
-  mechanism). **Fourth occurrence 2026-07-30 (Release 0.6.8.1, dump `WindowsTerminal.exe.133752.dmp`,
+  unreachable at our layer — don't retry it. **Current state: RESOLVED 2026-07-30 — native MUX tab
+  drag is PERMANENTLY DISABLED and the gesture is OURS.** `CanReorderTabs(false)` + `CanDragTabs(false)`
+  (`TerminalPage::Create` re-asserting `TabRowControl.xaml` — the exact configuration WT itself ships
+  for elevated windows, so a supported TabView mode) makes the broken lookup UNREACHABLE — no native
+  item-drag can start, so neither the drag-start nor the drop-side call ever runs; every `TabViewItem`
+  is additionally pinned `CanDrag(false)` (`_ApplyTabDragPolicy`, the renamed successor of
+  `_GuardTabDragUntilRegistered` — its defer-to-`Loaded` re-ENABLE was the one hole left in the
+  disable, and its per-Loaded log line stormed at ~30 Hz during a big window-restore). Reorder +
+  tear-out are re-implemented as the **pointer-owned gesture** (`_WireTabReorderGesture` /
+  `_TabReorder*` in `TerminalPage.AgentEngine.cpp`; pure decision math in
+  `AgentMaster/TabDragMath.h`, engine-tested): press a header (mouse/pen; touch keeps native strip
+  panning) → 6-DIP threshold captures the pointer ON THE TABVIEW → an accent INSERTION CARET (parented
+  in the TabView's TEMPLATE ROOT, not `Root()` — with showTabsInTitlebar the tab row leaves `Root()`)
+  tracks the midpoint rule over the REALIZED headers only — a caret-commit design: NOTHING moves until
+  release (no per-crossing selection/content churn), then ONE `_TryMoveTab` (UIA announce + settle +
+  Manager floor) — with edge auto-scroll (per-move + a 50 ms hold-still `SafeDispatcherTimer`); release
+  clear of the strip TEARS OUT via the exact native downstream (`_sendDraggedTabToWindow` → new
+  window); Esc cancels (nothing moved). `[nav]` taxonomy preserved: `tab-drag-begin` at activation,
+  `tab-drag-end` with `from=N to=M` / `(no same-window reorder)` / `(torn out to a new window)` /
+  `(cancelled: esc|capture lost|tab closed mid-drag)` / `(tear-out refused: not a terminal tab)`.
+  Deliberately retired with the OLE pipeline: native cross-window DOCKING (dragging a tab into
+  ANOTHER window's strip — release outside now always tears out into a NEW window; a same-process
+  hit-test docking replacement is the noted follow-up; `AllowDropTabs` + the `_onTabStripDragOver/
+  Drop` receive side stay wired but are dead with no in-process drag source). The old native handlers
+  (`_TabDragStarted`/`_TabDragCompleted`/`_onTabDragStarting`/`_onTabDroppedOutside`) also stay wired
+  — inert, and they'd matter again if the knobs were ever re-enabled. **Fourth occurrence 2026-07-30 (Release 0.6.8.1, dump `WindowsTerminal.exe.133752.dmp`,
   register-verified: `Rsi=0xA7` == 167 `TabItems` — the biggest strip yet — `Rdi=0` == died at index 0,
   the scrolled-out pinned Manager tab, `Rcx=0`) added TWO new facts.** (1) **The DROP-side call is a
   crash site too**: `[nav] tab-drag-begin` DID log (so the drag-START lookup inside
@@ -3611,17 +3634,15 @@ build **binlog uploads as an artifact** to diagnose the first run.
   retemplate in-repo), whose `TabView::UpdateTabContent` re-parents `tvi.Content()` into the
   template's `TabContentPresenter` on every selection change — so a Content that already has a parent
   (self-as-Content / template-root-as-Content / a header-parented Border) is a guaranteed
-  "already child of another element" crash. ⟹ **The only flawless class left: make the lookup
-  UNREACHABLE — `CanReorderTabs(false)` + `CanDragTabs(false)` (the exact configuration WT itself
-  ships for elevated windows, `TerminalPage.cpp` `CanDragDrop()`) and re-implement reorder as an
-  Agentmaster-owned pointer gesture over the existing `_TryMoveTab` machinery.** The belts: **`_SettleTabStripLayout()`** — `UpdateLayout()` after EVERY `TabItems()`
-  mutation (`_InitializeTab` / `_RemoveTab` / `_TryMoveTab` / `_PinManagerTabFirst` /
-  `_TabDragCompleted`) so the pump never sees an unsettled strip (XAML dispatches queued input ahead of
-  the pending layout pass) — plus **`_GuardTabDragUntilRegistered(tvi)`** — a (re)inserted tab stays
-  `CanDrag(false)` until `ContainerFromItem` resolves it, re-enabled inline or on its `Loaded`; the
-  Manager tab never re-enables (its non-movable contract, re-checked in the deferred path). **Don't add
-  a `TabItems()` mutation without routing through these**; logs `[tabdrag-guard]` when the deferred path
-  arms.
+  "already child of another element" crash. ⟹ **That one flawless class — lookup unreachable + our
+  own gesture — is what SHIPPED (the "Current state: RESOLVED" block above).** The remaining belts:
+  **`_SettleTabStripLayout()`** — `UpdateLayout()` after EVERY `TabItems()` mutation
+  (`_InitializeTab` / `_RemoveTab` / `_TryMoveTab` / `_PinManagerTabFirst` / `_TabDragCompleted`) so
+  the pump never sees an unsettled strip (our own gesture + `_RevealTabInStrip` probe the same
+  item->container map) — plus **`_ApplyTabDragPolicy(tvi)`** — settle + pin EVERY (re)inserted tab
+  `CanDrag(false)`, unconditionally (a `CanDrag(true)` element could still start a raw XAML drag into
+  the broken WUX `GetDraggedItems` path even with the list-level knobs off). **Don't add a
+  `TabItems()` mutation without routing through these.**
 - **A per-element `ToolTip` on rebuilt elements is a process-killing LEAK under XAML Islands — never
   `ToolTipService.SetToolTip` at BUILD time on any Manager-rebuilt surface.** The framework-side
   registration `SetToolTip` creates is never torn down under islands (the same broken bookkeeping that

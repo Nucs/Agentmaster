@@ -187,9 +187,9 @@ namespace winrt::TerminalApp::implementation
 
         auto tabViewItem = newTabImpl->TabViewItem();
         _tabView.TabItems().InsertAt(insertPosition, tabViewItem);
-        // Agentmaster: MUX TabView drag-start AV guard — settle the item->container mapping + hold
-        // the new tab undraggable until the strip can resolve it (see TerminalPage.AgentEngine.cpp).
-        _GuardTabDragUntilRegistered(tabViewItem);
+        // Agentmaster: settle the item->container mapping + pin the new tab CanDrag(false) — native
+        // MUX drag is permanently OFF (the drag-AV resolution; see TerminalPage.AgentEngine.cpp).
+        _ApplyTabDragPolicy(tabViewItem);
         // Agentmaster: [tab-new] timestamps the strip INSERTION exactly — the v0.6.7 MUX AV lived in
         // the insert->drag window, so the gap between this line and a [nav] tab-drag-begin is the
         // forensic measurement. Covers every tab kind (managed launches also log [spawn]/[rehome]).
@@ -1772,7 +1772,7 @@ namespace winrt::TerminalApp::implementation
             _tabView.TabItems().RemoveAt(currentTabIndex);
             _tabView.TabItems().InsertAt(newTabIndex, tabViewItem);
             _tabView.SelectedItem(tabViewItem);
-            _GuardTabDragUntilRegistered(tabViewItem); // Agentmaster: the reinsert breaks the item->container map (MUX drag-start AV guard)
+            _ApplyTabDragPolicy(tabViewItem); // Agentmaster: the reinsert breaks the item->container map — settle it (+ re-pin CanDrag(false))
 
             if (auto autoPeer = Automation::Peers::FrameworkElementAutomationPeer::FromElement(*this))
             {

@@ -53,6 +53,7 @@ namespace Agentmaster
     class Scheduler;
     class SessionScanner;
     class ProcessObserver;
+    struct TabDragBand; // Agentmaster: TabDragMath.h — the pointer-owned tab reorder gesture's band record (complete type included by the .cpp)
 }
 
 namespace winrt::TerminalApp::implementation
@@ -281,8 +282,28 @@ namespace winrt::TerminalApp::implementation
         double _managerTabWidthCache{ 0.0 };
         Windows::UI::Xaml::Controls::ScrollViewer::ViewChanged_revoker _tabStripViewChangedRevoker;
         Windows::UI::Xaml::FrameworkElement::SizeChanged_revoker _tabStripSizeChangedRevoker;
-        bool _tabStripCacheBoosted{ false }; // Agentmaster: latched once the strip's ItemsStackPanel.CacheLength is cranked to keep all tab headers realized (MUX drag-AV candidate — _BoostTabStripCacheForDrag; keeps a LEGAL virtualizing panel, no swap)
-        bool _tabStripCacheDiagged{ false }; // Agentmaster: one-shot guard so _BoostTabStripCacheForDrag logs a not-an-ItemsStackPanel diagnosis at most once (keeps a failed drag-test diagnosable)
+        // Agentmaster: the POINTER-OWNED tab reorder/tear-out gesture's state (native MUX drag is
+        // permanently OFF — the drag-AV resolution; TerminalPage.AgentEngine.cpp). One gesture at a
+        // time: armed on a header press, active once the threshold is crossed (pointer captured on
+        // the TabView), reset on release/cancel/capture-loss.
+        struct TabReorderGestureState
+        {
+            bool armed{ false }; // pressed on a draggable tab header; below the drag threshold
+            bool active{ false }; // threshold crossed — the gesture owns the pointer
+            uint32_t pointerId{ 0 }; // the one pointer this gesture tracks
+            winrt::Windows::Foundation::Point pressPoint{}; // TabView coords at press
+            winrt::Windows::Foundation::Point lastPoint{}; // TabView coords, refreshed each move (the auto-scroll tick reuses it)
+            winrt::Windows::Foundation::Point dragOffset{}; // the native tear-out recipe's client-cursor offset, captured at activation
+            winrt::TerminalApp::Tab tab{ nullptr }; // the dragged tab (identity — indexes re-resolve each event)
+            winrt::Microsoft::UI::Xaml::Controls::TabViewItem tvi{ nullptr }; // its header (the opacity "lifted" cue)
+            int originalIndex{ -1 }; // where it sat at activation (forensics)
+            int lastSlot{ -1 }; // the last decided insertion slot; -1 = none (tear-out zone / undecided)
+        };
+        TabReorderGestureState _tabReorder;
+        winrt::Windows::UI::Xaml::Controls::Border _tabDragIndicator{ nullptr }; // the insertion caret
+        winrt::Windows::UI::Xaml::Controls::Panel _tabDragIndicatorHost{ nullptr }; // the caret's parent panel — the TabView's template root grid (same tree as the strip in BOTH hosting modes: in Root() or re-homed into the titlebar), Root() as the fallback
+        SafeDispatcherTimer _tabDragAutoScrollTimer; // hold-still edge auto-scroll while active (guarded Destroy — teardown-safe)
+        winrt::Windows::UI::Xaml::UIElement::PreviewKeyDown_revoker _tabReorderKeyRevoker; // Esc-cancel, armed only while active
 
         Microsoft::Terminal::Settings::Model::CascadiaSettings _settings{ nullptr };
 
@@ -1186,9 +1207,26 @@ namespace winrt::TerminalApp::implementation
         void _RemoveSessionRecord(const std::wstring& sessionId);
         void _StripSessionFromSavedWindows(const std::wstring& sessionId);
         void _PinManagerTabFirst(); // Agentmaster: keep the non-closable Manager tab pinned at index 0 after any reorder
-        void _BoostTabStripCacheForDrag(); // Agentmaster: MUX drag-AV candidate — raise the strip ItemsStackPanel's CacheLength so every tab header stays realized (ContainerFromIndex(i) never null in MUX's drag-start loop); a LEGAL panel, no swap. See TerminalPage.AgentEngine.cpp
-        void _SettleTabStripLayout(); // Agentmaster: commit the strip's item->container mapping synchronously after a TabItems() mutation (MUX drag-start AV guard, layer 1 — a belt; see TerminalPage.AgentEngine.cpp)
-        void _GuardTabDragUntilRegistered(const Microsoft::UI::Xaml::Controls::TabViewItem& tabViewItem); // Agentmaster: a (re)inserted tab stays undraggable until ContainerFromItem resolves it (MUX drag AV guard, layer 2 — a belt: keeps a not-yet-mapped tab ungrabbable)
+        void _SettleTabStripLayout(); // Agentmaster: commit the strip's item->container mapping synchronously after a TabItems() mutation (a belt; see TerminalPage.AgentEngine.cpp)
+        // Agentmaster: the POINTER-OWNED tab reorder/tear-out gesture (the native-MUX-drag
+        // replacement — the drag-AV resolution; implementation + rationale in
+        // TerminalPage.AgentEngine.cpp, pure decision math in AgentMaster/TabDragMath.h):
+        void _WireTabReorderGesture(); // AddHandler(handledEventsToo) the pointer events on the TabView, once from Create()
+        void _TabReorderOnPressed(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e); // arm on a left-press over a draggable tab header
+        void _TabReorderOnMoved(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e); // threshold -> activate; active -> update caret/auto-scroll
+        void _TabReorderOnReleased(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e); // commit (reorder / tear-out) or disarm a plain click
+        void _TabReorderOnCaptureLost(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e); // external capture loss cancels (our own release is guarded by the reset-first order)
+        void _TabReorderActivate(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e); // capture the pointer + lift the tab + arm Esc/auto-scroll
+        void _TabReorderUpdate(const winrt::Windows::Foundation::Point& pos); // decide slot + caret + edge auto-scroll (shared by Moved + the timer tick)
+        void _TabReorderCommitRelease(const winrt::Windows::Foundation::Point& pos); // classify the release: reorder via _TryMoveTab, or tear out via _sendDraggedTabToWindow
+        void _TabReorderCancel(const wchar_t* reason); // end without any mutation (Esc / capture loss / tab vanished)
+        void _TabReorderReset(); // common teardown: flags first (re-entrancy), timer/Esc off, opacity+caret restored, captures released
+        int _TabReorderIndexOf(const winrt::TerminalApp::Tab& tab) const; // the tab's CURRENT _tabs index, -1 when gone (closed under the gesture)
+        std::vector<::Agentmaster::TabDragBand> _TabReorderBands(); // realized, on-strip header bands (TabView coords) — virtualized-out tabs simply have no band
+        void _EnsureTabDragIndicator(); // lazily create the insertion caret in Root()
+        void _PositionTabDragIndicator(double xInTabView); // place + show the caret at a TabView-x boundary
+        void _HideTabDragIndicator();
+        void _ApplyTabDragPolicy(const Microsoft::UI::Xaml::Controls::TabViewItem& tabViewItem); // Agentmaster: settle the strip + pin the tab CanDrag(false) — native MUX drag is permanently OFF (the drag-AV resolution; the pointer-owned gesture replaces it)
         std::wstring _DescribeTabForLog(const TerminalApp::Tab& tab); // Agentmaster: `<sid8> "<title>"` (title-only for a shell tab) — the tab-strip forensic log identity; never throws
         winrt::Windows::Foundation::IAsyncAction _AdoptExternalSessionImpl(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken); // Agentmaster (terminate-net): the body of _AdoptExternalSession, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
         winrt::fire_and_forget _AdoptExternalSession(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken); // Agentmaster: bind a hand-typed `claude` to its ConPTY

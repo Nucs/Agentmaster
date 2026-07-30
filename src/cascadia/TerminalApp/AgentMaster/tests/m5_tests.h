@@ -179,6 +179,12 @@ void TestPromptAnchorFloorIndex();
 void TestPromptAnchorRealCorpus();
 void TestSummaryUserMsgNoise();
 void TestPendingInput();
+// tests_tabdrag.cpp — TabDragMath.h: the pure brain of the pointer-owned tab reorder/tear-out
+// gesture (the native-MUX-drag replacement — CLAUDE.md "MUX TabView drag-start null-deref"
+// gotcha): arming threshold, midpoint insertion-slot rule over realized bands, caret boundary,
+// slot->_TryMoveTab target conversion (manager floor), release classification (reorder vs
+// tear-out slack), and edge auto-scroll steps
+void TestTabDragMath();
 void TestPendingPaste();
 
 // tests_commands.cpp — COMMANDS.md: slash-command bindings (ParseCommandEcho + the parser's
