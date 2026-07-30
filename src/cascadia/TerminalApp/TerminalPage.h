@@ -946,6 +946,13 @@ namespace winrt::TerminalApp::implementation
         // the box is deliberately empty, and letting the scan's clear debounce see that would erase the
         // very draft we are holding for the user. UI-thread-only state.
         std::unordered_map<std::wstring, bool> _draftSwapsInFlight; // sessionId -> "the control was ALREADY read-only before we took it" (so we never clear a read-only the user set)
+        // Agentmaster (PENDING_INPUT.md §8d — the MAIL button's "move" mode): remove a session's unsent
+        // input-box draft after it has been queued (the default mail click; Shift+Click keeps it). The
+        // DRAFT SWAP's verified clear ladder + read-only lock STANDING ALONE — no send, no restore (the
+        // draft is being intentionally removed, already safe in the queue). Shares _draftSwapsInFlight for
+        // box mutual-exclusion with sends. Page-wired into the overlay (AgentTabOverlay::SetClearDraftHandler).
+        winrt::fire_and_forget _ClearLiveDraftForSession(std::wstring sessionId); // terminate-net wrapper
+        winrt::Windows::Foundation::IAsyncAction _ClearLiveDraftForSessionImpl(std::wstring sessionId); // resume-foreground -> resolve control -> decline if held -> lock -> DecideDraftClear until VERIFIED empty -> SetPendingInput("") -> unlock
         std::wstring _FocusedPromptNavSession(); // Agentmaster (alt+up/down): the focused tab's managed CLAUDE sessionId, or empty (=> the handler falls back to MoveFocus)
         winrt::fire_and_forget _ScrollAdjacentPrompt(std::wstring sessionId, bool up); // Agentmaster (alt+up/down): re-read the sent prompts (mtime-gated), then center the view on the nearest OFF-SCREEN sent prompt up/down (fresh resolve every press); boundary sound at the ends
         winrt::fire_and_forget _RefreshPromptNavCache(std::wstring sessionId); // Agentmaster (alt+up/down, SUMMARY_JUMP.md §7): the 30s focused refresh — re-read sent prompts (mtime-gated) into _promptNavCache + re-resolve the overlay's jump eligibility, WITHOUT navigating

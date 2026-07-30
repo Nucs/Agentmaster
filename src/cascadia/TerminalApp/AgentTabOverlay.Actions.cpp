@@ -183,18 +183,22 @@ namespace winrt::TerminalApp::implementation
         if (kDevAutoTesting && !isCodexSession)
         {
             queueBtn = mkIconBtn(L"\xE715", // Mail — the same glyph the Manager's "Add to queue" envelope uses
-                                 L"Queue this session's unsent prompt \x2014 append what is typed into its input box but NOT yet sent to the Tests Autorunner queue.\n"
-                                 L"It is a copy: the prompt stays in the terminal box. Enabled only while the box holds an unsent draft (the pulsing 3 dots).");
+                                 L"Queue this session's unsent prompt into the Tests Autorunner queue and CLEAR it from the input box (a move).\n"
+                                 L"Shift+Click to queue but KEEP it in the box (a copy).\n"
+                                 L"Enabled only while the box holds an unsent draft (the pulsing 3 dots).");
             // Enabled ONLY while a draft actually exists, so a prominent toolbar button never fires a
             // silent no-op on an empty box (the "dead button" trap the pencil-icon comment records).
             // Seeded disabled; _Refresh -> _RefreshQueueButtonEnabled flips it in lockstep with the "3
             // dots" (both key on SessionInfo::pendingInput, whose empty<->non-empty FLIP is exactly what
             // fires the notify that drives _Refresh — so the enabled state is reliably maintained).
             queueBtn.IsEnabled(false);
+            // Default (plain) click MOVES the draft: queue it, then clear it from the input box. Shift+Click
+            // KEEPS it (the historical copy). Shift is read at click time via the overlay's shared
+            // IsShiftDown() (the same helper the summary-panel Shift-resize uses).
             queueBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
                 if (auto self = weak.get())
                 {
-                    self->_QueueCurrentPrompt();
+                    self->_QueueCurrentPrompt(/*clearBox*/ !IsShiftDown());
                 }
             });
             _queueBtn = queueBtn; // remembered so _RefreshQueueButtonEnabled can toggle it each refresh
@@ -508,7 +512,12 @@ namespace winrt::TerminalApp::implementation
     // NO one-shot latch, deliberately: §8a's pull into the compose box is a SILENT insert on focus (hence
     // its per-(session, draft) latch against double-queueing), while every append here is an explicit
     // click — so a second click queues a second copy, exactly like clicking the Manager's envelope twice.
-    void AgentTabOverlay::_QueueCurrentPrompt()
+    //
+    // clearBox (a PLAIN click) then REMOVES the draft from Claude's input box after queueing — the draft
+    // is MOVED to the queue (PENDING_INPUT.md §8d), via the page's verified clearer. Shift+Click passes
+    // false and KEEPS it in the box (the historical copy, Rule #13). The clear runs only AFTER a
+    // successful queue, so a failed/empty queue never touches the box.
+    void AgentTabOverlay::_QueueCurrentPrompt(bool clearBox)
     {
         if (!_registry || _sessionId.empty())
         {
@@ -564,14 +573,22 @@ namespace winrt::TerminalApp::implementation
             s.queue.push_back(std::move(p));
         });
         // Nav audit: the SAME "queue" verb the Manager's envelope logs, tagged with this surface (the
-        // overlay's Autorunner cycle already carries "(overlay)" the same way) and with WHERE the text
-        // came from, since here the user never typed it into a compose box.
-        ::Agentmaster::LogNav(L"queue " + ::Agentmaster::ShortId(_sessionId) + L" \"" + label + L"\" (overlay draft)");
+        // overlay's Autorunner cycle already carries "(overlay)" the same way), with WHERE the text came
+        // from (the user never typed it into a compose box) and whether the box is being cleared or kept.
+        ::Agentmaster::LogNav(L"queue " + ::Agentmaster::ShortId(_sessionId) + L" \"" + label + L"\" (overlay draft, " + (clearBox ? L"clear box" : L"keep box") + L")");
         // ...and the [pending] mechanism line naming WHICH source answered, beside the copy item's.
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[pending] " + ::Agentmaster::ShortId(_sessionId) + L" queue current prompt: " +
                                           (pick.fromLive ? L"live" : L"remembered") + L" chars=" + std::to_wstring(pick.text.size()) + L"\n");
         PlayActionSound(); // same click feedback as the copy menu / Open Path
+        // A PLAIN click MOVES the draft: now that it is safely queued, remove it from the input box (the
+        // page runs the verified clear — a no-op if the box isn't readable here / is already empty). A
+        // Shift+Click (clearBox == false) KEEPS it, the historical copy. Done AFTER the queue append, so a
+        // clear can never run without the prompt being safely captured first.
+        if (clearBox && _onClearDraft)
+        {
+            _onClearDraft();
+        }
         _Refresh(); // immediate repaint of row 1's ⏳N + row 3's next-prompt preview (the registry observer also refreshes, async)
     }
 

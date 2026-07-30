@@ -728,8 +728,8 @@ the `agentmaster` CLI — which is where they should be wired next.
 The third consumer of the same draft, and the one that needs no Manager visit at all: the per-tab
 badge's **mail** button (`AgentTabOverlay::_QueueCurrentPrompt`, row 1 between the folder and copy
 buttons — TAB_OVERLAY.md §13j) **queues the unsent draft into this session's own Auto-Testing queue**
-in one click. §8a answers "I want to queue this, but in the Manager"; this answers "I want to queue
-this, from right here".
+in one click, and **clears it out of the input box** — the draft is *moved* to the queue. §8a answers
+"I want to queue this, but in the Manager"; this answers "I want to queue this, from right here."
 
 **Same source, same rule** — the wrapped LIVE read (`_onReadLiveDraft` →
 `TerminalPage::_ReadLiveDraftForSession`) else `SessionInfo::pendingInput`, chosen by the one pure
@@ -752,13 +752,34 @@ so a prominent always-present toolbar button never fires a *silent* no-op — it
 empty↔non-empty flip this turns on (a text-only edit doesn't notify but can't change the boolean either).
 The empty-box handler branch below stays as the backstop.
 
-**Still a COPY, never a move** (Rule #13) — the draft stays in the input box, the "3 dots" keep pulsing,
-and §9's swap keeps the eventual send from merging the two. **No one-shot latch** (unlike §8a's silent
-focus-pull): the click is explicit, so clicking a present draft twice queues twice, like the Manager's
-envelope (a latch is also unblockable-in-practice, since a text-only draft change raises no notify to
-re-arm one). Nothing to queue ⇒ nothing queued, **no chime**, and `[pending] <sid8> queue current prompt:
-nothing (box empty, no remembered draft)`; a success chimes and logs `[nav] queue <sid8> "<label>"
-(overlay draft)` plus `[pending] <sid8> queue current prompt: live|remembered chars=N`.
+**MOVE by default, COPY on Shift+Click.** A plain click **removes** the draft from Claude's input box
+after queueing it — the prompt is *moved* to the queue, so you are not left with a duplicate to clear by
+hand. **Shift+Click** passes `clearBox == false` and **keeps** the draft in the box (the historical copy,
+Rule #13 — the read never wrote to the box; the terminal draft and its pulsing "3 dots" stay). Shift is
+read at click time via the overlay's shared `IsShiftDown()` (the summary-panel Shift-resize helper).
+
+**The removal is the DRAFT SWAP's verified clear, standing alone** (`TerminalPage::_ClearLiveDraftForSession`,
+run AFTER the queue append succeeds — a failed/empty queue never touches the box). It is §9 step 3
+verbatim: lock the control read-only (so the user's keystrokes can't interleave), then the same
+`DecideDraftClear` ladder (Ctrl+S stash / Ctrl+U kill / backspaces, honoring `draftSwapUseCtrlS`), each
+rung followed by a settle + re-read so a mid-repaint frame is never mistaken for "the key did nothing" —
+but with **no send and no restore** (the draft is being deliberately removed, already safe in the queue),
+and unlocked on every path. It shares the swap's box-mutex (`_draftSwapsInFlight`), so a concurrent send
+declines rather than injecting alongside it, and it is a no-op when the box isn't readable here / is
+already empty. On a **verified** clear it calls `SetPendingInput(id, "")` — the draft is no longer unsent,
+so the "3 dots" drop and the MAIL button disables **now** (not after the scanner's ~2-tick debounce),
+which also closes the window where a fast re-click would re-queue the still-remembered draft. If the box
+**won't** empty (the ladder gives up), the prompt is still queued and the draft is simply left in the box
+(degrading to the Shift+Click outcome), logged. Traced `[draft-clear] <sid8> …`.
+
+**No one-shot latch** on the queue itself (unlike §8a's silent focus-pull): the click is explicit, so
+clicking a present draft twice queues twice, like the Manager's envelope (a latch is also
+unblockable-in-practice, since a text-only draft change raises no notify to re-arm one) — though with the
+default move-clear the box empties after the first click, so the button disables and a second queue needs
+a fresh draft. Nothing to queue ⇒ nothing queued, **no chime**, no clear, and `[pending] <sid8> queue
+current prompt: nothing (box empty, no remembered draft)`; a success chimes and logs `[nav] queue <sid8>
+"<label>" (overlay draft, clear box|keep box)` plus `[pending] <sid8> queue current prompt:
+live|remembered chars=N`.
 
 ## 9. The DRAFT SWAP — sending a prompt without eating your unsent draft (built)
 

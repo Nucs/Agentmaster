@@ -241,7 +241,8 @@ as activity changes — a `pwsh` tab → `claude` the moment you run it → the 
 first prompt. The linked badge's **row 1** reads `status · actions · autorunner · queue` (**link state
 shows only when *not* linked**) over a dim **second row** `<workdir folder>/<live branch>`; its
 **always-shown row-1 action cluster** is a folder button (Open Path), a **mail** button (queue the
-tab's unsent draft into its Auto-Testing queue — dev-or-debug + Claude only), a **copy
+tab's unsent draft into its Auto-Testing queue + clear it from the input box, a move; Shift+Click keeps
+it — dev-or-debug + Claude only), a **copy
 menu** (Session Id · dir · branch · the **REAL** Claude/Codex launch CLI · Summary · Transcript), and
 a **pencil** toggling a **SUMMARY PANEL** (a second overlay ≤20% pane width rendering the
 `session-end.js` box from the transcript; GLOBAL `AppSettings.showSummaryPanel`, with a wrap-line

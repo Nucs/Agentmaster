@@ -392,11 +392,12 @@ full ≤300-char first line can show) but is `MaxWidth`-capped + right-anchored 
 balloon the HUD. The hourglass run is goldenrod (matching the row-1 `⏳N`); a hover tooltip names the row
 and reveals the **full** prompt behind the preview.
 
-### 13j. The MAIL button — queue the unsent draft (row 1, between folder and copy)
+### 13j. The MAIL button — move the unsent draft to the queue (row 1, between folder and copy)
 A **mail** button (`\xE715`, the SAME Segoe Fluent glyph the Manager compose row's "Add to queue" envelope
-uses) takes this session's **UNSENT input-box draft** and **queues it** into that session's own
-Auto-Testing queue — so a prompt you typed in the terminal and never sent reaches the Tests Autorunner
-without being retyped in the Manager. It is the badge's twin of that envelope, appending through the SAME
+uses) takes this session's **UNSENT input-box draft**, **queues it** into that session's own
+Auto-Testing queue, and **clears it out of the input box** — so a prompt you typed in the terminal and
+never sent reaches the Tests Autorunner without being retyped in the Manager, and you are not left with a
+duplicate to delete by hand. It is the badge's twin of that envelope, appending through the SAME
 registry seam as `AgentManagerContent::_OnAddPrompt` (one `Update` → a default `QueuedPrompt` — `Pending` /
 `OnTurnComplete`, label = the first 56 chars with newlines flattened — pushed onto `s.queue`), so the
 scheduler cannot tell the two apart and the entry shows in Auto Testing, row 1's `⏳N` and row 3's
@@ -422,15 +423,23 @@ button" trap the pencil-icon comment records). It keys on the SAME `SessionInfo:
 reliable here because `SetPendingInput` fires its notify (which drives `_Refresh`) on precisely the
 empty↔non-empty **flip** this predicate turns on. (A text-only draft edit doesn't notify, but it also can't
 change the boolean, so nothing is missed; the click still does the authoritative live-else-remembered read.)
-Deliberately **no re-queue latch**: clicking a present draft twice queues it twice (chime + `⏳N` increment +
-row-3 preview each time — the Manager envelope's "each click queues" model), which is both a legitimate act
-and unblockable-by-a-latch anyway, since a text-only draft change raises no notify to re-arm one.
+**MOVE by default, COPY on Shift+Click** (PENDING_INPUT.md §8d). A plain click **removes** the draft from
+Claude's input box after queueing it (the *move* — you don't have to clear the box yourself); **Shift+Click**
+**keeps** it in the box (the historical copy, Rule #13 — the read never wrote to the box). Shift is read at
+click time via the overlay's shared `IsShiftDown()`. The removal is the DRAFT SWAP's verified clear standing
+alone (`TerminalPage::_ClearLiveDraftForSession`): run AFTER the queue append (a failed/empty queue never
+touches the box), it locks the control read-only, runs the same `DecideDraftClear` ladder (Ctrl+S stash /
+Ctrl+U kill / backspaces, honoring `draftSwapUseCtrlS`) with a settle+re-read per rung, then unlocks — **no
+send, no restore** (the draft is safe in the queue). It shares the swap's `_draftSwapsInFlight` box-mutex
+(a concurrent send declines), and on a verified clear calls `SetPendingInput(id, "")` so the "3 dots" drop
+and this button disables immediately. If the box won't empty, the prompt is still queued and the draft is
+left in place (== the Shift+Click outcome), logged `[draft-clear] <sid8> …`.
 
-**It is a COPY, not a move** (Rule #13 — reading a buffer never writes to it): the draft stays in the
-terminal's input box and its "3 dots" keep pulsing until you send or clear it there; sending the queued
-copy later cannot eat it either, because the DRAFT SWAP (PENDING_INPUT.md §9) stashes the draft around
-every submit. **No one-shot latch**, unlike §8a's silent focus-pull: every append here is an explicit
-click, so a second click queues a second copy — exactly like clicking the Manager's envelope twice.
+Deliberately **no re-queue latch** on the queue append: clicking a present draft twice queues it twice
+(chime + `⏳N` increment + row-3 preview each time — the Manager envelope's "each click queues" model),
+which is both a legitimate act and unblockable-by-a-latch anyway (a text-only draft change raises no notify
+to re-arm one) — though with the default move-clear the box empties after the first click, so the button
+disables and a second queue needs a fresh draft.
 An empty box + no remembered draft is an honest no-op: nothing queued, **no chime**, and a log line
 (`[pending] <sid8> queue current prompt: nothing …`) so it is never a silent dead click. A success chimes
 and logs `[nav] queue <sid8> "<label>" (overlay draft)` + `[pending] <sid8> queue current prompt:

@@ -67,7 +67,12 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   button (Open Path) + a **mail** button (**queue the UNSENT input-box draft** into this session's
   Auto-Testing queue — the Manager compose row's "Add to queue" envelope, on the badge: same `\xE715`
   glyph, same registry append, the draft resolved by the same `PickCurrentPromptText` live-else-remembered
-  rule and left in the box [a COPY, Rule #13]; shown only on a **dev-or-debug** build, where the
+  rule; a **plain click MOVES it** — the draft is then **cleared out of the input box** via the DRAFT SWAP's
+  verified clear standing alone (`_ClearLiveDraftForSession`: lock → `DecideDraftClear` ladder → unlock, no
+  send/restore, shares the `_draftSwapsInFlight` box-mutex, `SetPendingInput("")` on a verified clear) —
+  while **Shift+Click KEEPS it** in the box (the historical copy, Rule #13, via `IsShiftDown()`); the button
+  is **enabled only while a draft exists** (`_RefreshQueueButtonEnabled`, tracking the "3 dots"/`pendingInput`
+  flip, so no silent dead-click on an empty box); shown only on a **dev-or-debug** build, where the
   autorunner actually runs, and only for **Claude**; explicit-click so no one-shot latch — TAB_OVERLAY.md
   §13j / PENDING_INPUT.md §8d) + a copy menu (Session Id · working dir · branch · the **Current Prompt** [the
   UNSENT input-box draft — PENDING_INPUT.md §8] · the REAL Claude/Codex launch
@@ -2882,7 +2887,8 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     enriched by the observer with `model · effort · kind`; also the registry-less `ShowActivity`
     **observe badge** (`○ <kind> · unlinked`: pwsh / cmd / unprompted-claude / codex) for every non-bound tab.
     Carries the **hover action row** (folder Open Path + a **mail** button [`_QueueCurrentPrompt` — queue
-    the tab's unsent draft into its Auto-Testing queue, dev-or-debug + Claude only] + a copy menu — Session
+    the tab's unsent draft into its Auto-Testing queue AND clear it from the input box (a move; Shift+Click
+    keeps it via `_ClearLiveDraftForSession`), dev-or-debug + Claude only] + a copy menu — Session
     Id / Copy Path / Copy
     Branch / Claude·Codex Launch CLI / Summary / Transcript, with a chime — `BuildLaunchCli` /
     `CopyConversationAsync`) and the **pencil-toggled SUMMARY PANEL** (`SetAgentSummaryOverlay` 2nd slot;

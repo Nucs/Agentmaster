@@ -186,6 +186,13 @@ namespace winrt::TerminalApp::implementation
         // SessionInfo::pendingInput inside CopySessionField. Set by _AttachClaudeOverlay.
         void SetLiveDraftHandler(std::function<std::wstring()> handler);
 
+        // Agentmaster (PENDING_INPUT.md §8d): the MAIL button's default (plain) click REMOVES the draft
+        // from the input box after queueing it (a move); Shift+Click keeps it. The overlay can't inject,
+        // so the page wires this clearer (TerminalPage::_ClearLiveDraftForSession — the verified draft-swap
+        // clear standing alone). Unwired => the box is simply left as-is (== Shift+Click). Set by
+        // _AttachClaudeOverlay.
+        void SetClearDraftHandler(std::function<void()> handler);
+
         // Agentmaster (SUMMARY_JUMP.md): highlight the summary row for the message we just jumped to —
         // via the ▸ button OR alt+up / alt+down nav (the page passes the landed 0-based message index). A
         // translucent band behind the row; it persists across panel re-renders and moves to the new
@@ -222,7 +229,7 @@ namespace winrt::TerminalApp::implementation
         void _SetExpanded(bool on); // dim<->bright the whole badge (driven by hover OR the copy-menu pinned state)
         void _CycleAutorunner(); // row-1 Autorunner button: cycle this session's mode Off -> Semi -> Full -> Off (mutates the shared registry; Rule #1)
         void _OpenFolder(); // row 3 folder button: open the session's working dir in Explorer (off-thread)
-        void _QueueCurrentPrompt(); // row-1 MAIL button (between folder and copy): queue this session's UNSENT input-box draft into its Auto-Testing queue — the badge twin of the Manager compose row's envelope. Dev-or-debug + Claude only; a COPY (the draft stays in the terminal, Rule #13)
+        void _QueueCurrentPrompt(bool clearBox); // row-1 MAIL button (between folder and copy): queue this session's UNSENT input-box draft into its Auto-Testing queue — the badge twin of the Manager compose row's envelope. Dev-or-debug + Claude only. clearBox (a PLAIN click) also REMOVES the draft from the input box after queueing (a move — PENDING_INPUT.md §8d); Shift+Click passes false to KEEP it (the historical copy, Rule #13)
         void _RefreshQueueButtonEnabled(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: enable the MAIL button only while a draft actually exists (mirrors the "3 dots" / pendingInput), so a prominent toolbar button never silently no-ops on an empty box (the "dead button" trap)
         void _CopyField(int which); // row 3 copy menu: 0=Session Id 1=Copy Path 2=Copy Branch 3=Claude CLI 4=Codex CLI 5=Transcript 6=Summary (full textual box)
         void _BuildSummaryPanel(); // build the summary panel element (the 2nd slot), collapsed
@@ -360,6 +367,7 @@ namespace winrt::TerminalApp::implementation
         std::function<std::vector<int>(const std::vector<std::wstring>&)> _onResolveEligibility; // -> page: a row per prompt (-1 == not on screen), for icon dimming
         std::function<void(bool)> _onAdjacentPrompt; // row-2 ↑/↓ buttons -> page (_ScrollAdjacentPrompt: scroll to prev/next off-screen prompt + highlight + boundary sound)
         std::function<std::wstring()> _onReadLiveDraft; // copy menu "Copy Current Prompt" -> page (read this session's input box out of the live buffer; "" when unreadable — the remembered draft then wins)
+        std::function<void()> _onClearDraft; // MAIL button (plain click) -> page (_ClearLiveDraftForSession: remove the draft from the input box after queueing — a move; Shift+Click skips this)
         // The jump buttons of the currently-rendered panel, paired with their 0-based prompt index, so
         // _RefreshJumpEligibility can dim the ones whose prompt no longer resolves. Rebuilt each _SetSummaryContent.
         std::vector<std::pair<int, winrt::Windows::UI::Xaml::Controls::Button>> _jumpButtons;

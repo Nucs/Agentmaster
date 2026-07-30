@@ -4445,6 +4445,15 @@ namespace winrt::TerminalApp::implementation
                 auto self = weakThis.get();
                 return self ? self->_ReadLiveDraftForSession(sessionId) : std::wstring{};
             });
+            // Agentmaster (PENDING_INPUT.md §8d): the MAIL button's default click REMOVES the draft from
+            // the input box after queueing it (a move); Shift+Click keeps it. The overlay can't inject, so
+            // the page runs the verified clear (self-marshaling; a no-op if the box isn't ours / is empty).
+            overlay->SetClearDraftHandler([weakThis, sessionId]() {
+                if (auto self = weakThis.get())
+                {
+                    self->_ClearLiveDraftForSession(sessionId);
+                }
+            });
         }
         if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(termContent))
         {
@@ -5046,6 +5055,158 @@ namespace winrt::TerminalApp::implementation
         // restore leaves the draft remembered, shown by the pending indicator, and copyable.
         _sessionRegistry->SetPendingInput(id, restored.empty() ? draft : restored);
         _EndDraftSwap(id, true);
+    }
+
+    // ---- CLEAR the box after a MAIL-button queue (PENDING_INPUT.md §8d, the "move" mode) ------------
+    //
+    // The per-tab overlay's MAIL button queues the session's unsent draft into its Auto-Testing queue.
+    // A PLAIN click now also REMOVES it from Claude's input box (the draft is MOVED, not copied); a
+    // Shift+Click keeps it (the historical copy). This is the removal half — invoked from the overlay's
+    // page-wired clear handler AFTER the queue append succeeded.
+    //
+    // It is the DRAFT SWAP's CLEAR phase (§9 step 3) standing ALONE — the same verified ladder
+    // (DecideDraftClear: Ctrl+S stash / Ctrl+U kill / backspaces, honoring AppSettings::draftSwapUseCtrlS),
+    // each rung followed by a settle+re-read so a mid-repaint frame is never mistaken for "the key did
+    // nothing" — but with NO send and NO restore, because the draft is being deliberately removed (it is
+    // already safe in the queue). It shares the swap's box-mutex (_draftSwapsInFlight) so a concurrent
+    // send declines rather than injecting alongside it, and it LOCKS the control read-only for the ~300ms
+    // clear so the user's own keystrokes can't interleave (unlocked on EVERY path via _EndDraftSwap — a
+    // stranded read-only is an un-typeable tab). fire_and_forget => a terminate-net wrapper (an escaped
+    // exception there is std::terminate), the body an awaitable Impl.
+    winrt::fire_and_forget TerminalPage::_ClearLiveDraftForSession(std::wstring sessionId)
+    {
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await _ClearLiveDraftForSessionImpl(sessionId);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ClearLiveDraftForSession");
+        }
+    }
+
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_ClearLiveDraftForSessionImpl(std::wstring sessionId)
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
+        if (!_sessionRegistry)
+        {
+            co_return;
+        }
+        const auto sid8 = ::Agentmaster::ShortId(sessionId);
+
+        const auto control = _ControlForSession(sessionId);
+        if (!control || control.ConnectionState() == TerminalConnection::ConnectionState::NotConnected)
+        {
+            // Not hosted here / dormant — there is no live box to clear. The draft is already queued;
+            // a box we cannot see is left untouched (nothing to move out).
+            co_return;
+        }
+        if (_draftSwapsInFlight.count(sessionId) != 0)
+        {
+            // A send-swap (or another clear) already holds this session's box — do not inject alongside
+            // it (the very merge the swap exists to prevent). Leave the draft; the box is being managed.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-clear] " + sid8 + L" declined: the box is already held (a swap/clear is in flight)\n");
+            co_return;
+        }
+
+        // READ — confirm there is actually something to clear (the box may have emptied since the click).
+        std::wstring box = _ReadLiveDraftForSession(sessionId);
+        if (DraftSwapNormalize(box).empty())
+        {
+            // Already empty: the draft moved to the queue, so make the registry agree (drops the "3 dots"
+            // + disables the MAIL button now) and stop.
+            _sessionRegistry->SetPendingInput(sessionId, L"");
+            co_return;
+        }
+
+        // LOCK — like the swap: keep the user's keystrokes from interleaving during the clear.
+        bool wasAlreadyReadOnly = true;
+        try
+        {
+            wasAlreadyReadOnly = control.ReadOnly();
+            if (!wasAlreadyReadOnly)
+            {
+                control.SetReadOnly(true);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ClearLiveDraftForSession lock");
+            wasAlreadyReadOnly = true; // never hand back a read-only we did not take
+        }
+        _draftSwapsInFlight[sessionId] = wasAlreadyReadOnly;
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-clear] " + sid8 + L" clearing the box after queueing (chars=" + std::to_wstring(box.size()) + L") via " + std::wstring(_appSettings.draftSwapUseCtrlS ? L"Ctrl+S stash" : L"the kill-ring") + L"\n");
+
+        // CLEAR (verified) — the SAME ladder + settle the swap's step 3 uses.
+        ::Agentmaster::DraftClearProgress spent;
+        spent.useStash = _appSettings.draftSwapUseCtrlS;
+        bool cleared = false;
+        const int64_t clearDeadline = TtNowMs() + kDraftSwapClearBudgetMs;
+        while (TtNowMs() < clearDeadline)
+        {
+            const auto plan = ::Agentmaster::DecideDraftClear(box, spent);
+            if (plan.action == ::Agentmaster::DraftClearAction::Done)
+            {
+                cleared = true;
+                break;
+            }
+            if (plan.action == ::Agentmaster::DraftClearAction::GiveUp)
+            {
+                break;
+            }
+            if (plan.action == ::Agentmaster::DraftClearAction::Stash)
+            {
+                _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildInputStash());
+                ++spent.stashPresses;
+            }
+            else if (plan.action == ::Agentmaster::DraftClearAction::Kill)
+            {
+                _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildInputKill());
+                ++spent.killPresses;
+            }
+            else
+            {
+                _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildBackspaces(plan.backspaces));
+                ++spent.backspaceRounds;
+            }
+            const std::wstring before = box;
+            for (int64_t settled = 0; settled <= kDraftSwapActionSettleMs; settled += kDraftSwapPollMs)
+            {
+                co_await winrt::resume_after(std::chrono::milliseconds(kDraftSwapPollMs));
+                co_await wil::resume_foreground(Dispatcher());
+                if (!_sessionRegistry)
+                {
+                    _EndDraftSwap(sessionId, true); // hand the tab back even on a defensive bail
+                    co_return;
+                }
+                box = _ReadLiveDraftForSession(sessionId);
+                if (box != before)
+                {
+                    break; // the keystroke landed + repainted — judge the rung on this
+                }
+            }
+            spent.shrank = box.size() < before.size();
+        }
+
+        if (cleared)
+        {
+            // The draft is out of the box and already in the queue, so it is no longer an unsent draft:
+            // tell the registry NOW (drops the "3 dots" + disables the MAIL button immediately, instead of
+            // waiting out the scanner's ~2-tick clear debounce — which also closes the window where a fast
+            // re-click would re-queue the still-remembered draft). Honest: the box is VERIFIED empty.
+            _sessionRegistry->SetPendingInput(sessionId, L"");
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-clear] " + sid8 + L" cleared (moved to the queue)\n");
+        }
+        else
+        {
+            // Best-effort: the box would not empty. The prompt is already queued, so the only cost is that
+            // the draft is ALSO still in the box (== a Shift+Click). Leave pendingInput alone (the draft is
+            // genuinely still there) and let the user clear it by hand.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-clear] " + sid8 + L" NOT cleared (the box would not empty after " + std::to_wstring(spent.stashPresses) + L" stash + " + std::to_wstring(spent.killPresses) + L" kill + " + std::to_wstring(spent.backspaceRounds) + L" backspace round(s)) - draft left in place (it is still queued)\n");
+        }
+        _EndDraftSwap(sessionId, true); // UNLOCK (only the read-only WE took)
     }
 
     // Agentmaster (eager-init / "Activate Tab"): start a DORMANT session's claude IN PLACE — without
