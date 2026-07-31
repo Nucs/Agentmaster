@@ -3628,7 +3628,20 @@ build **binlog uploads as an artifact** to diagnose the first run.
   drop (`Rdi=0`), proving a large cache is a realization HINT the panel may not honor; and (2) every
   **check-then-allow gate is structurally beaten** — the begin logged means the SAME loop walked
   `[0..draggedIndex]` successfully at drag-START, and 2.5 s later the drop AVed, so mid-drag
-  derealization defeats any gate that can only veto the START (the drop cannot be vetoed). The
+  derealization defeats any gate that can only veto the START (the drop cannot be vetoed). **The LOAD
+  link (user-observed: "reproduces when the machine/process is loaded and slow") is the mechanism
+  behind the intermittency**: container realization + cache-buffer fill are DEFERRED, low-priority
+  UI-thread work while INPUT is dispatched at high priority — so on a busy UI thread the drag's
+  lookup runs AHEAD of the very realization that would have made it safe (the priority inversion).
+  Idle machine ⇒ buffers fill ⇒ lucky windows where the lookup passes; loaded machine (a 166-tab /
+  605-session fleet's own per-tick UI work counts) ⇒ the realized set starves toward the bare
+  viewport ⇒ near-certain AV — which is why "fork then IMMEDIATELY drag" was the first repro (the
+  fork's insert+reveal queues mass re-virtualization the drag then outruns), why the CacheLength
+  hint could pass an idle-machine test yet fail live, and why load also lengthens drags (jank ⇒
+  longer button-hold ⇒ a wider mid-drag derealization window for the DROP-side variant). The
+  shipped resolution is deliberately LOAD-IMMUNE: no step of the pointer-owned gesture depends on
+  realization timing (bands read only what IS realized; the caret-commit applies exactly the slot
+  last shown — under load the caret merely updates less often). The
   **Content-trick family is dead too**: the parent probe is a SINGLE-level
   `VisualTreeHelper::GetParent(fe)` (no walk-up), and WT uses the STOCK TabView template (no
   retemplate in-repo), whose `TabView::UpdateTabContent` re-parents `tvi.Content()` into the
