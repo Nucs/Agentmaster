@@ -12,14 +12,20 @@ description: |
   mapped resources.pri, 0x80070020 same-full-name re-register collisions (orphaned
   claudes pin a removed package — bump the layout version, never kill them), stale
   build-mutex reclaim, Git-Bash msbuild invocation quirks, the ~156s `.appxsym` symbol-package
-  skip (the wrapper's default `/p:AppxSymbolPackageEnabled=false`, a measured 4–10x speedup), and
-  the transient `D8040` / `C1083 Permission denied` obj-lock build failure (clear leftover
-  MSBuild/mspdbsrv nodes, retry). Use when asked to build, rebuild, compile-check,
-  deploy/reinstall/relaunch the dev or production instance, make the build faster,
-  register the loose layout, or diagnose a build/registration failure.
-keywords: build, install, deploy, register, relaunch, msbuild, TerminalAppLib, ClCompile, loose layout, Add-AppxPackage, Remove-AppxPackage, AgentmasterDev, Agentmaster, profile picker, resources.pri, PRI210, 0x80070020, 0x80073CF6, am-lock, build mutex, run-m5-tests, appxsym, AppxSymbolPackageEnabled, build speed, faster build, slow build, D8040, GenerateAppxSymbolPackage
-keywords-sparse: build the app, install it here, deploy dev, deploy production, reinstall agentmaster, relaunch the instance, compile check, register the layout, the build failed, make the build faster, build is slow
-keywords-regex: \bbuild\b|\binstall\b|\bdeploy\b|\bregister\b|\brelaunch\b|\bmsbuild\b|PRI210|0x800704c8|0x80070020|0x80073CF6|resources\.pri|Add-AppxPackage|appxsym|AppxSymbolPackageEnabled|D8040|GenerateAppxSymbolPackage
+  skip (the wrapper's default `/p:AppxSymbolPackageEnabled=false`, a measured 4–10x speedup), the
+  transient `D8040` / `C1083 Permission denied` obj-lock build failure (clear leftover
+  MSBuild/mspdbsrv nodes, retry), and the STALE-INCREMENTAL-BUILD class after a `SessionModels.h`/
+  `SessionRegistry.*`/other widely-included header or a `.idl` changes struct layout or WinRT
+  properties — a plain `LNK2019` on a symbol that IS defined in source, an `/RTC1` stack-corruption
+  fail-fast, or a genuine `STATUS_HEAP_CORRUPTION` (`0xC0000374`) crash on launch, all fixed the
+  SAME way (purge `Generated Files` + both engine projects' `obj`, full rebuild with `-ClMpCount 6`
+  to dodge a PCH virtual-memory-exhaustion failure of its own under unbounded `/m`), confirmed 3x
+  in one session. Use when asked to build, rebuild, compile-check, deploy/reinstall/relaunch the
+  dev or production instance, make the build faster, register the loose layout, or diagnose a
+  build/registration/crash-on-launch failure.
+keywords: build, install, deploy, register, relaunch, msbuild, TerminalAppLib, ClCompile, loose layout, Add-AppxPackage, Remove-AppxPackage, AgentmasterDev, Agentmaster, profile picker, resources.pri, PRI210, 0x80070020, 0x80073CF6, am-lock, build mutex, run-m5-tests, appxsym, AppxSymbolPackageEnabled, build speed, faster build, slow build, D8040, GenerateAppxSymbolPackage, stale build, incremental build, LNK2019, unresolved external, heap corruption, 0xC0000374, STATUS_HEAP_CORRUPTION, RTC1, stack corruption, ClMpCount, PCH, C3859, C1076, crash on launch, purge Generated Files
+keywords-sparse: build the app, install it here, deploy dev, deploy production, reinstall agentmaster, relaunch the instance, compile check, register the layout, the build failed, make the build faster, build is slow, it crashes on launch, unresolved external symbol, heap corruption crash, deploy dev please, build and deploy dev
+keywords-regex: \bbuild\b|\binstall\b|\bdeploy\b|\bregister\b|\brelaunch\b|\bmsbuild\b|PRI210|0x800704c8|0x80070020|0x80073CF6|resources\.pri|Add-AppxPackage|appxsym|AppxSymbolPackageEnabled|D8040|GenerateAppxSymbolPackage|LNK2019|0xC0000374|STATUS_HEAP_CORRUPTION|ClMpCount|C3859|C1076
 ---
 
 # Agentmaster — build & install on THIS machine
@@ -133,12 +139,22 @@ Standing-authorized ("always auto deploy") — no prompting. Full cycle:
 
 ```bash
 # 0. self-kill check (§1.2)  →  1. mutex (§1.1)
+# 0.5. check what changed since the last deploy - decides step 3's flavor (§5.8):
+git diff --stat <last-deployed-commit>..HEAD -- '**/SessionModels.h' '**/SessionRegistry.*' '**/*.idl'
+# non-empty output => purge before building (§5.8), don't bother trying incremental first
 ```
 ```powershell
 # 2. close the dev instance (path filter; add '*\bin\x64\Debug\*' to spare production)
-# 3. build:  pwsh -ExecutionPolicy Bypass -File .\tools\Build-Agentmaster.ps1 -NoRestore
+# 3. build - EITHER:
+#    incremental (no header/idl hit above):  pwsh -ExecutionPolicy Bypass -File .\tools\Build-Agentmaster.ps1 -NoRestore
+#    OR purge+clean (header/idl hit, §5.8):  rm -rf "src/cascadia/TerminalApp/Generated Files" "obj/x64/Debug/TerminalApp" "obj/x64/Debug/TerminalAppLib"
+#                                             pwsh -ExecutionPolicy Bypass -File .\tools\Build-Agentmaster.ps1 -NoRestore -ClMpCount 6
 # 4. relaunch:
 Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"
+# 4.5. verify it didn't crash on startup - wait for the window restore to genuinely finish
+#      (grep hooks.log for the tail-end "drag re-enabled on Loaded" burst / "window-save", not
+#      just "process exists 5s after launch" - a heap-corruption crash can take longer than that)
+#      before calling it stable; a Debug/dev pid disappearing after a Start-Process ~= it crashed.
 ```
 ```bash
 # 5. release the mutex
@@ -195,7 +211,14 @@ Start-Process "shell:appsFolder\Agentmaster_56k4f06dsfp9r!App"
 1. **`PRI210 / 0x800704c8` — "File move failed … resources.pri"** during a package build:
    the REGISTERED layout keeps `resources.pri` memory-mapped (no owning process visible).
    Fix: `rm src/cascadia/CascadiaPackage/bin/x64/<Config>/resources.pri` and rebuild —
-   MakePri then *creates* instead of overwriting. (First occurrence per layout is ~normal.)
+   MakePri then *creates* instead of overwriting. **Recurs reliably, not just "first occurrence
+   per layout"** — hit on the FIRST build of a deploy cycle twice in one session, both times
+   after the dev instance had been running a while before being closed. Cheap prevention: delete
+   it proactively BEFORE the first build of a cycle (same idiom as §5.7's daemon-clear) instead
+   of waiting to hit the error and retry:
+   ```bash
+   rm -f "src/cascadia/CascadiaPackage/bin/x64/Debug/resources.pri"
+   ```
 2. **Exe link fails / `LNK1104` on `WindowsTerminal.exe`**: that configuration's instance is
    still running — you skipped the close (or another window respawned). Re-run the path-
    filtered close for THAT tree, rebuild.
@@ -238,6 +261,38 @@ Start-Process "shell:appsFolder\Agentmaster_56k4f06dsfp9r!App"
    Hit + recovered live this session (first build failed, retry after the kill went clean). Cheap
    prevention: a pre-build `Get-Process MSBuild,mspdbsrv,cl` check before the FIRST build of a cycle
    (if any are resident from a prior aborted build, clear them first).
+8. **A binary that BUILDS clean but then crashes on launch, or a build that LINK-fails on a
+   symbol you can `grep` and find fully defined in source — after `AgentMaster/SessionModels.h`,
+   `SessionRegistry.{h,cpp}`, or another widely-included engine header changed struct layout, OR
+   after a `.idl` gained/changed a WinRT property.** This is MSBuild's incremental up-to-date
+   check under-tracking a dependency — some TUs get recompiled against the NEW layout/ABI, others
+   keep a STALE `.obj` compiled against the old one, and the mismatch either fails to link
+   (`LNK2019` on a symbol that genuinely exists — confirmed twice: `_OnPullDraftClicked`/
+   `_UpdateDraftPullButton` both defined in `AgentManagerContent.AutoTesting.cpp`, unresolved
+   anyway) or links fine and corrupts memory at runtime (confirmed twice more: an `/RTC1` stack
+   guard-byte failure inside `TabHeaderControl`'s ctor after `TerminalTabStatus.idl` gained new
+   properties — the NATIVE `.g.h`/`.g.cpp` WinRT glue was stale while the consumer projection
+   wasn't, proven by comparing `Generated Files\*.g.cpp` timestamps; and a genuine
+   `STATUS_HEAP_CORRUPTION` (`0xC0000374`) inside `TerminalPage`'s ctor / `TabRowControl`
+   activation, 100% reproducible with IDENTICAL registers across two separate launches of the
+   same binary). **Don't try to diagnose these individually — the fix is the same and cheap:
+   purge the generated glue + both engine projects' `obj`, then a FULL rebuild:**
+   ```bash
+   rm -rf "src/cascadia/TerminalApp/Generated Files" "obj/x64/<Config>/TerminalApp" "obj/x64/<Config>/TerminalAppLib"
+   pwsh -ExecutionPolicy Bypass -File ./tools/Build-Agentmaster.ps1 -NoRestore -ClMpCount 6
+   ```
+   **`-ClMpCount 6` is not optional here** — purging forces the WHOLE project to recompile in one
+   shot, and unbounded `/m` parallelism against every PCH-consuming TU at once measured a HARD
+   failure of its own (`error C3859: Failed to create virtual memory for PCH` + `error C1076:
+   compiler limit: internal heap limit reached`, tens of TUs at once) on this 32-thread/64GB
+   machine; throttled to 6 it's clean. Costs ~150–250s instead of the usual ~20–50s, but is the
+   only reliable fix — confirmed 3 separate times in one session: every purge+clean-rebuild
+   produced a stable binary (verified by watching a 45–50-tab window-restore run to completion,
+   `Responding=True`, no new `%LOCALAPPDATA%\CrashDumps\WindowsTerminal.exe.*.dmp`), and every
+   plain incremental rebuild attempted instead of a purge, after one of these header/idl changes,
+   reproduced a failure. **Default to purging whenever `git diff` on the commits since your last
+   known-good deploy touches `SessionModels.h`, `SessionRegistry.{h,cpp}`, or any `.idl` file** —
+   don't wait for the crash to prove it's needed.
 
 ## 6. Post-install verification checklist
 
