@@ -72,7 +72,7 @@ namespace winrt::TerminalApp::implementation
         // selected session.
         void SetHoverSessionHandler(std::function<void(winrt::hstring, bool)> handler);
         void SetArchiveHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> Close (shut down, keep the record so it stays resumable in Sessions; FAVORITES.md)
-        void SetCloseFolderHandler(std::function<void(winrt::hstring)> handler); // (folder) -> "Close ▸ Of Same Folder": close every live managed session whose effective work dir == folder (the content shows the ONE confirm listing titles; the page does the cross-window batch)
+        void SetCloseFolderHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (folder, excludeId) -> "Close ▸ Of Same Folder" / "Other of Same Folder": close every live managed session whose effective work dir == folder, SKIPPING excludeId when non-empty (the content shows the ONE confirm listing titles; the page does the cross-window batch)
         void SetRestoreHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> re-launch (resume) a closed session
         // Agentmaster: the Launch box accepts EITHER a working dir OR a session id. A FOUND session id
         // turns the launch button into "Resume session" (resume the conversation) and reveals a "Fork"
@@ -520,7 +520,7 @@ namespace winrt::TerminalApp::implementation
         void _CommitRename(); // apply the in-place editor's text to the session title
         void _CancelRename(); // discard the in-place editor (Esc)
         void _RequestArchive(const std::wstring& id); // route to the page's Close seam (presents the confirm + closes the tab; keeps the record so it stays resumable in Sessions — FAVORITES.md)
-        void _CloseSessionsInFolder(const std::wstring& folder); // "Close ▸ Of Same Folder": enumerate every live managed session in `folder`, show ONE confirm listing their titles, then hand the folder to the page's cross-window batch-close (_closeFolderHandler)
+        void _CloseSessionsInFolder(const std::wstring& folder, const std::wstring& excludeId = {}); // "Close ▸ Of Same Folder" (excludeId empty) / "Other of Same Folder" (excludeId == this session): enumerate every live managed session in `folder` (skipping excludeId), show ONE confirm listing their titles, then hand (folder, excludeId) to the page's cross-window batch-close (_closeFolderHandler)
 
         // Settings cog: an in-content modal overlay (NOT a ContentDialog — a text box inside a
         // ContentDialog receives no keypresses in XAML Islands; see the _renameBox note). Built
@@ -676,7 +676,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(bool)> _activateAllHandler; // Agentmaster (eager-init): "Activate All Tabs" -> wake every dormant tab (allWindows=false this window only / true + fan out)
         std::function<void(winrt::hstring, bool)> _hoverSessionHandler; // Agentmaster (Linked Lenses): push a managed card/row pointer enter/leave (id, entering) so the page pills its tab
         std::function<void(winrt::hstring)> _archiveHandler;
-        std::function<void(winrt::hstring)> _closeFolderHandler; // Agentmaster ("Close ▸ Of Same Folder"): (folder) -> the page closes every live managed session in that folder (cross-window), the content having already shown the one confirm
+        std::function<void(winrt::hstring, winrt::hstring)> _closeFolderHandler; // Agentmaster ("Close ▸ Of Same Folder" / "Other of Same Folder"): (folder, excludeId) -> the page closes every live managed session in that folder (cross-window) SKIPPING excludeId, the content having already shown the one confirm
         std::function<void(winrt::hstring)> _restoreHandler;
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _resumeSessionHandler; // Agentmaster: launch box holds a FOUND session id -> resume it (id, dir, title)
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _forkSessionHandler; // Agentmaster: launch box Fork -> fork the session id (id, dir, title)

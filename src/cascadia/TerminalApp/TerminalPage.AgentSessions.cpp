@@ -1281,9 +1281,10 @@ namespace winrt::TerminalApp::implementation
     // anywhere) is archived in place, mirroring _ArchiveClaudeSession's dead branch; an alive-but-not-
     // hosted-here session (bound in another window, or mid-bind) is left to its owner — the same
     // conservative guard as the single Close (never fake-archive a still-running claude — Rule #7).
-    void TerminalPage::_CloseClaudeSessionsInFolder(winrt::hstring folder)
+    void TerminalPage::_CloseClaudeSessionsInFolder(winrt::hstring folder, winrt::hstring excludeId)
     {
         const std::wstring dir{ folder };
+        const std::wstring exclude{ excludeId }; // "Other of Same Folder" passes the clicked session so it stays open
         if (dir.empty() || !_sessionRegistry)
         {
             return;
@@ -1291,17 +1292,18 @@ namespace winrt::TerminalApp::implementation
         // Collect the target ids from a SNAPSHOT first — closing mutates _claudeTabs AND the registry,
         // so never iterate either live container while closing. Match by the CANONICAL dir key
         // (NormDirKey — case/slash/trailing-normalized), the page-side equivalent of the content's PathEq
-        // (which is content-TU-local), over the SAME EffectiveWorkingDir the content used to build the list.
+        // (which is content-TU-local), over the SAME EffectiveWorkingDir the content used to build the
+        // list, and skip `exclude` (empty for "Of Same Folder").
         const std::wstring dirKey = ::Agentmaster::NormDirKey(dir);
         std::vector<std::wstring> targets;
         for (const auto& s : _sessionRegistry->Snapshot())
         {
-            if (s.live && ::Agentmaster::NormDirKey(::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, s)) == dirKey)
+            if (s.live && s.id != exclude && ::Agentmaster::NormDirKey(::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, s)) == dirKey)
             {
                 targets.push_back(s.id);
             }
         }
-        ::Agentmaster::LogNav(L"close-folder begin dir=" + dir + L" sessions=" + std::to_wstring(targets.size()));
+        ::Agentmaster::LogNav(L"close-folder begin dir=" + dir + (exclude.empty() ? std::wstring{} : (L" except=" + ::Agentmaster::ShortId(exclude))) + L" sessions=" + std::to_wstring(targets.size()));
         for (const auto& id : targets)
         {
             const auto it = _claudeTabs.find(id);
