@@ -314,28 +314,42 @@ namespace winrt::TerminalApp::implementation
 
     void AgentTabOverlay::_OpenFolder()
     {
-        if (!_registry || _sessionId.empty())
+        // Delegate to the ONE shared open-path action (AgentCopyActions.h), which the WT tab menu's
+        // "Open In Explorer" item also calls — so the overlay's folder button and the tab menu resolve
+        // the SAME EffectiveWorkingDir(inferred→cwd) folder and can never disagree.
+        if (_registry)
+        {
+            OpenSessionFolder(*_registry, _sessionId, _tabColorMode);
+        }
+    }
+
+    // Agentmaster (AgentCopyActions.h): the shared "open a session's working folder in explorer.exe"
+    // action — the overlay's folder button (Open Path, via _OpenFolder above) AND the WT tab menu's
+    // "Open In Explorer" item both route through here, so they can never open a DIFFERENT folder.
+    // Resolves EffectiveWorkingDir(tabColorMode, s) (the INFERRED dir while the session infers, else the
+    // launch cwd — matching Copy Path / the overlay subline), falling back to the live PEB cwd.
+    void OpenSessionFolder(SessionRegistry& registry, const std::wstring& sessionId, int tabColorMode)
+    {
+        if (sessionId.empty())
         {
             return;
         }
-        const auto info = _registry->Get(_sessionId);
+        const auto info = registry.Get(sessionId);
         if (!info)
         {
             return;
         }
-        // The session's EFFECTIVE work dir (EffectiveWorkingDir — the INFERRED dir under the Inferred
-        // tab-color mode, else the persisted M-axis workingDir; the same resolution as row 2); fall
-        // back to the live PEB cwd. Opens where the session actually WORKS — the folder row 2 names.
-        const std::wstring effDir = ::Agentmaster::EffectiveWorkingDir(static_cast<::Agentmaster::TabColorMode>(_tabColorMode), *info);
-        std::wstring dir = !effDir.empty() ? effDir : info->liveCwd;
-        if (!dir.empty())
+        const std::wstring effDir = ::Agentmaster::EffectiveWorkingDir(static_cast<::Agentmaster::TabColorMode>(tabColorMode), *info);
+        const std::wstring dir = !effDir.empty() ? effDir : info->liveCwd;
+        if (dir.empty())
         {
-            // Nav audit: the user clicked the overlay's folder button (Open Path) — opens the session's
-            // working dir in explorer.exe.
-            ::Agentmaster::LogNav(L"open-path " + ::Agentmaster::ShortId(_sessionId) + L" dir=" + dir);
-            OpenPathInExplorerAsync(dir);
-            PlayActionSound(); // same click feedback as the copy menu (Open Path)
+            return;
         }
+        // Nav audit: the user asked to open the session's working dir in explorer.exe (the overlay's
+        // folder button OR the tab menu's "Open In Explorer" — same [nav] tag, same action).
+        ::Agentmaster::LogNav(L"open-path " + ::Agentmaster::ShortId(sessionId) + L" dir=" + dir);
+        OpenPathInExplorerAsync(dir);
+        PlayActionSound(); // same click feedback as the copy menu (Open Path)
     }
 
     // Agentmaster: the shared copy-field action (declared in AgentCopyActions.h) — the SINGLE

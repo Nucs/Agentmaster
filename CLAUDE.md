@@ -2985,7 +2985,15 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     `ControlCore::ReadPendingInputDraft`), absent/failing/`""` for a session hosted in another window, a
     dormant tab or a torn-down control — falling back to the observer's recorded
     `SessionInfo::pendingInput` (possibly the persisted memory), chosen by the pure, unit-tested
-    `PickCurrentPromptText` (`PendingInput.h`). Claude only (Codex has no `❯` input box).
+    `PickCurrentPromptText` (`PendingInput.h`). Claude only (Codex has no `❯` input box). Also
+    **`OpenSessionFolder`** — the ONE shared "open a session's working folder in explorer.exe" action
+    (resolves `EffectiveWorkingDir(mode, s)` — the INFERRED dir while the session infers, else the launch
+    cwd — falling back to the live PEB cwd; opens off-thread + the click chime + `[nav] open-path`). Both
+    the per-tab overlay's **Open Path** folder button (`AgentTabOverlay::_OpenFolder` now delegates to it)
+    AND the **WT tab menu's "Open In Explorer"** item (`Tab::OpenInExplorerRequested` →
+    `TerminalPage::_RegisterTabEvents` → `OpenSessionFolder`) route through it, so they can never resolve a
+    different folder — session-only, shown at flyout-open via `Tab::SetAgentOpenInExplorerVisible` (the
+    `SetAgentMarkUnreadVisible` idiom). Implemented in `AgentTabOverlay.Actions.cpp` beside `CopySessionField`.
   - `src/cascadia/TerminalApp/TerminalPage.Agent{Engine,Sessions,Observer,WindowRecord,SessionsPage}.cpp`
     — the TerminalPage-side Agentmaster *implementation* in five same-class TUs (the upstream
     `TabManagement.cpp` pattern). (**`TerminalPage.AgentArchivePage.cpp` was DELETED** — the full-window

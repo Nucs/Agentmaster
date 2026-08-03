@@ -2593,6 +2593,24 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster: context-menu "Open In Explorer" -> open THIS tab's managed session's EFFECTIVE
+        // working directory (the inferred dir while it infers, else the launch cwd) in explorer.exe,
+        // through the SAME shared OpenSessionFolder action the per-tab overlay's Open Path folder button
+        // runs — so the tab menu and the overlay always open the same folder. No-op on a non-session tab
+        // (the item is hidden there anyway — see the flyout Opening handler below).
+        hostingTab.OpenInExplorerRequested([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (!page || !tab || !page->_sessionRegistry)
+            {
+                return;
+            }
+            if (const auto sid = page->_ClaudeSessionForTab(*tab); !sid.empty())
+            {
+                OpenSessionFolder(*page->_sessionRegistry, sid, static_cast<int>(page->_appSettings.tabColorMode));
+            }
+        });
+
         // Agentmaster (Waiting-for-you + Error triage): context-menu "Move to Idle/Done" / "Move to
         // Waiting-for-you" -> move THIS tab's managed session between the WaitingForInput/Error and
         // Idle/Done triage states (an Error demote is the error DISMISSAL). The tab-menu twin of the
@@ -2782,6 +2800,7 @@ namespace winrt::TerminalApp::implementation
                     tab->SetNewSessionModels(launchModels, isCodex, page->_ModelSpecifyOpener());
                     tab->SetForkSessionModels(launchModels, isSession && !isCodex, page->_ModelSpecifyOpener());
                     tab->SetAgentMarkUnreadVisible(isSession); // Agentmaster: "Mark Unread" is session-only too
+                    tab->SetAgentOpenInExplorerVisible(isSession); // Agentmaster: "Open In Explorer" is session-only too (opens the session's EFFECTIVE work dir — inferred → cwd — like the overlay Open Path)
                     tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star
                     tab->SetAgentTagVisible(isSession); // Agentmaster (bookmark tags): "Tag" is session-only too
                     // Agentmaster (tab color modes — NoColor/"Remove colors"): NO tab can be

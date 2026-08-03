@@ -2295,6 +2295,29 @@ namespace winrt::TerminalApp::implementation
         }
 
         {
+            // "Open In Explorer" (Agentmaster) — open this session's EFFECTIVE working directory (the
+            // inferred dir while it infers, else the launch cwd) in explorer.exe. Reuses the SAME shared
+            // OpenSessionFolder action the per-tab overlay's folder button (Open Path) runs, so both
+            // resolve the same folder. Built COLLAPSED — the page shows it (SetAgentOpenInExplorerVisible
+            // at flyout-open) only on a managed agent-session tab, like "Mark Unread"; raises
+            // OpenInExplorerRequested and the page resolves THIS tab's session + opens the folder.
+            Controls::FontIcon openExplorerSymbol;
+            openExplorerSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            openExplorerSymbol.Glyph(L"\xE838"); // FolderOpen
+
+            _openInExplorerMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->OpenInExplorerRequested.raise();
+                }
+            });
+            _openInExplorerMenuItem.Text(L"Open In Explorer");
+            _openInExplorerMenuItem.Icon(openExplorerSymbol);
+            _openInExplorerMenuItem.Visibility(WUX::Visibility::Collapsed); // shown only on a managed agent-session tab (page-driven)
+            WUX::Controls::ToolTipService::SetToolTip(_openInExplorerMenuItem, box_value(winrt::hstring{ L"Open this session's working directory in File Explorer" }));
+        }
+
+        {
             // "Move to Idle/Done" / "Move to Waiting-for-you" (Agentmaster, Waiting-for-you + Error triage)
             // — a status-adaptive manual state move: the tab-menu twin of the Triage Board card's "Move to
             // Idle/Done", plus its reverse. Built COLLAPSED with a placeholder label; the page shows it and
@@ -2552,6 +2575,7 @@ namespace winrt::TerminalApp::implementation
         contextMenuFlyout.Items().Append(_renameTabMenuItem);
         contextMenuFlyout.Items().Append(_copySessionSubMenu); // Agentmaster: "Copy >" directly below "Rename Tab" (hidden unless this tab hosts a managed session)
         contextMenuFlyout.Items().Append(_markUnreadMenuItem); // Agentmaster: "Mark Unread" — session-only, grouped under "Copy >"
+        contextMenuFlyout.Items().Append(_openInExplorerMenuItem); // Agentmaster: "Open In Explorer" — session-only, beside "Mark Unread" (opens the session's working dir; the overlay Open Path twin)
         contextMenuFlyout.Items().Append(_triageMoveMenuItem); // Agentmaster (Waiting-for-you + Error triage): status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" — session-only, beside "Mark Unread"
         contextMenuFlyout.Items().Append(_favoriteMenuItem); // Agentmaster (FAVORITES.md): "Favorite"/"Unfavorite" — session-only, beside "Mark Unread"
         contextMenuFlyout.Items().Append(_tagMenuItem); // Agentmaster (bookmark tags): "Tag" — session-only, beside "Favorite"
@@ -2721,6 +2745,17 @@ namespace winrt::TerminalApp::implementation
         ASSERT_UI_THREAD();
 
         _markUnreadMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+    }
+
+    // Agentmaster: show/hide the "Open In Explorer" item. Like SetAgentMarkUnreadVisible, the page
+    // resolves whether THIS tab hosts a managed agent session and calls this at flyout-open, so the item
+    // appears only on a linked Claude/Codex tab (never a plain shell / the pinned Manager tab) — matching
+    // where the per-tab overlay's Open Path folder button appears.
+    void Tab::SetAgentOpenInExplorerVisible(bool visible)
+    {
+        ASSERT_UI_THREAD();
+
+        _openInExplorerMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
     }
 
     // Agentmaster (Waiting-for-you + Error triage): show/hide the status-adaptive triage-move item AND set

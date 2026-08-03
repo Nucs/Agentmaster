@@ -59,4 +59,15 @@ namespace winrt::TerminalApp::implementation
                           bool truncate,
                           int tabColorMode = 0,
                           const std::function<std::wstring()>& liveDraft = {});
+
+    // Agentmaster (TAB_OVERLAY.md): open a session's EFFECTIVE working directory in explorer.exe — the
+    // ONE shared "open path" action behind BOTH the per-tab overlay's folder button (Open Path) AND the
+    // WT tab menu's "Open In Explorer" item, so the two can never resolve a DIFFERENT folder. It resolves
+    // EffectiveWorkingDir(tabColorMode, s) — the INFERRED dir while the session infers, else the launch
+    // cwd (the SAME resolution as Copy Path, case 1 above, and the overlay subline) — falling back to the
+    // live PEB cwd, then opens it OFF-thread (ShellExecuteEx explorer.exe). A no-op for an unknown session
+    // id or an empty dir; plays the same click chime and logs [nav] open-path. Call from the UI thread.
+    // Works for Claude AND Codex (both have a working directory). Implemented in AgentTabOverlay.cpp
+    // beside CopySessionField, so the tab-menu handler (page) links the exact same code the overlay runs.
+    void OpenSessionFolder(::Agentmaster::SessionRegistry& registry, const std::wstring& sessionId, int tabColorMode);
 }
