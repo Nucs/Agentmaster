@@ -234,6 +234,11 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::UnregisterWindowRestartHandler(_windowRestartToken);
         }
+        // Agentmaster (cross-window "Close ▸ Of Same Folder"): drop this window's close-session sink too (Rule #10).
+        if (_windowCloseSessionToken)
+        {
+            ::Agentmaster::UnregisterWindowCloseSessionHandler(_windowCloseSessionToken);
+        }
         // Agentmaster (eager-init "Activate All Tabs"): drop this window's activate-all sink too (Rule #10).
         if (_windowActivateAllToken)
         {
@@ -665,6 +670,25 @@ namespace winrt::TerminalApp::implementation
             });
         }
 
+        // Cross-window close-session sink ("Close ▸ Of Same Folder"): the board/tree session menu closes
+        // every live managed session sharing a folder; the initiating window closes the tabs it hosts and
+        // fans the rest out here. When ANOTHER window's folder-close targets a session hosted HERE, this
+        // sink hops to this window's UI thread and closes its tab (skip-confirm — the initiating window's
+        // one "Close N sessions in this folder?" dialog already covered the whole batch). A miss is a
+        // no-op. Detached in ~TerminalPage (Rule #10).
+        {
+            const auto weakThis = get_weak();
+            const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
+            _windowCloseSessionToken = ::Agentmaster::RegisterWindowCloseSessionHandler(_windowId, [weakThis, dispatcher](const std::wstring& id) {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, id]() {
+                    if (auto self = weakThis.get())
+                    {
+                        self->_CloseClaudeSessionLocal(id);
+                    }
+                });
+            });
+        }
+
         // Cross-window "Activate All Tabs" sink (eager-init): the Manager's fleet-wide "Activate All Tabs"
         // in ANOTHER window fans out here; this sink hops to this window's UI thread and eager-inits all of
         // its OWN dormant tabs (a tab can only be started in the window that hosts its control). Detached in
@@ -1042,6 +1066,15 @@ namespace winrt::TerminalApp::implementation
             if (auto self = weakThis.get())
             {
                 self->_ArchiveClaudeSession(id);
+            }
+        });
+        // Agentmaster (board/tree session menu — "Close ▸ Of Same Folder"): close every live managed
+        // session whose effective work dir matches the folder. The content already showed the ONE confirm
+        // listing the titles; the page does the batch close (local tabs directly, cross-window fanned out).
+        content->SetCloseFolderHandler([weakThis](winrt::hstring folder) {
+            if (auto self = weakThis.get())
+            {
+                self->_CloseClaudeSessionsInFolder(folder);
             }
         });
         content->SetRestoreHandler([weakThis](winrt::hstring id) {

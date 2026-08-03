@@ -313,6 +313,10 @@ namespace winrt::TerminalApp::implementation
     {
         _archiveHandler = std::move(handler);
     }
+    void AgentManagerContent::SetCloseFolderHandler(std::function<void(winrt::hstring)> handler)
+    {
+        _closeFolderHandler = std::move(handler);
+    }
     void AgentManagerContent::SetRestoreHandler(std::function<void(winrt::hstring)> handler)
     {
         _restoreHandler = std::move(handler);

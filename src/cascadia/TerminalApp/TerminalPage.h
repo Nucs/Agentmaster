@@ -366,6 +366,11 @@ namespace winrt::TerminalApp::implementation
         // hops to this window's UI thread and rebuilds its ConPTY connection in place. Detached in
         // ~TerminalPage (Rule #10).
         uint64_t _windowRestartToken{ 0 };
+        // Agentmaster (cross-window "Close ▸ Of Same Folder"): this window's close-session sink on the
+        // shared engine — a folder-close initiated in ANOTHER window fans a session hosted HERE out to
+        // this sink, which hops to this window's UI thread and closes its tab (skip-confirm — the
+        // initiating window's one dialog already covered the batch). Detached in ~TerminalPage (Rule #10).
+        uint64_t _windowCloseSessionToken{ 0 };
         // Agentmaster (eager-init / "Activate All Tabs"): this window's "wake all dormant tabs" sink on
         // the shared engine — the Manager's fleet-wide "Activate All" in ANOTHER window fans out here, and
         // this window eager-inits its own dormant controls. Detached in ~TerminalPage (Rule #10).
@@ -1161,6 +1166,8 @@ namespace winrt::TerminalApp::implementation
         void _RestartClaudeSession(winrt::hstring sessionId); // Agentmaster (Triage Board / Explorer-tree "Restart session"): restart a managed session's connection in place — local first, then fan out to the hosting window (RestartSessionInOtherWindows), mirroring _ActivateClaudeSession
         bool _RestartClaudeSessionLocal(const std::wstring& sessionId); // Agentmaster (cross-window restart): restart the session's tab IN THIS WINDOW via _restartPaneConnection (the NotConnected guard + _RestartManagedSession); the receiving half of the restart sink. Returns false when this window doesn't host the session's tab.
         void _ArchiveClaudeSession(winrt::hstring sessionId); // Agentmaster: archive (shut down + keep restorable) via the tab-close seam
+        void _CloseClaudeSessionsInFolder(winrt::hstring folder); // Agentmaster (board/tree "Close ▸ Of Same Folder"): close every live managed session whose effective work dir == `folder` — local tabs directly (skip-confirm; the content already showed the one confirm), remote ones fanned out via CloseSessionInOtherWindows
+        bool _CloseClaudeSessionLocal(const std::wstring& sessionId); // Agentmaster (cross-window folder-close): close the session's tab IN THIS WINDOW (skip-confirm), the receiving half of the close-session sink. Returns false when this window doesn't host the session's tab.
         TerminalApp::Tab _RestoreArchivedSession(winrt::hstring sessionId); // Agentmaster: re-launch (claude --resume / codex resume) an archived session — kind-aware; returns the created tab (null on gate/no-op) so the resume nav-END can log the actually-launched id
         void _AdoptExternalClaude(uint32_t pid, winrt::hstring cwd, bool fork); // Agentmaster (Fleet Observer): bring an EXTERNAL claude's conversation under management (fork==true => --fork-session into a NEW transcript [safe on a live external]; else --resume the same; fresh if none)
         winrt::fire_and_forget _PromptClaudeMissing(); // Agentmaster (native-exe-only policy): the page-level "Claude Code (native) not found" notice — shown by the launch choke points (Restore/Resume/Fork/Adopt/Spawn) when EnsureClaudeAvailable() is false and the Manager tab's rich modal can't render (full-window page / tab / CLI). Idempotent via _claudeMissingPromptShowing (collapses a bulk loop to one dialog); no Re-check by design — the next attempt re-resolves.

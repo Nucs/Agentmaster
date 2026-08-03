@@ -1763,8 +1763,16 @@ What works, by area:
   (jump to the live tab), and **right-click opens the SAME context menu** as the tree session row —
   also surfaced by a **hover-revealed `⋯` more-button** in the card's top-right corner (a
   discoverable twin for users who never right-click)
-  (`_MakeSessionMenu` — **Jump to Tab** / Rename (F2) / **Close** (always archives, keeps it resumable in
-  Sessions; FAVORITES.md) / Open New
+  (`_MakeSessionMenu` — **Jump to Tab** / Rename (F2) / a **Close ▸** submenu [**This Session** (always
+  archives, keeps it resumable in Sessions; FAVORITES.md) · **Of Same Folder** — close EVERY live managed
+  session sharing this one's EFFECTIVE work dir (`_WorkDirOf` = the inferred dir while it infers, else the
+  launch cwd — the SAME key the Explorer Tree groups by; the item is hidden when that dir is empty). The
+  content shows ONE confirm LISTING the tab titles (capped at 20 + "…and N more"), then hands the folder to
+  the page's `_CloseClaudeSessionsInFolder` — a **cross-window** batch close: local tabs archived+closed
+  directly (skip-confirm), remote ones fanned out via the new `CloseSessionInOtherWindows` engine sink
+  (`RegisterWindowCloseSessionHandler` → `_CloseClaudeSessionLocal`, mirroring the restart sink), an
+  already-exited session archived in place, an alive-but-unhosted one left open (Rule #7). Logs `[nav]
+  close-folder begin/done`] / Open New
   Session Here / a **Copy** submenu [Session Id · Path · Branch · Current Prompt · Launch CLI · Transcript ·
   Summary, via the shared `CopySessionField`]; a board-invoked Rename first
   makes the tree row renderable — un-collapses its dir, widens a LOCAL scope to GLOBAL for a

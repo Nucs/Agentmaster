@@ -1270,6 +1270,86 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (board/tree session menu — "Close ▸ Of Same Folder"): close EVERY live managed
+    // session whose EFFECTIVE work dir (EffectiveWorkingDir — the inferred dir while the session infers,
+    // else the launch cwd — the SAME key the Explorer Tree groups by and the board bands paint) matches
+    // `folder`. The Manager content already showed the ONE "Close N sessions in this folder?" confirm
+    // listing the titles, so this just DOES the batch with no per-session confirm. Cross-window: a
+    // session's live tab lives in exactly one window — the ones THIS window hosts are archived+closed
+    // directly (skip-confirm), the rest are fanned out to their hosting window (CloseSessionInOtherWindows),
+    // which closes them the same way. A session whose claude has EXITED but still reads live (no host
+    // anywhere) is archived in place, mirroring _ArchiveClaudeSession's dead branch; an alive-but-not-
+    // hosted-here session (bound in another window, or mid-bind) is left to its owner — the same
+    // conservative guard as the single Close (never fake-archive a still-running claude — Rule #7).
+    void TerminalPage::_CloseClaudeSessionsInFolder(winrt::hstring folder)
+    {
+        const std::wstring dir{ folder };
+        if (dir.empty() || !_sessionRegistry)
+        {
+            return;
+        }
+        // Collect the target ids from a SNAPSHOT first — closing mutates _claudeTabs AND the registry,
+        // so never iterate either live container while closing. Match by the CANONICAL dir key
+        // (NormDirKey — case/slash/trailing-normalized), the page-side equivalent of the content's PathEq
+        // (which is content-TU-local), over the SAME EffectiveWorkingDir the content used to build the list.
+        const std::wstring dirKey = ::Agentmaster::NormDirKey(dir);
+        std::vector<std::wstring> targets;
+        for (const auto& s : _sessionRegistry->Snapshot())
+        {
+            if (s.live && ::Agentmaster::NormDirKey(::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, s)) == dirKey)
+            {
+                targets.push_back(s.id);
+            }
+        }
+        ::Agentmaster::LogNav(L"close-folder begin dir=" + dir + L" sessions=" + std::to_wstring(targets.size()));
+        for (const auto& id : targets)
+        {
+            const auto it = _claudeTabs.find(id);
+            if (const auto tab = (it != _claudeTabs.end()) ? it->second.get() : nullptr)
+            {
+                // Hosted here — archive + close, skip-confirm (the folder dialog already ran). With
+                // skipConfirm the coroutine runs synchronously (no suspension point), so this loops
+                // sequentially like the per-tab close in _ArchiveClaudeSession — safe against the
+                // _claudeTabs mutation each close triggers (we iterate the snapshot `targets`, not the map).
+                _ArchiveAndCloseClaudeTab(tab, id, /*skipConfirm*/ true);
+                continue;
+            }
+            // Not hosted here. A still-RUNNING claude hosted in ANOTHER window is closed there (its sink
+            // skips its own confirm); an EXITED session (its process gone) is archived in place — the same
+            // dead-branch cleanup _ArchiveClaudeSession does. An alive-but-unhosted session (mid-bind /
+            // just carded) is left open, exactly as the single Close leaves it.
+            if (const auto info = _sessionRegistry->Get(id); info && info->pid != 0 && ::Agentmaster::ProcessAlive(info->pid))
+            {
+                ::Agentmaster::CloseSessionInOtherWindows(id, _windowId);
+                continue;
+            }
+            _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
+                s.live = false;
+                s.pendingConfirmPromptId.clear();
+            });
+            _sessionRegistry->SetInjector(id, nullptr);
+            _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
+            ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+        }
+        ::Agentmaster::LogNav(L"close-folder done dir=" + dir);
+    }
+
+    // Agentmaster (cross-window folder-close): close `sessionId`'s tab IN THIS WINDOW (skip-confirm) —
+    // the receiving half of the close-session sink. Returns false when this window doesn't host the tab
+    // (the fan-out simply misses here). The initiating window's one dialog already confirmed the batch,
+    // so this never re-prompts.
+    bool TerminalPage::_CloseClaudeSessionLocal(const std::wstring& sessionId)
+    {
+        const auto it = _claudeTabs.find(sessionId);
+        const auto tab = (it != _claudeTabs.end()) ? it->second.get() : nullptr;
+        if (!tab)
+        {
+            return false;
+        }
+        _ArchiveAndCloseClaudeTab(tab, sessionId, /*skipConfirm*/ true);
+        return true;
+    }
+
     // Agentmaster (FAVORITES.md — INTERNAL record-drop): drop a managed record from the registry +
     // persist, clear this window's per-session maps, and strip the id from SAVED (non-live) window
     // records so a reopen can't resurrect it. The conversation .jsonl on disk is deliberately KEPT

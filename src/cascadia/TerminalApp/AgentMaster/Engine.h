@@ -189,6 +189,25 @@ namespace Agentmaster
         std::vector<WindowRestartSink> restartSinks;
         uint64_t nextRestartToken{ 1 };
 
+        // Agentmaster (cross-window "Close ▸ Of Same Folder"): per-window "close this session's tab"
+        // sinks — same shape + lifetime as restartSinks. The Manager's board/tree session menu's
+        // "Close ▸ Of Same Folder" closes EVERY live managed session sharing the clicked session's
+        // effective work dir, but each session's tab lives in exactly ONE window; the initiating
+        // window closes the ones it hosts directly and fans the rest out here (the ONE confirm already
+        // ran, so the receiving side skips its own confirm). Each TerminalPage registers a sink at
+        // engine init ("close this session if YOU host its tab; no-op on a miss") and detaches it at
+        // teardown (Rule #10). Snapshot-under-lock / invoke-outside-it, like restartSinks (each sink
+        // marshals into its own window's dispatcher).
+        struct WindowCloseSessionSink
+        {
+            uint64_t token{ 0 };
+            std::wstring windowId;
+            std::function<void(const std::wstring& sessionId)> fn;
+        };
+        std::mutex closeSessionMutex;
+        std::vector<WindowCloseSessionSink> closeSessionSinks;
+        uint64_t nextCloseSessionToken{ 1 };
+
         // Agentmaster (cross-window settings broadcast): per-window "global settings changed" sinks.
         // The Settings cog AND the Explorer-Tree / Triage-Board sort toggles all write the GLOBAL
         // AppSettings (settings.json) from whichever window the user is in. To keep every OPEN window in
@@ -378,6 +397,17 @@ namespace Agentmaster
     uint64_t RegisterWindowRestartHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler);
     void UnregisterWindowRestartHandler(uint64_t token);
     void RestartSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId);
+
+    // Agentmaster (cross-window "Close ▸ Of Same Folder"): register THIS window's close-session sink
+    // (monotonic token; detach with UnregisterWindowCloseSessionHandler — removing a stale token is a
+    // no-op, the registry-token pattern). CloseSessionInOtherWindows fans `sessionId` out to every
+    // registered sink EXCEPT `sourceWindowId`'s (the caller already closed the tabs IT hosts): exactly
+    // one window hosts a session's tab, so at most one sink acts; with no host anywhere the call is a
+    // no-op. The receiving window closes the tab WITHOUT its own confirm — the initiating window's
+    // "Close N sessions in this folder?" dialog already covered the whole batch.
+    uint64_t RegisterWindowCloseSessionHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler);
+    void UnregisterWindowCloseSessionHandler(uint64_t token);
+    void CloseSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId);
 
     // Agentmaster (cross-window settings broadcast): register THIS window's settings sink (monotonic
     // token; detach with UnregisterSettingsChangedHandler — removing a stale token is a no-op, the

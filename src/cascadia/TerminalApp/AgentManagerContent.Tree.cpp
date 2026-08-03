@@ -1780,17 +1780,28 @@ namespace winrt::TerminalApp::implementation
             menu.Items().Append(fork);
         }
 
-        // Close — the LAST item, set apart by a separator and carrying the X glyph, exactly like the WT
-        // tab's right-click menu (its terminal Close item, glyph \xE711). Close shuts the session down
-        // (FAVORITES.md: the "Close" verb that replaced Archive/Delete) but KEEPS the record (always
-        // archived) so it stays in Sessions, resumable anytime — the conversation on disk is never
-        // deleted. Routed through _RequestArchive (the archive seam).
+        // Close — the LAST group, set apart by a separator and carrying the X glyph, mirroring the WT
+        // tab's right-click "Close ▸" submenu (glyph \xE711). A SUBMENU (per the user's "Close -> Of
+        // Same Folder"):
+        //   • This Session — the plain Close: shut this tab down (FAVORITES.md: the "Close" verb that
+        //     replaced Archive/Delete) but KEEP the record (always archived) so it stays in Sessions,
+        //     resumable anytime — the conversation on disk is never deleted. Routed through _RequestArchive.
+        //   • Of Same Folder — close EVERY live managed session sharing this session's EFFECTIVE work dir
+        //     (`cwd` — the inferred dir while it infers, else the launch cwd; the SAME key the Explorer
+        //     Tree groups it under and the board band paints). _CloseSessionsInFolder shows ONE confirm
+        //     listing their titles, then the page does the cross-window batch close.
+        // Both defer one tick (the closing flyout's focus restore mustn't race the dialog).
         menu.Items().Append(MenuFlyoutSeparator{});
-        MenuFlyoutItem closeItem;
-        closeItem.Text(L"Close");
-        closeItem.Icon(glyphIcon(L"\xE711")); // Close (the X — matches the WT tab menu's Close)
-        AgentSetTip(closeItem, L"Close this session \x2014 shut its tab down. It stays in Sessions and can be resumed anytime; star it there to keep it in your favorites (the conversation on disk is never deleted).");
-        closeItem.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+        MenuFlyoutSubItem closeSub;
+        closeSub.Text(L"Close");
+        closeSub.Icon(glyphIcon(L"\xE711")); // Close (the X — matches the WT tab menu's "Close ▸")
+        AgentSetTip(closeSub, L"Close this session, or every session that shares its folder. Closed sessions stay in Sessions and can be resumed anytime; the conversation on disk is never deleted.");
+
+        MenuFlyoutItem closeThis;
+        closeThis.Text(L"This Session");
+        closeThis.Icon(glyphIcon(L"\xE711")); // Close (the X)
+        AgentSetTip(closeThis, L"Close this session \x2014 shut its tab down. It stays in Sessions and can be resumed anytime; star it there to keep it in your favorites (the conversation on disk is never deleted).");
+        closeThis.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
             {
                 disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { self->_RequestArchive(id); } });
@@ -1800,7 +1811,32 @@ namespace winrt::TerminalApp::implementation
                 self->_RequestArchive(id);
             }
         });
-        menu.Items().Append(closeItem);
+        closeSub.Items().Append(closeThis);
+
+        // Of Same Folder — offered only when we have a folder to close (an empty effective dir would be a
+        // dead item). `cwd` is the effective work dir already captured for "Open New Session Here", so
+        // this needs no registry scan at menu-build time (the menu is rebuilt for every card each refresh
+        // — keep it cheap; the enumeration happens lazily on click in _CloseSessionsInFolder).
+        if (!cwd.empty())
+        {
+            MenuFlyoutItem closeFolder;
+            closeFolder.Text(L"Of Same Folder");
+            closeFolder.Icon(glyphIcon(L"\xE8B7")); // Folder — "everything in this folder"
+            AgentSetTip(closeFolder, L"Close EVERY open session whose working directory is the same as this one \x2014 you'll see the full list first and can cancel. Each stays in Sessions, resumable anytime (nothing on disk is deleted).");
+            closeFolder.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
+                if (disp)
+                {
+                    disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { self->_CloseSessionsInFolder(cwd); } });
+                }
+                else if (auto self = weak.get())
+                {
+                    self->_CloseSessionsInFolder(cwd);
+                }
+            });
+            closeSub.Items().Append(closeFolder);
+        }
+
+        menu.Items().Append(closeSub);
 
         return menu;
     }
@@ -2019,6 +2055,66 @@ namespace winrt::TerminalApp::implementation
         {
             _archiveHandler(winrt::hstring{ id });
         }
+    }
+
+    // Agentmaster (board/tree session menu — "Close ▸ Of Same Folder"): gather every LIVE managed
+    // session whose EFFECTIVE work dir (_WorkDirOf — the inferred dir while it infers, else the launch
+    // cwd; the SAME key the tree groups by and "Of Same Folder" was invoked against) matches `folder`,
+    // show ONE confirm LISTING THEIR TITLES, and — on accept — hand the folder to the page's cross-window
+    // batch close (_closeFolderHandler). Unlike _RequestArchive (which lets the page present the single
+    // Close consequence), the batch's confirm lives HERE: the content has the titles + _Confirm, and the
+    // page's per-session confirm is skipped for the batch. The page re-enumerates the same set under the
+    // shared registry + settings, so the listed sessions are exactly what closes.
+    void AgentManagerContent::_CloseSessionsInFolder(const std::wstring& folder)
+    {
+        if (folder.empty() || !_registry || !_closeFolderHandler)
+        {
+            return;
+        }
+        // The board/tree GLOBAL snapshot is the WHOLE fleet, so a folder spanning multiple windows lists
+        // every session in it; the page then closes them cross-window. LIVE only — a closed session isn't
+        // a tab to close (it already lives in the Sessions browser).
+        std::vector<std::wstring> titles;
+        for (const auto& s : _registry->Snapshot())
+        {
+            if (s.live && PathEq(_WorkDirOf(s), folder))
+            {
+                titles.push_back(s.title.empty() ? std::wstring{ L"(untitled)" } : s.title);
+            }
+        }
+        if (titles.empty())
+        {
+            return; // nothing live in this folder right now (a card can race a close) — no dialog, no-op
+        }
+
+        // Body: the folder + a bulleted list of the tab titles (single-lined so a multi-line title stays
+        // one row), capped so a huge folder can't overflow the dialog — the remainder summarized.
+        constexpr size_t kMaxListed = 20;
+        std::wstring body = L"These open sessions in\n" + folder + L"\nwill be closed:\n";
+        const size_t shown = (std::min)(titles.size(), kMaxListed);
+        for (size_t i = 0; i < shown; ++i)
+        {
+            body += L"\n \x2022 " + std::wstring{ OneLine(titles[i]) }; // • <title>
+        }
+        if (titles.size() > shown)
+        {
+            body += L"\n \x2026 and " + std::to_wstring(titles.size() - shown) + L" more";
+        }
+        body += L"\n\nEach stays in the Sessions browser \x2014 resume any of them anytime (nothing on disk is deleted).";
+
+        const std::wstring titleStr = L"Close " + std::to_wstring(titles.size()) + (titles.size() == 1 ? L" session in this folder?" : L" sessions in this folder?");
+
+        const auto folderCopy = folder;
+        auto weak = get_weak();
+        _Confirm(winrt::hstring{ titleStr }, winrt::hstring{ body }, L"Close All", [weak, folderCopy]() {
+            if (auto self = weak.get())
+            {
+                if (self->_closeFolderHandler)
+                {
+                    self->_closeFolderHandler(winrt::hstring{ folderCopy });
+                }
+            }
+        });
     }
 
     // A buttons-only confirm (XAML-Islands-safe: a text box inside a ContentDialog gets no

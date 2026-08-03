@@ -1138,6 +1138,65 @@ namespace Agentmaster
         }
     }
 
+    uint64_t RegisterWindowCloseSessionHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler)
+    {
+        if (!handler)
+        {
+            return 0;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.closeSessionMutex);
+        const auto token = e.nextCloseSessionToken++;
+        e.closeSessionSinks.push_back({ token, windowId, std::move(handler) });
+        return token;
+    }
+
+    void UnregisterWindowCloseSessionHandler(uint64_t token)
+    {
+        if (token == 0)
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.closeSessionMutex);
+        for (auto it = e.closeSessionSinks.begin(); it != e.closeSessionSinks.end(); ++it)
+        {
+            if (it->token == token)
+            {
+                e.closeSessionSinks.erase(it);
+                return;
+            }
+        }
+    }
+
+    void CloseSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        // Snapshot under the lock, invoke outside it (the RestartSessionInOtherWindows pattern): each
+        // sink hops into its own window's dispatcher, so holding the engine lock across foreign-window
+        // marshaling would be a needless ordering hazard.
+        std::vector<std::function<void(const std::wstring&)>> sinks;
+        {
+            std::lock_guard<std::mutex> lk(e.closeSessionMutex);
+            sinks.reserve(e.closeSessionSinks.size());
+            for (const auto& s : e.closeSessionSinks)
+            {
+                if (s.fn && s.windowId != sourceWindowId)
+                {
+                    sinks.push_back(s.fn);
+                }
+            }
+        }
+        for (const auto& fn : sinks)
+        {
+            fn(sessionId); // fire-and-forget; the (single) hosting window closes the session's tab, the rest miss
+        }
+    }
+
     uint64_t RegisterSettingsChangedHandler(const std::wstring& windowId, std::function<void(const AppSettings&)> handler)
     {
         if (!handler)
