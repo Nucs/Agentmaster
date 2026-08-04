@@ -277,18 +277,59 @@ The 08:11→08:42 park was the §8 question-guard trap (fixed: re-arm release + 
 visibility). The deeper one: the stacked `#6` (*"then for another one but spawn subagent…"*)
 sits terminally **`Sent`** in the persisted queue while the transcript proves it **never became a
 message** (§9 — consumed by the AskUserQuestion dialog rendering). The §9 floor prevents this
-*cause*, but three residual gaps remain — spec'd for the implementer in
-[`DELIVERY_PLAN.md`](DELIVERY_PLAN.md):
+*cause*; the three residual gaps R1–R3 are now **IMPLEMENTED** (spec + deviations in
+[`DELIVERY_PLAN.md`](DELIVERY_PLAN.md); engine-tested — the harness's `TestLostSendReconciler` +
+the rewritten guard/watchdog/ordered suites):
 
-- **R1 — no lost-send detection.** A `Sent` prompt whose echo never arrived and whose text never
-  appears as a user message is indistinguishable from a real delivery, forever. Any future
-  mid-turn collision (e.g. racing a manual submit typed at the same moment) silently reproduces
-  the loss. Needs a reconciler that flags it once the session is next at rest.
-- **R2 — the transcript-advance release is unsound while ANOTHER turn is in flight.** Both
-  `DecideEnterRetry`'s "picked up" filter and the §9 pickup guard's release read *any* transcript
-  progress past `sentAtUnixMs` as "our prompt started its turn" — but a still-running previous
-  turn also writes. That is exactly why the watchdog drained instead of rescuing `#6`.
-- **R3 — phantom / duplicate `UserPromptSubmit` events.** The log shows extra UPS events
-  (08:42:28.904, 08:44:53.902) that match no delivery and no transcript message; their late
-  `lastPromptUnixMs` stamps can floor-suppress a *real* Stop (benign but latency-adding: the
-  quiescent synth heals it ~2.5 s later) and re-light Running on a settled session.
+- **R1 — the lost-send reconciler (shipped).** Two halves. **(1) The PULL echo-consume:**
+  `NoteExternalPrompt` (fed by the scanner with each user line's OWN timestamp, newly parsed onto
+  `TranscriptEvent::lineTsMs`) now marks a fold-matched `Sent`+unechoed Autorun prompt **`echoed`**
+  — the transcript line IS the proof the injection became a message — so `echoed` is THE delivery
+  fact for hooked and no-hook sessions alike (a replayed OLD identical line, ts before the send,
+  never vouches; a late-READ fresh line still consumes — deliberately no recency window; logged
+  `[pull-echo]`). **(2) The verdict:** pure `DecideLostSend` (Scheduler.h, `kLostSendSettleMs`
+  15 s) — a live session AT REST + gate closed, a `Sent`+unechoed+stamped Autorun prompt settled
+  past 15 s ⇒ LOST; the scanner's reconcile pass applies it (freshest-record decide + in-`Update`
+  re-verify): **`Failed` + the session's autorunner paused** (`mode → Off`), logged `[lost-send]`
+  to both logs, **never auto-resent** (the text may sit in the TUI's type-ahead/box — a resend can
+  double it). **Deviation from the plan draft:** the "a turn ran past the send" conjunct was
+  DROPPED — a watchdog press refreshes `sentAtUnixMs`, which made that conjunct permanently false
+  after one press (stranding the draft-blocked corner `Sent` forever — the very gap R1 closes);
+  the press-refresh also naturally serializes the two recoveries (the verdict can only fire once
+  the ladder went quiet), and the echo conjunct is the real false-positive protection.
+- **R2 — sound pickup evidence (shipped).** Both consumers re-keyed: `DecideEnterRetry`'s
+  "picked up" drain and the §9 pickup guard's release **dropped the raw transcript-advance
+  clause** (`convLastActivityUnixMs` — a still-running PREVIOUS turn also writes the file; it is
+  exactly why the watchdog drained instead of resolving `#6`); started-ness is now `echoed` (push
+  or pull) / the state leaving the ready set / a newer prompt-carrying UPS stamp (guard only).
+  The retired `kEnterRetryActivityMarginMs` is gone. **Addition the plan lacked — the DRAFT
+  GUARD, proven load-bearing on this very log:** at 08:50:07 the box held the user's 17-char
+  draft (*"maybe another one"*) while the lost `#6` sat Sent-unechoed — the plan-as-written
+  watchdog, re-armed at that Stop, would have pressed a lone Enter and **submitted the user's
+  draft** (the RC3 merge). Now a box observed holding text ≠ the watched prompt
+  (`DraftMatchesPromptText` — the promoted shared `FoldCrToLf` + trailing-trim) is never pressed
+  into (answer `Waiting`; the lost verdict owns the terminal resolution), while a box holding OUR
+  prompt still presses — that IS the eaten-CR rescue.
+- **R3 — phantom / duplicate `UserPromptSubmit` events (shipped, forensics corrected).** The
+  Step-1 instrumentation came first and REDATED the diagnosis: the phantom UPS events
+  (08:42:28.904, 08:44:53.902, 08:50:14.515 — the pattern is endemic: a late twin ~0.5–2.6 s
+  after each real hook) recorded **no `Typed` rows** and match **no transcript message**, so they
+  carried **EMPTY prompt text** — late duplicate deliveries whose payload lost the prompt, NOT
+  text-duplicates; and the AskUserQuestion dialog answer rides **`PostToolUse`**, never a UPS
+  (proven at 08:48:47), so the plan's dialog-answer caveat is moot. Fix: the ordered machine
+  gates BOTH `turns.lastPromptUnixMs` **and the type-ahead count** on a **non-empty prompt** — an
+  empty UPS is state-only (→ Running, self-healing if phantom). That kills the real-Stop floor
+  suppression (measured: the 08:42 real Stop at +1.9 s of the twin's stamp read stale — now it
+  measures against the real prompt and completes cleanly), the phantom type-ahead consume (the
+  real Stop read as a batch consume and stranded Running ~2.5 s), and the guard's spurious
+  prompt-stamp release; the scanner's recon-run synth (deliberately empty) stops stamping too —
+  its reconciliation-timed stamp was itself a floor hazard. The speculative text-dedupe was
+  **rejected**: unmotivated by evidence, and it risked eating a real repeat-typed type-ahead
+  ("y" twice mid-turn), reintroducing the mid-turn advance. Every UPS now logs one `[ups]`
+  disposition line (`chars=N hash=… -> echo|typed|noise|EMPTY`), so any future phantom shape is
+  self-evident from hooks.log.
+
+Invariant addendum (extends §5/§9): **a `Sent` prompt is either provably a message (`echoed` —
+push or pull), provably dead (`Failed`, surfaced, autorunner paused), or still being watched**;
+**no watcher accepts another turn's activity as proof of our prompt's pickup**; and **the
+watchdog never presses into a box holding anything but the watched prompt itself**.

@@ -10,6 +10,7 @@
 #include "CommandWatch.h" // ParseCommandEcho + the slash-command binding/await feeds (COMMANDS.md)
 #include "Json.h"
 #include "ProcessInspect.h" // SubagentActivityUnixMs — subagent/Task side-file activity (the parent transcript stays quiescent while a subagent runs)
+#include "Scheduler.h" // DecideLostSend — the lost-send verdict this reconcile pass applies (DELIVERY_PLAN.md R1)
 #include "SessionRegistry.h"
 #include "TranscriptStore.h" // IsNoiseUserPrompt — keep control markers out of the Auto-Testing back-fill
 
@@ -398,6 +399,10 @@ namespace Agentmaster
                     TranscriptEvent ev;
                     ev.kind = TranscriptEvent::Kind::UserPrompt;
                     ev.text = std::move(prompt);
+                    // The line's own timestamp rides along for the PULL echo-consume's staleness
+                    // filter (DELIVERY_PLAN.md R1 — NoteExternalPrompt's observedUnixMs): an old
+                    // replayed identical line must never vouch for a NEW send's delivery.
+                    ev.lineTsMs = ParseTranscriptTimestamp(obj.StrAt(L"timestamp"));
                     out.events.push_back(std::move(ev));
                 }
             }
@@ -1130,6 +1135,65 @@ namespace Agentmaster
                                L"[recon-block] " + s.id + L" (unanswered " + st.pendingInteractiveTool + L" -> needs you)\n");
             }
         }
+
+        // Agentmaster (DELIVERY_PLAN.md R1 — the LOST-SEND verdict). A delivered prompt that never
+        // became a message used to be terminally invisible: its queue row read `Sent` exactly like a
+        // success (the recorded `#6` — pasted into a running turn, consumed by an AskUserQuestion
+        // dialog's rendering, discovered only by a human diffing the transcript). This pass owns
+        // transcript truth and has JUST caught the cursor up (any user line on disk fed the pull
+        // echo-consume above via NoteExternalPrompt), so an at-rest, settled, still-unechoed Sent
+        // prompt is provably not a message: mark it Failed and PAUSE the session's autorunner
+        // (mirrors the Enter-retry give-up — never advance past a vanished step, and NEVER resend:
+        // the text may sit in the TUI's type-ahead or box, where a resend doubles it). Decided on
+        // the FRESHEST record (the synths above may have just settled the state this very pass) and
+        // re-verified inside the Update against the live row — an echo or a watchdog press landing
+        // between the decide and the apply wins (the press refreshes sentAtUnixMs, un-settling it).
+        {
+            // Steady-state pre-filter on the PASS SNAPSHOT: only a session showing a Sent-unechoed
+            // Autorun prompt pays the fresh Get (the overwhelming majority of passes see none). The
+            // snapshot may be a pass stale in EITHER direction (a consume just marked it echoed, or
+            // a send just landed) — the fresh decide + the in-Update re-verify are the truth.
+            bool lostCandidate = false;
+            for (const auto& p : s.queue)
+            {
+                if (p.origin == PromptOrigin::Autorun && p.status == PromptStatus::Sent && !p.echoed && p.sentAtUnixMs != 0)
+                {
+                    lostCandidate = true;
+                    break;
+                }
+            }
+            const auto fresh = lostCandidate ? _registry->Get(s.id) : std::nullopt;
+            if (fresh)
+            {
+                const int64_t verdictNow = NowMs();
+                const auto lostIds = DecideLostSend(*fresh, verdictNow);
+                for (const auto& lostId : lostIds)
+                {
+                    bool applied = false;
+                    std::wstring label;
+                    _registry->Update(s.id, [&](SessionInfo& live) {
+                        for (auto& p : live.queue)
+                        {
+                            if (p.id == lostId && p.status == PromptStatus::Sent && !p.echoed &&
+                                p.sentAtUnixMs != 0 && (verdictNow - p.sentAtUnixMs) >= kLostSendSettleMs)
+                            {
+                                p.status = PromptStatus::Failed;
+                                label = p.label;
+                                live.autorunner.mode = AutorunnerMode::Off;
+                                applied = true;
+                            }
+                        }
+                    });
+                    if (applied)
+                    {
+                        const std::wstring line = L"[lost-send] " + ShortId(s.id) + L" prompt " + ShortId(lostId) +
+                                                  L" \"" + label + L"\" (delivered but never became a message - marked Failed, autorunner paused; not resent)\n";
+                        AppendStateLog(L"autorunner.log", line);
+                        AppendStateLog(L"hooks.log", line);
+                    }
+                }
+            }
+        }
     }
 
     bool SessionScanner::_readDelta(ScanState& st, const SessionInfo& s, int64_t size)
@@ -1416,7 +1480,10 @@ namespace Agentmaster
                     // back-fill seam should the parser's filter ever be relaxed.
                     if (!IsNoiseUserPrompt(ev.text))
                     {
-                        _registry->NoteExternalPrompt(s.id, ev.text); // idempotent by text — back-fills a dropped hook
+                        // Idempotent by text — back-fills a dropped hook; a fold-match against a
+                        // Sent+unechoed Autorun prompt is additionally CONSUMED as that send's PULL
+                        // echo (DELIVERY_PLAN.md R1), the line's own timestamp guarding a replay.
+                        _registry->NoteExternalPrompt(s.id, ev.text, ev.lineTsMs);
                     }
                 }
             }

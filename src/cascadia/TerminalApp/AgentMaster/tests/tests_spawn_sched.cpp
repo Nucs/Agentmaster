@@ -1325,18 +1325,45 @@ void TestEnterRetry()
         CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::None, "needs-approval -> none");
     }
     {
-        // No-hook fast-turn fallback: echo never set + state back to Waiting, but the transcript
-        // advanced past the send -> it was picked up, stop watching.
+        // Agentmaster (DELIVERY_PLAN.md R2): raw transcript advance past the send NO LONGER drains
+        // the watch — a still-running PREVIOUS turn also writes the file, which is exactly how the
+        // watchdog drained instead of resolving the lost `#6` (delivered into another turn,
+        // consumed by a dialog, never a message). With the pull echo-consume (R1) marking a
+        // genuinely-delivered prompt `echoed`, an unechoed one past transcript activity is a
+        // problem to KEEP watching, not proof of pickup.
         auto s = mk(SessionState::WaitingForInput, T, false, 0);
-        s.convLastActivityUnixMs = T + kEnterRetryActivityMarginMs + 1;
-        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::None, "transcript advanced -> none");
+        s.convLastActivityUnixMs = T + 60000; // the (other) turn wrote plenty past our send
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::Retry,
+              "R2: transcript advance alone no longer drains the watch (another turn's writes are not our pickup)");
     }
     {
-        // Transcript moved only WITHIN the margin (a send fired right after the prior turn's tail) ->
-        // NOT counted as started; still retry.
+        // Agentmaster (DELIVERY_PLAN.md R2 — the DRAFT GUARD, proven on the 08:50:07 live log): a
+        // box observed holding text that is NOT our watched prompt is never pressed into — a lone
+        // Enter would SUBMIT the human's draft (the RC3 merge). Keep watching (Waiting) instead;
+        // the lost-send verdict owns the terminal resolution.
         auto s = mk(SessionState::WaitingForInput, T, false, 0);
-        s.convLastActivityUnixMs = T + kEnterRetryActivityMarginMs - 1;
-        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::Retry, "transcript within margin -> retry");
+        s.pendingInput = L"maybe another one"; // the human's draft, not our prompt ("go")
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::Waiting,
+              "R2 draft guard: a foreign draft in the box blocks the press (Waiting, never Retry)");
+        // The box holding OUR prompt is the eaten-CR shape — pressing IS the rescue.
+        s.pendingInput = L"go";
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::Retry,
+              "R2 draft guard: the box holding the watched prompt still presses (the rescue)");
+        // Newline-fold + trailing-trim tolerant: a \r-composed prompt vs the detector's \n box read.
+        s.queue[0].text = L"line1\rline2";
+        s.pendingInput = L"line1\nline2\n";
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::Retry,
+              "R2 draft guard: fold/trim-matched box text still presses");
+        // An empty observed box allows the press (a lone Enter into an empty box is a claude no-op).
+        s.pendingInput.clear();
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::Retry,
+              "R2 draft guard: an empty box presses");
+        // The guard never blocks the give-up accounting: at max presses a draft-blocked prompt
+        // still resolves through GiveUp's Failed+paused (the guard sits after the GiveUp branch).
+        s.pendingInput = L"human draft";
+        s.queue[0].enterRetries = kEnterRetryMax;
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::GiveUp,
+              "R2 draft guard: an exhausted ladder still gives up (Failed + paused), draft or not");
     }
     {
         // Exhausted the retry budget -> give up (and the caller stops watching + logs).
@@ -1498,23 +1525,25 @@ void TestDeliveryGate()
         const auto pgHeld = DecideAdvance(s, T + 9000, 0, false);
         CHECK(pgHeld.action == AdvanceAction::None && pgHeld.reason == L"awaiting injection pickup",
               "pickup: held at 9s with no turn evidence (the old 4s expiry fired here)");
-        // The echo releases.
+        // The echo releases — push (the hook) or pull (the scanner's transcript consume, R1): both
+        // land as `echoed`, THE became-a-message fact.
         s.queue[0].echoed = true;
-        CHECK(DecideAdvance(s, T + 9000, 0, false).action == AdvanceAction::Send, "pickup: the consumed echo releases");
+        CHECK(DecideAdvance(s, T + 9000, 0, false).action == AdvanceAction::Send, "pickup: the consumed echo releases (push or pull)");
         s.queue[0].echoed = false;
-        // A newer UserPromptSubmit stamp releases (an echo the text-match missed still proves pickup).
+        // A newer UserPromptSubmit stamp releases (an echo the text-match missed still proves
+        // pickup — and R3 makes the stamp sound: an EMPTY phantom twin no longer writes it).
         s.turns.lastPromptUnixMs = T + 1500;
         CHECK(DecideAdvance(s, T + 9000, 0, false).action == AdvanceAction::Send, "pickup: a newer prompt stamp releases");
         s.turns.lastPromptUnixMs = 0;
-        // The transcript advancing meaningfully past the send releases (the no-hook fallback)...
-        s.convLastActivityUnixMs = T + kEnterRetryActivityMarginMs + 1;
-        CHECK(DecideAdvance(s, T + 9000, 0, false).action == AdvanceAction::Send, "pickup: transcript advance releases");
-        // ...but within-margin noise (the prior turn's tail) does NOT.
-        s.convLastActivityUnixMs = T + kEnterRetryActivityMarginMs - 1;
-        CHECK(DecideAdvance(s, T + 9000, 0, false).action == AdvanceAction::None, "pickup: within-margin transcript noise keeps holding");
+        // Agentmaster (DELIVERY_PLAN.md R2): raw transcript advance past the send NO LONGER
+        // releases — a still-running PREVIOUS turn also writes the file (the exact shape in which
+        // `#6` was stacked and lost), so growth alone proves nothing about OUR prompt's turn.
+        s.convLastActivityUnixMs = T + 60000;
+        CHECK(DecideAdvance(s, T + 9000, 0, false).action == AdvanceAction::None,
+              "R2: transcript advance alone no longer releases the guard (another turn's writes are not our pickup)");
         s.convLastActivityUnixMs = 0;
         // The lost-evidence belt: past kPickupGuardMaxMs the guard stands aside (the Enter-retry
-        // watchdog has long since resolved a truly-dead send to Failed).
+        // watchdog / the lost-send verdict have long since resolved a truly-dead send to Failed).
         CHECK(DecideAdvance(s, T + kPickupGuardMaxMs, 0, false).action == AdvanceAction::Send, "pickup: the 30s belt releases");
     }
 
@@ -1616,6 +1645,194 @@ void TestDeliveryGate()
         const auto after2 = reg.Get(L"echo");
         CHECK(after2.has_value() && after2->queue.size() == 2, "echo-fold: CRLF prompt adds no dup row");
         CHECK(after2.has_value() && after2->queue.size() == 2 && after2->queue[1].echoed, "echo-fold: the CRLF prompt's echo is consumed");
+    }
+}
+
+// Agentmaster (DELIVERY_PLAN.md R1) — the LOST-SEND reconciler: the PULL echo-consume
+// (NoteExternalPrompt marking a fold-matched transcript user line as a Sent prompt's `echoed`
+// evidence) + the pure DecideLostSend verdict (a Sent, unechoed, at-rest, settled, gate-closed
+// Autorun prompt provably never became a message -> the scanner marks it Failed + pauses the
+// autorunner). The `#6` gap: a prompt pasted into a running turn, consumed by an AskUserQuestion
+// dialog's rendering, sat terminally `Sent` — indistinguishable from a success.
+void TestLostSendReconciler()
+{
+    std::wprintf(L"Lost-send reconciler (DELIVERY_PLAN.md R1):\n");
+
+    const int64_t T = 1'700'000'000'000;
+
+    // ---- the PULL echo-consume (NoteExternalPrompt's new evidence side-effect) ----
+    {
+        SessionRegistry reg;
+        auto s = MakeSession(L"pull", SessionState::WaitingForInput);
+        s.live = true;
+        reg.Upsert(s);
+        const int64_t sentAt = NowMsTest() - 5000;
+        reg.Update(L"pull", [&](SessionInfo& ss) {
+            QueuedPrompt p;
+            p.id = L"f1";
+            p.text = L"run the suite\ragain"; // compose-box \r newline
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = sentAt;
+            ss.queue.push_back(p);
+        });
+        // A STALE identical line (its own ts BEFORE the send — a history replay) must not vouch.
+        reg.NoteExternalPrompt(L"pull", L"run the suite\nagain", sentAt - 60000);
+        auto after = reg.Get(L"pull");
+        CHECK(after && after->queue.size() == 1 && !after->queue[0].echoed,
+              "pull-echo: a pre-send transcript line never consumes (replay guard)");
+        // The FRESH line (ts at/after the send) consumes — fold-matched, no duplicate row.
+        reg.NoteExternalPrompt(L"pull", L"run the suite\nagain", sentAt + 1200);
+        after = reg.Get(L"pull");
+        CHECK(after && after->queue.size() == 1, "pull-echo: the consuming line is deduped (no Typed row)");
+        CHECK(after && after->queue[0].echoed, "pull-echo: a fresh fold-matched user line marks the Sent prompt echoed");
+        // A ts-less caller (0) trusts the fold match — the pre-R1 call shape stays consuming.
+        reg.Update(L"pull", [&](SessionInfo& ss) {
+            QueuedPrompt p;
+            p.id = L"f2";
+            p.text = L"second send";
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = NowMsTest();
+            ss.queue.push_back(p);
+        });
+        reg.NoteExternalPrompt(L"pull", L"second send");
+        after = reg.Get(L"pull");
+        CHECK(after && after->queue.size() == 2 && after->queue[1].echoed, "pull-echo: a ts-less observation (0) still consumes");
+        // A NON-matching line records a Typed row exactly as before (the back-fill is untouched).
+        reg.NoteExternalPrompt(L"pull", L"something the human typed", NowMsTest());
+        after = reg.Get(L"pull");
+        CHECK(after && after->queue.size() == 3 && after->queue[2].origin == PromptOrigin::Typed,
+              "pull-echo: a non-matching line still back-fills a Typed row");
+        // Re-seeing the recorded line dedupes quietly and flips nothing (Typed rows are echoed=true).
+        reg.NoteExternalPrompt(L"pull", L"something the human typed", NowMsTest());
+        after = reg.Get(L"pull");
+        CHECK(after && after->queue.size() == 3, "pull-echo: a re-seen recorded line stays deduped");
+    }
+
+    // ---- DecideLostSend: the conjunct matrix ----
+    {
+        const auto mkLost = [&](SessionState st) {
+            SessionInfo s = MakeSession(L"lost", st);
+            s.live = true;
+            QueuedPrompt p;
+            p.id = L"l1";
+            p.label = L"the lost one";
+            p.text = L"then for another one but spawn subagent this time";
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = T;
+            s.queue.push_back(p);
+            return s;
+        };
+        // The verdict shape: at rest + settled + unechoed + gate closed -> LOST.
+        {
+            const auto s = mkLost(SessionState::WaitingForInput);
+            const auto lost = DecideLostSend(s, T + kLostSendSettleMs);
+            CHECK(lost.size() == 1 && lost[0] == L"l1", "lost: at-rest + settled + unechoed -> LOST");
+            CHECK(DecideLostSend(mkLost(SessionState::Idle), T + kLostSendSettleMs).size() == 1, "lost: Idle counts as at rest too");
+        }
+        // Each conjunct's negation holds the verdict:
+        {
+            auto s = mkLost(SessionState::Running);
+            CHECK(DecideLostSend(s, T + kLostSendSettleMs).empty(), "lost: never judged mid-turn (Running)");
+            s.state = SessionState::NeedsApproval;
+            CHECK(DecideLostSend(s, T + kLostSendSettleMs).empty(), "lost: never judged while needs-you (the dialog may yet consume it)");
+        }
+        {
+            auto s = mkLost(SessionState::WaitingForInput);
+            CHECK(DecideLostSend(s, T + kLostSendSettleMs - 1).empty(), "lost: not before the settle elapses (a slow push echo can still land)");
+        }
+        {
+            auto s = mkLost(SessionState::WaitingForInput);
+            s.queue[0].echoed = true; // push OR pull evidence arrived
+            CHECK(DecideLostSend(s, T + kLostSendSettleMs).empty(), "lost: an echoed prompt is a delivered message, never lost");
+        }
+        {
+            auto s = mkLost(SessionState::WaitingForInput);
+            s.deliveryPromptId = L"l1";
+            s.deliveryOpenedUnixMs = T + kLostSendSettleMs - 1000;
+            CHECK(DecideLostSend(s, T + kLostSendSettleMs).empty(), "lost: an open delivery gate defers the verdict");
+        }
+        {
+            auto s = mkLost(SessionState::WaitingForInput);
+            s.live = false;
+            CHECK(DecideLostSend(s, T + kLostSendSettleMs).empty(), "lost: an archived record is never judged");
+        }
+        {
+            auto s = mkLost(SessionState::WaitingForInput);
+            s.queue[0].origin = PromptOrigin::Typed;
+            CHECK(DecideLostSend(s, T + kLostSendSettleMs).empty(), "lost: a Typed capture is already the message, never a lost send");
+            s.queue[0].origin = PromptOrigin::Autorun;
+            s.queue[0].sentAtUnixMs = 0;
+            CHECK(DecideLostSend(s, T + kLostSendSettleMs).empty(), "lost: an un-stamped (restored) Sent row is never judged");
+        }
+        // The watchdog serialization: a press REFRESHES sentAtUnixMs, restarting the settle — the
+        // verdict structurally waits out an active ladder (DecideLostSend's contract).
+        {
+            auto s = mkLost(SessionState::WaitingForInput);
+            s.queue[0].sentAtUnixMs = T + 10000; // the last Enter-retry press
+            s.queue[0].enterRetries = 2;
+            CHECK(DecideLostSend(s, T + kLostSendSettleMs).empty(), "lost: a fresh watchdog press restarts the settle clock");
+            CHECK(DecideLostSend(s, T + 10000 + kLostSendSettleMs).size() == 1, "lost: settled after the ladder went quiet -> LOST");
+        }
+        // Multiple lost sends all report (send-now + autorun can both strand one).
+        {
+            auto s = mkLost(SessionState::WaitingForInput);
+            QueuedPrompt p2 = s.queue[0];
+            p2.id = L"l2";
+            p2.sentAtUnixMs = T + 2000;
+            s.queue.push_back(p2);
+            const auto lost = DecideLostSend(s, T + 2000 + kLostSendSettleMs);
+            CHECK(lost.size() == 2, "lost: every settled unechoed Sent reports (not just the newest)");
+        }
+    }
+
+    // ---- the `#6` shape end-to-end at the registry level (what the scanner's pass sees) ----
+    {
+        SessionRegistry reg;
+        auto s = MakeSession(L"six", SessionState::Running); // the dialog turn is running
+        s.live = true;
+        reg.Upsert(s);
+        const int64_t sentAt = NowMsTest() - kLostSendSettleMs - 2000;
+        reg.Update(L"six", [&](SessionInfo& ss) {
+            QueuedPrompt p;
+            p.id = L"p6";
+            p.text = L"then for another one but spawn subagent this time";
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = sentAt;
+            ss.queue.push_back(p);
+        });
+        // While the blocking turn runs: transcript lines from THAT turn arrive (another message's
+        // text) — they must neither consume our echo nor release anything.
+        reg.NoteExternalPrompt(L"six", L"check for best one", sentAt + 500);
+        auto mid = reg.Get(L"six");
+        CHECK(mid && !mid->queue[0].echoed, "six: another turn's user line is not our echo");
+        CHECK(DecideLostSend(*mid, NowMsTest()).empty(), "six: no verdict while the session is Running");
+        // The turn ends; the session comes to rest; the settle has long elapsed -> LOST.
+        reg.Update(L"six", [](SessionInfo& ss) { ss.state = SessionState::WaitingForInput; });
+        const auto rest = reg.Get(L"six");
+        const auto lost = DecideLostSend(*rest, NowMsTest());
+        CHECK(lost.size() == 1 && lost[0] == L"p6", "six: at rest, the vanished delivery is the verdict");
+        // The scanner's apply shape: re-verified mutate -> Failed + autorunner paused.
+        reg.Update(L"six", [&](SessionInfo& ss) {
+            for (auto& p : ss.queue)
+            {
+                if (p.id == lost[0] && p.status == PromptStatus::Sent && !p.echoed)
+                {
+                    p.status = PromptStatus::Failed;
+                    ss.autorunner.mode = AutorunnerMode::Off;
+                }
+            }
+        });
+        const auto done = reg.Get(L"six");
+        CHECK(done && done->queue[0].status == PromptStatus::Failed && done->autorunner.mode == AutorunnerMode::Off,
+              "six: the apply lands Failed + a paused autorunner (never a silent resend)");
     }
 }
 

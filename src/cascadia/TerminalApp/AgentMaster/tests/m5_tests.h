@@ -142,6 +142,7 @@ void TestBridgeRoundTrip();
 void TestScheduler();
 void TestEnterRetry();
 void TestDeliveryGate(); // DELIVERY.md: the per-session delivery gate — open/decline/owner-close/reclaim, the close-notify wake-up, DecideAdvance's hold, DecideEnterRetry's gate+dormant refusals, SubmitPrompt's lifecycles, the RC6 newline-folded echo consume
+void TestLostSendReconciler(); // DELIVERY_PLAN.md R1: the PULL echo-consume (NoteExternalPrompt marks a fold-matched transcript line as `echoed` evidence, line-ts replay-guarded) + the pure DecideLostSend verdict matrix + the `#6` shape end-to-end (Failed + autorunner paused, never resent)
 void TestBuildPromptSubmission();
 void TestSchedulerIntegration();
 void TestUpdaterVersionLogic(); // Updater.h: ParseVersion/CompareVersion (4th part = build metadata, ignored) + unpackaged facts + the settings.json skip/postpone RMW (preserve-other-keys, replace-not-append)

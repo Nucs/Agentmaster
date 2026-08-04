@@ -99,7 +99,7 @@ Favorite + Close refactor (Archive removed; Sessions is the sole history view): 
 Pending-input monitor (detect an UNSENT draft in a Claude tab's input box): [`doc/agentmaster/PENDING_INPUT.md`](doc/agentmaster/PENDING_INPUT.md).
 System notifications (Windows toasts when a session leaves Running; click = foreground + jump to tab): [`doc/agentmaster/NOTIFICATIONS.md`](doc/agentmaster/NOTIFICATIONS.md).
 Slash-command bindings + /handover + /handover-here (CommandWatch: bind to typed /commands, await follow-up activity): [`doc/agentmaster/COMMANDS.md`](doc/agentmaster/COMMANDS.md).
-Atomic prompt delivery (the DELIVERY GATE — one owner per input box; advance/watchdog/swap serialization): [`doc/agentmaster/DELIVERY.md`](doc/agentmaster/DELIVERY.md) (+ the residuals' implementer plan, NOT yet implemented — lost-send reconciler / sound pickup evidence / phantom-UPS hardening: [`doc/agentmaster/DELIVERY_PLAN.md`](doc/agentmaster/DELIVERY_PLAN.md)).
+Atomic prompt delivery (the DELIVERY GATE — one owner per input box; advance/watchdog/swap serialization): [`doc/agentmaster/DELIVERY.md`](doc/agentmaster/DELIVERY.md) (+ the residuals R1–R3 — lost-send reconciler / sound pickup evidence + the Enter-retry DRAFT GUARD / empty-phantom-UPS hardening — now IMPLEMENTED, outcomes in §10, plan + deviations: [`doc/agentmaster/DELIVERY_PLAN.md`](doc/agentmaster/DELIVERY_PLAN.md)).
 
 ## Status
 
@@ -1428,12 +1428,30 @@ What works, by area:
   **type-ahead** prompt (`UserPromptSubmit` at Enter-time mid-turn; the queued batch then runs
   as the next turn with NO further hook) is counted so that turn's `Stop` stays **Running**
   instead of stranding the whole follow-on turn in `WaitingForInput` — the "second turn never
-  shows Running" bug. The autorunner's **pickup guard is EVIDENCE-released** now, not
+  shows Running" bug — **but ONLY a prompt-CARRYING `UserPromptSubmit` stamps
+  `turns.lastPromptUnixMs` or counts type-ahead** (DELIVERY_PLAN.md R3): the live log showed each
+  real hook trailed by a late EMPTY twin (~0.5–2.6s, a duplicate delivery whose payload lost the
+  prompt — no `Typed` row, no transcript message) whose late stamp floor-suppressed the next REAL
+  Stop and whose phantom type-ahead count made it read as a batch consume; an empty UPS (the
+  twins AND the scanner's recon-run synth) is now state-only (→ Running, self-healing), and every
+  UPS logs one `[ups] chars/hash → echo|typed|noise|EMPTY` disposition line. The autorunner's
+  **pickup guard is EVIDENCE-released** now, not
   time-expired (DELIVERY.md §9): a Sent-unacknowledged flight prompt holds the next advance until
-  the turn visibly started (echo consumed / a newer prompt stamp / transcript advanced past the
-  send), with `kPickupGuardMaxMs` (30s) only the lost-evidence belt above the Enter-retry
+  the turn visibly started — the echo consumed (**push hook OR the scanner's PULL consume**:
+  `NoteExternalPrompt` marks a fold-matched, line-ts-fresh transcript user line as the Sent
+  prompt's `echoed`, `[pull-echo]` — DELIVERY_PLAN.md R1) or a newer prompt-carrying UPS stamp;
+  the raw transcript-advance release is GONE (R2 — a still-running PREVIOUS turn also writes the
+  file, which is how the watchdog drained instead of rescuing the lost `#6`), with
+  `kPickupGuardMaxMs` (30s) only the lost-evidence belt above the Enter-retry
   watchdog's ~21s give-up — the old naked 4s expiry was the other half of the stacking race (the
-  07:27 incident's #6 fired 9s after #5 through exactly that lapsed window). The scanner's synthesized missed-Stop is `quiescentStop` (≥2s-quiet
+  07:27 incident's #6 fired 9s after #5 through exactly that lapsed window). A `Sent` prompt that
+  is at rest + settled 15s with NO echo either way is judged **LOST** by the scanner's pass (pure
+  `DecideLostSend`, `kLostSendSettleMs`) → **`Failed` + that session's autorunner paused**, logged
+  `[lost-send]`, never auto-resent — the `#6` "delivered but never became a message" gap closed;
+  and the watchdog carries a **DRAFT GUARD** (R2): it never presses its lone Enter while the box's
+  observed draft differs from the watched prompt (`DraftMatchesPromptText`) — a foreign draft
+  would be SUBMITTED by that press (proven one keystroke away on the 08:50:07 log) — while a box
+  still holding OUR prompt presses as before (the eaten-CR rescue). The scanner's synthesized missed-Stop is `quiescentStop` (≥2s-quiet
   transcript): always lands `WaitingForInput`, never stale, never held by the queue. Hook `ts`
   also refreshes `lastActivityUnixMs` monotonically (real hooks previously never updated the
   Waiting→Idle decay anchor — it only moved on synthesized events). The scanner's missed-Stop
@@ -2016,12 +2034,19 @@ What works, by area:
   to `kEnterRetryMax` (3) presses, then **gives up — the prompt is marked `Failed` and the session's
   Tests Autorunner is PAUSED** (mode→Off): it never landed, so don't strand a phantom `Sent` nor advance
   past a broken step (the user Send-nows / re-arms; rolling back to `Pending` would just re-send and
-  be re-eaten — an infinite loop). **"Started" = OR of three signals** so it
-  degrades across hook / no-hook sessions: the prompt's `UserPromptSubmit` echo arrived (`echoed`) ·
+  be re-eaten — an infinite loop). **"Started" = TWO signals** (DELIVERY_PLAN.md R2 — the former
+  raw transcript-advance third signal is GONE: a still-running PREVIOUS turn also advances
+  `convLastActivityUnixMs`, so it drained the watch in exactly the shape that needed rescuing; a
+  no-hook session's delivery now reads `echoed` via the scanner's PULL consume instead):
+  the prompt's `UserPromptSubmit` echo arrived (`echoed` — push hook OR pull consume) ·
   the session left the ready set (state advanced past `Idle`/`WaitingForInput`, e.g. `Running` — the
-  transcript-tail-driven adopted path) · the transcript advanced past the send
-  (`convLastActivityUnixMs`, with `kEnterRetryActivityMarginMs` slop — the no-hook fast-turn
-  fallback). Only **live, injector-bound** sessions are driven — the gate is **controllability**
+  transcript-tail-driven adopted path, doubling as the never-press-mid-turn safety gate). A press
+  is additionally **DRAFT-GUARDED** (R2): a box observed holding text ≠ the watched prompt is
+  never pressed into (a lone Enter would submit the human's draft — the RC3 merge, one keystroke
+  from happening on the 08:50:07 log); the box holding OUR prompt still presses (the rescue), and
+  a draft-blocked prompt resolves through the scanner's **lost-send verdict** (`DecideLostSend`,
+  15s settle at rest → `Failed` + autorunner paused + `[lost-send]`, never resent — R1).
+  Only **live, injector-bound** sessions are driven — the gate is **controllability**
   (`HasInjector`: do we hold this session's stdin?), NOT provenance (`external`: did we launch it?);
   an **adopted** `+`-tab claude is `external=true` yet injector-bound, so it IS driven (gating on
   `external` here was the autorunner-on-adopted bug). The watch is **armed

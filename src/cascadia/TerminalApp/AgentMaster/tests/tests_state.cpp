@@ -134,6 +134,15 @@ void TestOrderedStateMachine()
         m.sessionId = L"a";
         m.event = ev;
         m.ts = ts;
+        // A REAL UserPromptSubmit always carries its prompt text (claude refuses an empty submit —
+        // Enter on an empty box is a no-op), and the ordered machine's turn ACCOUNTING now keys on
+        // that (DELIVERY_PLAN.md R3: an empty phantom twin gets the state effect only). The fixture
+        // models the real shape; the R3 block below covers the empty-prompt variants explicitly.
+        // Distinct per ts so the registry-integration block's rows never fold-collide.
+        if (ev == HookEvent::UserPromptSubmit)
+        {
+            m.promptText = L"prompt@" + std::to_wstring(ts);
+        }
         return m;
     };
 
@@ -257,6 +266,44 @@ void TestOrderedStateMachine()
         // Recovery through the ordered machine: a fresh prompt from Error -> Running, no spurious queue bump.
         auto rr = NextSessionStateOrdered(SessionState::Error, at(HookEvent::UserPromptSubmit, 4000), t);
         CHECK(rr.state == SessionState::Running && t.queuedPrompts == 0, "ordered: Error + new prompt -> Running (fresh turn, not queued)");
+    }
+    { // Agentmaster (DELIVERY_PLAN.md R3 — the EMPTY-prompt UserPromptSubmit gate). The live phantom
+      // twins (b5f766fc: 08:42:28.904 / 08:44:53.902 / 08:50:14.515 — late duplicate hook deliveries
+      // whose payload carried NO prompt; each matched no transcript user message and recorded no
+      // Typed row) and the scanner's recon-run synth are STATE-ONLY: -> Running (self-healing if
+      // phantom — the machine's documented property), but they neither stamp turns.lastPromptUnixMs
+      // (a twin's late ts floor-suppressed the next REAL Stop and spuriously released the pickup
+      // guard's prompt-stamp clause) nor count type-ahead (a phantom count made the real Stop read
+      // as a batch consume and strand Running until the quiescent heal).
+        const auto emptyUps = [](int64_t ts) {
+            HookMessage m;
+            m.sessionId = L"a";
+            m.event = HookEvent::UserPromptSubmit;
+            m.ts = ts;
+            return m; // promptText deliberately empty — the phantom-twin / recon-run-synth shape
+        };
+        TurnAccounting t;
+        auto r1 = NextSessionStateOrdered(SessionState::Idle, at(HookEvent::UserPromptSubmit, 400000), t); // the real submit
+        CHECK(r1.state == SessionState::Running && t.lastPromptUnixMs == 400000, "R3: a prompt-carrying UPS stamps");
+        auto ph = NextSessionStateOrdered(r1.state, emptyUps(402600), t); // the empty twin, +2.6s (the measured skew)
+        CHECK(ph.state == SessionState::Running, "R3: an empty UPS keeps the state effect (Running self-heals if phantom)");
+        CHECK(t.lastPromptUnixMs == 400000, "R3: an empty UPS never stamps lastPromptUnixMs");
+        CHECK(t.queuedPrompts == 0, "R3: an empty UPS mid-turn never counts as type-ahead");
+        auto realStop = NextSessionStateOrdered(ph.state, at(HookEvent::Stop, 404500), t); // the real 4.5s turn end
+        CHECK(realStop.state == SessionState::WaitingForInput && realStop.turnComplete && !realStop.staleStop,
+              "R3: the real Stop after an empty twin completes CLEANLY (pre-gate its 1.9s span vs the twin's stamp read floor-stale)");
+        // The 08:42 window replay (the plan's acceptance shape): echo UPS -> dup Stop (floor-stale)
+        // -> empty dup UPS (accounting-inert) -> real Stop = exactly ONE clean turn.
+        TurnAccounting w;
+        auto e1 = NextSessionStateOrdered(SessionState::WaitingForInput, at(HookEvent::UserPromptSubmit, 500000), w); // "asdasd"'s echo
+        CHECK(e1.state == SessionState::Running, "R3 replay: the echo starts the turn");
+        auto d1 = NextSessionStateOrdered(e1.state, at(HookEvent::Stop, 500015), w); // the dup Stop, 15ms later
+        CHECK(d1.staleStop && !d1.turnComplete, "R3 replay: the dup Stop reads stale (the §9 floor)");
+        NextSessionStateOrdered(d1.state, emptyUps(506400), w); // the empty dup UPS (+6.4s, the incident's skew)
+        CHECK(w.lastPromptUnixMs == 500000 && w.queuedPrompts == 0, "R3 replay: the empty dup UPS is accounting-inert");
+        auto realEnd = NextSessionStateOrdered(SessionState::Running, at(HookEvent::Stop, 508290), w); // the real end (~8.3s turn)
+        CHECK(realEnd.state == SessionState::WaitingForInput && realEnd.turnComplete && !realEnd.staleStop,
+              "R3 replay: one clean turn-complete for the whole window (pre-gate: 508290-506400=1.9s < floor -> wrongly suppressed)");
     }
     { // Registry integration: the full OnHookEvent path applies the ordered machine + advance seam.
         SessionRegistry reg;

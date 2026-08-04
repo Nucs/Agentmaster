@@ -138,7 +138,16 @@ namespace Agentmaster
         // prior Typed captures), it is NOT re-added, so the push (hook) and pull (scan) paths
         // converge instead of double-recording. Otherwise it appends a Typed/Sent entry exactly
         // like a hook-captured typed prompt and notifies. No-op for empty text / unknown id.
-        void NoteExternalPrompt(const std::wstring& id, const std::wstring& text);
+        //
+        // Agentmaster (DELIVERY_PLAN.md R1 — the PULL echo-consume): when the fold-matched recorded
+        // prompt is a Sent + UNECHOED Autorun one, this transcript line IS the proof our injection
+        // became a message — it is marked `echoed` (quietly), unifying delivery evidence for hooked
+        // and no-hook sessions alike (the pickup guard / Enter-retry watchdog / lost-send verdict
+        // all key on `echoed`). `observedUnixMs` is the transcript LINE's own timestamp (0 = not
+        // known): a replayed OLD identical line (ts before the prompt's send) never vouches for a
+        // NEW send, while a late-READ fresh line still consumes (deliberately no recency window —
+        // the line's own time is the staleness filter, not our read time). Thread-safe.
+        void NoteExternalPrompt(const std::wstring& id, const std::wstring& text, int64_t observedUnixMs = 0);
 
         // Wiring. Multiple observers may register (e.g. a logger, the Triage Board UI, the
         // scheduler, every window's Manager lens); each is invoked on every change, outside the

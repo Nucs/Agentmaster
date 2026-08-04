@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio> // swprintf (the [ups] disposition trace's FNV-1a fingerprint)
 
 #include "ClaudeSpawn.h" // AppendStateLog (the --fork-session source-id-echo suppression trace)
 #include "TranscriptStore.h" // IsNoiseUserPrompt — keep teammate/control protocol out of the Typed record
@@ -35,33 +36,24 @@ namespace
     // human message that happens to repeat the text).
     constexpr int64_t kEchoWindowMs = 15000;
 
-    // Agentmaster (DELIVERY.md RC6): newline-FOLD for the echo/dedupe text compares — CRLF and a
-    // lone CR both read as LF, the SAME fold BuildPromptFill applies when injecting. The Manager
-    // compose TextBox stores a typed newline as '\r' (the measured UWP quirk EvaluateDraftPull
-    // already folds for) while the wire echo carries '\n' (claude received the folded paste), so
-    // the old EXACT compare never matched a multi-line composed prompt: its echo went unconsumed
-    // (a phantom un-acknowledged send for the pickup guard + the Enter-retry watchdog) and the
-    // message was re-recorded as a duplicate Typed row.
-    std::wstring FoldCrToLf(std::wstring_view s)
+    // (FoldCrToLf — the DELIVERY.md RC6 newline-fold for every echo/dedupe text compare — moved to
+    // SessionModels.h: the scheduler's Enter-retry draft guard needed the identical fold, and two
+    // hand-synced copies of a compare rule is how the RC6 bug happened in the first place.)
+
+    // Agentmaster (DELIVERY_PLAN.md R3 — the [ups] disposition trace): a short FNV-1a fingerprint of
+    // a prompt's FOLDED text, so hooks.log can say which message a UserPromptSubmit carried (and two
+    // deliveries of the same text read as the same hash) without logging the prompt body itself.
+    std::wstring FoldedPromptHash(const std::wstring& foldedText)
     {
-        std::wstring out;
-        out.reserve(s.size());
-        for (size_t i = 0; i < s.size(); ++i)
+        uint32_t h = 2166136261u;
+        for (const wchar_t c : foldedText)
         {
-            if (s[i] == L'\r')
-            {
-                out.push_back(L'\n');
-                if (i + 1 < s.size() && s[i + 1] == L'\n')
-                {
-                    ++i; // collapse CRLF -> one LF
-                }
-            }
-            else
-            {
-                out.push_back(s[i]);
-            }
+            h ^= static_cast<uint32_t>(c);
+            h *= 16777619u;
         }
-        return out;
+        wchar_t buf[12];
+        ::swprintf(buf, 12, L"%08x", h);
+        return buf;
     }
 
     // TabTokenEq (the case-insensitive WT_SESSION/tabToken compare this TU leans on everywhere)
@@ -323,6 +315,7 @@ namespace Agentmaster
         SessionInfo snapshot;
         bool found = false;
         bool triggerAdvance = false;
+        std::wstring upsTrace; // DELIVERY_PLAN.md R3: the [ups] disposition line, filled under the lock, logged after it
 
         {
             std::lock_guard guard{ _mtx };
@@ -468,7 +461,8 @@ namespace Agentmaster
                         break;
                     }
                 }
-                if (!isEcho && !IsNoiseUserPrompt(msg.promptText))
+                const bool isNoise = !isEcho && IsNoiseUserPrompt(msg.promptText);
+                if (!isEcho && !isNoise)
                 {
                     QueuedPrompt typed;
                     typed.id = L"typed-" + std::to_wstring(now) + L"-" + std::to_wstring(_typedSeq++);
@@ -482,6 +476,18 @@ namespace Agentmaster
                     s.queue.push_back(std::move(typed));
                     TrimQueueHistory(s.queue); // bounded history: only the OLDEST completed entries drop, never queued work
                 }
+                upsTrace = L"[ups] " + ShortId(msg.sessionId) + L" chars=" + std::to_wstring(msg.promptText.size()) +
+                           L" hash=" + FoldedPromptHash(echoFolded) +
+                           (isEcho ? L" -> echo consumed" : (isNoise ? L" -> noise (not recorded)" : L" -> recorded as Typed")) + L"\n";
+            }
+            else if (msg.event == HookEvent::UserPromptSubmit)
+            {
+                // Agentmaster (DELIVERY_PLAN.md R3 — instrument, don't guess): an EMPTY-prompt
+                // UserPromptSubmit. The live phantom twins (DELIVERY.md §10) were exactly this shape —
+                // matched no transcript message, recorded no row — and the ordered machine now keeps
+                // them out of the turn accounting (no lastPromptUnixMs stamp, no type-ahead count;
+                // HookEvents.h). The scanner's recon-run synth also rides this branch by design.
+                upsTrace = L"[ups] " + ShortId(msg.sessionId) + L" chars=0 -> EMPTY (state-only; no stamp, no type-ahead, no record)\n";
             }
 
             snapshot = s;
@@ -494,6 +500,14 @@ namespace Agentmaster
             triggerAdvance = ordered.turnComplete;
         }
 
+        if (!upsTrace.empty())
+        {
+            // DELIVERY_PLAN.md R3 (instrument first): one line per UserPromptSubmit naming its
+            // disposition — echo-consumed / recorded / noise / EMPTY — plus size + a folded-text
+            // fingerprint, so a phantom/duplicate UPS is self-evident from hooks.log (two deliveries
+            // of one message share a hash; the empty twins read chars=0). Logged outside the lock.
+            AppendStateLog(L"hooks.log", upsTrace);
+        }
         if (found)
         {
             _notify(snapshot, msg.event);
@@ -879,7 +893,7 @@ namespace Agentmaster
         it->second.pendingPasteRefs = refs;
     }
 
-    void SessionRegistry::NoteExternalPrompt(const std::wstring& id, const std::wstring& text)
+    void SessionRegistry::NoteExternalPrompt(const std::wstring& id, const std::wstring& text, int64_t observedUnixMs)
     {
         if (text.empty())
         {
@@ -887,6 +901,7 @@ namespace Agentmaster
         }
         SessionInfo snapshot;
         bool changed = false;
+        std::wstring pullEchoTrace; // DELIVERY_PLAN.md R1: filled under the lock, logged after it
         {
             std::lock_guard guard{ _mtx };
             const auto it = _sessions.find(id);
@@ -901,28 +916,60 @@ namespace Agentmaster
             // recording a human message that happens to match a queued prompt's text. Newline-fold
             // both sides (DELIVERY.md RC6) — the transcript text carries \n while a compose-queued
             // prompt's record may carry \r, the same mismatch the echo consume folds for.
+            //
+            // Agentmaster (DELIVERY_PLAN.md R1 — the PULL echo-consume): a fold-matched Sent+unechoed
+            // Autorun prompt is not merely deduped — this transcript user line IS the proof our
+            // injection became a message, so mark it `echoed`. That unifies delivery evidence across
+            // hooked AND no-hook sessions ("echoed" = it became a message, fed by the push hook OR by
+            // this), which is what the pickup guard, the Enter-retry watchdog, and the lost-send
+            // verdict (DecideLostSend) all key on. UNLIKE the push consume, there is deliberately NO
+            // recency window on the consume: the line's OWN timestamp (observedUnixMs, when the caller
+            // has one) is the staleness filter — a replayed OLD identical line (ts before the send)
+            // must not vouch for a NEW send, but a scanner that reads the line late (write-lag, a
+            // catch-up pass) must still consume it, or the lost-send verdict would fire on a
+            // demonstrably-delivered prompt. observedUnixMs==0 (no per-line ts) trusts the match.
             const std::wstring textFolded = FoldCrToLf(text);
-            for (const auto& p : s.queue)
+            bool alreadyRecorded = false;
+            for (auto& p : s.queue)
             {
-                if (p.status == PromptStatus::Sent && FoldCrToLf(p.text) == textFolded)
+                if (p.status != PromptStatus::Sent || FoldCrToLf(p.text) != textFolded)
                 {
-                    return;
+                    continue;
+                }
+                alreadyRecorded = true;
+                if (p.origin == PromptOrigin::Autorun && !p.echoed &&
+                    (observedUnixMs == 0 || p.sentAtUnixMs == 0 || observedUnixMs >= p.sentAtUnixMs))
+                {
+                    p.echoed = true; // the transcript confirmed the send became a message (pull evidence)
+                    pullEchoTrace = L"[pull-echo] " + ShortId(id) + L" prompt " + ShortId(p.id) +
+                                    L" (transcript confirmed the delivered prompt became a message)\n";
+                    break; // consume at most one — mirrors the push consume's one-echo-per-injection rule
                 }
             }
-            const int64_t now = NowMs();
-            QueuedPrompt typed;
-            typed.id = L"recon-" + std::to_wstring(now) + L"-" + std::to_wstring(_typedSeq++);
-            typed.label = MakeLabel(text);
-            typed.text = text;
-            typed.status = PromptStatus::Sent;
-            typed.origin = PromptOrigin::Typed;
-            typed.echoed = true; // it IS the message; no further echo expected
-            typed.attempts = 1;
-            typed.sentAtUnixMs = now;
-            s.queue.push_back(std::move(typed));
-            TrimQueueHistory(s.queue); // bounded history: only the OLDEST completed entries drop, never queued work
-            snapshot = s;
-            changed = true;
+            if (!alreadyRecorded)
+            {
+                // Deduped paths fall through with changed=false — never a duplicate Typed row (and the
+                // consume above is bookkeeping-QUIET: no notify, matching the push consume; the state
+                // ride-along and the turn boundary come from the scanner's own synths, not from here).
+                const int64_t now = NowMs();
+                QueuedPrompt typed;
+                typed.id = L"recon-" + std::to_wstring(now) + L"-" + std::to_wstring(_typedSeq++);
+                typed.label = MakeLabel(text);
+                typed.text = text;
+                typed.status = PromptStatus::Sent;
+                typed.origin = PromptOrigin::Typed;
+                typed.echoed = true; // it IS the message; no further echo expected
+                typed.attempts = 1;
+                typed.sentAtUnixMs = now;
+                s.queue.push_back(std::move(typed));
+                TrimQueueHistory(s.queue); // bounded history: only the OLDEST completed entries drop, never queued work
+                snapshot = s;
+                changed = true;
+            }
+        }
+        if (!pullEchoTrace.empty())
+        {
+            AppendStateLog(L"hooks.log", pullEchoTrace); // outside the lock, like every trace here
         }
         if (changed)
         {

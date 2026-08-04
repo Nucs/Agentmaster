@@ -493,6 +493,57 @@ namespace Agentmaster
         return L"\x1b[200~" + body + L"\x1b[201~";
     }
 
+    // Agentmaster (DELIVERY.md RC6): newline-FOLD for prompt-text compares — CRLF and a lone CR
+    // both read as LF, the SAME fold BuildPromptFill applies when injecting. The Manager compose
+    // TextBox stores a typed newline as '\r' (the measured UWP quirk EvaluateDraftPull already
+    // folds for) while a transcript/wire echo and the pending-input detector carry '\n', so an
+    // exact compare never matches a multi-line composed prompt against its delivered form. ONE
+    // definition, shared by the registry's echo consume + NoteExternalPrompt dedupe and the
+    // scheduler's draft guard (DraftMatchesPromptText below) — the AgentStatusColors.h rule: the
+    // second consumer is the cue to factor it. PURE.
+    inline std::wstring FoldCrToLf(std::wstring_view s)
+    {
+        std::wstring out;
+        out.reserve(s.size());
+        for (size_t i = 0; i < s.size(); ++i)
+        {
+            if (s[i] == L'\r')
+            {
+                out.push_back(L'\n');
+                if (i + 1 < s.size() && s[i + 1] == L'\n')
+                {
+                    ++i; // collapse CRLF -> one LF
+                }
+            }
+            else
+            {
+                out.push_back(s[i]);
+            }
+        }
+        return out;
+    }
+
+    // Agentmaster (DELIVERY_PLAN.md R2 — the Enter-retry DRAFT GUARD's compare): does the input
+    // box's observed draft READ AS the watched prompt's text? Newline-folded (above) + trailing
+    // whitespace/newlines trimmed on both sides — the pending-input detector extracts the box
+    // verbatim (LF newlines) while the queued prompt may carry compose-box CRs and a trailing
+    // newline the paste normalized away. Deliberately NO leading trim / fuzz: the guard's whole
+    // point is telling OUR still-sitting prompt (press Enter — the rescue) from a HUMAN's draft
+    // (never press — a lone Enter would submit it), and a prompt the TUI mangled beyond a
+    // trailing-whitespace difference is not provably ours to submit. PURE.
+    inline bool DraftMatchesPromptText(std::wstring_view boxDraft, std::wstring_view promptText)
+    {
+        const auto norm = [](std::wstring_view v) {
+            std::wstring f = FoldCrToLf(v);
+            while (!f.empty() && (f.back() == L'\n' || f.back() == L' ' || f.back() == L'\t'))
+            {
+                f.pop_back();
+            }
+            return f;
+        };
+        return norm(boxDraft) == norm(promptText);
+    }
+
     // Agentmaster (COMMANDS.md §5b — the standby fill's HANDS-OFF latch): has the user already
     // driven this session? The pump's standby lane must never FILL (or re-fill) a session the
     // user owns — and sampling the STATE alone has a hole: a prompt submitted and COMPLETED

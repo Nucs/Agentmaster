@@ -1,11 +1,13 @@
 # Delivery hardening — implementer plan (R1–R3)
 
-> **Status: PLAN — not yet implemented.** Companion to [`DELIVERY.md`](DELIVERY.md) (read §9–§10
-> first: the incidents, the shipped fixes, and where these residuals were carved off). Everything
-> here is engine-side and pure-testable unless marked otherwise; follow the house rules — pure
-> decision functions with the `DecideAdvance` pattern, harness coverage in
-> `AgentMaster/tests/`, `[tag]`-logged observability, Rule #18 on every catch, and amend
-> `DELIVERY.md` + `CLAUDE.md` when done.
+> **Status: IMPLEMENTED — with three evidence-driven deviations** (each flagged `⚠ DEVIATION`
+> inline; the outcomes live in [`DELIVERY.md`](DELIVERY.md) §10). The pre-implementation log
+> re-analysis materially corrected the R3 forensics (the phantom UPS events are EMPTY late
+> twins, not text-duplicates — no `Typed` rows exist for them; the AskUserQuestion dialog answer
+> rides `PostToolUse`, never a UPS) and proved R2-as-written unsafe on the very incident log (the
+> re-armed watchdog would have submitted the user's draft at 08:50:07 — the draft guard below is
+> mandatory, not hardening). Engine-tested: `TestLostSendReconciler` + the rewritten
+> guard/watchdog/ordered suites (harness 3130/3130); `TerminalAppLib` compiles green.
 
 **Target invariant (extends DELIVERY.md §5/§9):** a `Sent` prompt is either *provably a message*
 (echo — push or pull), *provably dead* (`Failed`, surfaced), or *still being watched*. No prompt
@@ -38,11 +40,18 @@ user messages per pass):**
 2. **The lost verdict.** Pure `DecideLostSend(const SessionInfo& s, int64_t nowMs)` → the set of
    `Sent`+`!echoed`+`sentAtUnixMs != 0` Autorun prompts that are LOST, defined as ALL of:
    - the session is AT REST (`Idle`/`WaitingForInput`) — never judge mid-turn;
-   - turn evidence exists PAST the send (`turns.lastPromptUnixMs > sentAt` or a real Stop landed
-     after it): a turn ran and our text still never showed;
-   - a settle margin elapsed (`kLostSendSettleMs`, suggest 15 000 — must exceed the Enter-retry
+   - ~~turn evidence exists PAST the send (`turns.lastPromptUnixMs > sentAt` or a real Stop landed
+     after it): a turn ran and our text still never showed;~~ **⚠ DEVIATION — conjunct DROPPED
+     as implemented:** a watchdog press REFRESHES `sentAtUnixMs`, making this permanently false
+     after one press — the draft-blocked corner would strand `Sent` forever, the very gap R1
+     closes; it also never guarded the false-positive it appeared to (a fold-miss echo produces
+     turn evidence too — the echo conjunct is the real protection), and eaten-vs-lost
+     disambiguation is already serialized by that same press-refresh (the verdict structurally
+     fires only after the ladder went quiet);
+   - a settle margin elapsed (`kLostSendSettleMs` = 15 000 — must exceed the Enter-retry
      give-up horizon ~21 s? No: independent watchers; pick ≥ the echo window 15 s so a slow push
-     echo can never be beaten to the verdict);
+     echo can never be beaten to the verdict — and the press-refresh above means an ACTIVE ladder
+     always postpones it anyway);
    - the delivery gate for it is closed (never race an in-flight swap).
 
 **Recovery (decision made — mirror the Enter-retry give-up, `Scheduler.cpp`):** mark the prompt
@@ -86,13 +95,26 @@ no-hook sessions alike. Re-key both consumers:
   `turns.lastPromptUnixMs > sentAt` (a submit stamp is still direct evidence); drop the
   transcript-advance clause. `kPickupGuardMaxMs` stays as the lost-evidence belt.
 
+**⚠ DEVIATION — the DRAFT GUARD is a mandatory third leg, proven on the incident log itself.**
+Dropping the drain clause RE-ARMS the watchdog in the lost shape (the prompt stays a watch
+candidate once the session returns to rest) — and at 08:50:07 the live log shows exactly that
+moment with the box holding the user's 17-char draft (*"maybe another one"*): the plan-as-written
+watchdog would have pressed a lone Enter there and SUBMITTED it (the RC3 merge). As implemented,
+`DecideEnterRetry` never presses while `s.pendingInput` (the pending-input monitor's box read) is
+non-empty and ≠ the watched prompt's text (`DraftMatchesPromptText` — the shared `FoldCrToLf`,
+promoted to SessionModels.h, + trailing-trim): a box holding OUR prompt still presses (that IS
+the eaten-CR rescue), a foreign draft answers `Waiting` (never press; the R1 verdict owns the
+terminal resolution — its settle clock, keyed on the un-refreshed `sentAtUnixMs`, keeps running
+while presses are refused). An empty observed box presses (a lone Enter into an empty claude box
+is a no-op; the pending scan's eager-show bounds the race to ~one tick).
+
 **Decision point (flagged, needs a corpus check before committing):** the scanner's pull-consume
 cadence is ~2.5 s and transcript-write-lagged; on a no-hook ADOPTED session a genuinely-started
 turn may not mark `echoed` for a few seconds. Both consumers already tolerate that (the guard
 holds a little longer — correct direction; the watchdog's first press is at 3 s and a press into
-a running turn's box is an empty-box no-op). Verify against a no-hook session live before
-shipping; if the watchdog presses prove noisy, gate its Retry (not its Waiting) on one extra
-poll.
+a running turn's box is an empty-box no-op — and the transcript-derived state leaves the ready
+set within a tick, ending the watch). Live no-hook verification rides the next deploy cycle with
+the rest; the draft guard bounds the worst case to a no-op press either way.
 
 **Files.** `Scheduler.h` (both pure functions + comments), tests in `tests_spawn_sched.cpp`
 (replace the transcript-advance release/drain cases with echoed-keyed ones; add the
@@ -115,13 +137,33 @@ short fold-hash) of the prompt to the `[UserPromptSubmit]` hook log line, and ca
 repro (likely candidates: the AskUserQuestion answer-submit, the stash-pop auto-submit, or a
 duplicate forwarder like the §9 Stops). The wire already carries the prompt — this is log-only.
 
-**Step 2 — the likely hardenings (pick per evidence):**
-- an **empty-prompt** UPS never bumps `turns.lastPromptUnixMs` (a promptless submit is not a new
-  turn's start — but FIRST verify the dialog-answer UPS is the empty one, because that submit
-  DOES resume API work and may deserve the stamp);
-- a UPS whose folded text equals an already-`echoed` recorded message within the echo window is
-  a DUPLICATE: apply the state effect (Running is harmless and self-heals) but skip the stamp,
-  so it can never floor-suppress the real Stop that follows.
+**⚠ DEVIATION — Step 1's questions were answerable from the EXISTING record, and the answers
+redirected Step 2.** The persisted queue holds NO `Typed` rows at any phantom instant (a
+non-empty non-echo UPS always records one; noise shapes are real turns) and the transcript holds
+no user message there ⇒ the phantoms carried **EMPTY prompt text** — late duplicate deliveries
+(~0.5–2.6 s after each real hook, the same twin pattern as the §9 duplicate Stops, degraded to a
+promptless payload; a third instance found at 08:50:14.515). And the dialog-answer question is
+moot: the AskUserQuestion answer fires **`PostToolUse`** (proven live at 08:48:47), never a UPS.
+(The earlier "duplicate asdasd entries" reading was itself wrong — those are two separate
+legitimate sends, 08:11 and 08:42.)
+
+**Step 2 — as implemented (per that evidence):**
+- an **empty-prompt** UPS is STATE-ONLY in the ordered machine: it never bumps
+  `turns.lastPromptUnixMs` **and never counts type-ahead** (`++queuedPrompts` — a phantom count
+  made the next REAL Stop read as a batch consume and strand Running for a quiescent-heal cycle);
+  the → Running state effect stays (self-healing if phantom). This also covers the scanner's
+  recon-run synth (deliberately empty), whose reconciliation-timed stamp was itself a
+  floor-suppression hazard.
+- ~~the already-`echoed` text-DUPLICATE dedupe~~ **⚠ DEVIATION — REJECTED:** no evidence
+  motivates it (the phantoms are empty, so the text path never sees them), and it carries a real
+  false-positive: a human repeat-typing the same short prompt ("y") as mid-turn type-ahead within
+  the window would lose its type-ahead count — making the current turn's Stop read turn-complete
+  and fire the advance into the repeat's turn, the exact mid-turn stacking this whole effort
+  kills. Do not add it without a recorded non-empty duplicate.
+- the `[ups]` disposition line ships regardless: one line per UserPromptSubmit —
+  `chars=N hash=<fnv1a of the folded text> -> echo consumed | recorded as Typed | noise | EMPTY`
+  — so any future phantom shape is self-evident from hooks.log (two deliveries of one message
+  share a hash; the empty twins read `chars=0`).
 
 **Files.** `HooksBridge.cpp`/`Engine.cpp` (wherever the `[UserPromptSubmit]` trace prints),
 `SessionRegistry.cpp` (`OnHookEvent` — the stamp gate), `HookEvents.h` only if the stamp rule
@@ -143,7 +185,10 @@ real Stop a clean turn-complete with its true question bit.
 Order: **R1 → R2** (R2 consumes R1's pull echo), **R3** independent (Step 1 can start
 immediately). Each lands with: harness green (`run-m5-tests.bat`), `TerminalAppLib`
 compile-check, `DELIVERY.md` §10 updated with the outcome, the `CLAUDE.md` M7 paragraph amended,
-an extensive commit.
+an extensive commit. **(As landed: the three interlock — R2's guard consumes R1's `echoed`, R3's
+stamp gate is what makes R2's remaining prompt-stamp release sound — so they shipped as ONE
+change set, validated together: harness 3130/3130 + lib green; deploy verification rides the
+next cycle.)**
 
 Adjacent, still-open items (from DELIVERY.md §8 — separate scope, listed so the implementer sees
 the whole board): a per-prompt question-guard opt-out control in the Manager queue UI + a

@@ -333,19 +333,40 @@ namespace Agentmaster
             turns = {}; // a (re)start / end settles turn identity
             break;
         case HookEvent::UserPromptSubmit:
-            // A prompt submitted while a turn is in flight (Running, or blocked on a permission
-            // request) is QUEUED behind it — Claude consumes it as the next turn with no
-            // further hook, so remember that the conversation outlives the next Stop.
-            if (current == SessionState::Running || current == SessionState::NeedsApproval)
+            // Agentmaster (DELIVERY_PLAN.md R3 — phantom/duplicate UserPromptSubmit hardening): only a
+            // PROMPT-CARRYING UserPromptSubmit is a turn's start for the ACCOUNTING. The live incident
+            // (b5f766fc, DELIVERY.md §10): each real hook fired a late EMPTY twin ~0.5-2.6s after it
+            // (08:42:28.904 / 08:44:53.902 / 08:50:14.515 — matched NO transcript user message and
+            // recorded NO Typed row, so its promptText was provably empty). Each twin's late ts bumped
+            // lastPromptUnixMs — which floor-suppressed the next REAL Stop (kMinRealTurnSpanMs read it
+            // as too-fast) and spuriously released the pickup guard's "a newer prompt stamp proves the
+            // pickup" clause — and a twin landing mid-turn ++queuedPrompts, making the real Stop read
+            // as a type-ahead consume (stuck Running until the quiescent synth healed it ~2.5s later).
+            // A REAL submit always carries text (claude refuses an empty submit — Enter on an empty box
+            // is a no-op — and the AskUserQuestion dialog answer rides PostToolUse, never a UPS: proven
+            // live at 08:48:47), so an empty-prompt UPS gets the STATE effect only (-> Running, which
+            // self-heals if phantom — the machine's documented property) and touches no accounting.
+            // This also covers the scanner's recon-run SYNTH (deliberately empty promptText): its
+            // reconciliation-timed stamp was itself a floor-suppression hazard for a hooked session
+            // whose real Stop landed within the floor of the late synth time. Known narrow edge: an
+            // image-only submit (if claude ever reports it promptless) would skip the type-ahead count;
+            // the delivery gate + §9 floor still bound the damage to one quiescent-heal.
+            if (!m.promptText.empty())
             {
-                if (turns.queuedPrompts < kMaxQueuedPrompts)
+                // A prompt submitted while a turn is in flight (Running, or blocked on a permission
+                // request) is QUEUED behind it — Claude consumes it as the next turn with no
+                // further hook, so remember that the conversation outlives the next Stop.
+                if (current == SessionState::Running || current == SessionState::NeedsApproval)
                 {
-                    ++turns.queuedPrompts;
+                    if (turns.queuedPrompts < kMaxQueuedPrompts)
+                    {
+                        ++turns.queuedPrompts;
+                    }
                 }
-            }
-            if (m.ts > turns.lastPromptUnixMs)
-            {
-                turns.lastPromptUnixMs = m.ts; // monotonic: a late-arriving older prompt must not regress it
+                if (m.ts > turns.lastPromptUnixMs)
+                {
+                    turns.lastPromptUnixMs = m.ts; // monotonic: a late-arriving older prompt must not regress it
+                }
             }
             break;
         case HookEvent::Stop:

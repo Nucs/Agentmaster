@@ -129,10 +129,14 @@ namespace Agentmaster
         // "handover") + the <command-args> body verbatim (outer-trimmed; "" when absent).
         std::wstring commandName;
         std::wstring commandArgs;
-        // Command only: the transcript line's own `timestamp` -> Unix ms (0 when absent). The
-        // CommandWatch's replay guard — only a fresh stamp arms a sighting, so a history replay
-        // (a restored/adopted session's initial read, a truncation rewind) can never re-fire an
-        // old command. Deliberately NOT filled for other kinds (per-line parse cost for nothing).
+        // Command + UserPrompt: the transcript line's own `timestamp` -> Unix ms (0 when absent).
+        // Command: the CommandWatch's replay guard — only a fresh stamp arms a sighting, so a
+        // history replay (a restored/adopted session's initial read, a truncation rewind) can never
+        // re-fire an old command. UserPrompt: the PULL echo-consume's staleness filter
+        // (DELIVERY_PLAN.md R1 — NoteExternalPrompt's observedUnixMs): a replayed OLD user line
+        // whose text matches a NEW Sent prompt must not vouch for that send, while a late-READ
+        // fresh line still consumes — the line's own time decides, not our read time. Deliberately
+        // NOT filled for the remaining kinds (per-line parse cost for nothing).
         int64_t lineTsMs{ 0 };
         // Assistant only (COMMANDS.md): the file-WRITING tool_use paths of this message — each
         // Write/Edit (and legacy MultiEdit) block's input.file_path, in block order. Feeds the

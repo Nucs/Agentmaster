@@ -77,6 +77,7 @@ int wmain()
     TestScheduler();
     TestEnterRetry();
     TestDeliveryGate();
+    TestLostSendReconciler();
     TestBuildPromptSubmission();
     TestSchedulerIntegration();
     TestUpdaterVersionLogic();

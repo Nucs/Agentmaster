@@ -21,6 +21,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "SessionModels.h"
 
@@ -41,12 +42,18 @@ namespace Agentmaster
     // The old expiry meant "a lost echo shouldn't stall the plan", but 4s is routinely beaten by
     // real forwarder latency — the 07:27 incident's #6 fired 9s after #5 exactly because the
     // guard had lapsed while the delivery was still being accepted, stacking the next prompt on
-    // top. Now the guard holds until the TURN visibly started (the echo consumed, a newer
-    // UserPromptSubmit stamped turns.lastPromptUnixMs, or the transcript advanced past the send)
-    // and this cap is only the lost-evidence belt: it sits ABOVE the Enter-retry watchdog's
-    // give-up horizon (~21s: 3s + 6s + 6s presses + the poll), which resolves a truly-dead send
-    // to Failed (and pauses the autorunner) long before the cap — so in practice the cap only
-    // ever releases a session whose watchdog could not run (no injector mid-rebind).
+    // top. Now the guard holds until the TURN visibly started — the echo consumed (`echoed`, fed
+    // by the push hook OR the scanner's pull consume, DELIVERY_PLAN.md R1/R2), or a newer
+    // prompt-carrying UserPromptSubmit stamped turns.lastPromptUnixMs past the send (an echo the
+    // fold couldn't match still proves the pickup; an EMPTY phantom twin no longer stamps — R3).
+    // The former raw transcript-advance release is GONE (R2): a still-running PREVIOUS turn also
+    // writes the transcript, so "the file grew past sentAt" never proved OUR prompt started — it
+    // is exactly how the watchdog drained instead of rescuing the lost `#6`. This cap is only the
+    // lost-evidence belt: it sits ABOVE the Enter-retry watchdog's give-up horizon (~21s: 3s + 6s
+    // + 6s presses + the poll), which resolves a truly-dead send to Failed (and pauses the
+    // autorunner) long before the cap — so in practice the cap only ever releases a session whose
+    // watchdog could not run (no injector mid-rebind, or draft-guarded presses; the lost-send
+    // verdict below then owns the terminal resolution).
     inline constexpr int64_t kPickupGuardMaxMs = 30000;
 
     // Enter-retry (the "the TUI ate my Enter" backstop). The ConPTY can deliver an injected
@@ -58,14 +65,28 @@ namespace Agentmaster
     // (never the text again — that would duplicate it), up to kEnterRetryMax extra presses, then gives
     // up: the prompt is marked Failed and the session's autorunner is PAUSED (it never landed — don't
     // strand a phantom Sent nor advance past a broken step; the user Send-nows / re-arms). kEnterRetry-
-    // PollMs is how often the worker re-checks while a send awaits pickup. kEnterRetryActivityMarginMs
-    // guards the transcript-advanced "it started" signal against a send fired sub-second after the
-    // prior turn ended (so a real conversation write — not the prior turn's tail — is what clears it).
+    // PollMs is how often the worker re-checks while a send awaits pickup. (The former
+    // kEnterRetryActivityMarginMs transcript-advance "it started" signal is GONE — DELIVERY_PLAN.md
+    // R2: a still-running PREVIOUS turn also advances the transcript, so it drained the watch in
+    // exactly the shape that needed rescuing; started-ness now keys on `echoed` — push or pull —
+    // and on the state leaving the ready set.)
     inline constexpr int64_t kEnterRetryFirstMs = 3000; // first re-press fires fast — rescue the common eaten-CR case without a long stall
     inline constexpr int64_t kEnterRetryIntervalMs = 6000; // subsequent re-presses: slower (the turn may be genuinely starting)
     inline constexpr uint32_t kEnterRetryMax = 3; // never re-press Enter more than this many times
     inline constexpr int64_t kEnterRetryPollMs = 1000; // worker re-check cadence while a send awaits pickup
-    inline constexpr int64_t kEnterRetryActivityMarginMs = 1000; // transcript must advance at least this far past the send to count as "started"
+
+    // Agentmaster (DELIVERY_PLAN.md R1 — the LOST-SEND verdict's settle): a Sent Autorun prompt with
+    // NO echo (push hook or the scanner's pull consume) this long after its send, on a session AT
+    // REST with the delivery gate closed, provably never became a message — the transcript would
+    // have shown its user line by now and the pull consume would have marked it. >= the push echo
+    // window (SessionRegistry's kEchoWindowMs, 15s), so a slow hook echo can never be beaten to the
+    // verdict; and because every Enter-retry press REFRESHES sentAtUnixMs, the verdict structurally
+    // waits out an active watchdog ladder (it can only fire once the presses stopped — gave up
+    // [already Failed, verdict moot], draft-blocked, or uncontrollable). The recorded gap this
+    // closes (DELIVERY.md §9/§10): prompt `#6` pasted into a running turn was consumed by an
+    // AskUserQuestion dialog's rendering, never became a message, and sat terminally `Sent` —
+    // indistinguishable from a success until a human diffed the transcript.
+    inline constexpr int64_t kLostSendSettleMs = 15000;
 
     enum class AdvanceAction
     {
@@ -154,11 +175,15 @@ namespace Agentmaster
         // turn it should start has not visibly begun, hold off — otherwise an advance driven by
         // an observed change in that window would send the NEXT prompt on top of it (stacking two
         // messages into one box). EVIDENCE-released (DELIVERY.md §9), not time-expired: the turn
-        // started when the echo was consumed (`echoed`), a newer UserPromptSubmit stamped
+        // started when the echo was consumed (`echoed` — the push hook OR the scanner's pull
+        // consume, DELIVERY_PLAN.md R1), or a newer prompt-carrying UserPromptSubmit stamped
         // turns.lastPromptUnixMs past the send (an echo the fold couldn't match still proves the
-        // pickup), or the transcript advanced meaningfully past it (the no-hook fallback — the
-        // same margin DecideEnterRetry trusts). kPickupGuardMaxMs is the lost-evidence belt only;
-        // the Enter-retry watchdog resolves a truly-dead send to Failed well before it. Ignores
+        // pickup; empty phantom twins no longer stamp — R3). The former transcript-advance release
+        // is GONE (R2): a still-running PREVIOUS turn also writes the file, so raw growth past
+        // sentAt proved nothing about OUR prompt — it is the clause that released the guard while
+        // `#6` was being consumed by a dialog. kPickupGuardMaxMs is the lost-evidence belt only;
+        // the Enter-retry watchdog resolves a truly-dead send to Failed well before it, and the
+        // lost-send verdict (DecideLostSend) owns the case the watchdog can't reach. Ignores
         // un-timestamped Sent prompts (a restored plan) via sentAtUnixMs != 0; a restored Sent
         // prompt also loads echoed=true (Persistence), so it can never re-arm this guard.
         for (const auto& q : s.queue)
@@ -172,9 +197,7 @@ namespace Agentmaster
             {
                 continue;
             }
-            const bool turnStarted =
-                (s.turns.lastPromptUnixMs > q.sentAtUnixMs) ||
-                (s.convLastActivityUnixMs != 0 && s.convLastActivityUnixMs > q.sentAtUnixMs + kEnterRetryActivityMarginMs);
+            const bool turnStarted = s.turns.lastPromptUnixMs > q.sentAtUnixMs;
             if (!turnStarted)
             {
                 plan.reason = L"awaiting injection pickup";
@@ -257,12 +280,27 @@ namespace Agentmaster
     // PURE decision (the DecideAdvance pattern): given a session snapshot + now, should the scheduler
     // re-press Enter for a Flight prompt whose submit Enter the TUI may have eaten? See the
     // kEnterRetry* constants above. The turn is considered STARTED — so no retry, stop watching — when
-    // ANY of: the prompt's UserPromptSubmit echo arrived (`echoed`, the hook path); the session left
+    // ANY of: the prompt's UserPromptSubmit echo arrived (`echoed` — the push hook, OR the scanner's
+    // PULL consume when the transcript shows the message, DELIVERY_PLAN.md R1); or the session left
     // the ready set (state advanced past Idle/WaitingForInput, e.g. Running — covers a hook-less
-    // adopted session driven by the transcript tail); or the conversation transcript advanced past the
-    // send (`convLastActivityUnixMs`, the no-hook fast-turn fallback). Otherwise the most-recently-sent
-    // un-acknowledged Flight prompt is watched: Waiting until kEnterRetryIntervalMs elapses, then Retry
-    // (until kEnterRetryMax presses), then GiveUp.
+    // adopted session driven by the transcript tail, and doubles as the mid-turn SAFETY gate: never
+    // press into a running turn). The former transcript-advance drain is GONE (R2): a still-running
+    // PREVIOUS turn also advances `convLastActivityUnixMs`, so it drained the watch in exactly the
+    // shape that needed the watchdog — a prompt delivered into (and consumed by) another turn.
+    // Otherwise the most-recently-sent un-acknowledged Flight prompt is watched: Waiting until
+    // kEnterRetryIntervalMs elapses, then Retry (until kEnterRetryMax presses), then GiveUp.
+    //
+    // DRAFT GUARD (R2 — mandatory, proven on the live log): before pressing, the box's observed
+    // unsent draft (s.pendingInput, the PENDING_INPUT.md monitor) is compared to the watched
+    // prompt's text. A box holding OUR prompt (fold-matched) is the eaten-CR shape — press, that IS
+    // the rescue. A box holding ANYTHING ELSE is (or may be) the human's draft — a lone Enter would
+    // SUBMIT it, the exact RC3 merge: in the recorded incident the box held the user's 17-char
+    // draft at 08:50:07 while the lost `#6` sat Sent-unechoed, and without this guard the re-armed
+    // watch would have pressed right there. Answer Waiting (keep watching, never press); the
+    // draft-blocked prompt is then resolved by the lost-send verdict (DecideLostSend below) once
+    // settled. An EMPTY pendingInput allows the press: the pending scan's eager-show records a
+    // draft within ~one tick, and a press into a truly empty box is a no-op for claude — the
+    // narrow race (a draft begun sub-tick before the press) is bounded by that no-op window.
     //
     // `controllable` == "we hold a bound stdin injector for this session, so a re-pressed Enter can
     // actually reach it". The caller passes SessionRegistry::HasInjector(s.id). This is CONTROLLABILITY
@@ -300,17 +338,13 @@ namespace Agentmaster
         {
             return plan;
         }
-        // The most-recently-sent Flight prompt still awaiting its pickup (Sent, not echoed, and the
-        // transcript hasn't advanced past it). A later send supersedes an earlier one.
+        // The most-recently-sent Flight prompt still awaiting its pickup (Sent, not echoed — push
+        // OR pull evidence both mark `echoed` now, DELIVERY_PLAN.md R1/R2). A later send supersedes
+        // an earlier one. (The raw transcript-advance drain that used to sit here is gone — R2.)
         const QueuedPrompt* best = nullptr;
         for (const auto& p : s.queue)
         {
             if (p.origin != PromptOrigin::Autorun || p.status != PromptStatus::Sent || p.echoed || p.sentAtUnixMs == 0)
-            {
-                continue;
-            }
-            // Transcript advanced meaningfully past this send => Claude picked it up (started a turn).
-            if (s.convLastActivityUnixMs != 0 && s.convLastActivityUnixMs > p.sentAtUnixMs + kEnterRetryActivityMarginMs)
             {
                 continue;
             }
@@ -330,6 +364,14 @@ namespace Agentmaster
             plan.action = EnterRetryAction::GiveUp;
             return plan;
         }
+        // DRAFT GUARD (R2, see the contract above): a box observed holding text that is NOT our
+        // watched prompt is never pressed into — a lone Enter would submit the human's draft (the
+        // RC3 merge). Keep watching instead; the lost-send verdict owns the terminal resolution.
+        if (!s.pendingInput.empty() && !DraftMatchesPromptText(s.pendingInput, best->text))
+        {
+            plan.action = EnterRetryAction::Waiting;
+            return plan;
+        }
         // First re-press fires after kEnterRetryFirstMs (snappy rescue); later presses space out by
         // kEnterRetryIntervalMs. sentAtUnixMs is refreshed on each press, so this is "since last press".
         const int64_t due = (best->enterRetries == 0) ? kEnterRetryFirstMs : kEnterRetryIntervalMs;
@@ -340,6 +382,63 @@ namespace Agentmaster
         }
         plan.action = EnterRetryAction::Waiting;
         return plan;
+    }
+
+    // Agentmaster (DELIVERY_PLAN.md R1 — the LOST-SEND verdict). PURE (the DecideAdvance pattern):
+    // which of this session's Sent Autorun prompts are provably LOST — delivered to the terminal
+    // yet never became a message? The recorded gap (DELIVERY.md §9/§10): a prompt pasted into a
+    // running turn was consumed by an AskUserQuestion dialog's rendering; its queue row read `Sent`,
+    // indistinguishable from a success, forever. A prompt is LOST when ALL hold:
+    //   * Sent + UNECHOED (`echoed` is THE became-a-message fact, fed by the push hook echo OR the
+    //     scanner's pull consume — NoteExternalPrompt marking a fold-matched transcript user line)
+    //     with a real send stamp (sentAtUnixMs != 0; a restored plan's Sent rows load echoed=true);
+    //   * the session is AT REST (Idle / WaitingForInput) — never judged mid-turn: while a turn is
+    //     in flight our text may still be queued type-ahead the next turn will consume;
+    //   * kLostSendSettleMs elapsed since the send — past the push echo window, past multiple
+    //     scanner passes (so the pull consume had every chance), and — because each Enter-retry
+    //     press REFRESHES sentAtUnixMs — structurally AFTER the watchdog's ladder went quiet (an
+    //     actively-pressing watchdog resets this clock, so the two recoveries never race: the
+    //     rescue always gets to finish; a rescued prompt echoes and leaves this set);
+    //   * the delivery gate is CLOSED (never race an in-flight swap, whose box hold is legitimate).
+    // NO "a turn ran past the send" conjunct, deliberately (a deviation from the first plan draft):
+    // (a) a watchdog press refreshing sentAtUnixMs made `lastPromptUnixMs > sentAt` PERMANENTLY
+    // false afterward, stranding the draft-blocked corner Sent forever — the very gap R1 closes;
+    // (b) it never guarded the false-positive it appeared to (a fold-miss echo produces turn
+    // evidence too — the echo conjunct is the real protection); (c) eaten-vs-lost disambiguation is
+    // already serialized by the press refresh above. The caller (the SessionScanner's reconcile
+    // pass — the transcript-truth lane, its cursor caught up by construction) marks each returned
+    // prompt Failed and PAUSES the session's autorunner (mode -> Off), mirroring the Enter-retry
+    // give-up: the queue past a vanished step is suspect, and silently continuing is how the loss
+    // went unnoticed until a human diffed the transcript. NEVER auto-resend — the text may sit in
+    // the TUI's type-ahead or box, and a resend can double it; the user Send-nows / re-arms.
+    inline std::vector<std::wstring> DecideLostSend(const SessionInfo& s, int64_t nowUnixMs)
+    {
+        std::vector<std::wstring> lost;
+        if (!s.live)
+        {
+            return lost; // an archived record has no live terminal to have lost a send into
+        }
+        if (s.state != SessionState::WaitingForInput && s.state != SessionState::Idle)
+        {
+            return lost; // mid-turn / needs-you / ended — never judge while a turn may yet consume it
+        }
+        if (DeliveryGateOpen(s, nowUnixMs))
+        {
+            return lost; // a delivery/clear owns the box right now — judge after it resolves
+        }
+        for (const auto& p : s.queue)
+        {
+            if (p.origin != PromptOrigin::Autorun || p.status != PromptStatus::Sent || p.echoed || p.sentAtUnixMs == 0)
+            {
+                continue;
+            }
+            const int64_t sentAge = nowUnixMs - p.sentAtUnixMs;
+            if (sentAge >= kLostSendSettleMs)
+            {
+                lost.push_back(p.id);
+            }
+        }
+        return lost;
     }
 
     class Scheduler
