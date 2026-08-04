@@ -1265,6 +1265,7 @@ void TestEnterRetry()
         s.id = L"r";
         s.live = true;
         s.external = false;
+        s.started = true; // its claude is RUNNING — a dormant session is never pressed (DELIVERY.md RC3; the dedicated dormant checks live in TestDeliveryGate)
         s.state = st;
         QueuedPrompt p;
         p.id = L"rp";
@@ -1389,6 +1390,189 @@ void TestEnterRetry()
         s.queue.push_back(p2);
         const auto r = DecideEnterRetry(s, T + 2000 + kEnterRetryIntervalMs);
         CHECK(r.action == EnterRetryAction::Retry && r.promptId == L"rp2", "latest send is the watched one");
+    }
+}
+
+// Agentmaster (DELIVERY.md) — the DELIVERY GATE: the per-session "someone owns the input box" fact
+// that serializes the whole placement pipeline. Covers the pure predicate, the registry's
+// open/decline/owner-close/reclaim/stale-close semantics + the close-notify wake-up, DecideAdvance's
+// hold, DecideEnterRetry's gate + dormant refusals, SubmitPrompt's synchronous decline / fallback
+// resolve / submitter lifecycles, and the RC6 newline-folded echo consume.
+void TestDeliveryGate()
+{
+    std::wprintf(L"Delivery gate (DELIVERY.md):\n");
+
+    // ---- the pure predicate ----
+    {
+        SessionInfo s = MakeSession(L"g");
+        const int64_t T = 1000000;
+        CHECK(!DeliveryGateOpen(s, T), "gate: default closed");
+        s.deliveryPromptId = L"p1";
+        s.deliveryOpenedUnixMs = T;
+        CHECK(DeliveryGateOpen(s, T + 1000), "gate: open within the window");
+        CHECK(!DeliveryGateOpen(s, T + kDeliveryGateTimeoutMs), "gate: expired reads closed (fail-open)");
+        CHECK(!DeliveryGateOpen(s, T - 5), "gate: a future stamp reads closed (clock jump)");
+        s.deliveryOpenedUnixMs = 0;
+        CHECK(!DeliveryGateOpen(s, T), "gate: a tag with no stamp reads closed");
+    }
+
+    // ---- registry open / decline / owner-close / reclaim / stale-close ----
+    {
+        SessionRegistry reg;
+        auto s = MakeSession(L"gate-1");
+        s.live = true;
+        reg.Upsert(s);
+        CHECK(reg.TryOpenDeliveryGate(L"gate-1", L"pA"), "registry: first open succeeds");
+        CHECK(!reg.TryOpenDeliveryGate(L"gate-1", L"pB"), "registry: second open declined while held");
+        CHECK(reg.DeliveryGateHeld(L"gate-1"), "registry: held query");
+        reg.CloseDeliveryGate(L"gate-1", L"pB"); // a mismatched close must NOT clear pA's claim
+        CHECK(reg.DeliveryGateHeld(L"gate-1"), "registry: mismatched close is a no-op");
+        reg.CloseDeliveryGate(L"gate-1", L"pA");
+        CHECK(!reg.DeliveryGateHeld(L"gate-1"), "registry: owner close releases");
+        CHECK(reg.TryOpenDeliveryGate(L"gate-1", L"pB"), "registry: reopen after close");
+        // Expiry reclaim: backdate the open stamp past the timeout, then a new open reclaims it.
+        reg.UpdateQuiet(L"gate-1", [](SessionInfo& ss) { ss.deliveryOpenedUnixMs -= (kDeliveryGateTimeoutMs + 1000); });
+        CHECK(!reg.DeliveryGateHeld(L"gate-1"), "registry: an expired gate reads not-held");
+        CHECK(reg.TryOpenDeliveryGate(L"gate-1", L"pC"), "registry: an expired gate is reclaimed by a new open");
+        reg.CloseDeliveryGate(L"gate-1", L"pB"); // the dead holder's late close: mismatched now
+        CHECK(reg.DeliveryGateHeld(L"gate-1"), "registry: the dead holder's late close cannot clear the reclaimer");
+        reg.CloseDeliveryGate(L"gate-1", L"pC");
+        CHECK(!reg.TryOpenDeliveryGate(L"unknown-id", L"p"), "registry: an unknown session cannot open");
+        CHECK(!reg.TryOpenDeliveryGate(L"gate-1", L""), "registry: an empty tag is refused (it could never be owner-closed)");
+    }
+
+    // ---- the close NOTIFIES (the held advance's wake-up); opens + double closes stay quiet ----
+    {
+        SessionRegistry reg;
+        reg.Upsert(MakeSession(L"gate-n"));
+        std::atomic<int> notifies{ 0 };
+        const auto tok = reg.AddObserver([&](const SessionInfo&, HookEvent) { ++notifies; });
+        reg.TryOpenDeliveryGate(L"gate-n", L"p1");
+        const int afterOpen = notifies.load();
+        reg.CloseDeliveryGate(L"gate-n", L"p1");
+        CHECK(notifies.load() == afterOpen + 1, "gate: a real close notifies exactly once (the open is quiet)");
+        reg.CloseDeliveryGate(L"gate-n", L"p1"); // double close
+        CHECK(notifies.load() == afterOpen + 1, "gate: a double close is quiet (no phantom wake-ups)");
+        reg.RemoveObserver(tok);
+    }
+
+    // ---- DecideAdvance HOLDS while the gate is open (the 07:27 livelock's fix) ----
+    {
+        SessionInfo s = MakeSession(L"a", SessionState::WaitingForInput);
+        s.live = true;
+        s.autorunner.mode = AutorunnerMode::Full;
+        QueuedPrompt p;
+        p.id = L"q1";
+        p.text = L"next";
+        s.queue.push_back(p);
+        const int64_t T = 1000000;
+        CHECK(DecideAdvance(s, T, 0, false).action == AdvanceAction::Send, "advance: sends with the gate closed");
+        s.deliveryPromptId = L"in-flight-prompt";
+        s.deliveryOpenedUnixMs = T - 1000;
+        const auto held = DecideAdvance(s, T, 0, false);
+        CHECK(held.action == AdvanceAction::None && held.reason == L"delivery in flight", "advance: HOLDS while the gate is open (never mark-then-decline)");
+        s.deliveryOpenedUnixMs = T - kDeliveryGateTimeoutMs - 1;
+        CHECK(DecideAdvance(s, T, 0, false).action == AdvanceAction::Send, "advance: an expired gate no longer holds (the leaked-gate belt)");
+    }
+
+    // ---- DecideEnterRetry: never press while gated / into a dormant session ----
+    {
+        const int64_t T = 1000000;
+        SessionInfo s = MakeSession(L"r", SessionState::Idle);
+        s.live = true;
+        s.started = true;
+        QueuedPrompt p;
+        p.id = L"q1";
+        p.text = L"go";
+        p.status = PromptStatus::Sent;
+        p.origin = PromptOrigin::Autorun;
+        p.echoed = false;
+        p.sentAtUnixMs = T;
+        s.queue.push_back(p);
+        CHECK(DecideEnterRetry(s, T + kEnterRetryFirstMs).action == EnterRetryAction::Retry, "enter-retry: due press with the gate closed + started");
+        s.deliveryPromptId = L"q1";
+        s.deliveryOpenedUnixMs = T;
+        CHECK(DecideEnterRetry(s, T + kEnterRetryFirstMs).action == EnterRetryAction::None, "enter-retry: NEVER presses while the gate is open (a mid-swap Enter would submit the user's draft)");
+        s.deliveryPromptId.clear();
+        s.deliveryOpenedUnixMs = 0;
+        s.started = false;
+        s.external = false;
+        CHECK(DecideEnterRetry(s, T + kEnterRetryFirstMs).action == EnterRetryAction::None, "enter-retry: never presses into a DORMANT session (restart press-storms)");
+        s.external = true; // adopted: `started` is meaningless for it — still drivable
+        CHECK(DecideEnterRetry(s, T + kEnterRetryFirstMs).action == EnterRetryAction::Retry, "enter-retry: an adopted external stays drivable");
+    }
+
+    // ---- SubmitPrompt: synchronous decline while held; the fallback resolves synchronously;
+    //      an accepted submitter keeps the gate open until the window's close ----
+    {
+        SessionRegistry reg;
+        auto s = MakeSession(L"sub", SessionState::WaitingForInput);
+        s.live = true;
+        reg.Upsert(s);
+        std::atomic<int> injected{ 0 };
+        reg.SetInjector(L"sub", [&](const std::wstring&) { ++injected; });
+        CHECK(reg.TryOpenDeliveryGate(L"sub", L"held"), "submit: pre-hold the gate");
+        CHECK(!reg.SubmitPrompt({ L"sub", L"pX", L"text", false }), "submit: declined while the gate is held");
+        CHECK(injected.load() == 0, "submit: a declined submit reaches no injector");
+        reg.CloseDeliveryGate(L"sub", L"held");
+        CHECK(reg.SubmitPrompt({ L"sub", L"pX", L"text", false }), "submit: delivers once the gate is free");
+        CHECK(injected.load() == 1, "submit: the fallback inject ran exactly once");
+        CHECK(!reg.DeliveryGateHeld(L"sub"), "submit: the fallback path closes the gate synchronously");
+        // Submitter path: `accepted` keeps the gate OPEN — the hosting window owns the close.
+        reg.SetPromptSubmitter(L"sub", [](const ::Agentmaster::PromptSubmission&) { return true; });
+        CHECK(reg.SubmitPrompt({ L"sub", L"pY", L"text", false }), "submit: submitter accepted");
+        CHECK(reg.DeliveryGateHeld(L"sub"), "submit: accepted keeps the gate open until the swap resolves");
+        CHECK(!reg.SubmitPrompt({ L"sub", L"pZ", L"text", false }), "submit: a second delivery is declined while the first is unresolved");
+        reg.CloseDeliveryGate(L"sub", ::Agentmaster::DeliveryGateTagFor({ L"sub", L"pY", L"text", false }));
+        CHECK(!reg.DeliveryGateHeld(L"sub"), "submit: the window's owner-tagged close releases");
+        // A submitter that REFUSES closes the gate right here (nothing was or will be sent).
+        reg.SetPromptSubmitter(L"sub", [](const ::Agentmaster::PromptSubmission&) { return false; });
+        CHECK(!reg.SubmitPrompt({ L"sub", L"pW", L"text", false }), "submit: submitter refusal reads not-accepted");
+        CHECK(!reg.DeliveryGateHeld(L"sub"), "submit: a refused submission closes the gate");
+        // A THROWING submitter: contained (Rule #18 logging), false, gate closed.
+        reg.SetPromptSubmitter(L"sub", [](const ::Agentmaster::PromptSubmission&) -> bool { throw 42; });
+        CHECK(!reg.SubmitPrompt({ L"sub", L"pT", L"text", false }), "submit: a throwing submitter reads not-accepted");
+        CHECK(!reg.DeliveryGateHeld(L"sub"), "submit: a throwing submitter closes the gate");
+        // The tag rule: an id-less submission still maps to a closable owner tag.
+        CHECK(DeliveryGateTagFor({ L"sub", L"", L"text", false }) == L"#send", "gate tag: an id-less submission gets the reserved #send tag");
+        CHECK(DeliveryGateTagFor({ L"sub", L"pid-1", L"text", false }) == L"pid-1", "gate tag: a prompt id IS its tag");
+    }
+
+    // ---- RC6: the \r-composed multi-line prompt's \n echo is CONSUMED, once, with no dup row ----
+    {
+        SessionRegistry reg;
+        auto s = MakeSession(L"echo", SessionState::WaitingForInput);
+        s.live = true;
+        reg.Upsert(s);
+        reg.Update(L"echo", [&](SessionInfo& ss) {
+            QueuedPrompt p;
+            p.id = L"m1";
+            p.text = L"line one\rline two"; // the compose TextBox stores a typed newline as \r
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = NowMsTest();
+            ss.queue.push_back(p);
+        });
+        reg.OnHookEvent(UPS(L"echo", L"line one\nline two")); // the wire echo carries \n (BuildPromptFill folded at inject)
+        const auto after = reg.Get(L"echo");
+        CHECK(after.has_value() && after->queue.size() == 1, "echo-fold: no duplicate Typed row is recorded");
+        CHECK(after.has_value() && !after->queue.empty() && after->queue[0].echoed, "echo-fold: the \\r-composed prompt's \\n echo is consumed");
+        // CRLF-composed folds identically.
+        reg.Update(L"echo", [&](SessionInfo& ss) {
+            QueuedPrompt p;
+            p.id = L"m2";
+            p.text = L"a\r\nb";
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = NowMsTest();
+            ss.queue.push_back(p);
+        });
+        reg.OnHookEvent(UPS(L"echo", L"a\nb"));
+        const auto after2 = reg.Get(L"echo");
+        CHECK(after2.has_value() && after2->queue.size() == 2, "echo-fold: CRLF prompt adds no dup row");
+        CHECK(after2.has_value() && after2->queue.size() == 2 && after2->queue[1].echoed, "echo-fold: the CRLF prompt's echo is consumed");
     }
 }
 

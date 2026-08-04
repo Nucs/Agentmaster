@@ -473,8 +473,14 @@ namespace Agentmaster
         p.maxAttempts = v.U32At(L"maxAttempts", 1);
         p.sentAtUnixMs = v.I64At(L"sentAtUnixMs");
         p.origin = PromptOriginFromString(v.StrAt(L"origin", L"Autorun"));
-        // `echoed` is transient (not persisted): a reloaded Sent prompt's echo already
-        // happened in a past run; the recency window stops it from matching a fresh message.
+        // `echoed` is transient (not persisted): a reloaded Sent prompt's echo already happened in
+        // a past run (or never will) — so mark it CONSUMED on load (DELIVERY.md RC3). Left false,
+        // every restored Sent prompt read as an in-flight, un-acknowledged send: the Enter-retry
+        // watchdog armed on the reopen re-observe, blind-pressed 3 Enters into each restored box
+        // (same-millisecond multi-session press-storms in the live log), then marked the prompt
+        // Failed and PAUSED the autorunner the reopen had just re-armed. The recency window only
+        // ever stopped it from matching a fresh message; the watchdog had no guard at all.
+        p.echoed = (p.status == PromptStatus::Sent);
         return p;
     }
 

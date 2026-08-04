@@ -35,6 +35,35 @@ namespace
     // human message that happens to repeat the text).
     constexpr int64_t kEchoWindowMs = 15000;
 
+    // Agentmaster (DELIVERY.md RC6): newline-FOLD for the echo/dedupe text compares — CRLF and a
+    // lone CR both read as LF, the SAME fold BuildPromptFill applies when injecting. The Manager
+    // compose TextBox stores a typed newline as '\r' (the measured UWP quirk EvaluateDraftPull
+    // already folds for) while the wire echo carries '\n' (claude received the folded paste), so
+    // the old EXACT compare never matched a multi-line composed prompt: its echo went unconsumed
+    // (a phantom un-acknowledged send for the pickup guard + the Enter-retry watchdog) and the
+    // message was re-recorded as a duplicate Typed row.
+    std::wstring FoldCrToLf(std::wstring_view s)
+    {
+        std::wstring out;
+        out.reserve(s.size());
+        for (size_t i = 0; i < s.size(); ++i)
+        {
+            if (s[i] == L'\r')
+            {
+                out.push_back(L'\n');
+                if (i + 1 < s.size() && s[i + 1] == L'\n')
+                {
+                    ++i; // collapse CRLF -> one LF
+                }
+            }
+            else
+            {
+                out.push_back(s[i]);
+            }
+        }
+        return out;
+    }
+
     // TabTokenEq (the case-insensitive WT_SESSION/tabToken compare this TU leans on everywhere)
     // moved to SessionModels.h — the restart seam's tabToken fallback needed it too.
 
@@ -424,11 +453,15 @@ namespace Agentmaster
             {
                 const int64_t now = NowMs();
                 bool isEcho = false;
+                // Newline-fold BOTH sides (DELIVERY.md RC6): a \r-composed multi-line prompt is
+                // injected \n-folded (BuildPromptFill), so its echo can only match folded. Folded
+                // once per event, per candidate — the scan is bounded by the Sent-unechoed set.
+                const std::wstring echoFolded = FoldCrToLf(msg.promptText);
                 for (auto& p : s.queue)
                 {
                     if (p.origin == PromptOrigin::Autorun && p.status == PromptStatus::Sent && !p.echoed &&
-                        p.text == msg.promptText && p.sentAtUnixMs != 0 && (now - p.sentAtUnixMs) >= 0 &&
-                        (now - p.sentAtUnixMs) < kEchoWindowMs)
+                        p.sentAtUnixMs != 0 && (now - p.sentAtUnixMs) >= 0 &&
+                        (now - p.sentAtUnixMs) < kEchoWindowMs && FoldCrToLf(p.text) == echoFolded)
                     {
                         p.echoed = true; // consume exactly one echo per injected prompt
                         isEcho = true;
@@ -865,10 +898,13 @@ namespace Agentmaster
             // Idempotent: a message already recorded (status Sent — a Typed capture or an injected
             // Flight prompt's echo, which also shows up as a user line in the transcript) must not
             // be duplicated. Pending plan items are NOT "recorded messages", so they don't suppress
-            // recording a human message that happens to match a queued prompt's text.
+            // recording a human message that happens to match a queued prompt's text. Newline-fold
+            // both sides (DELIVERY.md RC6) — the transcript text carries \n while a compose-queued
+            // prompt's record may carry \r, the same mismatch the echo consume folds for.
+            const std::wstring textFolded = FoldCrToLf(text);
             for (const auto& p : s.queue)
             {
-                if (p.status == PromptStatus::Sent && p.text == text)
+                if (p.status == PromptStatus::Sent && FoldCrToLf(p.text) == textFolded)
                 {
                     return;
                 }
@@ -1002,9 +1038,113 @@ namespace Agentmaster
         }
     }
 
-    // Agentmaster (PENDING_INPUT.md §9): the ONE send seam. See the header for the contract.
-    bool SessionRegistry::SubmitPrompt(const PromptSubmission& submission) const
+    // Agentmaster (DELIVERY.md): atomically claim the per-session delivery gate for `tag`. See
+    // the header for the contract; the log lines here are the gate's observability.
+    bool SessionRegistry::TryOpenDeliveryGate(const std::wstring& id, const std::wstring& tag)
     {
+        if (tag.empty())
+        {
+            return false; // an ownerless gate could never be owner-matched closed — refuse
+        }
+        bool reclaimed = false;
+        std::wstring prevTag;
+        {
+            std::lock_guard guard{ _mtx };
+            const auto it = _sessions.find(id);
+            if (it == _sessions.end())
+            {
+                return false; // unknown session — nothing to deliver into
+            }
+            auto& s = it->second;
+            if (DeliveryGateOpen(s, NowMs()))
+            {
+                return false; // held (unexpired) — exactly ONE operation may own the box
+            }
+            if (!s.deliveryPromptId.empty())
+            {
+                // Open but past kDeliveryGateTimeoutMs (or future-stamped): the holder died
+                // without closing (a page torn down mid-swap). Reclaim — fail-open by design.
+                reclaimed = true;
+                prevTag = s.deliveryPromptId;
+            }
+            s.deliveryPromptId = tag;
+            s.deliveryOpenedUnixMs = NowMs();
+        }
+        if (reclaimed)
+        {
+            AppendStateLog(L"hooks.log",
+                           L"[gate] " + ShortId(id) + L" reclaimed an EXPIRED delivery gate (was held by " +
+                               ShortId(prevTag) + L" past " + std::to_wstring(kDeliveryGateTimeoutMs / 1000) + L"s)\n");
+        }
+        return true;
+    }
+
+    void SessionRegistry::CloseDeliveryGate(const std::wstring& id, const std::wstring& tag)
+    {
+        SessionInfo snapshot;
+        bool closed = false;
+        bool stale = false;
+        {
+            std::lock_guard guard{ _mtx };
+            const auto it = _sessions.find(id);
+            if (it == _sessions.end())
+            {
+                return;
+            }
+            auto& s = it->second;
+            if (s.deliveryPromptId.empty())
+            {
+                return; // already closed (a double close, or an Upsert re-key wiped the transient
+                        // fields) — a QUIET no-op, never a phantom wake-up
+            }
+            if (s.deliveryPromptId != tag)
+            {
+                stale = true; // someone else's claim (expiry-reclaimed while this holder ran) —
+                              // NEVER clear a younger delivery's hold
+            }
+            else
+            {
+                s.deliveryPromptId.clear();
+                s.deliveryOpenedUnixMs = 0;
+                snapshot = s;
+                closed = true;
+            }
+        }
+        if (stale)
+        {
+            AppendStateLog(L"hooks.log", L"[gate] " + ShortId(id) + L" stale close ignored (tag " + ShortId(tag) + L" no longer owns the gate)\n");
+            return;
+        }
+        if (closed)
+        {
+            // The wake-up (DELIVERY.md): OnObserved re-requests the advance this open gate held,
+            // and re-arms the Enter-retry watch if the just-resolved send is still unacknowledged.
+            _notify(snapshot, HookEvent::Unknown);
+        }
+    }
+
+    bool SessionRegistry::DeliveryGateHeld(const std::wstring& id) const
+    {
+        std::lock_guard guard{ _mtx };
+        const auto it = _sessions.find(id);
+        return it != _sessions.end() && DeliveryGateOpen(it->second, NowMs());
+    }
+
+    // Agentmaster (PENDING_INPUT.md §9): the ONE send seam. See the header for the contract.
+    // Agentmaster (DELIVERY.md): now also the gate's opening seam — exactly one delivery may be
+    // in flight per session, decided HERE (synchronously, before anything marshals), so a racing
+    // second submit is declined instead of marshalled-then-declined (the mark/decline/rollback
+    // livelock the 07:27 incident recorded).
+    bool SessionRegistry::SubmitPrompt(const PromptSubmission& submission)
+    {
+        const std::wstring tag = DeliveryGateTagFor(submission);
+        if (!TryOpenDeliveryGate(submission.sessionId, tag))
+        {
+            AppendStateLog(L"hooks.log",
+                           L"[gate] " + ShortId(submission.sessionId) + L" submit declined: the box is owned (delivery/clear in flight) - prompt " +
+                               ShortId(submission.promptId) + L" stays with its caller's rollback\n");
+            return false;
+        }
         PromptSubmitter fn;
         {
             std::lock_guard guard{ _mtx };
@@ -1017,12 +1157,26 @@ namespace Agentmaster
         if (!fn)
         {
             // No hosting window registered one (an older window, a test/CLI host, a session bound
-            // by something other than the launch seam): the historical path, verbatim.
-            return Inject(submission.sessionId, BuildPromptSubmission(submission.text));
+            // by something other than the launch seam): the historical path, verbatim — and the
+            // inject IS the whole delivery here, so the gate resolves synchronously.
+            const bool ok = Inject(submission.sessionId, BuildPromptSubmission(submission.text));
+            if (ok)
+            {
+                AppendStateLog(L"hooks.log", L"[delivered] " + ShortId(submission.sessionId) + L" prompt " + ShortId(tag) + L" (direct inject)\n");
+            }
+            CloseDeliveryGate(submission.sessionId, tag);
+            return ok;
         }
         try
         {
-            return fn(submission);
+            const bool accepted = fn(submission);
+            if (!accepted)
+            {
+                CloseDeliveryGate(submission.sessionId, tag); // nothing was or will be sent
+            }
+            // accepted == true: the hosting window owns the outcome — it closes the gate when the
+            // swap RESOLVES (delivered / aborted), on every exit path (DELIVERY.md §3).
+            return accepted;
         }
         catch (...)
         {
@@ -1030,6 +1184,7 @@ namespace Agentmaster
             // prompt back to Pending, so the queue stays honest, but the throw itself must not be
             // lost (Rule #18) — a submitter that dies looks identical to a torn-down window here.
             LogSwallowedException(L"SessionRegistry::SubmitPrompt");
+            CloseDeliveryGate(submission.sessionId, tag);
             return false;
         }
     }

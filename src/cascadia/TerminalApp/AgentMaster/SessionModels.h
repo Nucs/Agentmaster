@@ -569,6 +569,28 @@ namespace Agentmaster
         bool refundAutoSend{ false };
     };
 
+    // Agentmaster (DELIVERY.md — the DELIVERY GATE): the bounded lifetime of a per-session
+    // delivery gate. An open gate past this age reads CLOSED everywhere (fail-open) and is
+    // RECLAIMED by the next TryOpenDeliveryGate — so a holder that died without closing (a page
+    // torn down mid draft-swap) can stall a session's plan for at most this long, never
+    // permanently. ~2x the swap's worst legitimate hold (2.4s clear + 18s submit-await + restore).
+    inline constexpr int64_t kDeliveryGateTimeoutMs = 45'000;
+
+    // The reserved gate tag for the mail-button box-CLEAR (PENDING_INPUT.md §8d): it holds the
+    // same input box a delivery would, so it excludes deliveries through the same gate. Prompt
+    // ids are GUIDs, so the leading '#' can never collide with a real delivery's tag.
+    inline constexpr std::wstring_view kDeliveryGateClearTag = L"#draft-clear";
+
+    // The ONE rule mapping a submission to its gate OWNER tag — SubmitPrompt (which opens the
+    // gate) and the hosting window's swap (which closes it on resolve) must derive the SAME tag
+    // from the same submission, or the close would be an owner-mismatch no-op and the gate would
+    // sit open until the expiry belt. promptId is never empty on today's callers; the fallback
+    // keeps a hypothetical id-less submission closable.
+    inline std::wstring DeliveryGateTagFor(const PromptSubmission& s)
+    {
+        return s.promptId.empty() ? std::wstring{ L"#send" } : s.promptId;
+    }
+
     struct ApprovalPolicy
     {
         bool pauseForHuman{ true }; // default: do not auto-approve tool permissions
@@ -857,6 +879,18 @@ namespace Agentmaster
         // draft itself already raised).
         std::wstring pendingPasteRefs;
 
+        // --- The DELIVERY GATE (DELIVERY.md) --- BOTH transient (NOT persisted — Persistence.cpp
+        // must not write them; a delivery never survives a restart). Non-empty deliveryPromptId ==
+        // some operation OWNS this session's input box right now: a prompt delivery in flight
+        // through SubmitPrompt (tag == the prompt id), or the mail-button box-clear (the reserved
+        // kDeliveryGateClearTag). Maintained by SessionRegistry under its lock (TryOpen/Close);
+        // read by the pure decisions via DeliveryGateOpen(s, now) so DecideAdvance can HOLD (never
+        // mark-then-decline — the recorded 07:27 livelock) and DecideEnterRetry can never press a
+        // lone Enter into a held box (the mid-swap draft-submit hazard). deliveryOpenedUnixMs is
+        // the expiry anchor (kDeliveryGateTimeoutMs — a leaked gate reads closed past it).
+        std::wstring deliveryPromptId;
+        int64_t deliveryOpenedUnixMs{ 0 };
+
         // --- Fleet Observer live enrichment (OBSERVER.md §5c) ---
         // ALL transient (NOT persisted — Persistence.cpp must not write them; PIDs / WT_SESSION /
         // AM_SESSION / process facts are per-run and re-derived each launch by the observer). Filled
@@ -957,6 +991,23 @@ namespace Agentmaster
     // exists to exclude. Codex never shows the hint: the tooltip copy ("Claude's prompt cache")
     // and both signals are Claude-specific (a managed Codex has no hooks and its conv timing is
     // never fed), and before this gate a Codex card could ⚡ off a bare triage-move stamp.
+    // Agentmaster (DELIVERY.md): is this session's DELIVERY GATE open right now — i.e. does some
+    // operation (a SubmitPrompt delivery, the mail-button box-clear) currently OWN its input box?
+    // The ONE predicate every consumer reads (DecideAdvance's hold, DecideEnterRetry's refusal,
+    // the fill pumps' per-tick skip), so "held" can never mean different things in different
+    // places. Expiry-aware: a gate older than kDeliveryGateTimeoutMs reads CLOSED (the holder
+    // died without closing — fail-open, the plan resumes), and a FUTURE-stamped gate (a clock
+    // jump) also reads closed rather than holding until the clock catches up. PURE.
+    inline bool DeliveryGateOpen(const SessionInfo& s, int64_t nowUnixMs) noexcept
+    {
+        if (s.deliveryPromptId.empty() || s.deliveryOpenedUnixMs == 0)
+        {
+            return false;
+        }
+        const int64_t heldForMs = nowUnixMs - s.deliveryOpenedUnixMs;
+        return heldForMs >= 0 && heldForMs < kDeliveryGateTimeoutMs;
+    }
+
     inline bool ServerCacheStillWarm(const SessionInfo& s, uint32_t cacheMinutes, int64_t nowMs) noexcept
     {
         // AT REST ONLY — never while Running. The hint answers "if I follow up NOW, is it cheap?", which

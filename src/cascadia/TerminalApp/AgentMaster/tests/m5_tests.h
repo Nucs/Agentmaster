@@ -141,6 +141,7 @@ void TestWorkspaceTrust(); // workspace-trust seed: ClaudeWorkspaceTrustKey norm
 void TestBridgeRoundTrip();
 void TestScheduler();
 void TestEnterRetry();
+void TestDeliveryGate(); // DELIVERY.md: the per-session delivery gate — open/decline/owner-close/reclaim, the close-notify wake-up, DecideAdvance's hold, DecideEnterRetry's gate+dormant refusals, SubmitPrompt's lifecycles, the RC6 newline-folded echo consume
 void TestBuildPromptSubmission();
 void TestSchedulerIntegration();
 void TestUpdaterVersionLogic(); // Updater.h: ParseVersion/CompareVersion (4th part = build metadata, ignored) + unpackaged facts + the settings.json skip/postpone RMW (preserve-other-keys, replace-not-append)

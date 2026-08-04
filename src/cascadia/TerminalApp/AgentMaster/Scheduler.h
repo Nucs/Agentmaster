@@ -126,6 +126,20 @@ namespace Agentmaster
             return plan;
         }
 
+        // Agentmaster (DELIVERY.md): a delivery (or the mail-button box-clear) currently OWNS this
+        // session's input box — the hosting window is mid draft-swap. Advancing now could only mark
+        // a prompt Sent to be synchronously declined and rolled back (the recorded 07:27 livelock:
+        // 8 mark/decline/rollback cycles at ~750ms while ONE swap legitimately held the box for
+        // 24s — the echo-keyed pickup guard below cannot see a delivery, only its echo). HOLD; the
+        // gate's CLOSE notifies, which re-requests this advance, so nothing polls. The expiry belt
+        // (kDeliveryGateTimeoutMs, checked inside DeliveryGateOpen) bounds a leaked gate, so this
+        // can never stall a plan permanently.
+        if (DeliveryGateOpen(s, nowUnixMs))
+        {
+            plan.reason = L"delivery in flight";
+            return plan;
+        }
+
         // Awaiting-injection-pickup guard: if a Flight prompt we just injected is Sent but has
         // not yet echoed back (Claude hasn't moved to Running), hold off — otherwise an advance
         // driven by an observed change in that brief window would send the NEXT prompt too,
@@ -142,7 +156,9 @@ namespace Agentmaster
             }
         }
 
-        // First Pending prompt that isn't blocked by an unmet dependency.
+        // First Pending prompt, by queue order. (`dependsOn` / `delayMs` / `maxAttempts` are
+        // data-model-only today — carried, persisted, but NOT evaluated here; the Auto-Testing UI
+        // queues everything at the OnTurnComplete default. Do not describe them as enforced.)
         bool found = false;
         size_t idx = 0;
         for (size_t i = 0; i < s.queue.size(); ++i)
@@ -238,6 +254,25 @@ namespace Agentmaster
         if (s.state != SessionState::WaitingForInput && s.state != SessionState::Idle)
         {
             return plan; // the turn started (Running / NeedsApproval / Error / Done) — nothing to retry
+        }
+        // Agentmaster (DELIVERY.md RC3): never press into a DORMANT session — a window-restored
+        // background tab is live + injector-bound but its claude has not launched (WT starts the
+        // child lazily on first show), so a pre-Connected WriteInput silently drops: the presses
+        // could only burn the retry budget and end in a spurious Failed + autorunner-paused ~15s
+        // after reopen (the recorded restart press-storms). `started` is meaningless for an
+        // external (adopted) session — the same carve-out OnObserved's idle-start trigger uses.
+        if (!s.started && !s.external)
+        {
+            return plan;
+        }
+        // Agentmaster (DELIVERY.md RC3): a delivery/clear OWNS the box right now — a lone Enter
+        // injected mid-swap would submit whatever the box holds (the user's partially-cleared
+        // draft on the ladder, or the just-restored draft), the exact merge the swap exists to
+        // prevent. Drop the watch; the gate's close notifies OnObserved, which re-arms it if the
+        // send is still unacknowledged then.
+        if (DeliveryGateOpen(s, nowUnixMs))
+        {
+            return plan;
         }
         // The most-recently-sent Flight prompt still awaiting its pickup (Sent, not echoed, and the
         // transcript hasn't advanced past it). A later send supersedes an earlier one.

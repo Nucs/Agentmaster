@@ -76,6 +76,7 @@ int wmain()
     TestWorkspaceTrust();
     TestScheduler();
     TestEnterRetry();
+    TestDeliveryGate();
     TestBuildPromptSubmission();
     TestSchedulerIntegration();
     TestUpdaterVersionLogic();

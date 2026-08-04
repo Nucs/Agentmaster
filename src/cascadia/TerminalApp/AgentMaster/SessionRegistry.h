@@ -187,7 +187,26 @@ namespace Agentmaster
         // false keeps every existing caller's rollback behavior byte-identical. Thread-safe: the
         // submitter is copied under the lock and invoked outside it (the Inject recipe), so a
         // submitter that hops to its UI thread cannot deadlock the caller.
-        bool SubmitPrompt(const PromptSubmission& submission) const;
+        //
+        // Agentmaster (DELIVERY.md): non-const since the gate work — it OPENS the session's
+        // delivery gate before invoking anything and declines SYNCHRONOUSLY (false, nothing
+        // marshalled) while another delivery/clear holds it; the fallback path closes the gate
+        // right after its inline inject, an accepted submitter keeps it open for the hosting
+        // window to close on resolve, and a refusing/throwing submitter closes it here.
+        bool SubmitPrompt(const PromptSubmission& submission);
+
+        // Agentmaster (DELIVERY.md — the DELIVERY GATE): claim / release / query the per-session
+        // "someone owns the input box" fact (SessionInfo::deliveryPromptId/-OpenedUnixMs,
+        // transient). TryOpen atomically claims it for `tag` (a prompt id, or the reserved
+        // kDeliveryGateClearTag) — false while another unexpired claim holds it; an EXPIRED claim
+        // (the holder died without closing) is reclaimed, logged. Close releases ONLY a matching
+        // tag (a stale holder can never clear a younger delivery's claim; a double close is a
+        // quiet no-op) and NOTIFIES observers on a real release — that notify is what wakes the
+        // scheduler's held advance (OnObserved -> RequestAdvance), so nothing polls. Held is the
+        // expiry-aware query the fill pumps skip a tick on. All thread-safe.
+        bool TryOpenDeliveryGate(const std::wstring& id, const std::wstring& tag);
+        void CloseDeliveryGate(const std::wstring& id, const std::wstring& tag);
+        bool DeliveryGateHeld(const std::wstring& id) const;
 
         // Return a Sent prompt to Pending — the shared body of the Rule-#4 rollback every send path
         // already performed inline, now also reachable from the hosting window when an accepted

@@ -325,19 +325,29 @@ namespace Agentmaster
             {
                 std::wstring text;
                 std::wstring promptId; // PENDING_INPUT.md §9: what an aborted draft swap rolls back
+                // Agentmaster (DELIVERY.md): resolve the target BY ID from the snapshot the plan was
+                // decided on, then mutate by id — a bare index could be redirected onto a DIFFERENT
+                // Pending prompt by a concurrent queue reorder/delete during the throttle sleep
+                // above (the status re-check alone can't tell "the same slot, another prompt").
+                if (plan2.promptIndex < s2->queue.size())
+                {
+                    promptId = s2->queue[plan2.promptIndex].id;
+                }
                 _registry->Update(id, [&](SessionInfo& ss) {
-                    if (plan2.promptIndex < ss.queue.size() && ss.queue[plan2.promptIndex].status == PromptStatus::Pending)
+                    for (auto& p : ss.queue)
                     {
-                        auto& p = ss.queue[plan2.promptIndex];
-                        text = p.text;
-                        promptId = p.id;
-                        p.status = PromptStatus::Sent;
-                        p.sentAtUnixMs = NowMs();
-                        p.attempts += 1;
-                        p.echoed = false; // await this injection's UserPromptSubmit echo
-                        p.enterRetries = 0; // fresh send -> reset the Enter-retry watch (Scheduler.h)
-                        ss.autorunner.autoSendsThisRun += 1;
-                        ss.pendingConfirmPromptId.clear();
+                        if (p.id == promptId && p.status == PromptStatus::Pending)
+                        {
+                            text = p.text;
+                            p.status = PromptStatus::Sent;
+                            p.sentAtUnixMs = NowMs();
+                            p.attempts += 1;
+                            p.echoed = false; // await this injection's UserPromptSubmit echo
+                            p.enterRetries = 0; // fresh send -> reset the Enter-retry watch (Scheduler.h)
+                            ss.autorunner.autoSendsThisRun += 1;
+                            ss.pendingConfirmPromptId.clear();
+                            break;
+                        }
                     }
                 });
                 // The plan progressed (a send is being attempted): drop the change-dedup state so a
@@ -361,27 +371,32 @@ namespace Agentmaster
                     }
                     else
                     {
-                        // No stdin injector bound yet — can happen if a restored session's plan
-                        // bootstraps from Idle before its ConPTY is wired. Roll the prompt back to
-                        // Pending (Rule #4: never strand a phantom Sent) so it re-fires once the
-                        // injector binds (the SessionStart hook re-triggers an advance).
+                        // No stdin injector bound yet (a restored session's plan bootstrapping from
+                        // Idle before its ConPTY is wired), OR the delivery gate declined a racing
+                        // second submit (DELIVERY.md — a Send-now landed between our decide and the
+                        // seam). Roll the prompt back to Pending (Rule #4: never strand a phantom
+                        // Sent) so it re-fires on the injector bind / the gate's close notify —
+                        // BY ID, matching the mark above.
                         _registry->Update(id, [&](SessionInfo& ss) {
-                            if (plan2.promptIndex < ss.queue.size() && ss.queue[plan2.promptIndex].status == PromptStatus::Sent)
+                            for (auto& p : ss.queue)
                             {
-                                auto& p = ss.queue[plan2.promptIndex];
-                                p.status = PromptStatus::Pending;
-                                p.echoed = false;
-                                if (p.attempts > 0)
+                                if (p.id == promptId && p.status == PromptStatus::Sent)
                                 {
-                                    p.attempts -= 1;
-                                }
-                                if (ss.autorunner.autoSendsThisRun > 0)
-                                {
-                                    ss.autorunner.autoSendsThisRun -= 1;
+                                    p.status = PromptStatus::Pending;
+                                    p.echoed = false;
+                                    if (p.attempts > 0)
+                                    {
+                                        p.attempts -= 1;
+                                    }
+                                    if (ss.autorunner.autoSendsThisRun > 0)
+                                    {
+                                        ss.autorunner.autoSendsThisRun -= 1;
+                                    }
+                                    break;
                                 }
                             }
                         });
-                        AppendStateLog(L"autorunner.log", L"[send-deferred] " + id + L" (no injector yet)\n");
+                        AppendStateLog(L"autorunner.log", L"[send-deferred] " + id + L" (not delivered: no injector, or the box is owned - rolled back to Pending)\n");
                     }
                 }
                 return;
@@ -613,7 +628,7 @@ namespace Agentmaster
                         }
                     }
                 });
-                AppendStateLog(L"autorunner.log", L"[confirm-deferred] " + sessionId + L" (no injector yet)\n");
+                AppendStateLog(L"autorunner.log", L"[confirm-deferred] " + sessionId + L" (not delivered: no injector, or the box is owned - rolled back to Pending)\n");
             }
         }
     }

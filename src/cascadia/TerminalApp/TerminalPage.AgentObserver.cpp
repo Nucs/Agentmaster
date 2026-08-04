@@ -4629,6 +4629,32 @@ namespace winrt::TerminalApp::implementation
         return std::wstring{ s.substr(0, end) };
     }
 
+    // Agentmaster (DELIVERY.md RC4): newline-fold for the submit-await's box-vs-sent-text compare —
+    // CRLF and a lone CR both read as LF, the same fold BuildPromptFill applies at inject (a
+    // compose-sourced submission carries \r; the box detector emits \n — without the fold the two
+    // could never compare equal).
+    static std::wstring DraftSwapFoldCr(std::wstring_view s)
+    {
+        std::wstring out;
+        out.reserve(s.size());
+        for (size_t i = 0; i < s.size(); ++i)
+        {
+            if (s[i] == L'\r')
+            {
+                out.push_back(L'\n');
+                if (i + 1 < s.size() && s[i + 1] == L'\n')
+                {
+                    ++i; // collapse CRLF -> one LF
+                }
+            }
+            else
+            {
+                out.push_back(s[i]);
+            }
+        }
+        return out;
+    }
+
     // The submitter this window registers next to its injector. Called on the SENDING thread — the
     // scheduler worker, or another window's Manager UI thread for a Send-now — so it must stay cheap
     // and thread-safe: nothing here touches _appSettings, the controls, or the in-flight map (all
@@ -4762,6 +4788,14 @@ namespace winrt::TerminalApp::implementation
         //    the header comment: on a non-empty box that same key stashes instead of restoring, which
         //    would hide the text rather than return it).
         std::wstring box = _ReadLiveDraftForSession(sessionId);
+        // Agentmaster (DELIVERY.md RC4): VERIFY-FIRST — the TUI may have restored the draft ITSELF
+        // (a stash pops back at turn end on some builds; the 07:26:59 incident's box re-population).
+        // If the box already reads the draft, any press could only disturb it — a stash press on a
+        // non-empty box STASHES it away again, a yank would append — so: already there ⇒ done.
+        if (DraftSwapNormalize(box) == wanted)
+        {
+            co_return winrt::hstring{ box };
+        }
         if (viaStash)
         {
             if (box.empty())
@@ -4811,12 +4845,42 @@ namespace winrt::TerminalApp::implementation
         const auto sid8 = ::Agentmaster::ShortId(id);
         if (!_sessionRegistry)
         {
-            co_return;
+            co_return; // registry gone == process teardown; the gate it owned is gone with it
         }
+        // Agentmaster (DELIVERY.md): the registry opened this session's delivery gate when it
+        // ACCEPTED this submission; WE own closing it — on EVERY exit, which is what un-holds the
+        // scheduler's advance (the close notifies) and re-admits the Enter-retry watch. A scope
+        // guard is legal here, unlike the read-only release: CloseDeliveryGate is registry-only
+        // work (thread-safe, no UI affinity), so running it on whatever thread unwinds this frame
+        // is safe — the UI-affine unlock stays an explicit call on every path (_EndDraftSwap). A
+        // close after an expiry-reclaim / an Upsert re-key is an owner-mismatch no-op in the
+        // registry, so this guard can never clear a younger delivery's claim.
+        auto gateCloser = wil::scope_exit([gateRegistry = _sessionRegistry, gateId = submission.sessionId, gateTag = ::Agentmaster::DeliveryGateTagFor(submission)]() noexcept {
+            try
+            {
+                gateRegistry->CloseDeliveryGate(gateId, gateTag);
+            }
+            catch (...)
+            {
+                // Rule #18 — and a noexcept-destructor context: a throw escaping here would be
+                // std::terminate, so the containment is load-bearing, not just forensics.
+                ::Agentmaster::AgentLogCaughtException(L"_SubmitPromptWithDraftSwap gate close");
+            }
+        });
 
         // ---- the fast paths: no swap needed, inject exactly as before ----
         const auto plainSend = [&]() -> bool {
-            return _sessionRegistry->Inject(id, ::Agentmaster::BuildPromptSubmission(submission.text));
+            const bool ok = _sessionRegistry->Inject(id, ::Agentmaster::BuildPromptSubmission(submission.text));
+            if (ok)
+            {
+                // DELIVERY.md RC5: [send] in autorunner.log is "accepted for delivery"; THIS is the
+                // injection actually reaching the ConPTY — the line that separates "8 sends logged,
+                // 0 delivered" from reality.
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[delivered] " + sid8 + L" prompt " + ::Agentmaster::ShortId(submission.promptId) +
+                                                  L" (chars=" + std::to_wstring(submission.text.size()) + L")\n");
+            }
+            return ok;
         };
         const auto info = _sessionRegistry->Get(id);
         const auto control = _ControlForSession(id);
@@ -5001,8 +5065,16 @@ namespace winrt::TerminalApp::implementation
         // ---- 6. AWAIT the prompt leaving the box ----
         // "Submitted" is a turn-started signal (the same three DecideEnterRetry trusts: the state left
         // the ready set, a UserPromptSubmit stamped turns.lastPromptUnixMs, or the transcript advanced)
-        // AND a box that reads empty. The box gate is the hard one: restoring into a box that still
-        // holds the un-submitted prompt would merge exactly the way this feature exists to prevent.
+        // AND a box that no longer holds THE PROMPT. The box gate exists to prevent restoring into a
+        // box that still holds the un-submitted prompt — the merge this feature exists to prevent —
+        // so the test is "the box does not read the sent text": empty, OR reading something else.
+        //
+        // ⚠ Deliberately NOT "box empty" (DELIVERY.md RC4 — the recorded 07:26:59 incident): claude
+        // can repopulate the box right after a successful submit (a Ctrl+S stash popping back at turn
+        // end, a repaint the detector half-reads), and the empty-box demand held this await for its
+        // FULL 18s budget on a send that had demonstrably submitted (echo at +2s, clean Stop at +8s)
+        // — keeping the gate + latch held, deferring the restore, and feeding the advance livelock.
+        const auto sentNorm = DraftSwapNormalize(DraftSwapFoldCr(submission.text));
         bool submitted = false;
         for (int64_t waited = 0; waited <= kDraftSwapSubmitBudgetMs; waited += kDraftSwapPollMs)
         {
@@ -5019,7 +5091,8 @@ namespace winrt::TerminalApp::implementation
                                      ((now->state != ::Agentmaster::SessionState::Idle && now->state != ::Agentmaster::SessionState::WaitingForInput) ||
                                       now->turns.lastPromptUnixMs > sentAtMs ||
                                       now->convLastActivityUnixMs > sentAtMs);
-            if (box.empty() && turnStarted)
+            const bool promptGone = box.empty() || DraftSwapNormalize(DraftSwapFoldCr(box)) != sentNorm;
+            if (promptGone && turnStarted)
             {
                 submitted = true;
                 break;
@@ -5027,10 +5100,25 @@ namespace winrt::TerminalApp::implementation
         }
         if (!submitted && !box.empty())
         {
-            // The prompt is still sitting in the box (the classic eaten submit CR). The Enter-retry
-            // watchdog owns that; we must not add to the box. The draft is NOT lost: it is in the
-            // TUI's kill-ring (one Ctrl+Y away) and stays in the registry's memory below.
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + L" restore DEFERRED: the prompt has not left the input box - draft kept in the kill-ring (Ctrl+Y) and in memory, not re-typed\n");
+            // The box still holds the PROMPT (the classic eaten submit CR — with the promptGone
+            // test above, a non-empty box can only strand us here by reading the sent text, or by
+            // the turn never signaling at all). The Enter-retry watchdog owns the rescue once the
+            // gate closes; we must not add to the box. The draft is NOT lost: it is in the TUI's
+            // kill-ring (one Ctrl+Y away) and stays in the registry's memory below. Log WHAT the
+            // box reads (DELIVERY.md observability — the 07:26:59 forensics could not tell).
+            std::wstring head = box.substr(0, 48);
+            for (auto& ch : head)
+            {
+                if (ch == L'\n' || ch == L'\r' || ch == L'\t')
+                {
+                    ch = L' ';
+                }
+            }
+            const bool boxIsPrompt = DraftSwapNormalize(DraftSwapFoldCr(box)) == sentNorm;
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[draft-swap] " + sid8 + L" restore DEFERRED: the prompt has not left the input box (box chars=" +
+                                              std::to_wstring(box.size()) + L" matchesPrompt=" + (boxIsPrompt ? L"yes" : L"no") +
+                                              L" head=\"" + head + L"\") - draft kept in the kill-ring (Ctrl+Y) and in memory, not re-typed\n");
             _sessionRegistry->SetPendingInput(id, draft);
             _EndDraftSwap(id, true);
             co_return;
@@ -5120,6 +5208,28 @@ namespace winrt::TerminalApp::implementation
             _sessionRegistry->SetPendingInput(sessionId, L"");
             co_return;
         }
+
+        // Agentmaster (DELIVERY.md): own the box through the ENGINE gate too — a concurrent
+        // SubmitPrompt is then declined SYNCHRONOUSLY (before marking anything Sent) and the
+        // scheduler's DecideAdvance HOLDS instead of mark/decline/rollback-flapping against this
+        // clear (the queue-append that precedes a mail-move is exactly what wakes the autorunner).
+        // The gate's close (the scope guard below) notifies, which re-fires the held advance the
+        // moment the box is free.
+        if (!_sessionRegistry->TryOpenDeliveryGate(sessionId, std::wstring{ ::Agentmaster::kDeliveryGateClearTag }))
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-clear] " + sid8 + L" declined: a delivery owns the box (gate held) - draft left in place (it is already queued)\n");
+            co_return;
+        }
+        auto clearGateCloser = wil::scope_exit([gateRegistry = _sessionRegistry, sessionId]() noexcept {
+            try
+            {
+                gateRegistry->CloseDeliveryGate(sessionId, std::wstring{ ::Agentmaster::kDeliveryGateClearTag });
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_ClearLiveDraftForSession gate close");
+            }
+        });
 
         // LOCK — like the swap: keep the user's keystrokes from interleaving during the clear.
         bool wasAlreadyReadOnly = true;
@@ -7088,6 +7198,14 @@ namespace winrt::TerminalApp::implementation
                         continue;
                     }
                 }
+                // Agentmaster (DELIVERY.md): a delivery/clear owns the box this tick — a fill now
+                // would land inside the swap's clear/restore window. Wait a tick; the gate is
+                // short-lived and expiry-bounded, and the deadline above still caps everything.
+                if (_sessionRegistry->DeliveryGateHeld(id))
+                {
+                    ++it;
+                    continue;
+                }
                 const bool delivered = _sessionRegistry->Inject(id, ::Agentmaster::BuildPromptFill(entry.standbyText));
                 if (delivered)
                 {
@@ -7536,6 +7654,15 @@ namespace winrt::TerminalApp::implementation
                     it = _pendingDraftRestores.erase(it);
                     continue;
                 }
+            }
+            // Agentmaster (DELIVERY.md): a delivery/clear owns the box this tick — a fill now would
+            // land inside the swap's clear/restore window (an autorunner consuming the reopened
+            // session's queue races this pump by design; the taken-over latch above then retires
+            // the entry on ITS next pass). Wait a tick; the gate is short-lived + expiry-bounded.
+            if (_sessionRegistry->DeliveryGateHeld(id))
+            {
+                ++it;
+                continue;
             }
             const bool delivered = _sessionRegistry->Inject(id, ::Agentmaster::BuildPromptFill(entry.draftText));
             if (delivered)

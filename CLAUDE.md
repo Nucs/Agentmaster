@@ -99,6 +99,7 @@ Favorite + Close refactor (Archive removed; Sessions is the sole history view): 
 Pending-input monitor (detect an UNSENT draft in a Claude tab's input box): [`doc/agentmaster/PENDING_INPUT.md`](doc/agentmaster/PENDING_INPUT.md).
 System notifications (Windows toasts when a session leaves Running; click = foreground + jump to tab): [`doc/agentmaster/NOTIFICATIONS.md`](doc/agentmaster/NOTIFICATIONS.md).
 Slash-command bindings + /handover + /handover-here (CommandWatch: bind to typed /commands, await follow-up activity): [`doc/agentmaster/COMMANDS.md`](doc/agentmaster/COMMANDS.md).
+Atomic prompt delivery (the DELIVERY GATE — one owner per input box; advance/watchdog/swap serialization): [`doc/agentmaster/DELIVERY.md`](doc/agentmaster/DELIVERY.md).
 
 ## Status
 
@@ -2020,7 +2021,47 @@ What works, by area:
   echo still lands inside the registry's 15s echo window (else it'd be mis-recorded as a fresh `Typed`
   prompt) AND the pickup guard stays armed (the queue won't drain past the stuck prompt during
   retries). `enterRetries` is transient (reset to 0 at each fresh send). Logs: `[enter-retry] <id>
-  press k/3` · `[enter-retry-giveup] <id>` (`autorunner.log`).
+  press k/3` · `[enter-retry-giveup] <id>` (`autorunner.log`). **The DELIVERY GATE
+  ([`DELIVERY.md`](doc/agentmaster/DELIVERY.md)) — placing the next prompt is ATOMIC; engine-tested
+  (3082/3082) + lib-compiled green, rides the next deploy cycle.** One engine-owned, per-session
+  "someone OWNS the input box" fact (`SessionInfo::deliveryPromptId`/`deliveryOpenedUnixMs`,
+  transient; `TryOpen`/`CloseDeliveryGate`/`DeliveryGateHeld` + the pure `DeliveryGateOpen`)
+  serializes the WHOLE placement pipeline — the fix for the log-proven 07:27 livelock (a swap
+  legitimately held the box ~24s while the Stop-seam advance marked the next prompt Sent → declined
+  → rolled back → the rollback's own notify re-advanced, 8 cycles at ~750ms until the user
+  intervened; the echo-keyed pickup guard cannot see a DELIVERY, only its echo). `SubmitPrompt`
+  (the one send seam) OPENS the gate before invoking anything and declines a racing second delivery
+  SYNCHRONOUSLY (before any marshal); the no-submitter fallback resolves + closes inline; an
+  ACCEPTED submitter keeps it open until the swap RESOLVES — the hosting window closes on EVERY
+  exit (a registry-only `wil::scope_exit`, legal on a frame-teardown thread unlike the UI-affine
+  read-only unlock, which stays `_EndDraftSwap`), and the CLOSE NOTIFIES — that notify is what
+  re-fires the held advance, so nothing polls. Consumers: `DecideAdvance` HOLDS (`"delivery in
+  flight"`, `[advance-skip]`-deduped) instead of mark-then-decline; `DecideEnterRetry` NEVER
+  presses while the gate is open (a mid-swap lone Enter would submit the user's partially-cleared
+  or restored draft — the exact §9 merge) NOR into a DORMANT session (`!started && !external` — a
+  restored background tab's pre-Connected `WriteInput` silently drops, so presses only burned the
+  budget into a spurious Failed + autorunner-paused ~15s after reopen); the mail-button clear (§8d)
+  opens the same gate (reserved `kDeliveryGateClearTag`) around its ladder; the standby + §10
+  re-fill pumps skip a gated tick. Owner-checked close (a stale/expired holder can never clear a
+  younger claim; a double close is quiet — no phantom wake-ups), a 45s expiry belt
+  (`kDeliveryGateTimeoutMs`: a leaked gate reads CLOSED everywhere + is reclaimed by the next open,
+  logged `[gate]`), fail-open on an Upsert re-key. THREE companion fixes ride it: **(1)** a loaded
+  `Sent` prompt reads `echoed=true` (Persistence — a restored plan can never look like an in-flight
+  unacknowledged send; the source of the same-millisecond multi-session restart press-storms in the
+  live log); **(2)** the echo consume + `NoteExternalPrompt`'s dedupe are newline-FOLDED (a
+  `\r`-composed compose-box prompt vs its `\n` wire echo — the duplicate-Typed-row +
+  phantom-unacknowledged-send bug; `FoldCrToLf`, the `BuildPromptFill` fold); **(3)** the swap's
+  submit-await succeeds on turn-started + box ≠ THE SENT TEXT rather than demanding an EMPTY box —
+  claude can repopulate the box right after a successful submit (a Ctrl+S stash popping back at
+  turn end), which held the await its full 18s on a demonstrably-submitted send; only a box still
+  READING the prompt defers, the defer log now prints `chars/matchesPrompt/head` (the 07:26:59
+  forensics couldn't tell what the detector saw), and `_RestoreDraftAfterSwap` VERIFIES FIRST — a
+  box already holding the draft is returned untouched (a stash press there would re-stash it). The
+  auto-send also resolves its target BY ID from the decided snapshot (a bare index could be
+  redirected onto a different Pending prompt by a concurrent queue reorder/delete during the 500ms
+  throttle sleep), and every actual injection logs **`[delivered]`** (hooks.log) beside the
+  accepted-for-delivery `[send]` (autorunner.log) — the line that separates "8 sends logged, 0
+  delivered" from reality.
 - **Persistence + archive/restore (M8, `Json.h`/`Persistence`).** Sessions + named plan
   templates + the path-picker's recent-dirs MRU (de)serialize to JSON under the **ACTIVE
   PROFILE** dir (`AgentmasterStateDir()` — default `%USERPROFILE%\.agentmaster\`, dev package

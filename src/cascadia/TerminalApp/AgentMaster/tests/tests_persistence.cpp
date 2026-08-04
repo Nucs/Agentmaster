@@ -246,6 +246,11 @@ void TestPersistence()
             CHECK(r.pendingPasteRefs == L"paste #1 (+273 lines) -> bf8eefafa3e80676.txt", "pendingPasteRefs preserved (the paste-cache annotation)");
             CHECK(r.queue.size() == 2, "queue size");
             CHECK(r.queue.size() == 2 && r.queue[0].status == PromptStatus::Sent && r.queue[0].sentAtUnixMs == 999, "Sent status preserved (no replay)");
+            // DELIVERY.md RC3: a loaded Sent prompt's echo happened in a past run (or never will) —
+            // it loads CONSUMED, so the Enter-retry watchdog can never read it as an in-flight,
+            // un-acknowledged send and blind-press Enters on reopen (the restart press-storms).
+            CHECK(r.queue.size() == 2 && r.queue[0].echoed, "a loaded Sent prompt reads echoed=true (restart press-storm fix)");
+            CHECK(r.queue.size() == 2 && !r.queue[1].echoed, "a loaded Pending prompt stays echoed=false");
             CHECK(r.queue.size() == 2 && r.queue[0].origin == PromptOrigin::Typed && r.queue[1].origin == PromptOrigin::Autorun, "prompt origin preserved (Typed vs Flight)");
             CHECK(r.queue.size() == 2 && r.queue[1].gate == PromptGate::Manual && r.queue[1].guardPattern == L"answers-a-question:ok", "prompt gate+guard preserved");
             CHECK(r.autorunner.mode == AutorunnerMode::Full && r.autorunner.throttleMs == 750 && !r.autorunner.stopOnError && r.autorunner.maxAutoSends == 7, "autorunner preserved");
