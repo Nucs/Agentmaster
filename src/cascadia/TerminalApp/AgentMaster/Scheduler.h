@@ -34,10 +34,20 @@ namespace Agentmaster
 
     // After injecting a prompt the session lingers Idle/WaitingForInput for a beat until
     // Claude's UserPromptSubmit moves it to Running. DecideAdvance refuses to fire another
-    // prompt while a Flight prompt is Sent-but-not-yet-echoed within this window — so a
-    // change-driven advance (the observer trigger that lets idle plans START) can't drain the
-    // whole queue at once. Bounded in time so a lost echo can't permanently stall the plan.
-    inline constexpr int64_t kPickupGuardMs = 4000;
+    // prompt while a Flight prompt is Sent-but-not-yet-acknowledged — so a change-driven
+    // advance (the observer trigger that lets idle plans START) can't drain the whole queue.
+    //
+    // Agentmaster (DELIVERY.md §9): the guard is EVIDENCE-released, no longer a naked 4s window.
+    // The old expiry meant "a lost echo shouldn't stall the plan", but 4s is routinely beaten by
+    // real forwarder latency — the 07:27 incident's #6 fired 9s after #5 exactly because the
+    // guard had lapsed while the delivery was still being accepted, stacking the next prompt on
+    // top. Now the guard holds until the TURN visibly started (the echo consumed, a newer
+    // UserPromptSubmit stamped turns.lastPromptUnixMs, or the transcript advanced past the send)
+    // and this cap is only the lost-evidence belt: it sits ABOVE the Enter-retry watchdog's
+    // give-up horizon (~21s: 3s + 6s + 6s presses + the poll), which resolves a truly-dead send
+    // to Failed (and pauses the autorunner) long before the cap — so in practice the cap only
+    // ever releases a session whose watchdog could not run (no injector mid-rebind).
+    inline constexpr int64_t kPickupGuardMaxMs = 30000;
 
     // Enter-retry (the "the TUI ate my Enter" backstop). The ConPTY can deliver an injected
     // `prompt + CR` faster than Claude's Ink UI initializes its input handler, so the submit Enter
@@ -140,16 +150,32 @@ namespace Agentmaster
             return plan;
         }
 
-        // Awaiting-injection-pickup guard: if a Flight prompt we just injected is Sent but has
-        // not yet echoed back (Claude hasn't moved to Running), hold off — otherwise an advance
-        // driven by an observed change in that brief window would send the NEXT prompt too,
-        // draining the queue. Time-bounded (kPickupGuardMs) so a lost echo can't stall forever,
-        // and ignores un-timestamped Sent prompts (e.g. a restored plan) via sentAtUnixMs != 0.
+        // Awaiting-injection-pickup guard: if a Flight prompt we just injected is Sent but the
+        // turn it should start has not visibly begun, hold off — otherwise an advance driven by
+        // an observed change in that window would send the NEXT prompt on top of it (stacking two
+        // messages into one box). EVIDENCE-released (DELIVERY.md §9), not time-expired: the turn
+        // started when the echo was consumed (`echoed`), a newer UserPromptSubmit stamped
+        // turns.lastPromptUnixMs past the send (an echo the fold couldn't match still proves the
+        // pickup), or the transcript advanced meaningfully past it (the no-hook fallback — the
+        // same margin DecideEnterRetry trusts). kPickupGuardMaxMs is the lost-evidence belt only;
+        // the Enter-retry watchdog resolves a truly-dead send to Failed well before it. Ignores
+        // un-timestamped Sent prompts (a restored plan) via sentAtUnixMs != 0; a restored Sent
+        // prompt also loads echoed=true (Persistence), so it can never re-arm this guard.
         for (const auto& q : s.queue)
         {
-            if (q.origin == PromptOrigin::Autorun && q.status == PromptStatus::Sent && !q.echoed &&
-                q.sentAtUnixMs != 0 && (nowUnixMs - q.sentAtUnixMs) >= 0 &&
-                (nowUnixMs - q.sentAtUnixMs) < kPickupGuardMs)
+            if (q.origin != PromptOrigin::Autorun || q.status != PromptStatus::Sent || q.echoed || q.sentAtUnixMs == 0)
+            {
+                continue;
+            }
+            const int64_t sentAge = nowUnixMs - q.sentAtUnixMs;
+            if (sentAge < 0 || sentAge >= kPickupGuardMaxMs)
+            {
+                continue;
+            }
+            const bool turnStarted =
+                (s.turns.lastPromptUnixMs > q.sentAtUnixMs) ||
+                (s.convLastActivityUnixMs != 0 && s.convLastActivityUnixMs > q.sentAtUnixMs + kEnterRetryActivityMarginMs);
+            if (!turnStarted)
             {
                 plan.reason = L"awaiting injection pickup";
                 return plan;

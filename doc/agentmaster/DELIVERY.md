@@ -197,3 +197,51 @@ one `false`.
 - The pending-input detector's **~120-row read window**: a draft taller than the window is
   invisible to the swap's protection entirely.
 - A fuller **accepted/delivered log split** beyond the added `[delivered]` lines.
+
+## 9. Incident 2 — the duplicate-Stop advance (fixed)
+
+Post-deploy live report (`b5f766fc`, 08:44 local): *"sent two messages on top of each other while
+the previous message was just now accepted but the status was yet to update."* The trail:
+
+```
+08:44:50.860  [Stop]  question=1            ← the real turn end
+08:44:51.710  [delivered] 0906f5ce          ← prompt #1 ("check for best one") delivered
+08:44:53.360  [UserPromptSubmit]            ← #1's echo: the new turn starts (Running)
+08:44:53.375  [Stop]                        ← 15 ms later — a DUPLICATE of 08:44:50's Stop whose
+                                              slow pwsh forwarder stamped its ts ~3.6 s late,
+                                              i.e. AFTER the next prompt's UPS ts
+08:44:53.884  [send] #6                     ← the advance seam trusted it as an instant complete
+08:44:54.778  [delivered] 9a5fccd1          ← prompt #2 pasted into claude's RUNNING turn
+```
+
+The transcript proves the damage: claude had opened an `AskUserQuestion` dialog for prompt #1;
+prompt #2's 49 characters were consumed by the dialog rendering and **never became a message** —
+a silent loss recorded as delivered (the dialog's eventual answer carries only the user's option
+pick). The ordered machine's staleness test (`stop.ts < lastPromptUnixMs`) assumes a Stop's `ts`
+orders it truthfully; a duplicate Stop process stamped after the next prompt's UPS defeats it and
+reads as a 15 ms turn-complete — flipping state to Waiting, re-latching the question bit, and
+firing the advance.
+
+**Two-layer fix (both pure, both tested):**
+
+- **The minimum-real-turn-span floor** — `kMinRealTurnSpanMs` (2 s) in `NextSessionStateOrdered`:
+  a non-quiescent Stop landing within the floor of the newest prompt's `ts` cannot be that turn's
+  real completion (measured anchors: the fastest trivial turn in the incident corpus is 3.4 s; the
+  observed duplicate-stamp skew is ≤0.4 s). It reads STALE — state kept, question-bit and advance
+  suppressed. Deliberately placed **after** the type-ahead branch (a queued batch's consume
+  legitimately lands close behind its type-ahead prompt), and the scanner's quiescent Stop is
+  exempt — the self-heal for a genuinely-faster-than-floor turn (~2.5 s extra latency, nothing
+  lost, advance included).
+- **The evidence-released pickup guard** — `DecideAdvance` no longer expires its hold after a
+  naked 4 s (the other half of the same race class: the 07:27 incident's `#6` fired 9 s after `#5`
+  through exactly that lapsed window). A Sent-unacknowledged flight prompt now holds the next
+  advance until the turn **visibly started** — the echo consumed, a newer `UserPromptSubmit`
+  stamped `turns.lastPromptUnixMs` past the send (an echo the text-match missed still proves the
+  pickup), or the transcript advanced meaningfully past it (the no-hook fallback, the same margin
+  `DecideEnterRetry` trusts) — with `kPickupGuardMaxMs` (30 s) as the lost-evidence belt, sitting
+  above the Enter-retry watchdog's ~21 s give-up horizon (which resolves a truly-dead send to
+  `Failed` + a paused autorunner first).
+
+Invariant addendum (extends §5): **an advance may fire only off a turn-complete whose turn
+demonstrably ran** (the floor), and **never while the previous delivery's turn has not visibly
+started** (the evidence-held guard). Time alone releases nothing except the two belts.

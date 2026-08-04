@@ -157,16 +157,58 @@ void TestOrderedStateMachine()
         CHECK(r3.state == SessionState::Running && t.queuedPrompts == 0, "ordered: the approval-interlude turn's Stop still honors the queue");
     }
     { // Stale Stop: FIRED before the newest prompt -> it ends an older turn -> keep state, no advance.
+      // (Gaps are realistic — a real turn spans seconds — because a clean Stop must also clear the
+      // kMinRealTurnSpanMs floor below.)
         TurnAccounting t;
         auto r1 = NextSessionStateOrdered(SessionState::Idle, at(HookEvent::UserPromptSubmit, 1000), t);
-        auto r2 = NextSessionStateOrdered(r1.state, at(HookEvent::Stop, 1500), t); // turn 1 done
+        auto r2 = NextSessionStateOrdered(r1.state, at(HookEvent::Stop, 6000), t); // turn 1 done (5s turn)
         CHECK(r2.state == SessionState::WaitingForInput, "ordered: clean Stop -> Waiting");
-        auto r3 = NextSessionStateOrdered(r2.state, at(HookEvent::UserPromptSubmit, 2000), t); // turn 2
+        auto r3 = NextSessionStateOrdered(r2.state, at(HookEvent::UserPromptSubmit, 10000), t); // turn 2
         CHECK(r3.state == SessionState::Running, "ordered: turn-2 UPS -> Running");
-        auto r4 = NextSessionStateOrdered(r3.state, at(HookEvent::Stop, 1400), t); // turn 1's LATE duplicate
+        auto r4 = NextSessionStateOrdered(r3.state, at(HookEvent::Stop, 9000), t); // turn 1's LATE duplicate
         CHECK(r4.state == SessionState::Running && r4.staleStop && !r4.turnComplete, "ordered: stale Stop (ts < newest prompt) keeps Running");
-        auto r5 = NextSessionStateOrdered(r4.state, at(HookEvent::Stop, 2500), t); // turn 2's real end
+        auto r5 = NextSessionStateOrdered(r4.state, at(HookEvent::Stop, 16000), t); // turn 2's real end (6s turn)
         CHECK(r5.state == SessionState::WaitingForInput && r5.turnComplete, "ordered: fresh Stop after the stale one completes the turn");
+    }
+    { // The kMinRealTurnSpanMs FLOOR (DELIVERY.md §9 — the b5f766fc incident): a duplicate Stop whose
+      // slow forwarder stamped its ts AFTER the next prompt's UPS beats the strict `ts < lastPrompt`
+      // test — but no real turn completes in milliseconds, so a Stop inside the floor reads STALE:
+      // state kept, no question-bit, and CRUCIALLY no turnComplete (the advance that delivered the
+      // next prompt into claude's running turn came from exactly this).
+        TurnAccounting t;
+        NextSessionStateOrdered(SessionState::Idle, at(HookEvent::UserPromptSubmit, 100000), t);
+        NextSessionStateOrdered(SessionState::Running, at(HookEvent::Stop, 110000), t); // turn 1 done
+        auto r2 = NextSessionStateOrdered(SessionState::WaitingForInput, at(HookEvent::UserPromptSubmit, 120000), t); // turn 2 (our delivery's echo)
+        CHECK(r2.state == SessionState::Running, "floor: turn-2 UPS -> Running");
+        // The duplicate: turn 1's second Stop process, ts-stamped 15ms AFTER turn 2's UPS (the
+        // incident's exact shape — 08:44:53.360 UPS, 08:44:53.375 Stop).
+        auto dup = NextSessionStateOrdered(r2.state, at(HookEvent::Stop, 120015), t);
+        CHECK(dup.state == SessionState::Running && dup.staleStop && !dup.turnComplete,
+              "floor: a Stop 15ms after the newest UPS reads STALE (no advance, no state flip)");
+        // Still under the floor near its edge:
+        auto edge = NextSessionStateOrdered(SessionState::Running, at(HookEvent::Stop, 120000 + kMinRealTurnSpanMs - 1), t);
+        CHECK(edge.staleStop && !edge.turnComplete, "floor: just under kMinRealTurnSpanMs still reads stale");
+        // At/after the floor: a real completion.
+        auto real = NextSessionStateOrdered(SessionState::Running, at(HookEvent::Stop, 120000 + kMinRealTurnSpanMs), t);
+        CHECK(real.state == SessionState::WaitingForInput && real.turnComplete && !real.staleStop,
+              "floor: at kMinRealTurnSpanMs the Stop is a real turn-complete");
+        // The floor never gates the scanner's quiescent Stop (transcript-proven idle) — the
+        // self-heal path for a genuinely-faster-than-floor turn.
+        TurnAccounting t2;
+        NextSessionStateOrdered(SessionState::Idle, at(HookEvent::UserPromptSubmit, 200000), t2);
+        HookMessage q = at(HookEvent::Stop, 200010); // 10ms later, but transcript-proven
+        q.quiescentStop = true;
+        auto qs = NextSessionStateOrdered(SessionState::Running, q, t2);
+        CHECK(qs.state == SessionState::WaitingForInput && qs.turnComplete, "floor: a quiescent Stop is exempt (the self-heal)");
+        // The floor never gates the TYPE-AHEAD consume either (a queued batch's Stop legitimately
+        // lands close behind the type-ahead prompt).
+        TurnAccounting t3;
+        NextSessionStateOrdered(SessionState::Idle, at(HookEvent::UserPromptSubmit, 300000), t3);
+        NextSessionStateOrdered(SessionState::Running, at(HookEvent::UserPromptSubmit, 309000), t3); // type-ahead
+        CHECK(t3.queuedPrompts == 1, "floor: type-ahead queued");
+        auto ta = NextSessionStateOrdered(SessionState::Running, at(HookEvent::Stop, 309500), t3); // 500ms after the type-ahead UPS
+        CHECK(ta.state == SessionState::Running && !ta.staleStop && t3.queuedPrompts == 0,
+              "floor: the type-ahead consume stays floor-free (batch turn starts, still Running)");
     }
     { // Quiescent (scanner-synthesized) Stop overrides everything: the transcript is provably idle.
         TurnAccounting t;
@@ -246,7 +288,7 @@ void TestOrderedStateMachine()
         CHECK(after && !after->lastMessageWasQuestion, "registry: stale Stop's question bit suppressed");
         CHECK(after && after->lastActivityUnixMs == 3000, "registry: a stale ts does not regress the anchor");
 
-        auto stop2 = at(HookEvent::Stop, 4000);
+        auto stop2 = at(HookEvent::Stop, 30000); // a realistic turn span past the ts-2000 prompt (clears the kMinRealTurnSpanMs floor)
         stop2.sessionId = L"ord-1";
         stop2.lastMessageIsQuestion = true;
         reg.OnHookEvent(stop2);

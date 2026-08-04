@@ -1475,6 +1475,49 @@ void TestDeliveryGate()
         CHECK(DecideAdvance(s, T, 0, false).action == AdvanceAction::Send, "advance: an expired gate no longer holds (the leaked-gate belt)");
     }
 
+    // ---- the EVIDENCE-released pickup guard (DELIVERY.md §9 — no more naked 4s expiry) ----
+    {
+        const int64_t T = 1000000;
+        SessionInfo s = MakeSession(L"pg", SessionState::WaitingForInput);
+        s.live = true;
+        s.autorunner.mode = AutorunnerMode::Full;
+        QueuedPrompt sent; // the just-delivered prompt, still unacknowledged
+        sent.id = L"p1";
+        sent.text = L"first";
+        sent.status = PromptStatus::Sent;
+        sent.origin = PromptOrigin::Autorun;
+        sent.echoed = false;
+        sent.sentAtUnixMs = T;
+        s.queue.push_back(sent);
+        QueuedPrompt next;
+        next.id = L"p2";
+        next.text = L"second";
+        s.queue.push_back(next);
+        // No evidence the turn started: held FAR past the old 4s window — the 07:27 incident's #6
+        // fired 9s after #5 exactly through that lapsed window.
+        const auto pgHeld = DecideAdvance(s, T + 9000, 0, false);
+        CHECK(pgHeld.action == AdvanceAction::None && pgHeld.reason == L"awaiting injection pickup",
+              "pickup: held at 9s with no turn evidence (the old 4s expiry fired here)");
+        // The echo releases.
+        s.queue[0].echoed = true;
+        CHECK(DecideAdvance(s, T + 9000, 0, false).action == AdvanceAction::Send, "pickup: the consumed echo releases");
+        s.queue[0].echoed = false;
+        // A newer UserPromptSubmit stamp releases (an echo the text-match missed still proves pickup).
+        s.turns.lastPromptUnixMs = T + 1500;
+        CHECK(DecideAdvance(s, T + 9000, 0, false).action == AdvanceAction::Send, "pickup: a newer prompt stamp releases");
+        s.turns.lastPromptUnixMs = 0;
+        // The transcript advancing meaningfully past the send releases (the no-hook fallback)...
+        s.convLastActivityUnixMs = T + kEnterRetryActivityMarginMs + 1;
+        CHECK(DecideAdvance(s, T + 9000, 0, false).action == AdvanceAction::Send, "pickup: transcript advance releases");
+        // ...but within-margin noise (the prior turn's tail) does NOT.
+        s.convLastActivityUnixMs = T + kEnterRetryActivityMarginMs - 1;
+        CHECK(DecideAdvance(s, T + 9000, 0, false).action == AdvanceAction::None, "pickup: within-margin transcript noise keeps holding");
+        s.convLastActivityUnixMs = 0;
+        // The lost-evidence belt: past kPickupGuardMaxMs the guard stands aside (the Enter-retry
+        // watchdog has long since resolved a truly-dead send to Failed).
+        CHECK(DecideAdvance(s, T + kPickupGuardMaxMs, 0, false).action == AdvanceAction::Send, "pickup: the 30s belt releases");
+    }
+
     // ---- DecideEnterRetry: never press while gated / into a dormant session ----
     {
         const int64_t T = 1000000;
@@ -1927,9 +1970,10 @@ void TestSchedulerIntegration()
         }
         CHECK(sent, "pickup window: the first prompt sends");
         const auto atSent = notifies.load();
-        // Inside the pickup window (well under kPickupGuardMs and the 3s first Enter-retry) the
-        // registry must stay untouched: DecideAdvance answers None (awaiting pickup) WITHOUT the
-        // un-hold probe's no-op Update re-notifying. Pre-fix: hundreds of notifies here.
+        // Inside the pickup hold (no turn evidence yet — well under kPickupGuardMaxMs and the 3s
+        // first Enter-retry) the registry must stay untouched: DecideAdvance answers None (awaiting
+        // pickup) WITHOUT the un-hold probe's no-op Update re-notifying. Pre-fix: hundreds of
+        // notifies here.
         std::this_thread::sleep_for(std::chrono::milliseconds(600));
         const int drift = notifies.load() - atSent;
         CHECK(drift <= 2, "pickup window SETTLES: the no-Held un-hold probe is registry-silent");

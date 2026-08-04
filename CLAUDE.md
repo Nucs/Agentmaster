@@ -1417,11 +1417,23 @@ What works, by area:
   work; old 8-field lines parse with ts=0 → arrival order). `ts` drives the **ordered state
   machine** (`NextSessionStateOrdered` + `SessionInfo.turns`, HOOKS.md *State machine*): a
   **stale Stop** (fired before the newest prompt — the slow Stop forwarder lands it after the
-  next turn's `UserPromptSubmit`) keeps state + suppresses its question-bit/advance, and a
+  next turn's `UserPromptSubmit`) keeps state + suppresses its question-bit/advance, a
+  **too-fast Stop** reads stale too (**`kMinRealTurnSpanMs`** 2s, DELIVERY.md §9 — a DUPLICATE
+  Stop whose slow forwarder stamped its ts AFTER the next prompt's UPS beats the strict ts-order
+  test and read as a 15ms turn-complete, flipping state + firing the autorunner advance INTO the
+  running turn: the `b5f766fc` lost-prompt incident, where the stacked delivery was consumed by an
+  AskUserQuestion dialog and never became a message; a genuinely-faster-than-floor turn self-heals
+  via the exempt quiescent Stop ~2.5s later; the type-ahead consume below is deliberately
+  floor-free), and a
   **type-ahead** prompt (`UserPromptSubmit` at Enter-time mid-turn; the queued batch then runs
   as the next turn with NO further hook) is counted so that turn's `Stop` stays **Running**
   instead of stranding the whole follow-on turn in `WaitingForInput` — the "second turn never
-  shows Running" bug. The scanner's synthesized missed-Stop is `quiescentStop` (≥2s-quiet
+  shows Running" bug. The autorunner's **pickup guard is EVIDENCE-released** now, not
+  time-expired (DELIVERY.md §9): a Sent-unacknowledged flight prompt holds the next advance until
+  the turn visibly started (echo consumed / a newer prompt stamp / transcript advanced past the
+  send), with `kPickupGuardMaxMs` (30s) only the lost-evidence belt above the Enter-retry
+  watchdog's ~21s give-up — the old naked 4s expiry was the other half of the stacking race (the
+  07:27 incident's #6 fired 9s after #5 through exactly that lapsed window). The scanner's synthesized missed-Stop is `quiescentStop` (≥2s-quiet
   transcript): always lands `WaitingForInput`, never stale, never held by the queue. Hook `ts`
   also refreshes `lastActivityUnixMs` monotonically (real hooks previously never updated the
   Waiting→Idle decay anchor — it only moved on synthesized events). The scanner's missed-Stop

@@ -290,6 +290,21 @@ namespace Agentmaster
     // falls back to arrival order — exactly the pre-ordering behavior.
     inline constexpr int32_t kMaxQueuedPrompts = 8; // type-ahead cap (collapse-on-Stop bounds drift anyway)
 
+    // Agentmaster (DELIVERY.md §9 — the duplicate-Stop floor): a NON-quiescent Stop may complete
+    // the newest turn ONLY if that turn has demonstrably RUN — its wire ts must be at least this
+    // far past the newest UserPromptSubmit's ts. The live incident (b5f766fc, 08:44): a turn's
+    // Stop hook fired TWICE; the duplicate's forwarder (pwsh, slow spawn under load) stamped its
+    // ts ~3.6s after the turn actually ended — 15ms AFTER the NEXT prompt's UserPromptSubmit ts —
+    // so the strict `ts < lastPrompt` staleness test passed it, it read as the new turn's INSTANT
+    // completion, state flipped WaitingForInput, and the advance seam delivered the next queued
+    // prompt into claude's RUNNING turn (the pasted text was consumed by an AskUserQuestion dialog
+    // and lost — never became a message). No real turn completes in 15ms: an API roundtrip alone
+    // is ~1s, and the fastest measured trivial turn in the incident corpus is 3.4s; the observed
+    // duplicate-stamp skew is <=0.4s. 2000ms sits comfortably between. A genuinely-faster-than-
+    // floor turn self-heals: its Stop reads stale (state kept), and the scanner's quiescent Stop —
+    // EXEMPT from both checks — reconciles to WaitingForInput ~2.5s later, advance included.
+    inline constexpr int64_t kMinRealTurnSpanMs = 2000;
+
     struct OrderedTransition
     {
         SessionState state{ SessionState::Idle }; // the next state
@@ -349,6 +364,21 @@ namespace Agentmaster
                 // so the session is still mid-conversation — NOT waiting for the user.
                 turns.queuedPrompts = 0;
                 out.state = SessionState::Running;
+                break;
+            }
+            if (!m.quiescentStop && m.ts != 0 && turns.lastPromptUnixMs != 0 &&
+                (m.ts - turns.lastPromptUnixMs) < kMinRealTurnSpanMs)
+            {
+                // TOO FAST to be the newest turn's real completion (kMinRealTurnSpanMs above): a
+                // DUPLICATE Stop of an older turn whose slow forwarder stamped its ts after the
+                // newest prompt beats the strict `ts < lastPrompt` test — this floor catches it.
+                // Same handling as stale: keep state, suppress the question-bit + advance. The
+                // accounting is NOT zeroed (this Stop is bookkeeping noise, not a boundary), and a
+                // genuinely sub-floor turn is reconciled by the scanner's exempt quiescent Stop.
+                // Placed AFTER the type-ahead branch on purpose: a queued batch's consume must stay
+                // floor-free (its Stop legitimately lands close behind the type-ahead prompt).
+                out.state = current;
+                out.staleStop = true;
                 break;
             }
             turns.queuedPrompts = 0;
