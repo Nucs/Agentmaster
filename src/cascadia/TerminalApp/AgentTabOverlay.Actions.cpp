@@ -23,6 +23,7 @@
 #include "AgentStatusColors.h" // the ONE shared state->color palette (board / overlay / tab dot)
 #include "AgentTipHelpers.h" // AgentSetTip — the Dark-pinned, fast-open, stuck-proof hover tooltip recipe (vs raw ToolTipService)
 #include "AgentMaster/PendingInput.h" // PickCurrentPromptText — the pure live-vs-remembered draft rule ("Copy Current Prompt")
+#include "AgentMaster/Scheduler.h" // kAnswersQuestionOk — the MAIL button's queued draft carries the question-guard opt-out (DELIVERY.md §8)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / BuildClaude|CodexCommandline (row 3 CLI + transcript)
 #include "AgentMaster/ProcessInspect.h" // ReadProcessCommandLine / ReadConversationText / Codex rollout resolve (row 3)
@@ -584,6 +585,15 @@ namespace winrt::TerminalApp::implementation
             p.id = NewSessionId();
             p.label = label;
             p.text = pick.text; // verbatim + whole (multi-line drafts included) — this is what gets SENT
+            // Agentmaster (DELIVERY.md §8 — the question-guard trap, closed for this surface): this
+            // queues the session's OWN unsent input-box draft — the message the user typed TO this
+            // session and was one Enter away from sending. When the agent's last turn ended on a
+            // clarifying question, that draft IS (by construction) the user's next message to it, so
+            // it carries the answers-a-question opt-out and never parks behind lastMessageWasQuestion
+            // the way a PLANNED test prompt (the guard's real subject) must. The reported trap
+            // otherwise: mail-move the answer -> the box is cleared -> the queue holds it
+            // indefinitely -> "3 queued messages but none are auto-sending".
+            p.guardPattern = std::wstring{ ::Agentmaster::kAnswersQuestionOk };
             s.queue.push_back(std::move(p));
         });
         // Nav audit: the SAME "queue" verb the Manager's envelope logs, tagged with this surface (the

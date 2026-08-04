@@ -1370,6 +1370,14 @@ namespace winrt::TerminalApp::implementation
                 // Arming resets the per-run backstop counter and clears any stale confirm.
                 s.autorunner.autoSendsThisRun = 0;
                 s.pendingConfirmPromptId.clear();
+                // Agentmaster (DELIVERY.md §8): an EXPLICIT re-arm also releases the question-guard
+                // latch. The guard exists so an UNATTENDED plan can't blindly answer a clarifying
+                // question — but a human clicking the toggle to Semi/Full IS attending, and this
+                // gesture is exactly what a user stuck on the guard tries ("switching from Off,
+                // Semi and back to Full didn't help" — the live report: 3 Pending prompts parked by
+                // lastMessageWasQuestion with nothing on screen saying why). The next Stop that ends
+                // on a question re-latches it, so the protection is undiminished for later turns.
+                s.lastMessageWasQuestion = false;
             }
         });
     }

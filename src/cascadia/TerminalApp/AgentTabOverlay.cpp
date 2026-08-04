@@ -21,6 +21,7 @@
 #include "AgentCopyActions.h" // the shared CopySessionField (reused by the Triage Board's Copy submenu)
 #include "AgentStatusColors.h" // the ONE shared state->color palette (board / overlay / tab dot)
 #include "AgentTipHelpers.h" // AgentSetTip — the Dark-pinned, fast-open, stuck-proof hover tooltip recipe (vs raw ToolTipService)
+#include "AgentMaster/Scheduler.h" // kAnswersQuestionOk — row 3 marks a queue HELD by the question-guard (DELIVERY.md §8)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / BuildClaude|CodexCommandline (row 3 CLI + transcript)
 #include "AgentMaster/ProcessInspect.h" // ReadProcessCommandLine / ReadConversationText / Codex rollout resolve (row 3)
@@ -504,6 +505,21 @@ namespace winrt::TerminalApp::implementation
             }
             else
             {
+                // Agentmaster (DELIVERY.md §8 — make the question-guard HOLD visible where the user is
+                // looking): when the agent's last turn ended on a clarifying question and the NEXT
+                // prompt does not carry the answers-a-question opt-out, DecideAdvance parks the whole
+                // queue — previously with the reason visible ONLY as an [advance-skip] line in
+                // autorunner.log (the live report: "3 queued messages but none are auto-sending",
+                // mode-cycling tried blind). Say so on the row itself, and teach the releases in the tip.
+                const bool heldByQuestion = s.lastMessageWasQuestion &&
+                                            nextPrompt->guardPattern != ::Agentmaster::kAnswersQuestionOk;
+                if (heldByQuestion)
+                {
+                    Run held{};
+                    held.Text(L"\x2753 held \x2014 answer the question  "); // ❓
+                    held.Foreground(Fill(0xFF, 0xFF, 0x8C, 0x00)); // dark orange — the NeedsApproval "needs you" tone
+                    _promptLine.Inlines().Append(held);
+                }
                 Run hg{};
                 hg.Text(winrt::hstring{ std::wstring{ kHourglass } + L" " });
                 hg.Foreground(Fill(0xFF, 0xDA, 0xA5, 0x20)); // goldenrod — "queued / pending", matching the row-1 ⏳N
@@ -518,7 +534,12 @@ namespace winrt::TerminalApp::implementation
                 {
                     full = full.substr(0, 4000) + L"\x2026"; // …
                 }
-                const std::wstring tip = std::wstring{ L"Next queued prompt \x2014 sent on the next turn-complete (or via Send now).\n\n" } + full;
+                const std::wstring tip = heldByQuestion ?
+                                             std::wstring{ L"Queue HELD \x2014 the agent's last message ended with a QUESTION, so auto-send waits (a planned prompt must not answer it blindly).\n"
+                                                           L"Release: answer in the terminal, Send now, or cycle the Tests Autorunner toggle to Semi/Full (an explicit re-arm clears the hold).\n\n"
+                                                           L"Next queued prompt:\n" } +
+                                                 full :
+                                             std::wstring{ L"Next queued prompt \x2014 sent on the next turn-complete (or via Send now).\n\n" } + full;
                 AgentSetTip(_promptLine, winrt::hstring{ tip });
                 _promptLine.Visibility(Visibility::Visible);
             }
@@ -671,6 +692,11 @@ namespace winrt::TerminalApp::implementation
                 // Arming resets the per-run backstop counter + clears any stale confirm (== _OnAutorunnerChanged).
                 s.autorunner.autoSendsThisRun = 0;
                 s.pendingConfirmPromptId.clear();
+                // Agentmaster (DELIVERY.md §8): an explicit re-arm also releases the question-guard
+                // latch — the human clicking Semi/Full IS attending, so the "don't blindly answer a
+                // question" hold no longer applies; the next question-ending Stop re-latches it.
+                // (== _OnAutorunnerChanged — the two arming paths must stay in step.)
+                s.lastMessageWasQuestion = false;
             }
         });
         _Refresh(); // immediate repaint (the async registry observer also refreshes)

@@ -2061,7 +2061,18 @@ What works, by area:
   redirected onto a different Pending prompt by a concurrent queue reorder/delete during the 500ms
   throttle sleep), and every actual injection logs **`[delivered]`** (hooks.log) beside the
   accepted-for-delivery `[send]` (autorunner.log) — the line that separates "8 sends logged, 0
-  delivered" from reality.
+  delivered" from reality. **Question-guard release (the `b5f766fc` live report — "3 queued
+  messages but none are auto-sending", mode-cycling tried blind):** the guard's park was
+  INVISIBLE (only a change-deduped `[advance-skip] (question pending…)`) and UNRELEASABLE (no
+  gesture cleared `lastMessageWasQuestion` — cycling the mode only reset the send budget +
+  confirm). Now an EXPLICIT autorunner re-arm (Off→Semi/Full — the Manager header toggle AND the
+  overlay cycle, kept in step) also clears the latch (a human clicking GO is attending; the next
+  question-ending Stop re-latches, so unattended protection is undiminished), the overlay MAIL
+  button queues its draft with `guardPattern = kAnswersQuestionOk` (the session's OWN unsent
+  draft IS the user's next message — it never parks behind the guard the way a planned test
+  prompt must), and the overlay's ⏳ row-3 prefixes **"❓ held — answer the question"** (orange)
+  with the releases taught in its tooltip whenever the guard holds the next prompt
+  (DELIVERY.md §8).
 - **Persistence + archive/restore (M8, `Json.h`/`Persistence`).** Sessions + named plan
   templates + the path-picker's recent-dirs MRU (de)serialize to JSON under the **ACTIVE
   PROFILE** dir (`AgentmasterStateDir()` — default `%USERPROFILE%\.agentmaster\`, dev package

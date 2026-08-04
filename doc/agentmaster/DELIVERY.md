@@ -179,8 +179,18 @@ one `false`.
 
 ## 8. Explicitly out of scope (known, separate)
 
-- The **question-guard opt-out** for a mail-queued own-draft (`kAnswersQuestionOk` is reachable
-  only from tests today) — a moved "answer" can park until a manual Send-now.
+- The **question-guard trap — CLOSED** (the `b5f766fc` live report: three mail-queued prompts
+  parked by `lastMessageWasQuestion`, autorunner Full, mode-cycling tried blind, the reason
+  visible only as a change-deduped `[advance-skip]`). Three-part fix: **(1)** an **explicit
+  autorunner re-arm** (Off→Semi/Full, the Manager header toggle *and* the overlay cycle — the
+  exact gesture users try) clears the question latch: a human clicking GO is attending, so the
+  "don't blindly answer a question" hold no longer applies, and the next question-ending Stop
+  re-latches it, keeping the protection for later turns; **(2)** the overlay **mail button**
+  queues its draft with `guardPattern = kAnswersQuestionOk` — the session's *own* unsent draft
+  is by construction the user's next message to it, never a blind auto-answer; **(3)** the
+  overlay's ⏳ row prefixes **"❓ held — answer the question"** (orange) whenever the guard is
+  holding the next prompt, with the releases spelled out in its tooltip. Still open: a
+  per-prompt opt-out control in the Manager queue UI, and a board-card hold indicator.
 - **Paste placeholders** (`[Pasted text #N +M lines]`) queued verbatim by the mail button lose the
   paste content when the queued copy is sent — expansion at queue time is the §8c/§9-consistent
   fix.
