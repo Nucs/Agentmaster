@@ -99,7 +99,7 @@ Favorite + Close refactor (Archive removed; Sessions is the sole history view): 
 Pending-input monitor (detect an UNSENT draft in a Claude tab's input box): [`doc/agentmaster/PENDING_INPUT.md`](doc/agentmaster/PENDING_INPUT.md).
 System notifications (Windows toasts when a session leaves Running; click = foreground + jump to tab): [`doc/agentmaster/NOTIFICATIONS.md`](doc/agentmaster/NOTIFICATIONS.md).
 Slash-command bindings + /handover + /handover-here (CommandWatch: bind to typed /commands, await follow-up activity): [`doc/agentmaster/COMMANDS.md`](doc/agentmaster/COMMANDS.md).
-Atomic prompt delivery (the DELIVERY GATE — one owner per input box; advance/watchdog/swap serialization): [`doc/agentmaster/DELIVERY.md`](doc/agentmaster/DELIVERY.md).
+Atomic prompt delivery (the DELIVERY GATE — one owner per input box; advance/watchdog/swap serialization): [`doc/agentmaster/DELIVERY.md`](doc/agentmaster/DELIVERY.md) (+ the residuals' implementer plan, NOT yet implemented — lost-send reconciler / sound pickup evidence / phantom-UPS hardening: [`doc/agentmaster/DELIVERY_PLAN.md`](doc/agentmaster/DELIVERY_PLAN.md)).
 
 ## Status
 

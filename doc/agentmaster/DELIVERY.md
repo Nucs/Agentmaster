@@ -245,3 +245,50 @@ firing the advance.
 Invariant addendum (extends §5): **an advance may fire only off a turn-complete whose turn
 demonstrably ran** (the floor), and **never while the previous delivery's turn has not visibly
 started** (the evidence-held guard). Time alone releases nothing except the two belts.
+
+## 10. Incident follow-ups — coverage verdicts + residuals (→ DELIVERY_PLAN.md)
+
+Two more suspected behaviors in the same session (`b5f766fc`), checked against the logs:
+
+**A — "the next prompt was sent while a question was asked": the SAME duplicate-Stop race,
+recorded twice.** The duplicate Stop carries the question bit of the *old* transcript tail, so its
+false turn-complete both re-latches `question=1` and fires the advance in one stroke:
+
+```
+08:42:26.325  [UserPromptSubmit]            ← "asdasd"'s echo (turn actually still running)
+08:42:26.340  [Stop] question=1             ← duplicate, 15 ms later — advance fired…
+                                              …but the OLD 4s pickup guard caught it by ~200 ms
+                                              (the send waited for the REAL Stop at 30.791)
+08:44:53.360  [UserPromptSubmit]            ← "check for best one"'s echo
+08:44:53.375  [Stop] question=1             ← the same duplicate shape; the echo had already
+                                              consumed → the guard released → #6 stacked (§9)
+```
+
+**Covered** by the §9 floor: both duplicates now read stale — no advance, no state flip, no
+question re-latch — and a floor-suppressed *real* Stop's question bit is recovered by the
+scanner's quiescent synth, which computes it from the tail (`SessionScanner.cpp` —
+`EndsWithQuestion` on the last assistant text; the quiescent Stop is never stale, so the ordered
+machine applies its bit). Note the deliberate semantic that remains: a **mail-queued** prompt
+(`kAnswersQuestionOk`, §8) still fires on a *genuine* question-ending turn-complete — that is the
+opt-out working, not a race.
+
+**B — "the agent finished but the follow-up wasn't prompted in": two phenomena, one residual.**
+The 08:11→08:42 park was the §8 question-guard trap (fixed: re-arm release + mail opt-out +
+visibility). The deeper one: the stacked `#6` (*"then for another one but spawn subagent…"*)
+sits terminally **`Sent`** in the persisted queue while the transcript proves it **never became a
+message** (§9 — consumed by the AskUserQuestion dialog rendering). The §9 floor prevents this
+*cause*, but three residual gaps remain — spec'd for the implementer in
+[`DELIVERY_PLAN.md`](DELIVERY_PLAN.md):
+
+- **R1 — no lost-send detection.** A `Sent` prompt whose echo never arrived and whose text never
+  appears as a user message is indistinguishable from a real delivery, forever. Any future
+  mid-turn collision (e.g. racing a manual submit typed at the same moment) silently reproduces
+  the loss. Needs a reconciler that flags it once the session is next at rest.
+- **R2 — the transcript-advance release is unsound while ANOTHER turn is in flight.** Both
+  `DecideEnterRetry`'s "picked up" filter and the §9 pickup guard's release read *any* transcript
+  progress past `sentAtUnixMs` as "our prompt started its turn" — but a still-running previous
+  turn also writes. That is exactly why the watchdog drained instead of rescuing `#6`.
+- **R3 — phantom / duplicate `UserPromptSubmit` events.** The log shows extra UPS events
+  (08:42:28.904, 08:44:53.902) that match no delivery and no transcript message; their late
+  `lastPromptUnixMs` stamps can floor-suppress a *real* Stop (benign but latency-adding: the
+  quiescent synth heals it ~2.5 s later) and re-light Running on a settled session.
