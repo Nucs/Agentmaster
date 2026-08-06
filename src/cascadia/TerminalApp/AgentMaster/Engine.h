@@ -43,6 +43,26 @@ namespace Agentmaster
     class ProcessObserver;
     class CommandWatch; // COMMANDS.md — slash-command bindings + awaited follow-up activity
 
+    // Agentmaster (cross-window tab DOCKING — the pointer-owned gesture's replacement for the OLE
+    // docking that died with CanDragTabs(false); see Engine::DockTargetSink). What a dragging window
+    // asks a dock TARGET about a screen point.
+    enum class DockProbeMode : int
+    {
+        Query, // hit-test only (the release path)
+        Preview, // hit-test + light/track the target's OWN insertion caret (the drag-time preview)
+        HideCaret, // clear the target's caret (the pointer left it / the gesture ended); point args ignored
+    };
+
+    // A dock probe's answer: slot >= 0 == the screen point is over the target's tab-strip row — dock
+    // at this INSERTION slot (0..itemCount over the target's tabs, floored past its pinned Manager
+    // tab), with windowId == the target's numeric WT window id (what _MoveContent/AppHost route by).
+    // slot < 0 == miss (not this window's strip / target torn down).
+    struct DockProbeResult
+    {
+        int slot{ -1 };
+        unsigned long long windowId{ 0 };
+    };
+
     // The shared engine's three long-lived owners. Held by the process singleton; windows copy
     // the shared_ptrs into their TerminalPage so the registry/bridge/scheduler outlive any one
     // window.
@@ -265,6 +285,31 @@ namespace Agentmaster
         std::mutex closeSessionMutex;
         std::vector<WindowCloseSessionSink> closeSessionSinks;
         uint64_t nextCloseSessionToken{ 1 };
+
+        // Agentmaster (cross-window tab DOCKING): per-window DOCK TARGETS — the pointer-owned
+        // gesture's replacement for the retired OLE cross-window docking. Each TerminalPage
+        // registers {its top-level HWND, a probe} at engine init and detaches in ~TerminalPage
+        // (Rule #10). A dragging window resolves the top-level HWND under the cursor
+        // (WindowFromPoint — z-order-true by construction, so an overlapped background window is
+        // never mis-targeted) to a registered probe via FindWindowDockProbe and invokes it
+        // SYNCHRONOUSLY: every window lives on the Emperor's ONE UI thread (WindowEmperor::
+        // CreateNewWindow), the same architecture fact the native OLE receive path relied on
+        // (AppHost::_handleMoveContent calls the target window's AttachContent directly). The
+        // probe computes strip-hit + insertion slot FRESH from its own XAML tree (no published-
+        // rect staleness) and — in Preview mode — lights its own insertion caret so the drag is
+        // aimed, not blind; it self-guards, answering a MISS on any failure. HWND is carried as
+        // void* so this header stays Win32-type-free. Placed LAST in the struct (layout-safe
+        // incremental rebuilds, like closeSessionSinks).
+        struct DockTargetSink
+        {
+            uint64_t token{ 0 };
+            std::wstring windowId;
+            void* topLevelHwnd{ nullptr };
+            std::function<DockProbeResult(long screenX, long screenY, DockProbeMode mode)> probe;
+        };
+        std::mutex dockTargetMutex;
+        std::vector<DockTargetSink> dockTargetSinks;
+        uint64_t nextDockTargetToken{ 1 };
     };
 
     // The one process-wide engine. The FIRST call constructs it (creates the registry, wires
@@ -409,6 +454,18 @@ namespace Agentmaster
     uint64_t RegisterWindowCloseSessionHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler);
     void UnregisterWindowCloseSessionHandler(uint64_t token);
     void CloseSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId);
+
+    // Agentmaster (cross-window tab DOCKING): register THIS window as a dock TARGET — its top-level
+    // HWND + a probe ("is this screen point over MY tab-strip row, and at which insertion slot?";
+    // Preview mode also lights the target's own insertion caret, HideCaret clears it). Monotonic
+    // token; detach with UnregisterWindowDockTarget (a stale token is a no-op, the registry-token
+    // pattern). FindWindowDockProbe resolves the top-level HWND under a drag's cursor to the
+    // registered probe (empty when unknown — a foreign process's window, or the caller excluded its
+    // own): returned BY COPY, invoked outside the lock. Same-thread by architecture (one Emperor UI
+    // thread); the probe self-guards, answering a MISS on any failure.
+    uint64_t RegisterWindowDockTarget(const std::wstring& windowId, void* topLevelHwnd, std::function<DockProbeResult(long, long, DockProbeMode)> probe);
+    void UnregisterWindowDockTarget(uint64_t token);
+    std::function<DockProbeResult(long, long, DockProbeMode)> FindWindowDockProbe(void* topLevelHwnd);
 
     // Agentmaster (cross-window settings broadcast): register THIS window's settings sink (monotonic
     // token; detach with UnregisterSettingsChangedHandler — removing a stale token is a no-op, the

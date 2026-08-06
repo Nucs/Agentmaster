@@ -54,6 +54,8 @@ namespace Agentmaster
     class SessionScanner;
     class ProcessObserver;
     struct TabDragBand; // Agentmaster: TabDragMath.h — the pointer-owned tab reorder gesture's band record (complete type included by the .cpp)
+    enum class DockProbeMode : int; // Agentmaster: Engine.h — cross-window tab docking, what a drag asks a dock target (complete type included by the .cpp)
+    struct DockProbeResult; // Agentmaster: Engine.h — cross-window tab docking, a dock target's answer (slot + numeric window id)
 }
 
 namespace winrt::TerminalApp::implementation
@@ -304,6 +306,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Panel _tabDragIndicatorHost{ nullptr }; // the caret's parent panel — the TabView's template root grid (same tree as the strip in BOTH hosting modes: in Root() or re-homed into the titlebar), Root() as the fallback
         SafeDispatcherTimer _tabDragAutoScrollTimer; // hold-still edge auto-scroll while active (guarded Destroy — teardown-safe)
         winrt::Windows::UI::Xaml::UIElement::PreviewKeyDown_revoker _tabReorderKeyRevoker; // Esc-cancel, armed only while active
+        void* _dockHoverHwnd{ nullptr }; // Agentmaster (cross-window docking): the dock TARGET window whose insertion caret this window's in-flight drag is currently lighting (Preview) — cleared (HideCaret) on leave/commit/reset. UI thread only
 
         Microsoft::Terminal::Settings::Model::CascadiaSettings _settings{ nullptr };
 
@@ -375,6 +378,11 @@ namespace winrt::TerminalApp::implementation
         // the shared engine — the Manager's fleet-wide "Activate All" in ANOTHER window fans out here, and
         // this window eager-inits its own dormant controls. Detached in ~TerminalPage (Rule #10).
         uint64_t _windowActivateAllToken{ 0 };
+        // Agentmaster (cross-window tab DOCKING): this window's dock-target sink on the shared engine —
+        // another window's in-flight tab drag probes here ("is this screen point over MY strip row, and
+        // at which insertion slot?") for the drag-time caret preview and the release-time dock. Detached
+        // in ~TerminalPage (Rule #10).
+        uint64_t _windowDockTargetToken{ 0 };
         // Agentmaster (COMMANDS.md — command actions): this window's command-action sink on the shared
         // engine — a CommandWatch binding's await resolved (v1: /handover's markdown is on disk); the
         // sink hops to this window's UI thread and acts only when this window HOSTS the origin
@@ -1234,6 +1242,9 @@ namespace winrt::TerminalApp::implementation
         void _EnsureTabDragIndicator(); // lazily create the insertion caret in Root()
         void _PositionTabDragIndicator(double xInTabView); // place + show the caret at a TabView-x boundary
         void _HideTabDragIndicator();
+        ::Agentmaster::DockProbeResult _DockProbeHit(long screenX, long screenY, ::Agentmaster::DockProbeMode mode); // Agentmaster (cross-window docking — the TARGET side): screen point -> strip-row hit + insertion slot over THIS window's realized bands (Preview also lights/hides its own caret); {-1, 0} on a miss
+        void _UpdateDockPreview(); // Agentmaster (cross-window docking — the SOURCE side, per move/tick while in the tear-out zone): light the insertion caret on the Agentmaster window under the cursor, tracking target changes
+        void _ClearDockPreview(); // Agentmaster (cross-window docking): hide the last previewed target's caret (pointer left it / gesture ended)
         void _ApplyTabDragPolicy(const Microsoft::UI::Xaml::Controls::TabViewItem& tabViewItem); // Agentmaster: settle the strip + pin the tab CanDrag(false) — native MUX drag is permanently OFF (the drag-AV resolution; the pointer-owned gesture replaces it)
         std::wstring _DescribeTabForLog(const TerminalApp::Tab& tab); // Agentmaster: `<sid8> "<title>"` (title-only for a shell tab) — the tab-strip forensic log identity; never throws
         winrt::Windows::Foundation::IAsyncAction _AdoptExternalSessionImpl(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken); // Agentmaster (terminate-net): the body of _AdoptExternalSession, awaited inside its try/catch (see _SweepClaudeLivenessImpl)

@@ -239,6 +239,12 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::UnregisterWindowCloseSessionHandler(_windowCloseSessionToken);
         }
+        // Agentmaster (cross-window tab DOCKING): drop this window's dock-target sink too (Rule #10) —
+        // a torn-down window must never be offered as a drop target.
+        if (_windowDockTargetToken)
+        {
+            ::Agentmaster::UnregisterWindowDockTarget(_windowDockTargetToken);
+        }
         // Agentmaster (eager-init "Activate All Tabs"): drop this window's activate-all sink too (Rule #10).
         if (_windowActivateAllToken)
         {
@@ -687,6 +693,37 @@ namespace winrt::TerminalApp::implementation
                     }
                 });
             });
+        }
+
+        // Cross-window tab-DOCKING target (the pointer-owned gesture's OLE-docking replacement): register
+        // THIS window's top-level HWND + a probe so another window's in-flight drag can ask "is this
+        // screen point over YOUR strip row, and at which insertion slot?" (Preview also lights this
+        // window's own insertion caret). Invoked SYNCHRONOUSLY by the dragging window — every window
+        // lives on the Emperor's ONE UI thread (WindowEmperor::CreateNewWindow), the same fact the
+        // native OLE receive path relied on (AppHost::_handleMoveContent calls the target's
+        // AttachContent directly) — and self-guarded: a torn-down page (or any threading surprise —
+        // the guarded XAML reads would throw) answers a MISS, which the source degrades to the classic
+        // new-window tear-out. Detached in ~TerminalPage (Rule #10).
+        if (_hostingHwnd)
+        {
+            const auto weakThis = get_weak();
+            _windowDockTargetToken = ::Agentmaster::RegisterWindowDockTarget(
+                _windowId,
+                static_cast<void*>(*_hostingHwnd),
+                [weakThis](long screenX, long screenY, ::Agentmaster::DockProbeMode mode) -> ::Agentmaster::DockProbeResult {
+                    try
+                    {
+                        if (auto self = weakThis.get())
+                        {
+                            return self->_DockProbeHit(screenX, screenY, mode);
+                        }
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"dock-target probe");
+                    }
+                    return {}; // miss — the source falls back to the classic tear-out
+                });
         }
 
         // Cross-window "Activate All Tabs" sink (eager-init): the Manager's fleet-wide "Activate All Tabs"
@@ -1710,16 +1747,18 @@ namespace winrt::TerminalApp::implementation
     // there is no per-crossing selection/content churn) -> edge auto-scroll (per-move + a
     // hold-still timer) slides the strip -> release IN the strip band commits ONE _TryMoveTab
     // (which already logs [nav] tab-move, announces for UIA, settles + respects the Manager
-    // floor); release CLEAR of the strip tears the tab out into a new window through the exact
-    // native downstream (_sendDraggedTabToWindow, which logs [nav] tab-send-to-window and
-    // detaches the managed session correctly); Esc cancels (nothing moved, nothing to revert).
-    // [nav] taxonomy preserved: tab-drag-begin at activation, tab-drag-end at every exit.
+    // floor); release over ANOTHER Agentmaster window's tab-strip row DOCKS the tab into that
+    // window at the aimed slot (the dock-target probes — see the cross-window DOCKING block
+    // below — with the target's own insertion caret previewing the slot while hovered); release
+    // CLEAR of everything else tears the tab out into a new window through the exact native
+    // downstream (_sendDraggedTabToWindow, which logs [nav] tab-send-to-window and detaches the
+    // managed session correctly); Esc cancels (nothing moved, nothing to revert). [nav] taxonomy
+    // preserved: tab-drag-begin at activation, tab-drag-end at every exit.
     //
     // Deliberate limits: TOUCH is left to the strip's native panning (a touch-drag threshold
-    // would fight the pan gesture); cross-window DOCKING (release over another Agentmaster
-    // window's strip) is not detected — it tears out into a new window like any outside release
-    // (the native OLE docking died with CanDragTabs=false; a same-process hit-test replacement
-    // is the noted follow-up).
+    // would fight the pan gesture); a window of ANOTHER Agentmaster PROCESS (the dev install
+    // beside the release one) is not a dock target — its dock sink lives in the other process's
+    // engine — so a release there tears out into a new window, exactly as before.
     // ======================================================================================
 
     namespace
@@ -1728,6 +1767,7 @@ namespace winrt::TerminalApp::implementation
         constexpr double kTabDragEdgeBandDips = 36.0; // auto-scroll engages within this of a strip edge
         constexpr double kTabDragScrollStepDips = 28.0; // per move/tick step (~560 DIPs/s on the 50 ms timer)
         constexpr double kTabDragTearOutSlackDips = 32.0; // grace band around the strip before a release reads as tear-out
+        constexpr double kTabDockStripSlackDips = 12.0; // cross-window dock: vertical grace around a TARGET window's strip row (tighter than the tear-out slack — a dock must aim at the tab bar, not the content below it)
         constexpr auto kTabDragAutoScrollTick = std::chrono::milliseconds{ 50 };
     }
 
@@ -2005,10 +2045,12 @@ namespace winrt::TerminalApp::implementation
             }
             if (Agentmaster::ClassifyTabDragRelease(pos.X, pos.Y, stripW, stripH, kTabDragTearOutSlackDips) == Agentmaster::TabDragRelease::TearOut)
             {
-                _tabReorder.lastSlot = -1; // a release here is a tear-out, not a reorder
+                _tabReorder.lastSlot = -1; // a release here is a tear-out — or a DOCK into the window under the cursor
                 _HideTabDragIndicator();
+                _UpdateDockPreview(); // cross-window: light the insertion caret on the Agentmaster strip under the cursor (or clear it)
                 return;
             }
+            _ClearDockPreview(); // back over our own strip — a foreign window's caret must not linger
             const auto bands = _TabReorderBands();
             const int itemCount = static_cast<int>(_tabView.TabItems().Size());
             int slot = Agentmaster::DecideTabInsertionSlot(bands, pos.X, itemCount);
@@ -2102,6 +2144,56 @@ namespace winrt::TerminalApp::implementation
             {
                 ::Agentmaster::LogNav(L"tab-drag-end (tear-out refused: not a terminal tab)");
                 return;
+            }
+            // Cross-window DOCK (the retired OLE docking, reborn): released over ANOTHER Agentmaster
+            // window's tab-strip row? WindowFromPoint is z-order-true (the topmost window at the
+            // point), so an overlapped background window is never mis-targeted; our own window never
+            // docks (a release over our OWN strip was classified Reorder above, and over our content
+            // area it stays a tear-out — WindowFromPoint answers us and we exclude ourselves). The
+            // target's probe answers synchronously (one Emperor UI thread) with its Manager-floored
+            // insertion slot; the send then rides the EXACT native downstream — _sendDraggedTabToWindow
+            // -> _MoveContent -> AppHost::_handleMoveContent routes by the numeric window id -> the
+            // target's AttachContent lands the tab + moves it into the slot (its own _TryMoveTab
+            // enforcing its Manager floor). Any failure falls through to the classic new-window
+            // tear-out — never guess a drop.
+            bool dockCommitted = false; // once the send started, a throw must NOT fall through to a SECOND send (the tab may be half-consumed)
+            try
+            {
+                POINT screenPt{};
+                if (_hostingHwnd && GetCursorPos(&screenPt))
+                {
+                    const HWND hitTop = GetAncestor(WindowFromPoint(screenPt), GA_ROOT);
+                    if (hitTop && hitTop != *_hostingHwnd)
+                    {
+                        if (const auto probe = ::Agentmaster::FindWindowDockProbe(static_cast<void*>(hitTop)))
+                        {
+                            const auto hit = probe(screenPt.x, screenPt.y, ::Agentmaster::DockProbeMode::Query);
+                            if (hit.slot >= 0 && hit.windowId != 0)
+                            {
+                                dockCommitted = true;
+                                _stashed.draggedTab = tabImpl;
+                                _stashed.dragOffset = dragOffset;
+                                _sendDraggedTabToWindow(winrt::to_hstring(hit.windowId), static_cast<uint32_t>(hit.slot), std::nullopt);
+                                ::Agentmaster::LogNav(L"tab-drag-end (docked into window " + std::to_wstring(hit.windowId) + L" at slot " + std::to_wstring(hit.slot) + L")");
+                                SetForegroundWindow(hitTop); // attention follows the tab (a tear-out's new window foregrounds too); same-process, so permitted
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_TabReorderCommitRelease dock");
+                if (dockCommitted)
+                {
+                    // The dock's send chain threw mid-flight (the whole attach runs nested in this
+                    // frame). The tab is in an unknown half-moved state — re-sending it to a new
+                    // window could double-consume its content; leave it be and end the gesture.
+                    ::Agentmaster::LogNav(L"tab-drag-end (dock send failed — tab left in place)");
+                    return;
+                }
+                // The hit-test/probe itself failed — fall through to the classic tear-out.
             }
             _stashed.draggedTab = tabImpl;
             _stashed.dragOffset = dragOffset;
@@ -2197,6 +2289,7 @@ namespace winrt::TerminalApp::implementation
         }
         CATCH_LOG();
         _HideTabDragIndicator();
+        _ClearDockPreview(); // a foreign window's previewed caret must not outlive the gesture
         try
         {
             if (_tabView)
@@ -2367,6 +2460,149 @@ namespace winrt::TerminalApp::implementation
             }
         }
         CATCH_LOG();
+    }
+
+    // ======================================================================================
+    // Agentmaster: cross-window tab DOCKING — the pointer-owned gesture's replacement for the
+    // OLE docking that died with CanDragTabs(false). SOURCE side: while the drag rides the
+    // tear-out zone, _UpdateDockPreview resolves the top-level window under the cursor
+    // (WindowFromPoint — z-order-true) to a registered dock target (Engine::FindWindowDockProbe)
+    // and has it light ITS OWN insertion caret (Preview); the release re-probes (Query) and sends
+    // the tab through the exact native downstream (_sendDraggedTabToWindow with the target's
+    // numeric window id). TARGET side: _DockProbeHit maps the screen point into its strip row
+    // (screen -> client px -> island DIPs -> TabView-local) and answers the midpoint-rule
+    // insertion slot over its realized bands — the same TabDragMath the local caret uses, so a
+    // dock and a local reorder can never disagree about what a boundary means. Everything runs on
+    // the ONE Emperor UI thread (WindowEmperor::CreateNewWindow — the same fact the native OLE
+    // receive path relied on); every entry is guarded so any failure reads as a MISS, degrading
+    // to the classic new-window tear-out (never guess a drop).
+    // ======================================================================================
+
+    ::Agentmaster::DockProbeResult TerminalPage::_DockProbeHit(long screenX, long screenY, ::Agentmaster::DockProbeMode mode)
+    {
+        ::Agentmaster::DockProbeResult miss{};
+        try
+        {
+            if (mode == ::Agentmaster::DockProbeMode::HideCaret)
+            {
+                _HideTabDragIndicator();
+                return miss;
+            }
+            if (!_tabView || !_hostingHwnd)
+            {
+                return miss;
+            }
+            POINT client{ screenX, screenY };
+            if (!ScreenToClient(*_hostingHwnd, &client))
+            {
+                return miss;
+            }
+            const auto xamlRoot = _tabView.XamlRoot();
+            if (!xamlRoot)
+            {
+                return miss;
+            }
+            const double scale = xamlRoot.RasterizationScale();
+            if (scale <= 0.0)
+            {
+                return miss;
+            }
+            // The XAML island fills the client area at (0,0), so client px / scale == island-root DIPs.
+            const double rootX = client.x / scale;
+            const double rootY = client.y / scale;
+            const auto origin = _tabView.TransformToVisual(nullptr).TransformPoint({ 0.0f, 0.0f });
+            const double localX = rootX - origin.X;
+            const double localY = rootY - origin.Y;
+            const double stripH = _tabView.ActualHeight();
+            // The DOCK zone is the whole tab-bar ROW: y against the strip band with a tight slack —
+            // x is deliberately NOT tested (the window hit is already established by WindowFromPoint,
+            // so a drop on the titlebar area right of the tabs reads as an APPEND, not a surprise new
+            // window on top of the target). A collapsed/degenerate strip (focus mode) is no target.
+            if (stripH < 8.0 || localY < -kTabDockStripSlackDips || localY > stripH + kTabDockStripSlackDips)
+            {
+                if (mode == ::Agentmaster::DockProbeMode::Preview)
+                {
+                    _HideTabDragIndicator(); // over this window, but not its strip row
+                }
+                return miss;
+            }
+            const auto bands = _TabReorderBands();
+            const int itemCount = static_cast<int>(_tabView.TabItems().Size());
+            int slot = Agentmaster::DecideTabInsertionSlot(bands, localX, itemCount);
+            if (slot < 0)
+            {
+                slot = itemCount; // over the strip but nothing realized to decide against -> append
+            }
+            slot = std::max(slot, _managerTab ? 1 : 0); // nothing lands ahead of the pinned Manager tab
+            if (mode == ::Agentmaster::DockProbeMode::Preview)
+            {
+                double boundaryX{};
+                if (Agentmaster::InsertionSlotBoundaryX(bands, slot, boundaryX))
+                {
+                    _PositionTabDragIndicator(boundaryX);
+                }
+                else
+                {
+                    _HideTabDragIndicator(); // an append with no realized bands — nothing to anchor the caret to
+                }
+            }
+            return { slot, static_cast<unsigned long long>(_WindowProperties.WindowId()) };
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_DockProbeHit"); // a torn tree reads as a miss
+            return miss;
+        }
+    }
+
+    void TerminalPage::_UpdateDockPreview()
+    {
+        try
+        {
+            POINT screenPt{};
+            if (_hostingHwnd && GetCursorPos(&screenPt))
+            {
+                const HWND hitTop = GetAncestor(WindowFromPoint(screenPt), GA_ROOT);
+                if (hitTop && hitTop != *_hostingHwnd)
+                {
+                    if (const auto probe = ::Agentmaster::FindWindowDockProbe(static_cast<void*>(hitTop)))
+                    {
+                        if (_dockHoverHwnd && _dockHoverHwnd != static_cast<void*>(hitTop))
+                        {
+                            _ClearDockPreview(); // switched targets — the old one's caret goes out first
+                        }
+                        probe(screenPt.x, screenPt.y, ::Agentmaster::DockProbeMode::Preview);
+                        _dockHoverHwnd = static_cast<void*>(hitTop);
+                        return;
+                    }
+                }
+            }
+            _ClearDockPreview(); // over nothing dockable (own window / foreign app / empty desktop)
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_UpdateDockPreview");
+        }
+    }
+
+    void TerminalPage::_ClearDockPreview()
+    {
+        if (!_dockHoverHwnd)
+        {
+            return;
+        }
+        try
+        {
+            if (const auto probe = ::Agentmaster::FindWindowDockProbe(_dockHoverHwnd))
+            {
+                probe(0, 0, ::Agentmaster::DockProbeMode::HideCaret);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ClearDockPreview");
+        }
+        _dockHoverHwnd = nullptr;
     }
 
     // Agentmaster (M10 Increment 3): TerminalWindow hands us the record id it resolved from the

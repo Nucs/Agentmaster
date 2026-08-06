@@ -1197,6 +1197,57 @@ namespace Agentmaster
         }
     }
 
+    uint64_t RegisterWindowDockTarget(const std::wstring& windowId, void* topLevelHwnd, std::function<DockProbeResult(long, long, DockProbeMode)> probe)
+    {
+        if (!probe || !topLevelHwnd)
+        {
+            return 0;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.dockTargetMutex);
+        const auto token = e.nextDockTargetToken++;
+        e.dockTargetSinks.push_back({ token, windowId, topLevelHwnd, std::move(probe) });
+        return token;
+    }
+
+    void UnregisterWindowDockTarget(uint64_t token)
+    {
+        if (token == 0)
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.dockTargetMutex);
+        for (auto it = e.dockTargetSinks.begin(); it != e.dockTargetSinks.end(); ++it)
+        {
+            if (it->token == token)
+            {
+                e.dockTargetSinks.erase(it);
+                return;
+            }
+        }
+    }
+
+    std::function<DockProbeResult(long, long, DockProbeMode)> FindWindowDockProbe(void* topLevelHwnd)
+    {
+        if (!topLevelHwnd)
+        {
+            return {};
+        }
+        auto& e = SharedEngine();
+        // By copy, invoked outside the lock (the sink-snapshot pattern) — the probe runs target-window
+        // code, and holding the engine lock across it would be a needless ordering hazard.
+        std::lock_guard<std::mutex> lk(e.dockTargetMutex);
+        for (const auto& s : e.dockTargetSinks)
+        {
+            if (s.topLevelHwnd == topLevelHwnd && s.probe)
+            {
+                return s.probe;
+            }
+        }
+        return {};
+    }
+
     uint64_t RegisterSettingsChangedHandler(const std::wstring& windowId, std::function<void(const AppSettings&)> handler)
     {
         if (!handler)

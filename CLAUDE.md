@@ -2707,8 +2707,10 @@ What works, by area:
   mid-drag)` / `(tear-out refused: not a terminal tab)` (a begin with no end == died mid-drag; the
   Manager tab never arms, so there is no refused line any more), `tab-move <ident> idx=N -> M` (moveTab
   action / the gesture's commit; `refused (manager tab is pinned)`), `tab-send-to-window <ident>
-  win=<id|-1> idx=N` (the tab left this window: `-1` = torn out into a NEW window — beside the
-  managed-session `[move-out]`; cross-window docking retired with the OLE pipeline), with mechanism
+  win=<id|-1> idx=N` (the tab left this window: `-1` = torn out into a NEW window, a numeric id = a
+  cross-window DOCK into that window's strip at idx (the gesture's release over its strip row — the
+  Gotchas bullet's dock-target probes; its `tab-drag-end` reads `(docked into window <id> at slot
+  N)`) — beside the managed-session `[move-out]`), with mechanism
   tags `[tab-new] idx=N tabs=M <ident>` (every strip INSERTION timestamped), `[pin-manager]`
   (a displaced pinned tab snapped back to 0 — belts-only now), and `[tabdrag-guard]` (the settle-threw
   belt; the deferred-arm/re-enable lines went with `_GuardTabDragUntilRegistered` → `_ApplyTabDragPolicy`;
@@ -3709,12 +3711,35 @@ build **binlog uploads as an artifact** to diagnose the first run.
   Manager floor) — with edge auto-scroll (per-move + a 50 ms hold-still `SafeDispatcherTimer`); release
   clear of the strip TEARS OUT via the exact native downstream (`_sendDraggedTabToWindow` → new
   window); Esc cancels (nothing moved). `[nav]` taxonomy preserved: `tab-drag-begin` at activation,
-  `tab-drag-end` with `from=N to=M` / `(no same-window reorder)` / `(torn out to a new window)` /
-  `(cancelled: esc|capture lost|tab closed mid-drag)` / `(tear-out refused: not a terminal tab)`.
-  Deliberately retired with the OLE pipeline: native cross-window DOCKING (dragging a tab into
-  ANOTHER window's strip — release outside now always tears out into a NEW window; a same-process
-  hit-test docking replacement is the noted follow-up; `AllowDropTabs` + the `_onTabStripDragOver/
-  Drop` receive side stay wired but are dead with no in-process drag source). The old native handlers
+  `tab-drag-end` with `from=N to=M` / `(docked into window <id> at slot N)` / `(no same-window
+  reorder)` / `(torn out to a new window)` / `(cancelled: esc|capture lost|tab closed mid-drag)` /
+  `(tear-out refused: not a terminal tab)`.
+  **Cross-window DOCKING is REBORN as the same-process hit-test replacement** (the OLE pipeline's
+  docking died with `CanDragTabs=false`; this closes that noted follow-up): a release over ANOTHER
+  Agentmaster window's **tab-strip row** moves the tab INTO that window at the aimed slot, with the
+  TARGET's own insertion caret previewing the slot while the drag hovers its strip. Per-window
+  **dock-target sinks** on the shared engine (`Engine::RegisterWindowDockTarget` — top-level HWND +
+  a probe; `FindWindowDockProbe`; detached in `~TerminalPage`, Rule #10): the dragging window
+  resolves the top-level window under the cursor (`WindowFromPoint` → `GA_ROOT` — z-order-true, so
+  an overlapped background window is never mis-targeted; its own hwnd excluded) and invokes the
+  target's probe SYNCHRONOUSLY — every window lives on the Emperor's ONE UI thread
+  (`WindowEmperor::CreateNewWindow`), the same fact the native OLE receive path relied on
+  (`AppHost::_handleMoveContent` calls the target's `AttachContent` directly). The probe
+  (`TerminalPage::_DockProbeHit`) maps screen → client px → island DIPs → TabView-local, hit-tests
+  the strip ROW (y-only + a tight 12-DIP slack — x is not tested, so a drop on the titlebar right
+  of the tabs APPENDS instead of surprising with a new window; a collapsed strip is never a
+  target), and answers the midpoint-rule insertion slot over its realized bands — the SAME
+  `TabDragMath` the local caret uses (`DecideTabInsertionSlot` + Manager floor), so a dock and a
+  local reorder can never disagree; Preview mode also lights/hides the target's own caret
+  (`_UpdateDockPreview`/`_ClearDockPreview` track target changes per move/tick, cleared on
+  reset/commit/Esc). The send rides the EXACT native downstream — `_sendDraggedTabToWindow(<numeric
+  window id>, slot)` → `_MoveContent` → `AppHost::_handleMoveContent` routes by id → the target's
+  `AttachContent` lands the tab + `_TryMoveTab`s it into the slot (enforcing ITS Manager floor) —
+  then the target window is foregrounded (attention follows the tab, like a tear-out's new window).
+  Any failure (foreign-process window — the dev install beside release; torn tree; threading
+  surprise) reads as a MISS and degrades to the classic new-window tear-out — never guess a drop.
+  (`AllowDropTabs` + the `_onTabStripDragOver/Drop` OLE receive side stay wired but dead — no
+  in-process OLE drag source exists.) The old native handlers
   (`_TabDragStarted`/`_TabDragCompleted`/`_onTabDragStarting`/`_onTabDroppedOutside`) also stay wired
   — inert, and they'd matter again if the knobs were ever re-enabled. **Fourth occurrence 2026-07-30 (Release 0.6.8.1, dump `WindowsTerminal.exe.133752.dmp`,
   register-verified: `Rsi=0xA7` == 167 `TabItems` — the biggest strip yet — `Rdi=0` == died at index 0,
