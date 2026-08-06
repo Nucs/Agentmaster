@@ -2724,6 +2724,47 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster: context-menu "Close > Of Same Folder" -> close EVERY live managed session sharing
+        // THIS tab's session's EFFECTIVE work dir (inferred -> cwd), cross-window, after one confirm
+        // listing the titles. Routes through the SAME _ConfirmAndCloseClaudeSessionsInFolder the Manager
+        // board/tree "Close > Of Same Folder" uses (excludeId empty = include this session). No-op on a
+        // non-session tab (the items are hidden there — see the flyout Opening handler below).
+        hostingTab.CloseSessionsOfSameFolderRequested([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (!page || !tab || !page->_sessionRegistry)
+            {
+                return;
+            }
+            if (const auto sid = page->_ClaudeSessionForTab(*tab); !sid.empty())
+            {
+                if (const auto info = page->_sessionRegistry->Get(sid))
+                {
+                    const auto folder = ::Agentmaster::EffectiveWorkingDir(page->_appSettings.tabColorMode, *info);
+                    page->_ConfirmAndCloseClaudeSessionsInFolder(winrt::hstring{ folder }, winrt::hstring{});
+                }
+            }
+        });
+
+        // Agentmaster: context-menu "Close > Other of Same Folder" -> the same folder batch MINUS this
+        // tab's session (it stays open) — excludeId == this session's id.
+        hostingTab.CloseOtherSessionsOfSameFolderRequested([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (!page || !tab || !page->_sessionRegistry)
+            {
+                return;
+            }
+            if (const auto sid = page->_ClaudeSessionForTab(*tab); !sid.empty())
+            {
+                if (const auto info = page->_sessionRegistry->Get(sid))
+                {
+                    const auto folder = ::Agentmaster::EffectiveWorkingDir(page->_appSettings.tabColorMode, *info);
+                    page->_ConfirmAndCloseClaudeSessionsInFolder(winrt::hstring{ folder }, winrt::hstring{ sid });
+                }
+            }
+        });
+
         // Agentmaster: context-menu "Copy > <field>" -> copy that field of the managed session hosting
         // THIS tab, through the SAME shared CopySessionField action the per-tab overlay's copy button and
         // the Manager's Copy submenu use (so the three copy menus can never drift). `which` is the copy-menu
@@ -2859,6 +2900,10 @@ namespace winrt::TerminalApp::implementation
                     // show it whenever this window hosts >=1 managed session (not just when THIS tab is one),
                     // since it stars every session in the window. Nothing to favorite otherwise -> hidden.
                     tab->SetFavoriteAndCloseAllVisible(page->_WindowHasManagedSession());
+                    // Agentmaster: "Close > Of Same Folder" / "Other of Same Folder" are session-scoped
+                    // (they close every live session sharing THIS session's effective work dir) — shown
+                    // only when this tab IS a managed session.
+                    tab->SetAgentFolderCloseVisible(isSession);
                 }
             });
         }

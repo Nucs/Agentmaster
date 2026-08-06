@@ -1799,10 +1799,13 @@ What works, by area:
   session sharing this one's EFFECTIVE work dir (`_WorkDirOf` = the inferred dir while it infers, else the
   launch cwd — the SAME key the Explorer Tree groups by) · **Other of Same Folder** — the same batch MINUS
   this session (the WT "Close other tabs" twin, scoped to the folder; a no-op when this is the folder's
-  only session). Both folder items are hidden when that dir is empty. The content shows ONE confirm LISTING
-  the tab titles (capped at 20 + "…and N more"), then hands `(folder, excludeId)` — `excludeId` = this
-  session's id for **Other**, empty for **Of Same Folder** — to the page's `_CloseClaudeSessionsInFolder`,
-  a **cross-window** batch close: local tabs archived+closed directly (skip-confirm), remote ones fanned
+  only session). Both folder items are hidden when that dir is empty. The content just forwards
+  `(folder, excludeId)` — `excludeId` = this session's id for **Other**, empty for **Of Same Folder** — to
+  the page's **`_ConfirmAndCloseClaudeSessionsInFolder`**, the SINGLE confirm+close entry BOTH surfaces
+  route through (this menu AND the WT tab-strip **Close ▸** submenu — below — so they can never drift): it
+  shows ONE confirm LISTING the tab titles (capped at 20 + "…and N more", via the window's presenter,
+  agentmaster-dark like every other close confirm), then on accept hands off to `_CloseClaudeSessionsInFolder`
+  — a **cross-window** batch close: local tabs archived+closed directly (skip-confirm), remote ones fanned
   out via the new `CloseSessionInOtherWindows` engine sink (`RegisterWindowCloseSessionHandler` →
   `_CloseClaudeSessionLocal`, mirroring the restart sink), an already-exited session archived in place, an
   alive-but-unhosted one left open (Rule #7). Logs `[nav] close-folder begin/done`] / Open New
@@ -2135,7 +2138,13 @@ What works, by area:
   Cancel All aborts the whole close; a batch of only plain shell tabs skips the dialog). The
   tab context-menu's **Close ›** submenu also gained **Close tabs to the left** (`_CloseTabsBefore`, the
   left twin of close-to-the-right), and both close-left/right now **skip the pinned Manager tab** (index 0)
-  so a bulk close can never kill it. Restore
+  so a bulk close can never kill it. The same **Close ›** submenu also carries **Of Same Folder** +
+  **Other of Same Folder** (`Tab::_closeSessionsOfSameFolderMenuItem` / `_closeOtherSessionsOfSameFolderMenuItem`
+  → `CloseSessionsOfSameFolderRequested` / `CloseOtherSessionsOfSameFolderRequested` → the page resolves THIS
+  tab's session's `EffectiveWorkingDir` and calls the SHARED `_ConfirmAndCloseClaudeSessionsInFolder` — the
+  exact twin of the Manager board/tree menu's folder items), shown only for a **managed session** tab
+  (`Tab::SetAgentFolderCloseVisible(isSession)` at flyout-open, the `SetFavoriteAndCloseAllVisible` idiom;
+  built collapsed, no icon to match the icon-less close sub-items). Restore
   re-launches in the working dir + reloads the Auto Testing + autorunner; resume is
   **transcript-gated**: `claude --resume <id>` only when Claude actually has a conversation for
   that id, otherwise a **fresh** session (new id, same dir + queue) — and the stale archived

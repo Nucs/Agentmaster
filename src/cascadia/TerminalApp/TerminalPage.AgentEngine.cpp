@@ -1070,12 +1070,13 @@ namespace winrt::TerminalApp::implementation
         });
         // Agentmaster (board/tree session menu — "Close ▸ Of Same Folder" / "Other of Same Folder"): close
         // every live managed session whose effective work dir matches the folder, skipping excludeId when
-        // non-empty ("Other …" keeps the clicked session). The content already showed the ONE confirm
-        // listing the titles; the page does the batch close (local tabs directly, cross-window fanned out).
+        // non-empty ("Other …" keeps the clicked session). Routes to the SHARED confirm+close entry
+        // _ConfirmAndCloseClaudeSessionsInFolder (the same one the WT tab-strip "Close ▸" submenu uses), so
+        // the page shows the ONE confirm listing the titles, then does the cross-window batch close.
         content->SetCloseFolderHandler([weakThis](winrt::hstring folder, winrt::hstring excludeId) {
             if (auto self = weakThis.get())
             {
-                self->_CloseClaudeSessionsInFolder(folder, excludeId);
+                self->_ConfirmAndCloseClaudeSessionsInFolder(folder, excludeId);
             }
         });
         content->SetRestoreHandler([weakThis](winrt::hstring id) {

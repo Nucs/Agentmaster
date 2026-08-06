@@ -2133,6 +2133,34 @@ namespace winrt::TerminalApp::implementation
         _favoriteAndCloseAllTabsMenuItem.Visibility(WUX::Visibility::Collapsed); // shown only when the window hosts a managed session (page-driven)
         WUX::Controls::ToolTipService::SetToolTip(_favoriteAndCloseAllTabsMenuItem, box_value(winrt::hstring{ L"Star every managed session (find them later in Sessions), then close all tabs" }));
 
+        // Of Same Folder / Other of Same Folder (Agentmaster) — the folder-scoped twins of "Close other
+        // tabs", but keyed on the SESSION's effective work dir (inferred -> cwd) and CROSS-WINDOW: they
+        // close every live managed session sharing this tab's session's folder (incl. / excl. this one).
+        // Built COLLAPSED; the page shows them at flyout-open only for a managed session tab
+        // (SetAgentFolderCloseVisible). Each raises its event; the page routes through the SHARED
+        // _ConfirmAndCloseClaudeSessionsInFolder (the Manager board/tree "Close > Of Same Folder" twin),
+        // which shows ONE confirm listing the titles, then closes. No icon — matches the icon-less close
+        // sub-items beside them.
+        _closeSessionsOfSameFolderMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->CloseSessionsOfSameFolderRequested.raise();
+            }
+        });
+        _closeSessionsOfSameFolderMenuItem.Text(L"Of Same Folder");
+        _closeSessionsOfSameFolderMenuItem.Visibility(WUX::Visibility::Collapsed); // shown only for a managed session tab (page-driven)
+        WUX::Controls::ToolTipService::SetToolTip(_closeSessionsOfSameFolderMenuItem, box_value(winrt::hstring{ L"Close every open session whose working directory is the same as this one \x2014 you'll see the full list first and can cancel. Each stays in Sessions, resumable anytime (nothing on disk is deleted)." }));
+
+        _closeOtherSessionsOfSameFolderMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->CloseOtherSessionsOfSameFolderRequested.raise();
+            }
+        });
+        _closeOtherSessionsOfSameFolderMenuItem.Text(L"Other of Same Folder");
+        _closeOtherSessionsOfSameFolderMenuItem.Visibility(WUX::Visibility::Collapsed); // shown only for a managed session tab (page-driven)
+        WUX::Controls::ToolTipService::SetToolTip(_closeOtherSessionsOfSameFolderMenuItem, box_value(winrt::hstring{ L"Close every OTHER open session whose working directory is the same as this one \x2014 this session stays open. You'll see the full list first and can cancel. Each stays in Sessions, resumable anytime (nothing on disk is deleted)." }));
+
         // Close
         // Agentmaster: kept as a member (not a local) so the pinned Manager tab can gray
         // out the "Close tab" entry. See DisableCloseAndMoveMenuItems().
@@ -2164,6 +2192,8 @@ namespace winrt::TerminalApp::implementation
         _closeSubMenu.Items().Append(_closeTabsBeforeMenuItem); // Agentmaster: left, then right, then "other"
         _closeSubMenu.Items().Append(_closeTabsAfterMenuItem);
         _closeSubMenu.Items().Append(_closeOtherTabsMenuItem);
+        _closeSubMenu.Items().Append(_closeSessionsOfSameFolderMenuItem); // Agentmaster: folder-scoped, managed-session tabs only (cross-window)
+        _closeSubMenu.Items().Append(_closeOtherSessionsOfSameFolderMenuItem); // Agentmaster: the same folder batch minus this session
         _closeSubMenu.Items().Append(_closeAllTabsMenuItem); // Agentmaster: close every tab in the window
         _closeSubMenu.Items().Append(_favoriteAndCloseAllTabsMenuItem); // Agentmaster (FAVORITES.md): star all + close all (shown only when a managed session exists)
         flyout.Items().Append(_closeSubMenu);
@@ -2926,6 +2956,19 @@ namespace winrt::TerminalApp::implementation
         ASSERT_UI_THREAD();
 
         _favoriteAndCloseAllTabsMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+    }
+
+    // Agentmaster: show/hide the "Close ▸ Of Same Folder" + "Other of Same Folder" close-submenu items.
+    // Managed agent-session tabs only (they close every live session sharing THIS session's effective
+    // work dir — a shell/Manager tab has no session/folder). Built collapsed in _AppendCloseMenuItems;
+    // the page calls this at flyout-open (alongside SetAgentOpenInExplorerVisible etc.).
+    void Tab::SetAgentFolderCloseVisible(bool visible)
+    {
+        ASSERT_UI_THREAD();
+
+        const auto vis = visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed;
+        _closeSessionsOfSameFolderMenuItem.Visibility(vis);
+        _closeOtherSessionsOfSameFolderMenuItem.Visibility(vis);
     }
 
     void Tab::UpdateTabViewIndex(const uint32_t idx, const uint32_t numTabs, const uint32_t reservedLeading)

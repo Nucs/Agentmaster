@@ -2076,70 +2076,19 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (board/tree session menu — "Close ▸ Of Same Folder" / "Other of Same Folder"): gather
-    // every LIVE managed session whose EFFECTIVE work dir (_WorkDirOf — the inferred dir while it infers,
-    // else the launch cwd; the SAME key the tree groups by and the item was invoked against) matches
-    // `folder`, SKIPPING `excludeId` (set by "Other of Same Folder" to this session's id so it stays open;
-    // empty for "Of Same Folder"), show ONE confirm LISTING THEIR TITLES, and — on accept — hand
-    // (folder, excludeId) to the page's cross-window batch close (_closeFolderHandler). Unlike
-    // _RequestArchive (which lets the page present the single Close consequence), the batch's confirm
-    // lives HERE: the content has the titles + _Confirm, and the page's per-session confirm is skipped for
-    // the batch. The page re-enumerates the same set under the shared registry + settings (also skipping
-    // excludeId), so the listed sessions are exactly what closes.
+    // Agentmaster (board/tree session menu — "Close ▸ Of Same Folder" / "Other of Same Folder"): forward
+    // to the page, which owns the SHARED confirm+close (_ConfirmAndCloseClaudeSessionsInFolder — the same
+    // entry the WT tab-strip "Close ▸" submenu uses, so the two surfaces can never drift). The page
+    // enumerates the fleet's LIVE sessions in `folder` (skipping `excludeId` — set by "Other of Same
+    // Folder" to this session's id so it stays open), shows ONE confirm LISTING the titles, then does the
+    // cross-window batch close. A no-folder / no-handler click is a no-op.
     void AgentManagerContent::_CloseSessionsInFolder(const std::wstring& folder, const std::wstring& excludeId)
     {
-        if (folder.empty() || !_registry || !_closeFolderHandler)
+        if (folder.empty() || !_closeFolderHandler)
         {
             return;
         }
-        // The board/tree GLOBAL snapshot is the WHOLE fleet, so a folder spanning multiple windows lists
-        // every session in it; the page then closes them cross-window. LIVE only — a closed session isn't
-        // a tab to close (it already lives in the Sessions browser). excludeId keeps the clicked session
-        // out of the "Other of Same Folder" batch.
-        std::vector<std::wstring> titles;
-        for (const auto& s : _registry->Snapshot())
-        {
-            if (s.live && s.id != excludeId && PathEq(_WorkDirOf(s), folder))
-            {
-                titles.push_back(s.title.empty() ? std::wstring{ L"(untitled)" } : s.title);
-            }
-        }
-        if (titles.empty())
-        {
-            return; // nothing (else) live in this folder right now (e.g. "Other" when this is the only one) — no dialog, no-op
-        }
-
-        const bool others = !excludeId.empty();
-        // Body: the folder + a bulleted list of the tab titles (single-lined so a multi-line title stays
-        // one row), capped so a huge folder can't overflow the dialog — the remainder summarized.
-        constexpr size_t kMaxListed = 20;
-        std::wstring body = (others ? L"These OTHER open sessions in\n" : L"These open sessions in\n") + folder + L"\nwill be closed:\n";
-        const size_t shown = (std::min)(titles.size(), kMaxListed);
-        for (size_t i = 0; i < shown; ++i)
-        {
-            body += L"\n \x2022 " + std::wstring{ OneLine(titles[i]) }; // • <title>
-        }
-        if (titles.size() > shown)
-        {
-            body += L"\n \x2026 and " + std::to_wstring(titles.size() - shown) + L" more";
-        }
-        body += L"\n\nEach stays in the Sessions browser \x2014 resume any of them anytime (nothing on disk is deleted).";
-
-        const std::wstring countWord = std::to_wstring(titles.size()) + (others ? L" other" : L"");
-        const std::wstring titleStr = L"Close " + countWord + (titles.size() == 1 ? L" session in this folder?" : L" sessions in this folder?");
-
-        const auto folderCopy = folder;
-        const auto excludeCopy = excludeId;
-        auto weak = get_weak();
-        _Confirm(winrt::hstring{ titleStr }, winrt::hstring{ body }, L"Close All", [weak, folderCopy, excludeCopy]() {
-            if (auto self = weak.get())
-            {
-                if (self->_closeFolderHandler)
-                {
-                    self->_closeFolderHandler(winrt::hstring{ folderCopy }, winrt::hstring{ excludeCopy });
-                }
-            }
-        });
+        _closeFolderHandler(winrt::hstring{ folder }, winrt::hstring{ excludeId });
     }
 
     // A buttons-only confirm (XAML-Islands-safe: a text box inside a ContentDialog gets no

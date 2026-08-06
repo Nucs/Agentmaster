@@ -1270,11 +1270,119 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (board/tree session menu — "Close ▸ Of Same Folder"): close EVERY live managed
-    // session whose EFFECTIVE work dir (EffectiveWorkingDir — the inferred dir while the session infers,
-    // else the launch cwd — the SAME key the Explorer Tree groups by and the board bands paint) matches
-    // `folder`. The Manager content already showed the ONE "Close N sessions in this folder?" confirm
-    // listing the titles, so this just DOES the batch with no per-session confirm. Cross-window: a
+    // Agentmaster ("Close ▸ Of Same Folder" / "Other of Same Folder" — the SINGLE confirm+close entry):
+    // show ONE confirm LISTING the tab titles, then close the batch. BOTH surfaces that offer folder
+    // close route through here so they can never drift — the Manager board/tree menu (via
+    // _closeFolderHandler) AND the WT tab-strip "Close ▸" submenu (via its CloseSessionsOfSameFolder…
+    // events). Enumerate the fleet's LIVE sessions whose EFFECTIVE work dir matches `folder`, skipping
+    // `excludeId` ("Other …" keeps the clicked session open), show the dialog via the window's presenter
+    // (agentmaster-dark, exactly like _RemoveTabs / _ArchiveAndCloseClaudeTab), and on accept hand off to
+    // _CloseClaudeSessionsInFolder (the cross-window batch). A safe_void_coroutine (terminate-net) since
+    // both callers invoke it fire-and-forget and it co_awaits the dialog.
+    safe_void_coroutine TerminalPage::_ConfirmAndCloseClaudeSessionsInFolder(winrt::hstring folder, winrt::hstring excludeId)
+    {
+        const std::wstring dir{ folder };
+        const std::wstring exclude{ excludeId };
+        if (dir.empty() || !_sessionRegistry)
+        {
+            co_return;
+        }
+        // Collapse a (possibly multi-line) title to one row for the bulleted list — the page can't reach
+        // the content-TU-local OneLine, so this small inline twin does the same CR/LF/TAB -> space fold.
+        const auto oneLine = [](const std::wstring& s) {
+            std::wstring out;
+            out.reserve(s.size());
+            bool pendingSpace = false;
+            for (const wchar_t c : s)
+            {
+                if (c == L'\r' || c == L'\n' || c == L'\t')
+                {
+                    pendingSpace = !out.empty();
+                    continue;
+                }
+                if (pendingSpace)
+                {
+                    out.push_back(L' ');
+                    pendingSpace = false;
+                }
+                out.push_back(c);
+            }
+            return out;
+        };
+        // Build the title list from a SNAPSHOT (match by the canonical dir key; skip excludeId) — the SAME
+        // set _CloseClaudeSessionsInFolder will act on (both use NormDirKey(EffectiveWorkingDir)).
+        const std::wstring dirKey = ::Agentmaster::NormDirKey(dir);
+        std::vector<std::wstring> titles;
+        for (const auto& s : _sessionRegistry->Snapshot())
+        {
+            if (s.live && s.id != exclude && ::Agentmaster::NormDirKey(::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, s)) == dirKey)
+            {
+                titles.push_back(s.title.empty() ? std::wstring{ L"(untitled)" } : s.title);
+            }
+        }
+        if (titles.empty())
+        {
+            co_return; // nothing (else) live in this folder right now (e.g. "Other" when this is the only one) — no dialog, no-op
+        }
+
+        const bool others = !exclude.empty();
+        // Body: the folder + a bulleted list of the tab titles (single-lined; capped so a huge folder
+        // can't overflow the dialog — the remainder summarized).
+        constexpr size_t kMaxListed = 20;
+        std::wstring body = (others ? L"These OTHER open sessions in\n" : L"These open sessions in\n") + dir + L"\nwill be closed:\n";
+        const size_t shown = (std::min)(titles.size(), kMaxListed);
+        for (size_t i = 0; i < shown; ++i)
+        {
+            body += L"\n \x2022 " + oneLine(titles[i]); // • <title>
+        }
+        if (titles.size() > shown)
+        {
+            body += L"\n \x2026 and " + std::to_wstring(titles.size() - shown) + L" more";
+        }
+        body += L"\n\nEach stays in the Sessions browser \x2014 resume any of them anytime (nothing on disk is deleted).";
+
+        const std::wstring countWord = std::to_wstring(titles.size()) + (others ? L" other" : L"");
+        const std::wstring titleStr = L"Close " + countWord + (titles.size() == 1 ? L" session in this folder?" : L" sessions in this folder?");
+
+        const auto weak = get_weak();
+        // Confirm via the window's shared presenter (like every other close confirm). No presenter (rare —
+        // mid-teardown) => close anyway; it's non-destructive (always archives), so don't strand it.
+        if (const auto presenter{ _dialogPresenter.get() })
+        {
+            ContentDialog dialog;
+            dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
+            dialog.Title(winrt::box_value(winrt::hstring{ titleStr }));
+            dialog.Content(winrt::box_value(winrt::hstring{ body }));
+            dialog.PrimaryButtonText(L"Close All");
+            dialog.CloseButtonText(L"Cancel");
+            dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel
+            const auto result = co_await presenter.ShowDialog(dialog);
+            const auto strong = weak.get(); // ShowDialog awaits; re-acquire before touching state
+            if (!strong)
+            {
+                co_return;
+            }
+            if (result != ContentDialogResult::Primary)
+            {
+                ::Agentmaster::LogNav(L"close-folder cancelled dir=" + dir + (exclude.empty() ? std::wstring{} : (L" except=" + ::Agentmaster::ShortId(exclude))));
+                co_return; // Cancel / dismiss -> close nothing
+            }
+            // Close THROUGH `strong` (still in scope) — a member coroutine holds NO strong ref to `this`,
+            // so if the dialog await outlived every other ref, letting `strong` drop before the call would
+            // run ~TerminalPage right here and the close would be a use-after-free (the fire_and_forget
+            // teardown class — see Gotchas). Holding it across the call is the fix.
+            strong->_CloseClaudeSessionsInFolder(folder, excludeId);
+            co_return;
+        }
+        // No presenter (rare — mid-teardown): no co_await happened, so `this` is alive; close directly.
+        _CloseClaudeSessionsInFolder(folder, excludeId);
+    }
+
+    // Agentmaster ("Close ▸ Of Same Folder" / "Other of Same Folder" — the batch close, no confirm):
+    // close EVERY live managed session whose EFFECTIVE work dir (EffectiveWorkingDir — the inferred dir
+    // while the session infers, else the launch cwd — the SAME key the Explorer Tree groups by and the
+    // board bands paint) matches `folder`, skipping `excludeId`. _ConfirmAndCloseClaudeSessionsInFolder
+    // already showed the ONE confirm listing the titles, so this just DOES the batch. Cross-window: a
     // session's live tab lives in exactly one window — the ones THIS window hosts are archived+closed
     // directly (skip-confirm), the rest are fanned out to their hosting window (CloseSessionInOtherWindows),
     // which closes them the same way. A session whose claude has EXITED but still reads live (no host
