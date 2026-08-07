@@ -1555,7 +1555,23 @@ What works, by area:
   newer-Claude error that wrote one. The session **leaves Error on the first turn event** — a real
   `UserPromptSubmit` (push) → `Running`, or `ShouldSynthesizeRunning` (pull) — and a GENUINE double-ESC
   rewind to a leaf OFF the frontier releases to `WaitingForInput` (`ShouldReleaseErrorOnLeafMove`, logged
-  `[recon-error-release]`). Validated by replaying the NEW pipeline over all on-disk transcripts:
+  `[recon-error-release]`). **The RETRY edge is now race-proof (the `2b34b07f` stuck-Error report,
+  2026-08-07 — "still error although it is running >10 minutes"):** the PULL half of the recovery was
+  DEAD — `ShouldSynthesizeRunning` accepts `Error` (unit-pinned) but recon-run's freshest-state re-check
+  listed only Idle/WaitingForInput, so the synth never fired — and the ENTRY raced the push: the retry's
+  REAL `UserPromptSubmit` flipped Error → Running (14:59:51.152) while the in-flight pass's parsed tail
+  still ended at the error line (the retry's user line not yet flushed), so recon-error — state read
+  FRESH (no longer Error ⇒ the idempotence arm passed), transcript evidence STALE — re-asserted Error
+  38 ms after the prompt, and with the pull recovery dead the red card stood for the whole 35-min retry
+  turn (released only by the real `Stop`). Fixed BOTH ways: the re-check now includes `Error` (logged
+  `[recon-run] … (user retried after an API error — Error -> Running)`, kept in lockstep with the pure
+  gate's state set), and `ShouldSynthesizeError` gained a **prompt-supersession guard** —
+  `turns.lastPromptUnixMs` STRICTLY newer than the transcript's last-write time at the pass's read is
+  positive proof the parsed tail is superseded (the retry just hasn't hit the file yet) ⇒ hold the
+  synth; a stamp of 0 (hookless) or an unknown tail time self-disables it (never suppress blind), a
+  retry that ITSELF dies writes a NEW error line whose flush moves the tail past the stamp so a real
+  re-error still fires, and the guard is belted again on the fresh re-Get (a prompt landing between the
+  pass snapshot and the re-Get — the exact logged interleave). Validated by replaying the NEW pipeline over all on-disk transcripts:
   **503/503** API errors flag Error at their live-tail instant (was 498 — the leaf bug silently suppressed
   5 across 3 projects), **0 false positives** (any turn event clears `lastWasApiError` + the frontier), **0
   genuine rewinds** in 2906 transcripts. **`Done` no longer vetoes it — the fix for a fatal API error that

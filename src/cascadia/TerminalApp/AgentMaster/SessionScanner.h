@@ -337,7 +337,24 @@ namespace Agentmaster
     // errorDismissed set, so THAT path was never what this arm protected (errorDismissed is, at the call
     // site). Flipping to Error also restores the recovery edge, since ShouldSynthesizeRunning accepts
     // Error but not Done.
-    inline bool ShouldSynthesizeError(SessionState state, bool errorIsActiveLeaf, int64_t quietForMs) noexcept
+    //
+    // PROMPT-SUPERSESSION GUARD (the 2b34b07f stale-snapshot race, 2026-08-07). The two evidence
+    // sources this predicate joins are read at DIFFERENT instants: the transcript tail (parsed up to
+    // the pass's attribute read) and the session STATE (which a real push hook mutates concurrently).
+    // A user RETRY threads the needle: the UserPromptSubmit hook lands (Error -> Running — state no
+    // longer Error, so the idempotence arm passes) while the retry's user line has not yet been
+    // FLUSHED to the transcript (lastWasApiError still latched from the pre-retry tail) — and the
+    // error was re-asserted 38ms after the real prompt, then stood for the whole 35-min retry turn
+    // (compounded by the recon-run call-site gap, fixed alongside). `lastPromptUnixMs` (the newest
+    // REAL prompt-carrying UserPromptSubmit's wire ts — TurnAccounting) STRICTLY NEWER than
+    // `tailWriteUnixMs` (the transcript's last-write time at this pass's read — the newest byte the
+    // parse can possibly reflect) is positive proof the parsed tail is superseded: the user already
+    // retried, the new turn just hasn't hit the file yet -> hold the synth (the next pass consumes
+    // the retry line, which clears lastWasApiError anyway; a retry that ITSELF dies writes a NEW
+    // error line whose flush moves tailWrite past the prompt stamp, so a real re-error still fires).
+    // A hookless session never stamps lastPromptUnixMs (0 -> guard inert), and tailWriteUnixMs == 0
+    // (unknown — defaulted legacy callers) self-disables the guard rather than suppressing blind.
+    inline bool ShouldSynthesizeError(SessionState state, bool errorIsActiveLeaf, int64_t quietForMs, int64_t lastPromptUnixMs = 0, int64_t tailWriteUnixMs = 0) noexcept
     {
         if (!errorIsActiveLeaf)
         {
@@ -346,6 +363,10 @@ namespace Agentmaster
         if (state == SessionState::Error)
         {
             return false; // already Error — idempotent, never re-fires off the unchanged tail
+        }
+        if (tailWriteUnixMs > 0 && lastPromptUnixMs > tailWriteUnixMs)
+        {
+            return false; // a REAL prompt postdates every parsed transcript byte -> the error is superseded (retry in flight)
         }
         return quietForMs >= kScanStopQuiescenceMs;
     }

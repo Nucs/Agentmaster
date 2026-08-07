@@ -330,6 +330,27 @@ void TestTranscriptScan()
         CHECK(!ShouldSynthesizeError(SessionState::Running, false, kScanStopQuiescenceMs), "api-error: not the active leaf -> no Error");
         CHECK(!ShouldSynthesizeError(SessionState::Error, true, kScanStopQuiescenceMs), "api-error: already Error -> idempotent (never re-fires)");
     }
+    // Agentmaster (REGRESSION — the prompt-supersession guard; session 2b34b07f, 2026-08-07 "still
+    // error although it is running"). A user RETRY after an API error races the scanner pass: the real
+    // UserPromptSubmit flipped Error -> Running at 14:59:51.152 (state read fresh — the idempotence arm
+    // passes) while the pass's parsed tail still ended at the 14:58 error line (the retry's user line
+    // not yet flushed), and recon-error re-asserted Error 38ms after the prompt — a red card standing
+    // for the whole 35-min retry turn. A REAL prompt stamp (TurnAccounting::lastPromptUnixMs) STRICTLY
+    // newer than the transcript's last-write time at the pass's read proves the parsed tail is
+    // superseded -> hold the synth. Hookless (stamp 0) and unknown-tail (0, legacy 3-arg callers)
+    // self-disable the guard — never suppress blind.
+    {
+        CHECK(!ShouldSynthesizeError(SessionState::Running, true, kScanStopQuiescenceMs, 2'000, 1'000),
+              "api-error: prompt stamp NEWER than the parsed tail -> superseded (retry in flight), no re-assert");
+        CHECK(ShouldSynthesizeError(SessionState::Running, true, kScanStopQuiescenceMs, 1'000, 2'000),
+              "api-error: prompt stamp OLDER than the tail write (the errored turn's own prompt) -> fires normally");
+        CHECK(ShouldSynthesizeError(SessionState::Running, true, kScanStopQuiescenceMs, 1'500, 1'500),
+              "api-error: stamp == tail write -> not strictly newer, fires (the error line's own flush)");
+        CHECK(ShouldSynthesizeError(SessionState::Running, true, kScanStopQuiescenceMs, 0, 2'000),
+              "api-error: hookless session (no prompt stamp) -> guard inert, fires");
+        CHECK(ShouldSynthesizeError(SessionState::Running, true, kScanStopQuiescenceMs, 2'000, 0),
+              "api-error: unknown tail-write time -> guard self-disables (never suppress blind)");
+    }
     // Agentmaster (REGRESSION — a live Done session with an errored tail must read Error; session
     // 33f54bdd, 2026-07-25 "why is this idle/done while it is clearly still running"). A bogus
     // `--model` 404s: Claude Code writes the isApiErrorMessage line, fires SessionEnd (-> Done) 1.5s

@@ -786,15 +786,25 @@ namespace Agentmaster
         if (ShouldSynthesizeRunning(s.state, consumedTurnEvent, wasPrimed, st.lastStopReason, NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime)))
         {
             const auto fresh = _registry->Get(s.id);
-            if (fresh && (fresh->state == SessionState::Idle || fresh->state == SessionState::WaitingForInput))
+            // Agentmaster (the stuck-Error report — session 2b34b07f, 2026-08-07): Error is one of the
+            // pure gate's recoverable states (the documented "come out of Error on the first change" PULL
+            // edge, pinned by the run-repair unit tests) — but this freshest-state re-check listed only
+            // Idle/WaitingForInput, so the recovery could never actually FIRE. A session whose Error had
+            // been re-asserted over the push's fresh Running (the recon-error stale-snapshot race, now
+            // guarded in ShouldSynthesizeError below) therefore stayed a red card for the WHOLE retry turn
+            // (35 min live: Error re-asserted 14:59:51.190, released only by the real Stop at 15:35:14)
+            // while every pass's consumed transcript append said "recover". Keep this re-check in lockstep
+            // with ShouldSynthesizeRunning's state set.
+            if (fresh && (fresh->state == SessionState::Idle || fresh->state == SessionState::WaitingForInput || fresh->state == SessionState::Error))
             {
+                const bool fromError = fresh->state == SessionState::Error;
                 HookMessage run;
                 run.event = HookEvent::UserPromptSubmit;
                 run.sessionId = s.id;
                 run.cwd = s.workingDir;
                 run.ts = NowMs();
                 _registry->OnHookEvent(run);
-                AppendStateLog(L"scanner.log", L"[recon-run] " + s.id + L" (turn in progress, prompt hook missed/folded)\n");
+                AppendStateLog(L"scanner.log", L"[recon-run] " + s.id + (fromError ? L" (user retried after an API error — Error -> Running)" : L" (turn in progress, prompt hook missed/folded)") + L"\n");
             }
         }
 
@@ -978,7 +988,15 @@ namespace Agentmaster
         // both keyed off the parser clearing st.lastWasApiError the instant a later turn event supersedes
         // the error. The re-Get mirrors the other synths' freshest-state re-check (a real hook wins).
         const bool errorIsActiveLeaf = ApiErrorIsActiveLeaf(st.lastWasApiError, st.activeLeafUuid, st.errorEpochLeaf, st.errorBranchUuids);
-        if (ShouldSynthesizeError(s.state, errorIsActiveLeaf, quietForMs))
+        // The newest transcript byte THIS pass's parse can possibly reflect (the attribute read the
+        // delta was taken against). A REAL UserPromptSubmit stamped AFTER it proves the parsed tail is
+        // superseded — the user already retried and the new turn just hasn't hit the file yet — so the
+        // error must not (re-)enter. The live race (session 2b34b07f, 2026-08-07): the push hook flipped
+        // Error -> Running at 14:59:51.152 and this arm — state read fresh (no longer Error, so the
+        // idempotence arm passed) but transcript evidence still ending at the 14:58 error line — re-fired
+        // recon-error 38ms later, re-asserting a red card over a genuinely running retry turn.
+        const int64_t tailWriteMs = FiletimeToUnixMs(fad.ftLastWriteTime);
+        if (ShouldSynthesizeError(s.state, errorIsActiveLeaf, quietForMs, s.turns.lastPromptUnixMs, tailWriteMs))
         {
             const auto fresh = _registry->Get(s.id);
             // Manual dismissal gate (the triage "Move to Idle/Done" on an Error card): the user
@@ -991,7 +1009,11 @@ namespace Agentmaster
             // what protects it, which is why Done is no longer excluded here or in ShouldSynthesizeError:
             // a live session in Done with an unrecovered API-error tail is an ABORTED session whose claude
             // is still up, and it must read Error (see the DONE FIRES TOO note on the predicate).
-            if (fresh && !fresh->errorDismissed && fresh->state != SessionState::Error)
+            // The lastPromptUnixMs re-check is the supersession guard's FRESH belt: the pure gate above
+            // tested the pass-start snapshot's stamp, and a real prompt can land in the window between
+            // that snapshot and this re-Get — the exact interleave that re-asserted 2b34b07f's Error.
+            if (fresh && !fresh->errorDismissed && fresh->state != SessionState::Error &&
+                fresh->turns.lastPromptUnixMs <= tailWriteMs)
             {
                 HookMessage err;
                 err.event = HookEvent::Notification; // neutral carrier; the apiError flag drives the transition
