@@ -730,6 +730,17 @@ namespace Agentmaster
     //     slot is not inspectable) and worth knowing; their live draft is never at risk, only a
     //     previously stashed one.
     //
+    //   ! THE STASH IS NOT A DISCARD: claude AUTO-RESTORES a stashed draft into the input box
+    //     ~0.4s after the NEXT message submission, whoever submits it (measured 2026-08-07 on a
+    //     live PTY; it survives idle indefinitely, and the status line reads "stashed" while the
+    //     slot is loaded). The swap is safe because it always CONSUMES the slot — its restore
+    //     pops it back deliberately, or the auto-pop beats it and the verify-first restore leaves
+    //     it be. But a clear that stashes and WALKS AWAY plants a scheduled re-paste: the mail
+    //     button's MOVE-clear did exactly that, and the moved draft reappeared in the box seconds
+    //     after its own queued copy was delivered (the "Second pass please" incident, session
+    //     d373b992). A MOVE-style clear must use the DISCARD ladder below (DecideDraftDiscard),
+    //     never this rung.
+    //
     // THE FALLBACK CHANNEL is the line-editor kill-ring, used when the Ctrl+S rung is switched off
     // (AppSettings::draftSwapUseCtrlS) or does not empty the box:
     //
@@ -874,6 +885,108 @@ namespace Agentmaster
             return plan;
         }
         plan.action = DraftClearAction::GiveUp;
+        return plan;
+    }
+
+    // ---- The MOVE-clear DISCARD ladder (PENDING_INPUT.md 8d) ---------------------------------
+    //
+    // The overlay MAIL button's plain click MOVES the box's draft into the Auto-Testing queue, so
+    // its clear must DESTROY the box copy — which the swap's ladder above cannot promise: its
+    // first rung is Ctrl+S, and the stash is not a discard (the auto-restore caution above). The
+    // discard ladder never touches the stash. Its rungs, each verified live on a PTY (2026-08-07):
+    //
+    //   End + Ctrl+U      -- End (CSI F) first: Ctrl+U kills only caret -> line-start, so a caret
+    //                        parked mid-line leaves the right-hand tail without it (measured).
+    //                        Then one kill eats the line. A multi-line draft clears a line per
+    //                        effective round, but the presses BETWEEN lines can legitimately
+    //                        change nothing (measured on a 3-line draft: kill x2/x4 were no-ops),
+    //                        so ONE stalled round is tolerated and only TWO consecutive no-change
+    //                        rounds judge the rung dead.
+    //   End + Backspaces  -- the binding-free fallback, End first each round: BLIND backspaces
+    //                        stall permanently once the caret reaches position 0 with lines still
+    //                        below it (measured — two full rounds changed nothing). Per-round End
+    //                        + length+margin erases converge at ~a line per round; a
+    //                        [Pasted text #N] placeholder deletes atomically on a single press.
+    //
+    // Both rungs are TRUE discards — a killed draft never returns across a submit (the kill-ring
+    // is manual-only, Ctrl+Y) — and both are MID-TURN SAFE (measured: a streaming turn survives
+    // untouched; Esc, by contrast, INTERRUPTS a running turn even with text in the box, which is
+    // why it is not a rung). Same contract as the swap's ladder: pure decisions over a re-read
+    // box, forward-only rungs pinned by their own counters, bounded termination.
+    inline constexpr wchar_t kInputEscapeChar = L'\x1b';
+
+    // End = CSI F -- the sequence ConPTY/xterm-family terminals send for the End key, and what
+    // Claude's line editor binds (measured: it re-anchors the caret so the erase rungs can eat
+    // the whole line; CSI 1;5F Ctrl+End is NOT recognized).
+    inline std::wstring BuildInputEnd()
+    {
+        std::wstring s;
+        s.push_back(kInputEscapeChar);
+        s.push_back(L'[');
+        s.push_back(L'F');
+        return s;
+    }
+
+    // Round caps. Kill rounds run ~2 per line worst case (the measured no-op between lines) and
+    // the detector's read window bounds the box at ~120 rows; backspace rounds eat ~a line each.
+    // The stall limit is the real bail — the caps are the runaway backstop under the caller's
+    // wall-clock budget.
+    inline constexpr uint32_t kMaxDiscardKillRounds = 48;
+    inline constexpr uint32_t kMaxDiscardBackspaceRounds = 24;
+    inline constexpr uint32_t kDiscardStallLimit = 2; // consecutive NO-CHANGE rounds => the rung is dead
+
+    enum class DraftDiscardAction
+    {
+        Done, // the box reads empty -- the move is complete
+        EndKill, // press End then Ctrl+U (kill the caret's line, whole once End landed)
+        EndBackspace, // press End then erase `backspaces` characters, then re-read
+        GiveUp, // the box will not empty -- leave the draft (it is already queued; a Shift+Click end state)
+    };
+
+    struct DraftDiscardPlan
+    {
+        DraftDiscardAction action{ DraftDiscardAction::Done };
+        size_t backspaces{ 0 }; // valid for EndBackspace
+    };
+
+    // What the caller has spent. The stall counters are PER RUNG and caller-maintained: +1 after
+    // a round that left the box byte-identical, reset to 0 on any change — the measured kill
+    // alternation (change / no-op / change) must keep its rung, while two consecutive dead rounds
+    // must advance it.
+    struct DraftDiscardProgress
+    {
+        uint32_t killRounds{ 0 };
+        uint32_t killStalls{ 0 };
+        uint32_t backspaceRounds{ 0 };
+        uint32_t backspaceStalls{ 0 };
+    };
+
+    // PURE decision (the DecideDraftClear pattern) for ONE round of the discard ladder. The
+    // ladder only ever moves FORWARD -- once a backspace round has run, the kill rung is never
+    // revisited -- so no two rungs can alternate and the loop always terminates.
+    inline DraftDiscardPlan DecideDraftDiscard(std::wstring_view box, const DraftDiscardProgress& spent)
+    {
+        DraftDiscardPlan plan;
+        if (pending_detail::AllWhitespace(box))
+        {
+            plan.action = DraftDiscardAction::Done;
+            return plan;
+        }
+        if (spent.backspaceRounds == 0 &&
+            spent.killRounds < kMaxDiscardKillRounds &&
+            spent.killStalls < kDiscardStallLimit)
+        {
+            plan.action = DraftDiscardAction::EndKill;
+            return plan;
+        }
+        if (spent.backspaceRounds < kMaxDiscardBackspaceRounds &&
+            spent.backspaceStalls < kDiscardStallLimit)
+        {
+            plan.action = DraftDiscardAction::EndBackspace;
+            plan.backspaces = box.size() + 8; // + margin: a trailing cursor cell / a wide glyph
+            return plan;
+        }
+        plan.action = DraftDiscardAction::GiveUp;
         return plan;
     }
 }

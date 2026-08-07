@@ -1544,6 +1544,97 @@ void TestPendingInput()
             CHECK(steps <= static_cast<int>(kMaxDraftStashPresses + kMaxDraftKillPresses + kMaxDraftBackspaceRounds) + 2, "draft clear: termination is bounded by the rung caps");
         }
     }
+    // 27. The MOVE-clear DISCARD ladder (PENDING_INPUT.md §8d). The mail button's plain click MOVES
+    // the draft into the queue, so its clear must DESTROY the box copy — never Ctrl+S: a stashed
+    // draft is AUTO-RESTORED by claude ~0.4s after the NEXT submit (measured live), which re-planted
+    // a moved draft right after its own queued copy was delivered. The discard rungs (End+Ctrl+U,
+    // then End+Backspaces) are measured true discards; the ladder must tolerate the measured no-op
+    // kill round between lines, stay forward-only, and terminate bounded like the swap's.
+    {
+        CHECK(BuildInputEnd() == L"\x1b[F", "discard: End is CSI F (ESC [ F)");
+
+        const auto dspent = [](uint32_t killRounds, uint32_t killStalls, uint32_t bsRounds, uint32_t bsStalls) {
+            DraftDiscardProgress p;
+            p.killRounds = killRounds;
+            p.killStalls = killStalls;
+            p.backspaceRounds = bsRounds;
+            p.backspaceStalls = bsStalls;
+            return p;
+        };
+
+        // Emptiness — the same whitespace rule as everywhere else.
+        CHECK(DecideDraftDiscard(L"", dspent(0, 0, 0, 0)).action == DraftDiscardAction::Done, "discard: empty box -> Done");
+        CHECK(DecideDraftDiscard(L"   " + NL, dspent(3, 1, 1, 0)).action == DraftDiscardAction::Done, "discard: whitespace-only box -> Done whatever was spent");
+
+        // The happy path starts (and stays) on End+Ctrl+U.
+        CHECK(DecideDraftDiscard(L"my draft", dspent(0, 0, 0, 0)).action == DraftDiscardAction::EndKill, "discard: first look at a filled box -> End+Ctrl+U");
+        // The measured 3-line alternation: a kill round BETWEEN lines can change nothing once —
+        // one stalled round keeps the rung, two consecutive dead rounds judge it dead.
+        CHECK(DecideDraftDiscard(L"two lines left", dspent(2, 1, 0, 0)).action == DraftDiscardAction::EndKill, "discard: ONE stalled kill round is tolerated (the measured no-op between lines)");
+        CHECK(DecideDraftDiscard(L"unmoved", dspent(2, kDiscardStallLimit, 0, 0)).action == DraftDiscardAction::EndBackspace, "discard: two consecutive dead kill rounds -> End+Backspaces");
+        CHECK(DecideDraftDiscard(L"still here", dspent(kMaxDiscardKillRounds, 0, 0, 0)).action == DraftDiscardAction::EndBackspace, "discard: kill rounds are capped -> End+Backspaces");
+        {
+            const auto p = DecideDraftDiscard(L"0123456789", dspent(0, kDiscardStallLimit, 0, 0));
+            CHECK(p.action == DraftDiscardAction::EndBackspace, "discard: a dead kill rung hands over to the erase rung");
+            CHECK(p.backspaces > 10, "discard: backspaces cover the box plus a margin");
+        }
+        // Forward-only: once a backspace round has run, the kill rung is never revisited.
+        CHECK(DecideDraftDiscard(L"tail", dspent(1, 0, 1, 0)).action == DraftDiscardAction::EndBackspace, "discard: past the kill rung the ladder never alternates back");
+        // The erase rung is bounded by its cap AND its own stall counter, then GiveUp (draft left —
+        // it is already queued, a Shift+Click-equivalent end state).
+        CHECK(DecideDraftDiscard(L"stubborn", dspent(1, kDiscardStallLimit, kMaxDiscardBackspaceRounds, 0)).action == DraftDiscardAction::GiveUp, "discard: exhausted backspace rounds -> GiveUp");
+        CHECK(DecideDraftDiscard(L"stubborn", dspent(0, kDiscardStallLimit, 2, kDiscardStallLimit)).action == DraftDiscardAction::GiveUp, "discard: two dead backspace rounds -> GiveUp");
+
+        // TERMINATION against a worst-case TUI that ignores every keystroke: the stall limits bound
+        // the whole run at 2 dead rounds per rung — never the (much larger) runaway caps.
+        {
+            DraftDiscardProgress p;
+            int steps = 0;
+            auto last = DraftDiscardAction::EndKill;
+            while (steps++ < 64)
+            {
+                const auto plan = DecideDraftDiscard(L"never changes", p);
+                last = plan.action;
+                if (plan.action == DraftDiscardAction::GiveUp || plan.action == DraftDiscardAction::Done)
+                {
+                    break;
+                }
+                if (plan.action == DraftDiscardAction::EndKill)
+                {
+                    ++p.killRounds;
+                    ++p.killStalls; // nothing changed — the unresponsive TUI
+                }
+                else
+                {
+                    ++p.backspaceRounds;
+                    ++p.backspaceStalls;
+                }
+            }
+            CHECK(last == DraftDiscardAction::GiveUp, "discard: an unresponsive TUI terminates at GiveUp");
+            CHECK(steps <= static_cast<int>(2 * kDiscardStallLimit) + 2, "discard: termination is bounded by the stall limits (2 dead rounds per rung)");
+        }
+        // The measured 3-line kill sequence (change / no-op / change / no-op / change) never leaves
+        // the kill rung and ends Done — the caller-side stall accounting the ladder is designed for.
+        {
+            DraftDiscardProgress p;
+            const wchar_t* boxes[] = { L"one alpha\ntwo beta\nthree gamma", L"one alpha\ntwo beta", L"one alpha\ntwo beta", L"one alpha", L"one alpha", L"" };
+            bool stayedOnKillRung = true;
+            for (int i = 0; i + 1 < 6; ++i)
+            {
+                const auto plan = DecideDraftDiscard(boxes[i], p);
+                if (plan.action != DraftDiscardAction::EndKill)
+                {
+                    stayedOnKillRung = false;
+                    break;
+                }
+                const bool changed = std::wstring_view{ boxes[i] } != std::wstring_view{ boxes[i + 1] };
+                ++p.killRounds;
+                p.killStalls = changed ? 0 : p.killStalls + 1;
+            }
+            CHECK(stayedOnKillRung, "discard: the measured 3-line alternation stays on the kill rung throughout");
+            CHECK(DecideDraftDiscard(L"", p).action == DraftDiscardAction::Done, "discard: ...and the emptied box ends Done");
+        }
+    }
 }
 
 // Agentmaster (PENDING_INPUT.md §2b): the paste-cache resolver — marker grammar, the two counting

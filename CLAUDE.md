@@ -67,9 +67,13 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   button (Open Path) + a **mail** button (**queue the UNSENT input-box draft** into this session's
   Auto-Testing queue — the Manager compose row's "Add to queue" envelope, on the badge: same `\xE715`
   glyph, same registry append, the draft resolved by the same `PickCurrentPromptText` live-else-remembered
-  rule; a **plain click MOVES it** — the draft is then **cleared out of the input box** via the DRAFT SWAP's
-  verified clear standing alone (`_ClearLiveDraftForSession`: lock → `DecideDraftClear` ladder → unlock, no
-  send/restore, shares the `_draftSwapsInFlight` box-mutex, `SetPendingInput("")` on a verified clear) —
+  rule; a **plain click MOVES it** — the draft is then **cleared out of the input box** via the verified
+  **DISCARD ladder** (`_ClearLiveDraftForSession`: lock → `DecideDraftDiscard` — per-round `End`+`Ctrl+U`,
+  then `End`+backspaces, probe-measured true discards + mid-turn safe — → unlock-FIRST-then-bookkeep, no
+  send/restore, shares the `_draftSwapsInFlight` box-mutex + the gate's clear tag, `SetPendingInput("")` on
+  a verified clear; ⚠ deliberately NOT the swap's `DecideDraftClear`, whose Ctrl+S rung is a STASH claude
+  auto-restores at the next submit — a stash-and-walk-away re-planted the moved draft right after its own
+  queued copy delivered, the "Second pass please" incident) —
   while **Shift+Click KEEPS it** in the box (the historical copy, Rule #13, via `IsShiftDown()`); the button
   is **enabled only while a draft exists** (`_RefreshQueueButtonEnabled`, tracking the "3 dots"/`pendingInput`
   flip, so no silent dead-click on an empty box); shown only on a **dev-or-debug** build, where the
@@ -3994,6 +3998,21 @@ build **binlog uploads as an artifact** to diagnose the first run.
   `_ForkSessionFromDisk` gate on `!existing`). `DeriveSessionTitle` (the cwd-derived default) is never
   empty, so a managed title can't go blank; renames are trimmed/rejected on BOTH entry points
   (`_CommitRename` and `_SyncClaudeTitleFromTab`).
+- **Claude's Ctrl+S stash is NOT a discard — it AUTO-RESTORES into the input box ~0.4s after the NEXT
+  submit** (measured 2026-08-07 on a live PTY, plus the earlier RC4 sighting from the other side; the
+  status line reads `› stashed` while the slot is loaded, and the pop survives idle indefinitely). Any
+  clear that stashes and WALKS AWAY therefore plants a scheduled re-paste for whichever submit comes
+  next — the mail-button MOVE-clear did exactly that, and the moved draft reappeared right after its own
+  queued copy was delivered, reading as a double-send because the stash content and the queued prompt
+  are the same bytes ("Second pass please", session `d373b992`). The DRAFT SWAP may keep its stash rung
+  ONLY because its restore always CONSUMES the slot (deliberate pop, or the auto-pop + verify-first).
+  Clearing keys, all probe-measured (`scratchpad` esc/kill probes): fast double-`Esc` truly clears at
+  idle but **`Esc` INTERRUPTS a running turn even with text in the box** (and fast double-Esc on an
+  EMPTY box opens the Rewind menu) — never an automation rung; **`End`+`Ctrl+U` / `End`+backspaces are
+  true discards AND mid-turn safe** (killed text returns only via a manual `Ctrl+Y`; `Ctrl+U` is
+  caret→line-start so `End` must precede it; blind backspaces stall at position 0 with lines below;
+  a `[Pasted text #N]` placeholder deletes atomically on one press) — the mail-move's
+  `DecideDraftDiscard` ladder is built on exactly these facts (PENDING_INPUT.md §8d/§9).
 
 ## Correctness rules (do not regress)
 

@@ -4613,6 +4613,7 @@ namespace winrt::TerminalApp::implementation
     static constexpr int64_t kDraftSwapPollMs = 60;
     static constexpr int64_t kDraftSwapActionSettleMs = 300; // how long one keystroke gets to land + repaint before we judge it
     static constexpr int64_t kDraftSwapClearBudgetMs = 2400;
+    static constexpr int64_t kDraftDiscardBudgetMs = 4000; // the mail-move DISCARD ladder walks ~a line per round (the swap's stash clears whole-box in one press), so it gets a larger wall-clock; a single-line clear still finishes in ~150ms
     static constexpr int64_t kDraftSwapSubmitBudgetMs = 18000;
     static constexpr int64_t kDraftSwapRestoreBudgetMs = 1200;
 
@@ -5152,15 +5153,23 @@ namespace winrt::TerminalApp::implementation
     // Shift+Click keeps it (the historical copy). This is the removal half — invoked from the overlay's
     // page-wired clear handler AFTER the queue append succeeded.
     //
-    // It is the DRAFT SWAP's CLEAR phase (§9 step 3) standing ALONE — the same verified ladder
-    // (DecideDraftClear: Ctrl+S stash / Ctrl+U kill / backspaces, honoring AppSettings::draftSwapUseCtrlS),
-    // each rung followed by a settle+re-read so a mid-repaint frame is never mistaken for "the key did
-    // nothing" — but with NO send and NO restore, because the draft is being deliberately removed (it is
-    // already safe in the queue). It shares the swap's box-mutex (_draftSwapsInFlight) so a concurrent
-    // send declines rather than injecting alongside it, and it LOCKS the control read-only for the ~300ms
-    // clear so the user's own keystrokes can't interleave (unlocked on EVERY path via _EndDraftSwap — a
-    // stranded read-only is an un-typeable tab). fire_and_forget => a terminate-net wrapper (an escaped
-    // exception there is std::terminate), the body an awaitable Impl.
+    // ⚠ It deliberately does NOT reuse the swap's clear ladder: that ladder's first rung is Ctrl+S,
+    // and Claude's stash is not a discard — a stashed draft is AUTO-RESTORED into the input box ~0.4s
+    // after the NEXT message submission (measured live, PendingInput.h). The swap is safe because its
+    // restore always CONSUMES the slot; this clear has NO restore by design, so a stash here planted a
+    // scheduled re-paste — the moved draft reappeared in the box right after its own queued copy was
+    // delivered (the "Second pass please" incident, session d373b992). It runs the DISCARD ladder
+    // instead (DecideDraftDiscard: per-round End+Ctrl+U, then End+Backspaces — true discards, measured
+    // mid-turn-safe), each round judged by re-reading the LIVE box (ControlCore::ReadPendingInputDraft
+    // via _ReadLiveDraftForSession — the direct buffer read on a 60ms poll, never the scanner's cached
+    // copy) so the loop exits within one poll tick of the box actually emptying. NO send and NO restore
+    // — the draft is being deliberately removed (it is already safe in the queue; the kill-ring keeps a
+    // manually recoverable copy, Ctrl+Y). It shares the swap's box-mutex (_draftSwapsInFlight) so a
+    // concurrent send declines rather than injecting alongside it, and it LOCKS the control read-only
+    // for the clear so the user's own keystrokes can't interleave — the lock is handed back the INSTANT
+    // the outcome is known (unlock precedes every piece of bookkeeping; unlocked on EVERY path via
+    // _EndDraftSwap — a stranded read-only is an un-typeable tab). fire_and_forget => a terminate-net
+    // wrapper (an escaped exception there is std::terminate), the body an awaitable Impl.
     winrt::fire_and_forget TerminalPage::_ClearLiveDraftForSession(std::wstring sessionId)
     {
         auto strongThis{ get_strong() };
@@ -5247,40 +5256,33 @@ namespace winrt::TerminalApp::implementation
             wasAlreadyReadOnly = true; // never hand back a read-only we did not take
         }
         _draftSwapsInFlight[sessionId] = wasAlreadyReadOnly;
-        ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-clear] " + sid8 + L" clearing the box after queueing (chars=" + std::to_wstring(box.size()) + L") via " + std::wstring(_appSettings.draftSwapUseCtrlS ? L"Ctrl+S stash" : L"the kill-ring") + L"\n");
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-clear] " + sid8 + L" clearing the box after queueing (chars=" + std::to_wstring(box.size()) + L") via End+Ctrl+U discard\n");
 
-        // CLEAR (verified) — the SAME ladder + settle the swap's step 3 uses.
-        ::Agentmaster::DraftClearProgress spent;
-        spent.useStash = _appSettings.draftSwapUseCtrlS;
+        // CLEAR (verified) — the DISCARD ladder (PendingInput.h), NOT the swap's: a MOVE must
+        // destroy the box copy, and the swap's Ctrl+S rung only relocates it into the stash slot,
+        // which claude auto-restores at the next submit (the header-comment caution). Each round
+        // is ONE inject — End + the eat, processed in order by the TUI — then the settle re-read
+        // against the LIVE box; the per-rung stall counters implement the measured tolerance for
+        // a no-op kill round between lines.
+        ::Agentmaster::DraftDiscardProgress spent;
         bool cleared = false;
-        const int64_t clearDeadline = TtNowMs() + kDraftSwapClearBudgetMs;
+        const int64_t clearDeadline = TtNowMs() + kDraftDiscardBudgetMs;
         while (TtNowMs() < clearDeadline)
         {
-            const auto plan = ::Agentmaster::DecideDraftClear(box, spent);
-            if (plan.action == ::Agentmaster::DraftClearAction::Done)
+            const auto plan = ::Agentmaster::DecideDraftDiscard(box, spent);
+            if (plan.action == ::Agentmaster::DraftDiscardAction::Done)
             {
                 cleared = true;
                 break;
             }
-            if (plan.action == ::Agentmaster::DraftClearAction::GiveUp)
+            if (plan.action == ::Agentmaster::DraftDiscardAction::GiveUp)
             {
                 break;
             }
-            if (plan.action == ::Agentmaster::DraftClearAction::Stash)
-            {
-                _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildInputStash());
-                ++spent.stashPresses;
-            }
-            else if (plan.action == ::Agentmaster::DraftClearAction::Kill)
-            {
-                _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildInputKill());
-                ++spent.killPresses;
-            }
-            else
-            {
-                _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildBackspaces(plan.backspaces));
-                ++spent.backspaceRounds;
-            }
+            const bool killRung = plan.action == ::Agentmaster::DraftDiscardAction::EndKill;
+            _sessionRegistry->Inject(sessionId,
+                                     killRung ? ::Agentmaster::BuildInputEnd() + ::Agentmaster::BuildInputKill() :
+                                                ::Agentmaster::BuildInputEnd() + ::Agentmaster::BuildBackspaces(plan.backspaces));
             const std::wstring before = box;
             for (int64_t settled = 0; settled <= kDraftSwapActionSettleMs; settled += kDraftSwapPollMs)
             {
@@ -5294,11 +5296,28 @@ namespace winrt::TerminalApp::implementation
                 box = _ReadLiveDraftForSession(sessionId);
                 if (box != before)
                 {
-                    break; // the keystroke landed + repainted — judge the rung on this
+                    break; // the keystrokes landed + repainted — judge the round on this
                 }
             }
-            spent.shrank = box.size() < before.size();
+            const bool changed = box != before;
+            if (killRung)
+            {
+                ++spent.killRounds;
+                spent.killStalls = changed ? 0 : spent.killStalls + 1;
+            }
+            else
+            {
+                ++spent.backspaceRounds;
+                spent.backspaceStalls = changed ? 0 : spent.backspaceStalls + 1;
+            }
         }
+
+        // UNLOCK FIRST — the instant the outcome is known the keyboard is the user's again;
+        // nothing below (registry writes, log appends) may sit between the verdict and the
+        // hand-back. Then the delivery gate, whose close-notify re-fires a held advance — the
+        // box-mutex is already down, so that delivery is not declined by our own leftovers.
+        _EndDraftSwap(sessionId, true); // UNLOCK (only the read-only WE took)
+        clearGateCloser.reset(); // close the gate NOW (guarded lambda), not at co_return after the bookkeeping
 
         if (cleared)
         {
@@ -5314,9 +5333,8 @@ namespace winrt::TerminalApp::implementation
             // Best-effort: the box would not empty. The prompt is already queued, so the only cost is that
             // the draft is ALSO still in the box (== a Shift+Click). Leave pendingInput alone (the draft is
             // genuinely still there) and let the user clear it by hand.
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-clear] " + sid8 + L" NOT cleared (the box would not empty after " + std::to_wstring(spent.stashPresses) + L" stash + " + std::to_wstring(spent.killPresses) + L" kill + " + std::to_wstring(spent.backspaceRounds) + L" backspace round(s)) - draft left in place (it is still queued)\n");
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-clear] " + sid8 + L" NOT cleared (the box would not empty after " + std::to_wstring(spent.killRounds) + L" End+kill + " + std::to_wstring(spent.backspaceRounds) + L" End+backspace round(s)) - draft left in place (it is still queued)\n");
         }
-        _EndDraftSwap(sessionId, true); // UNLOCK (only the read-only WE took)
     }
 
     // Agentmaster (eager-init / "Activate Tab"): start a DORMANT session's claude IN PLACE — without

@@ -758,19 +758,36 @@ hand. **Shift+Click** passes `clearBox == false` and **keeps** the draft in the 
 Rule #13 — the read never wrote to the box; the terminal draft and its pulsing "3 dots" stay). Shift is
 read at click time via the overlay's shared `IsShiftDown()` (the summary-panel Shift-resize helper).
 
-**The removal is the DRAFT SWAP's verified clear, standing alone** (`TerminalPage::_ClearLiveDraftForSession`,
-run AFTER the queue append succeeds — a failed/empty queue never touches the box). It is §9 step 3
-verbatim: lock the control read-only (so the user's keystrokes can't interleave), then the same
-`DecideDraftClear` ladder (Ctrl+S stash / Ctrl+U kill / backspaces, honoring `draftSwapUseCtrlS`), each
-rung followed by a settle + re-read so a mid-repaint frame is never mistaken for "the key did nothing" —
-but with **no send and no restore** (the draft is being deliberately removed, already safe in the queue),
-and unlocked on every path. It shares the swap's box-mutex (`_draftSwapsInFlight`), so a concurrent send
-declines rather than injecting alongside it, and it is a no-op when the box isn't readable here / is
-already empty. On a **verified** clear it calls `SetPendingInput(id, "")` — the draft is no longer unsent,
-so the "3 dots" drop and the MAIL button disables **now** (not after the scanner's ~2-tick debounce),
-which also closes the window where a fast re-click would re-queue the still-remembered draft. If the box
-**won't** empty (the ladder gives up), the prompt is still queued and the draft is simply left in the box
-(degrading to the Shift+Click outcome), logged. Traced `[draft-clear] <sid8> …`.
+**The removal is a verified DISCARD, deliberately NOT the swap's clear ladder**
+(`TerminalPage::_ClearLiveDraftForSession`, run AFTER the queue append succeeds — a failed/empty queue
+never touches the box). The first cut *did* reuse §9's ladder, whose first rung is `Ctrl+S` — and that
+shipped a real bug: **Claude's stash is not a discard** (the §9 caution below — a stashed draft is
+auto-restored into the box ~0.4 s after the *next* submit), so a stash-and-walk-away clear planted a
+scheduled re-paste, and the moved draft reappeared in the box seconds after its own queued copy was
+delivered (the "Second pass please" incident, session `d373b992` — it read exactly like a double-send,
+because the stash content and the queued prompt are the same bytes by construction). The MOVE-clear now
+runs the **discard ladder** (`DecideDraftDiscard`, PendingInput.h — each rung probe-verified live):
+per-round **`End` + `Ctrl+U`** (End first: `Ctrl+U` kills only caret→line-start, so a mid-line caret
+leaves a tail without it; ~a line per effective round, tolerating the measured no-op press between
+lines — only TWO consecutive no-change rounds judge the rung dead), then per-round **`End` +
+backspaces** (blind backspaces stall permanently once the caret hits position 0 with lines still below —
+measured; a `[Pasted text #N]` placeholder deletes atomically on one press), then give up. Both rungs
+are **true discards** (a killed draft never returns across a submit; the kill-ring keeps a manually
+recoverable copy — `Ctrl+Y`) and both are **mid-turn safe** (a streaming turn survives untouched;
+`Esc`, by contrast, *interrupts* a running turn even with text in the box, which is why it is not a
+rung). Mechanics otherwise unchanged: lock the control read-only so the user's keystrokes can't
+interleave, each round settle + re-read against the **live** box (`ControlCore::ReadPendingInputDraft`
+on a 60 ms poll — the direct buffer read, never the scanner's cached copy, so the loop exits within one
+poll tick of the box actually emptying), **no send and no restore**, and the lock is handed back the
+**instant** the outcome is known — the unlock precedes every piece of bookkeeping (registry write, log
+append), and is released on every path. It shares the swap's box-mutex (`_draftSwapsInFlight`) so a
+concurrent send declines rather than injecting alongside it, opens the delivery gate's reserved clear
+tag, and is a no-op when the box isn't readable here / is already empty. On a **verified** clear it
+calls `SetPendingInput(id, "")` — the draft is no longer unsent, so the "3 dots" drop and the MAIL
+button disables **now** (not after the scanner's ~2-tick debounce), which also closes the window where
+a fast re-click would re-queue the still-remembered draft. If the box **won't** empty (the ladder gives
+up), the prompt is still queued and the draft is simply left in the box (degrading to the Shift+Click
+outcome), logged. Traced `[draft-clear] <sid8> … via End+Ctrl+U discard`.
 
 **No one-shot latch** on the queue itself (unlike §8a's silent focus-pull): the click is explicit, so
 clicking a present draft twice queues twice, like the Manager's envelope (a latch is also
@@ -819,6 +836,16 @@ killed the current line and restored badly when the cursor sat mid-text, so it i
 ⚠ **One slot.** A stash the *user* had already made is discarded by ours. That is unavoidable — the
 slot is not inspectable — and worth knowing; their **live** draft is never at risk, only a previously
 stashed one.
+
+⚠ **The stash is not a discard — claude AUTO-RESTORES it at the next submit** (measured 2026-08-07 on
+a live PTY: a stashed draft survives idle indefinitely — the status line reads `› stashed` while the
+slot is loaded — and is popped back into the input box **~0.4 s after the next message submission**,
+whoever submits it; the same behavior RC4 observed from the other side as "a Ctrl+S stash popping
+back"). The swap is safe *because it always consumes the slot*: its restore pops it back deliberately,
+or the auto-pop beats it and the verify-first restore leaves the box untouched. Any clear that stashes
+and **walks away** — no restore step — plants a scheduled re-paste for whichever submit comes next;
+that was the §8d mail-move bug ("Second pass please" reappearing right after its queued copy
+delivered). A MOVE-style clear must use the discard ladder (`DecideDraftDiscard`), never this rung.
 
 ⚠ **Never press the toggle blind.** `Ctrl+S` on a box that still has text *stashes* it rather than
 restoring, so `_RestoreDraftAfterSwap` re-reads and **skips the press unless the box is verified empty**,
