@@ -195,7 +195,8 @@ one `false`.
   paste content when the queued copy is sent — expansion at queue time is the §8c/§9-consistent
   fix.
 - The pending-input detector's **~120-row read window**: a draft taller than the window is
-  invisible to the swap's protection entirely.
+  invisible to the swap's protection entirely. **→ promoted into R5** (the tri-state box read +
+  the on-demand raised verification window — [`DELIVERY_PLAN.md`](DELIVERY_PLAN.md) Part 2).
 - A fuller **accepted/delivered log split** beyond the added `[delivered]` lines.
 
 ## 9. Incident 2 — the duplicate-Stop advance (fixed)
@@ -333,3 +334,72 @@ Invariant addendum (extends §5/§9): **a `Sent` prompt is either provably a mes
 push or pull), provably dead (`Failed`, surfaced, autorunner paused), or still being watched**;
 **no watcher accepts another turn's activity as proof of our prompt's pickup**; and **the
 watchdog never presses into a box holding anything but the watched prompt itself**.
+
+## 11. Incident 3 — the invisible-content MERGED send (→ the R4–R8 verified-placement plan)
+
+Live, post-R1–R3 (dev, session `1bf4bd83` — the same experiment session as §1 — 2026-08-12
+10:28 local). A 13-char prompt was delivered into a box every read had called empty, and the one
+message claude received carried **4205 chars** — pre-existing TUI-internal content concatenated
+with our prompt. The user-facing lesson, verbatim spirit: *once we SET text in the edit box,
+nothing validated that the exact text is the actual prompt* — the whole pipeline validates the
+steps AROUND the placement (clear, restore, discard), never the placement itself.
+
+```
+10:24:48–10:25:25  three swap cycles: a ~2.2–2.5K placeholder-bearing draft cleared via Ctrl+S
+                   each time, prompt sent + echoed each time — but the RESTORE FAILED all three
+                   ("could NOT be put back verbatim … kept in memory and in the kill-ring"),
+                   and the box kept REFILLING between cycles (chars=2241 → 2455 → 2466: the
+                   stash auto-pop at each submit re-planting it). After three failed channel
+                   round-trips the TUI-internal state (stash-slot parity, kill-ring content)
+                   is UNKNOWN to us — ~2.4K parked somewhere we cannot read.
+10:27:58 / 10:28:01  two mail-queue moves; each DISCARD-ladder clear VERIFIED empty (live read).
+10:28:11.077  [Stop]                            ← turn complete → the advance fires
+10:28:11.969  [delivered] fb83b0ef (chars=13)   ← "lol again 10s" — via the swap's NO-DRAFT FAST
+                                                  PATH: the live double-read (60 ms apart, and
+                                                  mutation-id-gated, so a pop between the reads
+                                                  would have been seen) answered EMPTY — no
+                                                  lock, no clear, paste+CR in ONE write
+10:28:12.505  [ups] chars=4205 -> recorded as Typed   ← the submitted message: ~4.2K of
+                                                  TUI-internal content + our 13 chars, MERGED
+10:28:30.388  [lost-send] fb83b0ef … marked Failed, autorunner paused
+```
+
+**Proven:** the box was verified empty at 10:28:01.58 (discard ladder) and again by the fast
+path's two live reads ~60 ms before the write; the message claude received carries our prompt
+inside 4205 chars; the post-hoc machinery (fold-mismatch → `Typed` row; `DecideLostSend` →
+`Failed` + paused) worked exactly as designed — **18 s after claude had already acted on a
+message nobody wrote**. **Not pinned:** which channel materialized the content (the loaded
+stash slot's auto-pop at turn-end / at our own submit; late fallout of the failed restores'
+Ctrl+S/Ctrl+U churn) and where it landed — in the ≤60 ms window between the last read and the
+write, between the paste and the CR inside claude's own event interleave, or in a render shape
+the detector misses. Phase-0 probes in the plan pin it; every variant is covered by the same
+three-layer answer (R4 catches it at the read-back, R6 removes the dominant source, R7 names
+the aftermath honestly).
+
+**Root causes (extend §2):**
+
+- **RC7 — the PLACEMENT itself is open-loop.** Every verified cycle guards a *neighboring* step:
+  the clear re-reads until confirmed empty, the restore compares against the draft, the discard
+  ladder re-reads per round, the submit-await re-reads after the fact. The send is
+  `BuildPromptSubmission` = bracketed paste + CR in ONE `WriteInput`: nothing ever reads the box
+  between the paste landing and the CR committing. Everything ahead of it is precondition
+  checking; the commit point trusts blindly.
+- **RC8 — `""` is ambiguous.** The pure detector computes `boxFound`, but
+  `ControlCore::ReadPendingInputDraft` drops it at the boundary: "no box visible" (an
+  AskUserQuestion menu replacing the box — the §9 damage shape, a draft taller than the 120-row
+  window, a mid-repaint frame) and "box present, empty" both read `""` — and every consumer
+  treats `""` as the SAFE case ("nothing to protect ⇒ inject").
+- **RC9 — a failed channel operation leaves TUI-internal state UNKNOWN, and it detonates
+  later.** Ctrl+S is a one-slot toggle that AUTO-POPS at the next submit (measured — the
+  PendingInput.h gotcha); Ctrl+U/Ctrl+Y is a ring we share with claude. Three failed restores
+  left ~2.4K parked across those channels with parity we cannot inspect; the pipeline carried on
+  as if the swap had cleanly resolved, and the parked content re-entered the box at a
+  TUI-chosen moment no scan tick was guaranteed to precede.
+
+Invariant addendum (extends §5): **no submit CR is committed into a box that has not been read
+back as exactly-the-prompt** (or provably collapse-equal — claude re-collapses a large pasted
+fill into a `[Pasted text #N +M lines]` placeholder), and **a box that cannot be read refuses
+placement instead of defaulting to "empty"**. The implementing plan — **R4 verified placement
+(fill → read-back → commit) · R5 the tri-state box read · R6 TUI-channel hygiene · R7 the merge
+classifier · R8 the live-read watchdog press** — is [`DELIVERY_PLAN.md`](DELIVERY_PLAN.md)
+Part 2.
