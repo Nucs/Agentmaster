@@ -238,6 +238,17 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // Agentmaster (PENDING_INPUT.md): the UNSENT draft in Claude's input box, read from the bottom of
         // the buffer (read-only). Empty => no pending draft.
         winrt::hstring ReadPendingInputDraft();
+        // Agentmaster (DELIVERY_PLAN.md R5 — the tri-state box read): the InputBoxState verdict of the
+        // SAME cached 120-row scan ReadPendingInputDraft uses (Unknown/NoBox/Empty/Draft/MenuOpen as
+        // int32 — "" is ambiguous, the verdict is not). Unknown when the terminal isn't initialized.
+        int32_t ReadPendingInputBoxState();
+        // Agentmaster (R4/R5 — the VERIFIED-PLACEMENT probe): a FRESH (uncached) read of the input box
+        // at a caller-chosen row window (bounded), returning the verdict AND the draft in ONE
+        // consistent read: "<state digit><draft text>" — [0] ∈ '0'..'4' == InputBoxState, the rest the
+        // draft text. "" ⇔ the terminal isn't initialized (Unknown). One method rather than two so a
+        // buffer mutation can never split the pair; a raised window is what lets a filled prompt
+        // TALLER than the scan's 120 rows still verify. Read-only.
+        winrt::hstring ReadInputBoxProbe(int32_t maxRows);
 
         void LeftClickOnTerminal(const til::point terminalPosition,
                                  const int numberOfClicks,
@@ -445,6 +456,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         uint64_t _pendingInputScanMutationId{ 0 };
         bool _pendingInputScanValid{ false };
         winrt::hstring _pendingInputScanResult{};
+        int32_t _pendingInputScanState{ 0 }; // the cached scan's InputBoxState verdict (R5), beside the text
 
         // Agentmaster (SUMMARY_JUMP.md §4, perf): ResolveConversationPromptRows' epoch cache. The batch
         // resolve is O(prompts x haystack) -- up to kAnchorRecentWindowChars (1.2M) chars scanned several

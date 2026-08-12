@@ -109,7 +109,8 @@ through `DeliveryGateOpen(s, now)` (SessionModels.h).
 
 **Failure containment (fail-open by construction).**
 
-- **Expiry belt:** `kDeliveryGateTimeoutMs` (45 s ≈ 2× the swap's worst case). An expired gate
+- **Expiry belt:** `kDeliveryGateTimeoutMs` (≈ 2× the swap's worst case — 45 s originally; 75 s
+  since the §11 VERIFIED PLACEMENT grew the worst case to ~36 s). An expired gate
   reads *closed* everywhere; the next open **reclaims** it (logged `[gate] … reclaimed`). A gate
   stamped in the future (clock jump) also reads closed.
 - **Owner-checked close:** `CloseDeliveryGate(id, tag)` clears only a matching tag — a stale
@@ -403,3 +404,23 @@ placement instead of defaulting to "empty"**. The implementing plan — **R4 ver
 (fill → read-back → commit) · R5 the tri-state box read · R6 TUI-channel hygiene · R7 the merge
 classifier · R8 the live-read watchdog press** — is [`DELIVERY_PLAN.md`](DELIVERY_PLAN.md)
 Part 2.
+
+**Outcome — R4–R8 are IMPLEMENTED** (deviations flagged inline in the plan; the largest: a
+verify-STRIKE ledger so an unverifiable prompt resolves `Failed`+paused instead of rollback-
+livelocking, a whitespace-stripped compare so soft wrap can't false-Foreign a wide prompt, the
+Phase-0 probes deferred with every probe-gated decision taken conservative, and the send-side
+protections extended to ADOPTED sessions — their bind path had registered the injector alone, no
+submitter, so no swap and no verify). The send is now `Inject(BuildPromptFill)` → a deep
+read-back probe (`ReadInputBoxProbe`, 1000 rows — a filled prompt can outgrow the 120-row scan)
+→ the lone CR only on `Verified`/`VerifiedCollapsed`; `Eaten` re-fills (≤2), `Partial` discards
+its own text and re-fills, `Foreign` undoes the insertion in verified backspace batches (budget
+== the folded prompt length, so foreign text can never be eaten) and records the remainder as
+`pendingInput`; the pre-flight declines into `NoBox`/`MenuOpen` (the recorded state holds the
+advance; the release notifies); the watchdog's Enter goes through a live-read presser that never
+presses into a menu; a merged submit is named `[merge-detected]` at both echo seams and Failed
+immediately; the fill pumps content-verify. Off-switch `AppSettings::verifySendBeforeSubmit`
+(default ON, cog → TESTS AUTORUNNER). Engine-tested (`TestVerifiedPlacement`, harness
+**3214/3214**) + `TerminalAppLib`/`TerminalControlLib`/CLI compile green; live verification
+rides the next deploy cycle. Replaying §11's shape against the new pipeline: the double-read
+answering Empty is now followed by a LOCKED fill whose read-back sees the 4K materialize →
+`Foreign` → no CR, insertion undone, content recorded on the dots — the merge cannot commit.

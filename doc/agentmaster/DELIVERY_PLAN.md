@@ -206,18 +206,24 @@ fuller accepted/delivered log split.
 
 # Part 2 — VERIFIED PLACEMENT (R4–R8): close the loop between "set" and "submit"
 
-> **Status: PLANNED — not implemented.** Motivated by **Incident 3** (DELIVERY.md §11, session
-> `1bf4bd83`, 2026-08-12 10:28): a 13-char prompt delivered through the no-draft fast path merged
-> with ~4.2K of TUI-internal content the reads never saw — `[ups] chars=4205 -> recorded as
-> Typed`, then `[lost-send] … Failed` 18 s after claude had acted on the mangled message. The
-> R1–R3 machinery detected the loss *after the fact*, exactly as designed — the gap is that the
-> placement itself has no read-back.
+> **Status: IMPLEMENTED — with the deviations flagged `⚠ DEVIATION` inline** (the largest: the
+> Phase-0 probes were DEFERRED and every probe-gated decision took its conservative branch; a
+> verify-STRIKE ledger was added — the plan as written would have re-created the RC2 rollback
+> livelock in a new coat; and the send-side protections were extended to ADOPTED sessions, whose
+> bind path was found to register the injector ALONE — no submitter, so no swap and no verify).
+> Engine-tested: `TestVerifiedPlacement` (+84 checks; harness **3214/3214**); `TerminalAppLib` +
+> `TerminalControlLib` + the CLI compile green. Rides the next deploy cycle. Motivated by
+> **Incident 3** (DELIVERY.md §11, session `1bf4bd83`, 2026-08-12 10:28): a 13-char prompt
+> delivered through the no-draft fast path merged with ~4.2K of TUI-internal content the reads
+> never saw — `[ups] chars=4205 -> recorded as Typed`, then `[lost-send] … Failed` 18 s after
+> claude had acted on the mangled message. The R1–R3 machinery detected the loss *after the
+> fact*, exactly as designed — the gap was that the placement itself had no read-back.
 >
 > **The organizing principle (the user's lesson, adopted as doctrine):** every automated WRITE
 > into claude's input box — a fill, a submission, a lone Enter, a clear rung — must be followed
 > by a READ-BACK against expectation through the fullest read we have, before any irreversible
 > commit; and a read that cannot SEE the box must refuse rather than default to "empty ⇒ safe".
-> The clear/restore/discard cycles already live by this; the send and the press do not.
+> The clear/restore/discard cycles already lived by this; now the send and the press do too.
 
 **Target invariant (extends DELIVERY.md §5/§9/§11):** no submit CR is committed into a box that
 has not been read back as exactly-the-prompt (or provably collapse-equal); an unreadable box
@@ -225,6 +231,16 @@ refuses placement; a failed TUI-channel round-trip never ends with content parke
 can find it; a merged submit is *named* (`[merge-detected]`), not just "lost".
 
 ## Phase 0 — probes before code (the R3 discipline: instrument before deciding)
+
+> **⚠ DEVIATION — the probes were DEFERRED and every probe-gated decision took its CONSERVATIVE
+> branch instead** (each noted at its site): P1 → the verification reads use a raised on-demand
+> window (`ReadInputBoxProbe(1000 rows)`, the shallow 120-row scan untouched) and a fill that is
+> STILL unreadable fails CLOSED (no CR, no blind undo, rollback); P2 → the collapse verify
+> accepts BOTH observed counting conventions + the anchored middle-elided form and REFUSES
+> everything else (incl. multi-marker — a false refusal costs a rollback, a false accept is the
+> §11 merge); P3 → the R6(c) rung-default flip is NOT taken (Ctrl+S stays the default clear rung
+> until the kill-ring's placeholder fidelity is measured); P4 → forensic only, gates no code. The
+> probes remain worth running — they can only ever RELAX these branches.
 
 All four run in the existing harnesses (`tests/pending_probe.cpp` + `_run-pending-probe.bat`
 AttachConsole oracle; the HOOKS.md pywinpty PTY recipe in a scratchpad dir) — no product code.
@@ -320,6 +336,30 @@ CR; give-up after 2.
 trail; a plain empty-box send is ≤ ~360 ms slower; the handover paste tier still delivers
 (via `VerifiedCollapsed`).
 
+**⚠ DEVIATION — as implemented, four hardenings the plan lacked:**
+
+- **The verify-STRIKE ledger** (`_sendVerifyStrikes`, `kSendVerifyStrikeLimit` = 2): the plan's
+  "Foreign ⇒ rollback to Pending" re-creates the RC2 livelock in a new coat — the rollback's
+  notify re-advances, the same doomed verify re-runs at advance cadence forever (concretely: a
+  prompt whose own text renders as marker-like literal — multi-marker — can NEVER verify). The
+  SECOND unverifiable delivery of one prompt therefore resolves TERMINALLY: `Failed` + autorunner
+  paused (the lost-send idiom), logged to both logs. Every undelivered verdict (Foreign, eaten ×2,
+  unreadable-after-fill, discard-refused Partial) strikes; a delivered CR clears the ledger.
+- **Whitespace-stripped compare** (`verify_detail::WsStripped`, the PromptAnchor.h tolerance
+  precedent): the detector reads RENDERED rows — a prompt wider than the terminal soft-wraps into
+  rows re-joined with `\n`, their wrap-boundary spaces RTrimmed away — so the plan's fold+trim
+  equality would have read **every wrapped prompt as Foreign**. Foreign detection is unweakened:
+  foreign content changes the character sequence, not just whitespace.
+- **`Partial` — a fifth verdict** the plan's four lacked: a box that is a strict prefix of the
+  prompt is OUR paste mid-stream (or tail-eaten) — neither Eaten (a re-fill would double the
+  prefix) nor Foreign (an undo would fire on our own text). It keeps the settle polling; at
+  budget end it is DISCARDED (the mail-clear's End+Ctrl+U ladder — a true discard of our own
+  text) and re-filled, counting as a fill attempt.
+- **preserveDraftOnSend OFF now composes with verify ON**: the box-holding-a-draft case flows
+  through the same fill → Foreign → undo → strike pipeline (two attempts then Failed+paused,
+  each undone) — the user opted out of draft RESCUE, not of mangled-message protection; both
+  switches off restores the historical blind paste+CR byte-for-byte.
+
 ## R5 — the tri-state box read: plumb `boxFound` (+ the menu verdict) through the boundary
 
 **Problem (RC8).** `PendingInputDraft.boxFound` exists in the pure detector and dies at
@@ -378,6 +418,19 @@ then throws that knowledge away by answering plain-empty.
 preview pane / no box at all / bottom-rule-only tall-box shape); pre-flight decline replay;
 pump verdict-aware waits; `DecideAdvance` hold + release.
 
+**⚠ DEVIATION — as implemented:** the deep probe is ONE method returning `"<state digit><draft
+text>"` (`ReadInputBoxProbe(maxRows)` — no MIDL3 out-param precedent exists in this repo, and
+one call means a buffer mutation can never split verdict from text), beside the cached-scan
+state getter `ReadPendingInputBoxState()`; `MenuOpen` is fed by BOTH menu shapes — the preview
+rejector (`IsMenuOptionCaret`) and a new plain-menu signal (`IsNumberedOptionShape` on a caret
+candidate with no rule above; candidate REJECTION stays exactly as narrow as before — the shape
+only feeds the VERDICT); the escalation shipped as the pure `ShouldPauseOnBoxNotVisible`
+(`kBoxNotVisibleEscalateMs` = 60 s, applied by the scanner's reconcile pass beside the lost-send
+verdict, self-deduping via mode-Off; MenuOpen deliberately NEVER escalates — an unanswered
+question legitimately parks for hours) rather than the sketched M-refusals counter; and
+`SetPendingBoxState` notifies ONLY on the blocked→unblocked RELEASE (the gate close-notify
+idiom) so a held advance re-fires without polling and the scan's steady-state stays quiet.
+
 ## R6 — TUI-channel hygiene: a failed round-trip must not leave a loaded landmine
 
 **Problem (RC9).** Incident 3's fuel: three failed stash-restores left ~2.4K in channels we
@@ -411,6 +464,17 @@ failure paths.
 
 **Tests.** Restore-settle extension (growing box ⇒ budget extends; static wrong box ⇒ fails at
 cap); the pop-back rung (loaded slot ⇒ content lands in box + recorded; empty slot ⇒ no-op).
+
+**⚠ DEVIATION — as implemented:** (b)'s analysis refined against the code — the restore's step 1
+already presses the un-stash when the box is EMPTY at entry, so the actual gap was the
+**junk-kill path**: a restore entered on a non-empty box kills the junk (Ctrl+U) and then exited
+with the user's draft still sitting in the slot. The rung now fires exactly there (`viaStash`,
+no stash press made this restore, box verified empty after the kill): one un-stash press — what
+pops == the draft ⇒ recovered late; something ELSE ⇒ left VISIBLE in the box + recorded (a
+landmine converted into a draft the next swap handles in the open); nothing ⇒ no-op. (a) also
+extends the R4 fill-verify settle, not just the restore's. (c) is **DEFERRED pending P3** —
+`draftSwapUseCtrlS` keeps its ON default. (d) shipped as restore-path log lines
+(`slot=consumed|maybe-loaded` + the un-stash rung's own lines) rather than a swap-end field.
 
 ## R7 — the merge classifier: name a mangled message at the echo seam
 
@@ -455,6 +519,18 @@ contract is unchanged.
 **Files.** `SessionRegistry.{h,cpp}` (the presser registration beside the submitter),
 `Scheduler.cpp` (`_sweepPendingPickups` resolves through it), `TerminalPage.AgentObserver.cpp`
 (register + implement), `Scheduler.h` tests (menu-refusal, foreign-refresh, empty-press).
+
+**⚠ DEVIATION — a pre-existing gap found and closed while wiring the presser:** the observer's
+adopt/re-home bind path (`_BindClaudeSessionToTab`) registered the INJECTOR alone — no submitter
+— so every ADOPTED session's sends took the registry's raw no-submitter fallback: **no draft
+swap, and (post-R4) no fill→verify→CR**, exactly the unprotected shape Incident 3 proved fatal.
+The bind path now registers the submitter AND the presser in lockstep with the injector (the
+same lambdas as the launch seam), and the superseded id of an in-session `/resume` re-home
+clears all three. One protection contract for launched and adopted sessions alike. The presser's
+attempt bookkeeping stays scheduler-side and is spent even on a refusal (deliberate: refusals
+must surface through the give-up ladder — Failed + paused — never retry silently forever); the
+pure `DecideEnterRetry` additionally refuses on the scan-recorded NoBox/MenuOpen, so the
+fallback (no presser bound — tests/CLI) is safer too.
 
 ## Sequencing + interlocks
 

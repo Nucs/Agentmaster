@@ -2797,3 +2797,306 @@ void TestUpdaterVersionLogic()
     }
 }
 
+// ---- DELIVERY.md sect. 11 / DELIVERY_PLAN.md Part 2 (R4-R8): VERIFIED PLACEMENT ----------------
+// The closed-loop send: the tri-state box read (R5), the fill verify + foreign undo (R4), the
+// merge classifier (R7), the box-state advance/watchdog holds + the escalation (R5/R8).
+void TestVerifiedPlacement()
+{
+    std::wprintf(L"Verified placement (DELIVERY_PLAN.md Part 2):\n");
+
+    const std::wstring rule = L"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+
+    // ---- R5: the detector's tri-state verdict ----
+    {
+        // Empty box: rule / caret / rule.
+        std::vector<std::wstring> rows{ rule, L"\u276F\u00A0", rule };
+        auto d = DetectPendingInput(rows);
+        CHECK(d.boxFound && d.state == InputBoxState::Empty, "verdict: an empty rule-wrapped box reads Empty");
+
+        // A draft.
+        rows = { rule, L"\u276F\u00A0fix the tests", rule };
+        d = DetectPendingInput(rows);
+        CHECK(d.boxFound && d.state == InputBoxState::Draft && d.text == L"fix the tests", "verdict: a draft reads Draft");
+
+        // A draft that STARTS "2. " (no column separator) is still a Draft, never a menu.
+        rows = { rule, L"\u276F\u00A02. fix the tests", rule };
+        d = DetectPendingInput(rows);
+        CHECK(d.boxFound && d.state == InputBoxState::Draft, "verdict: a numbered-start draft (no separator) stays Draft");
+
+        // The AskUserQuestion PREVIEW menu (column separator) -> MenuOpen.
+        rows = { rule, L"\u276F 1. Yes  \u2502 preview pane text", rule };
+        d = DetectPendingInput(rows);
+        CHECK(!d.boxFound && d.state == InputBoxState::MenuOpen, "verdict: the preview-menu caret reads MenuOpen");
+
+        // A PLAIN menu (question text above, numbered option) -> MenuOpen.
+        rows = { L"Which option do you want?", L"\u276F 1. Yes", L"  2. No" };
+        d = DetectPendingInput(rows);
+        CHECK(!d.boxFound && d.state == InputBoxState::MenuOpen, "verdict: a plain numbered menu reads MenuOpen");
+
+        // Ordinary output only -> NoBox.
+        rows = { L"some tool output", L"more output" };
+        d = DetectPendingInput(rows);
+        CHECK(!d.boxFound && d.state == InputBoxState::NoBox, "verdict: no caret anywhere reads NoBox");
+
+        // A menu echo in scrollback with a REAL box below it -> the box wins (Draft/Empty).
+        rows = { L"Which option?", L"\u276F 1. Yes", L"", rule, L"\u276F\u00A0typed", rule };
+        d = DetectPendingInput(rows);
+        CHECK(d.boxFound && d.state == InputBoxState::Draft, "verdict: a real box below a menu echo wins");
+    }
+
+    // ---- R4: VerifyFillAgainstPrompt ----
+    {
+        using FV = FillVerify;
+        CHECK(VerifyFillAgainstPrompt(L"fix the tests", L"fix the tests") == FV::Verified, "verify: exact match");
+        CHECK(VerifyFillAgainstPrompt(L"line one\nline two", L"line one\rline two") == FV::Verified, "verify: CR-composed prompt folds equal");
+        // Soft wrap: the detector re-joins wrapped rows with \n and RTrims the wrap-boundary
+        // space away -- the whitespace-stripped compare absorbs both.
+        CHECK(VerifyFillAgainstPrompt(L"alpha beta\ngamma", L"alpha beta gamma") == FV::Verified, "verify: soft-wrap newline is whitespace-tolerated");
+        CHECK(VerifyFillAgainstPrompt(L"", L"anything") == FV::Eaten, "verify: an empty box reads Eaten");
+        CHECK(VerifyFillAgainstPrompt(L"alpha", L"alpha beta gamma") == FV::Partial, "verify: a strict prefix reads Partial");
+        CHECK(VerifyFillAgainstPrompt(L"other text entirely", L"the prompt") == FV::Foreign, "verify: unrelated text reads Foreign");
+        CHECK(VerifyFillAgainstPrompt(L"FOREIGN fix the tests", L"fix the tests") == FV::Foreign, "verify: foreign-prefix + prompt reads Foreign (the merge shape)");
+
+        // Whole-collapse placeholder: M == newline count.
+        const std::wstring p5nl = L"a\nb\nc\nd\ne\nf"; // 5 newlines, 6 segments
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1 +5 lines]", p5nl) == FV::VerifiedCollapsed, "verify: collapsed marker, newline convention");
+        const std::wstring p5seg = L"a\nb\nc\nd\ne"; // 4 newlines, 5 segments
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1 +5 lines]", p5seg) == FV::VerifiedCollapsed, "verify: collapsed marker, segment convention");
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1 +9 lines]", p5nl) == FV::Foreign, "verify: collapsed marker with WRONG arithmetic reads Foreign");
+        // The sect. 11 hazard: a pre-existing placeholder + our prompt appended must NEVER verify.
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1 +5 lines]\nmy prompt text", L"my prompt text") == FV::Foreign,
+              "verify: placeholder + appended prompt reads Foreign (the Incident-3 shape)");
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1 +5 lines] [Pasted text #2 +3 lines]", p5nl) == FV::Foreign, "verify: multiple markers read Foreign");
+
+        // Middle-elided render: full head lines + head-fragment [marker] tail-fragment + full tail lines.
+        const std::wstring big = L"alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\ngolf";
+        CHECK(VerifyFillAgainstPrompt(L"alpha\nbra[...Truncated text #2 +4 lines...]trot\ngolf", big) == FV::VerifiedCollapsed,
+              "verify: middle-elided render anchors prefix+suffix");
+        CHECK(VerifyFillAgainstPrompt(L"[...Truncated text #2 +4 lines...]trot\ngolf", big) == FV::Foreign,
+              "verify: an elided render with an EMPTY prefix never verifies");
+        CHECK(VerifyFillAgainstPrompt(L"zzz\nbra[...Truncated text #2 +4 lines...]trot\ngolf", big) == FV::Foreign,
+              "verify: an elided render whose prefix does not anchor reads Foreign");
+    }
+
+    // ---- R4: DecideSendUndo ----
+    {
+        auto plan = DecideSendUndo(L"FOREIGN STUFF fix the tests", L"fix the tests");
+        CHECK(plan.action == SendUndoAction::Press && plan.presses == 13, "undo: box ending with the prompt presses its folded length");
+        plan = DecideSendUndo(L"fix the tests and the user typed more", L"fix the tests");
+        CHECK(plan.action == SendUndoAction::Done, "undo: prompt at the HEAD (foreign suffix) never presses");
+        plan = DecideSendUndo(L"", L"fix the tests");
+        CHECK(plan.action == SendUndoAction::Done, "undo: an empty box is done");
+        const std::wstring p5 = L"a\nb\nc\nd\ne\nf"; // 5 newlines
+        plan = DecideSendUndo(L"user typed\n[Pasted text #3 +5 lines]", p5);
+        CHECK(plan.action == SendUndoAction::Press && plan.presses == 1, "undo: a trailing collapsed marker that is arithmetically OURS deletes in one press");
+        plan = DecideSendUndo(L"user typed\n[Pasted text #3 +9 lines]", p5);
+        CHECK(plan.action == SendUndoAction::Done, "undo: a trailing marker that is NOT ours (wrong arithmetic) is never deleted");
+    }
+
+    // ---- R7: PromptSwallowedByMessage ----
+    {
+        CHECK(PromptSwallowedByMessage(L"FOREIGN fix the tests", L"fix the tests"), "merge: message ending with the prompt classifies");
+        CHECK(!PromptSwallowedByMessage(L"fix the tests", L"fix the tests"), "merge: an exact match is the echo, not a merge");
+        CHECK(!PromptSwallowedByMessage(L"abxy", L"xy"), "merge: a short prompt (under the floor) never classifies");
+        CHECK(!PromptSwallowedByMessage(L"fix the tests FOREIGN", L"fix the tests"), "merge: prompt at the head is not the merge shape");
+        CHECK(PromptSwallowedByMessage(L"stuff\nfix the tests", L"fix the tests\n"), "merge: fold+trim tolerant");
+    }
+
+    // ---- R5: DecideAdvance holds on the box state ----
+    {
+        auto mk = [&](InputBoxState st) {
+            SessionInfo s = MakeSession(L"adv", SessionState::WaitingForInput);
+            s.live = true;
+            s.autorunner.mode = AutorunnerMode::Full;
+            s.autorunner.maxAutoSends = 10;
+            s.pendingBoxState = st;
+            QueuedPrompt p;
+            p.id = L"p1";
+            p.text = L"go";
+            p.status = PromptStatus::Pending;
+            p.origin = PromptOrigin::Autorun;
+            s.queue.push_back(p);
+            return s;
+        };
+        const int64_t now = NowMsTest();
+        CHECK(DecideAdvance(mk(InputBoxState::MenuOpen), now, 0, false).action == AdvanceAction::None, "advance: MenuOpen holds");
+        CHECK(DecideAdvance(mk(InputBoxState::NoBox), now, 0, false).action == AdvanceAction::None, "advance: NoBox holds");
+        CHECK(DecideAdvance(mk(InputBoxState::Empty), now, 0, false).action == AdvanceAction::Send, "advance: a verified-Empty box sends");
+        CHECK(DecideAdvance(mk(InputBoxState::Draft), now, 0, false).action == AdvanceAction::Send, "advance: a Draft box still sends (the swap owns the draft)");
+        CHECK(DecideAdvance(mk(InputBoxState::Unknown), now, 0, false).action == AdvanceAction::Send, "advance: Unknown never holds (no information)");
+    }
+
+    // ---- R5/R8: DecideEnterRetry refuses on the box state ----
+    {
+        auto mk = [&](InputBoxState st) {
+            SessionInfo s = MakeSession(L"press", SessionState::WaitingForInput);
+            s.live = true;
+            s.started = true;
+            s.pendingBoxState = st;
+            QueuedPrompt p;
+            p.id = L"w1";
+            p.text = L"the watched prompt";
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = NowMsTest() - 5000; // past the first-press due
+            s.queue.push_back(p);
+            return s;
+        };
+        CHECK(DecideEnterRetry(mk(InputBoxState::NoBox), NowMsTest()).action == EnterRetryAction::Waiting, "watchdog: NoBox refuses the press");
+        CHECK(DecideEnterRetry(mk(InputBoxState::MenuOpen), NowMsTest()).action == EnterRetryAction::Waiting, "watchdog: MenuOpen refuses the press (Enter would SELECT)");
+        CHECK(DecideEnterRetry(mk(InputBoxState::Empty), NowMsTest()).action == EnterRetryAction::Retry, "watchdog: a verified-Empty box still presses (the rescue)");
+        CHECK(DecideEnterRetry(mk(InputBoxState::Unknown), NowMsTest()).action == EnterRetryAction::Retry, "watchdog: Unknown never strands the rescue");
+    }
+
+    // ---- R5: the box-not-visible escalation ----
+    {
+        auto mk = [&]() {
+            SessionInfo s = MakeSession(L"esc", SessionState::WaitingForInput);
+            s.live = true;
+            s.autorunner.mode = AutorunnerMode::Full;
+            s.pendingBoxState = InputBoxState::NoBox;
+            s.pendingBoxStateUnixMs = NowMsTest() - kBoxNotVisibleEscalateMs - 1000;
+            QueuedPrompt p;
+            p.id = L"e1";
+            p.status = PromptStatus::Pending;
+            s.queue.push_back(p);
+            return s;
+        };
+        CHECK(ShouldPauseOnBoxNotVisible(mk(), NowMsTest()), "escalate: persistent NoBox + queued work + active autorunner pauses");
+        {
+            auto s = mk();
+            s.pendingBoxState = InputBoxState::MenuOpen;
+            CHECK(!ShouldPauseOnBoxNotVisible(s, NowMsTest()), "escalate: MenuOpen never escalates (a menu legitimately parks)");
+        }
+        {
+            auto s = mk();
+            s.pendingBoxStateUnixMs = NowMsTest() - 1000;
+            CHECK(!ShouldPauseOnBoxNotVisible(s, NowMsTest()), "escalate: a fresh NoBox holds, not pauses");
+        }
+        {
+            auto s = mk();
+            s.autorunner.mode = AutorunnerMode::Off;
+            CHECK(!ShouldPauseOnBoxNotVisible(s, NowMsTest()), "escalate: mode Off self-dedupes");
+        }
+        {
+            auto s = mk();
+            s.queue.clear();
+            CHECK(!ShouldPauseOnBoxNotVisible(s, NowMsTest()), "escalate: no queued work, nothing held, no pause");
+        }
+        {
+            auto s = mk();
+            s.state = SessionState::Running;
+            CHECK(!ShouldPauseOnBoxNotVisible(s, NowMsTest()), "escalate: never judged mid-turn");
+        }
+    }
+
+    // ---- R5: SetPendingBoxState notify semantics (quiet except the blocked->unblocked release) ----
+    {
+        SessionRegistry reg;
+        int notifies = 0;
+        reg.AddObserver([&](const SessionInfo&, HookEvent) { ++notifies; });
+        auto s = MakeSession(L"box", SessionState::WaitingForInput);
+        s.live = true;
+        reg.Upsert(s);
+        const int base = notifies; // the upsert's own notify
+        reg.SetPendingBoxState(L"box", InputBoxState::NoBox);
+        CHECK(notifies == base, "box-state: entering the blocked set is quiet");
+        reg.SetPendingBoxState(L"box", InputBoxState::NoBox);
+        CHECK(notifies == base, "box-state: an unchanged state is a no-op");
+        reg.SetPendingBoxState(L"box", InputBoxState::Empty);
+        CHECK(notifies == base + 1, "box-state: the blocked->unblocked RELEASE notifies (re-fires a held advance)");
+        reg.SetPendingBoxState(L"box", InputBoxState::Draft);
+        CHECK(notifies == base + 1, "box-state: unblocked->unblocked stays quiet");
+        const auto after = reg.Get(L"box");
+        CHECK(after && after->pendingBoxState == InputBoxState::Draft && after->pendingBoxStateUnixMs != 0, "box-state: the state + change stamp persist on the record");
+    }
+
+    // ---- R7: the merge classifier at the echo seam (push side) ----
+    {
+        SessionRegistry reg;
+        auto s = MakeSession(L"merge", SessionState::WaitingForInput);
+        s.live = true;
+        s.autorunner.mode = AutorunnerMode::Full;
+        reg.Upsert(s);
+        reg.Update(L"merge", [&](SessionInfo& ss) {
+            QueuedPrompt p;
+            p.id = L"m1";
+            p.label = L"the swallowed one";
+            p.text = L"lol again 10s";
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = NowMsTest() - 1000;
+            ss.queue.push_back(p);
+        });
+        // The Incident-3 shape: a UPS whose text is foreign content + our prompt as the tail.
+        reg.OnHookEvent(UPS(L"merge", L"four kilobytes of invisible box content ... lol again 10s"));
+        auto after = reg.Get(L"merge");
+        CHECK(after && after->queue.size() == 2, "merge: the merged message still records as the Typed row it is");
+        CHECK(after && after->queue[0].status == PromptStatus::Failed && !after->queue[0].echoed, "merge: the swallowed prompt is Failed immediately (not lost-send-later)");
+        CHECK(after && after->autorunner.mode == AutorunnerMode::Off, "merge: the autorunner pauses (the stop-on-error idiom)");
+
+        // An EXACT echo is never classified (the echo consume owns it).
+        SessionRegistry reg2;
+        auto s2 = MakeSession(L"echo", SessionState::WaitingForInput);
+        s2.live = true;
+        s2.autorunner.mode = AutorunnerMode::Full;
+        reg2.Upsert(s2);
+        reg2.Update(L"echo", [&](SessionInfo& ss) {
+            QueuedPrompt p;
+            p.id = L"m2";
+            p.text = L"lol again 10s";
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = NowMsTest() - 1000;
+            ss.queue.push_back(p);
+        });
+        reg2.OnHookEvent(UPS(L"echo", L"lol again 10s"));
+        auto after2 = reg2.Get(L"echo");
+        CHECK(after2 && after2->queue.size() == 1 && after2->queue[0].echoed && after2->queue[0].status == PromptStatus::Sent,
+              "merge: an exact echo consumes normally, never classifies");
+        CHECK(after2 && after2->autorunner.mode == AutorunnerMode::Full, "merge: an exact echo never pauses");
+    }
+
+    // ---- R7: the pull-side twin (NoteExternalPrompt) ----
+    {
+        SessionRegistry reg;
+        auto s = MakeSession(L"pullm", SessionState::WaitingForInput);
+        s.live = true;
+        s.autorunner.mode = AutorunnerMode::Full;
+        reg.Upsert(s);
+        const int64_t sentAt = NowMsTest() - 3000;
+        reg.Update(L"pullm", [&](SessionInfo& ss) {
+            QueuedPrompt p;
+            p.id = L"m3";
+            p.text = L"deploy dev please";
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = sentAt;
+            ss.queue.push_back(p);
+        });
+        // A STALE line (ts before the send) never classifies.
+        reg.NoteExternalPrompt(L"pullm", L"old stuff deploy dev please", sentAt - 60000);
+        auto after = reg.Get(L"pullm");
+        CHECK(after && after->queue[0].status == PromptStatus::Sent, "merge-pull: a pre-send line never classifies");
+        // A FRESH merged transcript line classifies.
+        reg.NoteExternalPrompt(L"pullm", L"foreign box content deploy dev please", sentAt + 1500);
+        after = reg.Get(L"pullm");
+        CHECK(after && after->queue[0].status == PromptStatus::Failed, "merge-pull: a fresh merged line marks the prompt Failed");
+        CHECK(after && after->autorunner.mode == AutorunnerMode::Off, "merge-pull: the autorunner pauses");
+    }
+
+    // ---- R4: the verifySendBeforeSubmit setting round-trips ----
+    {
+        AppSettings a;
+        CHECK(a.verifySendBeforeSubmit, "settings: verifySendBeforeSubmit defaults ON");
+        a.verifySendBeforeSubmit = false;
+        const AppSettings b = DeserializeAppSettings(SerializeAppSettings(a));
+        CHECK(!b.verifySendBeforeSubmit, "settings: OFF round-trips");
+        const AppSettings c = DeserializeAppSettings(L"{\"version\":1,\"settings\":{}}");
+        CHECK(c.verifySendBeforeSubmit, "settings: an absent key reads the ON default");
+    }
+}

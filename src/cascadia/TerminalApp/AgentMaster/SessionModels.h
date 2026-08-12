@@ -15,6 +15,8 @@
 #include <vector>
 
 #include "Activity.h" // RunningApp (Fleet Observer live-enrichment field on SessionInfo)
+#include "PendingInput.h" // InputBoxState (the R5 tri-state box read) + the ws/normalize detail helpers
+#include "PendingPaste.h" // FindPasteMarkers + segment helpers (the R4 collapse-tolerant fill verify)
 
 namespace Agentmaster
 {
@@ -531,17 +533,39 @@ namespace Agentmaster
     // point is telling OUR still-sitting prompt (press Enter — the rescue) from a HUMAN's draft
     // (never press — a lone Enter would submit it), and a prompt the TUI mangled beyond a
     // trailing-whitespace difference is not provably ours to submit. PURE.
+    // The shared fold + trailing-trim normalization for prompt-text compares (the norm
+    // DraftMatchesPromptText always applied, factored out for the R4/R7 consumers below). PURE.
+    inline std::wstring FoldTrimPromptText(std::wstring_view v)
+    {
+        std::wstring f = FoldCrToLf(v);
+        while (!f.empty() && (f.back() == L'\n' || f.back() == L' ' || f.back() == L'\t'))
+        {
+            f.pop_back();
+        }
+        return f;
+    }
+
     inline bool DraftMatchesPromptText(std::wstring_view boxDraft, std::wstring_view promptText)
     {
-        const auto norm = [](std::wstring_view v) {
-            std::wstring f = FoldCrToLf(v);
-            while (!f.empty() && (f.back() == L'\n' || f.back() == L' ' || f.back() == L'\t'))
-            {
-                f.pop_back();
-            }
-            return f;
-        };
-        return norm(boxDraft) == norm(promptText);
+        return FoldTrimPromptText(boxDraft) == FoldTrimPromptText(promptText);
+    }
+
+    // Agentmaster (DELIVERY_PLAN.md R7 — the MERGE classifier): does `messageText` (a transcript /
+    // UserPromptSubmit message that did NOT fold-match any awaited echo) read as a MERGED submit that
+    // SWALLOWED `promptText` — i.e. pre-existing box content + our pasted prompt submitted as ONE
+    // message? The physical merge shape is suffix-anchored: the paste lands at a cursor sitting after
+    // the foreign content, so our prompt is the message's TAIL. Guards: the prompt must be
+    // non-trivial (kMergeDetectMinChars folded chars — a bare "y"/"ok" suffix proves nothing) and the
+    // message STRICTLY longer (an exact match is the echo, handled upstream). Compared fold+trimmed
+    // (the wire echo is editor text, so no soft-wrap tolerance is needed here). PURE.
+    inline constexpr size_t kMergeDetectMinChars = 8;
+    inline bool PromptSwallowedByMessage(std::wstring_view messageText, std::wstring_view promptText)
+    {
+        const std::wstring m = FoldTrimPromptText(messageText);
+        const std::wstring p = FoldTrimPromptText(promptText);
+        return p.size() >= kMergeDetectMinChars &&
+               m.size() > p.size() &&
+               m.compare(m.size() - p.size(), p.size(), p) == 0;
     }
 
     // Agentmaster (COMMANDS.md §5b — the standby fill's HANDS-OFF latch): has the user already
@@ -605,6 +629,227 @@ namespace Agentmaster
         return BuildPromptFill(text) + L"\r";
     }
 
+    // ---- VERIFIED PLACEMENT (DELIVERY.md §11 / DELIVERY_PLAN.md Part 2, R4) --------------------
+    //
+    // The send used to be BuildPromptSubmission — paste + CR in ONE write, nothing ever reading the
+    // box between the paste landing and the CR committing (RC7, the Incident-3 merge: a 13-char
+    // prompt delivered into a box every read had called empty submitted as one 4205-char message).
+    // The verified send splits it: Inject(BuildPromptFill) → READ THE BOX BACK → only a read that
+    // verifies fires the lone CR. This is the pure verdict for that read-back.
+    //
+    // Soft-wrap tolerance: the detector reads RENDERED rows — a long line soft-wraps into several
+    // rows (re-joined with '\n', trailing spaces at the wrap boundary RTrimmed away by the row
+    // read), so a raw equality can NEVER match a prompt wider than the terminal. The compare
+    // therefore strips ALL whitespace from both sides (the PromptAnchor.h whitespace-tolerance
+    // precedent — soft wrap mangles only whitespace, never content characters), which still catches
+    // every FOREIGN shape: foreign content changes the character sequence itself.
+    //
+    // Collapse tolerance: claude re-collapses a large pasted fill into a "[Pasted text #N +M lines]"
+    // placeholder AT PASTE TIME (or elides its middle: "head[...Truncated #N +M lines...]tail"), so
+    // the box legitimately does NOT read as the prompt after a big fill — exactly the handover
+    // paste-tier injections. A naive equality would refuse every one of them; the marker arithmetic
+    // below accepts a box that is provably the COLLAPSED render of this prompt and nothing else.
+    enum class FillVerify
+    {
+        Verified, // the box reads exactly the prompt (whitespace-tolerant) — commit the CR
+        VerifiedCollapsed, // the box is the prompt's collapsed/elided placeholder render — commit the CR
+        Partial, // the box is a strict PREFIX of the prompt: the paste is still streaming in, or its tail
+                 // was eaten. Keep settling; at budget end the recovery is clear-and-refill (it is OUR
+                 // text — discarding it loses nothing).
+        Eaten, // the box is EMPTY: the TUI ate the paste pre-raw-mode (the standby lane's measured
+               // race). Safe to re-fill — nothing of ours is in the box to duplicate.
+        Foreign, // the box holds something ELSE (alone or around our prompt) — the merge, caught
+                 // BEFORE the commit. Never CR; undo our insertion (DecideSendUndo) and refuse.
+    };
+
+    namespace verify_detail
+    {
+        // Strip EVERY whitespace char (ASCII + the invisible Unicode spaces the detector already
+        // treats as whitespace — NBSP is claude's own marker separator).
+        inline std::wstring WsStripped(std::wstring_view s)
+        {
+            std::wstring out;
+            out.reserve(s.size());
+            for (const auto c : s)
+            {
+                if (!pending_detail::IsWs(c))
+                {
+                    out.push_back(c);
+                }
+            }
+            return out;
+        }
+    }
+
+    inline FillVerify VerifyFillAgainstPrompt(std::wstring_view boxText, std::wstring_view promptText)
+    {
+        using namespace verify_detail;
+        const std::wstring box = FoldTrimPromptText(boxText);
+        const std::wstring prompt = FoldTrimPromptText(promptText);
+        if (box.empty())
+        {
+            return FillVerify::Eaten;
+        }
+        if (prompt.empty())
+        {
+            return FillVerify::Foreign; // a non-empty box can never verify against an empty prompt
+        }
+        const std::wstring boxStripped = WsStripped(box);
+        const std::wstring promptStripped = WsStripped(prompt);
+        if (boxStripped == promptStripped && !promptStripped.empty())
+        {
+            return FillVerify::Verified;
+        }
+        // A placeholder render? Exactly ONE marker: our fill is ONE bracketed paste, so claude
+        // collapses it into ONE marker — several markers mean pre-existing placeholder content
+        // (the §11 shape) or marker-like literal text, neither of which may ever verify.
+        const auto markers = FindPasteMarkers(box);
+        if (markers.size() == 1)
+        {
+            const auto& m = markers.front();
+            const auto boxLines = paste_detail::SplitSegments(box);
+            const auto promptSegs = paste_detail::SplitSegments(prompt);
+            if (!m.truncated)
+            {
+                // WHOLE-COLLAPSE: the marker must be the box's ONLY visible content (fragments /
+                // other lines would be content the prompt does not explain), and its M must match
+                // the prompt under either observed counting convention (PendingPaste.h).
+                bool onlyContent = WsStripped(m.headFragment).empty() && WsStripped(m.tailFragment).empty();
+                for (size_t li = 0; onlyContent && li < boxLines.size(); ++li)
+                {
+                    if (li != m.draftLine && !WsStripped(boxLines[li]).empty())
+                    {
+                        onlyContent = false;
+                    }
+                }
+                if (onlyContent &&
+                    (static_cast<size_t>(m.lines) == paste_detail::NewlineCount(prompt) ||
+                     static_cast<size_t>(m.lines) == promptSegs.size()))
+                {
+                    return FillVerify::VerifiedCollapsed;
+                }
+                return FillVerify::Foreign;
+            }
+            // MIDDLE-ELIDED ("head[...Truncated #N +M lines...]tail"): everything VISIBLE around the
+            // marker must anchor onto the prompt — the text before the marker a PREFIX, the text
+            // after a SUFFIX (both whitespace-stripped, so soft wrap can't break them), BOTH
+            // non-empty (the elided render always shows head and tail; an empty prefix is exactly
+            // the §11 hazard shape — a pre-existing placeholder with our prompt appended — and must
+            // never verify), together no longer than the prompt, and the hidden line count sane.
+            std::wstring pre;
+            for (size_t li = 0; li < m.draftLine && li < boxLines.size(); ++li)
+            {
+                pre += boxLines[li];
+            }
+            pre += m.headFragment;
+            std::wstring post = m.tailFragment;
+            for (size_t li = m.draftLine + 1; li < boxLines.size(); ++li)
+            {
+                post += boxLines[li];
+            }
+            const std::wstring sp = WsStripped(pre);
+            const std::wstring ss = WsStripped(post);
+            if (!sp.empty() && !ss.empty() &&
+                sp.size() + ss.size() <= promptStripped.size() &&
+                promptStripped.compare(0, sp.size(), sp) == 0 &&
+                promptStripped.compare(promptStripped.size() - ss.size(), ss.size(), ss) == 0 &&
+                m.lines >= 1 && static_cast<size_t>(m.lines) < promptSegs.size() + 1)
+            {
+                return FillVerify::VerifiedCollapsed;
+            }
+            return FillVerify::Foreign;
+        }
+        if (!markers.empty())
+        {
+            return FillVerify::Foreign;
+        }
+        // No markers, not equal: a strict prefix is our own paste mid-stream / tail-eaten.
+        if (promptStripped.size() > boxStripped.size() && !boxStripped.empty() &&
+            promptStripped.compare(0, boxStripped.size(), boxStripped) == 0)
+        {
+            return FillVerify::Partial;
+        }
+        return FillVerify::Foreign;
+    }
+
+    // Agentmaster (R4 — the FOREIGN recovery's undo verdict): after a Foreign read-back the fill
+    // must be taken OUT of the box before the prompt rolls back — leaving it would merge into the
+    // session's next submit, and re-clearing blindly could destroy the foreign content, which is
+    // the user's until proven otherwise. The undo presses backspaces (each deletes ONE editor
+    // character — soft wrap is render-only, so the budget is the FOLDED prompt length exactly,
+    // never more: over-deletion would eat foreign characters, under-deletion leaves OUR text and is
+    // detectable). This is the per-round verdict; the caller owns the loop, the cumulative budget,
+    // and the stall counter (the DecideDraftClear pattern).
+    //
+    //   Done  — nothing of ours reads at the box tail any more (or nothing left to judge): stop.
+    //   Press — our prompt's tail is still at the box end: press up to `presses` backspaces
+    //           (bounded by the caller's remaining budget). A trailing collapsed MARKER TOKEN that
+    //           plausibly stands for our prompt deletes atomically in ONE press (measured).
+    //   Stop  — the box tail is not ours and not clean (ambiguous): stop pressing, report.
+    enum class SendUndoAction
+    {
+        Done,
+        Press,
+        Stop,
+    };
+
+    struct SendUndoPlan
+    {
+        SendUndoAction action{ SendUndoAction::Done };
+        size_t presses{ 0 };
+    };
+
+    inline SendUndoPlan DecideSendUndo(std::wstring_view boxText, std::wstring_view promptText)
+    {
+        using namespace verify_detail;
+        SendUndoPlan plan;
+        const std::wstring box = FoldTrimPromptText(boxText);
+        const std::wstring prompt = FoldTrimPromptText(promptText);
+        if (box.empty() || prompt.empty())
+        {
+            return plan; // Done — nothing to undo / nothing to judge against
+        }
+        const std::wstring boxStripped = WsStripped(box);
+        const std::wstring promptStripped = WsStripped(prompt);
+        if (boxStripped.empty() || promptStripped.empty())
+        {
+            return plan;
+        }
+        // A trailing collapsed marker token that stands for OUR prompt: ONE press removes it
+        // atomically. Checked BEFORE the tail test — the token's text shares no characters with the
+        // prompt it stands for. Guarded by the SAME collapse arithmetic the verify accepts (M ==
+        // the prompt's newline count or segment count): a placeholder that fails it is treated as
+        // the USER's content (a pre-existing paste-cache draft) and never deleted.
+        const auto markers = FindPasteMarkers(box);
+        if (!markers.empty())
+        {
+            const auto& last = markers.back();
+            const auto boxLines = paste_detail::SplitSegments(box);
+            const bool isLastLine = (last.draftLine + 1 == boxLines.size());
+            const bool atLineEnd = WsStripped(last.tailFragment).empty();
+            const bool arithmeticOurs = !last.truncated &&
+                                        (static_cast<size_t>(last.lines) == paste_detail::NewlineCount(prompt) ||
+                                         static_cast<size_t>(last.lines) == paste_detail::SplitSegments(prompt).size());
+            if (isLastLine && atLineEnd && arithmeticOurs)
+            {
+                plan.action = SendUndoAction::Press;
+                plan.presses = 1;
+                return plan;
+            }
+        }
+        const size_t tailLen = promptStripped.size() < 24 ? promptStripped.size() : size_t{ 24 };
+        const std::wstring tail = promptStripped.substr(promptStripped.size() - tailLen);
+        const bool tailPresent = boxStripped.size() >= tail.size() &&
+                                 boxStripped.compare(boxStripped.size() - tail.size(), tail.size(), tail) == 0;
+        if (!tailPresent)
+        {
+            return plan; // Done — our text no longer ends the box (never press further)
+        }
+        plan.action = SendUndoAction::Press;
+        plan.presses = prompt.size(); // the caller caps this against its remaining budget + per-inject max
+        return plan;
+    }
+
     // Agentmaster (PENDING_INPUT.md §9): ONE prompt submission, as handed to the hosting window's
     // submitter (SessionRegistry::SetPromptSubmitter). Every path that SENDS a queued prompt —
     // the autorunner's auto-send, its SemiAuto confirm, the Manager's Send-now, and the /handover
@@ -624,8 +869,11 @@ namespace Agentmaster
     // delivery gate. An open gate past this age reads CLOSED everywhere (fail-open) and is
     // RECLAIMED by the next TryOpenDeliveryGate — so a holder that died without closing (a page
     // torn down mid draft-swap) can stall a session's plan for at most this long, never
-    // permanently. ~2x the swap's worst legitimate hold (2.4s clear + 18s submit-await + restore).
-    inline constexpr int64_t kDeliveryGateTimeoutMs = 45'000;
+    // permanently. ~2x the swap's worst legitimate hold — which the R4 VERIFIED PLACEMENT grew:
+    // 2.4s clear + ~3s fill-verify (2 attempts) + ~4s partial-discard + ~5s foreign-undo + 18s
+    // submit-await + ~4s progress-extended restore ≈ 36s worst case, so the belt is 75s (was 45s
+    // against the pre-R4 ~21s worst).
+    inline constexpr int64_t kDeliveryGateTimeoutMs = 75'000;
 
     // The reserved gate tag for the mail-button box-CLEAR (PENDING_INPUT.md §8d): it holds the
     // same input box a delivery would, so it excludes deliveries through the same gate. Prompt
@@ -929,6 +1177,21 @@ namespace Agentmaster
         // recorded via the registry's QUIET SetPendingPasteRefs (no notify: it rides the same flip the
         // draft itself already raised).
         std::wstring pendingPasteRefs;
+        // Agentmaster (DELIVERY_PLAN.md R5 — the tri-state box read): the input box's last observed
+        // STATE (InputBoxState — Unknown/NoBox/Empty/Draft/MenuOpen), fed by the UI scan lane each
+        // liveness tick (SetPendingBoxState — quiet except a blocked→unblocked release, which
+        // notifies so a held advance re-fires) and by the swap's pre-flight decline (fresh
+        // evidence). ADVISORY + at-rest-consumed: DecideAdvance holds on NoBox/MenuOpen (a paste
+        // would land in a menu / an unreadable box — the §9 dialog-consumed delivery and the §11
+        // invisible-content merge), DecideEnterRetry refuses the lone Enter on them (an Enter into
+        // a menu SELECTS the highlighted option). Unknown means "no information" and never holds.
+        // TRANSIENT (never persisted — a box state can't survive a restart).
+        InputBoxState pendingBoxState{ InputBoxState::Unknown };
+        // When pendingBoxState last CHANGED (system-clock ms) — the anchor for the scanner's
+        // box-not-visible escalation (ShouldPauseOnBoxNotVisible: NoBox persisting past the window
+        // with queued work ⇒ pause the autorunner LOUDLY instead of holding silently forever).
+        // TRANSIENT.
+        int64_t pendingBoxStateUnixMs{ 0 };
 
         // --- The DELIVERY GATE (DELIVERY.md) --- BOTH transient (NOT persisted — Persistence.cpp
         // must not write them; a delivery never survives a restart). Non-empty deliveryPromptId ==
@@ -1533,6 +1796,16 @@ namespace Agentmaster
         // it beats the line-scoped Ctrl+U kill-ring pair that remains the fallback. OFF ⇒ the swap
         // starts at that fallback instead; either way an unresponsive rung ends in a clean ABORT.
         bool draftSwapUseCtrlS{ true };
+        // Agentmaster (DELIVERY.md §11 / DELIVERY_PLAN.md R4 — VERIFIED PLACEMENT): after the send's
+        // bracketed-paste FILL lands, READ THE BOX BACK and fire the submit CR only when it verifies
+        // as exactly-the-prompt (or its collapsed placeholder render) — the closed-loop send. OFF
+        // restores the historical one-write paste+CR (the blind commit). ORTHOGONAL to
+        // preserveDraftOnSend: preservation governs whether an existing draft is RESCUED around the
+        // send (clear + restore); this governs whether the COMMIT may be blind — a Foreign read-back
+        // refuses the CR even with preservation off (a merge is never OK), and turning THIS off is
+        // the documented escape hatch for a future TUI render drift (a broken detector then means
+        // refused sends — loud — rather than silent no-protection).
+        bool verifySendBeforeSubmit{ true };
         // Agentmaster (PENDING_INPUT.md §10 — the restore RE-FILL): when a session whose record
         // carries a persisted unsent-draft MEMORY is reopened (Sessions-browser resume /
         // window-restore rehome / re-fork), TYPE the remembered draft back into the fresh claude's

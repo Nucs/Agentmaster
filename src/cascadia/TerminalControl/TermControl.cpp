@@ -2882,6 +2882,18 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         return _core.ReadPendingInputDraft();
     }
 
+    // Agentmaster (DELIVERY_PLAN.md R5): the tri-state verdict of that same cached scan. Pure passthrough.
+    int32_t TermControl::ReadPendingInputBoxState()
+    {
+        return _core.ReadPendingInputBoxState();
+    }
+
+    // Agentmaster (DELIVERY_PLAN.md R4/R5): the verified-send read-back probe. Pure passthrough.
+    winrt::hstring TermControl::ReadInputBoxProbe(int32_t maxRows)
+    {
+        return _core.ReadInputBoxProbe(maxRows);
+    }
+
     // Agentmaster (alt+up / alt+down prompt nav): scroll to the nearest SENT prompt that is currently
     // OFF-SCREEN in the given direction and CENTER it. Reuses the read-only batch resolve (a buffer row
     // per prompt; the order-preserving greedy handles duplicate texts) plus the live viewport, so the

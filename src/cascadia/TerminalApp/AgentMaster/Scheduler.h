@@ -171,6 +171,25 @@ namespace Agentmaster
             return plan;
         }
 
+        // Agentmaster (DELIVERY_PLAN.md R5 — the tri-state box read): the scan lane (or a send's
+        // pre-flight decline) last saw NO parseable input box on this session's screen. A MENU means
+        // a paste now would feed the MENU (the §9 dialog that silently consumed a delivered prompt);
+        // a bare NoBox means an unreadable/replaced box (the §11 invisible-content merge lived
+        // exactly there). HOLD — the scan re-reads every liveness tick and SetPendingBoxState
+        // notifies on the blocked→unblocked release, so the held advance re-fires the moment a box
+        // is visible again; a NoBox that persists with queued work escalates loudly instead
+        // (ShouldPauseOnBoxNotVisible below). Unknown (no read yet — a dormant tab) never holds.
+        if (s.pendingBoxState == InputBoxState::MenuOpen)
+        {
+            plan.reason = L"input box not visible (a menu/dialog is open)";
+            return plan;
+        }
+        if (s.pendingBoxState == InputBoxState::NoBox)
+        {
+            plan.reason = L"input box not visible";
+            return plan;
+        }
+
         // Awaiting-injection-pickup guard: if a Flight prompt we just injected is Sent but the
         // turn it should start has not visibly begun, hold off — otherwise an advance driven by
         // an observed change in that window would send the NEXT prompt on top of it (stacking two
@@ -372,6 +391,18 @@ namespace Agentmaster
             plan.action = EnterRetryAction::Waiting;
             return plan;
         }
+        // BOX-STATE GUARD (DELIVERY_PLAN.md R5/R8): the scan last saw NO parseable input box — a
+        // MENU (an AskUserQuestion / permission list, where a lone Enter SELECTS the highlighted
+        // option: an answer fabricated by the rescue mechanism) or a bare NoBox (nothing readable
+        // to press into). Never press; keep watching — the lost-send verdict / the give-up ladder
+        // own the terminal resolution, and the scan clears the state the moment a box re-renders.
+        // Unknown (no read yet) deliberately passes: a dormant tab is already excluded above, and
+        // an un-scanned live box must not strand the eaten-CR rescue.
+        if (s.pendingBoxState == InputBoxState::NoBox || s.pendingBoxState == InputBoxState::MenuOpen)
+        {
+            plan.action = EnterRetryAction::Waiting;
+            return plan;
+        }
         // First re-press fires after kEnterRetryFirstMs (snappy rescue); later presses space out by
         // kEnterRetryIntervalMs. sentAtUnixMs is refreshed on each press, so this is "since last press".
         const int64_t due = (best->enterRetries == 0) ? kEnterRetryFirstMs : kEnterRetryIntervalMs;
@@ -439,6 +470,44 @@ namespace Agentmaster
             }
         }
         return lost;
+    }
+
+    // Agentmaster (DELIVERY_PLAN.md R5 — the box-not-visible ESCALATION): a NoBox that persists is
+    // either a detector/render drift or a modal parked over the box, and DecideAdvance's hold on it
+    // would otherwise park a queued plan silently forever (the §8 question-guard lesson: an
+    // invisible park is a bug report). Once NoBox has stood this long on a LIVE, at-rest session
+    // with an ACTIVE autorunner and QUEUED work, the scanner pauses the autorunner (mode → Off) —
+    // loud (the mode shows on every surface + the log line), terminal (the user re-arms after
+    // fixing/reporting the cause), and self-deduping (mode Off fails the predicate next pass).
+    // MenuOpen deliberately NEVER escalates: a menu legitimately parks for hours (an unanswered
+    // AskUserQuestion is the question-guard's domain, not a fault). PURE.
+    inline constexpr int64_t kBoxNotVisibleEscalateMs = 60'000;
+    inline bool ShouldPauseOnBoxNotVisible(const SessionInfo& s, int64_t nowUnixMs)
+    {
+        if (!s.live || s.autorunner.mode == AutorunnerMode::Off)
+        {
+            return false;
+        }
+        if (s.state != SessionState::WaitingForInput && s.state != SessionState::Idle)
+        {
+            return false; // only an at-rest session consults the box state (the advisory contract)
+        }
+        if (s.pendingBoxState != InputBoxState::NoBox || s.pendingBoxStateUnixMs == 0)
+        {
+            return false;
+        }
+        if ((nowUnixMs - s.pendingBoxStateUnixMs) < kBoxNotVisibleEscalateMs)
+        {
+            return false;
+        }
+        for (const auto& p : s.queue)
+        {
+            if (p.status == PromptStatus::Pending)
+            {
+                return true; // queued work is being silently held — surface it
+            }
+        }
+        return false;
     }
 
     class Scheduler

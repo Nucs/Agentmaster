@@ -171,6 +171,13 @@ namespace Microsoft.Terminal.Control
         // Agentmaster (PENDING_INPUT.md): the UNSENT draft in Claude's input box, read from the bottom of
         // the rendered buffer (the bottom-most prompt line wrapped by rules). Read-only; "" => no draft.
         String ReadPendingInputDraft();
+        // Agentmaster (DELIVERY_PLAN.md R5): the tri-state verdict of that same cached scan — an
+        // InputBoxState as Int32 (0 Unknown / 1 NoBox / 2 Empty / 3 Draft / 4 MenuOpen). "" is
+        // ambiguous ("empty box" vs "no box visible"); this is not.
+        Int32 ReadPendingInputBoxState();
+        // Agentmaster (DELIVERY_PLAN.md R4/R5 — the verified-placement probe): ONE fresh read of the
+        // input box at a caller-chosen row window, "<state digit><draft text>" ("" => not initialized).
+        String ReadInputBoxProbe(Int32 maxRows);
 
         Microsoft.Terminal.Core.Color ForegroundColor { get; };
         Microsoft.Terminal.Core.Color BackgroundColor { get; };

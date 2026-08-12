@@ -1215,6 +1215,34 @@ namespace Agentmaster
                     }
                 }
             }
+
+            // Agentmaster (DELIVERY_PLAN.md R5 — the box-not-visible ESCALATION): DecideAdvance
+            // holds queued work while the box reads NoBox, and that hold is deliberately silent
+            // (an [advance-skip] line). A NoBox that PERSISTS (a detector/render drift, a modal
+            // parked over the box) must not park a plan invisibly forever — pause the autorunner
+            // LOUDLY instead (the lost-send idiom; the user re-arms after fixing the cause).
+            // Self-deduping: mode Off fails the predicate on the next pass. Fresh-read + re-verify
+            // inside the Update, like the lost-send verdict above.
+            if (ShouldPauseOnBoxNotVisible(s, NowMs())) // snapshot pre-check: nearly always false, so the fresh re-Get is rare
+            {
+                bool paused = false;
+                _registry->Update(s.id, [&](SessionInfo& live) {
+                    if (ShouldPauseOnBoxNotVisible(live, NowMs())) // freshest-record re-verify (the lost-send pattern)
+                    {
+                        live.autorunner.mode = AutorunnerMode::Off;
+                        paused = true;
+                    }
+                });
+                if (paused)
+                {
+                    const std::wstring line = L"[send-verify] " + ShortId(s.id) +
+                                              L" autorunner paused (no parseable input box for >" +
+                                              std::to_wstring(kBoxNotVisibleEscalateMs / 1000) +
+                                              L"s with queued prompts - a menu/modal may be parked over it, or the render drifted)\n";
+                    AppendStateLog(L"autorunner.log", line);
+                    AppendStateLog(L"hooks.log", line);
+                }
+            }
         }
     }
 

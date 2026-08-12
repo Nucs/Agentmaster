@@ -145,6 +145,12 @@ namespace Microsoft.Terminal.Control
         Int32 ScrollToAdjacentConversationPrompt(Windows.Foundation.Collections.IVector<String> messages, Boolean up);
         // Agentmaster (PENDING_INPUT.md): the UNSENT draft in Claude's input box (read-only); "" => none.
         String ReadPendingInputDraft();
+        // Agentmaster (DELIVERY_PLAN.md R5): the tri-state verdict of that same cached scan (Int32
+        // InputBoxState — 0 Unknown / 1 NoBox / 2 Empty / 3 Draft / 4 MenuOpen).
+        Int32 ReadPendingInputBoxState();
+        // Agentmaster (DELIVERY_PLAN.md R4/R5): ONE fresh input-box read at a caller-chosen row window,
+        // "<state digit><draft text>" ("" => not initialized). The verified-send read-back channel.
+        String ReadInputBoxProbe(Int32 maxRows);
 
         void CreateSearchBoxControl();
         Boolean SearchBoxEditInFocus();

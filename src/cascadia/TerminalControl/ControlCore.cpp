@@ -953,6 +953,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             _pendingInputScanMutationId = mutationId;
             _pendingInputScanValid = true;
             _pendingInputScanResult = {};
+            _pendingInputScanState = static_cast<int32_t>(::Agentmaster::InputBoxState::NoBox); // a blank screen has no box
             return {};
         }
         // The input box + a little context above it is at most a viewport tall; 120 rows is generous and
@@ -969,7 +970,64 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         _pendingInputScanMutationId = mutationId;
         _pendingInputScanValid = true;
         _pendingInputScanResult = winrt::hstring{ draft.text };
+        _pendingInputScanState = static_cast<int32_t>(draft.state); // R5: cache the verdict beside the text
         return _pendingInputScanResult;
+    }
+
+    // Agentmaster (DELIVERY_PLAN.md R5): the tri-state verdict of the SAME cached shallow scan as
+    // ReadPendingInputDraft — a second view over one cache, so the scan lane can record the box STATE
+    // (SessionInfo::pendingBoxState) at the same ~free steady-state cost. Unknown when the terminal
+    // isn't initialized (there is nothing to read, which is not the same as "no box").
+    int32_t ControlCore::ReadPendingInputBoxState()
+    {
+        if (!_initializedTerminal.load(std::memory_order_relaxed))
+        {
+            return static_cast<int32_t>(::Agentmaster::InputBoxState::Unknown);
+        }
+        ReadPendingInputDraft(); // ensure the cached scan is fresh for the current mutation id
+        const auto lock = _terminal->LockForReading();
+        return _pendingInputScanState;
+    }
+
+    // Agentmaster (DELIVERY.md §11 / DELIVERY_PLAN.md R4+R5 — the VERIFIED-PLACEMENT probe): ONE
+    // fresh, uncached read of the input box at a caller-chosen row window, encoding verdict + draft
+    // in a single return ("<state digit><text>"; "" ⇔ not initialized == Unknown) so a buffer
+    // mutation between two calls can never split the pair. The raised window (bounded at 2000 rows)
+    // is what lets a filled prompt TALLER than the shallow scan's 120 rows still read back — the
+    // shallow scan deliberately keeps its fixed cheap bound (it runs per tab per ~2.5s tick; this
+    // runs at send cadence). Deliberately does NOT touch the shallow cache: interleaving two window
+    // sizes through one mutation-keyed slot would make the scan lane's next read answer from
+    // whichever window ran last.
+    winrt::hstring ControlCore::ReadInputBoxProbe(int32_t maxRows)
+    {
+        if (!_initializedTerminal.load(std::memory_order_relaxed))
+        {
+            return {};
+        }
+        const auto rowBudget = static_cast<til::CoordType>(std::clamp<int32_t>(maxRows, 1, 2000));
+        const auto lock = _terminal->LockForReading();
+        const auto& tb = _terminal->GetTextBuffer();
+        auto state = ::Agentmaster::InputBoxState::NoBox;
+        std::wstring text;
+        const auto lastRow = tb.GetLastNonSpaceCharacter().y;
+        if (lastRow >= 0)
+        {
+            const auto startRow = (std::max)(static_cast<til::CoordType>(0), static_cast<til::CoordType>(lastRow + 1 - rowBudget));
+            std::vector<std::wstring> rows;
+            rows.reserve(static_cast<size_t>(lastRow - startRow + 1));
+            for (til::CoordType y = startRow; y <= lastRow; ++y)
+            {
+                rows.emplace_back(tb.GetRowByOffset(y).GetText());
+            }
+            auto draft = ::Agentmaster::DetectPendingInput(rows);
+            state = draft.state;
+            text = std::move(draft.text);
+        }
+        std::wstring encoded;
+        encoded.reserve(text.size() + 1);
+        encoded.push_back(static_cast<wchar_t>(L'0' + static_cast<int32_t>(state)));
+        encoded += text;
+        return winrt::hstring{ encoded };
     }
 
     void ControlCore::AdjustOpacity(const float adjustment)

@@ -187,11 +187,32 @@ namespace Agentmaster
             {
                 // Re-press a LONE Enter — never the prompt text (it is already typed in Claude's box;
                 // resending it would duplicate the message).
-                const bool delivered = _registry->Inject(id, L"\r");
-                if (!delivered)
+                //
+                // Agentmaster (DELIVERY_PLAN.md R8 — the VERIFIED PRESSER): with a hosting-window
+                // presser bound, the press routes through a LIVE box read at press time — pressed
+                // only into a verified-Empty box or one holding the watched prompt; a Foreign /
+                // NoBox / MenuOpen read REFUSES (an Enter into a menu SELECTS the highlighted
+                // option) and refreshes the registry facts so the next DecideEnterRetry waits. The
+                // attempt is spent either way (below) — a refused press must surface through the
+                // give-up ladder, never retry silently forever. No presser bound (tests/CLI) keeps
+                // the historical raw inject.
+                std::wstring watchedText;
+                for (const auto& p : s->queue)
                 {
-                    done.push_back(id); // injector vanished (tab closing) — stop watching
-                    continue;
+                    if (p.id == plan.promptId)
+                    {
+                        watchedText = p.text;
+                        break;
+                    }
+                }
+                if (!_registry->PressEnterVerified(id, plan.promptId, watchedText))
+                {
+                    const bool delivered = _registry->Inject(id, L"\r");
+                    if (!delivered)
+                    {
+                        done.push_back(id); // injector vanished (tab closing) — stop watching
+                        continue;
+                    }
                 }
                 // Bump the counter + RESTART the echo/pickup window from this Enter: when a late press
                 // finally submits, its UserPromptSubmit echo must land within kEchoWindowMs of the

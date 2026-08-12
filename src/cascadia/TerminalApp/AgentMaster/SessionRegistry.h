@@ -55,6 +55,14 @@ namespace Agentmaster
     // behaves exactly as it always did.
     using PromptSubmitter = std::function<bool(const PromptSubmission& submission)>;
 
+    // Agentmaster (DELIVERY_PLAN.md R8 — the VERIFIED PRESSER): the hosting window's hook for the
+    // Enter-retry watchdog's lone-Enter press. Where the raw Inject("\r") trusted the scan-stale
+    // draft guard alone, the presser reads the LIVE box at press time (fire-and-forget onto its UI
+    // thread) and presses only into a verified-Empty box or one holding the watched prompt — a
+    // Foreign/NoBox/MenuOpen read refuses and refreshes the registry facts instead. Registered in
+    // lockstep with the injector/submitter by the one window that owns the control.
+    using EnterPresser = std::function<void(const std::wstring& sessionId, const std::wstring& promptId, const std::wstring& promptText)>;
+
     // Opaque handles returned by AddObserver / AddAdoptionHandler; pass the same value to the
     // matching Remove* to detach. Agentmaster M9: the engine is a process-wide singleton shared
     // by every window's Manager lens, so a closing window MUST drop its observer (it captures a
@@ -132,6 +140,14 @@ namespace Agentmaster
         // dropped when the draft has meanwhile cleared. Thread-safe.
         void SetPendingPasteRefs(const std::wstring& id, const std::wstring& refs);
 
+        // Agentmaster (DELIVERY_PLAN.md R5 — the tri-state box read): record the input box's last
+        // observed STATE (SessionInfo::pendingBoxState + its change stamp). Fed by the UI scan lane
+        // each liveness tick and by a send's pre-flight decline (fresh evidence). Change-gated and
+        // QUIET — except a BLOCKED→UNBLOCKED transition (NoBox/MenuOpen → Empty/Draft/Unknown),
+        // which notifies: that release is what re-fires an advance DecideAdvance held on the box
+        // (the delivery gate's close-notify idiom). No-op for an unknown id. Thread-safe.
+        void SetPendingBoxState(const std::wstring& id, InputBoxState state);
+
         // Record a human message the interval reconciler (SessionScanner) found in the transcript
         // that the UserPromptSubmit hook dropped. IDEMPOTENT by text: if an identical message is
         // already recorded (any prompt with status Sent — covers our injected Flight echoes AND
@@ -187,6 +203,24 @@ namespace Agentmaster
         // Agentmaster (PENDING_INPUT.md §9): bind / clear the hosting window's prompt submitter.
         // Set and cleared in lockstep with SetInjector — the same window, the same lifetime.
         void SetPromptSubmitter(const std::wstring& id, PromptSubmitter submitter);
+
+        // Agentmaster (DELIVERY_PLAN.md R8 — the VERIFIED PRESSER): bind / clear the hosting
+        // window's Enter presser — the watchdog's lone-Enter rescue routed through a LIVE box read
+        // at press time instead of the scan-stale draft guard alone. Same registration lifetime as
+        // the submitter/injector. The presser is invoked on the SCHEDULER worker and must
+        // self-marshal (fire-and-forget to its UI thread), where it reads the box and presses ONLY
+        // into a verified-Empty box or one holding the watched prompt; a Foreign read refreshes
+        // pendingInput, a NoBox/MenuOpen read refreshes pendingBoxState (an Enter into a menu
+        // SELECTS the highlighted option), and both refuse — each outcome logged by the window.
+        void SetEnterPresser(const std::wstring& id, EnterPresser presser);
+
+        // Dispatch the watchdog's lone-Enter press for `promptId`/`promptText`. With a presser
+        // bound: invoke it (outside the lock) and return true — the WINDOW owns the verified press
+        // + its logging; the caller does its bookkeeping (attempt count / sentAt refresh)
+        // immediately, a later refusal reading as a spent attempt (deliberate: refusals must
+        // surface through the give-up ladder, never retry silently forever). With none bound:
+        // returns false — the caller keeps the historical raw Inject("\r") path (tests/CLI).
+        bool PressEnterVerified(const std::wstring& id, const std::wstring& promptId, const std::wstring& promptText);
 
         // SEND a queued prompt — the ONE seam every submit path goes through (the autorunner's
         // auto-send, its SemiAuto confirm, the Manager's Send-now, the /handover paste pump), so
@@ -256,6 +290,7 @@ namespace Agentmaster
         std::unordered_map<std::wstring, SessionInfo> _sessions;
         std::unordered_map<std::wstring, Injector> _injectors;
         std::unordered_map<std::wstring, PromptSubmitter> _submitters; // PENDING_INPUT.md §9
+        std::unordered_map<std::wstring, EnterPresser> _pressers; // DELIVERY_PLAN.md R8 — same lifetime as the submitter
         std::unordered_map<std::wstring, int64_t> _lastHumanInput;
         std::vector<std::pair<ObserverToken, RegistryObserver>> _observers;
         uint64_t _nextObserverId{ 1 };

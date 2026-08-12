@@ -1075,6 +1075,10 @@ namespace winrt::TerminalApp::implementation
         _setDraftSwapCtrlS.Header(winrt::box_value(L"Use Ctrl+S to stash my draft aside while it sends"));
         AgentSetTip(_setDraftSwapCtrlS, L"How the setting above moves your draft out of the way: with Claude's own stash (Ctrl+S), which lifts the WHOLE input box aside in one keystroke and puts it back exactly as it was \x2014 wherever your cursor happened to be.\n\nRecommended, and on by default. Turn it off only if Ctrl+S misbehaves in your build: the swap then falls back to the terminal's line-editor undo, which works a line at a time and can restore poorly when the cursor sits mid-text.\n\nNote Claude keeps ONE stash slot, so a swap replaces anything you had stashed yourself earlier. Your live draft is never at risk either way \x2014 if the box cannot be cleared, nothing is sent.");
         panel.Children().Append(_setDraftSwapCtrlS);
+        _setVerifySend = ToggleSwitch{};
+        _setVerifySend.Header(winrt::box_value(L"Verify the input box before submitting a sent prompt"));
+        AgentSetTip(_setVerifySend, L"After a prompt is pasted into a session's input box, READ THE BOX BACK and press Enter only when it shows exactly that prompt (or Claude's own collapsed [Pasted text #N] placeholder for it). If anything else is in the box \x2014 content no read had seen, a menu that opened over the box \x2014 nothing is submitted: the paste is undone, the prompt goes back to the queue, and the box's real content shows on the pending-draft dots.\n\nThis is what prevents a queued prompt from being merged into text that appeared in the box between the read and the send (a stash popping back, a menu swallowing the paste). Recommended, and on by default.\n\nTurn it off only if sends start being refused after a Claude update changes how the input box renders \x2014 that restores the old blind send while a fix ships.");
+        panel.Children().Append(_setVerifySend);
         // Agentmaster (PENDING_INPUT.md §10 — the restore RE-FILL). Claude never restores its own
         // input box, so a remembered unsent draft is typed back by us when the session reopens.
         _setRestoreDraft = ToggleSwitch{};
@@ -2440,6 +2444,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setDraftSwapCtrlS.IsOn(_appSettings.draftSwapUseCtrlS);
         }
+        if (_setVerifySend)
+        {
+            _setVerifySend.IsOn(_appSettings.verifySendBeforeSubmit);
+        }
         if (_setRestoreDraft)
         {
             _setRestoreDraft.IsOn(_appSettings.restoreDraftOnResume);
@@ -3066,6 +3074,10 @@ namespace winrt::TerminalApp::implementation
         if (_setDraftSwapCtrlS)
         {
             _appSettings.draftSwapUseCtrlS = _setDraftSwapCtrlS.IsOn();
+        }
+        if (_setVerifySend)
+        {
+            _appSettings.verifySendBeforeSubmit = _setVerifySend.IsOn();
         }
         if (_setRestoreDraft)
         {

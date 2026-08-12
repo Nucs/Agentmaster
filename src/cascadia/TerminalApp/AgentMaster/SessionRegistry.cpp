@@ -149,6 +149,7 @@ namespace Agentmaster
             _sessions.erase(id);
             _injectors.erase(id);
             _submitters.erase(id); // PENDING_INPUT.md §9 — same lifetime as the injector
+            _pressers.erase(id); // DELIVERY_PLAN.md R8 — same lifetime as the submitter
             _lastHumanInput.erase(id);
             _order.erase(std::remove(_order.begin(), _order.end(), id), _order.end());
         }
@@ -316,6 +317,7 @@ namespace Agentmaster
         bool found = false;
         bool triggerAdvance = false;
         std::wstring upsTrace; // DELIVERY_PLAN.md R3: the [ups] disposition line, filled under the lock, logged after it
+        std::wstring mergeTrace; // DELIVERY_PLAN.md R7: the [merge-detected] line (both logs), filled under the lock
 
         {
             std::lock_guard guard{ _mtx };
@@ -461,6 +463,34 @@ namespace Agentmaster
                         break;
                     }
                 }
+                // Agentmaster (DELIVERY_PLAN.md R7 — the MERGE classifier): a non-echo message that
+                // ENDS WITH an awaited Sent+unechoed prompt's text is a MERGED submit — pre-existing
+                // box content + our pasted prompt committed as ONE message (Incident 3's 4205-char
+                // Typed row, DELIVERY.md §11). The transcript row IS the proof, so the verdict is
+                // immediate (no reason to wait out the lost-send settle): the prompt is Failed (it
+                // never became ITS OWN message; `echoed` stays false), the autorunner pauses (the
+                // stop-on-error idiom — the queue past a mangled step is suspect), and the merged
+                // message still records as the Typed row it really is. Same candidate window as the
+                // echo scan.
+                std::wstring mergedPromptId;
+                if (!isEcho)
+                {
+                    for (auto& p : s.queue)
+                    {
+                        if (p.origin == PromptOrigin::Autorun && p.status == PromptStatus::Sent && !p.echoed &&
+                            p.sentAtUnixMs != 0 && (now - p.sentAtUnixMs) >= 0 &&
+                            (now - p.sentAtUnixMs) < kEchoWindowMs && PromptSwallowedByMessage(msg.promptText, p.text))
+                        {
+                            p.status = PromptStatus::Failed;
+                            s.autorunner.mode = AutorunnerMode::Off;
+                            mergedPromptId = p.id;
+                            mergeTrace = L"[merge-detected] " + ShortId(msg.sessionId) + L" prompt " + ShortId(p.id) +
+                                         L" \"" + p.label + L"\" swallowed into a " + std::to_wstring(msg.promptText.size()) +
+                                         L"-char message (pre-existing box content + the pasted prompt submitted as ONE - marked Failed, autorunner paused)\n";
+                            break;
+                        }
+                    }
+                }
                 const bool isNoise = !isEcho && IsNoiseUserPrompt(msg.promptText);
                 if (!isEcho && !isNoise)
                 {
@@ -478,7 +508,11 @@ namespace Agentmaster
                 }
                 upsTrace = L"[ups] " + ShortId(msg.sessionId) + L" chars=" + std::to_wstring(msg.promptText.size()) +
                            L" hash=" + FoldedPromptHash(echoFolded) +
-                           (isEcho ? L" -> echo consumed" : (isNoise ? L" -> noise (not recorded)" : L" -> recorded as Typed")) + L"\n";
+                           (isEcho ? L" -> echo consumed" :
+                                     (isNoise ? L" -> noise (not recorded)" :
+                                                (!mergedPromptId.empty() ? L" -> recorded as Typed (MERGED - swallowed prompt " + ShortId(mergedPromptId) + L")" :
+                                                                           L" -> recorded as Typed"))) +
+                           L"\n";
             }
             else if (msg.event == HookEvent::UserPromptSubmit)
             {
@@ -507,6 +541,13 @@ namespace Agentmaster
             // fingerprint, so a phantom/duplicate UPS is self-evident from hooks.log (two deliveries
             // of one message share a hash; the empty twins read chars=0). Logged outside the lock.
             AppendStateLog(L"hooks.log", upsTrace);
+        }
+        if (!mergeTrace.empty())
+        {
+            // R7: the merge verdict goes to BOTH logs (the lost-send precedent) — it is an
+            // autorunner-pausing event AND a delivery forensic.
+            AppendStateLog(L"hooks.log", mergeTrace);
+            AppendStateLog(L"autorunner.log", mergeTrace);
         }
         if (found)
         {
@@ -893,6 +934,39 @@ namespace Agentmaster
         it->second.pendingPasteRefs = refs;
     }
 
+    // Agentmaster (DELIVERY_PLAN.md R5 — the tri-state box read): record the box's observed STATE.
+    // Change-gated + QUIET, except the BLOCKED→UNBLOCKED release (NoBox/MenuOpen → anything else),
+    // which notifies — that release is what re-fires an advance DecideAdvance held on the box (the
+    // delivery gate's close-notify idiom; entering the blocked set needs no notify, holds happen at
+    // decide time). The change stamp anchors the scanner's ShouldPauseOnBoxNotVisible escalation.
+    void SessionRegistry::SetPendingBoxState(const std::wstring& id, InputBoxState state)
+    {
+        SessionInfo snapshot;
+        bool release = false;
+        {
+            std::lock_guard guard{ _mtx };
+            const auto it = _sessions.find(id);
+            if (it == _sessions.end() || it->second.pendingBoxState == state)
+            {
+                return;
+            }
+            const auto blocked = [](InputBoxState v) noexcept {
+                return v == InputBoxState::NoBox || v == InputBoxState::MenuOpen;
+            };
+            release = blocked(it->second.pendingBoxState) && !blocked(state);
+            it->second.pendingBoxState = state;
+            it->second.pendingBoxStateUnixMs = NowMs();
+            if (release)
+            {
+                snapshot = it->second;
+            }
+        }
+        if (release)
+        {
+            _notify(snapshot, HookEvent::Unknown);
+        }
+    }
+
     void SessionRegistry::NoteExternalPrompt(const std::wstring& id, const std::wstring& text, int64_t observedUnixMs)
     {
         if (text.empty())
@@ -902,6 +976,7 @@ namespace Agentmaster
         SessionInfo snapshot;
         bool changed = false;
         std::wstring pullEchoTrace; // DELIVERY_PLAN.md R1: filled under the lock, logged after it
+        std::wstring mergeTrace; // DELIVERY_PLAN.md R7: the pull-side [merge-detected] line
         {
             std::lock_guard guard{ _mtx };
             const auto it = _sessions.find(id);
@@ -946,6 +1021,30 @@ namespace Agentmaster
                     break; // consume at most one — mirrors the push consume's one-echo-per-injection rule
                 }
             }
+            // Agentmaster (DELIVERY_PLAN.md R7 — the merge classifier's PULL twin): a transcript user
+            // line that fold-matched nothing but ENDS WITH an awaited Sent+unechoed prompt is the
+            // MERGED submit observed from the pull side (a no-hook session, or a push delivery whose
+            // payload was dropped). Same verdict as the push side: the prompt is Failed, the
+            // autorunner pauses, and the merged line still records below as the Typed row it is.
+            // The line's own timestamp is the staleness filter (a replayed OLD line never vouches).
+            if (!alreadyRecorded)
+            {
+                for (auto& p : s.queue)
+                {
+                    if (p.origin == PromptOrigin::Autorun && p.status == PromptStatus::Sent && !p.echoed &&
+                        p.sentAtUnixMs != 0 &&
+                        (observedUnixMs == 0 || observedUnixMs >= p.sentAtUnixMs) &&
+                        PromptSwallowedByMessage(text, p.text))
+                    {
+                        p.status = PromptStatus::Failed;
+                        s.autorunner.mode = AutorunnerMode::Off;
+                        mergeTrace = L"[merge-detected] " + ShortId(id) + L" prompt " + ShortId(p.id) +
+                                     L" \"" + p.label + L"\" swallowed into a " + std::to_wstring(text.size()) +
+                                     L"-char transcript message (pull side - marked Failed, autorunner paused)\n";
+                        break;
+                    }
+                }
+            }
             if (!alreadyRecorded)
             {
                 // Deduped paths fall through with changed=false — never a duplicate Typed row (and the
@@ -970,6 +1069,11 @@ namespace Agentmaster
         if (!pullEchoTrace.empty())
         {
             AppendStateLog(L"hooks.log", pullEchoTrace); // outside the lock, like every trace here
+        }
+        if (!mergeTrace.empty())
+        {
+            AppendStateLog(L"hooks.log", mergeTrace);
+            AppendStateLog(L"autorunner.log", mergeTrace);
         }
         if (changed)
         {
@@ -1083,6 +1187,47 @@ namespace Agentmaster
         {
             _submitters.erase(id);
         }
+    }
+
+    // Agentmaster (DELIVERY_PLAN.md R8 — the VERIFIED PRESSER): same shape + lifetime as the
+    // submitter above.
+    void SessionRegistry::SetEnterPresser(const std::wstring& id, EnterPresser presser)
+    {
+        std::lock_guard guard{ _mtx };
+        if (presser)
+        {
+            _pressers[id] = std::move(presser);
+        }
+        else
+        {
+            _pressers.erase(id);
+        }
+    }
+
+    bool SessionRegistry::PressEnterVerified(const std::wstring& id, const std::wstring& promptId, const std::wstring& promptText)
+    {
+        EnterPresser presser;
+        {
+            std::lock_guard guard{ _mtx };
+            const auto it = _pressers.find(id);
+            if (it == _pressers.end() || !it->second)
+            {
+                return false; // no presser bound — the caller keeps the historical raw Inject("\r")
+            }
+            presser = it->second; // copy under the lock, invoke outside it (the Inject recipe)
+        }
+        try
+        {
+            presser(id, promptId, promptText);
+        }
+        catch (...)
+        {
+            // Rule #18 — and the press dispatch is a rescue path: a throw here means the eaten-CR
+            // rescue silently died for this session. The attempt is still spent by the caller, so
+            // the give-up ladder eventually surfaces it either way.
+            LogSwallowedException(L"SessionRegistry::PressEnterVerified");
+        }
+        return true;
     }
 
     // Agentmaster (DELIVERY.md): atomically claim the per-session delivery gate for `tag`. See

@@ -980,6 +980,29 @@ namespace winrt::TerminalApp::implementation
         std::wstring _ReadDraftForSwap(const std::wstring& sessionId, const std::wstring& remembered); // one verified box read: the live buffer, re-read on a thin/empty result, with the observer's remembered draft as the payload fallback
         winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> _RestoreDraftAfterSwap(std::wstring sessionId, std::wstring draft, bool allowPaste, bool viaStash); // put the draft back and VERIFY it against that ground truth: the TUI's own channel first (viaStash ? Ctrl+S un-stash, gated on a verified-EMPTY box since that key stashes otherwise : Ctrl+Y yank — both preserve a paste placeholder's binding), else clear + re-paste verbatim; returns what the box finally reads
         void _EndDraftSwap(const std::wstring& sessionId, bool restoreInteractive); // release the read-only window (only if WE took it) + drop the in-flight latch; UI thread, called on EVERY exit path
+        // Agentmaster (DELIVERY.md §11 / DELIVERY_PLAN.md R4+R5 — VERIFIED PLACEMENT): one fresh
+        // tri-state read of a session's input box (TermControl::ReadInputBoxProbe decoded —
+        // {InputBoxState, draft text}), at a caller-chosen row window so a filled prompt taller than
+        // the scan's 120 rows still reads back. Unknown + "" for a dormant/unhosted/throwing control.
+        std::pair<int32_t, std::wstring> _ReadInputBoxProbeForSession(const std::wstring& sessionId, int32_t maxRows);
+        // The VERIFIED SEND core (R4): fill (bracketed paste, NO CR) -> settle -> read the box back ->
+        // commit the lone CR only on a Verified/VerifiedCollapsed read. Eaten re-fills (<=2), Partial
+        // clears-and-refills (it is OUR text), Foreign UNDOES the insertion (verified backspace
+        // batches, budget == the folded prompt length so foreign text can never be eaten) + records
+        // what remains as pendingInput and returns undelivered. Returns: 1 == delivered (CR fired);
+        // 0 == not delivered, nothing irrevocable (caller rolls back); 2 == not delivered AND the
+        // prompt was terminally FAILED here (verify strikes — caller must NOT roll back). Assumes the
+        // caller holds the box (lock + _draftSwapsInFlight) and verified/knows it empty-ish.
+        winrt::Windows::Foundation::IAsyncOperation<int32_t> _InjectPromptVerified(std::wstring sessionId, std::wstring sid8, std::wstring promptId, std::wstring text);
+        // R4 verify-strike bookkeeping: promptId -> consecutive Foreign/unverifiable verdicts. Two
+        // strikes mark the prompt Failed + pause the autorunner (a rollback would re-fire the same
+        // doomed verify forever — the RC2 livelock shape, closed terminally + loudly instead).
+        std::unordered_map<std::wstring, int32_t> _sendVerifyStrikes;
+        // Agentmaster (DELIVERY_PLAN.md R8 — the VERIFIED PRESSER): the Enter-retry watchdog's lone
+        // Enter routed through a LIVE box read at press time. Presses only into a verified-Empty box
+        // or one holding the watched prompt; Foreign refreshes pendingInput, NoBox/MenuOpen refresh
+        // pendingBoxState (an Enter into a menu SELECTS the highlighted option) — both refuse, logged.
+        winrt::fire_and_forget _PressEnterForWatchedPrompt(std::wstring sessionId, std::wstring promptId, std::wstring promptText);
         // Sessions whose swap is running right now. Read by _ScanPendingInput, which SKIPS them: mid-swap
         // the box is deliberately empty, and letting the scan's clear debounce see that would erase the
         // very draft we are holding for the user. UI-thread-only state.

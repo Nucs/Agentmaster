@@ -988,6 +988,15 @@ namespace winrt::TerminalApp::implementation
             const auto self = weakThis.get();
             return self ? self->_AcceptPromptSubmission(submission) : false; // gone => not accepted; the caller rolls back (Rule #4)
         });
+        // Agentmaster (DELIVERY_PLAN.md R8 — the VERIFIED PRESSER): the Enter-retry watchdog's lone
+        // Enter routed through a live box read at press time. Same lifetime as the submitter; the
+        // handler self-marshals (fire_and_forget), so the scheduler worker never blocks on the UI.
+        _sessionRegistry->SetEnterPresser(spec.sessionId, [weakThis{ get_weak() }](const std::wstring& pressId, const std::wstring& promptId, const std::wstring& promptText) {
+            if (const auto self = weakThis.get())
+            {
+                self->_PressEnterForWatchedPrompt(pressId, promptId, promptText);
+            }
+        });
 
         // Agentmaster (PENDING_INPUT.md §10 — the restore RE-FILL): a REOPENED record carrying a
         // persisted unsent-draft memory gets it typed back into the fresh claude's input box once the
@@ -1266,6 +1275,7 @@ namespace winrt::TerminalApp::implementation
             });
             _sessionRegistry->SetInjector(id, nullptr);
             _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
+            _sessionRegistry->SetEnterPresser(id, nullptr); // DELIVERY_PLAN.md R8 — same lifetime as the submitter
             ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
         }
     }
@@ -1439,6 +1449,7 @@ namespace winrt::TerminalApp::implementation
             });
             _sessionRegistry->SetInjector(id, nullptr);
             _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
+            _sessionRegistry->SetEnterPresser(id, nullptr); // DELIVERY_PLAN.md R8 — same lifetime as the submitter
             ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
         }
         ::Agentmaster::LogNav(L"close-folder done dir=" + dir);
@@ -1648,6 +1659,7 @@ namespace winrt::TerminalApp::implementation
             });
             _sessionRegistry->SetInjector(sessionId, nullptr);
             _sessionRegistry->SetPromptSubmitter(sessionId, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
+            _sessionRegistry->SetEnterPresser(sessionId, nullptr); // DELIVERY_PLAN.md R8 — same lifetime as the submitter
             ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
         }
         _claudeTabs.erase(sessionId);
@@ -1710,6 +1722,7 @@ namespace winrt::TerminalApp::implementation
             });
             _sessionRegistry->SetInjector(id, nullptr);
             _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
+            _sessionRegistry->SetEnterPresser(id, nullptr); // DELIVERY_PLAN.md R8 — same lifetime as the submitter
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[teardown-archive] " + id + L"\n");
         }
         _claudeTabs.clear();

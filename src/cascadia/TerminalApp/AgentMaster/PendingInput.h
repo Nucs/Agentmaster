@@ -77,10 +77,40 @@ namespace Agentmaster
     inline constexpr wchar_t kPendingPromptMarkerA = L'\u276F';
     inline constexpr wchar_t kPendingPromptMarkerB = L'\u203A';
 
+    // Agentmaster (DELIVERY.md sect. 11 RC8 / DELIVERY_PLAN.md R5 -- the TRI-STATE box read): the
+    // detector's VERDICT, kept distinct from the draft text because "" is fatally ambiguous -- "box
+    // present and empty" (safe to paste into) and "no box visible at all" (a menu/dialog replaced it,
+    // the box is taller than the read window, a mid-repaint frame) used to both read as an empty
+    // string, and every consumer treated the empty string as the SAFE case. Incident 3 (a 13-char
+    // prompt merged with ~4.2K of invisible content) and the sect. 9 dialog-consumed delivery are both
+    // ""-misread shapes. Int-typed values are a wire contract: the verdict crosses the ControlCore DLL
+    // boundary as an Int32 (ReadPendingInputBoxState / ReadInputBoxProbe) and rides
+    // SessionInfo::pendingBoxState -- never renumber, only append.
+    //
+    //   Unknown  -- no read has happened (a dormant tab, a not-yet-initialized terminal). Consumers
+    //               must treat it as "no information", never as a hold.
+    //   NoBox    -- rows were read and NO rule-wrapped U+276F input box was found. At rest this means
+    //               a modal is parked over the box (the workspace-trust dialog), the render drifted,
+    //               or the box's caret line is above the read window (a very tall draft).
+    //   Empty    -- the box was found and holds no text: VERIFIED empty, safe to place into.
+    //   Draft    -- the box was found and holds an unsent draft (PendingInputDraft::text).
+    //   MenuOpen -- no input box, and the bottom-most caret row reads as a MENU selection cursor
+    //               (an AskUserQuestion / permission menu). A paste now would feed the MENU, and a
+    //               lone Enter would SELECT the highlighted option -- both must refuse.
+    enum class InputBoxState : int32_t
+    {
+        Unknown = 0,
+        NoBox = 1,
+        Empty = 2,
+        Draft = 3,
+        MenuOpen = 4,
+    };
+
     // The resolved draft for one session's input box.
     struct PendingInputDraft
     {
         bool boxFound{ false }; // the bottom-most U+276F input box (rule-wrapped) was located at all
+        InputBoxState state{ InputBoxState::NoBox }; // the tri-state verdict (see above); callers with no rows at all report Unknown themselves
         std::wstring text; // the UNSENT draft (empty => the box is empty, or no box was found)
         // Indices INTO the rows passed to DetectPendingInput -- diagnostic, and the seam for an
         // attribute-aware refinement (reading the prompt line's cells to skip a DIM placeholder).
@@ -180,9 +210,14 @@ namespace Agentmaster
         // framed box's TRAILING "│" has nothing after it (not a column separator).
         //   postMarker = the candidate row's text AFTER the marker glyph (separator not yet stripped)
         //   rawRow     = the full (right-trimmed) row
-        inline bool IsMenuOptionCaret(std::wstring_view rawRow, std::wstring_view postMarker) noexcept
+        // "N. " (1-3 digits, a dot, then whitespace-or-end) right after the marker + separator --
+        // the NUMBERED-OPTION shape every Claude menu row carries ("> 1. Yes"). On its own this is
+        // only a VERDICT signal (a caret candidate that fails the box checks AND reads like this is
+        // most plausibly an open menu -- InputBoxState::MenuOpen); candidate REJECTION additionally
+        // requires the preview menu's column separator (IsMenuOptionCaret below), because a real
+        // draft may legitimately start "2. fix the tests".
+        inline bool IsNumberedOptionShape(std::wstring_view postMarker) noexcept
         {
-            // "N. " (1-3 digits, a dot, then whitespace-or-end) right after the marker + separator.
             size_t p = 0;
             while (p < postMarker.size() && IsWs(postMarker[p]))
             {
@@ -199,9 +234,14 @@ namespace Agentmaster
                 return false;
             }
             ++p;
-            if (p < postMarker.size() && !IsWs(postMarker[p]))
+            return p >= postMarker.size() || IsWs(postMarker[p]); // "2.5x" etc. -- not an option number
+        }
+
+        inline bool IsMenuOptionCaret(std::wstring_view rawRow, std::wstring_view postMarker) noexcept
+        {
+            if (!IsNumberedOptionShape(postMarker))
             {
-                return false; // "2.5x" etc. -- not an option number
+                return false;
             }
             // A column-separator U+2502-family glyph with real content after it on the same row.
             for (size_t i = 0; i < rawRow.size(); ++i)
@@ -296,6 +336,7 @@ namespace Agentmaster
         int caret = -1;
         int bottom = -1;
         size_t markerPos = 0; // index of the marker glyph within the caret row (after ws/border skip)
+        bool sawMenuCaret = false; // a rejected candidate READ like a menu row -> the MenuOpen verdict when no real box exists
         for (int i = n - 1; i >= 0; --i)
         {
             const auto t = RTrim(rows[i]);
@@ -337,6 +378,14 @@ namespace Agentmaster
             }
             if (!hasTop)
             {
+                // A rejected caret whose post-marker text reads "N. <label>" is a PLAIN menu's
+                // selection cursor (question text above, no rule): the AskUserQuestion / permission
+                // menu shape. Only a VERDICT signal (R5 -- MenuOpen when no real box exists below);
+                // rejection itself stays exactly as narrow as before.
+                if (IsNumberedOptionShape(t.substr(pos + 1)))
+                {
+                    sawMenuCaret = true;
+                }
                 continue; // not the box -- keep scanning upward
             }
 
@@ -344,6 +393,7 @@ namespace Agentmaster
             // preview menu's selection cursor even when a (mis-)anchored rule sits above it.
             if (IsMenuOptionCaret(t, t.substr(pos + 1)))
             {
+                sawMenuCaret = true;
                 continue;
             }
 
@@ -370,7 +420,13 @@ namespace Agentmaster
         }
         if (caret < 0)
         {
-            return out; // no rule-wrapped input box visible at all
+            // No rule-wrapped input box visible at all. The verdict tells the two shapes apart (R5):
+            // a menu-shaped caret among the rejected candidates => a menu is (most plausibly) open
+            // and would EAT a paste / SELECT on a lone Enter; anything else is a bare NoBox (modal /
+            // render drift / box taller than the window). Both are ADVISORY -- consumers act on them
+            // only for a session at rest (a running turn legitimately scrolls menu echoes around).
+            out.state = sawMenuCaret ? InputBoxState::MenuOpen : InputBoxState::NoBox;
+            return out;
         }
 
         out.boxFound = true;
@@ -434,6 +490,7 @@ namespace Agentmaster
             text.pop_back();
         }
         out.text = std::move(text);
+        out.state = out.text.empty() ? InputBoxState::Empty : InputBoxState::Draft;
         return out;
     }
 
