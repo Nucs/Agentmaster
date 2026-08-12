@@ -365,6 +365,7 @@ namespace Agentmaster
                             p.attempts += 1;
                             p.echoed = false; // await this injection's UserPromptSubmit echo
                             p.enterRetries = 0; // fresh send -> reset the Enter-retry watch (Scheduler.h)
+                            p.injectedAtUnixMs = 0; // fresh send -> injection evidence pending (DELIVERY.md §12)
                             ss.autorunner.autoSendsThisRun += 1;
                             ss.pendingConfirmPromptId.clear();
                             break;
@@ -405,6 +406,7 @@ namespace Agentmaster
                                 {
                                     p.status = PromptStatus::Pending;
                                     p.echoed = false;
+                                    p.injectedAtUnixMs = 0; // DELIVERY.md §12
                                     if (p.attempts > 0)
                                     {
                                         p.attempts -= 1;
@@ -601,6 +603,7 @@ namespace Agentmaster
                         p.attempts += 1;
                         p.echoed = false; // await this injection's UserPromptSubmit echo
                         p.enterRetries = 0; // fresh send -> reset the Enter-retry watch (Scheduler.h)
+                        p.injectedAtUnixMs = 0; // fresh send -> injection evidence pending (DELIVERY.md §12)
                         ss.autorunner.autoSendsThisRun += 1;
                     }
                     else if (!confirm)
@@ -637,6 +640,7 @@ namespace Agentmaster
                         {
                             p.status = PromptStatus::Pending;
                             p.echoed = false;
+                            p.injectedAtUnixMs = 0; // DELIVERY.md §12
                             if (p.attempts > 0)
                             {
                                 p.attempts -= 1;

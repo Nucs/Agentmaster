@@ -424,3 +424,112 @@ immediately; the fill pumps content-verify. Off-switch `AppSettings::verifySendB
 rides the next deploy cycle. Replaying §11's shape against the new pipeline: the double-read
 answering Empty is now followed by a LOCKED fill whose read-back sees the 4K materialize →
 `Foreign` → no CR, insertion undone, content recorded on the dots — the merge cannot commit.
+
+## 12. Incident 4 — give-up-to-Off fired on FALSE signals and overrode a manual Full (fixed: confirm-and-retry)
+
+**The report (2026-08-12, the same experiment tab `1bf4bd83`, ~3.5h after R4–R8 deployed):**
+"the state of a tab moves to **Off** instead of staying **Full** … we are fully capable of
+reading the entire string in the prompt box, clearing it, filling it back — all 100% successful —
+we just have to keep **confirming** the transaction of inputting a string was successful, and
+**if not, retry** — instead of giving up and moving the autorunner to Off." Read as a design
+directive: the R4 input transaction (fill → read-back → CR) is trusted; the TERMINAL give-ups
+around it are not.
+
+R4–R8 had added FOUR new mode→Off sites on top of the three that pre-dated them. The live log
+showed two of them firing **on false signals** within one minute of each other:
+
+**Episode A — the R5 box-not-visible escalation overrode an explicit manual re-arm.**
+```
+20:43:10.775  [Stop] 1bf4bd83                              turn complete
+20:43:14.003  [nav] autorunner 1bf4bd83 -> Semi (overlay)  the human cycling the mode
+20:43:14.005  [advance-skip] (input box not visible)       recorded box state was ALREADY NoBox
+20:43:16.079  [nav] autorunner 1bf4bd83 -> Full (overlay)  the human's explicit GO
+20:44:04.505  [send-verify] 1bf4bd83 autorunner paused (no parseable input box for >60s …)
+```
+The NoBox clock (`pendingBoxStateUnixMs`) had been running from ~20:43:04 — BEFORE the re-arm —
+so the escalation measured "60 s ignored" from a stamp that predated the human's GO and flipped
+their Full back to Off 48 s after they set it. Compounding it: a NoBox verdict is **not always a
+fault** — the detector's `MenuOpen` verdict keys on the NUMBERED option-row shape (`❯ 1. Yes`),
+so a parked NON-numbered menu (the rewind / slash-command class) falls through to NoBox — the
+same "legitimately parks for hours" class MenuOpen was always escalation-exempt for. (Whether
+Episode A's NoBox was a real parked menu or a render drift is unresolved — the ConPTY probe
+harness had an input-side regression that day — but the fix is correct under either truth.)
+
+**Episode B — the lost-send verdict fired ONE SECOND after gate expiry on a delivery that was
+still alive, and the "lost" prompt then delivered fine.**
+```
+20:40:41.7    [rehome] … resume claude 1bf4bd83            a 51-tab window restore, ~85 claudes live
+20:40:45.239  [send] 1bf4bd83 #25                          mark-Sent, delivery ACCEPTED
+   (the delivery coroutine sits queued behind the restore-wedged UI dispatcher…)
+20:42:01.591  [lost-send] … prompt a85dfc20 "lol again 5s" (marked Failed, autorunner paused)
+20:42:08.939  [delivered] 1bf4bd83 prompt a85dfc20 (chars=12, verified=exact)
+20:42:09.494  [ups] … -> recorded as Typed                 the echo found no Sent prompt (Failed) ⇒ duplicate row
+20:42:14.145  [startup] splash: foreground terminal connected (90219ms)
+```
+Mark-Sent and the INJECTION are separated by the hosting window's dispatcher, and that gap was
+measured at **83 s** on a loaded restore — longer than the gate's 75 s expiry belt. The verdict
+required only Sent + unechoed + settled + gate-closed, so the expired gate un-held it at 76 s;
+the delivery then executed anyway (nothing re-checked the prompt's status), submitted a message
+the system had already written off, and the echo — finding no Sent row — double-recorded it as
+Typed. Every element of the verdict's premise ("delivered but never became a message") was
+false: it had not yet been delivered at all.
+
+### The fix — confirm-and-retry, never override a human, terminal only on real evidence
+
+**Injection evidence (`QueuedPrompt::injectedAtUnixMs`, transient).** Every seam that actually
+writes a prompt's bytes to the ConPTY (the verified CR commit, the legacy `plainSend`, the
+registry's no-submitter direct inject) stamps it via `SessionRegistry::MarkPromptInjected`;
+every mark-Sent/rollback seam resets it. `DecideLostSend` now REQUIRES it, and the settle runs
+from `max(sentAt, injectedAt)` — a late injection gets its full echo window. The terminal
+verdict (Failed + autorunner paused, unchanged) is thereby reserved for the case it was designed
+for: a prompt that demonstrably reached the terminal and demonstrably never became a message
+(the `#6` dialog-consumed shape — which still carries injection evidence).
+
+**The undelivered-send RECLAIM (`DecideUndeliveredReclaim` + the scanner's `[send-reclaim]`).**
+A Sent prompt with NO injection evidence whose gate claim has lapsed is rolled back to
+**Pending** — no Failed, no pause, the advance's notify retries it. Unconditionally safe:
+nothing was ever typed, so nothing can double. This is the directive's retry, applied at the one
+place a retry is provably harmless. (State-independent on purpose — reclaiming promptly is also
+what disarms a zombie delivery before it could fire mid-turn.)
+
+**The zombie-delivery abort (the per-attempt gate tag + the top guard).** `SubmitPrompt` stamps
+a monotonic `submitNonce` into the submission, so each delivery ATTEMPT owns a unique gate tag
+(`DeliveryGateTagFor` = `promptId#nonce`) — a reclaim + resend of one prompt mints a NEW tag.
+`_SubmitPromptWithDraftSwapImpl`'s first act after its dispatcher hop is now a STALE-DELIVERY
+GUARD: the prompt must still be Sent and `RevalidateDeliveryGate` must re-assert THIS attempt's
+claim (an expired-but-unreclaimed claim revives — the holder was alive, merely starved; a
+reclaimed one refuses ⇒ abort, type nothing, touch nothing). The verified injector re-asserts
+the claim before each fill and — decisively — immediately before the irreversible CR
+(`_InjectPromptVerified` return 3 = stale abort, no rollback: the prompt belongs to whichever
+newer attempt owns the claim). Under Episode B's replay: the reclaim rolls the prompt back at
+~76 s, the advance resends (new tag), the zombie wakes at 83 s, fails its top guard, and exactly
+one carrier delivers.
+
+**The R5 escalation is DEFANGED into a once-per-episode WARNING (`ShouldWarnOnBoxNotVisible`).**
+It no longer touches the mode — `DecideAdvance`'s NoBox hold already parks the queue, and
+`SetPendingBoxState`'s blocked→unblocked notify already self-resumes it the instant a box
+renders, so flipping Off bought nothing except robbing the user's setting and requiring a manual
+re-arm for a state that heals itself. The scanner logs the `[send-verify] … queued prompts HELD`
+warning once per NoBox episode (deduped on the stamp in `ScanState::boxNotVisibleWarnedStamp`).
+**And a manual Off→Semi/Full re-arm now RE-STAMPS `pendingBoxStateUnixMs`** (both arming
+surfaces — the Manager header toggle and the overlay cycle, the question-latch-clear precedent),
+so no automatic window is ever measured from before a human's explicit GO. The state itself is
+deliberately NOT cleared on re-arm: a genuinely unreadable box must keep holding until the scan
+sees a box again (~one tick when it was a phantom).
+
+**The R4 verify-strike terminal keeps the MODE.** `kSendVerifyMaxFills` 2 → 3 (more inner
+confirm-and-retry — livelock-free, the fill loop never touches the advance trigger), and the
+2-strike terminal still marks the prompt Failed (bounded — never the same doomed verify at
+advance cadence, the RC2 shape) but no longer pauses the autorunner: a REFUSED merge is the
+protection working, not a fault to punish the user's mode for, and a persistent wall is held
+upstream by the strike-free pre-flight decline + the recorded box state. The paths that DO still
+pause: a POST-COMMIT `[merge-detected]` (a real mangled message reached the transcript), the
+Enter-retry give-up (3 verified presses into a readable box that ignored them), stop-on-error,
+and the evidence-backed `[lost-send]` — each a real, human-worthy fault, none reachable by a
+merely-slow delivery or an unreadable render any more.
+
+Coverage: the §12 conjuncts + reclaim matrix + `MarkPromptInjected` / `RevalidateDeliveryGate` /
+nonce-tag uniqueness + the re-arm re-stamp window in `TestLostSendReconciler` /
+`TestVerifiedPlacement` (harness **3244/3244**); `TerminalAppLib` compiles green. Live
+verification (the Episode-A gesture: Stop → set Full → wait, tab stays Full) rides the next
+deploy cycle.

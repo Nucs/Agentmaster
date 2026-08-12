@@ -341,6 +341,16 @@ namespace Agentmaster
         // the turn has not started within kEnterRetryIntervalMs, re-sends a lone Enter — capped at
         // kEnterRetryMax (Scheduler.h). Reset to 0 at each fresh send.
         uint32_t enterRetries{ 0 };
+        // Transient (NOT persisted): when this prompt's bytes ACTUALLY reached the ConPTY (the
+        // [delivered] seams — the verified send's CR commit, the legacy plain paste+CR, and the
+        // registry's no-submitter direct inject), 0 == never injected. INJECTION EVIDENCE for the
+        // lost-send verdict (DELIVERY.md §12): mark-Sent ("accepted for delivery") and the injection
+        // itself can be MINUTES apart when the hosting window's dispatcher is backlogged (measured
+        // 83s on a 51-tab restore — the 20:40:45→20:42:08 incident), so "Sent + settled + no echo"
+        // alone cannot distinguish "delivered but vanished" (terminal — Failed) from "never yet
+        // delivered" (retryable — reclaimed to Pending). Reset to 0 at each fresh send/rollback;
+        // deliberately NOT reset by an Enter-retry press (the fill it retries WAS injected).
+        int64_t injectedAtUnixMs{ 0 };
     };
 
     // Agentmaster (bounded queue history): the queue records EVERY message a session received
@@ -863,6 +873,13 @@ namespace Agentmaster
         std::wstring promptId;
         std::wstring text;
         bool refundAutoSend{ false };
+        // Stamped by SessionRegistry::SubmitPrompt (a process-monotonic sequence) BEFORE the gate
+        // opens, so each delivery ATTEMPT owns a UNIQUE gate tag (DeliveryGateTagFor below). Without
+        // it a reclaimed-then-resent prompt reused the SAME tag (== promptId), and a stale delivery
+        // that had sat in a backlogged dispatcher past the gate expiry could "revalidate" the FRESH
+        // resend's claim as its own — two carriers of one prompt both believing they own the box
+        // (DELIVERY.md §12). 0 == not stamped (a caller-constructed submission before the seam).
+        int64_t submitNonce{ 0 };
     };
 
     // Agentmaster (DELIVERY.md — the DELIVERY GATE): the bounded lifetime of a per-session
@@ -884,10 +901,19 @@ namespace Agentmaster
     // gate) and the hosting window's swap (which closes it on resolve) must derive the SAME tag
     // from the same submission, or the close would be an owner-mismatch no-op and the gate would
     // sit open until the expiry belt. promptId is never empty on today's callers; the fallback
-    // keeps a hypothetical id-less submission closable.
+    // keeps a hypothetical id-less submission closable. The submitNonce suffix makes the tag
+    // unique PER DELIVERY ATTEMPT (not per prompt): a reclaim + resend of the same prompt mints a
+    // new tag, so a stale first delivery can never revalidate the resend's claim as its own and
+    // the two can never interleave on one box (DELIVERY.md §12; nonce 0 — a pre-seam submission —
+    // keeps the historical per-prompt tag, which is also what the older tests pin).
     inline std::wstring DeliveryGateTagFor(const PromptSubmission& s)
     {
-        return s.promptId.empty() ? std::wstring{ L"#send" } : s.promptId;
+        std::wstring tag = s.promptId.empty() ? std::wstring{ L"#send" } : s.promptId;
+        if (s.submitNonce != 0)
+        {
+            tag += L"#" + std::to_wstring(s.submitNonce);
+        }
+        return tag;
     }
 
     struct ApprovalPolicy
@@ -1188,7 +1214,7 @@ namespace Agentmaster
         // TRANSIENT (never persisted — a box state can't survive a restart).
         InputBoxState pendingBoxState{ InputBoxState::Unknown };
         // When pendingBoxState last CHANGED (system-clock ms) — the anchor for the scanner's
-        // box-not-visible escalation (ShouldPauseOnBoxNotVisible: NoBox persisting past the window
+        // box-not-visible warning (ShouldWarnOnBoxNotVisible: NoBox persisting past the window
         // with queued work ⇒ pause the autorunner LOUDLY instead of holding silently forever).
         // TRANSIENT.
         int64_t pendingBoxStateUnixMs{ 0 };

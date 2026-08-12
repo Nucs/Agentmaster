@@ -1591,12 +1591,18 @@ void TestDeliveryGate()
         CHECK(injected.load() == 1, "submit: the fallback inject ran exactly once");
         CHECK(!reg.DeliveryGateHeld(L"sub"), "submit: the fallback path closes the gate synchronously");
         // Submitter path: `accepted` keeps the gate OPEN — the hosting window owns the close.
-        reg.SetPromptSubmitter(L"sub", [](const ::Agentmaster::PromptSubmission&) { return true; });
+        // §12: the submitter receives the NONCE-STAMPED copy, and the window's close derives its
+        // tag from THAT copy (the caller-side original — nonce 0 — would be a stale-close no-op).
+        ::Agentmaster::PromptSubmission acceptedSub;
+        reg.SetPromptSubmitter(L"sub", [&](const ::Agentmaster::PromptSubmission& ps) { acceptedSub = ps; return true; });
         CHECK(reg.SubmitPrompt({ L"sub", L"pY", L"text", false }), "submit: submitter accepted");
+        CHECK(acceptedSub.submitNonce != 0, "submit: the submitter receives the nonce-stamped copy (§12)");
         CHECK(reg.DeliveryGateHeld(L"sub"), "submit: accepted keeps the gate open until the swap resolves");
         CHECK(!reg.SubmitPrompt({ L"sub", L"pZ", L"text", false }), "submit: a second delivery is declined while the first is unresolved");
         reg.CloseDeliveryGate(L"sub", ::Agentmaster::DeliveryGateTagFor({ L"sub", L"pY", L"text", false }));
-        CHECK(!reg.DeliveryGateHeld(L"sub"), "submit: the window's owner-tagged close releases");
+        CHECK(reg.DeliveryGateHeld(L"sub"), "submit: a nonce-less (caller-shaped) close is a stale no-op - it can never clear the attempt's claim");
+        reg.CloseDeliveryGate(L"sub", ::Agentmaster::DeliveryGateTagFor(acceptedSub));
+        CHECK(!reg.DeliveryGateHeld(L"sub"), "submit: the window's owner-tagged close (the stamped copy's tag) releases");
         // A submitter that REFUSES closes the gate right here (nothing was or will be sent).
         reg.SetPromptSubmitter(L"sub", [](const ::Agentmaster::PromptSubmission&) { return false; });
         CHECK(!reg.SubmitPrompt({ L"sub", L"pW", L"text", false }), "submit: submitter refusal reads not-accepted");
@@ -1725,15 +1731,35 @@ void TestLostSendReconciler()
             p.origin = PromptOrigin::Autorun;
             p.echoed = false;
             p.sentAtUnixMs = T;
+            p.injectedAtUnixMs = T; // §12: the LOST verdict needs INJECTION evidence (the bytes reached the pty)
             s.queue.push_back(p);
             return s;
         };
-        // The verdict shape: at rest + settled + unechoed + gate closed -> LOST.
+        // The verdict shape: at rest + settled + unechoed + INJECTED + gate closed -> LOST.
         {
             const auto s = mkLost(SessionState::WaitingForInput);
             const auto lost = DecideLostSend(s, T + kLostSendSettleMs);
-            CHECK(lost.size() == 1 && lost[0] == L"l1", "lost: at-rest + settled + unechoed -> LOST");
+            CHECK(lost.size() == 1 && lost[0] == L"l1", "lost: at-rest + settled + unechoed + injected -> LOST");
             CHECK(DecideLostSend(mkLost(SessionState::Idle), T + kLostSendSettleMs).size() == 1, "lost: Idle counts as at rest too");
+        }
+        // §12 — the INJECTION-EVIDENCE conjunct: a Sent prompt whose delivery never actually typed
+        // (injectedAtUnixMs == 0 — e.g. still queued behind a starved dispatcher) is NEVER lost.
+        // The live incident: mark-Sent 20:40:45, gate expired at 75s, the old verdict fired at 76s,
+        // and the delivery then landed verified=exact at 83s — a false positive that Failed the
+        // prompt, paused the autorunner, and double-recorded the message as Typed.
+        {
+            auto s = mkLost(SessionState::WaitingForInput);
+            s.queue[0].injectedAtUnixMs = 0;
+            CHECK(DecideLostSend(s, T + kLostSendSettleMs).empty(), "lost: never judged without injection evidence (the delivery may still be queued)");
+            CHECK(DecideLostSend(s, T + 10 * kLostSendSettleMs).empty(), "lost: however long it settles, an uninjected send is a reclaim case, not a loss");
+        }
+        // §12 — the settle runs from the INJECTION too: an injection that landed late (the starved
+        // dispatcher finally drained) gets its own full echo window before any verdict.
+        {
+            auto s = mkLost(SessionState::WaitingForInput);
+            s.queue[0].injectedAtUnixMs = T + 60000; // injected 60s after the mark (the measured shape)
+            CHECK(DecideLostSend(s, T + 60000 + kLostSendSettleMs - 1).empty(), "lost: a late injection restarts the settle (its echo deserves the full window)");
+            CHECK(DecideLostSend(s, T + 60000 + kLostSendSettleMs).size() == 1, "lost: settled past the late injection -> LOST");
         }
         // Each conjunct's negation holds the verdict:
         {
@@ -1791,6 +1817,131 @@ void TestLostSendReconciler()
         }
     }
 
+    // ---- DecideUndeliveredReclaim (§12): the retryable sibling — accepted, never injected,
+    //      claim lapsed -> roll back to Pending and RETRY (nothing typed => nothing can double) ----
+    {
+        const auto mkUndelivered = [&]() {
+            SessionInfo s = MakeSession(L"und", SessionState::WaitingForInput);
+            s.live = true;
+            QueuedPrompt p;
+            p.id = L"u1";
+            p.label = L"the stalled one";
+            p.text = L"lol again 5s";
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = T;
+            p.injectedAtUnixMs = 0; // accepted, never injected — the dispatcher-starved shape
+            s.queue.push_back(p);
+            return s;
+        };
+        {
+            const auto s = mkUndelivered();
+            const auto und = DecideUndeliveredReclaim(s, T + kLostSendSettleMs);
+            CHECK(und.size() == 1 && und[0] == L"u1", "reclaim: settled + uninjected + gate closed -> reclaimed for a retry");
+        }
+        {
+            auto s = mkUndelivered();
+            s.deliveryPromptId = L"u1#7"; // the delivery holds (or re-validated) its claim
+            s.deliveryOpenedUnixMs = T + kLostSendSettleMs - 1000;
+            CHECK(DecideUndeliveredReclaim(s, T + kLostSendSettleMs).empty(), "reclaim: an OPEN gate means the delivery is alive - never snatch it back");
+        }
+        {
+            auto s = mkUndelivered();
+            s.queue[0].injectedAtUnixMs = T + 100; // it DID inject — the lost verdict's case now
+            CHECK(DecideUndeliveredReclaim(s, T + kLostSendSettleMs).empty(), "reclaim: an injected send is never reclaimed (a resend could double it)");
+        }
+        {
+            const auto s = mkUndelivered();
+            CHECK(DecideUndeliveredReclaim(s, T + kLostSendSettleMs - 1).empty(), "reclaim: not before the settle (the accept may still be marshalling)");
+        }
+        {
+            auto s = mkUndelivered();
+            s.live = false;
+            CHECK(DecideUndeliveredReclaim(s, T + kLostSendSettleMs).empty(), "reclaim: an archived record is never judged");
+        }
+        {
+            // Deliberately STATE-INDEPENDENT (unlike the lost verdict): nothing was typed, so the
+            // rollback is safe mid-turn too — and reclaiming promptly is what disarms a zombie
+            // delivery before it could fire into a running turn.
+            auto s = mkUndelivered();
+            s.state = SessionState::Running;
+            CHECK(DecideUndeliveredReclaim(s, T + kLostSendSettleMs).size() == 1, "reclaim: fires mid-turn too (nothing typed => state-independent)");
+        }
+        {
+            auto s = mkUndelivered();
+            s.queue[0].echoed = true; // it became a message after all (a pull consume raced us)
+            CHECK(DecideUndeliveredReclaim(s, T + kLostSendSettleMs).empty(), "reclaim: an echoed prompt is delivered, never reclaimed");
+        }
+    }
+
+    // ---- §12 registry seams: MarkPromptInjected + RevalidateDeliveryGate + the nonce tags ----
+    {
+        SessionRegistry reg;
+        auto s = MakeSession(L"inj", SessionState::WaitingForInput);
+        s.live = true;
+        reg.Upsert(s);
+        reg.Update(L"inj", [&](SessionInfo& ss) {
+            QueuedPrompt p;
+            p.id = L"j1";
+            p.text = L"go";
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = NowMsTest();
+            ss.queue.push_back(p);
+        });
+        reg.MarkPromptInjected(L"inj", L"j1");
+        auto after = reg.Get(L"inj");
+        CHECK(after && after->queue[0].injectedAtUnixMs != 0, "inject-stamp: a Sent prompt takes the injection stamp");
+        reg.Update(L"inj", [&](SessionInfo& ss) { ss.queue[0].status = PromptStatus::Failed; ss.queue[0].injectedAtUnixMs = 0; });
+        reg.MarkPromptInjected(L"inj", L"j1");
+        after = reg.Get(L"inj");
+        CHECK(after && after->queue[0].injectedAtUnixMs == 0, "inject-stamp: a no-longer-Sent prompt is never stamped");
+        reg.MarkPromptInjected(L"nosuch", L"j1"); // must not throw / touch anything
+        reg.MarkPromptInjected(L"inj", L"");
+
+        // RevalidateDeliveryGate: the owner re-stamps (even an EXPIRED claim — the holder was
+        // alive, merely starved); a non-owner (reclaimed / closed) refuses.
+        CHECK(reg.TryOpenDeliveryGate(L"inj", L"j1#1"), "revalidate: open a claim");
+        CHECK(reg.RevalidateDeliveryGate(L"inj", L"j1#1"), "revalidate: the owner re-asserts its live claim");
+        CHECK(!reg.RevalidateDeliveryGate(L"inj", L"j1#2"), "revalidate: a different tag never adopts the claim");
+        // Expire it (backdate the stamp), then revalidate: the owner REVIVES it...
+        reg.Update(L"inj", [&](SessionInfo& ss) { ss.deliveryOpenedUnixMs = NowMsTest() - kDeliveryGateTimeoutMs - 1000; });
+        CHECK(!reg.DeliveryGateHeld(L"inj"), "revalidate: an expired claim reads closed to everyone else");
+        CHECK(reg.RevalidateDeliveryGate(L"inj", L"j1#1"), "revalidate: the starved-but-alive owner revives its expired claim");
+        CHECK(reg.DeliveryGateHeld(L"inj"), "revalidate: ...and the gate reads open again (the deciders hold)");
+        // ...but once a NEWER attempt reclaims the expired gate, the old owner is locked out.
+        reg.Update(L"inj", [&](SessionInfo& ss) { ss.deliveryOpenedUnixMs = NowMsTest() - kDeliveryGateTimeoutMs - 1000; });
+        CHECK(reg.TryOpenDeliveryGate(L"inj", L"j1#2"), "revalidate: a newer attempt reclaims the expired gate");
+        CHECK(!reg.RevalidateDeliveryGate(L"inj", L"j1#1"), "revalidate: the superseded owner can never take the claim back");
+        reg.CloseDeliveryGate(L"inj", L"j1#2");
+        CHECK(!reg.RevalidateDeliveryGate(L"inj", L"j1#2"), "revalidate: a closed gate refuses (nothing to revive)");
+
+        // The nonce tag rule (DeliveryGateTagFor over a stamped submission).
+        {
+            ::Agentmaster::PromptSubmission sub{ L"inj", L"pid-1", L"text", false };
+            sub.submitNonce = 7;
+            CHECK(DeliveryGateTagFor(sub) == L"pid-1#7", "gate tag: a stamped submission carries its attempt nonce");
+        }
+        // SubmitPrompt stamps DISTINCT nonces — two attempts of ONE prompt own two different tags
+        // (the stale-carrier lockout above is what this uniqueness feeds).
+        {
+            std::vector<::Agentmaster::PromptSubmission> seen;
+            reg.SetPromptSubmitter(L"inj", [&](const ::Agentmaster::PromptSubmission& ps) {
+                seen.push_back(ps);
+                return true;
+            });
+            CHECK(reg.SubmitPrompt({ L"inj", L"pid-9", L"text", false }), "nonce: first attempt accepted");
+            reg.CloseDeliveryGate(L"inj", DeliveryGateTagFor(seen.at(0)));
+            CHECK(reg.SubmitPrompt({ L"inj", L"pid-9", L"text", false }), "nonce: second attempt of the SAME prompt accepted");
+            reg.CloseDeliveryGate(L"inj", DeliveryGateTagFor(seen.at(1)));
+            CHECK(seen.size() == 2 && seen[0].submitNonce != 0 && seen[1].submitNonce != 0 &&
+                      DeliveryGateTagFor(seen[0]) != DeliveryGateTagFor(seen[1]),
+                  "nonce: each delivery attempt owns a UNIQUE gate tag");
+        }
+    }
+
     // ---- the `#6` shape end-to-end at the registry level (what the scanner's pass sees) ----
     {
         SessionRegistry reg;
@@ -1806,6 +1957,7 @@ void TestLostSendReconciler()
             p.origin = PromptOrigin::Autorun;
             p.echoed = false;
             p.sentAtUnixMs = sentAt;
+            p.injectedAtUnixMs = sentAt; // #6's paste+CR DID reach the pty — the dialog ate it (§12: a real loss has injection evidence)
             ss.queue.push_back(p);
         });
         // While the blocking turn runs: transcript lines from THAT turn arrive (another message's
@@ -2949,7 +3101,14 @@ void TestVerifiedPlacement()
         CHECK(DecideEnterRetry(mk(InputBoxState::Unknown), NowMsTest()).action == EnterRetryAction::Retry, "watchdog: Unknown never strands the rescue");
     }
 
-    // ---- R5: the box-not-visible escalation ----
+    // ---- R5 (defanged by §12 into a WARNING): the box-not-visible predicate ----
+    // The apply side no longer flips the autorunner mode — DecideAdvance's hold + the
+    // blocked->unblocked notify already park + self-resume the plan; the predicate now gates a
+    // once-per-episode [send-verify] warning (the scanner dedups on pendingBoxStateUnixMs).
+    // A manual Off->Semi/Full re-arm RE-STAMPS pendingBoxStateUnixMs (both arming surfaces), so
+    // the 60s window can never be measured from before the human's explicit GO — the live
+    // incident: the clock ran from before the re-arm and the old escalation overrode a manual
+    // Full 48s after it was set.
     {
         auto mk = [&]() {
             SessionInfo s = MakeSession(L"esc", SessionState::WaitingForInput);
@@ -2963,31 +3122,40 @@ void TestVerifiedPlacement()
             s.queue.push_back(p);
             return s;
         };
-        CHECK(ShouldPauseOnBoxNotVisible(mk(), NowMsTest()), "escalate: persistent NoBox + queued work + active autorunner pauses");
+        CHECK(ShouldWarnOnBoxNotVisible(mk(), NowMsTest()), "warn: persistent NoBox + queued work + active autorunner warns");
         {
             auto s = mk();
             s.pendingBoxState = InputBoxState::MenuOpen;
-            CHECK(!ShouldPauseOnBoxNotVisible(s, NowMsTest()), "escalate: MenuOpen never escalates (a menu legitimately parks)");
+            CHECK(!ShouldWarnOnBoxNotVisible(s, NowMsTest()), "warn: MenuOpen never warns (a menu legitimately parks)");
         }
         {
             auto s = mk();
             s.pendingBoxStateUnixMs = NowMsTest() - 1000;
-            CHECK(!ShouldPauseOnBoxNotVisible(s, NowMsTest()), "escalate: a fresh NoBox holds, not pauses");
+            CHECK(!ShouldWarnOnBoxNotVisible(s, NowMsTest()), "warn: a fresh NoBox holds quietly");
+        }
+        {
+            // The re-arm re-stamp shape: a NoBox older than the window, re-stamped by an explicit
+            // Off->Full re-arm, reads fresh again — the warning (and formerly the pause) can never
+            // fire against a clock that predates the human's GO.
+            auto s = mk();
+            s.pendingBoxStateUnixMs = NowMsTest(); // == what the arming surfaces write
+            CHECK(!ShouldWarnOnBoxNotVisible(s, NowMsTest() + kBoxNotVisibleEscalateMs - 1), "warn: a re-arm re-stamp restarts the window");
+            CHECK(ShouldWarnOnBoxNotVisible(s, NowMsTest() + kBoxNotVisibleEscalateMs), "warn: ...and a NoBox persisting a FULL window past the re-arm still warns");
         }
         {
             auto s = mk();
             s.autorunner.mode = AutorunnerMode::Off;
-            CHECK(!ShouldPauseOnBoxNotVisible(s, NowMsTest()), "escalate: mode Off self-dedupes");
+            CHECK(!ShouldWarnOnBoxNotVisible(s, NowMsTest()), "warn: mode Off has nothing held worth warning for");
         }
         {
             auto s = mk();
             s.queue.clear();
-            CHECK(!ShouldPauseOnBoxNotVisible(s, NowMsTest()), "escalate: no queued work, nothing held, no pause");
+            CHECK(!ShouldWarnOnBoxNotVisible(s, NowMsTest()), "warn: no queued work, nothing held, no warning");
         }
         {
             auto s = mk();
             s.state = SessionState::Running;
-            CHECK(!ShouldPauseOnBoxNotVisible(s, NowMsTest()), "escalate: never judged mid-turn");
+            CHECK(!ShouldWarnOnBoxNotVisible(s, NowMsTest()), "warn: never judged mid-turn");
         }
     }
 

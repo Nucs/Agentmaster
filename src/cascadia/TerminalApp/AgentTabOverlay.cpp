@@ -697,6 +697,18 @@ namespace winrt::TerminalApp::implementation
                 // question" hold no longer applies; the next question-ending Stop re-latches it.
                 // (== _OnAutorunnerChanged — the two arming paths must stay in step.)
                 s.lastMessageWasQuestion = false;
+                // Agentmaster (DELIVERY.md §12): the re-arm also RE-STAMPS a blocked box-state clock,
+                // so no automatic path ever measures a "held for N seconds" window from before the
+                // human's explicit GO (== _OnAutorunnerChanged — kept in step). The state itself is
+                // deliberately NOT cleared: a genuinely unreadable box must keep holding the advance
+                // until the scan sees a box again.
+                if (s.pendingBoxState == ::Agentmaster::InputBoxState::NoBox ||
+                    s.pendingBoxState == ::Agentmaster::InputBoxState::MenuOpen)
+                {
+                    s.pendingBoxStateUnixMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  std::chrono::system_clock::now().time_since_epoch())
+                                                  .count();
+                }
             }
         });
         _Refresh(); // immediate repaint (the async registry observer also refreshes)

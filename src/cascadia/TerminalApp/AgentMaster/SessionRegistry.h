@@ -250,6 +250,21 @@ namespace Agentmaster
         bool TryOpenDeliveryGate(const std::wstring& id, const std::wstring& tag);
         void CloseDeliveryGate(const std::wstring& id, const std::wstring& tag);
         bool DeliveryGateHeld(const std::wstring& id) const;
+        // Agentmaster (DELIVERY.md §12): re-assert an in-flight delivery's OWN claim. True + a fresh
+        // openedUnixMs stamp iff the gate's tag is still `tag` — INCLUDING one that expired while the
+        // delivery sat in a backlogged dispatcher (the owner is alive after all; re-stamping revives
+        // the claim so the deciders read "delivery in flight" again). False when the tag no longer
+        // owns it (reclaimed / re-opened by a newer attempt — the caller must ABORT: another carrier
+        // owns the box now) or the gate is closed. Called at the delivery's top guard and before the
+        // irreversible CR commit, so a stale delivery can never type into a box it no longer owns.
+        bool RevalidateDeliveryGate(const std::wstring& id, const std::wstring& tag);
+        // Agentmaster (DELIVERY.md §12 — INJECTION EVIDENCE): stamp QueuedPrompt::injectedAtUnixMs
+        // the moment a prompt's bytes actually reach the ConPTY (the [delivered] seams). QUIET
+        // bookkeeping (no notify — the echo/turn machinery carries the visible consequences); no-op
+        // for an unknown id/prompt or one no longer Sent. This is what lets the lost-send verdict
+        // (DecideLostSend) tell "delivered but vanished" from "accepted but never yet delivered"
+        // (DecideUndeliveredReclaim) instead of failing a slow delivery one second past gate expiry.
+        void MarkPromptInjected(const std::wstring& id, const std::wstring& promptId);
 
         // Return a Sent prompt to Pending — the shared body of the Rule-#4 rollback every send path
         // already performed inline, now also reachable from the hosting window when an accepted
@@ -304,5 +319,9 @@ namespace Agentmaster
         // Monotonic counter for ids of `Typed` prompts the registry synthesizes from
         // UserPromptSubmit (the registry has no GUID dependency; the id is local-unique).
         uint64_t _typedSeq{ 0 };
+        // Monotonic counter behind PromptSubmission::submitNonce (DELIVERY.md §12) — each delivery
+        // ATTEMPT through SubmitPrompt gets a unique gate tag, so a stale attempt can never
+        // revalidate a newer attempt's claim. Guarded by _mtx (stamped inside SubmitPrompt).
+        int64_t _submitSeq{ 0 };
     };
 }

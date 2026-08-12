@@ -1197,7 +1197,8 @@ namespace Agentmaster
                         for (auto& p : live.queue)
                         {
                             if (p.id == lostId && p.status == PromptStatus::Sent && !p.echoed &&
-                                p.sentAtUnixMs != 0 && (verdictNow - p.sentAtUnixMs) >= kLostSendSettleMs)
+                                p.sentAtUnixMs != 0 && (verdictNow - p.sentAtUnixMs) >= kLostSendSettleMs &&
+                                p.injectedAtUnixMs != 0 && (verdictNow - p.injectedAtUnixMs) >= kLostSendSettleMs)
                             {
                                 p.status = PromptStatus::Failed;
                                 label = p.label;
@@ -1214,34 +1215,76 @@ namespace Agentmaster
                         AppendStateLog(L"hooks.log", line);
                     }
                 }
+
+                // Agentmaster (DELIVERY.md §12 — the UNDELIVERED-SEND reclaim, the lost verdict's
+                // retryable sibling): a Sent prompt whose delivery was ACCEPTED but provably never
+                // INJECTED (injectedAtUnixMs == 0) and whose gate claim has lapsed. Nothing was ever
+                // typed, so a re-send cannot double anything — roll it back to Pending and let the
+                // advance retry (the Update's notify IS the retry trigger). This replaces the old
+                // behavior where the lost verdict — blind to injection — failed such a prompt and
+                // paused the autorunner ONE SECOND after the gate expired, while its delivery was
+                // still queued behind a starved dispatcher (the 20:40:45→20:42:08 incident: the
+                // "lost" prompt then delivered verified=exact and became a duplicate Typed row).
+                // The stale delivery itself aborts at its top guard (the §12 nonce gate tags), so
+                // the reclaim and the zombie can never both deliver.
+                const auto undeliveredIds = DecideUndeliveredReclaim(*fresh, verdictNow);
+                for (const auto& undeliveredId : undeliveredIds)
+                {
+                    bool reclaimed = false;
+                    std::wstring label;
+                    _registry->Update(s.id, [&](SessionInfo& live) {
+                        if (DeliveryGateOpen(live, NowMs()))
+                        {
+                            return; // a delivery re-validated its claim between the decide and this apply — it is alive
+                        }
+                        for (auto& p : live.queue)
+                        {
+                            if (p.id == undeliveredId && p.status == PromptStatus::Sent && !p.echoed &&
+                                p.sentAtUnixMs != 0 && p.injectedAtUnixMs == 0 &&
+                                (verdictNow - p.sentAtUnixMs) >= kLostSendSettleMs)
+                            {
+                                p.status = PromptStatus::Pending;
+                                p.echoed = false;
+                                p.enterRetries = 0;
+                                if (p.attempts > 0)
+                                {
+                                    p.attempts -= 1;
+                                }
+                                label = p.label;
+                                reclaimed = true;
+                            }
+                        }
+                    });
+                    if (reclaimed)
+                    {
+                        const std::wstring line = L"[send-reclaim] " + ShortId(s.id) + L" prompt " + ShortId(undeliveredId) +
+                                                  L" \"" + label + L"\" (accepted for delivery but never injected and the gate lapsed - rolled back to Pending for a retry; autorunner keeps its mode)\n";
+                        AppendStateLog(L"autorunner.log", line);
+                        AppendStateLog(L"hooks.log", line);
+                    }
+                }
             }
 
-            // Agentmaster (DELIVERY_PLAN.md R5 — the box-not-visible ESCALATION): DecideAdvance
-            // holds queued work while the box reads NoBox, and that hold is deliberately silent
-            // (an [advance-skip] line). A NoBox that PERSISTS (a detector/render drift, a modal
-            // parked over the box) must not park a plan invisibly forever — pause the autorunner
-            // LOUDLY instead (the lost-send idiom; the user re-arms after fixing the cause).
-            // Self-deduping: mode Off fails the predicate on the next pass. Fresh-read + re-verify
-            // inside the Update, like the lost-send verdict above.
-            if (ShouldPauseOnBoxNotVisible(s, NowMs())) // snapshot pre-check: nearly always false, so the fresh re-Get is rare
+            // Agentmaster (DELIVERY_PLAN.md R5, defanged by DELIVERY.md §12 — the box-not-visible
+            // WARNING): DecideAdvance holds queued work while the box reads NoBox, and that hold is
+            // deliberately quiet (an [advance-skip] line). A NoBox that PERSISTS (a detector/render
+            // drift, a modal parked over the box) must not park a plan invisibly forever — WARN
+            // loudly, once per NoBox episode. The R5 cut paused the autorunner (mode → Off) here,
+            // and the live incident showed why that is wrong: the NoBox clock ran from BEFORE the
+            // user's explicit Off→Full re-arm, so the escalation overrode a human's GO 48s after
+            // they gave it — for a verdict that is not even always a fault (a parked non-numbered
+            // menu reads NoBox, the same legitimately-parks-for-hours class MenuOpen was always
+            // exempt for). The hold already stops any send and self-releases the moment a box
+            // renders (SetPendingBoxState's blocked→unblocked notify), so the mode is never robbed.
+            if (ShouldWarnOnBoxNotVisible(s, NowMs()) && st.boxNotVisibleWarnedStamp != s.pendingBoxStateUnixMs)
             {
-                bool paused = false;
-                _registry->Update(s.id, [&](SessionInfo& live) {
-                    if (ShouldPauseOnBoxNotVisible(live, NowMs())) // freshest-record re-verify (the lost-send pattern)
-                    {
-                        live.autorunner.mode = AutorunnerMode::Off;
-                        paused = true;
-                    }
-                });
-                if (paused)
-                {
-                    const std::wstring line = L"[send-verify] " + ShortId(s.id) +
-                                              L" autorunner paused (no parseable input box for >" +
-                                              std::to_wstring(kBoxNotVisibleEscalateMs / 1000) +
-                                              L"s with queued prompts - a menu/modal may be parked over it, or the render drifted)\n";
-                    AppendStateLog(L"autorunner.log", line);
-                    AppendStateLog(L"hooks.log", line);
-                }
+                st.boxNotVisibleWarnedStamp = s.pendingBoxStateUnixMs;
+                const std::wstring line = L"[send-verify] " + ShortId(s.id) +
+                                          L" queued prompts HELD: no parseable input box for >" +
+                                          std::to_wstring(kBoxNotVisibleEscalateMs / 1000) +
+                                          L"s (a menu/modal may be parked over it, or the render drifted) - the advance stays held and self-resumes when a box renders; the autorunner keeps its mode\n";
+                AppendStateLog(L"autorunner.log", line);
+                AppendStateLog(L"hooks.log", line);
             }
         }
     }

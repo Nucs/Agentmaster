@@ -864,6 +864,7 @@ namespace winrt::TerminalApp::implementation
                     target->sentAtUnixMs = NowMs();
                     target->echoed = false; // await this injection's UserPromptSubmit echo
                     target->enterRetries = 0; // fresh send -> reset the scheduler's Enter-retry watch
+                    target->injectedAtUnixMs = 0; // fresh send -> injection evidence pending (DELIVERY.md §12)
                 }
             });
         }
@@ -897,6 +898,7 @@ namespace winrt::TerminalApp::implementation
                         {
                             p.status = PromptStatus::Pending;
                             p.echoed = false;
+                            p.injectedAtUnixMs = 0; // DELIVERY.md §12
                             if (p.attempts > 0)
                             {
                                 p.attempts -= 1;
@@ -1378,6 +1380,18 @@ namespace winrt::TerminalApp::implementation
                 // lastMessageWasQuestion with nothing on screen saying why). The next Stop that ends
                 // on a question re-latches it, so the protection is undiminished for later turns.
                 s.lastMessageWasQuestion = false;
+                // Agentmaster (DELIVERY.md §12): the re-arm also RE-STAMPS a blocked box-state clock
+                // (the question-latch precedent applied to the R5 escalation's anchor). The live
+                // incident: the NoBox clock had run from BEFORE the user's explicit Off→Full, so an
+                // automatic path measured 60s "ignored" from a stamp predating the human's GO and
+                // overrode it 48s later. Never CLEAR the state itself — if the box is genuinely
+                // unreadable the advance must keep holding (the scan re-reads within a tick and
+                // releases the hold the moment a box renders); only the clock defers to the human.
+                if (s.pendingBoxState == ::Agentmaster::InputBoxState::NoBox ||
+                    s.pendingBoxState == ::Agentmaster::InputBoxState::MenuOpen)
+                {
+                    s.pendingBoxStateUnixMs = NowMs();
+                }
             }
         });
     }

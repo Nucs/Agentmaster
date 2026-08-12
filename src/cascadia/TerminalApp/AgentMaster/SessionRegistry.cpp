@@ -938,7 +938,8 @@ namespace Agentmaster
     // Change-gated + QUIET, except the BLOCKED→UNBLOCKED release (NoBox/MenuOpen → anything else),
     // which notifies — that release is what re-fires an advance DecideAdvance held on the box (the
     // delivery gate's close-notify idiom; entering the blocked set needs no notify, holds happen at
-    // decide time). The change stamp anchors the scanner's ShouldPauseOnBoxNotVisible escalation.
+    // decide time). The change stamp anchors the scanner's ShouldWarnOnBoxNotVisible warning
+    // (and is RE-STAMPED by an explicit autorunner re-arm - DELIVERY.md §12).
     void SessionRegistry::SetPendingBoxState(const std::wstring& id, InputBoxState state)
     {
         SessionInfo snapshot;
@@ -1322,6 +1323,50 @@ namespace Agentmaster
         return it != _sessions.end() && DeliveryGateOpen(it->second, NowMs());
     }
 
+    // Agentmaster (DELIVERY.md §12): see the header. Owner-matched re-stamp — an EXPIRED gate whose
+    // tag is still ours revives (the holder was alive all along, just starved of a thread); any
+    // other tag (or a closed gate) refuses, and the caller must abort its delivery.
+    bool SessionRegistry::RevalidateDeliveryGate(const std::wstring& id, const std::wstring& tag)
+    {
+        if (tag.empty())
+        {
+            return false;
+        }
+        std::lock_guard guard{ _mtx };
+        const auto it = _sessions.find(id);
+        if (it == _sessions.end() || it->second.deliveryPromptId != tag)
+        {
+            return false; // closed, or a newer attempt reclaimed it — this carrier no longer owns the box
+        }
+        it->second.deliveryOpenedUnixMs = NowMs(); // revive/extend the claim (quiet — nothing changed for observers)
+        return true;
+    }
+
+    // Agentmaster (DELIVERY.md §12 — INJECTION EVIDENCE): see the header. Quiet by design (the
+    // [delivered] log line at the call site is the observability; the echo machinery carries the
+    // visible consequences).
+    void SessionRegistry::MarkPromptInjected(const std::wstring& id, const std::wstring& promptId)
+    {
+        if (promptId.empty())
+        {
+            return;
+        }
+        std::lock_guard guard{ _mtx };
+        const auto it = _sessions.find(id);
+        if (it == _sessions.end())
+        {
+            return;
+        }
+        for (auto& p : it->second.queue)
+        {
+            if (p.id == promptId && p.status == PromptStatus::Sent)
+            {
+                p.injectedAtUnixMs = NowMs();
+                break;
+            }
+        }
+    }
+
     // Agentmaster (PENDING_INPUT.md §9): the ONE send seam. See the header for the contract.
     // Agentmaster (DELIVERY.md): now also the gate's opening seam — exactly one delivery may be
     // in flight per session, decided HERE (synchronously, before anything marshals), so a racing
@@ -1329,18 +1374,28 @@ namespace Agentmaster
     // livelock the 07:27 incident recorded).
     bool SessionRegistry::SubmitPrompt(const PromptSubmission& submission)
     {
-        const std::wstring tag = DeliveryGateTagFor(submission);
-        if (!TryOpenDeliveryGate(submission.sessionId, tag))
+        // Agentmaster (DELIVERY.md §12): stamp a process-monotonic nonce so THIS delivery attempt
+        // owns a UNIQUE gate tag — a reclaim + resend of the same prompt mints a new tag, and a
+        // stale first attempt then fails its RevalidateDeliveryGate top guard instead of adopting
+        // the resend's claim. The stamped COPY is what flows to the submitter/fallback, so the
+        // hosting window's close derives the identical tag.
+        PromptSubmission stamped = submission;
+        {
+            std::lock_guard guard{ _mtx };
+            stamped.submitNonce = ++_submitSeq;
+        }
+        const std::wstring tag = DeliveryGateTagFor(stamped);
+        if (!TryOpenDeliveryGate(stamped.sessionId, tag))
         {
             AppendStateLog(L"hooks.log",
-                           L"[gate] " + ShortId(submission.sessionId) + L" submit declined: the box is owned (delivery/clear in flight) - prompt " +
-                               ShortId(submission.promptId) + L" stays with its caller's rollback\n");
+                           L"[gate] " + ShortId(stamped.sessionId) + L" submit declined: the box is owned (delivery/clear in flight) - prompt " +
+                               ShortId(stamped.promptId) + L" stays with its caller's rollback\n");
             return false;
         }
         PromptSubmitter fn;
         {
             std::lock_guard guard{ _mtx };
-            const auto it = _submitters.find(submission.sessionId);
+            const auto it = _submitters.find(stamped.sessionId);
             if (it != _submitters.end())
             {
                 fn = it->second; // copy so we call it outside the lock (it may hop to a UI thread)
@@ -1351,20 +1406,21 @@ namespace Agentmaster
             // No hosting window registered one (an older window, a test/CLI host, a session bound
             // by something other than the launch seam): the historical path, verbatim — and the
             // inject IS the whole delivery here, so the gate resolves synchronously.
-            const bool ok = Inject(submission.sessionId, BuildPromptSubmission(submission.text));
+            const bool ok = Inject(stamped.sessionId, BuildPromptSubmission(stamped.text));
             if (ok)
             {
-                AppendStateLog(L"hooks.log", L"[delivered] " + ShortId(submission.sessionId) + L" prompt " + ShortId(tag) + L" (direct inject)\n");
+                MarkPromptInjected(stamped.sessionId, stamped.promptId); // §12: the inject IS the delivery here
+                AppendStateLog(L"hooks.log", L"[delivered] " + ShortId(stamped.sessionId) + L" prompt " + ShortId(stamped.promptId) + L" (direct inject)\n");
             }
-            CloseDeliveryGate(submission.sessionId, tag);
+            CloseDeliveryGate(stamped.sessionId, tag);
             return ok;
         }
         try
         {
-            const bool accepted = fn(submission);
+            const bool accepted = fn(stamped);
             if (!accepted)
             {
-                CloseDeliveryGate(submission.sessionId, tag); // nothing was or will be sent
+                CloseDeliveryGate(stamped.sessionId, tag); // nothing was or will be sent
             }
             // accepted == true: the hosting window owns the outcome — it closes the gate when the
             // swap RESOLVES (delivered / aborted), on every exit path (DELIVERY.md §3).
@@ -1376,7 +1432,7 @@ namespace Agentmaster
             // prompt back to Pending, so the queue stays honest, but the throw itself must not be
             // lost (Rule #18) — a submitter that dies looks identical to a torn-down window here.
             LogSwallowedException(L"SessionRegistry::SubmitPrompt");
-            CloseDeliveryGate(submission.sessionId, tag);
+            CloseDeliveryGate(stamped.sessionId, tag);
             return false;
         }
     }
@@ -1400,6 +1456,7 @@ namespace Agentmaster
                 }
                 p.status = PromptStatus::Pending;
                 p.echoed = false;
+                p.injectedAtUnixMs = 0; // §12: a rolled-back prompt's next send is a fresh delivery
                 if (p.attempts > 0)
                 {
                     p.attempts -= 1;

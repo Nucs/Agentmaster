@@ -178,7 +178,7 @@ namespace Agentmaster
         // exactly there). HOLD — the scan re-reads every liveness tick and SetPendingBoxState
         // notifies on the blocked→unblocked release, so the held advance re-fires the moment a box
         // is visible again; a NoBox that persists with queued work escalates loudly instead
-        // (ShouldPauseOnBoxNotVisible below). Unknown (no read yet — a dormant tab) never holds.
+        // (ShouldWarnOnBoxNotVisible below — a warning since §12, never a mode change). Unknown (no read yet — a dormant tab) never holds.
         if (s.pendingBoxState == InputBoxState::MenuOpen)
         {
             plan.reason = L"input box not visible (a menu/dialog is open)";
@@ -415,21 +415,28 @@ namespace Agentmaster
         return plan;
     }
 
-    // Agentmaster (DELIVERY_PLAN.md R1 — the LOST-SEND verdict). PURE (the DecideAdvance pattern):
-    // which of this session's Sent Autorun prompts are provably LOST — delivered to the terminal
-    // yet never became a message? The recorded gap (DELIVERY.md §9/§10): a prompt pasted into a
-    // running turn was consumed by an AskUserQuestion dialog's rendering; its queue row read `Sent`,
-    // indistinguishable from a success, forever. A prompt is LOST when ALL hold:
+    // Agentmaster (DELIVERY_PLAN.md R1 — the LOST-SEND verdict; tightened by DELIVERY.md §12). PURE
+    // (the DecideAdvance pattern): which of this session's Sent Autorun prompts are provably LOST —
+    // delivered to the terminal yet never became a message? The recorded gap (DELIVERY.md §9/§10): a
+    // prompt pasted into a running turn was consumed by an AskUserQuestion dialog's rendering; its
+    // queue row read `Sent`, indistinguishable from a success, forever. A prompt is LOST when ALL hold:
     //   * Sent + UNECHOED (`echoed` is THE became-a-message fact, fed by the push hook echo OR the
     //     scanner's pull consume — NoteExternalPrompt marking a fold-matched transcript user line)
     //     with a real send stamp (sentAtUnixMs != 0; a restored plan's Sent rows load echoed=true);
+    //   * INJECTED (injectedAtUnixMs != 0 — the §12 conjunct): the prompt's bytes demonstrably
+    //     reached the ConPTY (the [delivered] seams stamp it). WITHOUT this the verdict fired on a
+    //     delivery still QUEUED behind a backlogged UI dispatcher — measured live: mark-Sent
+    //     20:40:45, gate expired at 75s, the verdict fired at 76s, and the SAME prompt then
+    //     delivered `verified=exact` at 83s and became a real message (recorded as a duplicate
+    //     Typed row, the flight row stranded Failed, the autorunner robbed to Off). A Sent-but-
+    //     never-injected prompt is DecideUndeliveredReclaim's case below (retry, not a fault);
     //   * the session is AT REST (Idle / WaitingForInput) — never judged mid-turn: while a turn is
     //     in flight our text may still be queued type-ahead the next turn will consume;
-    //   * kLostSendSettleMs elapsed since the send — past the push echo window, past multiple
-    //     scanner passes (so the pull consume had every chance), and — because each Enter-retry
-    //     press REFRESHES sentAtUnixMs — structurally AFTER the watchdog's ladder went quiet (an
-    //     actively-pressing watchdog resets this clock, so the two recoveries never race: the
-    //     rescue always gets to finish; a rescued prompt echoes and leaves this set);
+    //   * kLostSendSettleMs elapsed since BOTH the send and the injection — past the push echo
+    //     window, past multiple scanner passes (so the pull consume had every chance), and —
+    //     because each Enter-retry press REFRESHES sentAtUnixMs — structurally AFTER the watchdog's
+    //     ladder went quiet (an actively-pressing watchdog resets this clock, so the two recoveries
+    //     never race: the rescue always gets to finish; a rescued prompt echoes and leaves this set);
     //   * the delivery gate is CLOSED (never race an in-flight swap, whose box hold is legitimate).
     // NO "a turn ran past the send" conjunct, deliberately (a deviation from the first plan draft):
     // (a) a watchdog press refreshing sentAtUnixMs made `lastPromptUnixMs > sentAt` PERMANENTLY
@@ -439,9 +446,10 @@ namespace Agentmaster
     // already serialized by the press refresh above. The caller (the SessionScanner's reconcile
     // pass — the transcript-truth lane, its cursor caught up by construction) marks each returned
     // prompt Failed and PAUSES the session's autorunner (mode -> Off), mirroring the Enter-retry
-    // give-up: the queue past a vanished step is suspect, and silently continuing is how the loss
-    // went unnoticed until a human diffed the transcript. NEVER auto-resend — the text may sit in
-    // the TUI's type-ahead or box, and a resend can double it; the user Send-nows / re-arms.
+    // give-up: an INJECTED prompt that vanished is a real unaccounted-for transmission — the queue
+    // past it is suspect, and silently continuing is how the loss went unnoticed until a human
+    // diffed the transcript. NEVER auto-resend — the text may sit in the TUI's type-ahead or box,
+    // and a resend can double it; the user Send-nows / re-arms.
     inline std::vector<std::wstring> DecideLostSend(const SessionInfo& s, int64_t nowUnixMs)
     {
         std::vector<std::wstring> lost;
@@ -463,8 +471,13 @@ namespace Agentmaster
             {
                 continue;
             }
+            if (p.injectedAtUnixMs == 0)
+            {
+                continue; // never injected — DecideUndeliveredReclaim's case, not a loss
+            }
             const int64_t sentAge = nowUnixMs - p.sentAtUnixMs;
-            if (sentAge >= kLostSendSettleMs)
+            const int64_t injectedAge = nowUnixMs - p.injectedAtUnixMs;
+            if (sentAge >= kLostSendSettleMs && injectedAge >= kLostSendSettleMs)
             {
                 lost.push_back(p.id);
             }
@@ -472,17 +485,69 @@ namespace Agentmaster
         return lost;
     }
 
-    // Agentmaster (DELIVERY_PLAN.md R5 — the box-not-visible ESCALATION): a NoBox that persists is
-    // either a detector/render drift or a modal parked over the box, and DecideAdvance's hold on it
-    // would otherwise park a queued plan silently forever (the §8 question-guard lesson: an
-    // invisible park is a bug report). Once NoBox has stood this long on a LIVE, at-rest session
-    // with an ACTIVE autorunner and QUEUED work, the scanner pauses the autorunner (mode → Off) —
-    // loud (the mode shows on every surface + the log line), terminal (the user re-arms after
-    // fixing/reporting the cause), and self-deduping (mode Off fails the predicate next pass).
-    // MenuOpen deliberately NEVER escalates: a menu legitimately parks for hours (an unanswered
-    // AskUserQuestion is the question-guard's domain, not a fault). PURE.
+    // Agentmaster (DELIVERY.md §12 — the UNDELIVERED-SEND reclaim, DecideLostSend's retryable
+    // sibling). PURE: which of this session's Sent Autorun prompts were ACCEPTED for delivery but
+    // provably NEVER INJECTED (injectedAtUnixMs == 0) and whose delivery claim has lapsed (the gate
+    // is closed — resolved, expired, or reclaimed)? Nothing was ever typed into the terminal for
+    // these, so rolling them back to Pending and letting the advance RE-SEND is unconditionally
+    // safe — no text exists that a resend could double, which is exactly the hazard that makes the
+    // LOST verdict terminal. This is the confirm-and-retry half the live incident demanded: a
+    // delivery that sat queued behind a wedged dispatcher past the gate expiry used to be judged
+    // LOST (Failed + autorunner paused) one second after the expiry; now it is reclaimed and
+    // retried, and the stale delivery itself aborts at its top guard (the submitNonce gate tag).
+    // Same settle as the lost verdict (kLostSendSettleMs since the send) so an in-flight-but-slow
+    // accept is never snatched back mid-marshal, and the gate-closed conjunct keeps it ordered
+    // AFTER the expiry belt (a live delivery refreshes/holds its gate; only a lapsed one reclaims).
+    // Deliberately NO at-rest conjunct: with nothing ever typed, the rollback is state-independent
+    // — and reclaiming promptly is what disarms a zombie delivery before it can fire mid-turn.
+    // The caller logs [send-reclaim] and rolls back via RollbackPromptToPending (refund=false: the
+    // retry legitimately spends a fresh auto-send slot).
+    inline std::vector<std::wstring> DecideUndeliveredReclaim(const SessionInfo& s, int64_t nowUnixMs)
+    {
+        std::vector<std::wstring> undelivered;
+        if (!s.live)
+        {
+            return undelivered;
+        }
+        if (DeliveryGateOpen(s, nowUnixMs))
+        {
+            return undelivered; // the delivery still owns its claim — it is alive; judge after it lapses
+        }
+        for (const auto& p : s.queue)
+        {
+            if (p.origin != PromptOrigin::Autorun || p.status != PromptStatus::Sent || p.echoed ||
+                p.sentAtUnixMs == 0 || p.injectedAtUnixMs != 0)
+            {
+                continue;
+            }
+            const int64_t sentAge = nowUnixMs - p.sentAtUnixMs;
+            if (sentAge >= kLostSendSettleMs)
+            {
+                undelivered.push_back(p.id);
+            }
+        }
+        return undelivered;
+    }
+
+    // Agentmaster (DELIVERY_PLAN.md R5 — the box-not-visible escalation; DEFANGED by DELIVERY.md
+    // §12 into a WARNING): a NoBox that persists is either a detector/render drift or a modal
+    // parked over the box, and DecideAdvance's hold on it would otherwise park a queued plan
+    // silently forever (the §8 question-guard lesson: an invisible park is a bug report). Once
+    // NoBox has stood this long on a LIVE, at-rest session with an ACTIVE autorunner and QUEUED
+    // work, the scanner WARNS loudly (once per NoBox episode — ScanState-deduped) — it no longer
+    // pauses the autorunner. The R5 cut flipped mode → Off here, and the live incident showed why
+    // that is wrong: the NoBox clock had been running from BEFORE the user's explicit Off→Full
+    // re-arm, so 48s after a human said GO the escalation overrode them — and a NoBox verdict is
+    // not always a fault (a parked non-numbered menu reads NoBox too: the detector's MenuOpen
+    // verdict keys on the numbered-option row shape, so the rewind/slash-style menus fall through
+    // to NoBox — the same "legitimately parks for hours" class MenuOpen was always exempt for).
+    // The HOLD (DecideAdvance) already stops any send while NoBox stands, and SetPendingBoxState's
+    // blocked→unblocked release notifies, so the plan self-resumes the moment a box renders — the
+    // user's mode setting is never robbed for a state that heals itself. MenuOpen deliberately
+    // never even warns: a menu legitimately parks for hours (an unanswered AskUserQuestion is the
+    // question-guard's domain, not a fault). PURE.
     inline constexpr int64_t kBoxNotVisibleEscalateMs = 60'000;
-    inline bool ShouldPauseOnBoxNotVisible(const SessionInfo& s, int64_t nowUnixMs)
+    inline bool ShouldWarnOnBoxNotVisible(const SessionInfo& s, int64_t nowUnixMs)
     {
         if (!s.live || s.autorunner.mode == AutorunnerMode::Off)
         {

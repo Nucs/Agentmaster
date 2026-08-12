@@ -992,6 +992,13 @@ namespace Agentmaster
             // tool_use (AskUserQuestion)? Per-pass scratch — reset before each _readDelta, read by the
             // recon-resume gate as the "the user just answered" signal. See ShouldSynthesizeResumed.
             bool answeredInteractive{ false };
+            // Agentmaster (DELIVERY.md §12 — the box-not-visible WARNING's once-per-episode dedup):
+            // the SessionInfo::pendingBoxStateUnixMs stamp this scanner already warned for. The R5
+            // escalation used to pause the autorunner (mode → Off), which self-deduped; the §12
+            // defang keeps the mode, so ShouldWarnOnBoxNotVisible stays true every pass while the
+            // NoBox episode stands — this stamp keeps the [send-verify] warning to one line per
+            // episode (a recovered-then-re-lost box mints a new stamp and warns afresh).
+            int64_t boxNotVisibleWarnedStamp{ 0 };
             // The latest consumed turn event was the synthetic API-error message (isApiErrorMessage),
             // i.e. the transcript tail is CURRENTLY an UNRECOVERED API error. Set by an apiError
             // assistant line; CLEARED by any later turn event (a new user prompt, a non-error assistant

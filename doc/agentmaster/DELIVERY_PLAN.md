@@ -67,6 +67,18 @@ until a human diffed the transcript. Do **NOT** auto-resend: the text may sit in
 type-ahead or box; a resend can double it. The user re-arms / Send-nows (both already release
 paths).
 
+**⚠ AMENDED (DELIVERY.md §12 — Incident 4, a measured false positive):** the verdict fired one
+second after the gate's 75 s expiry on a delivery still QUEUED behind a restore-wedged UI
+dispatcher (mark-Sent → actual injection measured 83 s apart); the "lost" prompt then delivered
+`verified=exact` and double-recorded as Typed. `DecideLostSend` therefore now also requires
+**injection evidence** (`QueuedPrompt::injectedAtUnixMs`, stamped at every `[delivered]` seam by
+`MarkPromptInjected`, settle from `max(sentAt, injectedAt)`) — the terminal Failed+pause is
+reserved for a prompt that demonstrably reached the terminal. Its new retryable sibling,
+`DecideUndeliveredReclaim`, rolls a Sent-but-never-injected prompt whose gate claim lapsed back
+to **Pending** (`[send-reclaim]` — nothing was typed, so a retry can double nothing; the mode is
+untouched), and the stale delivery itself aborts at its top guard (the per-attempt
+`submitNonce` gate tags + `RevalidateDeliveryGate`).
+
 **Files.** `SessionScanner.cpp` (the per-pass feed + the consume + the verdict application),
 `Scheduler.h` or `SessionModels.h` (the pure `DecideLostSend` + constants — put it where
 `DecideEnterRetry` lives for symmetry), `SessionRegistry.h/.cpp` only if the consume needs a new
@@ -345,6 +357,13 @@ trail; a plain empty-box send is ≤ ~360 ms slower; the handover paste tier sti
   SECOND unverifiable delivery of one prompt therefore resolves TERMINALLY: `Failed` + autorunner
   paused (the lost-send idiom), logged to both logs. Every undelivered verdict (Foreign, eaten ×2,
   unreadable-after-fill, discard-refused Partial) strikes; a delivered CR clears the ledger.
+  **⚠ AMENDED (DELIVERY.md §12):** the terminal strike keeps `Failed` (still bounded, still never
+  the RC2 shape) but no longer flips the autorunner mode to Off — a refused merge is the
+  protection working; the mode stays the user's, the queue proceeds, and a persistent wall is
+  held by the strike-free pre-flight + box-state holds. `kSendVerifyMaxFills` also rose 2 → 3
+  (inner confirm-and-retry, livelock-free). Each fill and the CR commit now RE-ASSERT the
+  delivery's own gate claim (`RevalidateDeliveryGate`, return 3 = stale abort) so a
+  dispatcher-starved carrier can never type into a box a newer attempt owns.
 - **Whitespace-stripped compare** (`verify_detail::WsStripped`, the PromptAnchor.h tolerance
   precedent): the detector reads RENDERED rows — a prompt wider than the terminal soft-wraps into
   rows re-joined with `\n`, their wrap-boundary spaces RTrimmed away — so the plan's fold+trim
@@ -430,6 +449,15 @@ verdict, self-deduping via mode-Off; MenuOpen deliberately NEVER escalates — a
 question legitimately parks for hours) rather than the sketched M-refusals counter; and
 `SetPendingBoxState` notifies ONLY on the blocked→unblocked RELEASE (the gate close-notify
 idiom) so a held advance re-fires without polling and the scan's steady-state stays quiet.
+
+**⚠ SUPERSEDED (DELIVERY.md §12 — Incident 4):** the escalation's mode→Off was DEFANGED into a
+once-per-episode WARNING (`ShouldWarnOnBoxNotVisible`; dedup via
+`ScanState::boxNotVisibleWarnedStamp`) after it fired live against a stamp predating the user's
+explicit Off→Full re-arm and overrode them 48 s later — for a NoBox verdict that is not even
+always a fault (a parked NON-numbered menu reads NoBox; only numbered option rows read MenuOpen).
+The advance's NoBox hold + the release-notify already park + self-resume the plan, so the mode
+flip bought nothing. A manual re-arm now also RE-STAMPS `pendingBoxStateUnixMs` on both arming
+surfaces, so no automatic window is ever measured from before a human's GO.
 
 ## R6 — TUI-channel hygiene: a failed round-trip must not leave a loaded landmine
 

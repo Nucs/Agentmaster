@@ -4657,10 +4657,10 @@ namespace winrt::TerminalApp::implementation
     static constexpr int32_t kSendVerifyProbeRows = 1000; // the raised read window for verification reads — a filled prompt can render taller than the scan's fixed 120 rows
     static constexpr int64_t kSendVerifySettleMs = 1500; // per fill: how long the read-back may keep settling while the box is still CHANGING (progress-extended)
     static constexpr int64_t kSendVerifySettleHardCapMs = 4000; // absolute cap on one fill's settle, however long the box keeps growing
-    static constexpr int32_t kSendVerifyMaxFills = 2; // fill attempts per delivery before giving up (the standby lane's constant)
+    static constexpr int32_t kSendVerifyMaxFills = 3; // fill attempts per delivery before giving up (was 2; raised per the confirm-and-retry directive, DELIVERY.md §12 — inner re-fills are livelock-free: they never touch the advance trigger)
     static constexpr int64_t kSendUndoBudgetMs = 5000; // wall-clock cap on the Foreign undo ladder
     static constexpr int64_t kDraftSwapRestoreHardCapMs = 4000; // R6a: the restore settle extends while the box is still CHANGING (a large stash pop's repaint outruns the fixed 1.2s), up to this
-    static constexpr int32_t kSendVerifyStrikeLimit = 2; // unverifiable deliveries per prompt before it FAILS terminally + pauses the autorunner (a plain rollback would re-fire the same doomed verify forever — the RC2 livelock shape)
+    static constexpr int32_t kSendVerifyStrikeLimit = 2; // unverifiable deliveries per prompt before it FAILS terminally (a plain rollback would re-fire the same doomed verify forever — the RC2 livelock shape). §12: the terminal strike no longer pauses the autorunner — the prompt Fails (bounded forward progress, never the same doomed verify twice more) but the MODE stays the user's; a persistent wall is held upstream by the pre-flight decline + the recorded box state, which never strike.
 
     // Do two box reads describe the same draft? Both sides come out of the SAME detector on the same
     // box, so a plain comparison is fair; only trailing whitespace is normalized away (the box
@@ -4947,12 +4947,21 @@ namespace winrt::TerminalApp::implementation
     //   NoBox/MenuOpen/Unknown post-fill → cannot verify: no CR, no blind undo (an unreadable box
     //              must not be blind-backspaced), record the box state, strike.
     // A STRIKE rolls the prompt back (caller-side) — but the SECOND strike for one prompt marks it
-    // Failed + pauses the autorunner instead (return 2): a rollback would re-fire the same doomed
-    // verify at advance cadence forever, the RC2 mark/decline/rollback livelock in a new coat.
+    // Failed instead (return 2): a rollback would re-fire the same doomed verify at advance cadence
+    // forever, the RC2 mark/decline/rollback livelock in a new coat. §12: the terminal strike no
+    // longer flips the autorunner mode to Off — the Failed prompt is the bounded resolution and the
+    // MODE stays the user's (the walls that could burn a whole queue are held upstream by the
+    // strike-free pre-flight decline + the recorded box state).
+    // `gateTag` is THIS delivery attempt's gate claim (DeliveryGateTagFor over the nonce-stamped
+    // submission): it is REVALIDATED at each fill and immediately before the irreversible CR, so a
+    // delivery that lost its claim (expired + reclaimed by a newer attempt while this one starved
+    // in a backlogged dispatcher) ABORTS instead of typing into a box another carrier now owns.
     // Returns 1 == delivered (CR fired), 0 == not delivered (caller rolls back), 2 == not delivered
-    // AND terminally Failed here (caller must NOT roll back). Caller holds the box (read-only lock +
-    // _draftSwapsInFlight) and has cleared/verified it empty-ish; UI thread.
-    winrt::Windows::Foundation::IAsyncOperation<int32_t> TerminalPage::_InjectPromptVerified(std::wstring sessionId, std::wstring sid8, std::wstring promptId, std::wstring text)
+    // AND terminally Failed here (caller must NOT roll back), 3 == aborted stale — the gate claim
+    // was lost mid-flight (caller must NOT roll back either: the prompt now belongs to whichever
+    // newer attempt took the claim, or to the reclaim verdict that lapsed it). Caller holds the box
+    // (read-only lock + _draftSwapsInFlight) and has cleared/verified it empty-ish; UI thread.
+    winrt::Windows::Foundation::IAsyncOperation<int32_t> TerminalPage::_InjectPromptVerified(std::wstring sessionId, std::wstring sid8, std::wstring promptId, std::wstring text, std::wstring gateTag)
     {
         auto strongThis{ get_strong() };
         co_await wil::resume_foreground(Dispatcher());
@@ -4966,8 +4975,14 @@ namespace winrt::TerminalApp::implementation
         constexpr auto stUnknown = static_cast<int32_t>(::Agentmaster::InputBoxState::Unknown);
 
         // The strike ledger: an unverifiable delivery rolls back ONCE; the second one for the same
-        // prompt resolves terminally (Failed + autorunner paused, the lost-send idiom) so the
-        // advance can never livelock re-trying a delivery that provably cannot verify.
+        // prompt resolves terminally (Failed, the lost-send idiom) so the advance can never livelock
+        // re-trying a delivery that provably cannot verify. §12: the terminal strike keeps the
+        // autorunner MODE — Failed already stops THIS prompt from re-firing, the queue proceeds
+        // (bounded: ≤ kSendVerifyStrikeLimit deliveries per prompt), and a persistent wall is held
+        // upstream by the strike-free pre-flight decline + recorded box state. Only a detected
+        // POST-COMMIT merge (an actually-mangled message on the transcript — the R7 classifier) and
+        // the give-up ladder still pause; a REFUSED merge is the protection working, not a fault to
+        // punish the user's mode for.
         const auto strike = [&](const std::wstring& why) -> int32_t {
             const int32_t strikes = ++_sendVerifyStrikes[promptId];
             if (strikes < kSendVerifyStrikeLimit)
@@ -4987,11 +5002,10 @@ namespace winrt::TerminalApp::implementation
                         break;
                     }
                 }
-                ss.autorunner.mode = ::Agentmaster::AutorunnerMode::Off;
             });
             const std::wstring line = L"[send-verify] " + sid8 + L" prompt " + ::Agentmaster::ShortId(promptId) +
                                       L" FAILED after " + std::to_wstring(kSendVerifyStrikeLimit) + L" unverifiable deliveries (" + why +
-                                      L") - autorunner paused, not resent\n";
+                                      L") - not resent; the autorunner keeps its mode and continues with the next prompt\n";
             ::Agentmaster::AppendStateLog(L"hooks.log", line);
             ::Agentmaster::AppendStateLog(L"autorunner.log", line);
             return 2;
@@ -5000,6 +5014,18 @@ namespace winrt::TerminalApp::implementation
         int32_t fills = 0;
         while (fills < kSendVerifyMaxFills)
         {
+            // §12: re-assert THIS attempt's gate claim before typing anything (and refresh its
+            // expiry anchor — a slow verify must never expire out from under itself). A lost claim
+            // means a newer attempt (or the reclaim verdict) owns this prompt now: abort, type
+            // nothing, and do not touch the queue.
+            if (!_sessionRegistry->RevalidateDeliveryGate(sessionId, gateTag))
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[send-verify] " + sid8 + L" prompt " + ::Agentmaster::ShortId(promptId) +
+                                                  L" stale delivery aborted before fill " + std::to_wstring(fills + 1) +
+                                                  L" (the gate claim was lost - a newer attempt owns this prompt)\n");
+                co_return 3;
+            }
             if (!_sessionRegistry->Inject(sessionId, ::Agentmaster::BuildPromptFill(text)))
             {
                 co_return 0; // injector vanished — nothing typed; the caller rolls back
@@ -5061,11 +5087,23 @@ namespace winrt::TerminalApp::implementation
 
             if (verdict == ::Agentmaster::FillVerify::Verified || verdict == ::Agentmaster::FillVerify::VerifiedCollapsed)
             {
+                // §12: the LAST check before the one irreversible step — the CR commits whatever the
+                // box holds, so it must only ever fire while this attempt still owns the box. The
+                // settle above co_awaited (a starved dispatcher can stall there arbitrarily long), so
+                // the claim is re-asserted at the commit itself, not just at the fill.
+                if (!_sessionRegistry->RevalidateDeliveryGate(sessionId, gateTag))
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log",
+                                                  L"[send-verify] " + sid8 + L" prompt " + ::Agentmaster::ShortId(promptId) +
+                                                      L" stale delivery aborted at the CR commit (the gate claim was lost; the verified fill stays visible as a draft)\n");
+                    co_return 3;
+                }
                 if (!_sessionRegistry->Inject(sessionId, std::wstring(1, L'\r')))
                 {
                     co_return 0; // injector vanished between fill and CR — the fill stays visible as a draft; caller rolls back
                 }
                 _sendVerifyStrikes.erase(promptId);
+                _sessionRegistry->MarkPromptInjected(sessionId, promptId); // §12: injection evidence for the lost-send verdict
                 ::Agentmaster::AppendStateLog(L"hooks.log",
                                               L"[delivered] " + sid8 + L" prompt " + ::Agentmaster::ShortId(promptId) +
                                                   L" (chars=" + std::to_wstring(text.size()) +
@@ -5247,12 +5285,50 @@ namespace winrt::TerminalApp::implementation
                 // DELIVERY.md RC5: [send] in autorunner.log is "accepted for delivery"; THIS is the
                 // injection actually reaching the ConPTY — the line that separates "8 sends logged,
                 // 0 delivered" from reality.
+                _sessionRegistry->MarkPromptInjected(id, submission.promptId); // §12: injection evidence
                 ::Agentmaster::AppendStateLog(L"hooks.log",
                                               L"[delivered] " + sid8 + L" prompt " + ::Agentmaster::ShortId(submission.promptId) +
                                                   L" (chars=" + std::to_wstring(submission.text.size()) + L")\n");
             }
             return ok;
         };
+
+        // ---- STALE-DELIVERY GUARD (DELIVERY.md §12) ----
+        // The resume_foreground above is the delivery's FIRST dispatcher hop, and it can starve for
+        // MINUTES on a backlogged UI thread (measured 83s during a 51-tab window restore). By the
+        // time this body runs, the world may have moved on: the gate expired and the reclaim verdict
+        // rolled the prompt back to Pending (a fresh attempt may already carry it — with its OWN
+        // nonce tag), or a verdict resolved it otherwise. Typing now would deliver a prompt the
+        // system no longer accounts as in-flight — the recorded incident's duplicate "Typed" row.
+        // So: the prompt must still be Sent, and THIS attempt's gate claim must still stand
+        // (RevalidateDeliveryGate re-stamps an expired-but-unreclaimed claim — the holder was alive
+        // all along, merely starved). Either failing aborts WITHOUT a rollback: a no-longer-Sent
+        // prompt was resolved by someone with fresher evidence, and a lost claim means a newer
+        // attempt owns it.
+        const auto gateTag = ::Agentmaster::DeliveryGateTagFor(submission);
+        {
+            bool stillSent = false;
+            if (const auto pre = _sessionRegistry->Get(id))
+            {
+                for (const auto& p : pre->queue)
+                {
+                    if (p.id == submission.promptId && p.status == ::Agentmaster::PromptStatus::Sent)
+                    {
+                        stillSent = true;
+                        break;
+                    }
+                }
+            }
+            if (!stillSent || !_sessionRegistry->RevalidateDeliveryGate(id, gateTag))
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[send-verify] " + sid8 + L" prompt " + ::Agentmaster::ShortId(submission.promptId) +
+                                                  L" stale delivery aborted at the top guard (" +
+                                                  (stillSent ? L"the gate claim was lost to a newer attempt" : L"the prompt is no longer Sent") +
+                                                  L") - nothing typed\n");
+                co_return; // the gateCloser releases our claim iff we still hold it (owner-matched)
+            }
+        }
         const auto info = _sessionRegistry->Get(id);
         const auto control = _ControlForSession(id);
         const bool verifyOn = _appSettings.verifySendBeforeSubmit;
@@ -5294,7 +5370,7 @@ namespace winrt::TerminalApp::implementation
         // frame; a persisting NoBox/MenuOpen DECLINES the delivery — the recorded state makes
         // DecideAdvance hold (no mark/decline livelock), the scan releases the hold the moment a box
         // renders again, and a NoBox that persists with queued work escalates via the scanner
-        // (ShouldPauseOnBoxNotVisible).
+        // (ShouldWarnOnBoxNotVisible - a once-per-episode warning since §12, never a mode change).
         constexpr auto stNoBox = static_cast<int32_t>(::Agentmaster::InputBoxState::NoBox);
         constexpr auto stMenu = static_cast<int32_t>(::Agentmaster::InputBoxState::MenuOpen);
         std::wstring probeText;
@@ -5371,7 +5447,7 @@ namespace winrt::TerminalApp::implementation
                 fastWasReadOnly = true; // never hand back a read-only we did not take
             }
             _draftSwapsInFlight[id] = fastWasReadOnly;
-            const int32_t delivered = co_await _InjectPromptVerified(id, sid8, submission.promptId, submission.text);
+            const int32_t delivered = co_await _InjectPromptVerified(id, sid8, submission.promptId, submission.text, gateTag);
             if (!_sessionRegistry)
             {
                 _EndDraftSwap(id, true);
@@ -5406,7 +5482,7 @@ namespace winrt::TerminalApp::implementation
                 offWasReadOnly = true;
             }
             _draftSwapsInFlight[id] = offWasReadOnly;
-            const int32_t delivered = co_await _InjectPromptVerified(id, sid8, submission.promptId, submission.text);
+            const int32_t delivered = co_await _InjectPromptVerified(id, sid8, submission.promptId, submission.text, gateTag);
             if (!_sessionRegistry)
             {
                 _EndDraftSwap(id, true);
@@ -5542,7 +5618,7 @@ namespace winrt::TerminalApp::implementation
         int32_t verifiedResult = -1; // -1 == the legacy path ran; 0/1/2 == _InjectPromptVerified's verdict
         if (verifyOn)
         {
-            verifiedResult = co_await _InjectPromptVerified(id, sid8, submission.promptId, submission.text);
+            verifiedResult = co_await _InjectPromptVerified(id, sid8, submission.promptId, submission.text, gateTag);
             if (!_sessionRegistry)
             {
                 _EndDraftSwap(id, true);
@@ -5558,12 +5634,13 @@ namespace winrt::TerminalApp::implementation
         {
             // _InjectPromptVerified already logged its own reason (and on its terminal verdict, 2,
             // already marked the prompt Failed — never roll THAT back to Pending, it would resurrect
-            // a resolved prompt); the legacy path logs here as before.
+            // a resolved prompt; a stale abort, 3, means a NEWER attempt owns the prompt — never
+            // touch it from this superseded carrier either); the legacy path logs here as before.
             if (verifiedResult == -1)
             {
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + L" send failed after clearing - restoring the draft, prompt stays Pending\n");
             }
-            if (verifiedResult != 2)
+            if (verifiedResult != 2 && verifiedResult != 3)
             {
                 _sessionRegistry->RollbackPromptToPending(id, submission.promptId, submission.refundAutoSend);
             }
@@ -7925,6 +8002,7 @@ namespace winrt::TerminalApp::implementation
                         p.attempts += 1;
                         p.echoed = false; // await this injection's UserPromptSubmit echo
                         p.enterRetries = 0; // fresh send -> arm the Enter-retry watch
+                        p.injectedAtUnixMs = 0; // fresh send -> injection evidence pending (DELIVERY.md §12)
                         break;
                     }
                 }

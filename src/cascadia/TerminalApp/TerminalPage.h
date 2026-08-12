@@ -993,7 +993,7 @@ namespace winrt::TerminalApp::implementation
         // 0 == not delivered, nothing irrevocable (caller rolls back); 2 == not delivered AND the
         // prompt was terminally FAILED here (verify strikes — caller must NOT roll back). Assumes the
         // caller holds the box (lock + _draftSwapsInFlight) and verified/knows it empty-ish.
-        winrt::Windows::Foundation::IAsyncOperation<int32_t> _InjectPromptVerified(std::wstring sessionId, std::wstring sid8, std::wstring promptId, std::wstring text);
+        winrt::Windows::Foundation::IAsyncOperation<int32_t> _InjectPromptVerified(std::wstring sessionId, std::wstring sid8, std::wstring promptId, std::wstring text, std::wstring gateTag); // 0=roll back, 1=delivered, 2=Failed terminally (no rollback), 3=stale/ownership lost (no rollback — DELIVERY.md §12)
         // R4 verify-strike bookkeeping: promptId -> consecutive Foreign/unverifiable verdicts. Two
         // strikes mark the prompt Failed + pause the autorunner (a rollback would re-fire the same
         // doomed verify forever — the RC2 livelock shape, closed terminally + loudly instead).
