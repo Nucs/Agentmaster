@@ -723,9 +723,26 @@ namespace winrt::TerminalApp::implementation
                 version = std::wstring{ CascadiaSettings::ApplicationVersion() };
             }
             CATCH_LOG();
+            // A PORTABLE copy's release version is the exe-side .am-version stamp (the zip ships
+            // it; the in-place update rewrites it) — the module file version above is upstream's
+            // build number, which would contradict the updater's own "You're on vX.Y.Z".
+            const bool portable = ::Agentmaster::Updater::IsPortableUpdateTarget();
+            if (portable)
+            {
+                try
+                {
+                    const auto stamp = ::Agentmaster::Updater::PortableVersionFromDir(::Agentmaster::Profiles::detail::ExeDirPath());
+                    if (stamp.major != 0 || stamp.minor != 0 || stamp.patch != 0)
+                    {
+                        version = ::Agentmaster::Updater::VersionToString(stamp);
+                    }
+                }
+                CATCH_LOG();
+            }
 
             const std::wstring pfn = ::Agentmaster::Profiles::PackageFamilyName();
-            const std::wstring channel = pfn.empty()                                 ? std::wstring{ L"Unpackaged" } :
+            const std::wstring channel = portable                                    ? std::wstring{ L"Portable" } :
+                                         pfn.empty()                                 ? std::wstring{ L"Unpackaged" } :
                                          ::Agentmaster::Profiles::IsDevPackage()     ? std::wstring{ L"Dev" } :
                                                                                        std::wstring{ L"Release" };
 #if defined(_DEBUG)
@@ -772,7 +789,7 @@ namespace winrt::TerminalApp::implementation
             // on the installed version). Always shown; the URL is fixed for the process lifetime. Opened
             // off-thread (a browser launch can stall) like the per-tab overlay's Open-Path.
             const std::wstring curChangelogUrl =
-                ::Agentmaster::Updater::ReleasePageForTag(::Agentmaster::Updater::VersionToString(::Agentmaster::Updater::CurrentPackageVersion()));
+                ::Agentmaster::Updater::ReleasePageForTag(::Agentmaster::Updater::VersionToString(::Agentmaster::Updater::CurrentInstallVersion()));
             _setCurrentChangelog = HyperlinkButton{};
             _setCurrentChangelog.Content(winrt::box_value(L"Current version changelog"));
             _setCurrentChangelog.Padding(Thickness{ 4, 2, 4, 2 });
@@ -2911,10 +2928,12 @@ namespace winrt::TerminalApp::implementation
             // (the silent check below, or the explicit button, reveals it).
             _setUpdateChangelog.Visibility(Visibility::Collapsed);
         }
-        // Updater is RELEASE-channel only (Updater::IsUpdaterChannel). On a dev/unpackaged build the
-        // GitHub release is NOT a self-update (different package + always-"behind" the 0.0.1.0
-        // placeholder), so don't check or offer it: disable the button, hide the changelog links, and
-        // explain. Only the release install checks (silently on open) + shows "vX.Y.Z available!".
+        // Updater is gated to the channels the releases target (Updater::IsUpdaterChannel): the
+        // RELEASE package + a PORTABLE copy (which self-updates in place via the release's zip
+        // asset). On a dev / plain-unpackaged build the GitHub release is NOT a self-update
+        // (different package + always-"behind" the 0.0.1.0 placeholder), so don't check or offer
+        // it: disable the button, hide the changelog links, and explain. The eligible installs
+        // check (silently on open) + show "vX.Y.Z available!".
         const bool updaterChannel = ::Agentmaster::Updater::IsUpdaterChannel();
         // Wedge-proofing: the in-flight flag + "Checking…" label are normally restored by the check's
         // completion — but if a worker/completion ever died mid-flight, they'd stay latched and every
@@ -4250,10 +4269,11 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        // Release-channel only (Updater::IsUpdaterChannel): a dev/unpackaged build must NOT present a
-        // GitHub release as a self-update — it's a different package and always-"behind" the 0.0.1.0
-        // placeholder. _ShowSettings already disables the button + shows the explanatory note there;
-        // this is the backstop so a stray call never runs the misleading check.
+        // Updater-channel only (Updater::IsUpdaterChannel — the release package OR a portable copy,
+        // which self-updates in place via the zip asset): a dev / plain-unpackaged build must NOT
+        // present a GitHub release as a self-update — it's a different package and always-"behind"
+        // the 0.0.1.0 placeholder. _ShowSettings already disables the button + shows the explanatory
+        // note there; this is the backstop so a stray call never runs the misleading check.
         if (!::Agentmaster::Updater::IsUpdaterChannel())
         {
             return;
@@ -4294,7 +4314,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         const std::wstring stateDir = ::Agentmaster::Profiles::ResolveProfileDir();
-        const auto cur = ::Agentmaster::Updater::CurrentPackageVersion();
+        const auto cur = ::Agentmaster::Updater::CurrentInstallVersion(); // packaged → package version; portable → the exe-side .am-version stamp
 
         auto weak = get_weak();
         auto disp = _dispatcher;
@@ -4319,7 +4339,7 @@ namespace winrt::TerminalApp::implementation
                     }
                     else if (info.available)
                     {
-                        line = tag + L" done: " + ::Agentmaster::Updater::DisplayVersion(info) + L" available (" + (info.isNightly ? L"NIGHTLY" : info.isPrerelease ? L"pre-release" : L"stable") + (info.installable ? L", installable)" : L", NO installable assets)");
+                        line = tag + L" done: " + ::Agentmaster::Updater::DisplayVersion(info) + L" available (" + (info.isNightly ? L"NIGHTLY" : info.isPrerelease ? L"pre-release" : L"stable") + (::Agentmaster::Updater::InstallableForThisInstall(info) ? L", installable)" : L", NO installable assets)");
                     }
                     else
                     {

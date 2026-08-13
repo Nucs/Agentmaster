@@ -536,7 +536,8 @@ portable; true-portable zips pass `-PortableMode`; a portable NEVER reads the ho
 `Unpackaged` slot can't tell two unzips apart) > the per-install slot in
 `~/.agentmaster.profiles` > per-identity default (`~/.agentmaster` release+unpackaged /
 `~/.agentmaster-dev` dev). An INSTALLED copy's **first launch AUTO-SELECTS the per-identity default
-WITHOUT prompting** — release → **Production** (`~/.agentmaster`), dev → **Development** (`~/.agentmaster-dev`)
+WITHOUT prompting** — release → **Default** (`~/.agentmaster`; the picker option formerly labeled
+“Production”), dev → **Development** (`~/.agentmaster-dev`)
 — and persists it (`EnsureProfileResolvedAtStartup` → `DefaultProfileDir()` + `SaveChoice` +
 `SeedTerminalSettings`), running from `WindowEmperor::HandleCommandlineArgs` AFTER the single-instance
 handoff and BEFORE any state read (no UI, so a `-Embedding` defterm activation takes the same path);
@@ -545,15 +546,16 @@ profile (self-contained)"** `<unzip>\profile` option, the migrate checkbox offer
 pre-existing `<unzip>\profile` — and remembers the answer in `profile.path`
 (`SaveLocalProfilePointer`; Cancel/`-Embedding` lands on `<unzip>\profile` UN-persisted so the next
 interactive launch re-asks; `allowUi` gates that prompt + the two-instances-on-one-profile warning).
-The **Production / Development /
-Browse…** TaskDialog picker (comctl32 v6 dep in `WindowsTerminal.manifest`; + a "copy existing data from
+The **Default / Development /
+Browse…** TaskDialog picker (each option’s path line reads “— existing data” when that folder
+already holds something — `ProfileDirHasData`) (comctl32 v6 dep in `WindowsTerminal.manifest`; + a "copy existing data from
 `~/.agentmaster`" checkbox that skips `locks/`+`shim/`+`bridge.json` and never clobbers) is thus reached
 from a PORTABLE first launch AND the cog's **PROFILE** row's
 Change… (applies on restart; persists via **`PersistProfileChoice`** — portable/pointer-steered copies
 rewrite `profile.path`, the old home-map write was a DEAD choice for portables since their resolution
 never read it; a refused write is surfaced, not swallowed) — an installed first launch is silent.
 A kernel **profile mutex** warns if two live
-instances point at one folder (incl. a portable pointed at the Production profile while the installed
+instances point at one folder (incl. a portable pointed at the Default profile while the installed
 release runs). The generated hook
 forwarder's bridge discovery is now per-profile too (`BuildForwarderScript(stateDir)` — was a
 hardcoded `~/.agentmaster/bridge.json`, a cross-instance hook-routing bug). Engine code is
@@ -616,8 +618,20 @@ GitHub-release self-updater for our side-by-side packaged app, header-only pure-
 `ProfileBootstrap.h` (so the WindowsTerminal EXE includes it without the engine lib). On launch the
 `WindowEmperor` runs `RunStartupUpdateCheck` **after the profile resolves and BEFORE the "Reopen your
 N windows?" prompt** — a bounded (≤6 s, on a worker so a slow network can't wedge launch) GitHub-API
-query for the newest release, gated to **packaged RELEASE installs** (dev/unpackaged skip unless
-`AGENTMASTER_UPDATE_STARTUP` is set). When a strictly-newer version exists it shows a TaskDialog —
+query for the newest release, gated to **packaged RELEASE installs + PORTABLE copies** (the
+`IsUpdaterChannel` gate; dev / plain-unpackaged skip unless `AGENTMASTER_UPDATE_STARTUP` is set).
+**A PORTABLE copy self-updates IN PLACE** (`IsPortableUpdateTarget` = unpackaged + the `.portable`
+marker): its current version reads from the exe-side **`.am-version`** stamp the zip ships
+(`CurrentInstallVersion` → `PortableVersionFromDir`; absent ⇒ 0.0.0, so a pre-stamp zip adopts the
+newest release on its first check — self-healing), `ParseReleaseObj` picks the release's
+**arch-matched portable zip asset** (compile-time `kPortableZipSuffix` — the update replaces the
+very binaries running the check; digest captured, same `IsTrustedAssetUrl` gate as the bundle),
+`InstallableForThisInstall` routes every consumer (prompt copy · ApplyDecision · log lines ·
+LaunchInstaller's gate) to zip-vs-MSIX, and "Update now" runs `am-update.ps1 -Portable`: download
+the zip → stop what runs under the unzip → swap its binaries **preserving `settings\` + `profile\`
++ `profile.path`** (Install-Agentmaster.ps1's exact list; both unwrap `agentmaster-<ver>` AND the
+pre-rename `terminal-<ver>` zip folders) → restamp `.am-version` → relaunch `WindowsTerminal.exe`
+(no cert, no admin, no package registration). When a strictly-newer version exists it shows a TaskDialog —
 **TWO buttons — Update now / Postpone — over a SIX-radio group** picking what Postpone means:
 **Remind me next restart** (the **default**, and what Cancel / X / Esc / any failure resolves to — the
 only choice that writes NOTHING durable: it latches the process-scoped declined-this-run marker, so the
@@ -3195,7 +3209,7 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   `.portable` marker fallback (`<exedir>\profile`, un-chosen portable) >
   the `%USERPROFILE%\.agentmaster.profiles` per-install choice file > the per-identity default;
   an INSTALLED first launch auto-selects silently, a PORTABLE first launch prompts — Portable /
-  Production / Development / Browse… (PROFILES.md §2a) — and everyone changes it from
+  Default / Development / Browse… (PROFILES.md §2a) — and everyone changes it from
   the cog's PROFILE row, applied on restart). Contents: `hooks-settings.json` +
   `agentmaster-hook.ps1` (the shared hooks config Claude is pointed at via `--settings`),
   `hooks.log` + `autorunner.log` (engine traces — `hooks.log` carries the hook event stream
@@ -3486,7 +3500,7 @@ The pipeline is **prep** (version from the tag/input, stamped into `Package-Rel.
 (`build/scripts/Create-AppxBundle.ps1` merges both arches → `.msixbundle`, then self-signs;
 `New-UnpackagedTerminalDistribution.ps1 -PortableMode:$true` makes the portable zips — TRUE
 portable: `.portable` marker ⇒ first launch PROMPTS which profile to use (default: the
-self-contained `<unzip>\profile`; also Production / Development / Browse…), remembered in the
+self-contained `<unzip>\profile`; also Default / Development / Browse…), remembered in the
 `<unzip>\profile.path` pointer; Terminal's own settings ride the chosen profile
 (`<profile>\terminal\`, seeded from a pre-choice `<unzip>\settings`) — PROFILES.md §2a) →
 **release** (`softprops/action-gh-release` creates a **DRAFT** GitHub Release
@@ -4221,7 +4235,7 @@ build **binlog uploads as an artifact** to diagnose the first run.
 15. **One profile per install, resolved ONCE, before ANY state read; everything persists inside
     it.** The WindowEmperor resolves the profile **after** winning the single-instance handoff and
     **before** the first settings/state read — first launch **auto-selects the per-identity default**
-    (release → Production, dev → Development) WITHOUT UI, so a handed-off process or a `-Embedding`
+    (release → Default, dev → Development) WITHOUT UI, so a handed-off process or a `-Embedding`
     (defterm) activation takes the same silent path; the only profile picker left is the cog's
     explicit **Change…** (never shown from a handed-off / `-Embedding` process). Never read or
     write persisted state (engine files, Terminal settings, window records, the reopen scan)

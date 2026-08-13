@@ -967,9 +967,15 @@ void TestProfileBootstrap()
         fs::create_directories(fs::path{ fakeExe });
         CHECK(!P::IsPortableInstallIn(fakeExe), "portable: no marker -> not portable");
         CHECK(P::ReadLocalProfilePointerIn(fakeExe).empty(), "pointer: absent file -> empty");
+        // ProfileDirHasData — what the picker's "existing data" marker keys on: a MISSING dir and
+        // an EMPTY (auto-created) dir read as no data; any entry flips it.
+        CHECK(!P::ProfileDirHasData(fakeExe + L"\\missing"), "has-data: missing dir -> no data");
+        CHECK(!P::ProfileDirHasData(fakeExe), "has-data: empty dir -> no data");
+        CHECK(!P::ProfileDirHasData(L""), "has-data: empty path -> no data");
         {
             std::ofstream f{ fs::path{ fakeExe } / L".portable", std::ios::binary };
         }
+        CHECK(P::ProfileDirHasData(fakeExe), "has-data: a dir with an entry -> data");
         CHECK(P::IsPortableInstallIn(fakeExe), "portable: marker detected");
         CHECK(P::detail::SamePath(P::PortableDefaultProfileDirIn(fakeExe), fakeExe + L"\\profile"), "portable: default profile is <exedir>\\profile");
 
@@ -2712,6 +2718,10 @@ void TestUpdaterVersionLogic()
         U::ParseReleaseObj(*rel, U::ParseVersion(L"2.0.1"), older);
         CHECK(!older.available, "release: older release not available");
 
+        // The generic "portable.zip" asset above does NOT carry the arch suffix — the PORTABLE
+        // payload pick is arch-strict (kPortableZipSuffix), so it must stay unclaimed.
+        CHECK(!info.portableInstallable && info.zipUrl.empty(), "release: a non-arch zip never becomes the portable payload");
+
         // A tampered (foreign-host) asset set: still 'available' (the version IS newer) but NEVER
         // installable — the prompt then links to the releases page instead of installing it.
         const std::wstring evilJson =
@@ -2722,6 +2732,63 @@ void TestUpdaterVersionLogic()
         U::UpdateInfo einfo;
         U::ParseReleaseObj(*evil, cur, einfo);
         CHECK(einfo.available && !einfo.installable && einfo.bundleUrl.empty(), "release: foreign asset URLs rejected (not installable)");
+    }
+
+    // PORTABLE update assets (the portable zip self-update): ParseReleaseObj picks the zip whose
+    // name carries THIS binary's arch suffix (compile-time kPortableZipSuffix — the update replaces
+    // the very binaries running the check), captures its digest, and the same trust gate applies.
+    {
+        const std::wstring suffix{ U::kPortableZipSuffix };
+        CHECK(suffix == L"_x64.zip" || suffix == L"_arm64.zip", "portable-zip: suffix is one of the two shipped arches");
+        const std::wstring relJson =
+            L"{\"tag_name\":\"v2.0.0\",\"assets\":["
+            L"{\"name\":\"Agentmaster_2.0.0.0_x64.zip\",\"browser_download_url\":\"https://github.com/Nucs/Agentmaster/releases/download/v2.0.0/Agentmaster_2.0.0.0_x64.zip\",\"digest\":\"sha256:zx\"},"
+            L"{\"name\":\"Agentmaster_2.0.0.0_arm64.zip\",\"browser_download_url\":\"https://github.com/Nucs/Agentmaster/releases/download/v2.0.0/Agentmaster_2.0.0.0_arm64.zip\",\"digest\":\"sha256:za\"}]}";
+        const auto rel = json::Parse(relJson);
+        U::UpdateInfo info;
+        U::ParseReleaseObj(*rel, U::ParseVersion(L"1.0.0"), info);
+        CHECK(info.portableInstallable && !info.zipUrl.empty(), "portable-zip: the arch-matched zip is the payload");
+        CHECK(info.zipUrl.size() > suffix.size() && info.zipUrl.compare(info.zipUrl.size() - suffix.size(), suffix.size(), suffix) == 0,
+              "portable-zip: the picked URL carries THIS binary's arch suffix");
+        CHECK(info.zipSha256 == (suffix == L"_x64.zip" ? L"sha256:zx" : L"sha256:za"), "portable-zip: the matching asset's digest rides along");
+        CHECK(!info.installable, "portable-zip: a zip-only release is NOT MSIX-installable (no bundle/cer)");
+        // The harness runs unpackaged with NO .portable marker next to the test exe, so THIS
+        // process is not a portable target — the mode router must answer the MSIX field here.
+        CHECK(!U::IsPortableUpdateTarget(), "portable-zip: the harness itself is not a portable target");
+        CHECK(U::InstallableForThisInstall(info) == info.installable, "portable-zip: non-portable installs route to the MSIX answer");
+
+        // Foreign-host zip: rejected by the same trust gate as the bundle/cer.
+        const std::wstring evilJson =
+            L"{\"tag_name\":\"v2.0.0\",\"assets\":["
+            L"{\"name\":\"Agentmaster_2.0.0.0_x64.zip\",\"browser_download_url\":\"https://evil.example/Agentmaster_2.0.0.0_x64.zip\"},"
+            L"{\"name\":\"Agentmaster_2.0.0.0_arm64.zip\",\"browser_download_url\":\"https://evil.example/Agentmaster_2.0.0.0_arm64.zip\"}]}";
+        const auto evil = json::Parse(evilJson);
+        U::UpdateInfo einfo;
+        U::ParseReleaseObj(*evil, U::ParseVersion(L"1.0.0"), einfo);
+        CHECK(!einfo.portableInstallable && einfo.zipUrl.empty(), "portable-zip: foreign zip URLs rejected");
+    }
+
+    // PortableVersionFromDir: the exe-side .am-version stamp (shipped in the zip, rewritten by the
+    // in-place update) is a portable copy's CURRENT version; absent/garbage reads {0,0,0,0} so a
+    // pre-stamp zip adopts the newest release on its first check (self-healing).
+    {
+        namespace fs = std::filesystem;
+        wchar_t tmpDir[MAX_PATH];
+        ::GetTempPathW(MAX_PATH, tmpDir);
+        const std::wstring dir = std::wstring{ tmpDir } + L"am-portver-" + NewSessionId();
+        fs::create_directories(fs::path{ dir });
+        const auto none = U::PortableVersionFromDir(dir);
+        CHECK(none.major == 0 && none.minor == 0 && none.patch == 0, "am-version: missing stamp -> 0.0.0");
+        {
+            std::ofstream f{ fs::path{ dir } / L".am-version", std::ios::binary };
+            f << "0.7.1.0\r\n"; // the ASCII+CRLF shape Out-File -Encoding ascii produces
+        }
+        const auto v = U::PortableVersionFromDir(dir);
+        CHECK(v.major == 0 && v.minor == 7 && v.patch == 1 && v.build == 0, "am-version: stamp parses (CRLF tolerated)");
+        CHECK(U::CompareVersion(U::ParseVersion(L"v0.7.2"), v) > 0, "am-version: orders against release tags");
+        CHECK(U::PortableVersionFromDir(L"").major == 0, "am-version: empty dir handle -> 0.0.0");
+        std::error_code ec;
+        fs::remove_all(dir, ec);
     }
 
     // NIGHTLY channel (IsNightlyTag / ReleaseAllowedOnChannel): a nightly is an unstable dev build

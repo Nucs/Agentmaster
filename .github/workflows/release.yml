@@ -21,9 +21,10 @@
 # Produces, attached to a GitHub Release:
 #   - Agentmaster_<ver>.msixbundle   (x64+arm64; SELF-SIGNED — see the .cer caveat below)
 #   - Agentmaster.cer                (public cert; import to Trusted People to install the bundle)
-#   - Agentmaster_<ver>_x64.zip      (TRUE portable: ships the .portable marker — Terminal
-#     settings live in <unzip>\settings and the Agentmaster profile in <unzip>\profile, fully
-#     self-contained; unzip & run, no install/cert needed)
+#   - Agentmaster_<ver>_x64.zip      (TRUE portable: one agentmaster-<ver> folder shipping the
+#     .portable marker + an .am-version stamp — first launch ASKS which profile to use (default:
+#     the self-contained <unzip>\profile; remembered in <unzip>\profile.path), the in-app updater
+#     self-updates it IN PLACE via this very zip asset; unzip & run, no install/cert needed)
 #   - Agentmaster_<ver>_arm64.zip    (portable)
 #
 # Heads-up (things a runner may need that this box has natively):
@@ -221,11 +222,12 @@ jobs:
                   Select-Object -First 1
           if (-not $xaml) { throw "No Microsoft.UI.Xaml appx for ${{ matrix.xamlarch }}" }
           New-Item -ItemType Directory -Force _unpackaged | Out-Null
-          # -PortableMode: ship the .portable marker, so the zip is TRULY self-contained —
-          # Terminal settings in <unzip>\settings (upstream portable mode) and the Agentmaster
-          # state profile in <unzip>\profile (ProfileBootstrap's portable branch; never asks,
-          # never touches ~/.agentmaster). Without it the zip would share the global unpackaged
-          # settings dir with any other unpackaged Terminal.
+          # -PortableMode: ship the .portable marker + the .am-version stamp, so the zip is a
+          # TRUE portable — its first launch asks which profile to use (default: the
+          # self-contained <unzip>\profile, remembered in <unzip>\profile.path; PROFILES.md §2a)
+          # and the in-app updater self-updates it IN PLACE from this zip asset (Updater.h
+          # -Portable). Without the marker the zip would share the global unpackaged settings
+          # dir with any other unpackaged Terminal.
           .\build\scripts\New-UnpackagedTerminalDistribution.ps1 `
             -TerminalAppX "${{ steps.loc.outputs.msix }}" `
             -XamlAppX $xaml.FullName `
@@ -379,7 +381,7 @@ jobs:
             & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version ${{ needs.prep.outputs.rawver }} -Portable -Launch
             ```
 
-            **Portable (recommended, no cert):** download `Agentmaster_${{ needs.prep.outputs.ver4 }}_x64.zip` (or `_arm64`), unzip anywhere, run `agentmaster.exe`. Fully self-contained.
+            **Portable (recommended, no cert):** download `Agentmaster_${{ needs.prep.outputs.ver4 }}_x64.zip` (or `_arm64`), unzip anywhere, run `WindowsTerminal.exe` inside the `agentmaster-${{ needs.prep.outputs.ver4 }}` folder. First launch asks which profile to use (Enter keeps it self-contained), and it self-updates in place from then on.
 
             **MSIX bundle (self-signed):**
             1. Download `Agentmaster.cer` + `Agentmaster_${{ needs.prep.outputs.ver4 }}.msixbundle`.

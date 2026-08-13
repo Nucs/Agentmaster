@@ -13,10 +13,10 @@
 // side by side; without per-install profiles they would fight over ONE ~/.agentmaster (two
 // SharedEngines clobbering sessions.json / open-windows.json / bridge.json). Each install
 // remembers its OWN profile choice. An INSTALLED copy's first launch AUTO-SELECTS the per-identity
-// default WITHOUT prompting — release → Production (~/.agentmaster), dev → Development
-// (~/.agentmaster-dev) — and persists it; a PORTABLE copy's first launch instead ASKS (Portable /
-// Production / Development / Browse…) and remembers the answer NEXT TO THE EXE. Everyone can
-// switch later from the cog's "Change profile folder…".
+// default WITHOUT prompting — release → Default (~/.agentmaster; the picker option formerly
+// labeled "Production"), dev → Development (~/.agentmaster-dev) — and persists it; a PORTABLE
+// copy's first launch instead ASKS (Portable / Default / Development / Browse…) and remembers the
+// answer NEXT TO THE EXE. Everyone can switch later from the cog's "Change profile folder…".
 //
 // RESOLUTION ORDER (ResolveProfileDir):
 //   1. env  AGENTMASTER_PROFILE        — explicit override (also exported by the bootstrap so
@@ -608,7 +608,7 @@ namespace Agentmaster::Profiles
     // PURE: the line the pointer file stores for a chosen profile dir. PREFER RELATIVE — but only
     // when the dir sits INSIDE the exe dir (the `profile` case and any subfolder), so the pointer
     // survives the user moving the whole unzip. Anything else — another tree, another drive, the
-    // home-dir Production/Development defaults — is stored ABSOLUTE verbatim: a `..`-relative
+    // home-dir Default/Development defaults — is stored ABSOLUTE verbatim: a `..`-relative
     // spelling would silently re-anchor to a WRONG (and then auto-created) folder if the unzip
     // moved, which is worse than an absolute path that at least stays honest.
     inline std::wstring EncodeLocalProfilePointer(std::wstring_view exeDir, std::wstring_view profileDir)
@@ -1087,13 +1087,40 @@ namespace Agentmaster::Profiles
         }
     }
 
+    // True when `dir` exists AND holds at least one entry — the picker marks such options with
+    // "existing data" so the choice between "fresh start" and "adopt what's already there" is
+    // informed (a Default profile another install populated, an older portable's ./profile). An
+    // auto-created EMPTY folder deliberately reads as no data.
+    inline bool ProfileDirHasData(const std::wstring& dir)
+    {
+        if (dir.empty())
+        {
+            return false;
+        }
+        try
+        {
+            const std::filesystem::path p{ dir };
+            if (!std::filesystem::is_directory(p))
+            {
+                return false;
+            }
+            return std::filesystem::directory_iterator{ p } != std::filesystem::directory_iterator{};
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
     // The profile picker. `migrateSource` is the folder offered by the "copy existing data"
     // checkbox (a portable's first launch: the pre-existing <exedir>\profile, when one exists;
     // the cog's Change…: the active profile). Pure Win32 (TaskDialogIndirect needs the
     // Common-Controls v6 manifest dependency, which WindowsTerminal.manifest declares). Loops
     // back from a cancelled Browse…. On a PORTABLE copy (the `.portable` marker) a leading
     // "Portable profile" command link offers the self-contained <exedir>\profile and is the
-    // default — for everyone else the picker is byte-identical to before.
+    // default — for everyone else the picker is byte-identical to before. Every fixed option's
+    // path line appends "— existing data" when that folder already holds something
+    // (ProfileDirHasData), so a profile that EXISTS is visibly different from a fresh one.
     inline PickerResult ShowProfilePicker(HWND owner, bool firstLaunch, const std::wstring& migrateSource)
     {
         PickerResult result;
@@ -1130,9 +1157,12 @@ namespace Agentmaster::Profiles
             content += L"\n\nThe new profile takes effect the next time Agentmaster starts.";
         }
 
-        const std::wstring portableLabel = L"Portable profile (self-contained)\n" + portableDir;
-        const std::wstring prodLabel = L"Production profile\n" + releaseDir;
-        const std::wstring devLabel = L"Development profile\n" + devDir;
+        const auto dirLine = [](const std::wstring& dir) {
+            return ProfileDirHasData(dir) ? dir + L"  \x2014  existing data" : dir;
+        };
+        const std::wstring portableLabel = L"Portable profile (self-contained)\n" + dirLine(portableDir);
+        const std::wstring prodLabel = L"Default profile\n" + dirLine(releaseDir);
+        const std::wstring devLabel = L"Development profile\n" + dirLine(devDir);
         const std::wstring browseLabel = L"Browse for a profile folder…\nUse any folder (a synced drive, a per-project location, …)";
         const std::wstring verification = L"Copy existing data from " + migrateSource + L" into the chosen profile";
         const std::wstring footer = L"Change this later from the Manager tab \x2192 \x2699 Settings \x2192 Profile.";
@@ -1244,9 +1274,9 @@ namespace Agentmaster::Profiles
     // BEFORE anything reads persisted state (Terminal settings via the GetBaseSettingsPath
     // redirect, ApplicationState, the windows/<id>.json reopen scan, and — later — the engine's
     // AgentmasterStateDir). An INSTALLED copy's first launch (no env / pointer / saved choice)
-    // AUTO-SELECTS the per-identity default profile (release → Production, dev → Development) and
+    // AUTO-SELECTS the per-identity default profile (release → Default, dev → Development) and
     // persists it — no prompt. A PORTABLE copy's first launch (marker, no pointer yet) instead
-    // PROMPTS (Portable <exedir>\profile / Production / Development / Browse…) and remembers the
+    // PROMPTS (Portable <exedir>\profile / Default / Development / Browse…) and remembers the
     // answer in the exe-side pointer file; Cancel — and `allowUi == false` (a `-Embedding` COM
     // activation / defterm handoff must never block on a dialog) — lands on the self-contained
     // <exedir>\profile WITHOUT persisting, so the next interactive launch asks again. `allowUi`
@@ -1314,9 +1344,9 @@ namespace Agentmaster::Profiles
         if (dir.empty())
         {
             // First launch of an INSTALLED copy: AUTO-SELECT the per-identity default profile and
-            // remember it, WITHOUT prompting — the RELEASE install picks the Production profile
+            // remember it, WITHOUT prompting — the RELEASE install picks the Default profile
             // (~/.agentmaster), the DEV install picks the Development profile (~/.agentmaster-dev).
-            // (The Production / Development / Browse… TaskDialog picker — ShowProfilePicker — is
+            // (The Default / Development / Browse… TaskDialog picker — ShowProfilePicker — is
             // shown by a PORTABLE first launch above and by the cog's "Change profile folder…".)
             // The choice is keyed off the package identity (DefaultProfileDir == IsDevPackage() ?
             // dev : release), so it needs no UI and runs for headless -Embedding/defterm

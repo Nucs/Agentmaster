@@ -65,7 +65,10 @@ $version = $manifest.Package.Identity.Version
 $architecture = $manifest.Package.Identity.ProcessorArchitecture
 
 $distributionName = "{0}_{1}_{2}" -f ($pfn, $version, $architecture)
-$terminalDir = "terminal-{0}" -f ($version)
+# Agentmaster: the zip's single wrapper folder is agentmaster-<ver> (was upstream's terminal-<ver>;
+# consumers that unwrap it -- Install-Agentmaster.ps1, am-update.ps1's -Portable mode -- match BOTH
+# spellings so pre-rename releases keep installing).
+$terminalDir = "agentmaster-{0}" -f ($version)
 
 ########
 # Unpacking Terminal and XAML
@@ -136,6 +139,10 @@ $finalTerminalPriFile = Join-Path $terminalAppPath "resources.pri"
 $portableModeMarkerFile = Join-Path $terminalAppPath ".portable"
 If ($PortableMode) {
 	"" | Out-File $portableModeMarkerFile
+	# Agentmaster: stamp the build's version beside the marker. The in-app updater reads it as the
+	# portable copy's CURRENT version (Updater.h CurrentInstallVersion -> <exedir>\.am-version) and
+	# the in-place zip update rewrites it. ASCII so the C++ UTF-8 reader takes it verbatim.
+	$version | Out-File (Join-Path $terminalAppPath ".am-version") -Encoding ascii
 }
 
 If ($PSCmdlet.ParameterSetName -Eq "AppX") {

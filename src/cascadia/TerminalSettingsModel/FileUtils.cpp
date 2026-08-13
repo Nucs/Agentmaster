@@ -39,7 +39,7 @@ namespace winrt::Microsoft::Terminal::Settings::Model
             // (or any two profiles) can never share or clobber each other's Terminal settings.
             // This deliberately OUTRANKS upstream's portable-mode `settings` folder below: a
             // PORTABLE copy now CHOOSES its profile at first launch (ProfileBootstrap — possibly
-            // the shared Production one), and wherever that profile lives, it owns ALL persisted
+            // the shared Default one), and wherever that profile lives, it owns ALL persisted
             // state; the bootstrap seeds a pre-choice portable's <exedir>\settings into
             // <profile>\terminal so nothing is lost. Headless hosts that never ran the bootstrap
             // (tests, tools) fall through — a portable module keeps the upstream exe-side

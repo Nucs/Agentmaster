@@ -30,7 +30,7 @@
 #include <unordered_set>
 
 // Agentmaster: the per-install state PROFILE — resolved (and, on an install's first launch,
-// PICKED: Production / Development / Browse…) before anything reads persisted state. Header-only
+// PICKED: Portable / Default / Development / Browse…) before anything reads persisted state. Header-only
 // on purpose: the Emperor links TerminalApp.dll, not the TerminalAppLib static lib.
 #include "../TerminalApp/AgentMaster/ProfileBootstrap.h"
 // Agentmaster: the in-app updater — the startup GitHub-release check + prompt, run BEFORE the
@@ -551,9 +551,9 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     // below routes through GetBaseSettingsPath's AGENTMASTER_PROFILE redirect), the reopen
     // scan further down, and — much later — the engine's AgentmasterStateDir(). An INSTALLED
     // copy's first launch (no saved choice) AUTO-SELECTS the per-identity default profile
-    // (release → Production ~/.agentmaster, dev → Development ~/.agentmaster-dev) and persists
+    // (release → Default ~/.agentmaster, dev → Development ~/.agentmaster-dev) and persists
     // it WITHOUT prompting; a PORTABLE copy's first launch (`.portable` marker, no exe-side
-    // `profile.path` pointer yet) instead PROMPTS (Portable <exedir>\profile / Production /
+    // `profile.path` pointer yet) instead PROMPTS (Portable <exedir>\profile / Default /
     // Development / Browse…) and remembers the answer next to the exe. The `embedding` flag
     // suppresses that portable prompt (falls to the self-contained <exedir>\profile,
     // un-persisted, so the next interactive launch asks) AND the "profile in use by another

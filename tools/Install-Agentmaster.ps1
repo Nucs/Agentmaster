@@ -570,7 +570,9 @@ function Install-Portable {
     $tmp = Join-Path $Cache ('extract-' + [IO.Path]::GetFileNameWithoutExtension($zip.name))
     if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
     Expand-Archive -LiteralPath $zipPath -DestinationPath $tmp -Force
-    $src = Get-ChildItem $tmp -Directory | Where-Object { $_.Name -like 'terminal-*' } | Select-Object -First 1
+    # The zip's wrapper folder: agentmaster-<ver> (current releases) or terminal-<ver> (pre-rename
+    # ones -- keep matching so -Version can still install an older release).
+    $src = Get-ChildItem $tmp -Directory | Where-Object { $_.Name -like 'agentmaster-*' -or $_.Name -like 'terminal-*' } | Select-Object -First 1
     if (-not $src) { $src = Get-Item $tmp }   # fall back to flat layout
 
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null

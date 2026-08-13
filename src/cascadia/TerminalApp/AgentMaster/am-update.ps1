@@ -29,8 +29,16 @@
       * Relaunches the app.
 
     The release was already resolved by the app, so the bundle/cer URLs are passed in rather than
-    discovered from the GitHub API (unlike Install-Agentmaster.ps1). The "extra modes" of the
-    standalone installer (portable, -Version/-Prerelease resolution) are intentionally omitted.
+    discovered from the GitHub API (unlike Install-Agentmaster.ps1). The -Version/-Prerelease
+    release resolution of the standalone installer is intentionally omitted.
+
+    -Portable performs the PORTABLE in-place update instead (a portable copy = unpackaged + the
+    .portable marker; Updater.h routes it here): download the release's arch-matched portable zip
+    (-ZipUrl, SHA-256-verified when -ZipSha256 is supplied), stop any instance still running under
+    -PortableDir, swap the folder's binaries while PRESERVING the exe-side user state (settings\ +
+    profile\ + profile.path -- Install-Agentmaster.ps1's exact preserve list), stamp .am-version
+    with the new version (the updater's next check reads it), and relaunch WindowsTerminal.exe.
+    No cert, no admin, no package registration.
 
     -Uninstall removes the installed package (per-user, no admin). Your profile data (e.g.
     %USERPROFILE%\.agentmaster) lives OUTSIDE the package and is never touched.
@@ -46,7 +54,11 @@ param(
     [string]$BundleSha256 = '',
     [string]$Family       = 'Agentmaster_56k4f06dsfp9r',
     [int]   $WaitPid      = 0,
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$Portable,
+    [string]$PortableDir  = '',
+    [string]$ZipUrl       = '',
+    [string]$ZipSha256    = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -108,9 +120,18 @@ function Wait-ForExit {
 function Stop-PackageProcesses {
     param($Pkg)
     if (-not $Pkg.InstallLocation) { return }
+    Stop-ProcessesUnder $Pkg.InstallLocation
+}
+
+# The path-filtered process stop both flavors share: kill our exes ONLY under $DirPath, so the
+# Store Windows Terminal and any other install (a different path) are never touched (the same
+# filter Install-Agentmaster.ps1's Stop-RunningUnder uses).
+function Stop-ProcessesUnder {
+    param($DirPath)
+    if (-not $DirPath) { return }
     try {
         Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Pkg.InstallLocation, [StringComparison]::OrdinalIgnoreCase) } |
+            Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($DirPath, [StringComparison]::OrdinalIgnoreCase) } |
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     } catch {}
 }
@@ -314,6 +335,61 @@ function Invoke-Install {
     Start-Sleep -Seconds 2
 }
 
+# The PORTABLE in-place update (mirrors tools\Install-Agentmaster.ps1's Install-Portable core --
+# KEEP IN SYNC): download the arch-matched release zip, stop what runs under the portable folder,
+# replace its binaries while preserving the exe-side user state, stamp .am-version, relaunch.
+function Invoke-PortableUpdate {
+    Write-Host ''
+    Write-Host "Agentmaster updater - installing $Version (portable, in place)" -ForegroundColor White
+    Write-Host ''
+    if (-not $ZipUrl -or -not $PortableDir) { throw 'Internal error: the portable update was launched without a zip URL / target folder.' }
+    if (-not (Test-Path (Join-Path $PortableDir 'WindowsTerminal.exe'))) {
+        throw "The portable folder no longer holds WindowsTerminal.exe: $PortableDir"
+    }
+    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    $zip = Join-Path $Dir ([IO.Path]::GetFileName(([Uri]$ZipUrl).AbsolutePath))
+
+    Write-Step 'Downloading the update'
+    Save-File $ZipUrl $zip $ZipSha256
+
+    Write-Step 'Extracting'
+    $tmp = Join-Path $Dir 'extract'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force
+    # The zip wraps everything in one folder: agentmaster-<ver> (current releases) or
+    # terminal-<ver> (pre-rename ones); a flat zip is tolerated.
+    $src = Get-ChildItem $tmp -Directory | Where-Object { $_.Name -like 'agentmaster-*' -or $_.Name -like 'terminal-*' } | Select-Object -First 1
+    if (-not $src) { $src = Get-Item $tmp }
+    if (-not (Test-Path (Join-Path $src.FullName 'WindowsTerminal.exe'))) {
+        throw 'The downloaded zip does not look like an Agentmaster portable build (no WindowsTerminal.exe inside).'
+    }
+
+    Wait-ForExit
+    Stop-ProcessesUnder $PortableDir
+
+    Write-Step "Installing $Version into $PortableDir"
+    # Replace binaries; preserve the user state held next to the exe (Install-Agentmaster.ps1's
+    # exact list): settings\ (pre-choice portable WT settings) + profile\ (the self-contained
+    # profile) + profile.path (WHICH profile this copy chose) + .am-version (refreshed below).
+    Get-ChildItem $PortableDir -Force | Where-Object { $_.Name -notin @('settings', 'profile', 'profile.path', '.am-version') } |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Copy-Item -Path (Join-Path $src.FullName '*') -Destination $PortableDir -Recurse -Force
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+
+    # Stamp the new version for the updater's next check. The zip ships its own .am-version (and
+    # the copy above laid it down); this explicit write is the belt for updating FROM a zip that
+    # predates the stamp, and normalizes a suffixed tag ("v0.8.0-prerelease" -> "0.8.0").
+    $num = ($Version -replace '^[vV]', '' -split '-')[0]
+    try { ([version]$num).ToString() | Out-File -FilePath (Join-Path $PortableDir '.am-version') -Encoding ascii -Force } catch {}
+    Write-Ok 'installed'
+
+    Write-Step 'Relaunching Agentmaster'
+    Start-Process (Join-Path $PortableDir 'WindowsTerminal.exe')
+    Write-Host ''
+    Write-Host "Updated to $Version." -ForegroundColor White
+    Start-Sleep -Seconds 2
+}
+
 function Invoke-Uninstall {
     Write-Host ''
     Write-Host "Agentmaster uninstaller" -ForegroundColor White
@@ -337,7 +413,7 @@ function Invoke-Uninstall {
 # ============================ main ============================
 try {
     Initialize-Net
-    if ($Uninstall) { Invoke-Uninstall } else { Invoke-Install }
+    if ($Uninstall) { Invoke-Uninstall } elseif ($Portable) { Invoke-PortableUpdate } else { Invoke-Install }
 }
 catch {
     Write-Host ''

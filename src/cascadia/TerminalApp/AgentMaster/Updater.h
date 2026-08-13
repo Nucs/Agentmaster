@@ -6,7 +6,12 @@
 // version, prompts the user (Update now / Postpone [next restart · tomorrow 08:00 · 3·7·30 days · skip])
 // with a Win32 TaskDialog, and — on Update — materializes the installer script into the active
 // profile dir (am-update.ps1 + a tiny am-update.cmd launcher) and runs it detached to download +
-// cert-trust + Add-AppxPackage the new .msixbundle and relaunch. The script (am-update.ps1) is the
+// cert-trust + Add-AppxPackage the new .msixbundle and relaunch. A PORTABLE copy (unpackaged +
+// the `.portable` marker — IsPortableUpdateTarget) updates IN PLACE instead: the SAME script in
+// -Portable mode downloads the release's arch-matched portable ZIP and swaps the unzip's binaries
+// while preserving the exe-side user state (settings\ + profile\ + profile.path), then relaunches
+// WindowsTerminal.exe; its current version reads from the exe-side `.am-version` stamp the zip
+// ships (CurrentInstallVersion). The script (am-update.ps1) is the
 // REAL file at src/cascadia/TerminalApp/AgentMaster/am-update.ps1, compiled into WindowsTerminal.exe
 // as the AM_UPDATE_PS1 RT_RCDATA resource and READ FROM THE BINARY here (FindResource/LoadResource)
 // — never fetched from GitHub, and never read/copied/opened as a loose file on disk. The same script
@@ -86,6 +91,16 @@ namespace Agentmaster::Updater
     inline constexpr const wchar_t* kReleaseAumid = L"Agentmaster_56k4f06dsfp9r!App";
     inline constexpr const wchar_t* kReleaseFamily = L"Agentmaster_56k4f06dsfp9r";
     inline constexpr const wchar_t* kReleasesPage = L"https://github.com/Nucs/Agentmaster/releases";
+
+    // The portable-zip asset suffix for THIS binary's architecture (release assets:
+    // Agentmaster_<ver>_x64.zip / _arm64.zip). COMPILE-TIME on purpose — a portable update
+    // replaces the very binaries running this code, so the zip must match THEM (an x64 copy
+    // deliberately run under ARM64 emulation stays x64).
+#if defined(_M_ARM64)
+    inline constexpr const wchar_t* kPortableZipSuffix = L"_arm64.zip";
+#else
+    inline constexpr const wchar_t* kPortableZipSuffix = L"_x64.zip";
+#endif
 
     // Defined in the observability section below; declared first so EVERY function in this header —
     // incl. the version gates and the detail:: file helpers — can trace its own failures (POLICY:
@@ -233,6 +248,30 @@ namespace Agentmaster::Updater
             try
             {
                 LogUpdate(Profiles::ResolveProfileDir(), L"packaged-state read CRASHED (assuming unpackaged)");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
+            return false;
+        }
+    }
+
+    // True when THIS run should be updated IN PLACE as a PORTABLE folder: unpackaged + the
+    // exe-side `.portable` marker (the release zip). "Update now" then swaps the unzip's binaries
+    // with the release's portable ZIP instead of installing the MSIX bundle — which would create a
+    // SEPARATE packaged install BESIDE the portable, not update it. No-throw gate helper.
+    inline bool IsPortableUpdateTarget()
+    {
+        try
+        {
+            return !IsPackaged() && Profiles::IsPortableInstall();
+        }
+        catch (...)
+        {
+            try
+            {
+                LogUpdate(Profiles::ResolveProfileDir(), L"portable-target read CRASHED (assuming not portable)");
             }
             catch (...)
             {
@@ -474,6 +513,70 @@ namespace Agentmaster::Updater
         }
     }
 
+    // ============================ install-version resolution ============================
+
+    // The version STAMPED next to a portable copy's exe: <exeDir>\.am-version — one numeric line
+    // ("0.7.1.0"), shipped inside the release zip (New-UnpackagedTerminalDistribution.ps1 writes
+    // it beside the .portable marker) and rewritten by both installers (Install-Agentmaster.ps1
+    // and am-update.ps1's -Portable mode). {0,0,0,0} when absent/unreadable — a pre-stamp zip then
+    // reads as older-than-everything, so its first check offers the newest release, whose in-place
+    // update lays the stamp down (self-healing adoption).
+    inline Version PortableVersionFromDir(const std::wstring& exeDir)
+    {
+        try
+        {
+            if (exeDir.empty())
+            {
+                return Version{};
+            }
+            // ParseVersion skips leading non-digits and stops at the first non-numeric char, so a
+            // BOM/whitespace-wrapped or CRLF-terminated stamp parses clean.
+            return ParseVersion(detail::ReadFileWide(exeDir + L"\\.am-version"));
+        }
+        catch (...)
+        {
+            try
+            {
+                LogUpdate(Profiles::ResolveProfileDir(), L".am-version read CRASHED (0.0.0 assumed)");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
+            return Version{};
+        }
+    }
+
+    // The version of THIS install — what "is a newer release available?" compares against:
+    // packaged → the package identity version; a PORTABLE copy → the exe-side .am-version stamp;
+    // any other unpackaged run → {0,0,0,0} (the updater channel excludes those anyway).
+    inline Version CurrentInstallVersion()
+    {
+        if (IsPackaged())
+        {
+            return CurrentPackageVersion();
+        }
+        if (IsPortableUpdateTarget())
+        {
+            try
+            {
+                return PortableVersionFromDir(Profiles::detail::ExeDirPath());
+            }
+            catch (...)
+            {
+                try
+                {
+                    LogUpdate(Profiles::ResolveProfileDir(), L"portable version read CRASHED (0.0.0 assumed)");
+                }
+                catch (...)
+                {
+                    // logger-failed: nothing left to report through
+                }
+            }
+        }
+        return Version{};
+    }
+
     // Epoch milliseconds (FILETIME is 100ns since 1601; Unix epoch is +11644473600s).
     inline long long NowUnixMs()
     {
@@ -706,9 +809,22 @@ namespace Agentmaster::Updater
         std::wstring bundleUrl; // .msixbundle browser_download_url
         std::wstring bundleSha256; // the bundle asset's "sha256:<hex>" digest (when GitHub provides it) — verified by am-update.ps1
         std::wstring cerUrl; // .cer browser_download_url
+        bool portableInstallable{ false }; // the release carries a portable zip for THIS binary's arch (kPortableZipSuffix)
+        std::wstring zipUrl; // the arch-matched portable-zip browser_download_url (the -Portable update's payload)
+        std::wstring zipSha256; // that asset's "sha256:<hex>" digest (when GitHub provides it) — verified by am-update.ps1
         std::wstring notes; // release body (markdown; parsed + available — the prompt now LINKS to the release page rather than showing it inline)
         std::wstring htmlUrl; // release page (changelog) — .../releases/tag/<tag>; "What's new" / "Update's changelog" open this
     };
+
+    // Whether "Update now" can actually INSTALL for THIS install: a portable target needs the
+    // arch-matched zip asset, everything else the .msixbundle + .cer pair. The mode routing lives
+    // here — NOT in ParseReleaseObj — so the parse stays pure (the harness pins it with no
+    // exe-dir/marker dependency) and every consumer (the prompt copy, ApplyDecision, the log
+    // lines, LaunchInstaller's gate) asks ONE predicate.
+    inline bool InstallableForThisInstall(const UpdateInfo& info)
+    {
+        return IsPortableUpdateTarget() ? info.portableInstallable : info.installable;
+    }
 
     // "v0.4.3" — always with a leading v, for display.
     inline std::wstring DisplayVersion(const UpdateInfo& info)
@@ -931,9 +1047,17 @@ namespace Agentmaster::Updater
                 {
                     info.cerUrl = url;
                 }
+                else if (detail::EndsWithNoCase(name, kPortableZipSuffix))
+                {
+                    // The portable payload for THIS binary's arch (Agentmaster_<ver>_x64.zip /
+                    // _arm64.zip) — the other arch's zip never matches the compile-time suffix.
+                    info.zipUrl = url;
+                    info.zipSha256 = a.StrAt(L"digest");
+                }
             }
         }
         info.installable = !info.bundleUrl.empty() && !info.cerUrl.empty();
+        info.portableInstallable = !info.zipUrl.empty();
         info.available = CompareVersion(info.latest, cur) > 0;
     }
 
@@ -1011,6 +1135,7 @@ namespace Agentmaster::Updater
                         // reach the stable channel. Reads as up-to-date; the trail shows the tag.
                         info.available = false;
                         info.installable = false;
+                        info.portableInstallable = false;
                     }
                 }
                 else
@@ -1344,7 +1469,7 @@ namespace Agentmaster::Updater
                 // the install decision happens — restate what a nightly IS right where it's chosen.
                 content += L"\x26A0 This is a NIGHTLY build \x2014 an unstable development version. It may have memory leaks, CPU issues, and crashes.\n\n";
             }
-            content += info.installable ?
+            content += InstallableForThisInstall(info) ?
                            L"Choose \x201CUpdate now\x201D and Agentmaster will close and reopen automatically once the new version is installed, or pick when to be reminded." :
                            L"Choose \x201CUpdate now\x201D to open the download page, or pick when to be reminded.";
             // "What's new" OPENS this release's GitHub page (the changelog fixated on the specific
@@ -1468,22 +1593,36 @@ namespace Agentmaster::Updater
 
     // Materialize am-update.ps1 (from the embedded resource) + a tiny am-update.cmd launcher into
     // stateDir and launch the .cmd DETACHED (it survives this process exiting). The .cmd invokes the
-    // .ps1 with the resolved values as parameters. Returns true if launched — the caller MUST then
-    // exit / quit the app so the package isn't in use while it upgrades + relaunches.
+    // .ps1 with the resolved values as parameters. A PORTABLE target runs the script's -Portable
+    // mode instead (zip download + in-place binary swap of <exedir>, preserving settings\ +
+    // profile\ + profile.path, then relaunch). Returns true if launched — the caller MUST then
+    // exit / quit the app so the package/exe isn't in use while it upgrades + relaunches.
     inline bool LaunchInstaller(const std::wstring& stateDir, const UpdateInfo& info)
     {
         try
         {
-            if (!info.installable)
+            const bool portable = IsPortableUpdateTarget();
+            if (!InstallableForThisInstall(info))
             {
                 return false;
             }
             // Belt on top of ParseReleaseObj's gate: never hand a non-own-repo URL to a script that
             // downloads + installs it, no matter how the UpdateInfo was assembled.
-            if (!IsTrustedAssetUrl(info.bundleUrl) || !IsTrustedAssetUrl(info.cerUrl))
+            if (portable ? !IsTrustedAssetUrl(info.zipUrl) :
+                           (!IsTrustedAssetUrl(info.bundleUrl) || !IsTrustedAssetUrl(info.cerUrl)))
             {
                 LogUpdate(stateDir, L"installer REFUSED (asset URL outside our release downloads)");
                 return false;
+            }
+            std::wstring portableDir;
+            if (portable)
+            {
+                portableDir = Profiles::detail::ExeDirPath();
+                if (portableDir.empty())
+                {
+                    LogUpdate(stateDir, L"installer REFUSED (portable target but the exe dir is unresolvable)");
+                    return false;
+                }
             }
             const std::wstring ps1 = InstallerPs1();
             if (ps1.empty())
@@ -1494,14 +1633,27 @@ namespace Agentmaster::Updater
 
             std::wstring cmd = L"@echo off\r\ntitle Agentmaster Update\r\n";
             cmd += L"powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0am-update.ps1\"";
-            cmd += L" -BundleUrl " + CmdArg(info.bundleUrl);
-            cmd += L" -CerUrl " + CmdArg(info.cerUrl);
-            cmd += L" -Version " + CmdArg(DisplayVersion(info));
-            if (!info.bundleSha256.empty())
+            if (portable)
             {
-                cmd += L" -BundleSha256 " + CmdArg(info.bundleSha256);
+                cmd += L" -Portable";
+                cmd += L" -PortableDir " + CmdArg(portableDir);
+                cmd += L" -ZipUrl " + CmdArg(info.zipUrl);
+                if (!info.zipSha256.empty())
+                {
+                    cmd += L" -ZipSha256 " + CmdArg(info.zipSha256);
+                }
             }
-            cmd += L" -Family " + CmdArg(kReleaseFamily);
+            else
+            {
+                cmd += L" -BundleUrl " + CmdArg(info.bundleUrl);
+                cmd += L" -CerUrl " + CmdArg(info.cerUrl);
+                if (!info.bundleSha256.empty())
+                {
+                    cmd += L" -BundleSha256 " + CmdArg(info.bundleSha256);
+                }
+                cmd += L" -Family " + CmdArg(kReleaseFamily);
+            }
+            cmd += L" -Version " + CmdArg(DisplayVersion(info));
             cmd += L" -WaitPid " + std::to_wstring(::GetCurrentProcessId());
             cmd += L"\r\n";
 
@@ -1624,7 +1776,7 @@ namespace Agentmaster::Updater
             switch (d)
             {
             case Decision::UpdateNow:
-                if (info.installable)
+                if (InstallableForThisInstall(info))
                 {
                     const bool launched = LaunchInstaller(stateDir, info);
                     LogUpdate(stateDir, launched ? L"prompt " + DisplayVersion(info) + L" -> Update now; installer launched \x2014 app exiting for upgrade" :
@@ -1683,9 +1835,11 @@ namespace Agentmaster::Updater
 
     // ============================ channel gate ============================
 
-    // True when THIS install is the channel the GitHub releases actually target: the published
-    // RELEASE package (Agentmaster). The updater is gated to it EVERYWHERE — the startup auto-prompt
-    // AND the cog's "Check for updates" + the on-open label — because dev/unpackaged builds:
+    // True when THIS install is a channel the GitHub releases actually target: the published
+    // RELEASE package (Agentmaster) OR a PORTABLE copy (unpackaged + the `.portable` marker — the
+    // release zips, which self-update IN PLACE via the zip asset; IsPortableUpdateTarget). The
+    // updater is gated to these EVERYWHERE — the startup auto-prompt AND the cog's "Check for
+    // updates" + the on-open label — because dev / plain-unpackaged builds:
     //   * never publish to GitHub (there are no AgentmasterDev releases), and
     //   * carry the unstamped 0.0.1.0 manifest placeholder, so EVERY release looks "newer", and
     //   * would install the SEPARATE release family side-by-side (a different package) on "Update",
@@ -1694,7 +1848,8 @@ namespace Agentmaster::Updater
     // AGENTMASTER_UPDATE_STARTUP forces it on so the full flow can still be exercised from a dev build.
     // NOTE: a LOCALLY-built RELEASE install is also 0.0.1.0 (only CI stamps the version), so it shows
     // "available" until it picks up a CI-published build — that's correct: same family, real in-place
-    // update to the published release.
+    // update to the published release. A locally-assembled portable layout (marker, no .am-version)
+    // reads 0.0.0 the same way and adopts the newest published zip on its first "Update now".
     // No-throw: this gate runs UNGUARDED on the launch path (_setupUpdateAutocheck) and in the cog;
     // an undeterminable channel reads as "not the updater channel" — the updater goes quiet, the
     // app never breaks.
@@ -1706,7 +1861,11 @@ namespace Agentmaster::Updater
             {
                 return true;
             }
-            return IsPackaged() && !Profiles::IsDevPackage();
+            if (IsPackaged())
+            {
+                return !Profiles::IsDevPackage();
+            }
+            return IsPortableUpdateTarget(); // the portable zip updates in place; other unpackaged runs stay off
         }
         catch (...)
         {
@@ -1742,7 +1901,7 @@ namespace Agentmaster::Updater
         {
             if (!IsUpdaterChannel())
             {
-                return false; // dev/unpackaged: the updater targets the RELEASE install (see IsUpdaterChannel)
+                return false; // dev / plain-unpackaged: the updater targets the RELEASE install + portable zips (see IsUpdaterChannel)
             }
             const std::wstring stateDir = Profiles::ResolveProfileDir();
             const std::wstring tag = std::wstring{ L"check (" } + origin + L")";
@@ -1765,8 +1924,8 @@ namespace Agentmaster::Updater
                 LogUpdate(stateDir, tag + L" skipped: declined this run (" + declined + L" \x2014 asking again next launch)");
                 return false;
             }
-            const Version cur = CurrentPackageVersion();
-            LogUpdate(stateDir, tag + L" begin: cur=" + VersionToString(cur) + L" prerelease=" + (prefs.allowPrerelease ? L"on" : L"off") + L" nightly=" + (prefs.allowNightly ? L"on" : L"off"));
+            const Version cur = CurrentInstallVersion(); // packaged → the package version; portable → the exe-side .am-version stamp
+            LogUpdate(stateDir, tag + L" begin: cur=" + VersionToString(cur) + (IsPortableUpdateTarget() ? L" (portable)" : L"") + L" prerelease=" + (prefs.allowPrerelease ? L"on" : L"off") + L" nightly=" + (prefs.allowNightly ? L"on" : L"off"));
 
             // Bound the TOTAL network wait so a slow-but-present network can't wedge launch: WinHTTP's
             // per-phase timeouts (resolve/connect/send/receive) could otherwise sum to ~4x, and this
@@ -1813,7 +1972,7 @@ namespace Agentmaster::Updater
                 return false; // the user skipped exactly this version
             }
             // (A this-run decline never reaches here — the presence gate above skips pre-network.)
-            LogUpdate(stateDir, tag + L" done: " + DisplayVersion(info) + L" available (" + (info.isNightly ? L"NIGHTLY" : info.isPrerelease ? L"pre-release" : L"stable") + (info.installable ? L", installable) \x2014 prompting" : L", NO installable assets) \x2014 prompting"));
+            LogUpdate(stateDir, tag + L" done: " + DisplayVersion(info) + L" available (" + (info.isNightly ? L"NIGHTLY" : info.isPrerelease ? L"pre-release" : L"stable") + (InstallableForThisInstall(info) ? L", installable) \x2014 prompting" : L", NO installable assets) \x2014 prompting"));
             const Decision d = ShowUpdatePrompt(owner, info);
             return ApplyDecision(stateDir, info, d, owner);
         }
