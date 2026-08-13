@@ -1251,6 +1251,17 @@ void TestProcessInspectTree()
         const std::vector<ProcEntry> orphan = { { 700, 690 /*gone*/, L"claude.exe" } };
         CHECK(FindTerminalHostPid(orphan, 700) == 0, "orphaned claude (dead host) -> no terminal host pid");
     }
+    {
+        // Agentmaster.exe — OUR fork's GUI binary (the renamed WindowsTerminal output): a sibling
+        // install's claudes must resolve their hosting terminal under the NEW image name too (the
+        // WindowsTerminal.exe case above stays for real WT + pre-rename installs).
+        const std::vector<ProcEntry> am = {
+            { 800, 1, L"agentmaster.exe" }, // image compare is case-insensitive (ImageNameEq)
+            { 801, 800, L"pwsh.exe" },
+            { 802, 801, L"claude.exe" },
+        };
+        CHECK(FindTerminalHostPid(am, 802) == 800, "claude under our renamed Agentmaster.exe host resolves");
+    }
 }
 
 void TestProcessInspectParse()

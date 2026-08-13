@@ -6,7 +6,7 @@
 // WHY THIS EXISTS (the "click opens a stray window" bug):
 // A packaged app's toast click is dispatched by the shell. With NO ToastActivatorCLSID registered,
 // the shell falls back to a plain **AUMID activation** of the package — which for our
-// FullTrustApplication means LAUNCHING WindowsTerminal.exe with no arguments. That launch hits the
+// FullTrustApplication means LAUNCHING Agentmaster.exe with no arguments. That launch hits the
 // single-instance handoff and the running Emperor obligingly opens a brand-new window with a default
 // tab. So a click produced BOTH the in-process jump (our ToastNotification.Activated handler) AND a
 // stray window. There is no way to tell that launch apart from a user typing `agentmasterdev` — the
@@ -21,7 +21,7 @@
 // session id, so the callback knows exactly which session to surface.
 //
 // COLD START (no instance running): the SCM launches our ExeServer registration —
-// `WindowsTerminal.exe -ToastActivated -Embedding` (the manifest's Arguments + COM's own -Embedding).
+// `Agentmaster.exe -ToastActivated -Embedding` (the manifest's Arguments + COM's own -Embedding).
 // WindowEmperor treats -ToastActivated as a NORMAL startup (it strips the pair and restores the
 // workspace, rather than taking the defterm -Embedding path); this registration then happens at engine
 // init and the SCM's pending activation completes into Activate() below, which jumps. If the SCM times

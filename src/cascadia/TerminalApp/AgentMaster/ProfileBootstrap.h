@@ -207,7 +207,7 @@ namespace Agentmaster::Profiles
         }
 
         // ⚠ MODULE-local, one-way DEBUG override — NOT process-wide. A function-local static inside an
-        // inline HEADER function is one PRIVATE copy per linked binary (WindowsTerminal.exe,
+        // inline HEADER function is one PRIVATE copy per linked binary (Agentmaster.exe,
         // TerminalApp.dll, the engine harness, the CLI — nothing exports the symbol across the DLL
         // boundary; the same per-module trap AgentCatchLog.h documents for wil's logging state). Cross-
         // module agreement therefore rides the per-PROCESS env block instead: ApplyPersistedDebugMode
@@ -514,7 +514,7 @@ namespace Agentmaster::Profiles
     {
         // The folder holding the running PROCESS image ("" on failure), no trailing separator.
         // Deliberately the process exe (GetModuleFileNameW(nullptr)) and not the current module:
-        // every module in one process (WindowsTerminal.exe, TerminalApp.dll, the Model DLL) must
+        // every module in one process (Agentmaster.exe, TerminalApp.dll, the Model DLL) must
         // agree on the SAME exe-side files, and every shipped layout (package, loose, portable
         // unzip) keeps all binaries — the app exe AND agentmaster-cli.exe — in one folder.
         inline std::wstring ExeDirPath()

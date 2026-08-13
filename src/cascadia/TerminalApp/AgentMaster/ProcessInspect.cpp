@@ -513,7 +513,11 @@ namespace Agentmaster
                 break; // ancestor exited (an orphan)
             }
             const ProcEntry& e = *it->second;
-            if (depth > 0 && (ImageNameEq(e.image, L"WindowsTerminal.exe") || ImageNameEq(e.image, L"wt.exe")))
+            // Agentmaster.exe = OUR fork's GUI binary (the renamed WindowsTerminal output) — a
+            // SIBLING install's claudes must still resolve their hosting terminal after the
+            // rename; WindowsTerminal.exe stays for the real Windows Terminal AND pre-rename
+            // Agentmaster installs still running the old binary name.
+            if (depth > 0 && (ImageNameEq(e.image, L"Agentmaster.exe") || ImageNameEq(e.image, L"WindowsTerminal.exe") || ImageNameEq(e.image, L"wt.exe")))
             {
                 return e.pid; // the hosting terminal (skip self at depth 0)
             }

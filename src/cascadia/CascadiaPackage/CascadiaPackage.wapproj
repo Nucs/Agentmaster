@@ -92,7 +92,7 @@
     <ProjectReference Include="$(OpenConsoleDir)src\cascadia\wt\wt.vcxproj">
       <Project>{506fd703-baa7-4f6e-9361-64f550ec8fca}</Project>
     </ProjectReference>
-    <!-- Agentmaster: the commandline introspection tool, shipped beside WindowsTerminal.exe and the
+    <!-- Agentmaster: the commandline introspection tool, shipped beside Agentmaster.exe (the GUI) and the
          wt[d].exe launcher shim, which execs it for a CLI verb (doc/agentmaster/CLI.md). -->
     <ProjectReference Include="$(OpenConsoleDir)src\cascadia\TerminalApp\AgentMaster\cli\agentmaster-cli.vcxproj">
       <Project>{7E5A9C12-3B4D-4E6F-8A1B-2C3D4E5F6A7B}</Project>

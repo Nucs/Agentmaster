@@ -1,5 +1,5 @@
 @echo off
-REM Build a vcxproj in ISOLATION (a separate exe — never relinks WindowsTerminal.exe, so no build
+REM Build a vcxproj in ISOLATION (a separate exe — never relinks the app exe (Agentmaster.exe), so no build
 REM mutex needed). Validates a project as a real package binary. Arg %1 = vcxproj path (defaults to
 REM agentmaster-cli.vcxproj).
 setlocal

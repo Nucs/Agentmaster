@@ -17,9 +17,9 @@
 //     `agentmaster show ...` prints to the caller's console and the shell waits for it. That REQUIRES
 //     this launcher to be CONSOLE subsystem (set in wt.vcxproj) — a GUI-subsystem exe cannot own
 //     stdout (the reason `wt.exe` never returned output);
-//   * ANY other commandline -> forward to WindowsTerminal.exe EXACTLY as the original shim did (bare
+//   * ANY other commandline -> forward to Agentmaster.exe (the GUI binary) EXACTLY as the original shim did (bare
 //     launch, `-w`/`-s` reopen, etc.). Defterm/COM handoff and Start-menu activation never hit the
-//     alias (they target WindowsTerminal.exe directly), so they are unaffected.
+//     alias (they target Agentmaster.exe directly), so they are unaffected.
 // Being console subsystem, a launch from a real shell attaches to the existing console (no flash);
 // the only no-console caller is our own reopen ShellExecute, where the loader allocates a console —
 // we FreeConsole it before forwarding so a GUI launch never flashes a console window.
@@ -146,8 +146,8 @@ int __cdecl wmain(int /*argc*/, wchar_t** /*argv*/)
         }
     }
 
-    // Swap wt[d].exe / agentmaster[dev].exe for WindowsTerminal.exe
-    module.replace_filename(L"WindowsTerminal.exe");
+    // Swap wt[d].exe / agentmaster[dev].exe for Agentmaster.exe (the GUI binary)
+    module.replace_filename(L"Agentmaster.exe");
 
     // Append the rest of the commandline to the saved name (== the original `%s %s` with pCmdLine).
     std::wstring cmdline;

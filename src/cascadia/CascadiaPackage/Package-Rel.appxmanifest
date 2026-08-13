@@ -136,7 +136,7 @@
         </com:Extension>
         <!-- Agentmaster (System notifications; NOTIFICATIONS.md §4a): the TOAST COM ACTIVATOR.
              Without this, clicking one of our toasts makes the shell fall back to a plain AUMID
-             activation — which for a FullTrustApplication LAUNCHES WindowsTerminal.exe with no args,
+             activation — which for a FullTrustApplication LAUNCHES Agentmaster.exe with no args,
              and the running Emperor turns that into a stray new window with a default tab (on top of
              the in-process jump). With the CLSID declared, the shell CoCreateInstances it instead and
              reaches the class object the running instance registered at engine init
@@ -153,7 +153,7 @@
                 <com:ExeServer DisplayName="OpenConsole" Executable="OpenConsole.exe">
                     <com:Class Id="1F9F2BF5-5BC3-4F17-B0E6-912413F1F451"/>
                 </com:ExeServer>
-                <com:ExeServer DisplayName="WindowsTerminal" Executable="WindowsTerminal.exe">
+                <com:ExeServer DisplayName="WindowsTerminal" Executable="Agentmaster.exe">
                     <com:Class Id="051F34EE-C1FD-4B19-AF75-9BA54648434C"/>
                 </com:ExeServer>
                 <!-- Agentmaster: the COLD-START half of the toast activator above (the CLSID must
@@ -162,7 +162,7 @@
                      hands the click straight to it and never launches this. `Arguments` is ours to
                      choose: WindowEmperor treats -ToastActivated as a NORMAL startup (restore the
                      workspace) rather than the defterm -Embedding path COM appends after it. -->
-                <com:ExeServer DisplayName="Agentmaster Notifications" Executable="WindowsTerminal.exe" Arguments="-ToastActivated">
+                <com:ExeServer DisplayName="Agentmaster Notifications" Executable="Agentmaster.exe" Arguments="-ToastActivated">
                     <com:Class Id="7608CBBC-E01D-4807-852F-0B630A1DDC51"/>
                 </com:ExeServer>
                 <com:SurrogateServer DisplayName="WindowsTerminalShellExt">

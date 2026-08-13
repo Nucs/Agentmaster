@@ -6,14 +6,21 @@
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>WindowsTerminal</RootNamespace>
     <ProjectName>WindowsTerminal</ProjectName>
-    <TargetName>WindowsTerminal</TargetName>
+    <!-- Agentmaster: the PROJECT keeps upstream's name (cheap rebases), but the OUTPUT binary is
+         Agentmaster.exe — the app IS Agentmaster, and every consumer follows: the appxmanifests'
+         Application Executable="$targetnametoken$.exe" resolves from THIS TargetName via the
+         wapproj's EntryPointProjectUniqueName, the com:ExeServer entries (defterm handoff + toast
+         activation) name it literally, and the launcher shims (wt/agentmaster-cli forward,
+         elevate-shim, the ShellExtension icon path, the reopen dispatch's unpackaged fallback)
+         resolve the neighbor Agentmaster.exe. -->
+    <TargetName>Agentmaster</TargetName>
     <ConfigurationType>Application</ConfigurationType>
     <OpenConsoleUniversalApp>false</OpenConsoleUniversalApp>
     <ApplicationType>Windows Store</ApplicationType>
     <WindowsStoreApp>true</WindowsStoreApp>
     <WindowsAppContainer>false</WindowsAppContainer>
     <TargetPlatformIdentifier>Windows</TargetPlatformIdentifier>
-    <VersionInfoFileDescription>Windows Terminal Host</VersionInfoFileDescription>
+    <VersionInfoFileDescription>Agentmaster</VersionInfoFileDescription>
     <PgoTarget>true</PgoTarget>
   </PropertyGroup>
 

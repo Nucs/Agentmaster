@@ -156,7 +156,7 @@ SessionRegistry::_notify (any session change; bridge/scanner/UI thread)
 
 **The bug this section exists for:** the first cut had no `ToastActivatorCLSID`, so the shell fell back
 to a plain **AUMID activation** of the package. For a `FullTrustApplication` that means *launching
-`WindowsTerminal.exe` with no arguments* — which hits the single-instance handoff, and the running
+the GUI exe with no arguments* — which hits the single-instance handoff, and the running
 Emperor obligingly opens **a brand-new window with a default tab**. So a click produced BOTH the
 in-process jump *and* a stray window ("opens both the desired tab but also a new window with new tab").
 There is no way to tell that launch apart from a user typing `agentmasterdev`: the activation reason
@@ -172,7 +172,7 @@ after the fact" — the launch never happens).
 
 | | |
 |---|---|
-| **Manifest** | `<desktop:Extension Category="windows.toastNotificationActivation">` + a `<com:Class>` under a `<com:ExeServer Executable="WindowsTerminal.exe" Arguments="-ToastActivated">`. **A manifest change ⇒ the loose layout must be re-registered** (`Add-AppxPackage -Register … -ForceUpdateFromAnyVersion`). |
+| **Manifest** | `<desktop:Extension Category="windows.toastNotificationActivation">` + a `<com:Class>` under a `<com:ExeServer Executable="Agentmaster.exe" Arguments="-ToastActivated">`. **A manifest change ⇒ the loose layout must be re-registered** (`Add-AppxPackage -Register … -ForceUpdateFromAnyVersion`). |
 | **CLSIDs** | **Per identity** — release `{7608CBBC-…}`, dev `{6CB0FAE1-…}` — because a CLSID is machine-global COM state and the two installs live side by side (sharing one would let whichever registered last steal the other's clicks). Picked at runtime by `Profiles::IsDevPackage()`. Deliberately **not** more of the shared-CLSID debt PROFILES.md §5 tracks for the defterm/shellext GUIDs. Keep the header constants and the manifests in lockstep — a mismatch silently reverts to the stray-window fallback. |
 | **Where it lives** | `TerminalApp.dll`, registered once (`std::once_flag`) from `_InitAgentmasterEngine`. Not `Engine.cpp` (plain C++/no-WinRT by contract) and not the EXE (which deliberately doesn't link the engine — only its header-only bits — while the jump routes through the engine's fan-out). |
 | **The jump** | `Activate()` runs on an RPC/COM thread, so it hands off to `ActivateSessionInOtherWindows(id, /*source*/ L"")` — an **empty** source window id, so no window is excluded: we're not "a window asking the others", we're the shell asking the fleet. Whichever window hosts the tab selects it and foregrounds itself via `_FocusClaudeSessionTab(id, /*bringWindowToFront*/ true)` = **restore-if-minimized + `SetForegroundWindow` + the `SwitchToThisWindow` fallback** (the shell may deny a foreground hand-off; the fallback does the Alt+Tab-style switch). A session whose tab closed since the toast was shown simply finds no host — nothing happens, still no stray window. |
@@ -189,7 +189,7 @@ legacy in-process `ToastNotification.Activated` handler, so the jump still works
 stray window and all. **A stale registration is never a regression, just un-fixed.**
 
 **Cold start** (no instance running): the SCM launches the ExeServer —
-`WindowsTerminal.exe -ToastActivated -Embedding` (our `Arguments` + the `-Embedding` COM appends).
+`Agentmaster.exe -ToastActivated -Embedding` (our `Arguments` + the `-Embedding` COM appends).
 Neither token is a WT commandline, and the `-Embedding` (defterm) branch would leave the click with no
 window at all, so `WindowEmperor::HandleCommandlineArgs` **strips the pair and continues as a plain
 no-arg launch**: the workspace restores exactly as from the Start menu (a fresh window IS the right

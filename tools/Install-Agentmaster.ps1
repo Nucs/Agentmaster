@@ -524,7 +524,7 @@ function Get-InstalledMsix {
 # ---- portable -------------------------------------------------------------------------------
 function Stop-RunningUnder {
     param($Dir)
-    $procs = Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" -ErrorAction SilentlyContinue |
+    $procs = Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Dir, [StringComparison]::OrdinalIgnoreCase) }
     foreach ($p in $procs) {
         Write-Warn "closing running portable instance (pid $($p.ProcessId))"
@@ -585,7 +585,12 @@ function Install-Portable {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 
     $RelVer.ToString() | Out-File -FilePath $marker -Encoding ascii -Force
-    New-StartMenuShortcut (Join-Path $Dir 'WindowsTerminal.exe') 'Agentmaster (Portable)'
+    # The app exe: Agentmaster.exe (current releases) or WindowsTerminal.exe (a pinned pre-rename
+    # -Version install) - shortcut + launch resolve whichever the zip actually shipped.
+    $appExe = @('Agentmaster.exe', 'WindowsTerminal.exe') | ForEach-Object { Join-Path $Dir $_ } |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $appExe) { $appExe = Join-Path $Dir 'Agentmaster.exe' }
+    New-StartMenuShortcut $appExe 'Agentmaster (Portable)'
     Write-Ok "Portable installed at $Dir"
     return $true
 }
@@ -598,13 +603,17 @@ function Invoke-PortableFlow {
     if (-not $zipAsset) { throw "Release $($Release.tag_name) has no portable $(Get-OSArch) zip." }
     $relVer = Get-AssetVersion -AssetName $zipAsset.name -TagName $Release.tag_name
     $null = Install-Portable -Release $Release -RelVer $relVer -Dir $Dir -Cache $Cache
+    # Agentmaster.exe (current releases) or WindowsTerminal.exe (a pinned pre-rename -Version).
+    $appExe = @('Agentmaster.exe', 'WindowsTerminal.exe') | ForEach-Object { Join-Path $Dir $_ } |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $appExe) { $appExe = Join-Path $Dir 'Agentmaster.exe' }
     Write-Host ""
     Write-Host "Done." -ForegroundColor White
-    Write-Info "Launch: `"$Dir\WindowsTerminal.exe`"  (or the 'Agentmaster (Portable)' Start-menu entry)"
+    Write-Info "Launch: `"$appExe`"  (or the 'Agentmaster (Portable)' Start-menu entry)"
     Write-Info "Upgrade: re-run this script (add -Portable to skip the install-mode question)."
-    if ($Launch -and (Test-Path (Join-Path $Dir 'WindowsTerminal.exe'))) {
+    if ($Launch -and (Test-Path $appExe)) {
         Write-Step "Launching Agentmaster"
-        Start-Process (Join-Path $Dir 'WindowsTerminal.exe')
+        Start-Process $appExe
     }
 }
 

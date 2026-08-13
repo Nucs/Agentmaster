@@ -7,7 +7,7 @@
 
 .DESCRIPTION
     This script is NOT meant to be run by hand. It is embedded as a binary resource (AM_UPDATE_PS1,
-    RT_RCDATA) inside WindowsTerminal.exe, read at runtime by Updater.h, materialized into the active
+    RT_RCDATA) inside the app exe (Agentmaster.exe), read at runtime by Updater.h, materialized into the active
     profile dir, and invoked by the generated am-update.cmd / am-uninstall.cmd launchers.
 
     It is a trimmed sibling of tools\Install-Agentmaster.ps1 and shares that script's install CORE
@@ -37,7 +37,8 @@
     (-ZipUrl, SHA-256-verified when -ZipSha256 is supplied), stop any instance still running under
     -PortableDir, swap the folder's binaries while PRESERVING the exe-side user state (settings\ +
     profile\ + profile.path -- Install-Agentmaster.ps1's exact preserve list), stamp .am-version
-    with the new version (the updater's next check reads it), and relaunch WindowsTerminal.exe.
+    with the new version (the updater's next check reads it), and relaunch the app exe
+    (Agentmaster.exe; a pre-rename folder's WindowsTerminal.exe is recognized too).
     No cert, no admin, no package registration.
 
     -Uninstall removes the installed package (per-user, no admin). Your profile data (e.g.
@@ -130,7 +131,7 @@ function Stop-ProcessesUnder {
     param($DirPath)
     if (-not $DirPath) { return }
     try {
-        Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" -ErrorAction SilentlyContinue |
+        Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" -ErrorAction SilentlyContinue |
             Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($DirPath, [StringComparison]::OrdinalIgnoreCase) } |
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     } catch {}
@@ -335,6 +336,17 @@ function Invoke-Install {
     Start-Sleep -Seconds 2
 }
 
+# The app exe inside an unzip/portable folder: Agentmaster.exe (current builds) or
+# WindowsTerminal.exe (pre-rename ones). $null when neither is present.
+function Get-AppExe {
+    param($DirPath)
+    foreach ($leaf in 'Agentmaster.exe', 'WindowsTerminal.exe') {
+        $p = Join-Path $DirPath $leaf
+        if (Test-Path $p) { return $p }
+    }
+    return $null
+}
+
 # The PORTABLE in-place update (mirrors tools\Install-Agentmaster.ps1's Install-Portable core --
 # KEEP IN SYNC): download the arch-matched release zip, stop what runs under the portable folder,
 # replace its binaries while preserving the exe-side user state, stamp .am-version, relaunch.
@@ -343,8 +355,8 @@ function Invoke-PortableUpdate {
     Write-Host "Agentmaster updater - installing $Version (portable, in place)" -ForegroundColor White
     Write-Host ''
     if (-not $ZipUrl -or -not $PortableDir) { throw 'Internal error: the portable update was launched without a zip URL / target folder.' }
-    if (-not (Test-Path (Join-Path $PortableDir 'WindowsTerminal.exe'))) {
-        throw "The portable folder no longer holds WindowsTerminal.exe: $PortableDir"
+    if (-not (Get-AppExe $PortableDir)) {
+        throw "The portable folder no longer holds the app exe (Agentmaster.exe): $PortableDir"
     }
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     $zip = Join-Path $Dir ([IO.Path]::GetFileName(([Uri]$ZipUrl).AbsolutePath))
@@ -360,8 +372,8 @@ function Invoke-PortableUpdate {
     # terminal-<ver> (pre-rename ones); a flat zip is tolerated.
     $src = Get-ChildItem $tmp -Directory | Where-Object { $_.Name -like 'agentmaster-*' -or $_.Name -like 'terminal-*' } | Select-Object -First 1
     if (-not $src) { $src = Get-Item $tmp }
-    if (-not (Test-Path (Join-Path $src.FullName 'WindowsTerminal.exe'))) {
-        throw 'The downloaded zip does not look like an Agentmaster portable build (no WindowsTerminal.exe inside).'
+    if (-not (Get-AppExe $src.FullName)) {
+        throw 'The downloaded zip does not look like an Agentmaster portable build (no app exe inside).'
     }
 
     Wait-ForExit
@@ -384,7 +396,8 @@ function Invoke-PortableUpdate {
     Write-Ok 'installed'
 
     Write-Step 'Relaunching Agentmaster'
-    Start-Process (Join-Path $PortableDir 'WindowsTerminal.exe')
+    $exe = Get-AppExe $PortableDir
+    if ($exe) { Start-Process $exe } else { Write-Warn 'app exe not found after the swap - launch it manually' }
     Write-Host ''
     Write-Host "Updated to $Version." -ForegroundColor White
     Start-Sleep -Seconds 2

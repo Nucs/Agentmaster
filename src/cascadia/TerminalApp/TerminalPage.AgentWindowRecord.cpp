@@ -720,7 +720,7 @@ namespace winrt::TerminalApp::implementation
     // alias leaf (release = agentmaster.exe, AgentmasterDev = agentmasterdev.exe — distinct on
     // purpose, so two side-by-side installs can never reopen windows into each other; resolved
     // by NAME through the WindowsApps PATH dir + APPEXECLINK reparse). Unpackaged (portable
-    // zip): the alias doesn't exist — launch the neighbor WindowsTerminal.exe directly; its
+    // zip): the alias doesn't exist — launch the neighbor Agentmaster.exe directly; its
     // wWinMain routes through the same single-instance handoff (previously this case silently
     // no-opped on the missing alias).
     static std::wstring _AgentmasterReopenTarget()
@@ -736,7 +736,7 @@ namespace winrt::TerminalApp::implementation
             try
             {
                 std::filesystem::path exe{ std::wstring{ buf, n } };
-                exe.replace_filename(L"WindowsTerminal.exe");
+                exe.replace_filename(L"Agentmaster.exe");
                 return exe.wstring();
             }
             catch (...)

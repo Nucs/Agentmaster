@@ -564,10 +564,10 @@ kind`); add an optional **"External (N)"** group for `runningApp==WindowsTermina
 (observe-only, no Auto Testing). No structural change.
 
 **Host label (release/dev/real-WT distinction).** An external row's host must NOT be named by the
-parent process's image leaf — our fork's exe is literally `WindowsTerminal.exe`, so an external claude
+parent process's image leaf — our fork's exe was literally `WindowsTerminal.exe` (Agentmaster.exe since the rename, but a PFN-blind image label would still collide with a pre-rename install), so an external claude
 in another **Agentmaster** instance read "WindowsTerminal" (indistinguishable from real WT, and from a
 dead-host orphan that read "ext"). `ResolveExternalHostLabel(snap, claudePid, amSessionPresent)` instead
-walks UP to the hosting terminal (`FindTerminalHostPid` — nearest `WindowsTerminal.exe`/`wt.exe`
+walks UP to the hosting terminal (`FindTerminalHostPid` — nearest `Agentmaster.exe`/`WindowsTerminal.exe`/`wt.exe`
 ancestor) and names it by **package family** (`ReadProcessPackageFamily`, authoritative for loose-
 registered AND MSIX): `Agentmaster_*` → **Agentmaster**, `AgentmasterDev_*` → **Agentmaster Dev**,
 `Microsoft.WindowsTerminal*` → **Windows Terminal**; image path is the unpackaged fallback. No live

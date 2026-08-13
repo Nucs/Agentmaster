@@ -164,7 +164,7 @@ via `<our alias> -w -1 -s <idx>` (`TerminalPage::_ReopenSavedWindows` ShellExecu
 **`_AgentmasterReopenTarget()`** — the per-IDENTITY execution alias **by name**, `agentmaster.exe`
 release / `agentmasterdev.exe` dev, so side-by-side installs never reopen into each other; not the
 upstream `wt.exe`, which doesn't exist for our packages; unpackaged falls back to the neighbor
-`WindowsTerminal.exe` — and the
+`Agentmaster.exe` — and the
 single-instance handoff routes it back to the Emperor) — the runtime analog of the Emperor loop. A
 window claimed-then-closed THIS session is **re-claimed** (its real id + lens) from a second
 **reclaimable pool** (`Engine::reclaimableWindowRecords`, fed by `UnregisterLiveWindow`, drawn by id
@@ -591,7 +591,7 @@ already targets the tiny `wt`/`wtd` launcher shim (`src/cascadia/wt/shim.cpp`, N
 `--json`/`--self`/`--tail`/`--instance`/`--state`/`--dir` — plus `--offline`, **reserved**: the shim
 routes it, but the P1 reader (`agentcli.cpp`) does not yet implement it and rejects it as unknown — none of which collide with a WT commandline)
 execs **`agentmaster-cli.exe`** on the caller's console; **any other commandline forwards to
-`WindowsTerminal.exe` byte-for-byte** (bare launch / `-w` / `-s` reopen / `-Embedding` defterm
+`Agentmaster.exe` (the GUI binary) byte-for-byte** (bare launch / `-w` / `-s` reopen / `-Embedding` defterm
 unaffected — defterm + Start-menu activate the GUI directly, never the alias). A GUI-subsystem exe
 can't own stdout (the reason `wt.exe` never returned output), so the launcher MUST be console; a
 console allocated for a no-parent-console launch (our reopen `ShellExecute`) is `FreeConsole`d before
@@ -602,7 +602,7 @@ over any inherited `AGENTMASTER_PROFILE` (the CLI clears the ambient env when pa
 release-hosted shell still gets dev from `agentmasterdev`); `--profile`/`--instance` cross-target; an
 unpackaged build falls back to inherited env > the `-DAGENTMASTER_DEV` compile brand > default. Wired
 into `OpenConsole.slnx` + `CascadiaPackage.wapproj` (mirrors the `wt` references; the flatten step
-vends `agentmaster-cli.exe` into the package beside `WindowsTerminal.exe`) + `wt.vcxproj`
+vends `agentmaster-cli.exe` into the package beside the GUI exe) + `wt.vcxproj`
 `SubSystem=Console`. Live-verified end-to-end via the real `agentmasterdev` alias (every verb returns
 valid JSON, auto-targeting dev). **Still to finish (NOT P2/P3):** the committed build wiring has only
 been **isolation-built + XML-validated — a real full `Build-Agentmaster.ps1` / CI Release build has NOT
@@ -630,7 +630,7 @@ very binaries running the check; digest captured, same `IsTrustedAssetUrl` gate 
 LaunchInstaller's gate) to zip-vs-MSIX, and "Update now" runs `am-update.ps1 -Portable`: download
 the zip → stop what runs under the unzip → swap its binaries **preserving `settings\` + `profile\`
 + `profile.path`** (Install-Agentmaster.ps1's exact list; both unwrap `agentmaster-<ver>` AND the
-pre-rename `terminal-<ver>` zip folders) → restamp `.am-version` → relaunch `WindowsTerminal.exe`
+pre-rename `terminal-<ver>` zip folders) → restamp `.am-version` → relaunch the app exe
 (no cert, no admin, no package registration). When a strictly-newer version exists it shows a TaskDialog —
 **TWO buttons — Update now / Postpone — over a SIX-radio group** picking what Postpone means:
 **Remind me next restart** (the **default**, and what Cancel / X / Esc / any failure resolves to — the
@@ -2529,7 +2529,7 @@ What works, by area:
   `_FocusClaudeSessionTab(id, bringWindowToFront=true)` = restore-if-minimized + `SetForegroundWindow` +
   the `SwitchToThisWindow` fallback), so **no second process launches and the click can't open a stray
   window** — the bug the first cut had, where the shell's fallback AUMID activation launched
-  `WindowsTerminal.exe` with no args and the Emperor turned it into a new window with a default tab. The
+  the GUI exe with no args and the Emperor turned it into a new window with a default tab. The
   toast's `launch` attr carries the session id (== `invokedArgs`); the legacy in-process
   `ToastNotification.Activated` handler is wired ONLY when the activator didn't register
   (`ToastActivator::IsRegistered()` — unpackaged, or a package not re-registered since the manifest gained
@@ -3065,7 +3065,7 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     `cli/` — the **commandline introspection tool** (CLI.md): `agentcli.cpp` (the read-only P1
     reader — `show`/`list`/`sessions`/`tabs`/`windows`/`external`/`--self`/`--json`, linking these
     engine units like the test harness) + `agentmaster-cli.vcxproj` (a CONSOLE exe shipped beside
-    `WindowsTerminal.exe`) + `_compile.bat` / `_build-proj.bat` (standalone + isolation builds).
+    `Agentmaster.exe`) + `_compile.bat` / `_build-proj.bat` (standalone + isolation builds).
   - `src/cascadia/TerminalApp/AgentTabOverlay.{h,cpp}` — the per-tab link badge (TAB_OVERLAY.md),
     enriched by the observer with `model · effort · kind`; also the registry-less `ShowActivity`
     **observe badge** (`○ <kind> · unlinked`: pwsh / cmd / unprompted-claude / codex) for every non-bound tab.
@@ -3186,12 +3186,12 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   - `src/cascadia/wt/shim.cpp` + `wt.vcxproj` (the `agentmaster <verb>` overload, CLI.md §2): the
     alias-target launcher shim is now **console-subsystem + dual-mode** (`SubSystem=Console`) — it
     execs `agentmaster-cli.exe` for a CLI verb / leading CLI-flag and forwards everything else to
-    `WindowsTerminal.exe` byte-for-byte; the `agentmaster-cli.vcxproj` reference + the `wt`-mirrored
+    `Agentmaster.exe` byte-for-byte; the `agentmaster-cli.vcxproj` reference + the `wt`-mirrored
     entry in `OpenConsole.slnx` + `CascadiaPackage.wapproj` ship the CLI in the package.
   - `Package-Rel.appxmanifest` + `Package-Dev.appxmanifest` (the two identities; selection in
     `CascadiaPackage.wapproj` via `AgentmasterPackageIdentity`; each also declares its OWN
-    **toast-activator CLSID** — `<desktop:ToastNotificationActivation>` + a `<com:Class>` under a
-    `WindowsTerminal.exe` ExeServer with `Arguments="-ToastActivated"` — see `AgentToastActivator.h` /
+    **toast-activator CLSID** — `<desktop:ToastNotificationActivation>` + a `<com:Class>` under an
+    `Agentmaster.exe` ExeServer with `Arguments="-ToastActivated"` — see `AgentToastActivator.h` /
     NOTIFICATIONS.md §4a; a change here needs a **re-register**), a comctl32-v6 dependency in
     `WindowsTerminal.manifest` (the profile picker's TaskDialog), the `AGENTMASTER_PROFILE`
     redirect in `TerminalSettingsModel/FileUtils.cpp` (Terminal's own settings →
@@ -3383,7 +3383,8 @@ re-runs `nuget restore` every call. Per-file `/MP` is already enabled
 
 ## Deploy & run
 
-A packaged app can't be launched by running `WindowsTerminal.exe` directly (WT #926/#4043);
+A packaged app can't be launched by running `Agentmaster.exe` (the GUI binary — the renamed
+WindowsTerminal-project output) directly (WT #926/#4043);
 it must be deployed. Deploy the **loose layout** (what VS F5 does) — no signing/cert/admin:
 
 ```powershell
@@ -3410,7 +3411,7 @@ There is exactly ONE dev instance and ONE build output tree (`…\CascadiaPackag
 so the close→build→relaunch cycle is **process-global and destructive**. Two actors running it at
 once — two AI agents, or an agent + a human — collide: one closes the instance the other just
 launched, two msbuilds race on the same outputs, and the **exe link fails because a running
-`WindowsTerminal.exe` locks the very `WindowsTerminal.exe` being relinked**. **REQUIREMENT: hold
+`Agentmaster.exe` locks the very `Agentmaster.exe` being relinked**. **REQUIREMENT: hold
 the global `build-launch` mutex for the WHOLE cycle before you build (full exe), launch, deploy,
 OR close our instance.** (A lib-only compile-check — Building FAST #6 — doesn't relink the running
 exe, so it needs no lock.) The mutex is a filesystem lock (`tools/am-lock.sh`, built on `mkdir(2)`
@@ -3431,7 +3432,7 @@ next `acquire`. Token-checked `release` means one agent can't drop another's loc
 now), `with --wait 600 -- <cmd>` (acquire → run one command → release). `bash tools/am-lock.sh --help`.
 
 **Inner loop.** The loose layout is live (binaries update in place), but you **cannot
-relink `WindowsTerminal.exe` while the app is running** — it locks the exe. So: close *our*
+relink `Agentmaster.exe` while the app is running** — it locks the exe. So: close *our*
 dev instance (spare the Store WT), rebuild, relaunch. **Building, deploying, and installing
 require the user's permission — always ask first** (see *Development Rules*; the prior "always
 auto deploy, run without prompting" standing authorization is **revoked**). Just never touch the
@@ -3443,8 +3444,10 @@ TOKEN=$(bash tools/am-lock.sh acquire --wait 600 --label "deploy $(git rev-parse
 ```
 ```powershell
 # 1. close ONLY our dev instance (path filter spares the Store WT — see Gotchas)
-Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" |
+Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" |
   ? { $_.ExecutablePath -like 'K:\source\Agentmaster\*' } | % { Stop-Process -Id $_.ProcessId -Force }
+# (the GUI exe is Agentmaster.exe since the rename; WindowsTerminal.exe stays in the filter for a
+#  STILL-RUNNING pre-rename instance during the transition deploy)
 # 2. build (full exe link; the wrapper skips the ~156s appxsym by default — see Building FAST)
 pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore      # or: msbuild OpenConsole.slnx /t:Terminal\CascadiaPackage /m /p:Configuration=Debug /p:Platform=x64 /p:AppxSymbolPackageEnabled=false
 # 3. relaunch
@@ -3513,7 +3516,7 @@ review the assets, then **the user publishes it** (a draft creates no git tag un
 whose subject is **read from the manifest**, so it always equals the Publisher (this is *why* the
 Publisher is `CN=Agentmaster` — see Repo facts). Being self-signed, users must trust
 `Agentmaster.cer` once to install the `.msixbundle`; the **portable `.zip` needs no cert** (unzip +
-run `WindowsTerminal.exe` — fully self-contained: settings + profile live inside the unzip dir).
+run `Agentmaster.exe` — fully self-contained: settings + profile live inside the unzip dir).
 To sign with a real cert instead, set repo secrets **`SIGNING_PFX_BASE64`**
 + **`SIGNING_PFX_PASSWORD`** (its subject must still equal the Publisher).
 
@@ -3599,7 +3602,8 @@ build **binlog uploads as an artifact** to diagnose the first run.
 - **Closing instances to relink.** Closing **our** dev instance for the deploy inner loop
   **requires the user's permission first** (see *Development Rules*; the prior "always auto
   deploy, no prompt" authorization is **revoked**). Once permitted, filter by
-  `ExecutablePath -like 'K:\source\Agentmaster\*'` (matches our `WindowsTerminal.exe` *and*
+  `ExecutablePath -like 'K:\source\Agentmaster\*'` (matches our `Agentmaster.exe` — the GUI,
+  `WindowsTerminal.exe` pre-rename — *and*
   its `OpenConsole.exe` ConPTY hosts) — but **scope it tighter** (e.g. `\bin\x64\Debug\`),
   because a **Release** instance can host the very session you're running in (`AM_SESSION` /
   `CCMGR_HOOK_PIPE` set), so the broad path filter would **self-kill** it — then `Stop-Process`,

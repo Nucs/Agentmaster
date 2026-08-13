@@ -164,10 +164,11 @@ namespace Agentmaster
     // unpackaged fallback for host classification (a loose Release/Debug build path).
     std::wstring ReadProcessImagePath(uint32_t pid);
 
-    // BFS UP the ancestor chain of `pid` (NOT self) for the nearest WindowsTerminal.exe / wt.exe — the
-    // hosting terminal of a claude (directly for a Manager-launched ConPTY-root claude, or past its
-    // shell for a hand-typed one). 0 if none (a bare cmd/console host, or the host already exited).
-    // Pure over the snapshot. (OBSERVER.md §11c)
+    // BFS UP the ancestor chain of `pid` (NOT self) for the nearest terminal-host image —
+    // Agentmaster.exe (OUR fork's GUI binary) / WindowsTerminal.exe (real WT + pre-rename installs)
+    // / wt.exe — the hosting terminal of a claude (directly for a Manager-launched ConPTY-root
+    // claude, or past its shell for a hand-typed one). 0 if none (a bare cmd/console host, or the
+    // host already exited). Pure over the snapshot. (OBSERVER.md §11c)
     uint32_t FindTerminalHostPid(const std::vector<ProcEntry>& snap, uint32_t pid);
 
     // The display label for an EXTERNAL claude's HOST: walk to the hosting terminal

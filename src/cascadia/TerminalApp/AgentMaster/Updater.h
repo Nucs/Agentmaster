@@ -10,10 +10,10 @@
 // the `.portable` marker — IsPortableUpdateTarget) updates IN PLACE instead: the SAME script in
 // -Portable mode downloads the release's arch-matched portable ZIP and swaps the unzip's binaries
 // while preserving the exe-side user state (settings\ + profile\ + profile.path), then relaunches
-// WindowsTerminal.exe; its current version reads from the exe-side `.am-version` stamp the zip
+// the app exe; its current version reads from the exe-side `.am-version` stamp the zip
 // ships (CurrentInstallVersion). The script (am-update.ps1) is the
-// REAL file at src/cascadia/TerminalApp/AgentMaster/am-update.ps1, compiled into WindowsTerminal.exe
-// as the AM_UPDATE_PS1 RT_RCDATA resource and READ FROM THE BINARY here (FindResource/LoadResource)
+// REAL file at src/cascadia/TerminalApp/AgentMaster/am-update.ps1, compiled into the app exe
+// (Agentmaster.exe) as the AM_UPDATE_PS1 RT_RCDATA resource and READ FROM THE BINARY here (FindResource/LoadResource)
 // — never fetched from GitHub, and never read/copied/opened as a loose file on disk. The same script
 // also performs an UNINSTALL (LaunchUninstaller -> am-update.ps1 -Uninstall). It mirrors
 // tools\Install-Agentmaster.ps1's install core + recovery (VCLibs dependency; removing a conflicting
@@ -458,10 +458,10 @@ namespace Agentmaster::Updater
         }
 
         // Read an embedded RT_RCDATA resource (UTF-8 bytes) into a wide string. The installer payload
-        // (am-update.ps1) is baked into WindowsTerminal.exe as the AM_UPDATE_PS1 resource — the REAL
+        // (am-update.ps1) is baked into the app exe as the AM_UPDATE_PS1 resource — the REAL
         // .ps1 file, compiled in, so it is read from the binary at runtime and never shipped/opened as
         // a loose file. Both callers (the EXE startup check AND the DLL-hosted cog) run inside the
-        // WindowsTerminal.exe process, so the process module (GetModuleHandleW(nullptr)) carries it;
+        // app exe process, so the process module (GetModuleHandleW(nullptr)) carries it;
         // we also fall back to the module this inline code is linked into, for robustness.
         inline std::wstring LoadResourceTextUtf8(const wchar_t* resName)
         {
@@ -1373,7 +1373,7 @@ namespace Agentmaster::Updater
     // query, no prompt — even a NEWER release published mid-run waits for the next launch; the
     // cog's explicit "Check for updates" stays fully live, it's user-initiated). The latch is
     // PROCESS-scoped and deliberately an ENVIRONMENT VARIABLE: Updater.h is compiled into BOTH
-    // WindowsTerminal.exe (the startup + hourly checks) and TerminalApp.dll (the cog's prompt) — an
+    // the app exe (the startup + hourly checks) and TerminalApp.dll (the cog's prompt) — an
     // inline/static would exist once PER MODULE, but the env block is one per PROCESS, so a decline
     // taken on the cog's prompt also silences the EXE's hourly timer. It dies with the
     // process; child processes inherit it (harmless — RunStartupUpdateCheck CLEARS it at every
@@ -1558,7 +1558,7 @@ namespace Agentmaster::Updater
     // ============================ the embedded installer ============================
 
     // The installer PowerShell — the REAL am-update.ps1 file (src/cascadia/TerminalApp/AgentMaster/),
-    // compiled into WindowsTerminal.exe as the AM_UPDATE_PS1 RT_RCDATA resource and read from the
+    // compiled into the app exe as the AM_UPDATE_PS1 RT_RCDATA resource and read from the
     // binary here. It is NEVER fetched from GitHub, and never read/copied/opened as a loose file on
     // disk. It mirrors tools\Install-Agentmaster.ps1's install core + recovery (VCLibs dependency,
     // conflicting-install removal) and adds the in-app specifics (wait-for-app, relaunch, -Uninstall).

@@ -19,7 +19,7 @@ autosaves a single flat `sessions.json` on every registry change
 startup. Two facts break this the moment there is more than one window:
 
 - **One process, many windows.** v1.24 uses the **WindowEmperor** model: launching a
-  second `WindowsTerminal.exe` hands its command line to the existing instance and exits
+  second app process (`Agentmaster.exe`) hands its command line to the existing instance and exits
   (`WindowEmperor.cpp:482`); the Emperor hosts every window on its own thread. So all
   Agentmaster windows share one process — see `DESIGN.md` and the "two windows = one
   process" note.

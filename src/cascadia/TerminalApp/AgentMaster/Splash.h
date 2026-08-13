@@ -245,7 +245,7 @@ namespace Agentmaster::Splash
                 wc.hbrBackground = nullptr; // we paint everything (double-buffered in WM_PAINT)
                 wc.lpszClassName = kClass;
                 // The app's own icon, for the taskbar button + the caption. Extract it from this exe
-                // (WindowsTerminal.exe / agentmaster) so the loading window matches the installed app;
+                // (Agentmaster.exe / the alias) so the loading window matches the installed app;
                 // a null result just falls back to the default icon.
                 wchar_t exePath[MAX_PATH]{};
                 if (::GetModuleFileNameW(nullptr, exePath, MAX_PATH))

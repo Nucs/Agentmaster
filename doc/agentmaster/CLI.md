@@ -20,7 +20,7 @@ Related: [`DESIGN.md`](DESIGN.md), [`OBSERVER.md`](OBSERVER.md) (the pull model 
 
 Three facts decide the architecture:
 
-1. **The app exe is GUI-subsystem.** `WindowsTerminal.exe` (the alias target's forward) cannot write
+1. **The app exe is GUI-subsystem.** `Agentmaster.exe` (the GUI binary — the alias target's forward; named `WindowsTerminal.exe` pre-rename) cannot write
    to the caller's stdout — the shell does not wait on a GUI child, so any `AttachConsole` output
    races the next prompt. This is *why* `wt.exe` never returns query output. A queryable CLI must be
    a **console-subsystem** binary.
@@ -35,8 +35,8 @@ Three facts decide the architecture:
 ## 2. Transport: overload the alias shim (minimal, always-works)
 
 The execution alias `agentmaster.exe` / `agentmasterdev.exe` already targets the tiny **`wt` launcher
-shim** (`src/cascadia/wt/shim.cpp`), not the GUI — it just `CreateProcessW`s `WindowsTerminal.exe`
-and exits. Defterm/COM handoff targets `WindowsTerminal.exe` *directly* (manifest `com:ComServer`),
+shim** (`src/cascadia/wt/shim.cpp`), not the GUI — it just `CreateProcessW`s `Agentmaster.exe`
+and exits. Defterm/COM handoff targets `Agentmaster.exe` *directly* (manifest `com:ComServer`),
 so it is untouched by anything we do to the alias. The shim is the seam.
 
 **Change:** flip the alias-target launcher to `/SUBSYSTEM:CONSOLE` and dispatch on `argv[1]`:
@@ -46,7 +46,7 @@ wmain:
   if first token ∈ { show, list, sessions, tabs, windows, external, restore, archive }
         OR a leading CLI-only flag { --json, --self, --offline, --tail, --instance, --state, --dir }
        → exec agentmaster-cli.exe on THIS console, wait, return its exit code     # CLI
-  else → CreateProcessW(WindowsTerminal.exe, <forward argv verbatim>) detached     # GUI (unchanged)
+  else → CreateProcessW(Agentmaster.exe, <forward argv verbatim>) detached          # GUI (unchanged)
 ```
 
 - A verb invoked **from a shell** attaches to the existing console → synchronous, ordered stdout
@@ -223,7 +223,7 @@ token), so `agentmaster --instance dev show …` dispatches too. Anything else (
   that compiles the pure-C++ engine units (`SessionRegistry` / `Persistence` / `ProcessInspect` /
   `TranscriptStore` / `SessionScanner` / `SessionSearch` / `ClaudeSpawn`) — **no WinRT, no
   `TerminalAppLib`** — and links `ole32 user32 oleaut32` (the `tests/` harness link set). Added to
-  `CascadiaPackage` so it ships beside `WindowsTerminal.exe`.
+  `CascadiaPackage` so it ships beside `Agentmaster.exe`.
 - **Launcher** — `wt/shim.cpp` flips to console subsystem + the verb dispatch in §2.
 - **Emperor** — the `--am-restore` / `--am-archive` commandline intercept (§4).
 - **Standalone validation** — like the engine tests, `agentmaster-cli` compiles + runs via a `cl`
@@ -239,7 +239,7 @@ token), so `agentmaster --instance dev show …` dispatches too. Anything else (
   authored, but the full build is unproven:** `agentmaster-cli.vcxproj` (console; links the engine
   units) compiles clean and the `wt`/`wtd` shim is console-subsystem + dual-mode (`shim.cpp` +
   `wt.vcxproj` `SubSystem=Console`), wired into `OpenConsole.slnx` + `CascadiaPackage.wapproj` so a
-  build *should* ship `agentmaster-cli.exe` beside `WindowsTerminal.exe` — but this committed wiring
+  build *should* ship `agentmaster-cli.exe` beside the GUI exe — but this committed wiring
   has only been **isolation-built + XML-validated**; a real full `Build-Agentmaster.ps1` / CI Release
   build has NOT run, so the wapproj integration + a properly-branded `wtd.exe` are unconfirmed and the
   live dev alias runs on **hand-copied binaries** until then. **Remaining: a destructive full package

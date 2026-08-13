@@ -791,7 +791,7 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
 
         // Agentmaster (System notifications; NOTIFICATIONS.md §4a): a COLD-START toast activation.
         // When NO instance is running, a toast click makes the SCM launch the ExeServer our manifests
-        // register for the toast-activator CLSID: `WindowsTerminal.exe -ToastActivated -Embedding`
+        // register for the toast-activator CLSID: `Agentmaster.exe -ToastActivated -Embedding`
         // (our chosen Arguments + the -Embedding COM appends). Neither token is a WT commandline —
         // parsing them would fail, and falling into the -Embedding (defterm) branch below would leave
         // the click with NO window at all. So strip the pair and continue as a PLAIN NO-ARG LAUNCH:
