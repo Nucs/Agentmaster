@@ -12,29 +12,45 @@
 // WHY: the RELEASE package (Agentmaster_...) and the DEV package (AgentmasterDev_...) install
 // side by side; without per-install profiles they would fight over ONE ~/.agentmaster (two
 // SharedEngines clobbering sessions.json / open-windows.json / bridge.json). Each install
-// remembers its OWN profile choice. First launch AUTO-SELECTS the per-identity default WITHOUT
-// prompting — release → Production (~/.agentmaster), dev → Development (~/.agentmaster-dev) — and
-// persists it; the user can switch later (Production / Development / Browse…) from the cog.
+// remembers its OWN profile choice. An INSTALLED copy's first launch AUTO-SELECTS the per-identity
+// default WITHOUT prompting — release → Production (~/.agentmaster), dev → Development
+// (~/.agentmaster-dev) — and persists it; a PORTABLE copy's first launch instead ASKS (Portable /
+// Production / Development / Browse…) and remembers the answer NEXT TO THE EXE. Everyone can
+// switch later from the cog's "Change profile folder…".
 //
 // RESOLUTION ORDER (ResolveProfileDir):
 //   1. env  AGENTMASTER_PROFILE        — explicit override (also exported by the bootstrap so
 //                                        every module in the process resolves identically).
-//   2. <exedir>\profile                — when <exedir>\.portable exists (true portable zip:
-//                                        fully self-contained, never asks).
-//   3. the saved per-install choice    — %USERPROFILE%\.agentmaster.profiles, a tiny text map
+//   2. <exedir>\profile.path           — the EXE-SIDE POINTER: one line naming the profile folder
+//                                        (a RELATIVE line resolves against the exe dir, so a moved
+//                                        unzip keeps working). Written by a PORTABLE copy's
+//                                        first-launch picker — its per-unzip memory (the home
+//                                        map's one "Unpackaged" slot can't tell two unzips apart);
+//                                        honored for INSTALLED copies too when someone plants one
+//                                        next to the exe (creating it there needs a writable exe
+//                                        dir, which an MSIX install doesn't have — power users).
+//   3. <exedir>\profile                — when <exedir>\.portable exists and no pointer was written
+//                                        yet: the self-contained default. The EXE prelude PROMPTS
+//                                        on a portable's first interactive launch; headless/library
+//                                        resolution never asks (Rule #15) and lands here. A
+//                                        portable NEVER consults the home map below (steps 4–5) —
+//                                        self-containment, and the shared "Unpackaged" slot would
+//                                        cross-contaminate unzips and legacy tools.
+//   4. the saved per-install choice    — %USERPROFILE%\.agentmaster.profiles, a tiny text map
 //                                        keyed by package family name (or "Unpackaged"). Lives
 //                                        OUTSIDE any profile (chicken-and-egg) and OUTSIDE the
 //                                        MSIX-virtualized AppData, so it is shared, honest and
 //                                        debuggable.
-//   4. the per-identity default        — ~/.agentmaster (release) / ~/.agentmaster-dev (the
+//   5. the per-identity default        — ~/.agentmaster (release) / ~/.agentmaster-dev (the
 //                                        AgentmasterDev package). Headless/test resolution never
 //                                        shows UI and lands here, which preserves the historical
 //                                        ~/.agentmaster for unpackaged tools and the test harness.
 //
 // The PICKER (TaskDialogIndirect command links + an IFileDialog folder browse, ShowProfilePicker)
-// is NO LONGER shown on first launch — that path auto-selects by identity (above). It is now only
-// shown by the Settings cog's "Change profile folder…" (an explicit user action). It is pure Win32
-// — in XAML Islands a Win32 modal gets its keyboard input directly (no ContentDialog input trap).
+// is shown on a PORTABLE copy's first launch (with the exe-local "Portable profile" option leading
+// and defaulted) and by the Settings cog's "Change profile folder…" — an INSTALLED first launch
+// auto-selects by identity (above), no prompt. It is pure Win32 — in XAML Islands a Win32 modal
+// gets its keyboard input directly (no ContentDialog input trap).
 //
 // SAFETY: EnsureProfileResolvedAtStartup also takes a kernel mutex named after the resolved
 // profile dir. Two live instances (e.g. release + dev pointed at one folder via Browse…) would
@@ -55,6 +71,7 @@
 #include <map>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "Json.h" // Agentmaster::json — read the persisted "Enable Debug Mode" setting (PersistedDebugModeEnabled); tiny + header-only
 
@@ -491,32 +508,229 @@ namespace Agentmaster::Profiles
         return IsDevPackage() ? DefaultDevProfileDir() : DefaultReleaseProfileDir();
     }
 
-    // True-portable runs (the release zip ships an exe-relative `.portable` marker): the profile
-    // is <exedir>\profile — fully self-contained, never asks, never touches the user profile.
-    inline std::wstring PortableProfileDir()
+    // ------------------------------------------- portable install + the exe-side pointer ----
+
+    namespace detail
     {
-        wchar_t buf[MAX_PATH * 2];
-        const DWORD n = ::GetModuleFileNameW(nullptr, buf, ARRAYSIZE(buf));
-        if (n == 0 || n >= ARRAYSIZE(buf))
+        // The folder holding the running PROCESS image ("" on failure), no trailing separator.
+        // Deliberately the process exe (GetModuleFileNameW(nullptr)) and not the current module:
+        // every module in one process (WindowsTerminal.exe, TerminalApp.dll, the Model DLL) must
+        // agree on the SAME exe-side files, and every shipped layout (package, loose, portable
+        // unzip) keeps all binaries — the app exe AND agentmaster-cli.exe — in one folder.
+        inline std::wstring ExeDirPath()
         {
-            return {};
+            wchar_t buf[MAX_PATH * 2];
+            const DWORD n = ::GetModuleFileNameW(nullptr, buf, ARRAYSIZE(buf));
+            if (n == 0 || n >= ARRAYSIZE(buf))
+            {
+                return {};
+            }
+            const std::wstring exe{ buf, n };
+            const size_t cut = exe.find_last_of(L"\\/");
+            if (cut == std::wstring::npos || cut == 0)
+            {
+                return {};
+            }
+            return exe.substr(0, cut);
+        }
+    }
+
+    // True when a `.portable` marker sits in exeDir — the TRUE-PORTABLE layout (the release zip
+    // ships one; upstream WT keys its own portable settings mode off the same file).
+    inline bool IsPortableInstallIn(const std::wstring& exeDir)
+    {
+        if (exeDir.empty())
+        {
+            return false;
         }
         try
         {
-            std::filesystem::path exe{ std::wstring{ buf, n } };
-            auto marker = exe;
-            marker.replace_filename(L".portable");
-            if (std::filesystem::exists(marker))
-            {
-                auto profile = exe;
-                profile.replace_filename(L"profile");
-                return profile.wstring();
-            }
+            return std::filesystem::exists(std::filesystem::path{ exeDir } / L".portable");
         }
         catch (...)
         {
+            return false;
+        }
+    }
+
+    inline bool IsPortableInstall()
+    {
+        return IsPortableInstallIn(detail::ExeDirPath());
+    }
+
+    // The portable-local default profile — <exedir>\profile: the self-contained choice the picker
+    // offers first, and the silent fallback when a portable's first-launch prompt is cancelled or
+    // headless. "" when the exe dir is unknown.
+    inline std::wstring PortableDefaultProfileDirIn(const std::wstring& exeDir)
+    {
+        return exeDir.empty() ? std::wstring{} : exeDir + L"\\profile";
+    }
+
+    inline std::wstring PortableDefaultProfileDir()
+    {
+        return PortableDefaultProfileDirIn(detail::ExeDirPath());
+    }
+
+    // <exedir>\profile.path — the EXE-SIDE PROFILE POINTER: one value line naming the profile
+    // folder this exe location uses. A PORTABLE copy's first-launch picker writes it (the
+    // per-unzip memory the shared home map cannot provide); an installed copy honors a manually
+    // planted one too. Plain UTF-8 text (`#` comments + blank lines skipped, first value line
+    // wins) so the EXE parses it without JSON helpers — the choice-file idiom.
+    inline constexpr std::wstring_view LocalProfilePointerLeaf{ L"profile.path" };
+
+    inline std::wstring LocalProfilePointerPathIn(const std::wstring& exeDir)
+    {
+        return exeDir.empty() ? std::wstring{} : exeDir + L"\\" + std::wstring{ LocalProfilePointerLeaf };
+    }
+
+    inline std::wstring LocalProfilePointerPath()
+    {
+        return LocalProfilePointerPathIn(detail::ExeDirPath());
+    }
+
+    inline bool LocalProfilePointerExistsIn(const std::wstring& exeDir)
+    {
+        const auto path = LocalProfilePointerPathIn(exeDir);
+        if (path.empty())
+        {
+            return false;
+        }
+        try
+        {
+            return std::filesystem::exists(std::filesystem::path{ path });
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    // PURE: the line the pointer file stores for a chosen profile dir. PREFER RELATIVE — but only
+    // when the dir sits INSIDE the exe dir (the `profile` case and any subfolder), so the pointer
+    // survives the user moving the whole unzip. Anything else — another tree, another drive, the
+    // home-dir Production/Development defaults — is stored ABSOLUTE verbatim: a `..`-relative
+    // spelling would silently re-anchor to a WRONG (and then auto-created) folder if the unzip
+    // moved, which is worse than an absolute path that at least stays honest.
+    inline std::wstring EncodeLocalProfilePointer(std::wstring_view exeDir, std::wstring_view profileDir)
+    {
+        std::wstring exe{ exeDir };
+        while (!exe.empty() && (exe.back() == L'\\' || exe.back() == L'/'))
+        {
+            exe.pop_back();
+        }
+        const std::wstring dir{ profileDir };
+        if (!exe.empty() && dir.size() > exe.size() + 1 &&
+            (dir[exe.size()] == L'\\' || dir[exe.size()] == L'/') &&
+            detail::SamePath(dir.substr(0, exe.size()), exe))
+        {
+            return dir.substr(exe.size() + 1); // inside the exe dir -> the relative tail
+        }
+        return dir;
+    }
+
+    // PURE: pointer-file text -> the profile dir it names ("" when it names none). First
+    // non-empty, non-`#` line wins; a RELATIVE value resolves against the exe dir; the result is
+    // lexically normalized (`./profile`, mixed slashes and `.` segments all collapse).
+    inline std::wstring DecodeLocalProfilePointer(std::wstring_view exeDir, std::wstring_view text)
+    {
+        size_t pos = 0;
+        while (pos <= text.size())
+        {
+            size_t nl = text.find(L'\n', pos);
+            if (nl == std::wstring_view::npos)
+            {
+                nl = text.size();
+            }
+            std::wstring line{ text.substr(pos, nl - pos) };
+            pos = nl + 1;
+            while (!line.empty() && (line.back() == L'\r' || line.back() == L' ' || line.back() == L'\t'))
+            {
+                line.pop_back();
+            }
+            size_t b = 0;
+            while (b < line.size() && (line[b] == L' ' || line[b] == L'\t'))
+            {
+                ++b;
+            }
+            line.erase(0, b);
+            if (line.empty() || line.front() == L'#')
+            {
+                continue;
+            }
+            const bool absolute = (line.size() >= 2 && line[1] == L':') || line.front() == L'\\' || line.front() == L'/';
+            if (!absolute && exeDir.empty())
+            {
+                return {}; // a relative pointer with no exe-dir anchor is unusable
+            }
+            try
+            {
+                const std::filesystem::path p = absolute ? std::filesystem::path{ line } :
+                                                           (std::filesystem::path{ std::wstring{ exeDir } } / line);
+                return p.lexically_normal().wstring();
+            }
+            catch (...)
+            {
+                return {};
+            }
         }
         return {};
+    }
+
+    // The pointer's resolved profile dir ("" when the file is absent / empty / comments-only).
+    inline std::wstring ReadLocalProfilePointerIn(const std::wstring& exeDir)
+    {
+        const auto path = LocalProfilePointerPathIn(exeDir);
+        if (path.empty())
+        {
+            return {};
+        }
+        return DecodeLocalProfilePointer(exeDir, detail::ReadUtf8File(path));
+    }
+
+    inline std::wstring ReadLocalProfilePointer()
+    {
+        return ReadLocalProfilePointerIn(detail::ExeDirPath());
+    }
+
+    // Persist the pointer (atomic tmp + rename, the choice-file idiom). False when the exe dir
+    // refuses the write — a portable on read-only media simply asks again next launch.
+    inline bool SaveLocalProfilePointerIn(const std::wstring& exeDir, const std::wstring& profileDir)
+    {
+        const auto path = LocalProfilePointerPathIn(exeDir);
+        if (path.empty() || profileDir.empty())
+        {
+            return false;
+        }
+        try
+        {
+            std::string bytes = "# Agentmaster profile pointer: the profile folder THIS exe location uses.\n"
+                                "# A relative line resolves against the exe's folder (a moved portable keeps working).\n";
+            bytes += detail::WideToUtf8(EncodeLocalProfilePointer(exeDir, profileDir));
+            bytes += '\n';
+            const std::wstring tmp = path + L".tmp";
+            {
+                std::ofstream f{ std::filesystem::path{ tmp }, std::ios::binary | std::ios::trunc };
+                if (!f)
+                {
+                    return false;
+                }
+                f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+                if (!f.good())
+                {
+                    return false;
+                }
+            }
+            return ::MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    inline bool SaveLocalProfilePointer(const std::wstring& profileDir)
+    {
+        return SaveLocalProfilePointerIn(detail::ExeDirPath(), profileDir);
     }
 
     // ------------------------------------------------------------------- the choice file ----
@@ -628,6 +842,40 @@ namespace Agentmaster::Profiles
         return WriteChoiceFile(path, entries);
     }
 
+    // Persist a profile choice WHERE THIS INSTALL'S RESOLUTION READS IT BACK — the one rule that
+    // keeps the cog's "Change profile folder…" honest for every layout. A PORTABLE copy (and any
+    // copy already steered by an exe-side pointer file, which outranks the home map) writes the
+    // pointer NEXT TO THE EXE; everything else writes its slot in ~/.agentmaster.profiles. False
+    // == the choice could not be stored anywhere resolution would actually read it (a portable
+    // whose exe dir refuses the write — its resolution never consults the home map, so a map
+    // write would be a DEAD choice; same for a pointer-steered install whose pointer can't be
+    // rewritten, since the stale pointer would keep outranking the map). The caller should say
+    // so instead of pretending the change took.
+    inline bool PersistProfileChoiceIn(const std::wstring& exeDir, const std::wstring& profileDir)
+    {
+        if (IsPortableInstallIn(exeDir) || LocalProfilePointerExistsIn(exeDir))
+        {
+            return SaveLocalProfilePointerIn(exeDir, profileDir);
+        }
+        return SaveChoice(profileDir);
+    }
+
+    inline bool PersistProfileChoice(const std::wstring& profileDir)
+    {
+        return PersistProfileChoiceIn(detail::ExeDirPath(), profileDir);
+    }
+
+    // WHERE PersistProfileChoice will write for this install — for error messages + display.
+    inline std::wstring ProfileChoiceStorePath()
+    {
+        const auto exeDir = detail::ExeDirPath();
+        if (IsPortableInstallIn(exeDir) || LocalProfilePointerExistsIn(exeDir))
+        {
+            return LocalProfilePointerPathIn(exeDir);
+        }
+        return ChoiceFilePath();
+    }
+
     // ----------------------------------------------------------------------- resolution ----
 
     // The full precedence WITHOUT UI and WITHOUT caching (tests use this directly).
@@ -637,9 +885,19 @@ namespace Agentmaster::Profiles
         {
             return env;
         }
-        if (auto portable = PortableProfileDir(); !portable.empty())
+        const auto exeDir = detail::ExeDirPath();
+        if (auto pinned = ReadLocalProfilePointerIn(exeDir); !pinned.empty())
         {
-            return portable;
+            return pinned; // the exe-side pointer: a portable's remembered choice (honored for installed copies too)
+        }
+        if (IsPortableInstallIn(exeDir))
+        {
+            // Portable with nothing chosen yet: the classic self-contained default. The EXE
+            // prelude prompts here (EnsureProfileResolvedAtStartup); library/headless resolution
+            // never does (Rule #15). NEVER fall through to the home map: its one "Unpackaged"
+            // slot is shared by every unzip AND legacy unpackaged tools — reading it would
+            // cross-contaminate copies that must stay self-contained.
+            return PortableDefaultProfileDirIn(exeDir);
         }
         if (auto saved = ReadSavedChoice(); !saved.empty())
         {
@@ -703,17 +961,57 @@ namespace Agentmaster::Profiles
         }
     }
 
+    // Seed <profile>\terminal from an EXPLICIT source folder holding Terminal's settings.json /
+    // state.json. Copy-if-target-absent per file, so it is idempotent and never clobbers.
+    inline void SeedTerminalSettingsFromDir(const std::wstring& fromDir, const std::wstring& profileDir)
+    {
+        try
+        {
+            if (fromDir.empty() || profileDir.empty())
+            {
+                return;
+            }
+            const std::filesystem::path stock{ fromDir };
+            std::error_code probe;
+            if (!std::filesystem::exists(stock, probe))
+            {
+                return;
+            }
+            const std::filesystem::path target = std::filesystem::path{ profileDir } / L"terminal";
+            std::filesystem::create_directories(target);
+            for (const auto* leaf : { L"settings.json", L"state.json", L"elevated-state.json" })
+            {
+                const auto from = stock / leaf;
+                const auto to = target / leaf;
+                std::error_code ec;
+                if (std::filesystem::exists(from, ec) && !std::filesystem::exists(to, ec))
+                {
+                    std::filesystem::copy_file(from, to, ec);
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
     // Seed <profile>\terminal with the Terminal settings this install currently uses, so the
     // first profile-redirected launch looks identical instead of resetting to defaults. The
-    // STOCK location (what GetBaseSettingsPath resolves without the redirect): packaged →
-    // %LOCALAPPDATA%\Packages\<PFN>\LocalState; unpackaged → %LOCALAPPDATA%\Microsoft\Windows
-    // Terminal. Copy-if-target-absent only.
+    // source is where this install kept them BEFORE the profile redirect: a PORTABLE copy →
+    // <exedir>\settings (upstream WT portable mode, which the AGENTMASTER_PROFILE redirect now
+    // outranks); packaged → %LOCALAPPDATA%\Packages\<PFN>\LocalState; unpackaged →
+    // %LOCALAPPDATA%\Microsoft\Windows Terminal. Copy-if-target-absent only.
     inline void SeedTerminalSettings(const std::wstring& profileDir)
     {
         try
         {
             if (profileDir.empty())
             {
+                return;
+            }
+            if (const auto exeDir = detail::ExeDirPath(); IsPortableInstallIn(exeDir))
+            {
+                SeedTerminalSettingsFromDir(exeDir + L"\\settings", profileDir);
                 return;
             }
             const auto localAppData = detail::GetEnvVar(L"LOCALAPPDATA");
@@ -731,18 +1029,7 @@ namespace Agentmaster::Profiles
             {
                 stock = stock / L"Microsoft" / L"Windows Terminal";
             }
-            const std::filesystem::path target = std::filesystem::path{ profileDir } / L"terminal";
-            std::filesystem::create_directories(target);
-            for (const auto* leaf : { L"settings.json", L"state.json", L"elevated-state.json" })
-            {
-                const auto from = stock / leaf;
-                const auto to = target / leaf;
-                std::error_code ec;
-                if (std::filesystem::exists(from, ec) && !std::filesystem::exists(to, ec))
-                {
-                    std::filesystem::copy_file(from, to, ec);
-                }
-            }
+            SeedTerminalSettingsFromDir(stock.wstring(), profileDir);
         }
         catch (...)
         {
@@ -801,9 +1088,12 @@ namespace Agentmaster::Profiles
     }
 
     // The profile picker. `migrateSource` is the folder offered by the "copy existing data"
-    // checkbox (first launch: the legacy/shared ~/.agentmaster; the cog's Change…: the active
-    // profile). Pure Win32 (TaskDialogIndirect needs the Common-Controls v6 manifest dependency,
-    // which WindowsTerminal.manifest declares). Loops back from a cancelled Browse….
+    // checkbox (a portable's first launch: the pre-existing <exedir>\profile, when one exists;
+    // the cog's Change…: the active profile). Pure Win32 (TaskDialogIndirect needs the
+    // Common-Controls v6 manifest dependency, which WindowsTerminal.manifest declares). Loops
+    // back from a cancelled Browse…. On a PORTABLE copy (the `.portable` marker) a leading
+    // "Portable profile" command link offers the self-contained <exedir>\profile and is the
+    // default — for everyone else the picker is byte-identical to before.
     inline PickerResult ShowProfilePicker(HWND owner, bool firstLaunch, const std::wstring& migrateSource)
     {
         PickerResult result;
@@ -812,6 +1102,8 @@ namespace Agentmaster::Profiles
         const std::wstring devDir = DefaultDevProfileDir();
         const bool dev = IsDevPackage();
         const bool packaged = !PackageFamilyName().empty();
+        const std::wstring portableDir = PortableDefaultProfileDir();
+        const bool offerPortable = IsPortableInstall() && !portableDir.empty();
 
         bool offerMigrate = false;
         try
@@ -829,14 +1121,16 @@ namespace Agentmaster::Profiles
             L"A profile folder holds everything Agentmaster stores: sessions, test queues, window "
             L"layouts, settings and hooks. Each installation remembers its own choice, so the "
             L"release and development installs never touch each other's data.\n\nAsking: ";
-        content += !packaged ? L"a portable/unpackaged copy." :
-                   dev       ? L"the DEVELOPMENT install (AgentmasterDev)." :
-                               L"the RELEASE install (Agentmaster).";
+        content += offerPortable ? L"a PORTABLE copy \x2014 its choice is remembered next to the exe (profile.path; kept relative when the profile lives inside this folder, so the unzip stays movable)." :
+                   !packaged     ? L"a portable/unpackaged copy." :
+                   dev           ? L"the DEVELOPMENT install (AgentmasterDev)." :
+                                   L"the RELEASE install (Agentmaster).";
         if (!firstLaunch)
         {
             content += L"\n\nThe new profile takes effect the next time Agentmaster starts.";
         }
 
+        const std::wstring portableLabel = L"Portable profile (self-contained)\n" + portableDir;
         const std::wstring prodLabel = L"Production profile\n" + releaseDir;
         const std::wstring devLabel = L"Development profile\n" + devDir;
         const std::wstring browseLabel = L"Browse for a profile folder…\nUse any folder (a synced drive, a per-project location, …)";
@@ -846,11 +1140,15 @@ namespace Agentmaster::Profiles
         constexpr int idProd = 1001;
         constexpr int idDev = 1002;
         constexpr int idBrowse = 1003;
-        const TASKDIALOG_BUTTON buttons[] = {
-            { idProd, prodLabel.c_str() },
-            { idDev, devLabel.c_str() },
-            { idBrowse, browseLabel.c_str() },
-        };
+        constexpr int idPortable = 1004;
+        std::vector<TASKDIALOG_BUTTON> buttons;
+        if (offerPortable)
+        {
+            buttons.push_back({ idPortable, portableLabel.c_str() });
+        }
+        buttons.push_back({ idProd, prodLabel.c_str() });
+        buttons.push_back({ idDev, devLabel.c_str() });
+        buttons.push_back({ idBrowse, browseLabel.c_str() });
 
         for (;;)
         {
@@ -862,9 +1160,9 @@ namespace Agentmaster::Profiles
             cfg.pszMainIcon = TD_INFORMATION_ICON;
             cfg.pszMainInstruction = instruction.c_str();
             cfg.pszContent = content.c_str();
-            cfg.cButtons = ARRAYSIZE(buttons);
-            cfg.pButtons = buttons;
-            cfg.nDefaultButton = dev ? idDev : idProd;
+            cfg.cButtons = static_cast<UINT>(buttons.size());
+            cfg.pButtons = buttons.data();
+            cfg.nDefaultButton = offerPortable ? idPortable : (dev ? idDev : idProd);
             cfg.pszFooter = footer.c_str();
             cfg.pszFooterIcon = TD_INFORMATION_ICON;
             if (offerMigrate)
@@ -883,6 +1181,9 @@ namespace Agentmaster::Profiles
             std::wstring dir;
             switch (pressed)
             {
+            case idPortable:
+                dir = portableDir;
+                break;
             case idProd:
                 dir = releaseDir;
                 break;
@@ -942,18 +1243,69 @@ namespace Agentmaster::Profiles
     // The WindowEmperor calls this ONCE, right after winning the single-instance handoff and
     // BEFORE anything reads persisted state (Terminal settings via the GetBaseSettingsPath
     // redirect, ApplicationState, the windows/<id>.json reopen scan, and — later — the engine's
-    // AgentmasterStateDir). First launch (no env / portable marker / saved choice) AUTO-SELECTS the
-    // per-identity default profile (release → Production, dev → Development) and persists it — no
-    // prompt. `allowUi` no longer gates the resolution (the auto-pick needs no UI); it only gates
-    // the "profile already in use by another instance" warning below — a `-Embedding` COM activation
-    // (defterm handoff) passes false so it can never block on a dialog. Returns false ONLY when the
+    // AgentmasterStateDir). An INSTALLED copy's first launch (no env / pointer / saved choice)
+    // AUTO-SELECTS the per-identity default profile (release → Production, dev → Development) and
+    // persists it — no prompt. A PORTABLE copy's first launch (marker, no pointer yet) instead
+    // PROMPTS (Portable <exedir>\profile / Production / Development / Browse…) and remembers the
+    // answer in the exe-side pointer file; Cancel — and `allowUi == false` (a `-Embedding` COM
+    // activation / defterm handoff must never block on a dialog) — lands on the self-contained
+    // <exedir>\profile WITHOUT persisting, so the next interactive launch asks again. `allowUi`
+    // therefore gates that portable prompt AND the "profile already in use by another instance"
+    // warning below; the installed auto-pick needs no UI either way. Returns false ONLY when the
     // profile is held by another live instance and the user chose not to continue — caller exits.
     inline bool EnsureProfileResolvedAtStartup(bool allowUi)
     {
         std::wstring dir = detail::GetEnvVar(L"AGENTMASTER_PROFILE");
         if (dir.empty())
         {
-            dir = PortableProfileDir();
+            const auto exeDir = detail::ExeDirPath();
+            dir = ReadLocalProfilePointerIn(exeDir); // a portable's remembered choice (installed copies honor a planted one too)
+            if (IsPortableInstallIn(exeDir))
+            {
+                if (dir.empty() && allowUi)
+                {
+                    // FIRST INTERACTIVE LAUNCH of a PORTABLE copy: ask. The migrate checkbox
+                    // offers the pre-existing <exedir>\profile when one holds data already (an
+                    // older portable build used it unconditionally), so upgrading users can carry
+                    // it into a non-portable pick; picking Portable itself keeps that data in
+                    // place (SamePath makes the migrate a no-op).
+                    std::wstring migrateSource = PortableDefaultProfileDirIn(exeDir);
+                    try
+                    {
+                        if (!std::filesystem::exists(std::filesystem::path{ migrateSource }))
+                        {
+                            migrateSource.clear();
+                        }
+                    }
+                    catch (...)
+                    {
+                        migrateSource.clear();
+                    }
+                    const auto pick = ShowProfilePicker(nullptr, true, migrateSource);
+                    if (pick.chosen)
+                    {
+                        dir = pick.dir;
+                        detail::EnsureDirExists(dir);
+                        // Best-effort: an unwritable exe dir (read-only media) simply asks again
+                        // next launch — the session still runs on the chosen dir.
+                        SaveLocalProfilePointerIn(exeDir, dir);
+                        if (pick.migrate)
+                        {
+                            MigrateProfileData(migrateSource, dir);
+                        }
+                    }
+                }
+                if (dir.empty())
+                {
+                    dir = PortableDefaultProfileDirIn(exeDir); // cancelled / headless: self-contained, un-persisted
+                }
+                // The pre-choice portable kept Terminal's own settings in <exedir>\settings
+                // (upstream WT portable mode, which the AGENTMASTER_PROFILE redirect now
+                // outranks) — seed <profile>\terminal from there so the first profile-homed
+                // launch keeps the user's terminal look. Copy-if-absent ⇒ a no-op every launch
+                // after the first, and it never clobbers a profile that already has settings.
+                SeedTerminalSettings(dir);
+            }
         }
         if (dir.empty())
         {
@@ -961,14 +1313,14 @@ namespace Agentmaster::Profiles
         }
         if (dir.empty())
         {
-            // First launch of this install: AUTO-SELECT the per-identity default profile and
+            // First launch of an INSTALLED copy: AUTO-SELECT the per-identity default profile and
             // remember it, WITHOUT prompting — the RELEASE install picks the Production profile
             // (~/.agentmaster), the DEV install picks the Development profile (~/.agentmaster-dev).
-            // (Was: a Production / Development / Browse… TaskDialog picker — see ShowProfilePicker,
-            // still used by the cog's "Change profile folder…".) The choice is keyed off the package
-            // identity (DefaultProfileDir == IsDevPackage() ? dev : release), so it needs no UI and
-            // runs for headless -Embedding/defterm activations too (allowUi only gates the in-use
-            // warning below). It stays changeable later from the cog's "Change profile folder…".
+            // (The Production / Development / Browse… TaskDialog picker — ShowProfilePicker — is
+            // shown by a PORTABLE first launch above and by the cog's "Change profile folder…".)
+            // The choice is keyed off the package identity (DefaultProfileDir == IsDevPackage() ?
+            // dev : release), so it needs no UI and runs for headless -Embedding/defterm
+            // activations too. It stays changeable later from the cog's "Change profile folder…".
             dir = DefaultProfileDir();
             detail::EnsureDirExists(dir);
             SaveChoice(dir);

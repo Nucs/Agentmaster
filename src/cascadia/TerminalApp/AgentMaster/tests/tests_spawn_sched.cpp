@@ -936,6 +936,67 @@ void TestProfileBootstrap()
         fs::remove_all(dst, ec);
     }
 
+    // The exe-side profile POINTER + portable primitives (the portable-chooses-a-profile feature:
+    // a portable's first launch PROMPTS and remembers next to the exe in profile.path). Encode
+    // prefers a RELATIVE line only for a dir INSIDE the exe dir — the pointer then survives the
+    // user moving the whole unzip — while anything outside (another tree/drive, the home-dir
+    // defaults) stays ABSOLUTE verbatim: a `..`-relative spelling would silently re-anchor to a
+    // wrong (then auto-created) folder if the unzip moved.
+    {
+        namespace fs = std::filesystem;
+        const std::wstring exe = L"C:\\port\\app";
+        CHECK(P::EncodeLocalProfilePointer(exe, L"C:\\port\\app\\profile") == L"profile", "pointer encode: <exedir>\\profile -> relative");
+        CHECK(P::EncodeLocalProfilePointer(exe, L"c:/PORT/app/data/p1") == L"data/p1", "pointer encode: inside via case/slash-variant spelling -> relative tail");
+        CHECK(P::EncodeLocalProfilePointer(exe + L"\\", L"C:\\port\\app\\profile") == L"profile", "pointer encode: trailing-separator exe dir still matches");
+        CHECK(P::EncodeLocalProfilePointer(exe, L"C:\\port\\apple\\profile") == L"C:\\port\\apple\\profile", "pointer encode: sibling dir sharing a name PREFIX stays absolute");
+        CHECK(P::EncodeLocalProfilePointer(exe, L"C:\\Users\\x\\.agentmaster") == L"C:\\Users\\x\\.agentmaster", "pointer encode: outside the exe dir -> absolute");
+        CHECK(P::EncodeLocalProfilePointer(exe, L"D:\\x") == L"D:\\x", "pointer encode: another drive -> absolute");
+        CHECK(P::EncodeLocalProfilePointer(exe, exe) == exe, "pointer encode: the exe dir itself -> absolute (degenerate, honored)");
+
+        CHECK(P::DecodeLocalProfilePointer(exe, L"profile") == L"C:\\port\\app\\profile", "pointer decode: relative resolves against the exe dir");
+        CHECK(P::DecodeLocalProfilePointer(exe, L"./profile\r\n") == L"C:\\port\\app\\profile", "pointer decode: ./ spelling + CRLF normalize away");
+        CHECK(P::DecodeLocalProfilePointer(exe, L"# comment\n\n   D:\\elsewhere\\prof  \n") == L"D:\\elsewhere\\prof", "pointer decode: comments/blank skipped, absolute passes through trimmed");
+        CHECK(P::DecodeLocalProfilePointer(exe, L"# only a comment\n").empty(), "pointer decode: no value line -> empty");
+        CHECK(P::DecodeLocalProfilePointer(exe, L"").empty(), "pointer decode: empty text -> empty");
+        CHECK(P::DecodeLocalProfilePointer(L"", L"profile").empty(), "pointer decode: relative with no exe-dir anchor -> unusable");
+
+        // Real-file round-trip on a temp "exe dir" + the .portable marker gate + persist routing.
+        wchar_t tmpDir2[MAX_PATH];
+        ::GetTempPathW(MAX_PATH, tmpDir2);
+        const std::wstring fakeExe = std::wstring{ tmpDir2 } + L"am-portable-" + NewSessionId();
+        fs::create_directories(fs::path{ fakeExe });
+        CHECK(!P::IsPortableInstallIn(fakeExe), "portable: no marker -> not portable");
+        CHECK(P::ReadLocalProfilePointerIn(fakeExe).empty(), "pointer: absent file -> empty");
+        {
+            std::ofstream f{ fs::path{ fakeExe } / L".portable", std::ios::binary };
+        }
+        CHECK(P::IsPortableInstallIn(fakeExe), "portable: marker detected");
+        CHECK(P::detail::SamePath(P::PortableDefaultProfileDirIn(fakeExe), fakeExe + L"\\profile"), "portable: default profile is <exedir>\\profile");
+
+        CHECK(P::SaveLocalProfilePointerIn(fakeExe, fakeExe + L"\\profile"), "pointer: save the self-contained choice");
+        {
+            // The FILE must hold the RELATIVE spelling — the whole point: move the unzip, it
+            // still resolves. No drive-rooted path may appear in the stored value.
+            std::ifstream f{ fs::path{ fakeExe } / L"profile.path", std::ios::binary };
+            const std::string body{ std::istreambuf_iterator<char>{ f }, std::istreambuf_iterator<char>{} };
+            CHECK(body.find("profile") != std::string::npos && body.find(":\\") == std::string::npos && body.find(":/") == std::string::npos,
+                  "pointer: an inside-the-exe-dir choice is stored RELATIVE (no drive letter in the file)");
+        }
+        CHECK(P::detail::SamePath(P::ReadLocalProfilePointerIn(fakeExe), fakeExe + L"\\profile"), "pointer: relative round-trips to the absolute dir");
+        CHECK(P::SaveLocalProfilePointerIn(fakeExe, L"D:\\elsewhere\\prof"), "pointer: overwrite with an outside choice");
+        CHECK(P::ReadLocalProfilePointerIn(fakeExe) == L"D:\\elsewhere\\prof", "pointer: absolute round-trips verbatim");
+        CHECK(P::LocalProfilePointerExistsIn(fakeExe), "pointer: existence probe sees the file");
+
+        // PersistProfileChoiceIn routing: a portable (or pointer-steered) copy writes the
+        // exe-side pointer — NEVER the shared home map (whose one "Unpackaged" slot can't tell
+        // two unzips apart and which portable resolution deliberately never reads).
+        CHECK(P::PersistProfileChoiceIn(fakeExe, fakeExe + L"\\profile"), "persist routing: portable writes the pointer");
+        CHECK(P::detail::SamePath(P::ReadLocalProfilePointerIn(fakeExe), fakeExe + L"\\profile"), "persist routing: the pointer carries the new choice");
+
+        std::error_code ec2;
+        fs::remove_all(fakeExe, ec2);
+    }
+
     // PersistedDebugModeEnabled reads the ENGINE ENVELOPE — {version, settings:{debugMode}} — the
     // shape SaveAppSettings actually writes. The original top-level-only read could never see the
     // nested key (Json.h's *At readers are flat), which made the About-tab "Enable Debug Mode"

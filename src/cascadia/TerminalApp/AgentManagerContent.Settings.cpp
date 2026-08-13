@@ -2067,7 +2067,25 @@ namespace winrt::TerminalApp::implementation
                     {
                         return;
                     }
-                    ::Agentmaster::Profiles::SaveChoice(pick.dir);
+                    // Persist WHERE THIS INSTALL'S RESOLUTION READS IT BACK: a PORTABLE copy (or
+                    // one steered by an exe-side profile.path pointer, which outranks the home
+                    // map) writes the pointer next to the exe — the home map's shared
+                    // "Unpackaged" slot was a DEAD write for portables (resolution never read
+                    // it) — everything else writes its ~/.agentmaster.profiles slot. A refused
+                    // write (read-only exe dir) is surfaced instead of pretending the change
+                    // took: nothing durable recorded it, so nothing would apply on restart.
+                    if (!::Agentmaster::Profiles::PersistProfileChoice(pick.dir))
+                    {
+                        const std::wstring store = ::Agentmaster::Profiles::ProfileChoiceStorePath();
+                        ::Agentmaster::LogNav(L"profile-change " + active + L" -> " + pick.dir + L" FAILED to persist (store: " + store + L")");
+                        ::MessageBoxW(::GetActiveWindow(),
+                                      (L"The profile choice could not be saved.\n\nThis copy stores its choice at:\n\n    " + store +
+                                       L"\n\nMake that location writable and try again.")
+                                          .c_str(),
+                                      L"Agentmaster",
+                                      MB_OK | MB_ICONWARNING);
+                        return;
+                    }
                     // Nav audit: the user re-pointed this install at a different profile folder (the cog's
                     // "Change profile folder…"). It re-homes ALL persisted state and applies on the NEXT
                     // start (never mid-run), so the trail records the staged from -> to.

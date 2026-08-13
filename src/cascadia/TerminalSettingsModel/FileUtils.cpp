@@ -31,21 +31,19 @@ namespace winrt::Microsoft::Terminal::Settings::Model
     std::filesystem::path GetBaseSettingsPath()
     {
         static auto baseSettingsPath = []() {
-            if (!IsPackaged() && IsPortableMode())
-            {
-                std::filesystem::path modulePath{ wil::GetModuleFileNameW<std::wstring>(wil::GetModuleInstanceHandle()) };
-                modulePath.replace_filename(PortableModeSettingsFolder);
-                std::filesystem::create_directories(modulePath);
-                return modulePath;
-            }
-
             // Agentmaster: when a state PROFILE is active (AGENTMASTER_PROFILE — exported by the
             // WindowEmperor's startup bootstrap BEFORE any settings load; see
             // TerminalApp/AgentMaster/ProfileBootstrap.h), Terminal's own settings.json /
             // state.json live INSIDE the profile, under <profile>\terminal\ — the profile folder
             // is the ONE place an install persists anything, so side-by-side release/dev installs
             // (or any two profiles) can never share or clobber each other's Terminal settings.
-            // Headless hosts that never ran the bootstrap (tests, tools) take the stock paths.
+            // This deliberately OUTRANKS upstream's portable-mode `settings` folder below: a
+            // PORTABLE copy now CHOOSES its profile at first launch (ProfileBootstrap — possibly
+            // the shared Production one), and wherever that profile lives, it owns ALL persisted
+            // state; the bootstrap seeds a pre-choice portable's <exedir>\settings into
+            // <profile>\terminal so nothing is lost. Headless hosts that never ran the bootstrap
+            // (tests, tools) fall through — a portable module keeps the upstream exe-side
+            // `settings` folder there, everything else the stock paths.
             {
                 std::wstring profile;
                 if (const DWORD need = ::GetEnvironmentVariableW(L"AGENTMASTER_PROFILE", nullptr, 0); need > 0)
@@ -61,6 +59,14 @@ namespace winrt::Microsoft::Terminal::Settings::Model
                     std::filesystem::create_directories(p);
                     return p;
                 }
+            }
+
+            if (!IsPackaged() && IsPortableMode())
+            {
+                std::filesystem::path modulePath{ wil::GetModuleFileNameW<std::wstring>(wil::GetModuleInstanceHandle()) };
+                modulePath.replace_filename(PortableModeSettingsFolder);
+                std::filesystem::create_directories(modulePath);
+                return modulePath;
             }
 
             wil::unique_cotaskmem_string localAppDataFolder;

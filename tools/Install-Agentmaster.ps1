@@ -574,8 +574,10 @@ function Install-Portable {
     if (-not $src) { $src = Get-Item $tmp }   # fall back to flat layout
 
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-    # Replace binaries; preserve user state held next to the exe (.portable: settings\ + profile\).
-    Get-ChildItem $Dir -Force | Where-Object { $_.Name -notin @('settings', 'profile', '.am-version') } |
+    # Replace binaries; preserve user state held next to the exe (.portable: settings\ + profile\ +
+    # profile.path — the exe-side pointer remembering WHICH profile this copy chose at first launch;
+    # wiping it would re-prompt every upgrade and forget a custom/absolute choice).
+    Get-ChildItem $Dir -Force | Where-Object { $_.Name -notin @('settings', 'profile', 'profile.path', '.am-version') } |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     Copy-Item -Path (Join-Path $src.FullName '*') -Destination $Dir -Recurse -Force
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

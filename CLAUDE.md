@@ -517,26 +517,44 @@ file — converge on a quiet day), so a color change must be made in BOTH places
 **Release/dev separation + per-install state PROFILES ([`PROFILES.md`](doc/agentmaster/PROFILES.md))
 is implemented — lib-compiled green + engine-tested (604/604 incl. new profile checks); it rides the
 next deploy cycle (and needs the one-time `Remove-AppxPackage`/re-register migration documented in
-Deploy & run).** The GitHub release now ships its OWN identity (`Package-Rel.appxmanifest`:
+Deploy & run). + the PORTABLE-CHOOSES-A-PROFILE wave (PROFILES.md §2a — the exe-side `profile.path`
+pointer + the portable first-launch picker + the profile-over-portable Terminal-settings precedence;
+engine-tested 3269/3269, TerminalAppLib + Settings.ModelLib green; rides the next deploy cycle
+too).** The GitHub release now ships its OWN identity (`Package-Rel.appxmanifest`:
 `Agentmaster`/`agentmaster.exe`, selected by `/p:AgentmasterPackageIdentity=Release`) while the dev
 loose layout becomes **`AgentmasterDev`**/`agentmasterdev.exe`/"Agentmaster Dev" — so both install
 side by side; `GetWtExePath`-class launchers and the reopen dispatch (`_AgentmasterReopenTarget`) pick
 the alias by PFN prefix (Dev first). ALL persisted state — engine files AND Terminal's own
-settings.json/state.json (a `GetBaseSettingsPath` redirect to `<profile>\terminal\`) — lives in ONE
-**profile folder** per install: resolved env `AGENTMASTER_PROFILE` > `.portable` marker
-(`<exedir>\profile`, true-portable zips now pass `-PortableMode`) > the per-install slot in
+settings.json/state.json (a `GetBaseSettingsPath` redirect to `<profile>\terminal\`, which now
+OUTRANKS upstream portable mode's `<exedir>\settings` — a portable's CHOSEN profile owns Terminal's
+settings too, seeded from a pre-choice `<unzip>\settings`) — lives in ONE
+**profile folder** per install: resolved env `AGENTMASTER_PROFILE` > the **exe-side `profile.path`
+POINTER** (one line naming the profile dir — RELATIVE when it sits inside the exe dir so a moved
+unzip keeps working, absolute otherwise; a PORTABLE copy's per-unzip memory, honored for installed
+copies too when planted) > `.portable` marker fallback (`<exedir>\profile` — an un-chosen/headless
+portable; true-portable zips pass `-PortableMode`; a portable NEVER reads the home map — its shared
+`Unpackaged` slot can't tell two unzips apart) > the per-install slot in
 `~/.agentmaster.profiles` > per-identity default (`~/.agentmaster` release+unpackaged /
-`~/.agentmaster-dev` dev). An install's **first launch AUTO-SELECTS the per-identity default WITHOUT
-prompting** — release → **Production** (`~/.agentmaster`), dev → **Development** (`~/.agentmaster-dev`)
+`~/.agentmaster-dev` dev). An INSTALLED copy's **first launch AUTO-SELECTS the per-identity default
+WITHOUT prompting** — release → **Production** (`~/.agentmaster`), dev → **Development** (`~/.agentmaster-dev`)
 — and persists it (`EnsureProfileResolvedAtStartup` → `DefaultProfileDir()` + `SaveChoice` +
 `SeedTerminalSettings`), running from `WindowEmperor::HandleCommandlineArgs` AFTER the single-instance
-handoff and BEFORE any state read (no UI, so a `-Embedding` defterm activation takes the same path —
-`allowUi` now gates only the two-instances-on-one-profile warning). The old **Production / Development /
+handoff and BEFORE any state read (no UI, so a `-Embedding` defterm activation takes the same path);
+a **PORTABLE copy's first launch instead PROMPTS** — the same picker led by a defaulted **"Portable
+profile (self-contained)"** `<unzip>\profile` option, the migrate checkbox offering a data-holding
+pre-existing `<unzip>\profile` — and remembers the answer in `profile.path`
+(`SaveLocalProfilePointer`; Cancel/`-Embedding` lands on `<unzip>\profile` UN-persisted so the next
+interactive launch re-asks; `allowUi` gates that prompt + the two-instances-on-one-profile warning).
+The **Production / Development /
 Browse…** TaskDialog picker (comctl32 v6 dep in `WindowsTerminal.manifest`; + a "copy existing data from
-`~/.agentmaster`" checkbox that skips `locks/`+`shim/`+`bridge.json` and never clobbers) still exists
-(`ShowProfilePicker` / `MigrateProfileData`) but is now reached **only** from the cog's **PROFILE** row's
-Change… (applies on restart) — first launch is silent. A kernel **profile mutex** warns if two live
-instances point at one folder. The generated hook
+`~/.agentmaster`" checkbox that skips `locks/`+`shim/`+`bridge.json` and never clobbers) is thus reached
+from a PORTABLE first launch AND the cog's **PROFILE** row's
+Change… (applies on restart; persists via **`PersistProfileChoice`** — portable/pointer-steered copies
+rewrite `profile.path`, the old home-map write was a DEAD choice for portables since their resolution
+never read it; a refused write is surfaced, not swallowed) — an installed first launch is silent.
+A kernel **profile mutex** warns if two live
+instances point at one folder (incl. a portable pointed at the Production profile while the installed
+release runs). The generated hook
 forwarder's bridge discovery is now per-profile too (`BuildForwarderScript(stateDir)` — was a
 hardcoded `~/.agentmaster/bridge.json`, a cross-instance hook-routing bug). Engine code is
 otherwise untouched: `AgentmasterStateDir()` simply resolves through `ProfileBootstrap.h`, so
@@ -3172,9 +3190,12 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     Microsoft-internal and never runs for this fork.
 - **Runtime state dir = the ACTIVE PROFILE** (PROFILES.md; historically — and still, as the
   release/unpackaged default — `%USERPROFILE%\.agentmaster\`; dev-package default
-  `%USERPROFILE%\.agentmaster-dev\`; resolution: env `AGENTMASTER_PROFILE` > `.portable` marker >
+  `%USERPROFILE%\.agentmaster-dev\`; resolution: env `AGENTMASTER_PROFILE` > the exe-side
+  `profile.path` pointer (a PORTABLE copy's remembered choice, relative-when-inside-the-unzip) >
+  `.portable` marker fallback (`<exedir>\profile`, un-chosen portable) >
   the `%USERPROFILE%\.agentmaster.profiles` per-install choice file > the per-identity default;
-  picked on an install's FIRST LAUNCH — Production / Development / Browse… — and changeable from
+  an INSTALLED first launch auto-selects silently, a PORTABLE first launch prompts — Portable /
+  Production / Development / Browse… (PROFILES.md §2a) — and everyone changes it from
   the cog's PROFILE row, applied on restart). Contents: `hooks-settings.json` +
   `agentmaster-hook.ps1` (the shared hooks config Claude is pointed at via `--settings`),
   `hooks.log` + `autorunner.log` (engine traces — `hooks.log` carries the hook event stream
@@ -3464,8 +3485,11 @@ The pipeline is **prep** (version from the tag/input, stamped into `Package-Rel.
 `AgentmasterDev` manifest, `AppxPackageSigningEnabled=false`) → **bundle**
 (`build/scripts/Create-AppxBundle.ps1` merges both arches → `.msixbundle`, then self-signs;
 `New-UnpackagedTerminalDistribution.ps1 -PortableMode:$true` makes the portable zips — TRUE
-portable: `.portable` marker ⇒ WT settings in `<unzip>\settings`, the Agentmaster profile in
-`<unzip>\profile`) → **release** (`softprops/action-gh-release` creates a **DRAFT** GitHub Release
+portable: `.portable` marker ⇒ first launch PROMPTS which profile to use (default: the
+self-contained `<unzip>\profile`; also Production / Development / Browse…), remembered in the
+`<unzip>\profile.path` pointer; Terminal's own settings ride the chosen profile
+(`<profile>\terminal\`, seeded from a pre-choice `<unzip>\settings`) — PROFILES.md §2a) →
+**release** (`softprops/action-gh-release` creates a **DRAFT** GitHub Release
 with the `.msixbundle`, `Agentmaster.cer`, and both portable `.zip`s). It lands as a **draft** —
 review the assets, then **the user publishes it** (a draft creates no git tag until published; a
 `workflow_dispatch` draft is safe to delete). After publishing, refresh the release notes + README

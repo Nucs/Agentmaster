@@ -5,12 +5,16 @@
 > persisted state**. The app "merely loads a profile folder": everything an install stores —
 > engine state *and* Terminal's own settings — lives in ONE folder chosen **automatically by
 > package identity on first launch** (release → Production, dev → Development), and changeable later
-> from the cog (Production / Development / **Browse…**).
+> from the cog (Production / Development / **Browse…**). A **PORTABLE copy** instead **chooses on
+> its first launch** — the same picker, led by a **Portable (`<unzip>\profile`)** option — and
+> remembers the answer **next to the exe** (`profile.path`), so a portable can be self-contained
+> OR deliberately share the Production/Development/any profile.
 
 Status: **shipped & live-verified.** The identity split + per-install profiles are in public
-releases (v0.2.0+); first launch now **auto-selects** the per-identity default silently — the
-Production / Development / Browse… picker moved to the cog (§2). Engine harness 900+ incl. the
-profile checks; side-by-side release + dev installs run cleanly.
+releases (v0.2.0+); an installed first launch **auto-selects** the per-identity default silently —
+the Production / Development / Browse… picker is shown by a **portable first launch** (§2a) and the
+cog (§2). Engine harness 900+ incl. the profile checks; side-by-side release + dev installs run
+cleanly.
 
 ---
 
@@ -24,7 +28,7 @@ profile checks; side-by-side release + dev installs run cleanly.
 | 4 | **The state dir `~/.agentmaster`** | One dir for both: two `SharedEngine`s would clobber `sessions.json`, `open-windows.json`, `windows/<id>.json`, `settings.json`, fight over window records and reopen each other's workspaces. | **Per-install profiles** (§2). Each install resolves its own profile folder; ALL engine state lives there. |
 | 5 | **`bridge.json` discovery** | The generated PowerShell forwarder hardcoded `$env:USERPROFILE\.agentmaster\bridge.json` — a no-env hook from one instance's session could route to the OTHER instance's pipe. | `BuildForwarderScript(stateDir)` bakes the **per-profile** `<profile>\bridge.json` path in (PS-single-quoted; unit-tested). The shim already embedded the per-profile `--settings` path. |
 | 6 | **Terminal's own settings.json / state.json** | Per-package `LocalState` — isolated, but OUTSIDE the profile (violates "everything in the profile"). | `GetBaseSettingsPath()` honors **`AGENTMASTER_PROFILE`** → `<profile>\terminal\` (exported by the bootstrap before any settings load). Headless hosts (tests/tools) that never ran the bootstrap keep stock paths. |
-| 7 | **The "portable" zip** | Built WITHOUT the `.portable` marker — it shared the global unpackaged WT settings dir, and its Agentmaster state went to `~/.agentmaster`. | `release.yml` passes `-PortableMode:$true`: WT settings in `<unzip>\settings` (upstream portable mode) and the profile in **`<unzip>\profile`** (the bootstrap's portable branch — fully self-contained, never asks, never touches the user profile). |
+| 7 | **The "portable" zip** | Built WITHOUT the `.portable` marker — it shared the global unpackaged WT settings dir, and its Agentmaster state went to `~/.agentmaster`. Then (first cut): the marker hard-wired the profile to `<unzip>\profile` — self-contained, but the user never got to say "use my Production data", and the cog's Change… was a DEAD write (resolution never read the home map for portables). | `release.yml` passes `-PortableMode:$true` (the `.portable` marker). **First launch PROMPTS** — Portable (`<unzip>\profile`, the default) / Production / Development / Browse… — and the answer persists in the exe-side **`profile.path` pointer** (§2a): relative when the profile lives inside the unzip (movable), absolute otherwise. Terminal's own settings ride the CHOSEN profile (`<profile>\terminal\`, seam #6 — the redirect now outranks upstream portable mode's `<unzip>\settings`, which is seeded in on first choice). |
 | 8 | **Same profile, two instances** (user points both installs at one folder via Browse…) | n/a (new failure mode the picker introduces) | A kernel **profile mutex** (`Local\Agentmaster.profile.<fnv1a64(dir)>`, auto-released on process death — can't go stale): the second instance gets a warn-and-confirm before touching anything. |
 
 **Known shared seam (deliberate, documented):** the defterm/handoff CLSIDs
@@ -58,45 +62,92 @@ operate on Claude's store).
 
 1. **`AGENTMASTER_PROFILE`** env var — explicit override; also what the bootstrap exports so every
    module (exe, TerminalApp.dll, TerminalSettingsModel.dll) resolves identically in-process.
-2. **`<exedir>\profile`** when `<exedir>\.portable` exists (the true-portable zip; never asks).
-3. **The saved per-install choice** — `%USERPROFILE%\.agentmaster.profiles`, a tiny UTF-8 text map
+2. **`<exedir>\profile.path`** — the **exe-side pointer** (§2a): one line naming the profile folder
+   this exe location uses; a relative line resolves against the exe dir. Written by a portable's
+   first-launch picker; honored for installed copies too when someone plants one next to the exe
+   (creating it there needs a writable exe dir — an MSIX package dir isn't, so that's a power-user
+   loose-layout move).
+3. **`<exedir>\profile`** when `<exedir>\.portable` exists and no pointer was written yet — the
+   self-contained default. The EXE prelude **prompts** here on a portable's first interactive
+   launch (§2a); headless/library resolution never asks (Rule #15) and lands here silently. A
+   portable **never falls through to the home map below** — the one shared `Unpackaged` slot can't
+   tell two unzips apart and would cross-contaminate them (and the legacy tools that key on it).
+4. **The saved per-install choice** — `%USERPROFILE%\.agentmaster.profiles`, a tiny UTF-8 text map
    (`<PFN or "Unpackaged">=<absolute dir>` per line). Plain text, NOT JSON, on purpose: the
    WindowsTerminal EXE links `TerminalApp.dll` (not the static lib) and parses it without JSON
    helpers; it lives OUTSIDE any profile (chicken-and-egg) and outside MSIX-virtualized AppData,
    so it's shared, honest, debuggable, and survives package reinstall.
-4. **Per-identity default** — `~/.agentmaster` (release package **and** unpackaged/headless runs:
+5. **Per-identity default** — `~/.agentmaster` (release package **and** unpackaged/headless runs:
    the historical dir, which keeps the test harness and old tooling unchanged) or
    `~/.agentmaster-dev` (the `AgentmasterDev` package).
 
 Resolution is cached process-wide — a profile cannot change mid-run; the cog's "Change…" applies
 on the next launch.
 
-### First launch — auto-select by identity (no prompt)
+### §2a The portable first-launch choice + the `profile.path` pointer
+
+A **portable copy** (the `.portable` marker next to the exe) integrates with the profile system
+instead of hard-coding `<unzip>\profile`:
+
+- **First interactive launch** (marker present, no `profile.path` yet): `EnsureProfileResolvedAtStartup`
+  shows the SAME picker the cog uses, with a leading, defaulted **"Portable profile (self-contained)"**
+  command link for `<unzip>\profile`, then Production / Development / Browse…. When a pre-existing
+  `<unzip>\profile` holds data (an upgrade from a build that used it unconditionally), the "copy
+  existing data" checkbox offers migrating it into a non-portable pick; picking Portable keeps that
+  data in place (Enter = keep everything). **Cancel** — and a headless `-Embedding` activation —
+  lands on `<unzip>\profile` **without persisting**, so the next interactive launch asks again.
+- **The pointer file `<exedir>\profile.path`** persists the answer *next to the exe* (the home
+  map's one shared `Unpackaged` slot can't tell two unzips apart). Plain UTF-8, `#` comments +
+  blank lines skipped, first value line wins. The stored line **prefers a RELATIVE path** — used
+  whenever the chosen dir sits INSIDE the exe dir (`profile`, `data\p1`) so a moved unzip keeps
+  working — and falls back to **absolute** for anything else (the home-dir defaults, another
+  drive); a `..`-relative spelling is deliberately never written (it would silently re-anchor to a
+  wrong, then auto-created, folder if the unzip moved). `Install-Agentmaster.ps1` preserves it on
+  upgrade alongside `settings\` + `profile\`.
+- **Terminal's own settings follow the chosen profile** (`<profile>\terminal\` — seam #6 now
+  outranks upstream portable mode's `<unzip>\settings` in `GetBaseSettingsPath`); the bootstrap
+  seeds `<profile>\terminal\` from a pre-choice `<unzip>\settings` (copy-if-absent, idempotent) so
+  an upgrading portable keeps its terminal look. Headless hosts that never ran the bootstrap still
+  fall through to the upstream exe-side `settings` folder, unchanged.
+- **The cog's Change…** persists through `PersistProfileChoice`: a portable (or any copy already
+  steered by a pointer) rewrites `profile.path`; everything else writes its home-map slot. This
+  also fixed the old dead-write: a portable's cog change used to land in the home map, which
+  portable resolution never read. A refused pointer write (read-only exe dir) is surfaced with the
+  store path instead of silently pretending the change took.
+- An **installed** (user/machine) copy is unchanged: first launch auto-selects Production
+  (release) / Development (dev) with no prompt; only a manually planted `profile.path` next to its
+  exe would steer it (resolution step 2).
+
+### First launch — installed auto-selects by identity (no prompt); portable asks
 
 `WindowEmperor::HandleCommandlineArgs` calls `EnsureProfileResolvedAtStartup(allowUi)` **after**
 winning the single-instance handoff (a handed-off second process never shows UI) and **before**
 anything reads persisted state (`ReloadSettings`, `ApplicationState`, the `windows/*.json` reopen
-scan, and — much later — the engine's `AgentmasterStateDir()`). With no saved choice it **does not
-prompt** — it auto-selects the **per-identity default** (`DefaultProfileDir()`) and persists it:
+scan, and — much later — the engine's `AgentmasterStateDir()`). With no saved choice an INSTALLED
+copy **does not prompt** — it auto-selects the **per-identity default** (`DefaultProfileDir()`)
+and persists it:
 
 - the **RELEASE** install (`Agentmaster`) → **Production**, `%USERPROFILE%\.agentmaster`
 - the **DEV** install (`AgentmasterDev`) → **Development**, `%USERPROFILE%\.agentmaster-dev`
 - unpackaged / portable-without-marker → the release default (the historical `~/.agentmaster`)
+- a **PORTABLE** copy (`.portable` marker, no `profile.path` pointer yet) instead **prompts** —
+  see §2a; Cancel / `-Embedding` lands on `<unzip>\profile` un-persisted (asks again next launch)
 
 It then **seeds `<profile>\terminal\`** with the install's current Terminal settings (from package
-`LocalState` / the unpackaged dir) so the first redirected launch looks identical instead of
-resetting to defaults. The auto-pick needs no UI, so it runs identically for a real launch and a
-`-Embedding` COM activation (defterm handoff) — `allowUi` now governs only the "profile in use by
-another instance" warning, never the choice itself.
+`LocalState` / the unpackaged dir / a portable's `<unzip>\settings`) so the first redirected launch
+looks identical instead of resetting to defaults. The installed auto-pick needs no UI, so it runs
+identically for a real launch and a `-Embedding` COM activation (defterm handoff) — `allowUi`
+governs the portable first-launch prompt (§2a) and the "profile in use by another instance"
+warning, never the installed choice.
 
 > Earlier builds showed a one-time **Production / Development / Browse…** `TaskDialogIndirect`
 > picker (with a "Copy existing data from `~/.agentmaster`" migrate checkbox). That UI still exists
 > (`ShowProfilePicker`, plus `MigrateProfileData` for the migrate path — a skip-existing copy that
 > excludes `locks/`, `shim/`, `bridge.json` and `*.tmp`, all machine-global or regenerated per-profile
-> at engine init) but is now reached **only**
-> from the cog's **Change profile folder…** — first launch is silent. To land on a non-default
-> folder (a synced drive, a shared dir, or to copy the legacy `~/.agentmaster` into a fresh dev
-> profile), launch once, then switch via the cog (below).
+> at engine init) and is reached from a **portable first launch** (§2a — with the leading Portable
+> option) and the cog's **Change profile folder…** — an installed first launch is silent. To land an
+> installed copy on a non-default folder (a synced drive, a shared dir, or to copy the legacy
+> `~/.agentmaster` into a fresh dev profile), launch once, then switch via the cog (below).
 
 ### Changing later
 
@@ -141,8 +192,8 @@ the family is free after step 1 — and ITS first launch silently lands on **Pro
 | Start menu | Agentmaster | Agentmaster Dev | — |
 | Alias | `agentmaster` | `agentmasterdev` | run `WindowsTerminal.exe` |
 | Manifest | `Package-Rel.appxmanifest` (`/p:AgentmasterPackageIdentity=Release`; release.yml stamps the version here) | `Package-Dev.appxmanifest` (default) | n/a |
-| Default profile | `~/.agentmaster` | `~/.agentmaster-dev` | `<unzip>\profile` (marker; no picker) |
-| Terminal settings | `<profile>\terminal\` | `<profile>\terminal\` | `<unzip>\settings` (upstream portable) |
+| Default profile | `~/.agentmaster` | `~/.agentmaster-dev` | **chosen at first launch** (picker, default `<unzip>\profile`) → `<unzip>\profile.path` pointer (§2a) |
+| Terminal settings | `<profile>\terminal\` | `<profile>\terminal\` | `<profile>\terminal\` (seeded from a pre-choice `<unzip>\settings`) |
 | Local build | `Build-Agentmaster.ps1 -ReleaseIdentity` (smoke tests the release identity — NOTE: registering it replaces an installed GitHub release) | `Build-Agentmaster.ps1` | `New-UnpackagedTerminalDistribution.ps1 -PortableMode:$true` |
 
 Cross-instance behavior while BOTH run: each engine has its own pipe (`agentmaster.<pid>`), shim,
@@ -160,4 +211,6 @@ correct and even useful (watch the prod fleet from dev).
 - **Profile import/export** — the profile folder is already a self-contained unit; a zip
   export/import in the cog would make moving machines trivial.
 - The choice file keys unpackaged NON-portable runs as one `Unpackaged` slot; if multiple loose
-  copies ever need distinct profiles, key by exe-path hash instead (the AUMID already does this).
+  copies ever need distinct profiles, key by exe-path hash instead (the AUMID already does this) —
+  or drop a `profile.path` pointer next to each copy's exe (§2a), which already gives per-location
+  profiles today; PORTABLE copies are covered (each unzip remembers via its own pointer).
