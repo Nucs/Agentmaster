@@ -3188,6 +3188,24 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     execs `agentmaster-cli.exe` for a CLI verb / leading CLI-flag and forwards everything else to
     `Agentmaster.exe` byte-for-byte; the `agentmaster-cli.vcxproj` reference + the `wt`-mirrored
     entry in `OpenConsole.slnx` + `CascadiaPackage.wapproj` ship the CLI in the package.
+  - `src/cascadia/WindowsTerminalShim/` (`shim.cpp` + `WindowsTerminalShim.rc` + `resource.h` +
+    `WindowsTerminalShim.vcxproj`, GUID `{34770444-…}`) — the **`WindowsTerminal.exe`
+    BACKWARDS-COMPAT shim**. The GUI binary is now `Agentmaster.exe`; this tiny **GUI-subsystem**
+    forwarder (project `WindowsTerminalShim`, **`TargetName=WindowsTerminal`** so the output leaf
+    is the old name) keeps a by-name launch of `WindowsTerminal.exe` working — it `CreateProcessW`s
+    the neighbor `Agentmaster.exe` with the **verbatim commandline tail** and exits, so old
+    shortcuts / scripts / muscle-memory land in the ONE real app. Deliberately a shim, **not a copy
+    of the binary**: WindowEmperor derives its single-instance identity from the process IMAGE path
+    (unpackaged), so a second exe named `WindowsTerminal.exe` would hash to a DIFFERENT identity and
+    spin up a SECOND instance on the same profile (the profile mutex would warn) — forwarding keeps
+    exactly one identity, the real one. Its `.rc` embeds the SAME branding-conditional terminal icon
+    block as `WindowsTerminal.rc` (`WT_BRANDING_DEV` ⇒ `images-Dev\terminal.ico`), verified
+    byte-identical to `Agentmaster.exe`'s icon, so it LOOKS identical too. NOT referenced by either
+    manifest (defterm/COM + AUMID activation target `Agentmaster.exe` directly — only a raw by-name
+    launch hits the shim); it flattens into the package root as `WindowsTerminal.exe` and rides the
+    portable zip automatically (the wapproj flatten + `New-UnpackagedTerminalDistribution.ps1`'s
+    keep-list). Wired via the `wt`-mirrored `OpenConsole.slnx` entry + a `CascadiaPackage.wapproj`
+    `ProjectReference`.
   - `Package-Rel.appxmanifest` + `Package-Dev.appxmanifest` (the two identities; selection in
     `CascadiaPackage.wapproj` via `AgentmasterPackageIdentity`; each also declares its OWN
     **toast-activator CLSID** — `<desktop:ToastNotificationActivation>` + a `<com:Class>` under an

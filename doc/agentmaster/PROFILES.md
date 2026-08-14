@@ -199,7 +199,7 @@ the family is free after step 1 — and ITS first launch silently lands on **Def
 |---|---|---|---|
 | Package family | `Agentmaster_56k4f06dsfp9r` | `AgentmasterDev_56k4f06dsfp9r` | (unpackaged) |
 | Start menu | Agentmaster | Agentmaster Dev | — |
-| Alias | `agentmaster` | `agentmasterdev` | run `Agentmaster.exe` |
+| Alias | `agentmaster` | `agentmasterdev` | run `Agentmaster.exe` (or the `WindowsTerminal.exe` compat shim) |
 | Manifest | `Package-Rel.appxmanifest` (`/p:AgentmasterPackageIdentity=Release`; release.yml stamps the version here) | `Package-Dev.appxmanifest` (default) | n/a |
 | Default profile | `~/.agentmaster` | `~/.agentmaster-dev` | **chosen at first launch** (picker, default `<unzip>\profile`) → `<unzip>\profile.path` pointer (§2a) |
 | Terminal settings | `<profile>\terminal\` | `<profile>\terminal\` | `<profile>\terminal\` (seeded from a pre-choice `<unzip>\settings`) |

@@ -92,6 +92,14 @@
     <ProjectReference Include="$(OpenConsoleDir)src\cascadia\wt\wt.vcxproj">
       <Project>{506fd703-baa7-4f6e-9361-64f550ec8fca}</Project>
     </ProjectReference>
+    <!-- Agentmaster: the WindowsTerminal.exe BACKWARDS-COMPAT shim — the GUI binary is now
+         Agentmaster.exe, so this tiny GUI-subsystem forwarder keeps the old exe name working
+         (same icon, forwards its commandline into the one real Agentmaster.exe). It flattens into
+         the package root as WindowsTerminal.exe and rides the portable zip; the manifest doesn't
+         reference it (it's a bystander payload). See src/cascadia/WindowsTerminalShim/shim.cpp. -->
+    <ProjectReference Include="$(OpenConsoleDir)src\cascadia\WindowsTerminalShim\WindowsTerminalShim.vcxproj">
+      <Project>{34770444-5033-4DAF-8A4B-6A16022BB90A}</Project>
+    </ProjectReference>
     <!-- Agentmaster: the commandline introspection tool, shipped beside Agentmaster.exe (the GUI) and the
          wt[d].exe launcher shim, which execs it for a CLI verb (doc/agentmaster/CLI.md). -->
     <ProjectReference Include="$(OpenConsoleDir)src\cascadia\TerminalApp\AgentMaster\cli\agentmaster-cli.vcxproj">

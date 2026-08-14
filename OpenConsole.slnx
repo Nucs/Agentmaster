@@ -764,6 +764,13 @@
       <Build Solution="Fuzzing|x64" Project="false" />
       <Build Solution="Fuzzing|x86" Project="false" />
     </Project>
+    <Project Path="src/cascadia/WindowsTerminalShim/WindowsTerminalShim.vcxproj" Id="34770444-5033-4daf-8a4b-6a16022bb90a">
+      <Platform Solution="*|Any CPU" Project="Win32" />
+      <Build Solution="*|Any CPU" Project="false" />
+      <Build Solution="Fuzzing|ARM64" Project="false" />
+      <Build Solution="Fuzzing|x64" Project="false" />
+      <Build Solution="Fuzzing|x86" Project="false" />
+    </Project>
   </Folder>
   <Folder Name="/Terminal/Window/">
     <Project Path="src/cascadia/ShellExtension/WindowsTerminalShellExt.vcxproj" Id="f2ed628a-db22-446f-a081-4cc845b51a2b">

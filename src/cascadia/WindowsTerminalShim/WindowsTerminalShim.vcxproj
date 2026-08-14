@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{34770444-5033-4DAF-8A4B-6A16022BB90A}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>WindowsTerminalShim</RootNamespace>
+    <ProjectName>WindowsTerminalShim</ProjectName>
+    <!-- Agentmaster: the OUTPUT is WindowsTerminal.exe (the backwards-compat name); the PROJECT is
+         WindowsTerminalShim so it never collides with the GUI project (which is still named
+         WindowsTerminal but now outputs Agentmaster.exe). See shim.cpp. -->
+    <TargetName>WindowsTerminal</TargetName>
+    <ConfigurationType>Application</ConfigurationType>
+    <VersionInfoFileDescription>Agentmaster (compatibility launcher)</VersionInfoFileDescription>
+  </PropertyGroup>
+
+  <Import Project="..\..\..\common.openconsole.props" Condition="'$(OpenConsoleDir)'==''" />
+  <Import Project="$(OpenConsoleDir)src\common.build.pre.props" />
+  <Import Project="$(OpenConsoleDir)src\common.nugetversions.props" />
+
+  <!-- Source Files -->
+  <ItemGroup>
+    <ClCompile Include="shim.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="resource.h" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ResourceCompile Include="WindowsTerminalShim.rc" />
+  </ItemGroup>
+
+  <Import Project="$(OpenConsoleDir)src\common.build.post.props" />
+  <Import Project="$(OpenConsoleDir)src\common.nugetversions.targets" />
+
+  <ItemDefinitionGroup>
+    <Link>
+      <!-- GUI subsystem: no console flash on a shortcut/Explorer launch; the shim creates no
+           window of its own, it just forwards to Agentmaster.exe and exits. -->
+      <SubSystem>Windows</SubSystem>
+      <!-- Remove all non-onecore dependencies (same lean link set as the wt shim). -->
+      <AdditionalDependencies>onecore.lib</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>
