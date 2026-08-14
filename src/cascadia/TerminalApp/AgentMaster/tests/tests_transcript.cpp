@@ -518,6 +518,32 @@ void TestTranscriptScan()
         CHECK(s && s->lastAssistantText == L"peek", "UpdateQuiet mutates the record");
         CHECK(observed == afterUpsert, "UpdateQuiet fires NO observer (no persist/UI churn)");
     }
+    // Agentmaster (the 2026-08-14 stuck-Running WEDGE, session 6434e5f8): DecideDeltaNoNewline —
+    // the delta reader's no-newline decision. The live wedge: a 1.51 MiB single-line PDF-read
+    // tool_result at cursor +0 with 3.74 MB total backlog — the old handling (skip only when
+    // avail > 4 MiB, prime only when the whole remainder fit the 1 MiB window) consumed NOTHING
+    // on every pass forever, freezing the parse fold mid-turn and killing every pull release
+    // (recon-stop / recon-stop-idle / recon-block) while the real Stop had already been eaten by
+    // a type-ahead phantom whose documented safety net is exactly the scanner's quiescent synth.
+    {
+        constexpr int64_t MiB = 1 << 20;
+        // THE live wedge numbers: a 1 MiB window read, 3,742,238 bytes of backlog, no newline in
+        // the window (the first line alone is 1.51 MiB) -> GROW, never wait forever.
+        CHECK(DecideDeltaNoNewline(MiB, 3742238) == DeltaNoNewline::Grow, "wedge repro: 1 MiB window / 3.74 MB backlog -> Grow (was: consume nothing forever)");
+        // A grown read that reached the stat'd end without a newline: ONE unterminated append in
+        // flight (a monster line still being written) -> caught up on complete lines, re-read later.
+        CHECK(DecideDeltaNoNewline(3742238, 3742238) == DeltaNoNewline::PartialInFlight, "grown read to file end, still no newline -> partial line in flight");
+        // The classic small case is unchanged: the whole sub-window remainder read, no newline yet.
+        CHECK(DecideDeltaNoNewline(512, 512) == DeltaNoNewline::PartialInFlight, "small partial line in flight (classic behavior)");
+        // A window read with more backlog beyond it under the force cap -> grow (1-4 MiB lines parse).
+        CHECK(DecideDeltaNoNewline(MiB, MiB + 1) == DeltaNoNewline::Grow, "just past the window -> Grow");
+        CHECK(DecideDeltaNoNewline(kScanForceConsumeBytes - 1, 10 * MiB) == DeltaNoNewline::Grow, "one byte under the force cap -> still Grow (the cap allows a bigger read)");
+        // A FULL force-cap read verified newline-less with backlog beyond it: corrupt/binary — skip
+        // the PROVEN run only (the caller advances by got, never teleports to the file end).
+        CHECK(DecideDeltaNoNewline(kScanForceConsumeBytes, 10 * MiB) == DeltaNoNewline::SkipRead, "a full 4 MiB newline-less read -> SkipRead (advance past the verified run)");
+        // Read-to-end wins over the cap: got >= avail is caught-up even at exactly the force cap.
+        CHECK(DecideDeltaNoNewline(kScanForceConsumeBytes, kScanForceConsumeBytes) == DeltaNoNewline::PartialInFlight, "read-to-end at the force cap -> PartialInFlight (not a skip)");
+    }
 }
 
 // Agentmaster — the CURRENT-MODEL adornment (the board card / per-tab overlay / tab tooltip model):

@@ -58,6 +58,44 @@ namespace Agentmaster
     inline constexpr int64_t kScanExternalWorkGraceMs = 20000; // "OUTLIVED the turn" proof margin: external work counts as OUTLIVING a FINISHED/aborted turn only when it postdates the parent transcript's last write by MORE than this — separating genuinely ongoing background work (an in-process TEAMMATE / a run_in_background Agent writing subagents/*.jsonl for minutes-hours after the lead's end_turn; a live SHELL job keeping presence "shell"/"busy") from turn-tail RESIDUE (a classic subagent's final flush lands us-before end_turn and post-Esc dying subagents keep flushing up to kScanSubagentFreshMs; "busy" lingers a ~2s S-lane tick after a real Stop). Must exceed kScanSubagentFreshMs so an interrupted turn's dying flushes can NEVER read as outliving it (the 291 MB-log oscillation class)
     static_assert(kScanExternalWorkGraceMs > kScanSubagentFreshMs, "outlive margin must exceed the dying-subagent flush window, or post-Esc residue promotes Waiting->Running and oscillates against recon-stop");
 
+    // PURE + total (the 2026-08-14 stuck-Running WEDGE, session 6434e5f8): what to do when a delta
+    // window read found NO newline. A SINGLE transcript line can outgrow the 1 MiB read window — a
+    // huge pasted / tool_result user line (the live wedge: two PDF-read tool_results of 1.51 MiB
+    // and 2.0 MiB) — and the old handling then consumed NOTHING while the remainder stayed under
+    // the 4 MiB force-consume guard: the cursor froze at the same offset on EVERY pass, the parse
+    // fold (lastStopReason / interrupted / pendingInteractiveTool) stayed mid-turn forever, and
+    // every pull release was structurally dead — recon-stop needs a terminal tail, recon-stop-idle
+    // REFUSES a pending non-terminal stop_reason, recon-block needs an interactive tool — so the
+    // session sat Running 17+ minutes with claude provably idle, its real Stop already consumed by
+    // a type-ahead phantom (whose documented safety net is exactly this scanner's quiescent synth).
+    // Inputs: got = bytes this read returned; avail = bytes past the cursor at the pass's stat.
+    //   * PartialInFlight — the read reached the stat'd end: the whole remainder is ONE
+    //     unterminated append in flight; caught up on complete lines (primed), re-read whole once
+    //     its newline lands.
+    //   * Grow — more bytes exist past this read and the force cap allows a bigger window: RE-READ
+    //     at min(avail, kScanForceConsumeBytes) so a 1-4 MiB line parses like any other line.
+    //   * SkipRead — a full force-cap read with no newline: a corrupt/binary run. Advance the
+    //     cursor past the PROVEN newline-less bytes only (never teleport to the file end — complete
+    //     lines beyond the run must still parse on later passes).
+    enum class DeltaNoNewline
+    {
+        PartialInFlight,
+        Grow,
+        SkipRead,
+    };
+    inline DeltaNoNewline DecideDeltaNoNewline(int64_t got, int64_t avail) noexcept
+    {
+        if (got >= avail)
+        {
+            return DeltaNoNewline::PartialInFlight; // read to the stat'd end — nothing more to grow into
+        }
+        if (got < kScanForceConsumeBytes)
+        {
+            return DeltaNoNewline::Grow; // the FIRST unconsumed line outgrew this window — a bigger read can finish it
+        }
+        return DeltaNoNewline::SkipRead; // a force-cap read verified newline-less — skip the run, not the file
+    }
+
     // One reconciled record extracted from a transcript .jsonl line (the PURE parser's output).
     struct TranscriptEvent
     {

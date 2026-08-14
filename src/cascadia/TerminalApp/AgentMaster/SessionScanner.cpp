@@ -1322,9 +1322,9 @@ namespace Agentmaster
         bytes.resize(want);
         DWORD got = 0;
         const BOOL ok = ::ReadFile(h, bytes.data(), want, &got, nullptr);
-        ::CloseHandle(h);
         if (!ok || got == 0)
         {
+            ::CloseHandle(h);
             return false;
         }
         bytes.resize(got);
@@ -1332,32 +1332,63 @@ namespace Agentmaster
         // Consume only up to the last newline; a trailing partial line is an append in flight and
         // is re-read whole next tick. (Splitting on the '\n' BYTE is UTF-8-safe: 0x0A is never a
         // continuation byte.)
-        const size_t nl = bytes.rfind('\n');
+        size_t nl = bytes.rfind('\n');
+        if (nl == std::string::npos &&
+            DecideDeltaNoNewline(static_cast<int64_t>(got), avail) == DeltaNoNewline::Grow)
+        {
+            // The FIRST unconsumed line alone outgrew the window (a huge single-line tool_result —
+            // the 2026-08-14 stuck-Running wedge, session 6434e5f8: two PDF-read user lines of
+            // 1.51 MiB and 2.0 MiB froze the cursor at one offset for 17+ minutes and every pull
+            // release was structurally dead — see DecideDeltaNoNewline). RE-READ with the window
+            // grown to the force-consume cap so a 1-4 MiB line parses like any other line.
+            const DWORD wantBig = static_cast<DWORD>(avail < kScanForceConsumeBytes ? avail : kScanForceConsumeBytes);
+            LARGE_INTEGER liBig{};
+            liBig.QuadPart = st.offset;
+            if (::SetFilePointerEx(h, liBig, nullptr, FILE_BEGIN))
+            {
+                std::string bigBytes;
+                bigBytes.resize(wantBig);
+                DWORD bigGot = 0;
+                if (::ReadFile(h, bigBytes.data(), wantBig, &bigGot, nullptr) && bigGot >= got)
+                {
+                    bigBytes.resize(bigGot);
+                    bytes.swap(bigBytes);
+                    got = bigGot;
+                    nl = bytes.rfind('\n');
+                }
+            }
+        }
+        ::CloseHandle(h);
         if (nl == std::string::npos)
         {
-            // No complete line in this window. Guard against a corrupt/binary run wedging the
-            // cursor forever: if the unterminated run is pathologically large, skip past it.
-            if (avail > kScanForceConsumeBytes)
+            switch (DecideDeltaNoNewline(static_cast<int64_t>(got), avail))
             {
-                st.offset = size;
-                st.primed = true; // skipped to the end — caught up
-            }
-            else if (avail <= kScanMaxDeltaBytes && static_cast<int64_t>(got) == avail)
-            {
+            case DeltaNoNewline::SkipRead:
+                // A run PROVEN newline-less past the force-consume cap: corrupt/binary. Advance the
+                // cursor past the VERIFIED bytes only — never teleport to the file end, which would
+                // silently drop every complete line written beyond the run (they parse next pass).
+                st.offset += static_cast<int64_t>(got);
+                break;
+            case DeltaNoNewline::PartialInFlight:
                 st.primed = true; // the whole remainder is one partial line in flight — caught up on complete lines
+                break;
+            default:
+                // Grow — the bigger re-read failed or came back short (an I/O hiccup): change
+                // nothing; the next pass retries from the same cursor.
+                break;
             }
             return false;
         }
         const size_t completeBytes = nl + 1;
         const std::wstring wide = Utf8ToUtf16(bytes.data(), static_cast<int>(completeBytes));
         st.offset += static_cast<int64_t>(completeBytes);
-        if (avail <= kScanMaxDeltaBytes && static_cast<int64_t>(got) == avail)
+        if (static_cast<int64_t>(got) == avail)
         {
-            // This read reached the file's current end (everything available fit the window):
-            // the cursor is caught up — anything consumed on a LATER pass is a live append, so
-            // the run-repair may key on it. (A capped backlog chunk — avail > the window — is
-            // still mid-replay and does NOT prime; the pass that finishes the replay primes for
-            // the NEXT one.)
+            // This read reached the file's current end (everything available fit the window —
+            // the 1 MiB default or the grown big-line one): the cursor is caught up — anything
+            // consumed on a LATER pass is a live append, so the run-repair may key on it. (A
+            // capped backlog chunk — avail > the read — is still mid-replay and does NOT prime;
+            // the pass that finishes the replay primes for the NEXT one.)
             st.primed = true;
         }
 
