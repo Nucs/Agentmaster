@@ -33,6 +33,7 @@
 #include "AgentMaster/SessionStore.h" // Agentmaster (FAVORITES.md): IsSessionFavorite for the tab context-menu Favorite item
 #include "AgentMaster/StartupTiming.h" // Agentmaster: [startup] phase timing for _OnFirstLayout
 #include "AgentMaster/Splash.h" // Agentmaster: dismiss the launch splash once the first window is laid out
+#include "AgentCatchLog.h" // Agentmaster: AgentLogCaughtException — the fail-open per-tab guards in the settings/theme reload loops
 #include "App.h"
 #include "DebugTapConnection.h"
 #include "MarkdownPaneContent.h"
@@ -5015,22 +5016,34 @@ namespace winrt::TerminalApp::implementation
 
         for (const auto& tab : _tabs)
         {
-            if (auto tabImpl{ _GetTabImpl(tab) })
+            // Agentmaster (fail-open): this loop runs under a raised settings event with no catch
+            // between here and the dispatcher boundary — one tab whose refresh throws would abort
+            // the reload for every LATER tab and then std::terminate the whole multi-window process.
+            // Contain per tab: the broken tab keeps its old settings, everything else stays current,
+            // and the throw lands in hooks.log with its VEH throw-site stack (Rule #18).
+            try
             {
-                // Let the tab know that there are new settings. It's up to each content to decide what to do with them.
-                tabImpl->UpdateSettings(_settings);
+                if (auto tabImpl{ _GetTabImpl(tab) })
+                {
+                    // Let the tab know that there are new settings. It's up to each content to decide what to do with them.
+                    tabImpl->UpdateSettings(_settings);
 
-                // Update the icon of the tab for the currently focused profile in that tab.
-                // Only do this for TerminalTabs. Other types of tabs won't have multiple panes
-                // and profiles so the Title and Icon will be set once and only once on init.
-                _UpdateTabIcon(*tabImpl);
+                    // Update the icon of the tab for the currently focused profile in that tab.
+                    // Only do this for TerminalTabs. Other types of tabs won't have multiple panes
+                    // and profiles so the Title and Icon will be set once and only once on init.
+                    _UpdateTabIcon(*tabImpl);
 
-                // Force the TerminalTab to re-grab its currently active control's title.
-                tabImpl->UpdateTitle();
+                    // Force the TerminalTab to re-grab its currently active control's title.
+                    tabImpl->UpdateTitle();
+                }
+
+                auto tabImpl{ winrt::get_self<Tab>(tab) };
+                tabImpl->SetActionMap(_settings.ActionMap());
             }
-
-            auto tabImpl{ winrt::get_self<Tab>(tab) };
-            tabImpl->SetActionMap(_settings.ActionMap());
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_RefreshUIForSettingsReload per-tab");
+            }
         }
 
         if (const auto focusedTab{ _GetFocusedTabImpl() })
@@ -6108,15 +6121,25 @@ namespace winrt::TerminalApp::implementation
         {
             _updatePaneResources(requestedTheme);
 
+            // Agentmaster (fail-open): per-tab guard below — this runs under dispatcher-dispatched
+            // event handlers with no catch above; one tab's throwing pane walk must not abort the
+            // rest nor std::terminate the process.
             for (const auto& tab : _tabs)
             {
-                if (auto tabImpl{ _GetTabImpl(tab) })
+                try
                 {
-                    // The root pane will propagate the theme change to all its children.
-                    if (const auto& rootPane{ tabImpl->GetRootPane() })
+                    if (auto tabImpl{ _GetTabImpl(tab) })
                     {
-                        rootPane->UpdateResources(_paneResources);
+                        // The root pane will propagate the theme change to all its children.
+                        if (const auto& rootPane{ tabImpl->GetRootPane() })
+                        {
+                            rootPane->UpdateResources(_paneResources);
+                        }
                     }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"_updateThemeColors pane resources per-tab");
                 }
             }
         }
@@ -6185,15 +6208,27 @@ namespace winrt::TerminalApp::implementation
         // applies tab.background to the tabs via Tab::ThemeColor.
         //
         // Do this second, so that we already know the bgColor of the titlebar.
+        //
+        // Agentmaster: STAGGERED. On a REAL theme change every tab pays the full apply (the
+        // dictionary rewrite + _RefreshVisualState's triple theme flip — ~0.5s/tab measured at a
+        // 42-tab strip during the 2026-08-14 RDP freeze), so a big fleet's pass is seconds-long.
+        // Applying the first chunk inline and the rest in Low-priority dispatcher hops keeps the
+        // pump alive (input + paint interleave) instead of one long synchronous grind; a small
+        // window (<= one chunk) is byte-identical to the old inline loop. A newer pass supersedes
+        // an in-flight trickle via the generation counter, and Tab::ThemeColor's own equality gate
+        // makes any overlap re-application free.
         {
-            const auto tabBackground = theme.Tab() ? theme.Tab().Background() : nullptr;
-            const auto tabUnfocusedBackground = theme.Tab() ? theme.Tab().UnfocusedBackground() : nullptr;
+            auto batch = std::make_shared<ThemeColorApplyBatch>();
+            batch->tabBackground = theme.Tab() ? theme.Tab().Background() : nullptr;
+            batch->tabUnfocusedBackground = theme.Tab() ? theme.Tab().UnfocusedBackground() : nullptr;
+            batch->tabRowColor = bgColor;
+            batch->tabs.reserve(_tabs.Size());
             for (const auto& tab : _tabs)
             {
-                winrt::com_ptr<Tab> tabImpl;
-                tabImpl.copy_from(winrt::get_self<Tab>(tab));
-                tabImpl->ThemeColor(tabBackground, tabUnfocusedBackground, bgColor);
+                batch->tabs.push_back(tab);
             }
+            const auto generation = ++_themeApplyGeneration;
+            _ApplyTabThemeColorsChunk(batch, generation);
         }
         // Update the new tab button to have better contrast with the new color.
         // In theory, it would be convenient to also change these for the
@@ -6215,6 +6250,44 @@ namespace winrt::TerminalApp::implementation
             // Nothing was set in the theme - fall back to null. The window will
             // use that as an indication to use the default window frame.
             FrameBrush(nullptr);
+        }
+    }
+
+    // Agentmaster: the staggered per-tab ThemeColor apply (see the batch construction in
+    // _updateThemeColors). Applies up to one chunk synchronously, then reschedules itself at Low
+    // dispatcher priority so a big strip's theme pass never blocks the pump in one piece. A newer
+    // _updateThemeColors bumps _themeApplyGeneration, which cancels an in-flight trickle (the new
+    // pass covers every tab from index 0, so nothing is left half-applied). Per-tab fail-open: one
+    // throwing apply is logged and skipped, never aborting the rest or escaping to the dispatcher.
+    void TerminalPage::_ApplyTabThemeColorsChunk(const std::shared_ptr<ThemeColorApplyBatch>& batch, uint64_t generation)
+    {
+        if (!batch || generation != _themeApplyGeneration)
+        {
+            return; // superseded by a newer theme pass
+        }
+        constexpr size_t kChunk = 8;
+        const size_t end = std::min(batch->next + kChunk, batch->tabs.size());
+        for (; batch->next < end; ++batch->next)
+        {
+            try
+            {
+                winrt::com_ptr<Tab> tabImpl;
+                tabImpl.copy_from(winrt::get_self<Tab>(batch->tabs[batch->next]));
+                tabImpl->ThemeColor(batch->tabBackground, batch->tabUnfocusedBackground, batch->tabRowColor);
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_ApplyTabThemeColorsChunk per-tab");
+            }
+        }
+        if (batch->next < batch->tabs.size())
+        {
+            Dispatcher().RunAsync(CoreDispatcherPriority::Low, [weakThis = get_weak(), batch, generation]() {
+                if (auto page{ weakThis.get() })
+                {
+                    page->_ApplyTabThemeColorsChunk(batch, generation);
+                }
+            });
         }
     }
 

@@ -392,6 +392,19 @@ namespace Agentmaster
     void UnregisterLiveWindow(const std::wstring& windowId);
     std::vector<std::wstring> LiveWindowIds();
 
+    // Agentmaster: UI-thread stall WATCHDOG (the 2026-08-14 RDP freeze's observability gap — the UI
+    // thread ground for 20+ minutes while every engine lane logged normally, so hooks.log contained
+    // no line SAYING the window was dead). Each window's UI lane stamps NoteUiHeartbeat from
+    // _ObserverProbeImpl once it is ON the UI thread (every ~2s scanner tick, dispatched as a
+    // dispatcher item — so a beat PROVES dispatcher items are draining); a lazy background checker
+    // logs [ui-stall] into hooks.log when a window that has beaten before goes 20s+ silent, re-logs
+    // each minute, and logs the recovery with its duration. The checker thread starts on the FIRST
+    // beat only — the standalone test harness / CLI (which link this TU but host no UI) never spawn
+    // it. DropUiHeartbeat runs from UnregisterLiveWindow: a closing window stops beating by design
+    // and must never be reported stalled.
+    void NoteUiHeartbeat(const std::wstring& windowId);
+    void DropUiHeartbeat(const std::wstring& windowId);
+
     // Agentmaster (discard Manager-only windows): race-safe "may THIS window self-close because it is
     // now Manager-only?" Returns true (and reserves the close) iff more than one live Agentmaster window
     // would remain after it goes — counting live windows MINUS those that have already reserved a close

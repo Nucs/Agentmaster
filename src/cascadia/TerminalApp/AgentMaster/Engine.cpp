@@ -29,8 +29,9 @@
 #include <cstdio>
 #include <mutex> // Agentmaster: guards the log observer's per-id dedup map (notify fires from several threads)
 #include <random>
+#include <chrono> // Agentmaster: the UI-stall watchdog's sleep cadence
 #include <string>
-#include <thread> // Agentmaster: the debounced sessions.json autosaver worker
+#include <thread> // Agentmaster: the debounced sessions.json autosaver worker + the UI-stall watchdog
 #include <unordered_map> // Agentmaster: per-id last-logged [Unknown] line, to dedup the pull/transient notify flood
 
 namespace Agentmaster
@@ -794,12 +795,142 @@ namespace Agentmaster
         UnregisterLiveWindowIn(SharedEngine(), windowId);
     }
 
+    // ---- Agentmaster: UI-thread stall watchdog (hooks.log [ui-stall]) --------------------------
+    // See the Engine.h declaration for the why. The state is a LEAKED function-local static, never
+    // an Engine member: the detached checker thread reads it up to process exit, and process
+    // teardown must not race a destructor (the AppendStateLog idiom). Lazy: nothing spawns until a
+    // real UI lane beats at least once, so the test harness / CLI (which link this TU) stay clean.
+    namespace
+    {
+        struct UiBeatState
+        {
+            std::mutex m;
+            std::unordered_map<std::wstring, uint64_t> beats; // windowId -> last UI-lane beat (GetTickCount64 ms)
+            struct Stall
+            {
+                uint64_t staleBeatMs = 0; // the beat the stall was declared against (for the recovery duration)
+                uint64_t lastLogMs = 0; // the last [ui-stall] line for this window (re-log throttle)
+            };
+            std::unordered_map<std::wstring, Stall> stalled;
+            bool checkerStarted = false;
+        };
+
+        UiBeatState& UiBeats()
+        {
+            static UiBeatState* s = new UiBeatState(); // deliberately leaked (see the block comment above)
+            return *s;
+        }
+
+        void UiStallCheckerPass(UiBeatState& s)
+        {
+            constexpr uint64_t kStallAfterMs = 20 * 1000; // a UI lane beats every ~2s; 20s of silence is a stall, not jitter
+            constexpr uint64_t kRelogMs = 60 * 1000;
+            const uint64_t now = ::GetTickCount64();
+            std::vector<std::wstring> lines; // log OUTSIDE the lock (AppendStateLog does file I/O)
+            {
+                std::lock_guard<std::mutex> lk(s.m);
+                for (const auto& [id, beat] : s.beats)
+                {
+                    const uint64_t quiet = now - beat;
+                    const auto st = s.stalled.find(id);
+                    if (quiet < kStallAfterMs)
+                    {
+                        if (st != s.stalled.end())
+                        {
+                            lines.push_back(L"[ui-stall] window " + id + L" RECOVERED after ~" +
+                                            std::to_wstring((beat - st->second.staleBeatMs) / 1000) + L"s — the UI thread is pumping again\n");
+                            s.stalled.erase(st);
+                        }
+                        continue;
+                    }
+                    if (st == s.stalled.end())
+                    {
+                        s.stalled[id] = UiBeatState::Stall{ beat, now };
+                        lines.push_back(L"[ui-stall] window " + id + L" UI thread has NOT pumped for ~" +
+                                        std::to_wstring(quiet / 1000) +
+                                        L"s — dispatcher items are not draining (the window reads Not Responding while the engine lanes continue; sample the process's FIRST thread's CPU + stack to see what it is grinding on)\n");
+                    }
+                    else if (now - st->second.lastLogMs >= kRelogMs)
+                    {
+                        st->second.lastLogMs = now;
+                        lines.push_back(L"[ui-stall] window " + id + L" still stalled — ~" +
+                                        std::to_wstring(quiet / 1000) + L"s without a UI-lane beat\n");
+                    }
+                }
+            }
+            for (const auto& l : lines)
+            {
+                AppendStateLog(L"hooks.log", l);
+            }
+        }
+    }
+
+    void NoteUiHeartbeat(const std::wstring& windowId)
+    {
+        if (windowId.empty())
+        {
+            return;
+        }
+        auto& s = UiBeats();
+        bool startChecker = false;
+        {
+            std::lock_guard<std::mutex> lk(s.m);
+            s.beats[windowId] = ::GetTickCount64();
+            if (!s.checkerStarted)
+            {
+                s.checkerStarted = true;
+                startChecker = true;
+            }
+        }
+        if (startChecker)
+        {
+            try
+            {
+                std::thread([]() {
+                    auto& st = UiBeats();
+                    for (;;)
+                    {
+                        std::this_thread::sleep_for(std::chrono::seconds(5));
+                        try
+                        {
+                            UiStallCheckerPass(st);
+                        }
+                        catch (...)
+                        {
+                            LogSwallowedException(L"UiStallCheckerPass");
+                        }
+                    }
+                }).detach();
+                AppendStateLog(L"hooks.log", L"[ui-stall] watchdog armed (20s threshold, 5s cadence)\n");
+            }
+            catch (...)
+            {
+                // Thread spawn failed — un-latch so a later beat retries instead of silently
+                // running with no checker forever.
+                std::lock_guard<std::mutex> lk(s.m);
+                s.checkerStarted = false;
+                LogSwallowedException(L"NoteUiHeartbeat spawn checker");
+            }
+        }
+    }
+
+    void DropUiHeartbeat(const std::wstring& windowId)
+    {
+        auto& s = UiBeats();
+        std::lock_guard<std::mutex> lk(s.m);
+        s.beats.erase(windowId);
+        s.stalled.erase(windowId);
+    }
+
     void UnregisterLiveWindowIn(Engine& e, const std::wstring& windowId)
     {
         if (windowId.empty())
         {
             return;
         }
+        // Agentmaster: the closing window's UI thread stops beating BY DESIGN — take it off the
+        // stall watchdog before anything else so teardown can never be reported as a hang.
+        DropUiHeartbeat(windowId);
         // Re-read the closing window's record from disk BEFORE the lock (disk I/O off the mutex). It is
         // returned to the reclaimable pool below so the in-session recover button can re-claim it.
         // Absent on disk (a window closed before its first autosave) => nothing to re-claim, fine.

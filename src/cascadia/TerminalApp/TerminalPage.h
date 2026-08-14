@@ -1643,6 +1643,23 @@ namespace winrt::TerminalApp::implementation
         void _updateAllTabCloseButtons();
         void _updatePaneResources(const winrt::Windows::UI::Xaml::ElementTheme& requestedTheme);
 
+        // Agentmaster: staggered per-tab theme apply — _updateThemeColors snapshots the per-tab
+        // ThemeColor arguments into one batch and _ApplyTabThemeColorsChunk applies it a chunk per
+        // Low-priority dispatcher hop (first chunk inline), so a big strip's REAL theme change
+        // (~0.5s/tab of dictionary rewrite + visual-state flips at fleet scale) degrades to a brief
+        // visual trickle instead of one pump-blocking grind. _themeApplyGeneration supersedes an
+        // in-flight trickle when a newer pass starts.
+        struct ThemeColorApplyBatch
+        {
+            std::vector<winrt::TerminalApp::Tab> tabs;
+            winrt::Microsoft::Terminal::Settings::Model::ThemeColor tabBackground{ nullptr };
+            winrt::Microsoft::Terminal::Settings::Model::ThemeColor tabUnfocusedBackground{ nullptr };
+            til::color tabRowColor{};
+            size_t next{ 0 };
+        };
+        uint64_t _themeApplyGeneration{ 0 };
+        void _ApplyTabThemeColorsChunk(const std::shared_ptr<ThemeColorApplyBatch>& batch, uint64_t generation);
+
         safe_void_coroutine _ControlCompletionsChangedHandler(const winrt::Windows::Foundation::IInspectable sender, const winrt::Microsoft::Terminal::Control::CompletionsChangedEventArgs args);
 
         void _OpenSuggestions(const Microsoft::Terminal::Control::TermControl& sender, Windows::Foundation::Collections::IVector<winrt::Microsoft::Terminal::Settings::Model::Command> commandsCollection, winrt::TerminalApp::SuggestionsMode mode, winrt::hstring filterText);

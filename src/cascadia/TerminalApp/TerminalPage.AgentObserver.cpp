@@ -8842,6 +8842,14 @@ namespace winrt::TerminalApp::implementation
             co_return;
         }
 
+        // Agentmaster: UI-thread heartbeat for the engine's [ui-stall] watchdog. This coroutine is
+        // ON the UI thread here (the resume_foreground above), dispatched as a dispatcher item off
+        // the scanner's ~2s tick — so a beat PROVES the window's dispatcher is draining. When the
+        // UI thread wedges (the 2026-08-14 RDP theme-storm class), the beats stop while the engine
+        // lanes keep running, and the watchdog names the dead window in hooks.log instead of the
+        // freeze being invisible in our own logs.
+        ::Agentmaster::NoteUiHeartbeat(_windowId);
+
         // Lowercase a GUID-plain string to match the observer's roster key form (it lowercases too).
         const auto lower = [](std::wstring s) {
             for (auto& c : s)
