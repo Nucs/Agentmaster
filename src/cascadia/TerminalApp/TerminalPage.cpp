@@ -4993,6 +4993,14 @@ namespace winrt::TerminalApp::implementation
     //   finally create the tab flyout
     void TerminalPage::_RefreshUIForSettingsReload()
     {
+        // Agentmaster: the pane walk below makes every TermControl raise
+        // PropertyChanged("BackgroundBrush"), whose handler runs the O(tabs) _updateThemeColors —
+        // quadratic per reload. Coalesce: suppress the re-entry for the duration and run the one
+        // deliberate pass at "Begin Theme handling" below (scope_exit so an exception can't leave
+        // theme updates permanently suppressed).
+        _themeColorUpdatesSuppressed = true;
+        const auto releaseThemeSuppression = wil::scope_exit([&]() { _themeColorUpdatesSuppressed = false; });
+
         // Re-wire the keybindings to their handlers, as we'll have created a
         // new AppKeyBindings object.
         _HookupKeyBindings(_settings.ActionMap());
@@ -5058,6 +5066,8 @@ namespace winrt::TerminalApp::implementation
 
         ////////////////////////////////////////////////////////////////////////
         // Begin Theme handling
+        // Agentmaster: the ONE coalesced theme pass for this reload (see the suppression at the top).
+        _themeColorUpdatesSuppressed = false;
         _updateThemeColors();
 
         _updateAllTabCloseButtons();
@@ -5290,6 +5300,17 @@ namespace winrt::TerminalApp::implementation
     // - <none>
     void TerminalPage::_SetNewTabButtonColor(const til::color color, const til::color accentColor)
     {
+        // Agentmaster: unchanged-input gate — this repaint (9 resource inserts + two animated
+        // VisualStateManager transitions) runs on every _updateThemeColors pass, i.e. every
+        // selection / active-pane / window-activation change. Identical inputs produce an
+        // identical repaint, so skip it.
+        const std::pair<til::color, til::color> newTabButtonColorKey{ color, accentColor };
+        if (_lastNewTabButtonColorKey == newTabButtonColorKey)
+        {
+            return;
+        }
+        _lastNewTabButtonColorKey = newTabButtonColorKey;
+
         constexpr auto lightnessThreshold = 0.6f;
         // TODO GH#3327: Look at what to do with the tab button when we have XAML theming
         const auto isBrightColor = ColorFix::GetLightness(color) >= lightnessThreshold;
@@ -6068,6 +6089,15 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_updateThemeColors()
     {
         if (_settings == nullptr)
+        {
+            return;
+        }
+
+        // Agentmaster: coalesced during _RefreshUIForSettingsReload — the reload's pane walk raises
+        // one BackgroundBrush PropertyChanged per pane and each used to land here (the 2026-08-14
+        // RDP freeze: panes × tabs × the _RefreshVisualState triple theme flip). The reload runs
+        // one trailing pass itself, so the re-entries are pure repetition.
+        if (_themeColorUpdatesSuppressed)
         {
             return;
         }

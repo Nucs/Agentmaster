@@ -1140,11 +1140,25 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
         else
         {
-            Media::SolidColorBrush solidColor{};
+            // Agentmaster: reuse the existing solid brush (exactly like the acrylic path above)
+            // instead of minting a new SolidColorBrush per call. The BackgroundBrush
+            // observable-property setter below only raises on an OBJECT change, so a fresh brush
+            // per settings pass meant one spurious "BackgroundBrush" PropertyChanged per pane per
+            // reload — each fanning out into TerminalPage::_updateThemeColors' all-tabs pass (half
+            // of the 2026-08-14 RDP settings-reload freeze). RootGrid has no markup Background, so
+            // any solid brush found here is one this function set.
+            auto solidColor = RootGrid().Background().try_as<Media::SolidColorBrush>();
+            if (!solidColor)
+            {
+                solidColor = Media::SolidColorBrush{};
+            }
             solidColor.Opacity(_core.Opacity());
             solidColor.Color(bgColor);
 
-            RootGrid().Background(solidColor);
+            if (RootGrid().Background() != solidColor)
+            {
+                RootGrid().Background(solidColor);
+            }
         }
 
         BackgroundBrush(RootGrid().Background());
@@ -1184,6 +1198,32 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             bg = Windows::UI::Colors::Transparent();
         }
 
+        // Agentmaster: no-op gate. UpdateControlSettings lands here on every settings pass, and the
+        // deliberate manual raise below (the brush OBJECT usually doesn't change, only its Color)
+        // fans out into TerminalPage::_updateThemeColors' all-tabs pass — so raising when the COLOR
+        // didn't change either multiplied a settings reload into panes × tabs work (the 2026-08-14
+        // RDP freeze). Same brush already published AND already carrying this exact color ⇒ nothing
+        // changed ⇒ nothing to raise. (_isBackgroundLight is refreshed first so that side effect
+        // stays live even when we skip.)
+        _isBackgroundLight = _isColorLight(bg);
+        if (RootGrid().Background() == _BackgroundBrush)
+        {
+            if (const auto acrylic = RootGrid().Background().try_as<Media::AcrylicBrush>())
+            {
+                if (til::color{ acrylic.TintColor() } == bg && til::color{ acrylic.FallbackColor() } == bg)
+                {
+                    return;
+                }
+            }
+            else if (const auto solidColor = RootGrid().Background().try_as<Media::SolidColorBrush>())
+            {
+                if (til::color{ solidColor.Color() } == bg)
+                {
+                    return;
+                }
+            }
+        }
+
         if (auto acrylic = RootGrid().Background().try_as<Media::AcrylicBrush>())
         {
             acrylic.FallbackColor(bg);
@@ -1207,8 +1247,6 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // Firing it manually makes sure it does.
         _BackgroundBrush = RootGrid().Background();
         PropertyChanged.raise(*this, Data::PropertyChangedEventArgs{ L"BackgroundBrush" });
-
-        _isBackgroundLight = _isColorLight(bg);
     }
 
     bool TermControl::_isColorLight(til::color bg) noexcept

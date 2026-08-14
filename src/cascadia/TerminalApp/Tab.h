@@ -313,6 +313,18 @@ namespace winrt::TerminalApp::implementation
         winrt::Microsoft::Terminal::Settings::Model::ThemeColor _unfocusedThemeColor{ nullptr };
         til::color _tabRowColor;
 
+        // Agentmaster: per-tab refresh gates (the N×M half of the 2026-08-14 RDP freeze).
+        // _themeColorSeeded arms ThemeColor()'s input-equality skip after the first real apply;
+        // _lastAppliedTabColorKey is the (color, tab-row, deselected) render key that lets
+        // _ApplyTabColorOnUIThread no-op an identical re-apply — skipping its ~20-brush resource-
+        // dictionary rewrite and _RefreshVisualState's RequestedTheme Light→Dark→restore flip —
+        // and _tabColorCleared lets _ClearTabBackgroundColor no-op once already cleared (the FIRST
+        // clear still runs: GH#11382 wants the Transparent hit-test background even on a
+        // never-colored tab).
+        bool _themeColorSeeded{ false };
+        bool _tabColorCleared{ false };
+        std::optional<std::array<til::color, 3>> _lastAppliedTabColorKey;
+
         Microsoft::Terminal::Settings::Model::TabCloseButtonVisibility _closeButtonVisibility{ Microsoft::Terminal::Settings::Model::TabCloseButtonVisibility::Always };
 
         std::shared_ptr<Pane> _rootPane{ nullptr };

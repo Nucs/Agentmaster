@@ -794,6 +794,16 @@ namespace winrt::TerminalApp::implementation
         bool _activated{ false };
         bool _visible{ true };
 
+        // Agentmaster: theme-refresh coalescing (the 2026-08-14 RDP freeze). While
+        // _RefreshUIForSettingsReload walks the panes, every TermControl::UpdateControlSettings
+        // raises PropertyChanged("BackgroundBrush") whose handler re-enters _updateThemeColors —
+        // panes × tabs × the per-tab visual-state flip made one settings reload a multi-minute
+        // UI-thread grind at fleet scale. The reload suppresses the re-entry and runs ONE trailing
+        // pass; the new-tab-button repaint keys on its input pair so an unchanged repaint skips its
+        // resource inserts + two VisualStateManager transitions.
+        bool _themeColorUpdatesSuppressed{ false };
+        std::optional<std::pair<til::color, til::color>> _lastNewTabButtonColorKey;
+
         std::vector<std::vector<Microsoft::Terminal::Settings::Model::ActionAndArgs>> _previouslyClosedPanesAndTabs{};
 
         uint32_t _systemRowsToScroll{ DefaultRowsToScroll };

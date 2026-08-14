@@ -3430,6 +3430,29 @@ namespace winrt::TerminalApp::implementation
     {
         ASSERT_UI_THREAD();
 
+        // Agentmaster: input-equality gate. TerminalPage::_updateThemeColors calls this for EVERY
+        // tab on every BackgroundBrush raise / selection change / window (de)activation, and the
+        // recalc's tail (the resource-dictionary rewrite + _RefreshVisualState's triple theme flip)
+        // made those passes tabs-quadratic at fleet scale (the 2026-08-14 RDP freeze). The
+        // ThemeColor objects are stable for a loaded Theme — a settings reload mints new instances —
+        // so pointer equality on them plus the tab-row color is exactly "nothing changed".
+        // ⚠ A theme color of type TerminalBackground evaluates against the tab's OWN control brush,
+        // which can change while these three inputs don't — never skip that shape (a runtime/profile
+        // tab color pins the render and re-enables the skip; the recalc it falls through to is then
+        // still bounded by _ApplyTabColorOnUIThread's output-equality gate).
+        if (_themeColorSeeded && _themeColor == focused && _unfocusedThemeColor == unfocused && _tabRowColor == tabRowColor)
+        {
+            using winrt::Microsoft::Terminal::Settings::Model::ThemeColorType;
+            const bool followsTerminalBrush = !GetTabColor().has_value() &&
+                                              ((focused && focused.ColorType() == ThemeColorType::TerminalBackground) ||
+                                               (unfocused && unfocused.ColorType() == ThemeColorType::TerminalBackground));
+            if (!followsTerminalBrush)
+            {
+                return;
+            }
+        }
+        _themeColorSeeded = true;
+
         _themeColor = focused;
         _unfocusedThemeColor = unfocused;
         _tabRowColor = tabRowColor;
@@ -3595,6 +3618,21 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // Agentmaster: output-equality gate. Everything inserted below derives from exactly
+        // (color, _tabRowColor, deselectedTabColor) — deselectedTabColor already folds in the
+        // unfocused-theme evaluation over the control's brush, so a control-background change
+        // lands in the key. An identical key would re-insert ~20 identical brushes and run
+        // _RefreshVisualState's RequestedTheme Light→Dark→restore flip + two animated
+        // VisualStateManager transitions — the per-tab constant that made settings-reload ×
+        // tabs quadratic work freeze the app at fleet scale (the 2026-08-14 RDP freeze).
+        const std::array<til::color, 3> applyKey{ color, _tabRowColor, deselectedTabColor };
+        if (_lastAppliedTabColorKey == applyKey)
+        {
+            return;
+        }
+        _lastAppliedTabColorKey = applyKey;
+        _tabColorCleared = false;
+
         // currently if a tab has a custom color, a deselected state is
         // signified by using the same color with a bit of transparency
         deselectedTabBrush.Color(deselectedTabColor.with_alpha(255));
@@ -3697,6 +3735,15 @@ namespace winrt::TerminalApp::implementation
     // - <none>
     void Tab::_ClearTabBackgroundColor()
     {
+        // Agentmaster: already-cleared gate (pairs with _ApplyTabColorOnUIThread's output gate) —
+        // a redundant clear would only re-remove absent keys and run the _RefreshVisualState
+        // triple theme flip. The FIRST clear on a never-colored tab still runs: GH#11382 below
+        // wants the Transparent hit-test background applied even then.
+        if (_tabColorCleared && !_lastAppliedTabColorKey.has_value())
+        {
+            return;
+        }
+
         static const winrt::hstring keys[] = {
             // TabViewItem.Background
             L"TabViewItemHeaderBackground",
@@ -3754,6 +3801,9 @@ namespace winrt::TerminalApp::implementation
         // tab won't be hit testable at all. Transparent, however, is a totally
         // valid hit test target. That makes sense.
         TabViewItem().Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
+
+        _lastAppliedTabColorKey.reset();
+        _tabColorCleared = true;
 
         _RefreshVisualState();
     }
