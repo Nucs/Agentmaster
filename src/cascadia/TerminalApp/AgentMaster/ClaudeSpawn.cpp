@@ -3713,9 +3713,52 @@ send - nothing is submitted until the user presses Enter in that tab.
         return out;
     }
 
+    bool ShouldDefaultEditorToEdit(const std::vector<std::pair<std::wstring, std::wstring>>& userEnv, bool editorDefinedOutsideProcess, bool editExeOnPath)
+    {
+        // (condition 2) There must actually be an `edit` command on disk to point $EDITOR at.
+        if (!editExeOnPath)
+        {
+            return false;
+        }
+        // (condition 1a) EDITOR inherited into OUR process from the shell that launched us == "defined
+        // outside the process" — the user's own choice. Our per-spawn env entry would WIN over the
+        // inherited block, so we stand down and let their EDITOR flow through untouched.
+        if (editorDefinedOutsideProcess)
+        {
+            return false;
+        }
+        // (condition 1b) EDITOR set by the user in the cog (global or per-dir env) — theirs wins too
+        // (case-insensitive, the same fold Windows env + MergeSessionEnv use).
+        for (const auto& kv : userEnv)
+        {
+            if (EnvNameFold(kv.first) == L"EDITOR")
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     std::vector<std::pair<std::wstring, std::wstring>> ResolveSessionEnv(const AppSettings& settings, std::wstring_view workingDir)
     {
-        return MergeSessionEnv(settings.env, GetDirEnv(std::wstring{ workingDir }));
+        auto env = MergeSessionEnv(settings.env, GetDirEnv(std::wstring{ workingDir }));
+
+        // [Agentmaster] COMPUTED default (never a persisted seed): point $EDITOR at Microsoft Edit
+        // (`edit.exe`) when the user has claimed EDITOR nowhere and `edit` is actually installed. Both
+        // conditions are LIVE machine facts, re-checked on EVERY spawn — which is exactly why this can't
+        // be one of the version-gated seeds in ApplyEnvDefaults: a one-time seed can't honor "EDITOR not
+        // defined outside the process" (our per-spawn entry wins over the inherited block, so the live
+        // process env must be consulted each spawn, not once at install), and would miss an `edit.exe`
+        // installed after that first launch. When EDITOR already exists anywhere, we add nothing and the
+        // inherited / cog value flows through unchanged. See ENV_VARS.md §9.
+        const bool editorDefinedOutsideProcess = ::GetEnvironmentVariableW(L"EDITOR", nullptr, 0) != 0;
+        wchar_t editPath[MAX_PATH];
+        const bool editExeOnPath = ::SearchPathW(nullptr, L"edit", L".exe", ARRAYSIZE(editPath), editPath, nullptr) != 0;
+        if (ShouldDefaultEditorToEdit(env, editorDefinedOutsideProcess, editExeOnPath))
+        {
+            env.emplace_back(L"EDITOR", L"edit");
+        }
+        return env;
     }
 
     std::pair<std::wstring, uint32_t> ApplyEnvDefaults(std::wstring_view envText, uint32_t seededVersion)

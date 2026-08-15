@@ -228,8 +228,26 @@ namespace Agentmaster
 
     // ResolveSessionEnv = MergeSessionEnv(settings.env, GetDirEnv(workingDir)) — the env applied to a
     // session spawned in `workingDir`. Disk-touching (reads dir-env.json via Persistence::GetDirEnv);
-    // the merge itself is the pure MergeSessionEnv above.
+    // the merge itself is the pure MergeSessionEnv above. It ALSO layers the COMPUTED `EDITOR=edit`
+    // default (below) on top when the machine warrants it, so every spawn path — both Claude
+    // (AppendManagedClaudeEnv) and both Codex sites — inherits it from this one chokepoint.
     std::vector<std::pair<std::wstring, std::wstring>> ResolveSessionEnv(const AppSettings& settings, std::wstring_view workingDir);
+
+    // Agentmaster: decide whether ResolveSessionEnv should append the COMPUTED default `EDITOR=edit`
+    // (Microsoft Edit). This is NOT one of the version-gated settings seeds (ApplyEnvDefaults) — it is
+    // recomputed from LIVE machine facts on every spawn, because neither condition survives a one-time
+    // seed. PURE (the two facts are passed in) + unit-tested:
+    //   * userEnv                     — the merged cog env (global + per-dir) for this session.
+    //   * editorDefinedOutsideProcess — EDITOR is present in Agentmaster's OWN process env, i.e.
+    //                                   inherited from the shell that launched us ("defined outside the
+    //                                   process"). Our per-spawn env entry WINS over the inherited block,
+    //                                   so an inherited EDITOR must never be clobbered by our default.
+    //   * editExeOnPath               — `edit.exe` actually resolves on PATH (so `edit` is a real
+    //                                   command the agent can invoke).
+    // Returns true ONLY when EDITOR is claimed NOWHERE the user controls (cog env AND process env) AND
+    // `edit.exe` exists — so the user's own EDITOR (from either place) always wins, and nothing is
+    // added when there's no `edit` to point at.
+    bool ShouldDefaultEditorToEdit(const std::vector<std::pair<std::wstring, std::wstring>>& userEnv, bool editorDefinedOutsideProcess, bool editExeOnPath);
 
     // --- env-text lexer (drives the Settings cog's live border color + bottom status line) ---
     // A per-line verdict over an env editor's text. Ignored = blank / '#' comment (no var); Ok = a

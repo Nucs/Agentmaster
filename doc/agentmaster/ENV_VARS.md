@@ -228,3 +228,39 @@ bool                       SetClaudeCleanupPeriodDays(std::optional<int64_t>); /
 `ApplyEnvDefaults` (seed-from-0, no-re-seed-when-current, no-duplicate-NAME case-insensitive,
 fresh-line append) and `UpsertJsonNumberKey` (set on empty, preserve other keys + single member on
 update, `nullopt` removes, refuse to clobber an unparseable / non-object file).
+
+## 9. Computed default (NOT seeded) — `EDITOR=edit` (Microsoft Edit)
+
+Distinct from the §8 seeded defaults: `EDITOR=edit` is **computed at every spawn** and never written
+to `settings.json`. `ResolveSessionEnv` appends it to a session's resolved env **iff**, at that
+moment:
+
+1. **`edit.exe` resolves on PATH** (`SearchPathW(L"edit", L".exe")`) — Microsoft Edit is actually
+   installed, so `edit` is a real command for claude/codex to invoke; **and**
+2. **EDITOR is claimed nowhere the user controls** — neither in the merged cog env (Global /
+   per-directory) **nor in Agentmaster's own process environment** (inherited from the shell that
+   launched us == "defined outside the process").
+
+The decision core is the pure, unit-tested **`ShouldDefaultEditorToEdit(userEnv, editorDefinedOutside-
+Process, editExeOnPath)`** (`ClaudeSpawn.{h,cpp}`); `ResolveSessionEnv` gathers the two live machine
+facts (`GetEnvironmentVariableW(L"EDITOR")` / `SearchPathW`) and passes them in, so **both** Claude
+spawn paths (`AppendManagedClaudeEnv`) and **both** Codex sites get it from the ONE chokepoint — one
+set, both agents, exactly like the layered env above.
+
+**Why computed, not a §8 seed** — a version-gated one-time seed is a poor fit for either condition:
+
+- **Condition 2 is per-spawn, not per-install.** Our per-spawn env entry **wins** over the inherited
+  process block (§1), so honoring "don't override the user's own EDITOR" requires reading the LIVE
+  process env at each spawn. A value baked once into `AppSettings.env` would clobber an EDITOR the user
+  exports later, and would be silently wrong for anyone who already exports one.
+- **Condition 1 can change.** `edit.exe` installed **after** the first launch would never trigger a
+  one-time seed (its `introVersion` is already ≤ the stored marker). Recomputing each spawn picks it
+  up automatically.
+
+**How to override** — set EDITOR yourself, in your shell (real env) or the cog's *Environment
+variables ▸ Global / Per-directory*, and the computed default stands down (your value flows through
+untouched). There is nothing to delete: it is never persisted.
+
+**Note on "defined"** — the process-env check treats EDITOR as *defined* whenever it EXISTS, even if
+set to the empty string (a deliberately-cleared `EDITOR=` reads as a "no editor" choice we don't
+override).

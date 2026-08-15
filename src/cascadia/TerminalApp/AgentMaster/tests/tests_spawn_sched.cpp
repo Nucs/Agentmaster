@@ -421,6 +421,22 @@ void TestSpawnBuilders()
         CHECK(MergeSessionEnv(L"", L"").empty(), "merge: empty -> none");
     }
 
+    // ShouldDefaultEditorToEdit (ENV_VARS.md §9): the decision core of the COMPUTED `EDITOR=edit`
+    // default. PURE — the machine facts (EDITOR in the process env / edit.exe on PATH) are passed in,
+    // so the two-condition logic is exercised without touching the real machine.
+    {
+        const std::vector<std::pair<std::wstring, std::wstring>> noEditor{ { L"FOO", L"bar" } };
+        const std::vector<std::pair<std::wstring, std::wstring>> cogEditor{ { L"FOO", L"bar" }, { L"editor", L"vim" } };
+        // Add it ONLY when edit.exe exists AND EDITOR is claimed nowhere.
+        CHECK(ShouldDefaultEditorToEdit(noEditor, false, true), "editor default: add when edit.exe on PATH + EDITOR unset");
+        // No `edit` on the machine -> never add (nothing to point at).
+        CHECK(!ShouldDefaultEditorToEdit(noEditor, false, false), "editor default: no edit.exe -> skip");
+        // EDITOR inherited from the shell (defined outside the process) -> the user's own wins.
+        CHECK(!ShouldDefaultEditorToEdit(noEditor, true, true), "editor default: EDITOR in process env -> skip (never clobber)");
+        // EDITOR set by the user in the cog env (case-insensitive fold) -> theirs wins.
+        CHECK(!ShouldDefaultEditorToEdit(cogEditor, false, true), "editor default: EDITOR in cog env -> skip (case-insensitive)");
+    }
+
     // LexEnvText: per-line verdicts + worst level + first-issue (drives the cog border + status line).
     {
         const auto okr = LexEnvText(L"FOO=bar\nBAZ=1");
