@@ -1181,6 +1181,55 @@ void TestBridgeRoundTrip()
     CHECK(became, "registry reached WaitingForInput via pipe");
     CHECK(reg.Get(L"pipe-1") && reg.Get(L"pipe-1")->lastMessageWasQuestion, "question flag carried over the pipe");
     CHECK(reg.Get(L"pipe-1") && reg.Get(L"pipe-1")->workingDir == L"K:/x", "existing workingDir preserved");
+    // Agentmaster (the ea1dc3dd double-send, 2026-08-15): that line carried NO ts field — the bridge
+    // now stamps ARRIVAL time on a ts==0 parse, observable as the decay anchor advancing (a ts==0
+    // dispatch used to leave lastActivityUnixMs at 0 — the monotonic stamp never fired).
+    CHECK(reg.Get(L"pipe-1") && reg.Get(L"pipe-1")->lastActivityUnixMs != 0, "ts-less line arrival-stamped (decay anchor advanced)");
+
+    // --- The ea1dc3dd incident replay (2026-08-15 11:12): a DUPLICATE delivery of an already-
+    //     processed Stop, its trailing ts LOST to truncation, arriving moments after a prompt's
+    //     UserPromptSubmit. Pre-fix, ts==0 disabled BOTH ordering defenses (the stale check + the
+    //     kMinRealTurnSpanMs floor are gated on `ts != 0`), so it read as a fresh 37ms turn-complete
+    //     -> WaitingForInput -> the advance double-sent the queue into the RUNNING turn. With the
+    //     bridge's arrival stamp the floor sees the real sub-2s span and keeps the state Running. ---
+    reg.Upsert(MakeSession(L"pipe-2"));
+    const int64_t upsTs = NowMsTest();
+    {
+        const std::string ups = "UserPromptSubmit\tpipe-2\tK:/x\t0\t0\t\t\tdo the thing\t" + std::to_string(upsTs) + "\n";
+        CHECK(WriteLineToPipe(pipeName, ups), "client wrote UPS wire line (real ts)");
+    }
+    bool running = false;
+    for (int i = 0; i < 200; ++i)
+    {
+        const auto s = reg.Get(L"pipe-2");
+        if (s && s->state == SessionState::Running)
+        {
+            running = true;
+            break;
+        }
+        ::Sleep(10);
+    }
+    CHECK(running, "UPS over the pipe -> Running");
+    ::Sleep(40); // the incident's 37ms gap between the UPS and the duplicate Stop
+    CHECK(WriteLineToPipe(pipeName, std::string{ "Stop\tpipe-2\tK:/x\t0\t0\t\n" }), "client wrote ts-less duplicate Stop");
+    bool stopSeen = false;
+    for (int i = 0; i < 200; ++i)
+    {
+        const auto s = reg.Get(L"pipe-2");
+        // The Stop's arrival stamp advances the decay anchor past the UPS ts once it is processed.
+        if (s && s->lastActivityUnixMs > upsTs)
+        {
+            stopSeen = true;
+            break;
+        }
+        ::Sleep(10);
+    }
+    CHECK(stopSeen, "ts-less duplicate Stop processed (arrival stamped past the UPS)");
+    {
+        const auto s = reg.Get(L"pipe-2");
+        CHECK(s && s->state == SessionState::Running,
+              "ts-less duplicate Stop moments after the prompt is FLOORED (state stays Running - no bogus turn-complete, no advance)");
+    }
 
     bridge.Stop();
     CHECK(!bridge.Running(), "bridge stopped");
@@ -1306,16 +1355,99 @@ void TestScheduler()
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "pickup guard: awaiting injection -> none");
     }
     {
-        // Echoed (Claude moved to Running and back) -> the next Pending proceeds.
+        // Echoed (Claude moved to Running and back) — but only 500ms after the send: the MINIMUM
+        // SEND SPACING holds (the ea1dc3dd double-send: #2 fired 2.6s after #1 through a bogus
+        // turn-complete exactly here — the pickup guard had legitimately released on the echo, and
+        // nothing else stood between the corrupted status and the next injection). This test used
+        // to pin the OPPOSITE ("echoed lead -> next pending sends"); the spacing deliberately
+        // changes it — the send now proceeds only past kMinSendSpacingMs (next block).
         auto s = withLead(PromptStatus::Sent, true, now - 500, SessionState::WaitingForInput);
         const auto p = DecideAdvance(s, now, 0, false);
-        CHECK(p.action == AdvanceAction::Send && s.queue[p.promptIndex].id == L"p1", "echoed lead -> next pending sends");
+        CHECK(p.action == AdvanceAction::None, "echoed lead 500ms ago -> held by send spacing");
+        CHECK(p.retryAfterMs == kMinSendSpacingMs - 500, "spacing hold is TIMED (retryAfterMs = remaining window)");
+    }
+    {
+        // Past the spacing window the echoed lead releases -> the next Pending proceeds.
+        auto s = withLead(PromptStatus::Sent, true, now - kMinSendSpacingMs, SessionState::WaitingForInput);
+        const auto p = DecideAdvance(s, now, 0, false);
+        CHECK(p.action == AdvanceAction::Send && s.queue[p.promptIndex].id == L"p1", "echoed lead past spacing -> next pending sends");
+        CHECK(p.retryAfterMs == 0, "a Send plan carries no retry timer");
     }
     {
         // Stale un-echoed (echo lost long ago) -> window expired, don't stall the plan forever.
         auto s = withLead(PromptStatus::Sent, false, now - 60000, SessionState::WaitingForInput);
         const auto p = DecideAdvance(s, now, 0, false);
         CHECK(p.action == AdvanceAction::Send && s.queue[p.promptIndex].id == L"p1", "stale un-echoed -> window expired, proceed");
+    }
+
+    // --- Minimum send spacing (kMinSendSpacingMs — the ea1dc3dd double-send, 2026-08-15): at
+    //     least 20s between OUR automatic injections into one session, measured from our OWN
+    //     registry-clock stamps so no wire-ts corruption can defeat it (the incident's duplicate
+    //     Stop carried a truncated ts that disabled both ordering defenses). ---
+    {
+        // The incident shape verbatim: #1 delivered + echoed 2.6s ago, a bogus turn-complete
+        // flipped the state WaitingForInput — spacing is what refuses #2.
+        auto s = withLead(PromptStatus::Sent, true, now - 2600, SessionState::WaitingForInput);
+        const auto p = DecideAdvance(s, now, 0, false);
+        CHECK(p.action == AdvanceAction::None, "incident replay: echoed send 2.6s ago -> held");
+        CHECK(p.retryAfterMs == kMinSendSpacingMs - 2600, "incident replay: timed re-check scheduled for the remainder");
+    }
+    {
+        // injectedAtUnixMs counts on its own: a wedged dispatcher can inject long after the mark
+        // (DELIVERY.md §12 measured 83s apart) — spacing keys on the LATEST keystroke evidence.
+        auto s = withLead(PromptStatus::Sent, true, now - 25000, SessionState::WaitingForInput);
+        s.queue[0].injectedAtUnixMs = now - 3000;
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "recent injection (old sent mark) -> held");
+    }
+    {
+        // A Failed lead spaces too: the enter-retry ladder pressed real Enters into the box (each
+        // press refreshes sentAtUnixMs) before giving up.
+        auto s = withLead(PromptStatus::Failed, false, now - 5000, SessionState::WaitingForInput);
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "failed lead 5s ago -> held");
+    }
+    {
+        // A rolled-back Pending lead (send-deferred / undelivered-reclaim) does NOT space: the
+        // stale sentAt survives the rollback but provably NOTHING was typed — spacing it would only
+        // slow the legitimate retry. The lead itself is the first Pending, so it re-fires.
+        auto s = withLead(PromptStatus::Pending, false, now - 1000, SessionState::WaitingForInput);
+        const auto p = DecideAdvance(s, now, 0, false);
+        CHECK(p.action == AdvanceAction::Send && s.queue[p.promptIndex].id == L"p0", "rolled-back pending -> no spacing, retry fires");
+    }
+    {
+        // A human-typed row never spaces OUR sends (its running turn already holds the advance via
+        // state; the queue is only ever spaced by our own injections).
+        auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput);
+        QueuedPrompt typed;
+        typed.id = L"t0";
+        typed.text = L"typed by the human";
+        typed.status = PromptStatus::Sent;
+        typed.origin = PromptOrigin::Typed;
+        typed.echoed = true;
+        typed.sentAtUnixMs = now - 1000;
+        s.queue.insert(s.queue.begin(), typed);
+        const auto p = DecideAdvance(s, now, 0, false);
+        CHECK(p.action == AdvanceAction::Send && s.queue[p.promptIndex].id == L"p1", "typed row 1s ago -> no spacing (ours only)");
+    }
+    {
+        // Clock skew: a send stamp in the FUTURE reads as expired, never a permanent hold (the
+        // pickup guard's negative-age idiom).
+        auto s = withLead(PromptStatus::Sent, true, now + 5000, SessionState::WaitingForInput);
+        const auto p = DecideAdvance(s, now, 0, false);
+        CHECK(p.action == AdvanceAction::Send && s.queue[p.promptIndex].id == L"p1", "future stamp -> no hold (skew-safe)");
+    }
+    {
+        // Spacing sits AFTER the Pending scan: a drained plan still answers PlanDone immediately.
+        auto s = withLead(PromptStatus::Sent, true, now - 500, SessionState::WaitingForInput);
+        s.queue[1].status = PromptStatus::Skipped;
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::PlanDone, "drained + recent send -> plan done (not spacing)");
+    }
+    {
+        // SemiAuto arming is spaced like an auto-send (the armed suggestion races status the same
+        // way); the human's Confirm click itself bypasses DecideAdvance and is never spaced.
+        auto s = withLead(PromptStatus::Sent, true, now - 500, SessionState::WaitingForInput);
+        s.autorunner.mode = AutorunnerMode::SemiAuto;
+        const auto p = DecideAdvance(s, now, 0, false);
+        CHECK(p.action == AdvanceAction::None && p.retryAfterMs > 0, "semi-auto within spacing -> timed hold (arming deferred)");
     }
 }
 
@@ -1593,14 +1725,20 @@ void TestDeliveryGate()
         CHECK(pgHeld.action == AdvanceAction::None && pgHeld.reason == L"awaiting injection pickup",
               "pickup: held at 9s with no turn evidence (the old 4s expiry fired here)");
         // The echo releases — push (the hook) or pull (the scanner's transcript consume, R1): both
-        // land as `echoed`, THE became-a-message fact.
+        // land as `echoed`, THE became-a-message fact. Probed AT the send-spacing boundary
+        // (T + kMinSendSpacingMs, still inside the 30s pickup belt): the echo is what releases the
+        // pickup guard there — an unechoed twin still holds (next check) — while inside the window
+        // the SPACING would hold even an echoed lead (the ea1dc3dd double-send fired 2.6s after the
+        // echo exactly because nothing spaced it; pinned in TestScheduler).
         s.queue[0].echoed = true;
-        CHECK(DecideAdvance(s, T + 9000, 0, false).action == AdvanceAction::Send, "pickup: the consumed echo releases (push or pull)");
+        CHECK(DecideAdvance(s, T + kMinSendSpacingMs, 0, false).action == AdvanceAction::Send, "pickup: the consumed echo releases (push or pull)");
         s.queue[0].echoed = false;
+        CHECK(DecideAdvance(s, T + kMinSendSpacingMs, 0, false).reason == L"awaiting injection pickup",
+              "pickup: unechoed at the same instant still holds (the echo, not the clock, released above)");
         // A newer UserPromptSubmit stamp releases (an echo the text-match missed still proves
         // pickup — and R3 makes the stamp sound: an EMPTY phantom twin no longer writes it).
         s.turns.lastPromptUnixMs = T + 1500;
-        CHECK(DecideAdvance(s, T + 9000, 0, false).action == AdvanceAction::Send, "pickup: a newer prompt stamp releases");
+        CHECK(DecideAdvance(s, T + kMinSendSpacingMs, 0, false).action == AdvanceAction::Send, "pickup: a newer prompt stamp releases");
         s.turns.lastPromptUnixMs = 0;
         // Agentmaster (DELIVERY_PLAN.md R2): raw transcript advance past the send NO LONGER
         // releases — a still-running PREVIOUS turn also writes the file (the exact shape in which

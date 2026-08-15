@@ -9,11 +9,19 @@
 
 #include <windows.h>
 
+#include <chrono>
 #include <string>
 #include <string_view>
 
 namespace
 {
+    int64_t NowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }
+
     // Convert a UTF-8 byte span to UTF-16. Returns empty on failure.
     std::wstring Utf8ToUtf16(const char* data, int len)
     {
@@ -233,8 +241,24 @@ namespace Agentmaster
                     {
                         const std::wstring wline = Utf8ToUtf16(accum.data(), static_cast<int>(nl));
                         accum.erase(0, nl + 1);
-                        if (const auto msg = ParseWireLine(wline); msg && _sink)
+                        if (auto msg = ParseWireLine(wline); msg && _sink)
                         {
+                            // Agentmaster (the ea1dc3dd double-send, 2026-08-15): a truncated/garbled
+                            // record parses with ts==0 — and ts==0 DISABLES both of the ordered state
+                            // machine's defenses (the stale check + the kMinRealTurnSpanMs floor,
+                            // HookEvents.h: both are gated on `ts != 0`), which is exactly how a
+                            // DUPLICATE Stop delivery that lost its trailing ts field read as a fresh
+                            // 37ms turn-complete and double-sent the queue into a running turn. Every
+                            // CURRENT forwarder stamps ts unconditionally (FIRST, before any slow
+                            // work), so a missing ts here means a mangled delivery, not an old
+                            // forwarder — stamp the ARRIVAL time instead. Arrival can only OVERSTATE
+                            // the fire time, which errs toward reading a suspect event as stale /
+                            // too-fast — the self-healing direction (a genuinely-completed turn is
+                            // settled by the scanner's exempt quiescent Stop ~2.5s later).
+                            if (msg->ts == 0)
+                            {
+                                msg->ts = NowMs();
+                            }
                             try
                             {
                                 _sink(*msg);
@@ -256,8 +280,17 @@ namespace Agentmaster
                 if (!accum.empty())
                 {
                     const std::wstring wline = Utf8ToUtf16(accum.data(), static_cast<int>(accum.size()));
-                    if (const auto msg = ParseWireLine(wline); msg && _sink)
+                    if (auto msg = ParseWireLine(wline); msg && _sink)
                     {
+                        // Arrival-stamp a ts-less parse (see the framed-line dispatch above). This
+                        // trailing-flush path parses a record with NO terminating '\n' — for our
+                        // forwarder (which ALWAYS appends one) that is BY CONSTRUCTION a truncated
+                        // fragment of a dying client, i.e. precisely the delivery most likely to
+                        // have lost its trailing ts field.
+                        if (msg->ts == 0)
+                        {
+                            msg->ts = NowMs();
+                        }
                         try
                         {
                             _sink(*msg);

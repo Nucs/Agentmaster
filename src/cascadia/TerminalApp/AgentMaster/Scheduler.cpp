@@ -81,16 +81,64 @@ namespace Agentmaster
             {
                 std::unique_lock lk{ _mtx };
                 const auto ready = [this] { return !_running.load() || !_queue.empty(); };
-                if (_pending.empty())
+                // Agentmaster (send spacing): promote DUE deferred re-advances into the queue (a
+                // spacing hold's timed self-release — _scheduleDeferredAdvance), and remember the
+                // earliest still-future due so the wait below wakes for it. One-shot: promoted
+                // entries are erased here; RequestAdvance's dedup shape is mirrored inline.
+                const int64_t dnow = NowMs();
+                int64_t nextDueMs = 0;
+                for (auto it = _deferred.begin(); it != _deferred.end();)
                 {
-                    _cv.wait(lk, ready);
+                    if (it->second <= dnow)
+                    {
+                        bool queued = false;
+                        for (const auto& q : _queue)
+                        {
+                            if (q == it->first)
+                            {
+                                queued = true;
+                                break;
+                            }
+                        }
+                        if (!queued)
+                        {
+                            _queue.push_back(it->first);
+                        }
+                        it = _deferred.erase(it);
+                    }
+                    else
+                    {
+                        if (nextDueMs == 0 || it->second < nextDueMs)
+                        {
+                            nextDueMs = it->second;
+                        }
+                        ++it;
+                    }
                 }
-                else
+                if (_queue.empty())
                 {
-                    // A Flight send is awaiting pickup — wake on a poll cadence to re-check it (and
-                    // re-press Enter when due) even if no advance is queued. (Spurious early wakes
-                    // just run an extra cheap sweep; the predicate still gates real work.)
-                    _cv.wait_for(lk, std::chrono::milliseconds(kEnterRetryPollMs), ready);
+                    if (_pending.empty() && nextDueMs == 0)
+                    {
+                        _cv.wait(lk, ready);
+                    }
+                    else
+                    {
+                        // A Flight send is awaiting pickup (poll cadence, so the Enter-retry sweep
+                        // keeps running) and/or a deferred re-advance is scheduled (wake at its due
+                        // time, whichever is sooner). Spurious early wakes just run an extra cheap
+                        // pass; the predicate still gates real work. A timed-out wake falls through
+                        // with no advance — the NEXT iteration's promote pass picks up the due entry.
+                        int64_t waitMs = _pending.empty() ? (nextDueMs - dnow) : kEnterRetryPollMs;
+                        if (!_pending.empty() && nextDueMs != 0 && (nextDueMs - dnow) < waitMs)
+                        {
+                            waitMs = nextDueMs - dnow;
+                        }
+                        if (waitMs < 1)
+                        {
+                            waitMs = 1;
+                        }
+                        _cv.wait_for(lk, std::chrono::milliseconds(waitMs), ready);
+                    }
                 }
                 if (!_running.load() && _queue.empty())
                 {
@@ -273,6 +321,25 @@ namespace Agentmaster
     {
         std::lock_guard lk{ _mtx };
         _lastSkipReason.erase(id);
+    }
+
+    void Scheduler::_scheduleDeferredAdvance(const std::wstring& id, int64_t delayMs)
+    {
+        if (delayMs < 1)
+        {
+            delayMs = 1;
+        }
+        const int64_t due = NowMs() + delayMs;
+        {
+            std::lock_guard lk{ _mtx };
+            const auto it = _deferred.find(id);
+            if (it != _deferred.end() && it->second <= due)
+            {
+                return; // an earlier (or equal) re-check is already scheduled — keep it
+            }
+            _deferred[id] = due;
+        }
+        _cv.notify_one(); // re-aim the worker's wait at the new (earlier) due time
     }
 
     void Scheduler::_process(const std::wstring& id)
@@ -486,6 +553,15 @@ namespace Agentmaster
             if (!plan.reason.empty())
             {
                 _noteAdvanceSkip(id, plan.reason);
+            }
+            // Agentmaster (send spacing): a TIMED hold (retryAfterMs — today only the minimum send
+            // spacing) self-releases: schedule the re-decide for its expiry. Every OTHER None reason
+            // has an external re-trigger (a hook, a notify, the gate's close, the box-state release);
+            // the spacing window on a quiet session has none — without this the plan would stall
+            // until some unrelated registry mutation happened along.
+            if (plan.retryAfterMs > 0)
+            {
+                _scheduleDeferredAdvance(id, plan.retryAfterMs);
             }
             break;
         case AdvanceAction::Send: // (already handled / state changed away from Send)

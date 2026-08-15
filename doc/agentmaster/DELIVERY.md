@@ -533,3 +533,81 @@ nonce-tag uniqueness + the re-arm re-stamp window in `TestLostSendReconciler` /
 `TestVerifiedPlacement` (harness **3244/3244**); `TerminalAppLib` compiles green. Live
 verification (the Episode-A gesture: Stop → set Full → wait, tab stays Full) rides the next
 deploy cycle.
+
+## 13. Incident 5 — the ts-corrupted duplicate Stop double-send (fixed: arrival stamp + MINIMUM SEND SPACING)
+
+**The report (session `ea1dc3dd`, 2026-08-15 11:12): two queued prompts popped and double-sent
+~2.6 s apart.** The reconstructed timeline (hooks.log + autorunner.log + the transcript, which
+is ground truth — local = UTC+3):
+
+```
+11:12:01.5  the running turn's REAL end (transcript end_turn text; stop_hook_summary 02.179Z+3h)
+11:12:02.6  [Stop] arrives -> WaitingForInput          (the line's 11:11:47.975 stamp is a
+            [send] #1 (11:12:02.654)                    partial-line artifact: [tooltip-wheel]
+                                                        wrote the line-head without a newline)
+11:12:04.159 [delivered] #1 (61 chars, verified=exact)  the /np-function prompt
+11:12:04.169Z+3h the transcript's user line — #1 SUBMITTED, the turn RUNNING
+11:12:04.692 [ups] echo consumed -> Running             pickup guard legitimately released
+11:12:04.729 [Stop] state=2  ← THE BUG: accepted as a fresh turn-complete 37ms after the UPS
+11:12:05.240 [send] #2 (the 500ms throttle after the bogus turn-complete)
+11:12:06.378 [delivered] #2 (280 chars, verified=exact) — INTO THE RUNNING TURN; claude queued
+             it (transcript queue-operation 06.399Z; the box then read "Press up to edit queued
+             messages"), the user's overlay mail-click re-queued + cleared the box, #2's turn
+             never started -> enter-retry ×3 -> give-up -> Failed + autorunner paused
+```
+
+**Root cause — a duplicate Stop delivery with a corrupted ordering stamp.** No turn ended at
+11:12:04.729 (the transcript's next output is 11:13:20), so that Stop is a DUPLICATE delivery of
+the 11:12:02 Stop — the §9/§10 twin phenomenon (this very session also shows two `[Unknown]`
+twins at 10:10:07.026 and 11:12:02.649: mangled deliveries whose event name didn't parse). §9's
+`kMinRealTurnSpanMs` floor should have read a 37 ms "turn" as stale — but with BOTH stamps sane
+the acceptance is arithmetically impossible (`stop.ts ≥ ups.ts + 2000` cannot hold when the Stop
+ARRIVED 37 ms after the UPS and ts is stamped before delivery), so at least one of the two wire
+`ts` fields was lost/garbled: `ParseWireLine` leaves `ts=0` on a truncated tail (the ts is the
+LAST field — the first casualty of truncation; the bridge's trailing-flush path even parses a
+fragment of a mid-write-dying client), and **`ts==0` DISABLES both ordering defenses** — the
+stale check AND the floor are gated on `ts != 0 && lastPromptUnixMs != 0` (a ts-less UPS
+likewise skips the `lastPromptUnixMs` stamp, leaving the floor measuring against a prompt an
+hour old). Either corruption lets the duplicate fall through to `turnComplete` → WaitingForInput
+→ the advance seam → send #2.
+
+**Fix 1 — the bridge stamps ARRIVAL time on a ts-less parse (`HooksBridge.cpp`, both dispatch
+sites).** Every current forwarder stamps ts unconditionally (FIRST, before any slow work), so a
+missing ts at the bridge means a mangled delivery, not an old forwarder. Arrival can only
+OVERSTATE the fire time, which errs toward reading a suspect event as stale/too-fast — the
+self-healing direction (a genuinely-completed turn is settled by the scanner's exempt quiescent
+Stop ~2.5 s later). Under the incident's replay, whichever field was corrupted now resolves to
+stale/floored: state stays Running, no advance.
+
+**Fix 2 — the MINIMUM SEND SPACING (`Scheduler.h kMinSendSpacingMs`, 20 s): never two AUTOMATIC
+injections into one session closer than 20 s, measured from OUR OWN registry-clock stamps**
+(`sentAtUnixMs` on Sent/Failed Autorun rows + `injectedAtUnixMs` on any Autorun row — NowMs at
+the mark/deliver seams, so NO wire corruption can defeat it; the user-prescribed belt). Every
+status-correction lane that catches a bogus at-rest state (the scanner's recon-run pass ~2.5 s,
+the presence heartbeat ~2 s, the push/pull echo consume) needs only seconds — 20 s outlasts them
+all, so a status race can cost a DELAYED send, never a DOUBLE send (in the incident's replay the
+hold expires at ~11:12:24 with the session already re-lit Running by recon-run; #2 then rides
+the REAL turn end). Deliberately NOT spaced: a Typed row (the human's own prompt — its running
+turn already holds the advance via state), a rolled-back Pending row (send-deferred/reclaim —
+provably nothing typed; spacing would only slow the legitimate retry), and the human's explicit
+paths (Send-now, the SemiAuto Confirm click — they bypass `DecideAdvance`). The hold is a TIMED
+None (`AdvancePlan::retryAfterMs`) — unlike every other hold it has no external re-trigger on a
+quiet session, so the scheduler schedules a **deferred re-advance** (`_scheduleDeferredAdvance`
+→ the worker's wait wakes at the earliest due and promotes it back into the queue): the plan
+self-resumes, nothing polls. Placement: after the question-guard (a question-parked plan
+schedules no pointless timers) and after the Pending scan (a drained plan still answers PlanDone
+immediately); it gates SemiAuto ARMING too (the armed suggestion races status the same way).
+
+**One deliberate behavior change:** "echoed lead → next pending sends immediately" is GONE —
+the echo still releases the *pickup guard*, but the next send now waits out the spacing window.
+That immediacy is exactly what §13 proved unsafe: between the echo (04.692) and send #2 (05.240)
+there was NOTHING left to hold a corrupted status.
+
+Coverage (`tests_spawn_sched.cpp`): the incident replay through the REAL pipe + parser + state
+machine (`TestBridgeRoundTrip` — a real-ts UPS then a ts-less duplicate Stop 40 ms later must
+stay Running; pre-fix it flips WaitingForInput), the arrival-stamp observable (a ts-less line
+now advances the decay anchor), and the `DecideAdvance` spacing matrix (`TestScheduler`: the
+2.6 s incident shape held + `retryAfterMs` exact, injection-stamp-only hold, Failed-lead hold,
+rolled-back-Pending exempt, Typed exempt, future-stamp skew-safe, PlanDone precedence, SemiAuto
+arming spaced, release at exactly 20 s; the pickup-release probes moved to the spacing boundary
+with an unechoed contrast so echo-vs-clock stays pinned).

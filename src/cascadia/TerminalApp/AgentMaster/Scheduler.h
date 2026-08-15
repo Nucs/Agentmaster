@@ -56,6 +56,26 @@ namespace Agentmaster
     // verdict below then owns the terminal resolution).
     inline constexpr int64_t kPickupGuardMaxMs = 30000;
 
+    // Agentmaster (the ea1dc3dd double-send, 2026-08-15 — MINIMUM SEND SPACING): never two AUTOMATIC
+    // injections into one session closer than this, measured from OUR OWN registry-clock stamps
+    // (QueuedPrompt::sentAtUnixMs / injectedAtUnixMs, stamped NowMs at the mark/deliver seams) —
+    // deliberately NEVER from any wire-derived time. The incident this closes: prompt #1 delivered
+    // 11:12:04.159 + its UserPromptSubmit echo consumed 04.692 (pickup guard legitimately released —
+    // the turn HAD started), then a DUPLICATE delivery of the ALREADY-PROCESSED previous Stop arrived
+    // 04.729 with its trailing wire ts lost to truncation — and ts==0 DISABLES both of
+    // NextSessionStateOrdered's ordering defenses (the stale check AND the kMinRealTurnSpanMs floor,
+    // HookEvents.h — both are gated on `ts != 0 && lastPromptUnixMs != 0`), so a 37ms "turn-complete"
+    // flipped the state WaitingForInput and the advance delivered prompt #2 into the RUNNING turn
+    // 2.6s after #1 (claude queued it as type-ahead, the user's box-clear then orphaned it,
+    // enter-retry gave up, the plan derailed). The HooksBridge now stamps ARRIVAL time on a ts==0
+    // parse (the root fix), and THIS spacing is the wire-independent belt: every status-correction
+    // lane that would catch a bogus at-rest state (the scanner's recon-run pass ~2.5s cadence, the
+    // presence heartbeat ~2s, the push/pull echo consume) needs only seconds, so 20s of spacing
+    // outlasts them all — a status race can cost a DELAYED send now, never a DOUBLE send. The hold
+    // is TIMED (AdvancePlan::retryAfterMs → the scheduler's deferred re-advance), so a spaced plan
+    // self-resumes with no external notify needed.
+    inline constexpr int64_t kMinSendSpacingMs = 20000;
+
     // Enter-retry (the "the TUI ate my Enter" backstop). The ConPTY can deliver an injected
     // `prompt + CR` faster than Claude's Ink UI initializes its input handler, so the submit Enter
     // is absorbed as a NEWLINE instead of sending — the prompt sits typed-but-not-submitted and the
@@ -105,6 +125,11 @@ namespace Agentmaster
         AdvanceAction action{ AdvanceAction::None };
         size_t promptIndex{ 0 };
         std::wstring reason;
+        // Non-zero ONLY when action==None is a TIMED hold (today: the minimum send spacing) — how
+        // long until the hold self-releases. The scheduler schedules a deferred re-advance for it:
+        // unlike every other None reason, a spacing hold has NO external re-trigger of its own (a
+        // quiet session may see no registry notify for minutes — OnObserved fires on changes only).
+        int64_t retryAfterMs{ 0 };
     };
 
     // PURE decision (DESIGN §10 "the loop" + the three-states table). Inputs are explicit so
@@ -115,7 +140,8 @@ namespace Agentmaster
     // Encodes, in order: global pause; mode Off; not-ready (only Idle or WaitingForInput are
     // ready — see below); pause-on-human-input; maxAutoSends; awaiting-injection-pickup guard;
     // (no Pending => PlanDone); Manual-gate skip; question-guard (None — the prompt stays queued
-    // and waits, exactly like a Running mid-turn); SemiAuto => AwaitConfirm; Full => Send.
+    // and waits, exactly like a Running mid-turn); minimum SEND SPACING (kMinSendSpacingMs — a
+    // TIMED hold, retryAfterMs set); SemiAuto => AwaitConfirm; Full => Send.
     inline AdvancePlan DecideAdvance(const SessionInfo& s,
                                      int64_t nowUnixMs,
                                      int64_t lastHumanInputUnixMs,
@@ -267,6 +293,53 @@ namespace Agentmaster
         {
             plan.reason = L"question pending — stay queued and wait (treated like running)";
             return plan; // None: the prompt stays Pending; a later non-question turn-complete fires it
+        }
+
+        // MINIMUM SEND SPACING (kMinSendSpacingMs above — the ea1dc3dd double-send): never fire the
+        // next automatic injection within the spacing window of the previous one, measured from OUR
+        // OWN stamps so no wire-ts corruption can defeat it. What counts as "the previous send":
+        //   * injectedAtUnixMs on ANY Autorun row — real keystrokes demonstrably reached the ConPTY
+        //     then (a wedged dispatcher can inject long after the mark — DELIVERY.md §12 measured
+        //     83s — so the LATEST evidence wins);
+        //   * sentAtUnixMs on a Sent or Failed Autorun row — an accepted send whose injection may
+        //     still be materializing (Sent), or one that failed AFTER real Enter presses went in
+        //     (Failed: the enter-retry ladder refreshes sentAtUnixMs per press).
+        // Deliberately NOT counted: a Typed row (the human's own prompt never spaces OUR queue — its
+        // running turn already holds the advance via state), and a rolled-back Pending row (the
+        // send-deferred / undelivered-reclaim paths keep the stale stamp but provably typed NOTHING —
+        // spacing it would just slow the legitimate retry). A negative gap (clock skew / a future
+        // stamp) reads as expired, the pickup guard's idiom — never a permanent hold. Sits AFTER the
+        // question-guard so a question-parked plan doesn't schedule pointless timed re-checks, and
+        // AFTER the Pending scan so a drained plan still answers PlanDone immediately; it gates the
+        // SemiAuto arming too (the armed suggestion races status exactly like an auto-send would).
+        // The human's explicit paths (Send-now, a SemiAuto Confirm click) bypass DecideAdvance
+        // entirely and are deliberately NOT spaced.
+        int64_t lastSendMs = 0;
+        for (const auto& q : s.queue)
+        {
+            if (q.origin != PromptOrigin::Autorun)
+            {
+                continue;
+            }
+            if (q.injectedAtUnixMs > lastSendMs)
+            {
+                lastSendMs = q.injectedAtUnixMs;
+            }
+            if ((q.status == PromptStatus::Sent || q.status == PromptStatus::Failed) && q.sentAtUnixMs > lastSendMs)
+            {
+                lastSendMs = q.sentAtUnixMs;
+            }
+        }
+        if (lastSendMs != 0)
+        {
+            const int64_t sinceSend = nowUnixMs - lastSendMs;
+            if (sinceSend >= 0 && sinceSend < kMinSendSpacingMs)
+            {
+                // Fixed literal (no countdown in the text) so _noteAdvanceSkip's change-dedup works.
+                plan.reason = L"send spacing (a prompt was sent/injected moments ago)";
+                plan.retryAfterMs = kMinSendSpacingMs - sinceSend;
+                return plan;
+            }
         }
 
         if (s.autorunner.mode == AutorunnerMode::SemiAuto)
@@ -618,6 +691,11 @@ namespace Agentmaster
         // plan-done), so the NEXT stall logs again instead of being swallowed by the dedup.
         void _noteAdvanceSkip(const std::wstring& id, const std::wstring& reason);
         void _clearAdvanceSkip(const std::wstring& id);
+        // Agentmaster (send spacing): re-run a session's advance once a TIMED hold expires
+        // (AdvancePlan::retryAfterMs). Keeps the EARLIEST scheduled due per session; the worker's
+        // wait wakes for it and promotes it into _queue. Without this a spacing-held plan on a
+        // quiet session would stall until some unrelated registry notify happened along.
+        void _scheduleDeferredAdvance(const std::wstring& id, int64_t delayMs);
 
         std::shared_ptr<SessionRegistry> _registry;
         std::thread _thread;
@@ -632,6 +710,10 @@ namespace Agentmaster
         // _noteAdvanceSkip). Guarded by _mtx; erased on plan progress; wholesale-reset past a
         // generous cap (the Engine.cpp [Unknown]-dedup precedent) so a long run can't grow it.
         std::unordered_map<std::wstring, std::wstring> _lastSkipReason;
+        // sessionId -> due NowMs for a deferred re-advance (the send-spacing hold's self-release;
+        // _scheduleDeferredAdvance). Guarded by _mtx; one-shot — an entry is erased the moment the
+        // worker promotes it into _queue, so it is bounded by the sessions currently spacing-held.
+        std::unordered_map<std::wstring, int64_t> _deferred;
         std::atomic<bool> _running{ false };
         std::atomic<bool> _globalPause{ false };
     };
