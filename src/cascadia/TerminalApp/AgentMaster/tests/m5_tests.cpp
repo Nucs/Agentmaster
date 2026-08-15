@@ -69,6 +69,7 @@ int wmain()
     TestForkSourceIdEcho();
     TestTypedCapture();
     TestQueueHistoryTrim();
+    TestTakeLastPendingPrompt();
     TestObserveClaude();
     TestSupersedeStaleTabSiblings();
     TestSpawnBuilders();

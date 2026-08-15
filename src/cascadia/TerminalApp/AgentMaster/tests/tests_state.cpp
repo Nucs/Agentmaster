@@ -1069,6 +1069,75 @@ void TestQueueHistoryTrim()
     }
 }
 
+// Agentmaster (queue pop — Ctrl+Shift+Up on the empty compose box): TakeLastPendingPrompt pops the
+// LAST still-queued (Pending / legacy Held) prompt out of the queue and returns it, skipping
+// completed history (Sent/Skipped/Failed are records of delivered messages — never popped, so a
+// racing send between keystroke and lock finds nothing). The UI runs it inside ONE registry Update;
+// here the pure pop is pinned: order (last in QUEUE order), history preservation, LIFO drain, the
+// Held belt, and the nothing-to-pop cases.
+void TestTakeLastPendingPrompt()
+{
+    std::wprintf(L"TakeLastPendingPrompt (queue pop — the envelope's inverse):\n");
+
+    const auto mk = [](const std::wstring& id, PromptStatus st, const std::wstring& text) {
+        QueuedPrompt p;
+        p.id = id;
+        p.label = text.substr(0, 8);
+        p.text = text;
+        p.status = st;
+        return p;
+    };
+
+    // 1. Empty queue: nothing to pop, queue untouched.
+    {
+        std::vector<QueuedPrompt> q;
+        CHECK(!TakeLastPendingPrompt(q).has_value(), "empty queue pops nothing");
+        CHECK(q.empty(), "empty queue stays empty");
+    }
+    // 2. The LAST Pending pops (queue order), with its text/id intact; earlier rows survive.
+    {
+        std::vector<QueuedPrompt> q{ mk(L"s0", PromptStatus::Sent, L"done"),
+                                     mk(L"a", PromptStatus::Pending, L"first queued"),
+                                     mk(L"b", PromptStatus::Pending, L"last queued") };
+        const auto taken = TakeLastPendingPrompt(q);
+        CHECK(taken && taken->id == L"b" && taken->text == L"last queued", "the LAST Pending pops, text whole");
+        CHECK(q.size() == 2 && q[0].id == L"s0" && q[1].id == L"a", "history + the earlier Pending survive in order");
+    }
+    // 3. Completed history at the BACK is skipped over — the pop reaches the last real Pending.
+    {
+        std::vector<QueuedPrompt> q{ mk(L"a", PromptStatus::Pending, L"work"),
+                                     mk(L"x", PromptStatus::Sent, L"sent"),
+                                     mk(L"y", PromptStatus::Failed, L"failed") };
+        const auto taken = TakeLastPendingPrompt(q);
+        CHECK(taken && taken->id == L"a", "trailing Sent/Failed history is never popped — the Pending behind it is");
+        CHECK(q.size() == 2 && q[0].id == L"x" && q[1].id == L"y", "the delivered-message records survive");
+    }
+    // 4. All-completed queue: nothing to pop (the race shape — the row went Sent under our feet).
+    {
+        std::vector<QueuedPrompt> q{ mk(L"x", PromptStatus::Sent, L"sent"),
+                                     mk(L"y", PromptStatus::Skipped, L"skipped"),
+                                     mk(L"z", PromptStatus::Failed, L"failed") };
+        CHECK(!TakeLastPendingPrompt(q).has_value(), "an all-history queue pops nothing");
+        CHECK(q.size() == 3, "nothing removed when nothing pops");
+    }
+    // 5. A legacy Held row (pre-rehabilitation sessions.json) still counts as queued work.
+    {
+        std::vector<QueuedPrompt> q{ mk(L"x", PromptStatus::Sent, L"sent"),
+                                     mk(L"h", PromptStatus::Held, L"held work") };
+        const auto taken = TakeLastPendingPrompt(q);
+        CHECK(taken && taken->id == L"h", "legacy Held pops like Pending (still-queued work)");
+    }
+    // 6. Repeated pops drain LIFO — b, then a, then nothing (the multi-undo shape).
+    {
+        std::vector<QueuedPrompt> q{ mk(L"a", PromptStatus::Pending, L"one"),
+                                     mk(L"b", PromptStatus::Pending, L"two") };
+        const auto first = TakeLastPendingPrompt(q);
+        const auto second = TakeLastPendingPrompt(q);
+        CHECK(first && first->id == L"b" && second && second->id == L"a", "repeated pops walk newest -> oldest");
+        CHECK(!TakeLastPendingPrompt(q).has_value() && q.empty(), "a drained queue pops nothing");
+    }
+}
+
 // Fleet Observer O3 (OBSERVER.md §9): the provenance-aware PULL upsert. A claude observed
 // out-of-band enriches its record (facts) but NEVER overrides hook-owned state; first sight
 // creates an external+live record and fires adoption; a steady-state re-observe is a no-op.

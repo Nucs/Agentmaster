@@ -397,6 +397,29 @@ namespace Agentmaster
         }
     }
 
+    // Agentmaster (queue pop — the envelope's inverse): take the LAST still-queued prompt OUT of the
+    // queue and return it, so the compose box's Ctrl+Shift+Up can load "the last queued item" back
+    // into the editor for re-editing/re-aiming. "Last" is last in QUEUE ORDER (the bottom UPCOMING
+    // row — a Move-down counts), and "queued" is Pending (plus a legacy Held, which the loader
+    // rehabilitates to Pending — same still-queued-work set TrimQueueHistory protects). Completed
+    // entries (Sent / Skipped / Failed) are HISTORY, never popped — the record of a delivered message
+    // must survive (Rule #4) — so a racing scheduler advance that marks the row Sent between the
+    // keystroke and this call simply leaves nothing to pop. PURE + total; the UI runs it inside ONE
+    // registry Update so the find + capture + erase are atomic against that race.
+    inline std::optional<QueuedPrompt> TakeLastPendingPrompt(std::vector<QueuedPrompt>& queue)
+    {
+        for (auto it = queue.rbegin(); it != queue.rend(); ++it)
+        {
+            if (it->status == PromptStatus::Pending || it->status == PromptStatus::Held)
+            {
+                std::optional<QueuedPrompt> taken{ std::move(*it) };
+                queue.erase(std::next(it).base()); // reverse_iterator -> the element it denotes
+                return taken;
+            }
+        }
+        return std::nullopt;
+    }
+
     // Agentmaster: a ONE-LINE, capped preview of a prompt body — its FIRST line, at most `maxChars`
     // characters of text content. A trailing "..." is appended when EITHER the first line surpassed
     // the cap (truncated) OR there is real content after it (further lines), so "..." ALWAYS means

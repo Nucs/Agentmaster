@@ -377,6 +377,14 @@ namespace winrt::TerminalApp::implementation
         bool _TakeDraftIntoPromptBox(const std::wstring& draft, bool fromLive, const wchar_t* how);
         void _OnMovePrompt(int delta);
         void _OnDeletePrompt();
+        // Agentmaster (queue pop): Ctrl+Shift+Up on an EMPTY compose box pops the selected session's
+        // LAST still-Pending queued prompt back into the editor — the envelope's ("Add to queue")
+        // inverse: un-queue the most recent upcoming row to edit/re-aim it before it fires. Returns
+        // true when it popped (the keystroke is then marked handled); a non-empty box / no selection /
+        // nothing Pending returns false so the TextBox keeps its native Ctrl+Shift+Up (selection
+        // extension). The find+capture+erase run in ONE registry Update (TakeLastPendingPrompt) so a
+        // racing scheduler send can't be un-recorded.
+        bool _PopLastQueuedPromptIntoBox();
         void _OnAutorunnerChanged(int index);
         // Agentmaster: the FLIGHT-PLAN-header Autorunner toggle. _CycleAutorunner advances the
         // selected session's mode (Off -> Semi-auto -> Full -> Off); _UpdateAutorunnerButton paints

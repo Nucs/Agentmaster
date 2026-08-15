@@ -2022,7 +2022,16 @@ What works, by area:
   behind a `_promptHistoryNavigating` latch so a recall write doesn't reset the index), and **focus
   snaps back to the compose box after a queue/send** (deferred PAST the Send-now confirm so it can't steal
   the dialog's focus) so you can keep typing. Only a **plain** Up/Down browses history — a **modified**
-  arrow (Shift/Ctrl+arrow) passes through for caret/selection, never hijacked. **Clicking / tabbing into
+  arrow (Shift/Ctrl+arrow) passes through for caret/selection, never hijacked — with ONE carve-out:
+  **Ctrl+Shift+Up on an EMPTY compose box POPS the last queued item back into it**
+  (`_PopLastQueuedPromptIntoBox` → the pure, tested `TakeLastPendingPrompt`): the selected session's
+  LAST still-`Pending` row (queue order — the bottom UPCOMING row; legacy `Held` counts) is removed
+  from the queue and loaded into the editor, caret at end — the envelope's inverse ("take back / edit
+  what I just queued before the Autorunner fires it"). Empty-box-gated so it can never clobber
+  composed text (with text in the box the chord keeps the TextBox's native selection-extend), and the
+  find+capture+erase run in ONE registry `Update` so a racing scheduler send can't be un-recorded — a
+  row that went `Sent` in between simply isn't found (completed history is never popped). Logged
+  `[nav] queue-pop <sid8> "label"`, the `queue` line's inverse. **Clicking / tabbing into
   the EMPTY compose box PULLS IN the selected session's UNSENT input-box draft** (PENDING_INPUT.md §8a —
   the prompt you typed into the terminal but never sent, the one its "3 dots" are pulsing for), so it can
   be queued here without retyping: `_MaybePrefillPromptFromDraft` resolves it through the SAME

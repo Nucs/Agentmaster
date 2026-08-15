@@ -733,6 +733,44 @@ namespace winrt::TerminalApp::implementation
         _FocusPromptBox(); // Agentmaster: keep focus in the editor so the user can queue the next prompt
     }
 
+    // Agentmaster (queue pop): Ctrl+Shift+Up on an EMPTY compose box — pop the selected session's
+    // LAST still-Pending queued prompt back into the editor, _OnAddPrompt's exact inverse ("take
+    // back / edit what I just queued before the Autorunner fires it"). Empty-box-gated so composed
+    // text can never be clobbered, and the find + capture + erase run in ONE registry Update
+    // (TakeLastPendingPrompt) so a racing scheduler advance can't be un-recorded: a row that went
+    // Sent between the keystroke and the lock simply isn't there to pop (completed history is never
+    // taken), and the pop either moves the text whole or does nothing.
+    bool AgentManagerContent::_PopLastQueuedPromptIntoBox()
+    {
+        if (_selectedId.empty() || !_registry || !_addPromptBox)
+        {
+            return false; // no drivable selection (an EXTERNAL's read-only plan has no queue)
+        }
+        if (!std::wstring{ _addPromptBox.Text() }.empty())
+        {
+            return false; // only an EMPTY box takes the pop — never overwrite what's being composed
+        }
+        const auto id = _selectedId;
+        std::optional<QueuedPrompt> taken;
+        _registry->Update(id, [&](SessionInfo& s) {
+            taken = TakeLastPendingPrompt(s.queue);
+        });
+        if (!taken)
+        {
+            return false; // nothing Pending (or a race just sent it) — leave the chord to the TextBox
+        }
+        // Nav audit: the inverse of the envelope's `queue` line (same identifying label).
+        ::Agentmaster::LogNav(L"queue-pop " + ::Agentmaster::ShortId(id) + L" \"" + taken->label + L"\"");
+        if (taken->id == _selectedPromptId)
+        {
+            _selectedPromptId.clear(); // the row is gone — don't leave a dangling menu/Send-now target
+        }
+        _ApplyPromptHistoryText(taken->text); // the history recall's guarded setter: text + caret at end
+        _ResetPromptHistory(); // the popped text is a fresh DRAFT — any stale history walk is over
+        _Refresh(); // the upcoming list lost its last row
+        return true;
+    }
+
     void AgentManagerContent::_OnSendNow()
     {
         if (_selectedId.empty() || !_registry)

@@ -1456,6 +1456,21 @@ namespace winrt::TerminalApp::implementation
                         }
                         return;
                     }
+                    // Agentmaster (queue pop): Ctrl+Shift+Up on an EMPTY box pops the selected
+                    // session's LAST queued (still-Pending) prompt back into the editor — the
+                    // envelope's inverse ("take back / edit what I just queued"). ONLY an empty box
+                    // takes it — never clobber composed text (the §8b rule) — so with text in the box
+                    // the chord stays the TextBox's native selection-extend, like every other
+                    // modified arrow below (and on an empty box that native behavior is a no-op, so
+                    // nothing is stolen when there is nothing to pop either).
+                    if (key == VirtualKey::Up && ctrl && shift && !alt)
+                    {
+                        if (_PopLastQueuedPromptIntoBox())
+                        {
+                            e.Handled(true);
+                        }
+                        return;
+                    }
                     if (key != VirtualKey::Up && key != VirtualKey::Down)
                     {
                         return; // only the bare Up/Down arrows drive history

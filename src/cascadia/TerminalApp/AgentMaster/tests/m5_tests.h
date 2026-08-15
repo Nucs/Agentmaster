@@ -132,6 +132,7 @@ void TestRegistryFanout();
 void TestForkSourceIdEcho();
 void TestTypedCapture();
 void TestQueueHistoryTrim(); // bounded queue history: TrimQueueHistory (pure) + the registry append-seam cap
+void TestTakeLastPendingPrompt(); // queue pop (Ctrl+Shift+Up on the empty compose box): TakeLastPendingPrompt (pure) — last-in-queue-order Pending/legacy-Held pops whole, completed history never, LIFO drain
 void TestObserveClaude();
 void TestSupersedeStaleTabSiblings();
 // tests_spawn_sched.cpp
