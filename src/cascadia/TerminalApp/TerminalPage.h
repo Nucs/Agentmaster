@@ -995,6 +995,11 @@ namespace winrt::TerminalApp::implementation
         // {InputBoxState, draft text}), at a caller-chosen row window so a filled prompt taller than
         // the scan's 120 rows still reads back. Unknown + "" for a dormant/unhosted/throwing control.
         std::pair<int32_t, std::wstring> _ReadInputBoxProbeForSession(const std::wstring& sessionId, int32_t maxRows);
+        // Agentmaster (PENDING_INPUT.md §9): the session input box's body height in VISUAL rows
+        // (TermControl::ReadInputBoxBodyRows). > 1 means it still holds blank "" rows (leftover
+        // newlines) the draft-clear ladders keep collapsing with Ctrl+U even after the draft text
+        // reads empty (the detector trims trailing blanks). 0 for a dormant/unhosted/throwing control.
+        int32_t _ReadInputBoxBodyRowsForSession(const std::wstring& sessionId);
         // The VERIFIED SEND core (R4): fill (bracketed paste, NO CR) -> settle -> read the box back ->
         // commit the lone CR only on a Verified/VerifiedCollapsed read. Eaten re-fills (<=2), Partial
         // clears-and-refills (it is OUR text), Foreign UNDOES the insertion (verified backspace

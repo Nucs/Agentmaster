@@ -954,6 +954,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             _pendingInputScanValid = true;
             _pendingInputScanResult = {};
             _pendingInputScanState = static_cast<int32_t>(::Agentmaster::InputBoxState::NoBox); // a blank screen has no box
+            _pendingInputScanBodyRows = 0; // no box => no rows (PENDING_INPUT.md §9)
             return {};
         }
         // The input box + a little context above it is at most a viewport tall; 120 rows is generous and
@@ -971,6 +972,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         _pendingInputScanValid = true;
         _pendingInputScanResult = winrt::hstring{ draft.text };
         _pendingInputScanState = static_cast<int32_t>(draft.state); // R5: cache the verdict beside the text
+        // §9: the box's body height in VISUAL rows (caret row .. bottom rule, exclusive) == newlines + 1.
+        // DetectPendingInput trims trailing blank rows out of the TEXT but bottomRuleRow still points at
+        // the real rule, so this span sees the leftover "" rows the draft-clear ladders must collapse.
+        _pendingInputScanBodyRows = draft.boxFound ? (draft.bottomRuleRow - draft.caretRow) : 0;
         return _pendingInputScanResult;
     }
 
@@ -987,6 +992,22 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         ReadPendingInputDraft(); // ensure the cached scan is fresh for the current mutation id
         const auto lock = _terminal->LockForReading();
         return _pendingInputScanState;
+    }
+
+    // Agentmaster (PENDING_INPUT.md §9): the input box's body height in VISUAL rows — a second view over
+    // the SAME cached shallow scan as ReadPendingInputDraft (the ReadPendingInputBoxState pattern), so it
+    // is ~free in steady state. > 1 means the box still spans blank "" rows (leftover newlines) that the
+    // draft-clear ladders keep collapsing with Ctrl+U even after the (trailing-trimmed) draft text reads
+    // empty. 0 when the terminal isn't initialized or no box is present.
+    int32_t ControlCore::ReadInputBoxBodyRows()
+    {
+        if (!_initializedTerminal.load(std::memory_order_relaxed))
+        {
+            return 0;
+        }
+        ReadPendingInputDraft(); // ensure the cached scan is fresh for the current mutation id
+        const auto lock = _terminal->LockForReading();
+        return _pendingInputScanBodyRows;
     }
 
     // Agentmaster (DELIVERY.md §11 / DELIVERY_PLAN.md R4+R5 — the VERIFIED-PLACEMENT probe): ONE

@@ -896,25 +896,46 @@ namespace Agentmaster
     // the box as RE-READ right now plus what has already been spent, so the caller is a plain
     // "read -> decide -> act -> read again" loop holding no hidden state:
     //
-    //   * empty box                     -> Done. Whitespace-only counts as empty (a focused empty
+    //   * empty box, single row         -> Done. Whitespace-only counts as empty (a focused empty
     //                                      box can render as padding alone), the same rule
     //                                      PickCurrentPromptText applies.
+    //   * empty box, still MULTI-ROW    -> NOT Done in the kill-ring mode: the box reads empty only
+    //     (boxMultiRow)                    because DetectPendingInput drops trailing blank rows, but
+    //                                      the box still SPANS several visual rows -- leftover "" rows
+    //                                      (== newlines the user wants gone). Ctrl+U collapses one such
+    //                                      row per press, so keep Killing until the box is a single row
+    //                                      (the user's "clean up empty lines ... until no newlines
+    //                                      appear"). Exempt in STASH mode: Ctrl+S already takes the
+    //                                      WHOLE box -- content AND newlines -- in one press, so an
+    //                                      empty box there is genuinely finished.
     //   * stash rung enabled + unspent  -> Stash. One press, whole box, cursor-independent.
     //   * kill presses left, and either
     //     none pressed yet or the last
-    //     action SHRANK the box         -> Kill. A multi-line draft can take a press per line.
+    //     action SHRANK the box         -> Kill. A multi-line draft can take a press per line, and a
+    //                                      press that only collapses a blank "" row (no text change)
+    //                                      still counts as SHRANK when the caller feeds the row-span
+    //                                      drop into `spent.shrank`.
     //   * an action that did NOT shrink -> fall through to the erase rung: that binding is not
     //                                      doing what we assumed, so stop pressing it.
     //   * backspace rounds left         -> Backspace, one per remaining character plus a small
     //                                      margin for a trailing cursor cell in the read.
     //   * otherwise                     -> GiveUp.
     //
+    // `boxMultiRow` is the box's visual-row fact the caller reads out-of-band (TermControl::
+    // ReadInputBoxBodyRows > 1) -- separate from `box`, whose trailing blanks the detector trims away.
+    //
     // The ladder only ever moves FORWARD -- a spent rung is pinned by its own counter -- so no two
     // rungs can alternate and the loop always terminates.
-    inline DraftClearPlan DecideDraftClear(std::wstring_view box, const DraftClearProgress& spent)
+    inline DraftClearPlan DecideDraftClear(std::wstring_view box, const DraftClearProgress& spent, bool boxMultiRow = false)
     {
         DraftClearPlan plan;
-        if (pending_detail::AllWhitespace(box))
+        // A box that reads empty but still spans several rows has leftover "" rows (newlines) the
+        // Ctrl+U rung collapses one per press; keep going until it is a single row. The STASH rung
+        // is exempt -- Ctrl+S takes the whole box (newlines included) in one press, so in stash mode
+        // an empty box is done (and a stray Ctrl+U afterward would only muddy which rung to restore
+        // through). So blank rows are a kill-ring-mode concern only.
+        const bool blankRowsToClean = boxMultiRow && !spent.useStash;
+        if (pending_detail::AllWhitespace(box) && !blankRowsToClean)
         {
             plan.action = DraftClearAction::Done;
             return plan;
@@ -1021,10 +1042,18 @@ namespace Agentmaster
     // PURE decision (the DecideDraftClear pattern) for ONE round of the discard ladder. The
     // ladder only ever moves FORWARD -- once a backspace round has run, the kill rung is never
     // revisited -- so no two rungs can alternate and the loop always terminates.
-    inline DraftDiscardPlan DecideDraftDiscard(std::wstring_view box, const DraftDiscardProgress& spent)
+    //
+    // `boxMultiRow` (TermControl::ReadInputBoxBodyRows > 1) is the box's visual-row fact, read
+    // out-of-band by the caller: `box` is the detector's text with trailing blank rows dropped, so a
+    // box that reads empty can still SPAN several rows -- leftover "" rows (newlines) that End+Ctrl+U
+    // collapses one per press. Done is therefore reached only when the box is an EMPTY SINGLE row
+    // (the user's "clean up empty lines ... until no newlines appear"); a cleaned "" row shows NO
+    // text change, so the caller must feed the row-span drop into its stall counter as PROGRESS or
+    // the rung would falsely stall and hand over to the erase rung before the newlines are gone.
+    inline DraftDiscardPlan DecideDraftDiscard(std::wstring_view box, const DraftDiscardProgress& spent, bool boxMultiRow = false)
     {
         DraftDiscardPlan plan;
-        if (pending_detail::AllWhitespace(box))
+        if (pending_detail::AllWhitespace(box) && !boxMultiRow)
         {
             plan.action = DraftDiscardAction::Done;
             return plan;

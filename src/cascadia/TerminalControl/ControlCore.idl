@@ -178,6 +178,12 @@ namespace Microsoft.Terminal.Control
         // Agentmaster (DELIVERY_PLAN.md R4/R5 — the verified-placement probe): ONE fresh read of the
         // input box at a caller-chosen row window, "<state digit><draft text>" ("" => not initialized).
         String ReadInputBoxProbe(Int32 maxRows);
+        // Agentmaster (PENDING_INPUT.md §9 — the "clean up empty lines" fact): how many VISUAL rows
+        // the input box currently spans (its body height, == newlines + 1). Read off the SAME cached
+        // 120-row scan as ReadPendingInputDraft. > 1 means the box holds blank "" rows the draft-clear
+        // ladders must collapse with Ctrl+U even when the (trailing-trimmed) draft text reads empty.
+        // 0 => no box / not initialized.
+        Int32 ReadInputBoxBodyRows();
 
         Microsoft.Terminal.Core.Color ForegroundColor { get; };
         Microsoft.Terminal.Core.Color BackgroundColor { get; };

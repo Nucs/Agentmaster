@@ -1543,6 +1543,19 @@ void TestPendingInput()
             CHECK(p.stashPresses <= kMaxDraftStashPresses, "draft clear: Ctrl+S is pressed at most once across a whole run");
             CHECK(steps <= static_cast<int>(kMaxDraftStashPresses + kMaxDraftKillPresses + kMaxDraftBackspaceRounds) + 2, "draft clear: termination is bounded by the rung caps");
         }
+
+        // §9 LEFTOVER BLANK ROWS ("clean up empty lines ... until no newlines appear"). The box TEXT
+        // read drops trailing blank rows, so a box that reads empty can still SPAN several visual rows;
+        // boxMultiRow (ReadInputBoxBodyRows > 1) is the separate fact the ladder acts on.
+        //   * kill-ring mode: an empty box that still spans rows is NOT Done — keep pressing Ctrl+U to
+        //     collapse the "" rows one per press; a single-row empty box IS Done.
+        CHECK(DecideDraftClear(L"", spent(0, 0, 0, false, false), /*boxMultiRow*/ true).action == DraftClearAction::Kill, "draft clear: empty box that still spans blank rows -> Kill (collapse the newlines)");
+        CHECK(DecideDraftClear(L"", spent(0, 1, 0, true, false), /*boxMultiRow*/ true).action == DraftClearAction::Kill, "draft clear: a still-shrinking multi-row empty box keeps Killing the blank rows");
+        CHECK(DecideDraftClear(L"", spent(0, 0, 0, false, false), /*boxMultiRow*/ false).action == DraftClearAction::Done, "draft clear: an empty SINGLE-row box is Done");
+        //   * stash mode is exempt — Ctrl+S already took the WHOLE box (newlines included) in one press,
+        //     so an empty box there is finished regardless of the span (a stray Ctrl+U afterward would
+        //     only muddy which rung to restore through).
+        CHECK(DecideDraftClear(L"", spent(1, 0, 0, false, true), /*boxMultiRow*/ true).action == DraftClearAction::Done, "draft clear: stash mode ignores the row span (Ctrl+S already took the whole box)");
     }
     // 27. The MOVE-clear DISCARD ladder (PENDING_INPUT.md §8d). The mail button's plain click MOVES
     // the draft into the queue, so its clear must DESTROY the box copy — never Ctrl+S: a stashed
@@ -1633,6 +1646,33 @@ void TestPendingInput()
             }
             CHECK(stayedOnKillRung, "discard: the measured 3-line alternation stays on the kill rung throughout");
             CHECK(DecideDraftDiscard(L"", p).action == DraftDiscardAction::Done, "discard: ...and the emptied box ends Done");
+        }
+
+        // §9 LEFTOVER BLANK ROWS ("clean up empty lines ... until no newlines appear"). The box TEXT
+        // read drops trailing blank rows, so an empty-reading box can still SPAN rows; boxMultiRow
+        // (ReadInputBoxBodyRows > 1) keeps End+Ctrl+U collapsing the "" rows until the box is one row.
+        CHECK(DecideDraftDiscard(L"", dspent(0, 0, 0, 0), /*boxMultiRow*/ true).action == DraftDiscardAction::EndKill, "discard: empty box that still spans blank rows -> End+Ctrl+U (collapse the newlines)");
+        CHECK(DecideDraftDiscard(L"", dspent(5, 1, 0, 0), /*boxMultiRow*/ true).action == DraftDiscardAction::EndKill, "discard: keep collapsing blank rows while the kill rung is alive");
+        CHECK(DecideDraftDiscard(L"", dspent(0, 0, 0, 0), /*boxMultiRow*/ false).action == DraftDiscardAction::Done, "discard: an empty SINGLE-row box is Done");
+        // The all-blank-box collapse (span 4 -> 3 -> 2 -> 1): the text reads "" throughout, but each
+        // End+Ctrl+U drops one row, which the caller records as a change (killStalls stays 0) — so the
+        // rung never falsely stalls to backspaces before the newlines are gone. Ends Done at one row.
+        {
+            DraftDiscardProgress p;
+            bool stayedOnKillRung = true;
+            for (int span = 4; span > 1; --span)
+            {
+                const auto plan = DecideDraftDiscard(L"", p, /*boxMultiRow*/ true);
+                if (plan.action != DraftDiscardAction::EndKill)
+                {
+                    stayedOnKillRung = false;
+                    break;
+                }
+                ++p.killRounds;
+                p.killStalls = 0; // the row span dropped => progress, never a stall
+            }
+            CHECK(stayedOnKillRung, "discard: collapsing consecutive blank rows stays on the kill rung (a row drop is progress, not a stall)");
+            CHECK(DecideDraftDiscard(L"", p, /*boxMultiRow*/ false).action == DraftDiscardAction::Done, "discard: ...and the single-row empty box ends Done");
         }
     }
 }

@@ -2932,6 +2932,12 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         return _core.ReadInputBoxProbe(maxRows);
     }
 
+    // Agentmaster (PENDING_INPUT.md §9): the input box's body height in visual rows. Pure passthrough.
+    int32_t TermControl::ReadInputBoxBodyRows()
+    {
+        return _core.ReadInputBoxBodyRows();
+    }
+
     // Agentmaster (alt+up / alt+down prompt nav): scroll to the nearest SENT prompt that is currently
     // OFF-SCREEN in the given direction and CENTER it. Reuses the read-only batch resolve (a buffer row
     // per prompt; the order-preserving greedy handles duplicate texts) plus the live viewport, so the

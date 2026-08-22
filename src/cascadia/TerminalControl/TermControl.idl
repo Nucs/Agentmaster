@@ -151,6 +151,9 @@ namespace Microsoft.Terminal.Control
         // Agentmaster (DELIVERY_PLAN.md R4/R5): ONE fresh input-box read at a caller-chosen row window,
         // "<state digit><draft text>" ("" => not initialized). The verified-send read-back channel.
         String ReadInputBoxProbe(Int32 maxRows);
+        // Agentmaster (PENDING_INPUT.md §9): the input box's body height in visual rows (newlines + 1);
+        // > 1 => it still holds blank "" rows the clear ladders collapse with Ctrl+U. 0 => no box.
+        Int32 ReadInputBoxBodyRows();
 
         void CreateSearchBoxControl();
         Boolean SearchBoxEditInFocus();

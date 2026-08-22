@@ -249,6 +249,11 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // buffer mutation can never split the pair; a raised window is what lets a filled prompt
         // TALLER than the scan's 120 rows still verify. Read-only.
         winrt::hstring ReadInputBoxProbe(int32_t maxRows);
+        // Agentmaster (PENDING_INPUT.md §9): the input box's body height in VISUAL rows (newlines + 1),
+        // off the SAME cached scan ReadPendingInputDraft uses. > 1 => the box still holds blank "" rows
+        // (leftover newlines) the clear ladders keep collapsing with Ctrl+U even after the draft text
+        // reads empty (the detector trims trailing blanks). 0 => no box / terminal not initialized.
+        int32_t ReadInputBoxBodyRows();
 
         void LeftClickOnTerminal(const til::point terminalPosition,
                                  const int numberOfClicks,
@@ -457,6 +462,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         bool _pendingInputScanValid{ false };
         winrt::hstring _pendingInputScanResult{};
         int32_t _pendingInputScanState{ 0 }; // the cached scan's InputBoxState verdict (R5), beside the text
+        int32_t _pendingInputScanBodyRows{ 0 }; // the cached scan's box body height in visual rows (PENDING_INPUT.md §9), beside the text
 
         // Agentmaster (SUMMARY_JUMP.md §4, perf): ResolveConversationPromptRows' epoch cache. The batch
         // resolve is O(prompts x haystack) -- up to kAnchorRecentWindowChars (1.2M) chars scanned several

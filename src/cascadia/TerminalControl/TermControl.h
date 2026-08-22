@@ -128,6 +128,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         winrt::hstring ReadPendingInputDraft(); // Agentmaster (PENDING_INPUT.md): the unsent input-box draft (read-only); empty => none
         int32_t ReadPendingInputBoxState(); // Agentmaster (DELIVERY_PLAN.md R5): the tri-state verdict of that same cached scan (InputBoxState as Int32)
         winrt::hstring ReadInputBoxProbe(int32_t maxRows); // Agentmaster (DELIVERY_PLAN.md R4/R5): "<state digit><draft>" fresh read at a chosen window; "" => not initialized
+        int32_t ReadInputBoxBodyRows(); // Agentmaster (PENDING_INPUT.md §9): the input box's body height in visual rows (newlines + 1); > 1 => leftover blank "" rows for the clear ladders; 0 => no box
 
         void AdjustFontSize(float fontSizeDelta);
         void ResetFontSize();

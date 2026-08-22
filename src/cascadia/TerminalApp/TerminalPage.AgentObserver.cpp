@@ -4602,6 +4602,32 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (PENDING_INPUT.md §9): how many VISUAL rows the session's input box spans right now
+    // (newlines + 1), off the SAME cached shallow scan as _ReadLiveDraftForSession. The draft-clear
+    // ladders read this beside the draft TEXT: the text drops trailing blank rows, so a box that reads
+    // empty can still span several rows — leftover "" rows (newlines) that Ctrl+U collapses one per
+    // press. > 1 tells the ladder to keep pressing until the box is a single row ("clean up empty lines
+    // ... until no newlines appear"), and a drop between two reads is the PROGRESS signal that a cleaned
+    // "" row (invisible to the trimmed text read) is not a stall. Every ordinary failure — not hosted
+    // here, dormant, torn down — reads 0 (no box), which the ladder treats as single-row. UI thread.
+    int32_t TerminalPage::_ReadInputBoxBodyRowsForSession(const std::wstring& sessionId)
+    {
+        try
+        {
+            const auto control = _ControlForSession(sessionId);
+            if (!control || control.ConnectionState() == TerminalConnection::ConnectionState::NotConnected)
+            {
+                return 0; // not hosted here, or dormant (no started buffer)
+            }
+            return control.ReadInputBoxBodyRows();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ReadInputBoxBodyRowsForSession");
+            return 0;
+        }
+    }
+
     // ---- The DRAFT SWAP (PENDING_INPUT.md §9) ------------------------------------------------
     //
     // THE PROBLEM. A prompt is delivered as a bracketed paste plus a submit CR. A paste lands AT THE
@@ -5129,10 +5155,14 @@ namespace winrt::TerminalApp::implementation
                 // must NOT come back) and re-fill; the attempt is spent either way.
                 ::Agentmaster::DraftDiscardProgress spent;
                 std::wstring cur = box;
+                // §9: track the box's visual row span so End+Ctrl+U collapses any leftover blank "" rows
+                // (newlines) before the re-fill — a partial paste's tail can leave empty rows the trimmed
+                // text read hides, and re-filling into them would re-introduce leading blank lines.
+                int32_t rows = _ReadInputBoxBodyRowsForSession(sessionId);
                 const int64_t discardDeadline = TtNowMs() + kDraftDiscardBudgetMs;
                 while (TtNowMs() < discardDeadline)
                 {
-                    const auto plan = ::Agentmaster::DecideDraftDiscard(cur, spent);
+                    const auto plan = ::Agentmaster::DecideDraftDiscard(cur, spent, rows > 1);
                     if (plan.action == ::Agentmaster::DraftDiscardAction::Done || plan.action == ::Agentmaster::DraftDiscardAction::GiveUp)
                     {
                         break;
@@ -5148,6 +5178,7 @@ namespace winrt::TerminalApp::implementation
                         ++spent.backspaceRounds;
                     }
                     const std::wstring before = cur;
+                    const int32_t rowsBefore = rows;
                     for (int64_t settled = 0; settled <= kDraftSwapActionSettleMs; settled += kDraftSwapPollMs)
                     {
                         co_await winrt::resume_after(std::chrono::milliseconds(kDraftSwapPollMs));
@@ -5157,12 +5188,15 @@ namespace winrt::TerminalApp::implementation
                             co_return 0;
                         }
                         cur = _ReadInputBoxProbeForSession(sessionId, kSendVerifyProbeRows).second;
-                        if (cur != before)
+                        rows = _ReadInputBoxBodyRowsForSession(sessionId);
+                        if (cur != before || rows != rowsBefore)
                         {
                             break;
                         }
                     }
-                    if (cur == before)
+                    // §9: a collapsed blank "" row leaves the probe TEXT unchanged, so a row-span drop is
+                    // progress too — else the round reads as a stall and hands over to backspaces early.
+                    if (cur == before && rows == rowsBefore)
                     {
                         (plan.action == ::Agentmaster::DraftDiscardAction::EndKill ? spent.killStalls : spent.backspaceStalls) += 1;
                     }
@@ -5531,11 +5565,16 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::DraftClearProgress spent;
         spent.useStash = _appSettings.draftSwapUseCtrlS;
         std::wstring box = draft;
+        // §9: the box's VISUAL row span, tracked beside the (trailing-trimmed) draft text so the kill-ring
+        // rung keeps collapsing leftover blank "" rows (newlines) even once the text reads empty — "clean
+        // up empty lines ... until no newlines appear". > 1 => still multi-row (blank rows remain). In the
+        // Ctrl+S stash mode this is inert (DecideDraftClear treats an empty box as done there).
+        int32_t rows = _ReadInputBoxBodyRowsForSession(id);
         bool cleared = false;
         const int64_t clearDeadline = TtNowMs() + kDraftSwapClearBudgetMs;
         while (TtNowMs() < clearDeadline)
         {
-            const auto plan = ::Agentmaster::DecideDraftClear(box, spent);
+            const auto plan = ::Agentmaster::DecideDraftClear(box, spent, rows > 1);
             if (plan.action == ::Agentmaster::DraftClearAction::Done)
             {
                 cleared = true;
@@ -5561,6 +5600,7 @@ namespace winrt::TerminalApp::implementation
                 ++spent.backspaceRounds;
             }
             const std::wstring before = box;
+            const int32_t rowsBefore = rows;
             for (int64_t settled = 0; settled <= kDraftSwapActionSettleMs; settled += kDraftSwapPollMs)
             {
                 co_await winrt::resume_after(std::chrono::milliseconds(kDraftSwapPollMs));
@@ -5576,12 +5616,15 @@ namespace winrt::TerminalApp::implementation
                 // Deliberately NOT PickCurrentPromptText here: mid-swap the remembered value is the draft
                 // we are trying to erase, so falling back to it would report the box as never-empty.
                 box = _ReadLiveDraftForSession(id);
-                if (box != before)
+                rows = _ReadInputBoxBodyRowsForSession(id);
+                if (box != before || rows != rowsBefore)
                 {
                     break; // the keystroke landed and repainted — judge the rung on this
                 }
             }
-            spent.shrank = box.size() < before.size();
+            // §9: a collapsed blank "" row leaves the trimmed TEXT unchanged, so count the row-span drop
+            // as SHRANK too — else the Ctrl+U rung would read a real clean as a no-op and hand off early.
+            spent.shrank = box.size() < before.size() || rows < rowsBefore;
         }
         // Which rung actually emptied the box decides how it is put back: a stash is restored by the
         // SAME Ctrl+S toggle, a kill by Ctrl+Y. Getting this wrong is not a cosmetic mistake — pressing
@@ -5873,11 +5916,14 @@ namespace winrt::TerminalApp::implementation
         }
 
         // READ — confirm there is actually something to clear (the box may have emptied since the click).
+        // §9: the box's VISUAL row span rides alongside the text — the text drops trailing blank rows, so
+        // a box that reads empty can still span leftover "" rows (newlines) worth collapsing.
         std::wstring box = _ReadLiveDraftForSession(sessionId);
-        if (DraftSwapNormalize(box).empty())
+        int32_t rows = _ReadInputBoxBodyRowsForSession(sessionId);
+        if (DraftSwapNormalize(box).empty() && rows <= 1)
         {
-            // Already empty: the draft moved to the queue, so make the registry agree (drops the "3 dots"
-            // + disables the MAIL button now) and stop.
+            // Already a single empty row: nothing to move and no blank rows to collapse, so make the
+            // registry agree (drops the "3 dots" + disables the MAIL button now) and stop.
             _sessionRegistry->SetPendingInput(sessionId, L"");
             co_return;
         }
@@ -5933,7 +5979,7 @@ namespace winrt::TerminalApp::implementation
         const int64_t clearDeadline = TtNowMs() + kDraftDiscardBudgetMs;
         while (TtNowMs() < clearDeadline)
         {
-            const auto plan = ::Agentmaster::DecideDraftDiscard(box, spent);
+            const auto plan = ::Agentmaster::DecideDraftDiscard(box, spent, rows > 1);
             if (plan.action == ::Agentmaster::DraftDiscardAction::Done)
             {
                 cleared = true;
@@ -5948,6 +5994,7 @@ namespace winrt::TerminalApp::implementation
                                      killRung ? ::Agentmaster::BuildInputEnd() + ::Agentmaster::BuildInputKill() :
                                                 ::Agentmaster::BuildInputEnd() + ::Agentmaster::BuildBackspaces(plan.backspaces));
             const std::wstring before = box;
+            const int32_t rowsBefore = rows;
             for (int64_t settled = 0; settled <= kDraftSwapActionSettleMs; settled += kDraftSwapPollMs)
             {
                 co_await winrt::resume_after(std::chrono::milliseconds(kDraftSwapPollMs));
@@ -5958,12 +6005,16 @@ namespace winrt::TerminalApp::implementation
                     co_return;
                 }
                 box = _ReadLiveDraftForSession(sessionId);
-                if (box != before)
+                rows = _ReadInputBoxBodyRowsForSession(sessionId);
+                if (box != before || rows != rowsBefore)
                 {
                     break; // the keystrokes landed + repainted — judge the round on this
                 }
             }
-            const bool changed = box != before;
+            // §9: collapsing a blank "" row (End+Ctrl+U) leaves the trimmed TEXT unchanged but drops the
+            // row span, so count a row-span change as PROGRESS too — else that round reads as a stall and
+            // the ladder hands over to backspaces before the newlines are gone ("until no newlines appear").
+            const bool changed = box != before || rows != rowsBefore;
             if (killRung)
             {
                 ++spent.killRounds;
