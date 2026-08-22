@@ -521,6 +521,7 @@ void TestAppSettings()
         in.preserveDraftOnSend = false; // non-default (default true = the DRAFT SWAP is on) — PENDING_INPUT.md §9
         in.restoreDraftOnResume = false; // non-default (default true = the restore RE-FILL is on) — PENDING_INPUT.md §10
         in.confirmBeforeKill = false;
+        in.uiStallAutoRestart = false; // non-default (default true = the ui-stall RESTART tier is armed) — Engine.h escalation
         in.tabRenameCommitMode = TabRenameCommitMode::ClickAwayOrEnter; // non-default (default is ClickAwayOrShiftEnter)
         in.favoriteIcon = FavoriteIcon::Star; // non-default (default is Crown)
         in.tabColorMode = TabColorMode::Individual; // non-default (default is WorkingDirectory) — tab color modes
@@ -569,6 +570,7 @@ void TestAppSettings()
         CHECK(out.draftSwapUseCtrlS == false, "settings draftSwapUseCtrlS round-trip (Ctrl+S stash rung OFF)");
         CHECK(out.restoreDraftOnResume == false, "settings restoreDraftOnResume round-trip (restore re-fill OFF)");
         CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
+        CHECK(out.uiStallAutoRestart == false, "settings uiStallAutoRestart round-trip (restart tier OFF)");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter, "settings tabRenameCommitMode round-trip");
         CHECK(out.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon round-trip");
         CHECK(out.tabColorMode == TabColorMode::Individual, "settings tabColorMode round-trip");
@@ -660,6 +662,7 @@ void TestAppSettings()
         CHECK(out.hiddenSessionIds.empty(), "settings hiddenSessionIds empty on empty");
         const auto out2 = DeserializeAppSettings(L"not json");
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");
+        CHECK(out2.uiStallAutoRestart == true, "settings uiStallAutoRestart defaults ON on garbage (the restart tier is a default-armed backstop)");
     }
 
     // Agentmaster: the legacy "waitingDecayMinutes" key was RENAMED to "waitingForYouTimeoutMinutes"
@@ -1454,4 +1457,126 @@ void TestEngineWindowLifecycle()
     }
 
     wipe(); // leave no records behind (the scratch profile is wiped per bat run anyway)
+}
+
+// Agentmaster: the ui-stall ESCALATION decision (Engine.h's escalation block — the 2026-08-22
+// release freeze: XAML's CoreMessaging dispatch latched dead under machine-wide commit exhaustion
+// while the Win32 pump stayed alive, so every window ate no clicks for 18+ minutes with the engine
+// lanes running). The ladder is a pure function over pass-stamped clocks; these checks pin its
+// gates — most importantly the ones that must NEVER fire: wake-from-sleep, pump-dead stalls, a
+// half-alive process, the settings veto, and the once-per-process latch.
+void TestUiStallEscalation()
+{
+    std::wprintf(L"UI-stall escalation (rescue/restart ladder):\n");
+    const uint64_t t0 = 1000000; // arbitrary tick base
+
+    // Below the declare threshold — never escalated, whatever the ladder state claims.
+    {
+        UiStallEscalation e;
+        e.firstObservedMs = t0;
+        e.rescueAttempts = kUiStallRestartMinRescues;
+        e.lastPumpAlive = true;
+        CHECK(DecideUiStallAction(t0 + kUiStallRestartAfterMs, kUiStallDeclareMs - 1, e, true, true, false) == UiStallAction::None,
+              "ui-stall: below the declare threshold never escalates");
+    }
+    // A stall no checker pass has OBSERVED yet (firstObservedMs == 0) — the pass stamps first.
+    {
+        UiStallEscalation e;
+        CHECK(DecideUiStallAction(t0, 10 * 60 * 1000, e, true, true, false) == UiStallAction::None,
+              "ui-stall: an unobserved stall never escalates (the pass stamps the clock first)");
+    }
+    // Wake-from-sleep safety: GetTickCount64 counts through standby, so the beat's age (quiet) can
+    // be huge the instant the machine wakes — but the OBSERVED span is zero, and the revived
+    // dispatcher's next beat clears the stall before the ladder can move.
+    {
+        UiStallEscalation e;
+        e.firstObservedMs = t0;
+        CHECK(DecideUiStallAction(t0, 45 * 60 * 1000, e, true, true, false) == UiStallAction::None,
+              "ui-stall: wake-from-sleep (huge quiet, zero observed) never escalates");
+    }
+    // First rescue at 45s observed; not a second earlier.
+    {
+        UiStallEscalation e;
+        e.firstObservedMs = t0;
+        CHECK(DecideUiStallAction(t0 + kUiStallRescueAfterMs - 1000, kUiStallRescueAfterMs, e, true, true, false) == UiStallAction::None,
+              "ui-stall: below 45s observed holds");
+        CHECK(DecideUiStallAction(t0 + kUiStallRescueAfterMs, kUiStallRescueAfterMs, e, true, true, false) == UiStallAction::Rescue,
+              "ui-stall: first rescue at 45s observed");
+    }
+    // Rescue retries respect the 30s spacing (a slow/failed rescue can never hot-loop).
+    {
+        UiStallEscalation e;
+        e.firstObservedMs = t0;
+        e.lastRescueMs = t0 + kUiStallRescueAfterMs;
+        e.rescueAttempts = 1;
+        const uint64_t early = e.lastRescueMs + kUiStallRescueRetryMs - 1000;
+        const uint64_t due = e.lastRescueMs + kUiStallRescueRetryMs;
+        CHECK(DecideUiStallAction(early, early - t0, e, true, true, false) == UiStallAction::None,
+              "ui-stall: rescue retry respects the 30s spacing");
+        CHECK(DecideUiStallAction(due, due - t0, e, true, true, false) == UiStallAction::Rescue,
+              "ui-stall: rescue retries once the spacing elapses");
+    }
+    // The restart bar — and every one of its gates vetoing individually.
+    {
+        UiStallEscalation e;
+        e.firstObservedMs = t0;
+        e.rescueAttempts = kUiStallRestartMinRescues;
+        e.lastPumpAlive = true;
+        e.lastRescueMs = t0 + kUiStallRestartAfterMs - 5000; // recent — Rescue's spacing wouldn't fire here anyway
+        const uint64_t now = t0 + kUiStallRestartAfterMs;
+        CHECK(DecideUiStallAction(now, now - t0, e, true, true, false) == UiStallAction::Restart,
+              "ui-stall: restart fires when every gate is met");
+        CHECK(DecideUiStallAction(now - 1000, now - 1000 - t0, e, true, true, false) != UiStallAction::Restart,
+              "ui-stall: under 180s observed never restarts");
+        UiStallEscalation few = e;
+        few.rescueAttempts = kUiStallRestartMinRescues - 1;
+        CHECK(DecideUiStallAction(now, now - t0, few, true, true, false) != UiStallAction::Restart,
+              "ui-stall: fewer than the minimum rescues never restarts");
+        UiStallEscalation dead = e;
+        dead.lastPumpAlive = false;
+        CHECK(DecideUiStallAction(now, now - t0, dead, true, true, false) != UiStallAction::Restart,
+              "ui-stall: a pump-DEAD stall (a blocked UI thread, not the dispatch wedge) never restarts");
+        CHECK(DecideUiStallAction(now, now - t0, e, false, true, false) != UiStallAction::Restart,
+              "ui-stall: a half-alive process (not every window stalled) never restarts");
+        CHECK(DecideUiStallAction(now, now - t0, e, true, false, false) != UiStallAction::Restart,
+              "ui-stall: uiStallAutoRestart OFF never restarts");
+        CHECK(DecideUiStallAction(now, now - t0, e, true, true, true) != UiStallAction::Restart,
+              "ui-stall: the once-per-process latch never restarts twice");
+    }
+    // A restart-vetoed stall keeps RESCUING on the retry cadence — the ladder degrades, it never
+    // goes idle (the drain attempts are themselves the recovery lever).
+    {
+        UiStallEscalation e;
+        e.firstObservedMs = t0;
+        e.rescueAttempts = kUiStallRestartMinRescues;
+        e.lastPumpAlive = false; // pump-dead — restart permanently vetoed
+        e.lastRescueMs = t0 + 100 * 1000;
+        const uint64_t now = e.lastRescueMs + kUiStallRescueRetryMs;
+        CHECK(DecideUiStallAction(now, now - t0, e, true, true, false) == UiStallAction::Rescue,
+              "ui-stall: a restart-vetoed stall keeps rescuing on the retry cadence");
+    }
+    // The LIMP guard: a drain can force-pump the queued beats ("recovered") while delivery stays
+    // latched — each such recovery resets the per-episode ladder, so repeated drain-assisted
+    // recoveries inside the window must cross the restart bar on their own.
+    {
+        UiStallEpisodeHistory h;
+        CHECK(NoteUiStallRescuedRecovery(h, t0) == false && h.rescuedRecoveries == 1 && h.firstMs == t0,
+              "ui-stall limp: the first drain-assisted recovery opens the window at 1");
+        CHECK(NoteUiStallRescuedRecovery(h, t0 + 90 * 1000) == false && h.rescuedRecoveries == 2,
+              "ui-stall limp: the second inside the window accumulates");
+        CHECK(NoteUiStallRescuedRecovery(h, t0 + 180 * 1000) == true && h.rescuedRecoveries == kUiStallMaxRescuedEpisodes,
+              "ui-stall limp: the third inside the window crosses the restart bar");
+        // Outside the window the counting RESTARTS — sparse recoveries never accumulate to a restart.
+        UiStallEpisodeHistory sparse;
+        NoteUiStallRescuedRecovery(sparse, t0);
+        NoteUiStallRescuedRecovery(sparse, t0 + 5 * 60 * 1000);
+        CHECK(NoteUiStallRescuedRecovery(sparse, t0 + 5 * 60 * 1000 + kUiStallEpisodeWindowMs + 1) == false && sparse.rescuedRecoveries == 1,
+              "ui-stall limp: a recovery outside the window re-opens the count at 1");
+        // A rewound clock (nowMs < firstMs) resets instead of underflowing.
+        UiStallEpisodeHistory rewound;
+        rewound.firstMs = t0 + 1000;
+        rewound.rescuedRecoveries = 2;
+        CHECK(NoteUiStallRescuedRecovery(rewound, t0) == false && rewound.rescuedRecoveries == 1 && rewound.firstMs == t0,
+              "ui-stall limp: a rewound clock resets the window instead of underflowing");
+    }
 }

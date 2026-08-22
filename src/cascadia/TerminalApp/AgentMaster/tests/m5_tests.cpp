@@ -93,6 +93,7 @@ int wmain()
     TestTabNamingAndColor();
     TestTabColorModes();
     TestEngineWindowLifecycle();
+    TestUiStallEscalation();
     TestProcessInspectTree();
     TestProcessInspectParse();
     TestTranscriptResolve();

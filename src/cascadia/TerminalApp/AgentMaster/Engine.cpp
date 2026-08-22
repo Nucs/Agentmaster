@@ -810,8 +810,15 @@ namespace Agentmaster
             {
                 uint64_t staleBeatMs = 0; // the beat the stall was declared against (for the recovery duration)
                 uint64_t lastLogMs = 0; // the last [ui-stall] line for this window (re-log throttle)
+                UiStallEscalation esc; // the rescue/restart ladder (the Engine.h escalation block)
+                bool noRescuerLogged = false; // "no rescuer registered" logged once per episode
             };
             std::unordered_map<std::wstring, Stall> stalled;
+            std::unordered_map<std::wstring, UiStallEpisodeHistory> episodes; // windowId -> drain-assisted recovery history (the LIMP guard, Engine.h)
+            std::unordered_map<std::wstring, std::function<UiRescueOutcome()>> rescuers; // windowId -> app-side rescue probe
+            std::function<void(const std::wstring&)> restartHandler; // process-wide, registered once by the app layer
+            bool restartFired = false; // once per process — the handler terminates us, a second decision is meaningless
+            uint64_t lastRestartVetoLogMs = 0; // "restart decided but vetoed" re-log throttle (covers BOTH the deep-stall and limp paths)
             bool checkerStarted = false;
         };
 
@@ -823,44 +830,222 @@ namespace Agentmaster
 
         void UiStallCheckerPass(UiBeatState& s)
         {
-            constexpr uint64_t kStallAfterMs = 20 * 1000; // a UI lane beats every ~2s; 20s of silence is a stall, not jitter
             constexpr uint64_t kRelogMs = 60 * 1000;
             const uint64_t now = ::GetTickCount64();
             std::vector<std::wstring> lines; // log OUTSIDE the lock (AppendStateLog does file I/O)
+            struct RescueJob
+            {
+                std::wstring id;
+                std::function<UiRescueOutcome()> fn;
+                int attemptNo = 0;
+            };
+            std::vector<RescueJob> rescues; // run OUTSIDE the lock (each does a bounded SendMessageTimeout into the UI thread)
+            bool restartCandidate = false;
+            std::wstring restartReason;
             {
                 std::lock_guard<std::mutex> lk(s.m);
+                // Restart is only ever considered when EVERY window that has beaten is stalled — a
+                // half-alive process (one window's lane dead, another's fine) is not the process-wide
+                // dispatch wedge this ladder exists for.
+                bool allStalled = !s.beats.empty();
+                for (const auto& [id, beat] : s.beats)
+                {
+                    if (now - beat < kUiStallDeclareMs)
+                    {
+                        allStalled = false;
+                        break;
+                    }
+                }
                 for (const auto& [id, beat] : s.beats)
                 {
                     const uint64_t quiet = now - beat;
                     const auto st = s.stalled.find(id);
-                    if (quiet < kStallAfterMs)
+                    if (quiet < kUiStallDeclareMs)
                     {
                         if (st != s.stalled.end())
                         {
+                            const int episodeRescues = st->second.esc.rescueAttempts;
                             lines.push_back(L"[ui-stall] window " + id + L" RECOVERED after ~" +
-                                            std::to_wstring((beat - st->second.staleBeatMs) / 1000) + L"s — the UI thread is pumping again\n");
+                                            std::to_wstring((beat - st->second.staleBeatMs) / 1000) + L"s — the UI thread is pumping again" +
+                                            (episodeRescues > 0 ? L" (drain-assisted, " + std::to_wstring(episodeRescues) + L" rescue(s) this episode)" : L"") + L"\n");
                             s.stalled.erase(st);
+                            if (episodeRescues > 0)
+                            {
+                                // The LIMP guard (Engine.h): a drain-assisted recovery may just be
+                                // the queue being force-pumped while delivery stays latched — count
+                                // it, and treat repeated ones as an unrecoverable wedge.
+                                if (NoteUiStallRescuedRecovery(s.episodes[id], now))
+                                {
+                                    restartCandidate = true;
+                                    if (!restartReason.empty())
+                                    {
+                                        restartReason += L", ";
+                                    }
+                                    restartReason += id + L" LIMPING — " + std::to_wstring(s.episodes[id].rescuedRecoveries) +
+                                                     L" drain-assisted recoveries in " +
+                                                     std::to_wstring((now - s.episodes[id].firstMs) / 1000) + L"s (delivery latched, drains only force-pump it)";
+                                }
+                            }
+                            else
+                            {
+                                s.episodes.erase(id); // an ORGANIC recovery — the dispatcher healed itself
+                            }
                         }
                         continue;
                     }
                     if (st == s.stalled.end())
                     {
-                        s.stalled[id] = UiBeatState::Stall{ beat, now };
+                        auto& fresh = s.stalled[id];
+                        fresh = UiBeatState::Stall{ beat, now };
+                        // Escalation clocks run on OBSERVED spans (this pass's stamp), never on the
+                        // beat's age — GetTickCount64 counts through standby, so a wake-from-sleep
+                        // sees a huge quiet span but zero observed span (Engine.h block comment).
+                        fresh.esc.firstObservedMs = now;
                         lines.push_back(L"[ui-stall] window " + id + L" UI thread has NOT pumped for ~" +
                                         std::to_wstring(quiet / 1000) +
                                         L"s — dispatcher items are not draining (the window reads Not Responding while the engine lanes continue; sample the process's FIRST thread's CPU + stack to see what it is grinding on)\n");
+                        continue; // observed span is 0 this pass — the ladder can't fire yet by construction
                     }
-                    else if (now - st->second.lastLogMs >= kRelogMs)
+                    if (now - st->second.lastLogMs >= kRelogMs)
                     {
                         st->second.lastLogMs = now;
                         lines.push_back(L"[ui-stall] window " + id + L" still stalled — ~" +
                                         std::to_wstring(quiet / 1000) + L"s without a UI-lane beat\n");
+                    }
+                    // The escalation ladder (Engine.h). Decide with restartEnabled=true here — the
+                    // SETTING is read at execution time (outside the lock, rare path), so a veto
+                    // never latches restartFired and a later settings flip still takes effect.
+                    auto& stall = st->second;
+                    const auto action = DecideUiStallAction(now, quiet, stall.esc, allStalled, true, s.restartFired);
+                    if (action == UiStallAction::Rescue)
+                    {
+                        const auto r = s.rescuers.find(id);
+                        if (r == s.rescuers.end())
+                        {
+                            if (!stall.noRescuerLogged)
+                            {
+                                stall.noRescuerLogged = true;
+                                lines.push_back(L"[ui-stall] window " + id + L" rescue skipped — no rescuer registered\n");
+                            }
+                        }
+                        else
+                        {
+                            // Stamp BEFORE the (out-of-lock) run so a slow/throwing rescuer can
+                            // never hot-loop the ladder.
+                            stall.esc.lastRescueMs = now;
+                            stall.esc.rescueAttempts += 1;
+                            rescues.push_back(RescueJob{ id, r->second, stall.esc.rescueAttempts });
+                        }
+                    }
+                    else if (action == UiStallAction::Restart)
+                    {
+                        restartCandidate = true;
+                        if (!restartReason.empty())
+                        {
+                            restartReason += L", ";
+                        }
+                        restartReason += id + L" stalled ~" + std::to_wstring(quiet / 1000) + L"s (observed ~" +
+                                         std::to_wstring((now - stall.esc.firstObservedMs) / 1000) + L"s, rescues " +
+                                         std::to_wstring(stall.esc.rescueAttempts) + L")";
                     }
                 }
             }
             for (const auto& l : lines)
             {
                 AppendStateLog(L"hooks.log", l);
+            }
+            for (auto& job : rescues)
+            {
+                UiRescueOutcome outcome{};
+                try
+                {
+                    outcome = job.fn();
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"UiStallRescue");
+                }
+                {
+                    std::lock_guard<std::mutex> lk(s.m);
+                    const auto st = s.stalled.find(job.id);
+                    if (st != s.stalled.end())
+                    {
+                        st->second.esc.lastPumpAlive = outcome.pumpAlive;
+                    }
+                }
+                AppendStateLog(L"hooks.log",
+                               L"[ui-stall] rescue #" + std::to_wstring(job.attemptNo) + L" window " + job.id +
+                                   L": pump=" + (outcome.pumpAlive ? L"ALIVE" : L"DEAD (probe timed out — a blocked UI thread, not the dispatch wedge; never auto-restarted)") +
+                                   L" drain=" + (outcome.drainRan ? L"ran (if the dispatcher revived, the next beat clears this stall)" : L"did not run") + L"\n");
+            }
+            if (restartCandidate)
+            {
+                bool enabled = true; // an unreadable settings.json keeps the DEFAULT (restart ON) — the safe direction for a dead UI
+                try
+                {
+                    enabled = LoadAppSettings().uiStallAutoRestart;
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"UiStallRestart settings read");
+                }
+                const bool debuggerAttached = ::IsDebuggerPresent() != 0;
+                std::function<void(const std::wstring&)> handler;
+                bool logVeto = false;
+                bool logDebugger = false;
+                bool latchedNow = false;
+                {
+                    std::lock_guard<std::mutex> lk(s.m);
+                    if (s.restartFired)
+                    {
+                        // raced by a previous pass's in-flight handler — nothing to do
+                    }
+                    else if (!enabled)
+                    {
+                        // Throttled by time (not per-Stall state): the LIMP path decides restart at
+                        // the moment its window RECOVERS — its Stall entry is already erased, so a
+                        // per-Stall flag would silently swallow the veto line there.
+                        if (now - s.lastRestartVetoLogMs >= 60 * 1000)
+                        {
+                            s.lastRestartVetoLogMs = now;
+                            logVeto = true;
+                        }
+                    }
+                    else if (debuggerAttached)
+                    {
+                        logDebugger = true;
+                    }
+                    else
+                    {
+                        s.restartFired = true;
+                        latchedNow = true;
+                        handler = s.restartHandler;
+                    }
+                }
+                if (logVeto)
+                {
+                    AppendStateLog(L"hooks.log", L"[ui-stall] restart decided but uiStallAutoRestart is OFF — staying up (" + restartReason + L")\n");
+                }
+                if (logDebugger)
+                {
+                    AppendStateLog(L"hooks.log", L"[ui-stall] restart decided but a debugger is attached — staying up (" + restartReason + L")\n");
+                }
+                if (handler)
+                {
+                    AppendStateLog(L"hooks.log", L"[ui-stall] UNRECOVERABLE dispatch wedge — RESTARTING the app (" + restartReason + L"); sessions/windows/drafts are autosaved on disk and will restore\n");
+                    try
+                    {
+                        handler(restartReason);
+                    }
+                    catch (...)
+                    {
+                        LogSwallowedException(L"UiStallRestartHandler");
+                    }
+                }
+                else if (latchedNow)
+                {
+                    AppendStateLog(L"hooks.log", L"[ui-stall] restart decided but no restart handler is registered — staying up (" + restartReason + L")\n");
+                }
             }
         }
     }
@@ -920,6 +1105,72 @@ namespace Agentmaster
         std::lock_guard<std::mutex> lk(s.m);
         s.beats.erase(windowId);
         s.stalled.erase(windowId);
+        s.episodes.erase(windowId);
+        s.rescuers.erase(windowId); // belt — the page unregisters explicitly, but a dropped window must never be rescued
+    }
+
+    // Agentmaster: the LIMP guard's counting rule (Engine.h). PURE mutation of the caller-owned
+    // history: a recovery outside the window re-opens it at 1; inside it accumulates, and crossing
+    // kUiStallMaxRescuedEpisodes says the dispatcher is limping, not healed.
+    bool NoteUiStallRescuedRecovery(UiStallEpisodeHistory& h, const uint64_t nowMs) noexcept
+    {
+        if (h.firstMs == 0 || nowMs < h.firstMs || nowMs - h.firstMs > kUiStallEpisodeWindowMs)
+        {
+            h.rescuedRecoveries = 1;
+            h.firstMs = nowMs;
+            return false;
+        }
+        h.rescuedRecoveries += 1;
+        return h.rescuedRecoveries >= kUiStallMaxRescuedEpisodes;
+    }
+
+    // Agentmaster: the UI-stall escalation decision (Engine.h block comment). PURE — the checker
+    // pass owns every clock stamp; this only reads them, so the harness can drive the whole ladder.
+    UiStallAction DecideUiStallAction(const uint64_t nowMs, const uint64_t quietMs, const UiStallEscalation& e, const bool allWindowsStalled, const bool restartEnabled, const bool restartAlreadyFired) noexcept
+    {
+        if (quietMs < kUiStallDeclareMs || e.firstObservedMs == 0 || nowMs < e.firstObservedMs)
+        {
+            return UiStallAction::None;
+        }
+        // The ladder runs on the OBSERVED span (stamped by a live checker pass), never on the beat's
+        // age — the wake-from-sleep safety (GetTickCount64 counts through standby).
+        const uint64_t observed = nowMs - e.firstObservedMs;
+        if (observed >= kUiStallRestartAfterMs && e.rescueAttempts >= kUiStallRestartMinRescues &&
+            e.lastPumpAlive && allWindowsStalled && restartEnabled && !restartAlreadyFired)
+        {
+            return UiStallAction::Restart;
+        }
+        if (observed >= kUiStallRescueAfterMs &&
+            (e.lastRescueMs == 0 || nowMs - e.lastRescueMs >= kUiStallRescueRetryMs))
+        {
+            return UiStallAction::Rescue;
+        }
+        return UiStallAction::None;
+    }
+
+    void RegisterUiStallRescuer(const std::wstring& windowId, std::function<UiRescueOutcome()> rescuer)
+    {
+        if (windowId.empty() || !rescuer)
+        {
+            return;
+        }
+        auto& s = UiBeats();
+        std::lock_guard<std::mutex> lk(s.m);
+        s.rescuers[windowId] = std::move(rescuer);
+    }
+
+    void UnregisterUiStallRescuer(const std::wstring& windowId)
+    {
+        auto& s = UiBeats();
+        std::lock_guard<std::mutex> lk(s.m);
+        s.rescuers.erase(windowId);
+    }
+
+    void SetUiStallRestartHandler(std::function<void(const std::wstring& reason)> handler)
+    {
+        auto& s = UiBeats();
+        std::lock_guard<std::mutex> lk(s.m);
+        s.restartHandler = std::move(handler);
     }
 
     void UnregisterLiveWindowIn(Engine& e, const std::wstring& windowId)

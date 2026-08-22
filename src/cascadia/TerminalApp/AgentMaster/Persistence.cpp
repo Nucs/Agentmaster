@@ -691,6 +691,7 @@ namespace Agentmaster
         o.Set(L"verifySendBeforeSubmit", json::Value::MkBool(s.verifySendBeforeSubmit));
         o.Set(L"restoreDraftOnResume", json::Value::MkBool(s.restoreDraftOnResume));
         o.Set(L"confirmBeforeKill", json::Value::MkBool(s.confirmBeforeKill));
+        o.Set(L"uiStallAutoRestart", json::Value::MkBool(s.uiStallAutoRestart));
         o.Set(L"tabRenameCommitMode", json::Value::MkStr(ToString(s.tabRenameCommitMode)));
         o.Set(L"defaultLaunchDir", json::Value::MkStr(s.defaultLaunchDir));
         o.Set(L"waitingForYouTimeoutMinutes", json::Value::MkNum(s.waitingForYouTimeoutMinutes));
@@ -826,6 +827,7 @@ namespace Agentmaster
         s.verifySendBeforeSubmit = v.BoolAt(L"verifySendBeforeSubmit", true);
         s.restoreDraftOnResume = v.BoolAt(L"restoreDraftOnResume", true);
         s.confirmBeforeKill = v.BoolAt(L"confirmBeforeKill", true);
+        s.uiStallAutoRestart = v.BoolAt(L"uiStallAutoRestart", true);
         s.tabRenameCommitMode = TabRenameCommitModeFromString(v.StrAt(L"tabRenameCommitMode", L"shiftEnter"));
         s.defaultLaunchDir = v.StrAt(L"defaultLaunchDir");
         // A STORED 0 is meaningful (= never decay) — U32At only falls back when the key is absent.

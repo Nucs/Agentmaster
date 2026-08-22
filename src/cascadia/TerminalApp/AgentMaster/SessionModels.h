@@ -1871,6 +1871,15 @@ namespace Agentmaster
 
         // --- Behavior sugar ---
         bool confirmBeforeKill{ true }; // confirm before killing a session from the Manager
+        // Agentmaster (UI-stall self-heal — the 2026-08-22 CoreMessaging dispatch wedge; Engine.h's
+        // escalation block): when the [ui-stall] watchdog proves the process-wide XAML dispatch is
+        // unrecoverably jammed (every window's UI lane dead 3+ minutes, the Win32 pump provably
+        // ALIVE, repeated ProcessEvents rescues attempted), the app restarts ITSELF — a hard exit is
+        // the durability-designed path (open-windows.json + autosaved sessions/records/drafts), so a
+        // restart loses nothing while a silently frozen window loses the user's whole fleet until a
+        // human notices. OFF => the watchdog still detects/logs/rescues, but never restarts.
+        // No cog UI (deliberately — a corrective backstop, not a preference); set in settings.json.
+        bool uiStallAutoRestart{ true };
         // How the tab/session rename box commits via the keyboard (focus-loss always commits). GLOBAL
         // across windows. Default = Shift+Enter commits while a plain Enter still inserts a newline
         // (titles are multi-line). See TabRenameCommitMode.

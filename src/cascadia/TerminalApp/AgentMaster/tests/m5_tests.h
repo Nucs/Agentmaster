@@ -156,6 +156,7 @@ void TestAppSettings();
 void TestTabNamingAndColor();
 void TestTabColorModes(); // tab color modes: enum/JSON round-trips + ChooseSessionAutoColor + SessionColorKeyDir/ResolveSessionColorHex
 void TestEngineWindowLifecycle(); // Engine window lifecycle (local-Engine `...In` seams — NEVER SharedEngine() in tests): claim-by-id vs front-pop + the open-at-exit manifest's skip-empty rule + the reclaimable pool + Manager-only record deletion + ReserveManagerOnlyClose (PERSISTENCE.md 13.5 / Rule #16)
+void TestUiStallEscalation(); // the ui-stall rescue/restart ladder's pure decision (Engine.h escalation block — the 2026-08-22 CoreMessaging dispatch wedge): declare/rescue/retry/restart gates + the never-fire belts (wake-from-sleep, pump-dead, half-alive, settings veto, once-latch)
 // tests_transcript.cpp
 void TestTranscriptScan();
 void TestCurrentModel(); // current-model adornment: ShortModelName / SessionDisplayModel (pure) + the delta's assistant message.model capture + TailFactsFromTranscriptChunk (recap+model, one pass)

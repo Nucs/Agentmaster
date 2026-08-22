@@ -149,8 +149,14 @@ int wmain(int argc, wchar_t** argv) {
               if (mode == L"WALK" || mode == L"BOTH") { wprintf(L"-- unwind --\n"); walkThread(proc, ctx, all ? 6 : 60); }
               if (mode == L"SCAN" || mode == L"BOTH") {
                   wprintf(L"-- stack scan --\n");
-                  BYTE* sd = g_base + t.Stack.Memory.Rva;
-                  scanThread(proc, t.Stack.StartOfMemoryRange, sd, t.Stack.Memory.DataSize);
+                  // Full-memory dumps (comsvcs/WER) don't duplicate stacks into the
+                  // ThreadList descriptors (Stack.Memory.Rva is stale/garbage there) —
+                  // read the stack out of the Memory64 ranges from RSP upward instead.
+                  ULONG64 stackTop = ctx.Rsp & ~7ull;
+                  ULONG64 cap = 512 * 1024;
+                  std::vector<BYTE> sbuf(cap);
+                  DWORD got = 0; readDumpMem(stackTop, sbuf.data(), (DWORD)cap, &got);
+                  scanThread(proc, stackTop, sbuf.data(), got);
               }
           }
       }

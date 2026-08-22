@@ -364,6 +364,12 @@ namespace winrt::TerminalApp::implementation
         // a session hosted HERE hops to this window's UI thread, selects the session's tab, and
         // brings this window to the foreground. Detached in ~TerminalPage (Rule #10).
         uint64_t _windowActivateToken{ 0 };
+        // Agentmaster (ui-stall escalation): this window's message-only RESCUE window — the engine
+        // watchdog SENDS into it when the UI lane stops beating (a sent message executes on the UI
+        // thread even while posted/dispatcher work is jammed — the 2026-08-22 CoreMessaging wedge),
+        // proving the pump alive + draining the dispatcher queue. Created on the UI thread at engine
+        // init; destroyed via a sent message in ~TerminalPage (Engine.h's escalation block).
+        HWND _uiRescueWnd{ nullptr };
         // Agentmaster (cross-window restart): this window's restart sink on the shared engine — another
         // window's "Restart session" (Triage Board card / Explorer-tree row) on a session hosted HERE
         // hops to this window's UI thread and rebuilds its ConPTY connection in place. Detached in

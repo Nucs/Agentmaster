@@ -405,6 +405,79 @@ namespace Agentmaster
     void NoteUiHeartbeat(const std::wstring& windowId);
     void DropUiHeartbeat(const std::wstring& windowId);
 
+    // Agentmaster: UI-stall ESCALATION — rescue, then self-restart (the 2026-08-22 release freeze).
+    // Dump-proven incident shape: during a machine-wide commit-exhaustion episode (192/249 GB
+    // committed, in-process bad_allocs, the observer census degraded fleet-wide), XAML's
+    // CoreMessaging dispatch delivery LATCHED DEAD for the process's single UI thread while the
+    // Win32 message pump stayed perfectly alive — the UI thread sat idle in the Emperor's
+    // GetMessageW, answered SENT messages (WM_NULL probes returned within 3s, IsHungAppWindow
+    // FALSE), yet CoreDispatcher.RunAsync work was accepted-but-never-delivered for 18+ minutes
+    // (~550 queued beats) and every window's XAML INPUT — which rides the same delivery — was dead
+    // with it ("window stopped accepting clicks"). Plain re-enqueue can never revive that state
+    // (the ~2s beats ARE re-enqueues; 550 of them changed nothing), so the watchdog escalates:
+    //   1. RESCUE (>=45s observed, retried every 30s): the app-side rescuer SENDS a message to a
+    //      per-window message-only HWND — sent messages are dispatched even while posted work is
+    //      jammed, so reaching the handler PROVES the pump is alive — and the handler, ON the UI
+    //      thread, attempts a CoreDispatcher.ProcessEvents drain of the backed-up queue.
+    //   2. RESTART (>=180s observed + >=3 rescues + the LAST rescue proved the pump alive + EVERY
+    //      beaten window stalled + AppSettings::uiStallAutoRestart + once per process): the
+    //      registered restart handler logs + toasts + relaunches the app and terminates. A hard
+    //      exit is the durability-designed path (open-windows.json keeps the full window set,
+    //      sessions/drafts/records are autosaved), so restarting loses nothing — unlike a frozen
+    //      window the user has to notice and kill by hand.
+    // "Observed" spans are stamped by a RUNNING checker pass (firstObservedMs), never derived from
+    // the beat's age alone — GetTickCount64 counts through standby, so a wake-from-sleep sees a
+    // huge quiet span but zero OBSERVED span and can never restart-storm (the revived dispatcher
+    // lands a beat within ~2s and clears the stall organically). Pump-DEAD stalls (the probe times
+    // out — a genuinely blocked UI thread, e.g. mid-restore) are deliberately NEVER auto-restarted:
+    // they may finish on their own, and Windows' own not-responding UX already covers them.
+    // The registries are WinRT-free (std::function) so this TU keeps compiling in the harness/CLI.
+    struct UiRescueOutcome
+    {
+        bool pumpAlive = false; // the sent probe reached the UI thread's wndproc within the timeout
+        bool drainRan = false; // the ProcessEvents drain executed without throwing
+    };
+    enum class UiStallAction
+    {
+        None,
+        Rescue,
+        Restart,
+    };
+    struct UiStallEscalation // per-window ladder state (public so the harness can drive the decision)
+    {
+        uint64_t firstObservedMs = 0; // first checker PASS that saw this window stalled (0 = not yet)
+        uint64_t lastRescueMs = 0; // when the last rescue attempt was dispatched
+        int rescueAttempts = 0;
+        bool lastPumpAlive = false; // the most recent rescue's probe verdict
+    };
+    inline constexpr uint64_t kUiStallDeclareMs = 20 * 1000; // a UI lane beats every ~2s; 20s of silence is a stall, not jitter
+    inline constexpr uint64_t kUiStallRescueAfterMs = 45 * 1000;
+    inline constexpr uint64_t kUiStallRescueRetryMs = 30 * 1000;
+    inline constexpr uint64_t kUiStallRestartAfterMs = 180 * 1000;
+    inline constexpr int kUiStallRestartMinRescues = 3;
+    UiStallAction DecideUiStallAction(uint64_t nowMs, uint64_t quietMs, const UiStallEscalation& e, bool allWindowsStalled, bool restartEnabled, bool restartAlreadyFired) noexcept;
+
+    // The LIMP guard: a drain can deliver the queued beats (the stall "recovers") while the
+    // underlying delivery stays latched — the window then re-stalls, gets drained again, recovers
+    // again... Each recovery resets the per-episode ladder, so without this the app would limp in
+    // 45s-stall/drain/recover cycles forever and the restart tier could never fire. A recovery that
+    // only happened AFTER rescues ran is counted per window; hitting
+    // kUiStallMaxRescuedEpisodes of them inside kUiStallEpisodeWindowMs says the dispatcher is
+    // limping, not healed => restart-worthy (same setting/debugger/handler gates). An ORGANIC
+    // recovery (no rescues that episode) clears the history — the dispatcher healed itself.
+    struct UiStallEpisodeHistory
+    {
+        int rescuedRecoveries = 0;
+        uint64_t firstMs = 0; // when the counting window opened
+    };
+    inline constexpr uint64_t kUiStallEpisodeWindowMs = 10 * 60 * 1000;
+    inline constexpr int kUiStallMaxRescuedEpisodes = 3;
+    // Fold one drain-assisted recovery into the history; true => the limp bar is crossed.
+    bool NoteUiStallRescuedRecovery(UiStallEpisodeHistory& h, uint64_t nowMs) noexcept;
+    void RegisterUiStallRescuer(const std::wstring& windowId, std::function<UiRescueOutcome()> rescuer);
+    void UnregisterUiStallRescuer(const std::wstring& windowId);
+    void SetUiStallRestartHandler(std::function<void(const std::wstring& reason)> handler);
+
     // Agentmaster (discard Manager-only windows): race-safe "may THIS window self-close because it is
     // now Manager-only?" Returns true (and reserves the close) iff more than one live Agentmaster window
     // would remain after it goes — counting live windows MINUS those that have already reserved a close

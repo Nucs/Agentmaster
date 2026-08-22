@@ -48,6 +48,9 @@
 #include "AgentMaster/SessionScanner.h" // liveness-probe token
 #include "AgentMaster/TabDragMath.h" // the pointer-owned tab reorder gesture's pure decision math (bands / slots / release / auto-scroll)
 
+#include <WtExeUtils.h> // IsPackaged — the ui-stall restart tier relaunches by AUMID when packaged
+#include <appmodel.h> // GetCurrentPackageFamilyName (the packaged relaunch target)
+
 using namespace winrt;
 using namespace winrt::Microsoft::Management::Deployment;
 using namespace winrt::Microsoft::Terminal::Control;
@@ -128,6 +131,201 @@ static void _SetTabStripButtonVisible(const winrt::WUX::Controls::Button& btn, b
     if (btn.Visibility() != desired)
     {
         btn.Visibility(desired);
+    }
+}
+
+// ---- Agentmaster: UI-stall RESCUE window + self-RESTART (Engine.h's escalation block) -------------
+// The 2026-08-22 release freeze, dump-proven: XAML's CoreMessaging dispatch delivery latched dead
+// under machine-wide commit exhaustion — the UI thread idled in the Emperor's GetMessageW and
+// answered SENT messages, while CoreDispatcher.RunAsync work was accepted-but-never-delivered for
+// 18+ minutes and every window's XAML input (same delivery) died with it. A SENT message is the one
+// channel that still executes code ON the UI thread in that state, so each window owns a message-only
+// rescue HWND: the engine watchdog SENDS into it to (a) PROVE the pump is alive and (b) attempt a
+// synchronous CoreDispatcher.ProcessEvents drain of the backed-up queue. If drains can't clear the
+// stall, the watchdog's restart tier calls _AgentUiStallRestart below.
+namespace
+{
+    extern "C" IMAGE_DOS_HEADER __ImageBase; // this DLL's module handle (for RegisterClassExW)
+
+    constexpr UINT kAgentUiRescueMsg = WM_APP + 0x5A; // probe + drain (sent by the watchdog thread)
+    constexpr UINT kAgentUiRescueDestroyMsg = WM_APP + 0x5B; // teardown: DestroyWindow ON the owning (UI) thread
+
+    struct AgentUiRescueCtx
+    {
+        winrt::Windows::UI::Core::CoreDispatcher dispatcher{ nullptr };
+        std::wstring windowId;
+    };
+
+    LRESULT CALLBACK _AgentUiRescueWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+    {
+        if (msg == kAgentUiRescueMsg)
+        {
+            // Executing here — via a SENT message — is itself the proof the Win32 pump is alive
+            // (posted/dispatcher work may still be jammed; the drain below is the attempt to fix
+            // that). Return contract with the rescuer: 1 = pump alive, 2 = pump alive + drain ran.
+            auto* ctx = reinterpret_cast<AgentUiRescueCtx*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+            LRESULT result = 1;
+            if (ctx && ctx->dispatcher)
+            {
+                try
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[ui-stall] rescue window " + ctx->windowId + L": ON the UI thread — draining the dispatcher queue (ProcessAllIfPresent)\n");
+                    // Synchronously deliver everything the jammed dispatcher has been sitting on.
+                    // This PULLS from the queue, so it works even when the wake/delivery side is
+                    // latched: the queued beats land (clearing the stall), queued UI work executes,
+                    // and the queue's empty->non-empty transition on the NEXT enqueue is a fresh
+                    // chance for the delivery machinery to re-arm. A nested pump here is the same
+                    // shape XAML's own modal loops use.
+                    ctx->dispatcher.ProcessEvents(winrt::Windows::UI::Core::CoreProcessEventsOption::ProcessAllIfPresent);
+                    result = 2;
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"AgentUiRescue ProcessEvents");
+                }
+            }
+            return result;
+        }
+        if (msg == kAgentUiRescueDestroyMsg)
+        {
+            ::DestroyWindow(hwnd);
+            return 0;
+        }
+        if (msg == WM_NCDESTROY)
+        {
+            auto* ctx = reinterpret_cast<AgentUiRescueCtx*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+            ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            delete ctx;
+            return 0;
+        }
+        return ::DefWindowProcW(hwnd, msg, wp, lp);
+    }
+
+    HWND _CreateAgentUiRescueWindow(const std::wstring& windowId, const winrt::Windows::UI::Core::CoreDispatcher& dispatcher)
+    {
+        static const ATOM atom = []() {
+            WNDCLASSEXW wc{ sizeof(wc) };
+            wc.lpfnWndProc = _AgentUiRescueWndProc;
+            wc.hInstance = reinterpret_cast<HINSTANCE>(&__ImageBase);
+            wc.lpszClassName = L"AgentmasterUiRescue";
+            return ::RegisterClassExW(&wc);
+        }();
+        if (!atom)
+        {
+            return nullptr;
+        }
+        const HWND hwnd = ::CreateWindowExW(0, L"AgentmasterUiRescue", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, reinterpret_cast<HINSTANCE>(&__ImageBase), nullptr);
+        if (!hwnd)
+        {
+            return nullptr;
+        }
+        auto ctx = std::make_unique<AgentUiRescueCtx>();
+        ctx->dispatcher = dispatcher;
+        ctx->windowId = windowId;
+        ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx.release()));
+        return hwnd;
+    }
+
+    // The watchdog's restart tier (runs on the WATCHDOG thread — the UI is unusable by definition
+    // here). Toast (best-effort) -> spawn a waiter that relaunches us after we exit -> terminate.
+    // A hard exit is the durability-designed path: open-windows.json holds the full window set and
+    // sessions/records/drafts are autosaved, so the relaunch restores the workspace (same contract
+    // as the updater's install-relaunch). If the relauncher can't even spawn, we deliberately STAY
+    // UP (a frozen app the user can kill beats a dead app that never comes back).
+    void _AgentUiStallRestart(const std::wstring& reason)
+    {
+        // The watchdog thread never touched COM — init MTA for the toast. S_FALSE/RPC_E_CHANGED_MODE
+        // are both fine (already initialized); the toast try/catch below covers a hostile state.
+        ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        try
+        {
+            namespace notif = winrt::Windows::UI::Notifications;
+            const auto xml = notif::ToastNotificationManager::GetTemplateContent(notif::ToastTemplateType::ToastText02);
+            const auto texts = xml.GetElementsByTagName(L"text");
+            texts.Item(0).InnerText(L"Agentmaster restarted itself");
+            texts.Item(1).InnerText(L"The UI froze (its dispatcher wedged), so the app restarted to recover. Your sessions and windows are preserved.");
+            xml.DocumentElement().SetAttribute(L"launch", L"--from-toast"); // the recognized no-op sentinel — a click just foregrounds/starts the app
+            notif::ToastNotification toast{ xml };
+            notif::ToastNotifier notifier{ nullptr };
+            if (IsPackaged())
+            {
+                notifier = notif::ToastNotificationManager::CreateToastNotifier();
+            }
+            else
+            {
+                wil::unique_cotaskmem_string aumid;
+                if (SUCCEEDED(::GetCurrentProcessExplicitAppUserModelID(&aumid)))
+                {
+                    notifier = notif::ToastNotificationManager::CreateToastNotifier(aumid.get());
+                }
+            }
+            if (notifier)
+            {
+                notifier.Show(toast);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"UiStallRestart toast");
+        }
+
+        // What to relaunch: packaged -> the package AUMID (a raw exe launch of a packaged app fails,
+        // WT #926/#4043); unpackaged -> this exe's path.
+        std::wstring relaunch;
+        if (IsPackaged())
+        {
+            wchar_t pfn[PACKAGE_FAMILY_NAME_MAX_LENGTH + 1]{};
+            UINT32 len = ARRAYSIZE(pfn);
+            if (::GetCurrentPackageFamilyName(&len, pfn) == ERROR_SUCCESS)
+            {
+                relaunch = std::wstring(L"shell:AppsFolder\\") + pfn + L"!App";
+            }
+        }
+        else
+        {
+            wchar_t exe[MAX_PATH * 2]{};
+            if (::GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe)) > 0)
+            {
+                relaunch = exe;
+            }
+        }
+
+        bool launched = false;
+        if (!relaunch.empty())
+        {
+            // Windows PowerShell by full path (always present; pwsh may not be): wait for OUR pid to
+            // die, then start the app. The waiter outlives us, so the relaunch can never race the
+            // single-instance handoff into the very process being killed.
+            wchar_t sysdir[MAX_PATH]{};
+            ::GetSystemDirectoryW(sysdir, ARRAYSIZE(sysdir));
+            std::wstring cmd = L"\"";
+            cmd += sysdir;
+            cmd += L"\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -WindowStyle Hidden -Command \"Wait-Process -Id ";
+            cmd += std::to_wstring(::GetCurrentProcessId());
+            cmd += L" -ErrorAction SilentlyContinue; Start-Process '";
+            cmd += relaunch;
+            cmd += L"'\"";
+            STARTUPINFOW si{ sizeof(si) };
+            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_HIDE;
+            PROCESS_INFORMATION pi{};
+            if (::CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+            {
+                ::CloseHandle(pi.hThread);
+                ::CloseHandle(pi.hProcess);
+                launched = true;
+            }
+        }
+
+        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                      launched ?
+                                          L"[ui-stall] restart: relauncher spawned — terminating now (" + reason + L")\n" :
+                                          L"[ui-stall] restart: relauncher FAILED to spawn — staying up, NOT terminating (" + reason + L")\n");
+        if (launched)
+        {
+            ::Sleep(1000); // let the toast + log write settle
+            ::TerminateProcess(::GetCurrentProcess(), 0x51A11u); // 'stall' marker exit code (like the updater's handoff, durability reopens the workspace)
+        }
     }
 }
 
@@ -254,6 +452,19 @@ namespace winrt::TerminalApp::implementation
         if (_settingsChangedToken)
         {
             ::Agentmaster::UnregisterSettingsChangedHandler(_settingsChangedToken);
+        }
+        // Agentmaster (ui-stall escalation): drop this window's rescuer from the engine watchdog
+        // (Rule #10 — a thread-safe engine detach, stays BARE so it can never be skipped), then
+        // destroy the message-only rescue window ON ITS OWNING (UI) THREAD via a sent message —
+        // ~TerminalPage can run on a pool thread (the fire_and_forget teardown class), where a
+        // direct DestroyWindow would fail. A timed-out send leaks one message-only window, which is
+        // harmless (it dies with the process; its wndproc guards a null context).
+        ::Agentmaster::UnregisterUiStallRescuer(_windowId);
+        if (_uiRescueWnd)
+        {
+            DWORD_PTR ignored = 0;
+            ::SendMessageTimeoutW(_uiRescueWnd, kAgentUiRescueDestroyMsg, 0, 0, SMTO_ABORTIFHUNG, 1000, &ignored);
+            _uiRescueWnd = nullptr;
         }
         // Fleet Observer (OBSERVER.md §10/§12): drop THIS window's tab roster from the process-wide
         // observer so a closed window's tabs aren't surveyed/correlated after teardown (Rule #10).
@@ -637,6 +848,42 @@ namespace winrt::TerminalApp::implementation
         // time) because _windowId is only resolved now — register early + correct so even a one-window
         // session lands in the manifest and reopens next run. Unregistered in ~TerminalPage.
         ::Agentmaster::RegisterLiveWindow(_windowId);
+
+        // Agentmaster (ui-stall escalation; Engine.h block comment + the TU-local helpers above):
+        // create this window's message-only RESCUE window on the UI thread and register the rescuer
+        // the engine watchdog SENDS into when the UI lane stops beating — a sent message executes on
+        // the UI thread even while posted/dispatcher work is jammed (the 2026-08-22 wedge), so it
+        // both proves the pump alive and drains the backed-up dispatcher queue. The restart handler
+        // is process-wide, registered once by whichever window initializes first (it is
+        // window-agnostic — by the time it fires, EVERY window's lane is dead). Detached in
+        // ~TerminalPage (Rule #10).
+        {
+            _uiRescueWnd = _CreateAgentUiRescueWindow(_windowId, Dispatcher());
+            if (_uiRescueWnd)
+            {
+                const HWND rescue = _uiRescueWnd;
+                ::Agentmaster::RegisterUiStallRescuer(_windowId, [rescue]() {
+                    ::Agentmaster::UiRescueOutcome o;
+                    DWORD_PTR res = 0;
+                    if (::SendMessageTimeoutW(rescue, kAgentUiRescueMsg, 0, 0, SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT, 3000, &res))
+                    {
+                        o.pumpAlive = true; // the handler ran on the UI thread within the timeout
+                        o.drainRan = (res == 2);
+                    }
+                    return o;
+                });
+            }
+            else
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[ui-stall] rescue window creation FAILED for " + _windowId + L" — stalls will be logged but not rescued\n");
+            }
+            static std::once_flag s_uiStallRestartOnce;
+            std::call_once(s_uiStallRestartOnce, []() {
+                ::Agentmaster::SetUiStallRestartHandler([](const std::wstring& reason) {
+                    _AgentUiStallRestart(reason);
+                });
+            });
+        }
 
         // Cross-window activate sink (Linked Lenses): the Manager board/tree show the WHOLE fleet,
         // but a session's tab lives in exactly one window — when ANOTHER window's Activate
