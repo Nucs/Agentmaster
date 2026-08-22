@@ -2185,6 +2185,9 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         RestorePointerCursor.raise(*this, nullptr);
 
+        // Agentmaster: show the "unavailable" cursor while hovering a locked (read-only) terminal.
+        _UpdateReadOnlyPointerCursor(true);
+
         const auto ptr = args.Pointer();
         const auto point = args.GetCurrentPoint(*this);
         const auto cursorPosition = point.Position();
@@ -3803,6 +3806,9 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     {
         _core.ToggleReadOnlyMode();
         ReadOnlyChanged.raise(*this, winrt::box_value(_core.IsInReadOnlyMode()));
+        // Agentmaster: a lock/unlock that lands while the pointer is over the terminal must reflect
+        // immediately (the next mouse move would otherwise be the first chance to update the shape).
+        _UpdateReadOnlyPointerCursor(_pointerInsideForReadOnly);
     }
 
     // Method Description:
@@ -3811,6 +3817,40 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     {
         _core.SetReadOnlyMode(readOnlyState);
         ReadOnlyChanged.raise(*this, winrt::box_value(_core.IsInReadOnlyMode()));
+        // Agentmaster: see ToggleReadOnly — refresh the "no" cursor if we're hovering the pane that
+        // just (un)locked. This is the path the draft-swap / delivery lock takes (SetReadOnly true),
+        // so the O-with-a-slash cursor appears the moment a hovered tab is locked, not only on move.
+        _UpdateReadOnlyPointerCursor(_pointerInsideForReadOnly);
+    }
+
+    // Agentmaster: drive the window pointer cursor for a read-only ("locked") terminal. When the
+    // pointer is over a read-only pane we show the Windows "unavailable" cursor (UniversalNo — the
+    // circle-with-a-slash "no" icon) so a locked tab reads as intentionally locked, rather than the
+    // pointer merely vanishing while you try to type into it (the classic hide-cursor-while-typing).
+    // When the pane is not read-only, or the pointer leaves it, we restore the default arrow. Only a
+    // *transition* touches the (window-global) CoreWindow, so a normal writable pane is untouched and
+    // a read-only pane sets the cursor once, not on every move. (No per-element cursor exists in this
+    // XAML projection — ProtectedCursor needs a subclass — so this mirrors the Manager splitters and
+    // the per-tab overlay grips, which drive CoreWindow::PointerCursor the same way.)
+    void TermControl::_UpdateReadOnlyPointerCursor(bool pointerInside)
+    {
+        _pointerInsideForReadOnly = pointerInside;
+
+        const auto wantNo = pointerInside && _core && _core.IsInReadOnlyMode();
+        if (wantNo == _readOnlyCursorApplied)
+        {
+            return;
+        }
+
+        try
+        {
+            if (const auto window = CoreWindow::GetForCurrentThread())
+            {
+                window.PointerCursor(CoreCursor{ wantNo ? CoreCursorType::UniversalNo : CoreCursorType::Arrow, 0 });
+                _readOnlyCursorApplied = wantNo;
+            }
+        }
+        CATCH_LOG();
     }
 
     // Method Description:
@@ -3823,6 +3863,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
                                             const Windows::UI::Xaml::Input::PointerRoutedEventArgs& /*e*/)
     {
         _core.ClearHoveredCell();
+
+        // Agentmaster: leaving the terminal restores the default arrow (only if we had overridden it
+        // for a read-only pane), so the "no" cursor never leaks onto the rest of the window chrome.
+        _UpdateReadOnlyPointerCursor(false);
     }
 
     void TermControl::_hoveredHyperlinkChanged(const IInspectable& /*sender*/, const IInspectable& /*args*/)

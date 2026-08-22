@@ -318,6 +318,16 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         std::optional<std::chrono::high_resolution_clock::time_point> _lastAutoScrollUpdateTime;
         bool _pointerPressedInBounds{ false };
 
+        // Agentmaster: while a pane is read-only ("locked" — e.g. an Agentmaster draft-swap that
+        // temporarily owns the input box, or the toggleReadOnlyMode action) we show the Windows
+        // "unavailable" mouse cursor (UniversalNo — the circle-with-a-slash "no" icon) over the
+        // terminal, so a locked tab reads as intentionally locked instead of the pointer merely
+        // vanishing while you type into it. _pointerInsideForReadOnly tracks the hover so a lock
+        // that lands while hovering can refresh the cursor; _readOnlyCursorApplied gates us to
+        // touching the (window-global) CoreWindow cursor on transitions only.
+        bool _pointerInsideForReadOnly{ false };
+        bool _readOnlyCursorApplied{ false };
+
         winrt::Windows::UI::Composition::ScalarKeyFrameAnimation _bellLightAnimation{ nullptr };
         winrt::Windows::UI::Composition::ScalarKeyFrameAnimation _bellDarkAnimation{ nullptr };
         SafeDispatcherTimer _bellLightTimer;
@@ -386,6 +396,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         void _PointerMovedHandler(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
         void _PointerReleasedHandler(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
         void _PointerExitedHandler(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _UpdateReadOnlyPointerCursor(bool pointerInside); // Agentmaster: UniversalNo cursor over a read-only (locked) terminal
         void _PointerCaptureLostHandler(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e); // Agentmaster
         void _MouseWheelHandler(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
         void _ScrollbarChangeHandler(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs& e);
