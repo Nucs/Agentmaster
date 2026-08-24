@@ -2006,6 +2006,50 @@ void TestTranscriptResolve()
         CHECK(!recapLine.empty() && recapLine.find(L"...") == std::wstring::npos, "RenderSessionSummaryBox: the recap line carries NO '...' truncation");
         CHECK(box.find(L"MMM...") != std::wstring::npos || box.find(L"...") != std::wstring::npos, "RenderSessionSummaryBox: a long numbered MESSAGE is still capped (control — the cap applies to messages, not the recap)");
     }
+
+    // --- AnalyzeSessionTranscript: a Skill tool_use -> the "Skills Loaded" summary section, and the
+    // artifacts block renders Skills Loaded / Files Created / Files Edited / Files Read (in THAT order).
+    // A Skill tool_use carries the loaded skill's name in input.skill; names are deduped + sorted like
+    // the file lists and never leak into the numbered Messages (they are assistant tool calls, not
+    // typed prompts). A Write's tool_result classifies created-vs-edited; a plain Read stays under Read.
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring pSkill = std::wstring{ tmp } + L"am_skill_" + std::to_wstring(::GetCurrentProcessId()) + L".jsonl";
+        MakeJsonl(pSkill,
+                  R"j({"type":"user","userType":"external","message":{"content":"do the thing"},"timestamp":"2026-03-01T10:00:00.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"s1","name":"Skill","input":{"skill":"git-grep"}}]},"timestamp":"2026-03-01T10:00:01.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"s2","name":"Skill","input":{"skill":"codex-cli","args":"review foo.cpp"}}]},"timestamp":"2026-03-01T10:00:02.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"s3","name":"Skill","input":{"skill":"git-grep"}}]},"timestamp":"2026-03-01T10:00:03.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":"/work/readonly.txt"}}]},"timestamp":"2026-03-01T10:00:04.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"w1","name":"Write","input":{"file_path":"/work/created.txt"}}]},"timestamp":"2026-03-01T10:00:05.000Z"})j" "\n"
+                  R"j({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"w1","content":"File created successfully at: /work/created.txt"}]},"timestamp":"2026-03-01T10:00:06.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"e1","name":"Edit","input":{"file_path":"/work/edited.txt"}}]},"timestamp":"2026-03-01T10:00:07.000Z"})j" "\n",
+                  1000, 1000);
+        const auto a = AnalyzeSessionTranscript(pSkill, 0);
+        CHECK(a.skillsLoaded.size() == 2, "AnalyzeSessionTranscript: a repeated Skill load is de-duplicated (git-grep loaded twice -> one entry)");
+        CHECK(a.skillsLoaded.size() == 2 && a.skillsLoaded[0] == L"codex-cli" && a.skillsLoaded[1] == L"git-grep",
+              "AnalyzeSessionTranscript: skillsLoaded is sorted (codex-cli before git-grep)");
+        CHECK(a.userMsgs.size() == 1, "AnalyzeSessionTranscript: Skill tool calls never leak into the numbered Messages");
+        CHECK(a.filesCreated.size() == 1 && a.filesCreated[0] == L"created.txt", "AnalyzeSessionTranscript: the Write with a 'File created' result -> Files Created (control)");
+        CHECK(a.filesEdited.size() == 1 && a.filesEdited[0] == L"edited.txt", "AnalyzeSessionTranscript: the Edit -> Files Edited (control)");
+        CHECK(a.filesRead.size() == 1 && a.filesRead[0] == L"readonly.txt", "AnalyzeSessionTranscript: the read-only file -> Files Read (control)");
+
+        const auto box = RenderSessionSummaryBox(a, L"sid-skill", L"/work", pSkill, L"claude --resume sid-skill", L"", L"", L"", /*full*/ true);
+        const size_t pSkills = box.find(L"Skills Loaded:");
+        const size_t pCreated = box.find(L"Files Created:");
+        const size_t pEdited = box.find(L"Files Edited:");
+        const size_t pRead = box.find(L"Files Read:");
+        CHECK(pSkills != std::wstring::npos, "RenderSessionSummaryBox: a Skills Loaded section is emitted when skills were loaded");
+        CHECK(box.find(L"* codex-cli") != std::wstring::npos && box.find(L"* git-grep") != std::wstring::npos,
+              "RenderSessionSummaryBox: each loaded skill is listed under Skills Loaded");
+        CHECK(pSkills != std::wstring::npos && pCreated != std::wstring::npos && pEdited != std::wstring::npos && pRead != std::wstring::npos &&
+                  pSkills < pCreated && pCreated < pEdited && pEdited < pRead,
+              "RenderSessionSummaryBox: the artifacts block order is Skills Loaded < Files Created < Files Edited < Files Read");
+
+        std::error_code ecS;
+        std::filesystem::remove(std::filesystem::path{ pSkill }, ecS);
+    }
 }
 
 // "YYYY\\MM\\DD" in LOCAL time for a unix-ms instant — mirrors ProcessInspect's CodexDayDirLocal

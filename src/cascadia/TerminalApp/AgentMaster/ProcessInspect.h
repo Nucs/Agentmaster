@@ -363,9 +363,9 @@ namespace Agentmaster
 
     // A faithful C++ port of ~/.claude/hooks/session-end.js parseTranscript + its field mapping, so the
     // per-tab summary panel renders the same box (Session / Parent / Plan / Dir / Folder / Resume /
-    // Duration / Branch / Tasks / Messages / Files Read / Files Edited). One forward pass over the
-    // Claude transcript .jsonl collects every field; the overlay composes the box + decides the live
-    // type label.
+    // Duration / Branch / Tasks / Messages / Skills Loaded / Files Created / Files Edited / Files Read).
+    // One forward pass over the Claude transcript .jsonl collects every field; the overlay composes the
+    // box + decides the live type label.
     struct SessionSummary
     {
         bool found{ false };
@@ -373,6 +373,7 @@ namespace Agentmaster
         std::vector<std::wstring> filesRead; // Read tool file_path basenames, sorted + unique
         std::vector<std::wstring> filesCreated; // Write tool file_path basenames whose result was "File created successfully at:" (NEW files), sorted + unique
         std::vector<std::wstring> filesEdited; // Edit / overwriting-Write tool file_path basenames (existing files), sorted + unique
+        std::vector<std::wstring> skillsLoaded; // Agentmaster: Skill tool_use `skill` names (skills loaded this session), sorted + unique
         std::wstring branch; // first gitBranch seen
         // Agentmaster: the Claude Code idle RECAP — the LAST {"type":"system","subtype":"away_summary"}
         // line's content (newer recaps supersede older), normalized via NormalizeRecapText (the trailing

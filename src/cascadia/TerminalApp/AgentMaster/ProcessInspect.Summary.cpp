@@ -442,13 +442,17 @@ namespace Agentmaster
                 line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m, wrapNewlines, truncate));
             }
         }
-        if (!a.filesRead.empty())
+        // Agentmaster: the artifacts block — Skills Loaded, then Files Created / Edited / Read (this
+        // order deliberately, per the summary reorder). skillsLoaded/filesCreated/filesEdited/filesRead
+        // are each already deduped + sorted by AnalyzeSessionTranscript (Files Read has the created/edited
+        // basenames removed there too), so the sections render their lists directly.
+        if (!a.skillsLoaded.empty())
         {
             sep();
-            line(L"Files Read:");
-            for (const auto& f : a.filesRead)
+            line(L"Skills Loaded:");
+            for (const auto& s : a.skillsLoaded)
             {
-                line(L"* " + f);
+                line(L"* " + s);
             }
         }
         if (!a.filesCreated.empty())
@@ -465,6 +469,15 @@ namespace Agentmaster
             sep();
             line(L"Files Edited:");
             for (const auto& f : a.filesEdited)
+            {
+                line(L"* " + f);
+            }
+        }
+        if (!a.filesRead.empty())
+        {
+            sep();
+            line(L"Files Read:");
+            for (const auto& f : a.filesRead)
             {
                 line(L"* " + f);
             }

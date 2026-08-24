@@ -24,7 +24,7 @@
 // 20% of the pane) that renders a session-end.js-style box analyzed off-thread from the transcript via
 // ProcessInspect::AnalyzeSessionTranscript. A pinned TITLE row (the tab/session name, SessionInfo.title) +
 // the live "ago" times line head the panel; below them the DISPLAYED box is a TRIMMED view (Parent/Plan/
-// Duration/Tasks/Messages/Files Read/Files Edited) — it omits everything panel 1 (the badge) already shows
+// Duration/Tasks/Messages/Skills Loaded/Files Created/Edited/Read) — it omits everything panel 1 (the badge) already shows
 // (state, branch, dir/folder); the copy menu's "Summary" yields the COMPLETE box (id +
 // resume CLI + dir + folder + branch + state header included). The toggle is a GLOBAL setting
 // (AppSettings::showSummaryPanel) — shared across windows + persisted; the pencil on any tab flips every tab's panel.

@@ -556,7 +556,7 @@ namespace
     //  - full=false (the DISPLAYED panel): omit everything the link badge (overlay panel 1) ALREADY
     //    shows — the live-state header (kept only for the plan-start/plan-end signal, which the badge
     //    does NOT show), the session id, Dir, Folder, the launch/resume CLI, and Branch. What's left is
-    //    the value-add: Parent/Plan, Duration, Tasks, Messages, Files Read/Edited.
+    //    the value-add: Parent/Plan, Duration, Tasks, Messages, Skills Loaded, Files Created/Edited/Read.
     //  - full=true (the COPYABLE "Summary" — copy menu): the COMPLETE box, including everything trimmed
     //    above (id + resume CLI + Dir + Folder + Branch + the state header), so a copy loses nothing.
     std::wstring RenderSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate, bool showPrevious)
@@ -719,13 +719,16 @@ namespace
                 editedShown.push_back(f);
             }
         }
-        if (!readShown.empty())
+        // Agentmaster: the artifacts block renders Skills Loaded first, then Files Created / Edited /
+        // Read (this order deliberately, per the summary reorder). Skills have no file de-dup concern
+        // (separate namespace); the file sections use the Created>Edited>Read de-dup computed above.
+        if (!a.skillsLoaded.empty())
         {
             sep();
-            line(L"Files Read:");
-            for (const auto& f : readShown)
+            line(L"Skills Loaded:");
+            for (const auto& s : a.skillsLoaded)
             {
-                line(L"* " + f);
+                line(L"* " + s);
             }
         }
         if (!a.filesCreated.empty())
@@ -742,6 +745,15 @@ namespace
             sep();
             line(L"Files Edited:");
             for (const auto& f : editedShown)
+            {
+                line(L"* " + f);
+            }
+        }
+        if (!readShown.empty())
+        {
+            sep();
+            line(L"Files Read:");
+            for (const auto& f : readShown)
             {
                 line(L"* " + f);
             }

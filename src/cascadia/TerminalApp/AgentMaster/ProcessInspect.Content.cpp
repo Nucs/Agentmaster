@@ -1054,7 +1054,7 @@ namespace Agentmaster
         // reverted message stays findable) — see TranscriptStore::ActiveBranchUuids.
         const std::unordered_set<std::wstring> activeBranch = truncated ? std::unordered_set<std::wstring>{} : ActiveBranchUuids(wide);
 
-        std::unordered_set<std::wstring> seenMsgs, seenRead, seenEdit, seenCreated;
+        std::unordered_set<std::wstring> seenMsgs, seenRead, seenEdit, seenCreated, seenSkills;
         // A Write's created-vs-overwrote verdict is in its tool_result ("File created successfully at:"
         // for a NEW file, "...has been updated successfully" otherwise), which arrives in a later user
         // message — so defer Write classification: map the Write's tool_use id -> its file_path here,
@@ -1377,6 +1377,17 @@ namespace Agentmaster
                                     interactiveAskIds.insert(askId);
                                 }
                             }
+                            // Agentmaster: a Skill tool_use LOADS a skill — its input carries the skill
+                            // name in `skill` (e.g. {"skill":"codex-cli","args":"..."}). Collect the name
+                            // for the summary box's "Skills Loaded" section (deduped + sorted like the file
+                            // lists). No file_path, so it lives OUTSIDE the fp block above.
+                            if (name == L"Skill" && input && input->type == json::Value::Type::Obj)
+                            {
+                                if (std::wstring sk = input->StrAt(L"skill"); !sk.empty() && seenSkills.insert(sk).second)
+                                {
+                                    out.skillsLoaded.push_back(std::move(sk));
+                                }
+                            }
                         }
                     }
                 }
@@ -1453,6 +1464,7 @@ namespace Agentmaster
         std::sort(out.filesRead.begin(), out.filesRead.end());
         std::sort(out.filesCreated.begin(), out.filesCreated.end());
         std::sort(out.filesEdited.begin(), out.filesEdited.end());
+        std::sort(out.skillsLoaded.begin(), out.skillsLoaded.end());
         // A file shown under Files Created / Files Edited is already accounted for there — drop it
         // from Files Read so the same basename is never listed twice (working on a file is the
         // meaningful line; the read of it is implied). Read keeps only files that were ONLY read.
