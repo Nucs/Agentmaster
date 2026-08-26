@@ -6098,12 +6098,67 @@ namespace winrt::TerminalApp::implementation
             ok = control.InitializeWithSize(w, h, scale);
         }
         CATCH_LOG();
+        // Agentmaster (deactivate): a DEACTIVATED tab is an ALREADY-INITIALIZED control parked on a
+        // not-started resume connection — InitializeWithSize refuses it (the core is built) and no
+        // layout init will ever re-run, so wake it by Starting the parked connection directly
+        // (TermControl::StartDormantConnection — the restart-path order: connection attached, buffer
+        // live). A genuine restored-dormant tab took the InitializeWithSize branch above; anything
+        // else (uninitialized core that failed init) reads false from both and stays untouched.
+        if (!ok)
+        {
+            try
+            {
+                ok = control.StartDormantConnection();
+            }
+            CATCH_LOG();
+        }
         if (ok && _sessionRegistry)
         {
             _sessionRegistry->SetStarted(sessionId, true); // instant: the half-hollow dot fills + the "Activate" count drops (the liveness tick would also reconcile)
             ::Agentmaster::LogNav(L"activate-dormant " + ::Agentmaster::ShortId(sessionId));
         }
         return ok;
+    }
+
+    // Agentmaster (deactivate — the wake half): focusing a DEACTIVATED tab resumes it. A deactivated
+    // tab is an ALREADY-INITIALIZED control parked on a not-started resume connection — the lazy
+    // layout-init that starts a window-restored dormant tab is one-shot and already spent on this
+    // control, so nothing else would ever Start it. Called from the tab-selection funnel
+    // (_OnTabSelectionChanged) for the newly-selected tab; TermControl::StartDormantConnection is the
+    // discriminating no-op for every other shape — false for an uninitialized core (a restored-dormant
+    // tab: its own lazy init owns the start the moment layout runs) and for any connection not sitting
+    // NotConnected (running / closed / shells). UI thread only.
+    void TerminalPage::_WakeDeactivatedTab(const winrt::TerminalApp::Tab& tab)
+    {
+        if (!tab || !_sessionRegistry)
+        {
+            return;
+        }
+        const auto sid = _ClaudeSessionForTab(tab);
+        if (sid.empty())
+        {
+            return; // not a managed session tab — nothing parked here
+        }
+        try
+        {
+            const auto control = _ControlForSession(sid);
+            if (!control || control.ConnectionState() != TerminalConnection::ConnectionState::NotConnected)
+            {
+                return; // running / closed / no control — nothing dormant to wake
+            }
+            if (control.StartDormantConnection())
+            {
+                // Instant started flip (the liveness tick would also reconcile): resumes the deferred
+                // autorunner via the registry notify, fills the half-hollow dot, and lets the §10
+                // draft-restore pump deliver a kept unsent draft back into the fresh box.
+                _sessionRegistry->SetStarted(sid, true);
+                ::Agentmaster::LogNav(L"reactivate " + ::Agentmaster::ShortId(sid) + L" (focus)");
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_WakeDeactivatedTab");
+        }
     }
 
     // Agentmaster (eager-init / "Activate All Tabs" pacing): the drip cadence. Waking a dormant tab

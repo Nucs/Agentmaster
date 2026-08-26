@@ -2393,6 +2393,309 @@ namespace winrt::TerminalApp::implementation
         return true;
     }
 
+    // Agentmaster (deactivate): return ONE managed session tab to the DORMANT "waiting for activation
+    // or focus" state a freshly reopened window's tabs sit in — its claude(/codex) is shut down while
+    // the tab stays exactly where it is (title, per-dir color, Auto-Testing queue, autorunner mode all
+    // kept), and the conversation resumes the moment the tab is focused or activated. Mechanically
+    // this is _RestartManagedSession's swap recipe with the Start() WITHHELD: build the resume-gated
+    // connection (a never-messaged fork re-forks; a transcript-less session relaunches FRESH with the
+    // SAME id — identical to what a window reopen would do), re-stamp the record's host identity, swap
+    // it in, and leave it NotConnected — which is the very dormancy contract every consumer already
+    // honors: the scheduler's started-gate defers auto-sends until SetStarted(true), the delivery
+    // pre-flight reads Unknown off a NotConnected control and holds, the Enter-retry watchdog never
+    // presses into a dormant session, the pending-input scan takes its remembered-draft branch, the
+    // tab dot goes half-hollow, and "Activate Tab" / "Activate All Tabs (N)" offer the wake. The ONE
+    // new seam is waking: an already-initialized control's connection is never started by the one-shot
+    // lazy layout-init, so focus (_WakeDeactivatedTab via the selection funnel) or any Activate
+    // surface presses TermControl::StartDormantConnection. Returns true when the tab actually went
+    // dormant; false == skipped (not a managed session / adopted-external / already dormant /
+    // mid-delivery / no pane / build failure), each meaningful skip logged. UI thread only.
+    bool TerminalPage::_DeactivateManagedTab(const winrt::TerminalApp::Tab& tab)
+    {
+        if (!_sessionRegistry || !_hooksBridge || !tab)
+        {
+            return false;
+        }
+        const auto sid = _ClaudeSessionForTab(tab);
+        if (sid.empty())
+        {
+            return false; // not a managed session tab (a plain shell / the Manager tab) — nothing to deactivate
+        }
+        const auto sid8 = ::Agentmaster::ShortId(sid);
+        const auto info = _sessionRegistry->Get(sid);
+        if (!info || !info->live)
+        {
+            return false;
+        }
+        // An ADOPTED session's ConPTY hosts the USER'S OWN SHELL (they typed `claude` into it) —
+        // swapping that connection would kill their shell and re-key the whole tab, a mutation far
+        // beyond "park this tab". Refuse: deactivate is for tabs whose connection is OURS
+        // (launched/restored). The menu already hides for these (SetAgentDeactivateState); this is
+        // the belt for the batch scopes.
+        if (info->external)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[deactivate] " + sid8 + L" skipped - adopted/external (its ConPTY is the user's shell, not ours to swap)\n");
+            return false;
+        }
+        // Never yank the input box out from under an in-flight delivery/swap — the gate owner is
+        // mid-verify on the very control we would reset. The 45s gate expiry self-heals a leak; the
+        // user simply retries the menu item a moment later.
+        if (_sessionRegistry->DeliveryGateHeld(sid) || _draftSwapsInFlight.count(sid) != 0)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[deactivate] " + sid8 + L" skipped - a prompt delivery is mid-flight (try again in a moment)\n");
+            return false;
+        }
+        // Resolve the SESSION'S OWN pane — by its connection's WT_SESSION == the record's tabToken
+        // (the _RestartTabIntoFreshSession discipline): in a user split the first/active pane could be
+        // a sibling shell, and swapping THAT would deactivate the wrong pane. A token-less/unmatched
+        // walk falls back to the tab's first terminal pane (the single-pane norm).
+        const auto tabImpl = _GetTabImpl(tab);
+        const auto rootPane = tabImpl ? tabImpl->GetRootPane() : nullptr;
+        if (!rootPane)
+        {
+            return false;
+        }
+        TermControl control{ nullptr };
+        TermControl firstControl{ nullptr };
+        rootPane->WalkTree([&](auto&& pane) {
+            if (const auto content = pane->GetContent())
+            {
+                if (const auto term = content.try_as<TerminalApp::TerminalPaneContent>())
+                {
+                    if (const auto ctrl = term.GetTermControl())
+                    {
+                        if (!firstControl)
+                        {
+                            firstControl = ctrl;
+                        }
+                        if (!info->tabToken.empty())
+                        {
+                            if (const auto conn = ctrl.Connection(); conn && ::Agentmaster::TabTokenEq(info->tabToken, ::Microsoft::Console::Utils::GuidToPlainString(conn.SessionId())))
+                            {
+                                control = ctrl;
+                                return true; // found the session's own pane — stop walking
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
+        });
+        if (!control)
+        {
+            control = firstControl;
+        }
+        if (!control)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[deactivate] " + sid8 + L" skipped - no terminal pane resolved\n");
+            return false;
+        }
+        // Already dormant (a restored tab never activated, or deactivated twice) — nothing running to
+        // stop. This doubles as the _restartPaneConnection NotConnected guard: a never-initialized
+        // control must never be HardReset/swapped (null state machine / null buffer -> AV).
+        if (control.ConnectionState() == TerminalConnection::ConnectionState::NotConnected)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[deactivate] " + sid8 + L" skipped - already dormant\n");
+            return false;
+        }
+
+        const std::wstring dir = info->workingDir;
+        const std::wstring title = info->title;
+        const bool isCodex = (info->kind == ::Agentmaster::AgentKind::Codex);
+        bool reforked = false;
+
+        // Build the DORMANT successor connection — _RestartManagedSession's construction verbatim,
+        // except inheritCursor=false: the buffer is blanked below, so the woken agent repaints from
+        // home on an empty screen exactly like a window-restored tab's first activation.
+        TerminalConnection::ConptyConnection newConn{ nullptr };
+        if (isCodex)
+        {
+            // Resume the rollout when it still exists, else fresh (rollout-gated, Rule #6). Never fork.
+            std::wstring resumeUuid;
+            if (!info->codexSessionId.empty() &&
+                !::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), info->codexSessionId).empty())
+            {
+                resumeUuid = info->codexSessionId;
+            }
+            const std::wstring commandline = ::Agentmaster::BuildCodexCommandline(resumeUuid, {}, ::Agentmaster::SharedEngine().codexExePath);
+            const auto codexEnv = ::Agentmaster::ResolveSessionEnv(::Agentmaster::LoadAppSettings(), dir);
+            const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, commandline);
+            newConn = _BuildAgentConnection(hostedCmd, dir, title, codexEnv, /*inheritCursor*/ false);
+        }
+        else
+        {
+            // Native-exe-only policy backstop (mirrors _RestartManagedSession): without a claude.exe
+            // there is no resume connection to park — better to leave the session running than swap
+            // in a doomed one. Silent (log only).
+            if (!::Agentmaster::EnsureClaudeAvailable())
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[deactivate] " + sid8 + L" blocked - no native claude.exe to build the parked resume connection\n");
+                return false;
+            }
+            const auto appSettings = ::Agentmaster::LoadAppSettings();
+            // Seed workspace trust NOW, at this launch seam (the spec builders stay pure and never
+            // touch ~/.claude.json): the wake may be hours or days away, but the trust flag is
+            // durable, so the woken claude can never park on the startup trust modal.
+            ::Agentmaster::PrepareManagedClaudeWorkspace(dir, appSettings);
+            const auto spec = ::Agentmaster::BuildClaudeRestartSpec(dir, title, _hooksBridge->PipeName(), sid, appSettings, ::Agentmaster::SharedEngine().claudeExePath, info->forkParentId);
+            const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline);
+            newConn = _BuildAgentConnection(hostedCmd, dir, title, spec.env, /*inheritCursor*/ false);
+            reforked = spec.commandline.find(L"--fork-session") != std::wstring::npos;
+        }
+        if (!newConn)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[deactivate] " + sid8 + L" skipped - connection build failed\n");
+            return false;
+        }
+
+        // Quiesce the flash/notify edge trackers to the POST state BEFORE the registry write:
+        // deactivating a Running session is a deliberate park, not a completion — without this the
+        // state normalize below reads as a Running -> Idle edge and raises a FALSE "Has completed …"
+        // toast plus a false red "needs you" flash ring (a batch "All Tabs" would light a whole wall
+        // of them). Pre-seeding prev == new makes both evaluators read no edge at all.
+        const auto normalized = ::Agentmaster::RestoredSessionState(info->state);
+        _agentFlashLastState[sid] = normalized;
+        _agentFlashRunSpan.erase(sid);
+        _agentNotifyLastState[sid] = normalized;
+        _agentNotifyRunningSinceMs.erase(sid);
+        _agentToastHeld.erase(sid);
+
+        // Re-stamp the session's HOST IDENTITY + dormant-normalize BEFORE the swap (the
+        // _RestartManagedSession order): the liveness sweep pinpoints the session's pane BY tabToken,
+        // so the record must never name a connection the tab no longer holds (it would read "pane
+        // gone" -> archive). started=false is the dormancy contract every consumer keys on; the
+        // display state normalizes exactly like a reopen (Rule #16 — the at-rest "needs you" states
+        // survive, in-flight/ended reset to Idle, and the question-guard flag rides only a preserved
+        // needs-you state). The unsent-draft memory is deliberately KEPT — deactivate is a park, the
+        // archive shape (PENDING_INPUT.md §5), NOT the restart-tab's watched-it-die eager clear.
+        // presenceStatus is cleared because the process it described is about to die (a stale
+        // "busy"/"shell" would hold the scanner's decay/synth gates on a dormant record).
+        const std::wstring newWt = ::Microsoft::Console::Utils::GuidToPlainString(newConn.SessionId());
+        _sessionRegistry->Update(sid, [&](::Agentmaster::SessionInfo& s) {
+            s.tabToken = newWt;
+            s.live = true;
+            s.pid = 0;
+            s.started = false;
+            s.state = ::Agentmaster::RestoredSessionState(s.state);
+            s.lastMessageWasQuestion = ::Agentmaster::RestoredQuestionFlag(s.state, s.lastMessageWasQuestion);
+            s.pendingConfirmPromptId.clear();
+            s.presenceStatus.clear();
+            if (reforked)
+            {
+                s.forkEchoConsumed = false; // re-arm: the woken re-fork will echo the source id once
+            }
+        });
+
+        // The swap — upstream's restart order MINUS Start(): leaving the new connection NotConnected
+        // IS the deactivation. control.Connection() revokes the old handlers and THEN closes the old
+        // connection, so claude/codex shuts down silently (no "[process exited …]" banner — the
+        // documented _RestartManagedSession order). ClearBuffer(All) then blanks screen + scrollback:
+        // the dead TUI's frozen frame must not linger — its ❯ input box would read as a LIVE draft box
+        // to the pending-input detector / delivery pre-flight the moment anything consulted the buffer
+        // (they gate on NotConnected first; the blank buffer is the belt), and a blank tab is exactly
+        // what a reopened window's dormant tab shows. Safe on the not-started connection:
+        // ConptyConnection::ClearBuffer no-ops before _isConnected().
+        control.HardResetWithoutErase();
+        control.Connection(newConn);
+        control.ClearBuffer(winrt::Microsoft::Terminal::Control::ClearBufferType::All);
+
+        // Re-point the stdin injector at the parked connection (Claude only — Codex has no injector in
+        // this phase). Rule #3 binds by sessionId; a write into the NotConnected connection silently
+        // drops, which is exactly a window-restored dormant tab's contract — and why the scheduler's
+        // started-gate defers every auto-send until the wake flips started back on.
+        if (!isCodex)
+        {
+            const auto conn = newConn;
+            _sessionRegistry->SetInjector(sid, [conn](const std::wstring& text) {
+                const auto* begin = reinterpret_cast<const char16_t*>(text.data());
+                conn.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
+            });
+        }
+
+        // §10 restore RE-FILL parity (PENDING_INPUT.md): the KEPT unsent-draft memory re-arms the
+        // type-back, so the draft returns to the box when the tab is woken — every resume path arms,
+        // and a deactivate->wake is a resume in every way that matters (the pump waits for started).
+        if (!isCodex && _appSettings.restoreDraftOnResume && !info->pendingInput.empty())
+        {
+            _ArmDraftRestore(sid, info->pendingInput);
+        }
+
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[deactivate] " + sid8 + (isCodex ? L" codex" : L" claude") + L" parked dormant \"" + title + L"\" cwd=" + dir + L" (resumes on focus/activate)\n");
+        return true;
+    }
+
+    // Agentmaster (deactivate): the tab context menu's "Deactivate ▸" dispatcher. scope: 0 == this tab
+    // · 1 == every OTHER managed tab in this window · 2 == EVERY managed tab in this window — the
+    // literal "as if the app had just opened" (every session parked dormant, each resuming on
+    // focus/activate). Batches silently pass over non-session tabs and count/log only meaningful
+    // skips (adopted / already dormant / mid-delivery — logged by _DeactivateManagedTab). NO confirm
+    // dialog by design: deactivate is non-destructive — the conversation stays on disk and a single
+    // click resumes it — exactly like "Restart session", which also kills the process unconfirmed.
+    // If the FOCUSED tab was parked, selection jumps to the Manager tab: the wake hook fires on
+    // selection CHANGE, so a dormant tab left focused would sit dead until a switch-away-and-back —
+    // and landing on the Manager mirrors what a fresh open shows. UI thread only.
+    void TerminalPage::_DeactivateTabsFromMenu(const winrt::TerminalApp::Tab& anchorTab, int32_t scope)
+    {
+        if (!anchorTab)
+        {
+            return;
+        }
+        const std::wstring scopeName = (scope == 0) ? L"this" : ((scope == 1) ? L"others" : L"all");
+        ::Agentmaster::LogNav(L"deactivate-begin scope=" + scopeName + L" anchor=" + _DescribeTabForLog(anchorTab));
+        const auto focusedTab = _GetFocusedTab();
+        bool focusedParked = false;
+        uint32_t parked = 0;
+        uint32_t skipped = 0;
+        std::vector<winrt::TerminalApp::Tab> targets;
+        if (scope == 0)
+        {
+            targets.push_back(anchorTab);
+        }
+        else
+        {
+            for (const auto& t : _tabs)
+            {
+                if (_managerTab && t == _managerTab)
+                {
+                    continue; // the pinned Manager tab hosts no session
+                }
+                if (scope == 1 && t == anchorTab)
+                {
+                    continue; // "Other Tabs": this one keeps running
+                }
+                targets.push_back(t);
+            }
+        }
+        for (const auto& t : targets)
+        {
+            if (_ClaudeSessionForTab(t).empty())
+            {
+                continue; // a plain shell tab — not part of the batch, not a "skip" worth counting
+            }
+            if (_DeactivateManagedTab(t))
+            {
+                ++parked;
+                if (focusedTab && t == focusedTab)
+                {
+                    focusedParked = true;
+                }
+            }
+            else
+            {
+                ++skipped;
+            }
+        }
+        if (focusedParked && _managerTab)
+        {
+            uint32_t managerIdx{};
+            if (_tabs.IndexOf(_managerTab, managerIdx))
+            {
+                _SelectTab(managerIdx);
+            }
+        }
+        ::Agentmaster::LogNav(L"deactivate-done scope=" + scopeName + L" parked=" + std::to_wstring(parked) + L" skipped=" + std::to_wstring(skipped));
+    }
+
     // Agentmaster: fork a MANAGED session by id — the kind-aware fork shared by the WT tab's "Fork
     // session" (_DuplicateTab) AND the Triage Board / Explorer-tree "Fork session" menu, so the two can
     // never drift. Branches the conversation into a NEW, independent session (the source's transcript is

@@ -74,6 +74,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         void OpenCWD();
         void Close();
         bool InitializeWithSize(double width, double height, float scale); // Agentmaster (eager-init): see TermControl.idl
+        bool StartDormantConnection(); // Agentmaster (deactivate/reactivate): Start an initialized control's parked NotConnected connection — see TermControl.idl
         Windows::Foundation::Size CharacterDimensions() const;
         Windows::Foundation::Size MinimumSize();
         float SnapDimensionToGrid(const bool widthOrHeight, const float dimension);

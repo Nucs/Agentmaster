@@ -1591,6 +1591,30 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         return ok;
     }
 
+    // Agentmaster (deactivate/reactivate — see TermControl.idl): Start an ALREADY-INITIALIZED
+    // control's parked, not-started connection. A "Deactivate Tab" swap leaves the core initialized
+    // with a dormant (never Start()ed) resume connection attached — a shape neither init path can
+    // wake: the lazy layout-init is one-shot (spent when this control first initialized) and
+    // InitializeWithSize refuses an initialized core. Start() is legal here precisely BECAUSE the
+    // core is initialized — buffer + state machine are live, the same order the restart path uses
+    // right after Connection(newConn) — and it is only ever pressed on a NotConnected connection
+    // (Start() is not re-entrant; a second call would transition the connection to Failed).
+    bool TermControl::StartDormantConnection()
+    {
+        if (_initializedTerminal)
+        {
+            if (const auto conn = _core.Connection(); conn && conn.State() == TerminalConnection::ConnectionState::NotConnected)
+            {
+                conn.Start();
+                return true;
+            }
+        }
+        // An uninitialized core must NEVER Start a connection — its output would reach the still-null
+        // buffer/state machine (the documented 0xC0000005 class); the lazy/eager init paths own that
+        // case with the AV-safe Initialize()->Start() order.
+        return false;
+    }
+
     safe_void_coroutine TermControl::_restoreInBackground()
     {
         const auto path = std::exchange(_restorePath, {});

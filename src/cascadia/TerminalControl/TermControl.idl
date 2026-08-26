@@ -122,6 +122,18 @@ namespace Microsoft.Terminal.Control
         // tab is eventually laid out. Returns true if it initialized (false if already initialized or the
         // size is non-positive). UI thread only.
         Boolean InitializeWithSize(Double width, Double height, Single scale);
+
+        // Agentmaster (deactivate/reactivate): START an ALREADY-INITIALIZED control's parked,
+        // not-started connection. The inverse-of-deactivate wake: "Deactivate Tab" swaps a managed
+        // tab's connection for a dormant (never Start()ed) resume connection while the control's core
+        // stays initialized — a shape the lazy layout-init can never start (it is one-shot and
+        // already spent) and InitializeWithSize refuses (the core is built). Start() here is safe
+        // BECAUSE the core is initialized (buffer/state machine live — the same order the restart
+        // path uses after Connection(newConn)), and it is only ever pressed on a NotConnected
+        // connection (Start() is not re-entrant). Returns true iff it started one; false for an
+        // uninitialized core (the lazy/eager init paths own that case) or any non-dormant
+        // connection state. UI thread only.
+        Boolean StartDormantConnection();
         Windows.Foundation.Size CharacterDimensions { get; };
         Windows.Foundation.Size MinimumSize { get; };
         Single SnapDimensionToGrid(Boolean widthOrHeight, Single dimension);

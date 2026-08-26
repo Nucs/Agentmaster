@@ -2692,6 +2692,20 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster (deactivate): context-menu "Deactivate ▸ ..." -> park this tab / every other
+        // managed tab / EVERY managed tab in this window back in the DORMANT waiting-for-focus state a
+        // freshly reopened window's tabs sit in — claude shut down, the tab kept exactly where it is,
+        // the conversation resuming the moment the tab is focused or activated. scope: 0 == this tab ·
+        // 1 == other tabs · 2 == all tabs.
+        hostingTab.DeactivateTabsRequested([weakTab, weakThis](int32_t scope) {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (page && tab)
+            {
+                page->_DeactivateTabsFromMenu(*tab, scope);
+            }
+        });
+
         // Agentmaster: context-menu "Close > Close tabs to the left" -> close every tab to the left
         // of this one. The mirror of the upstream "Close tabs to the right" (CloseTabsAfter) action,
         // routed through _CloseTabsBefore -> _RemoveTabs so it shares the aggregate confirmation, the
@@ -2818,12 +2832,16 @@ namespace winrt::TerminalApp::implementation
                     const bool isSession = !sid.empty();
                     // Agentmaster: resolve the session's agent so the "Copy >" submenu offers ONLY the
                     // matching launch-CLI item (Codex CLI for a Codex session, Claude CLI otherwise).
+                    // Agentmaster (deactivate): also capture whether it is ADOPTED (external) — the
+                    // "Deactivate ▸" submenu below hides for those (their ConPTY is the user's shell).
                     bool isCodex = false;
+                    bool isExternal = false;
                     if (isSession && page->_sessionRegistry)
                     {
                         if (const auto info = page->_sessionRegistry->Get(sid))
                         {
                             isCodex = info->kind == ::Agentmaster::AgentKind::Codex;
+                            isExternal = info->external;
                         }
                     }
                     tab->SetAgentCopyMenuVisible(isSession, isCodex);
@@ -2905,6 +2923,12 @@ namespace winrt::TerminalApp::implementation
                     // (they close every live session sharing THIS session's effective work dir) — shown
                     // only when this tab IS a managed session.
                     tab->SetAgentFolderCloseVisible(isSession);
+                    // Agentmaster (deactivate): the "Deactivate ▸" submenu directly above "Close ▸" —
+                    // shown for a managed session tab, but never an ADOPTED one (its ConPTY hosts the
+                    // user's own shell — not ours to swap a dormant connection into). `dormant`
+                    // (computed above for "Activate Tab") grays its "Deactivate Tab" item when this
+                    // session is already parked; the batch items stay clickable (other tabs may run).
+                    tab->SetAgentDeactivateState(isSession && !isExternal, dormant);
                 }
             });
         }

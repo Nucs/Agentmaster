@@ -2043,6 +2043,70 @@ namespace winrt::TerminalApp::implementation
         flyout.Items().Append(_moveSubMenu);
     }
 
+    // Agentmaster (deactivate): append the "Deactivate ▸" submenu — the inverse of "Activate Tab"
+    // (eager-init) and the non-destructive sibling of "Close ▸", appended directly ABOVE it so the two
+    // verb submenus read as a pair: PARK it vs END it. Deactivating returns a managed session tab to
+    // the DORMANT waiting-for-focus state a freshly reopened window's tabs sit in: its claude(/codex)
+    // is shut down, the tab keeps its place/title/color/queue/autorunner, and the conversation resumes
+    // the moment the tab is focused or activated. Built COLLAPSED — the page shows it at flyout-open
+    // only for a managed, NON-adopted session tab (SetAgentDeactivateState); each item raises
+    // DeactivateTabsRequested with its scope and the page does the work (_DeactivateTabsFromMenu).
+    void Tab::_AppendDeactivateMenuItems(winrt::Windows::UI::Xaml::Controls::MenuFlyout flyout)
+    {
+        auto weakThis{ get_weak() };
+
+        // Deactivate Tab (this one). Grayed while the session is already dormant
+        // (SetAgentDeactivateState) — there is nothing running to stop; "Activate Tab" is the
+        // offered verb then.
+        _deactivateTabMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->DeactivateTabsRequested.raise(0);
+            }
+        });
+        _deactivateTabMenuItem.Text(L"Deactivate Tab");
+        WUX::Controls::ToolTipService::SetToolTip(_deactivateTabMenuItem, box_value(winrt::hstring{ L"Shut this session's agent down but KEEP the tab exactly where it is \x2014 blank and waiting, like a freshly reopened window's tab. Focusing or activating the tab resumes the conversation. Nothing is closed or deleted." }));
+
+        // Other Tabs — every OTHER managed session tab in this window (this one keeps running): the
+        // deactivate twin of "Close other tabs", for quiescing the background fleet in one gesture.
+        _deactivateOtherTabsMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->DeactivateTabsRequested.raise(1);
+            }
+        });
+        _deactivateOtherTabsMenuItem.Text(L"Other Tabs");
+        WUX::Controls::ToolTipService::SetToolTip(_deactivateOtherTabsMenuItem, box_value(winrt::hstring{ L"Deactivate every OTHER managed session tab in this window \x2014 this one keeps running. Each parked tab resumes its conversation when you focus or activate it." }));
+
+        // All Tabs — every managed session tab in this window, this one included: the strip then
+        // reads exactly as if the app had just opened (every session dormant, waiting for a
+        // focus/activate; you land on the Manager tab).
+        _deactivateAllTabsMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->DeactivateTabsRequested.raise(2);
+            }
+        });
+        _deactivateAllTabsMenuItem.Text(L"All Tabs");
+        WUX::Controls::ToolTipService::SetToolTip(_deactivateAllTabsMenuItem, box_value(winrt::hstring{ L"Deactivate EVERY managed session tab in this window \x2014 as if the app had just opened: all tabs parked dormant, each resuming when focused or activated. You land on the Manager tab." }));
+
+        // The submenu header. Moon glyph (QuietHours) — "asleep, waiting": deactivation is dormancy,
+        // not an ending (that is Close's X). Kept as a member so the page can show/hide it
+        // (SetAgentDeactivateState) and the pinned Manager tab can gray it
+        // (DisableCloseAndMoveMenuItems).
+        Controls::FontIcon deactivateSymbol;
+        deactivateSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+        deactivateSymbol.Glyph(L"\xE708"); // QuietHours (moon)
+        _deactivateSubMenu.Text(L"Deactivate");
+        _deactivateSubMenu.Icon(deactivateSymbol);
+        _deactivateSubMenu.Visibility(WUX::Visibility::Collapsed); // shown only for a managed, non-adopted session tab (page-driven)
+        WUX::Controls::ToolTipService::SetToolTip(_deactivateSubMenu, box_value(winrt::hstring{ L"Park session tabs in the dormant waiting-for-focus state a freshly reopened window's tabs sit in \x2014 the agent process shuts down, the tab stays where it is, and focusing or activating it resumes the conversation" }));
+        _deactivateSubMenu.Items().Append(_deactivateTabMenuItem);
+        _deactivateSubMenu.Items().Append(_deactivateOtherTabsMenuItem);
+        _deactivateSubMenu.Items().Append(_deactivateAllTabsMenuItem);
+        flyout.Items().Append(_deactivateSubMenu);
+    }
+
     // Method Description:
     // - Append the close menu items to the context menu flyout
     // Arguments:
@@ -2627,6 +2691,7 @@ namespace winrt::TerminalApp::implementation
         contextMenuFlyout.Items().Append(_forkSessionSubMenu); // Agentmaster (launch-model picker): its submenu twin — SetForkSessionModels shows exactly one of the pair, so they occupy one visual slot
         contextMenuFlyout.Items().Append(menuSeparator);
 
+        _AppendDeactivateMenuItems(contextMenuFlyout); // Agentmaster (deactivate): "Deactivate ▸" directly ABOVE "Close ▸" — park it vs end it
         auto closeSubMenu = _AppendCloseMenuItems(contextMenuFlyout);
         closeSubMenu.Items().Append(_closePaneMenuItem);
 
@@ -2709,6 +2774,7 @@ namespace winrt::TerminalApp::implementation
         _moveSubMenu.IsEnabled(false);
         _closeSubMenu.IsEnabled(false);
         _closeTabMenuItem.IsEnabled(false);
+        _deactivateSubMenu.IsEnabled(false); // Agentmaster (deactivate): belt — it never SHOWS on the Manager tab (no session), but gray it like the Close submenu anyway
     }
 
     // Agentmaster: permanently disable renaming for this tab. Used by the pinned Manager tab,
@@ -2858,6 +2924,21 @@ namespace winrt::TerminalApp::implementation
         ASSERT_UI_THREAD();
 
         _activateSessionMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+    }
+
+    // Agentmaster (deactivate): show/hide the "Deactivate ▸" submenu + gray its "Deactivate Tab" item
+    // while THIS session is already dormant (nothing running to stop — "Activate Tab" is the offered
+    // verb then; the batch items stay enabled since OTHER tabs may be running). Page-driven at
+    // flyout-open beside SetAgentActivateVisible — the two are complementary halves of one toggle: a
+    // dormant session offers Activate, a running one offers Deactivate. Hidden for a plain shell /
+    // the pinned Manager tab AND for an ADOPTED session (its ConPTY hosts the user's own shell — not
+    // ours to swap a dormant connection into).
+    void Tab::SetAgentDeactivateState(bool visible, bool thisTabDormant)
+    {
+        ASSERT_UI_THREAD();
+
+        _deactivateSubMenu.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+        _deactivateTabMenuItem.IsEnabled(!thisTabDormant);
     }
 
     // Agentmaster (launch-model picker): choose which "New Session Here" form this tab's context menu

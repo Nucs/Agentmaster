@@ -2217,7 +2217,36 @@ What works, by area:
   tab's session's `EffectiveWorkingDir` and calls the SHARED `_ConfirmAndCloseClaudeSessionsInFolder` — the
   exact twin of the Manager board/tree menu's folder items), shown only for a **managed session** tab
   (`Tab::SetAgentFolderCloseVisible(isSession)` at flyout-open, the `SetFavoriteAndCloseAllVisible` idiom;
-  built collapsed, no icon to match the icon-less close sub-items). Restore
+  built collapsed, no icon to match the icon-less close sub-items). **Directly ABOVE "Close ▸" sits
+  the "Deactivate ▸" submenu** (moon glyph `\xE708`; `Tab::_AppendDeactivateMenuItems`) — the
+  non-destructive sibling (PARK it vs END it) and the inverse of the eager-init "Activate Tab":
+  **Deactivate Tab · Other Tabs · All Tabs** return managed session tabs to the DORMANT
+  waiting-for-focus state a freshly reopened window's tabs sit in — claude/codex is shut down while
+  the tab keeps its place/title/color/queue/autorunner, and the conversation RESUMES the moment the
+  tab is focused or activated ("as if agentmaster just opened and all tabs are deactivated waiting
+  for activation or focus"). Mechanically `_DeactivateManagedTab` is `_RestartManagedSession`'s swap
+  recipe with the `Start()` WITHHELD: build the resume-gated connection (re-fork / fresh-same-id
+  fallbacks included), re-stamp `tabToken` BEFORE the swap (the liveness-sweep order), normalize the
+  display state like a reopen (Rule #16) + `started=false` (the dormancy contract the scheduler's
+  started-gate / Enter-retry dormant guard / delivery pre-flight / pending-input memory branch all
+  already key on), pre-seed the flash+notify edge trackers (a deliberate park must not raise a false
+  "Has completed" toast or a red ring), `HardResetWithoutErase` + `Connection(newConn)` (old claude
+  dies silently, no exit banner) + `ClearBuffer(All)` (a blank tab — the dead TUI's frozen `❯` box
+  must not masquerade as a live draft box), injector re-pointed, the kept unsent-draft memory
+  re-armed for the §10 re-fill. **Waking is the one new seam**: a deactivated tab's control is
+  ALREADY initialized, so the one-shot lazy layout-init can never start the parked connection —
+  `TermControl::StartDormantConnection` (new, idl-projected) Starts an initialized control's
+  NotConnected connection, pressed by the tab-selection funnel (`_WakeDeactivatedTab` in
+  `_OnTabSelectionChanged` — plain focus wakes it) AND by `_ActivateDormantSession`'s fallback, so
+  every existing Activate surface (menu item, Shift+Click, "Activate All Tabs (N)", cross-window
+  fan-out) wakes deactivated tabs too. Adopted/external sessions are refused (their ConPTY is the
+  user's own shell); mid-delivery sessions are skipped (the gate owner holds the box); already-dormant
+  tabs gray the "Deactivate Tab" item (`SetAgentDeactivateState`, beside `SetAgentActivateVisible` at
+  flyout-open). Deactivating the FOCUSED tab jumps selection to the Manager tab (the wake fires on
+  selection CHANGE — a dormant tab left focused would sit dead). No confirm (non-destructive, like
+  "Restart session"); logged `[nav] deactivate-begin/done` + per-tab `[deactivate]` +
+  `[nav] reactivate <sid8> (focus)`. An app restart converges naturally — a deactivated tab's record
+  reopens as a plain restored-dormant tab. Restore
   re-launches in the working dir + reloads the Auto Testing + autorunner; resume is
   **transcript-gated**: `claude --resume <id>` only when Claude actually has a conversation for
   that id, otherwise a **fresh** session (new id, same dir + queue) — and the stale archived
