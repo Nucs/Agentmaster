@@ -350,6 +350,22 @@ namespace Agentmaster
     // IsNoiseUserPrompt). `maxBytes` 0 == the whole file. Filesystem only; empty on any read failure.
     std::wstring ReadConversationText(std::wstring_view transcriptPath, bool codex, size_t maxBytes);
 
+    // Agentmaster (the "Transcript Followup" copy — AgentCopyActions.h code 8): the conversation
+    // folded PER TURN into a paste-into-a-follow-up-session brief — a "<Legend>" header naming the
+    // two markers, then every turn as
+    //     U+276F <the user message, whole>
+    //     U+25CF <the assistant's message at the END of that turn>
+    // where the U+25CF reply is the turn's LAST visible assistant text before the next user message
+    // (a mid-turn progress note is superseded by the final answer; a turn whose reply never came —
+    // still running / interrupted / thinking-only — shows just its U+276F block). Continuation lines
+    // indent 2 spaces so each block reads aligned under its marker; blocks are blank-line separated
+    // (one paragraph == one turn; a type-ahead batch folds its U+276F lines into one paragraph).
+    // The WALK + FILTERS are ReadConversationText's, verbatim (live branch only, TEXT blocks only,
+    // tool_result turns skipped, IsNoiseUserPrompt, meta/compact/sidechain dropped; Codex: event_msg
+    // user_message/agent_message) — a deliberate lockstep COPY, see the Impl's warning. Empty when
+    // the conversation has no visible message (never a legend-only copy). Filesystem only.
+    std::wstring ReadConversationFollowupText(std::wstring_view transcriptPath, bool codex, size_t maxBytes);
+
     // ===== Session summary (TAB_OVERLAY.md summary panel) — the session-end.js analyzer, ported =====
     // Agentmaster (conversation lineage): ONE segment of a multi-part conversation — the run of
     // messages between two compaction boundaries (a `/compact` splits a transcript into segments;

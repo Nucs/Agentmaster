@@ -313,7 +313,10 @@ namespace
     // rollout glob recurses the date-sharded sessions tree), read it into a plain-text conversation
     // (user + assistant TEXT only — no tools/results/thinking), then hop back to `disp` to copy
     // (WinRT Clipboard is UI-thread only). No-op when there is no transcript / nothing to copy.
-    winrt::fire_and_forget CopyConversationAsync(winrt::Windows::System::DispatcherQueue disp, bool codex, std::wstring claudeId, std::wstring codexId)
+    // `followup` selects the "Transcript Followup" render (ReadConversationFollowupText — the
+    // per-turn ❯ user + ● final-reply brief with its legend header, AgentCopyActions.h code 8)
+    // instead of the classic whole-transcript "User:/Assistant:" text (code 5).
+    winrt::fire_and_forget CopyConversationAsync(winrt::Windows::System::DispatcherQueue disp, bool codex, std::wstring claudeId, std::wstring codexId, bool followup = false)
     {
         // Agentmaster (contained): an exception escaping this fire_and_forget == winrt::terminate() ==
         // the whole app dies. ReadConversationText self-contains, but the glue (the whole-conversation
@@ -338,7 +341,8 @@ namespace
             {
                 co_return; // no transcript yet (never prompted)
             }
-            const std::wstring convo = ::Agentmaster::ReadConversationText(path, codex, 0 /* whole file */);
+            const std::wstring convo = followup ? ::Agentmaster::ReadConversationFollowupText(path, codex, 0 /* whole file */) :
+                                                 ::Agentmaster::ReadConversationText(path, codex, 0 /* whole file */);
             if (convo.empty() || !disp)
             {
                 co_return;

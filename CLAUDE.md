@@ -80,7 +80,11 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   autorunner actually runs, and only for **Claude**; explicit-click so no one-shot latch — TAB_OVERLAY.md
   §13j / PENDING_INPUT.md §8d) + a copy menu (Session Id · working dir · branch · the **Current Prompt** [the
   UNSENT input-box draft — PENDING_INPUT.md §8] · the REAL Claude/Codex launch
-  CLI · the full session **Summary** · the **Transcript**) + a **pencil** that toggles a **SUMMARY
+  CLI · the full session **Summary** · the **Transcript** · the **Transcript Followup** [the conversation
+  folded per turn — a `<Legend>` header, then each turn as `❯ <the user message, whole>` + `● <the
+  assistant's message at the END of that turn>` (its LAST visible text — mid-turn notes superseded),
+  2-space continuation indents, blank-line-separated turns; `ReadConversationFollowupText`, the
+  paste-into-a-follow-up-session brief]) + a **pencil** that toggles a **SUMMARY
   PANEL**: a second overlay below the badge (≤20% pane width) rendering the `session-end.js` box
   (messages/files/tasks/plan) analyzed from the transcript, its show/hide a GLOBAL setting
   (`AppSettings.showSummaryPanel`); a **wrap-line toggle** (↵) at the right of its times bar flips a
@@ -2802,7 +2806,7 @@ What works, by area:
   (the explicit swatch recolor of an existing tag, beside the existing `tag add`/`tag remove`/`tag delete`);
   **clipboard/shell** — `copy <field>` (the ONE `CopySessionField` chokepoint behind EVERY copy
   menu — the per-tab overlay's AND the board/tree Copy submenu AND the WT tab menu's `Copy >` — `field` ∈
-  session-id/path/branch/claude-cli/codex-cli/transcript/summary/**current-prompt**; the last one also
+  session-id/path/branch/claude-cli/codex-cli/transcript/summary/**current-prompt**/**transcript-followup**; current-prompt also
   logs a `[pending] <sid8> copy current prompt: live|remembered chars=N` mechanism line naming which
   source answered — or `nothing` when neither did), `open-path` (the overlay folder button →
   explorer); **cog/settings** — `settings-save` (the cog Save — logs the behavior-impacting fields
@@ -3146,6 +3150,8 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     classic floating tips automatically.
   - `src/cascadia/TerminalApp/AgentCopyActions.h` — the ONE shared `CopySessionField` action
     (Session Id · working-dir Path · Branch · **Current Prompt** · Claude/Codex Launch CLI · Transcript ·
+    **Transcript Followup** [code 8 — the per-turn `❯ user + ● final-reply` brief with its `<Legend>`
+    header, `ReadConversationFollowupText`] ·
     Summary) behind the per-tab overlay's copy menu (`AgentTabOverlay`), the Triage Board / Explorer-tree
     session menu's Copy submenu (`AgentManagerContent`), AND the WT tab menu's `Copy >` (`Tab` →
     `TerminalPage`), so the three copy menus can never drift apart. **Current Prompt** (code 7,

@@ -244,6 +244,7 @@ namespace winrt::TerminalApp::implementation
         }
         addItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files), including everything the displayed panel trims", 6);
         addItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
+        addItem(L"Transcript Followup", L"Copy the conversation folded per turn \x2014 ❯ each of your messages + ● the agent's end-of-turn reply \x2014 with a legend header, ready to paste into a follow-up session", 8);
         // The pointer must LEAVE the badge to reach the menu, so pin the expanded state while it's open.
         flyout.Opened([weak](const IInspectable&, const IInspectable&) {
             if (auto self = weak.get())
@@ -378,8 +379,8 @@ namespace winrt::TerminalApp::implementation
         // Nav audit: the user copied a session field to the clipboard. This ONE shared action backs BOTH
         // copy menus (the per-tab overlay's + the Triage Board / Explorer-tree Copy submenu), so logging
         // here covers "what was picked" for every copy site at once.
-        static const wchar_t* const kCopyFieldNames[] = { L"session-id", L"path", L"branch", L"claude-cli", L"codex-cli", L"transcript", L"summary", L"current-prompt" };
-        ::Agentmaster::LogNav(std::wstring{ L"copy " } + ((which >= 0 && which < 8) ? kCopyFieldNames[which] : L"?") + L" " + ::Agentmaster::ShortId(sessionId));
+        static const wchar_t* const kCopyFieldNames[] = { L"session-id", L"path", L"branch", L"claude-cli", L"codex-cli", L"transcript", L"summary", L"current-prompt", L"transcript-followup" };
+        ::Agentmaster::LogNav(std::wstring{ L"copy " } + ((which >= 0 && which < 9) ? kCopyFieldNames[which] : L"?") + L" " + ::Agentmaster::ShortId(sessionId));
         switch (which)
         {
         case 0: // Session Id — the resumable conversation id (Codex: its rollout uuid)
@@ -417,6 +418,9 @@ namespace winrt::TerminalApp::implementation
             break;
         case 5: // Transcript — the whole conversation (user + assistant text only), off-thread
             CopyConversationAsync(dispatcher, codex, s.id, s.codexSessionId);
+            break;
+        case 8: // Transcript Followup — the per-turn ❯ user + ● final-reply brief (legend header), off-thread
+            CopyConversationAsync(dispatcher, codex, s.id, s.codexSessionId, /*followup*/ true);
             break;
         case 6: // Summary — the FULL textual session-end.js box (everything; the panel shows a trimmed view)
         {

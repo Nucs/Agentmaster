@@ -2284,7 +2284,8 @@ namespace winrt::TerminalApp::implementation
                 return item;
             };
             // The `which` codes + labels are the per-tab overlay copy menu's, verbatim (AgentCopyActions.h):
-            // 0 Session Id, 1 Path, 2 Branch, 7 Current Prompt, 3 Claude CLI, 4 Codex CLI, 6 Summary, 5 Transcript.
+            // 0 Session Id, 1 Path, 2 Branch, 7 Current Prompt, 3 Claude CLI, 4 Codex CLI, 6 Summary,
+            // 5 Transcript, 8 Transcript Followup.
             addCopyItem(L"Session Id", L"Copy the resumable conversation id (Codex: its rollout uuid)", 0);
             addCopyItem(L"Copy Path", L"Copy the session's working-directory path", 1);
             addCopyItem(L"Copy Branch Name", L"Copy the session's current git branch name", 2);
@@ -2300,6 +2301,7 @@ namespace winrt::TerminalApp::implementation
             _copyCodexCliItem = addCopyItem(L"Codex Launch CLI", L"Copy the full codex launch command line", 4);
             addCopyItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files)", 6);
             addCopyItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
+            addCopyItem(L"Transcript Followup", L"Copy the conversation folded per turn \x2014 ❯ each of your messages + ● the agent's end-of-turn reply \x2014 with a legend header, ready to paste into a follow-up session", 8);
         }
 
         {

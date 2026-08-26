@@ -170,6 +170,7 @@ void TestSessionTags(); // bookmark tags: normalize/fold/encode/decode + the sto
 void TestExtractPathsFromText(); // tab color modes: absolute-path mining from shell command strings (quoted free-form; unquoted 1-space-in-folder-names) + the ClassifyTranscriptLine command wiring
 void TestInferWorkingDirectory(); // tab color modes: the pure inferred-workdir picker (majority-deepest over tool-touched paths)
 void TestConversationLineage();
+void TestConversationFollowup(); // the "Transcript Followup" copy (ReadConversationFollowupText): legend + per-turn folding (last assistant text wins), indents, batch glue, Codex, revert-aware lockstep, degenerate inputs, + a guarded live pin on the c0724e15 reference session
 void TestAnalyzeFootprint(); // analyze footprint: ScrubLargeBase64Payloads (pure) + the AnalyzeSessionTranscript (size,mtime) cache hit/invalidation/copy semantics
 void TestSessionSearch();
 void TestProcessInspectLive();

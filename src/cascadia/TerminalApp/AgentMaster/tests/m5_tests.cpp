@@ -103,6 +103,7 @@ int wmain()
     TestExtractPathsFromText();
     TestInferWorkingDirectory();
     TestConversationLineage();
+    TestConversationFollowup();
     TestAnalyzeFootprint();
     TestCommandWatch();
     TestCommandHandoverE2E();

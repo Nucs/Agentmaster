@@ -4484,3 +4484,155 @@ void TestTeammateLiveCorpus()
         }
     }
 }
+
+// --- "Transcript Followup" copy (ReadConversationFollowupText): the per-turn ❯/● brief ----------
+// AgentCopyActions.h code 8: a "<Legend>" header naming the two markers, then every turn folded to
+// "❯ <the user message, whole>" + "● <the assistant's message at the END of that turn>" — the
+// turn's LAST visible assistant text (a mid-turn progress note is superseded), continuation lines
+// indented 2 spaces, one paragraph == one turn. The walk/filters are ReadConversationTextImpl's
+// VERBATIM (the deliberate lockstep COPY — see ProcessInspect.Content.cpp), so the shared-filter
+// behaviors (tool_result turns, command echoes, thinking-only lines, the revert-aware branch skip)
+// are re-pinned HERE against the followup reader too: a drift between the two loops fails this suite.
+void TestConversationFollowup()
+{
+    std::wprintf(L"Transcript Followup (the per-turn user/reply brief):\n");
+    wchar_t tmp[MAX_PATH]{};
+    ::GetTempPathW(MAX_PATH, tmp);
+    const std::wstring base = std::wstring{ tmp } + L"am_followup_" + std::to_wstring(::GetCurrentProcessId());
+
+    // (1) THE FORMAT, pinned exactly. Turn 1: a thinking-only assistant line, a mid-turn progress
+    // note, a tool_use + its tool_result "user" line, then the final multi-paragraph reply — only
+    // the LAST visible text becomes the ● (and the tool_result must NOT seal the turn early). A
+    // <command-name> slash-command echo is not a message. Turn 2: a multi-line user message
+    // (continuation lines indent 2 spaces). Turn 3: answerless — its ❯ stands alone, no stray
+    // separators, no trailing newline.
+    const std::wstring p1 = base + L"_fold.jsonl";
+    MakeJsonl(p1,
+              R"j({"type":"user","userType":"external","message":{"content":"Test1"},"timestamp":"2026-08-26T10:00:00.000Z"})j" "\n"
+              R"j({"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]},"timestamp":"2026-08-26T10:00:01.000Z"})j" "\n"
+              R"j({"type":"assistant","message":{"content":[{"type":"text","text":"Working on it..."}]},"timestamp":"2026-08-26T10:00:02.000Z"})j" "\n"
+              R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"echo hi"}}]},"timestamp":"2026-08-26T10:00:03.000Z"})j" "\n"
+              R"j({"type":"user","userType":"external","message":{"content":[{"type":"tool_result","content":"hi","tool_use_id":"t1"}]},"timestamp":"2026-08-26T10:00:04.000Z"})j" "\n"
+              R"j({"type":"assistant","message":{"content":[{"type":"text","text":"Final answer 1.\n\nSecond paragraph."}]},"timestamp":"2026-08-26T10:00:05.000Z"})j" "\n"
+              R"j({"type":"user","userType":"external","message":{"content":"<command-name>/model</command-name><command-message>model</command-message>"},"timestamp":"2026-08-26T10:00:06.000Z"})j" "\n"
+              R"j({"type":"user","userType":"external","message":{"content":"Test2 line one\nline two"},"timestamp":"2026-08-26T10:01:00.000Z"})j" "\n"
+              R"j({"type":"assistant","message":{"content":[{"type":"text","text":"Final answer 2."}]},"timestamp":"2026-08-26T10:01:01.000Z"})j" "\n"
+              R"j({"type":"user","userType":"external","message":{"content":"Unanswered tail"},"timestamp":"2026-08-26T10:02:00.000Z"})j" "\n",
+              1000, 1000);
+    {
+        const std::wstring fu = ReadConversationFollowupText(p1, false, 0);
+        const std::wstring expect =
+            L"<Legend>\n"
+            L"❯ The user message\n"
+            L"● The assistant message\n"
+            L"\n"
+            L"❯ Test1\n"
+            L"● Final answer 1.\n"
+            L"\n"
+            L"  Second paragraph.\n"
+            L"\n"
+            L"❯ Test2 line one\n"
+            L"  line two\n"
+            L"● Final answer 2.\n"
+            L"\n"
+            L"❯ Unanswered tail";
+        CHECK(fu == expect, "followup: exact output — legend + per-turn folding (last text wins; thinking/tool_use/tool_result/command echoes invisible; multi-line indent; answerless tail stands alone)");
+    }
+
+    // (2) a type-ahead batch — two prompts consumed by ONE turn fold into one paragraph over the
+    // shared reply (no reply between them, so the second ❯ glues onto the first).
+    const std::wstring p2 = base + L"_batch.jsonl";
+    MakeJsonl(p2,
+              R"j({"type":"user","userType":"external","message":{"content":"First"},"timestamp":"2026-08-26T11:00:00.000Z"})j" "\n"
+              R"j({"type":"user","userType":"external","message":{"content":"Second"},"timestamp":"2026-08-26T11:00:01.000Z"})j" "\n"
+              R"j({"type":"assistant","message":{"content":[{"type":"text","text":"Both done."}]},"timestamp":"2026-08-26T11:00:02.000Z"})j" "\n",
+              1000, 1000);
+    {
+        const std::wstring fu = ReadConversationFollowupText(p2, false, 0);
+        CHECK(fu.find(L"❯ First\n❯ Second\n● Both done.") != std::wstring::npos,
+              "followup: a type-ahead batch folds its prompts into ONE paragraph over the shared end-of-turn reply");
+    }
+
+    // (3) Codex rollout: event_msg user_message/agent_message; the turn's LAST agent_message wins.
+    const std::wstring p3 = base + L"_codex.jsonl";
+    MakeJsonl(p3,
+              R"j({"type":"event_msg","payload":{"type":"user_message","message":"do x"}})j" "\n"
+              R"j({"type":"event_msg","payload":{"type":"agent_message","message":"progress note"}})j" "\n"
+              R"j({"type":"event_msg","payload":{"type":"agent_message","message":"done x"}})j" "\n"
+              R"j({"type":"event_msg","payload":{"type":"user_message","message":"then y"}})j" "\n"
+              R"j({"type":"event_msg","payload":{"type":"agent_message","message":"done y"}})j" "\n",
+              1000, 1000);
+    {
+        const std::wstring fu = ReadConversationFollowupText(p3, true, 0);
+        CHECK(fu.find(L"❯ do x\n● done x\n\n❯ then y\n● done y") != std::wstring::npos,
+              "followup (codex): user_message/agent_message pairs, the turn's LAST agent message winning");
+        CHECK(fu.find(L"progress note") == std::wstring::npos,
+              "followup (codex): a superseded mid-turn agent message never survives");
+    }
+
+    // (4) revert-aware (lockstep with ReadConversationText): a double-ESC rewind's abandoned branch
+    // stays OUT of the followup brief — only the live leaf->root chain is folded.
+    const std::wstring p4 = base + L"_revert.jsonl";
+    MakeJsonl(p4,
+              R"j({"type":"user","userType":"external","uuid":"u_dead","parentUuid":null,"message":{"content":"dead prompt"},"timestamp":"2026-08-26T12:00:00.000Z"})j" "\n"
+              R"j({"type":"assistant","uuid":"a_dead","parentUuid":"u_dead","message":{"content":[{"type":"text","text":"dead reply"}]},"timestamp":"2026-08-26T12:00:01.000Z"})j" "\n"
+              R"j({"type":"user","userType":"external","uuid":"u_live","parentUuid":null,"message":{"content":"live prompt"},"timestamp":"2026-08-26T12:01:00.000Z"})j" "\n"
+              R"j({"type":"assistant","uuid":"a_live","parentUuid":"u_live","message":{"content":[{"type":"text","text":"live reply"}]},"timestamp":"2026-08-26T12:01:01.000Z"})j" "\n"
+              R"j({"type":"last-prompt","lastPrompt":"live prompt","leafUuid":"a_live"})j" "\n",
+              1000, 1000);
+    {
+        const std::wstring fu = ReadConversationFollowupText(p4, false, 0);
+        CHECK(fu.find(L"❯ live prompt\n● live reply") != std::wstring::npos,
+              "followup (revert-aware): the live branch's turn is folded");
+        CHECK(fu.find(L"dead") == std::wstring::npos,
+              "followup (revert-aware): the rewound-away branch is excluded (lockstep with ReadConversationText)");
+    }
+
+    // (5) degenerate inputs: an absent file and an all-noise transcript both yield EMPTY — never a
+    // legend-only copy (the clipboard write is skipped upstream on empty).
+    CHECK(ReadConversationFollowupText(base + L"_missing.jsonl", false, 0).empty(),
+          "followup: an absent transcript yields empty (no legend-only output)");
+    const std::wstring p5 = base + L"_noise.jsonl";
+    MakeJsonl(p5,
+              R"j({"type":"user","userType":"external","message":{"content":"<command-name>/clear</command-name>"},"timestamp":"2026-08-26T13:00:00.000Z"})j" "\n",
+              1000, 1000);
+    CHECK(ReadConversationFollowupText(p5, false, 0).empty(),
+          "followup: an all-noise transcript yields empty (no legend-only output)");
+
+    // (6) the REAL reference session (guarded): the 3-turn Test1/Test2/Test3 desktop session this
+    // format was specified against (c0724e15, cwd C:\Users\ELI\Desktop). Resolved through the normal
+    // projects glob so the suite stays machine-independent — absent => [info]-skip; present => pin
+    // the real end-to-end shape (legend, the three ❯ turns, each ● the turn's FINAL reply, indents).
+    {
+        const std::wstring real = ResolveClaudeTranscriptPath(L"c0724e15-580d-49ed-9749-af1880fbe9dd");
+        if (real.empty())
+        {
+            std::wprintf(L"  [info] reference session c0724e15 not on this machine -> live pin skipped\n");
+        }
+        else
+        {
+            const std::wstring fu = ReadConversationFollowupText(real, false, 0);
+            CHECK(fu.rfind(L"<Legend>\n❯ The user message\n● The assistant message\n\n❯ Test1\n● Hi Eli", 0) == 0,
+                  "followup (live c0724e15): opens with the legend + turn 1 (the final reply, not the thinking line)");
+            CHECK(fu.find(L"\n\n❯ Test2\n● Still here") != std::wstring::npos,
+                  "followup (live c0724e15): turn 2 folded (blank-line separated, reply glued)");
+            CHECK(fu.find(L"\n\n❯ Test3\n● Got it") != std::wstring::npos,
+                  "followup (live c0724e15): turn 3 folded");
+            CHECK(fu.find(L"\n  What would you like to work on?") != std::wstring::npos,
+                  "followup (live c0724e15): continuation lines indent 2 spaces under the marker");
+            size_t userMarks = 0;
+            for (size_t at = fu.find(L"\n❯ "); at != std::wstring::npos; at = fu.find(L"\n❯ ", at + 1))
+            {
+                ++userMarks;
+            }
+            CHECK(userMarks == 4, "followup (live c0724e15): exactly the legend line + the 3 real turns carry the user marker");
+        }
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::path{ p1 }, ec);
+    std::filesystem::remove(std::filesystem::path{ p2 }, ec);
+    std::filesystem::remove(std::filesystem::path{ p3 }, ec);
+    std::filesystem::remove(std::filesystem::path{ p4 }, ec);
+    std::filesystem::remove(std::filesystem::path{ p5 }, ec);
+}

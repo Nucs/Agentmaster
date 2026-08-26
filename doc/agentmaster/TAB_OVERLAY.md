@@ -18,7 +18,7 @@
 > surfaced only when *not* linked** (a linked tab's badge already implies the link), over a dim **second
 > `<workdir>/<branch>` row** and a **third `⏳ <next queued prompt, ≤300 chars>` row** (§13i); the always-shown row-1 **action cluster** is a **folder Open-Path + a copy
 > menu** (Session Id / Path / Branch / the current unsent prompt / the real Claude·Codex launch CLI /
-> Summary / Transcript, with a
+> Summary / Transcript / Transcript Followup, with a
 > chime) **+ a pencil** that toggles a **second overlay, the SUMMARY PANEL**. The Observer's `model ·
 > effort · kind` enrichment feeds the Manager cards / summary panel / observe badge (no longer the
 > linked badge's strip). A matching **tab-strip status dot**
@@ -323,7 +323,16 @@ Claude only; read LIVE from the buffer, falling back to the observer's recorded 
 `Claude Launch CLI` · `Codex Launch CLI` (each the **REAL** full
 command — the live process commandline from the PEB, or the builder Launch/Restore would use, *not*
 a toy `--resume <id>`) · `Summary` (the full textual session box) · `Transcript` (the whole
-conversation, user + assistant TEXT only via `ReadConversationText`). Every copy / Open Path plays a
+conversation, user + assistant TEXT only via `ReadConversationText`) · **`Transcript Followup`** (the
+conversation folded **per turn** for pasting into a follow-up session as context, via
+`ReadConversationFollowupText` — a `<Legend>` header naming the two markers, then every turn as
+`❯ <the user message, whole>` + `● <the assistant's message at the END of that turn>` (the turn's LAST
+visible assistant text — a mid-turn progress note is superseded; a still-unanswered prompt shows just
+its ❯ block; a type-ahead batch folds its ❯ lines into one paragraph over the shared reply), with
+continuation lines indented 2 spaces under the marker and one blank line between turns; the walk +
+filters are `ReadConversationText`'s verbatim — a deliberate lockstep copy, so what counts as "a
+message" can never differ between the two items — copy-menu code **8**, `[nav] copy
+transcript-followup`). Every copy / Open Path plays a
 short confirmation chime (`PlaySoundW`). Built only for a LINKED session (never an observe badge); the
 buttons stay laid out, while the whole badge is dim at rest and brightens on hover.
 

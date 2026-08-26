@@ -1643,6 +1643,7 @@ namespace winrt::TerminalApp::implementation
         }
         addCopyItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files)", 6);
         addCopyItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
+        addCopyItem(L"Transcript Followup", L"Copy the conversation folded per turn \x2014 ❯ each of your messages + ● the agent's end-of-turn reply \x2014 with a legend header, ready to paste into a follow-up session", 8);
         menu.Items().Append(copySub);
 
         // The three WT-tab-menu session ops (mirrored here at the user's request): New Session Here /

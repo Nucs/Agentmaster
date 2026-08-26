@@ -320,6 +320,296 @@ namespace Agentmaster
         return out;
     }
 
+    static std::wstring ReadConversationFollowupTextImpl(std::wstring_view transcriptPath, bool codex, size_t maxBytes);
+    // Agentmaster ("Transcript Followup"): the same never-throw containment as ReadConversationText
+    // above — the caller is a background fire_and_forget (the copy action), where an escaped parse
+    // throw would winrt::terminate() the whole app. Degrade to empty (== no copy).
+    std::wstring ReadConversationFollowupText(std::wstring_view transcriptPath, bool codex, size_t maxBytes)
+    {
+        try
+        {
+            return ReadConversationFollowupTextImpl(transcriptPath, codex, maxBytes);
+        }
+        catch (...)
+        {
+            OutputDebugStringW(L"[Agentmaster] ReadConversationFollowupText: swallowed parse exception (no crash)\n");
+            LogSwallowedException(L"ReadConversationFollowupText"); // + hooks.log: OutputDebugString needs a live debugger
+            return {};
+        }
+    }
+    // The U+276F/U+25CF PER-TURN brief (the "Transcript Followup" copy — AgentCopyActions.h code 8):
+    // a "<Legend>" header naming the two markers, then every turn as
+    //     U+276F <the user message, whole>
+    //     U+25CF <the assistant's message at the END of that turn>
+    // The U+25CF is the turn's LAST visible assistant text (each later text supersedes the previous,
+    // so a mid-turn "working on it" note never survives past the final answer); a turn whose reply
+    // never came (still running / interrupted / thinking-only) shows just its U+276F block, and a
+    // type-ahead batch (several prompts consumed by one turn) folds its U+276F lines into ONE
+    // paragraph over the shared reply. Continuation lines indent 2 spaces (the marker + its space)
+    // so a block reads aligned under its marker; interior empty lines stay empty; paragraphs (==
+    // turns) are blank-line separated. Empty when no visible message exists (never legend-only).
+    //
+    // ⚠ The read + WALK + FILTERS below are ReadConversationTextImpl's, VERBATIM (the base64 scrub,
+    // the live-branch skip, type user/assistant only, no meta/compact/sidechain, tool_result turns
+    // dropped, only `text` blocks visible, IsNoiseUserPrompt on user prompts, the Codex event_msg
+    // user_message/agent_message pair) — a deliberate lockstep COPY, not a shared walker, so the
+    // long-standing formatter above stays byte-identical (the AgentStatusColors/StateColor
+    // precedent). A filter change must land in BOTH loops, or the two Transcript copies drift.
+    static std::wstring ReadConversationFollowupTextImpl(std::wstring_view transcriptPath, bool codex, size_t maxBytes)
+    {
+        if (transcriptPath.empty())
+        {
+            return {};
+        }
+        const std::wstring path{ transcriptPath };
+        // Scrub pasted-image base64 blobs BEFORE widening (analyze-footprint; the copied text never
+        // contains image bytes anyway — the elide placeholder lives in fields no text block reads).
+        const std::string bytes = ScrubLargeBase64Payloads(ReadFileHead(path, maxBytes));
+        if (bytes.empty())
+        {
+            return {};
+        }
+        const bool truncated = (maxBytes != 0); // a head read may end mid-line -> skip the last segment
+        const std::wstring wide = Utf8ToWide(bytes);
+        // Revert-aware DISPLAY, exactly like ReadConversationTextImpl: only the LIVE conversation —
+        // the chain from the current leaf to root — so a rewound-away branch is excluded.
+        const std::unordered_set<std::wstring> activeBranch = (!codex && !truncated) ? ActiveBranchUuids(wide) : std::unordered_set<std::wstring>{};
+
+        // The markers, by code point so this source stays pure-ASCII (the PromptAnchor.h idiom):
+        // U+276F = the user's prompt caret (Claude's own input-box glyph), U+25CF = the TUI's
+        // assistant output bullet — the two glyphs the terminal itself teaches the reader.
+        static constexpr const wchar_t* kUserMark = L"\u276F";
+        static constexpr const wchar_t* kReplyMark = L"\u25CF";
+
+        std::wstring turns; // the marker blocks; the legend is prepended at the end, only when a turn exists
+        std::wstring lastReply; // the current turn's would-be FINAL reply (each later assistant text supersedes it)
+        bool turnOpen = false; // a U+276F block emitted whose reply hasn't been — the U+25CF (or a batch's next U+276F) glues onto it
+
+        // Append "<marker> <text>" to `turns`: trimmed exactly like ReadConversationText's emit,
+        // every continuation line indented 2 spaces, interior \r dropped (CRLF -> LF), interior
+        // EMPTY lines left unpadded (no trailing spaces), no trailing newline. Separation is decided
+        // here too: glue == same paragraph/turn (single newline), else a blank line starts a new
+        // one. Returns whether anything was emitted (a whitespace-only message is not a message).
+        const auto appendBlock = [&turns](const wchar_t* marker, bool glue, std::wstring t) {
+            while (!t.empty() && (t.back() == L'\n' || t.back() == L'\r' || t.back() == L' ' || t.back() == L'\t'))
+            {
+                t.pop_back();
+            }
+            size_t b = 0;
+            while (b < t.size() && (t[b] == L'\n' || t[b] == L'\r' || t[b] == L' ' || t[b] == L'\t'))
+            {
+                ++b;
+            }
+            if (b)
+            {
+                t.erase(0, b);
+            }
+            if (t.empty())
+            {
+                return false;
+            }
+            if (!turns.empty())
+            {
+                turns += glue ? L"\n" : L"\n\n";
+            }
+            turns += marker;
+            turns += L' ';
+            bool atLineStart = false;
+            for (const wchar_t ch : t)
+            {
+                if (ch == L'\r')
+                {
+                    continue; // CRLF -> LF (the edges are already trimmed; this drops interior \r)
+                }
+                if (ch == L'\n')
+                {
+                    turns += L'\n';
+                    atLineStart = true;
+                    continue;
+                }
+                if (atLineStart)
+                {
+                    turns += L"  "; // align the continuation under the marker + its space
+                    atLineStart = false;
+                }
+                turns += ch;
+            }
+            return true;
+        };
+        // Seal the previous turn: emit its buffered final reply, glued onto its own U+276F block. A
+        // reply that trims to nothing leaves the turn open, so an answerless prompt and its
+        // successor still fold into one paragraph instead of stranding a stray separator.
+        const auto flushReply = [&]() {
+            if (lastReply.empty())
+            {
+                return;
+            }
+            if (appendBlock(kReplyMark, /*glue*/ turnOpen, std::move(lastReply)))
+            {
+                turnOpen = false;
+            }
+            lastReply.clear();
+        };
+        const auto onUser = [&](std::wstring t) {
+            flushReply(); // any buffered reply belongs to the PREVIOUS turn — close it first
+            if (appendBlock(kUserMark, /*glue*/ turnOpen, std::move(t)))
+            {
+                turnOpen = true;
+            }
+        };
+
+        size_t start = 0;
+        for (size_t i = 0; i <= wide.size(); ++i)
+        {
+            if (i < wide.size() && wide[i] != L'\n')
+            {
+                continue;
+            }
+            if (i == wide.size() && truncated)
+            {
+                break;
+            }
+            std::wstring_view line(wide.data() + start, i - start);
+            start = i + 1;
+            while (!line.empty() && line.back() == L'\r')
+            {
+                line.remove_suffix(1);
+            }
+            if (line.empty())
+            {
+                continue;
+            }
+            const auto parsed = json::Parse(line);
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            const auto& obj = *parsed;
+
+            if (codex)
+            {
+                // Codex rollout: the CLEAN visible messages are event_msg/{user_message,agent_message};
+                // reasoning, tool calls, response_item context blobs, etc. are all skipped.
+                if (obj.StrAt(L"type") != L"event_msg")
+                {
+                    continue;
+                }
+                const auto* pl = obj.Find(L"payload");
+                if (!pl || pl->type != json::Value::Type::Obj)
+                {
+                    continue;
+                }
+                const std::wstring pt = pl->StrAt(L"type");
+                if (pt == L"user_message")
+                {
+                    std::wstring msg = pl->StrAt(L"message");
+                    if (!msg.empty() && !IsNoiseUserPrompt(msg))
+                    {
+                        onUser(std::move(msg));
+                    }
+                }
+                else if (pt == L"agent_message")
+                {
+                    if (std::wstring msg = pl->StrAt(L"message"); !msg.empty())
+                    {
+                        lastReply = std::move(msg); // the turn's LAST agent message wins (an empty one is invisible, never a supersede)
+                    }
+                }
+                continue;
+            }
+
+            // Agentmaster (revert-aware): skip a Claude line on a rewound-away branch (its uuid isn't on
+            // the active leaf->root chain), so the copied brief reflects the live conversation only.
+            // Empty activeBranch (head read / no leaf marker) => keep all.
+            if (!activeBranch.empty())
+            {
+                if (const std::wstring uuid = obj.StrAt(L"uuid"); !uuid.empty() && activeBranch.count(uuid) == 0)
+                {
+                    continue;
+                }
+            }
+            // Claude transcript: type user/assistant only; drop meta/compact/sidechain turns.
+            const std::wstring lineType = obj.StrAt(L"type");
+            const bool isUser = (lineType == L"user");
+            const bool isAssistant = (lineType == L"assistant");
+            if ((!isUser && !isAssistant) || obj.BoolAt(L"isMeta") || obj.BoolAt(L"isCompactSummary") || obj.BoolAt(L"isSidechain"))
+            {
+                continue;
+            }
+            const auto* msg = obj.Find(L"message");
+            if (!msg || msg->type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            const auto* content = msg->Find(L"content");
+            if (!content)
+            {
+                continue;
+            }
+            std::wstring text;
+            bool hasToolResult = false;
+            if (content->type == json::Value::Type::Str)
+            {
+                text = content->str;
+            }
+            else if (content->type == json::Value::Type::Arr)
+            {
+                for (const auto& blk : content->arr)
+                {
+                    if (blk.type != json::Value::Type::Obj)
+                    {
+                        continue;
+                    }
+                    const std::wstring bt = blk.StrAt(L"type");
+                    if (bt == L"tool_result")
+                    {
+                        hasToolResult = true; // a tool-result turn (user role), not a human message
+                        break;
+                    }
+                    if (bt == L"text")
+                    {
+                        if (!text.empty())
+                        {
+                            text += L"\n";
+                        }
+                        text += blk.StrAt(L"text");
+                    }
+                    // tool_use / thinking / image / etc. -> skipped (only visible TEXT is kept)
+                }
+            }
+            if (isUser)
+            {
+                if (hasToolResult || text.empty() || IsNoiseUserPrompt(text))
+                {
+                    continue; // tool-result turn, empty, or a control marker — not a human message
+                }
+                onUser(std::move(text));
+            }
+            else // assistant
+            {
+                if (text.empty())
+                {
+                    continue; // a pure tool_use / thinking turn — no visible assistant text
+                }
+                lastReply = std::move(text); // the turn's LAST visible text wins (supersedes a mid-turn note)
+            }
+        }
+        flushReply(); // the final turn's reply (a no-op when the conversation ended answerless)
+        if (turns.empty())
+        {
+            return {}; // no visible message — never a legend-only copy
+        }
+        std::wstring out;
+        out.reserve(turns.size() + 96);
+        out += L"<Legend>\n";
+        out += kUserMark;
+        out += L" The user message\n";
+        out += kReplyMark;
+        out += L" The assistant message\n\n";
+        out += turns;
+        return out;
+    }
+
     // --- session-end.js port helpers (TAB_OVERLAY.md summary panel) ---
     static std::wstring SeBasename(const std::wstring& fp)
     {

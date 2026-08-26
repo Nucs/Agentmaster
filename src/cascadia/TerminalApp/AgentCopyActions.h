@@ -31,6 +31,9 @@ namespace winrt::TerminalApp::implementation
     //   5 = Transcript            (the whole conversation as text — user + assistant only — read off-thread)
     //   6 = Summary               (the FULL session-end.js box — analyzed off-thread)
     //   7 = Current Prompt        (the UNSENT draft in the session's input box — PENDING_INPUT.md; Claude only)
+    //   8 = Transcript Followup   (the conversation folded per turn — a "<Legend>" header, then each turn as
+    //                              ❯ the user message + ● the assistant's END-of-turn reply — the paste-into-a-
+    //                              follow-up-session brief; ReadConversationFollowupText, read off-thread)
     // wrapNewlines / truncate are the GLOBAL summary-panel flags (AppSettings::summaryPanelWrapNewlines /
     // summaryPanelTruncate) that govern how the Summary (case 6) renders its messages; they are
     // ignored by the other cases. tabColorMode is the GLOBAL AppSettings::tabColorMode as an int
