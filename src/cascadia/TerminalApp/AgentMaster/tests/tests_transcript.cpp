@@ -4525,6 +4525,7 @@ void TestConversationFollowup()
             L"<Legend>\n"
             L"❯ The user message\n"
             L"● The assistant message\n"
+            L"</Legend>\n"
             L"\n"
             L"❯ Test1\n"
             L"● Final answer 1.\n"
@@ -4599,6 +4600,63 @@ void TestConversationFollowup()
     CHECK(ReadConversationFollowupText(p5, false, 0).empty(),
           "followup: an all-noise transcript yields empty (no legend-only output)");
 
+    // (5b) STALE-MARKER EXTENSION — the reported 80bdb9f0 bug. A PURELY LINEAR conversation (no
+    // rewind) where the last `last-prompt` marker sits MID-TURN (on an attachment line) and the SAME
+    // turn keeps streaming assistant/tool lines after it, ending at the real final answer. The old
+    // ActiveBranchUuids anchored on that stale marker and orphaned everything after it, so every
+    // reader (Transcript / Summary / Followup) dropped the true closing message. The fix extends the
+    // anchor to the physical tail because it descends from the marked leaf and was written AFTER the
+    // marker. Assert the pure resolver AND both Transcript copies.
+    const std::wstring pStale = base + L"_stale.jsonl";
+    const std::string staleJsonl =
+        R"j({"type":"user","userType":"external","uuid":"u1","parentUuid":null,"message":{"content":"Do the whole job"},"timestamp":"2026-08-26T14:00:00.000Z"})j" "\n"
+        R"j({"type":"assistant","uuid":"u2","parentUuid":"u1","message":{"content":[{"type":"text","text":"Mid-turn progress note"}]},"timestamp":"2026-08-26T14:00:01.000Z"})j" "\n"
+        R"j({"type":"attachment","uuid":"att","parentUuid":"u2","timestamp":"2026-08-26T14:00:02.000Z"})j" "\n"
+        R"j({"type":"last-prompt","lastPrompt":"Do the whole job","leafUuid":"att"})j" "\n"
+        R"j({"type":"assistant","uuid":"u3","parentUuid":"att","message":{"content":[{"type":"text","text":"Penultimate note"}]},"timestamp":"2026-08-26T14:00:03.000Z"})j" "\n"
+        R"j({"type":"assistant","uuid":"u4","parentUuid":"u3","message":{"content":[{"type":"tool_use","id":"tX","name":"Bash","input":{"command":"echo hi"}}]},"timestamp":"2026-08-26T14:00:04.000Z"})j" "\n"
+        R"j({"type":"user","userType":"external","uuid":"u5","parentUuid":"u4","message":{"content":[{"type":"tool_result","content":"hi","tool_use_id":"tX"}]},"timestamp":"2026-08-26T14:00:05.000Z"})j" "\n"
+        R"j({"type":"assistant","uuid":"u6","parentUuid":"u5","message":{"content":[{"type":"text","text":"THE REAL FINAL ANSWER"}]},"timestamp":"2026-08-26T14:00:06.000Z"})j" "\n"
+        R"j({"type":"system","subtype":"turn_duration","uuid":"sys","parentUuid":"u6","timestamp":"2026-08-26T14:00:07.000Z"})j" "\n";
+    MakeJsonl(pStale, staleJsonl, 1000, 1000);
+    {
+        // Pure resolver (byte-widen — the fixture is ASCII, the existing revert test's idiom): the
+        // anchor extends past the stale mid-turn marker to the physical tail's live chain.
+        const auto active = ActiveBranchUuids(std::wstring{ staleJsonl.begin(), staleJsonl.end() });
+        CHECK(active.count(L"u6") && active.count(L"u3") && active.count(L"u1") && active.count(L"att"),
+              "ActiveBranchUuids: a stale mid-turn marker is EXTENDED to the physical tail (post-marker nodes u3/u6 are active)");
+
+        const std::wstring convo = ReadConversationText(pStale, false, 0);
+        CHECK(convo.find(L"THE REAL FINAL ANSWER") != std::wstring::npos,
+              "ReadConversationText: the post-stale-marker final assistant message is present (not orphaned)");
+
+        const std::wstring fu = ReadConversationFollowupText(pStale, false, 0);
+        CHECK(fu.find(L"❯ Do the whole job\n● THE REAL FINAL ANSWER") != std::wstring::npos,
+              "followup: the ● is the turn's TRUE final answer past a stale mid-turn marker (not the mid-turn/penultimate note)");
+        CHECK(fu.find(L"Mid-turn progress note") == std::wstring::npos && fu.find(L"Penultimate note") == std::wstring::npos,
+              "followup: superseded mid-turn notes before the real final answer are dropped");
+    }
+
+    // (5c) REWIND-THEN-STOP contrast — the marker is written AFTER the (now-abandoned) tail and
+    // NOTHING follows it, so the extension must NOT fire: the anchor stays on the marker's live
+    // branch and the abandoned follow-up is excluded (the same guarantee the revert test pins, here
+    // asserted against the stale-marker code path so the two can't diverge).
+    const std::wstring pRewindStop = base + L"_rewindstop.jsonl";
+    MakeJsonl(pRewindStop,
+              R"j({"type":"user","userType":"external","uuid":"r1","parentUuid":null,"message":{"content":"Question one"},"timestamp":"2026-08-26T15:00:00.000Z"})j" "\n"
+              R"j({"type":"assistant","uuid":"r2","parentUuid":"r1","message":{"content":[{"type":"text","text":"Answer one KEPT"}]},"timestamp":"2026-08-26T15:00:01.000Z"})j" "\n"
+              R"j({"type":"user","userType":"external","uuid":"r3","parentUuid":"r2","message":{"content":"Question two REWOUND"},"timestamp":"2026-08-26T15:00:02.000Z"})j" "\n"
+              R"j({"type":"assistant","uuid":"r4","parentUuid":"r3","message":{"content":[{"type":"text","text":"Answer two ABANDONED"}]},"timestamp":"2026-08-26T15:00:03.000Z"})j" "\n"
+              R"j({"type":"last-prompt","lastPrompt":"Question one","leafUuid":"r2"})j" "\n",
+              1000, 1000);
+    {
+        const std::wstring fu = ReadConversationFollowupText(pRewindStop, false, 0);
+        CHECK(fu.find(L"❯ Question one\n● Answer one KEPT") != std::wstring::npos,
+              "followup (rewind-then-stop): the marker's live branch is kept");
+        CHECK(fu.find(L"REWOUND") == std::wstring::npos && fu.find(L"ABANDONED") == std::wstring::npos,
+              "followup (rewind-then-stop): the abandoned post-rewind tail is excluded (extension does NOT fire when nothing follows the marker)");
+    }
+
     // (6) the REAL reference session (guarded): the 3-turn Test1/Test2/Test3 desktop session this
     // format was specified against (c0724e15, cwd C:\Users\ELI\Desktop). Resolved through the normal
     // projects glob so the suite stays machine-independent — absent => [info]-skip; present => pin
@@ -4612,8 +4670,8 @@ void TestConversationFollowup()
         else
         {
             const std::wstring fu = ReadConversationFollowupText(real, false, 0);
-            CHECK(fu.rfind(L"<Legend>\n❯ The user message\n● The assistant message\n\n❯ Test1\n● Hi Eli", 0) == 0,
-                  "followup (live c0724e15): opens with the legend + turn 1 (the final reply, not the thinking line)");
+            CHECK(fu.rfind(L"<Legend>\n❯ The user message\n● The assistant message\n</Legend>\n\n❯ Test1\n● Hi Eli", 0) == 0,
+                  "followup (live c0724e15): opens with the CLOSED legend + turn 1 (the final reply, not the thinking line)");
             CHECK(fu.find(L"\n\n❯ Test2\n● Still here") != std::wstring::npos,
                   "followup (live c0724e15): turn 2 folded (blank-line separated, reply glued)");
             CHECK(fu.find(L"\n\n❯ Test3\n● Got it") != std::wstring::npos,
@@ -4635,4 +4693,6 @@ void TestConversationFollowup()
     std::filesystem::remove(std::filesystem::path{ p3 }, ec);
     std::filesystem::remove(std::filesystem::path{ p4 }, ec);
     std::filesystem::remove(std::filesystem::path{ p5 }, ec);
+    std::filesystem::remove(std::filesystem::path{ pStale }, ec);
+    std::filesystem::remove(std::filesystem::path{ pRewindStop }, ec);
 }

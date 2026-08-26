@@ -605,7 +605,8 @@ namespace Agentmaster
         out += kUserMark;
         out += L" The user message\n";
         out += kReplyMark;
-        out += L" The assistant message\n\n";
+        out += L" The assistant message\n";
+        out += L"</Legend>\n\n"; // a CLOSED legend block (the user's exact spec), then the turns
         out += turns;
         return out;
     }

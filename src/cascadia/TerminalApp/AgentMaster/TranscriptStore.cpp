@@ -767,8 +767,12 @@ namespace Agentmaster
         // marker (file order => the authoritative current leaf). EVERY uuid-bearing line is a node,
         // INCLUDING attachment lines (skill_listing / file snippets injected mid-turn) — they are
         // pass-through hops in the chain, so omitting them would break the walk at the first one.
+        // Also track the PHYSICAL TAIL (the last uuid-bearing line) and whether any node was written
+        // AFTER the last leafUuid marker — the stale-marker extension below needs both.
         std::unordered_map<std::wstring, std::wstring> parentOf;
         std::wstring leaf;
+        std::wstring tailUuid; // the last uuid-bearing line in the file (the physical tip)
+        bool nodeAfterMarker = false; // a uuid line appeared AFTER the last leafUuid marker
         size_t start = 0;
         for (size_t i = 0; i <= transcriptText.size(); ++i)
         {
@@ -795,11 +799,14 @@ namespace Agentmaster
             if (const std::wstring lu = obj.StrAt(L"leafUuid"); !lu.empty())
             {
                 leaf = lu; // a `last-prompt` (or bare leafUuid) line advances the current leaf
+                nodeAfterMarker = false; // this marker supersedes; nothing seen after it yet
             }
             if (const std::wstring u = obj.StrAt(L"uuid"); !u.empty())
             {
                 // parentUuid "" (StrAt returns "" for a JSON null/absent) == a conversation ROOT.
                 parentOf[u] = obj.StrAt(L"parentUuid");
+                tailUuid = u;
+                nodeAfterMarker = true; // a real node was written after the last marker
             }
         }
 
@@ -811,10 +818,42 @@ namespace Agentmaster
         {
             return active;
         }
-        // Pass 2: walk leaf -> root via parentUuid. The `active.insert().second` test is the cycle
+        // STALE-MARKER EXTENSION: the `leafUuid` marker records the tip as of the LAST `last-prompt`
+        // event, but ONE turn keeps producing assistant/tool lines after that — a mid-turn attachment
+        // / context-refresh writes the marker, then the SAME turn streams more (assistant text, a
+        // tool_use, its tool_result, more text). So the marker routinely UNDERSHOOTS the real live
+        // tip, and walking from it would orphan the true final assistant message. Extend the anchor
+        // to the PHYSICAL TAIL when (a) a node was written after the last marker AND (b) that tail
+        // descends from the marked leaf (the turn continued THIS branch — a rewind would have written
+        // its OWN newer marker, so post-marker content is never a fork). A rewind-then-STOP is the
+        // mirror case and stays correct: its marker is written AFTER the now-abandoned tail (no node
+        // follows it => nodeAfterMarker=false), so the anchor stays on the marker's live branch and
+        // the abandoned tail is excluded. [the 80bdb9f0 report: a purely linear conversation whose
+        // last `last-prompt` sat 6 lines before the real final assistant message, so every
+        // Transcript / Summary / Followup reader dropped the true closing answer.]
+        std::wstring anchor = leaf;
+        if (nodeAfterMarker && !tailUuid.empty() && tailUuid != leaf)
+        {
+            std::unordered_set<std::wstring> up; // cycle-guarded walk tail -> root, looking for leaf
+            for (std::wstring c = tailUuid; !c.empty() && up.insert(c).second;)
+            {
+                if (c == leaf)
+                {
+                    anchor = tailUuid; // the tail is a descendant of the marked leaf => it IS the live tip
+                    break;
+                }
+                const auto it = parentOf.find(c);
+                if (it == parentOf.end())
+                {
+                    break; // reached a root off the marked branch => keep the marker (safety)
+                }
+                c = it->second;
+            }
+        }
+        // Pass 2: walk anchor -> root via parentUuid. The `active.insert().second` test is the cycle
         // guard (a malformed self/loop reference stops instead of spinning); a parent that isn't a
         // known node terminates the walk (the chain reached the root, whose parentUuid is "").
-        std::wstring cur = leaf;
+        std::wstring cur = anchor;
         while (!cur.empty() && active.insert(cur).second)
         {
             const auto it = parentOf.find(cur);
