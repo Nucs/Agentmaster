@@ -7304,6 +7304,23 @@ namespace winrt::TerminalApp::implementation
                 // still-live terminal. (Never archive a tab whose content we couldn't read.)
                 isDead = sawTerminal && !anyAlive;
             }
+            // Agentmaster (deactivate unbind fix): NEVER archive a fully-DORMANT tab — one where every
+            // control sits on a NotConnected connection (anyStarted == false, so nothing is running).
+            // A DEACTIVATED session is parked exactly this way: the swap attaches a fresh, un-Started
+            // resume connection (pid=0), as does a window-restored tab not yet woken. There is no live
+            // claude to have DIED, so the strict "pane gone -> dead" arm above (foundSessionConn==false,
+            // reached transiently when the observer re-stamps tabToken off the dying OLD connection
+            // during the swap — the re-stamp alone can't win that race) must not fire here. Archiving a
+            // parked tab sets live=false, clears the injector, and ERASES it from _claudeTabs (below) ->
+            // the tab UNBINDS: _ClaudeSessionForTab / _DuplicateTab stop recognizing it, so a fork lands
+            // in %USERPROFILE% as a default-profile PowerShell and focusing it shows the pwsh host, not
+            // the session (the deactivate->"all tabs became a powershell terminal" bug). A GENUINE crash
+            // leaves the connection Closed (startedThis==true -> anyStarted true), so this never shields
+            // a real death; and restored-dormant tabs (empty tabToken) already took the safe else-branch.
+            if (isDead && !anyStarted)
+            {
+                isDead = false;
+            }
             if (isDead)
             {
                 dead.push_back(id);
