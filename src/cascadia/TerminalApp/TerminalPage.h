@@ -1070,7 +1070,7 @@ namespace winrt::TerminalApp::implementation
         std::unordered_map<std::wstring, _AgentTooltipSummary> _tabTooltipSummary;
         std::unordered_set<std::wstring> _tabTooltipSummaryInFlight;
         std::unordered_map<std::wstring, std::wstring> _tabTooltipSig;
-        winrt::fire_and_forget _EnsureTabTooltipSummary(winrt::TerminalApp::Tab tab, winrt::hstring sessionId, bool codex, winrt::hstring codexId, winrt::hstring cwd); // Agentmaster (tab tooltip): off-thread resolve+stat+analyze the transcript; on mtime growth render the Summary box + re-host the card; mtime-cached + in-flight-guarded
+        winrt::fire_and_forget _EnsureTabTooltipSummary(winrt::TerminalApp::Tab tab, winrt::hstring sessionId, bool codex, winrt::hstring codexId, winrt::hstring cwd); // Agentmaster (tab tooltip): off-thread resolve+stat+analyze the transcript; on mtime growth render the Summary box + re-host the card; mtime-cached + in-flight-guarded. ⚠ The completion re-host passes kickSummary=false — it must NEVER re-kick the analyze (an analyze outliving the 4s throttle would make every completion arm the next: the perpetual per-tab parse+rebuild loop that ground the release UI thread at ~80% of a core, 2026-08-29)
         // Agentmaster (tab tooltip — WHEEL SCROLL): a long conversation's Summary body is taller than the
         // card's height budget, so the body is a VIEWPORT the mouse wheel scrolls, with a slim overlay
         // scrollbar that fades out a couple of seconds after the last notch. The card itself stays inert +

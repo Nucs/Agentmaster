@@ -1017,7 +1017,12 @@ namespace winrt::TerminalApp::implementation
         if (const auto tab = it->second.get())
         {
             _SetTabAgentTags(tab, ::Agentmaster::GetSessionTags(sessionId));
-            _UpdateTabAgentToolTip(tab, sessionId); // the tooltip's tag-chip row rides the spec — reflect a toggle instantly (sig-gated)
+            // kickSummary=false: this ALSO runs at launch/bind/adopt/re-home (see the function comment),
+            // not just a tag toggle — a default kick here burst one whole-transcript parse per restored
+            // tab AND seeded the summary-completion loop for every tab with no hover ever (half of the
+            // 2026-08-29 release grind — see _EnsureTabTooltipSummary's re-host). The chip row needs only
+            // the sig-gated re-host; the analyze belongs to a real hover (_ArmTabAgentToolTipHover).
+            _UpdateTabAgentToolTip(tab, sessionId, /* swapWhileOpen */ false, /* kickSummary */ false); // the tooltip's tag-chip row rides the spec — reflect a toggle instantly (sig-gated)
         }
     }
 
@@ -2466,7 +2471,9 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Keep the Summary body fresh off-thread (throttled + mtime-gated). First sight has no body yet, so
-        // this fills it in, then re-hosts the card (a recursive _UpdateTabAgentToolTip on completion).
+        // this fills it in, then re-hosts the card (a recursive _UpdateTabAgentToolTip on completion — which
+        // passes kickSummary=false, so the recursion is exactly ONE level deep: a completion never schedules
+        // the next analyze; only a real hover does. See the completion call for the incident that rule fixed).
         // kickSummary=false (the arm/bind pre-host) skips the kick entirely: those builds exist only so
         // ToolTipService has a hosted card before the first hover — the analyze belongs to a REAL hover
         // (else the first sweep after a 60-tab window restore would burst 60 whole-transcript parses onto
@@ -2921,11 +2928,21 @@ namespace winrt::TerminalApp::implementation
                     slot.body = winrt::hstring{ body };
                 }
                 // Re-host the card with the now-loaded / refreshed body. _UpdateTabAgentToolTip recomputes the
-                // signature (new mtime) so it re-hosts; the throttle (lastCheckMs, bumped by the caller) keeps it
-                // from immediately re-kicking us. swapWhileOpen: the hover that kicked this load is likely still
-                // showing the header-only card — the one-shot open-swap grant lets the body land IN the open tip
-                // (the single moment the "no Content swap while open" rule is wrong — the user is waiting for it).
-                _UpdateTabAgentToolTip(tab, id, /* swapWhileOpen */ true);
+                // signature (new mtime) so it re-hosts. swapWhileOpen: the hover that kicked this load is likely
+                // still showing the header-only card — the one-shot open-swap grant lets the body land IN the
+                // open tip (the single moment the "no Content swap while open" rule is wrong — the user is
+                // waiting for it). ⚠ kickSummary=false — this re-host must NEVER schedule another analyze. The
+                // 4s lastCheckMs throttle canNOT contain it here, because at fleet scale the analyze routinely
+                // OUTLIVES 4s (a multi-MB transcript + N in-flight parses contending on the pool), so a default
+                // kick re-armed the next analyze on every completion — a PERPETUAL per-tab [stat → whole-file
+                // parse → card rebuild] loop, contention-locked (more loops ⇒ slower analyzes ⇒ every loop
+                // certainly past the throttle). Live-diagnosed 2026-08-29 on the release instance: 38 active
+                // sessions, the ONE Emperor UI thread at ~80% of a core for 2 days grinding TtBuildTooltipCard
+                // re-measures (sampled stacks all in this completion path), with 22–39s [ui-stall] episodes when
+                // builds stacked. Freshness rides real hovers instead: each PointerEntered re-checks (>4s
+                // apart), so an open tip gets its body landed ONCE and a new hover re-analyzes — human cadence,
+                // never loop cadence.
+                _UpdateTabAgentToolTip(tab, id, /* swapWhileOpen */ true, /* kickSummary */ false);
             }
             // path empty => no transcript yet (never prompted): leave the header-only card. The in-flight
             // flag was already cleared above, so a later hover retries.
