@@ -39,6 +39,7 @@ static constexpr std::wstring_view kSpecifyModelSentinel = L"" "specify-model";
 #include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
 #include "AgentMaster/Updater.h" // the in-app updater: the cog's "Check for updates" + the "vX available!" label
+#include "AgentMaster/PortableInstall.h" // an INSTALLED portable copy's Uninstall (the cog's Uninstall button routes there for unpackaged installs)
 
 // Agentmaster: the build-stamped git commit + branch (the Settings page header). Generated into
 // $(GeneratedFilesDir) by TerminalAppLib.vcxproj's AgentmasterGenerateBuildInfo target, which is
@@ -2148,26 +2149,35 @@ namespace winrt::TerminalApp::implementation
         _setDebugModeNote.TextWrapping(TextWrapping::Wrap);
         panel.Children().Append(_setDebugModeNote);
 
-        // "Uninstall Agentmaster…" — removes THIS install (the current package family) via the same
-        // embedded am-update.ps1 (-Uninstall). Shown only for packaged installs (gated in _ShowSettings);
-        // per-user, no admin, and the profile data (~/.agentmaster) is kept. Confirms, then quits so the
-        // package isn't in use while it's removed. LAST item in About — a destructive action at the foot.
+        // "Uninstall Agentmaster…" — removes THIS install via the same embedded am-update.ps1: a
+        // PACKAGED install through -Uninstall (the current package family), an INSTALLED PORTABLE copy
+        // (PortableInstall.h — the per-user MSI-like install a portable's first launch makes) through
+        // -UninstallPortable (files + shortcuts + right-click menu + Apps & Features + PATH). Shown for
+        // either (gated in _ShowSettings); per-user, no admin, and the profile data (~/.agentmaster)
+        // is kept. Confirms, then quits so the package/binaries aren't in use while removed. LAST item
+        // in About — a destructive action at the foot.
         _setUninstallBtn = Button{};
         _setUninstallBtn.Content(winrt::box_value(L"Uninstall Agentmaster\x2026"));
         _setUninstallBtn.Margin(Thickness{ 0, 10, 0, 0 });
         AgentSetTip(_setUninstallBtn, L"Remove this Agentmaster install. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster closes to finish.");
         _setUninstallBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+            const bool portableInstall = !::Agentmaster::Updater::IsPackaged() && ::Agentmaster::PortableInstall::IsInstalledPortable();
             _Confirm(L"Uninstall Agentmaster?",
-                     L"This removes the installed Agentmaster package. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster will close to finish uninstalling.",
+                     portableInstall ?
+                         L"This removes the installed Agentmaster files, its desktop and Start-menu shortcuts, the \x201COpen in Agentmaster\x201D right-click entry, the Apps & Features entry and the PATH entry. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster will close to finish uninstalling." :
+                         L"This removes the installed Agentmaster package. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster will close to finish uninstalling.",
                      L"Uninstall",
-                     [this]() {
-                         // Guarded: quits ONLY when the uninstaller actually launched (LaunchUninstaller
-                         // is no-throw and false on any failure) — never close the app with nothing
+                     [this, portableInstall]() {
+                         // Guarded: quits ONLY when the uninstaller actually launched (both launchers are
+                         // no-throw and false on any failure) — never close the app with nothing
                          // uninstalling, and never let a resolution hiccup crash the confirm callback.
                          try
                          {
                              const std::wstring stateDir = ::Agentmaster::Profiles::ResolveProfileDir();
-                             if (::Agentmaster::Updater::LaunchUninstaller(stateDir) && _quitForUpdateHandler)
+                             const bool launched = portableInstall ?
+                                                       ::Agentmaster::PortableInstall::LaunchPortableUninstaller(::Agentmaster::Profiles::detail::ExeDirPath()) :
+                                                       ::Agentmaster::Updater::LaunchUninstaller(stateDir);
+                             if (launched && _quitForUpdateHandler)
                              {
                                  _quitForUpdateHandler();
                              }
@@ -2957,9 +2967,11 @@ namespace winrt::TerminalApp::implementation
         if (_setUninstallBtn)
         {
             // Uninstall removes the CURRENT package family (release OR dev), so it's offered for any
-            // packaged install — independent of the release-only updater channel. An unpackaged build
-            // has nothing registered to remove, so hide it there.
-            _setUninstallBtn.Visibility(::Agentmaster::Updater::IsPackaged() ? Visibility::Visible : Visibility::Collapsed);
+            // packaged install — independent of the release-only updater channel — AND for an INSTALLED
+            // PORTABLE copy (PortableInstall.h: registered shortcuts / menu / Apps & Features to remove).
+            // A plain unpackaged / stay-portable run has nothing registered to remove, so hide it there.
+            const bool uninstallable = ::Agentmaster::Updater::IsPackaged() || ::Agentmaster::PortableInstall::IsInstalledPortable();
+            _setUninstallBtn.Visibility(uninstallable ? Visibility::Visible : Visibility::Collapsed);
         }
         if (_setCurrentChangelog)
         {

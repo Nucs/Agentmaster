@@ -925,7 +925,10 @@ namespace Agentmaster::Profiles
     // Copy an existing state folder into a (typically fresh) profile. skip_existing — never
     // clobber data already in the target. Excludes the things that must NOT travel: locks/
     // (the build-launch mutex, machine-global dev tooling), shim/ + bridge.json (both embed
-    // absolute paths / a live pipe name; the engine regenerates them at init), and *.tmp.
+    // absolute paths / a live pipe name; the engine regenerates them at init), bin/ (the
+    // portable INSTALL folder PortableInstall.h places INSIDE the Default profile —
+    // ~/.agentmaster\bin — binaries, not state: copying it would drag ~200 MB of exe/dll into
+    // every migrated profile), and *.tmp.
     inline void MigrateProfileData(const std::wstring& fromDir, const std::wstring& toDir)
     {
         try
@@ -945,7 +948,7 @@ namespace Agentmaster::Profiles
             {
                 const auto leaf = entry.path().filename().wstring();
                 const auto leafKey = detail::NormPathKey(leaf);
-                if (leafKey == L"locks" || leafKey == L"shim" || leafKey == L"bridge.json" ||
+                if (leafKey == L"locks" || leafKey == L"shim" || leafKey == L"bridge.json" || leafKey == L"bin" ||
                     (leafKey.size() > 4 && leafKey.compare(leafKey.size() - 4, 4, L".tmp") == 0))
                 {
                     continue;
@@ -1048,7 +1051,9 @@ namespace Agentmaster::Profiles
     namespace detail
     {
         // IFileDialog in FOS_PICKFOLDERS mode (the modern folder browser). Returns "" on cancel.
-        inline std::wstring BrowseForFolder(HWND owner)
+        // `title` names the dialog: the profile picker's default, or the portable installer's
+        // "Choose where to install Agentmaster" (PortableInstall.h).
+        inline std::wstring BrowseForFolder(HWND owner, const wchar_t* title = L"Choose the Agentmaster profile folder")
         {
             std::wstring picked;
             const HRESULT coInit = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -1061,7 +1066,7 @@ namespace Agentmaster::Profiles
                     DWORD opts = 0;
                     dlg->GetOptions(&opts);
                     dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
-                    dlg->SetTitle(L"Choose the Agentmaster profile folder");
+                    dlg->SetTitle(title ? title : L"Choose the Agentmaster profile folder");
                     if (SUCCEEDED(dlg->Show(owner)))
                     {
                         IShellItem* item = nullptr;
@@ -1281,9 +1286,14 @@ namespace Agentmaster::Profiles
     // activation / defterm handoff must never block on a dialog) — lands on the self-contained
     // <exedir>\profile WITHOUT persisting, so the next interactive launch asks again. `allowUi`
     // therefore gates that portable prompt AND the "profile already in use by another instance"
-    // warning below; the installed auto-pick needs no UI either way. Returns false ONLY when the
-    // profile is held by another live instance and the user chose not to continue — caller exits.
-    inline bool EnsureProfileResolvedAtStartup(bool allowUi)
+    // warning below; the installed auto-pick needs no UI either way. `deferPortablePicker` (the
+    // portable INSTALL question's "Ask me later" — PortableInstall.h) skips the portable picker
+    // for THIS launch only: the copy runs on the self-contained <exedir>\profile without
+    // persisting a choice (exactly the Cancel path), so one "later" defers every first-launch
+    // question at once instead of trading one dialog for another; the in-use warning still shows.
+    // Returns false ONLY when the profile is held by another live instance and the user chose not
+    // to continue — caller exits.
+    inline bool EnsureProfileResolvedAtStartup(bool allowUi, bool deferPortablePicker = false)
     {
         std::wstring dir = detail::GetEnvVar(L"AGENTMASTER_PROFILE");
         if (dir.empty())
@@ -1292,7 +1302,7 @@ namespace Agentmaster::Profiles
             dir = ReadLocalProfilePointerIn(exeDir); // a portable's remembered choice (installed copies honor a planted one too)
             if (IsPortableInstallIn(exeDir))
             {
-                if (dir.empty() && allowUi)
+                if (dir.empty() && allowUi && !deferPortablePicker)
                 {
                     // FIRST INTERACTIVE LAUNCH of a PORTABLE copy: ask. The migrate checkbox
                     // offers the pre-existing <exedir>\profile when one holds data already (an

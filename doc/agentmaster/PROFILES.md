@@ -90,7 +90,8 @@ on the next launch.
 A **portable copy** (the `.portable` marker next to the exe) integrates with the profile system
 instead of hard-coding `<unzip>\profile`:
 
-- **First interactive launch** (marker present, no `profile.path` yet): `EnsureProfileResolvedAtStartup`
+- **First interactive launch** (marker present, no `profile.path` yet — and after the §2b INSTALL
+  question, which comes first and, for an installed copy, answers this one silently): `EnsureProfileResolvedAtStartup`
   shows the SAME picker the cog uses, with a leading, defaulted **"Portable profile (self-contained)"**
   command link for `<unzip>\profile`, then Default / Development / Browse… (each option’s path line
   reads “— existing data” when that folder already holds something, so adopting an in-use profile
@@ -127,6 +128,88 @@ instead of hard-coding `<unzip>\profile`:
   restamps `.am-version`, and relaunches. The zip's wrapper folder is **`agentmaster-<ver>`**
   (renamed from upstream's `terminal-<ver>`; installers unwrap both spellings).
 
+### §2b The portable first-launch INSTALL question + the `install.path` decision file
+
+Before the §2a profile question — before ANY file is written — a pristine portable copy asks
+**"Where should Agentmaster live?"** (`AgentMaster/PortableInstall.h`, `EnsureInstallDecidedAtStartup`,
+run from the EXE prelude right after the single-instance handoff and BEFORE
+`EnsureProfileResolvedAtStartup`). *Pristine* = the `.portable` marker with neither an `install.path`
+nor a `profile.path` beside the exe (a portable that already chose a profile before this question
+existed is never nagged; an explicit `AGENTMASTER_PROFILE` skips it; a `-Embedding` activation never
+prompts — it runs self-contained and persists nothing). The command links, the first defaulted:
+
+- **Install to your user folder** — `%USERPROFILE%\.agentmaster\bin` (the Default profile's `bin`
+  sibling). The option ADAPTS to a previous user install of ours (the HKCU Apps & Features entry with a
+  live app exe): **Update the installed Agentmaster (vX → vY)** upgrades it in place (its `settings\`
+  + `profile\` + `profile.path` + `install.path` preserved; only entries the zip SHIPS are replaced, so
+  a folder shared with other files keeps them; refused while something runs from it), or — when it is
+  already the same/newer version — **Use the installed Agentmaster**: this unzip records
+  `install.path` = that dir and hands the launch off to it. It is then a **launcher stub**: every later
+  launch of the unzip forwards its commandline to the install (a vanished install re-asks).
+- **Install to a folder you pick…** — Browse; a non-empty folder that isn't already ours gets an
+  `\Agentmaster` subfolder (the usual installer manners). A destination inside the running unzip, or
+  containing it, is refused.
+- **Install here** — the folder holding the RUNNING binary (`ExeDirPath`, never the cwd): no copy,
+  just the registration below.
+- **Keep it portable, run from here** — no shortcuts, no registry; writes `install.path` = `portable`
+  so it never asks again, then the classic §2a profile picker follows.
+- **Ask me later** (also Cancel / X / Esc) — writes NOTHING: this launch runs on the self-contained
+  `<exedir>\profile` WITHOUT persisting a profile choice (the §2a picker is deferred too —
+  `EnsureProfileResolvedAtStartup(allowUi, deferPortablePicker)` — one "later" defers every
+  first-launch question instead of trading one dialog for another), and the next launch asks again.
+
+**What an install is** — MSI-like, per-user, with no MSI, package, certificate or admin: the binaries
+copied (or registered in place); a **desktop** shortcut; a **Start-menu** shortcut (Start search finds
+it — the `.lnk` carries the unpackaged AUMID the installed copy runs under, `unpackagedAumidForImagePath`
+in `WindowEmperor.cpp` == the app's own formula, which is what routes an unpackaged app's toasts); an
+**"Open in Agentmaster"** right-click verb on folders, folder backgrounds and drives
+(`HKCU\Software\Classes\{Directory | Directory\Background | Drive}\shell\Agentmaster`, command
+`"<exe>" -d "%1|%V"` — the classic registry form of what the MSIX shell extension provides;
+Windows 11 lists it under *Show more options*); an **Apps & Features** entry
+(`HKCU\...\Uninstall\Agentmaster` — DisplayVersion from `.am-version`, InstallLocation, DisplayIcon,
+`UninstallString` = `"<exe>" --uninstall-portable`, NoModify/NoRepair, EstimatedSize); and the install
+dir on the **user PATH** (`agentmaster-cli.exe` reachable from any shell; `WM_SETTINGCHANGE`
+broadcast). The work runs on a worker under a marquee TaskDialog (*Installing Agentmaster…*, no
+cancel), then the INSTALLED copy is launched and the installing process exits like the updater
+handoff (an in-place install just carries on); any failure is shown and the question returns.
+
+**The installed copy's state:** it is an installed copy, so it uses the per-identity **Default**
+profile (`~/.agentmaster`) silently — the installer writes its `profile.path` (absolute) — and
+migrates whatever a "later" run accumulated in `<unzip>\profile` into it (`MigrateProfileData`,
+copy-if-absent; `bin/` is now excluded from every profile migration, since the default install dir
+sits INSIDE the Default profile). It keeps its `.portable` marker: it still self-updates in place
+(the zip swap in `am-update.ps1 -Portable` / `Install-Agentmaster.ps1` preserves `install.path` beside
+`profile.path`), and `RefreshInstalledRegistration` (every launch, registry reads only) re-stamps the
+Apps & Features version + the verbs' command paths after such an update.
+
+**Existing installs — never overridden, taken over where we can:**
+
+- the installed **package** (the MSIX release family `Agentmaster_56k4f06dsfp9r`, incl. an
+  admin-trusted one — `GetPackagesByPackageFamily`): its files are untouchable and untouched; the
+  install adopts its DATA (the same Default profile), and a verification checkbox — checked by default
+  unless the package is RUNNING (its windows would be closed; `packageRunning` = a process image under
+  the package path) — removes it afterwards (hidden Windows PowerShell, `Remove-AppxPackage`, per-user,
+  no admin; the GUI under the package path is stopped first and its ConPTY hosts DRAINED, never
+  killed). A failed removal is a note; the install still succeeds.
+- a **machine-wide** entry (`HKLM\...\Uninstall\Agentmaster`, administrator-managed): left alone,
+  called out in the prompt — this copy installs for the current user only.
+- a previous **user install** of ours: the adaptive first option above (update / use).
+
+**The decision file `<exedir>\install.path`** (plain UTF-8, `#` comments, first value line wins —
+the `profile.path` idiom): `installed` (this folder IS the install — in place, or an install's
+destination) · `portable` (stay portable, never ask) · `<absolute dir>` (installed elsewhere — a
+launcher stub). A relative/garbage value reads as none (re-asks). Both installer swaps preserve it.
+
+**Uninstall:** `Agentmaster.exe --uninstall-portable` (the Apps & Features entry; the cog's About →
+*Uninstall Agentmaster…* routes an installed portable there too) is handled in the prelude BEFORE the
+single-instance handoff (a running instance would otherwise receive the flag as a commandline): a
+confirm, then the embedded `am-update.ps1` is materialized into `%TEMP%\Agentmaster-update` and run
+detached with `-UninstallPortable -PortableDir <dir> -WaitPid <pid>` — the shortcuts (only those
+pointing INTO the folder), the three verbs, the Apps & Features entry (only when its InstallLocation
+IS the folder), the PATH entry and the binaries go; `settings\` + `profile\` + `profile.path` and the
+profile folder itself are kept. The whole flow logs `[install]` lines into the Default profile's
+`hooks.log` (only after a decision that writes anyway — a pristine "later" creates nothing).
+
 ### First launch — installed auto-selects by identity (no prompt); portable asks
 
 `WindowEmperor::HandleCommandlineArgs` calls `EnsureProfileResolvedAtStartup(allowUi)` **after**
@@ -140,7 +223,9 @@ and persists it:
 - the **DEV** install (`AgentmasterDev`) → **Development**, `%USERPROFILE%\.agentmaster-dev`
 - unpackaged / portable-without-marker → the release default (the historical `~/.agentmaster`)
 - a **PORTABLE** copy (`.portable` marker, no `profile.path` pointer yet) instead **prompts** —
-  see §2a; Cancel / `-Embedding` lands on `<unzip>\profile` un-persisted (asks again next launch)
+  first the §2b INSTALL question (install / keep portable / later), then, for a kept-portable copy,
+  the §2a picker; Cancel / "Ask me later" / `-Embedding` lands on `<unzip>\profile` un-persisted
+  (asks again next launch); an INSTALLED copy has its `profile.path` written to the Default profile
 
 It then **seeds `<profile>\terminal\`** with the install's current Terminal settings (from package
 `LocalState` / the unpackaged dir / a portable's `<unzip>\settings`) so the first redirected launch

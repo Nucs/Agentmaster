@@ -381,7 +381,7 @@ jobs:
             & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version ${{ needs.prep.outputs.rawver }} -Portable -Launch
             ```
 
-            **Portable (recommended, no cert):** download `Agentmaster_${{ needs.prep.outputs.ver4 }}_x64.zip` (or `_arm64`), unzip anywhere, run `Agentmaster.exe` inside the `agentmaster-${{ needs.prep.outputs.ver4 }}` folder (a `WindowsTerminal.exe` compat shim next to it works too). First launch asks which profile to use (Enter keeps it self-contained), and it self-updates in place from then on.
+            **Portable (recommended, no cert):** download `Agentmaster_${{ needs.prep.outputs.ver4 }}_x64.zip` (or `_arm64`), unzip anywhere, run `Agentmaster.exe` inside the `agentmaster-${{ needs.prep.outputs.ver4 }}` folder (a `WindowsTerminal.exe` compat shim next to it works too). First launch asks where Agentmaster should live: **Enter installs it to your user folder** (`%USERPROFILE%\.agentmaster\bin` — a desktop icon, a Start-menu entry, an "Open in Agentmaster" folder right-click entry and an Apps & Features entry with Uninstall; no admin, no package), or pick a folder, install it right there, keep it portable (self-contained), or decide later. Either way it self-updates in place from then on.
 
             **MSIX bundle (self-signed):**
             1. Download `Agentmaster.cer` + `Agentmaster_${{ needs.prep.outputs.ver4 }}.msixbundle`.

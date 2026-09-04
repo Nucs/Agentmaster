@@ -70,7 +70,7 @@ In active use, shipping regular [**releases**](https://github.com/Nucs/Agentmast
 
 Flags: `-Version <x.y.z>` · `-Portable` (cert-free, no admin) · `-Elevate` (skip the question, straight to UAC) · `-Launch` · `-Prerelease` · `-Nightly` (also consider unstable nightly builds) · `-Force` · `-Uninstall`.
 
-Prefer the files? Grab them from [**Releases**](https://github.com/Nucs/Agentmaster/releases): the **portable zip** (unzip, run `agentmaster.exe` — fully self-contained, no cert) or the self-signed **`.msixbundle`** (trust `Agentmaster.cer` once, then `Add-AppxPackage`).
+Prefer the files? Grab them from [**Releases**](https://github.com/Nucs/Agentmaster/releases): the **portable zip** (unzip, run `Agentmaster.exe` — no cert; its first launch offers a per-user install — desktop icon, Start menu, folder right-click menu, Apps & Features — into `~/.agentmaster\bin`, or keeps it fully self-contained) or the self-signed **`.msixbundle`** (trust `Agentmaster.cer` once, then `Add-AppxPackage`).
 
 First launch silently picks a per-install **profile folder** (`~/.agentmaster`) holding everything it persists. **Requires** Windows 10 19041+, x64/arm64, and a native [Claude Code](https://www.anthropic.com/claude-code) `claude.exe` on `PATH` (Codex optional).
 

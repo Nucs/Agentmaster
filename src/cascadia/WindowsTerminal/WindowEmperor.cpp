@@ -36,6 +36,9 @@
 // Agentmaster: the in-app updater — the startup GitHub-release check + prompt, run BEFORE the
 // window-restoration prompt below. Header-only + pure Win32 for the same reason as ProfileBootstrap.
 #include "../TerminalApp/AgentMaster/Updater.h"
+// Agentmaster (portable install): a portable copy's first-launch "Where should Agentmaster live?"
+// question + the launcher-stub handoff + the --uninstall-portable flag (header-only, pure Win32).
+#include "../TerminalApp/AgentMaster/PortableInstall.h"
 // Agentmaster: [startup] phase timing — see where the (slow) launch spends its time. Header-only,
 // shares one process-creation clock with the dll-side TerminalPage/Engine lines in the same hooks.log.
 #include "../TerminalApp/AgentMaster/StartupTiming.h"
@@ -222,6 +225,44 @@ static wil::unique_mutex acquireMutexOrAttemptHandoff(const wchar_t* className, 
     }
 
     return {};
+}
+
+// Agentmaster (PortableInstall.h): the unpackaged AppUserModelID an image at `exePath` runs under —
+// the ONE formula HandleCommandlineArgs applies to our own image (branding + exe-path hash + user-SID
+// hash; the same isolation the single-instance mutex uses), factored out so the portable installer
+// can stamp the INSTALLED copy's Start-menu shortcut with the id THAT copy will actually use (a
+// Start-menu .lnk carrying the AUMID is what routes an unpackaged app's toasts — see _setupAumid).
+static std::wstring unpackagedAumidForImagePath(const std::wstring& exePath)
+{
+#if defined(WT_BRANDING_RELEASE)
+    std::wstring aumid = L"Microsoft.WindowsTerminal";
+#elif defined(WT_BRANDING_PREVIEW)
+    std::wstring aumid = L"Microsoft.WindowsTerminalPreview";
+#elif defined(WT_BRANDING_CANARY)
+    std::wstring aumid = L"Microsoft.WindowsTerminalCanary";
+#else
+    std::wstring aumid = L"WindowsTerminalDev";
+#endif
+    {
+        const auto hash = til::hash(exePath);
+#ifdef _WIN64
+        fmt::format_to(std::back_inserter(aumid), FMT_COMPILE(L".{:016x}"), hash);
+#else
+        fmt::format_to(std::back_inserter(aumid), FMT_COMPILE(L".{:08x}"), hash);
+#endif
+    }
+    {
+        wil::unique_handle processToken{ GetCurrentProcessToken() };
+        const auto userTokenInfo{ wil::get_token_information<TOKEN_USER>(processToken.get()) };
+        const auto sidLength{ GetLengthSid(userTokenInfo->User.Sid) };
+        const auto hash{ til::hash(userTokenInfo->User.Sid, sidLength) };
+#ifdef _WIN64
+        fmt::format_to(std::back_inserter(aumid), FMT_COMPILE(L".{:016x}"), hash);
+#else
+        fmt::format_to(std::back_inserter(aumid), FMT_COMPILE(L".{:08x}"), hash);
+#endif
+    }
+    return aumid;
 }
 
 static constexpr bool IsInputKey(WORD vkey) noexcept
@@ -507,11 +548,12 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
         const auto hash = til::hash(path);
 #ifdef _WIN64
         fmt::format_to(std::back_inserter(windowClassName), FMT_COMPILE(L" {:016x}"), hash);
-        fmt::format_to(std::back_inserter(unpackagedAumid), FMT_COMPILE(L".{:016x}"), hash);
 #else
         fmt::format_to(std::back_inserter(windowClassName), FMT_COMPILE(L" {:08x}"), hash);
-        fmt::format_to(std::back_inserter(unpackagedAumid), FMT_COMPILE(L".{:08x}"), hash);
 #endif
+        // Agentmaster: the AUMID's own path + SID hashes ride the shared formula
+        // (unpackagedAumidForImagePath) so the portable installer stamps identical ids.
+        unpackagedAumid = unpackagedAumidForImagePath(path);
     }
 
     {
@@ -526,13 +568,19 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
 #endif
         if (!IsPackaged())
         {
-#ifdef _WIN64
-            fmt::format_to(std::back_inserter(unpackagedAumid), FMT_COMPILE(L".{:016x}"), hash);
-#else
-            fmt::format_to(std::back_inserter(unpackagedAumid), FMT_COMPILE(L".{:08x}"), hash);
-#endif
             _setupAumid(unpackagedAumid);
         }
+    }
+
+    // Agentmaster (PortableInstall.h): `Agentmaster.exe --uninstall-portable` — the Apps & Features
+    // UninstallString of an INSTALLED PORTABLE copy (and the cog's Uninstall button). Handled BEFORE
+    // the single-instance handoff below: a running instance would otherwise receive the flag as a
+    // commandline it can't parse. Confirms, launches the detached uninstaller, and exits WITHOUT
+    // starting the app (or exits on Cancel) — never a window.
+    if (::Agentmaster::PortableInstall::HandleUninstallFlagAtStartup())
+    {
+        TerminateProcess(GetCurrentProcess(), gsl::narrow_cast<UINT>(0));
+        __assume(false);
     }
 
     // Windows Terminal is a single-instance application. Either acquire ownership
@@ -564,7 +612,31 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     {
         const std::wstring_view cmdline{ GetCommandLineW() };
         const bool embedding = cmdline.find(L"-Embedding") != std::wstring_view::npos;
-        if (!::Agentmaster::Profiles::EnsureProfileResolvedAtStartup(!embedding))
+
+        // Agentmaster (PortableInstall.h): a PORTABLE copy's very first launch — BEFORE the profile
+        // resolves, i.e. before ANY file is written — asks "Where should Agentmaster live?": install to
+        // the user folder (~/.agentmaster\bin) / a picked folder / here, keep it portable, or ask
+        // later. An install copies + registers (shortcuts, right-click menu, Apps & Features, PATH)
+        // and RELAUNCHES the installed copy — this process then exits like the handoff above; a
+        // launcher-stub unzip (already installed elsewhere) hands off the same way. "Ask me later"
+        // persists nothing and ALSO defers the §2a profile picker (one "later" for every first-launch
+        // question); a `-Embedding` activation never prompts. Non-portable / already-decided copies
+        // pass straight through. The AUMID lambda lets the installer stamp the installed copy's
+        // Start-menu shortcut with the id that copy will run under (toast routing).
+        bool deferPortablePicker = false;
+        switch (::Agentmaster::PortableInstall::EnsureInstallDecidedAtStartup(!embedding, [](const std::wstring& exe) { return unpackagedAumidForImagePath(exe); }))
+        {
+        case ::Agentmaster::PortableInstall::StartupAction::Exit:
+            TerminateProcess(GetCurrentProcess(), gsl::narrow_cast<UINT>(0));
+            __assume(false);
+        case ::Agentmaster::PortableInstall::StartupAction::ContinueDeferProfile:
+            deferPortablePicker = true;
+            break;
+        default:
+            break;
+        }
+
+        if (!::Agentmaster::Profiles::EnsureProfileResolvedAtStartup(!embedding, deferPortablePicker))
         {
             TerminateProcess(GetCurrentProcess(), gsl::narrow_cast<UINT>(0));
             __assume(false);
@@ -585,6 +657,12 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     // export can reach child shells like a user-set AGENTMASTER_DEBUG would — accepted: WT's env
     // regeneration drops it for tab children, and a same-profile relaunch re-derives from settings.json.
     ::Agentmaster::Profiles::ApplyPersistedDebugMode();
+
+    // Agentmaster (PortableInstall.h): an INSTALLED portable copy re-stamps its Apps & Features entry
+    // (DisplayVersion / InstallLocation) + right-click verbs when they drifted — the in-place zip
+    // update swaps the binaries but knows nothing of the registration. Registry reads only, unless
+    // something changed; a non-installed copy returns at once.
+    ::Agentmaster::PortableInstall::RefreshInstalledRegistration();
 
     // Agentmaster ([startup] timing): the profile is resolved — safe to log now. This anchors the
     // exe prelude (single-instance handoff + profile resolution) since process creation; the dll-side

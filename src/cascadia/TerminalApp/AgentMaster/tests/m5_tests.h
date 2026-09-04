@@ -148,6 +148,7 @@ void TestVerifiedPlacement(); // DELIVERY_PLAN.md Part 2 (R4-R8): the tri-state 
 void TestBuildPromptSubmission();
 void TestSchedulerIntegration();
 void TestUpdaterVersionLogic(); // Updater.h: ParseVersion/CompareVersion (4th part = build metadata, ignored) + unpackaged facts + the settings.json skip/postpone RMW (preserve-other-keys, replace-not-append)
+void TestPortableInstall(); // PortableInstall.h: the portable first-launch INSTALL question — the install.path decision file (encode/decode/round-trip), DecideStartup (the prelude's plan matrix), the PATH-list edits, the copy/preserve leaf rules, the right-click command, the dest guards, the version/package-name parsers, GatherStartupFacts on a scratch dir
 // tests_persistence.cpp
 void TestPersistence();
 void TestManagerLayout();

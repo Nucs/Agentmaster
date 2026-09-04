@@ -44,6 +44,15 @@
     -Uninstall removes the installed package (per-user, no admin). Your profile data (e.g.
     %USERPROFILE%\.agentmaster) lives OUTSIDE the package and is never touched.
 
+    -UninstallPortable (with -PortableDir) removes an INSTALLED PORTABLE copy -- the per-user,
+    MSI-like install PortableInstall.h makes on a portable's first launch (`Agentmaster.exe
+    --uninstall-portable` is its Apps & Features UninstallString; the cog's Uninstall button
+    routes here too): the desktop + Start-menu shortcuts (only those pointing INTO the folder),
+    the "Open in Agentmaster" right-click verbs (HKCU\Software\Classes), the Apps & Features
+    entry (only when its InstallLocation IS the folder), the folder's user-PATH entry, and the
+    binaries. The exe-side user state (settings\ + profile\ + profile.path) is KEPT in place and
+    the profile folder is never touched -- reinstalling later finds everything again.
+
 .NOTES
     Agentmaster -- a fork of Windows Terminal. The released MSIX is self-signed, so trusting its
     certificate requires administrator rights once.
@@ -56,6 +65,7 @@ param(
     [string]$Family       = 'Agentmaster_56k4f06dsfp9r',
     [int]   $WaitPid      = 0,
     [switch]$Uninstall,
+    [switch]$UninstallPortable,
     [switch]$Portable,
     [string]$PortableDir  = '',
     [string]$ZipUrl       = '',
@@ -124,16 +134,39 @@ function Stop-PackageProcesses {
     Stop-ProcessesUnder $Pkg.InstallLocation
 }
 
-# The path-filtered process stop both flavors share: kill our exes ONLY under $DirPath, so the
-# Store Windows Terminal and any other install (a different path) are never touched (the same
-# filter Install-Agentmaster.ps1's Stop-RunningUnder uses).
+# The path-filtered process stop both flavors share (verbatim from Install-Agentmaster.ps1's
+# Stop-RunningUnder -- KEEP IN SYNC): kill ONLY the GUI process under $DirPath, so the Store
+# Windows Terminal and any other install (a different path) are never touched -- and NEVER its
+# OpenConsole.exe ConPTY hosts. A host hit by Stop-Process dies without its graceful shutdown (the
+# CTRL_CLOSE_EVENT broadcast to the tab's pwsh + claude.exe + MCP children), which leaves every
+# session of that tab running forever with a DEAD console (2026-09-04: 35 pwsh+claude pairs and
+# ~140 node/cmd children from one such kill, alive six days). Killing the GUI alone closes its pipe
+# handles; each host then shuts its clients down itself and exits -- we WAIT for that so the
+# binaries are free before the swap / removal (a host locks OpenConsole.exe in $DirPath).
 function Stop-ProcessesUnder {
     param($DirPath)
     if (-not $DirPath) { return }
     try {
-        Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($DirPath, [StringComparison]::OrdinalIgnoreCase) } |
-            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        $gui = Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($DirPath, [StringComparison]::OrdinalIgnoreCase) }
+        foreach ($p in $gui) {
+            Write-Warn "closing running instance (pid $($p.ProcessId))"
+            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        # Wait for the ConPTY hosts under $DirPath to drain (each ends its clients -- up to ~5 s per
+        # stubborn client -- then exits). 30 s is generous; whatever is still there after that is
+        # wedged, and only then is it killed as the last resort (its tab's clients WILL be orphaned).
+        $deadline = (Get-Date).AddSeconds(30)
+        do {
+            Start-Sleep -Milliseconds 500
+            $hosts = Get-CimInstance Win32_Process -Filter "Name='OpenConsole.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($DirPath, [StringComparison]::OrdinalIgnoreCase) }
+        } while ($hosts -and (Get-Date) -lt $deadline)
+        foreach ($p in $hosts) {
+            Write-Warn "ConPTY host pid $($p.ProcessId) did not exit in 30 s; killing it (its tab's session processes may be orphaned)"
+            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        if ($gui -or $hosts) { Start-Sleep -Milliseconds 700 }
     } catch {}
 }
 
@@ -382,8 +415,10 @@ function Invoke-PortableUpdate {
     Write-Step "Installing $Version into $PortableDir"
     # Replace binaries; preserve the user state held next to the exe (Install-Agentmaster.ps1's
     # exact list): settings\ (pre-choice portable WT settings) + profile\ (the self-contained
-    # profile) + profile.path (WHICH profile this copy chose) + .am-version (refreshed below).
-    Get-ChildItem $PortableDir -Force | Where-Object { $_.Name -notin @('settings', 'profile', 'profile.path', '.am-version') } |
+    # profile) + profile.path (WHICH profile this copy chose) + install.path (the first-launch
+    # INSTALL decision -- PortableInstall.h; without it an installed copy would re-ask "where should
+    # Agentmaster live?" after every update) + .am-version (refreshed below).
+    Get-ChildItem $PortableDir -Force | Where-Object { $_.Name -notin @('settings', 'profile', 'profile.path', 'install.path', '.am-version') } |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     Copy-Item -Path (Join-Path $src.FullName '*') -Destination $PortableDir -Recurse -Force
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
@@ -423,10 +458,90 @@ function Invoke-Uninstall {
     Start-Sleep -Seconds 2
 }
 
+# Remove an INSTALLED PORTABLE copy (PortableInstall.h's per-user, MSI-like install). Every entry
+# is removed ONLY when it points into $PortableDir, so a second install elsewhere (or the MSIX
+# package) keeps its own shortcuts / verbs / Apps & Features entry. The exe-side user state
+# (settings\ + profile\ + profile.path) and the profile folder itself are never touched.
+function Invoke-PortableUninstall {
+    Write-Host ''
+    Write-Host "Agentmaster uninstaller (portable install)" -ForegroundColor White
+    Write-Host ''
+    if (-not $PortableDir) { throw 'Internal error: the portable uninstall was launched without a target folder.' }
+    $dir = [IO.Path]::GetFullPath($PortableDir).TrimEnd('\')
+    $under = { param($p) $p -and ([IO.Path]::GetFullPath($p).TrimEnd('\') + '\').StartsWith($dir + '\', [StringComparison]::OrdinalIgnoreCase) }
+
+    Wait-ForExit
+    Stop-ProcessesUnder $dir
+
+    Write-Step 'Removing shortcuts'
+    $sh = New-Object -ComObject WScript.Shell
+    foreach ($folder in @([Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('DesktopDirectory'))) {
+        if (-not $folder) { continue }
+        $lnk = Join-Path $folder 'Agentmaster.lnk'
+        if (Test-Path -LiteralPath $lnk) {
+            $target = ''
+            try { $target = $sh.CreateShortcut($lnk).TargetPath } catch {}
+            if (& $under $target) { Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue; Write-Ok "removed $lnk" }
+            else { Write-Info "kept $lnk (points elsewhere: $target)" }
+        }
+    }
+
+    Write-Step 'Removing the right-click menu'
+    foreach ($base in 'Directory', 'Directory\Background', 'Drive') {
+        $key = "HKCU:\Software\Classes\$base\shell\Agentmaster"
+        if (Test-Path -LiteralPath $key) {
+            $cmd = ''
+            try { $cmd = (Get-ItemProperty -LiteralPath "$key\command" -ErrorAction SilentlyContinue).'(default)' } catch {}
+            if (-not $cmd -or $cmd -like "*$dir*") { Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue; Write-Ok "removed $key" }
+            else { Write-Info "kept $key (points elsewhere)" }
+        }
+    }
+
+    Write-Step 'Removing the Apps & Features entry'
+    $uk = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Agentmaster'
+    if (Test-Path -LiteralPath $uk) {
+        $loc = ''
+        try { $loc = (Get-ItemProperty -LiteralPath $uk -ErrorAction SilentlyContinue).InstallLocation } catch {}
+        if (-not $loc -or ([IO.Path]::GetFullPath($loc).TrimEnd('\') -ieq $dir)) { Remove-Item -LiteralPath $uk -Recurse -Force -ErrorAction SilentlyContinue; Write-Ok 'removed' }
+        else { Write-Info "kept (it describes another install at $loc)" }
+    }
+
+    Write-Step 'Removing the PATH entry'
+    try {
+        $envKey = Get-Item -LiteralPath 'HKCU:\Environment'
+        $raw = $envKey.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+        if ($raw) {
+            $kept = @($raw -split ';' | Where-Object { $_ -and ($_.Trim().Trim('"').TrimEnd('\') -ine $dir) })
+            $new = ($kept -join ';')
+            if ($new -ne $raw) {
+                Set-ItemProperty -LiteralPath 'HKCU:\Environment' -Name 'Path' -Value $new -Type ExpandString
+                # Tell running shells / Explorer the environment changed (what setx does).
+                $sig = '[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);'
+                $u32 = Add-Type -MemberDefinition $sig -Name 'AmEnvBroadcast' -Namespace 'Agentmaster' -PassThru -ErrorAction SilentlyContinue
+                if ($u32) { [UIntPtr]$r = [UIntPtr]::Zero; $null = $u32::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 3000, [ref]$r) }
+                Write-Ok 'removed'
+            }
+        }
+    } catch { Write-Warn "PATH entry not updated: $($_.Exception.Message)" }
+
+    Write-Step "Removing the binaries under $dir"
+    $keep = @('settings', 'profile', 'profile.path')
+    Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin $keep } |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    $left = @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue)
+    if ($left.Count -eq 0) { Remove-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue; Write-Ok 'removed' }
+    else { Write-Ok "removed (kept your exe-side state: $(($left | ForEach-Object { $_.Name }) -join ', '))" }
+
+    Write-Host ''
+    Write-Host 'Agentmaster was uninstalled.' -ForegroundColor White
+    Write-Info 'Your profile data (sessions, settings, window layouts) was left untouched.'
+    Start-Sleep -Seconds 3
+}
+
 # ============================ main ============================
 try {
     Initialize-Net
-    if ($Uninstall) { Invoke-Uninstall } elseif ($Portable) { Invoke-PortableUpdate } else { Invoke-Install }
+    if ($Uninstall) { Invoke-Uninstall } elseif ($UninstallPortable) { Invoke-PortableUninstall } elseif ($Portable) { Invoke-PortableUpdate } else { Invoke-Install }
 }
 catch {
     Write-Host ''

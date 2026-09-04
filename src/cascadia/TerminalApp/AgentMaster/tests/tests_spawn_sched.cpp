@@ -22,6 +22,7 @@
 #include "m5_tests.h"
 
 #include "../Updater.h" // version parse/compare + the settings.json skip/postpone RMW (TestUpdaterVersionLogic)
+#include "../PortableInstall.h" // the portable first-launch INSTALL question - the pure pieces (TestPortableInstall)
 
 // The updater tests odr-use RunStartupUpdateCheck (the fresh-launch latch-clear check), which pulls
 // ShowUpdatePrompt -> TaskDialogIndirect — imported from comctl32 BY ORDINAL (345), which only
@@ -3549,4 +3550,193 @@ void TestVerifiedPlacement()
         const AppSettings c = DeserializeAppSettings(L"{\"version\":1,\"settings\":{}}");
         CHECK(c.verifySendBeforeSubmit, "settings: an absent key reads the ON default");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Agentmaster (PortableInstall.h): the portable copy's first-launch INSTALL question — the pure
+// pieces. The `install.path` decision file (encode / decode / disk round-trip), DecideStartup (the
+// prelude's plan over the facts: marker, env override, decision, pre-feature pointer, stub target,
+// UI), the user-PATH list edits (add idempotent, remove exact, case/trailing-separator tolerant),
+// the copy / preserve leaf rules the install + the scripts share, the right-click verb command, the
+// destination containment guard, the version + package-full-name parsers, the PowerShell quoting +
+// base64 helpers behind the package takeover, and GatherStartupFacts on a scratch exe dir. (The
+// TaskDialogs, the copy, the shortcut/registry writes and the process probes are UI / machine
+// state — untested headless, like the profile picker.)
+// ---------------------------------------------------------------------------------------------
+void TestPortableInstall()
+{
+    namespace PI = ::Agentmaster::PortableInstall;
+    namespace P = ::Agentmaster::Profiles;
+    namespace U = ::Agentmaster::Updater;
+    std::wprintf(L"PortableInstall (portable first-launch install):\n");
+
+    // ---- the decision file: decode ----
+    CHECK(PI::DecodeInstallDecision(L"").kind == PI::Decision::None, "decode: empty -> None (pristine)");
+    CHECK(PI::DecodeInstallDecision(L"# only a comment\n\n").kind == PI::Decision::None, "decode: comments only -> None");
+    CHECK(PI::DecodeInstallDecision(L"installed\n").kind == PI::Decision::Installed, "decode: installed");
+    CHECK(PI::DecodeInstallDecision(L"# header\r\n  INSTALLED  \r\n").kind == PI::Decision::Installed, "decode: keyword is case/whitespace/CRLF tolerant");
+    CHECK(PI::DecodeInstallDecision(L"here").kind == PI::Decision::Installed, "decode: the 'here' spelling == installed");
+    CHECK(PI::DecodeInstallDecision(L"portable").kind == PI::Decision::Portable, "decode: portable");
+    {
+        const auto d = PI::DecodeInstallDecision(L"C:\\Users\\x\\.agentmaster\\bin\n");
+        CHECK(d.kind == PI::Decision::InstalledTo && d.dir == L"C:\\Users\\x\\.agentmaster\\bin", "decode: an absolute dir -> InstalledTo (verbatim)");
+    }
+    {
+        const auto d = PI::DecodeInstallDecision(L"C:/Users/x/./bin");
+        CHECK(d.kind == PI::Decision::InstalledTo && d.dir == L"C:\\Users\\x\\bin", "decode: forward slashes + '.' segments normalize");
+    }
+    CHECK(PI::DecodeInstallDecision(L"\\\\server\\share\\am").kind == PI::Decision::InstalledTo, "decode: a UNC dir -> InstalledTo");
+    CHECK(PI::DecodeInstallDecision(L"relative\\dir").kind == PI::Decision::None, "decode: a relative value -> None (re-ask)");
+    CHECK(PI::DecodeInstallDecision(L"some garbage").kind == PI::Decision::None, "decode: garbage -> None");
+    CHECK(PI::DecodeInstallDecision(L"# a\n\n# b\nportable\ninstalled\n").kind == PI::Decision::Portable, "decode: first value line wins");
+
+    // ---- encode / decode round-trip ----
+    CHECK(PI::EncodeInstallDecision({ PI::Decision::None, {} }).empty(), "encode: None -> empty (never written)");
+    CHECK(PI::EncodeInstallDecision({ PI::Decision::Installed, {} }) == L"installed", "encode: installed");
+    CHECK(PI::EncodeInstallDecision({ PI::Decision::Portable, {} }) == L"portable", "encode: portable");
+    CHECK(PI::EncodeInstallDecision({ PI::Decision::InstalledTo, L"D:\\Apps\\Agentmaster" }) == L"D:\\Apps\\Agentmaster", "encode: InstalledTo -> the dir");
+    for (const auto kind : { PI::Decision::Installed, PI::Decision::Portable })
+    {
+        CHECK(PI::DecodeInstallDecision(PI::EncodeInstallDecision({ kind, {} })).kind == kind, "encode/decode: keyword round-trip");
+    }
+    {
+        const auto back = PI::DecodeInstallDecision(PI::EncodeInstallDecision({ PI::Decision::InstalledTo, L"D:\\Apps\\Agentmaster" }));
+        CHECK(back.kind == PI::Decision::InstalledTo && back.dir == L"D:\\Apps\\Agentmaster", "encode/decode: InstalledTo round-trip");
+    }
+
+    // ---- the decision file on disk (a scratch "exe dir") ----
+    wchar_t tmpBuf[MAX_PATH];
+    ::GetTempPathW(MAX_PATH, tmpBuf);
+    const std::wstring exeDir = std::wstring{ tmpBuf } + L"am-portable-install-" + NewSessionId();
+    std::filesystem::create_directories(std::filesystem::path{ exeDir });
+    {
+        CHECK(PI::ReadInstallDecisionIn(exeDir).kind == PI::Decision::None, "file: absent -> None");
+        CHECK(!PI::SaveInstallDecisionIn(L"", { PI::Decision::Installed, {} }), "file: an empty exe dir is refused");
+        CHECK(!PI::SaveInstallDecisionIn(exeDir, { PI::Decision::None, {} }), "file: None is never written");
+        CHECK(PI::ReadInstallDecisionIn(exeDir).kind == PI::Decision::None, "file: a refused write leaves no file");
+        CHECK(PI::SaveInstallDecisionIn(exeDir, { PI::Decision::Installed, {} }), "file: save installed");
+        CHECK(PI::ReadInstallDecisionIn(exeDir).kind == PI::Decision::Installed, "file: reads installed back");
+        CHECK(PI::SaveInstallDecisionIn(exeDir, { PI::Decision::InstalledTo, L"D:\\Apps\\Agentmaster" }), "file: overwrite with InstalledTo");
+        const auto d = PI::ReadInstallDecisionIn(exeDir);
+        CHECK(d.kind == PI::Decision::InstalledTo && d.dir == L"D:\\Apps\\Agentmaster", "file: reads the dir back");
+        CHECK(std::filesystem::exists(std::filesystem::path{ PI::DecisionPathIn(exeDir) }), "file: lives at <exedir>\\install.path");
+        CHECK(!std::filesystem::exists(std::filesystem::path{ PI::DecisionPathIn(exeDir) + L".tmp" }), "file: the atomic tmp is renamed away");
+        CHECK(PI::DecisionPathIn(L"").empty(), "file: no exe dir -> no path");
+    }
+
+    // ---- the default install dir ----
+    {
+        const auto def = PI::DefaultUserInstallDir();
+        CHECK(def == P::DefaultReleaseProfileDir() + L"\\bin", "default install dir == <Default profile>\\bin");
+        CHECK(def.size() > 16 && def.compare(def.size() - 16, 16, L".agentmaster\\bin") == 0, "default install dir ends .agentmaster\\bin (the user folder)");
+        CHECK(PI::AppExeIn(L"D:\\x") == L"D:\\x\\Agentmaster.exe", "AppExeIn appends the app exe leaf");
+        CHECK(PI::AppExeIn(L"").empty(), "AppExeIn: empty dir -> empty");
+        CHECK(!PI::DirHoldsAppExe(exeDir), "DirHoldsAppExe: a folder without the exe");
+    }
+
+    // ---- leaf rules: what an upgrade preserves, what a copy never carries ----
+    CHECK(PI::IsPreservedLeaf(L"settings") && PI::IsPreservedLeaf(L"profile") && PI::IsPreservedLeaf(L"Profile.Path") && PI::IsPreservedLeaf(L"install.path"), "preserve: settings / profile / profile.path / install.path (the scripts' list + install.path)");
+    CHECK(!PI::IsPreservedLeaf(L"Agentmaster.exe") && !PI::IsPreservedLeaf(L".am-version") && !PI::IsPreservedLeaf(L".portable"), "preserve: binaries / stamps are replaced");
+    CHECK(PI::IsCopyExcludedLeaf(L"profile") && PI::IsCopyExcludedLeaf(L"profile.path") && PI::IsCopyExcludedLeaf(L"install.path") && PI::IsCopyExcludedLeaf(L"x.TMP"), "copy: the source's profile data / pointers / temps never travel");
+    CHECK(!PI::IsCopyExcludedLeaf(L"settings") && !PI::IsCopyExcludedLeaf(L".portable") && !PI::IsCopyExcludedLeaf(L".am-version") && !PI::IsCopyExcludedLeaf(L"Agentmaster.exe"), "copy: settings / marker / stamp / binaries travel");
+
+    // ---- the user PATH list ----
+    CHECK(PI::PathListContains(L"C:\\a;C:\\B\\;c:\\c", L"c:\\b"), "path: contains is case + trailing-separator insensitive");
+    CHECK(!PI::PathListContains(L"C:\\a;C:\\bb", L"C:\\b"), "path: no prefix match");
+    CHECK(PI::PathListContains(L"\"C:\\a b\";C:\\c", L"C:\\a b"), "path: a quoted entry matches");
+    CHECK(!PI::PathListContains(L"", L"C:\\b") && !PI::PathListContains(L"C:\\b", L""), "path: empty list / empty dir never match");
+    CHECK(PI::AddDirToPathList(L"", L"C:\\x") == L"C:\\x", "path add: onto an empty list");
+    CHECK(PI::AddDirToPathList(L"C:\\a;C:\\b", L"C:\\x") == L"C:\\a;C:\\b;C:\\x", "path add: appends");
+    CHECK(PI::AddDirToPathList(L"C:\\a;C:\\b;", L"C:\\x") == L"C:\\a;C:\\b;C:\\x", "path add: a trailing ';' is normalized (no ';;')");
+    CHECK(PI::AddDirToPathList(L"C:\\a;c:\\X\\", L"C:\\x") == L"C:\\a;c:\\X\\", "path add: already present -> unchanged (idempotent)");
+    CHECK(PI::RemoveDirFromPathList(L"C:\\a;c:\\X\\;C:\\b", L"C:\\x") == L"C:\\a;C:\\b", "path remove: drops every match, keeps the rest verbatim");
+    CHECK(PI::RemoveDirFromPathList(L"C:\\a;C:\\b", L"C:\\x") == L"C:\\a;C:\\b", "path remove: absent -> unchanged");
+    CHECK(PI::RemoveDirFromPathList(L"C:\\x", L"C:\\x").empty(), "path remove: the sole entry -> empty");
+    CHECK(PI::RemoveDirFromPathList(L"%SystemRoot%;C:\\x;%SystemRoot%\\system32", L"C:\\x") == L"%SystemRoot%;%SystemRoot%\\system32", "path remove: unexpanded entries are kept as typed");
+    CHECK(PI::AddDirToPathList(PI::RemoveDirFromPathList(L"C:\\a;C:\\x", L"C:\\x"), L"C:\\x") == L"C:\\a;C:\\x", "path: remove then add round-trips");
+
+    // ---- the right-click verb command ----
+    CHECK(PI::ContextMenuCommand(L"C:\\p\\Agentmaster.exe", L"%V") == L"\"C:\\p\\Agentmaster.exe\" -d \"%V\"", "context menu: \"<exe>\" -d \"%V\"");
+    CHECK(PI::Quoted(L"a b") == L"\"a b\"", "Quoted wraps in double quotes");
+
+    // ---- the destination containment guard ----
+    CHECK(PI::IsSameOrBelow(L"C:\\a\\b", L"C:\\A\\") && PI::IsSameOrBelow(L"C:\\a", L"c:\\a"), "same-or-below: below / same (case + trailing-separator insensitive)");
+    CHECK(!PI::IsSameOrBelow(L"C:\\ab", L"C:\\a") && !PI::IsSameOrBelow(L"C:\\a", L"C:\\a\\b"), "same-or-below: a sibling prefix / the parent are not below");
+    CHECK(!PI::IsSameOrBelow(L"", L"C:\\a") && !PI::IsSameOrBelow(L"C:\\a", L""), "same-or-below: empty never matches");
+
+    // ---- DecideStartup: the prelude's plan ----
+    {
+        PI::StartupFacts f;
+        f.allowUi = true;
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::Continue, "plan: not a portable copy -> Continue");
+        f.portableMarker = true;
+        f.envProfileSet = true;
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::Continue, "plan: AGENTMASTER_PROFILE set -> Continue (explicit override)");
+        f.envProfileSet = false;
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::Prompt, "plan: pristine + UI -> Prompt");
+        f.allowUi = false;
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::ContinueDeferProfile, "plan: pristine + no UI (-Embedding) -> run self-contained, persist nothing");
+        f.allowUi = true;
+        f.profilePointerExists = true;
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::Continue, "plan: a pre-feature portable that already chose a profile is never nagged");
+        f.profilePointerExists = false;
+        f.decision = { PI::Decision::Installed, {} };
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::Continue, "plan: installed -> Continue");
+        f.decision = { PI::Decision::Portable, {} };
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::Continue, "plan: stay-portable -> Continue (never asks again)");
+        f.decision = { PI::Decision::InstalledTo, L"D:\\Apps\\Agentmaster" };
+        f.installedTargetExists = true;
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::Handoff, "plan: a launcher stub whose install exists -> Handoff");
+        f.installedTargetExists = false;
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::Prompt, "plan: the install vanished -> pristine again (Prompt)");
+        f.allowUi = false;
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::ContinueDeferProfile, "plan: vanished install + no UI -> self-contained run");
+        f.allowUi = true;
+        f.envProfileSet = true;
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::Continue, "plan: the env override outranks even a stub decision");
+    }
+
+    // ---- versions ----
+    {
+        CHECK(PI::FormatVersion(U::Version{ 1, 2, 3, 0 }) == L"1.2.3", "format: 3 parts when build == 0");
+        CHECK(PI::FormatVersion(U::Version{ 1, 2, 3, 4 }) == L"1.2.3.4", "format: 4 parts when build != 0");
+        const auto v = PI::detail::VersionFromPackageFullName(L"Agentmaster_1.2.3.0_x64__56k4f06dsfp9r");
+        CHECK(v.major == 1 && v.minor == 2 && v.patch == 3 && v.build == 0, "package full name -> version");
+        CHECK(PI::detail::VersionFromPackageFullName(L"garbage").major == 0, "package full name: no '_' -> 0.0.0");
+        CHECK(PI::VersionStampIn(exeDir).major == 0 && PI::VersionStampIn(L"").major == 0, "stamp: missing / no dir -> 0.0.0");
+        {
+            std::ofstream f{ std::filesystem::path{ exeDir + L"\\.am-version" }, std::ios::binary | std::ios::trunc };
+            f << "0.9.1.0\r\n";
+        }
+        const auto s = PI::VersionStampIn(exeDir);
+        CHECK(s.major == 0 && s.minor == 9 && s.patch == 1, "stamp: <dir>\\.am-version parses (CRLF tolerant)");
+    }
+
+    // ---- the package-takeover helpers ----
+    CHECK(PI::detail::PsQuote(L"it's") == L"'it''s'", "PsQuote doubles single quotes");
+    CHECK(PI::detail::PsQuote(L"") == L"''", "PsQuote: empty -> ''");
+    CHECK(PI::detail::Base64Utf16(L"").empty(), "base64: empty");
+    CHECK(PI::detail::Base64Utf16(L"A") == L"QQA=", "base64: one UTF-16LE char (41 00) -> QQA=");
+    CHECK(PI::detail::Base64Utf16(L"AB") == L"QQBCAA==", "base64: two chars (41 00 42 00) -> QQBCAA==");
+    CHECK(PI::detail::Base64Utf16(L"ABC") == L"QQBCAEMA", "base64: three chars (6 bytes, no padding)");
+
+    // ---- GatherStartupFacts on the scratch exe dir ----
+    {
+        auto f = PI::GatherStartupFacts(exeDir, true);
+        CHECK(!f.portableMarker, "facts: no .portable marker -> not portable");
+        CHECK(f.decision.kind == PI::Decision::InstalledTo && !f.installedTargetExists, "facts: the stub decision is read; a missing target reads absent");
+        {
+            std::ofstream m{ std::filesystem::path{ exeDir + L"\\.portable" }, std::ios::binary | std::ios::trunc };
+        }
+        f = PI::GatherStartupFacts(exeDir, false);
+        CHECK(f.portableMarker && !f.allowUi, "facts: the marker + allowUi pass through");
+        CHECK(!f.profilePointerExists, "facts: no profile.path");
+        CHECK(!PI::IsInstalledPortableIn(exeDir), "installed-portable: a stub is not an installed copy");
+        PI::SaveInstallDecisionIn(exeDir, { PI::Decision::Installed, {} });
+        CHECK(PI::IsInstalledPortableIn(exeDir), "installed-portable: marker + installed decision");
+        CHECK(!PI::IsInstalledPortableIn(L""), "installed-portable: no dir -> false");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::path{ exeDir }, ec);
 }

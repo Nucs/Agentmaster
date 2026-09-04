@@ -599,8 +599,10 @@ function Install-Portable {
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     # Replace binaries; preserve user state held next to the exe (.portable: settings\ + profile\ +
     # profile.path — the exe-side pointer remembering WHICH profile this copy chose at first launch;
-    # wiping it would re-prompt every upgrade and forget a custom/absolute choice).
-    Get-ChildItem $Dir -Force | Where-Object { $_.Name -notin @('settings', 'profile', 'profile.path', '.am-version') } |
+    # wiping it would re-prompt every upgrade and forget a custom/absolute choice — and install.path,
+    # the first-launch INSTALL decision (PortableInstall.h): without it an installed copy re-asks
+    # "where should Agentmaster live?" after every upgrade).
+    Get-ChildItem $Dir -Force | Where-Object { $_.Name -notin @('settings', 'profile', 'profile.path', 'install.path', '.am-version') } |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     Copy-Item -Path (Join-Path $src.FullName '*') -Destination $Dir -Recurse -Force
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
