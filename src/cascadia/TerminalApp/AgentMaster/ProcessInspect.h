@@ -448,9 +448,13 @@ namespace Agentmaster
     {
         bool found{ false };
         std::vector<std::wstring> userMsgs; // type=user, userType=external, text content; deduped; command/bash/Caveat/Overview/interrupt-skipped
-        std::vector<std::wstring> filesRead; // Read tool file_path basenames, sorted + unique
-        std::vector<std::wstring> filesCreated; // Write tool file_path basenames whose result was "File created successfully at:" (NEW files), sorted + unique
-        std::vector<std::wstring> filesEdited; // Edit / overwriting-Write tool file_path basenames (existing files), sorted + unique
+        // Agentmaster: the three file lists hold DISPLAY LABELS (SeSummaryFileLabel) — a bare basename, or
+        // `scratchpad/<basename>` for a file inside a session scratchpad — each list unique + sorted with
+        // the scratchpad labels LAST (SeSummaryLabelLess). Labels, not paths: two distinct files with one
+        // basename in one origin class still collapse (the session-end.js contract).
+        std::vector<std::wstring> filesRead; // Read tool file_path labels, sorted + unique (minus any label already under Created / Edited)
+        std::vector<std::wstring> filesCreated; // Write tool file_path labels whose result was "File created successfully at:" (NEW files), sorted + unique
+        std::vector<std::wstring> filesEdited; // Edit / overwriting-Write tool file_path labels (existing files), sorted + unique
         std::vector<std::wstring> skillsLoaded; // Agentmaster: Skill tool_use `skill` names (skills loaded this session), sorted + unique
         std::wstring branch; // first gitBranch seen
         // Agentmaster: the Claude Code idle RECAP — the LAST {"type":"system","subtype":"away_summary"}
@@ -595,6 +599,23 @@ namespace Agentmaster
     // starting with the ●/⏺/⎿ marker glyphs) out of the summary's numbered Messages list. Distinct from
     // IsNoiseUserPrompt (titles / Auto Testing). Exposed for tests. Expects leading whitespace trimmed.
     bool SeIsCommandNoise(const std::wstring& c);
+
+    // Agentmaster: the DISPLAY label the summary's file lists (Files Created / Edited / Read) show for
+    // a tool-touched path. Every path reads as its bare basename (the session-end.js look) EXCEPT a
+    // file inside a Claude Code session SCRATCHPAD, which reads `scratchpad/<basename>` — so a scratch
+    // file is told apart at a glance from a repo file of the same name (sessions write to the
+    // scratchpad constantly, and "complex_nan_act.cs" alone can't say which of the two it was). The
+    // scratchpad is recognized by its exact SHAPE, `<temp>/claude/<encoded-cwd>/<session-id>/scratchpad/…`
+    // (either separator; `claude` + `scratchpad` compared case-insensitively — it is a Windows temp
+    // path), so ANY session's scratchpad qualifies (a successor reading its predecessor's briefing),
+    // while a bare `scratchpad` folder a repo happens to own does NOT, and the machine's CURRENT temp
+    // root is never consulted (the session may have run under another; the shape is machine-
+    // independent). The `scratchpad/` prefix is the one label form carrying a separator, so a list
+    // sorts its scratchpad entries LAST (SeSummaryLabelLess). Pure; exposed for tests.
+    std::wstring SeSummaryFileLabel(const std::wstring& fp);
+    // The list order the analyzer sorts the three file lists by: plain (repo) labels first, ordinal;
+    // then the `scratchpad/…` labels, ordinal — so the scratch files read as one trailing group.
+    bool SeSummaryLabelLess(const std::wstring& a, const std::wstring& b);
 
     // Agentmaster: the session-end.js summary BOX rendered to PLAIN TEXT — the SINGLE source of
     // truth shared by the per-tab overlay's summary panel (AgentTabOverlay) AND the Sessions page's

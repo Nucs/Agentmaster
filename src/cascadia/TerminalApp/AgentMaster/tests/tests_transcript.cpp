@@ -2166,6 +2166,64 @@ void TestTranscriptResolve()
         std::error_code ecS;
         std::filesystem::remove(std::filesystem::path{ pSkill }, ecS);
     }
+
+    // --- Agentmaster: a file inside the session SCRATCHPAD (`<temp>\claude\<encoded-cwd>\<session-id>\
+    // scratchpad\…`) is labeled `scratchpad/<basename>` in the summary's file lists — sessions write to
+    // the scratchpad constantly, and a bare "complex_nan_act.cs" could not say whether the REPO file or
+    // the scratch copy was touched. Every other path stays a bare basename; a repo-owned folder that
+    // merely happens to be NAMED scratchpad is not the session scratchpad; and each list sorts its
+    // scratchpad labels LAST so the scratch files read as one trailing group.
+    {
+        // The pure label rule.
+        CHECK(SeSummaryFileLabel(L"C:\\Users\\ELI\\AppData\\Local\\Temp\\claude\\K--source-Agentmaster\\58d686c8-5e36-48ae-9c97-18b196345695\\scratchpad\\complex_nan_act.cs") == L"scratchpad/complex_nan_act.cs",
+              "SeSummaryFileLabel: a Windows session-scratchpad file -> scratchpad/<basename>");
+        CHECK(SeSummaryFileLabel(L"/tmp/claude/K--source-x/sid/scratchpad/x.py") == L"scratchpad/x.py", "SeSummaryFileLabel: the POSIX form of the same shape qualifies too");
+        CHECK(SeSummaryFileLabel(L"C:\\Temp\\CLAUDE\\enc\\sid\\SCRATCHPAD\\x.py") == L"scratchpad/x.py", "SeSummaryFileLabel: the two folder names compare case-insensitively + the label prefix is normalized lowercase");
+        CHECK(SeSummaryFileLabel(L"C:\\Temp\\claude\\enc\\sid\\scratchpad\\sub\\x.py") == L"scratchpad/x.py", "SeSummaryFileLabel: a file NESTED below the scratchpad still reads scratchpad/<basename> (the leaf, not the sub-path)");
+        CHECK(SeSummaryFileLabel(L"C:\\Temp\\claude\\enc\\other-session\\scratchpad\\brief.md") == L"scratchpad/brief.md", "SeSummaryFileLabel: ANY session's scratchpad qualifies (a successor reading its predecessor's briefing)");
+        CHECK(SeSummaryFileLabel(L"K:\\repo\\scratchpad\\x.py") == L"x.py", "SeSummaryFileLabel: a repo folder merely NAMED scratchpad is not the session scratchpad -> bare basename");
+        CHECK(SeSummaryFileLabel(L"K:\\claude\\enc\\scratchpad\\x.py") == L"x.py", "SeSummaryFileLabel: claude/<one>/scratchpad is not the shape (exactly two components sit between) -> bare basename");
+        CHECK(SeSummaryFileLabel(L"K:\\repo\\src\\x.py") == L"x.py" && SeSummaryFileLabel(L"x.py") == L"x.py", "SeSummaryFileLabel: an ordinary path / a bare name -> the basename (the session-end.js look, unchanged)");
+        CHECK(SeSummaryFileLabel(L"C:\\Temp\\claude\\enc\\sid\\scratchpad") == L"scratchpad", "SeSummaryFileLabel: the scratchpad dir ITSELF (nothing beneath it) is just a leaf named scratchpad");
+        CHECK(SeSummaryFileLabel(L"C:\\Temp\\claude\\\\enc\\sid\\scratchpad\\x.py") == L"scratchpad/x.py", "SeSummaryFileLabel: a doubled separator yields no empty component (the shape still matches)");
+        // The list order: plain labels first (ordinal), then the scratchpad group (ordinal).
+        CHECK(SeSummaryLabelLess(L"zeta.txt", L"scratchpad/a.txt") && !SeSummaryLabelLess(L"scratchpad/a.txt", L"zeta.txt"), "SeSummaryLabelLess: a plain label sorts BEFORE any scratchpad label, even past it ordinally");
+        CHECK(SeSummaryLabelLess(L"a.txt", L"b.txt") && SeSummaryLabelLess(L"scratchpad/a.txt", L"scratchpad/b.txt"), "SeSummaryLabelLess: ordinal within each group");
+        CHECK(!SeSummaryLabelLess(L"scratchpad", L"a.txt") && SeSummaryLabelLess(L"a.txt", L"scratchpad"), "SeSummaryLabelLess: a bare leaf named scratchpad (no slash) is a PLAIN label");
+
+        // End to end through the analyzer + the shared box: a scratch file and a repo file with the SAME
+        // basename are BOTH listed (distinct labels — they no longer collapse into one basename).
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring pScratch = std::wstring{ tmp } + L"am_scratchlabel_" + std::to_wstring(::GetCurrentProcessId()) + L".jsonl";
+        MakeJsonl(pScratch,
+                  R"j({"type":"user","userType":"external","message":{"content":"port the NaN activation"},"timestamp":"2026-03-01T10:00:00.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"w1","name":"Write","input":{"file_path":"C:\\Users\\ELI\\AppData\\Local\\Temp\\claude\\K--source-Agentmaster\\58d686c8-5e36-48ae-9c97-18b196345695\\scratchpad\\complex_nan_act.cs"}}]},"timestamp":"2026-03-01T10:00:01.000Z"})j" "\n"
+                  R"j({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"w1","content":"File created successfully at: C:\\Users\\ELI\\AppData\\Local\\Temp\\claude\\K--source-Agentmaster\\58d686c8-5e36-48ae-9c97-18b196345695\\scratchpad\\complex_nan_act.cs"}]},"timestamp":"2026-03-01T10:00:02.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"w2","name":"Write","input":{"file_path":"K:\\source\\Agentmaster\\src\\complex_nan_act.cs"}}]},"timestamp":"2026-03-01T10:00:03.000Z"})j" "\n"
+                  R"j({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"w2","content":"File created successfully at: K:\\source\\Agentmaster\\src\\complex_nan_act.cs"}]},"timestamp":"2026-03-01T10:00:04.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"e1","name":"Edit","input":{"file_path":"/tmp/claude/K--source-x/sid/scratchpad/notes.md"}}]},"timestamp":"2026-03-01T10:00:05.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":"C:\\Users\\ELI\\AppData\\Local\\Temp\\claude\\enc\\sid\\scratchpad\\sub\\deep.txt"}}]},"timestamp":"2026-03-01T10:00:06.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"r2","name":"Read","input":{"file_path":"K:\\repo\\zeta.txt"}}]},"timestamp":"2026-03-01T10:00:07.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"r3","name":"Read","input":{"file_path":"K:\\repo\\scratchpad\\local.txt"}}]},"timestamp":"2026-03-01T10:00:08.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"r4","name":"Read","input":{"file_path":"K:\\claude\\enc\\scratchpad\\one.txt"}}]},"timestamp":"2026-03-01T10:00:09.000Z"})j" "\n",
+                  1000, 1000);
+        const auto a = AnalyzeSessionTranscript(pScratch, 0);
+        CHECK(a.filesCreated.size() == 2 && a.filesCreated[0] == L"complex_nan_act.cs" && a.filesCreated[1] == L"scratchpad/complex_nan_act.cs",
+              "AnalyzeSessionTranscript: the repo file AND its scratchpad namesake are BOTH created entries (distinct labels), repo first");
+        CHECK(a.filesEdited.size() == 1 && a.filesEdited[0] == L"scratchpad/notes.md", "AnalyzeSessionTranscript: an Edit of a (POSIX-form) scratchpad file -> scratchpad/<basename> under Files Edited");
+        CHECK(a.filesRead.size() == 4 && a.filesRead[0] == L"local.txt" && a.filesRead[1] == L"one.txt" && a.filesRead[2] == L"zeta.txt" && a.filesRead[3] == L"scratchpad/deep.txt",
+              "AnalyzeSessionTranscript: Files Read = the plain labels (ordinal; the repo-owned scratchpad folder + the one-between shape stay bare) THEN the scratchpad group");
+
+        const auto box = RenderSessionSummaryBox(a, L"sid-scratch", L"K:\\source\\Agentmaster", pScratch, L"claude --resume sid-scratch", L"", L"", L"", /*full*/ true);
+        CHECK(box.find(L"* scratchpad/complex_nan_act.cs") != std::wstring::npos && box.find(L"* complex_nan_act.cs") != std::wstring::npos,
+              "RenderSessionSummaryBox: the scratch copy renders as '* scratchpad/<basename>' beside the plain '* <basename>' of the repo file");
+        CHECK(box.find(L"* zeta.txt") != std::wstring::npos && box.find(L"* scratchpad/deep.txt") != std::wstring::npos && box.find(L"* zeta.txt") < box.find(L"* scratchpad/deep.txt"),
+              "RenderSessionSummaryBox: within Files Read the scratchpad entry renders AFTER every plain entry");
+
+        std::error_code ecL;
+        std::filesystem::remove(std::filesystem::path{ pScratch }, ecL);
+    }
 }
 
 // "YYYY\\MM\\DD" in LOCAL time for a unix-ms instant — mirrors ProcessInspect's CodexDayDirLocal

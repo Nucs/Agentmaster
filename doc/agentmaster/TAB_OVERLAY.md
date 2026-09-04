@@ -353,7 +353,13 @@ capped to ≤20 % of the pane width), shown while the **GLOBAL** `AppSettings.sh
 read-modify-write + a live broadcast to every linked overlay in the window; the cog Save preserves
 it). It renders the `~/.claude/hooks/session-end.js` box — a faithful C++ port in
 `ProcessInspect::AnalyzeSessionTranscript` (user messages [deduped, noise-filtered via
-`SeIsCommandNoise`], files read / **created** / edited, branch, first/last timestamps, tasks, plan
+`SeIsCommandNoise`], files read / **created** / edited — each listed by **basename**, except that a
+file inside the session **scratchpad** (`<temp>\claude\<encoded-cwd>\<session-id>\scratchpad\…`, the
+exact Claude Code layout; any session's) reads **`scratchpad/<basename>`** and sorts LAST in its list
+(`SeSummaryFileLabel` / `SeSummaryLabelLess`), so a scratch file is never confused with a repo file of
+the same name — sessions write to the scratchpad constantly, and a bare `complex_nan_act.cs` could not
+say which one was touched; a repo folder merely NAMED scratchpad stays a bare basename —, branch,
+first/last timestamps, tasks, plan
 signals, parent/plan) — analyzed **off-thread** (`_LoadSummaryAsync`) and reloaded only when the
 transcript **mtime grows** (a quiet tab costs one `GetFileAttributesEx`). The displayed panel is a
 **TRIMMED** view (omits what the badge already shows); the copy menu's `Summary` yields the COMPLETE

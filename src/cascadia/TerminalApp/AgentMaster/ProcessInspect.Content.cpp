@@ -629,6 +629,87 @@ namespace Agentmaster
         }
         return n.find(L"/plans/") != std::wstring::npos;
     }
+    // Agentmaster (summary file labels): ASCII case-insensitive component equality — the two folder
+    // names the scratchpad shape keys on (`claude`, `scratchpad`) are ASCII, and a Windows temp path
+    // may carry them in any casing.
+    static bool SeComponentIs(std::wstring_view part, std::wstring_view nameLower)
+    {
+        if (part.size() != nameLower.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i < part.size(); ++i)
+        {
+            wchar_t c = part[i];
+            if (c >= L'A' && c <= L'Z')
+            {
+                c = static_cast<wchar_t>(c - L'A' + L'a');
+            }
+            if (c != nameLower[i])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+    // The label prefix a session-scratchpad file wears (see SeSummaryFileLabel in the header). The
+    // ONLY label form that carries a separator — a bare basename never does — so "starts with this"
+    // is an exact test for "a scratchpad entry" (SeSummaryLabelLess groups them last on it).
+    static constexpr std::wstring_view kSeScratchpadLabelPrefix = L"scratchpad/";
+    std::wstring SeSummaryFileLabel(const std::wstring& fp)
+    {
+        std::wstring base = SeBasename(fp);
+        // Split into non-empty components on either separator (a leading "/" or a UNC "\\" yields
+        // empties — skipped, so a doubled separator can never fake a component), then look for a
+        // `scratchpad` component sitting exactly THREE below a `claude` one — `claude/<encoded-cwd>/
+        // <session-id>/scratchpad` — with at least one more component (the file) beneath it. The
+        // shape is Claude Code's session-scratchpad layout verbatim; a `scratchpad` anywhere else
+        // (a repo folder of that name, `claude/x/scratchpad`) is NOT the session scratchpad.
+        std::vector<std::wstring_view> parts;
+        {
+            const std::wstring_view v{ fp };
+            size_t start = 0;
+            while (start <= v.size())
+            {
+                const size_t end = v.find_first_of(L"/\\", start);
+                const std::wstring_view part = v.substr(start, (end == std::wstring_view::npos ? v.size() : end) - start);
+                if (!part.empty())
+                {
+                    parts.push_back(part);
+                }
+                if (end == std::wstring_view::npos)
+                {
+                    break;
+                }
+                start = end + 1;
+            }
+        }
+        if (parts.size() >= 5) // claude / x / y / scratchpad / <file>
+        {
+            for (size_t i = 3; i + 1 < parts.size(); ++i)
+            {
+                if (SeComponentIs(parts[i], L"scratchpad") && SeComponentIs(parts[i - 3], L"claude"))
+                {
+                    std::wstring label{ kSeScratchpadLabelPrefix };
+                    label += base;
+                    return label;
+                }
+            }
+        }
+        return base;
+    }
+    bool SeSummaryLabelLess(const std::wstring& a, const std::wstring& b)
+    {
+        const auto isScratch = [](const std::wstring& s) {
+            return s.size() > kSeScratchpadLabelPrefix.size() && std::wstring_view{ s }.substr(0, kSeScratchpadLabelPrefix.size()) == kSeScratchpadLabelPrefix;
+        };
+        const bool sa = isScratch(a), sb = isScratch(b);
+        if (sa != sb)
+        {
+            return !sa; // plain labels first, the scratchpad group last
+        }
+        return a < b;
+    }
     // Agentmaster (summary): the inner text of the FIRST <tag>...</tag> in c, trimmed of surrounding
     // whitespace. Empty if the tag (or its closer) is absent. Used to rebuild a slash-command prompt
     // from its wrapper tags.
@@ -1612,7 +1693,7 @@ namespace Agentmaster
                             }
                             if (!fp.empty())
                             {
-                                const std::wstring base = SeBasename(fp);
+                                const std::wstring base = SeSummaryFileLabel(fp); // basename, or scratchpad/<basename>
                                 if (name == L"Read")
                                 {
                                     if (seenRead.insert(base).second)
@@ -1705,7 +1786,7 @@ namespace Agentmaster
                             {
                                 continue;
                             }
-                            const std::wstring base = SeBasename(pw->second);
+                            const std::wstring base = SeSummaryFileLabel(pw->second);
                             pendingWrites.erase(pw);
                             std::wstring res; // the tool_result text (a string, or {type:text} blocks)
                             if (const auto* rc = blk.Find(L"content"))
@@ -1745,16 +1826,18 @@ namespace Agentmaster
         // Any Write whose tool_result never arrived (a truncated tail) falls back to "edited".
         for (const auto& [id, fp] : pendingWrites)
         {
-            const std::wstring base = SeBasename(fp);
+            const std::wstring base = SeSummaryFileLabel(fp);
             if (seenCreated.find(base) == seenCreated.end() && seenEdit.insert(base).second)
             {
                 out.filesEdited.push_back(base);
             }
         }
 
-        std::sort(out.filesRead.begin(), out.filesRead.end());
-        std::sort(out.filesCreated.begin(), out.filesCreated.end());
-        std::sort(out.filesEdited.begin(), out.filesEdited.end());
+        // Agentmaster: ordinal within each origin class, the `scratchpad/…` labels grouped LAST
+        // (SeSummaryLabelLess) — repo files first, then the session's scratch files, in every list.
+        std::sort(out.filesRead.begin(), out.filesRead.end(), SeSummaryLabelLess);
+        std::sort(out.filesCreated.begin(), out.filesCreated.end(), SeSummaryLabelLess);
+        std::sort(out.filesEdited.begin(), out.filesEdited.end(), SeSummaryLabelLess);
         std::sort(out.skillsLoaded.begin(), out.skillsLoaded.end());
         // A file shown under Files Created / Files Edited is already accounted for there — drop it
         // from Files Read so the same basename is never listed twice (working on a file is the
