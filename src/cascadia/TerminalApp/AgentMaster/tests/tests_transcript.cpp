@@ -1290,6 +1290,122 @@ void TestProcessInspectTree()
     }
 }
 
+// Agentmaster (OBSERVER.md §13a — orphaned CONSOLE groups): the pure reap decision + the group walk,
+// over the exact 2026-09-04 shape, plus a live sanity read of the harness's own console host.
+void TestOrphanConsoleReaper()
+{
+    std::wprintf(L"Orphaned console groups - the reaper (OBSERVER.md 13a):\n");
+    // The live shape: Agentmaster 11144 (dead — NOT in the snapshot) had launched pwsh 32640 on a
+    // ConPTY whose host OpenConsole 32632 was TerminateProcess'd (also absent); claude 25520 under the
+    // pwsh, a tool bash 700 attached to the same (dead) console, its MCP launcher cmd 900 -> node 901
+    // on their OWN conhost 38164 (alive). Beside it a live Store-WT tab: OpenConsole 77596 hosting
+    // pwsh 80684 -> claude 20884.
+    const std::vector<ProcEntry> snap = {
+        { 4, 0, L"System" },
+        { 6352, 4, L"explorer.exe" },
+        { 79496, 6352, L"WindowsTerminal.exe" },
+        { 77596, 79496, L"OpenConsole.exe" }, // a LIVE pty host (the Store WT's)
+        { 80684, 79496, L"pwsh.exe" }, // a live WT tab's shell
+        { 20884, 80684, L"claude.exe" }, // its claude — host 77596 ALIVE
+        { 32640, 11144, L"pwsh.exe" }, // the orphan wrapper (parent 11144 dead, absent)
+        { 25520, 32640, L"claude.exe" }, // the orphan claude
+        { 700, 25520, L"bash.exe" }, // a tool shell attached to the dead console
+        { 900, 25520, L"cmd.exe" }, // the MCP launcher — on its OWN console
+        { 901, 900, L"node.exe" }, // the MCP server
+        { 38164, 900, L"conhost.exe" }, // the MCP console's host (alive)
+    };
+    const std::unordered_map<uint32_t, uint32_t> hosts = {
+        { 80684, 77596 }, { 20884, 77596 }, // live console
+        { 32640, 32632 }, { 25520, 32632 }, { 700, 32632 }, // the DEAD console 32632
+        { 900, 38164 }, { 901, 38164 }, // the MCP servers' own live console
+    };
+    const auto hostOf = [&hosts](uint32_t p) -> uint32_t {
+        const auto it = hosts.find(p);
+        return it == hosts.end() ? 0u : it->second;
+    };
+
+    // --- DecideOrphanReap: every leg is a hard veto ---
+    OrphanReapInput in;
+    in.amStamped = true;
+    in.rostered = false;
+    in.consoleHostPid = 32632;
+    in.hostAlive = false;
+    in.deadSinceMs = 1000;
+    in.nowMs = 6000;
+    CHECK(DecideOrphanReap(in, 5000), "reap: stamped + host known + dead + grace elapsed");
+    {
+        auto x = in;
+        x.nowMs = 5999;
+        CHECK(!DecideOrphanReap(x, 5000), "no reap: grace not yet elapsed (a snapshot race gets a second look)");
+    }
+    {
+        auto x = in;
+        x.deadSinceMs = 0;
+        CHECK(!DecideOrphanReap(x, 5000), "no reap: first sighting (the caller stamps deadSince this survey)");
+    }
+    {
+        auto x = in;
+        x.amStamped = false;
+        CHECK(!DecideOrphanReap(x, 5000), "no reap: not stamped (a hand-typed / real-WT / bare-console claude is never ours to touch)");
+    }
+    {
+        auto x = in;
+        x.rostered = true;
+        CHECK(!DecideOrphanReap(x, 5000), "no reap: rostered (bound to one of our tabs)");
+    }
+    {
+        auto x = in;
+        x.consoleHostPid = 0;
+        CHECK(!DecideOrphanReap(x, 5000), "no reap: unknown console host (a failed read never reads as dead)");
+    }
+    {
+        auto x = in;
+        x.hostAlive = true;
+        CHECK(!DecideOrphanReap(x, 5000), "no reap: the host is alive (a client mid-CTRL_CLOSE is never raced)");
+    }
+    {
+        auto x = in;
+        x.nowMs = 500;
+        CHECK(!DecideOrphanReap(x, 5000), "no reap: clock went backwards");
+    }
+    CHECK(DecideOrphanReap(in, 0), "reap: a zero grace reaps on the second sighting");
+
+    // --- CollectDeadConsoleGroup: the wrapper + the claude + the attached bash; NEVER the MCP console ---
+    const auto group = CollectDeadConsoleGroup(snap, 25520, 32632, hostOf);
+    CHECK(group.size() == 3, "group: pwsh wrapper + claude + attached bash (3 members)");
+    CHECK(group.size() == 3 && group[0] == 32640 && group[1] == 25520 && group[2] == 700, "group order: ancestors first, then the anchor, then descendants");
+    bool crossed = false;
+    for (const auto p : group)
+    {
+        crossed = crossed || p == 900 || p == 901 || p == 38164 || p == 20884 || p == 80684 || p == 77596;
+    }
+    CHECK(!crossed, "group never crosses into the MCP servers' own console nor touches the live WT tab");
+    const auto lone = CollectDeadConsoleGroup(snap, 700, 32632, hostOf);
+    CHECK(lone.size() == 3 && lone[0] == 32640 && lone[1] == 25520 && lone[2] == 700, "anchoring at a descendant (the bash) climbs to the wrapper and finds the same group");
+    const auto live = CollectDeadConsoleGroup(snap, 20884, 32632, hostOf);
+    CHECK(live.size() == 1 && live[0] == 20884, "a live-hosted anchor yields only itself (never its live-console neighbors)");
+    CHECK(CollectDeadConsoleGroup(snap, 0, 32632, hostOf).empty() && CollectDeadConsoleGroup(snap, 25520, 0, hostOf).empty(), "no anchor / no host -> empty");
+    CHECK(CollectDeadConsoleGroup(snap, 999, 32632, hostOf).size() == 1, "an anchor absent from the snapshot still yields itself (TerminateProcessById is the caller's guard)");
+    CHECK(CollectDeadConsoleGroup(snap, 25520, 32632, nullptr).size() == 1, "no host lookup -> the anchor alone (never a guess)");
+
+    // --- live sanity: this harness runs on a console; its host must resolve and be alive ---
+    const uint32_t self = ::GetCurrentProcessId();
+    const uint32_t host = ReadConsoleHostPid(self);
+    if (host != 0)
+    {
+        CHECK(ProcessAlive(host), "live: the harness's own console host is alive");
+        CHECK(host != self, "live: the console host is another process (conhost / OpenConsole)");
+    }
+    else
+    {
+        std::wprintf(L"  (no console host resolved for the harness - headless run; live check skipped)\n");
+    }
+    CHECK(ReadConsoleHostPid(0) == 0, "live: pid 0 -> unknown (0)");
+    uint32_t err = 0;
+    CHECK(!TerminateProcessById(0, kOrphanReapExitCode, &err) && err == ERROR_INVALID_PARAMETER, "TerminateProcessById(0) refuses with ERROR_INVALID_PARAMETER");
+    CHECK(kOrphanReapExitCode == 0xC000013Au, "the reap exit code is STATUS_CONTROL_C_EXIT (a console client's console-close death)");
+}
+
 void TestProcessInspectParse()
 {
     std::wprintf(L"ProcessInspect cmdline/env parse + classify:\n");

@@ -1628,6 +1628,12 @@ namespace winrt::TerminalApp::implementation
                 {
                     self->_scanner->SetWaitingDecayMinutes(s.waitingForYouTimeoutMinutes);
                 }
+                // OBSERVER.md §13a: push the (possibly changed) orphan-reaper switch to the process-wide
+                // Fleet Observer so it applies on its next survey, not next launch (one engine per process).
+                if (self->_observer)
+                {
+                    self->_observer->SetReapOrphanedSessions(s.reapOrphanedSessions);
+                }
                 // Re-materialize the shared --settings file so model / co-authored-by /
                 // permission-mode changes also reach an adopted hand-typed `claude` (the PATH
                 // shim points at this file). Fresh spawns rebuild it from settings regardless.

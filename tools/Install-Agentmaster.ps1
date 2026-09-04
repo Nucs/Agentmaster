@@ -524,13 +524,34 @@ function Get-InstalledMsix {
 # ---- portable -------------------------------------------------------------------------------
 function Stop-RunningUnder {
     param($Dir)
-    $procs = Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" -ErrorAction SilentlyContinue |
+    # Kill ONLY the GUI process (Agentmaster.exe / a pre-rename WindowsTerminal.exe) — NEVER its
+    # OpenConsole.exe ConPTY hosts. A host hit by Stop-Process dies without its graceful shutdown (the
+    # CTRL_CLOSE_EVENT broadcast to the tab's pwsh + claude.exe + MCP children), which leaves every
+    # session of that tab running forever with a DEAD console (2026-09-04: 35 pwsh+claude pairs and
+    # ~140 node/cmd children from one such kill, alive six days). Killing the GUI alone closes its pipe
+    # handles; each host then shuts its clients down itself and exits — we WAIT for that below so the
+    # binaries are free before the swap (a host locks OpenConsole.exe in $Dir).
+    $gui = Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Dir, [StringComparison]::OrdinalIgnoreCase) }
-    foreach ($p in $procs) {
+    foreach ($p in $gui) {
         Write-Warn "closing running portable instance (pid $($p.ProcessId))"
         Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
     }
-    if ($procs) { Start-Sleep -Milliseconds 700 }
+    if (-not $gui) { return }
+    # Wait for the ConPTY hosts under $Dir to drain (each ends its clients — up to ~5 s per stubborn
+    # client — then exits). 30 s is generous; whatever is still there after that is wedged, and only
+    # then is it killed as the last resort (logged: that tab's clients WILL be orphaned).
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        Start-Sleep -Milliseconds 500
+        $hosts = Get-CimInstance Win32_Process -Filter "Name='OpenConsole.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Dir, [StringComparison]::OrdinalIgnoreCase) }
+    } while ($hosts -and (Get-Date) -lt $deadline)
+    foreach ($p in $hosts) {
+        Write-Warn "ConPTY host pid $($p.ProcessId) did not exit in 30 s; killing it (its tab's session processes may be orphaned)"
+        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 700
 }
 
 function New-StartMenuShortcut {

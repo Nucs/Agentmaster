@@ -318,6 +318,158 @@ namespace Agentmaster
         return alive;
     }
 
+    // ===== Orphaned console groups — the reaper's primitives (OBSERVER.md §13a) ==============
+
+    uint32_t ReadConsoleHostPid(uint32_t pid)
+    {
+        // ProcessConsoleHostProcess (PROCESSINFOCLASS 49): a ULONG_PTR whose upper bits are the
+        // console host's pid and whose low 2 bits are flags (Task Manager masks them the same way).
+        // PROCESS_QUERY_LIMITED_INFORMATION suffices — no VM read, so this also answers for a process
+        // whose PEB we could not read. Any failure reads 0 == unknown (never "dead").
+        const auto ntqip = GetNtQip();
+        if (pid == 0 || ntqip == nullptr)
+        {
+            return 0;
+        }
+        const HANDLE h = OpenForQuery(pid);
+        if (h == nullptr)
+        {
+            return 0;
+        }
+        ULONG_PTR host = 0;
+        ULONG got = 0;
+        const LONG st = ntqip(h, 49 /*ProcessConsoleHostProcess*/, &host, sizeof(host), &got);
+        ::CloseHandle(h);
+        if (st != 0)
+        {
+            return 0;
+        }
+        return static_cast<uint32_t>(host & ~static_cast<ULONG_PTR>(3));
+    }
+
+    bool TerminateProcessById(uint32_t pid, uint32_t exitCode, uint32_t* lastErrorOut)
+    {
+        if (lastErrorOut)
+        {
+            *lastErrorOut = 0;
+        }
+        if (pid == 0)
+        {
+            if (lastErrorOut)
+            {
+                *lastErrorOut = ERROR_INVALID_PARAMETER;
+            }
+            return false;
+        }
+        const HANDLE h = ::OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+        if (h == nullptr)
+        {
+            if (lastErrorOut)
+            {
+                *lastErrorOut = ::GetLastError();
+            }
+            return false;
+        }
+        const BOOL ok = ::TerminateProcess(h, exitCode);
+        const DWORD err = ok ? 0 : ::GetLastError();
+        ::CloseHandle(h);
+        if (lastErrorOut)
+        {
+            *lastErrorOut = err;
+        }
+        return ok == TRUE;
+    }
+
+    bool DecideOrphanReap(const OrphanReapInput& in, int64_t graceMs)
+    {
+        if (!in.amStamped || in.rostered) // not ours to touch / provably live-hosted
+        {
+            return false;
+        }
+        if (in.consoleHostPid == 0 || in.hostAlive) // unknown console (never on a failed read) / a live host
+        {
+            return false;
+        }
+        if (in.deadSinceMs <= 0 || in.nowMs < in.deadSinceMs) // first sighting (the caller stamps it) / a clock oddity
+        {
+            return false;
+        }
+        return (in.nowMs - in.deadSinceMs) >= graceMs;
+    }
+
+    std::vector<uint32_t> CollectDeadConsoleGroup(const std::vector<ProcEntry>& snap,
+                                                  uint32_t anchorPid,
+                                                  uint32_t deadHostPid,
+                                                  const std::function<uint32_t(uint32_t)>& hostOf)
+    {
+        std::vector<uint32_t> out;
+        if (anchorPid == 0 || deadHostPid == 0)
+        {
+            return out;
+        }
+        const auto findEntry = [&snap](uint32_t pid) -> const ProcEntry* {
+            for (const auto& e : snap)
+            {
+                if (e.pid == pid)
+                {
+                    return &e;
+                }
+            }
+            return nullptr;
+        };
+        const auto onDeadConsole = [&](uint32_t pid) { return hostOf && hostOf(pid) == deadHostPid; };
+
+        // UP: the wrapper chain (pwsh -> ... ) that shares the dead console. Stops at a process on
+        // another console or one not in the snapshot (the dead terminal). A pid-cycle belt (a
+        // recycled ppid pointing back down the chain) is bounded by the `seen` set.
+        std::vector<uint32_t> ancestors; // nearest first
+        std::unordered_set<uint32_t> seen{ anchorPid };
+        if (const auto* a = findEntry(anchorPid))
+        {
+            uint32_t p = a->ppid;
+            while (p != 0 && seen.insert(p).second)
+            {
+                const auto* pe = findEntry(p);
+                if (pe == nullptr || !onDeadConsole(p))
+                {
+                    break;
+                }
+                ancestors.push_back(p);
+                p = pe->ppid;
+            }
+        }
+        // Emit topmost-first so a wrapper is terminated before the process it wraps (either order
+        // works for TerminateProcess; this reads naturally in the log).
+        for (auto it = ancestors.rbegin(); it != ancestors.rend(); ++it)
+        {
+            out.push_back(*it);
+        }
+        out.push_back(anchorPid);
+
+        // DOWN: BFS from every group member, descending only through processes on the dead console —
+        // a child on its OWN console (an MCP server's conhost) is a different console group and its
+        // subtree inherits THAT console, so the walk does not enter it.
+        std::vector<uint32_t> queue = out;
+        for (size_t qi = 0; qi < queue.size(); ++qi)
+        {
+            const uint32_t parent = queue[qi];
+            for (const auto& e : snap)
+            {
+                if (e.ppid != parent || e.pid == parent || !seen.insert(e.pid).second)
+                {
+                    continue;
+                }
+                if (!onDeadConsole(e.pid))
+                {
+                    continue;
+                }
+                out.push_back(e.pid);
+                queue.push_back(e.pid);
+            }
+        }
+        return out;
+    }
+
     // ===== PURE: tree helpers ==============================================================
 
     bool ImageNameEq(std::wstring_view a, std::wstring_view b)

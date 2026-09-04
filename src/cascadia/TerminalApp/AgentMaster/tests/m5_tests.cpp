@@ -95,6 +95,7 @@ int wmain()
     TestEngineWindowLifecycle();
     TestUiStallEscalation();
     TestProcessInspectTree();
+    TestOrphanConsoleReaper();
     TestProcessInspectParse();
     TestTranscriptResolve();
     TestCodexObserve();

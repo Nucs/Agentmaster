@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional> // CollectDeadConsoleGroup's injected console-host lookup (the orphan reaper)
 #include <optional>
 #include <string>
 #include <string_view>
@@ -69,6 +70,67 @@ namespace Agentmaster
     // True iff the pid names a process that is still running (OpenProcess + GetExitCodeProcess !=
     // STILL_ACTIVE is false). A cheap liveness gate for the cached-PID fast path.
     bool ProcessAlive(uint32_t pid);
+
+    // ===== Orphaned console groups — the reaper's primitives (OBSERVER.md §13a) ==============
+    //
+    // A managed session is a pwsh-hosted claude.exe (or codex.exe) attached to a ConPTY whose HOST
+    // is an OpenConsole.exe. When that host dies WITHOUT running its own shutdown — a TerminateProcess
+    // on OpenConsole.exe (the deploy script's `Stop-Process ... OpenConsole.exe` on 2026-08-29 left
+    // 35 pwsh+claude pairs and their ~140 MCP cmd/node children alive for SIX DAYS), a conhost crash —
+    // the attached clients never receive the CTRL_CLOSE_EVENT a graceful close broadcasts, and they
+    // live on with a DEAD console: no terminal can ever reach them again (their stdin/stdout point at
+    // nothing), their hook forwarder falls back to bridge.json and feeds a NEWER instance phantom
+    // events for conversations that instance may have resumed itself (two writers), and their
+    // presence heartbeats confuse pid-keyed binds. The reaper does what the missed broadcast would
+    // have done: terminate every process of that console group. (A graceful close is never raced:
+    // a client still mid-CTRL_CLOSE has an ALIVE host — the host exits only after its clients did.)
+
+    // The pid of the console host (conhost.exe / OpenConsole.exe, or a pty-hosting parent such as a
+    // claude that spawned teammates on its own pty) serving `pid`'s console —
+    // NtQueryInformationProcess(ProcessConsoleHostProcess), the value Task Manager groups by, low 2
+    // flag bits masked. 0 when the process has NO console (a detached MCP server) or the read is
+    // denied/failed — an unknown must never read as "dead", so callers treat 0 as "leave it alone".
+    uint32_t ReadConsoleHostPid(uint32_t pid);
+
+    // TerminateProcess(pid, exitCode). True on success; on failure `lastErrorOut` (optional) carries
+    // GetLastError (ERROR_ACCESS_DENIED for an elevated/other-user target, ERROR_INVALID_PARAMETER
+    // for an already-gone pid). The ONE place the engine ever ends a process — used only by the
+    // orphan reaper on a console group proven dead-hosted (Rule #13: a foreign process is never touched).
+    bool TerminateProcessById(uint32_t pid, uint32_t exitCode, uint32_t* lastErrorOut = nullptr);
+
+    // The exit code the reaper terminates an orphan with — STATUS_CONTROL_C_EXIT, the code a console
+    // client dies with when its console closes, so a post-mortem reads "killed as a console client".
+    inline constexpr uint32_t kOrphanReapExitCode = 0xC000013Au;
+
+    // Inputs of the PURE reap decision (one candidate process, one survey).
+    struct OrphanReapInput
+    {
+        bool amStamped{}; // AM_SESSION present — launched by an Agentmaster (THIS instance, a dead one, or a sibling install); a hand-typed / real-WT / bare-console claude never has it => never a candidate
+        bool rostered{}; // bound to one of THIS instance's tabs — its host is alive by definition (belt)
+        uint32_t consoleHostPid{}; // ReadConsoleHostPid: 0 == unknown (no console / denied) => never reap
+        bool hostAlive{}; // the host pid is present in the SAME process snapshot
+        int64_t deadSinceMs{}; // the survey time the dead host was FIRST observed for this pid (0 == this survey is the first sighting)
+        int64_t nowMs{};
+    };
+
+    // PURE: reap iff stamped AND not rostered AND the host is KNOWN AND dead AND has read dead for at
+    // least `graceMs` (>= 2 surveys — a snapshot race, the host exiting between the snapshot and the
+    // console-host query, self-clears on the next pass instead of costing a client that was about to
+    // exit anyway). Every leg is a hard veto; nothing else is consulted (OBSERVER.md §13a).
+    bool DecideOrphanReap(const OrphanReapInput& in, int64_t graceMs);
+
+    // PURE (the OS is injected): the console GROUP behind a dead host — starting at `anchorPid`, walk
+    // UP through parents and DOWN through descendants (snapshot order) keeping every process whose
+    // `hostOf(pid) == deadHostPid`; the walk STOPS at a process on a different console (an MCP server
+    // in its own conhost — it exits by itself on the stdin EOF its parent's death gives it, exactly as
+    // after a graceful close; the dead terminal process above the wrapper is not in the snapshot at
+    // all). Returns the pids to terminate — ancestors first, then the anchor, then descendants
+    // (BFS), no duplicates; the anchor is always included. `hostOf` is ReadConsoleHostPid live and a
+    // canned map in the harness, which is what keeps this testable without a real console.
+    std::vector<uint32_t> CollectDeadConsoleGroup(const std::vector<ProcEntry>& snap,
+                                                  uint32_t anchorPid,
+                                                  uint32_t deadHostPid,
+                                                  const std::function<uint32_t(uint32_t)>& hostOf);
 
     // ===== PURE: tree helpers over a snapshot (no syscalls) ================================
 

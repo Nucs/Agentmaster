@@ -191,6 +191,7 @@ void TestPendingInput();
 // slot->_TryMoveTab target conversion (manager floor), release classification (reorder vs
 // tear-out slack), and edge auto-scroll steps
 void TestTabDragMath();
+void TestOrphanConsoleReaper(); // OBSERVER.md §13a: the dead-console reap decision + group walk (tests_transcript.cpp)
 void TestPendingPaste();
 
 // tests_commands.cpp — COMMANDS.md: slash-command bindings (ParseCommandEcho + the parser's

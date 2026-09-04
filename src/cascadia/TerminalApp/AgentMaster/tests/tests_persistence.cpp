@@ -521,6 +521,7 @@ void TestAppSettings()
         in.preserveDraftOnSend = false; // non-default (default true = the DRAFT SWAP is on) — PENDING_INPUT.md §9
         in.restoreDraftOnResume = false; // non-default (default true = the restore RE-FILL is on) — PENDING_INPUT.md §10
         in.confirmBeforeKill = false;
+        in.reapOrphanedSessions = false; // non-default (default true = the §13a orphan reaper is armed) — OBSERVER.md
         in.uiStallAutoRestart = false; // non-default (default true = the ui-stall RESTART tier is armed) — Engine.h escalation
         in.tabRenameCommitMode = TabRenameCommitMode::ClickAwayOrEnter; // non-default (default is ClickAwayOrShiftEnter)
         in.favoriteIcon = FavoriteIcon::Star; // non-default (default is Crown)
@@ -570,6 +571,7 @@ void TestAppSettings()
         CHECK(out.draftSwapUseCtrlS == false, "settings draftSwapUseCtrlS round-trip (Ctrl+S stash rung OFF)");
         CHECK(out.restoreDraftOnResume == false, "settings restoreDraftOnResume round-trip (restore re-fill OFF)");
         CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
+        CHECK(out.reapOrphanedSessions == false, "settings reapOrphanedSessions round-trip (orphan reaper OFF)");
         CHECK(out.uiStallAutoRestart == false, "settings uiStallAutoRestart round-trip (restart tier OFF)");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter, "settings tabRenameCommitMode round-trip");
         CHECK(out.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon round-trip");
@@ -663,6 +665,7 @@ void TestAppSettings()
         const auto out2 = DeserializeAppSettings(L"not json");
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");
         CHECK(out2.uiStallAutoRestart == true, "settings uiStallAutoRestart defaults ON on garbage (the restart tier is a default-armed backstop)");
+        CHECK(out2.reapOrphanedSessions == true, "settings reapOrphanedSessions defaults ON on garbage (a dead-console session is unreachable by construction)");
     }
 
     // Agentmaster: the legacy "waitingDecayMinutes" key was RENAMED to "waitingForYouTimeoutMinutes"

@@ -969,6 +969,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setVerifySend{ nullptr }; // DELIVERY_PLAN.md R4 — verified placement (fill → read-back → CR)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setRestoreDraft{ nullptr }; // PENDING_INPUT.md §10 — the restore RE-FILL: type a remembered unsent draft back into a reopened session's box
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setConfirmKill{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setReapOrphans{ nullptr }; // OBSERVER.md §13a: shut down a session whose terminal host died (reapOrphanedSessions)
         // NOTIFICATIONS tab (System notifications): the Running -> X Windows-toast switches. The master
         // toggle gates the rest (the dependents grey out while it's off); the five checkboxes pick WHICH
         // target states notify (all checked == the "Running to anything else" default rule).

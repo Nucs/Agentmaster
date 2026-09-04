@@ -320,6 +320,105 @@ namespace Agentmaster
         return c.lastActivityMs != 0 ? c.lastActivityMs : mtimeMs;
     }
 
+    // Agentmaster (OBSERVER.md §13a — orphaned CONSOLE groups): the one place the engine ends a
+    // process. A managed session whose ConPTY host died WITHOUT its graceful shutdown (an
+    // OpenConsole.exe hit by TerminateProcess — the deploy script's Stop-Process on 2026-08-29 —
+    // or a conhost crash) never received the CTRL_CLOSE_EVENT a proper close broadcasts, so its
+    // pwsh wrapper + claude (+ attached tool shells) live on with a DEAD console: unreachable by any
+    // terminal, forever. Proven 2026-09-04: 35 pwsh+claude pairs (+~140 MCP cmd/node children) from an
+    // instance killed six days earlier, every one with a live parent (so the parent-dead orphan test
+    // never saw them) and a dead console host. This finishes what the missed broadcast would have.
+    bool ProcessObserver::_ObserveConsoleOrphan(const std::vector<ProcEntry>& snap, uint32_t pid, int64_t startUnixMs, const wchar_t* kind, const std::wstring& sid, const std::wstring& cwd, int64_t now)
+    {
+        if (_orphanReapedPids.count(pid))
+        {
+            return true; // terminated a tick ago and still listed by Toolhelp — stay an orphan, never re-log / re-kill
+        }
+        const uint32_t host = ReadConsoleHostPid(pid);
+        bool hostAlive = false;
+        if (host != 0)
+        {
+            for (const auto& e : snap)
+            {
+                if (e.pid == host)
+                {
+                    hostAlive = true;
+                    break;
+                }
+            }
+        }
+        if (host == 0 || hostAlive)
+        {
+            // A live console — or an UNKNOWN one (no console / a denied read), which must never read
+            // as dead. A prior dead reading was a snapshot race; forget it.
+            _orphanDeadHostSince.erase(pid);
+            return false;
+        }
+        const auto [it, first] = _orphanDeadHostSince.try_emplace(pid, now);
+        const bool reaperOn = _reapOrphans.load(std::memory_order_relaxed);
+        if (first && _orphanLogged.insert(pid).second)
+        {
+            AppendStateLog(L"hooks.log",
+                           L"[orphan] " + std::wstring{ kind } + L" pid=" + std::to_wstring(pid) +
+                               (sid.empty() ? std::wstring{} : (L" sid=" + ShortId(sid))) +
+                               L" console host " + std::to_wstring(host) + L" is DEAD (no terminal can reach it) cwd=" + cwd +
+                               (reaperOn ? (L" - reaping after " + std::to_wstring(kOrphanReapGraceMs / 1000) + L"s unless it exits")
+                                         : std::wstring{ L" - reaper OFF (reapOrphanedSessions=false), left running" }) +
+                               L"\n");
+        }
+        OrphanReapInput in;
+        in.amStamped = true; // the caller admits only AM_SESSION-stamped processes
+        in.rostered = false; // ... that are not bound to one of our tabs
+        in.consoleHostPid = host;
+        in.hostAlive = false;
+        in.deadSinceMs = it->second;
+        in.nowMs = now;
+        if (!reaperOn || !DecideOrphanReap(in, kOrphanReapGraceMs))
+        {
+            return true; // an orphan (the caller skips its External row) — not (yet) reaped
+        }
+
+        // The whole dead console group: the wrapper chain above, the anchor, attached tool shells
+        // below — never a child on its OWN console (an MCP server exits by itself on stdin EOF, exactly
+        // as after a graceful close), never a process whose console we could not read.
+        const auto group = CollectDeadConsoleGroup(snap, pid, host, [](uint32_t p) { return ReadConsoleHostPid(p); });
+        std::wstring members;
+        for (const auto m : group)
+        {
+            std::wstring image = L"?";
+            for (const auto& e : snap)
+            {
+                if (e.pid == m)
+                {
+                    image = e.image;
+                    break;
+                }
+            }
+            members += (members.empty() ? L"" : L" ") + image + L":" + std::to_wstring(m);
+        }
+        const int64_t upMin = (startUnixMs > 0 && now > startUnixMs) ? (now - startUnixMs) / 60000 : -1;
+        AppendStateLog(L"hooks.log",
+                       L"[orphan-reap] " + std::wstring{ kind } + L" pid=" + std::to_wstring(pid) +
+                           (sid.empty() ? std::wstring{} : (L" sid=" + ShortId(sid))) +
+                           L" host=" + std::to_wstring(host) + L" (dead " + std::to_wstring((now - it->second) / 1000) + L"s)" +
+                           L" group=[" + members + L"] cwd=" + cwd +
+                           (upMin >= 0 ? (L" up=" + std::to_wstring(upMin) + L"min") : std::wstring{}) + L"\n");
+        for (const auto m : group)
+        {
+            uint32_t err = 0;
+            if (TerminateProcessById(m, kOrphanReapExitCode, &err))
+            {
+                _orphanReapedPids.insert(m);
+            }
+            else
+            {
+                AppendStateLog(L"hooks.log", L"[orphan-reap] terminate FAILED pid=" + std::to_wstring(m) + L" err=" + std::to_wstring(err) + L"\n");
+            }
+        }
+        _orphanDeadHostSince.erase(pid);
+        return true;
+    }
+
     void ProcessObserver::_surveyOnce(bool forcedByWake)
     {
         const int64_t now = NowMs();
@@ -823,7 +922,22 @@ namespace Agentmaster
         };
         for (const auto& [pid, f] : factsByPid)
         {
-            const RunningApp app = rosteredOwner.count(pid) ? RunningApp::Agentmaster : f.runningApp;
+            const bool rostered = rosteredOwner.count(pid) != 0;
+            // Orphaned CONSOLE group (OBSERVER.md §13a) — checked BEFORE the ours/external split: the
+            // stamp of ANY instance qualifies (a dead instance's, a sibling install's, or ours — a
+            // `stamp`-ours claude whose ConPTY host died is just as unreachable), and a rostered claude
+            // can never match (its host is alive). A dead host makes it an orphan WHATEVER its parent is
+            // doing: the 2026-09-04 leftovers had LIVE pwsh parents, so the parent-dead test below never
+            // saw them and they sat on the board as 35 phantom `Other` externals for six days. Once the
+            // grace elapses (reaper ON) the whole console group is terminated; either way it gets no
+            // External row and no census bucket but `orphan`.
+            if (!rostered && !f.amSession.empty() &&
+                _ObserveConsoleOrphan(snap, pid, f.startUnixMs, L"claude", f.sessionIdArg.empty() ? f.resumeTarget : f.sessionIdArg, f.cwd, now))
+            {
+                ++orphan;
+                continue;
+            }
+            const RunningApp app = rostered ? RunningApp::Agentmaster : f.runningApp;
             if (app == RunningApp::Agentmaster)
             {
                 ++ours;
@@ -959,6 +1073,44 @@ namespace Agentmaster
             externalRows.push_back(std::move(ex));
         }
 
+        // 4a') Orphaned CONSOLE groups — the LONE-WRAPPER anchor (§13a). A managed launch is
+        //      `pwsh -NoLogo -NoExit -EncodedCommand <& claude ...>`; when its claude has ALREADY
+        //      exited, the dead-console group is just the wrapper, which the claude/codex anchors above
+        //      can never see (no facts to read). Cheap snapshot-only filter first — a pwsh/powershell
+        //      whose PARENT is not in the snapshot (the dead terminal process) and that has NO
+        //      claude/codex descendant (else the claude anchor owns the group) — then ONE PEB env read
+        //      for the AM_SESSION stamp (the 2026-09-04 leftovers included exactly one such wrapper).
+        for (const auto& e : snap)
+        {
+            if (!(ImageNameEq(e.image, L"pwsh.exe") || ImageNameEq(e.image, L"powershell.exe")))
+            {
+                continue;
+            }
+            bool parentPresent = false;
+            for (const auto& pe : snap)
+            {
+                if (pe.pid == e.ppid)
+                {
+                    parentPresent = true;
+                    break;
+                }
+            }
+            if (parentPresent || e.ppid == 0)
+            {
+                continue;
+            }
+            if (FindDescendantByImage(snap, e.pid, L"claude.exe") != 0 || FindDescendantByImage(snap, e.pid, L"codex.exe") != 0)
+            {
+                continue; // its claude/codex anchor (above / below) already covers this group
+            }
+            const auto env = ReadProcessEnv(e.pid);
+            if (env.empty() || EnvLookup(env, L"AM_SESSION").empty())
+            {
+                continue; // not launched by an Agentmaster (or unreadable) — never a candidate
+            }
+            _ObserveConsoleOrphan(snap, e.pid, ProcessStartUnixMs(e.pid), L"wrapper", L"", ReadProcessCwd(e.pid), now);
+        }
+
         // 4c) Codex census (Phase C1, OBSERVER.md §19-Q3): EVERY codex.exe is observe-only, so it is
         //     surfaced as an External row (kind=Codex) regardless of host — even one in OUR own tab
         //     (Codex is never adopted/driven in C1). Same orphan skip + host labeling as the claude
@@ -982,6 +1134,12 @@ namespace Agentmaster
             if (!f.wtSession.empty() && managedCodexTokens.count(f.wtSession))
             {
                 continue; // managed -> a Triage-Board card, not an observe-only External row
+            }
+            // Orphaned CONSOLE group (§13a, the claude census's twin): a stamped codex whose ConPTY host
+            // died ungracefully is unreachable — an orphan, reaped after the grace; never an External row.
+            if (!f.amSession.empty() && _ObserveConsoleOrphan(snap, pid, f.startUnixMs, L"codex", L"", f.cwd, now))
+            {
+                continue;
             }
             // Orphan skip (mirror the claude census): a codex whose host shell/terminal has exited is
             // a dead session, not a live external. PID-reuse guard: a present parent started no later.
@@ -1154,6 +1312,11 @@ namespace Agentmaster
             prunePidSet(_pebDeniedLogged);
             prunePidSet(_guiExcludedLogged);
             prunePidSet(_orphanLogged);
+            prunePidSet(_orphanReapedPids); // §13a: a terminated pid drops once Toolhelp stops listing it
+            for (auto it = _orphanDeadHostSince.begin(); it != _orphanDeadHostSince.end();)
+            {
+                it = (alivePids.find(it->first) == alivePids.end()) ? _orphanDeadHostSince.erase(it) : std::next(it);
+            }
             std::unordered_set<std::wstring> liveExtSids;
             liveExtSids.reserve(externalRows.size());
             for (const auto& ex : externalRows)

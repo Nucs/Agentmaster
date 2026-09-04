@@ -1817,6 +1817,29 @@ What works, by area:
     slow heartbeat. Retires the now-dead `SessionScanner` transcript-DISCOVERY sweep (`ArmDiscovery` /
     `RecentTranscripts`, which the observer subsumes; the scanner keeps its state-reconcile tail). A
     denied / elevated / WOW64 PEB read is guarded → observe-only, never a misread. 24-h soak: no leak / wedge.
+  - **Orphaned console groups — the REAPER (OBSERVER.md §13a; engine-tested `TestOrphanConsoleReaper`,
+    harness 3411/3411, lib green, rides the next deploy).** The ONE place the engine ends a process. A
+    session we launched whose ConPTY host (`OpenConsole.exe`) died WITHOUT its graceful shutdown (a
+    `Stop-Process` on the host — the old deploy recipe; a conhost crash) never got the `CTRL_CLOSE_EVENT`
+    a proper close broadcasts, so its `pwsh` wrapper + `claude.exe` live on with a **DEAD console**:
+    unreachable by any terminal, their hook forwarder feeding a NEWER instance phantom events through
+    `bridge.json`, their heartbeats confusing pid-keyed binds, their MCP `cmd`/`node` children piling up
+    on their own conhosts. The 2026-09-04 report ("46 claude.exe + 146 node.exe after a normal exit"):
+    **35 pwsh+claude pairs + ~140 children from release instance 11144, force-killed on 08-29** — every
+    one with a LIVE `pwsh` parent (so the parent-dead orphan test never saw them; they sat on the board as
+    35 phantom `Other` externals) and a dead console host; both of that day's normal X-quits had killed
+    their sessions cleanly. Each full survey now reads every **`AM_SESSION`-stamped, non-rostered**
+    claude/codex's console host (`ReadConsoleHostPid` — `ProcessConsoleHostProcess`; **0 == unknown,
+    never dead**) plus lone `pwsh` wrappers with a dead parent + the stamp: a DEAD host makes it an
+    orphan from that survey on (no External row, the census `orphan` bucket, `[orphan]` once), and after
+    **`kOrphanReapGraceMs` 5 s** (≥3 surveys — a client still mid-`CTRL_CLOSE` has an ALIVE host, so the
+    graceful path is never raced) the whole **console group** is terminated with `STATUS_CONTROL_C_EXIT`
+    (`CollectDeadConsoleGroup`: up through parents on the dead console, down through attached children,
+    STOPPING at any process on another console — an MCP server exits by itself on stdin EOF, as after a
+    graceful close; `[orphan-reap]`). Pure + injected-OS decision (`DecideOrphanReap` — every leg a hard
+    veto; Rule #13: a hand-typed / real-WT / bare-console claude is never a candidate). Off-switch
+    `AppSettings::reapOrphanedSessions` (cog → Behavior). The recipe that caused it is fixed too: kill the
+    GUI process ONLY, never `OpenConsole.exe` (Deploy & run / Gotchas; `Install-Agentmaster.ps1`).
 - **C1 UI (M6, `AgentManagerContent`).** Triage Board + Explorer Tree + Auto Testing,
   imperative and snapshot-driven from the registry (cross-thread refresh via
   `DispatcherQueue`), bidirectional selection + directory scope. Each **Triage-Board column**
@@ -2477,6 +2500,14 @@ What works, by area:
   box, fill-not-send, read-back verified; OFF = the classic display-only memory) and **behavior**
   (`confirmBeforeKill` — relabeled "Confirm before closing" — routes the Close action
   (tab X / Manager **Close** / tree `Del`) through the confirm dialog;
+  **`reapOrphanedSessions`** — "Shut down sessions whose terminal host has died", **default ON**: the
+  Fleet Observer's §13a **orphan reaper** (OBSERVER.md) terminates an `AM_SESSION`-stamped session
+  whose ConPTY host (`OpenConsole.exe`) died WITHOUT its graceful shutdown — a force-killed host, a
+  conhost crash — leaving its `pwsh` wrapper + `claude.exe` alive with a DEAD console no terminal can
+  reach (2026-09-04: 35 such pairs from a `Stop-Process OpenConsole.exe` six days earlier); a 5 s grace,
+  the whole dead console group (never an MCP child on its own console — it exits on stdin EOF), never a
+  hand-typed / real-WT claude; OFF = recognized as an orphan (no External row) but left running; pushed
+  live to the observer on Save; logged `[orphan]` / `[orphan-reap]`;
   `defaultLaunchDir` seeds the cwd box — empty ⇒ `%USERPROFILE%`). It also exposes `tabRenameCommitMode` (the rename box's
   commit key — click-away-or-Shift+Enter vs Enter), `waitingForYouTimeoutMinutes` (the **Waiting-for-you "unread"
   timeout** — a `WaitingForInput` card demotes to `Idle` only once this timeout elapses **AND** the user
@@ -2765,7 +2796,7 @@ What works, by area:
   (`ClaudeSpawn.cpp`, thread-safe + best-effort). Three layers: (1) the **hook event stream**
   (`[SessionStart]`/`[UserPromptSubmit]`/`[Stop]`/…) — the push state machine; (2) **engine-mechanism
   tags** — `[fork]`/`[resume]`/`[restore-fresh]`/`[rehome]`/`[spawn]`/`[launch-fail]`/`[archive]`/`[teardown-archive]`/
-  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[pending]`/`[notify]`/`[update]`/`[trust]`/`[cmd]`/`[cmd-fire]`/`[cmd-expire]`/`[persist-fail]`/`[draft-swap]`/`[observer]`/`[activity]`/… (each
+  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[pending]`/`[notify]`/`[update]`/`[trust]`/`[cmd]`/`[cmd-fire]`/`[cmd-expire]`/`[persist-fail]`/`[draft-swap]`/`[observer]`/`[activity]`/`[orphan]`/`[orphan-reap]`/… (each
   carries the resulting ids), plus the **window-restore story** — one coherent trace per `windowId`:
   `[window-claim]`/`[window-fresh]` (claim a saved record or start fresh, at engine init) → `[rehome-begin]`
   (every tab ref listed BY SESSION ID + the focus target) → per-tab `[rehome] window <id> resume|skip <sid>`
@@ -3505,11 +3536,21 @@ mutex around the whole cycle** (acquire at step 0, release at step 4 — see *Co
 TOKEN=$(bash tools/am-lock.sh acquire --wait 600 --label "deploy $(git rev-parse --short HEAD)") || exit 1
 ```
 ```powershell
-# 1. close ONLY our dev instance (path filter spares the Store WT — see Gotchas)
-Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" |
-  ? { $_.ExecutablePath -like 'K:\source\Agentmaster\*' } | % { Stop-Process -Id $_.ProcessId -Force }
+# 1. close ONLY our dev instance — the GUI PROCESS ONLY (path filter spares the Store WT AND the
+#    release layout under ...\bin\x64\Release — see Gotchas). ⚠ NEVER Stop-Process OpenConsole.exe:
+#    a ConPTY host killed outright skips its CTRL_CLOSE broadcast, so that tab's pwsh + claude.exe
+#    (+ MCP node children) live on forever with a DEAD console (2026-09-04: 35 such pairs + ~140
+#    children from ONE such kill, alive six days — OBSERVER.md §13a). Killing the GUI alone closes
+#    its pipe handles; every OpenConsole then ends its clients itself and exits.
+Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe'" |
+  ? { $_.ExecutablePath -like 'K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug\*' } | % { Stop-Process -Id $_.ProcessId -Force }
 # (the GUI exe is Agentmaster.exe since the rename; WindowsTerminal.exe stays in the filter for a
 #  STILL-RUNNING pre-rename instance during the transition deploy)
+# 1b. WAIT for the layout's ConPTY hosts to drain before relinking (they lock OpenConsole.exe; each
+#     ends its clients — ≤5 s per stubborn client — then exits; a host still alive after ~30 s is wedged)
+$deadline = (Get-Date).AddSeconds(30)
+do { Start-Sleep -Milliseconds 500; $hosts = Get-CimInstance Win32_Process -Filter "Name='OpenConsole.exe'" |
+  ? { $_.ExecutablePath -like 'K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug\*' } } while ($hosts -and (Get-Date) -lt $deadline)
 # 2. build (full exe link; the wrapper skips the ~156s appxsym by default — see Building FAST)
 pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore      # or: msbuild OpenConsole.slnx /t:Terminal\CascadiaPackage /m /p:Configuration=Debug /p:Platform=x64 /p:AppxSymbolPackageEnabled=false
 # 3. relaunch
@@ -3663,15 +3704,24 @@ build **binlog uploads as an artifact** to diagnose the first run.
   (ShellExecuteEx on the full `<PFN>\<alias>` path is the verified exception — see `GetWtExePath`).
 - **Closing instances to relink.** Closing **our** dev instance for the deploy inner loop
   **requires the user's permission first** (see *Development Rules*; the prior "always auto
-  deploy, no prompt" authorization is **revoked**). Once permitted, filter by
-  `ExecutablePath -like 'K:\source\Agentmaster\*'` (matches our `Agentmaster.exe` — the GUI,
-  `WindowsTerminal.exe` pre-rename — *and*
-  its `OpenConsole.exe` ConPTY hosts) — but **scope it tighter** (e.g. `\bin\x64\Debug\`),
-  because a **Release** instance can host the very session you're running in (`AM_SESSION` /
-  `CCMGR_HOOK_PIPE` set), so the broad path filter would **self-kill** it — then `Stop-Process`,
-  build, relaunch. But **never** touch the running **Store** Windows Terminal — it's the user's live session
-  (under `Program Files\WindowsApps\…`, not our path). Never blanket-`taskkill` by image
-  name; always path-filter so the Store WT is spared.
+  deploy, no prompt" authorization is **revoked**). Once permitted, kill **the GUI process ONLY**
+  (`Agentmaster.exe`; `WindowsTerminal.exe` pre-rename), path-filtered to the layout you are
+  actually redeploying (`…\bin\x64\Debug\` for dev) — a broad `K:\source\Agentmaster\*` filter ALSO
+  matches the **Release** loose layout (`…\bin\x64\Release`, the registered release install), which
+  can host the very session you're running in (`AM_SESSION` / `CCMGR_HOOK_PIPE` set), so it would
+  **self-kill** it. **⚠ NEVER `Stop-Process` the `OpenConsole.exe` ConPTY hosts** (the old recipe
+  did): a host killed outright never runs its graceful shutdown (`PtySignalInputThread::_Shutdown →
+  CloseConsoleProcessState → CTRL_CLOSE_EVENT` to every attached client), so that tab's `pwsh` wrapper +
+  `claude.exe` (+ its MCP `cmd`/`node` children) keep running forever with a **DEAD console** —
+  unreachable by any terminal, feeding a NEWER instance phantom hooks via `bridge.json`. The 2026-08-29
+  release redeploy did exactly that: **35 pwsh+claude pairs + ~140 children stayed alive six days**
+  until the user noticed "processes not shutting down" (OBSERVER.md §13a — the in-app orphan reaper now
+  ends such sessions, but don't create them). Killing the GUI alone closes its pipe handles; every host
+  then ends its clients and exits by itself — **wait for the layout's `OpenConsole.exe` set to drain**
+  (they lock the binary the build copies) before relinking. Then build, relaunch. And **never** touch
+  the running **Store** Windows Terminal — it's the user's live session (under
+  `Program Files\WindowsApps\…`, not our path). Never blanket-`taskkill` by image name; always
+  path-filter so the Store WT is spared.
 - **Packaging (`PRI210 / 0x800704c8`) can fail to overwrite `resources.pri`.** The registered
   loose-layout package keeps `src\cascadia\CascadiaPackage\bin\x64\Debug\resources.pri`
   memory-mapped, so MakePri's final overwrite-move dies with `0x800704c8` (ERROR_USER_MAPPED_FILE)

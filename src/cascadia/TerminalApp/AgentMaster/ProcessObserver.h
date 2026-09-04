@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "Activity.h" // CorrelationRow, TabActivityRow, TabRosterEntry, ObservedClaude
+#include "ProcessInspect.h" // ProcEntry (the orphan reaper walks the survey's snapshot)
 #include "TranscriptStore.h" // SessionPresenceRow (the validated presence table the S-lane publishes)
 
 namespace Agentmaster
@@ -40,6 +41,10 @@ namespace Agentmaster
     inline constexpr int64_t kObserverHeartbeatMs = 2000; // §8c FULL-survey cadence (the birth-detection floor; preserved by O7's debounce)
     inline constexpr int64_t kObserverFastTickMs = 1000; // O7: cheap (µs) liveness cadence BETWEEN full surveys
     inline constexpr int64_t kObserverCensusKeepaliveMs = 300000; // re-log an UNCHANGED census at most this often (5 min): a periodic fleet snapshot, NOT a per-tick drip (was 15 s — the bulk of the log spam alongside external-churn-triggered re-logs, now gated to OUR fleet only)
+    // §13a orphan reaper: a stamped session's console host must read DEAD for this long (>= 3 full
+    // surveys at the 2 s heartbeat) before its console group is terminated — a snapshot race (the host
+    // exiting between the Toolhelp snapshot and the console-host query) self-clears on the next pass.
+    inline constexpr int64_t kOrphanReapGraceMs = 5000;
 
     class ProcessObserver
     {
@@ -75,6 +80,12 @@ namespace Agentmaster
         // published table (and the per-session `presenceStatus` enrichment via ObserveClaude) —
         // never an ad-hoc UI read. Copy-under-lock like the other tables.
         std::vector<SessionPresenceRow> Presence() const;
+
+        // §13a orphan reaper on/off (AppSettings::reapOrphanedSessions; Engine init seeds it, the cog's
+        // Save pushes a change live). OFF: a dead-console session is still recognized as an orphan (no
+        // External row, counted in the census `orphan` bucket) but never terminated. Thread-safe.
+        void SetReapOrphanedSessions(bool on) noexcept { _reapOrphans.store(on, std::memory_order_relaxed); }
+        bool ReapOrphanedSessions() const noexcept { return _reapOrphans.load(std::memory_order_relaxed); }
 
     private:
         void _worker() noexcept; // heartbeat + Wake() loop (mirrors SessionScanner::_worker)
@@ -189,6 +200,25 @@ namespace Agentmaster
         std::unordered_set<uint32_t> _guiExcludedLogged; // GUI claude pids (the desktop Electron app) skipped — logged once
         std::unordered_set<uint32_t> _orphanLogged; // orphaned claude pids (host terminal exited) skipped — logged once
         std::unordered_map<std::wstring, std::wstring> _shellCwdCache; // wtSession -> last TRUSTWORTHY shell cwd (survives idle gaps when a pwsh has no child this tick)
+
+        // Orphaned CONSOLE groups — the reaper (OBSERVER.md §13a; ProcessInspect's DecideOrphanReap /
+        // CollectDeadConsoleGroup). Worker-thread-only (touched only inside _surveyOnce):
+        //   _orphanDeadHostSince: a stamped, non-rostered claude/codex pid -> the survey time its
+        //     console host FIRST read dead (the grace clock). Erased the moment the host reads alive
+        //     or unknown (a snapshot race), and pruned to alive pids at the survey tail.
+        //   _orphanReapedPids: pids this run already terminated — Toolhelp can still list a just-
+        //     terminated process for a tick, so they stay "orphan" without a second log/kill; pruned
+        //     to alive pids at the survey tail (a recycled pid IS a new process).
+        std::unordered_map<uint32_t, int64_t> _orphanDeadHostSince;
+        std::unordered_set<uint32_t> _orphanReapedPids;
+        std::atomic<bool> _reapOrphans{ true }; // AppSettings::reapOrphanedSessions (default ON)
+        // The orphaned-console check for ONE AM_SESSION-stamped, non-rostered claude/codex. Returns
+        // true iff its console host is DEAD — the caller then treats it as an orphan (no External row,
+        // the census `orphan` bucket) — and, once kOrphanReapGraceMs elapsed with the reaper ON,
+        // terminates the whole dead console group (its pwsh wrapper + it + attached children; never an
+        // MCP server on its own console — it exits by itself on stdin EOF). `kind` / `sid` / `cwd` /
+        // `startUnixMs` only decorate the [orphan] / [orphan-reap] log lines.
+        bool _ObserveConsoleOrphan(const std::vector<ProcEntry>& snap, uint32_t pid, int64_t startUnixMs, const wchar_t* kind, const std::wstring& sid, const std::wstring& cwd, int64_t now);
 
         // Worker-thread-only cache (no lock) of a session's LINE-DERIVED last-activity, mtime-gated.
         // The observer feeds SessionInfo.convLastActivityUnixMs from the transcript's last REAL

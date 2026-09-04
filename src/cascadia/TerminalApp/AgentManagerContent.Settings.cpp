@@ -1110,6 +1110,12 @@ namespace winrt::TerminalApp::implementation
         _setConfirmKill.Header(winrt::box_value(L"Confirm before closing a session"));
         AgentSetTip(_setConfirmKill, L"When on, closing a session (tab X, the tree's Del, or the Close menu) first asks to confirm. Off closes without the prompt. Closing always keeps the session in Sessions, resumable \x2014 nothing on disk is deleted either way.");
         panel.Children().Append(_setConfirmKill);
+        // Agentmaster (OBSERVER.md §13a — orphaned CONSOLE groups). Live: the cog's Save pushes it to the
+        // process-wide Fleet Observer, which does the terminating on its survey thread.
+        _setReapOrphans = ToggleSwitch{};
+        _setReapOrphans.Header(winrt::box_value(L"Shut down sessions whose terminal host has died"));
+        AgentSetTip(_setReapOrphans, L"A session Agentmaster launched runs inside a hidden console host (OpenConsole.exe). If that host is killed outright \x2014 a force-kill of the app that also killed its console hosts, a crashed host \x2014 the session's pwsh + claude.exe never get the close signal a normal exit sends them, and they keep running with a DEAD console: no terminal can ever reach them again, they hold memory and their MCP servers, and their hooks can feed a newer instance phantom events for a conversation it has since resumed itself.\n\nWhen on (the default), the Fleet Observer ends such a session \x2014 only a process Agentmaster itself launched (its AM_SESSION stamp) whose console host is provably gone, after a 5-second grace \x2014 exactly what the missed close signal would have done. A hand-typed claude, a real Windows Terminal tab or any other program is never touched; a normal window close or app quit never trips this (the host exits AFTER its clients did).\n\nOff: such a session is still recognized as an orphan (it is not shown as an external) but is left running for you to end by hand. Logged as [orphan] / [orphan-reap] in hooks.log.");
+        panel.Children().Append(_setReapOrphans);
         // How the tab/session rename box commits via the keyboard. Clicking away (focus loss) ALWAYS
         // commits; this only governs the Enter / Shift+Enter shortcut. The box is multi-line, so the
         // key that ISN'T the commit key inserts a newline. GLOBAL across windows (TabRenameCommitMode).
@@ -2491,6 +2497,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setConfirmKill.IsOn(_appSettings.confirmBeforeKill);
         }
+        if (_setReapOrphans)
+        {
+            _setReapOrphans.IsOn(_appSettings.reapOrphanedSessions);
+        }
         // NOTIFICATIONS tab: seed the master + the five target-state checkboxes + the two behavior
         // toggles, then sync the dependents' enabled state explicitly (don't rely on the programmatic
         // IsOn firing Toggled — the _setInferGitRoot seeding rule).
@@ -3123,6 +3133,10 @@ namespace winrt::TerminalApp::implementation
         if (_setConfirmKill)
         {
             _appSettings.confirmBeforeKill = _setConfirmKill.IsOn();
+        }
+        if (_setReapOrphans)
+        {
+            _appSettings.reapOrphanedSessions = _setReapOrphans.IsOn();
         }
         // NOTIFICATIONS tab. The checkboxes are read even while disabled (master off) — like
         // _setInferGitRoot, they still hold the user's stored preference, and dropping them here

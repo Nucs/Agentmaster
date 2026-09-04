@@ -1871,6 +1871,15 @@ namespace Agentmaster
 
         // --- Behavior sugar ---
         bool confirmBeforeKill{ true }; // confirm before killing a session from the Manager
+        // Agentmaster (OBSERVER.md §13a — orphaned CONSOLE groups): terminate a managed session whose
+        // ConPTY host (OpenConsole.exe) died WITHOUT its graceful shutdown — a TerminateProcess on the
+        // host (the deploy script's `Stop-Process ... OpenConsole.exe`), a conhost crash — leaving its
+        // pwsh wrapper + claude.exe (+ MCP children) alive with a DEAD console that no terminal can ever
+        // reach again (2026-09-04: 35 such pairs from an instance killed six days earlier). Only an
+        // AM_SESSION-stamped (Agentmaster-launched) process with a dead console host is ever a candidate,
+        // after a 5 s grace; a hand-typed / real-WT claude is never touched. OFF => such a session is still
+        // recognized as an orphan (no External row) but left running. Cog: Behavior -> General.
+        bool reapOrphanedSessions{ true };
         // Agentmaster (UI-stall self-heal — the 2026-08-22 CoreMessaging dispatch wedge; Engine.h's
         // escalation block): when the [ui-stall] watchdog proves the process-wide XAML dispatch is
         // unrecoverably jammed (every window's UI lane dead 3+ minutes, the Win32 pump provably

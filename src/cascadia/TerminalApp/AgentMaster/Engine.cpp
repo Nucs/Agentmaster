@@ -573,6 +573,10 @@ namespace Agentmaster
             {
                 Startup::ScopedPhase _t{ L"  observer start (S-lane)" };
                 e->observer = std::make_shared<ProcessObserver>(e->registry, e->amSession);
+                // §13a orphan reaper: seed the on/off from disk before the first survey (the cog's Save
+                // pushes a change live via SetReapOrphanedSessions). Default ON — a stamped session whose
+                // console host is dead is unreachable by construction, so ending it loses nothing.
+                e->observer->SetReapOrphanedSessions(LoadAppSettings().reapOrphanedSessions);
                 e->observer->Start();
             }
 

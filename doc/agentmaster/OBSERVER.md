@@ -733,6 +733,72 @@ fixed on resume; typed-vs-flight echo accounting needs C3's `UserPromptSubmit`.
   still **never driven** (no injector/Tests Autorunner — that is C4). §11f / §19-Q3.
 - **Debounce / caps:** survey ≤ 1 Toolhelp/known-interval; hard cap; abortable on `Stop`; the
   observer **never** writes to any shell stdin (invisibility invariant).
+- **Orphaned CONSOLE groups → the reaper (§13a, below).** The one exception to "only reads": a
+  session *we* launched whose ConPTY host died without its graceful shutdown is terminated.
+
+### 13a. Orphaned console groups — the reaper (2026-09-04)
+
+**The incident.** After a normal X-quit the user found **46 `claude.exe` + 146 `node.exe`** still
+running. Forensics (`ProcessConsoleHostProcess` per process, parent chains, the `[engine] bridge
+listening` markers in hooks.log): 35 of the claudes were **pwsh+claude pairs launched by release
+instance PID 11144 (08-27 → 08-29)**, every one with a **live `pwsh.exe` parent**, a **dead parent
+above it** (11144) and a **DEAD console host**; both of that day's normal quits (08:50 and 14:54)
+had killed their 27 + 31 sessions cleanly. Instance 11144 had ended on **08-29 16:12** by the deploy
+recipe's **force-kill**, whose `Stop-Process` list included **`OpenConsole.exe`** — and the release
+loose layout lives under `K:\source\Agentmaster\…\bin\x64\Release`, so the `K:\source\Agentmaster\*`
+path filter matched it.
+
+**Why killing the host orphans the clients.** A ConPTY close is graceful *only* through the host:
+`ConptyConnection::Close()` (or the terminal process dying — the Emperor's quit is a
+`TerminateProcess`) breaks the **signal pipe**, the host's `PtySignalInputThread::_Shutdown` →
+`VtIo::SendCloseEvent` → `CloseConsoleProcessState` → `HandleCtrlEvent(CTRL_CLOSE_EVENT)` →
+`EndTask` per attached client, and the host exits **after** its clients did. `TerminateProcess` on
+`OpenConsole.exe` skips all of it: the clients keep running with a dead console — no terminal can
+ever reach them (their stdin/stdout point at nothing), their hook forwarder falls back to
+`bridge.json` and feeds a **newer** instance phantom events for conversations it may have resumed
+itself (two writers), and their `sessions/<pid>.json` heartbeats confuse pid-keyed binds. Their MCP
+`cmd`/`node` children live on their **own** conhosts (alive), which is why `node.exe` piled up too.
+The pre-existing orphan test (§11c: *parent* dead) never saw them — the parent pwsh was alive — so
+they sat on every Triage Board as **35 phantom `Other` externals for six days** (the census line read
+`other=37`: those 35 plus two genuinely console-hosted ones). A 36th leftover was a **lone wrapper** —
+a `pwsh -NoExit -EncodedCommand` whose claude had already exited — which is why the reaper anchors on
+wrappers too (a pwsh/powershell with a DEAD parent, an `AM_SESSION` env stamp and no claude/codex
+descendant), not only on claude/codex facts.
+
+**The reaper.** Primitives in `ProcessInspect` — `ReadConsoleHostPid(pid)`
+(`NtQueryInformationProcess(ProcessConsoleHostProcess)`, low flag bits masked; **0 == unknown,
+never "dead"**), `TerminateProcessById`, the PURE `DecideOrphanReap(OrphanReapInput, graceMs)` and
+the PURE-with-injected-OS `CollectDeadConsoleGroup(snap, anchor, deadHost, hostOf)`. In the S-lane
+(`ProcessObserver::_ObserveConsoleOrphan`, run for every **AM_SESSION-stamped, non-rostered**
+claude/codex at each full survey — a stamp of *any* instance qualifies: a dead instance's, a sibling
+install's, or ours; a rostered session's host is alive by definition):
+1. its console host is read; **alive or unknown ⇒ not an orphan** (a prior dead reading was a
+   snapshot race and is forgotten);
+2. dead ⇒ it **is** an orphan from this survey on — counted in the census `orphan` bucket, **no
+   External row** (the phantom cards are gone whether or not the reaper is on), logged once
+   `[orphan] claude pid=… console host N is DEAD (no terminal can reach it) …`;
+3. after **`kOrphanReapGraceMs` = 5 s** (≥ 3 full surveys — a client still mid-`CTRL_CLOSE` has an
+   ALIVE host, so the graceful path is never raced) with the reaper ON, the whole **console group**
+   is terminated with `STATUS_CONTROL_C_EXIT` — the walk climbs through parents on the dead console
+   (the pwsh wrapper), then descends through children on it (attached tool shells), and **stops at
+   any process on another console** (an MCP server exits by itself on stdin EOF, exactly as after a
+   graceful close) — logged `[orphan-reap] claude pid=… host=… group=[pwsh.exe:32640 claude.exe:25520]
+   …` + `[orphan-reap] terminate FAILED pid=… err=…` per refusal (elevated / other-user).
+4. Rule #13 stands: a hand-typed `+`-tab claude (no stamp — WT regenerates the env), a real-WT tab, a
+   bare-console claude, any other program — **never a candidate**.
+
+Off-switch **`AppSettings::reapOrphanedSessions`** (default **ON**; cog → Behavior → General "Shut
+down sessions whose terminal host has died"; Engine init seeds it, a cog Save pushes it live via
+`SetReapOrphanedSessions`) — OFF keeps step 2 (recognized, hidden) and skips step 3. Engine-tested:
+`TestOrphanConsoleReaper` (every veto leg of the decision; the group walk over the incident's exact
+shape — wrapper + claude + attached bash, never the MCP console nor the live tab beside it; a live
+read of the harness's own console host) + the settings round-trip.
+
+**The recipe fix (the actual cause).** A force-kill must end **only the GUI process**
+(`Agentmaster.exe`) — never `OpenConsole.exe`: the GUI's death closes the pipe handles and every host
+then shuts its clients down gracefully and exits by itself. `CLAUDE.md`'s deploy inner loop and
+`Install-Agentmaster.ps1`'s `Stop-RunningUnder` were both corrected (they wait for the hosts to
+drain before touching the layout).
 
 ---
 
