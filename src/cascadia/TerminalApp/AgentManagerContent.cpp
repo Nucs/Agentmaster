@@ -171,12 +171,16 @@ namespace winrt::TerminalApp::implementation
         // window) and the "-2h30m" timing text. _Refresh() recomputes them from the live snapshot; it is
         // idempotent and already runs on every registry event, so this only covers quiet periods. Weak
         // self so a closed window never leaks a ticking timer.
+        // Agentmaster (perf): the tick no longer runs a FULL _Refresh (a whole board+tree+plan teardown
+        // + recreate — ~1-6s of UI-thread work at fleet scale, every 30s, forever). It rewrites the
+        // timing TextBlocks IN PLACE and only falls back to a rebuild when a ⚡ glyph has to appear or
+        // vanish (_RefreshTimingTexts). A hidden lens skips it entirely (the show-time rebuild recomputes).
         _cardRefreshTimer = DispatcherTimer{};
         _cardRefreshTimer.Interval(std::chrono::seconds(30));
         _cardRefreshTimer.Tick([weak = get_weak()](const IInspectable& sender, const IInspectable&) {
             if (auto self = weak.get())
             {
-                self->_Refresh();
+                self->_RefreshTimingTexts();
             }
             else if (const auto t = sender.try_as<DispatcherTimer>())
             {
@@ -409,6 +413,104 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::RefreshNow()
     {
         _Refresh();
+    }
+
+    // Agentmaster (perf — the hidden-lens rebuild tax): see the header. The catch-up rebuild runs
+    // synchronously here so the page's follow-on steps in the tab-switch funnel (BringSelectedIntoView,
+    // the selection highlight) see the rebuilt cards/rows.
+    void AgentManagerContent::SetLensVisible(bool visible)
+    {
+        if (_lensVisible == visible)
+        {
+            return;
+        }
+        _lensVisible = visible;
+        if (visible && _refreshDirty)
+        {
+            _Refresh();
+        }
+    }
+
+    // Agentmaster (perf — the 30s timing tick): rewrite the "-2h30m" timing text of every live card and
+    // row IN PLACE from a fresh live snapshot (the observer refreshes convLastActivityUnixMs SILENTLY —
+    // no notify — so the tick is what keeps "ago" honest), and detect whether any card's ⚡ "still
+    // server-cached" glyph must appear or vanish since it was rendered; only THAT (rare — a few-minute
+    // window lapsing) falls back to the full rebuild the tick used to run unconditionally. Hidden ⇒
+    // nothing to do: SetLensVisible(true) rebuilds everything from scratch anyway.
+    void AgentManagerContent::_RefreshTimingTexts()
+    {
+        if (!_lensVisible || !_registry)
+        {
+            return;
+        }
+        if (_cardTimingBinds.empty() && _rowTimingBinds.empty() && _cardWarmShown.empty())
+        {
+            return;
+        }
+        const auto live = _registry->SnapshotLive();
+        std::unordered_map<std::wstring, const SessionInfo*> byId;
+        byId.reserve(live.size());
+        for (const auto& s : live)
+        {
+            byId.emplace(s.id, &s);
+        }
+        bool needFull = false;
+        const auto rewrite = [&](std::vector<TimingBind>& binds) {
+            for (auto& b : binds)
+            {
+                const auto it = byId.find(b.id);
+                if (it == byId.end())
+                {
+                    needFull = true; // the session left the live set — its card/row must go
+                    continue;
+                }
+                const auto& s = *it->second;
+                const int64_t last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
+                const std::wstring txt = FormatSessionTiming(s.convCreatedUnixMs, last);
+                if (b.text && !txt.empty())
+                {
+                    const winrt::hstring h{ txt };
+                    if (b.text.Text() != h)
+                    {
+                        b.text.Text(h);
+                    }
+                }
+            }
+        };
+        rewrite(_cardTimingBinds);
+        rewrite(_rowTimingBinds);
+        const uint32_t cacheMin = _appSettings.serverCacheMinutes ? _appSettings.serverCacheMinutes : 5;
+        const int64_t now = NowMs();
+        for (const auto& [id, shown] : _cardWarmShown)
+        {
+            const auto it = byId.find(id);
+            if (it == byId.end())
+            {
+                needFull = true;
+                break;
+            }
+            if (::Agentmaster::ServerCacheStillWarm(*it->second, cacheMin, now) != shown)
+            {
+                needFull = true; // a ⚡ has to appear or vanish — that IS a layout change, rebuild
+                break;
+            }
+        }
+        if (needFull)
+        {
+            _Refresh();
+        }
+    }
+
+    // Agentmaster (perf): the parsed model-family list for the card's short model name, re-parsed only
+    // when the settings string actually changes (it was parsed once per card per rebuild).
+    const std::vector<std::wstring>& AgentManagerContent::_ModelFamilies()
+    {
+        if (_modelFamiliesSrc != _appSettings.modelFamilies)
+        {
+            _modelFamiliesSrc = _appSettings.modelFamilies;
+            _modelFamiliesCache = ::Agentmaster::ParseModelFamilies(_appSettings.modelFamilies);
+        }
+        return _modelFamiliesCache;
     }
     // Agentmaster (Linked Lenses — per-tab -> Manager sync): drive the lens selection from the page when
     // the user switches to a managed session's terminal tab. Routes through _SelectSession (the same path
@@ -1898,8 +2000,12 @@ namespace winrt::TerminalApp::implementation
         const int64_t since = now - _lastRegistryRefreshMs;
         if (since >= kMinGapMs)
         {
-            _lastRegistryRefreshMs = now;
             _Refresh();
+            // Agentmaster (perf): stamp AFTER the rebuild returns, not before it starts — the gap is
+            // measured from the END of the previous rebuild. Stamped at the start, a rebuild that
+            // itself outlived the gap (seconds, at fleet scale) let the very next notify run another
+            // one immediately: back-to-back rebuilds with no breathing room for input/render.
+            _lastRegistryRefreshMs = static_cast<int64_t>(::GetTickCount64());
             return;
         }
         if (_refreshDelayTimer && _refreshDelayTimer.IsEnabled())
@@ -1913,8 +2019,8 @@ namespace winrt::TerminalApp::implementation
                 if (auto self = weak.get())
                 {
                     self->_refreshDelayTimer.Stop();
-                    self->_lastRegistryRefreshMs = static_cast<int64_t>(::GetTickCount64());
                     self->_Refresh();
+                    self->_lastRegistryRefreshMs = static_cast<int64_t>(::GetTickCount64()); // from the END of the rebuild (see above)
                 }
                 else if (const auto t = sender.try_as<winrt::Windows::UI::Xaml::DispatcherTimer>())
                 {
@@ -1932,6 +2038,21 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+
+        // Agentmaster (perf — the hidden-lens rebuild tax): while this Manager's tab is NOT the selected
+        // tab, nothing below is visible, so the whole board+tree+plan teardown + recreate would be spent
+        // on pixels nobody sees — and it IS spent on the ONE UI thread every window shares, right in the
+        // path of the terminal tab the user is actually typing in. Record the request and return; the
+        // page's SetLensVisible(true) runs the single catch-up rebuild when the Manager comes back. The
+        // only _Refresh side effect that matters off-screen — the keep-awake hold (a SYSTEM state, not a
+        // pixel) — is re-evaluated here so WhileRunning keeps tracking the fleet while hidden.
+        if (!_lensVisible)
+        {
+            _refreshDirty = true;
+            _RefreshKeepAwakeHold(nullptr);
+            return;
+        }
+        _refreshDirty = false;
 
         // Agentmaster: preserve keyboard focus across the rebuild below. _Refresh fires on ANY
         // registry notification — including a mere title change (a rename, or claude floating its
@@ -1967,11 +2088,17 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // Agentmaster (perf): the LIVE subset only. Every consumer below shows / counts live sessions
+        // exclusively (the board + tree filter on s.live, the plan shows "select a session" for a closed
+        // one, dormant == live && !started, keep-awake looks at live Running) — the full Snapshot deep-
+        // copied the 800+ archived records (every string + every queued prompt) per refresh for nothing.
         std::vector<SessionInfo> sessions;
         if (_registry)
         {
-            sessions = _registry->Snapshot();
+            sessions = _registry->SnapshotLive();
         }
+        _cardTimingBinds.clear(); // re-seeded by _MakeCard (the 30s tick rewrites these in place)
+        _cardWarmShown.clear();
         _RebuildBoard(sessions);
         _SyncProgressTimer(); // Agentmaster: run the 1s countdown-bar drainer iff any Waiting-for-you bar is now tracked
         _RebuildTree(sessions);

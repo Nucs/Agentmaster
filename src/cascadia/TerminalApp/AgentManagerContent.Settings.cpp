@@ -209,7 +209,7 @@ namespace winrt::TerminalApp::implementation
             }
             else if (_registry)
             {
-                desired = anyRunning(_registry->Snapshot());
+                desired = anyRunning(_registry->SnapshotLive()); // anyRunning tests s.live anyway (perf — no archived deep copy)
             }
             break;
         }
@@ -303,7 +303,7 @@ namespace winrt::TerminalApp::implementation
         {
             localIds = _localScopeProvider();
         }
-        for (const auto& s : _registry->Snapshot())
+        for (const auto& s : _registry->SnapshotLive()) // dormant == live && !started: the live subset suffices (perf — no archived deep copy)
         {
             if (!IsSessionDormant(s))
             {
@@ -573,7 +573,18 @@ namespace winrt::TerminalApp::implementation
         // Recoverable == saved window records NOT currently open in this process (Engine-tracked).
         // Reads windows/*.json off disk, so keep this on the _Refresh cadence (registry changes), not
         // a hot path. Show the button only when there is something to recover.
-        const auto n = static_cast<int>(::Agentmaster::RecoverableWindows().size());
+        // Agentmaster (perf): RecoverableWindows() enumerates + parses every windows\<id>.json on disk,
+        // and this runs on EVERY _Refresh (every registry notify). Cache the count for a few seconds —
+        // a number on a button that is a few seconds stale is invisible, a disk directory walk per
+        // notify on the UI thread is not (NtCreateFile leaves in the 2026-09-04 release profile).
+        constexpr int64_t kReopenCountTtlMs = 5000;
+        const int64_t nowTick = static_cast<int64_t>(::GetTickCount64());
+        if (_reopenCountCheckedMs == 0 || nowTick - _reopenCountCheckedMs >= kReopenCountTtlMs)
+        {
+            _reopenCountCached = static_cast<int>(::Agentmaster::RecoverableWindows().size());
+            _reopenCountCheckedMs = nowTick;
+        }
+        const auto n = _reopenCountCached;
         _reopenBtn.Content(winrt::box_value(winrt::hstring{ L"Reopen Windows (" } + winrt::to_hstring(n) + L")"));
         _reopenBtn.Visibility(n > 0 ? Visibility::Visible : Visibility::Collapsed);
         _ReflowLaunchBar(); // the button just appeared/vanished/relabeled -> re-fit the row

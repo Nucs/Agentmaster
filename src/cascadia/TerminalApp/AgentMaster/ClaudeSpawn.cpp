@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <objbase.h> // CoCreateGuid
 
+#include <atomic> // Agentmaster (perf): AgentmasterStateDir's rate-limited directory re-assert
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -1366,10 +1367,30 @@ try {
         // tools: the historical location, unchanged), ~/.agentmaster-dev for AgentmasterDev.
         // Cached process-wide by ResolveProfileDir(): a profile cannot change mid-run.
         const std::wstring dir = Profiles::ResolveProfileDir();
+        // Agentmaster (perf — the UI-thread syscall tax): this function is called on EVERY log line,
+        // every state read (dir-colors / session-store / window records / ...), and — through
+        // GetDirColor — once per Triage-Board card per rebuild. Re-asserting the directory on EVERY
+        // call cost a directory-create syscall (NtCreateFile + ZwQueryFullAttributesFile — the
+        // `create_directories` probe showed up at ~3.4% of the release UI thread's busy samples in the
+        // 2026-09-04 profile). The heal-a-mid-run-delete semantics are kept, just RATE-LIMITED: the
+        // create is re-asserted at most once per kStateDirReassertMs process-wide (a deleted profile
+        // dir comes back within that window on the next call), and every other call is a pure
+        // return of the cached path. Lock-free: a racing pair of callers at the boundary both
+        // re-assert, which is harmless (create_directories is idempotent).
+        constexpr uint64_t kStateDirReassertMs = 2000;
+        static std::atomic<uint64_t> lastReassertTick{ 0 };
+        const uint64_t nowTick = ::GetTickCount64();
+        const uint64_t lastTick = lastReassertTick.load(std::memory_order_relaxed);
+        const bool reassert = (lastTick == 0) || (nowTick - lastTick >= kStateDirReassertMs);
+        if (!reassert)
+        {
+            return dir;
+        }
+        lastReassertTick.store(nowTick, std::memory_order_relaxed);
         try
         {
-            // Re-assert per call (the resolver created it once; this heals a mid-run delete,
-            // matching the pre-profile behavior).
+            // Re-assert (rate-limited, above): the resolver created it once; this heals a mid-run
+            // delete, matching the pre-profile behavior.
             std::filesystem::create_directories(std::filesystem::path{ dir });
         }
         catch (...)

@@ -165,6 +165,14 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: force a UI redraw (board/tree/plan) from the current data — the page calls this
         // after an out-of-band reload (the observer survey lands asynchronously) so fresh data shows.
         void RefreshNow();
+        // Agentmaster (perf — the hidden-lens rebuild tax): is this Manager's content ON SCREEN (its tab
+        // selected)? The page drives it from the one tab-switch funnel. While HIDDEN, every refresh
+        // trigger — a registry notify, the 30s timing tick, a tab-switch selection sync — only marks the
+        // lens DIRTY instead of rebuilding the whole board + tree + plan (the full XAML teardown +
+        // recreate of every card/row/menu, ~1-6s at fleet scale, measured on the ONE Emperor UI
+        // thread that every window shares) for pixels nobody can see; becoming visible again runs the
+        // ONE catch-up rebuild. Defaults to visible (the Manager tab is selected at window creation).
+        void SetLensVisible(bool visible);
         // Agentmaster (Linked Lenses — the per-tab -> Manager sync): select a managed session in the
         // lens from OUTSIDE. The page calls this when the user switches to that session's terminal tab,
         // so returning to the Manager tab shows the session you were just in selected (board card + tree
@@ -659,6 +667,60 @@ namespace winrt::TerminalApp::implementation
         std::shared_ptr<std::atomic<bool>> _refreshQueued{ std::make_shared<std::atomic<bool>>(false) };
         int64_t _lastRegistryRefreshMs{ 0 };
         winrt::Windows::UI::Xaml::DispatcherTimer _refreshDelayTimer{ nullptr };
+
+        // Agentmaster (perf — the hidden-lens rebuild tax, SetLensVisible): _lensVisible mirrors "the
+        // Manager tab is the selected tab"; _refreshDirty records a refresh that was REQUESTED while
+        // hidden, so the first SetLensVisible(true) runs exactly one catch-up _Refresh(). Every
+        // refresh trigger (registry notify, timing tick, selection sync, RefreshNow) funnels through
+        // _Refresh, which is where the gate lives — no caller needs to know.
+        bool _lensVisible{ true };
+        bool _refreshDirty{ false };
+
+        // Agentmaster (perf — the 30s timing tick): the "-2h30m" timing TextBlocks of the live cards +
+        // rows, bound to their session ids, so the periodic tick REWRITES their text in place (a
+        // handful of TextBlock.Text sets) instead of tearing down + recreating the whole board and
+        // tree (which is what the tick used to do — a full _Refresh every 30s, ~1-6s of UI-thread
+        // work at fleet scale, purely to move an "ago" string). Re-seeded by the rebuilds: cards are
+        // cleared + refilled in _RebuildBoard/_MakeCard, rows in _RebuildTree. _cardWarmShown remembers
+        // whether each card RENDERED the ⚡ "still server-cached" glyph, so the tick can detect a
+        // lapsed/started cache window (the other time-derived adornment) and fall back to one full
+        // rebuild only when a glyph must actually appear or vanish.
+        struct TimingBind
+        {
+            std::wstring id;
+            winrt::Windows::UI::Xaml::Controls::TextBlock text{ nullptr };
+        };
+        std::vector<TimingBind> _cardTimingBinds;
+        std::vector<TimingBind> _rowTimingBinds;
+        std::unordered_map<std::wstring, bool> _cardWarmShown;
+        void _RefreshTimingTexts(); // the 30s tick's in-place update (falls back to _Refresh when a ⚡ glyph flips)
+
+        // Agentmaster (perf): _UpdateReopenButton's "Reopen Windows (N)" count comes from
+        // RecoverableWindows(), which ENUMERATES + PARSES every windows\<id>.json on disk — it ran on
+        // every _Refresh (every registry notify). Cached with a short TTL; a fresh count is at most
+        // kReopenCountTtlMs stale, which is invisible for a button that reads a number.
+        int64_t _reopenCountCheckedMs{ 0 };
+        int _reopenCountCached{ 0 };
+
+        // Agentmaster (perf): ParseModelFamilies(_appSettings.modelFamilies) was re-parsed per card per
+        // rebuild for the card's short model name; parsed once per distinct settings string instead.
+        std::wstring _modelFamiliesSrc{ L"\x01unset" }; // a value no settings string can equal => the first call always parses
+        std::vector<std::wstring> _modelFamiliesCache;
+        const std::vector<std::wstring>& _ModelFamilies();
+
+        // Agentmaster (perf — LAZY context menus): a card carried TWO fully built session menus (the
+        // right-click ContextFlyout + the hover "⋯" button's Flyout) and a tree row one more — each
+        // ~13 items + 4 submenus + 2 launch-model pick lists + ~20 tooltips, plus a registry Get and a
+        // local-scope query — built EAGERLY for EVERY session on EVERY rebuild, i.e. ~50 full menus
+        // per refresh at fleet scale that were almost never opened (_MakeSessionMenu was ~12-15% of
+        // the UI thread's busy samples). These return an EMPTY MenuFlyout that populates itself in its
+        // Opening handler (the same "fill at flyout-open" idiom the WT tab context menu uses), so a
+        // menu costs nothing until it is actually opened — and then reflects the session's state AT
+        // OPEN time rather than at rebuild time. The eager builders stay as the fillers.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeLazySessionMenu(const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor = nullptr);
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeLazyExternalMenu(const ::Agentmaster::ExternalClaudeRow& ex);
+        void _PopulateSessionMenu(winrt::Windows::UI::Xaml::Controls::MenuFlyout& menu, const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor);
+        void _PopulateExternalTreeMenu(winrt::Windows::UI::Xaml::Controls::MenuFlyout& menu, const ::Agentmaster::ExternalClaudeRow& ex);
 
         // Agentmaster (Waiting-for-you countdown bar): the live 1px bottom bars to drain. Each holds the
         // bar's ScaleTransform (ScaleX = fraction of the waiting window still remaining, origin LEFT) +

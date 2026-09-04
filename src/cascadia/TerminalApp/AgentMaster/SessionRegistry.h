@@ -85,6 +85,14 @@ namespace Agentmaster
         bool Contains(const std::wstring& id) const;
         std::optional<SessionInfo> Get(const std::wstring& id) const;
         std::vector<SessionInfo> Snapshot() const; // ordered by insertion
+        // Agentmaster (perf): the LIVE subset only (SessionInfo::live), same insertion order. The
+        // registry holds every session EVER seen this profile (800+ archived records, each with its
+        // queue history), while the Manager lens, the per-tick tab reconcile, the dormant count and
+        // the keep-awake probe only ever look at the live handful — so the full Snapshot's deep copy
+        // (every string of every archived record + every QueuedPrompt) was pure waste on the UI
+        // thread, several times per refresh. Callers that need archived records (persistence, the
+        // Sessions browser, restore) keep using Snapshot().
+        std::vector<SessionInfo> SnapshotLive() const;
         size_t Count() const;
 
         // The single entry point that applies an authoritative hook event and mutates

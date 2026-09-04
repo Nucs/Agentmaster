@@ -30,6 +30,7 @@
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions
 #include "AgentMaster/SessionStore.h" // SetSessionFavorite (FAVORITES.md: "Favorite & Close All" batch branch)
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
+#include "AgentManagerContent.h" // SetLensVisible — the tab-switch funnel tells the Manager lens whether it is on screen (perf)
 
 #include <shlobj.h>
 
@@ -1641,7 +1642,36 @@ namespace winrt::TerminalApp::implementation
             if (selectedIndex >= 0 && selectedIndex < gsl::narrow_cast<int32_t>(_tabs.Size()))
             {
                 const auto tab{ _tabs.GetAt(selectedIndex) };
+                // Agentmaster (perf forensics — the SLOW TAB SWITCH stopwatch): a switch that stalls the UI
+                // thread for seconds (the 2026-09-04 release log shows a 45s one right after a
+                // `[nav] tab-focus`) leaves NOTHING behind that says which step ate the time — the 20s
+                // [ui-stall] watchdog only reports that the pump stopped. So the funnel is timed in
+                // four laps (content swap+focus+theme / lens+popups+flash+wake+summary+overlay /
+                // Manager selection sync / highlight+record+nav) and, ONLY when the whole switch took
+                // >= kSlowTabSwitchMs, logs `[tab-switch-slow]` with the breakdown; a Low-priority
+                // dispatcher probe then measures how long until the UI thread was idle again (the XAML
+                // layout/render of the new content + whatever was queued behind the switch) and logs
+                // `[tab-switch-settle]` when THAT exceeds kSlowTabSettleMs. A normal switch logs nothing.
+                constexpr double kSlowTabSwitchMs = 250.0;
+                constexpr double kSlowTabSettleMs = 750.0;
+                const auto swMs = [](const std::chrono::steady_clock::time_point& a, const std::chrono::steady_clock::time_point& b) {
+                    return static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(b - a).count()) / 1000.0;
+                };
+                const auto swT0 = std::chrono::steady_clock::now();
                 _UpdatedSelectedTab(tab);
+                const auto swT1 = std::chrono::steady_clock::now();
+                // Agentmaster (perf — the hidden-lens rebuild tax): tell the Manager lens whether it is
+                // now on screen. Hidden, it stops rebuilding its board/tree/plan on every registry
+                // notify / timing tick / selection sync (all of which land on THIS one UI thread, in
+                // the way of the terminal tab being used); shown again, it runs one catch-up rebuild
+                // — BEFORE the steps below that read its cards (selection highlight, bring-into-view).
+                if (const auto ipc = _agentManagerContent.get())
+                {
+                    if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+                    {
+                        mgr->SetLensVisible(_managerTab && tab == _managerTab);
+                    }
+                }
                 // Agentmaster (bookmark tags): a tab switch dismisses the Tags panel — it is anchored
                 // under the tab it was opened for, which the switch just left behind. The hover panel
                 // likewise (its badge anchor belongs to the strip layout that is about to change).
@@ -1664,6 +1694,7 @@ namespace winrt::TerminalApp::implementation
                 // overlay, so only the focused panel runs the expensive periodic jump-eligibility resolve
                 // (and the one we just switched TO resolves once, immediately).
                 _SyncOverlayFocusToTab(tab);
+                const auto swT2 = std::chrono::steady_clock::now(); // lap 2: lens visibility + popups + flash + wake + summary + overlay focus
                 // Agentmaster (PENDING_INPUT.md): a colored tab's effective background shifts on
                 // selection (WT draws a deselected tab at 30% over the tab row, much darker), so the
                 // now-deselected and now-selected pending tabs must re-pick their "3 dots" light/dark
@@ -1673,6 +1704,7 @@ namespace winrt::TerminalApp::implementation
                 // tab's managed session so returning to the Manager tab shows the session you were just
                 // in. No-op for the Manager tab, a non-session tab, or before startup completes.
                 _SyncManagerSelectionToTab(tab);
+                const auto swT3 = std::chrono::steady_clock::now(); // lap 3: pending-dots contrast + the Manager selection sync (a full lens rebuild when the Manager is on screen)
                 // Agentmaster (Linked Lenses): re-evaluate the per-tab "selected/active" pill — it
                 // shows only while the Manager tab is active, so leaving the Manager clears it and
                 // returning re-applies it for the current hover/selection.
@@ -1684,6 +1716,37 @@ namespace winrt::TerminalApp::implementation
                 {
                     _BringManagerSelectionIntoView();
                 }
+                const auto swT4 = std::chrono::steady_clock::now(); // lap 4: selection highlight + bring-into-view
+                const double swTotal = swMs(swT0, swT4);
+                if (swTotal >= kSlowTabSwitchMs)
+                {
+                    try
+                    {
+                        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                                      L"[tab-switch-slow] " + _DescribeTabForLog(tab) +
+                                                          L" total=" + std::to_wstring(static_cast<int>(swTotal)) + L"ms" +
+                                                          L" content-swap+focus+theme=" + std::to_wstring(static_cast<int>(swMs(swT0, swT1))) + L"ms" +
+                                                          L" lens+popups+flash+wake+summary+overlay=" + std::to_wstring(static_cast<int>(swMs(swT1, swT2))) + L"ms" +
+                                                          L" dots+manager-select=" + std::to_wstring(static_cast<int>(swMs(swT2, swT3))) + L"ms" +
+                                                          L" highlight+reveal=" + std::to_wstring(static_cast<int>(swMs(swT3, swT4))) + L"ms\n");
+                    }
+                    CATCH_LOG();
+                }
+                // The settle probe: a Low-priority item runs only once everything the switch queued —
+                // the new content's layout + render passes, any dispatcher work it triggered — has
+                // drained, so (now - swT0) at that point is the switch as the USER experienced it.
+                try
+                {
+                    const std::wstring swIdent = _DescribeTabForLog(tab);
+                    Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [swT0, swIdent, swMs, kSlowTabSettleMs]() {
+                        const double settleMs = swMs(swT0, std::chrono::steady_clock::now());
+                        if (settleMs >= kSlowTabSettleMs)
+                        {
+                            ::Agentmaster::AppendStateLog(L"hooks.log", L"[tab-switch-settle] " + swIdent + L" idle-again-after=" + std::to_wstring(static_cast<int>(settleMs)) + L"ms (the switch + the layout/render/queued work behind it)\n");
+                        }
+                    });
+                }
+                CATCH_LOG();
             }
             // Agentmaster (M10): the focused tab is part of the per-window record, so a reopen restores
             // it. Debounce-save on switch so the selection persists LIVE (not only at the graceful

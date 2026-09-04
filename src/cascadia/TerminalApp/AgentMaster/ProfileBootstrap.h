@@ -314,18 +314,26 @@ namespace Agentmaster::Profiles
     // The package family name, or "" when running unpackaged (portable zip, tests, tools).
     inline std::wstring PackageFamilyName()
     {
-        UINT32 len = 0;
-        if (::GetCurrentPackageFamilyName(&len, nullptr) != ERROR_INSUFFICIENT_BUFFER || len <= 1)
-        {
-            return {};
-        }
-        std::wstring pfn(len, L'\0');
-        if (::GetCurrentPackageFamilyName(&len, pfn.data()) != ERROR_SUCCESS)
-        {
-            return {};
-        }
-        pfn.resize(len > 0 ? len - 1 : 0); // drop the trailing NUL
-        return pfn;
+        // Agentmaster (perf): a process's package family name is immutable for its lifetime, so the
+        // two GetCurrentPackageFamilyName syscalls run ONCE per module and every later call is a
+        // string copy. IsDevPackage / IsDevOrDebugPackage sit on hot paths — once per Triage-Board
+        // card per rebuild (the ⚙ queue badge gate), per launch-model submenu, per settings seed —
+        // and used to pay the syscall pair each time.
+        static const std::wstring cached = []() -> std::wstring {
+            UINT32 len = 0;
+            if (::GetCurrentPackageFamilyName(&len, nullptr) != ERROR_INSUFFICIENT_BUFFER || len <= 1)
+            {
+                return {};
+            }
+            std::wstring pfn(len, L'\0');
+            if (::GetCurrentPackageFamilyName(&len, pfn.data()) != ERROR_SUCCESS)
+            {
+                return {};
+            }
+            pfn.resize(len > 0 ? len - 1 : 0); // drop the trailing NUL
+            return pfn;
+        }();
+        return cached;
     }
 
     // Forward declaration — the cached profile resolver is defined further down (it depends on the

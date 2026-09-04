@@ -565,10 +565,13 @@ namespace winrt::TerminalApp::implementation
                     if (nowTick - self->_agentToolTipWheelLogTick > 400)
                     {
                         self->_agentToolTipWheelLogTick = nowTick;
+                        // The trailing newline is what lets AppendStateLog stamp + frame the NEXT record —
+                        // without it every later line of ANY tag was glued onto this one (the hooks.log
+                        // "[tooltip-wheel] item: ...[tooltip-wheel] row: ...[notify] ..." run-on lines).
                         ::Agentmaster::AppendStateLog(L"hooks.log",
                                                       std::wstring{ L"[tooltip-wheel] item: cb=" } + (self->_agentToolTipWheelCb ? L"1" : L"0") +
                                                           L" tip=" + (self->_agentToolTip ? L"1" : L"0") +
-                                                          L" open=" + (open ? L"1" : L"0"));
+                                                          L" open=" + (open ? L"1" : L"0") + L"\n");
                     }
                     if (!self->_agentToolTipWheelCb || !open)
                     {

@@ -66,6 +66,7 @@ int wmain()
     TestWire();
     TestRegistry();
     TestRegistryFanout();
+    TestRegistrySnapshotLive();
     TestForkSourceIdEcho();
     TestTypedCapture();
     TestQueueHistoryTrim();

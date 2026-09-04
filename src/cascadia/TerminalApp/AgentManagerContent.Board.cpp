@@ -395,6 +395,7 @@ namespace winrt::TerminalApp::implementation
             if (auto t = TimingText(s.convCreatedUnixMs, last))
             {
                 stack.Children().Append(t);
+                _cardTimingBinds.push_back({ s.id, t }); // the 30s tick rewrites this text in place (perf — no rebuild)
             }
         }
 
@@ -412,7 +413,7 @@ namespace winrt::TerminalApp::implementation
             auto modelCtxRow = StackPanel{};
             modelCtxRow.Orientation(Orientation::Horizontal);
             modelCtxRow.Spacing(8);
-            if (const std::wstring shortModel = ::Agentmaster::ShortModelName(::Agentmaster::SessionDisplayModel(s), ::Agentmaster::ParseModelFamilies(_appSettings.modelFamilies)); !shortModel.empty())
+            if (const std::wstring shortModel = ::Agentmaster::ShortModelName(::Agentmaster::SessionDisplayModel(s), _ModelFamilies()); !shortModel.empty()) // parsed once per settings string, not per card (perf)
             {
                 auto modelText = Text(winrt::hstring{ shortModel }, 10, false, 0.45);
                 std::wstring mtip = L"What this session's last reply actually ran on, read from its transcript \x2014 so a mid-session /model switch shows up here on the next reply, not before.";
@@ -492,7 +493,9 @@ namespace winrt::TerminalApp::implementation
             // never shows it.
             {
                 const uint32_t cacheMin = _appSettings.serverCacheMinutes ? _appSettings.serverCacheMinutes : 5;
-                if (::Agentmaster::ServerCacheStillWarm(s, cacheMin, NowMs()))
+                const bool warmNow = ::Agentmaster::ServerCacheStillWarm(s, cacheMin, NowMs());
+                _cardWarmShown[s.id] = warmNow; // the 30s tick compares against this to decide whether a rebuild is due (perf)
+                if (warmNow)
                 {
                     auto cacheGlyph = Text(L"\x26A1", 11, false, 0.95); // ⚡ warm cache
                     cacheGlyph.Foreground(Fill(0xFF, 0xFF, 0xC1, 0x07)); // amber
@@ -541,7 +544,7 @@ namespace winrt::TerminalApp::implementation
             dotsBtn.OpacityTransition(st); // genuine fade on any Opacity change
         }
         AgentSetTitledTip(dotsBtn, L"More", L"This session's actions \x2014 jump to its tab, rename, tag, fork, restart, close, copy its details, or start a new session in its folder. Exactly what right-clicking the card gives you.", kCardTipDelay);
-        dotsBtn.Flyout(_MakeSessionMenu(s.id, _WorkDirOf(s), dotsBtn)); // a click opens the session menu (the button anchors its Tags panel); Open-New-Here targets the effective work dir
+        dotsBtn.Flyout(_MakeLazySessionMenu(s.id, _WorkDirOf(s), dotsBtn)); // a click opens the session menu (built at OPEN time — perf; the button anchors its Tags panel); Open-New-Here targets the effective work dir
         const auto dotsWeak = winrt::make_weak(dotsBtn);
 
         // Agentmaster: the body carries the inset the card used to own (card Padding is now 0 so
@@ -744,7 +747,7 @@ namespace winrt::TerminalApp::implementation
         // Right-click (or context key / long-press): the SAME menu as the Explorer-Tree session
         // row — Rename… / Archive… / Open New Session Here — one card/row, one action set
         // (Linked Lenses). The menu acts on the captured id/cwd, never "the selected session".
-        card.ContextFlyout(_MakeSessionMenu(id, _WorkDirOf(s), card)); // the card anchors its Tags panel; Open-New-Here targets the effective work dir
+        card.ContextFlyout(_MakeLazySessionMenu(id, _WorkDirOf(s), card)); // built at OPEN time (perf); the card anchors its Tags panel; Open-New-Here targets the effective work dir
         // Agentmaster: tag + register the card so _Refresh can RESTORE keyboard focus onto it after
         // a rebuild (a title/state change recreates every card). "b:" marks the board lens, so the
         // focused element's id + lens are read off its Tag alone — no visual-tree ancestry walk.
@@ -1842,7 +1845,7 @@ namespace winrt::TerminalApp::implementation
             dotsBtn.OpacityTransition(st);
         }
         AgentSetTitledTip(dotsBtn, L"More", L"What you can do with a session you don't own \x2014 adopt its conversation into a tab here, start a new session in its folder, or bring its window to the front. Exactly what right-clicking the card gives you.", kCardTipDelay);
-        dotsBtn.Flyout(_MakeExternalTreeMenu(ex)); // a click opens the external menu
+        dotsBtn.Flyout(_MakeLazyExternalMenu(ex)); // a click opens the external menu (built at OPEN time — perf)
         const auto dotsWeak = winrt::make_weak(dotsBtn);
 
         auto grid = Grid{};
@@ -1858,7 +1861,7 @@ namespace winrt::TerminalApp::implementation
         card.Background(Fill(selected ? 0x40 : 0x18, 0x80, 0x80, 0x80));
         card.BorderBrush(Fill(selected ? 0xFF : 0x60, 0x9E, 0x9E, 0x9E)); // gray — external / observe-only
         card.BorderThickness(selected ? Thickness{ 2, 2, 2, 2 } : Thickness{ 1, 1, 1, 1 });
-        card.ContextFlyout(_MakeExternalTreeMenu(ex));
+        card.ContextFlyout(_MakeLazyExternalMenu(ex)); // built at OPEN time (perf)
         const auto exId = ex.sessionId;
         const auto exCwd = ex.cwd;
         const auto exTitle = title;

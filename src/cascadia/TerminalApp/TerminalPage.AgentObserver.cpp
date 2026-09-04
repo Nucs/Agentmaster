@@ -2582,7 +2582,7 @@ namespace winrt::TerminalApp::implementation
                                       L"[tooltip-wheel] " + ::Agentmaster::ShortId(sessionId) + L" src=" + (fromTabItem ? L"item" : L"row") +
                                           L" delta=" + std::to_wstring(wheelDelta) +
                                           L" off=" + std::to_wstring(static_cast<int>(before)) + L"->" + std::to_wstring(static_cast<int>(it->second.offset)) +
-                                          L" max=" + std::to_wstring(static_cast<int>(maxOff)));
+                                          L" max=" + std::to_wstring(static_cast<int>(maxOff)) + L"\n"); // newline-terminated (see the item/row traces)
         if (maxOff <= 0.0)
         {
             return false; // the whole body already fits — don't steal the wheel from the strip
@@ -2654,7 +2654,7 @@ namespace winrt::TerminalApp::implementation
                     if (const auto nowTick = ::GetTickCount64(); !found && nowTick - page->_tooltipWheelLogTick > 400)
                     {
                         page->_tooltipWheelLogTick = nowTick;
-                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[tooltip-wheel] row: no open card");
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[tooltip-wheel] row: no open card\n"); // newline-terminated: keeps the next record on its own stamped line
                     }
                 }
                 catch (...)
@@ -8905,7 +8905,7 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        const auto sessions = _sessionRegistry->Snapshot();
+        const auto sessions = _sessionRegistry->SnapshotLive(); // perf: this ~2.5s tick only ever looks at live + tabToken'd sessions — no need to deep-copy 800+ archived records per tick per window
         size_t attempts = 0;
         for (const auto& s : sessions)
         {

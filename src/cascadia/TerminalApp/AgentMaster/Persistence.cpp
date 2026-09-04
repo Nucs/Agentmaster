@@ -2376,14 +2376,83 @@ namespace Agentmaster
         return out;
     }
 
+    namespace
+    {
+        // Agentmaster (perf — the per-card disk read): dir-colors.json used to be READ + PARSED from
+        // disk on EVERY GetDirColor / AssignDirAutoColor / SetDirColor call — and GetDirColor runs once
+        // per Triage-Board card AND once per Explorer-tree row on EVERY Manager rebuild
+        // (ResolveSessionColorHex), plus per tab paint, per Sessions-page chip, per pending-dots contrast
+        // pick. At fleet scale that was dozens of open+read+parse round-trips per rebuild on the UI
+        // thread (NtCreateFile / ZwQueryFullAttributesFile leaves in the 2026-09-04 release profile).
+        // The file is now cached in memory and validated by its (size, mtime) stamp: a call costs ONE
+        // GetFileAttributesEx while the file is unchanged, and re-reads only after a write — ours
+        // (SaveDirColors invalidates below, so the very next read sees the new map) or another
+        // instance's (its stamp changes). An ABSENT file caches as an empty map with a zero stamp, so a
+        // fresh profile never pays the read either. Guarded by its own mutex: the callers hold
+        // g_dirColorMtx around the read-modify-write sequences (that lock stays the authority over the
+        // map's CONTENT); this one only protects the cache slots, and is never held while taking the
+        // other, so there is no ordering hazard.
+        struct DirColorsCache
+        {
+            std::vector<std::pair<std::wstring, std::wstring>> colors;
+            uint64_t size{ 0 };
+            int64_t mtime{ 0 }; // FILETIME ticks of the last write we loaded; 0 == absent
+            bool valid{ false };
+        };
+        std::mutex g_dirColorsCacheMtx;
+        DirColorsCache g_dirColorsCache;
+
+        // (size, mtime) of the file, or {0, 0} when it does not exist / cannot be stat'ed (which the
+        // cache treats as "empty map" — exactly what a failed ReadAllUtf8 produced before).
+        std::pair<uint64_t, int64_t> DirColorsFileStamp(const std::wstring& path)
+        {
+#ifdef _WIN32
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+            {
+                return { 0, 0 };
+            }
+            const uint64_t size = (static_cast<uint64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+            const int64_t mtime = (static_cast<int64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) | fad.ftLastWriteTime.dwLowDateTime;
+            return { size, mtime };
+#else
+            return { 0, 0 };
+#endif
+        }
+    }
+
     void SaveDirColors(const std::vector<std::pair<std::wstring, std::wstring>>& colors)
     {
         WriteAllUtf8(AgentmasterStateDir() + L"\\dir-colors.json", SerializeDirColors(colors));
+        // Invalidate rather than store: the next LoadDirColors re-stats + re-reads, so the cache can
+        // never diverge from what actually landed on disk (a failed/partial write included).
+        std::lock_guard cacheGuard{ g_dirColorsCacheMtx };
+        g_dirColorsCache.valid = false;
     }
 
     std::vector<std::pair<std::wstring, std::wstring>> LoadDirColors()
     {
-        return DeserializeDirColors(ReadAllUtf8(AgentmasterStateDir() + L"\\dir-colors.json"));
+        const std::wstring path = AgentmasterStateDir() + L"\\dir-colors.json";
+        const auto [size, mtime] = DirColorsFileStamp(path);
+        {
+            std::lock_guard cacheGuard{ g_dirColorsCacheMtx };
+            if (g_dirColorsCache.valid && g_dirColorsCache.size == size && g_dirColorsCache.mtime == mtime)
+            {
+                return g_dirColorsCache.colors; // unchanged on disk since the last read (or still absent)
+            }
+        }
+        // Stamp changed (or first read): read + parse, then publish under the SAME stamp we observed
+        // BEFORE the read — a write landing between the stat and the read moves the stamp again, so
+        // the next call re-reads (never a stale map published under a fresh stamp).
+        auto colors = (size == 0 && mtime == 0) ? std::vector<std::pair<std::wstring, std::wstring>>{} : DeserializeDirColors(ReadAllUtf8(path));
+        {
+            std::lock_guard cacheGuard{ g_dirColorsCacheMtx };
+            g_dirColorsCache.colors = colors;
+            g_dirColorsCache.size = size;
+            g_dirColorsCache.mtime = mtime;
+            g_dirColorsCache.valid = true;
+        }
+        return colors;
     }
 
     std::optional<std::wstring> GetDirColor(const std::wstring& dir)

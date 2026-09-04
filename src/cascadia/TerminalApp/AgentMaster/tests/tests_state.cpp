@@ -1340,3 +1340,84 @@ void TestSupersedeStaleTabSiblings()
     }
 }
 
+// Agentmaster (perf): SnapshotLive is the Manager lens / per-tick reconcile / dormant-count /
+// keep-awake read — the LIVE subset in insertion order, byte-identical to filtering Snapshot() on
+// s.live. The registry holds every archived record too (800+ in a real profile, each with its queue
+// history), so the full snapshot's deep copy was pure waste on those paths.
+void TestRegistrySnapshotLive()
+{
+    std::wprintf(L"SessionRegistry::SnapshotLive:\n");
+    SessionRegistry reg;
+    {
+        SessionInfo a;
+        a.id = L"arch-1";
+        a.workingDir = L"C:\\a";
+        a.live = false;
+        QueuedPrompt p;
+        p.id = L"p1";
+        p.text = L"history";
+        p.status = PromptStatus::Sent;
+        a.queue.push_back(p);
+        reg.Upsert(a);
+    }
+    {
+        SessionInfo b;
+        b.id = L"live-1";
+        b.workingDir = L"C:\\b";
+        b.live = true;
+        b.started = true;
+        reg.Upsert(b);
+    }
+    {
+        SessionInfo c;
+        c.id = L"arch-2";
+        c.workingDir = L"C:\\c";
+        c.live = false;
+        reg.Upsert(c);
+    }
+    {
+        SessionInfo d;
+        d.id = L"live-2";
+        d.workingDir = L"C:\\d";
+        d.live = true;
+        QueuedPrompt p;
+        p.id = L"p2";
+        p.text = L"queued";
+        d.queue.push_back(p);
+        reg.Upsert(d);
+    }
+
+    const auto all = reg.Snapshot();
+    const auto live = reg.SnapshotLive();
+    CHECK(all.size() == 4, "Snapshot returns every record (archived included)");
+    CHECK(live.size() == 2, "SnapshotLive returns only the live records");
+    CHECK(live.size() == 2 && live[0].id == L"live-1" && live[1].id == L"live-2", "SnapshotLive keeps insertion order");
+    CHECK(live.size() == 2 && live[1].queue.size() == 1 && live[1].queue[0].text == L"queued", "SnapshotLive copies the live record's queue verbatim");
+    {
+        // equivalence with a filtered full snapshot
+        std::vector<std::wstring> filtered;
+        for (const auto& s : all)
+        {
+            if (s.live)
+            {
+                filtered.push_back(s.id);
+            }
+        }
+        bool same = filtered.size() == live.size();
+        for (size_t i = 0; same && i < live.size(); ++i)
+        {
+            same = (filtered[i] == live[i].id);
+        }
+        CHECK(same, "SnapshotLive == Snapshot filtered on live, same order");
+    }
+
+    // a flip is reflected by the next call (no caching inside the registry)
+    reg.Update(L"arch-2", [](SessionInfo& s) { s.live = true; });
+    CHECK(reg.SnapshotLive().size() == 3, "a record flipped live shows up in SnapshotLive");
+    reg.Update(L"live-1", [](SessionInfo& s) { s.live = false; });
+    const auto after = reg.SnapshotLive();
+    CHECK(after.size() == 2 && after[0].id == L"arch-2" && after[1].id == L"live-2", "a record archived drops out, order preserved");
+    CHECK(reg.Snapshot().size() == 4, "Snapshot still returns every record");
+    CHECK(SessionRegistry{}.SnapshotLive().empty(), "empty registry -> empty live snapshot");
+}
+

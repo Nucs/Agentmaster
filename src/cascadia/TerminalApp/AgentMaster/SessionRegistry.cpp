@@ -200,6 +200,21 @@ namespace Agentmaster
         return out;
     }
 
+    std::vector<SessionInfo> SessionRegistry::SnapshotLive() const
+    {
+        std::lock_guard guard{ _mtx };
+        std::vector<SessionInfo> out;
+        for (const auto& id : _order)
+        {
+            const auto it = _sessions.find(id);
+            if (it != _sessions.end() && it->second.live)
+            {
+                out.push_back(it->second);
+            }
+        }
+        return out;
+    }
+
     size_t SessionRegistry::Count() const
     {
         std::lock_guard guard{ _mtx };

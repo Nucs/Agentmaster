@@ -129,6 +129,7 @@ void TestOrderedStateMachine();
 void TestWire();
 void TestRegistry();
 void TestRegistryFanout();
+void TestRegistrySnapshotLive();
 void TestForkSourceIdEcho();
 void TestTypedCapture();
 void TestQueueHistoryTrim(); // bounded queue history: TrimQueueHistory (pure) + the registry append-seam cap

@@ -22,6 +22,7 @@
 #include "AgentManagerContent.h"
 
 #include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
+#include "AgentCatchLog.h" // AgentLogCaughtException — the lazy menus' Opening handlers (Rule #18: never a bare catch)
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentModelMenu.h" // AgentFillModelPickItems / AgentModelEditHint — the shared "Open New Session Here ▸ <model>" picker (launch-model picker)
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
@@ -94,6 +95,7 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _treeHost.Children().Clear();
+        _rowTimingBinds.clear(); // re-seeded by the rows below (the 30s tick rewrites their timing text in place — perf)
         _treeRowsById.clear(); // refilled below (focus-restore map; see _Refresh). Cleared ONLY on
                                // the full-rebuild path — the rename early-return above keeps the tree
                                // (and so its existing map) intact.
@@ -472,6 +474,7 @@ namespace winrt::TerminalApp::implementation
                     if (auto t = TimingText(s.convCreatedUnixMs, last))
                     {
                         row.Children().Append(t);
+                        _rowTimingBinds.push_back({ id, t }); // the 30s tick rewrites this text in place (perf — no rebuild)
                     }
                 }
 
@@ -558,7 +561,7 @@ namespace winrt::TerminalApp::implementation
                     }
                 });
                 // Right-click (or context key / long-press) menu: Rename / Archive / Open New Session Here.
-                rowBtn.ContextFlyout(_MakeSessionMenu(id, _WorkDirOf(s), rowBtn)); // the row anchors its Tags panel; Open-New-Here targets the EFFECTIVE work dir (the group this row sits under)
+                rowBtn.ContextFlyout(_MakeLazySessionMenu(id, _WorkDirOf(s), rowBtn)); // built at OPEN time (perf); the row anchors its Tags panel; Open-New-Here targets the EFFECTIVE work dir (the group this row sits under)
                 AgentSetTitledTip(rowBtn, winrt::hstring{ s.title.empty() ? std::wstring{ L"(untitled)" } : s.title }, L"Click selects this session (the pane on the right follows it), double-click or Enter jumps to its live tab. F2 renames it, Del closes it, Shift+Click starts it if it hasn't started yet, and right-click has the rest.");
                 // Agentmaster: tag + register the row so _Refresh can RESTORE keyboard focus onto it
                 // after a rebuild (see _MakeCard for the board-lens twin). "t:" marks the tree lens.
@@ -893,7 +896,7 @@ namespace winrt::TerminalApp::implementation
                 // Left-click SELECTS this external -> the Auto Testing shows its conversation prompts
                 // read-only (observe-only; we host no ConPTY so we can't drive it). Right-click -> the
                 // Adopt / Open New Session Here / Bring Window To Front menu.
-                rowBtn.ContextFlyout(_MakeExternalTreeMenu(ex));
+                rowBtn.ContextFlyout(_MakeLazyExternalMenu(ex)); // built at OPEN time (perf)
                 const auto exId = ex.sessionId;
                 const auto exCwd = ex.cwd;
                 const auto exTitle = title;
@@ -916,9 +919,9 @@ namespace winrt::TerminalApp::implementation
     // defer one tick like _MakeSessionMenu so the closing flyout's focus restore doesn't race the
     // spawn / tree rebuild / foreground hand-off. Acts on the row's (pid, cwd) — an external/observe-
     // only row has no registry session id.
-    MenuFlyout AgentManagerContent::_MakeExternalTreeMenu(const ::Agentmaster::ExternalClaudeRow& ex)
+    // Agentmaster (perf — LAZY menus): the filler half of _MakeExternalTreeMenu (see _PopulateSessionMenu).
+    void AgentManagerContent::_PopulateExternalTreeMenu(MenuFlyout& menu, const ::Agentmaster::ExternalClaudeRow& ex)
     {
-        MenuFlyout menu;
         auto disp = _dispatcher;
         auto weak = get_weak();
         const uint32_t pid = ex.pid;
@@ -1114,7 +1117,12 @@ namespace winrt::TerminalApp::implementation
             }
         });
         menu.Items().Append(bringFront);
+    }
 
+    MenuFlyout AgentManagerContent::_MakeExternalTreeMenu(const ::Agentmaster::ExternalClaudeRow& ex)
+    {
+        MenuFlyout menu;
+        _PopulateExternalTreeMenu(menu, ex);
         return menu;
     }
 
@@ -1332,9 +1340,13 @@ namespace winrt::TerminalApp::implementation
 
     // ---- Explorer-tree session actions (right-click menu, rename, delete) ----
 
-    MenuFlyout AgentManagerContent::_MakeSessionMenu(const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor)
+    // Agentmaster (perf — LAZY menus): the eager builder is now the FILLER — it appends the session's
+    // items into a caller-supplied menu. _MakeSessionMenu (below) still returns a fully built menu for
+    // any caller that wants one up front; _MakeLazySessionMenu returns an EMPTY menu whose Opening
+    // handler runs this, so a card/row pays for its menus only when one is actually opened — and the
+    // "read at flyout-creation time" note below then means "read at OPEN time", which is fresher still.
+    void AgentManagerContent::_PopulateSessionMenu(MenuFlyout& menu, const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor)
     {
-        MenuFlyout menu;
         auto disp = _dispatcher;
         auto weak = get_weak();
 
@@ -1857,7 +1869,77 @@ namespace winrt::TerminalApp::implementation
         }
 
         menu.Items().Append(closeSub);
+    }
 
+    MenuFlyout AgentManagerContent::_MakeSessionMenu(const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor)
+    {
+        MenuFlyout menu;
+        _PopulateSessionMenu(menu, id, cwd, anchor);
+        return menu;
+    }
+
+    // Agentmaster (perf — LAZY menus): an EMPTY MenuFlyout that fills itself on Opening (the WT tab
+    // context menu's fill-at-flyout-open idiom). A card carried two of these and a row one, each
+    // ~13 items + 4 submenus + 2 launch-model pick lists + ~20 tooltips + a registry Get, built for
+    // EVERY session on EVERY rebuild and almost never opened — ~50 full menus per refresh at fleet scale
+    // (_MakeSessionMenu was ~12-15% of the UI thread's busy samples in the 2026-09-04 release profile).
+    // Now the rebuild costs one empty flyout + one handler per site, and an opened menu reflects the
+    // session's state AT OPEN time (previously frozen at rebuild time). Items are rebuilt on every
+    // open (Items().Clear() first) so a menu can never show a stale "Move to Idle/Done" for a session
+    // that has since moved on. The anchor (Tags-panel placement) is held weakly: a rebuilt card's old
+    // menu is garbage by then, and a live one resolves its live anchor.
+    MenuFlyout AgentManagerContent::_MakeLazySessionMenu(const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor)
+    {
+        MenuFlyout menu;
+        auto weak = get_weak();
+        winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement> anchorWeak;
+        if (anchor)
+        {
+            anchorWeak = winrt::make_weak(anchor);
+        }
+        menu.Opening([weak, id, cwd, anchorWeak](const IInspectable& sender, const IInspectable&) {
+            const auto self = weak.get();
+            auto m = sender.try_as<MenuFlyout>();
+            if (!self || !m)
+            {
+                return;
+            }
+            try
+            {
+                m.Items().Clear();
+                const winrt::Windows::UI::Xaml::FrameworkElement anchorNow = anchorWeak ? anchorWeak.get() : nullptr;
+                self->_PopulateSessionMenu(m, id, cwd, anchorNow);
+            }
+            catch (...)
+            {
+                AgentLogCaughtException(L"_MakeLazySessionMenu Opening"); // an empty menu rather than a dead card
+            }
+        });
+        return menu;
+    }
+
+    MenuFlyout AgentManagerContent::_MakeLazyExternalMenu(const ::Agentmaster::ExternalClaudeRow& ex)
+    {
+        MenuFlyout menu;
+        auto weak = get_weak();
+        const ::Agentmaster::ExternalClaudeRow row = ex; // the row's facts as of this rebuild (what the eager builder captured too)
+        menu.Opening([weak, row](const IInspectable& sender, const IInspectable&) {
+            const auto self = weak.get();
+            auto m = sender.try_as<MenuFlyout>();
+            if (!self || !m)
+            {
+                return;
+            }
+            try
+            {
+                m.Items().Clear();
+                self->_PopulateExternalTreeMenu(m, row);
+            }
+            catch (...)
+            {
+                AgentLogCaughtException(L"_MakeLazyExternalMenu Opening");
+            }
+        });
         return menu;
     }
 
