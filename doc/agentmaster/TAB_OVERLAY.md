@@ -368,7 +368,14 @@ bottom / corner grips; size persisted GLOBALLY as pane fractions, or Shift-drag 
 ephemeral size), with a **wrap-line toggle** (↵: literal `\n` vs real newlines) and a **truncate
 toggle** (…: cap long messages, default ON) at the right of the times bar — both GLOBAL + persisted.
 Section separators fill border-to-border (a `StackPanel` of monospace `TextBlock`s interleaved with
-full-width `Border` rules driven by a `\x1F` sentinel). Codex renders a reduced box
+full-width `Border` rules driven by a `\x1F` sentinel). The `* item` LISTS (Files Created / Edited /
+Read, Skills Loaded — any section whose first line is a bare `<Label>:` header, `IsSummaryListHeader`)
+render **NoWrap + clipped** at the panel edge (`TextTrimming::Clip`, no ellipsis) instead of wrapping: a
+long file name in a narrow panel used to break into `*` over `myfile.txt`, doubling the list's height;
+now each item keeps its single line and runs off the right edge (widen the panel to see more; the text
+is whole for selection / the copied Summary). Every other line — headers, Tasks, Recap, the numbered
+messages and their wrap-ON continuations (even `* ` markdown bullets inside a prompt) — wraps as
+before. Codex renders a reduced box
 (`RenderCodexSummary`: model/effort + prompts).
 
 ### 13f. Tab-strip status dot (companion, not the overlay)

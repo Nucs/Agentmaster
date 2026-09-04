@@ -91,7 +91,9 @@ namespace winrt::TerminalApp::implementation
         // The body is a vertical StackPanel (not one TextBlock) so a section separator can be a
         // full-width Border rule that fills the panel border-to-border + re-fills on resize — a fixed
         // run of ─ chars can't do that in a wrapping block. _SetSummaryContent fills it: monospace,
-        // wrapped, selectable TextBlocks for text runs, interleaved with the Border rules.
+        // wrapped, selectable TextBlocks for text runs — except the "* item" lists (Files Created /
+        // Edited / Read, Skills Loaded), which are NoWrap + clipped at the panel edge — interleaved
+        // with the Border rules.
         _summaryStack = StackPanel{};
         _summaryStack.Orientation(Orientation::Vertical);
 
@@ -1015,6 +1017,36 @@ namespace winrt::TerminalApp::implementation
         return n >= 1 ? n - 1 : -1; // 1-based render -> 0-based prompt index
     }
 
+    // Agentmaster: is this line a bare "<Label>:" LIST HEADER — the shape RenderSummaryBox gives every
+    // "* item" list section ("Skills Loaded:", "Files Created:", "Files Edited:", "Files Read:", and any
+    // list section added later)? ASCII letters + spaces, then a trailing ':' and NOTHING after it. What
+    // it deliberately excludes: a numbered message that happens to end with ':' (" 1. do this:" — a
+    // leading space + digits, so a wrap-ON prompt whose continuation lines are markdown "* " bullets
+    // keeps wrapping), "Recap: <text>" / "Tasks:  3 done …" / "Parent: <id>" (text after the colon), and
+    // a "Previous session N · …" header. The section a list header opens renders its "* " items
+    // single-line + clipped instead of wrapped (see _SetSummaryContent).
+    static bool IsSummaryListHeader(const std::wstring& line)
+    {
+        if (line.size() < 2 || line.back() != L':')
+        {
+            return false;
+        }
+        const wchar_t first = line.front();
+        if (!((first >= L'A' && first <= L'Z') || (first >= L'a' && first <= L'z')))
+        {
+            return false;
+        }
+        for (size_t k = 0; k + 1 < line.size(); ++k)
+        {
+            const wchar_t c = line[k];
+            if (!((c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') || c == L' '))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     void AgentTabOverlay::_SetSummaryContent(const std::wstring& text)
     {
         if (!_summaryStack)
@@ -1025,6 +1057,17 @@ namespace winrt::TerminalApp::implementation
         _jumpButtons.clear(); // rebuilt below; stale Button refs from the prior render are dropped
         _summaryMsgRows.clear(); // rebuilt below; the highlight (_highlightedMsgIndex) is re-applied after
         std::wstring seg; // accumulated contiguous text lines
+        // Agentmaster: a run has ONE line mode. false = the classic WRAPPING run (headers, Tasks, Recap,
+        // message continuations). true = a LIST run — the "* item" lines of a Files Created / Edited /
+        // Read / Skills Loaded section — rendered NoWrap + CLIPPED at the panel edge: a long file name in
+        // a narrow panel used to wrap into "*" over "myfile.txt" (the bullet alone on its line), so a
+        // list read as twice its length and stopped scanning as one; now each item stays on its own
+        // single line and simply runs off the right edge (widen the panel via its grip to see more; the
+        // clipped text is still whole for selection / copy / the copyable Summary). The panel's
+        // ScrollViewer has horizontal scrolling disabled, so a NoWrap block is measured at the viewport
+        // width and TextTrimming::Clip cuts each line at a character boundary with no ellipsis (the
+        // "overflow hidden" look). Everything that is NOT a list item keeps wrapping exactly as before.
+        bool segNoWrap = false;
         const auto flushSeg = [&]() {
             if (seg.empty())
             {
@@ -1033,13 +1076,37 @@ namespace winrt::TerminalApp::implementation
             TextBlock tb{};
             tb.FontFamily(FontFamily{ L"Cascadia Mono" });
             tb.FontSize(11);
-            tb.TextWrapping(TextWrapping::Wrap);
+            if (segNoWrap)
+            {
+                tb.TextWrapping(TextWrapping::NoWrap);
+                tb.TextTrimming(TextTrimming::Clip);
+            }
+            else
+            {
+                tb.TextWrapping(TextWrapping::Wrap);
+            }
             tb.IsTextSelectionEnabled(true);
             tb.Foreground(Fill(0xFF, 0xDC, 0xDC, 0xDC));
             tb.Text(winrt::hstring{ seg });
             _WireSummaryContextMenu(tb, -1); // right-click a body line => the shared "Copy Summary" menu (a selectable TextBlock shadows the parent's); not a numbered message, so no "Copy Prompt"
             _summaryStack.Children().Append(tb);
             seg.clear();
+            segNoWrap = false;
+        };
+        // Append a line to the run being accumulated, closing the run first when the line's mode differs
+        // from the run's (a list header — wrapping — is followed by its "* " items — NoWrap — so the two
+        // never share one block; a run holds ONE mode).
+        const auto appendLine = [&](const std::wstring& lineStr, bool noWrap) {
+            if (!seg.empty() && segNoWrap != noWrap)
+            {
+                flushSeg();
+            }
+            if (!seg.empty())
+            {
+                seg += L"\n";
+            }
+            seg += lineStr;
+            segNoWrap = noWrap;
         };
         // Agentmaster (SUMMARY_JUMP.md): a numbered message renders as a 2-column Grid — a JUMP button
         // (col 0, auto) + the wrapping message text (col 1, *) — so the text still wraps within the panel
@@ -1132,6 +1199,11 @@ namespace winrt::TerminalApp::implementation
         // never flip it, and a prompt whose text happens to start with "Previous session " is never a
         // section's first line (the current messages' first line is always " 1. ...").
         bool sectionIsPrevious = false;
+        // Agentmaster: the section's first line is a bare "<Label>:" LIST header (IsSummaryListHeader —
+        // Files Created / Edited / Read, Skills Loaded, …): its "* " item lines render as a NoWrap +
+        // clipped run instead of wrapping. Decided by the section's FIRST line like sectionIsPrevious, so
+        // a "* " bullet inside a wrapped message or the Recap can never be mistaken for a list item.
+        bool sectionIsList = false;
         bool sectionKindPending = true; // the box's first section starts at the top, with no leading separator
         while (i <= text.size())
         {
@@ -1142,8 +1214,10 @@ namespace winrt::TerminalApp::implementation
             if (!isSep && sectionKindPending)
             {
                 // A section's FIRST line names its kind: a "Previous session N · <label>" header opens a
-                // previous segment (its numbered prompts index ITS list); anything else is a normal section.
+                // previous segment (its numbered prompts index ITS list); a bare "<Label>:" header opens a
+                // "* item" list section; anything else is a normal section.
                 sectionIsPrevious = (lineStr.rfind(L"Previous session ", 0) == 0);
+                sectionIsList = IsSummaryListHeader(lineStr);
                 sectionKindPending = false;
             }
             if (isSep)
@@ -1156,6 +1230,7 @@ namespace winrt::TerminalApp::implementation
                 rule.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4));
                 _summaryStack.Children().Append(rule);
                 sectionIsPrevious = false; // a new section opens below this rule; the next line names its kind
+                sectionIsList = false;
                 sectionKindPending = true;
             }
             else if (const int mi = ParseSummaryMsgIndex(lineStr); _onJumpToPrompt && !sectionIsPrevious && mi == expectedMsg && mi < static_cast<int>(_summaryUserMsgs.size()))
@@ -1166,11 +1241,9 @@ namespace winrt::TerminalApp::implementation
             }
             else
             {
-                if (!seg.empty())
-                {
-                    seg += L"\n";
-                }
-                seg += lineStr;
+                // A "* " item of a list section joins (or opens) a NoWrap run; every other line — the list
+                // header itself included — joins the classic wrapping run.
+                appendLine(lineStr, sectionIsList && lineStr.rfind(L"* ", 0) == 0);
             }
             if (nl == std::wstring::npos)
             {

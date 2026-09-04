@@ -233,7 +233,7 @@ namespace winrt::TerminalApp::implementation
         void _RefreshQueueButtonEnabled(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: enable the MAIL button only while a draft actually exists (mirrors the "3 dots" / pendingInput), so a prominent toolbar button never silently no-ops on an empty box (the "dead button" trap)
         void _CopyField(int which); // row 3 copy menu: 0=Session Id 1=Copy Path 2=Copy Branch 3=Claude CLI 4=Codex CLI 5=Transcript 6=Summary (full textual box)
         void _BuildSummaryPanel(); // build the summary panel element (the 2nd slot), collapsed
-        void _SetSummaryContent(const std::wstring& text); // fill the panel StackPanel: text runs -> TextBlocks, separator sentinels -> full-width Border rules
+        void _SetSummaryContent(const std::wstring& text); // fill the panel StackPanel: text runs -> TextBlocks (wrapping; the "* item" file/skill lists NoWrap + clipped), separator sentinels -> full-width Border rules
         void _UpdateTimesLine(); // re-render the live "age / last user msg / last activity" ago line (DispatcherTimer-driven)
         void _ApplySummaryVisibility(); // show the 2nd pane only when enabled AND non-empty (content rows or a times line); else collapse it
         void _ApplySummarySize(bool forced = false); // re-apply the panel size from the size fractions + cached pane size: at rest MaxWidth/MaxHeight only (fit content); forced==true (mid grip-drag) ALSO pins explicit Width/Height so the panel grows PAST its own content up to the shared max, then snaps back on release
