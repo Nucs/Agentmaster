@@ -470,7 +470,17 @@ namespace winrt::TerminalApp::implementation
                 {
                     bt.Foreground(SolidColorBrush{ Colors::DodgerBlue() });
                 }
-                AgentSetTitledTip(bt, L"Auto Testing queue", L"Prompts already sent / total queued for this session. Blue means its Tests Autorunner is on, so the rest will go out on their own as turns complete; gray means they wait for you.", kCardTipDelay);
+                // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): a gray badge on a session whose
+                // autorunner parked ITSELF (the user pressed Esc) says so — and names the mode that
+                // comes back on their next message — instead of reading like a plain "waits for you".
+                std::wstring queueTip = L"Prompts already sent / total queued for this session. Blue means its Tests Autorunner is on, so the rest will go out on their own as turns complete; gray means they wait for you.";
+                if (::Agentmaster::InterruptHoldActive(s.autorunner))
+                {
+                    queueTip += std::wstring{ L" Right now the autorunner is parked by your interrupt (Esc) and resumes to " } +
+                                ::Agentmaster::AutorunnerModeLabel(s.autorunner.interruptHeldMode) +
+                                L" on your next message; setting the mode yourself cancels that.";
+                }
+                AgentSetTitledTip(bt, L"Auto Testing queue", winrt::hstring{ queueTip }, kCardTipDelay);
                 metaRow.Children().Append(bt);
             }
 

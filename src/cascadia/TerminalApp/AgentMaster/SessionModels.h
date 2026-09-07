@@ -954,7 +954,105 @@ namespace Agentmaster
         uint32_t maxAutoSends{ 100 }; // runaway backstop
         uint32_t autoSendsThisRun{ 0 };
         ApprovalPolicy approval{};
+        // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): the mode this session's Tests Autorunner
+        // was running in when the user INTERRUPTED a turn (Esc — the `[Request interrupted by user…]`
+        // transcript marker); Off == no hold. On the interrupt the registry PARKS the autorunner
+        // (mode -> Off, interruptHeldMode = the mode it had — TakeInterruptHold) so the turn-end the
+        // interrupt produces (recon-stop -> WaitingForInput -> the advance seam) can NEVER auto-send the
+        // next queued prompt into a session the user just stopped in order to talk to it; it RESUMES to
+        // interruptHeldMode on the user's NEXT MESSAGE (ResumeInterruptHold — a real prompt-carrying
+        // UserPromptSubmit or the transcript's user line, push or pull; the echo of a user Send-now
+        // counts, protocol noise like a teammate delivery does not). A mode the USER sets meanwhile
+        // (the Auto-Testing header toggle / the overlay cycle) CANCELS the pending resume (both fields
+        // cleared — the human's explicit choice wins), as does every engine pause backstop
+        // (stop-on-error / enter-retry give-up / lost-send / the merge verdict), so a backstop pause is
+        // never silently undone by the next message. interruptHeldUnixMs = the marker line's own
+        // transcript timestamp: the resume ANCHOR — only a message stamped AFTER it resumes (a late-
+        // forwarded UPS of the killed turn, or a replayed older transcript line, never does).
+        // TRANSIENT (NOT persisted — Persistence.cpp must not write them): a reopened session re-stamps
+        // the cog's default mode, which voids any hold, and the restore seam clears it explicitly.
+        AutorunnerMode interruptHeldMode{ AutorunnerMode::Off };
+        int64_t interruptHeldUnixMs{ 0 };
     };
+
+    // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): the PURE rules over AutorunnerState, shared by
+    // the registry seams (NoteInterrupt / the UserPromptSubmit record / NoteExternalPrompt), the pause
+    // backstops, the UI cues, and the tests — so no two consumers can disagree on what "held" means.
+    inline const wchar_t* AutorunnerModeLabel(AutorunnerMode m) noexcept
+    {
+        switch (m)
+        {
+        case AutorunnerMode::Full:
+            return L"Full";
+        case AutorunnerMode::SemiAuto:
+            return L"Semi";
+        case AutorunnerMode::Off:
+        default:
+            return L"Off";
+        }
+    }
+
+    // Is a hold pending — the autorunner parked Off by an interrupt, waiting on the user's next message?
+    // Keyed on mode == Off AND a remembered mode: a stale remembered mode under a re-stamped non-Off
+    // mode is inert by construction (a resume can only ever move Off -> the held mode).
+    inline bool InterruptHoldActive(const AutorunnerState& a) noexcept
+    {
+        return a.mode == AutorunnerMode::Off && a.interruptHeldMode != AutorunnerMode::Off;
+    }
+
+    // Cancel a pending resume (the user set the mode / a backstop paused). The mode itself is untouched.
+    inline void ClearInterruptHold(AutorunnerState& a) noexcept
+    {
+        a.interruptHeldMode = AutorunnerMode::Off;
+        a.interruptHeldUnixMs = 0;
+    }
+
+    // PARK: an interrupt on a Semi/Full autorunner -> Off, the mode remembered, the marker stamp kept as
+    // the resume anchor. Returns true iff a hold was TAKEN. An already-Off autorunner is untouched —
+    // the user's own Off (they drive manually) or an existing hold (a second Esc while held keeps the
+    // ORIGINAL mode + anchor; idempotent).
+    inline bool TakeInterruptHold(AutorunnerState& a, int64_t markerUnixMs) noexcept
+    {
+        if (a.mode == AutorunnerMode::Off)
+        {
+            return false;
+        }
+        a.interruptHeldMode = a.mode;
+        a.interruptHeldUnixMs = markerUnixMs;
+        a.mode = AutorunnerMode::Off;
+        return true;
+    }
+
+    // RESUME on the user's next message: restores the held mode and clears the hold. Returns the resumed
+    // mode (Off == nothing resumed: no hold, or the message PREDATES the marker — a late-forwarded
+    // UserPromptSubmit of the very turn the user killed / a replayed older transcript line must not
+    // release it). messageUnixMs == 0 trusts the caller (a push hook's ts is 0 only from an old forwarder).
+    inline AutorunnerMode ResumeInterruptHold(AutorunnerState& a, int64_t messageUnixMs) noexcept
+    {
+        if (!InterruptHoldActive(a))
+        {
+            return AutorunnerMode::Off;
+        }
+        if (messageUnixMs != 0 && a.interruptHeldUnixMs != 0 && messageUnixMs < a.interruptHeldUnixMs)
+        {
+            return AutorunnerMode::Off;
+        }
+        const AutorunnerMode resumed = a.interruptHeldMode;
+        a.mode = resumed;
+        ClearInterruptHold(a);
+        return resumed;
+    }
+
+    // The replay belt: the scanner sights the marker on every read that ends on it — including a
+    // restored/adopted session's one-shot HISTORY replay and a caught-up small first read — so only a
+    // marker whose own transcript timestamp is RECENT may park anything (kInterruptHoldFreshMs, well
+    // past the scanner's ~2.5s pass cadence + write lag, well short of any plausible replay age). An
+    // unstamped marker (0) cannot prove it is live and never holds. A small FUTURE skew is tolerated.
+    inline constexpr int64_t kInterruptHoldFreshMs = 60000;
+    inline bool InterruptMarkerIsFresh(int64_t markerUnixMs, int64_t nowUnixMs) noexcept
+    {
+        return markerUnixMs != 0 && (nowUnixMs - markerUnixMs) <= kInterruptHoldFreshMs;
+    }
 
     // Agentmaster (event ordering + turn identity): per-session turn accounting for the
     // hook-driven state machine. Each hook is an independent fire-and-forget forwarder process,

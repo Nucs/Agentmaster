@@ -173,6 +173,22 @@ namespace Agentmaster
         // the line's own time is the staleness filter, not our read time). Thread-safe.
         void NoteExternalPrompt(const std::wstring& id, const std::wstring& text, int64_t observedUnixMs = 0);
 
+        // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): the SessionScanner sighted the user's
+        // turn-abort marker (`[Request interrupted by user…]`, Esc) as the transcript's NEWEST user
+        // line. PARK this session's Tests Autorunner — mode -> Off, the prior mode remembered in
+        // AutorunnerState::interruptHeldMode (TakeInterruptHold) — so the turn-end the interrupt
+        // produces (recon-stop -> WaitingForInput -> the advance seam) can never auto-send the next
+        // queued prompt into a session the user just stopped to talk to; the user's next message
+        // (a prompt-carrying UserPromptSubmit / a NoteExternalPrompt line stamped after the marker)
+        // resumes it (ResumeInterruptHold). `markerUnixMs` = the marker line's own transcript
+        // timestamp — the resume anchor AND the replay belt: a marker older than
+        // kInterruptHoldFreshMs (a restored/adopted session's history replay) or unstamped never
+        // holds (InterruptMarkerIsFresh). Live sessions only. Idempotent: an already-Off autorunner
+        // (the user's own Off, or an existing hold) is untouched and nothing notifies. A TAKEN hold
+        // logs [interrupt-hold] (hooks.log + autorunner.log) and notifies (the header toggle / overlay
+        // / board repaint Off; the scheduler's OnObserved reads Off). Thread-safe.
+        void NoteInterrupt(const std::wstring& id, int64_t markerUnixMs);
+
         // Wiring. Multiple observers may register (e.g. a logger, the Triage Board UI, the
         // scheduler, every window's Manager lens); each is invoked on every change, outside the
         // lock. AddObserver returns a token; RemoveObserver detaches it (M9 window teardown).

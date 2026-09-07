@@ -156,7 +156,10 @@ namespace Agentmaster
         }
         if (s.autorunner.mode == AutorunnerMode::Off)
         {
-            plan.reason = L"autorunner off";
+            // DELIVERY.md §14: name the interrupt hold so the [advance-skip] trail says WHY it is Off.
+            plan.reason = InterruptHoldActive(s.autorunner) ?
+                              L"autorunner off (interrupt hold - resumes on your next message)" :
+                              L"autorunner off";
             return plan;
         }
         // Ready for a prompt = turn-complete (a clean Stop -> WaitingForInput) OR sitting Idle

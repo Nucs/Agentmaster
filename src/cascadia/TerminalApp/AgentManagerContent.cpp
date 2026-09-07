@@ -1841,9 +1841,9 @@ namespace winrt::TerminalApp::implementation
                 _autorunnerBtn = Button{};
                 _autorunnerBtn.FontSize(11);
                 _autorunnerBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                AgentSetTitledTip(_autorunnerBtn, L"Tests Autorunner", L"How the selected session's queue is sent. Click to cycle: Off (nothing auto-sends \x2014 queue and use Send now) \xB7 Semi-auto (each send waits for you to confirm) \xB7 Full (the next prompt goes out on its own as soon as a turn completes). One prompt per turn either way, and a turn ending in a question holds the queue.");
+                AgentSetTitledTip(_autorunnerBtn, L"Tests Autorunner", L"How the selected session's queue is sent. Click to cycle: Off (nothing auto-sends \x2014 queue and use Send now) \xB7 Semi-auto (each send waits for you to confirm) \xB7 Full (the next prompt goes out on its own as soon as a turn completes). One prompt per turn either way, and a turn ending in a question holds the queue. Interrupting a turn (Esc) parks it at Off until your next message, then it resumes on its own \x2014 setting the mode yourself cancels that resume.");
                 _autorunnerBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleAutorunner(); });
-                _UpdateAutorunnerButton(AutorunnerMode::Off, false);
+                _UpdateAutorunnerButton(::Agentmaster::AutorunnerState{}, false); // a default state: Off, no interrupt hold
                 auto apStrip = StackPanel{};
                 apStrip.Orientation(Orientation::Horizontal);
                 apStrip.HorizontalAlignment(HorizontalAlignment::Right);

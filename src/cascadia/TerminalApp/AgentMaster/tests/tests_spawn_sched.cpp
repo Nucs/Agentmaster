@@ -3740,3 +3740,407 @@ void TestPortableInstall()
     std::error_code ec;
     std::filesystem::remove_all(std::filesystem::path{ exeDir }, ec);
 }
+
+// Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): interrupting a turn (Esc) must PARK the Tests
+// Autorunner so the turn-end the interrupt produces can never auto-send the next queued prompt into
+// the session the user just stopped to talk to; the user's NEXT message resumes the parked mode; a
+// mode the user sets meanwhile cancels the resume; every engine pause backstop wins over a resume.
+void TestInterruptHold()
+{
+    std::wprintf(L"Interrupt hold (Esc parks the autorunner; the next message resumes it):\n");
+    const int64_t now = NowMsTest();
+
+    // ---- the pure rules (SessionModels.h) ----
+    {
+        AutorunnerState a;
+        a.mode = AutorunnerMode::Full;
+        CHECK(!InterruptHoldActive(a), "pure: a running Full autorunner holds nothing");
+        CHECK(TakeInterruptHold(a, now - 1000), "pure: take parks a Full autorunner");
+        CHECK(a.mode == AutorunnerMode::Off && a.interruptHeldMode == AutorunnerMode::Full && a.interruptHeldUnixMs == now - 1000,
+              "pure: take -> Off, remembers Full + the marker stamp");
+        CHECK(InterruptHoldActive(a), "pure: the hold is active");
+        CHECK(!TakeInterruptHold(a, now), "pure: a second interrupt while held is a no-op");
+        CHECK(a.interruptHeldMode == AutorunnerMode::Full && a.interruptHeldUnixMs == now - 1000, "pure: the second take keeps the ORIGINAL mode + anchor");
+        CHECK(ResumeInterruptHold(a, now - 5000) == AutorunnerMode::Off, "pure: a message stamped BEFORE the marker never resumes");
+        CHECK(InterruptHoldActive(a) && a.mode == AutorunnerMode::Off, "pure: ...still held after it");
+        CHECK(ResumeInterruptHold(a, now) == AutorunnerMode::Full, "pure: a message after the marker resumes Full");
+        CHECK(a.mode == AutorunnerMode::Full && !InterruptHoldActive(a) && a.interruptHeldMode == AutorunnerMode::Off && a.interruptHeldUnixMs == 0,
+              "pure: resume restores the mode + clears the hold whole");
+        CHECK(ResumeInterruptHold(a, now) == AutorunnerMode::Off, "pure: nothing to resume once resumed");
+
+        AutorunnerState off;
+        CHECK(!TakeInterruptHold(off, now) && !InterruptHoldActive(off) && off.mode == AutorunnerMode::Off,
+              "pure: an Off autorunner takes no hold (the user drives manually)");
+
+        AutorunnerState semi;
+        semi.mode = AutorunnerMode::SemiAuto;
+        CHECK(TakeInterruptHold(semi, now) && semi.interruptHeldMode == AutorunnerMode::SemiAuto, "pure: SemiAuto parks with SemiAuto remembered");
+        CHECK(ResumeInterruptHold(semi, 0) == AutorunnerMode::SemiAuto && semi.mode == AutorunnerMode::SemiAuto,
+              "pure: an unstamped (0) message trusts the caller; SemiAuto resumes SemiAuto");
+
+        AutorunnerState cleared;
+        cleared.mode = AutorunnerMode::Full;
+        TakeInterruptHold(cleared, now);
+        ClearInterruptHold(cleared);
+        CHECK(cleared.mode == AutorunnerMode::Off && !InterruptHoldActive(cleared), "pure: clear cancels the resume; the mode itself stays Off");
+        CHECK(ResumeInterruptHold(cleared, now + 1) == AutorunnerMode::Off && cleared.mode == AutorunnerMode::Off, "pure: a cleared hold never resumes");
+
+        // A stale remembered mode under a re-stamped non-Off mode is inert (a resume only moves Off -> held).
+        AutorunnerState restamped;
+        restamped.mode = AutorunnerMode::Full;
+        restamped.interruptHeldMode = AutorunnerMode::SemiAuto;
+        CHECK(!InterruptHoldActive(restamped) && ResumeInterruptHold(restamped, now) == AutorunnerMode::Off && restamped.mode == AutorunnerMode::Full,
+              "pure: a remembered mode under a non-Off mode is inert");
+
+        CHECK(InterruptMarkerIsFresh(now - 1000, now), "pure: freshness - a second-old marker is fresh");
+        CHECK(InterruptMarkerIsFresh(now - kInterruptHoldFreshMs, now), "pure: freshness - exactly the window is fresh");
+        CHECK(!InterruptMarkerIsFresh(now - kInterruptHoldFreshMs - 1, now), "pure: freshness - past the window is stale (history replay)");
+        CHECK(!InterruptMarkerIsFresh(0, now), "pure: freshness - an unstamped marker is never fresh");
+        CHECK(InterruptMarkerIsFresh(now + 5000, now), "pure: freshness - a small future skew is tolerated");
+        CHECK(std::wstring{ AutorunnerModeLabel(AutorunnerMode::Full) } == L"Full" && std::wstring{ AutorunnerModeLabel(AutorunnerMode::SemiAuto) } == L"Semi" && std::wstring{ AutorunnerModeLabel(AutorunnerMode::Off) } == L"Off",
+              "pure: the mode labels");
+    }
+
+    // ---- the registry: NoteInterrupt parks; the interrupt's synthesized Stop can't auto-send; the
+    //      user's next UPS resumes ----
+    {
+        SessionRegistry reg;
+        {
+            auto s = MakeSession(L"h1", SessionState::Running);
+            s.live = true;
+            s.autorunner.mode = AutorunnerMode::Full;
+            QueuedPrompt next;
+            next.id = L"q-next";
+            next.text = L"the next queued test prompt";
+            next.status = PromptStatus::Pending;
+            next.origin = PromptOrigin::Autorun;
+            s.queue.push_back(next);
+            reg.Upsert(s);
+        }
+        int notifies = 0;
+        const auto tok = reg.AddObserver([&](const SessionInfo&, HookEvent) { ++notifies; });
+        int advances = 0;
+        reg.SetAdvanceHandler([&](const std::wstring&) { ++advances; });
+
+        reg.NoteInterrupt(L"h1", now - 10 * 60 * 1000); // a 10-minute-old marker: a history replay
+        auto s = reg.Get(L"h1");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Full && !InterruptHoldActive(s->autorunner), "registry: a STALE marker (history replay) never holds");
+        reg.NoteInterrupt(L"h1", 0);
+        s = reg.Get(L"h1");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Full, "registry: an unstamped marker never holds");
+        reg.NoteInterrupt(L"nope", now);
+        CHECK(notifies == 0, "registry: refused holds (stale / unstamped / unknown id) notify nothing");
+
+        const int64_t markerTs = now - 500;
+        reg.NoteInterrupt(L"h1", markerTs);
+        s = reg.Get(L"h1");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Off && s->autorunner.interruptHeldMode == AutorunnerMode::Full && s->autorunner.interruptHeldUnixMs == markerTs,
+              "registry: a fresh marker parks Full -> Off with the mode + anchor remembered");
+        CHECK(s && s->state == SessionState::Running, "registry: the hold never touches SessionState (the scanner's synth owns the turn end)");
+        CHECK(notifies == 1, "registry: a taken hold notifies once (UI repaint / the scheduler's OnObserved)");
+        reg.NoteInterrupt(L"h1", markerTs + 100);
+        s = reg.Get(L"h1");
+        CHECK(s && s->autorunner.interruptHeldMode == AutorunnerMode::Full && s->autorunner.interruptHeldUnixMs == markerTs && notifies == 1,
+              "registry: a repeat interrupt while held is a quiet no-op (original anchor kept)");
+
+        // The turn-end the interrupt produces: recon-stop's synthesized QUIESCENT Stop -> WaitingForInput +
+        // turnComplete fires the advance seam — and DecideAdvance must read the hold as Off.
+        {
+            auto stop = Msg(L"h1", HookEvent::Stop);
+            stop.quiescentStop = true;
+            stop.ts = now;
+            reg.OnHookEvent(stop);
+        }
+        s = reg.Get(L"h1");
+        CHECK(s && s->state == SessionState::WaitingForInput, "registry: the interrupt's synthesized Stop lands WaitingForInput");
+        CHECK(advances == 1, "registry: ...and fires the advance seam (it is DecideAdvance that must refuse)");
+        {
+            const auto plan = DecideAdvance(*s, now, 0, false);
+            CHECK(plan.action == AdvanceAction::None && plan.reason.find(L"interrupt hold") != std::wstring::npos,
+                  "DecideAdvance: a held session answers 'autorunner off (interrupt hold ...)' - the queued prompt does NOT auto-send");
+        }
+
+        // Not the user's message: a teammate delivery (protocol noise) ...
+        {
+            auto ups = UPS(L"h1", L"Another Claude session sent a message:\n<teammate-message teammate_id=\"x\" color=\"red\">\n{\"type\":\"idle_notification\"}\n</teammate-message>");
+            ups.ts = now + 1000;
+            reg.OnHookEvent(ups);
+        }
+        s = reg.Get(L"h1");
+        CHECK(s && InterruptHoldActive(s->autorunner), "registry: a teammate-delivery UPS does not resume (not the user talking)");
+        // ... an EMPTY UPS (the phantom twin / the recon-run synth) ...
+        {
+            auto ups = UPS(L"h1", L"");
+            ups.ts = now + 1100;
+            reg.OnHookEvent(ups);
+        }
+        s = reg.Get(L"h1");
+        CHECK(s && InterruptHoldActive(s->autorunner), "registry: an empty UPS does not resume");
+        // ... a late-forwarded UPS of the KILLED turn (fire time before the marker) ...
+        {
+            auto ups = UPS(L"h1", L"the prompt of the turn I interrupted");
+            ups.ts = markerTs - 3000;
+            reg.OnHookEvent(ups);
+        }
+        s = reg.Get(L"h1");
+        CHECK(s && InterruptHoldActive(s->autorunner), "registry: a UPS stamped BEFORE the marker (the killed turn's late forwarder) does not resume");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Off, "registry: ...mode still Off");
+
+        // The user's real next message resumes Full.
+        const int notifiesBeforeResume = notifies;
+        {
+            auto ups = UPS(L"h1", L"actually, do it the other way");
+            ups.ts = now + 2000;
+            reg.OnHookEvent(ups);
+        }
+        s = reg.Get(L"h1");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Full && !InterruptHoldActive(s->autorunner) && s->autorunner.interruptHeldUnixMs == 0,
+              "registry: the user's next typed message resumes Full and clears the hold");
+        CHECK(s && s->state == SessionState::Running && !s->queue.empty() && s->queue.back().origin == PromptOrigin::Typed && s->queue.back().text == L"actually, do it the other way",
+              "registry: ...the message still records as Typed and drives Running");
+        CHECK(notifies > notifiesBeforeResume, "registry: the resume notifies (the toggle repaints Full)");
+        // The queued prompt is still Pending — nothing was auto-sent while held — and the plan is live again.
+        bool nextStillPending = false;
+        for (const auto& p : s->queue)
+        {
+            if (p.id == L"q-next")
+            {
+                nextStillPending = p.status == PromptStatus::Pending;
+            }
+        }
+        CHECK(nextStillPending, "registry: the queued prompt was never touched while held");
+        reg.RemoveObserver(tok);
+    }
+
+    // ---- SemiAuto resumes SemiAuto; the echo of a user Send-now is the user's message too ----
+    {
+        SessionRegistry reg;
+        {
+            auto s = MakeSession(L"h2", SessionState::Running);
+            s.live = true;
+            s.autorunner.mode = AutorunnerMode::SemiAuto;
+            reg.Upsert(s);
+        }
+        reg.NoteInterrupt(L"h2", now - 200);
+        auto s = reg.Get(L"h2");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Off && s->autorunner.interruptHeldMode == AutorunnerMode::SemiAuto, "registry: SemiAuto parks with SemiAuto remembered");
+        // While held, mode is Off — the ONLY sends that can produce an echo are the user's own (a Send-now).
+        reg.Update(L"h2", [&](SessionInfo& ss) {
+            QueuedPrompt p;
+            p.id = L"sn";
+            p.text = L"the prompt I sent by hand";
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = NowMsTest();
+            ss.queue.push_back(p);
+        });
+        {
+            auto ups = UPS(L"h2", L"the prompt I sent by hand");
+            ups.ts = now + 500;
+            reg.OnHookEvent(ups);
+        }
+        s = reg.Get(L"h2");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::SemiAuto && !InterruptHoldActive(s->autorunner),
+              "registry: the echo of a user Send-now resumes SemiAuto (any real message while held is the user's)");
+        bool echoed = false;
+        for (const auto& p : s->queue)
+        {
+            if (p.id == L"sn")
+            {
+                echoed = p.echoed;
+            }
+        }
+        CHECK(echoed && s && s->queue.size() == 1, "registry: ...consumed as the echo, not re-recorded as Typed");
+    }
+
+    // ---- the PULL twin: NoteExternalPrompt resumes on a line stamped AFTER the marker only ----
+    {
+        SessionRegistry reg;
+        {
+            auto s = MakeSession(L"h3", SessionState::Running);
+            s.live = true;
+            s.autorunner.mode = AutorunnerMode::Full;
+            reg.Upsert(s);
+        }
+        const int64_t markerTs = now - 300;
+        reg.NoteInterrupt(L"h3", markerTs);
+        reg.NoteExternalPrompt(L"h3", L"an old line replayed from history", markerTs - 60000);
+        auto s = reg.Get(L"h3");
+        CHECK(s && InterruptHoldActive(s->autorunner), "pull: a user line stamped before the marker does not resume");
+        reg.NoteExternalPrompt(L"h3", L"a line with no timestamp", 0);
+        s = reg.Get(L"h3");
+        CHECK(s && InterruptHoldActive(s->autorunner), "pull: an unstamped line cannot prove it is the next message - no resume");
+        int notifies = 0;
+        const auto tok = reg.AddObserver([&](const SessionInfo&, HookEvent) { ++notifies; });
+        reg.NoteExternalPrompt(L"h3", L"the user's next message (its hook was dropped)", now + 100);
+        s = reg.Get(L"h3");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Full && !InterruptHoldActive(s->autorunner), "pull: a fresh user line after the marker resumes Full (the hookless path)");
+        CHECK(notifies >= 1, "pull: the resume notifies");
+        CHECK(s && !s->queue.empty() && s->queue.back().origin == PromptOrigin::Typed, "pull: ...and the line still back-fills as Typed");
+        // A DEDUPED line (already recorded — the push hook got there first) still resumes a hold: the
+        // hooked session's normal shape is push-records-then-pull-sees-the-same-line.
+        reg.NoteInterrupt(L"h3", now + 200);
+        s = reg.Get(L"h3");
+        CHECK(s && InterruptHoldActive(s->autorunner), "pull: re-held by a later interrupt");
+        const size_t rowsBefore = s ? s->queue.size() : 0;
+        reg.NoteExternalPrompt(L"h3", L"the user's next message (its hook was dropped)", now + 300);
+        s = reg.Get(L"h3");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Full && !InterruptHoldActive(s->autorunner), "pull: a deduped (already recorded) line stamped after the marker still resumes");
+        CHECK(s && s->queue.size() == rowsBefore, "pull: ...without a duplicate Typed row");
+        reg.RemoveObserver(tok);
+    }
+
+    // ---- the user sets the mode meanwhile: the pending resume is CANCELLED (the toggle's exact write) ----
+    {
+        SessionRegistry reg;
+        {
+            auto s = MakeSession(L"h4", SessionState::Running);
+            s.live = true;
+            s.autorunner.mode = AutorunnerMode::Full;
+            reg.Upsert(s);
+        }
+        reg.NoteInterrupt(L"h4", now - 100);
+        auto s = reg.Get(L"h4");
+        CHECK(s && InterruptHoldActive(s->autorunner), "user-set: held first");
+        // The _OnAutorunnerChanged / overlay _CycleAutorunner write for "Off" (the user clicked the toggle).
+        reg.Update(L"h4", [](SessionInfo& ss) {
+            ss.autorunner.mode = AutorunnerMode::Off;
+            ClearInterruptHold(ss.autorunner);
+        });
+        {
+            auto ups = UPS(L"h4", L"my next message");
+            ups.ts = now + 1000;
+            reg.OnHookEvent(ups);
+        }
+        s = reg.Get(L"h4");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Off && !InterruptHoldActive(s->autorunner),
+              "user-set Off while held: the next message does NOT resume (the human's choice wins)");
+        reg.NoteInterrupt(L"h4", now + 2000);
+        s = reg.Get(L"h4");
+        CHECK(s && !InterruptHoldActive(s->autorunner) && s->autorunner.mode == AutorunnerMode::Off, "user-set: an interrupt on a user's-Off session takes no hold");
+        // ...and a user re-arm (the toggle to Semi) clears too, so a LATER manual Off stays Off.
+        reg.Update(L"h4", [](SessionInfo& ss) {
+            ss.autorunner.mode = AutorunnerMode::Full;
+        });
+        reg.NoteInterrupt(L"h4", now + 2500);
+        reg.Update(L"h4", [](SessionInfo& ss) {
+            ss.autorunner.mode = AutorunnerMode::SemiAuto;
+            ClearInterruptHold(ss.autorunner);
+        });
+        reg.Update(L"h4", [](SessionInfo& ss) {
+            ss.autorunner.mode = AutorunnerMode::Off;
+            ClearInterruptHold(ss.autorunner);
+        });
+        {
+            auto ups = UPS(L"h4", L"another message");
+            ups.ts = now + 3000;
+            reg.OnHookEvent(ups);
+        }
+        s = reg.Get(L"h4");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Off, "user-set: re-arm then Off - nothing lingers to resume");
+    }
+
+    // ---- engine pause backstops win over a pending resume ----
+    {
+        // stop-on-error while held: the hold converts into a real, sticky pause (Scheduler::OnObserved).
+        auto reg = std::make_shared<SessionRegistry>();
+        Scheduler sched{ reg };
+        {
+            auto s = MakeSession(L"h5", SessionState::Running);
+            s.live = true;
+            s.autorunner.mode = AutorunnerMode::Full;
+            s.autorunner.stopOnError = true;
+            reg->Upsert(s);
+        }
+        reg->NoteInterrupt(L"h5", now - 100);
+        auto s = reg->Get(L"h5");
+        CHECK(s && InterruptHoldActive(s->autorunner), "stop-on-error: held first");
+        reg->Update(L"h5", [](SessionInfo& ss) { ss.state = SessionState::Error; });
+        sched.OnObserved(*reg->Get(L"h5"));
+        s = reg->Get(L"h5");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Off && !InterruptHoldActive(s->autorunner), "stop-on-error while held: the hold is cleared (a backstop pause is sticky)");
+        {
+            auto ups = UPS(L"h5", L"retry please");
+            ups.ts = now + 1000;
+            reg->OnHookEvent(ups);
+        }
+        s = reg->Get(L"h5");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Off, "stop-on-error: ...so the next message does NOT resume past the error pause");
+    }
+    {
+        // The MERGE verdict (push): the merged message is itself a user message, but the pause wins.
+        SessionRegistry reg;
+        {
+            auto s = MakeSession(L"h6", SessionState::Running);
+            s.live = true;
+            s.autorunner.mode = AutorunnerMode::Full;
+            reg.Upsert(s);
+        }
+        reg.NoteInterrupt(L"h6", now - 100);
+        reg.Update(L"h6", [&](SessionInfo& ss) {
+            QueuedPrompt p;
+            p.id = L"m";
+            p.text = L"run the whole test suite";
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = NowMsTest();
+            ss.queue.push_back(p);
+        });
+        {
+            auto ups = UPS(L"h6", L"some leftover draft text\nrun the whole test suite");
+            ups.ts = now + 500;
+            reg.OnHookEvent(ups);
+        }
+        auto s = reg.Get(L"h6");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Off && !InterruptHoldActive(s->autorunner), "merge verdict while held: paused for real, no resume");
+        bool failed = false;
+        for (const auto& p : s->queue)
+        {
+            if (p.id == L"m")
+            {
+                failed = p.status == PromptStatus::Failed;
+            }
+        }
+        CHECK(failed, "merge verdict: ...the swallowed prompt is Failed as before");
+    }
+    {
+        // The MERGE verdict (pull twin) — same rule from the transcript side.
+        SessionRegistry reg;
+        {
+            auto s = MakeSession(L"h7", SessionState::Running);
+            s.live = true;
+            s.autorunner.mode = AutorunnerMode::Full;
+            reg.Upsert(s);
+        }
+        reg.NoteInterrupt(L"h7", now - 100);
+        reg.Update(L"h7", [&](SessionInfo& ss) {
+            QueuedPrompt p;
+            p.id = L"m2";
+            p.text = L"run the whole test suite";
+            p.status = PromptStatus::Sent;
+            p.origin = PromptOrigin::Autorun;
+            p.echoed = false;
+            p.sentAtUnixMs = now - 50;
+            ss.queue.push_back(p);
+        });
+        reg.NoteExternalPrompt(L"h7", L"some leftover draft text\nrun the whole test suite", now + 500);
+        auto s = reg.Get(L"h7");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Off && !InterruptHoldActive(s->autorunner), "merge verdict (pull) while held: paused for real, no resume");
+    }
+
+    // ---- an archived (closed) session is never parked ----
+    {
+        SessionRegistry reg;
+        {
+            auto s = MakeSession(L"h8", SessionState::WaitingForInput);
+            s.live = false;
+            s.autorunner.mode = AutorunnerMode::Full;
+            reg.Upsert(s);
+        }
+        reg.NoteInterrupt(L"h8", now - 100);
+        auto s = reg.Get(L"h8");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Full && !InterruptHoldActive(s->autorunner), "archived: an interrupt marker on a closed session parks nothing");
+    }
+}

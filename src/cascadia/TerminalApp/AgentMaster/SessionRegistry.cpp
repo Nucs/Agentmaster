@@ -333,6 +333,7 @@ namespace Agentmaster
         bool triggerAdvance = false;
         std::wstring upsTrace; // DELIVERY_PLAN.md R3: the [ups] disposition line, filled under the lock, logged after it
         std::wstring mergeTrace; // DELIVERY_PLAN.md R7: the [merge-detected] line (both logs), filled under the lock
+        std::wstring holdTrace; // DELIVERY.md §14: the [interrupt-resume] line (both logs), filled under the lock
 
         {
             std::lock_guard guard{ _mtx };
@@ -498,6 +499,9 @@ namespace Agentmaster
                         {
                             p.status = PromptStatus::Failed;
                             s.autorunner.mode = AutorunnerMode::Off;
+                            // The INTERRUPT HOLD (DELIVERY.md §14): a backstop pause is STICKY — cancel any
+                            // pending resume, or this very (merged) message would un-pause it below.
+                            ClearInterruptHold(s.autorunner);
                             mergedPromptId = p.id;
                             mergeTrace = L"[merge-detected] " + ShortId(msg.sessionId) + L" prompt " + ShortId(p.id) +
                                          L" \"" + p.label + L"\" swallowed into a " + std::to_wstring(msg.promptText.size()) +
@@ -520,6 +524,23 @@ namespace Agentmaster
                     typed.sentAtUnixMs = now;
                     s.queue.push_back(std::move(typed));
                     TrimQueueHistory(s.queue); // bounded history: only the OLDEST completed entries drop, never queued work
+                }
+                // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): a REAL message — the human's typed
+                // prompt (recorded as Typed above) or the echo of a prompt they Send-now'd — is "the user's
+                // next message" after an interrupt, so a parked autorunner RESUMES to the mode it held
+                // (ResumeInterruptHold; while held, mode is Off, so the only sends that can produce an
+                // echo are the user's own). Never on protocol noise (a teammate delivery is not the user
+                // talking), never when this very message drew the MERGE verdict above (a backstop pause
+                // wins — it cleared the hold), and never for a UPS whose fire time predates the marker
+                // (a late-forwarded submit of the very turn the user killed).
+                if (mergedPromptId.empty() && (isEcho || !isNoise))
+                {
+                    const AutorunnerMode resumed = ResumeInterruptHold(s.autorunner, msg.ts);
+                    if (resumed != AutorunnerMode::Off)
+                    {
+                        holdTrace = L"[interrupt-resume] " + ShortId(msg.sessionId) + L" autorunner Off -> " + AutorunnerModeLabel(resumed) +
+                                    (isEcho ? L" (your message arrived - the Send-now echo)\n" : L" (your message arrived)\n");
+                    }
                 }
                 upsTrace = L"[ups] " + ShortId(msg.sessionId) + L" chars=" + std::to_wstring(msg.promptText.size()) +
                            L" hash=" + FoldedPromptHash(echoFolded) +
@@ -563,6 +584,12 @@ namespace Agentmaster
             // autorunner-pausing event AND a delivery forensic.
             AppendStateLog(L"hooks.log", mergeTrace);
             AppendStateLog(L"autorunner.log", mergeTrace);
+        }
+        if (!holdTrace.empty())
+        {
+            // §14: an autorunner MODE change — both logs, like the [interrupt-hold] that armed it.
+            AppendStateLog(L"hooks.log", holdTrace);
+            AppendStateLog(L"autorunner.log", holdTrace);
         }
         if (found)
         {
@@ -993,6 +1020,7 @@ namespace Agentmaster
         bool changed = false;
         std::wstring pullEchoTrace; // DELIVERY_PLAN.md R1: filled under the lock, logged after it
         std::wstring mergeTrace; // DELIVERY_PLAN.md R7: the pull-side [merge-detected] line
+        std::wstring holdTrace; // DELIVERY.md §14: the pull-side [interrupt-resume] line
         {
             std::lock_guard guard{ _mtx };
             const auto it = _sessions.find(id);
@@ -1054,6 +1082,9 @@ namespace Agentmaster
                     {
                         p.status = PromptStatus::Failed;
                         s.autorunner.mode = AutorunnerMode::Off;
+                        // The INTERRUPT HOLD (DELIVERY.md §14): a backstop pause is STICKY — cancel any
+                        // pending resume, or this very (merged) line would un-pause it below.
+                        ClearInterruptHold(s.autorunner);
                         mergeTrace = L"[merge-detected] " + ShortId(id) + L" prompt " + ShortId(p.id) +
                                      L" \"" + p.label + L"\" swallowed into a " + std::to_wstring(text.size()) +
                                      L"-char transcript message (pull side - marked Failed, autorunner paused)\n";
@@ -1081,6 +1112,24 @@ namespace Agentmaster
                 snapshot = s;
                 changed = true;
             }
+            // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): the PULL twin of the push resume. This
+            // non-noise user line is "the user's next message" when its OWN transcript timestamp
+            // postdates the interrupt marker — the anchor ResumeInterruptHold checks; an unstamped line
+            // (observedUnixMs == 0) cannot prove that and never resumes (on a hooked session the push
+            // hook resumes; a hookless session with unstamped lines waits for the user's toggle). A merge
+            // verdict above wins (it cleared the hold). Runs for a DEDUPED line too (the push already
+            // recorded it — a hooked session's normal shape) — idempotent, since a resumed hold is gone.
+            if (mergeTrace.empty() && observedUnixMs != 0)
+            {
+                const AutorunnerMode resumed = ResumeInterruptHold(s.autorunner, observedUnixMs);
+                if (resumed != AutorunnerMode::Off)
+                {
+                    holdTrace = L"[interrupt-resume] " + ShortId(id) + L" autorunner Off -> " + AutorunnerModeLabel(resumed) +
+                                L" (your message arrived - transcript line)\n";
+                    snapshot = s;
+                    changed = true; // a MODE change: the UI toggles repaint + the scheduler's OnObserved sees it
+                }
+            }
         }
         if (!pullEchoTrace.empty())
         {
@@ -1091,10 +1140,54 @@ namespace Agentmaster
             AppendStateLog(L"hooks.log", mergeTrace);
             AppendStateLog(L"autorunner.log", mergeTrace);
         }
+        if (!holdTrace.empty())
+        {
+            AppendStateLog(L"hooks.log", holdTrace);
+            AppendStateLog(L"autorunner.log", holdTrace);
+        }
         if (changed)
         {
             _notify(snapshot, HookEvent::UserPromptSubmit);
         }
+    }
+
+    void SessionRegistry::NoteInterrupt(const std::wstring& id, int64_t markerUnixMs)
+    {
+        // The replay belt FIRST (no lock): the scanner sights the marker on every read that ends on
+        // it — a restored/adopted session's history replay included — and only a RECENT marker may
+        // park anything (InterruptMarkerIsFresh; an unstamped one never can).
+        const int64_t now = NowMs();
+        if (!InterruptMarkerIsFresh(markerUnixMs, now))
+        {
+            return;
+        }
+        SessionInfo snapshot;
+        AutorunnerMode held = AutorunnerMode::Off;
+        {
+            std::lock_guard guard{ _mtx };
+            const auto it = _sessions.find(id);
+            if (it == _sessions.end() || !it->second.live)
+            {
+                return; // unknown / archived: nothing to drive, nothing to park
+            }
+            auto& s = it->second;
+            if (!TakeInterruptHold(s.autorunner, markerUnixMs))
+            {
+                return; // already Off — the user's own Off, or an existing hold (idempotent, quiet)
+            }
+            held = s.autorunner.interruptHeldMode;
+            snapshot = s;
+        }
+        const std::wstring line = L"[interrupt-hold] " + ShortId(id) + L" autorunner " + AutorunnerModeLabel(held) +
+                                  L" -> Off (you interrupted the turn; resumes to " + AutorunnerModeLabel(held) +
+                                  L" on your next message - setting the mode yourself cancels that)\n";
+        AppendStateLog(L"hooks.log", line);
+        AppendStateLog(L"autorunner.log", line);
+        // Outside the lock, like every notify: the header toggle / overlay / board card repaint Off,
+        // and the scheduler's OnObserved reads Off — BEFORE the interrupt's synthesized Stop can reach
+        // the advance seam (the scanner parses the marker before it reconciles, and this runs inside
+        // that parse), so DecideAdvance can only ever answer "autorunner off".
+        _notify(snapshot, HookEvent::Unknown);
     }
 
     ObserverToken SessionRegistry::AddObserver(RegistryObserver observer)

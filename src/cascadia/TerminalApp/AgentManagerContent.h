@@ -398,7 +398,9 @@ namespace winrt::TerminalApp::implementation
         // selected session's mode (Off -> Semi-auto -> Full -> Off); _UpdateAutorunnerButton paints
         // the button's colored state dot + label (dim/disabled when no live session is selected).
         void _CycleAutorunner();
-        void _UpdateAutorunnerButton(::Agentmaster::AutorunnerMode mode, bool enabled);
+        // Takes the whole AutorunnerState: an INTERRUPT-HELD Off (DELIVERY.md §14) paints differently
+        // from a user's Off — "Off -> Full on your next message".
+        void _UpdateAutorunnerButton(const ::Agentmaster::AutorunnerState& autorunner, bool enabled);
         // Agentmaster: the Auto-Testing pane's two-state [Summary | Auto Testing] tab toggle (its top
         // line). _SelectPlanPaneTab(summary) sets the GLOBAL choice (AppSettings::autoTestingShowsSummary),
         // persists + broadcasts it through the settings sink (the treeSort idiom), and re-paints;

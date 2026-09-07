@@ -611,3 +611,81 @@ now advances the decay anchor), and the `DecideAdvance` spacing matrix (`TestSch
 rolled-back-Pending exempt, Typed exempt, future-stamp skew-safe, PlanDone precedence, SemiAuto
 arming spaced, release at exactly 20 s; the pickup-release probes moved to the spacing boundary
 with an unechoed contrast so echo-vs-clock stays pinned).
+
+## 14. The INTERRUPT HOLD — Esc parks the autorunner until your next message (fixed)
+
+**The report (2026-09-07):** *"This session was interrupted. Were I to send in Full mode some
+queued messages I would have gotten them sent."* Pressing Esc mid-turn is the user taking the
+wheel — they stop the agent because they have something to say — yet a Full autorunner treated
+the interrupt's turn-end like any other turn-complete and delivered the next queued prompt into
+exactly that session (and with a draft already in the box, the §9 swap stashed and restored the
+user's half-written message around the send).
+
+**Why nothing existing caught it.** Claude fires NO `Stop` hook on an interrupt. The PULL scanner
+sees the `[Request interrupted by user…]` user line, flags `interrupted`, and once the transcript
+is ≥2 s quiet synthesizes a quiescent Stop (recon-stop) that lands `WaitingForInput` with
+`turnComplete`, so the advance seam fires. Every gate in `DecideAdvance` then reads the session as
+READY — it is at rest, the box is empty, no delivery is in flight, the question-guard holds no
+question — and the state machine cannot help: an interrupt is not an error and the session
+genuinely IS ready for input. The missing fact is *who* should supply that input.
+
+**The rule — three parts, one engine-owned fact (`AutorunnerState::interruptHeldMode` +
+`interruptHeldUnixMs`, transient; the pure helpers beside it in `SessionModels.h`):**
+
+1. **PARK.** When the scanner's parse ends on the interrupt marker (`_readDelta`: the marker was
+   sighted in this batch AND `st.interrupted` survived to the loop's end — a batch of `[marker,
+   the user's next prompt]` parks nothing, since that prompt already fed `NoteExternalPrompt`
+   inside the loop and a hold taken afterwards would have nobody left to resume it), it calls
+   `SessionRegistry::NoteInterrupt(id, markerLineTs)` — IN the parse, BEFORE the same pass's
+   reconciliation can synthesize the Stop. `TakeInterruptHold`: a Semi/Full autorunner goes
+   **Off** with the prior mode remembered and the marker's own transcript timestamp kept as the
+   resume ANCHOR; an already-Off autorunner (the user's own Off, or an existing hold — a second Esc)
+   is untouched. `DecideAdvance` then answers `autorunner off (interrupt hold - resumes on your next
+   message)`, so the interrupt's Stop advances into nothing. Logged `[interrupt-hold] <sid8>
+   autorunner Full -> Off (...)` on hooks.log + autorunner.log; the take notifies (the header
+   toggle / overlay / board repaint).
+2. **RESUME on the user's next message.** `ResumeInterruptHold` restores the held mode from the
+   two places a real message lands: the push `UserPromptSubmit` record in `OnHookEvent` (the human's
+   typed prompt — recorded as Typed — OR the echo of a prompt they **Send-now**'d: while held the
+   mode is Off, so the only sends that can produce an echo are the user's own) and the pull twin
+   `NoteExternalPrompt` (the transcript's user line, a deduped already-recorded line included — the
+   hooked session's normal push-then-pull shape). Never on protocol noise (a teammate delivery is
+   not the user talking — `IsNoiseUserPrompt`), never on an EMPTY UPS (the §10 phantom twins / the
+   recon-run synth), and never on a message stamped BEFORE the anchor (the push side's wire `ts`,
+   the pull side's line timestamp): a late-forwarded UPS of the very turn the user killed, or a
+   replayed older transcript line, must not release it; an unstamped pull line (0) cannot prove it
+   is the next message and never resumes (the push hook does on a hooked session). Logged
+   `[interrupt-resume] <sid8> autorunner Off -> Full (your message arrived …)`.
+3. **CANCEL on a user-set mode.** Whatever the user picks on the Auto-Testing header toggle or the
+   overlay cycle — Off included — `ClearInterruptHold` runs inside the same registry write, so the
+   pending resume is gone and the human's explicit choice stands until the NEXT interrupt arms the
+   mechanism again (the `[nav] autorunner … -> X (cancels the interrupt hold)` suffix marks it).
+
+**Precedence — a backstop pause always wins.** Every engine pause (`stop-on-error`,
+`enter-retry-giveup`, `lost-send`, the push AND pull merge verdicts) clears the hold beside its
+`mode = Off`, so a backstop pause is never silently undone by the next message; the merged-submit
+verdict in particular runs BEFORE the resume check on the very message that drew it. stop-on-error
+fires on a HELD session too (`mode != Off || InterruptHoldActive`), converting the hold into a
+real, sticky pause. The restore seam (`_LaunchClaudeSession`'s reopened-session mode re-stamp)
+clears it as well — the field is transient (never persisted), so a record loaded from disk never
+carries one, and a this-run-archived record's in-memory remainder is voided explicitly.
+
+**Belts.** The marker is sighted on every read that ends on it — a restored/adopted session's
+history replay included — so `NoteInterrupt` refuses a marker older than `kInterruptHoldFreshMs`
+(60 s; `InterruptMarkerIsFresh`, unstamped never) and the scanner gates the call on
+`primedAtParse` like the CommandWatch feeds; live sessions only; the anchor makes every resume
+strictly-after-the-marker. Codex is untouched (no injector, no autorunner, no `❯` marker).
+
+**UI.** An interrupt-held Off is painted distinctly from a user's Off so it never reads as "someone
+switched my autorunner off": the Auto-Testing header toggle says `Tests Autorunner: Off → Full on
+your next message` with its hollow circle in the held mode's color, the per-tab overlay's row-1
+button reads `Off → Full` in that color, the board card's ⚙ queue tooltip names the parked mode,
+and every autorunner tooltip states the rule.
+
+**Known edge (accepted):** a prompt the user TYPE-AHEAD'd before pressing Esc already fired its
+UPS (at Enter time), so it cannot be the resuming message; the hold then lasts until the next real
+message or the toggle. Coverage: `TestInterruptHold` (`tests_spawn_sched.cpp`) — the pure rules,
+the registry park (fresh-marker belt, idempotent, live-only, notify), the interrupt's synthesized
+Stop advancing into the hold, the push resume matrix (typed / Send-now echo / noise / empty /
+pre-anchor), the pull twin (pre-anchor / unstamped / fresh / deduped), the user-set cancel, and the
+stop-on-error + push/pull merge precedence.

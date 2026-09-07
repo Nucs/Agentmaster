@@ -83,6 +83,7 @@ int wmain()
     TestVerifiedPlacement();
     TestBuildPromptSubmission();
     TestSchedulerIntegration();
+    TestInterruptHold();
     TestUpdaterVersionLogic();
     TestPortableInstall();
     TestTranscriptScan();

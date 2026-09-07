@@ -100,7 +100,7 @@ namespace winrt::TerminalApp::implementation
         {
             _UpdateComposePlaceholder(false); // externals are observe-only — nothing to pull in
             _UpdateDraftPullButton(); // (§8b) same reason: hide the pull button in the EXTERNAL scope
-            _UpdateAutorunnerButton(AutorunnerMode::Off, false); // not drivable
+            _UpdateAutorunnerButton(::Agentmaster::AutorunnerState{}, false); // not drivable (a default state: Off, no hold)
             if (!_selectedExternalTitle.empty())
             {
                 _RebuildExternalPlan();
@@ -119,7 +119,7 @@ namespace winrt::TerminalApp::implementation
             _planHeaderHost.Children().Append(Text(L"Select a session to plan its prompts.", 13, false, 0.6));
             _UpdateComposePlaceholder(false); // nothing selected -> nothing to pull in
             _UpdateDraftPullButton(); // (§8b) ...and nothing to offer either
-            _UpdateAutorunnerButton(AutorunnerMode::Off, false); // no live session: dim the header toggle
+            _UpdateAutorunnerButton(::Agentmaster::AutorunnerState{}, false); // no live session: dim the header toggle (a default state: Off, no hold)
             _PinPlanToBottomOnSubjectChange(L""); // re-arm so re-selecting a session pins to bottom again
             return;
         }
@@ -154,7 +154,7 @@ namespace winrt::TerminalApp::implementation
         // only — no stdin injector, no hooks, so the Tests Autorunner can never drive it (C4 is the
         // deferred injector work): show its (Off) mode DISABLED instead of an armable placebo that
         // would leave queued prompts silently Pending forever.
-        _UpdateAutorunnerButton(sel->autorunner.mode, sel->kind == ::Agentmaster::AgentKind::Claude);
+        _UpdateAutorunnerButton(sel->autorunner, sel->kind == ::Agentmaster::AgentKind::Claude);
 
         // SemiAuto one-click confirm banner (the scheduler armed the next prompt).
         if (!sel->pendingConfirmPromptId.empty())
@@ -1395,16 +1395,23 @@ namespace winrt::TerminalApp::implementation
         // A managed CODEX session can never be driven (no stdin injector, no hooks — C4 deferred):
         // refuse to arm a mode that would only strand queued prompts as silently-Pending. The header
         // toggle is disabled for Codex (_RebuildPlan), so this is the belt for any other caller.
-        if (const auto cur = _registry->Get(_selectedId); cur && cur->kind != ::Agentmaster::AgentKind::Claude)
+        const auto cur = _registry->Get(_selectedId);
+        if (cur && cur->kind != ::Agentmaster::AgentKind::Claude)
         {
             return;
         }
         const AutorunnerMode mode = index == 2 ? AutorunnerMode::Full : index == 1 ? AutorunnerMode::SemiAuto :
                                                                                    AutorunnerMode::Off;
+        // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): a mode the USER sets cancels a pending
+        // interrupt resume — whatever they pick, Off included: the human's explicit choice wins over the
+        // "resume on your next message" automation, until the next interrupt arms it again.
+        const bool cancelsInterruptHold = cur && ::Agentmaster::InterruptHoldActive(cur->autorunner);
         // Nav audit: the user changed this session's Autorunner mode (the Auto-Testing header toggle).
-        ::Agentmaster::LogNav(L"autorunner " + ::Agentmaster::ShortId(_selectedId) + L" -> " + (mode == AutorunnerMode::Full ? L"Full" : mode == AutorunnerMode::SemiAuto ? L"Semi" : L"Off"));
+        ::Agentmaster::LogNav(L"autorunner " + ::Agentmaster::ShortId(_selectedId) + L" -> " + (mode == AutorunnerMode::Full ? L"Full" : mode == AutorunnerMode::SemiAuto ? L"Semi" : L"Off") +
+                              (cancelsInterruptHold ? L" (cancels the interrupt hold)" : L""));
         _registry->Update(_selectedId, [&](SessionInfo& s) {
             s.autorunner.mode = mode;
+            ::Agentmaster::ClearInterruptHold(s.autorunner); // §14: the user's pick outranks the pending resume
             if (mode != AutorunnerMode::Off)
             {
                 // Arming resets the per-run backstop counter and clears any stale confirm.
@@ -1459,13 +1466,17 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Paint the Autorunner toggle: a colored state dot (gray circle = Off, amber half = Semi, green
-    // disc = Full) + a label. Dim + disabled when no live session is selected.
-    void AgentManagerContent::_UpdateAutorunnerButton(AutorunnerMode mode, bool enabled)
+    // disc = Full) + a label. Dim + disabled when no live session is selected. An INTERRUPT-HELD Off
+    // (DELIVERY.md §14 — the user pressed Esc, the autorunner parked itself, it resumes on their next
+    // message) keeps the hollow Off circle but paints it in the HELD mode's color and says so in the
+    // label, so an Off the user did not choose never reads as "someone switched my autorunner off".
+    void AgentManagerContent::_UpdateAutorunnerButton(const ::Agentmaster::AutorunnerState& autorunner, bool enabled)
     {
         if (!_autorunnerBtn)
         {
             return;
         }
+        const AutorunnerMode mode = autorunner.mode;
         winrt::hstring glyph;
         winrt::hstring label;
         Color dot{};
@@ -1486,6 +1497,13 @@ namespace winrt::TerminalApp::implementation
             glyph = L"\x25CB"; // ○
             label = L"Tests Autorunner: Off";
             dot = Colors::Gray();
+            if (::Agentmaster::InterruptHoldActive(autorunner))
+            {
+                const bool heldFull = autorunner.interruptHeldMode == AutorunnerMode::Full;
+                label = heldFull ? L"Tests Autorunner: Off \x2192 Full on your next message" :
+                                   L"Tests Autorunner: Off \x2192 Semi on your next message";
+                dot = heldFull ? Colors::MediumSeaGreen() : Colors::Goldenrod();
+            }
             break;
         }
         auto row = StackPanel{};

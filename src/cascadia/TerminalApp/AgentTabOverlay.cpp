@@ -368,9 +368,14 @@ namespace winrt::TerminalApp::implementation
         appendSep();
         {
             const auto mode = s.autorunner.mode;
-            const auto modeBrush = (mode == AutorunnerMode::Full)     ? Fill(0xFF, 0x3C, 0xB3, 0x71) :  // MediumSeaGreen
-                                   (mode == AutorunnerMode::SemiAuto) ? Fill(0xFF, 0xDA, 0xA5, 0x20) :  // Goldenrod
-                                                                       Fill(0xFF, 0xB0, 0xB0, 0xB0);   // gray (Off)
+            // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): an Off the autorunner parked ITSELF
+            // into (the user pressed Esc; it resumes on their next message) reads "Off -> Full" in the
+            // held mode's color, so the badge never suggests someone switched the autorunner off.
+            const bool interruptHeld = ::Agentmaster::InterruptHoldActive(s.autorunner);
+            const auto colorMode = interruptHeld ? s.autorunner.interruptHeldMode : mode;
+            const auto modeBrush = (colorMode == AutorunnerMode::Full)     ? Fill(0xFF, 0x3C, 0xB3, 0x71) :  // MediumSeaGreen
+                                   (colorMode == AutorunnerMode::SemiAuto) ? Fill(0xFF, 0xDA, 0xA5, 0x20) :  // Goldenrod
+                                                                            Fill(0xFF, 0xB0, 0xB0, 0xB0);   // gray (Off)
             Button b{};
             b.Background(Fill(0x00, 0, 0, 0)); // transparent — still hit-testable; the template gives a hover highlight ("appears clickable")
             b.BorderThickness(ThicknessHelper::FromUniformLength(0));
@@ -384,7 +389,8 @@ namespace winrt::TerminalApp::implementation
             t.FontSize(12);
             t.VerticalAlignment(VerticalAlignment::Center);
             t.Foreground(modeBrush);
-            t.Text(winrt::hstring{ ModeLabel(mode) });
+            t.Text(interruptHeld ? winrt::hstring{ std::wstring{ L"Off \x2192 " } + ModeLabel(s.autorunner.interruptHeldMode) } :
+                                   winrt::hstring{ ModeLabel(mode) });
             // CLICK-THROUGH the label so a click on the text (not just the button background) still cycles
             // the mode: the on-top TextBlock would otherwise catch the glyph-area pointer without driving
             // the ButtonBase click. The button keeps hover + tooltip (AgentSetTip is on `b`).
@@ -393,7 +399,9 @@ namespace winrt::TerminalApp::implementation
             AgentSetTip(b, winrt::hstring{
                 L"Tests Autorunner \x2014 click to cycle Off \x2192 Semi \x2192 Full.\n"
                 L"Off: you drive. Semi: it proposes the next queued prompt, you confirm.\n"
-                L"Full: it auto-sends the queue on each turn-complete." });
+                L"Full: it auto-sends the queue on each turn-complete.\n"
+                L"Interrupting a turn (Esc) parks it at Off until your next message, then it\n"
+                L"resumes on its own (\"Off \x2192 Full\"); setting the mode yourself cancels that." });
             const auto weak = get_weak();
             b.Click([weak](const IInspectable&, const RoutedEventArgs&) {
                 if (auto self = weak.get())
@@ -682,11 +690,15 @@ namespace winrt::TerminalApp::implementation
         // Nav audit (the Manager's _OnAutorunnerChanged line, tagged with THIS surface): the overlay
         // cycle used to be the ONE mode-change path that logged nothing — the 2026-07-25 freeze
         // forensics had to infer the click from the [await-confirm] flood's start time.
+        // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): a mode the USER sets cancels a pending
+        // interrupt resume, whatever they pick (== _OnAutorunnerChanged — the two paths stay in step).
+        const bool cancelsInterruptHold = ::Agentmaster::InterruptHoldActive(info->autorunner);
         ::Agentmaster::LogNav(L"autorunner " + ::Agentmaster::ShortId(_sessionId) + L" -> " +
                               (next == AutorunnerMode::Full ? L"Full" : next == AutorunnerMode::SemiAuto ? L"Semi" : L"Off") +
-                              L" (overlay)");
+                              L" (overlay)" + (cancelsInterruptHold ? L" (cancels the interrupt hold)" : L""));
         _registry->Update(_sessionId, [&](SessionInfo& s) {
             s.autorunner.mode = next;
+            ::Agentmaster::ClearInterruptHold(s.autorunner); // §14: the user's pick outranks the pending resume
             if (next != AutorunnerMode::Off)
             {
                 // Arming resets the per-run backstop counter + clears any stale confirm (== _OnAutorunnerChanged).

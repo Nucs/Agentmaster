@@ -954,6 +954,11 @@ namespace winrt::TerminalApp::implementation
             // was already cleared above). Codex restores keep their own Off (see _LaunchCodexSession).
             info.autorunner.mode = _appSettings.defaultAutorunnerMode;
             info.autorunner.autoSendsThisRun = 0;
+            // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): the re-stamp above voids any hold a
+            // this-run-archived record still carries in memory (the field is transient, so a record
+            // loaded from disk never has one); clear it explicitly so a later user Off on this reopened
+            // session can never be "resumed" off a stale remembered mode.
+            ::Agentmaster::ClearInterruptHold(info.autorunner);
         }
         _sessionRegistry->Upsert(info);
 

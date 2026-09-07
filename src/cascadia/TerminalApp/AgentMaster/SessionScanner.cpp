@@ -1203,6 +1203,7 @@ namespace Agentmaster
                                 p.status = PromptStatus::Failed;
                                 label = p.label;
                                 live.autorunner.mode = AutorunnerMode::Off;
+                                ClearInterruptHold(live.autorunner); // DELIVERY.md §14: a backstop pause is sticky — no resume on the next message
                                 applied = true;
                             }
                         }
@@ -1418,6 +1419,15 @@ namespace Agentmaster
         // end) is preserved within a batch.
         const bool primedAtParse = st.primed;
         const bool feedWatch = primedAtParse && _commandWatch != nullptr;
+        // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): did THIS batch carry the user's turn-abort
+        // marker? Captured in the loop, applied AFTER it — only if the marker is still the batch's
+        // newest turn line (st.interrupted survives to the end: no later user prompt / assistant line
+        // superseded it). A batch of [marker, the user's next prompt] must NOT park anything: that
+        // prompt already fed NoteExternalPrompt inside the loop, so a hold taken afterwards would have
+        // nobody left to resume it. Gated on primedAtParse like the CommandWatch feeds (a mid-replay
+        // backlog chunk never parks); the registry's marker-freshness belt is the second guard.
+        bool sawInterruptMarker = false;
+        int64_t interruptMarkerTs = 0;
         for (const auto& ev : parsed.events)
         {
             if (ev.kind == TranscriptEvent::Kind::Assistant)
@@ -1588,6 +1598,8 @@ namespace Agentmaster
                     // stop_reason — so without this flag the turn's end goes unseen and the
                     // session stays Running forever. Flag it; recon-stop releases it to Waiting.
                     st.interrupted = true;
+                    sawInterruptMarker = true; // DELIVERY.md §14 — parked after the loop if still the tail
+                    interruptMarkerTs = ev.lineTsMs;
                     if (feedWatch)
                     {
                         _commandWatch->OnTurnEnd(s.id); // an interrupt ends the command's turn too (COMMANDS.md)
@@ -1611,6 +1623,16 @@ namespace Agentmaster
                     }
                 }
             }
+        }
+        // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): the user pressed Esc and has NOT sent
+        // anything since (the marker is still the tail) — park the Tests Autorunner NOW, in the parse,
+        // BEFORE this pass's reconciliation synthesizes the interrupt's Stop (recon-stop ->
+        // WaitingForInput -> the advance seam): a Full autorunner would otherwise auto-send the next
+        // queued prompt straight into the session the user just stopped to talk to. The registry
+        // refuses a stale/unstamped marker (history replay) and an already-Off autorunner.
+        if (sawInterruptMarker && st.interrupted && primedAtParse)
+        {
+            _registry->NoteInterrupt(s.id, interruptMarkerTs);
         }
         // ≥1 human prompt / assistant line consumed -> the caller may synthesize a missed
         // UserPromptSubmit off it (a bare tool_result / meta / garbage line never counts).

@@ -226,6 +226,7 @@ namespace Agentmaster
                         }
                     }
                     ss.autorunner.mode = AutorunnerMode::Off;
+                    ClearInterruptHold(ss.autorunner); // DELIVERY.md §14: a backstop pause is sticky — no resume on the next message
                 });
                 AppendStateLog(L"autorunner.log",
                                L"[enter-retry-giveup] " + id + L" (turn never started after " +
@@ -594,10 +595,17 @@ namespace Agentmaster
             }
         }
 
-        // stopOnError backstop: a turn that ended in Error pauses the plan.
-        if (s.state == SessionState::Error && s.autorunner.stopOnError && s.autorunner.mode != AutorunnerMode::Off)
+        // stopOnError backstop: a turn that ended in Error pauses the plan. An INTERRUPT-HELD session
+        // (DELIVERY.md §14 — parked Off with a resume pending on the user's next message) counts too:
+        // the error converts the hold into a real, sticky pause, so the next message cannot resume a
+        // plan into a broken session.
+        if (s.state == SessionState::Error && s.autorunner.stopOnError &&
+            (s.autorunner.mode != AutorunnerMode::Off || InterruptHoldActive(s.autorunner)))
         {
-            _registry->Update(s.id, [](SessionInfo& ss) { ss.autorunner.mode = AutorunnerMode::Off; });
+            _registry->Update(s.id, [](SessionInfo& ss) {
+                ss.autorunner.mode = AutorunnerMode::Off;
+                ClearInterruptHold(ss.autorunner);
+            });
             AppendStateLog(L"autorunner.log", L"[stop-on-error] paused " + s.id + L"\n");
             return;
         }
