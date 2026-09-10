@@ -623,31 +623,60 @@ void TestPromptAnchorFloorIndex()
               "floor-index: dense case still resolves via the floor needle");
     }
 
-    // The 2026-09-10 RELEASE FREEZE, reproduced exactly. All THREE conditions must coincide: (1) markers
-    // ENFORCED, (2) the floor prefix is DENSE (> kFloorIndexMaxHits => the FloorHitIndex aborts to the
-    // legacy vectorized rfind scan), and (3) EVERY occurrence is UNMARKED with the LOWEST one sitting a
-    // few chars from the buffer start (offset in [1, needleLen)). The marker-skip backward loop then walks
-    // down to that lowest occurrence, sets end = p-1, and MSVC's vectorized rfind(pat, end) returns that
-    // SAME p (> end) instead of npos -> end never drops -> INFINITE LOOP pegging the UI thread. The `p > end`
-    // guard in FindAcceptable turns it into a fast, correct "exhausted -> npos". A prefix of "xy " puts the
-    // first floor hit at offset 3 (not 0, which the p==0 guard already caught). If this regresses, the
-    // harness HANGS here (that is the bug); with the guard it returns in a few ms.
+    // The 2026-09-10 RELEASE FREEZE, reproduced exactly (verified against the pre-fix code: this shape
+    // HANGS pre-fix, resolves in <1ms with the `p > end` guard). ALL FOUR conditions must coincide, and
+    // dropping any ONE stops the reproduction (each was checked against the pre-fix resolver):
+    //   (1) markers ENFORCED — which requires at least ONE marker glyph to actually appear in the
+    //       haystack, else AnyMarkerPresent() auto-DISABLES enforcement and the backward loop returns on
+    //       its first hit (no skip, no loop). This is why the haystack carries one UNRELATED marked line;
+    //       WITHOUT it the whole case is inert and would pass even on the buggy code.
+    //   (2) the floor prefix is DENSE (> kFloorIndexMaxHits) -> the FloorHitIndex aborts to state=Dense
+    //       and every probe runs the LEGACY vectorized rfind scan (the indexed walk never calls rfind).
+    //   (3) EVERY floor occurrence is UNMARKED (the enforced walk must skip them all), and
+    //   (4) the LOWEST occurrence sits a few chars from the buffer start (offset in [1, needleLen)) — the
+    //       region where MSVC's vectorized rfind(pat, end) can return that SAME occurrence (> end) instead
+    //       of npos, so `end = p-1` never drops and the marker-skip loop spins forever. Offset 0 is caught
+    //       by the pre-existing `p == 0` guard; an offset >= needleLen never triggers the STL overshoot.
+    // If this regresses, the harness HANGS here (that IS the bug); with the guard it returns in a few ms.
     {
-        std::wstring hay = L"xy "; // first floor hit lands at offset 3 (within needleLen, > 0)
+        std::wstring hay = L"xy "; // first floor hit lands at offset 3 (in [1, needleLen), and != 0)
         for (int i = 0; i < 900; ++i) // > kFloorIndexMaxHits (512) => Dense => the legacy rfind path
         {
             hay += L"freezeme echo " + std::to_wstring(i) + L" diverges from the real prompt here\n";
         }
+        hay += caret + L" an unrelated real prompt sharing no prefix\n"; // (1): one marker => enforce is truly ON
         // floor-8 == "freezeme"; every longer backoff (64/32/16) is absent (each line diverges after it),
-        // and NONE of the 900 occurrences is preceded by a prompt marker.
+        // and none of the 900 "freezeme" occurrences is preceded by a marker (the trailing marked line
+        // shares no prefix), so the enforced in-order + global probes reject all 900 and the soft fallback
+        // lands the FIRST one (offset 3) as a floor-length partial.
         const std::wstring msg = L"freezeme prompt whose full text is nowhere in this scrollback at all";
         const auto t0 = std::chrono::steady_clock::now();
         const auto r = ResolvePromptAnchors(hay, { msg }, mk);
         const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
         CHECK(elapsedMs < 2000, "floor-index: dense+enforced+low-offset resolves fast (no infinite-loop freeze)");
         CHECK(batchEqualsSingle(hay, msg, mk), "floor-index: dense+enforced == legacy (soft fallback)");
-        CHECK(r.size() == 1 && r[0].found && r[0].partial && r[0].needleLen == 8,
-              "floor-index: dense+enforced falls back to the floor needle, partial");
+        CHECK(r.size() == 1 && r[0].found && r[0].partial && r[0].needleLen == 8 && r[0].offset < 8,
+              "floor-index: dense+enforced falls back to the floor needle at the low-offset first hit, partial");
+    }
+
+    // ANTI-MASKING guard: the `p > end` fix must never DROP a real MARKED occurrence that sits at a low
+    // offset. Here the ONLY marked render of the prompt is near the buffer start and a PRIOR prompt has
+    // pushed the greedy cursor past it, so it can only be resolved by the backward GLOBAL (out-of-order)
+    // probe walking down INTO the overshoot region. The marked hit must still be found (the STL overshoot
+    // only fabricates a match when nothing real is <= end, proven by the 9177-case clean masking sweep).
+    {
+        // buffer: P1's marked render first (low offset), then P0's marked render, then filler. Resolving
+        // [P0, P1]: P0 lands in-order at the LATER offset (cursor advances past P1's earlier render), so
+        // P1 must resolve out-of-order backward to the low offset — exercising the guarded region.
+        std::wstring hay = caret + L" findme alpha unique\n"; // P1 marked render at offset ~2 (low)
+        hay += caret + L" zzz bravo unique later\n"; // P0 marked render, higher offset
+        for (int i = 0; i < 40; ++i) hay += L"filler line number " + std::to_wstring(i) + L" no needle\n";
+        const std::vector<std::wstring> msgs{ L"zzz bravo unique later", L"findme alpha unique" };
+        const auto r = ResolvePromptAnchors(hay, msgs, mk);
+        CHECK(r.size() == 2 && r[0].found && r[1].found,
+              "anti-masking: both prompts resolve (guard never drops the low-offset marked hit)");
+        CHECK(r[1].found && r[1].offset < r[0].offset && !r[1].partial,
+              "anti-masking: the out-of-order low-offset MARKED render is found, not lost to npos");
     }
 }
 
