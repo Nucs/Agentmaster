@@ -307,6 +307,20 @@ namespace Agentmaster
                 {
                     return std::wstring::npos;
                 }
+                // Agentmaster (the 2026-09-10 release FREEZE): `p > end` means rfind returned a start
+                // index ABOVE the cap we asked for. MSVC's vectorized rfind (_Find_end_vectorized) can do
+                // this for a match sitting within ~needle-length of the buffer start: rfind(pat, 5) with the
+                // lowest occurrence at 6 returns 6, not npos. Without this guard the marker-skip walk below
+                // sets `end = p - 1` and the NEXT rfind returns the same `p` forever — a true INFINITE LOOP
+                // that pegged the one UI thread at 100% for hours whenever a DENSE, entirely-UNMARKED floor
+                // prefix (>512 hits => the FloorHitIndex goes Dense and this legacy scan runs) drove the
+                // marker-enforced backward probe to the bottom (SUMMARY_JUMP.md §5; live-dump-proven:
+                // ResolveConversationPromptRows for a 501-char prompt whose longer needles were all absent).
+                // A return past `end` means no occurrence remains at/below `end`, so the scan is exhausted.
+                if (p > end)
+                {
+                    return std::wstring::npos;
+                }
                 if (!enforceMarker || MarkerBefore(norm, p, markers, lookback))
                 {
                     return p;

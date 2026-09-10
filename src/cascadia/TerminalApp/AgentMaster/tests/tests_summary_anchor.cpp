@@ -622,6 +622,33 @@ void TestPromptAnchorFloorIndex()
         CHECK(r[0].found && r[0].partial && r[0].needleLen == 8,
               "floor-index: dense case still resolves via the floor needle");
     }
+
+    // The 2026-09-10 RELEASE FREEZE, reproduced exactly. All THREE conditions must coincide: (1) markers
+    // ENFORCED, (2) the floor prefix is DENSE (> kFloorIndexMaxHits => the FloorHitIndex aborts to the
+    // legacy vectorized rfind scan), and (3) EVERY occurrence is UNMARKED with the LOWEST one sitting a
+    // few chars from the buffer start (offset in [1, needleLen)). The marker-skip backward loop then walks
+    // down to that lowest occurrence, sets end = p-1, and MSVC's vectorized rfind(pat, end) returns that
+    // SAME p (> end) instead of npos -> end never drops -> INFINITE LOOP pegging the UI thread. The `p > end`
+    // guard in FindAcceptable turns it into a fast, correct "exhausted -> npos". A prefix of "xy " puts the
+    // first floor hit at offset 3 (not 0, which the p==0 guard already caught). If this regresses, the
+    // harness HANGS here (that is the bug); with the guard it returns in a few ms.
+    {
+        std::wstring hay = L"xy "; // first floor hit lands at offset 3 (within needleLen, > 0)
+        for (int i = 0; i < 900; ++i) // > kFloorIndexMaxHits (512) => Dense => the legacy rfind path
+        {
+            hay += L"freezeme echo " + std::to_wstring(i) + L" diverges from the real prompt here\n";
+        }
+        // floor-8 == "freezeme"; every longer backoff (64/32/16) is absent (each line diverges after it),
+        // and NONE of the 900 occurrences is preceded by a prompt marker.
+        const std::wstring msg = L"freezeme prompt whose full text is nowhere in this scrollback at all";
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto r = ResolvePromptAnchors(hay, { msg }, mk);
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        CHECK(elapsedMs < 2000, "floor-index: dense+enforced+low-offset resolves fast (no infinite-loop freeze)");
+        CHECK(batchEqualsSingle(hay, msg, mk), "floor-index: dense+enforced == legacy (soft fallback)");
+        CHECK(r.size() == 1 && r[0].found && r[0].partial && r[0].needleLen == 8,
+              "floor-index: dense+enforced falls back to the floor needle, partial");
+    }
 }
 
 // Agentmaster (SUMMARY_JUMP.md §5): edge-case + crash-safety fuzz for the prompt resolver with marker
