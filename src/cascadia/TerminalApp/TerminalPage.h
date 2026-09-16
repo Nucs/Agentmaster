@@ -421,6 +421,54 @@ namespace winrt::TerminalApp::implementation
         // (the page builds + owns it); erased alongside _claudeTabs on archive/close/liveness so the
         // overlay's registry observer detaches. Type completed in AgentTabOverlay.h (TerminalPage.cpp).
         std::unordered_map<std::wstring, winrt::com_ptr<implementation::AgentTabOverlay>> _claudeOverlays;
+        // --- Agentmaster SIDE PANEL state (TerminalPage.AgentSidePanel.cpp; built by _InitAgentSidePanel) ---
+        // UI elements. All UI-thread-only; null until _InitAgentSidePanel builds them (every method
+        // early-outs on !_sidePanelBuilt so a pre-init call is a safe no-op).
+        winrt::Windows::UI::Xaml::Controls::Grid _sidePanelHost{ nullptr }; // the panel column's root (dark, RequestedTheme Dark): header row + body; also hosts the collapsed expander strip
+        winrt::Windows::UI::Xaml::Controls::Border _sidePanelSplitter{ nullptr }; // the draggable VERTICAL separator between the terminal content and the panel (its own grid column)
+        winrt::Windows::UI::Xaml::Controls::Grid _sidePanelBody{ nullptr }; // rows: cards area (star*split) / horizontal splitter / summary area (star*(1-split)); hidden while collapsed
+        winrt::Windows::UI::Xaml::Controls::Border _sidePanelHSplitter{ nullptr }; // the draggable HORIZONTAL separator between the cards list and the summary area
+        winrt::Windows::UI::Xaml::Controls::TextBox _sidePanelSearchBox{ nullptr }; // top-row filter box (ParseSessionQuery grammar over title/dir/branch/id)
+        winrt::Windows::UI::Xaml::Controls::Button _sidePanelSortBtn{ nullptr }; // top-row order toggle — cycles the SHARED AppSettings::boardSort via AgentManagerContent::CycleBoardSort
+        winrt::Windows::UI::Xaml::Controls::Button _sidePanelCollapseBtn{ nullptr }; // top-row collapse chevron (points TOWARD the docked edge; _SidePanelApplyLayout re-glyphs it on dock flips)
+        winrt::Windows::UI::Xaml::Controls::Button _sidePanelStripBtn{ nullptr }; // the collapsed strip's expand chevron (points AWAY from the docked edge)
+        winrt::Windows::UI::Xaml::Controls::StackPanel _sidePanelCards{ nullptr }; // the vertical card list (inside its own ScrollViewer)
+        winrt::Windows::UI::Xaml::Controls::TextBlock _sidePanelCountText{ nullptr }; // dim "N shown / M live" line under the header (reads the filter's effect at a glance)
+        winrt::Windows::UI::Xaml::Controls::Grid _sidePanelSummaryHost{ nullptr }; // the bottom area hosting the fill-mode AgentTabOverlay summary panel (or the no-selection hint)
+        winrt::Windows::UI::Xaml::Controls::TextBlock _sidePanelSummaryHint{ nullptr }; // "select a session…" placeholder shown while nothing is bound below
+        winrt::Windows::UI::Xaml::Controls::StackPanel _sidePanelStrip{ nullptr }; // the COLLAPSED state's thin expander strip (a chevron button), shown instead of the body
+        winrt::Windows::UI::Xaml::Controls::Grid _sidePanelExpandedRoot{ nullptr }; // the EXPANDED state's whole content (header + count + body) — one element to toggle against the strip, so collapse never squeezes live controls into a 20px column
+        // The bottom area's summary renderer: a real AgentTabOverlay in fill-host mode for the SELECTED
+        // session — maximal reuse of the per-tab summary business logic (analyze/render/JUMP/times/
+        // wrap-truncate-previous toggles). DELIBERATELY NOT in _claudeOverlays: that map is keyed by
+        // session id and already holds the session's own per-tab overlay when its tab lives here —
+        // inserting this one would clobber it. Released (observer detached) on rebind + teardown.
+        winrt::com_ptr<implementation::AgentTabOverlay> _sidePanelSummaryOverlay{ nullptr };
+        std::wstring _sidePanelSummaryId; // which session the bottom overlay is bound to ("" == hint shown)
+        std::wstring _sidePanelSelectedId; // the selected card's session id ("" == none) — kept in step with the Manager lens both ways
+        std::wstring _sidePanelSearchText; // the filter box's current raw text (parsed per rebuild)
+        // id -> its card Border, rebuilt by _SidePanelRebuildCards — lets a selection change restyle
+        // two borders instead of rebuilding the list.
+        std::unordered_map<std::wstring, winrt::Windows::UI::Xaml::Controls::Border> _sidePanelCardsById;
+        // id -> its timing TextBlock, rebuilt with the cards — the 30s tick rewrites these IN PLACE
+        // (the Manager's _RefreshTimingTexts lesson: never a full rebuild just to move an "ago" string).
+        std::vector<std::pair<std::wstring, winrt::Windows::UI::Xaml::Controls::TextBlock>> _sidePanelTimingTexts;
+        // Live layout state — the per-window truth _CaptureWindowRecord persists. Fractions are of the
+        // CONTENT AREA width (vertical) / the panel body height (horizontal split); both stay inside
+        // the load-time bands ((0.10,0.50] / (0.15,0.85)) because the drag clamps write them.
+        double _sidePanelWidthFraction{ 0.22 };
+        double _sidePanelSplitFraction{ 0.5 };
+        bool _sidePanelCollapsed{ false };
+        bool _sidePanelBuilt{ false }; // _InitAgentSidePanel completed — the master gate for every side panel entry point
+        bool _sidePanelDirty{ false }; // a rebuild was deferred (min-gap throttle, or collapsed) — the periodic tick / expand catches up
+        bool _sidePanelLayoutQueued{ false }; // a coalesced _SidePanelApplyLayout tick is queued (_SidePanelQueueLayout) — later triggers fold into it
+        uint64_t _sidePanelLastRebuildMs{ 0 }; // GetTickCount64 of the last card rebuild (the min-gap throttle anchor)
+        uint64_t _sidePanelNextTimingMs{ 0 }; // next GetTickCount64 at/after which the in-place timing-text refresh runs (~30s cadence)
+        // Splitter drag state (one drag at a time; pointer captured on the splitter Border).
+        bool _sidePanelDragWidth{ false }; // a vertical-separator drag is in flight
+        bool _sidePanelDragSplit{ false }; // a horizontal-separator drag is in flight
+        double _sidePanelDragStart{ 0.0 }; // pointer X (width drag) / Y (split drag) at press, island-relative — only the delta matters
+        double _sidePanelDragStartVal{ 0.0 }; // panel width px (width drag) / cards-area height px (split drag) at press
         // Agentmaster (PENDING_INPUT.md): per-session consecutive-empty-read counter for the unsent-draft
         // scan's CLEAR debounce (eager show / lazy hide). A non-empty read shows the pending dots
         // immediately (and zeroes this); an empty read only CLEARS once it has been empty for
@@ -1408,6 +1456,31 @@ namespace winrt::TerminalApp::implementation
         void _RestoreAgentPageOverlays(); // re-show pages logically-open when the Manager tab was last left (their collapsed tree kept the search text/rows); called on RETURN to the Manager tab
         void _SetAgentPageOverlayOpenIntent(std::atomic<bool>* visibleMirror, bool open); // a page's Show/Hide flags whether _RestoreAgentPageOverlays should re-open it (found by its visibility mirror)
         void _MoveArchiveSelection(int delta); // Up/Down keyboard nav over _archiveVisibleOrder (same rotate semantics as the Sessions page)
+
+        // --- Agentmaster SIDE PANEL (TerminalPage.AgentSidePanel.cpp) ---------------------------------
+        // A window-chrome (NOT a terminal pane, NOT per-tab) fleet panel docked beside the tab content:
+        // a searchable/sortable vertical list of the LIVE session cards (the Triage-Board integration —
+        // select / double-click-activate / the full lazy session context menu) over the SELECTED
+        // session's summary (a fill-hosted AgentTabOverlay summary panel). Layout persists PER WINDOW
+        // (WindowRecord::sidePanel*) and every adjustment also RMWs the GLOBAL AppSettings defaults so
+        // the last window to adjust seeds new windows.
+        void _InitAgentSidePanel(); // build the panel UI into ContentArea (once, from _OnFirstLayout after the engine + window-record claim); seeds layout from the claimed record, else the AppSettings defaults
+        void _SidePanelApplyDock(); // assign TabContent / splitter / panel host to the ContentArea columns per the GLOBAL AppSettings::sidePanelOnLeft, then re-apply widths (a dock flip rotates which column is the star)
+        void _SidePanelApplyLayout(); // re-derive the three column widths + the cards/summary row ratios from the live fractions + collapse state; safe pre-layout (a 0-width area defers to the next SizeChanged)
+        void _SidePanelQueueLayout(); // coalesced _SidePanelApplyLayout on a clean dispatcher tick — the ONLY legal path from a layout-driven trigger (ContentArea.SizeChanged): a synchronous column-width write inside the layout pass risks XAML's E_LAYOUTCYCLE fail-fast (the tag-badge lesson)
+        void _SidePanelRebuildCards(); // SnapshotLive -> search-filter (ParseSessionQuery/MatchesQueryText) -> boardSort order (MakeSortKey/SortKeyLess) -> rebuild the card list; also rebinds the selection highlight + timing-text registry
+        void _SidePanelScheduleRebuild(bool force); // coalesced rebuild: force==true rebuilds now (user action); otherwise a rebuild within the min-gap only marks _sidePanelDirty (the periodic tick catches up) — and a COLLAPSED panel always defers (no pixels to show)
+        void _SidePanelNoteRegistryChange(); // the registry batch-drain hook (UI thread): a session changed somewhere -> schedule a non-forced rebuild
+        winrt::fire_and_forget _SidePanelPeriodicTick(); // liveness-probe rider (SCANNER thread; self-marshals like _ScanCacheWarmTabs — a terminate-netted fire_and_forget over the awaitable Impl): run the deferred dirty rebuild + the ~30s in-place timing-text refresh (no rebuild churn for a clock tick)
+        winrt::Windows::Foundation::IAsyncAction _SidePanelPeriodicTickImpl(); // the awaitable body (resume_foreground first) so an exception propagates to _SidePanelPeriodicTick's catch instead of std::terminate
+        void _SidePanelSelectSession(const std::wstring& id, bool driveManagerLens); // select a card (highlight + bind the summary below); driveManagerLens==true (a card click) also drives AgentManagerContent::SelectSession so the Manager lens follows — false for calls that ORIGINATE from the lens/tab funnel (re-entrancy guard: an already-selected id is a no-op)
+        void _SidePanelBindSummary(const std::wstring& id); // point the bottom area's fill-hosted AgentTabOverlay summary at `id` (create/replace the overlay; empty id -> release it + show the hint); same-id rebinds just kick RefreshSummaryContent
+        void _SidePanelApplySettings(); // adopt GLOBAL settings changes (cog Save / cross-window broadcast): sort label + dock side live, wrap/truncate/previous + color-mode pushed into the summary overlay, then a forced rebuild
+        void _SidePanelPersistDefaults(bool width, bool split, bool collapsed); // the "last one to adjust sets the default" half: freshest-disk RMW of ONLY the flagged AppSettings sidePanel* fields (granular, so a width drag never exports this window's collapse state), keeping _appSettings in step
+        void _SidePanelToggleCollapsed(); // collapse to the thin expander strip / expand back; persists per window (record autosave) AND as the global default (RMW)
+        void _SidePanelFlipDock(); // flip left<->right: RMW the GLOBAL sidePanelOnLeft, re-dock THIS window live (other windows re-dock via the settings broadcast)
+        void _SidePanelUpdateSortButton(); // reflect the current AppSettings::boardSort on the order button's label (the board's own label mapping)
+        winrt::Windows::UI::Xaml::Controls::Border _SidePanelMakeCard(const ::Agentmaster::SessionInfo& s); // build ONE compact session card (title band in the session's resolved color + state dot/label + pending dots + timing + dir/branch line), wired for select / activate / the shared lazy context menu
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);
 

@@ -429,9 +429,17 @@ namespace winrt::TerminalApp::implementation
 
         Grid layout{};
         layout.Children().Append(contentBorder);
-        layout.Children().Append(leftGrip);
-        layout.Children().Append(bottomGrip);
-        layout.Children().Append(cornerGrip); // last == on top, so the corner wins over the edge grips
+        // Agentmaster (SIDE PANEL, fill-host mode): the grips are NEVER mounted when the HOST owns
+        // sizing (SetSummaryFillHost) — a drag would fight the host's own splitters and its release
+        // would persist bogus per-tab GLOBAL fractions. The (cheap) grip objects above are simply
+        // dropped unrooted; keeping the construction unconditional keeps this diff — and the classic
+        // per-tab path — byte-identical in behavior.
+        if (!_summaryFillHost)
+        {
+            layout.Children().Append(leftGrip);
+            layout.Children().Append(bottomGrip);
+            layout.Children().Append(cornerGrip); // last == on top, so the corner wins over the edge grips
+        }
 
         _summaryRoot = Border{};
         // FULLY OPAQUE, matching the badge (_root) — its see-through-ness is owned SOLELY by
@@ -445,6 +453,43 @@ namespace winrt::TerminalApp::implementation
         _summaryRoot.Child(layout);
         _summaryRoot.Visibility(Visibility::Collapsed); // shown only while the GLOBAL showSummaryPanel is ON
         _summaryRoot.Opacity(_restOpacity); // dim at rest — same value as the badge (_root.Opacity)
+        // Agentmaster (SIDE PANEL, fill-host mode): stretch across the host slot's width; TOP-aligned
+        // vertically (NOT Stretch) so the root keeps hugging its content — the fill branch of
+        // _ApplySummarySize derives the panel's own chrome height as rootActual - scrollActual, which
+        // only holds while the root is content-sized. The height is governed by the scroll viewport's
+        // MaxHeight (pushed host height minus that chrome). Re-applies are driven by the root's OWN
+        // SizeChanged — the moment the title/times rows appear the chrome grows and the viewport cap
+        // must shrink — but DEFERRED to a clean dispatcher tick (coalesced by _summaryFillReapplyQueued):
+        // mutating MaxHeight synchronously inside a layout pass risks XAML's E_LAYOUTCYCLE fail-fast
+        // (the tag-badge lesson), while the deferred apply is change-gated so it converges.
+        if (_summaryFillHost)
+        {
+            _summaryRoot.HorizontalAlignment(HorizontalAlignment::Stretch);
+            _summaryRoot.VerticalAlignment(VerticalAlignment::Top);
+            _summaryRoot.Margin(ThicknessHelper::FromUniformLength(0));
+            _summaryRoot.SizeChanged([weak](const IInspectable&, const SizeChangedEventArgs&) {
+                const auto self = weak.get();
+                if (!self || self->_summaryFillReapplyQueued)
+                {
+                    return; // gone, or a re-apply tick is already queued — this change folds into it
+                }
+                self->_summaryFillReapplyQueued = true;
+                if (self->_dispatcher)
+                {
+                    self->_dispatcher.TryEnqueue([weak]() {
+                        if (const auto s2 = weak.get())
+                        {
+                            s2->_summaryFillReapplyQueued = false;
+                            s2->_ApplySummarySize(); // change-gated inside — an unchanged geometry is a no-op
+                        }
+                    });
+                }
+                else
+                {
+                    self->_summaryFillReapplyQueued = false; // no dispatcher (teardown) — drop, the next host push re-applies
+                }
+            });
+        }
         // Same hover MECHANISM as the badge (_WireHover/_SetExpanded): brighten to full on pointer-over,
         // back to dim on exit. The panel is text-heavy (selectable title / times / body runs) + has resize
         // grips, all hit-testable children whose bubbled PointerExited would otherwise dim the panel WHILE
@@ -796,6 +841,42 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // Agentmaster (SIDE PANEL): FILL-THE-HOST branch — the host slot (pushed via OnSummaryPaneSize)
+        // sizes the panel; the global width/height fractions and their caps are deliberately ignored
+        // (a 50%-of-pane cap makes sense floating over a terminal, not filling a dedicated slot).
+        // Width: MaxWidth = the host width (the root stretches to it; MaxWidth still bounds a wide
+        // unwrappable line). Height: the body viewport's MaxHeight = host height minus the panel's own
+        // CHROME (title + times bar + padding + border), measured as rootActual - scrollActual — valid
+        // because the fill root stays TOP-aligned/content-hugging (see _BuildSummaryPanel). Before the
+        // first real layout both actuals are 0, so a conservative fallback stands in; the root's
+        // deferred SizeChanged re-apply then corrects it. Every write is CHANGE-GATED (>0.5px delta)
+        // so the SizeChanged -> re-apply loop converges instead of cycling (`forced` never happens
+        // here — the grips that pass it are not built in fill mode).
+        if (_summaryFillHost)
+        {
+            if (_summaryPaneW > 1.0 && std::abs(_summaryRoot.MaxWidth() - _summaryPaneW) > 0.5)
+            {
+                _summaryRoot.MaxWidth(_summaryPaneW);
+            }
+            _summaryRoot.Width(NAN); // always content/host-driven — never the fraction pin
+            _summaryRoot.Height(NAN);
+            if (_summaryScroll && _summaryPaneH > 1.0)
+            {
+                _summaryScroll.Height(NAN);
+                const double rootH = _summaryRoot.ActualHeight();
+                const double scrollH = _summaryScroll.ActualHeight();
+                // Chrome = everything of the panel that is NOT the scrolling body. The subtraction is
+                // only meaningful once both are laid out AND sane; else assume ~64px (title 18 + times
+                // 17 + paddings 12 + border 2 + margins) — corrected by the next SizeChanged re-apply.
+                double chrome = (rootH > 0.0 && scrollH > 0.0 && rootH > scrollH && rootH - scrollH < _summaryPaneH) ? (rootH - scrollH) : 64.0;
+                const double maxH = std::max(40.0, _summaryPaneH - chrome);
+                if (std::abs(_summaryScroll.MaxHeight() - maxH) > 0.5)
+                {
+                    _summaryScroll.MaxHeight(maxH);
+                }
+            }
+            return;
+        }
         const double wpx = _CurrentSummaryWidthPx();
         if (wpx > 0.0)
         {
@@ -845,6 +926,15 @@ namespace winrt::TerminalApp::implementation
         _summaryPaneW = paneWidth;
         _summaryPaneH = paneHeight;
         _ApplySummarySize();
+    }
+
+    void AgentTabOverlay::SetSummaryFillHost()
+    {
+        // Agentmaster (SIDE PANEL): one-way, pre-Initialize switch (see the header doc — the grips and
+        // the root alignment are decided when _BuildSummaryPanel constructs the tree, so flipping this
+        // after Initialize would only change the sizing math, leaving anchored alignment + live grips).
+        // No un-set exists on purpose: an overlay's layout mode is fixed for its lifetime.
+        _summaryFillHost = true;
     }
 
     void AgentTabOverlay::SetSummarySize(double widthFraction, double heightFraction)

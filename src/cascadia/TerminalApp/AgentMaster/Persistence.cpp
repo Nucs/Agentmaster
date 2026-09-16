@@ -728,6 +728,13 @@ namespace Agentmaster
         o.Set(L"archiveSplitFraction", json::Value::MkNum(s.archiveSplitFraction));
         o.Set(L"summaryPanelWidthFraction", json::Value::MkNum(s.summaryPanelWidthFraction));
         o.Set(L"summaryPanelHeightFraction", json::Value::MkNum(s.summaryPanelHeightFraction));
+        // Side panel (window chrome): the GLOBAL new-window defaults — every splitter release /
+        // collapse / dock flip RMWs these ("last one to adjust sets the default"); per-window live
+        // values ride windows/<id>.json, never here.
+        o.Set(L"sidePanelOnLeft", json::Value::MkBool(s.sidePanelOnLeft));
+        o.Set(L"sidePanelWidthFraction", json::Value::MkNum(s.sidePanelWidthFraction));
+        o.Set(L"sidePanelSplitFraction", json::Value::MkNum(s.sidePanelSplitFraction));
+        o.Set(L"sidePanelCollapsed", json::Value::MkBool(s.sidePanelCollapsed));
         o.Set(L"allowUpdatePrerelease", json::Value::MkBool(s.allowUpdatePrerelease));
         o.Set(L"allowUpdateNightly", json::Value::MkBool(s.allowUpdateNightly)); // NIGHTLY opt-in (warning-gated; tag contains "nightly" — Updater.h)
         o.Set(L"debugMode", json::Value::MkBool(s.debugMode)); // About-tab "Enable Debug Mode" — the durable --debug twin (ProfileBootstrap.h IsDebugPackage)
@@ -918,6 +925,20 @@ namespace Agentmaster
             s.summaryPanelWidthFraction = (wf >= 0.08 && wf <= 0.5) ? wf : 0.0;
             const double hf = v.NumAt(L"summaryPanelHeightFraction", 0.0);
             s.summaryPanelHeightFraction = (hf >= 0.06 && hf <= 0.75) ? hf : 0.0;
+        }
+        {
+            // Side panel (window chrome) GLOBAL new-window defaults. Unlike the summary-panel fractions
+            // there is NO "auto" sentinel here — these ARE the fallback a fresh window uses — so an
+            // absent/corrupt value lands on the shipped defaults (0.22 width / 0.5 split) instead of 0.
+            // The bands mirror the drag clamps (width (0.10, 0.50] — never more than half the window;
+            // split (0.15, 0.85) — both panel areas stay usable), so a hand-edited extreme can't
+            // collapse the terminal or wedge a panel area to nothing.
+            s.sidePanelOnLeft = v.BoolAt(L"sidePanelOnLeft", false); // absent => dock RIGHT (the default)
+            const double pw = v.NumAt(L"sidePanelWidthFraction", 0.22);
+            s.sidePanelWidthFraction = (pw >= 0.10 && pw <= 0.50) ? pw : 0.22;
+            const double ps = v.NumAt(L"sidePanelSplitFraction", 0.5);
+            s.sidePanelSplitFraction = (ps >= 0.15 && ps <= 0.85) ? ps : 0.5;
+            s.sidePanelCollapsed = v.BoolAt(L"sidePanelCollapsed", false); // absent => expanded
         }
         // Updater (Updater.h): the prerelease + nightly opt-ins + the skip/postpone state (the latter
         // two are written OUTSIDE the cog form by the updater's JSON RMW; the cog's Save preserves them).
@@ -1187,6 +1208,21 @@ namespace Agentmaster
         o.Set(L"selectedTabIndex", json::Value::MkNum(static_cast<double>(w.selectedTabIndex))); // fallback for a shell tab
         o.Set(L"manager", ToJson(w.manager));
         o.Set(L"managerTabColor", json::Value::MkStr(w.managerTabColor)); // Agentmaster: the Manager tab's per-window color ("#RRGGBB"; "" => none)
+        // Side panel (window chrome): this window's own layout. The UNSET sentinels are written only
+        // conditionally — an unset field is OMITTED so the record keeps meaning "follow the global
+        // default" instead of freezing a 0/-1 that a stricter future reader might misread.
+        if (w.sidePanelWidthFraction > 0.0)
+        {
+            o.Set(L"sidePanelWidthFraction", json::Value::MkNum(w.sidePanelWidthFraction));
+        }
+        if (w.sidePanelSplitFraction > 0.0)
+        {
+            o.Set(L"sidePanelSplitFraction", json::Value::MkNum(w.sidePanelSplitFraction));
+        }
+        if (w.sidePanelCollapsed >= 0)
+        {
+            o.Set(L"sidePanelCollapsed", json::Value::MkBool(w.sidePanelCollapsed != 0));
+        }
         return o;
     }
 
@@ -1211,6 +1247,22 @@ namespace Agentmaster
         w.selectedSessionId = v.StrAt(L"selectedSessionId");
         w.selectedTabIndex = static_cast<int>(v.I64At(L"selectedTabIndex", -1));
         w.managerTabColor = v.StrAt(L"managerTabColor"); // empty when absent (a pre-feature record => no Manager-tab color)
+        // Side panel (window chrome): absent keys stay at the UNSET sentinels (0 fraction / -1
+        // collapsed) so a pre-feature record follows the GLOBAL defaults at open. A stored fraction is
+        // band-checked with the SAME bands as the AppSettings defaults (width (0.10, 0.50], split
+        // (0.15, 0.85)); out-of-band reads as unset — corrupt per-window state degrades to the global
+        // default rather than a degenerate layout.
+        {
+            const double pw = v.NumAt(L"sidePanelWidthFraction", 0.0);
+            w.sidePanelWidthFraction = (pw >= 0.10 && pw <= 0.50) ? pw : 0.0;
+            const double ps = v.NumAt(L"sidePanelSplitFraction", 0.0);
+            w.sidePanelSplitFraction = (ps >= 0.15 && ps <= 0.85) ? ps : 0.0;
+            // Tri-state: only a PRESENT bool commits the window to a choice; absent stays -1 (unset).
+            if (const auto* c = v.Find(L"sidePanelCollapsed"); c && c->type == json::Value::Type::Bool)
+            {
+                w.sidePanelCollapsed = v.BoolAt(L"sidePanelCollapsed", false) ? 1 : 0;
+            }
+        }
         if (const auto* m = v.Find(L"manager"); m && m->type == json::Value::Type::Obj)
         {
             w.manager = ManagerStateFromJson(*m);

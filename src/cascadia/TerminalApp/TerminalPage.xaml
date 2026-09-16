@@ -57,13 +57,36 @@
             </mux:InfoBar>
         </StackPanel>
 
-        <Grid x:Name="TabContent"
+        <!--
+            Agentmaster (SIDE PANEL): the content row is a 3-column grid so the fleet SIDE PANEL — a
+            non-terminal, window-chrome pane (session cards over the selected session's summary) — can
+            dock beside the terminal content. Column WIDTHS and the CHILDREN's column assignments are
+            owned by code (_SidePanelApplyDock / _SidePanelApplyLayout in
+            TerminalPage.AgentSidePanel.cpp): dock-right = [TabContent *][splitter][panel px], dock-left
+            = the mirror. The generically-named columns deliberately carry no role — the role rotates
+            with the dock side. Both extra columns start at 0 so a build without the panel (or before
+            _InitAgentSidePanel runs) renders exactly the pre-feature layout. The dialogs/palette
+            siblings stay at Grid.Row=2 of Root and overlay the WHOLE content area, panel included.
+        -->
+        <Grid x:Name="ContentArea"
               Grid.Row="2"
               HorizontalAlignment="Stretch"
               VerticalAlignment="Stretch">
-            <Grid.Background>
-                <ImageBrush />
-            </Grid.Background>
+            <!-- Unnamed on purpose: code addresses them by index (ColumnDefinitions().GetAt(i)) so no
+                 x:Name codegen is needed on non-FrameworkElement parts. -->
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="0" />
+                <ColumnDefinition Width="0" />
+            </Grid.ColumnDefinitions>
+            <Grid x:Name="TabContent"
+                  Grid.Column="0"
+                  HorizontalAlignment="Stretch"
+                  VerticalAlignment="Stretch">
+                <Grid.Background>
+                    <ImageBrush />
+                </Grid.Background>
+            </Grid>
         </Grid>
 
         <!--

@@ -189,6 +189,30 @@ namespace winrt::TerminalApp::implementation
         // tree row selection), or empty. The page reads it live to decide which tab wears the
         // "selected/active" pill when nothing is hovered.
         winrt::hstring SelectedSessionId() const noexcept { return winrt::hstring{ _selectedId }; }
+        // Agentmaster (SIDE PANEL): advance the GLOBAL Triage-Board card sort (AppSettings::boardSort,
+        // MOST ACTIVE -> NEWEST -> OLDEST -> A-Z -> wrap) — the SAME cycle + persist + re-sort path the
+        // board header's own sort toggle runs (_CycleBoardSort: mutate, persist via the settings sink
+        // — which preserves out-of-form fields, saves settings.json, and broadcasts to other windows —
+        // then refresh this lens). Exposed so the side panel's order button shares ONE sort spec with
+        // the board instead of growing a second, drift-prone setting. The sink runs synchronously on
+        // the UI thread, so on return the page's AppSettings copy already carries the new order — the
+        // caller can re-read boardSort and re-sort its own list immediately. UI thread only.
+        void CycleBoardSort() { _CycleBoardSort(); }
+        // Agentmaster (SIDE PANEL): build the full session context menu — the SAME lazily-populated
+        // MenuFlyout the Triage-Board card / Explorer-tree row shows (_MakeLazySessionMenu: Jump to
+        // Tab / Rename / Restart / Close ▸ / Open New Session Here ▸ model picker / Tags / Copy ▸ /
+        // ...), filled at Opening from the live registry so a stale snapshot can never mis-target.
+        // Exposed so a side-panel card offers the identical action set with zero drift — every item
+        // routes through this content's already-wired callbacks (activate / rename / close / spawn),
+        // exactly as if the user had right-clicked the board card. CAVEAT for hosts outside the
+        // Manager tab: Rename opens the Explorer tree's in-place editor, which lives on the (possibly
+        // hidden) Manager tab — the rename works, but the editor is only visible after switching
+        // there. `id` = the managed session; `cwd` = its effective working dir (feeds the folder-wide
+        // items). Returns a menu the caller shows via ShowAt; never null. UI thread only.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout BuildSessionMenuFor(const std::wstring& id, const std::wstring& cwd)
+        {
+            return _MakeLazySessionMenu(id, cwd);
+        }
 
         // Agentmaster (Fleet Observer O6; OBSERVER.md §11c): the External (WindowsTerminal) claude
         // census — observe-only sessions the observer detected in a real Windows Terminal (NOT our

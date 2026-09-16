@@ -368,6 +368,18 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // --- Side panel per-window layout ---
+        // Read the LIVE members only once the panel actually built this run; a capture before/without
+        // the panel keeps whatever the claimed record carried (rec is a copy of _windowRecord), so a
+        // build failure can never wipe a window's stored layout. The fractions are drag-band-clamped
+        // at every writer, so what lands here always re-loads (the FromJson band check passes).
+        if (_sidePanelBuilt)
+        {
+            rec.sidePanelWidthFraction = _sidePanelWidthFraction;
+            rec.sidePanelSplitFraction = _sidePanelSplitFraction;
+            rec.sidePanelCollapsed = _sidePanelCollapsed ? 1 : 0; // the tri-state commits once the panel exists
+        }
+
         return rec;
     }
 

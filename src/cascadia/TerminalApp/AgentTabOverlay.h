@@ -145,10 +145,25 @@ namespace winrt::TerminalApp::implementation
         // overlay can't reach AppSettings, so it calls this page-wired handler for the RMW + broadcast.
         void SetSummaryPreviousToggleHandler(std::function<void()> handler);
 
+        // Agentmaster (SIDE PANEL): switch the summary panel from its native ANCHORED-top-right,
+        // content-hugging, grip-resizable layout to a FILL-THE-HOST layout for embedding in a fixed
+        // slot the HOST sizes (the window side panel's bottom area). In fill mode the panel stretches
+        // to the host width (MaxWidth = the pushed pane width, ignoring the global width fraction and
+        // its 50% cap), the body ScrollViewer's MaxHeight tracks the pushed pane height minus the
+        // panel's own chrome (title + times bar + padding), and the three resize GRIPS are never built
+        // — the host owns sizing (its own splitters), so a grip would fight it and its drag-persist
+        // would corrupt the GLOBAL per-tab fractions. ⚠ MUST be called BEFORE Initialize: the grips
+        // and the root's alignment are decided when _BuildSummaryPanel constructs the tree, and there
+        // is deliberately no dynamic un-build (the mode is fixed for the overlay's lifetime). A
+        // fill-hosted overlay still honors every content flag (wrap/truncate/previous, SetSummary*)
+        // and still needs OnSummaryPaneSize pushes — the HOST's slot size, not a terminal pane's.
+        void SetSummaryFillHost();
+
         // Agentmaster (TAB_OVERLAY.md summary panel resize): the panel SIZE is a GLOBAL setting
         // (AppSettings::summaryPanelWidthFraction/HeightFraction), stored as FRACTIONS of the pane so it
         // scales with the window. The page seeds this overlay (on attach) and broadcasts (when ANY tab
         // resizes the panel); the overlay applies fraction*paneSize. 0 == "auto" (the original look).
+        // A fill-hosted overlay (SetSummaryFillHost) ignores the fractions — the host slot sizes it.
         // Call on the UI thread.
         void SetSummarySize(double widthFraction, double heightFraction);
         // The host (TerminalPaneContent) pushes the live PANE size here — on its wrapper's SizeChanged
@@ -338,6 +353,15 @@ namespace winrt::TerminalApp::implementation
         std::function<void()> _onToggleSummaryWrap; // wrap-line icon -> page (flip the global newline setting + broadcast)
         std::function<void()> _onToggleSummaryTruncate; // truncate icon -> page (flip the global truncate setting + broadcast)
         std::function<void()> _onToggleSummaryPrevious; // previous-session icon -> page (flip the global show-previous setting + broadcast)
+
+        // Agentmaster (SIDE PANEL): FILL-THE-HOST layout mode (SetSummaryFillHost — must be set before
+        // Initialize builds the panel). true => stretch to the pushed pane (host slot) size, no grips,
+        // fractions ignored; false (default) => the classic anchored/content-hugging per-tab panel.
+        bool _summaryFillHost{ false };
+        // Coalesces the fill mode's root-SizeChanged re-apply onto ONE clean dispatcher tick (the
+        // _PositionTagBadges discipline): mutating MaxHeight synchronously inside a layout-driven
+        // handler risks XAML's E_LAYOUTCYCLE fail-fast, so SizeChanged only queues; the tick applies.
+        bool _summaryFillReapplyQueued{ false };
 
         // Summary panel RESIZE (TAB_OVERLAY.md): the panel is anchored top-right; left/bottom/corner
         // grips drag it bigger (left=width, bottom=height, corner=both). Size is kept as FRACTIONS of

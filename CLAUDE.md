@@ -68,6 +68,7 @@
 - System notifications (Windows toasts when a session leaves Running; click = foreground + jump to tab): [`doc/agentmaster/NOTIFICATIONS.md`](doc/agentmaster/NOTIFICATIONS.md).
 - Slash-command bindings + /handover + /handover-here (CommandWatch: bind to typed /commands, await follow-up activity): [`doc/agentmaster/COMMANDS.md`](doc/agentmaster/COMMANDS.md).
 - Atomic prompt delivery (the DELIVERY GATE — one owner per input box; advance/watchdog/swap serialization): [`doc/agentmaster/DELIVERY.md`](doc/agentmaster/DELIVERY.md).
+- The SIDE PANEL (window-chrome fleet pane beside the terminal: session cards over the selected session's fill-hosted summary; per-window splitters whose last resize seeds new windows): [`doc/agentmaster/SIDE_PANEL.md`](doc/agentmaster/SIDE_PANEL.md).
 
 ## Status
 

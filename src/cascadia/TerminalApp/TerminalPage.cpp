@@ -770,6 +770,14 @@ namespace winrt::TerminalApp::implementation
             _OpenAgentManagerTab();
             ::Agentmaster::Startup::Phase(L"manager-tab" + _wid, ::GetTickCount64() - _swatch);
 
+            // Agentmaster (SIDE PANEL): the window-chrome fleet panel beside the tab content.
+            // AFTER the engine (registry + the claimed WindowRecord seed its per-window layout)
+            // and AFTER the Manager tab (its AgentManagerContent is the sort/menu/selection
+            // delegate), BEFORE the session restore (so restored cards land in a live list).
+            _swatch = ::GetTickCount64();
+            _InitAgentSidePanel();
+            ::Agentmaster::Startup::Phase(L"side-panel" + _wid, ::GetTickCount64() - _swatch);
+
             // Agentmaster: re-launch persisted sessions (claude --resume) so the app reopens
             // to the exact state it was closed in (DESIGN §13). (fire_and_forget, but its load runs
             // synchronously to co_return under the restore barrier, so this times the fleet load.)

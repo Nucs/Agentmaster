@@ -6737,6 +6737,10 @@ namespace winrt::TerminalApp::implementation
                 ov->SetSummaryWrapNewlines(next);
             }
         }
+        if (_sidePanelSummaryOverlay)
+        {
+            _sidePanelSummaryOverlay->SetSummaryWrapNewlines(next); // the side panel's fill-hosted overlay sits outside _claudeOverlays
+        }
         _InvalidateSessionsSummaryForToggle(); // the Sessions detail renders the same box, honoring this flag
     }
 
@@ -6757,6 +6761,10 @@ namespace winrt::TerminalApp::implementation
             {
                 ov->SetSummaryTruncate(next);
             }
+        }
+        if (_sidePanelSummaryOverlay)
+        {
+            _sidePanelSummaryOverlay->SetSummaryTruncate(next); // the side panel's fill-hosted overlay sits outside _claudeOverlays
         }
         _InvalidateSessionsSummaryForToggle(); // the Sessions detail renders the same box, honoring this flag
     }
@@ -6791,6 +6799,10 @@ namespace winrt::TerminalApp::implementation
             {
                 ov->SetSummaryShowPrevious(next);
             }
+        }
+        if (_sidePanelSummaryOverlay)
+        {
+            _sidePanelSummaryOverlay->SetSummaryShowPrevious(next); // the side panel's fill-hosted overlay sits outside _claudeOverlays
         }
     }
 

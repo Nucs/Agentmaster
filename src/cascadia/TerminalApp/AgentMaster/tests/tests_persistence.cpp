@@ -418,6 +418,12 @@ void TestWindowRecord()
     in.manager.boardTagFilter = { L"Release", L"bug" };
     in.manager.boardShowUntagged = false; // non-default (it defaults ON) so a dropped field fails the round-trip
 
+    // Side panel per-window layout: all three SET (in-band / committed), so a dropped field fails
+    // the round-trip (the unset sentinels 0 / -1 would otherwise mask it).
+    in.sidePanelWidthFraction = 0.3;
+    in.sidePanelSplitFraction = 0.6;
+    in.sidePanelCollapsed = 1; // collapsed (the tri-state's TRUE)
+
     const auto out = DeserializeWindowRecord(SerializeWindowRecord(in));
 
     CHECK(out.windowId == L"win-guid-1", "record windowId round-trip");
@@ -452,6 +458,9 @@ void TestWindowRecord()
               out.manager.boardTagFilter[1] == L"bug",
           "lens boardTagFilter (board bookmark-tag filter) round-trip, order + casing preserved");
     CHECK(out.manager.boardShowUntagged == false, "lens boardShowUntagged (the board's Untagged chip) round-trip");
+    CHECK(approx(out.sidePanelWidthFraction, 0.3), "sidePanelWidthFraction (per-window separator) round-trip");
+    CHECK(approx(out.sidePanelSplitFraction, 0.6), "sidePanelSplitFraction (per-window cards/summary split) round-trip");
+    CHECK(out.sidePanelCollapsed == 1, "sidePanelCollapsed committed TRUE round-trips as 1 (not the -1 unset)");
 
     // Tolerant of a missing / corrupt document.
     {
@@ -470,6 +479,20 @@ void TestWindowRecord()
         CHECK(legacy.manager.boardShowUntagged == true, "missing boardShowUntagged -> ON (older record still shows untagged cards)");
         const auto outOfRange = DeserializeWindowRecord(L"{\"windowId\":\"w\",\"manager\":{\"treeScope\":7}}");
         CHECK(outOfRange.manager.treeScope == 0, "out-of-range treeScope clamps to LOCAL");
+        // Side panel: a pre-feature record reads UNSET (0 fractions / -1 collapsed) — "follow the
+        // GLOBAL default at open", so the last-adjustment-anywhere rule keeps seeding it. NOTE the
+        // {"version":1,"window":{...}} ENVELOPE — DeserializeWindowRecord only reads the "window"
+        // object (an un-enveloped body parses to a default record, making any check vacuous).
+        const auto sideLegacy = DeserializeWindowRecord(L"{\"version\":1,\"window\":{\"windowId\":\"w\"}}");
+        CHECK(sideLegacy.windowId == L"w", "envelope sanity: the legacy side-panel probe actually parsed a record");
+        CHECK(sideLegacy.sidePanelWidthFraction == 0.0 && sideLegacy.sidePanelSplitFraction == 0.0, "missing sidePanel fractions -> unset (older record follows the global defaults)");
+        CHECK(sideLegacy.sidePanelCollapsed == -1, "missing sidePanelCollapsed -> -1 unset (older record follows the global default)");
+        // An out-of-band stored fraction degrades to UNSET (the global default), never a
+        // degenerate layout; a committed FALSE stays 0 (distinct from the -1 unset).
+        const auto sideBad = DeserializeWindowRecord(L"{\"version\":1,\"window\":{\"windowId\":\"w\",\"sidePanelWidthFraction\":0.9,\"sidePanelSplitFraction\":0.01,\"sidePanelCollapsed\":false}}");
+        CHECK(sideBad.windowId == L"w", "envelope sanity: the out-of-band side-panel probe actually parsed a record");
+        CHECK(sideBad.sidePanelWidthFraction == 0.0 && sideBad.sidePanelSplitFraction == 0.0, "out-of-band sidePanel fractions -> unset (degrade to the global defaults)");
+        CHECK(sideBad.sidePanelCollapsed == 0, "sidePanelCollapsed committed FALSE reads 0 (a real choice, not the -1 unset)");
     }
 
     // Disk round-trip (one file per window under .agentmaster\windows\). Uses a sentinel id and
@@ -557,6 +580,11 @@ void TestAppSettings()
         in.notifySuppressFocused = false;
         in.notifySound = false;
         in.hiddenSessionIds = { L"11111111-1111-1111-1111-111111111111", L"22222222-2222-2222-2222-222222222222" };
+        // Side panel (window chrome) new-window defaults — all four non-default.
+        in.sidePanelOnLeft = true; // non-default (default false = dock RIGHT)
+        in.sidePanelWidthFraction = 0.35; // in-band (0.10..0.50); default 0.22
+        in.sidePanelSplitFraction = 0.7; // in-band (0.15..0.85); default 0.5
+        in.sidePanelCollapsed = true; // non-default (default false = expanded)
         const auto out = DeserializeAppSettings(SerializeAppSettings(in));
         CHECK(out.skipPermissions == false, "settings skipPermissions round-trip");
         CHECK(out.env == L"FOO=bar;BAZ=qux", "settings env round-trip");
@@ -606,6 +634,10 @@ void TestAppSettings()
                   out.hiddenSessionIds[0] == L"11111111-1111-1111-1111-111111111111" &&
                   out.hiddenSessionIds[1] == L"22222222-2222-2222-2222-222222222222",
               "settings hiddenSessionIds round-trip (order preserved)");
+        CHECK(out.sidePanelOnLeft == true, "settings sidePanelOnLeft round-trip (dock LEFT stored)");
+        CHECK(out.sidePanelWidthFraction > 0.349 && out.sidePanelWidthFraction < 0.351, "settings sidePanelWidthFraction round-trip");
+        CHECK(out.sidePanelSplitFraction > 0.699 && out.sidePanelSplitFraction < 0.701, "settings sidePanelSplitFraction round-trip");
+        CHECK(out.sidePanelCollapsed == true, "settings sidePanelCollapsed round-trip (collapsed stored)");
     }
 
     // Agentmaster (launch-model picker): launchModels gates its default on key PRESENCE — an
@@ -662,6 +694,12 @@ void TestAppSettings()
         CHECK(out.notifySuppressFocused == true, "settings notifySuppressFocused default ON on empty");
         CHECK(out.notifySound == true, "settings notifySound default ON on empty");
         CHECK(out.hiddenSessionIds.empty(), "settings hiddenSessionIds empty on empty");
+        // Side panel defaults: dock RIGHT, 22% wide, 50/50 split, expanded — and unlike the
+        // summary-panel fractions there is NO 0 "auto" sentinel (these ARE the new-window values).
+        CHECK(out.sidePanelOnLeft == false, "settings sidePanelOnLeft default false (dock RIGHT) on empty");
+        CHECK(out.sidePanelWidthFraction > 0.219 && out.sidePanelWidthFraction < 0.221, "settings sidePanelWidthFraction default 0.22 on empty");
+        CHECK(out.sidePanelSplitFraction > 0.499 && out.sidePanelSplitFraction < 0.501, "settings sidePanelSplitFraction default 0.5 on empty");
+        CHECK(out.sidePanelCollapsed == false, "settings sidePanelCollapsed default false (expanded) on empty");
         const auto out2 = DeserializeAppSettings(L"not json");
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");
         CHECK(out2.uiStallAutoRestart == true, "settings uiStallAutoRestart defaults ON on garbage (the restart tier is a default-armed backstop)");
@@ -777,6 +815,25 @@ void TestAppSettings()
         CHECK(tall.summaryPanelHeightFraction == 0.0, "settings summaryPanelHeightFraction out-of-band (too tall) -> 0 (auto)");
         const auto tiny = DeserializeAppSettings(L"{\"settings\":{\"summaryPanelWidthFraction\":0.02}}");
         CHECK(tiny.summaryPanelWidthFraction == 0.0, "settings summaryPanelWidthFraction out-of-band (too thin) -> 0 (auto)");
+    }
+
+    // Side panel new-window defaults: an in-band stored value is honored; an out-of-band/corrupt
+    // one falls back to the SHIPPED defaults (0.22 width / 0.5 split) — NOT 0 (there is no "auto"
+    // sentinel here: these ARE the values a fresh window opens with, so a corrupt settings.json
+    // must not collapse the terminal or wedge a panel area). Bands mirror the drag clamps:
+    // width [0.10, 0.50], split [0.15, 0.85].
+    {
+        const auto ok = DeserializeAppSettings(L"{\"settings\":{\"sidePanelWidthFraction\":0.4,\"sidePanelSplitFraction\":0.2}}");
+        CHECK(ok.sidePanelWidthFraction > 0.399 && ok.sidePanelWidthFraction < 0.401, "settings sidePanelWidthFraction honored in-band");
+        CHECK(ok.sidePanelSplitFraction > 0.199 && ok.sidePanelSplitFraction < 0.201, "settings sidePanelSplitFraction honored in-band");
+        const auto wide = DeserializeAppSettings(L"{\"settings\":{\"sidePanelWidthFraction\":0.9}}");
+        CHECK(wide.sidePanelWidthFraction > 0.219 && wide.sidePanelWidthFraction < 0.221, "settings sidePanelWidthFraction out-of-band (over half) -> the 0.22 default");
+        const auto thin = DeserializeAppSettings(L"{\"settings\":{\"sidePanelWidthFraction\":0.02}}");
+        CHECK(thin.sidePanelWidthFraction > 0.219 && thin.sidePanelWidthFraction < 0.221, "settings sidePanelWidthFraction out-of-band (too thin) -> the 0.22 default");
+        const auto splitHi = DeserializeAppSettings(L"{\"settings\":{\"sidePanelSplitFraction\":0.95}}");
+        CHECK(splitHi.sidePanelSplitFraction > 0.499 && splitHi.sidePanelSplitFraction < 0.501, "settings sidePanelSplitFraction out-of-band (too high) -> the 0.5 default");
+        const auto splitLo = DeserializeAppSettings(L"{\"settings\":{\"sidePanelSplitFraction\":0.05}}");
+        CHECK(splitLo.sidePanelSplitFraction > 0.499 && splitLo.sidePanelSplitFraction < 0.501, "settings sidePanelSplitFraction out-of-band (too low) -> the 0.5 default");
     }
 }
 

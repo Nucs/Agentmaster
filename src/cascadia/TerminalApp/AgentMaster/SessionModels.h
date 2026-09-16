@@ -2210,6 +2210,30 @@ namespace Agentmaster
         // the splitter itself on drag release (read-modify-write of settings.json, not the cog),
         // seeded into every window's Archive shell. Default 0.5 == the original 50/50 split.
         double archiveSplitFraction{ 0.5 };
+        // Agentmaster (SIDE PANEL): the window-chrome fleet side panel — a non-terminal pane beside the
+        // tab content (cards of the live sessions over the selected session's summary). These four are
+        // the panel's GLOBAL DEFAULTS for NEW windows; the per-window live values ride the WindowRecord
+        // (windows/<id>.json) so each window keeps its own layout. The CONTRACT is "last one wins": every
+        // splitter release / collapse toggle / dock flip writes BOTH its window's record AND these
+        // defaults (a freshest-disk RMW), so the most recent adjustment anywhere seeds the next new
+        // window. All four are written OUTSIDE the cog form — the cog's BOTH preserve blocks must
+        // restore them from disk on Save (like the summary-panel fractions), else a Save would regress
+        // a resize made since the modal was seeded.
+        //   sidePanelOnLeft: dock the panel LEFT of the terminal content instead of RIGHT (the ↔ flip
+        //     button in the panel header). GLOBAL-only (not per-window — a mixed-dock fleet reads
+        //     confusing, and the flip is one click).
+        //   sidePanelWidthFraction: the panel's share of the content area's WIDTH (the vertical
+        //     separator). Band (0.10, 0.50] — never more than half the window; out-of-band falls back
+        //     to the 0.22 default so a corrupt value can't collapse the terminal.
+        //   sidePanelSplitFraction: the CARDS area's share of the panel's HEIGHT (the horizontal
+        //     separator between the cards list and the summary area). Band (0.15, 0.85) — both areas
+        //     stay usable; out-of-band falls back to the 0.5 default.
+        //   sidePanelCollapsed: whether the panel starts collapsed to its thin expander strip. A user
+        //     who collapses it is saying "not now" — new windows honor that until it is expanded again.
+        bool sidePanelOnLeft{ false };
+        double sidePanelWidthFraction{ 0.22 };
+        double sidePanelSplitFraction{ 0.5 };
+        bool sidePanelCollapsed{ false };
         // Agentmaster (updater; Updater.h): the in-app GitHub-release updater's state. allowUpdatePrerelease
         // is the Settings cog's "Allow updating to pre-release versions" toggle (default OFF — the check
         // uses /releases/latest, which excludes prereleases; ON uses the list endpoint, newest published).
@@ -2743,5 +2767,21 @@ namespace Agentmaster
         // rides here in the window record, letting each Agentmaster window's home tab be color-coded
         // independently. Empty/absent (an older record) => no override (the default tab look).
         std::wstring managerTabColor;
+        // Agentmaster (SIDE PANEL): this window's fleet side-panel layout — persisted PER WINDOW (not
+        // per tab), the window-local half of the AppSettings sidePanel* defaults. Each is a TRI-STATE:
+        // "unset" (a pre-feature record, or a window that never touched the panel) means "follow the
+        // GLOBAL default at open time", so the last-adjustment-anywhere rule keeps seeding windows
+        // that never made their own choice while a window that DID resize keeps its own layout.
+        //   sidePanelWidthFraction: the panel's share of the content-area width. 0 == unset (use the
+        //     AppSettings default); a stored value is band-checked (0.10, 0.50] on load, out-of-band
+        //     reads as unset so a corrupt record can't collapse the terminal.
+        //   sidePanelSplitFraction: the cards area's share of the panel height. 0 == unset; band
+        //     (0.15, 0.85) on load, out-of-band reads as unset.
+        //   sidePanelCollapsed: 1 == collapsed to the expander strip, 0 == expanded, -1 == unset
+        //     (absent in the record — follow the AppSettings default). Kept as an int precisely for
+        //     that third state: a plain bool could not tell "expanded" from "never chose".
+        double sidePanelWidthFraction{ 0.0 };
+        double sidePanelSplitFraction{ 0.0 };
+        int sidePanelCollapsed{ -1 };
     };
 }

@@ -1184,6 +1184,10 @@ namespace winrt::TerminalApp::implementation
                             }
                             self->_SyncClaudeTabTitleFromRegistry(id); // reads the CURRENT registry title (no stale capture)
                         }
+                        // Side panel: the fleet changed — schedule its coalesced card rebuild. ONCE per
+                        // drained batch (not per id): the rebuild reads the whole live snapshot anyway,
+                        // and the panel throttles further inside (min-gap + collapsed-defers).
+                        self->_SidePanelNoteRegistryChange();
                     });
                 }
                 catch (...)
@@ -1218,6 +1222,7 @@ namespace winrt::TerminalApp::implementation
                     self->_PumpDraftRestores(); // PENDING_INPUT.md §10: type a reopened session's remembered unsent draft back into its input box once its claude starts (fill, never submit)
                     self->_SweepAgentPendingToasts(); // System notifications: fire/drop the HELD completion toasts (spurious-toast suppression — SessionScanner's DecideHeldToast)
                     self->_ScanInferredTabColors(); // tab color modes: re-infer each Claude tab's ACTUAL workdir + recolor (every session under InferredWorkingDirectory; ONLY home-dir launches — forced inference, SessionInfersWorkingDir — in the other modes; throttled + mtime-gated inside)
+                    self->_SidePanelPeriodicTick(); // SIDE PANEL: deferred-rebuild catch-up + the summary's mtime-gated re-check + the ~30s in-place timing refresh (self-marshals)
                 }
             });
         }
@@ -1566,6 +1571,14 @@ namespace winrt::TerminalApp::implementation
                     s.commandHandoverMaterializedName = disk.commandHandoverMaterializedName;
                     s.commandHandoverHereMaterializedName = disk.commandHandoverHereMaterializedName;
                     s.commandHandoverStandbyMaterializedName = disk.commandHandoverStandbyMaterializedName; // the §5b standby member's marker
+                    // Side panel: all four are written OUTSIDE the cog form — the splitters' /
+                    // collapse's / dock flip's own freshest-disk RMWs ("last one to adjust sets the
+                    // new-window default") — so a form Save must never regress an adjustment made
+                    // since the modal was seeded (incl. from another window).
+                    s.sidePanelOnLeft = disk.sidePanelOnLeft;
+                    s.sidePanelWidthFraction = disk.sidePanelWidthFraction;
+                    s.sidePanelSplitFraction = disk.sidePanelSplitFraction;
+                    s.sidePanelCollapsed = disk.sidePanelCollapsed;
 
                 }
                 // Inferred-workdir inputs (mode / "Use .git folder to infer") — capture the change
@@ -1634,6 +1647,10 @@ namespace winrt::TerminalApp::implementation
                 {
                     self->_observer->SetReapOrphanedSessions(s.reapOrphanedSessions);
                 }
+                // Side panel: adopt the (possibly changed) globals — the shared boardSort label,
+                // the dock side, the summary content flags (its fill-hosted overlay sits outside
+                // the _claudeOverlays broadcast loops) — and rebuild the cards under the new rules.
+                self->_SidePanelApplySettings();
                 // Re-materialize the shared --settings file so model / co-authored-by /
                 // permission-mode changes also reach an adopted hand-typed `claude` (the PATH
                 // shim points at this file). Fresh spawns rebuild it from settings regardless.
@@ -1718,6 +1735,10 @@ namespace winrt::TerminalApp::implementation
                 // Agentmaster: the Jump Back button targets the selected session, so a selection
                 // change while on the Manager tab flips whether it has somewhere to jump back to.
                 self->_UpdateManagerNavButtons();
+                // Side panel: follow the lens selection (a board-card/tree click selects the same
+                // session's card + summary there). driveManagerLens=false — the lens IS the
+                // source; the panel's same-id early-out absorbs the echo of its own card clicks.
+                self->_SidePanelSelectSession(self->_windowRecord.manager.selectedId, /*driveManagerLens*/ false);
             }
         });
     }
@@ -1772,6 +1793,10 @@ namespace winrt::TerminalApp::implementation
                 mgr->SelectSession(winrt::hstring{ id });
             }
         }
+        // Side panel: the selection follows the focused tab here too (highlight the card + swing
+        // the summary below). driveManagerLens=false — the lens was just driven above, and the
+        // side panel's same-id early-out breaks any echo.
+        _SidePanelSelectSession(id, /*driveManagerLens*/ false);
     }
 
     // Agentmaster (cross-window settings broadcast): a GLOBAL settings change in ANOTHER window reached
@@ -1821,6 +1846,9 @@ namespace winrt::TerminalApp::implementation
                 mgr->ApplyExternalSettings(settings);
             }
         }
+        // Side panel: adopt the broadcast globals here too (shared sort label, dock side, the
+        // summary flags for its out-of-map overlay) + rebuild the cards under the new rules.
+        _SidePanelApplySettings();
     }
 
     // Agentmaster (Linked Lenses — the reveal half of the per-tab -> Manager sync): when the user
