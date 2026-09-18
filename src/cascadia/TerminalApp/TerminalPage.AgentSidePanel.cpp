@@ -235,6 +235,11 @@ namespace winrt::TerminalApp::implementation
         _sidePanelWidthFraction = (_windowRecord.sidePanelWidthFraction > 0.0) ? _windowRecord.sidePanelWidthFraction : _appSettings.sidePanelWidthFraction;
         _sidePanelSplitFraction = (_windowRecord.sidePanelSplitFraction > 0.0) ? _windowRecord.sidePanelSplitFraction : _appSettings.sidePanelSplitFraction;
         _sidePanelCollapsed = (_windowRecord.sidePanelCollapsed >= 0) ? (_windowRecord.sidePanelCollapsed != 0) : _appSettings.sidePanelCollapsed;
+        // The card-list SCOPE is per-window ONLY: the record's flag (absent == false), never an
+        // AppSettings default — the user's contract is that every window starts on ITS OWN tabs
+        // (LOCAL), and a fleet-wide (GLOBAL) view is an explicit choice that stays with the window
+        // that made it, so it can never leak into another window's list.
+        _sidePanelGlobal = _windowRecord.sidePanelGlobal;
         // Belt the seeds into the drag bands: the loaders band-check too, but the AppSettings copy
         // could have been mutated in-process — a degenerate fraction must never reach layout.
         _sidePanelWidthFraction = std::clamp(_sidePanelWidthFraction, kSidePanelMinWidthFrac, kSidePanelMaxWidthFrac);
@@ -356,7 +361,7 @@ namespace winrt::TerminalApp::implementation
             _sidePanelExpandedRoot.RowDefinitions().Append(r2);
         }
 
-        // Header row: [ search * ][ sort ][ ⇄ ][ chevron ].
+        // Header row: [ search * ][ scope ][ sort ][ ⇄ ][ chevron ].
         Grid header{};
         {
             ColumnDefinition c0{};
@@ -367,10 +372,13 @@ namespace winrt::TerminalApp::implementation
             c2.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
             ColumnDefinition c3{};
             c3.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            ColumnDefinition c4{};
+            c4.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
             header.ColumnDefinitions().Append(c0);
             header.ColumnDefinitions().Append(c1);
             header.ColumnDefinitions().Append(c2);
             header.ColumnDefinitions().Append(c3);
+            header.ColumnDefinitions().Append(c4);
             header.Padding(ThicknessHelper::FromLengths(4, 4, 4, 2));
             header.ColumnSpacing(3);
         }
@@ -394,6 +402,27 @@ namespace winrt::TerminalApp::implementation
         });
         Grid::SetColumn(_sidePanelSearchBox, 0);
         header.Children().Append(_sidePanelSearchBox);
+
+        // The card-list SCOPE toggle — LOCAL (this window's tabs; the default, always) / GLOBAL
+        // (every window's). The board's own LOCAL/GLOBAL words + accent look, but a SEPARATE state:
+        // it re-scopes only this list, never the Manager's tree/board (which answer a different
+        // question — what the fleet lens shows, not what sits beside your terminal), and it is
+        // remembered per window with NO global default (see _SidePanelToggleScope).
+        _sidePanelScopeBtn = Button{};
+        _sidePanelScopeBtn.FontSize(11);
+        _sidePanelScopeBtn.Padding(ThicknessHelper::FromLengths(8, 1, 8, 1));
+        _sidePanelScopeBtn.VerticalAlignment(VerticalAlignment::Center);
+        _sidePanelScopeBtn.IsTabStop(false);
+        EmphasizeScopeButton(_sidePanelScopeBtn); // the board's accent-blue scope look — this is the panel's primary toggle, louder than sort/dock/collapse
+        AgentSetTitledTip(_sidePanelScopeBtn, L"Card scope", winrt::hstring{ L"Which sessions the cards list: LOCAL = only the sessions open in THIS window (the default), GLOBAL = every window's.\nRemembered for this window only \x2014 a new window always starts LOCAL \x2014 and independent of the Triage Board's own scope." });
+        _sidePanelScopeBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelToggleScope();
+            }
+        });
+        Grid::SetColumn(_sidePanelScopeBtn, 1);
+        header.Children().Append(_sidePanelScopeBtn);
 
         _sidePanelSortBtn = Button{};
         _sidePanelSortBtn.FontSize(11);
@@ -421,7 +450,7 @@ namespace winrt::TerminalApp::implementation
             self->_SidePanelUpdateSortButton();
             self->_SidePanelScheduleRebuild(/*force*/ true);
         });
-        Grid::SetColumn(_sidePanelSortBtn, 1);
+        Grid::SetColumn(_sidePanelSortBtn, 2);
         header.Children().Append(_sidePanelSortBtn);
 
         Button dockBtn{};
@@ -437,7 +466,7 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelFlipDock();
             }
         });
-        Grid::SetColumn(dockBtn, 2);
+        Grid::SetColumn(dockBtn, 3);
         header.Children().Append(dockBtn);
 
         _sidePanelCollapseBtn = Button{};
@@ -453,7 +482,7 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelToggleCollapsed();
             }
         });
-        Grid::SetColumn(_sidePanelCollapseBtn, 3);
+        Grid::SetColumn(_sidePanelCollapseBtn, 4);
         header.Children().Append(_sidePanelCollapseBtn);
         Grid::SetRow(header, 0);
         _sidePanelExpandedRoot.Children().Append(header);
@@ -683,6 +712,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelBuilt = true;
         _SidePanelApplyDock(); // assigns the three columns per the global dock side + applies widths/glyphs
         _SidePanelUpdateSortButton();
+        _SidePanelUpdateScopeButton(); // LOCAL / GLOBAL per the seeded per-window scope
         _SidePanelRebuildCards();
         // Re-select the lens's restored session so a reopened window's summary shows immediately
         // (the same restored selection SetManagerState seeded into the Manager lens).
@@ -695,6 +725,7 @@ namespace winrt::TerminalApp::implementation
                                           L") width=" + std::to_wstring(_sidePanelWidthFraction) +
                                           L" split=" + std::to_wstring(_sidePanelSplitFraction) +
                                           (_sidePanelCollapsed ? L" collapsed" : L" expanded") +
+                                          (_sidePanelGlobal ? L" scope=global" : L" scope=local") +
                                           (_appSettings.sidePanelOnLeft ? L" dock=left\n" : L" dock=right\n"));
     }
 
@@ -868,6 +899,39 @@ namespace winrt::TerminalApp::implementation
         _sidePanelSortBtn.Content(winrt::box_value(label));
     }
 
+    // Reflect THIS window's card-list scope on the scope toggle — the board's own LOCAL/GLOBAL
+    // words (_UpdateBoardScopeButton), so the two surfaces read the same label for the same idea.
+    void TerminalPage::_SidePanelUpdateScopeButton()
+    {
+        if (!_sidePanelScopeBtn)
+        {
+            return;
+        }
+        _sidePanelScopeBtn.Content(winrt::box_value(_sidePanelGlobal ? L"GLOBAL" : L"LOCAL"));
+    }
+
+    // Flip the card list between LOCAL (only the sessions hosted in this window) and GLOBAL (every
+    // window's) — for THIS window only. Persists through the window-record autosave ALONE: there is
+    // deliberately no _SidePanelPersistDefaults call and no AppSettings field, because the scope has
+    // no global default by design — every new window starts LOCAL, so one window's fleet-wide view can
+    // never seed another window's list (the "my list shows another window's tabs" bug this scope
+    // exists to prevent). The Manager's own tree/board scope is NOT touched: it answers a different
+    // question (what the fleet lens shows), and a click here must not re-scope the Manager under
+    // the user. Logged as a [sidepanel] mechanism line like the width/split commits — not [nav]: a
+    // scope flip is a pure view filter (the board's LOCAL/GLOBAL toggle is unlogged for the same reason).
+    void TerminalPage::_SidePanelToggleScope()
+    {
+        if (!_sidePanelBuilt)
+        {
+            return;
+        }
+        _sidePanelGlobal = !_sidePanelGlobal;
+        _SidePanelUpdateScopeButton();
+        _SidePanelScheduleRebuild(/*force*/ true); // user action — past the throttle; the rebuild re-snapshots the hosted set
+        _ScheduleWindowRecordSave(); // the per-window half is the ONLY half (see above)
+        ::Agentmaster::AppendStateLog(L"hooks.log", std::wstring{ L"[sidepanel] scope -> " } + (_sidePanelGlobal ? L"global" : L"local") + L" (window " + ::Agentmaster::ShortId(_windowId) + L"; per-window only)\n");
+    }
+
     // Collapse to the thin expander strip / expand back. Persists BOTH halves of the contract:
     // this window's record (autosave reads the live member) and the global new-window default
     // (granular RMW — only the collapsed field). An expand replays any rebuild deferred while the
@@ -995,6 +1059,16 @@ namespace winrt::TerminalApp::implementation
         {
             co_return; // collapsed: stay fully idle — the expand path runs the catch-up
         }
+        // LOCAL-scope belt: the hosted set can change with NO registry notify — a tab docked into
+        // or torn out of this window moves a session that stays live + unchanged (the [move-out]
+        // path drops only the per-window binding), so the registry-drain trigger never fires for
+        // it and the list would keep (or miss) that card until an unrelated session changed. A
+        // set-compare per tick (tens of ids, no registry access) catches it; under GLOBAL every
+        // membership change IS a registry change, so there is nothing to diff.
+        if (!_sidePanelGlobal && !_sidePanelDirty && _HostedSessionIds() != _sidePanelRenderedLocalIds)
+        {
+            _sidePanelDirty = true;
+        }
         if (_sidePanelDirty)
         {
             _SidePanelRebuildCards(); // rebuild resets the timing texts too — skip the in-place pass
@@ -1031,10 +1105,32 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // The managed sessions hosted in THIS window: every _claudeTabs entry whose weak Tab still
+    // resolves (a torn-down tab's expired ref is skipped, so the set is live, not historical). The
+    // ONE "is this session here?" predicate — the Explorer Tree's LOCAL scope provider
+    // (_WireAgentManagerContent) and the side panel's LOCAL card list both read it, so a card in the
+    // panel always has a tab in this window and the two surfaces can never disagree about what
+    // "here" means. Cheap: a walk over the per-window map (tens of entries), no registry access.
+    // Returns the set of hosted session ids (Claude AND Codex — _claudeTabs is agent-agnostic).
+    std::unordered_set<std::wstring> TerminalPage::_HostedSessionIds() const
+    {
+        std::unordered_set<std::wstring> ids;
+        for (const auto& [id, weakTab] : _claudeTabs)
+        {
+            if (weakTab.get())
+            {
+                ids.insert(id);
+            }
+        }
+        return ids;
+    }
+
     // Rebuild the card list from the live fleet: SnapshotLive (never the full archived Snapshot —
-    // the Manager-lens tax rule) -> the search filter (the Sessions grammar) -> the SHARED
-    // boardSort order (MakeSortKey/SortKeyLess — the board's own comparator) -> compact cards.
-    // Also refreshes the count line and re-registers the selection highlight + timing-text maps.
+    // the Manager-lens tax rule) -> the SCOPE (LOCAL, the default: only sessions hosted in THIS
+    // window per _HostedSessionIds; GLOBAL: every window's) -> the search filter (the Sessions
+    // grammar) -> the SHARED boardSort order (MakeSortKey/SortKeyLess — the board's own comparator)
+    // -> compact cards. Also refreshes the count line (which names the scope) and re-registers the
+    // selection highlight + timing-text maps + the hosted set the periodic LOCAL belt diffs against.
     void TerminalPage::_SidePanelRebuildCards()
     {
         if (!_sidePanelBuilt || !_sidePanelCards || !_sessionRegistry)
@@ -1046,14 +1142,28 @@ namespace winrt::TerminalApp::implementation
 
         const auto snap = _sessionRegistry->SnapshotLive();
         const auto terms = ::Agentmaster::ParseSessionQuery(_sidePanelSearchText);
+        // LOCAL scope (the default): only the sessions whose tab lives in THIS window — the hosted
+        // set, snapshotted ONCE per rebuild and remembered so the periodic tick can detect a hosting
+        // change the registry never announces (a tab docked in / torn out — see _SidePanelPeriodicTickImpl).
+        const bool local = !_sidePanelGlobal;
+        std::unordered_set<std::wstring> hosted;
+        if (local)
+        {
+            hosted = _HostedSessionIds();
+        }
+        _sidePanelRenderedLocalIds = hosted; // empty under GLOBAL — the belt only diffs while LOCAL
         std::vector<const ::Agentmaster::SessionInfo*> rows;
         rows.reserve(snap.size());
-        size_t liveTotal = 0;
+        size_t liveTotal = 0; // the IN-SCOPE total (what "N of M" counts against — never another window's sessions under LOCAL)
         for (const auto& s : snap)
         {
             if (!s.live)
             {
                 continue; // belt — SnapshotLive should already be live-only
+            }
+            if (local && hosted.find(s.id) == hosted.end())
+            {
+                continue; // hosted by another window (or a live session with no tab here) — not "here"
             }
             ++liveTotal;
             if (SidePanelSessionMatches(s, terms, _appSettings.tabColorMode))
@@ -1076,7 +1186,10 @@ namespace winrt::TerminalApp::implementation
         {
             const std::wstring shown = std::to_wstring(rows.size());
             const std::wstring total = std::to_wstring(liveTotal);
-            _sidePanelCountText.Text(winrt::hstring{ terms.empty() ? (total + L" open session" + (liveTotal == 1 ? L"" : L"s")) : (shown + L" of " + total + L" open sessions") });
+            // The count names the scope, so a short list under LOCAL reads as "this window" rather
+            // than "the fleet shrank" — the cue that the toggle exists when a session seems missing.
+            const std::wstring where = local ? L" in this window" : L" across all windows";
+            _sidePanelCountText.Text(winrt::hstring{ terms.empty() ? (total + L" session" + (liveTotal == 1 ? L"" : L"s") + where) : (shown + L" of " + total + L" sessions" + where) });
         }
     }
 

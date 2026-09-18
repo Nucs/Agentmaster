@@ -1223,6 +1223,14 @@ namespace Agentmaster
         {
             o.Set(L"sidePanelCollapsed", json::Value::MkBool(w.sidePanelCollapsed != 0));
         }
+        // The card-list SCOPE is a plain per-window bool with a FIXED default (LOCAL) and NO global
+        // default to fall back to — so only a GLOBAL choice is worth a key: omitting `false` keeps a
+        // never-flipped window's record byte-identical to a pre-feature one, and a reader can only
+        // ever read an absent key as LOCAL (the safe direction — never another window's tabs).
+        if (w.sidePanelGlobal)
+        {
+            o.Set(L"sidePanelGlobal", json::Value::MkBool(true));
+        }
         return o;
     }
 
@@ -1262,6 +1270,10 @@ namespace Agentmaster
             {
                 w.sidePanelCollapsed = v.BoolAt(L"sidePanelCollapsed", false) ? 1 : 0;
             }
+            // Card-list scope: absent (a pre-feature record / a never-flipped window) or anything but a
+            // true bool reads LOCAL — the fixed per-window default; there is no global setting for it
+            // by design (SIDE_PANEL.md §4), so nothing else is consulted.
+            w.sidePanelGlobal = v.BoolAt(L"sidePanelGlobal", false);
         }
         if (const auto* m = v.Find(L"manager"); m && m->type == json::Value::Type::Obj)
         {

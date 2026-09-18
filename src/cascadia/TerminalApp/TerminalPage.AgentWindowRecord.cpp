@@ -378,6 +378,7 @@ namespace winrt::TerminalApp::implementation
             rec.sidePanelWidthFraction = _sidePanelWidthFraction;
             rec.sidePanelSplitFraction = _sidePanelSplitFraction;
             rec.sidePanelCollapsed = _sidePanelCollapsed ? 1 : 0; // the tri-state commits once the panel exists
+            rec.sidePanelGlobal = _sidePanelGlobal; // the card-list scope — per-window ONLY (no global default exists for it; ToJson omits a LOCAL false)
         }
 
         return rec;

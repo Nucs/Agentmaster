@@ -1489,20 +1489,15 @@ namespace winrt::TerminalApp::implementation
         });
         // Agentmaster: surface THIS window's hosted session ids for the Explorer Tree's LOCAL
         // scope. The shared (process-wide) registry holds every window's sessions; _claudeTabs is
-        // the per-window subset. Expired weak tabs (torn-down) are skipped so the set is live.
+        // the per-window subset. The set comes from _HostedSessionIds — the ONE "hosted here"
+        // predicate (expired weak tabs skipped, so it is live) that the SIDE PANEL's LOCAL card list
+        // reads too, so the tree's LOCAL and the panel's LOCAL can never list different sessions.
         content->SetLocalScopeProvider([weakThis]() -> std::unordered_set<std::wstring> {
-            std::unordered_set<std::wstring> ids;
             if (auto self = weakThis.get())
             {
-                for (const auto& [id, weakTab] : self->_claudeTabs)
-                {
-                    if (weakTab.get())
-                    {
-                        ids.insert(id);
-                    }
-                }
+                return self->_HostedSessionIds();
             }
-            return ids;
+            return {}; // page gone — an empty set reads "nothing hosted here", the safe answer
         });
         // Agentmaster (focus-steal fix): tell the content whether THIS window is the OS foreground
         // window. The Manager's _Refresh restores keyboard focus to a board card after each rebuild,

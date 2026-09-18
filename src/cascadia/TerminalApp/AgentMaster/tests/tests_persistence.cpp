@@ -423,6 +423,7 @@ void TestWindowRecord()
     in.sidePanelWidthFraction = 0.3;
     in.sidePanelSplitFraction = 0.6;
     in.sidePanelCollapsed = 1; // collapsed (the tri-state's TRUE)
+    in.sidePanelGlobal = true; // GLOBAL card scope — non-default (LOCAL is the fixed default; an absent key == false) so a dropped key fails the round-trip
 
     const auto out = DeserializeWindowRecord(SerializeWindowRecord(in));
 
@@ -461,6 +462,7 @@ void TestWindowRecord()
     CHECK(approx(out.sidePanelWidthFraction, 0.3), "sidePanelWidthFraction (per-window separator) round-trip");
     CHECK(approx(out.sidePanelSplitFraction, 0.6), "sidePanelSplitFraction (per-window cards/summary split) round-trip");
     CHECK(out.sidePanelCollapsed == 1, "sidePanelCollapsed committed TRUE round-trips as 1 (not the -1 unset)");
+    CHECK(out.sidePanelGlobal == true, "sidePanelGlobal (the per-window card-list scope) round-trips GLOBAL");
 
     // Tolerant of a missing / corrupt document.
     {
@@ -487,12 +489,32 @@ void TestWindowRecord()
         CHECK(sideLegacy.windowId == L"w", "envelope sanity: the legacy side-panel probe actually parsed a record");
         CHECK(sideLegacy.sidePanelWidthFraction == 0.0 && sideLegacy.sidePanelSplitFraction == 0.0, "missing sidePanel fractions -> unset (older record follows the global defaults)");
         CHECK(sideLegacy.sidePanelCollapsed == -1, "missing sidePanelCollapsed -> -1 unset (older record follows the global default)");
+        // The card-list scope has NO global default: an absent key is LOCAL, full stop — a
+        // pre-feature record must never reopen listing another window's tabs.
+        CHECK(sideLegacy.sidePanelGlobal == false, "missing sidePanelGlobal -> LOCAL (a pre-feature record never lists another window's tabs)");
         // An out-of-band stored fraction degrades to UNSET (the global default), never a
-        // degenerate layout; a committed FALSE stays 0 (distinct from the -1 unset).
-        const auto sideBad = DeserializeWindowRecord(L"{\"version\":1,\"window\":{\"windowId\":\"w\",\"sidePanelWidthFraction\":0.9,\"sidePanelSplitFraction\":0.01,\"sidePanelCollapsed\":false}}");
+        // degenerate layout; a committed FALSE stays 0 (distinct from the -1 unset); a non-bool
+        // scope value (hand-edited) reads LOCAL — the safe direction.
+        const auto sideBad = DeserializeWindowRecord(L"{\"version\":1,\"window\":{\"windowId\":\"w\",\"sidePanelWidthFraction\":0.9,\"sidePanelSplitFraction\":0.01,\"sidePanelCollapsed\":false,\"sidePanelGlobal\":\"yes\"}}");
         CHECK(sideBad.windowId == L"w", "envelope sanity: the out-of-band side-panel probe actually parsed a record");
         CHECK(sideBad.sidePanelWidthFraction == 0.0 && sideBad.sidePanelSplitFraction == 0.0, "out-of-band sidePanel fractions -> unset (degrade to the global defaults)");
         CHECK(sideBad.sidePanelCollapsed == 0, "sidePanelCollapsed committed FALSE reads 0 (a real choice, not the -1 unset)");
+        CHECK(sideBad.sidePanelGlobal == false, "sidePanelGlobal non-bool -> LOCAL (never another window's tabs on a corrupt value)");
+        // The scope key is written ONLY for a GLOBAL choice: `false` carries no information (no
+        // global default exists to override), so a never-flipped window's record stays byte-identical
+        // to a pre-feature one. Pinned both ways so a future "always write it" can't silently change
+        // what an absent key means.
+        {
+            WindowRecord localOnly;
+            localOnly.windowId = L"w-local";
+            CHECK(SerializeWindowRecord(localOnly).find(L"sidePanelGlobal") == std::wstring::npos, "sidePanelGlobal LOCAL (false) is OMITTED from the record");
+            WindowRecord global;
+            global.windowId = L"w-global";
+            global.sidePanelGlobal = true;
+            const auto text = SerializeWindowRecord(global);
+            CHECK(text.find(L"sidePanelGlobal") != std::wstring::npos, "sidePanelGlobal GLOBAL (true) is written");
+            CHECK(DeserializeWindowRecord(text).sidePanelGlobal == true, "sidePanelGlobal GLOBAL survives the on-disk shape");
+        }
     }
 
     // Disk round-trip (one file per window under .agentmaster\windows\). Uses a sentinel id and

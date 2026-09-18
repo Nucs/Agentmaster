@@ -429,6 +429,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Grid _sidePanelBody{ nullptr }; // rows: cards area (star*split) / horizontal splitter / summary area (star*(1-split)); hidden while collapsed
         winrt::Windows::UI::Xaml::Controls::Border _sidePanelHSplitter{ nullptr }; // the draggable HORIZONTAL separator between the cards list and the summary area
         winrt::Windows::UI::Xaml::Controls::TextBox _sidePanelSearchBox{ nullptr }; // top-row filter box (ParseSessionQuery grammar over title/dir/branch/id)
+        winrt::Windows::UI::Xaml::Controls::Button _sidePanelScopeBtn{ nullptr }; // top-row LOCAL/GLOBAL card-list scope toggle (between the search box and the sort toggle; the board's _boardScopeBtn accent look) — flips _sidePanelGlobal for THIS window only
         winrt::Windows::UI::Xaml::Controls::Button _sidePanelSortBtn{ nullptr }; // top-row order toggle — cycles the SHARED AppSettings::boardSort via AgentManagerContent::CycleBoardSort
         winrt::Windows::UI::Xaml::Controls::Button _sidePanelCollapseBtn{ nullptr }; // top-row collapse chevron (points TOWARD the docked edge; _SidePanelApplyLayout re-glyphs it on dock flips)
         winrt::Windows::UI::Xaml::Controls::Button _sidePanelStripBtn{ nullptr }; // the collapsed strip's expand chevron (points AWAY from the docked edge)
@@ -459,6 +460,18 @@ namespace winrt::TerminalApp::implementation
         double _sidePanelWidthFraction{ 0.22 };
         double _sidePanelSplitFraction{ 0.5 };
         bool _sidePanelCollapsed{ false };
+        // The card list's SCOPE: false == LOCAL — only the sessions whose tab is hosted in THIS window
+        // (_HostedSessionIds), the default ALWAYS; true == GLOBAL — every window's live sessions.
+        // Persisted PER WINDOW ONLY (WindowRecord::sidePanelGlobal, absent == LOCAL) and deliberately
+        // NEVER exported as an AppSettings default (unlike the fractions/collapse above): a new window
+        // must start on its own tabs, so one window's fleet-wide view can't leak into another's list.
+        bool _sidePanelGlobal{ false };
+        // The hosted-session set the LOCAL list was last built from. The periodic tick diffs the live
+        // set against it because a tab docked into / torn out of this window changes _claudeTabs with
+        // NO registry notify (the moved session stays live + unchanged — _DetachClaudeTabForMove drops
+        // only the per-window binding), so the registry-drain trigger alone would leave a LOCAL list
+        // stale. Empty while GLOBAL (the drain is complete there; nothing to diff).
+        std::unordered_set<std::wstring> _sidePanelRenderedLocalIds;
         bool _sidePanelBuilt{ false }; // _InitAgentSidePanel completed — the master gate for every side panel entry point
         bool _sidePanelDirty{ false }; // a rebuild was deferred (min-gap throttle, or collapsed) — the periodic tick / expand catches up
         bool _sidePanelLayoutQueued{ false }; // a coalesced _SidePanelApplyLayout tick is queued (_SidePanelQueueLayout) — later triggers fold into it
@@ -1460,10 +1473,12 @@ namespace winrt::TerminalApp::implementation
         // --- Agentmaster SIDE PANEL (TerminalPage.AgentSidePanel.cpp) ---------------------------------
         // A window-chrome (NOT a terminal pane, NOT per-tab) fleet panel docked beside the tab content:
         // a searchable/sortable vertical list of the LIVE session cards (the Triage-Board integration —
-        // select / double-click-activate / the full lazy session context menu) over the SELECTED
-        // session's summary (a fill-hosted AgentTabOverlay summary panel). Layout persists PER WINDOW
-        // (WindowRecord::sidePanel*) and every adjustment also RMWs the GLOBAL AppSettings defaults so
-        // the last window to adjust seeds new windows.
+        // select / double-click-activate / the full lazy session context menu; LOCAL to this window by
+        // default, a per-window LOCAL/GLOBAL toggle widens it to the fleet) over the SELECTED session's
+        // summary (a fill-hosted AgentTabOverlay summary panel). Layout persists PER WINDOW
+        // (WindowRecord::sidePanel*) and every LAYOUT adjustment also RMWs the GLOBAL AppSettings
+        // defaults so the last window to adjust seeds new windows — the card scope is the exception
+        // (per-window only, no global default: a new window always starts LOCAL).
         void _InitAgentSidePanel(); // build the panel UI into ContentArea (once, from _OnFirstLayout after the engine + window-record claim); seeds layout from the claimed record, else the AppSettings defaults
         void _SidePanelApplyDock(); // assign TabContent / splitter / panel host to the ContentArea columns per the GLOBAL AppSettings::sidePanelOnLeft, then re-apply widths (a dock flip rotates which column is the star)
         void _SidePanelApplyLayout(); // re-derive the three column widths + the cards/summary row ratios from the live fractions + collapse state; safe pre-layout (a 0-width area defers to the next SizeChanged)
@@ -1481,6 +1496,9 @@ namespace winrt::TerminalApp::implementation
         void _SidePanelToggleCollapsed(); // collapse to the thin expander strip / expand back; persists per window (record autosave) AND as the global default (RMW)
         void _SidePanelFlipDock(); // flip left<->right: RMW the GLOBAL sidePanelOnLeft, re-dock THIS window live (other windows re-dock via the settings broadcast)
         void _SidePanelUpdateSortButton(); // reflect the current AppSettings::boardSort on the order button's label (the board's own label mapping)
+        void _SidePanelToggleScope(); // flip the card list LOCAL <-> GLOBAL for THIS window: relabel, force a rebuild, persist via the window-record autosave ONLY — never _SidePanelPersistDefaults (the scope has no global default by design: every new window starts LOCAL) and never the Manager's own tree/board scope
+        void _SidePanelUpdateScopeButton(); // reflect _sidePanelGlobal on the scope toggle's label (LOCAL / GLOBAL — the board's own words)
+        std::unordered_set<std::wstring> _HostedSessionIds() const; // the ids of the managed sessions whose tab lives in THIS window (the live _claudeTabs entries) — the ONE "is this session here?" predicate the Explorer Tree's LOCAL scope provider (_WireAgentManagerContent) AND the side panel's LOCAL card list share, so the two surfaces can never disagree; defined in TerminalPage.AgentSidePanel.cpp
         winrt::Windows::UI::Xaml::Controls::Border _SidePanelMakeCard(const ::Agentmaster::SessionInfo& s); // build ONE compact session card (title band in the session's resolved color + state dot/label + pending dots + timing + dir/branch line), wired for select / activate / the shared lazy context menu
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);

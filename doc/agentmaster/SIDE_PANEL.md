@@ -10,8 +10,9 @@ overlay's components, so it carries their business logic verbatim instead of a p
 ```
 ┌ tab row ──────────────────────────────────────────────┐
 ├────────────────────────────────┬──┬────────────────────┤
-│                                │▐ │ [search][sort][⇄][»]│  ← header row
-│        terminal content        │▐ │ N of M open sessions│  ← count line
+│                                │▐ │ [search…] [LOCAL]   │  ← header row: filter + card SCOPE (LOCAL by
+│                                │▐ │ [sort][⇄][»]        │    default, per window) / order / dock / collapse
+│        terminal content        │▐ │ N of M (this window)│  ← count line (names the scope)
 │         (TabContent)           │▐ │ ┌────────────────┐ │
 │                                │▐ │ │ session CARDS  │ │  ← TOP area (own scroll)
 │                                │▐ │ └────────────────┘ │
@@ -30,14 +31,25 @@ overlay's components, so it carries their business logic verbatim instead of a p
   `_InitAgentSidePanel` runs, so a build without the panel renders the pre-feature layout.
 - The whole panel forces the Agentmaster DARK theme (explicit fills, `RequestedTheme(Dark)`).
 - Collapse (the header chevron / the strip) shrinks the panel to a 20px expander strip; the
-  header also carries a `⇄` dock-side flip.
+  header also carries a `⇄` dock-side flip and the card list's **LOCAL / GLOBAL** scope toggle (§2).
 
 ## 2. TOP — the session cards (the Triage-Board integration, vertical)
 
-- **Data**: `SessionRegistry::SnapshotLive()` (the whole fleet — GLOBAL, both kinds), rebuilt
-  off the page's already-batched registry drain, min-gap throttled (500ms), fully deferred
-  while collapsed (the Manager-lens rebuild-tax discipline). The ~30s "ago" refresh rewrites
-  the timing TextBlocks IN PLACE — never a rebuild for a clock tick.
+- **Data**: `SessionRegistry::SnapshotLive()` (both kinds), narrowed by the **card scope**:
+  **LOCAL by default — only the sessions whose tab is hosted in THIS window**
+  (`TerminalPage::_HostedSessionIds()`, the live `_claudeTabs` set — the SAME predicate the
+  Explorer Tree's LOCAL scope provider reads, so the two surfaces can never disagree about what
+  "here" means); the header's **LOCAL / GLOBAL** toggle (`_SidePanelToggleScope`) widens THIS
+  window's list to every window's sessions. It is a SEPARATE state from the Manager's tree/board
+  scope (they answer different questions — the fleet lens vs. what sits beside your terminal) and
+  is persisted **per window only** (§4). Rebuilt off the page's already-batched registry drain,
+  min-gap throttled (500ms), fully deferred while collapsed (the Manager-lens rebuild-tax
+  discipline) — plus, while LOCAL, a per-tick **hosted-set diff** (`_SidePanelPeriodicTickImpl`):
+  a tab docked into / torn out of the window changes `_claudeTabs` with NO registry notify (the
+  moved session stays live + unchanged), so the drain trigger alone would leave a LOCAL list
+  stale. The ~30s "ago" refresh rewrites the timing TextBlocks IN PLACE — never a rebuild for a
+  clock tick. The count line names the scope (`N of M sessions in this window` / `… across all
+  windows`), so a short list reads as "this window", not "the fleet shrank".
 - **Search** (top row): the Sessions browser's grammar reused — `ParseSessionQuery` +
   `MatchesQueryText`/`MatchesPathQuery` over title / effective dir / branch / id;
   whitespace-split AND terms, "quoted phrase" exact, a bare whole GUID matches the session +
@@ -111,7 +123,7 @@ these high-frequency events costs nothing at rest.
 
 The user contract: **both separators persist PER WINDOW (not per tab), and the last one to
 resize sets the default for new windows.** Collapse follows the same rule; the dock side is
-GLOBAL-only.
+GLOBAL-only; the **card scope is per-window ONLY** (no global default — see below).
 
 | state | per-window (windows/<id>.json) | global default (settings.json) |
 |---|---|---|
@@ -119,6 +131,14 @@ GLOBAL-only.
 | cards/summary split | `WindowRecord::sidePanelSplitFraction` (0 = unset) | `AppSettings::sidePanelSplitFraction` (0.5) |
 | collapsed | `WindowRecord::sidePanelCollapsed` (-1 = unset) | `AppSettings::sidePanelCollapsed` (false) |
 | dock side | — | `AppSettings::sidePanelOnLeft` (false = right) |
+| card scope (LOCAL/GLOBAL) | `WindowRecord::sidePanelGlobal` (absent = LOCAL; written only when GLOBAL) | — **none by design**: every new window starts LOCAL |
+
+- **The card scope is the one field with NO last-one-wins export**: `_SidePanelToggleScope`
+  persists it through the window-record autosave alone — never `_SidePanelPersistDefaults`, and
+  there is no `AppSettings` field to seed from. A window that flips to GLOBAL keeps that for
+  itself; a new window (or a pre-feature record, where the key is absent) starts LOCAL. This is
+  what guarantees one window's fleet-wide view can never leak into another window's list — the
+  bug that motivated the scope ("the upper list shows the tabs of a different window").
 
 - Every drag release / collapse toggle: update the live members → the window-record autosave
   captures them (`_CaptureWindowRecord`) → a GRANULAR freshest-disk RMW exports ONLY the

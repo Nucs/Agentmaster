@@ -2768,7 +2768,8 @@ namespace Agentmaster
         // independently. Empty/absent (an older record) => no override (the default tab look).
         std::wstring managerTabColor;
         // Agentmaster (SIDE PANEL): this window's fleet side-panel layout — persisted PER WINDOW (not
-        // per tab), the window-local half of the AppSettings sidePanel* defaults. Each is a TRI-STATE:
+        // per tab), the window-local half of the AppSettings sidePanel* defaults. Each LAYOUT field is a
+        // TRI-STATE (the card-list SCOPE below is the one exception — it has NO global default):
         // "unset" (a pre-feature record, or a window that never touched the panel) means "follow the
         // GLOBAL default at open time", so the last-adjustment-anywhere rule keeps seeding windows
         // that never made their own choice while a window that DID resize keeps its own layout.
@@ -2783,5 +2784,16 @@ namespace Agentmaster
         double sidePanelWidthFraction{ 0.0 };
         double sidePanelSplitFraction{ 0.0 };
         int sidePanelCollapsed{ -1 };
+        //   sidePanelGlobal: which sessions the panel's CARD LIST shows — false (the default) == LOCAL,
+        //     only the sessions whose tab is hosted in THIS window (the same live hosted-tab set the
+        //     Explorer Tree's LOCAL scope reads — TerminalPage::_HostedSessionIds — so a card here always
+        //     has a tab here); true == GLOBAL, every window's live sessions. ⚠ Deliberately NOT a
+        //     tri-state and NOT paired with an AppSettings default: the user's contract is "LOCAL by
+        //     default, always" — a window that flips to GLOBAL keeps that for ITSELF only, and a new
+        //     window (or a pre-feature record, where the key is absent) starts LOCAL again, so one
+        //     window's fleet-wide view can never leak into another window's list (the bug that
+        //     motivated it: a window's card list listing another window's tabs). Persisted only when
+        //     true (an absent key IS the default), captured by _CaptureWindowRecord once the panel built.
+        bool sidePanelGlobal{ false };
     };
 }
