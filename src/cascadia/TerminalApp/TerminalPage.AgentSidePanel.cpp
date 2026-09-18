@@ -103,6 +103,16 @@ namespace
     constexpr uint64_t kSidePanelRebuildMinGapMs = 500; // registry-drain rebuild throttle (a storm folds into the periodic catch-up)
     constexpr uint64_t kSidePanelTimingRefreshMs = 30'000; // the in-place "ago" text refresh cadence
 
+    // The two drag-to-resize separators paint a SOLID gray a touch lighter than the #2E2E2E panel
+    // background, so each reads as a visible raised divider at rest instead of a see-through gap: the
+    // previous ~9%-alpha white overlay was effectively transparent (and vanished entirely against a
+    // dark terminal on the VERTICAL bar's terminal-facing edge, since an alpha blend takes the color
+    // of whatever it sits on). Opaque + a single gray level (r==g==b) makes the bar look identical no
+    // matter what backs it; the HOT shade (pointer-over / mid-drag) is brighter to signal the grab.
+    // One place, so both splitters' initial paint AND their hover swaps can never disagree.
+    constexpr uint8_t kSidePanelSplitterIdleGray = 0x3E; // #3E3E3E — resting divider, subtly lighter than the panel
+    constexpr uint8_t kSidePanelSplitterHotGray = 0x60; // #606060 — the pointer-over / drag highlight
+
     // Case-fold for the in-process matchers (MatchesQueryText expects PRE-FOLDED haystacks; the
     // parser pre-folds the needles into SearchTerm::textLower). Per-character towlower — the same
     // basis the search module uses, so a term that matches on the Sessions page matches here.
@@ -238,10 +248,10 @@ namespace winrt::TerminalApp::implementation
         // legal, because pointer input is not a layout pass (the E_LAYOUTCYCLE trap is only
         // layout-driven triggers; those go through _SidePanelQueueLayout).
         _sidePanelSplitter = Border{};
-        _sidePanelSplitter.Background(Fill(0x18, 0xFF, 0xFF, 0xFF)); // subtle but visible + fully hit-testable
+        _sidePanelSplitter.Background(Fill(0xFF, kSidePanelSplitterIdleGray, kSidePanelSplitterIdleGray, kSidePanelSplitterIdleGray)); // subtle but visible + fully hit-testable
         {
-            const auto idle = Fill(0x18, 0xFF, 0xFF, 0xFF);
-            const auto hot = Fill(0x55, 0xC0, 0xC0, 0xC0);
+            const auto idle = Fill(0xFF, kSidePanelSplitterIdleGray, kSidePanelSplitterIdleGray, kSidePanelSplitterIdleGray);
+            const auto hot = Fill(0xFF, kSidePanelSplitterHotGray, kSidePanelSplitterHotGray, kSidePanelSplitterHotGray);
             _sidePanelSplitter.PointerEntered([weakThis, hot](const IInspectable& sender, const PointerRoutedEventArgs&) {
                 ApplyCursor(CoreCursorType::SizeWestEast);
                 if (const auto b = sender.try_as<Border>())
@@ -483,10 +493,10 @@ namespace winrt::TerminalApp::implementation
 
         // The HORIZONTAL separator (cards <-> summary) — same drag discipline as the vertical one.
         _sidePanelHSplitter = Border{};
-        _sidePanelHSplitter.Background(Fill(0x18, 0xFF, 0xFF, 0xFF));
+        _sidePanelHSplitter.Background(Fill(0xFF, kSidePanelSplitterIdleGray, kSidePanelSplitterIdleGray, kSidePanelSplitterIdleGray));
         {
-            const auto idle = Fill(0x18, 0xFF, 0xFF, 0xFF);
-            const auto hot = Fill(0x55, 0xC0, 0xC0, 0xC0);
+            const auto idle = Fill(0xFF, kSidePanelSplitterIdleGray, kSidePanelSplitterIdleGray, kSidePanelSplitterIdleGray);
+            const auto hot = Fill(0xFF, kSidePanelSplitterHotGray, kSidePanelSplitterHotGray, kSidePanelSplitterHotGray);
             _sidePanelHSplitter.PointerEntered([weakThis, hot](const IInspectable& sender, const PointerRoutedEventArgs&) {
                 ApplyCursor(CoreCursorType::SizeNorthSouth);
                 if (const auto b = sender.try_as<Border>())
