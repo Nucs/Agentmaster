@@ -223,6 +223,15 @@ public:
     bool IsUiaDataInitialized() const noexcept override;
 #pragma endregion
 
+    // Agentmaster: true while a full-screen app has switched to the ALTERNATE screen buffer (a TUI
+    // editor / pager — e.g. Claude Code's Ctrl+G external editor, or `edit.exe`). Claude Code draws
+    // its `>` prompt / input box INLINE in the MAIN buffer, never the alt buffer, so the alt buffer
+    // is by definition the CHILD app's screen. Exposed so ControlCore's pending-input draft scan can
+    // SKIP reading it (reading a full-screen app's screen as if it were an input box misparses its
+    // box-drawing UI as a draft box AND needlessly contends the terminal lock with the app's
+    // rendering every tick — PENDING_INPUT.md). Trivial wrapper over the private _inAltBuffer().
+    bool IsInAltBuffer() const noexcept { return _inAltBuffer(); }
+
     void SetWriteInputCallback(std::function<void(std::wstring_view)> pfn) noexcept;
     void SetWarningBellCallback(std::function<void()> pfn) noexcept;
     void SetTitleChangedCallback(std::function<void(std::wstring_view)> pfn) noexcept;

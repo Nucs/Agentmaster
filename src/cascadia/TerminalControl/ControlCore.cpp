@@ -939,6 +939,29 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
         const auto lock = _terminal->LockForReading();
         const auto& tb = _terminal->GetTextBuffer();
+        // Agentmaster (PENDING_INPUT.md): a full-screen app owns the ALTERNATE screen buffer — a TUI
+        // editor (Claude Code's Ctrl+G external editor / edit.exe), a pager, etc. Claude Code renders
+        // its `>` input box INLINE in the MAIN buffer, NEVER the alt buffer, so by construction there
+        // is no draft box to find here: the alt buffer IS the child app's own screen. Report NoBox and
+        // skip the read. This matters three ways: (1) a full-screen app redraws constantly, bumping
+        // GetLastMutationId every tick, so the mutation-id cache below would never skip and we'd
+        // read+parse the app's screen on every scan; (2) the app's box-drawing UI (menu/status bars,
+        // borders) can MISPARSE as a `>` input box — recording a phantom draft AND flipping the cached
+        // box-state to "box present", which stops the autorunner's "input box not visible" guard from
+        // firing and lets a queued prompt be delivered (the draft-swap: Ctrl+S/Ctrl+U, then the prompt
+        // + Enter) straight INTO the full-screen app; (3) the per-tick 120-row read contends the
+        // terminal lock with the app's rendering. Cache the verdict (mutation-id + NoBox) so the
+        // box-state / body-rows readers that share this scan also see NoBox, and so a return to the
+        // main buffer (a different mutation id) re-scans normally.
+        if (_terminal->IsInAltBuffer())
+        {
+            _pendingInputScanMutationId = tb.GetLastMutationId();
+            _pendingInputScanValid = true;
+            _pendingInputScanResult = {};
+            _pendingInputScanState = static_cast<int32_t>(::Agentmaster::InputBoxState::NoBox);
+            _pendingInputScanBodyRows = 0;
+            return {};
+        }
         // Agentmaster (perf): mutation-id gate — the buffer hasn't changed since the last poll, so the
         // rows (and therefore the detector's answer) are byte-identical; skip the 120-row read + parse.
         // A draft being typed IS buffer output (the TUI echoes it), so any draft change bumps the id.
