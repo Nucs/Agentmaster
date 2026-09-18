@@ -644,6 +644,42 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // --- The PEEK-vs-FOLLOW rule: the bottom summary FOLLOWS the terminal tab you're working in ---
+        // By default the summary tracks the FOCUSED terminal tab (so it reflects the session you are
+        // actually in); a side-panel CARD click PINS it to another session (a "peek") until you
+        // re-engage the terminal. Two complementary re-engage signals on TabContent (the terminal
+        // CONTENT column) route through _SidePanelFollowFocusedTab. Crucially the panel's own controls
+        // (cards / search / summary) live in a SIBLING ContentArea column, NOT under TabContent, so
+        // interacting with THEM never fires these — only touching the terminal does, which is exactly
+        // what ends a peek:
+        //   * PointerPressed via AddHandler(handledEventsToo) — the "click back into the terminal"
+        //     gesture. handledEventsToo is REQUIRED because TermControl marks its own presses Handled
+        //     (the Root() outside-press + tab-drag hooks use the same idiom), and it is the ONLY
+        //     reliable trigger for the common case: clicking a non-focusable card Border does NOT move
+        //     keyboard focus off the terminal, so a later re-click raises no GotFocus.
+        //   * GotFocus (plain bubbling) — covers a keyboard/programmatic return of focus INTO the
+        //     terminal (e.g. from the side panel's search box, or the window regaining activation).
+        // Registered ONCE (TabContent outlives the page) and captured weak, so no revoke is needed —
+        // the Root()/_tabView AddHandler precedent; a dead page makes the handler a no-op.
+        if (const auto content = TabContent())
+        {
+            content.AddHandler(
+                UIElement::PointerPressedEvent(),
+                winrt::box_value(PointerEventHandler{ [weakThis](const IInspectable&, const PointerRoutedEventArgs&) {
+                    if (const auto self = weakThis.get())
+                    {
+                        self->_SidePanelFollowFocusedTab();
+                    }
+                } }),
+                true /* handledEventsToo — the terminal control marks its presses Handled */);
+            content.GotFocus([weakThis](const IInspectable&, const RoutedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelFollowFocusedTab();
+                }
+            });
+        }
+
         _sidePanelBuilt = true;
         _SidePanelApplyDock(); // assigns the three columns per the global dock side + applies widths/glyphs
         _SidePanelUpdateSortButton();
@@ -1297,6 +1333,44 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         }
+    }
+
+    // The PEEK-vs-FOLLOW rule (the summary follows what you're working IN): re-select the FOCUSED
+    // terminal tab's session in the SIDE PANEL — card highlight + the bottom summary — which ENDS
+    // any card "peek" (a side-panel card click that pinned the summary to a different session). Wired
+    // to TabContent's PointerPressed (the click-back-into-the-terminal gesture) + bubbling GotFocus
+    // in _InitAgentSidePanel, so re-engaging the terminal snaps the summary back to the tab you're in
+    // while clicking a card overrides it until then. Deliberately scoped to the side panel
+    // (driveManagerLens=false): the Manager board/tree/Auto-Testing keeps its own deliberate
+    // selection — a terminal click must not yank the fleet lens around (the request is about the
+    // summary area only). The same-id early-out in _SidePanelSelectSession makes the steady state
+    // (already on the focused tab — the vast majority of these high-frequency events) a no-op.
+    void TerminalPage::_SidePanelFollowFocusedTab()
+    {
+        if (!_sidePanelBuilt)
+        {
+            return; // panel never built this run — nothing to follow
+        }
+        // Never during startup/restore: _RestoreWindowTabs programmatically focuses tabs, and this
+        // must not clobber the per-window side-panel selection _InitAgentSidePanel seeded from the
+        // record's manager.selectedId (the same gate _SyncManagerSelectionToTab uses for the lens).
+        if (_startupState != StartupState::Initialized)
+        {
+            return;
+        }
+        const auto tab = _GetFocusedTab();
+        // The Manager tab (its content isn't a session) and "nothing focused" both leave the current
+        // selection alone — returning to the Manager tab should keep showing the last peek, not clear it.
+        if (!tab || tab == _managerTab)
+        {
+            return;
+        }
+        const auto id = _ClaudeSessionForTab(tab);
+        if (id.empty())
+        {
+            return; // a pwsh / cmd / external shell tab — no managed summary to show; keep the current peek
+        }
+        _SidePanelSelectSession(id, /*driveManagerLens*/ false);
     }
 
     // Point the bottom area at `id`: create (or replace) the fill-hosted AgentTabOverlay whose

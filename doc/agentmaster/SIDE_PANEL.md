@@ -80,6 +80,33 @@ settings broadcast push the flags to it explicitly (`_SidePanelApplySettings`). 
 new session replaces the overlay (the old one's registry observer detaches on release); a
 same-id rebind just kicks the cheap mtime-gated `RefreshSummaryContent`.
 
+### Which session the summary shows — FOLLOW the terminal vs PEEK a card
+
+The bottom summary tracks **the session you are working IN by default, and the card you click
+when you deliberately peek another.** Two inputs drive the one selection (`_sidePanelSelectedId`
+= card highlight + summary):
+
+- **FOLLOW (default)** — the summary shows the **focused terminal tab's** session. On a tab
+  switch this rides the existing `_SyncManagerSelectionToTab`; and — the key case — whenever you
+  **re-engage the terminal content** (a click into it, or focus landing inside it),
+  `_SidePanelFollowFocusedTab` snaps the summary + card highlight back to the focused tab. It is
+  hooked to `TabContent`'s `PointerPressed` (`AddHandler`, `handledEventsToo` — `TermControl`
+  marks its presses Handled) plus its bubbling `GotFocus`. The panel's OWN controls live in a
+  SIBLING `ContentArea` column (not under `TabContent`), so touching cards / search / the summary
+  never fires these — only touching the terminal does, which is exactly what ends a peek.
+- **PEEK** — clicking a **card** pins the summary to THAT session (drives the Manager lens too,
+  "like the board card"); it holds until you re-engage the terminal. Because a non-focusable card
+  `Border` doesn't move keyboard focus off the terminal, `PointerPressed` (not `GotFocus`) is the
+  reliable "back to work" trigger.
+
+`_SidePanelFollowFocusedTab` is gated on `StartupState::Initialized` (never clobber the
+restore-seeded selection) and on the focused tab being a managed session (the Manager tab / a
+`pwsh`·`cmd`·external shell resolve empty → the current peek is kept, nothing to summarize). It
+passes `driveManagerLens=false`, so a terminal click moves ONLY the side panel — the Manager
+board/tree/Auto-Testing keeps its own deliberate selection. The same-id early-out in
+`_SidePanelSelectSession` makes the steady state (already on the focused tab) free, so hooking
+these high-frequency events costs nothing at rest.
+
 ## 4. Persistence — per window, last-one-wins defaults
 
 The user contract: **both separators persist PER WINDOW (not per tab), and the last one to
