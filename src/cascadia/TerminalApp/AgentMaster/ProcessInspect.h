@@ -398,9 +398,31 @@ namespace Agentmaster
     // with zero API traffic). Feeds SessionInfo.convApiActivityUnixMs, the ⚡ ServerCacheStillWarm
     // input: a teammate's/subagent's own-context turn never re-warms the LEAD's prefix cache, so the
     // folded display value must not light the hint (a background team kept ⚡ lit for hours).
+    // `turnStartMs` / `turnEndMs` (optional outs — the MOST RECENT sort, SessionInfo::turnStart/
+    // EndUnixMs): the newest TURN BOUNDARIES in the tail — see TurnBoundariesFromTranscriptChunk. Both
+    // 0 when none is in the window. Requesting them changes the tail-window rule ONLY in one case: a
+    // mid-turn tail (timestamped tool traffic but no boundary) grows once to the 2 MiB window — never to
+    // 16 MiB per survey, a monster turn would re-read it every ~2s; past that the hooks / the scanner's
+    // pull-echo / the persisted stamps carry the start, and the end lands in the tail the moment the
+    // turn completes. All three values come from ONE parse of the chunk.
     int64_t LastActivityMsFromTranscriptChunk(std::wstring_view chunk);
-    int64_t ReadTranscriptLastActivityTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, int64_t* apiLineMs = nullptr);
-    int64_t ReadTranscriptLastActivityTail(std::wstring_view cwd, std::wstring_view sessionId, int64_t* apiLineMs = nullptr);
+    int64_t ReadTranscriptLastActivityTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, int64_t* apiLineMs = nullptr, int64_t* turnStartMs = nullptr, int64_t* turnEndMs = nullptr);
+    int64_t ReadTranscriptLastActivityTail(std::wstring_view cwd, std::wstring_view sessionId, int64_t* apiLineMs = nullptr, int64_t* turnStartMs = nullptr, int64_t* turnEndMs = nullptr);
+
+    // Agentmaster (MOST RECENT sort — ExplorerSort::MostRecent): the TURN-BOUNDARY twin of
+    // LastActivityMsFromTranscriptChunk, PURE + unit-tested, sharing its one line walk. Over the same
+    // REAL conversation lines (type user/assistant, non-meta/compact/sidechain, timestamped) it reports:
+    //   turnStartMs — the newest REAL human prompt line (a user line whose text is not a tool_result and
+    //     not IsNoiseUserPrompt noise — the SAME filter the registry applies to hook prompts, so a
+    //     slash-command echo / task notification never reads as "the user sent a turn");
+    //   turnEndMs — the newest turn-ENDING line: an assistant line whose message.stop_reason is
+    //     TERMINAL (IsTerminalStopReason — end_turn / stop_sequence / max_tokens / refusal), or the
+    //     user's Esc-interrupt marker (IsUserInterruptMarker on the RAW text — the noise filters drop it,
+    //     yet it is authoritative "the turn is over NOW" and is timed by its own line).
+    // Everything MOST ACTIVE reacts to mid-turn is invisible here by construction: a tool_use assistant
+    // line, a tool_result user line, a subagent side-file write — none is a turn boundary. Both 0 when
+    // the chunk holds no such line. Max, not last-seen (a fork's copied tail carries OLD stamps).
+    void TurnBoundariesFromTranscriptChunk(std::wstring_view chunk, int64_t& turnStartMs, int64_t& turnEndMs);
 
     // Agentmaster (TAB_OVERLAY.md row 3 "Transcript"): read a transcript into a plain-text
     // conversation — ONLY the human + assistant TEXT messages, in order. Tool calls, tool results,

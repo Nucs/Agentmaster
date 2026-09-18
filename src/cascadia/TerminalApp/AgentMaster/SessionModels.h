@@ -131,19 +131,26 @@ namespace Agentmaster
     // Agentmaster: session ordering — the basis for BOTH sort toggles. (1) The Explorer Tree's sort
     // (AppSettings::treeSort) after its LOCAL/GLOBAL/EXTERNAL scope toggle, ordering the directory
     // groups AND the rows within each (and the EXTERNAL census); it cycles Newest -> Oldest ->
-    // MostActive -> Alpha -> ByPid. (2) The Triage Board's sort (AppSettings::boardSort) after its
-    // LOCAL/GLOBAL toggle, ordering the cards within each state column; it cycles MostActive (its
-    // DEFAULT) -> Newest -> Oldest -> Alpha — the tree's set minus ByPid (host/shell grouping is
-    // meaningless once cards are split across state columns). Both are GLOBAL app settings, persisted
-    // to settings.json so the choice is shared by every window and survives restart. One ExplorerSort
-    // comparator (SortKeyLess) serves both consumers.
+    // MostActive -> MostRecent -> Alpha -> ByPid. (2) The Triage Board's sort (AppSettings::boardSort)
+    // after its LOCAL/GLOBAL toggle, ordering the cards within each state column — and the SIDE PANEL's
+    // card list, which shares it; it cycles MostActive (its DEFAULT) -> MostRecent -> Newest -> Oldest
+    // -> Alpha — the tree's set minus ByPid (host/shell grouping is meaningless once cards are split
+    // across state columns). Both are GLOBAL app settings, persisted to settings.json so the choice is
+    // shared by every window and survives restart. One ExplorerSort comparator (SortKeyLess) serves
+    // both consumers.
     enum class ExplorerSort
     {
         Newest, // most recently created first (conversation ctime, desc); a fresh/never-prompted session floats up
         Oldest, // oldest created first (ctime, asc)
         MostActive, // most recent activity first; a currently-running session ranks at the very top
         Alpha, // A->Z by title (case-insensitive)
-        ByPid // group by host window/shell pid (externals: ExternalClaudeRow::hostPid; managed: the claude pid), then by most active within each group
+        ByPid, // group by host window/shell pid (externals: ExternalClaudeRow::hostPid; managed: the claude pid), then by most active within each group
+        // Newest TURN BOUNDARY first — the newer of (when the user last SENT a turn, when the assistant
+        // last FINISHED one): SessionInfo::turnStartUnixMs / turnEndUnixMs. Sharper than MostActive by
+        // construction: mid-turn tool calls, subagent/teammate side-file writes, and the SessionStart /
+        // triage-move stamps that keep MostActive jumping never move it, and there is NO Running pin — a
+        // running session ranks by when its turn was sent. Token "recent" (Persistence.cpp).
+        MostRecent
     };
 
     // Agentmaster: how the tab/session RENAME box treats Enter / Shift+Enter as a COMMIT (accept +
@@ -1146,6 +1153,29 @@ namespace Agentmaster
         // nothing to follow up INTO until the session is resumed, and a resumed session's truth is
         // re-derived from the transcript within one survey.
         int64_t lastTurnUnixMs{ 0 };
+        // Agentmaster (MOST RECENT sort — ExplorerSort::MostRecent): the two TURN-BOUNDARY stamps — when
+        // the user last SENT a turn and when the assistant last FINISHED one — the only two instants
+        // that order reads (SortKey::turn = the newer of the two). Deliberately NOT lastActivityUnixMs
+        // (SessionStart / the triage moves stamp it), NOT lastTurnUnixMs (every tool call stamps it), NOT
+        // convLastActivityUnixMs (per-LINE, plus the subagent/teammate side-file fold): those are exactly
+        // why MOST ACTIVE reads "not accurate" — a session grinding through tool calls, or hosting a
+        // background team, keeps floating above the one whose turn actually just began or ended.
+        // Monotonic MAX from EVERY source, so the hook and transcript channels never regress each other:
+        //   turnStartUnixMs — a prompt-CARRYING UserPromptSubmit's wire ts (push, OnHookEvent — the same
+        //     condition that stamps turns.lastPromptUnixMs; an EMPTY twin / the recon-run synth never
+        //     count); the scanner's pull-echo of a REAL human prompt line (NoteExternalPrompt, the line's
+        //     own timestamp — the hookless/adopted session's start); the observer's transcript-tail read
+        //     (ReadTranscriptLastActivityTail's turnStart out — the newest real prompt line in the tail).
+        //   turnEndUnixMs — a REAL Stop's wire ts (push; never a synthesized quiescent Stop, which is
+        //     reconciliation-timed, not turn-timed); the observer's tail read (the newest assistant line
+        //     with a TERMINAL stop_reason, or the user's [Request interrupted…] marker — an Esc ends the
+        //     turn too, and is timed by the marker's own line, not by the recon-stop that later releases it).
+        // PERSISTED (unlike lastTurnUnixMs): a dormant restored session must keep its place in the order
+        // before any hook or survey can refresh it. 0 == no turn evidence yet (a never-prompted session,
+        // or a record from before the stamps existed); MakeSortKey then falls back to lastActivityUnixMs
+        // so such a session isn't stranded at the bottom until its first turn.
+        int64_t turnStartUnixMs{ 0 };
+        int64_t turnEndUnixMs{ 0 };
         // True for a session ADOPTED from a claude we did NOT launch (typed into a `+` tab,
         // not Launched by the Manager). It is observe-only until the app correlates it to its
         // ConPTY (via the WT_SESSION tabToken) and binds an injector. Cleared once it is

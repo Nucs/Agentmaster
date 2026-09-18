@@ -207,6 +207,8 @@ void TestPersistence()
         s.pendingInput = L"an unsent draft\nwith a second line"; // PENDING_INPUT.md §5: the draft memory survives restart (PERSISTED)
         s.pendingInputUnixMs = 1784800000123; // the observation stamp keeps the staleness display honest
         s.pendingPasteRefs = L"paste #1 (+273 lines) -> bf8eefafa3e80676.txt"; // the paste-cache resolution annotation
+        s.turnStartUnixMs = 1784800001000; // MOST RECENT sort: the turn-boundary stamps survive restart (PERSISTED) — a dormant session keeps its place
+        s.turnEndUnixMs = 1784800002000;
         QueuedPrompt a;
         a.id = L"p1";
         a.label = L"add tests";
@@ -237,6 +239,7 @@ void TestPersistence()
             CHECK(r.id == L"sid-1" && r.title == L"My Task" && r.workingDir == L"K:/api", "session metadata");
             CHECK(r.state == SessionState::WaitingForInput, "session state");
             CHECK(r.lastMessageWasQuestion, "question-guard flag preserved (PERSISTED: a crash mustn't drop the guard and auto-answer a pending question)");
+            CHECK(r.turnStartUnixMs == 1784800001000 && r.turnEndUnixMs == 1784800002000, "MOST RECENT turn-boundary stamps round-trip (PERSISTED: a dormant restored session keeps its order)");
             CHECK(r.external, "external flag preserved");
             CHECK(r.forkParentId == L"src-conv-7", "forkParentId preserved (PERSISTED: restores a never-messaged fork)");
             CHECK(r.tabColorHex == L"#61AFEF", "tabColorHex preserved (PERSISTED: an Individual-mode session keeps ITS color across restore)");
@@ -748,6 +751,14 @@ void TestAppSettings()
         CHECK(a.treeSort == ExplorerSort::MostActive, "settings treeSort 'active' honored");
         const auto act = DeserializeAppSettings(L"{\"settings\":{\"boardSort\":\"active\"}}");
         CHECK(act.boardSort == ExplorerSort::MostActive, "settings boardSort 'active' honored");
+        // MOST RECENT (the turn-boundary order) rides the "recent" token on BOTH sorts, round-trip + parse.
+        AppSettings rec;
+        rec.boardSort = ExplorerSort::MostRecent;
+        rec.treeSort = ExplorerSort::MostRecent;
+        const auto recBack = DeserializeAppSettings(SerializeAppSettings(rec));
+        CHECK(recBack.boardSort == ExplorerSort::MostRecent && recBack.treeSort == ExplorerSort::MostRecent, "settings MostRecent round-trips through its 'recent' token for both sorts");
+        const auto recTok = DeserializeAppSettings(L"{\"settings\":{\"boardSort\":\"recent\",\"treeSort\":\"recent\"}}");
+        CHECK(recTok.boardSort == ExplorerSort::MostRecent && recTok.treeSort == ExplorerSort::MostRecent, "settings 'recent' token -> MostRecent for both sorts");
         const auto bad = DeserializeAppSettings(L"{\"settings\":{\"boardSort\":\"bogus\"}}");
         CHECK(bad.boardSort == ExplorerSort::Newest, "settings boardSort unknown token -> Newest");
     }

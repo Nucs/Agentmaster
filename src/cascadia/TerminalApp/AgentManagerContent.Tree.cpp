@@ -181,6 +181,7 @@ namespace winrt::TerminalApp::implementation
                 int64_t maxCreated{ 0 };
                 int64_t minCreated{ INT64_MAX };
                 int64_t bestLast{ 0 };
+                int64_t bestTurn{ 0 }; // MOST RECENT: a dir's rank is its newest turn boundary (SortKey::turn) across its sessions
                 uint32_t minPid{ UINT32_MAX }; // BY PID: a dir's rank is its lowest host/claude pid
             };
             std::vector<std::pair<std::wstring, DirAgg>> ranked;
@@ -196,6 +197,7 @@ namespace winrt::TerminalApp::implementation
                         agg.maxCreated = (std::max)(agg.maxCreated, k.created);
                         agg.minCreated = (std::min)(agg.minCreated, k.created);
                         agg.bestLast = (std::max)(agg.bestLast, k.active ? INT64_MAX : k.last);
+                        agg.bestTurn = (std::max)(agg.bestTurn, k.turn); // MOST RECENT: newest turn boundary in the dir (no Running pin)
                         agg.minPid = (std::min)(agg.minPid, k.pid);
                     }
                 }
@@ -217,6 +219,10 @@ namespace winrt::TerminalApp::implementation
                 case ::Agentmaster::ExplorerSort::MostActive:
                     if (a.bestLast != b.bestLast)
                         return a.bestLast > b.bestLast;
+                    break;
+                case ::Agentmaster::ExplorerSort::MostRecent:
+                    if (a.bestTurn != b.bestTurn)
+                        return a.bestTurn > b.bestTurn; // the dir whose session most recently sent/finished a turn first
                     break;
                 case ::Agentmaster::ExplorerSort::ByPid:
                     if (a.minPid != b.minPid)
@@ -604,7 +610,8 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster: order the external dirs by the active (global) sort, exactly like the managed
         // tree — a dir's rank aggregates its externals (NEWEST/OLDEST by creation, MOST ACTIVE by
-        // recency, A-Z by name). Rows within each dir are sorted the same way below.
+        // recency, MOST RECENT by the newest turn boundary — an external's line-derived last activity,
+        // it carries no hook/tail stamps — A-Z by name). Rows within each dir are sorted the same way below.
         const auto sortMode = _appSettings.treeSort;
         {
             struct DirAgg
@@ -612,6 +619,7 @@ namespace winrt::TerminalApp::implementation
                 int64_t maxCreated{ 0 };
                 int64_t minCreated{ INT64_MAX };
                 int64_t bestLast{ 0 };
+                int64_t bestTurn{ 0 }; // MOST RECENT: a dir's rank is its newest turn boundary (SortKey::turn — an external's line-derived last activity)
                 uint32_t minPid{ UINT32_MAX }; // BY PID: a dir's rank is its lowest host-window pid
             };
             std::vector<std::pair<std::wstring, DirAgg>> ranked;
@@ -627,6 +635,7 @@ namespace winrt::TerminalApp::implementation
                         agg.maxCreated = (std::max)(agg.maxCreated, k.created);
                         agg.minCreated = (std::min)(agg.minCreated, k.created);
                         agg.bestLast = (std::max)(agg.bestLast, k.active ? INT64_MAX : k.last);
+                        agg.bestTurn = (std::max)(agg.bestTurn, k.turn); // MOST RECENT: newest turn boundary in the dir (no Running pin)
                         agg.minPid = (std::min)(agg.minPid, k.pid);
                     }
                 }
@@ -648,6 +657,10 @@ namespace winrt::TerminalApp::implementation
                 case ::Agentmaster::ExplorerSort::MostActive:
                     if (a.bestLast != b.bestLast)
                         return a.bestLast > b.bestLast;
+                    break;
+                case ::Agentmaster::ExplorerSort::MostRecent:
+                    if (a.bestTurn != b.bestTurn)
+                        return a.bestTurn > b.bestTurn; // the dir whose session most recently sent/finished a turn first
                     break;
                 case ::Agentmaster::ExplorerSort::ByPid:
                     if (a.minPid != b.minPid)
@@ -1240,8 +1253,12 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: advance the Triage Board sort MOST ACTIVE -> NEWEST -> OLDEST -> A-Z -> MOST ACTIVE
-    // (it never visits BY PID — pid grouping is meaningless once cards split across the state columns).
+    // Agentmaster: advance the Triage Board sort MOST ACTIVE -> MOST RECENT -> NEWEST -> OLDEST -> A-Z ->
+    // MOST ACTIVE (it never visits BY PID — pid grouping is meaningless once cards split across the state
+    // columns). MOST RECENT orders by the newest TURN BOUNDARY only (SessionInfo::turnStart/EndUnixMs —
+    // the user's last prompt SENT / the assistant's last turn FINISHED), never mid-turn tool or subagent
+    // activity and with no Running pin — the sharper twin of MOST ACTIVE. The side panel's order button
+    // shares this setting and cycle (AgentManagerContent::CycleBoardSort).
     // A SEPARATE global setting from the tree's sort (AppSettings::boardSort), so the board and tree
     // remember their own order. Like treeSort it is GLOBAL + persisted: mutate _appSettings.boardSort,
     // refresh the label, push it through the settings sink (the page persists settings.json), so the
@@ -1252,6 +1269,9 @@ namespace winrt::TerminalApp::implementation
         switch (_appSettings.boardSort)
         {
         case ExplorerSort::MostActive:
+            _appSettings.boardSort = ExplorerSort::MostRecent;
+            break;
+        case ExplorerSort::MostRecent:
             _appSettings.boardSort = ExplorerSort::Newest;
             break;
         case ExplorerSort::Newest:
@@ -1280,16 +1300,17 @@ namespace winrt::TerminalApp::implementation
         if (_boardSortBtn)
         {
             using ::Agentmaster::ExplorerSort;
-            const wchar_t* label = (_appSettings.boardSort == ExplorerSort::Newest) ? L"NEWEST"
-                                   : (_appSettings.boardSort == ExplorerSort::Oldest) ? L"OLDEST"
-                                   : (_appSettings.boardSort == ExplorerSort::Alpha)  ? L"A\x2013Z"
-                                                                                      : L"MOST ACTIVE"; // MostActive (default) + any stray ByPid
+            const wchar_t* label = (_appSettings.boardSort == ExplorerSort::Newest)     ? L"NEWEST"
+                                   : (_appSettings.boardSort == ExplorerSort::Oldest)     ? L"OLDEST"
+                                   : (_appSettings.boardSort == ExplorerSort::Alpha)      ? L"A\x2013Z"
+                                   : (_appSettings.boardSort == ExplorerSort::MostRecent) ? L"MOST RECENT"
+                                                                                          : L"MOST ACTIVE"; // MostActive (default) + any stray ByPid
             _boardSortBtn.Content(winrt::box_value(label));
         }
     }
 
-    // Agentmaster: advance the Explorer Tree sort NEWEST -> OLDEST -> MOST ACTIVE -> A-Z -> BY PID ->
-    // NEWEST. The sort is a GLOBAL setting: mutate _appSettings.treeSort, refresh the label, then push
+    // Agentmaster: advance the Explorer Tree sort NEWEST -> OLDEST -> MOST ACTIVE -> MOST RECENT -> A-Z ->
+    // BY PID -> NEWEST. The sort is a GLOBAL setting: mutate _appSettings.treeSort, refresh the label, then push
     // it through the settings sink (the page persists it to settings.json and re-materializes), so the
     // choice survives restart and seeds every other / future window. _Refresh re-sorts THIS window's
     // tree (and re-renders the board/plan) immediately.
@@ -1305,6 +1326,9 @@ namespace winrt::TerminalApp::implementation
             _appSettings.treeSort = ExplorerSort::MostActive;
             break;
         case ExplorerSort::MostActive:
+            _appSettings.treeSort = ExplorerSort::MostRecent;
+            break;
+        case ExplorerSort::MostRecent:
             _appSettings.treeSort = ExplorerSort::Alpha;
             break;
         case ExplorerSort::Alpha:
@@ -1331,6 +1355,7 @@ namespace winrt::TerminalApp::implementation
             using ::Agentmaster::ExplorerSort;
             const wchar_t* label = (_appSettings.treeSort == ExplorerSort::Oldest)       ? L"OLDEST"
                                    : (_appSettings.treeSort == ExplorerSort::MostActive) ? L"MOST ACTIVE"
+                                   : (_appSettings.treeSort == ExplorerSort::MostRecent) ? L"MOST RECENT"
                                    : (_appSettings.treeSort == ExplorerSort::Alpha)      ? L"A\x2013Z"
                                    : (_appSettings.treeSort == ExplorerSort::ByPid)      ? L"BY PID"
                                                                                          : L"NEWEST";

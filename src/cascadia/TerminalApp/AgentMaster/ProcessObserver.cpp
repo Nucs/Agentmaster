@@ -300,20 +300,30 @@ namespace Agentmaster
         }
     }
 
-    int64_t ProcessObserver::_LineDerivedLastActivity(std::wstring_view cwd, const std::wstring& sid, int64_t mtimeMs, int64_t* apiOut)
+    int64_t ProcessObserver::_LineDerivedLastActivity(std::wstring_view cwd, const std::wstring& sid, int64_t mtimeMs, int64_t* apiOut, int64_t* turnStartOut, int64_t* turnEndOut)
     {
         _lineActivitySeenThisSurvey.insert(sid); // the survey-tail prune keeps exactly what this pass consulted
         auto& c = _lineActivityBySid[sid];
         if (c.mtime != mtimeMs) // transcript grew (or first sight) -> re-derive from the tail; else reuse
         {
             c.mtime = mtimeMs;
-            c.lastActivityMs = ReadTranscriptLastActivityTail(cwd, sid, &c.apiActivityMs);
+            // ONE tail read + parse yields all four values; the turn boundaries are always derived (the
+            // cache is shared by every caller, and the per-line extraction is a cheap text test).
+            c.lastActivityMs = ReadTranscriptLastActivityTail(cwd, sid, &c.apiActivityMs, &c.turnStartMs, &c.turnEndMs);
         }
         if (apiOut)
         {
             // The parent-line-derived API-activity half (⚡): NO mtime fallback — the mtime is bumped
             // by trailers + subagent/teammate side files, exactly the non-API noise this value excludes.
             *apiOut = c.apiActivityMs;
+        }
+        if (turnStartOut)
+        {
+            *turnStartOut = c.turnStartMs; // MOST RECENT sort: 0 == no real prompt in the tail window (never the mtime)
+        }
+        if (turnEndOut)
+        {
+            *turnEndOut = c.turnEndMs; // MOST RECENT sort: 0 == no turn-ending line in the window (never the mtime)
         }
         // 0 == no timestamped conversation line in the window (a never-prompted / unreadable transcript)
         // -> fall back to the mtime, preserving the old behavior for that degenerate case.
@@ -754,11 +764,11 @@ namespace Agentmaster
                 // untimestamped state lines that bump mtime without being activity, so a restored tab
                 // focused after a restart would read "active just now" (it only resumed). The tail read
                 // is mtime-gated (a quiet/just-resumed session costs only this stat after it settles).
-                int64_t convCreated = 0, convMtime = 0, convLast = 0, convApi = 0;
+                int64_t convCreated = 0, convMtime = 0, convLast = 0, convApi = 0, convTurnStart = 0, convTurnEnd = 0;
                 if (!sid.empty())
                 {
                     TranscriptTimes(f.cwd, sid, convCreated, convMtime); // ctime=created, mtime=the gate
-                    convLast = _LineDerivedLastActivity(f.cwd, sid, convMtime, &convApi);
+                    convLast = _LineDerivedLastActivity(f.cwd, sid, convMtime, &convApi, &convTurnStart, &convTurnEnd); // + the MOST RECENT sort's turn boundaries, same read
                 }
 
                 CorrelationRow cr;
@@ -817,6 +827,8 @@ namespace Agentmaster
                     o.createdUnixMs = convCreated;
                     o.lastActivityUnixMs = convLast;
                     o.apiActivityUnixMs = convApi; // the ⚡ half: the parent conversation's OWN last line (no subagent fold)
+                    o.turnStartUnixMs = convTurnStart; // MOST RECENT sort: the tail's newest real prompt (pull half; 0 == not in the window)
+                    o.turnEndUnixMs = convTurnEnd; // MOST RECENT sort: the tail's newest turn end (terminal stop / interrupt marker)
                     _registry->ObserveClaude(o);
                 }
                 continue;

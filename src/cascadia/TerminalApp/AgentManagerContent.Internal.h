@@ -974,6 +974,14 @@ namespace
                          // prompted session has no transcript yet, so it is treated as just-created
                          // (== newest), floating to the top of NEWEST and the bottom of OLDEST.
         int64_t last; // last activity (mtime); 0 when unknown.
+        // MOST RECENT key: the newest TURN BOUNDARY — the newer of SessionInfo::turnStartUnixMs (the user
+        // last SENT a turn) and turnEndUnixMs (the assistant last FINISHED one). Never mid-turn tool or
+        // subagent activity (that is `last`), never the Running pin. Falls back to the hook decay anchor
+        // (lastActivityUnixMs) only when a session has NO turn evidence yet — a never-prompted / just-
+        // launched session, or a record from before the stamps existed — so it isn't stranded at the
+        // bottom until its first turn. Externals carry no hook/tail boundary stamps: their line-derived
+        // last activity stands in (the best available; observe-only rows).
+        int64_t turn;
         bool active; // currently running (managed Running state) — floats to the top of MOST ACTIVE.
         std::wstring title; // display title for A-Z (case-insensitive).
         uint32_t pid; // BY PID key: the host window/shell pid (externals) or the claude pid (managed) — groups same-window rows together (matches the color-coded underline), UINT32_MAX when unknown (sorts last).
@@ -984,6 +992,11 @@ namespace
         SortKey k{};
         k.created = s.convCreatedUnixMs > 0 ? s.convCreatedUnixMs : INT64_MAX;
         k.last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
+        k.turn = (std::max)(s.turnStartUnixMs, s.turnEndUnixMs); // MOST RECENT: the newer turn boundary (hook push / tail pull / persisted — all monotonic)
+        if (k.turn == 0)
+        {
+            k.turn = s.lastActivityUnixMs; // no turn evidence yet (never prompted / pre-stamp record): the decay anchor, so it isn't stranded at the bottom
+        }
         k.active = (s.state == ::Agentmaster::SessionState::Running);
         k.title = s.title;
         k.pid = s.pid ? s.pid : UINT32_MAX; // managed: the claude pid (unique -> the most-active secondary rarely breaks ties)
@@ -996,6 +1009,7 @@ namespace
         const int64_t created = ex.createdUnixMs ? ex.createdUnixMs : ex.startUnixMs;
         k.created = created > 0 ? created : INT64_MAX;
         k.last = ex.lastActivityUnixMs;
+        k.turn = ex.lastActivityUnixMs; // MOST RECENT: no hook/tail boundary stamps on an observe-only row — the line-derived last activity is the best available
         k.active = false; // externals carry no run-state — rank by recency only
         k.title = !ex.title.empty() ? ex.title : ex.cwd;
         k.pid = ex.hostPid ? ex.hostPid : (ex.pid ? ex.pid : UINT32_MAX); // BY PID groups by host window/shell (the underline color key), so same-window externals sit together
@@ -1031,6 +1045,10 @@ namespace
                 return a.active; // a running session outranks any idle one
             if (a.last != b.last)
                 return a.last > b.last; // then most-recent activity first
+            break;
+        case ExplorerSort::MostRecent:
+            if (a.turn != b.turn)
+                return a.turn > b.turn; // newest turn boundary first — no Running pin, no mid-turn activity (the MOST ACTIVE difference)
             break;
         case ExplorerSort::Alpha:
             break; // name is the primary key — handled by the tiebreak below

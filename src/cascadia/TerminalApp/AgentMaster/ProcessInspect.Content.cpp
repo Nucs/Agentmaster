@@ -43,6 +43,7 @@
 #include "ClaudeSpawn.h" // ClaudeProjectsDir() — the live Claude transcript root
 #include "Json.h" // transcript line parsing (ReadTranscriptInfo)
 #include "TranscriptStore.h" // IsNoiseUserPrompt + PickDisplayTitle (the shared prompt-noise + title-precedence rules)
+#include "SessionScanner.h" // IsTerminalStopReason + IsUserInterruptMarker — the turn-END predicates the MOST RECENT sort's tail walk shares with the state reconciler
 #include "ProcessInspect.Internal.h" // the shared file-local PEB/string/file primitives
 
 namespace Agentmaster
@@ -866,7 +867,18 @@ namespace Agentmaster
         return ::SystemTimeToFileTime(&st, &outUtc) != FALSE;
     }
 
-    // Agentmaster: the line-derived LAST-ACTIVITY ms from a transcript chunk — the NEWEST `timestamp`
+    // (forward) the raw user-line text extractor, defined beside the conversation-lineage helpers below:
+    // the shared timing walk needs it to recognize the Esc-interrupt marker, which the prompt-noise
+    // filters deliberately drop.
+    static std::wstring SeUserLineRawText(const json::Value& obj);
+
+    // Agentmaster: the ONE line walk behind LastActivityMsFromTranscriptChunk (newestMs),
+    // TurnBoundariesFromTranscriptChunk (the two out-params) AND the tail reader, which wants all three
+    // from ONE parse of the chunk — the observer re-reads a busy transcript's tail every survey, so the
+    // chunk must never be parsed twice. The boundary extraction runs only when requested (a null out ==
+    // not wanted), so the last-activity-only callers pay nothing per line beyond what they always did.
+    //
+    // The line-derived LAST-ACTIVITY ms from a transcript chunk — the NEWEST `timestamp`
     // among REAL conversation lines (type "user"/"assistant", non-meta/compact/sidechain). WHY this
     // exists vs the file mtime (TranscriptTimes): `claude --resume`, a /model or permission-mode change,
     // and a shell-cwd reset all APPEND UNTIMESTAMPED state lines (`last-prompt`/`mode`/`permission-mode`/
@@ -878,9 +890,25 @@ namespace Agentmaster
     // last-seen": a fork's copied tail carries OLD stamps, so the newest among the chunk wins. Pure +
     // total; tolerates a partial leading line (a tail read can start mid-line — it fails json::Parse and
     // is skipped). 0 when the chunk holds no timestamped conversation line.
-    int64_t LastActivityMsFromTranscriptChunk(std::wstring_view chunk)
+    //
+    // The TURN BOUNDARIES (MOST RECENT sort — see TurnBoundariesFromTranscriptChunk in the header): on a
+    // user line the Esc-interrupt marker ENDS the turn (read off the RAW text — the noise filters drop it)
+    // and a REAL human prompt (non-empty raw text that is not IsNoiseUserPrompt noise — the registry's own
+    // hook-prompt filter, so a command echo never counts) STARTS one; on an assistant line a TERMINAL
+    // stop_reason ENDS one. A tool_result user line (empty raw text) and a tool_use assistant line
+    // (non-terminal) are neither — the mid-turn traffic MOST ACTIVE reacts to and this order ignores.
+    // `newestMs` (out): the last-activity value. `turnStartMs`/`turnEndMs` (optional outs): the boundaries.
+    static void SeScanChunkTiming(std::wstring_view chunk, int64_t& newestMs, int64_t* turnStartMs, int64_t* turnEndMs)
     {
         int64_t newest = 0;
+        if (turnStartMs)
+        {
+            *turnStartMs = 0;
+        }
+        if (turnEndMs)
+        {
+            *turnEndMs = 0;
+        }
         size_t start = 0;
         for (size_t i = 0; i <= chunk.size(); ++i)
         {
@@ -919,16 +947,73 @@ namespace Agentmaster
                 continue;
             }
             FILETIME ft{};
-            if (SeParseIso(ts, ft))
+            if (!SeParseIso(ts, ft))
             {
-                const int64_t ms = FileTimeToUnixMs(ft);
-                if (ms > newest)
+                continue;
+            }
+            const int64_t ms = FileTimeToUnixMs(ft);
+            if (ms > newest)
+            {
+                newest = ms;
+            }
+            if (!turnStartMs && !turnEndMs)
+            {
+                continue; // last-activity-only caller: no per-line boundary extraction
+            }
+            if (type == L"assistant")
+            {
+                // A turn END: a TERMINAL stop_reason means nothing more is coming without new input.
+                // "tool_use" (mid-turn) / "" (a streaming or user-cleared tail) never qualify — the
+                // whole difference from last-activity.
+                if (const auto* m = obj.Find(L"message"); m && m->type == json::Value::Type::Obj && IsTerminalStopReason(m->StrAt(L"stop_reason")))
                 {
-                    newest = ms;
+                    if (turnEndMs && ms > *turnEndMs)
+                    {
+                        *turnEndMs = ms;
+                    }
+                }
+                continue;
+            }
+            // A user line. Its RAW text (not the noise-filtered prompt): "" for a tool_result-only line
+            // (neither boundary); the Esc-interrupt marker ENDS the turn — it is filtered as noise by
+            // every prompt filter, yet it is authoritative "the turn is over NOW" (no clean Stop follows)
+            // and its own line stamps when; anything else that is not noise is a human prompt == a START.
+            const std::wstring raw = SeUserLineRawText(obj);
+            const size_t nb = raw.find_first_not_of(L" \t\r\n");
+            if (nb == std::wstring::npos)
+            {
+                continue; // tool_result-only / whitespace — not a turn boundary
+            }
+            const std::wstring_view lead = std::wstring_view{ raw }.substr(nb);
+            if (IsUserInterruptMarker(lead))
+            {
+                if (turnEndMs && ms > *turnEndMs)
+                {
+                    *turnEndMs = ms;
+                }
+            }
+            else if (!IsNoiseUserPrompt(lead))
+            {
+                if (turnStartMs && ms > *turnStartMs)
+                {
+                    *turnStartMs = ms;
                 }
             }
         }
+        newestMs = newest;
+    }
+
+    int64_t LastActivityMsFromTranscriptChunk(std::wstring_view chunk)
+    {
+        int64_t newest = 0;
+        SeScanChunkTiming(chunk, newest, nullptr, nullptr); // no boundary outs: the historical per-line cost, unchanged
         return newest;
+    }
+
+    void TurnBoundariesFromTranscriptChunk(std::wstring_view chunk, int64_t& turnStartMs, int64_t& turnEndMs)
+    {
+        int64_t newest = 0; // the last-activity value falls out of the same walk; this caller only wants the boundaries
+        SeScanChunkTiming(chunk, newest, &turnStartMs, &turnEndMs);
     }
 
     // Agentmaster: the line-derived last-activity read from the transcript TAIL — the cheap,
@@ -941,18 +1026,30 @@ namespace Agentmaster
     // files (the same fold TranscriptTimesIn does), and those files are short-lived/never-resumed so
     // their mtime is honest. 0 when the file is absent / has no timestamped conversation line in the
     // window (the caller then falls back to the mtime). Filesystem only.
-    int64_t ReadTranscriptLastActivityTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, int64_t* apiLineMs)
+    // `turnStartMs` / `turnEndMs` (optional outs, the MOST RECENT sort): the newest turn boundaries in the
+    // window (SeScanChunkTiming) — same parse, no second read; see the header for the one window-rule
+    // difference they introduce (a boundary-less mid-turn tail grows once to 2 MiB, never to 16).
+    int64_t ReadTranscriptLastActivityTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, int64_t* apiLineMs, int64_t* turnStartMs, int64_t* turnEndMs)
     {
         if (apiLineMs)
         {
             *apiLineMs = 0;
+        }
+        if (turnStartMs)
+        {
+            *turnStartMs = 0;
+        }
+        if (turnEndMs)
+        {
+            *turnEndMs = 0;
         }
         if (projectsDir.empty() || cwd.empty() || sessionId.empty())
         {
             return 0;
         }
         const std::wstring path = std::wstring{ projectsDir } + L"\\" + EncodeCwdToProjectDir(cwd) + L"\\" + std::wstring{ sessionId } + L".jsonl";
-        int64_t lineMs = 0;
+        int64_t lineMs = 0, tStart = 0, tEnd = 0;
+        const bool wantBoundaries = (turnStartMs != nullptr) || (turnEndMs != nullptr);
         for (const size_t window : { size_t{ 256u << 10 }, size_t{ 2u << 20 }, size_t{ 16u << 20 } })
         {
             const std::string bytes = ReadFileTail(path, window);
@@ -960,39 +1057,49 @@ namespace Agentmaster
             {
                 break; // absent / unreadable / empty
             }
-            lineMs = LastActivityMsFromTranscriptChunk(Utf8ToWide(bytes));
-            if (lineMs != 0 || bytes.size() < window)
+            // ONE parse serves all three values (the walk only extracts boundaries when asked for).
+            SeScanChunkTiming(Utf8ToWide(bytes), lineMs, wantBoundaries ? &tStart : nullptr, wantBoundaries ? &tEnd : nullptr);
+            const bool wholeFile = bytes.size() < window;
+            // The last-activity stop rule is UNCHANGED: the first window holding ANY timestamped
+            // conversation line answers it. The boundaries may need more — mid-turn the tail is tool
+            // traffic (timestamped, but no boundary) — so with boundaries requested and none found, grow
+            // ONCE to the 2 MiB window, never to 16 MiB (a monster turn would re-read it every ~2s):
+            // beyond that the hooks / the scanner's pull-echo / the persisted stamps carry the START,
+            // and the END lands in the tail the moment the turn completes.
+            const bool boundaryMissing = wantBoundaries && tStart == 0 && tEnd == 0 && window < (size_t{ 2u } << 20);
+            if (wholeFile || (lineMs != 0 && !boundaryMissing))
             {
-                break; // found a conversation timestamp, or the whole file already fit this window
+                break; // found a conversation timestamp (and a boundary, when one was wanted and reachable), or the whole file already fit this window
             }
         }
         if (apiLineMs)
         {
             *apiLineMs = lineMs; // the PARENT conversation's own last line — the ⚡ API-activity half, deliberately WITHOUT the subagent fold below
         }
+        if (turnStartMs)
+        {
+            *turnStartMs = tStart; // the newest real human prompt in the window (0 == not in the window)
+        }
+        if (turnEndMs)
+        {
+            *turnEndMs = tEnd; // the newest terminal-stop assistant line / interrupt marker in the window
+        }
         const int64_t subMs = SubagentActivityUnixMs(path); // running-subagent activity (parent quiescent)
         return (std::max<int64_t>)(lineMs, subMs); // explicit template arg + parens dodge the windows.h max() macro
     }
 
-    int64_t ReadTranscriptLastActivityTail(std::wstring_view cwd, std::wstring_view sessionId, int64_t* apiLineMs)
+    int64_t ReadTranscriptLastActivityTail(std::wstring_view cwd, std::wstring_view sessionId, int64_t* apiLineMs, int64_t* turnStartMs, int64_t* turnEndMs)
     {
-        return ReadTranscriptLastActivityTailIn(ClaudeProjectsDir(), cwd, sessionId, apiLineMs);
+        return ReadTranscriptLastActivityTailIn(ClaudeProjectsDir(), cwd, sessionId, apiLineMs, turnStartMs, turnEndMs);
     }
 
-    // Agentmaster (conversation lineage): the real human-prompt TEXT from a user line, or "" when it is
-    // NOT one (a tool-result turn, a slash-command/bash/notification noise marker, or whitespace-only).
-    // Mirrors the externalUser extraction in AnalyzeSessionTranscriptImpl (first text block / string
-    // content -> slash-command reconstruct -> strip leading whitespace -> SeIsCommandNoise), so the
-    // conversation-SEGMENT collector below can never drift from the live Messages list.
-    static std::wstring SeExtractRealUserPrompt(const json::Value& obj)
+    // Agentmaster: the RAW text of a user line — its string content, or the FIRST text block of a content
+    // array; "" when the line carries no message or no text (a tool_result-only line). NO noise filtering,
+    // trimming, or slash-command reconstruction: SeExtractRealUserPrompt (built on this) applies those,
+    // and the MOST RECENT sort's tail walk (SeScanChunkTiming) reads THIS to recognize the Esc-interrupt
+    // marker, which every prompt filter deliberately drops. `obj`: the parsed transcript line.
+    static std::wstring SeUserLineRawText(const json::Value& obj)
     {
-        // isCompactSummary == the synthetic "This session is being continued… Summary: …" bridge a
-        // /compact writes; it is NOT a human prompt (session-end.js treats it as meta). It rides a
-        // userType:"external" user line that SeIsCommandNoise doesn't catch, so guard it explicitly.
-        if (obj.BoolAt(L"isCompactSummary") || obj.BoolAt(L"isMeta"))
-        {
-            return {};
-        }
         const auto* msg = obj.Find(L"message");
         if (!msg || msg->type != json::Value::Type::Obj)
         {
@@ -1017,6 +1124,24 @@ namespace Agentmaster
                 }
             }
         }
+        return content;
+    }
+
+    // Agentmaster (conversation lineage): the real human-prompt TEXT from a user line, or "" when it is
+    // NOT one (a tool-result turn, a slash-command/bash/notification noise marker, or whitespace-only).
+    // Mirrors the externalUser extraction in AnalyzeSessionTranscriptImpl (first text block / string
+    // content -> slash-command reconstruct -> strip leading whitespace -> SeIsCommandNoise), so the
+    // conversation-SEGMENT collector below can never drift from the live Messages list.
+    static std::wstring SeExtractRealUserPrompt(const json::Value& obj)
+    {
+        // isCompactSummary == the synthetic "This session is being continued… Summary: …" bridge a
+        // /compact writes; it is NOT a human prompt (session-end.js treats it as meta). It rides a
+        // userType:"external" user line that SeIsCommandNoise doesn't catch, so guard it explicitly.
+        if (obj.BoolAt(L"isCompactSummary") || obj.BoolAt(L"isMeta"))
+        {
+            return {};
+        }
+        std::wstring content = SeUserLineRawText(obj); // "" when there is no message / no text ("" for a tool_result-only line)
         if (!content.empty() && content.find(L"<command-name>") != std::wstring::npos)
         {
             if (std::wstring cmd = SeReconstructCommandPrompt(content); !cmd.empty())

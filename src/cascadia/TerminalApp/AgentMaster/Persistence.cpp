@@ -216,6 +216,8 @@ namespace Agentmaster
             return L"oldest";
         case ExplorerSort::MostActive:
             return L"active";
+        case ExplorerSort::MostRecent:
+            return L"recent"; // the turn-boundary order (SessionInfo::turnStart/EndUnixMs)
         case ExplorerSort::Alpha:
             return L"alpha";
         case ExplorerSort::ByPid:
@@ -231,6 +233,8 @@ namespace Agentmaster
             return ExplorerSort::Oldest;
         if (s == L"active")
             return ExplorerSort::MostActive;
+        if (s == L"recent")
+            return ExplorerSort::MostRecent;
         if (s == L"alpha")
             return ExplorerSort::Alpha;
         if (s == L"pid")
@@ -548,6 +552,18 @@ namespace Agentmaster
         }
         o.Set(L"state", json::Value::MkStr(ToString(s.state)));
         o.Set(L"lastActivityUnixMs", json::Value::MkNum(static_cast<double>(s.lastActivityUnixMs)));
+        // Agentmaster (MOST RECENT sort): the two turn-boundary stamps (SessionInfo::turnStart/EndUnixMs),
+        // PERSISTED so a dormant restored session keeps its place in the order before any hook/survey
+        // refreshes it. Omitted while 0 (no turn evidence — the default + every pre-feature record), so
+        // an untouched sessions.json is byte-unchanged.
+        if (s.turnStartUnixMs != 0)
+        {
+            o.Set(L"turnStartUnixMs", json::Value::MkNum(static_cast<double>(s.turnStartUnixMs)));
+        }
+        if (s.turnEndUnixMs != 0)
+        {
+            o.Set(L"turnEndUnixMs", json::Value::MkNum(static_cast<double>(s.turnEndUnixMs)));
+        }
         o.Set(L"external", json::Value::MkBool(s.external));
         // Agentmaster (crash/restore fidelity — Rule #16): persist the question-guard flag so a crash
         // while the agent was WaitingForInput on a clarifying question can't drop the guard on reopen
@@ -614,6 +630,8 @@ namespace Agentmaster
         s.inferredWorkingDir = v.StrAt(L"inferredWorkingDir"); // PERSISTED (tab color modes): the inferred workdir cache; absent => "" (not inferred yet)
         s.state = SessionStateFromString(v.StrAt(L"state", L"Idle"));
         s.lastActivityUnixMs = v.I64At(L"lastActivityUnixMs");
+        s.turnStartUnixMs = v.I64At(L"turnStartUnixMs"); // PERSISTED (MOST RECENT sort): absent => 0 (no turn evidence; the sort falls back to the decay anchor)
+        s.turnEndUnixMs = v.I64At(L"turnEndUnixMs"); // ditto — the assistant's last turn END
         s.external = v.BoolAt(L"external", false);
         s.lastMessageWasQuestion = v.BoolAt(L"lastMessageWasQuestion", false); // PERSISTED (Rule #16): absent => false (back-compat + the common case)
         s.kind = (v.StrAt(L"kind", L"Claude") == L"Codex") ? AgentKind::Codex : AgentKind::Claude; // absent => Claude (back-compat)

@@ -205,6 +205,14 @@ namespace Agentmaster
         // teammate's/subagent's own-context turn never re-warms the LEAD's prefix cache, so the
         // folded display value above must not light the hint. 0 == unresolved (never the mtime).
         int64_t apiActivityUnixMs{};
+        // Agentmaster (MOST RECENT sort): the transcript-tail TURN BOUNDARIES — the newest REAL human
+        // prompt line's timestamp (a turn START) and the newest turn-ENDING line's (an assistant line
+        // with a terminal stop_reason, or the user's [Request interrupted…] marker) — the PULL half of
+        // SessionInfo::turnStartUnixMs / turnEndUnixMs (ReadTranscriptLastActivityTail's out-params; the
+        // hooks are the push half). 0 == not in the tail window / none yet; the registry folds them in
+        // with a monotonic MAX, so a 0 or a lagging survey never regresses a hook's newer stamp.
+        int64_t turnStartUnixMs{};
+        int64_t turnEndUnixMs{};
     };
 
     // An EXTERNAL agent — one we do NOT manage: a real Windows Terminal claude (has a WT_SESSION

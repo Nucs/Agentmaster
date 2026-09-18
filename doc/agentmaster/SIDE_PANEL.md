@@ -57,7 +57,16 @@ overlay's components, so it carries their business logic verbatim instead of a p
 - **Order** (top row): the SHARED `AppSettings::boardSort`, cycled through
   `AgentManagerContent::CycleBoardSort` (a new public wrapper over the board's own
   `_CycleBoardSort`) and applied with the board's own `MakeSortKey`/`SortKeyLess` — one sort
-  spec, two surfaces, zero drift.
+  spec, two surfaces, zero drift. The cycle is MOST ACTIVE · **MOST RECENT** · NEWEST · OLDEST ·
+  A–Z. **MOST RECENT** orders by the newest **turn boundary** only — `SessionInfo::turnStartUnixMs`
+  (the user's last prompt SENT: a prompt-carrying `UserPromptSubmit`, the scanner's pull-echo of a
+  real prompt line, or the observer's transcript-tail read) and `turnEndUnixMs` (the assistant's
+  last turn END: a real `Stop`, a terminal `stop_reason` line, or the `[Request interrupted…]`
+  marker), every writer a monotonic max and both persisted — so mid-turn tool calls, subagent /
+  teammate side-file writes, and the SessionStart / triage stamps that make MOST ACTIVE jumpy never
+  move it, and there is no Running pin (a running session ranks by when its turn was sent). A
+  session with no turn evidence yet falls back to the hook decay anchor so it isn't stranded at
+  the bottom. The pure extractor is `TurnBoundariesFromTranscriptChunk` (unit-tested).
 - **A card**: title on a band painted the session's `ResolveSessionColorHex` color
   (WCAG-contrast text), state dot + `StateLabel` in the shared `AgentStatusColors` palette, a
   teal `codex` pill, the pending-draft `BuildPendingDots` cluster, the `TimingText` adornment,

@@ -2077,6 +2077,68 @@ void TestTranscriptResolve()
         CHECK(LastActivityMsFromTranscriptChunk(L"") == 0, "LastActivityMsFromTranscriptChunk: empty chunk -> 0");
     }
 
+    // --- TurnBoundariesFromTranscriptChunk: the MOST RECENT sort's two instants (turn START / turn END) --
+    // The order the user asked for: "sorted only by start of turn (user sends turn) and end of turn
+    // (assistant finished turn)". Only a REAL human prompt line moves the START and only a turn-ENDING
+    // line (a terminal stop_reason assistant line, or the user's Esc-interrupt marker) moves the END.
+    // Everything MOST ACTIVE reacts to mid-turn — tool_use assistant lines, tool_result user lines,
+    // subagent side-file activity — is invisible here, which is exactly what makes the order sharper.
+    {
+        const std::wstring prompt = LR"j({"type":"user","userType":"external","message":{"role":"user","content":"fix the tests"},"timestamp":"2026-02-01T10:00:00.000Z"})j" L"\n";
+        const std::wstring toolUse = LR"j({"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]},"timestamp":"2026-02-01T10:01:00.000Z"})j" L"\n";
+        const std::wstring toolResult = LR"j({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]},"timestamp":"2026-02-01T10:02:00.000Z"})j" L"\n";
+        const std::wstring endTurn = LR"j({"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]},"timestamp":"2026-02-01T10:05:00.000Z"})j" L"\n";
+        const int64_t promptMs = LastActivityMsFromTranscriptChunk(prompt);
+        const int64_t endMs = LastActivityMsFromTranscriptChunk(endTurn);
+        int64_t st = -1, en = -1;
+        TurnBoundariesFromTranscriptChunk(prompt + toolUse + toolResult + endTurn, st, en);
+        CHECK(st == promptMs, "TurnBoundaries: the START is the real human prompt's timestamp");
+        CHECK(en == endMs, "TurnBoundaries: the END is the terminal end_turn assistant line's timestamp");
+
+        // THE POINT: tool traffic stamped AFTER the last boundary (a background task's tool_use +
+        // tool_result at 10:06/10:07, newer than the 10:05 end_turn) must move NEITHER boundary — while
+        // last-activity (MOST ACTIVE's key) DOES follow it to 10:07. That divergence is the whole feature.
+        const std::wstring toolUseLate = LR"j({"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash","input":{"command":"git status"}}]},"timestamp":"2026-02-01T10:06:00.000Z"})j" L"\n";
+        const std::wstring toolResultLate = LR"j({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"clean"}]},"timestamp":"2026-02-01T10:07:00.000Z"})j" L"\n";
+        int64_t st2 = -1, en2 = -1;
+        TurnBoundariesFromTranscriptChunk(prompt + endTurn + toolUseLate + toolResultLate, st2, en2);
+        CHECK(st2 == promptMs && en2 == endMs, "TurnBoundaries: a LATER tool_use assistant line + tool_result user line move NEITHER boundary (mid-turn activity is invisible)");
+        CHECK(LastActivityMsFromTranscriptChunk(prompt + endTurn + toolUseLate + toolResultLate) == LastActivityMsFromTranscriptChunk(toolResultLate),
+              "LastActivityMsFromTranscriptChunk: still follows the newest conversation line (the later tool_result) — the shared walk did not change last-activity, and this is exactly where MOST ACTIVE and MOST RECENT diverge");
+
+        // A newer prompt after the end: START > END (a turn is in flight) — the newer boundary wins the sort.
+        const std::wstring prompt2 = LR"j({"type":"user","userType":"external","message":{"role":"user","content":"and the docs"},"timestamp":"2026-02-01T10:10:00.000Z"})j" L"\n";
+        int64_t st3 = -1, en3 = -1;
+        TurnBoundariesFromTranscriptChunk(prompt + endTurn + prompt2 + toolUse, st3, en3);
+        CHECK(st3 == LastActivityMsFromTranscriptChunk(prompt2) && en3 == endMs, "TurnBoundaries: a newer prompt advances the START past the END (turn in flight)");
+
+        // The Esc-interrupt marker — a USER line the prompt-noise filters drop — ENDS the turn (no clean
+        // Stop follows it), timed by its own line; it never reads as a prompt START.
+        const std::wstring interrupted = LR"j({"type":"user","message":{"role":"user","content":"[Request interrupted by user for tool use]"},"timestamp":"2026-02-01T10:12:00.000Z"})j" L"\n";
+        int64_t st4 = -1, en4 = -1;
+        TurnBoundariesFromTranscriptChunk(prompt + endTurn + prompt2 + toolUse + interrupted, st4, en4);
+        CHECK(en4 == LastActivityMsFromTranscriptChunk(interrupted), "TurnBoundaries: the [Request interrupted by user...] marker is a turn END");
+        CHECK(st4 == LastActivityMsFromTranscriptChunk(prompt2), "TurnBoundaries: the interrupt marker never counts as a START");
+
+        // A slash-command echo (IsNoiseUserPrompt noise — the registry's own hook-prompt filter) and a
+        // sidechain (subagent) end_turn are excluded, like everywhere else.
+        const std::wstring cmdEcho = LR"j({"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"},"timestamp":"2026-02-01T10:20:00.000Z"})j" L"\n";
+        const std::wstring sideEnd = LR"j({"type":"assistant","isSidechain":true,"message":{"stop_reason":"end_turn","content":[{"type":"text","text":"sub done"}]},"timestamp":"2026-02-01T10:21:00.000Z"})j" L"\n";
+        int64_t st5 = -1, en5 = -1;
+        TurnBoundariesFromTranscriptChunk(prompt + endTurn + cmdEcho + sideEnd, st5, en5);
+        CHECK(st5 == promptMs && en5 == endMs, "TurnBoundaries: a slash-command echo and a sidechain (subagent) end_turn move neither boundary");
+
+        // Every terminal stop_reason ends a turn (IsTerminalStopReason), not just end_turn.
+        const std::wstring maxTok = LR"j({"type":"assistant","message":{"stop_reason":"max_tokens","content":[{"type":"text","text":"..."}]},"timestamp":"2026-02-01T10:30:00.000Z"})j" L"\n";
+        int64_t st6 = -1, en6 = -1;
+        TurnBoundariesFromTranscriptChunk(prompt + endTurn + maxTok, st6, en6);
+        CHECK(en6 == LastActivityMsFromTranscriptChunk(maxTok), "TurnBoundaries: a max_tokens stop_reason is a turn END too (IsTerminalStopReason)");
+
+        int64_t st7 = -1, en7 = -1;
+        TurnBoundariesFromTranscriptChunk(L"", st7, en7);
+        CHECK(st7 == 0 && en7 == 0, "TurnBoundaries: empty chunk -> 0/0 (no turn evidence)");
+    }
+
     // --- AnalyzeSessionTranscript: the idle RECAP (away_summary) is captured into .awaySummary -------
     // The summary panel / Sessions detail / copyable Summary read SessionSummary.awaySummary. The LAST
     // away_summary wins (a session that went idle, came back, and went idle again has a fresher recap),

@@ -437,6 +437,22 @@ namespace Agentmaster
             {
                 s.lastTurnUnixMs = msg.ts;
             }
+            // Agentmaster (MOST RECENT sort): the two TURN-BOUNDARY stamps — the PUSH half (the observer's
+            // transcript-tail read + the scanner's pull-echo are the pull half; every writer is a monotonic
+            // MAX so none regresses another). START = a prompt-CARRYING UserPromptSubmit — the same
+            // condition that stamps turns.lastPromptUnixMs (an EMPTY twin / the recon-run synth is
+            // state-only). END = a REAL Stop — never a synthesized quiescent one, which is
+            // reconciliation-timed, not turn-timed (the interrupt's end is stamped from the marker's own
+            // line by the tail read instead). Tool events deliberately touch NEITHER: that is the whole
+            // difference from lastTurnUnixMs above and from MOST ACTIVE.
+            if (msg.event == HookEvent::UserPromptSubmit && !msg.promptText.empty() && msg.ts > s.turnStartUnixMs)
+            {
+                s.turnStartUnixMs = msg.ts;
+            }
+            if (msg.event == HookEvent::Stop && !msg.quiescentStop && msg.ts > s.turnEndUnixMs)
+            {
+                s.turnEndUnixMs = msg.ts;
+            }
             if (s.workingDir.empty() && !msg.cwd.empty())
             {
                 s.workingDir = msg.cwd;
@@ -796,6 +812,21 @@ namespace Agentmaster
                 // subagent/teammate side-file fold, no mtime fallback (see convApiActivityUnixMs).
                 s.convApiActivityUnixMs = o.apiActivityUnixMs;
             }
+            // Agentmaster (MOST RECENT sort): the transcript-tail TURN BOUNDARIES — the PULL half of the
+            // turnStart/turnEnd stamps (OnHookEvent is the push half, NoteExternalPrompt the pull-echo).
+            // Monotonic MAX, never a plain assign: a hook's wire ts can be newer than the last tail read
+            // (the survey lags ~2s), and a tail window that missed the prompt line reads 0 — neither may
+            // regress the other. Silent like the rest of the transcript timing (not a "change" — no
+            // observer/persist cascade per survey): the order is re-read at the next rebuild, and the
+            // value rides the next real change into sessions.json (a Stop / archive always follows).
+            if (o.turnStartUnixMs > s.turnStartUnixMs)
+            {
+                s.turnStartUnixMs = o.turnStartUnixMs;
+            }
+            if (o.turnEndUnixMs > s.turnEndUnixMs)
+            {
+                s.turnEndUnixMs = o.turnEndUnixMs;
+            }
 
             // One ConPTY = one live conversation (Rule #14 / session-id divergence): this observed claude
             // (pid o.pid) is the CURRENT conversation on its tabToken, resolved from claude's own pid-keyed
@@ -1029,6 +1060,15 @@ namespace Agentmaster
                 return;
             }
             auto& s = it->second;
+            // Agentmaster (MOST RECENT sort): a REAL human prompt line (the scanner calls this only for
+            // non-noise UserPrompt events) is a turn START — stamp it with the line's own timestamp, the
+            // pull twin of OnHookEvent's UserPromptSubmit stamp that a hookless/adopted session never
+            // gets, and instant where the observer's tail read lags a survey. Monotonic; bookkeeping-
+            // QUIET like the echo consume below (the Typed record / the scanner's state synth notify).
+            if (observedUnixMs > s.turnStartUnixMs)
+            {
+                s.turnStartUnixMs = observedUnixMs;
+            }
             // Idempotent: a message already recorded (status Sent — a Typed capture or an injected
             // Flight prompt's echo, which also shows up as a user line in the transcript) must not
             // be duplicated. Pending plan items are NOT "recorded messages", so they don't suppress

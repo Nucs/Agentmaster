@@ -429,7 +429,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelSortBtn.Padding(ThicknessHelper::FromLengths(8, 1, 8, 1));
         _sidePanelSortBtn.VerticalAlignment(VerticalAlignment::Center);
         _sidePanelSortBtn.IsTabStop(false);
-        AgentSetTitledTip(_sidePanelSortBtn, L"Card order", winrt::hstring{ L"Order the session cards. Click to cycle: MOST ACTIVE \xB7 NEWEST \xB7 OLDEST \xB7 A\x2013Z.\nThe SAME saved order as the Triage Board's card sort \x2014 changing it here re-sorts the board too (and every window)." });
+        AgentSetTitledTip(_sidePanelSortBtn, L"Card order", winrt::hstring{ L"Order the session cards. Click to cycle: MOST ACTIVE (last activity of any kind, running sessions on top) \xB7 MOST RECENT (by the last turn boundary only: the prompt you last sent or the reply that last finished \x2014 tool calls and subagent work never move it) \xB7 NEWEST \xB7 OLDEST \xB7 A\x2013Z.\nThe SAME saved order as the Triage Board's card sort \x2014 changing it here re-sorts the board too (and every window)." });
         _sidePanelSortBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
             const auto self = weakThis.get();
             if (!self)
@@ -892,10 +892,11 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        const wchar_t* label = (_appSettings.boardSort == ExplorerSort::Newest) ? L"NEWEST" :
-                               (_appSettings.boardSort == ExplorerSort::Oldest) ? L"OLDEST" :
-                               (_appSettings.boardSort == ExplorerSort::Alpha)  ? L"A\x2013Z" :
-                                                                                  L"MOST ACTIVE"; // MostActive (default) + any stray ByPid
+        const wchar_t* label = (_appSettings.boardSort == ExplorerSort::Newest)     ? L"NEWEST" :
+                               (_appSettings.boardSort == ExplorerSort::Oldest)     ? L"OLDEST" :
+                               (_appSettings.boardSort == ExplorerSort::Alpha)      ? L"A\x2013Z" :
+                               (_appSettings.boardSort == ExplorerSort::MostRecent) ? L"MOST RECENT" : // the turn-boundary order (ExplorerSort::MostRecent)
+                                                                                      L"MOST ACTIVE"; // MostActive (default) + any stray ByPid
         _sidePanelSortBtn.Content(winrt::box_value(label));
     }
 

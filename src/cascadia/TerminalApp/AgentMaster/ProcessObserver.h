@@ -235,6 +235,8 @@ namespace Agentmaster
             int64_t mtime{ 0 }; // the transcript mtime the value was last derived at (the gate)
             int64_t lastActivityMs{ 0 }; // line-derived last-activity (0 == none found -> caller uses mtime)
             int64_t apiActivityMs{ 0 }; // the PRE-FOLD parent-line value (the ⚡ API-activity half; 0 == none — never the mtime)
+            int64_t turnStartMs{ 0 }; // MOST RECENT sort: the newest REAL human prompt line in the tail window (0 == none in the window) — from the SAME parse as the two above
+            int64_t turnEndMs{ 0 }; // MOST RECENT sort: the newest turn-ENDING line (terminal stop_reason / Esc-interrupt marker) in the window (0 == none)
         };
         std::unordered_map<std::wstring, LineActivity> _lineActivityBySid;
         std::unordered_set<std::wstring> _lineActivitySeenThisSurvey; // the sids _LineDerivedLastActivity served THIS full survey — the prune's keep-set (worker-thread-only)
@@ -244,6 +246,9 @@ namespace Agentmaster
         // `apiOut` (optional): the PRE-FOLD parent-line value for convApiActivityUnixMs — the newest
         // real line of the PARENT conversation itself (never the subagent fold, never the mtime): a
         // teammate's/subagent's own-context turn must not light the ⚡ cache hint.
-        int64_t _LineDerivedLastActivity(std::wstring_view cwd, const std::wstring& sid, int64_t mtimeMs, int64_t* apiOut = nullptr);
+        // `turnStartOut` / `turnEndOut` (optional): the tail's newest turn boundaries for the MOST RECENT
+        // sort (SessionInfo::turnStart/EndUnixMs' pull half) — cached alongside, from the same parse; 0 ==
+        // none in the window (the registry's monotonic-max fold treats 0 as "no news").
+        int64_t _LineDerivedLastActivity(std::wstring_view cwd, const std::wstring& sid, int64_t mtimeMs, int64_t* apiOut = nullptr, int64_t* turnStartOut = nullptr, int64_t* turnEndOut = nullptr);
     };
 }
