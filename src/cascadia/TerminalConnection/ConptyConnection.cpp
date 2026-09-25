@@ -9,6 +9,9 @@
 
 #include "CTerminalHandoff.h"
 #include "../../types/inc/utils.hpp"
+// Agentmaster (doc/agentmaster/CMD_PATH_LIMIT.md): the pure, header-only PATH-length guard — keeps every client's
+// PATH within cmd.exe's 8191-char reach (past it cmd.exe resolves NO command: Claude Code's Ctrl+G editor dies).
+#include "../TerminalApp/AgentMaster/CmdPathLimit.h"
 
 #include "ConptyConnection.g.cpp"
 
@@ -145,6 +148,29 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
 
                 // WSLENV.6: Prepend our additional environment variables to WSLENV.
                 wslEnv.insert(0, additionalWslEnv);
+            }
+        }
+
+        // Agentmaster (CmdPathLimit.h; doc/agentmaster/CMD_PATH_LIMIT.md): the client's FINAL PATH must stay within
+        // cmd.exe's reach — past 8191 chars cmd.exe resolves NO command, so Claude Code's Ctrl+G editor launch
+        // (`cmd /d /s /c "<EDITOR> ..."`) and every other `cmd /c` the session runs fail "not recognized", exit 1.
+        // The EXE prelude already compacts the PROCESS environment (WindowEmperor::HandleCommandlineArgs), so the
+        // usual sources are clean; this is the belt for a block assembled here from another source — a profile with
+        // reloadEnvironmentVariables ON regenerates it from the REGISTRY, which is where the bloat lives — and it
+        // runs after the profile/Agentmaster overrides above so a user's own PATH override is covered too. A PATH
+        // under the trigger is left byte-identical (a map lookup + length compare); an overlong one loses only its
+        // duplicate/empty entries, then — only if still needed — directories that provably do not exist. No catch
+        // on purpose: the only possible throw is bad_alloc, which surfaces through Start()'s existing failure path
+        // exactly like the allocations around it.
+        {
+            auto& vars = environment.as_map();
+            if (const auto pathVar = vars.find(L"PATH"); pathVar != vars.end()) // case-insensitive map: finds "Path" too
+            {
+                auto compacted = ::Agentmaster::PathLimit::CompactOverlongPath(pathVar->second, ::Agentmaster::PathLimit::IsPathEntryLiveOrUnprobeable);
+                if (compacted.changed)
+                {
+                    pathVar->second = std::move(compacted.path);
+                }
             }
         }
 

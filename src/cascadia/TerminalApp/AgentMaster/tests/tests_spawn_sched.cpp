@@ -23,6 +23,7 @@
 
 #include "../Updater.h" // version parse/compare + the settings.json skip/postpone RMW (TestUpdaterVersionLogic)
 #include "../PortableInstall.h" // the portable first-launch INSTALL question - the pure pieces (TestPortableInstall)
+#include "../CmdPathLimit.h" // the PATH-length guard behind the Ctrl+G fix - pure rule + Win32 probe (TestCmdPathLimit)
 
 // The updater tests odr-use RunStartupUpdateCheck (the fresh-launch latch-clear check), which pulls
 // ShowUpdatePrompt -> TaskDialogIndirect — imported from comctl32 BY ORDINAL (345), which only
@@ -4142,5 +4143,252 @@ void TestInterruptHold()
         reg.NoteInterrupt(L"h8", now - 100);
         auto s = reg.Get(L"h8");
         CHECK(s && s->autorunner.mode == AutorunnerMode::Full && !InterruptHoldActive(s->autorunner), "archived: an interrupt marker on a closed session parks nothing");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// CmdPathLimit.h — the PATH-length guard (doc/agentmaster/CMD_PATH_LIMIT.md; the 2026-09-25 Ctrl+G
+// incident): cmd.exe resolves NO command once PATH passes 8191 chars, so Claude Code's Ctrl+G editor
+// launch (`cmd /d /s /c "<EDITOR> ..."`) died "Edit quit unexpectedly (exit code 1)" in every tab.
+// Pins: the pure rule (CompactOverlongPath) through a FAKE probe — untouched at/under the trigger,
+// dedupe first (resolution-identical; the probe never runs when that is enough), the missing-dir pass
+// only when needed, verbatim spelling + order, the quote-aware split, the comparison key, the tail
+// sample, and never dropping a live entry; the Win32 probe's safety edges (UNC / relative / missing
+// volume, only PROVEN absence drops); the process-env apply (CompactProcessPathIfOverlong); and the
+// incident itself end to end through a REAL cmd.exe.
+// ---------------------------------------------------------------------------------------------
+
+// Runs `cmd.exe /d /s /c "<command>"` (the shape Claude Code uses for its external editor) with THIS
+// process's environment except PATH, which is replaced by `path`. Returns cmd's exit code, or
+// 0xFFFFFFFF when it could not be launched or did not finish within 20 s (then it is terminated).
+// CREATE_NO_WINDOW gives the child its own hidden console, so cmd's "is not recognized" text never
+// reaches the harness output.
+static DWORD RunCmdWithPathForTest(const std::wstring& path, const std::wstring& command)
+{
+    std::wstring block;
+    if (const auto env = ::GetEnvironmentStringsW())
+    {
+        for (auto p = env; *p; p += wcslen(p) + 1)
+        {
+            if (_wcsnicmp(p, L"PATH=", 5) != 0)
+            {
+                block.append(p);
+                block.push_back(L'\0');
+            }
+        }
+        ::FreeEnvironmentStringsW(env);
+    }
+    block.append(L"PATH=" + path);
+    block.push_back(L'\0');
+    block.push_back(L'\0');
+
+    wchar_t sys[MAX_PATH]{};
+    ::GetSystemDirectoryW(sys, MAX_PATH);
+    std::wstring cmdline = L"\"" + std::wstring{ sys } + L"\\cmd.exe\" /d /s /c \"" + command + L"\"";
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!::CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, block.data(), nullptr, &si, &pi))
+    {
+        return 0xFFFFFFFF;
+    }
+    DWORD rc = 0xFFFFFFFF;
+    if (::WaitForSingleObject(pi.hProcess, 20000) == WAIT_OBJECT_0)
+    {
+        ::GetExitCodeProcess(pi.hProcess, &rc);
+    }
+    else
+    {
+        ::TerminateProcess(pi.hProcess, 1);
+    }
+    ::CloseHandle(pi.hThread);
+    ::CloseHandle(pi.hProcess);
+    return rc;
+}
+
+// Reads this process's PATH (empty when unset) — the process-apply checks compare against it.
+static std::wstring ReadProcessPathForTest()
+{
+    const DWORD needed = ::GetEnvironmentVariableW(L"PATH", nullptr, 0);
+    if (needed == 0)
+    {
+        return {};
+    }
+    std::wstring value(needed, L'\0');
+    value.resize(::GetEnvironmentVariableW(L"PATH", value.data(), needed));
+    return value;
+}
+
+void TestCmdPathLimit()
+{
+    namespace PL = ::Agentmaster::PathLimit;
+    std::wprintf(L"CmdPathLimit (the PATH-length guard behind the Ctrl+G fix):\n");
+
+    // A counting FAKE probe: an entry is "live" unless it names a "dead" directory.
+    int probes = 0;
+    const auto fakeProbe = [&probes](std::wstring_view entry) {
+        ++probes;
+        return entry.find(L"dead") == std::wstring_view::npos;
+    };
+    // Appends `stem<i>\data\dotnet-home\.dotnet\tools` entries (the incident's shape) until `path` is LONGER than `minLen`.
+    const auto padWithJunk = [](std::wstring path, size_t minLen, const std::wstring& stem) {
+        for (int i = 0; path.size() <= minLen; ++i)
+        {
+            path += (path.empty() ? L"" : L";") + stem + std::to_wstring(i) + L"\\data\\dotnet-home\\.dotnet\\tools";
+        }
+        return path;
+    };
+
+    // ---- the constants ----
+    CHECK(PL::kCmdExeMaxVariableChars == 8191, "ceiling: cmd.exe's documented 8191-char limit");
+    CHECK(PL::kCompactTriggerChars < PL::kCmdExeMaxVariableChars && PL::kCompactTriggerChars == PL::kCmdExeMaxVariableChars - PL::kDownstreamHeadroomChars,
+          "trigger: sits the downstream headroom BELOW the ceiling (pwsh/bash/shim prepends must not tip a session over)");
+
+    // ---- a healthy PATH is byte-identical and never probed (even its dupes / empties stay: not at risk) ----
+    {
+        probes = 0;
+        const std::wstring healthy = L"C:\\Windows\\system32;C:\\Windows;;C:\\Windows\\system32";
+        const auto r = PL::CompactOverlongPath(healthy, fakeProbe);
+        CHECK(!r.changed && r.path == healthy && probes == 0 && r.originalChars == healthy.size() && !r.stillOverCmdLimit,
+              "healthy: byte-identical, probe never called");
+    }
+
+    // ---- the trigger boundary: exactly AT the trigger is untouched, one char over is processed ----
+    {
+        std::wstring atTrigger = L"C:\\a;C:\\a;C:\\";
+        atTrigger.append(PL::kCompactTriggerChars - atTrigger.size(), L'x');
+        probes = 0;
+        const auto at = PL::CompactOverlongPath(atTrigger, fakeProbe);
+        CHECK(atTrigger.size() == PL::kCompactTriggerChars && !at.changed && at.path == atTrigger, "boundary: a PATH exactly at the trigger is left alone (duplicate and all)");
+
+        const std::wstring overTrigger = atTrigger + L"x";
+        const auto over = PL::CompactOverlongPath(overTrigger, fakeProbe);
+        CHECK(over.changed && over.removedDuplicates == 1 && over.path == overTrigger.substr(5) && probes == 0,
+              "boundary: one char over -> the duplicate goes; dedupe alone was enough, so nothing is probed");
+    }
+
+    // ---- the comparison key: one directory, however it is spelled ----
+    CHECK(PL::PathEntryKey(L"C:\\Tools\\") == PL::PathEntryKey(L"c:/tools"), "key: case + slash + trailing-separator variants are one directory");
+    CHECK(PL::PathEntryKey(L"\"C:\\TOOLS\"") == PL::PathEntryKey(L"C:\\tools"), "key: quotes are stripped (cmd.exe strips them too)");
+    CHECK(PL::PathEntryKey(L"  C:\\tools\t") == PL::PathEntryKey(L"C:\\tools"), "key: surrounding whitespace is trimmed");
+    CHECK(PL::PathEntryKey(L"C:\\") != PL::PathEntryKey(L"C:"), "key: the drive ROOT keeps its slash (a bare C: is the drive's CURRENT dir)");
+    CHECK(PL::PathEntryKey(L"C:\\\\") == PL::PathEntryKey(L"C:\\"), "key: a doubled trailing slash on a root collapses to the root");
+    CHECK(PL::PathEntryKey(L"").empty() && PL::PathEntryKey(L" \t ").empty() && PL::PathEntryKey(L"\"\"").empty(), "key: blank / quote-only entries have an empty key");
+    CHECK(PL::PathEntryKey(L"C:\\\u00C9t\u00E9") != PL::PathEntryKey(L"C:\\\u00E9t\u00E9"), "key: non-ASCII case is NOT folded (a missed duplicate is the safe direction)");
+
+    // ---- the quote-aware split ----
+    {
+        const auto parts = PL::SplitPathEntries(L"C:\\a;\"C:\\odd;dir\";;C:\\b;");
+        CHECK(parts.size() == 5 && parts[0] == L"C:\\a" && parts[1] == L"\"C:\\odd;dir\"" && parts[2].empty() && parts[3] == L"C:\\b" && parts[4].empty(),
+              "split: a quoted ';' stays inside its entry; doubled / trailing ';' yield empty entries");
+    }
+
+    // ---- the missing pass: dead dirs dropped, live ones kept VERBATIM and IN ORDER, each probed once ----
+    PL::PathCompaction junk;
+    {
+        probes = 0;
+        std::wstring p = L"C:\\live1;\"C:\\Program Files\\live2\";C:\\live1\\";
+        p = padWithJunk(p, PL::kCmdExeMaxVariableChars + 3000, L"C:\\Temp\\dead\\run");
+        p += L";;C:\\live3";
+        junk = PL::CompactOverlongPath(p, fakeProbe);
+        CHECK(junk.changed && junk.removedDuplicates == 1 && junk.removedEmpty == 1, "missing pass: pass 1 still removes the trailing-slash duplicate and the empty entry");
+        CHECK(junk.path == L"C:\\live1;\"C:\\Program Files\\live2\";C:\\live3", "missing pass: every dead dir is dropped; live entries keep their spelling (quotes too) and order");
+        CHECK(junk.removedMissing >= 100 && !junk.stillOverCmdLimit, "missing pass: the junk pile is gone and cmd.exe can use the result");
+        CHECK(probes == 3 + static_cast<int>(junk.removedMissing), "missing pass: each surviving entry is probed exactly once (duplicates / empties never are)");
+        CHECK(junk.missingSample.size() == PL::kMissingSampleMax &&
+                  junk.missingSample.back().find(L"\\run" + std::to_wstring(junk.removedMissing - 1) + L"\\") != std::wstring::npos &&
+                  junk.missingSample.front().find(L"\\run" + std::to_wstring(junk.removedMissing - PL::kMissingSampleMax) + L"\\") != std::wstring::npos,
+              "missing pass: the log sample is the TAIL of the dropped entries, in order (appended pollution piles up there)");
+        const auto text = PL::DescribePathCompaction(junk);
+        CHECK(text.find(L"dropped 1 duplicate, " + std::to_wstring(junk.removedMissing) + L" missing, 1 empty") != std::wstring::npos &&
+                  text.find(L"missing e.g. ") != std::wstring::npos && text.find(L"STILL") == std::wstring::npos,
+              "describe: the log line carries the counts and the offending tail");
+    }
+
+    // ---- dedupe is tried FIRST: when it suffices, the existence probe never runs ----
+    {
+        probes = 0;
+        std::wstring p = L"C:\\one;C:\\two";
+        while (p.size() <= PL::kCompactTriggerChars)
+        {
+            p += L";c:/one/;C:\\TWO";
+        }
+        const auto r = PL::CompactOverlongPath(p, fakeProbe);
+        CHECK(r.changed && r.path == L"C:\\one;C:\\two" && r.removedMissing == 0 && probes == 0, "dedupe first: first spellings kept, no probe when dedupe is enough");
+    }
+
+    // ---- a PATH that is long for REAL (all live) is never trimmed by guessing — it is reported ----
+    {
+        probes = 0;
+        std::wstring p;
+        for (int i = 0; p.size() <= PL::kCmdExeMaxVariableChars + 500; ++i)
+        {
+            p += (p.empty() ? L"" : L";") + std::wstring{ L"C:\\live\\tool" } + std::to_wstring(i);
+        }
+        const auto r = PL::CompactOverlongPath(p, fakeProbe);
+        CHECK(!r.changed && r.path == p && r.stillOverCmdLimit && r.removedMissing == 0, "all live: nothing dropped, reported as still over the limit");
+        const auto text = PL::DescribePathCompaction(r);
+        CHECK(text.find(L"STILL over") != std::wstring::npos && text.find(L"no duplicate") != std::wstring::npos, "all live: the log line says it could not be fixed, and why");
+    }
+
+    // ---- the Win32 probe: only PROVEN absence drops; network / relative entries are never judged ----
+    wchar_t sysBuf[MAX_PATH]{};
+    ::GetSystemDirectoryW(sysBuf, MAX_PATH);
+    const std::wstring sysDir{ sysBuf };
+    wchar_t winBuf[MAX_PATH]{};
+    ::GetWindowsDirectoryW(winBuf, MAX_PATH);
+    const std::wstring winDir{ winBuf };
+    const std::wstring ghostRoot = std::filesystem::temp_directory_path().wstring() + L"am-cmdpath-ghost-" + std::to_wstring(::GetCurrentProcessId()) +
+                                   L"-" + std::to_wstring(::GetTickCount64());
+    {
+        CHECK(PL::IsPathEntryLiveOrUnprobeable(sysDir), "probe: an existing directory is live");
+        CHECK(PL::IsPathEntryLiveOrUnprobeable(L" \"" + sysDir + L"\" "), "probe: a quoted, padded existing directory is live");
+        CHECK(PL::IsPathEntryLiveOrUnprobeable(sysDir + L"\\cmd.exe"), "probe: an existing FILE is kept (absence not proven)");
+        CHECK(!PL::IsPathEntryLiveOrUnprobeable(ghostRoot + L"\\run0\\data\\dotnet-home\\.dotnet\\tools"), "probe: a missing dir under %TEMP% (the incident's shape) is PROVEN absent");
+        CHECK(PL::IsPathEntryLiveOrUnprobeable(L"bin") && PL::IsPathEntryLiveOrUnprobeable(L".") && PL::IsPathEntryLiveOrUnprobeable(L"C:tools") &&
+                  PL::IsPathEntryLiveOrUnprobeable(L"\\tools"),
+              "probe: relative / drive-relative / rooted-without-drive entries are kept (they depend on each child's cwd)");
+        const auto t0 = ::GetTickCount64();
+        const bool unc = PL::IsPathEntryLiveOrUnprobeable(L"\\\\am-no-such-host-7f3c\\share\\bin");
+        CHECK(unc && ::GetTickCount64() - t0 < 1000, "probe: a UNC entry is kept WITHOUT touching the network (an offline share would stall the launch)");
+        CHECK(PL::IsPathEntryLiveOrUnprobeable(L"\\\\?\\C:\\definitely\\not\\here"), "probe: a \\\\?\\ device path is never probed");
+        CHECK(!PL::IsPathEntryLiveOrUnprobeable(L"") && !PL::IsPathEntryLiveOrUnprobeable(L"  \"\"  "), "probe: an entry naming nothing is not kept");
+        const DWORD drives = ::GetLogicalDrives();
+        for (wchar_t letter = L'Z'; letter >= L'D'; --letter)
+        {
+            if ((drives & (1u << (letter - L'A'))) == 0)
+            {
+                CHECK(!PL::IsPathEntryLiveOrUnprobeable(std::wstring{ letter } + L":\\tools"), "probe: a drive letter with no volume behind it is dead");
+                break;
+            }
+        }
+    }
+
+    // ---- the process-env apply: an overlong process PATH is rewritten in place; a healthy one is left alone ----
+    {
+        const auto saved = ReadProcessPathForTest();
+        const std::wstring synthetic = padWithJunk(sysDir + L";" + sysDir + L"\\", PL::kCmdExeMaxVariableChars + 2000, ghostRoot + L"\\run");
+        ::SetEnvironmentVariableW(L"PATH", synthetic.c_str());
+        const auto r = PL::CompactProcessPathIfOverlong();
+        const auto afterApply = ReadProcessPathForTest();
+        ::SetEnvironmentVariableW(L"PATH", sysDir.c_str());
+        const auto healthy = PL::CompactProcessPathIfOverlong();
+        const auto afterHealthy = ReadProcessPathForTest();
+        // Restore FIRST, so every later test in the suite runs on the real PATH whatever these checks find.
+        ::SetEnvironmentVariableW(L"PATH", saved.empty() ? nullptr : saved.c_str());
+        CHECK(r.changed && r.applied && r.removedDuplicates == 1 && afterApply == sysDir, "process apply: the overlong PATH is rewritten to its live, deduped core");
+        CHECK(!healthy.changed && !healthy.applied && afterHealthy == sysDir, "process apply: a healthy PATH is left exactly as it was");
+    }
+
+    // ---- THE INCIDENT, end to end through a real cmd.exe: System32 up front, ~12K of dead temp dirs behind it ----
+    {
+        const std::wstring livePath = sysDir + L";" + winDir;
+        const std::wstring bloated = padWithJunk(livePath, PL::kCmdExeMaxVariableChars + 4000, ghostRoot + L"\\run");
+        const DWORD before = RunCmdWithPathForTest(bloated, L"hostname >nul 2>nul");
+        const auto r = PL::CompactOverlongPath(bloated, PL::IsPathEntryLiveOrUnprobeable);
+        const DWORD after = RunCmdWithPathForTest(r.path, L"hostname >nul 2>nul");
+        CHECK(before != 0 && before != 0xFFFFFFFF, "e2e: with the overlong PATH cmd.exe cannot resolve even a System32 command (the Ctrl+G 'exit code 1')");
+        CHECK(r.changed && !r.stillOverCmdLimit && r.path == livePath, "e2e: the guard compacts it to the live core");
+        CHECK(after == 0, "e2e: with the compacted PATH cmd.exe resolves the command again");
     }
 }

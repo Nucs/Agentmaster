@@ -264,3 +264,10 @@ untouched). There is nothing to delete: it is never persisted.
 **Note on "defined"** — the process-env check treats EDITOR as *defined* whenever it EXISTS, even if
 set to the empty string (a deliberately-cleared `EDITOR=` reads as a "no editor" choice we don't
 override).
+
+**How the editor is actually launched (and the 2026-09-25 Ctrl+G incident)** — Claude Code runs a terminal
+`$EDITOR` through **`cmd.exe /d /s /c "<EDITOR> "<tmp>""`**, so the bare `edit` resolves through cmd.exe's
+PATH search. That search FAILS FOR EVERY COMMAND once PATH exceeds 8191 chars, and that failure is
+exactly what surfaced as "Edit quit unexpectedly (exit code 1)". `SearchPathW` (our condition 1) has no
+such limit, so the default can be computed correctly and still not launch. Agentmaster now keeps every
+session's PATH within cmd.exe's reach: [`CMD_PATH_LIMIT.md`](./CMD_PATH_LIMIT.md).

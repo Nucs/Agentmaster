@@ -39,6 +39,9 @@
 // Agentmaster (portable install): a portable copy's first-launch "Where should Agentmaster live?"
 // question + the launcher-stub handoff + the --uninstall-portable flag (header-only, pure Win32).
 #include "../TerminalApp/AgentMaster/PortableInstall.h"
+// Agentmaster (doc/agentmaster/CMD_PATH_LIMIT.md): the PATH-length guard — HandleCommandlineArgs compacts the
+// process PATH first thing so cmd.exe (Claude's Ctrl+G editor launch, our .cmd updaters) can still resolve commands.
+#include "../TerminalApp/AgentMaster/CmdPathLimit.h"
 // Agentmaster: [startup] phase timing — see where the (slow) launch spends its time. Header-only,
 // shares one process-creation clock with the dll-side TerminalPage/Engine lines in the same hooks.log.
 #include "../TerminalApp/AgentMaster/StartupTiming.h"
@@ -494,6 +497,38 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     const auto _amStart = ::GetTickCount64();
     auto _amSw = _amStart;
 
+    // Agentmaster (CmdPathLimit.h; doc/agentmaster/CMD_PATH_LIMIT.md — the Ctrl+G incident): FIRST, before anything
+    // below can hand our environment on, bring THIS process's PATH back within cmd.exe's reach. Past 8191 chars
+    // cmd.exe resolves NO command at all, which is how a user PATH bloated with dead entries turned Claude Code's
+    // Ctrl+G (`cmd /d /s /c "<EDITOR> ..."`) into "Edit quit unexpectedly (exit code 1)" in every tab. It has to be
+    // this early because everything downstream COPIES the block: the portable uninstaller's .cmd launcher (just
+    // below), the single-instance handoff (serializes it to the running instance for the new window's tabs), the
+    // updater's am-update.cmd (bare `powershell`), and the Emperor's startup snapshot every restored window's `+`
+    // tabs start from; managed sessions inherit the live block. A healthy PATH is left byte-identical, and the
+    // persistent (registry) PATH is never touched. Rule #15 forbids a log line before the profile resolves, so
+    // the outcome (or the failure) is stashed here and logged right after EnsureProfileResolvedAtStartup.
+    ::Agentmaster::PathLimit::PathCompaction pathCompaction;
+    std::wstring pathCompactionError;
+    try
+    {
+        pathCompaction = ::Agentmaster::PathLimit::CompactProcessPathIfOverlong();
+    }
+    catch (const std::exception& e)
+    {
+        // Contained on purpose: the guard is a repair, never a reason not to start — an un-compacted PATH is the
+        // status quo. The only realistic throw is bad_alloc; its what() text is ASCII, so a per-byte widen is exact
+        // (explicit casts: no sign-extension of a stray high byte, and no implicit-conversion warning under /WX).
+        for (const char ch : std::string_view{ e.what() })
+        {
+            pathCompactionError.push_back(static_cast<wchar_t>(static_cast<unsigned char>(ch)));
+        }
+    }
+    catch (...)
+    {
+        // Same containment for a non-std throw; the description is all that is knowable here (no VEH ring in the EXE).
+        pathCompactionError = L"unknown exception";
+    }
+
     // When running without package identity, set an explicit AppUserModelID so
     // that toast notifications (and other shell features like taskbar grouping)
     // work correctly. We include...
@@ -663,6 +698,27 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     // update swaps the binaries but knows nothing of the registration. Registry reads only, unless
     // something changed; a non-installed copy returns at once.
     ::Agentmaster::PortableInstall::RefreshInstalledRegistration();
+
+    // Agentmaster (CmdPathLimit.h): the profile is resolved, so the first-thing PATH guard's outcome can be recorded
+    // now — one `[path-guard]` line, and only when it ACTED, FAILED, or met a PATH it could not bring under cmd.exe's
+    // limit (a healthy launch logs nothing). The line names the dropped entries' tail, i.e. the likely polluter.
+    try
+    {
+        if (!pathCompactionError.empty())
+        {
+            ::Agentmaster::Startup::Note(L"[path-guard] PATH compaction FAILED (" + pathCompactionError + L") \x2014 PATH left untouched");
+        }
+        else if (pathCompaction.changed || pathCompaction.stillOverCmdLimit)
+        {
+            ::Agentmaster::Startup::Note(L"[path-guard] " + ::Agentmaster::PathLimit::DescribePathCompaction(pathCompaction));
+        }
+    }
+    catch (...)
+    {
+        // ⚠ DELIBERATELY BARE (Rule #18's logging-path exemption): this catch guards the construction of the log
+        // line itself — only bad_alloc can land here, and the very logger that would report it needs the same
+        // allocation. Degradation: the [path-guard] line is missing; the compaction already happened (or not) above.
+    }
 
     // Agentmaster ([startup] timing): the profile is resolved — safe to log now. This anchors the
     // exe prelude (single-instance handoff + profile resolution) since process creation; the dll-side

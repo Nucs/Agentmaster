@@ -140,6 +140,25 @@ namespace Agentmaster::Startup
         detail::Write(L"[startup] " + std::wstring{ label } + L" (+" + std::to_wstring(SinceProcessStartMs()) + L"ms)");
     }
 
+    /// <summary>
+    /// Log one arbitrary, caller-TAGGED line (e.g. "[path-guard] ...") through the same EXE-safe writer the
+    /// [startup] lines use — for an exe-prelude FACT that is not a timing but must still land in the profile's
+    /// hooks.log, which the EXE cannot reach through the engine's AppendStateLog (it links TerminalApp.dll, not
+    /// the TerminalAppLib static lib).
+    /// </summary>
+    /// <param name="line">The whole line, tag included, WITHOUT the [HH:MM:SS.mmm] stamp (added here); a missing
+    /// trailing newline is added.</param>
+    /// <remarks>
+    /// Same Rule #15 contract as Phase/Mark: call only after the profile is resolved, or the profile dir is cached
+    /// prematurely. Best-effort and non-throwing past argument construction: a failed write is dropped inside
+    /// detail::Write (the logger has no channel left to report its own failure).
+    /// </remarks>
+    /// <exception cref="std::bad_alloc">Only while copying <paramref name="line"/> into the writer's buffer.</exception>
+    inline void Note(std::wstring_view line)
+    {
+        detail::Write(std::wstring{ line });
+    }
+
     // RAII: measure a scope's wall-clock duration and Phase()-log it when the scope exits (including
     // an early return or an exception unwinding through it).
     struct ScopedPhase

@@ -85,6 +85,7 @@ int wmain()
     TestSchedulerIntegration();
     TestInterruptHold();
     TestUpdaterVersionLogic();
+    TestCmdPathLimit();
     TestPortableInstall();
     TestTranscriptScan();
     TestCurrentModel();
