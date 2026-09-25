@@ -2332,9 +2332,16 @@ namespace Agentmaster
         // window. All four are written OUTSIDE the cog form — the cog's BOTH preserve blocks must
         // restore them from disk on Save (like the summary-panel fractions), else a Save would regress
         // a resize made since the modal was seeded.
-        //   sidePanelOnLeft: dock the panel LEFT of the terminal content instead of RIGHT (the ↔ flip
-        //     button in the panel header). GLOBAL-only (not per-window — a mixed-dock fleet reads
-        //     confusing, and the flip is one click).
+        //   sidePanelOnLeft: which side of the terminal content the panel docks on — true == LEFT (the
+        //     DEFAULT), false == RIGHT; flipped by the ⇄ button in the panel header. GLOBAL-only (not
+        //     per-window — a mixed-dock fleet reads confusing, and the flip is one click). ⚠ The
+        //     default reaches ONLY a settings.json that lacks the key (a fresh install, or a file from
+        //     before the panel existed — AppSettingsFromJson's absent-key fallback is LEFT as well):
+        //     every settings write serializes the WHOLE struct, so an install that ran the original
+        //     RIGHT default and saved anything since STORES false, which is indistinguishable from a
+        //     deliberate choice of RIGHT. That stored false is honored, never migrated — it keeps
+        //     RIGHT until one ⇄ click (the RIGHT default never shipped in a public release, so only
+        //     locally-built installs can carry one).
         //   sidePanelWidthFraction: the panel's share of the content area's WIDTH (the vertical
         //     separator). Band (0.10, 0.50] — never more than half the window; out-of-band falls back
         //     to the 0.22 default so a corrupt value can't collapse the terminal.
@@ -2343,7 +2350,7 @@ namespace Agentmaster
         //     stay usable; out-of-band falls back to the 0.5 default.
         //   sidePanelCollapsed: whether the panel starts collapsed to its thin expander strip. A user
         //     who collapses it is saying "not now" — new windows honor that until it is expanded again.
-        bool sidePanelOnLeft{ false };
+        bool sidePanelOnLeft{ true };
         double sidePanelWidthFraction{ 0.22 };
         double sidePanelSplitFraction{ 0.5 };
         bool sidePanelCollapsed{ false };

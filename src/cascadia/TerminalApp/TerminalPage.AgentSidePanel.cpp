@@ -5,9 +5,9 @@
 // Agentmaster SIDE PANEL — a WINDOW-CHROME fleet panel beside the terminal content.
 // Part of the TerminalPage same-class partial group (the TabManagement.cpp pattern).
 //
-// WHAT: a non-terminal, non-tab pane docked LEFT or RIGHT of the tab content (ContentArea's
-// 3-column grid in TerminalPage.xaml), split into two vertically-stacked areas with independent
-// scrolling:
+// WHAT: a non-terminal, non-tab pane docked LEFT (the default) or RIGHT of the tab content
+// (ContentArea's 3-column grid in TerminalPage.xaml), split into two vertically-stacked areas with
+// independent scrolling:
 //   TOP    — the LIVE session CARDS (the Triage-Board integration re-hosted vertically): a search
 //            box (the Sessions browser's ParseSessionQuery grammar over title / dir / branch / id)
 //            + an order toggle (the SHARED AppSettings::boardSort, cycled through
@@ -25,7 +25,7 @@
 // HORIZONTAL one (cards/summary split) — persist PER WINDOW (WindowRecord::sidePanel*, riding the
 // window-record autosave), and EVERY adjustment additionally RMWs the GLOBAL AppSettings defaults
 // ("the last one to resize sets the default for new windows"). Collapse follows the same rule; the
-// dock side (left/right) is GLOBAL-only.
+// dock side (LEFT by default; the header ⇄ flips it) is GLOBAL-only.
 //
 // PERF DISCIPLINE (the Manager-lens rebuild-tax lesson): rebuilds are COALESCED off the page's
 // already-batched registry drain, min-gap throttled, and deferred entirely while collapsed; the

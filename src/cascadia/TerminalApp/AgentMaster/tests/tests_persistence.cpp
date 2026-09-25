@@ -606,7 +606,7 @@ void TestAppSettings()
         in.notifySound = false;
         in.hiddenSessionIds = { L"11111111-1111-1111-1111-111111111111", L"22222222-2222-2222-2222-222222222222" };
         // Side panel (window chrome) new-window defaults — all four non-default.
-        in.sidePanelOnLeft = true; // non-default (default false = dock RIGHT)
+        in.sidePanelOnLeft = false; // non-default (default true = dock LEFT) — an explicit RIGHT must survive
         in.sidePanelWidthFraction = 0.35; // in-band (0.10..0.50); default 0.22
         in.sidePanelSplitFraction = 0.7; // in-band (0.15..0.85); default 0.5
         in.sidePanelCollapsed = true; // non-default (default false = expanded)
@@ -659,7 +659,7 @@ void TestAppSettings()
                   out.hiddenSessionIds[0] == L"11111111-1111-1111-1111-111111111111" &&
                   out.hiddenSessionIds[1] == L"22222222-2222-2222-2222-222222222222",
               "settings hiddenSessionIds round-trip (order preserved)");
-        CHECK(out.sidePanelOnLeft == true, "settings sidePanelOnLeft round-trip (dock LEFT stored)");
+        CHECK(out.sidePanelOnLeft == false, "settings sidePanelOnLeft round-trip (an explicit dock RIGHT stored + honored)");
         CHECK(out.sidePanelWidthFraction > 0.349 && out.sidePanelWidthFraction < 0.351, "settings sidePanelWidthFraction round-trip");
         CHECK(out.sidePanelSplitFraction > 0.699 && out.sidePanelSplitFraction < 0.701, "settings sidePanelSplitFraction round-trip");
         CHECK(out.sidePanelCollapsed == true, "settings sidePanelCollapsed round-trip (collapsed stored)");
@@ -682,6 +682,18 @@ void TestAppSettings()
         // A list the user actually edited is theirs — read back VERBATIM, never upgraded.
         const auto mine = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"launchModels\":\"Opus 4.8 | claude-opus-4-8\"}}");
         CHECK(mine.launchModels == L"Opus 4.8 | claude-opus-4-8", "settings launchModels: a USER-edited list (even pinned ids) is kept verbatim");
+    }
+
+    // Agentmaster (SIDE PANEL): the dock side defaults to LEFT on BOTH load paths — the struct default
+    // (a missing/corrupt file; the empty/garbage block below) AND AppSettingsFromJson's absent-key
+    // fallback (a VALID settings.json written before the key existed), which only this block reaches.
+    // The two must agree, else a pre-panel file would dock one way and a missing file the other. A
+    // PRESENT false is an explicit RIGHT and is honored as-is, never "upgraded" to the new default.
+    {
+        const auto prePanel = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"model\":\"opus\"}}");
+        CHECK(prePanel.model == L"opus" && prePanel.sidePanelOnLeft == true, "settings sidePanelOnLeft ABSENT key (a pre-side-panel settings.json) -> dock LEFT (the default)");
+        const auto right = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"sidePanelOnLeft\":false}}");
+        CHECK(right.sidePanelOnLeft == false, "settings sidePanelOnLeft PRESENT false == an explicit dock RIGHT -> kept (never migrated to the LEFT default)");
     }
 
     // Empty / garbage -> all defaults (a missing settings.json must change nothing).
@@ -719,9 +731,9 @@ void TestAppSettings()
         CHECK(out.notifySuppressFocused == true, "settings notifySuppressFocused default ON on empty");
         CHECK(out.notifySound == true, "settings notifySound default ON on empty");
         CHECK(out.hiddenSessionIds.empty(), "settings hiddenSessionIds empty on empty");
-        // Side panel defaults: dock RIGHT, 22% wide, 50/50 split, expanded — and unlike the
+        // Side panel defaults: dock LEFT, 22% wide, 50/50 split, expanded — and unlike the
         // summary-panel fractions there is NO 0 "auto" sentinel (these ARE the new-window values).
-        CHECK(out.sidePanelOnLeft == false, "settings sidePanelOnLeft default false (dock RIGHT) on empty");
+        CHECK(out.sidePanelOnLeft == true, "settings sidePanelOnLeft default true (dock LEFT) on empty");
         CHECK(out.sidePanelWidthFraction > 0.219 && out.sidePanelWidthFraction < 0.221, "settings sidePanelWidthFraction default 0.22 on empty");
         CHECK(out.sidePanelSplitFraction > 0.499 && out.sidePanelSplitFraction < 0.501, "settings sidePanelSplitFraction default 0.5 on empty");
         CHECK(out.sidePanelCollapsed == false, "settings sidePanelCollapsed default false (expanded) on empty");

@@ -951,7 +951,12 @@ namespace Agentmaster
             // The bands mirror the drag clamps (width (0.10, 0.50] — never more than half the window;
             // split (0.15, 0.85) — both panel areas stay usable), so a hand-edited extreme can't
             // collapse the terminal or wedge a panel area to nothing.
-            s.sidePanelOnLeft = v.BoolAt(L"sidePanelOnLeft", false); // absent => dock RIGHT (the default)
+            // The dock side's absent-key fallback MUST equal the struct default (LEFT): a settings.json
+            // that merely predates the key would otherwise dock one way while a missing file docks the
+            // other. A PRESENT value always wins, false included — a stored false is honored as RIGHT
+            // even though a whole-struct save may have serialized it from the original RIGHT default;
+            // it is deliberately not migrated (AppSettings::sidePanelOnLeft in SessionModels.h has why).
+            s.sidePanelOnLeft = v.BoolAt(L"sidePanelOnLeft", true); // absent => dock LEFT (the default)
             const double pw = v.NumAt(L"sidePanelWidthFraction", 0.22);
             s.sidePanelWidthFraction = (pw >= 0.10 && pw <= 0.50) ? pw : 0.22;
             const double ps = v.NumAt(L"sidePanelSplitFraction", 0.5);

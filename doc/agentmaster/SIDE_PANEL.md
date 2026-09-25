@@ -1,34 +1,38 @@
 # The SIDE PANEL — a window-chrome fleet pane beside the terminal
 
-A non-terminal, non-tab panel docked LEFT or RIGHT of the tab content — part of the window
-itself (every tab shares it), giving the fleet + the current session a permanent home next to
-whatever terminal you are working in. It deliberately REUSES the Manager tab's and the per-tab
-overlay's components, so it carries their business logic verbatim instead of a parallel copy.
+A non-terminal, non-tab panel docked LEFT (the default) or RIGHT of the tab content — part of
+the window itself (every tab shares it), giving the fleet + the current session a permanent home
+next to whatever terminal you are working in. It deliberately REUSES the Manager tab's and the
+per-tab overlay's components, so it carries their business logic verbatim instead of a parallel copy.
 
 ## 1. Layout
 
+Shown in the DEFAULT dock (LEFT); the header's `⇄` flips it to the mirror image (dock RIGHT),
+which also flips the collapse chevron (`«` here — it always points toward the docked edge).
+
 ```
-┌ tab row ──────────────────────────────────────────────┐
-├────────────────────────────────┬──┬────────────────────┤
-│                                │▐ │ [search…] [LOCAL]   │  ← header row: filter + card SCOPE (LOCAL by
-│                                │▐ │ [sort][⇄][»]        │    default, per window) / order / dock / collapse
-│        terminal content        │▐ │ N of M (this window)│  ← count line (names the scope)
-│         (TabContent)           │▐ │ ┌────────────────┐ │
-│                                │▐ │ │ session CARDS  │ │  ← TOP area (own scroll)
-│                                │▐ │ └────────────────┘ │
-│                                │▐ │ ━━━━━━━━━━━━━━━━━━ │  ← horizontal splitter
-│                                │▐ │ ┌────────────────┐ │
-│                                │▐ │ │ selected sess. │ │  ← BOTTOM area (own scroll)
-│                                │▐ │ │    SUMMARY     │ │
-│                                │▐ │ └────────────────┘ │
-└────────────────────────────────┴──┴────────────────────┘
-                                  ↑ vertical splitter (the resizable separator)
+┌ tab row ─────────────────────────────────────────────────┐
+├──────────────────────┬──┬────────────────────────────────┤
+│ [search…] [LOCAL]    │ ▌│                                │  ← header row: filter + card SCOPE (LOCAL by
+│ [sort][⇄][«]         │ ▌│                                │    default, per window) / order / dock / collapse
+│ N of M (this window) │ ▌│        terminal content        │  ← count line (names the scope)
+│ ┌──────────────────┐ │ ▌│          (TabContent)          │
+│ │ session CARDS    │ │ ▌│                                │  ← TOP area (own scroll)
+│ └──────────────────┘ │ ▌│                                │
+│ ━━━━━━━━━━━━━━━━━━━━ │ ▌│                                │  ← horizontal splitter
+│ ┌──────────────────┐ │ ▌│                                │
+│ │ selected sess.   │ │ ▌│                                │  ← BOTTOM area (own scroll)
+│ │    SUMMARY       │ │ ▌│                                │
+│ └──────────────────┘ │ ▌│                                │
+└──────────────────────┴──┴────────────────────────────────┘
+                         ↑ vertical splitter (the resizable separator)
 ```
 
 - `TerminalPage.xaml`'s content row became a 3-column `ContentArea` grid; code
   (`_SidePanelApplyDock`) assigns TabContent / splitter / panel to the columns per the GLOBAL
-  dock side, so dock-left is a pure column rotation. Both extra columns are 0 until
-  `_InitAgentSidePanel` runs, so a build without the panel renders the pre-feature layout.
+  dock side (`AppSettings::sidePanelOnLeft`, LEFT by default), so either dock is a pure column
+  rotation — LEFT = `[panel][splitter][TabContent *]`, RIGHT = its mirror. Both extra columns are
+  0 until `_InitAgentSidePanel` runs, so a build without the panel renders the pre-feature layout.
 - The whole panel forces the Agentmaster DARK theme (explicit fills, `RequestedTheme(Dark)`).
 - Collapse (the header chevron / the strip) shrinks the panel to a 20px expander strip; the
   header also carries a `⇄` dock-side flip and the card list's **LOCAL / GLOBAL** scope toggle (§2).
@@ -139,7 +143,7 @@ GLOBAL-only; the **card scope is per-window ONLY** (no global default — see be
 | panel width | `WindowRecord::sidePanelWidthFraction` (0 = unset) | `AppSettings::sidePanelWidthFraction` (0.22) |
 | cards/summary split | `WindowRecord::sidePanelSplitFraction` (0 = unset) | `AppSettings::sidePanelSplitFraction` (0.5) |
 | collapsed | `WindowRecord::sidePanelCollapsed` (-1 = unset) | `AppSettings::sidePanelCollapsed` (false) |
-| dock side | — | `AppSettings::sidePanelOnLeft` (false = right) |
+| dock side | — | `AppSettings::sidePanelOnLeft` (true = **left, the default**; false = right) |
 | card scope (LOCAL/GLOBAL) | `WindowRecord::sidePanelGlobal` (absent = LOCAL; written only when GLOBAL) | — **none by design**: every new window starts LOCAL |
 
 - **The card scope is the one field with NO last-one-wins export**: `_SidePanelToggleScope`
@@ -160,6 +164,14 @@ GLOBAL-only; the **card scope is per-window ONLY** (no global default — see be
   value degrades to the shipped default — a corrupt file can never collapse the terminal.
 - All four AppSettings fields are written OUTSIDE the cog form, so BOTH cog-Save preserve
   blocks (content + page sink) restore them from disk.
+- **The dock side defaults to LEFT** (it was RIGHT when the panel first landed). The struct
+  default and `AppSettingsFromJson`'s absent-key fallback deliberately agree, so a fresh install
+  and a settings.json from before the key both dock left. A PRESENT value always wins, `false`
+  included — and because every settings write serializes the WHOLE struct, an install that ran
+  the original RIGHT-default build and saved anything since stores `false`, which is
+  indistinguishable from choosing RIGHT on purpose. It is honored, never migrated: one `⇄` click
+  moves it (and persists). The RIGHT default never shipped in a public release, so only
+  locally-built installs can carry one.
 
 ## 5. Perf + safety rules upheld
 
