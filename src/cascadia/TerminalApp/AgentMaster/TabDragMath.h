@@ -216,7 +216,11 @@ namespace Agentmaster
         }
         else
         {
-            double padLeft = std::max(0.0, pad);
+            // (std::max) is parenthesized on purpose: the standalone test harness (tests\run-m5-tests.bat)
+            // pulls in <windows.h> WITHOUT NOMINMAX, whose function-like max macro turns a bare
+            // `std::max(` into C2589 and breaks the whole suite's compile. The app build defines NOMINMAX,
+            // so only the harness ever saw it. Same guard as PromptAnchor.h / DraftCarry.h.
+            double padLeft = (std::max)(0.0, pad);
             double padRight = padLeft;
             if (padLeft + itemWidth + padRight > viewportWidth)
             {
@@ -231,7 +235,7 @@ namespace Agentmaster
                 target = currentOffset + (itemRight - (viewportWidth - padRight)); // on the right: scroll right
             }
         }
-        target = std::clamp(target, 0.0, std::max(0.0, scrollableWidth));
+        target = std::clamp(target, 0.0, (std::max)(0.0, scrollableWidth)); // (std::max): the same <windows.h> max-macro guard as padLeft above
         if (std::abs(target - currentOffset) <= kRevealEpsilonDips)
         {
             return std::nullopt;
