@@ -247,6 +247,17 @@ void TestSpawnBuilders()
     CHECK(json.find(L"Stop") != std::wstring::npos, "settings has Stop");
     CHECK(json.find(L"SubagentStop") != std::wstring::npos, "settings has SubagentStop");
     CHECK(json.find(L"SessionEnd") != std::wstring::npos, "settings has SessionEnd");
+    // HOOKS.md "Compaction": both compaction brackets are wired (the silent 1-3+ minute window the
+    // pull reconcilers would otherwise read as "turn over").
+    CHECK(json.find(L"\"PreCompact\"") != std::wstring::npos && json.find(L"-Event PreCompact") != std::wstring::npos, "settings wires PreCompact to the forwarder");
+    CHECK(json.find(L"\"PostCompact\"") != std::wstring::npos && json.find(L"-Event PostCompact") != std::wstring::npos, "settings wires PostCompact to the forwarder");
+    {
+        // Still ONE well-formed object after the two new blocks (the separators are hand-assembled).
+        const auto parsed = ::Agentmaster::json::Parse(json);
+        const auto* hooks = (parsed && parsed->type == ::Agentmaster::json::Value::Type::Obj) ? parsed->Find(L"hooks") : nullptr;
+        CHECK(hooks && hooks->type == ::Agentmaster::json::Value::Type::Obj && hooks->members.size() == 8,
+              "settings JSON parses with exactly the 8 wired hook events");
+    }
     CHECK(json.find(L"-Event Stop") != std::wstring::npos, "settings wires -Event Stop");
     CHECK(json.find(L"C:/x/agentmaster-hook.ps1") != std::wstring::npos, "settings references forwarder");
     // All-defaults (bypass on, model empty, co-authored on) => hooks-only, no extra keys.
@@ -588,16 +599,23 @@ void TestSpawnBuilders()
     CHECK(fwd.find(L"CCMGR_HOOK_PIPE") != std::wstring::npos, "forwarder reads CCMGR_HOOK_PIPE");
     CHECK(fwd.find(L"session_id") != std::wstring::npos, "forwarder uses payload session_id");
     // Payload-FIRST precedence: the hook's session_id (Claude's CURRENT conversation, which follows
-    // /resume,/clear,/compact) must be chosen BEFORE the launch-time env fallback. Env-first
+    // /resume and /clear; a /compact keeps the id) must be chosen BEFORE the launch-time env fallback. Env-first
     // stranded a diverged managed session as a phantom record stuck in the last mis-attributed
     // state (no transcript under the dead launch id => the scanner could never reconcile it).
     {
         const auto payloadAt = fwd.find(L"$sid = [string]$j.session_id");
         const auto envAt = fwd.find(L"$sid = $env:CCMGR_SESSION_ID");
         CHECK(payloadAt != std::wstring::npos && envAt != std::wstring::npos && payloadAt < envAt,
-              "forwarder prefers payload session_id over the launch env (id follows /resume,/clear,/compact)");
+              "forwarder prefers payload session_id over the launch env (id follows /resume and /clear)");
     }
     CHECK(fwd.find(L"WT_SESSION") != std::wstring::npos, "forwarder emits WT_SESSION tabToken");
+    // HookWire.h field 10 (HOOKS.md "Compaction"): the payload discriminator per event, validated with
+    // SanitizeWireSource's exact rule, and appended LAST so a 9-field reader still parses the line.
+    CHECK(fwd.find(L"$Event -eq \"SessionStart\" -and $j.source") != std::wstring::npos, "forwarder reads SessionStart's source");
+    CHECK(fwd.find(L"$Event -eq \"SessionEnd\" -and $j.reason") != std::wstring::npos, "forwarder reads SessionEnd's reason");
+    CHECK(fwd.find(L"$Event -eq \"PreCompact\" -or $Event -eq \"PostCompact\") -and $j.trigger") != std::wstring::npos, "forwarder reads Pre/PostCompact's trigger");
+    CHECK(fwd.find(L"$src -cnotmatch '^[A-Za-z0-9_-]{0,32}\\z'") != std::wstring::npos, "forwarder validates the source like SanitizeWireSource (case-sensitive, true end anchor)");
+    CHECK(fwd.find(L"$line = ($Event, $sid, $cwd, $isQ, $perm, $tool, $tab, $prompt, $ts, $src) -join") != std::wstring::npos, "forwarder emits the 10-field wire line, source last");
     // The bridge-discovery fallback is PER-PROFILE: the stateDir is baked in (PS-single-quoted);
     // no profile-blind $env:USERPROFILE\.agentmaster path and no unexpanded placeholder remain.
     CHECK(fwd.find(L"$disc = 'C:\\Users\\x\\.agentmaster-dev\\bridge.json'") != std::wstring::npos, "forwarder discovery is the per-profile bridge.json");

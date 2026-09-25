@@ -651,8 +651,19 @@ namespace Agentmaster
         //     gone, or no longer a claude.exe (stale crash leftovers, PID reuse), is dropped. The
         //     surviving rows are published as a table AND feed the per-session `presenceStatus`
         //     enrichment below (a display FACT — never SessionState, Rule #13).
+        //     Agentmaster: a row must ALSO be THIS process's (PresenceRowMatchesProcess — the exact
+        //     `procStart` identity claude >= 2.1.2xx writes, else the legacy startedAt window). A live
+        //     claude.exe that REUSED a dead one's pid would otherwise wear the dead file's conversation
+        //     + status until its own registration overwrites the file (it does so ~1 s after start,
+        //     patching the same file in place) — painting a stale "busy"/"waiting" onto the dead
+        //     session. Both stamps are written ONCE at registration and survive every later patch (a
+        //     /clear or /resume only rewrites sessionId + updatedAt — read from claude 2.1.280's own
+        //     writer), so a switched session keeps passing.
         std::vector<SessionPresenceRow> presence = ReadSessionPresence();
-        presence.erase(std::remove_if(presence.begin(), presence.end(), [&factsByPid](const SessionPresenceRow& r) { return factsByPid.find(r.pid) == factsByPid.end(); }),
+        presence.erase(std::remove_if(presence.begin(), presence.end(), [&factsByPid](const SessionPresenceRow& r) {
+                           const auto fit = factsByPid.find(r.pid);
+                           return fit == factsByPid.end() || !PresenceRowMatchesProcess(r, fit->second.startUnixMs);
+                       }),
                        presence.end());
         // Agentmaster: sid -> (status, waitingFor). The waitingFor half is what the SCANNER's
         // blocked-on-user edge keys on (SessionScanner.h) — it needs neither a transcript line
@@ -665,13 +676,15 @@ namespace Agentmaster
         std::unordered_map<std::wstring, PresenceFact> presenceBySid;
         // pid -> the conversation id Claude is CURRENTLY on (its own heartbeat). Used to BIND a
         // correlated tab to the live conversation rather than the launch-time --session-id on the
-        // cmdline, which goes stale when the user /resume / /clear / /compact-s a managed session
-        // into a different conversation (the cmdline still shows the spawn id; presence does not).
-        // Bind-grade trust is STRICTER than the status enrichment above: the row must belong to the
-        // SAME live process — pid alive (already filtered) AND its recorded startedAt within an init
-        // window of the OS process-create time — so a stale presence file left by a REUSED pid can
-        // never mis-bind. Presence is pid-keyed, so it is immune to the cwd-density mis-bind Rule #14
-        // warns of. (See ResolveObservedId + the rostered bind below.)
+        // cmdline, which goes stale when the user /resume-s or /clear-s a managed session into a
+        // different conversation (the cmdline still shows the spawn id; presence does not). A
+        // /compact never needs it: compaction is IN-PLACE (same id, same file — HOOKS.md
+        // "Compaction"). Also feeds the EXTERNAL census's id (4a below), where no --session-id exists.
+        // Bind-grade trust == the table filter above (PresenceRowMatchesProcess — the row belongs to
+        // THIS live process, never a reused pid's leftover file), re-asserted here as a belt so the
+        // bind can never outrun a future loosening of that filter. Presence is pid-keyed, so it is
+        // immune to the cwd-density mis-bind Rule #14 warns of. (See ResolveObservedId + the
+        // rostered bind below.)
         std::unordered_map<uint32_t, std::wstring> presenceByPid;
         for (const auto& r : presence)
         {
@@ -685,10 +698,9 @@ namespace Agentmaster
             {
                 continue; // pid not a live claude this snapshot (already filtered, belt+suspenders)
             }
-            const int64_t procStart = fit->second.startUnixMs;
-            if (procStart > 0 && (r.startedAtMs < procStart - 5000 || r.startedAtMs > procStart + 60000))
+            if (!PresenceRowMatchesProcess(r, fit->second.startUnixMs))
             {
-                continue; // presence predates / long-postdates this process -> not its file (PID reuse)
+                continue; // not this process's file (PID reuse) — already filtered, belt+suspenders
             }
             presenceByPid[r.pid] = r.sessionId;
         }
@@ -741,10 +753,10 @@ namespace Agentmaster
                 const ClaudeProcessFacts f = (fit != factsByPid.end()) ? fit->second : ReadClaudeFacts(cpid);
                 std::wstring sid = ResolveObservedId(f);
                 // Claude's OWN presence heartbeat is the authoritative record of the conversation
-                // this pid is CURRENTLY on — it follows /resume, /clear and /compact, which the
-                // launch-time --session-id on the cmdline does NOT. When they disagree (a managed
-                // session the user resumed/cleared/compacted into a different conversation), the
-                // presence id wins, so the tab binds to — and displays the state of — the
+                // this pid is CURRENTLY on — it follows /resume and /clear, which the launch-time
+                // --session-id on the cmdline does NOT (a /compact keeps the id: it is in-place).
+                // When they disagree (a managed session the user resumed/cleared into a different
+                // conversation), the presence id wins, so the tab binds to — and displays the state of — the
                 // conversation actually running, not the stale launch id stuck as a phantom record.
                 // A brand-new spawn that hasn't written presence yet (or a denied PEB start time)
                 // is absent from presenceByPid and falls back to ResolveObservedId (== our launch
@@ -1010,7 +1022,20 @@ namespace Agentmaster
             // "Agentmaster Dev" instead of "WindowsTerminal" (our fork's exe leaf), and the real
             // Windows Terminal reads "Windows Terminal" — not lumped together. (OBSERVER.md §11c)
             ex.hostLabel = ResolveExternalHostLabel(snap, pid, !f.amSession.empty());
-            const std::wstring sid = ResolveObservedId(f);
+            // Agentmaster: the SAME precedence as the rostered bind — claude's own pid-validated
+            // presence heartbeat first, then the cmdline / ctime heuristic. An external has no
+            // --session-id, so ResolveObservedId falls to the ctime-closest-to-start transcript
+            // (Rule #14), which is structurally WRONG after a /clear (it keeps naming the conversation
+            // the process STARTED with — the new file is created long after start) and EMPTY for a
+            // `claude --continue` / picker `--resume` (the resumed transcript predates the process, so
+            // it is rejected): the live census had 14 of 18 externals with no id at all. Presence
+            // names the conversation the process is on NOW, so the row's title, timing, recap,
+            // read-only plan and Adopt all follow it.
+            std::wstring sid = ResolveObservedId(f);
+            if (const auto pit = presenceByPid.find(pid); pit != presenceByPid.end() && LooksLikeGuid(pit->second))
+            {
+                sid = pit->second;
+            }
             ex.sessionId = sid;
             if (!sid.empty())
             {

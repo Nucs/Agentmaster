@@ -286,6 +286,13 @@ namespace Agentmaster
                                 usage->I64At(L"cache_read_input_tokens") +
                                 usage->I64At(L"output_tokens");
                 }
+                // Agentmaster (HOOKS.md "Compaction"): a usage-bearing assistant line AFTER a compact
+                // boundary in this chunk is the newer context truth — drop the boundary's pending
+                // postTokens so the fold keeps this line's value (file order decides, never the kind).
+                if (ev.tokens > 0)
+                {
+                    out.compactPostTokens = 0;
+                }
                 out.events.push_back(std::move(ev));
             }
             else if (type == L"user")
@@ -433,6 +440,21 @@ namespace Agentmaster
                     if (std::wstring r = NormalizeRecapText(obj.StrAt(L"content")); !r.empty())
                     {
                         out.recap = std::move(r);
+                    }
+                }
+                if (obj.StrAt(L"subtype") == L"compact_boundary")
+                {
+                    // Agentmaster (HOOKS.md "Compaction"): the conversation was just summarized IN PLACE —
+                    // its context is now compactMetadata.postTokens (Claude Code stamps it before writing
+                    // the line; absent on older builds -> 0 -> the fold leaves the prior value). NOT a turn
+                    // event: a compaction neither starts nor ends a turn, and the boundary's parentUuid is
+                    // null, so emitNode below skips it (it is a chain ROOT, not an error bookkeeping child).
+                    if (const auto* md = obj.Find(L"compactMetadata"); md && md->type == json::Value::Type::Obj)
+                    {
+                        if (const int64_t post = md->I64At(L"postTokens"); post > 0)
+                        {
+                            out.compactPostTokens = post;
+                        }
                     }
                 }
                 // A system line (turn_duration child, away_summary, …) is on the API-error's bookkeeping
@@ -900,7 +922,8 @@ namespace Agentmaster
         // Agentmaster (subagent/fork activity): the parent <id>.jsonl can sit QUIESCENT while the
         // turn's real work happens elsewhere — a Task/Agent SUBAGENT writing <id>/subagents/*.jsonl
         // (the parent does not grow until the subagent returns), or, after a live /fork|/clear|
-        // /compact|/resume, a NEW conversation id the tab has not yet re-bound to. Two out-of-band
+        // /resume, a NEW conversation id the tab has not yet re-bound to (a /compact is in-place — same
+        // id, same file — and its silent window is held by CompactionInFlight below). Two out-of-band
         // signals recover "still working" without screen-scraping: the newest subagent/tool-result
         // side-file write (SubagentActivityUnixMs), and claude's OWN presence heartbeat ("busy",
         // pid-validated by the S-lane — Rule #13: a FACT the scanner may consume as a state input).
@@ -939,6 +962,19 @@ namespace Agentmaster
         if (presenceWorking)
         {
             quietForMs = 0; // claude self-reports working (a turn OR a live shell job) — the transcript may be momentarily quiet, the work is not over
+        }
+        // Agentmaster (the COMPACTION WINDOW — HOOKS.md "Compaction"): a PreCompact opened a window the
+        // closing hook has not ended yet — claude is summarizing the conversation, which writes NOTHING to
+        // the transcript for 1-3+ minutes while the tail still shows the previous turn's TERMINAL
+        // stop_reason. That is exactly the missed-Stop shape, so without this every quiescence-gated synth
+        // (recon-stop, the presence-idle release, recon-block, recon-error, the error release) would
+        // demote the compacting session within seconds — before the S-lane's ~2 s survey even publishes
+        // claude's "busy". Forcing the clock to 0 stands them ALL down together, the same way "busy" does;
+        // CompactionInFlight ends the hold on the closing hook, claude's own settled "idle" (a cancelled
+        // or failed compaction), or the hard cap (a lost closing hook).
+        if (CompactionInFlight(s.compactingSinceUnixMs, NowMs(), s.presenceStatus))
+        {
+            quietForMs = 0;
         }
 
         // Subagent/fork activity reconciliation — the EXTERNAL-WORK mirror of recon-run above.
@@ -1623,6 +1659,18 @@ namespace Agentmaster
                     }
                 }
             }
+        }
+        // Agentmaster (HOOKS.md "Compaction" — the stale "ctx N"): a compact_boundary that is this chunk's
+        // LAST context-bearing line reset the conversation's context to its postTokens (the parser zeroes
+        // the field when a usage-bearing assistant line follows the boundary, so the loop's per-line value
+        // above already won in that case). Mirrored QUIETLY like the per-line value — a display fact — so
+        // the card reads the compacted size right away instead of the pre-compaction one until the next
+        // assistant line (after a manual /compact at rest: the user's next prompt, possibly never).
+        if (parsed.compactPostTokens > 0 && parsed.compactPostTokens != st.contextTokens)
+        {
+            st.contextTokens = parsed.compactPostTokens;
+            const int64_t tok = parsed.compactPostTokens;
+            _registry->UpdateQuiet(s.id, [tok](SessionInfo& ss) { ss.contextTokens = tok; });
         }
         // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): the user pressed Esc and has NOT sent
         // anything since (the marker is still the tail) — park the Tests Autorunner NOW, in the parse,

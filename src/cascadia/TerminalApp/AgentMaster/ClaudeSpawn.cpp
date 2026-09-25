@@ -361,8 +361,8 @@ try {
   }
 
   # Session id: prefer Claude's OWN current conversation id from the hook PAYLOAD. It is
-  # authoritative and FOLLOWS /resume, /clear and /compact; the launch-time env does NOT (it is
-  # pinned at spawn). The env (set only for sessions WE launched) is the FALLBACK for the rare
+  # authoritative and FOLLOWS /resume and /clear (a /compact keeps the id - it is in-place); the
+  # launch-time env does NOT (it is pinned at spawn). The env (set only for sessions WE launched) is the FALLBACK for the rare
   # payload that lacks a session_id. Env-FIRST stranded a managed session whose conversation
   # diverged from its launch id: every post-divergence hook fed the dead launch-id record (which
   # has no transcript of its own, so the scanner could never reconcile it), leaving a phantom
@@ -393,9 +393,18 @@ try {
   $perm = "0"
   $tool = ""
   $prompt = ""
+  $src = ""
   if ($j -ne $null) {
     if ($j.cwd) { $cwd = [string]$j.cwd }
     if ($j.tool_name) { $tool = [string]$j.tool_name }
+    # The event's discriminator (HookWire.h field 10): SessionStart's `source` (startup|resume|
+    # clear|compact|fork), PreCompact/PostCompact's `trigger` (manual|auto) and SessionEnd's
+    # `reason` (clear|resume|logout|prompt_input_exit|other). The engine keys the COMPACTION
+    # window on it (HookEvents.h): a SessionStart(compact) must not reset a running turn to Idle,
+    # and a manual compaction's PostCompact hands the session back to the user.
+    if ($Event -eq "SessionStart" -and $j.source) { $src = [string]$j.source }
+    if ($Event -eq "SessionEnd" -and $j.reason) { $src = [string]$j.reason }
+    if (($Event -eq "PreCompact" -or $Event -eq "PostCompact") -and $j.trigger) { $src = [string]$j.trigger }
     # The submitted prompt text, so the Manager's Auto Testing reflects EVERY message the
     # session got (including ones typed straight into this terminal). Escaped to keep the
     # wire record single-line + TAB-free (mirrors HookWire.h WireEscape): \ -> \\ then tab/CR/LF.
@@ -439,7 +448,13 @@ try {
   $bs = $pipe.LastIndexOf("\")
   if ($bs -ge 0) { $name = $pipe.Substring($bs + 1) }
 
-  $line = ($Event, $sid, $cwd, $isQ, $perm, $tool, $tab, $prompt, $ts) -join "`t"
+  # Mirror HookWire.h SanitizeWireSource exactly: a plain [A-Za-z0-9_-] token of <= 32 chars, else
+  # EMPTY (never a trimmed guess - the engine compares it literally). -cnotmatch keeps the ranges
+  # case-SENSITIVE (a case-folded match could admit a Unicode look-alike) and \z anchors the true
+  # end (PowerShell's $ would also accept a trailing newline, which must never reach the record).
+  if ($src -cnotmatch '^[A-Za-z0-9_-]{0,32}\z') { $src = "" }
+
+  $line = ($Event, $sid, $cwd, $isQ, $perm, $tool, $tab, $prompt, $ts, $src) -join "`t"
 
   $client = New-Object System.IO.Pipes.NamedPipeClientStream(".", $name, [System.IO.Pipes.PipeDirection]::Out)
   try {
@@ -489,6 +504,16 @@ try {
         json += block(L"Notification") + L",\n";
         json += block(L"Stop") + L",\n";
         json += block(L"SubagentStop") + L",\n";
+        // Agentmaster (HOOKS.md "Compaction"): bracket every compaction, manual AND auto. A compaction
+        // runs 1-3+ minutes with the transcript completely SILENT, so without these the pull
+        // reconcilers read the quiet tail as "turn over" (an auto-compaction mid-turn blipped
+        // Running -> Waiting, and a manual /compact at rest never showed as working at all). One
+        // forwarder run each — claude waits for it before compacting, but a PowerShell start is
+        // ~0.5 s against a minutes-long compaction. An engine that predates these events parses them
+        // as HookEvent::Unknown (a state no-op), and a settings file without them simply leaves the
+        // pull floor in charge, so the two stay compatible in both directions.
+        json += block(L"PreCompact") + L",\n";
+        json += block(L"PostCompact") + L",\n";
         json += block(L"SessionEnd") + L"\n";
         json += L"  }"; // close "hooks"
 

@@ -11,6 +11,7 @@
 #include <time.h> // _mkgmtime64 (ISO timestamp -> Unix epoch)
 
 #include <algorithm>
+#include <cstdint> // UINT64_MAX (PresenceProcStartToUnixMs's overflow guard)
 #include <unordered_map>
 #include <unordered_set>
 
@@ -728,6 +729,22 @@ namespace Agentmaster
         {
             f.kind = TranscriptLineKind::System;
             AppendCapped(f.agentText, obj.StrAt(L"content"), maxAgentTextChars); // away_summary / api_error / local_command bodies
+            // Agentmaster (HOOKS.md "Compaction" — the stale "Ctx" column): a /compact (manual or auto)
+            // summarizes the conversation IN PLACE, and its boundary line records the context it left
+            // behind (compactMetadata.postTokens; absent on older builds -> 0 -> no value). Carried as THIS
+            // line's context so AccumulateTranscriptStats' forward fold lets the boundary supersede the
+            // pre-compaction assistant usage — and a later assistant line supersede the boundary in turn.
+            if (obj.StrAt(L"subtype") == L"compact_boundary")
+            {
+                if (const auto* md = obj.Find(L"compactMetadata"); md && md->type == json::Value::Type::Obj)
+                {
+                    f.contextTokens = md->I64At(L"postTokens");
+                    if (f.contextTokens < 0)
+                    {
+                        f.contextTokens = 0; // a malformed negative is "no value", never a context size
+                    }
+                }
+            }
         }
         else if (type == L"attachment")
         {
@@ -763,15 +780,62 @@ namespace Agentmaster
 
     std::unordered_set<std::wstring> ActiveBranchUuids(std::wstring_view transcriptText)
     {
-        // Pass 1: index every tree node's uuid -> parentUuid edge, and track the LAST `leafUuid`
-        // marker (file order => the authoritative current leaf). EVERY uuid-bearing line is a node,
-        // INCLUDING attachment lines (skill_listing / file snippets injected mid-turn) — they are
-        // pass-through hops in the chain, so omitting them would break the walk at the first one.
-        // Also track the PHYSICAL TAIL (the last uuid-bearing line) and whether any node was written
-        // AFTER the last leafUuid marker — the stale-marker extension below needs both.
-        std::unordered_map<std::wstring, std::wstring> parentOf;
+        // Pass 1: index every tree node's UPWARD edges, and track the LAST `leafUuid` marker (file
+        // order => the authoritative current leaf). EVERY uuid-bearing line is a node, INCLUDING
+        // attachment lines (skill_listing / file snippets injected mid-turn) — they are pass-through
+        // hops in the chain, so omitting them would break the walk at the first one. Also track the
+        // PHYSICAL TAIL (the last uuid-bearing line) and whether any node was written AFTER the last
+        // leafUuid marker — the stale-marker extension below needs both.
+        //
+        // Agentmaster (HOOKS.md "Compaction" — the walk CROSSES compactions). A /compact (manual or auto)
+        // is IN-PLACE — same file, same id — and its system/compact_boundary line is written with a NULL
+        // parentUuid (the post-compaction chain starts there), so a walk over parentUuid alone stopped at
+        // every boundary and orphaned the whole conversation before it (99.2% of the pre-compaction typed
+        // prompts measured off-branch over the 193 compacted transcripts on this machine). A node's upward
+        // edges are therefore:
+        //   * its parentUuid, from EVERY occurrence of the uuid — a legacy resume (Claude Code <= 2.1.147)
+        //     re-appended whole histories, and a partial compaction re-links preserved messages, so one
+        //     uuid can carry more than one parent; the union keeps each of them reachable;
+        //   * for a COMPACTION ROOT (a null parentUuid on a system/compact_boundary, or on any line that
+        //     declares a logicalParentUuid) — CROSSING edges into the conversation it summarized:
+        //       - every preserved message it names (compactMetadata.preservedMessages.uuids/allUuids,
+        //         preservedSegment.headUuid/tailUuid): a partial compaction keeps those verbatim, and an
+        //         auto-compaction writes the preserved TAIL after the summary, so that tail alone never
+        //         leads back;
+        //       - its logicalParentUuid (the last message before the compaction; sometimes never
+        //         written to disk);
+        //       - the PRE-BOUNDARY LEAF: the last node written before the boundary when one followed the
+        //         last leafUuid marker (the stale-marker rule below), else that marker's leaf — which is
+        //         what reaches the middle a "summarize from here" partial compaction folded away (its
+        //         logical parent + preserved list name only the EARLY messages it kept).
+        // A rewound-away branch is never an ancestor of any of these, so it stays excluded. Measured: the
+        // off-branch share fell to 11.0%, 225 of the remaining 233 prompts hang off a live node (genuine
+        // rewinds), and no prompt the parentUuid-only walk kept is ever dropped.
+        std::unordered_map<std::wstring, std::vector<std::wstring>> upEdges;
+        const auto addEdge = [&upEdges](const std::wstring& node, const std::wstring& target) {
+            if (target.empty() || target == node)
+            {
+                return; // no edge (a true root's null parent) / a self-reference (malformed)
+            }
+            auto& edges = upEdges[node];
+            if (std::find(edges.begin(), edges.end(), target) == edges.end())
+            {
+                edges.push_back(target); // a verbatim re-append repeats the same edge: keep it once
+            }
+        };
+        // A compaction root's pre-boundary leaf candidates, captured at the root's FIRST occurrence (its
+        // authentic position — a legacy re-append repeats the boundary elsewhere) and resolved once every
+        // node is known.
+        struct PreBoundaryLeaf
+        {
+            std::wstring markerLeaf; // the leafUuid in force when the boundary was written
+            std::wstring tailBefore; // the last NON-sidechain node before it (an inlined subagent chain is not the conversation)
+            bool nodeAfterMarker{ false }; // a node followed that marker => the tail continues the marker's branch
+        };
+        std::unordered_map<std::wstring, PreBoundaryLeaf> preBoundaryOf;
         std::wstring leaf;
         std::wstring tailUuid; // the last uuid-bearing line in the file (the physical tip)
+        std::wstring mainTailUuid; // the last NON-sidechain uuid-bearing line (the pre-boundary tail candidate)
         bool nodeAfterMarker = false; // a uuid line appeared AFTER the last leafUuid marker
         size_t start = 0;
         for (size_t i = 0; i <= transcriptText.size(); ++i)
@@ -803,10 +867,79 @@ namespace Agentmaster
             }
             if (const std::wstring u = obj.StrAt(L"uuid"); !u.empty())
             {
-                // parentUuid "" (StrAt returns "" for a JSON null/absent) == a conversation ROOT.
-                parentOf[u] = obj.StrAt(L"parentUuid");
+                const bool firstSighting = (upEdges.find(u) == upEdges.end());
+                upEdges.try_emplace(u); // register the node even when it has no upward edge (a true root)
+                // parentUuid "" (StrAt returns "" for a JSON null/absent) == a chain ROOT.
+                const std::wstring p = obj.StrAt(L"parentUuid");
+                addEdge(u, p);
+                if (p.empty())
+                {
+                    const std::wstring lp = obj.StrAt(L"logicalParentUuid");
+                    if (!lp.empty() || obj.StrAt(L"subtype") == L"compact_boundary")
+                    {
+                        // A COMPACTION ROOT: cross into the conversation it summarized (see the header).
+                        addEdge(u, lp);
+                        if (const auto* md = obj.Find(L"compactMetadata"); md && md->type == json::Value::Type::Obj)
+                        {
+                            if (const auto* pm = md->Find(L"preservedMessages"); pm && pm->type == json::Value::Type::Obj)
+                            {
+                                for (const wchar_t* key : { L"uuids", L"allUuids" })
+                                {
+                                    if (const auto* list = pm->Find(key); list && list->type == json::Value::Type::Arr)
+                                    {
+                                        for (const auto& item : list->arr)
+                                        {
+                                            if (item.type == json::Value::Type::Str)
+                                            {
+                                                addEdge(u, item.str);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (const auto* ps = md->Find(L"preservedSegment"); ps && ps->type == json::Value::Type::Obj)
+                            {
+                                addEdge(u, ps->StrAt(L"headUuid"));
+                                addEdge(u, ps->StrAt(L"tailUuid"));
+                            }
+                        }
+                        if (firstSighting)
+                        {
+                            preBoundaryOf.emplace(u, PreBoundaryLeaf{ leaf, mainTailUuid, nodeAfterMarker });
+                        }
+                    }
+                }
                 tailUuid = u;
+                if (!obj.BoolAt(L"isSidechain"))
+                {
+                    mainTailUuid = u;
+                }
                 nodeAfterMarker = true; // a real node was written after the last marker
+            }
+        }
+
+        // Resolve each compaction root's PRE-BOUNDARY LEAF now that every node is known: the tail written
+        // after the last marker continues that marker's branch (a rewind writes its own newer marker —
+        // the invariant the stale-marker extension below rests on), else the marker names the leaf; a
+        // candidate that is not a node of this file (a copy whose history lives in another file) adds no
+        // edge. Always added, never only as a fallback: it is the one edge that reaches the middle of a
+        // "summarize from here" compaction, and on an ordinary one it lands on the same chain as the
+        // logical parent (a no-op for the result).
+        for (const auto& [root, pre] : preBoundaryOf)
+        {
+            const bool tailKnown = !pre.tailBefore.empty() && upEdges.find(pre.tailBefore) != upEdges.end();
+            const bool markerKnown = !pre.markerLeaf.empty() && upEdges.find(pre.markerLeaf) != upEdges.end();
+            if (pre.nodeAfterMarker && tailKnown)
+            {
+                addEdge(root, pre.tailBefore);
+            }
+            else if (markerKnown)
+            {
+                addEdge(root, pre.markerLeaf);
+            }
+            else if (tailKnown)
+            {
+                addEdge(root, pre.tailBefore);
             }
         }
 
@@ -814,7 +947,7 @@ namespace Agentmaster
         // No leaf marker, OR the leaf names a node that isn't present (a truncated read, or a
         // stratum that never wrote markers) => return EMPTY so the caller keeps every line. NEVER
         // return a partial set built from an unknown leaf — that would wrongly orphan the whole file.
-        if (leaf.empty() || parentOf.find(leaf) == parentOf.end())
+        if (leaf.empty() || upEdges.find(leaf) == upEdges.end())
         {
             return active;
         }
@@ -834,34 +967,52 @@ namespace Agentmaster
         std::wstring anchor = leaf;
         if (nodeAfterMarker && !tailUuid.empty() && tailUuid != leaf)
         {
-            std::unordered_set<std::wstring> up; // cycle-guarded walk tail -> root, looking for leaf
-            for (std::wstring c = tailUuid; !c.empty() && up.insert(c).second;)
+            // Agentmaster (HOOKS.md "Compaction"): this search follows EVERY upward edge, compaction
+            // crossings included. A marker written before an auto-compaction while the same turn keeps
+            // streaming after it is the common shape; stopping at the boundary missed the leaf, so the
+            // anchor stayed pre-compaction and the whole live post-compaction tail read as off-branch.
+            std::unordered_set<std::wstring> up; // visited set: the cycle guard of the upward search
+            std::vector<std::wstring> pending{ tailUuid };
+            while (!pending.empty())
             {
+                std::wstring c = std::move(pending.back());
+                pending.pop_back();
+                if (c.empty() || !up.insert(c).second)
+                {
+                    continue;
+                }
                 if (c == leaf)
                 {
                     anchor = tailUuid; // the tail is a descendant of the marked leaf => it IS the live tip
                     break;
                 }
-                const auto it = parentOf.find(c);
-                if (it == parentOf.end())
+                const auto it = upEdges.find(c);
+                if (it != upEdges.end())
                 {
-                    break; // reached a root off the marked branch => keep the marker (safety)
+                    pending.insert(pending.end(), it->second.begin(), it->second.end());
                 }
-                c = it->second;
             }
+            // Not found anywhere above the tail => a root off the marked branch: keep the marker (safety).
         }
-        // Pass 2: walk anchor -> root via parentUuid. The `active.insert().second` test is the cycle
-        // guard (a malformed self/loop reference stops instead of spinning); a parent that isn't a
-        // known node terminates the walk (the chain reached the root, whose parentUuid is "").
-        std::wstring cur = anchor;
-        while (!cur.empty() && active.insert(cur).second)
+        // Pass 2: every node reachable UPWARD from the anchor — parent edges, compaction crossings. The
+        // `active.insert().second` test is the cycle guard (a malformed loop — e.g. a logical parent
+        // pointing at the boundary's own descendant, which a copied continuation file really writes —
+        // stops instead of spinning); an edge to a uuid that is not a node of this file is kept in the
+        // set (as the single-parent walk always did) and simply has nothing above it.
+        std::vector<std::wstring> pending{ anchor };
+        while (!pending.empty())
         {
-            const auto it = parentOf.find(cur);
-            if (it == parentOf.end())
+            std::wstring cur = std::move(pending.back());
+            pending.pop_back();
+            if (cur.empty() || !active.insert(cur).second)
             {
-                break;
+                continue;
             }
-            cur = it->second;
+            const auto it = upEdges.find(cur);
+            if (it != upEdges.end())
+            {
+                pending.insert(pending.end(), it->second.begin(), it->second.end());
+            }
         }
         return active;
     }
@@ -1012,6 +1163,14 @@ namespace Agentmaster
                 {
                     stats.contextTokens = f.contextTokens;
                 }
+            }
+            // Agentmaster (HOOKS.md "Compaction"): a compact_boundary resets the context to its postTokens
+            // (ClassifyTranscriptLine puts it on the System line). Same forward, last-wins fold as the
+            // assistant usage above, so file order decides: a boundary after the last assistant line wins
+            // (the conversation IS that small now), an assistant line after the boundary wins over it.
+            if (f.kind == TranscriptLineKind::System && !f.sidechain && f.contextTokens > 0)
+            {
+                stats.contextTokens = f.contextTokens;
             }
             // Deduped union of tool-touched paths (case-insensitive — Windows paths), capped.
             for (const auto& p : f.toolPaths)
@@ -1751,6 +1910,57 @@ namespace Agentmaster
 
     // ===== live-session presence =============================================================
 
+    int64_t PresenceProcStartToUnixMs(std::wstring_view procStart) noexcept
+    {
+        // A FILETIME is a 64-bit tick count; accept ONLY a plain run of 1..20 decimal digits and reject
+        // anything that would overflow uint64 — a malformed value must read "unknown" (0), never a
+        // wrapped number that could reject the correct row.
+        if (procStart.empty() || procStart.size() > 20)
+        {
+            return 0;
+        }
+        uint64_t ticks = 0;
+        for (const wchar_t c : procStart)
+        {
+            if (c < L'0' || c > L'9')
+            {
+                return 0;
+            }
+            const uint64_t digit = static_cast<uint64_t>(c - L'0');
+            if (ticks > (UINT64_MAX - digit) / 10ULL)
+            {
+                return 0; // overflow
+            }
+            ticks = ticks * 10ULL + digit;
+        }
+        // Same arithmetic as FileTimeToUnixMs (1601 -> 1970 offset, then truncate to ms), so a row
+        // written by the process compares EQUAL to ProcessStartUnixMs of that process.
+        constexpr uint64_t kEpochDiff = 116444736000000000ULL;
+        if (ticks < kEpochDiff)
+        {
+            return 0;
+        }
+        return static_cast<int64_t>((ticks - kEpochDiff) / 10000ULL);
+    }
+
+    bool PresenceRowMatchesProcess(const SessionPresenceRow& r, int64_t procStartUnixMs) noexcept
+    {
+        if (procStartUnixMs <= 0)
+        {
+            return true; // unknown process start: nothing to compare (the pid is already a live claude)
+        }
+        if (r.procStartUnixMs > 0)
+        {
+            // The exact identity: both sides are the SAME FILETIME truncated the same way. A mismatch
+            // is a different process that reused the pid — reject even if startedAt happens to fit.
+            const int64_t d = r.procStartUnixMs - procStartUnixMs;
+            return d >= -kPresenceProcStartToleranceMs && d <= kPresenceProcStartToleranceMs;
+        }
+        // Legacy rows (no procStart): claude stamps startedAt shortly AFTER its process is created.
+        return r.startedAtMs >= procStartUnixMs - kPresenceStartedAtEarlySkewMs &&
+               r.startedAtMs <= procStartUnixMs + kPresenceStartedAtLateSkewMs;
+    }
+
     std::vector<SessionPresenceRow> ReadSessionPresenceIn(std::wstring_view sessionsDir)
     {
         std::vector<SessionPresenceRow> out;
@@ -1795,6 +2005,11 @@ namespace Agentmaster
             // "no such signal" and falls back to the transcript/hook belts.
             r.waitingFor = parsed->StrAt(L"waitingFor");
             r.statusUpdatedAtMs = parsed->I64At(L"statusUpdatedAt");
+            // Agentmaster: the exact process-creation stamp (see the header) — a decimal STRING,
+            // because a FILETIME (~1.3e17) is far past a double's 2^53 exact range; json::Value would
+            // round a numeric form, so only the string is decoded (a numeric one reads 0 = unknown,
+            // which falls back to the startedAt window rather than risking a false reject).
+            r.procStartUnixMs = PresenceProcStartToUnixMs(parsed->StrAt(L"procStart"));
             if (r.pid != 0 && !r.sessionId.empty())
             {
                 out.push_back(std::move(r));
@@ -1838,6 +2053,7 @@ namespace Agentmaster
         // stats.parsedBytes the resume cursor.
         int64_t cachedSize = -1, cachedMtime = -1;
         int64_t cachedCtx = -1; // ctxTokens read from the sidecar; -1 == the key was ABSENT (a pre-contextTokens sidecar — see the backfill below)
+        int64_t cachedCtxVer = 0; // the sidecar's `ctxv` (the ctxTokens semantics version); 0 == absent (pre-compaction-aware) — see kSidecarCtxVersion
         {
             const std::string bytes = ReadFileWhole(sidecar, 4 << 20);
             if (!bytes.empty())
@@ -1863,6 +2079,7 @@ namespace Agentmaster
                     e.stats.cwd = o.StrAt(L"cwd");
                     e.stats.gitBranch = o.StrAt(L"gitBranch");
                     cachedCtx = o.I64At(L"ctxTokens", -1); // -1 == absent (an old sidecar): triggers the one-time backfill below
+                    cachedCtxVer = o.I64At(L"ctxv", 0); // 0 == absent: ctxTokens predates compact-boundary awareness
                     e.stats.contextTokens = cachedCtx < 0 ? 0 : cachedCtx;
                     if (const auto* paths = o.Find(L"paths"); paths && paths->type == json::Value::Type::Arr)
                     {
@@ -1884,7 +2101,11 @@ namespace Agentmaster
         // the key (>= 0) and never re-triggers. A genuinely usage-less session writes ctxTokens=0 and
         // is a normal cache hit next time. (Same one-time full read the index already paid when first
         // built — paid once more, only for in-window sessions, only on the first open after this ships.)
-        const bool needsCtxBackfill = cachedCtx < 0 && e.stats.assistantLines > 0;
+        // Agentmaster (HOOKS.md "Compaction"): the same one-time rebuild also fires for a sidecar whose
+        // ctxTokens was derived BEFORE compact boundaries counted (ctxv below kSidecarCtxVersion): a
+        // session compacted after its last assistant line would otherwise keep showing its
+        // pre-compaction size forever. Only sessions with assistant lines (a real value) pay it, once.
+        const bool needsCtxBackfill = (cachedCtx < 0 || cachedCtxVer < kSidecarCtxVersion) && e.stats.assistantLines > 0;
         if (cachedSize == ref.sizeBytes && cachedMtime == ref.mtimeMs && e.stats.found && !needsCtxBackfill)
         {
             e.sizeBytes = cachedSize;
@@ -1921,6 +2142,7 @@ namespace Agentmaster
         o.Set(L"assistantLines", json::Value::MkNum(e.stats.assistantLines));
         o.Set(L"toolUses", json::Value::MkNum(e.stats.toolUses));
         o.Set(L"ctxTokens", json::Value::MkNum(static_cast<double>(e.stats.contextTokens))); // context occupancy (≤ a few M — exact in a double)
+        o.Set(L"ctxv", json::Value::MkNum(static_cast<double>(kSidecarCtxVersion))); // the ctxTokens semantics version (compact-boundary aware) — see kSidecarCtxVersion
         o.Set(L"customTitle", json::Value::MkStr(e.stats.customTitle));
         o.Set(L"aiTitle", json::Value::MkStr(e.stats.aiTitle));
         o.Set(L"summary", json::Value::MkStr(e.stats.summary));

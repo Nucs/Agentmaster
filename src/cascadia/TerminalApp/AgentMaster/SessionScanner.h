@@ -193,6 +193,17 @@ namespace Agentmaster
         // SessionInfo.recap (the Triage-Board card tooltip); the agentmaster-cli `show` reader emits it.
         // NOT a turn event — it never affects the state machine (its presence is orthogonal to events).
         std::wstring recap;
+        // Agentmaster (HOOKS.md "Compaction" — the stale "ctx N" after a /compact): the context size a
+        // system/compact_boundary in THIS chunk reset the conversation to (its compactMetadata.postTokens),
+        // reported ONLY when that boundary is the chunk's LAST context-bearing line — an assistant line
+        // carrying usage AFTER it supersedes it (that line's own usage is the newer truth), so the value
+        // is 0 then. 0 too when the chunk has no boundary, or the boundary predates postTokens (an older
+        // Claude Code). The scanner folds a non-zero value into SessionInfo.contextTokens AFTER the event
+        // loop: without it the board kept showing the PRE-compaction size (e.g. "ctx 991k") until the next
+        // assistant line — which, after a manual /compact at rest, only comes with the user's NEXT prompt.
+        // Deliberately a side field, NOT a new TranscriptEvent kind: the scanner's event chain ends in a
+        // bare `else` that treats any unlisted kind as a HUMAN PROMPT (a turn event that clears the tail).
+        int64_t compactPostTokens{ 0 };
     };
 
     // PURE + total (never throws): parse a UTF-16 chunk of NEW transcript text into ordered
@@ -509,8 +520,9 @@ namespace Agentmaster
 
     // PURE: is Claude's presence heartbeat reporting this session as actively WORKING? The presence
     // file (~/.claude/sessions/<pid>.json "status") is claude's OWN self-report, and it (a) FOLLOWS
-    // the live conversation across /fork, /clear, /compact, /resume — it is pid-keyed, so it names
-    // the id the process is ACTUALLY in, not the stale launch id — and (b) stays "busy" for the WHOLE
+    // the live conversation across /fork, /clear, /resume — it is pid-keyed, so it names the id the
+    // process is ACTUALLY in, not the stale launch id (a /compact keeps the SAME id: it is in-place,
+    // verified over 429 boundaries) — and (b) stays "busy" for the WHOLE
     // turn, including while a Task/Agent subagent runs and the main transcript is quiescent. So it is
     // the one signal that covers BOTH spawn cases. The S-lane validates it against pid liveness before
     // publishing it onto SessionInfo.presenceStatus (Rule #13: a display FACT — the OBSERVER never
@@ -565,6 +577,53 @@ namespace Agentmaster
     inline bool PresenceIsAtRest(std::wstring_view presenceStatus) noexcept
     {
         return presenceStatus == L"idle";
+    }
+
+    // Agentmaster (the COMPACTION WINDOW — HOOKS.md "Compaction"): the hard cap on how long a PreCompact
+    // with no closing hook may hold the reconcilers. Far above the longest compaction measured on this
+    // machine (durationMs 313 s over 429 boundaries) so a slow summarization is never cut short, yet a
+    // LOST PostCompact/SessionStart (a dropped hook — the forwarder is fire-and-forget) can only hold for
+    // this long even when claude's heartbeat never reads "idle" to release it sooner.
+    inline constexpr int64_t kCompactionHoldMaxMs = 15 * 60 * 1000;
+    // How long after PreCompact claude's own "idle" heartbeat is trusted to END the window early (a
+    // compaction the user CANCELLED with Esc, or one that failed, fires no PostCompact). Covers ~2 S-lane
+    // surveys (kObserverHeartbeatMs 2 s), so the stale pre-compaction "idle" still published in the first
+    // moments of the window — before the survey sees claude flip to "busy" — can never release it.
+    inline constexpr int64_t kCompactionPresenceSettleMs = 5000;
+
+    // PURE + total: is a compaction IN FLIGHT for this session right now, i.e. must the scanner treat the
+    // (silent) transcript as WORKING rather than quiescent? `compactingSinceMs` is SessionInfo::
+    // compactingSinceUnixMs (the PreCompact wire ts, 0 when no window is open). A compaction writes
+    // NOTHING to the transcript until it finishes (the manual /compact echo included), and the tail it
+    // leaves meanwhile is the previous turn's TERMINAL stop_reason — exactly recon-stop's "a Stop was
+    // missed" shape — so the caller forces its quiescence clock to 0 while this holds, the same
+    // treatment a "busy" heartbeat gets (every quiescence-gated synth — recon-stop, the presence-idle
+    // release, recon-block, recon-error, the error release — then stands down together). Ends when:
+    //   * no window is open (0) — the normal case, and after PostCompact / SessionStart closed it;
+    //   * the window is older than kCompactionHoldMaxMs — the lost-closing-hook belt;
+    //   * claude's own heartbeat reads "idle" (PresenceIsAtRest) at least kCompactionPresenceSettleMs
+    //     after the window opened — a cancelled/failed compaction is back at the prompt.
+    // A negative age (a ts from a skewed clock) counts as a just-opened window: hold.
+    inline bool CompactionInFlight(int64_t compactingSinceMs, int64_t nowMs, std::wstring_view presenceStatus) noexcept
+    {
+        if (compactingSinceMs <= 0)
+        {
+            return false;
+        }
+        const int64_t ageMs = nowMs - compactingSinceMs;
+        if (ageMs < 0)
+        {
+            return true; // the window opened "in the future" (clock skew) — treat as just opened
+        }
+        if (ageMs >= kCompactionHoldMaxMs)
+        {
+            return false; // the closing hook was lost — stop holding
+        }
+        if (ageMs >= kCompactionPresenceSettleMs && PresenceIsAtRest(presenceStatus))
+        {
+            return false; // claude is back at the prompt (cancelled / failed compaction — no PostCompact)
+        }
+        return true;
     }
 
     // PURE + total: should the reconciler mark this session BLOCKED ON THE USER purely from claude's

@@ -44,6 +44,7 @@
 #include "AgentMaster/HooksBridge.h" // PipeName for the spawn spec
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / Save-LoadSessions / LoadAppSettings / dir colors
 #include "AgentMaster/ProcessInspect.h" // ProcessAlive / ProcessStartUnixMs / ResolveSessionId
+#include "AgentMaster/ProcessObserver.h" // External() — an Adopt takes the external's CURRENT (presence-resolved) conversation id
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/SessionStore.h" // SetSessionFavorite (FAVORITES.md: "Favorite & Close" dialog branch)
 
@@ -1999,7 +2000,9 @@ namespace winrt::TerminalApp::implementation
     //   * fork == false -> claude --resume <id> continues the SAME conversation (true take-over) — the
     //                      user chose "Resume anyway" and is expected to stop the original first to
     //                      avoid two writers on one transcript.
-    // Resolve the conversation id (cwd + process-start -> ResolveSessionId, Rule #14). No transcript
+    // Resolve the conversation id: the observer's External row first (the conversation the external is
+    // on NOW — presence-resolved, so it follows the external's own /clear and /resume), else cwd +
+    // process-start -> ResolveSessionId (Rule #14). No transcript
     // yet (never prompted -> id "") -> a fresh managed session in the same dir (both branches degrade
     // to fresh). _LaunchClaudeSession transcript-gates both --resume and the fork, so a transcript that
     // vanished between resolve and launch also degrades to fresh rather than dying on "No conversation
@@ -2017,7 +2020,30 @@ namespace winrt::TerminalApp::implementation
         }
         const std::wstring dir{ cwd };
         const int64_t start = ::Agentmaster::ProcessStartUnixMs(pid);
-        const std::wstring id = ::Agentmaster::ResolveSessionId(dir, start);
+        // Agentmaster: adopt the conversation the external is on NOW — the Fleet Observer's published
+        // External row carries it (claude's own pid-validated presence heartbeat, else its explicit
+        // --session-id / --resume <guid>). The bare cwd + start heuristic below is only the fallback:
+        // it names the conversation the process STARTED with, so after the external ran /clear an
+        // Adopt resumed (or forked) the OLD conversation, and it resolves nothing for a
+        // `claude --continue` whose resumed transcript predates the process. The row is matched by pid
+        // AND start time (a recycled pid must never lend another process's id).
+        std::wstring id;
+        if (_observer)
+        {
+            for (const auto& ex : _observer->External())
+            {
+                if (ex.pid == pid && (start == 0 || ex.startUnixMs == 0 || ex.startUnixMs == start) && !ex.sessionId.empty() &&
+                    ex.kind != ::Agentmaster::AgentKind::Codex)
+                {
+                    id = ex.sessionId;
+                    break;
+                }
+            }
+        }
+        if (id.empty())
+        {
+            id = ::Agentmaster::ResolveSessionId(dir, start);
+        }
         // Nav audit: the user adopted an EXTERNAL claude (its conversation resolved from cwd+start).
         // fork = branch a copy into a new transcript (safe on a live external); resume = take it over.
         // The downstream [adopt-external] + [fork]/[resume] lines carry the resulting managed id.

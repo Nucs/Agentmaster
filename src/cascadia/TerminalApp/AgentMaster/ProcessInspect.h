@@ -453,7 +453,8 @@ namespace Agentmaster
     // ===== Session summary (TAB_OVERLAY.md summary panel) — the session-end.js analyzer, ported =====
     // Agentmaster (conversation lineage): ONE segment of a multi-part conversation — the run of
     // messages between two compaction boundaries (a `/compact` splits a transcript into segments;
-    // cross-file `/clear` / plan-restart joins prepend earlier files' segments). The summary panel
+    // a cross-file plan-restart join prepends the parent file's segments — a /clear is NOT joined: it
+    // leaves no on-disk link to its successor, see CollectConversationLineage). The summary panel
     // renders a PREVIOUS segment exactly like the current Messages list, under a separator + `label`.
     struct ConversationSegment
     {
@@ -486,14 +487,14 @@ namespace Agentmaster
         // no recap (recaps off, or never idle). Surfaced in the summary box (overlay panel / Sessions
         // detail / the copyable Summary) as the "Recap:" section.
         std::wstring awaySummary;
-        std::wstring firstTs; // first entry.timestamp (ISO) — conversation start (age)
+        std::wstring firstTs; // first entry.timestamp (ISO) — conversation start (age); spans every /compact (the live branch crosses them), so the duration is the whole session's, not the last segment's
         std::wstring lastTs; // last entry.timestamp (ISO) — last activity
         std::wstring lastUserTs; // last real user INTERACTION's entry.timestamp (ISO) — "last user msg" ago: a typed external-user prompt OR the user's answer to an AskUserQuestion (a tool_result on an interactive tool_use), so answering a question advances the clock too
         int tasksCompleted{ 0 };
         int tasksPending{ 0 }; // pending + in_progress, from the LAST TodoWrite
         bool hasExitPlanMode{ false }; // an ExitPlanMode tool_use (plan-end signal)
         bool hasPlanContent{ false }; // planContent on the first external-user msg (plan-start signal)
-        std::wstring parentSessionId; // from "read the full transcript at: <...>.jsonl" in the first msg
+        std::wstring parentSessionId; // from "read the full transcript at: <...>.jsonl" in the TRUE first msg (the compact summary's own "read the full transcript at: <self>.jsonl" is never it — the live branch crosses the compaction, so the first on-branch prompt is the conversation's first)
         std::wstring planFilePath; // a Write into a /plans/ dir (plan-end's plan file)
         std::vector<std::wstring> planFilesRead; // Reads from a /plans/ dir (full paths)
         // Agentmaster (conversation lineage): true when a system/compact_boundary was seen (the
@@ -501,9 +502,12 @@ namespace Agentmaster
         // post-last-boundary) segment; previousSegments holds the EARLIER segments the compaction(s)
         // summarized away — the "previous session(s)" — OLDEST FIRST, each with its own numbered prompts
         // + a label. Empty (and compacted=false) for a never-compacted session. Gathered by file
-        // POSITION (the pre-compaction turns are off the active leaf chain — the boundary is a parentUuid
-        // root — so a leaf walk can't see them). Cross-file lineage (a /clear or plan-restart parent) is
-        // prepended here by the higher-level lineage resolver, not by AnalyzeSessionTranscript itself.
+        // POSITION, and userMsgs restarts at each on-branch boundary by the same rule, so a prompt is
+        // listed exactly once. Every OTHER field (files, skills, tasks, firstTs, the plan-parent link)
+        // spans the whole session: the live branch crosses each boundary (its logical parent, preserved
+        // messages and pre-boundary leaf — HOOKS.md "Compaction"), and a legacy resume's re-appended copy
+        // of a line is skipped (first occurrence wins). Cross-file lineage (a plan-restart parent) is prepended here by the
+        // higher-level lineage resolver, not by AnalyzeSessionTranscript itself.
         bool compacted{ false };
         std::vector<ConversationSegment> previousSegments;
     };
@@ -574,8 +578,10 @@ namespace Agentmaster
     std::vector<ConversationSegment> CollectConversationSegments(std::wstring_view transcriptText);
 
     // Agentmaster (cross-file conversation lineage): walk `sessionId`'s PREDECESSOR chain backwards —
-    // a plan-restart PARENT (the "read the full transcript at: <parent>.jsonl" link) or a /clear
-    // continuation predecessor (a NEW same-cwd session minted when the user /cleared) — reading each
+    // ONLY a plan-restart PARENT (the "read the full transcript at: <parent>.jsonl" link the child's
+    // first prompt carries; the former same-cwd /clear "continuation predecessor" guess was REMOVED —
+    // /clear leaves no on-disk link to its successor, so the timing heuristic merged unrelated
+    // conversations; /compact never needs this, it is IN-PLACE) — reading each
     // parent transcript, and return EVERY parent's segments OLDEST FIRST, ready to PREPEND to the
     // current session's SessionSummary.previousSegments. Each parent contributes its own in-file
     // /compact previousSegments followed by a segment for its active (leaf) messages, so the panel's

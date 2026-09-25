@@ -403,6 +403,24 @@ namespace Agentmaster
             // NO further UserPromptSubmit — both used to wrongly land WaitingForInput mid-turn.
             const auto ordered = NextSessionStateOrdered(s.state, msg, s.turns);
             s.state = ordered.state;
+            // Agentmaster (the COMPACTION WINDOW — HOOKS.md "Compaction"): PreCompact OPENS it (the
+            // scanner's CompactionInFlight then keeps the silent 1-3+ minute summarization from reading
+            // as a finished turn); PostCompact CLOSES it, and so does anything that proves the window is
+            // over or moot — the trailing SessionStart (compact or otherwise), SessionEnd, a Stop (real or
+            // a synthesized release; a real one cannot overtake the PreCompact that follows it, because
+            // claude AWAITS a Stop hook — it may block the stop — before it runs a queued /compact), or an
+            // API-error synth (a failed compaction). Deliberately NOT a
+            // UserPromptSubmit: a message the user types during a compaction fires its hook, but claude is
+            // still compacting, so the window must keep holding the reconcilers.
+            if (msg.event == HookEvent::PreCompact)
+            {
+                s.compactingSinceUnixMs = (msg.ts != 0) ? msg.ts : NowMs();
+            }
+            else if (msg.event == HookEvent::PostCompact || msg.event == HookEvent::SessionStart ||
+                     msg.event == HookEvent::SessionEnd || msg.event == HookEvent::Stop || msg.apiError)
+            {
+                s.compactingSinceUnixMs = 0;
+            }
             // Agentmaster (API-error triage): preserve the failure reason WHILE in Error so the
             // Triage-Board Error card can show what died (the scanner's recon-error synth carries it on
             // the apiError message); clear it the instant the session leaves Error (recovery), so a

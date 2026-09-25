@@ -131,7 +131,7 @@
 
 `~/.claude` == `%USERPROFILE%\.claude`; `CLAUDE_CONFIG_DIR` relocates everything. "Swept" =
 deleted by the startup sweep when older than **`cleanupPeriodDays`** (default **30**, min 1;
-this machine: 25555 ⇒ nothing pruned). User-added entries (skills, commands, hooks, …) omitted.
+this machine: 2555 ≈ 7 years ⇒ nothing pruned). User-added entries (skills, commands, hooks, …) omitted.
 
 | Entry | Purpose | Keyed by | Swept |
 | --- | --- | --- | --- |
@@ -141,7 +141,7 @@ this machine: 25555 ⇒ nothing pruned). User-added entries (skills, commands, h
 | `projects/<enc-cwd>/memory/` | Auto-memory notes — **not a session** | project | no |
 | `projects/<enc-cwd>/agent-<7hex>.jsonl` | **Legacy** (≤ ~2.0.x) subagent files at top level (818 here); lines carry the parent sid | short agentId | yes |
 | `history.jsonl` | **Every typed prompt**, globally: `{display, pastedContents, project, sessionId, timestamp}` — up-arrow recall | — (append) | **no** |
-| `sessions/<pid>.json` | **Live-session presence**: `{pid, sessionId, cwd, startedAt, version, kind, entrypoint, status: busy\|idle\|waiting\|shell, updatedAt}` — heartbeat-updated; stale after crashes | OS pid | undocumented |
+| `sessions/<pid>.json` | **Live-session presence**: `{pid, sessionId, cwd, startedAt, procStart, version, kind, entrypoint, status: busy\|idle\|waiting\|shell, waitingFor, updatedAt, statusUpdatedAt, messagingSocketPath, name, …}` — rewritten on every status transition; `sessionId` FOLLOWS `/clear`/`/resume` (a `/compact` keeps it), while `startedAt` + `procStart` (the process FILETIME, a decimal string — the exact PID-reuse guard, OBSERVER.md §8b) are written once at registration; stale after crashes | OS pid | undocumented |
 | `file-history/<sid>/<hash>@v<N>` | Pre-edit checkpoint snapshots (`/rewind`) | sid | yes |
 | `tasks/<sid>/<n>.json` | TaskCreate/TaskUpdate task lists | sid | yes |
 | `session-env/<sid>/` | Per-session env / session-scoped hook scripts | sid | yes |
@@ -200,9 +200,14 @@ fields.
   Jan–Feb 2026; zero in current files — reconciles our earlier 0/1,842 survey with community
   claims). `leafUuid` can point into **another (or a deleted) file** — cross-file and fallible.
 - **Compaction never truncates**: `/compact` appends `system/compact_boundary`
-  (`logicalParentUuid` = pre-compact tail, `compactMetadata {trigger, preTokens, postTokens,
-  preservedSegment, preservedMessages}`) + a `user isCompactSummary:true` line; the file keeps
-  growing.
+  (`parentUuid: null`, `logicalParentUuid` = pre-compact tail — occasionally a message never written
+  to disk — `compactMetadata {trigger, preTokens, postTokens, durationMs, preservedSegment,
+  preservedMessages, messagesSummarized, userContext}`) + a `user isCompactSummary:true` line; the file
+  keeps growing, same id. The boundary's null parent is why every live-branch walk must CROSS it (logical
+  parent / preserved messages / the pre-boundary leaf) or it hides the whole pre-compaction
+  conversation — HOOKS.md *Compaction*. A partial compaction writes its preserved tail after the summary
+  (auto) or keeps the early messages and summarizes the middle ("summarize from here"); a legacy resume
+  (≤ 2.1.147) re-appended the whole history (duplicate uuids — display readers keep the first).
 
 ---
 
@@ -235,11 +240,16 @@ projects/K--source-X/  ◄── enc(cwd)                                 ┌─
 ```
 
 - **Resume** (`--resume <id>`, `--continue`, picker) **appends to the same file, same id** — two
-  terminals resuming one session interleave into one transcript [docs]. No copy-on-resume.
+  terminals resuming one session interleave into one transcript [docs]. No copy-on-resume in current
+  builds; Claude Code ≤ 2.1.147 re-appended the loaded history verbatim on resume (6 transcripts here
+  carry up to 8,240 duplicate uuids — the display readers keep each message's first occurrence).
 - **Fork** = new file, full duplicate of the parent subtree from the current context root (the
   latest compact boundary); can contain **zero novel messages**.
-- **`/clear`** ends the session (`SessionEnd why_ended:"clear"`) and mints a new id; the old file
-  stays resumable.
+- **`/clear`** ends the session (`SessionEnd` reason `"clear"`, then `SessionStart` source `"clear"`)
+  and mints a new id in the SAME process; the old file stays resumable. The presence file follows the new
+  id; the cmdline `--session-id` does not.
+- **`/compact`** is **in-place**: same id, same file (`PreCompact` → `PostCompact` →
+  `SessionStart` source `"compact"`) — HOOKS.md *Compaction*.
 - **`/cd`** (v2.1.169+) **relocates** the transcript to the new dir's project folder — project-dir
   membership is not immutable.
 

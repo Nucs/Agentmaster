@@ -108,6 +108,7 @@ int wmain()
     TestExtractPathsFromText();
     TestInferWorkingDirectory();
     TestConversationLineage();
+    TestCompactionLifecycle();
     TestConversationFollowup();
     TestAnalyzeFootprint();
     TestCommandWatch();

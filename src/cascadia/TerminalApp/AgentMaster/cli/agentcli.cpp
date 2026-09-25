@@ -402,7 +402,11 @@ namespace
                 continue; // the Claude DESKTOP app (Electron GUI, cwd C:\WINDOWS\system32), not a CLI session
             }
             const SessionPresenceRow* pres = nullptr;
-            if (const auto it = presByPid.find(e.pid); it != presByPid.end())
+            // Agentmaster: the row must be THIS process's heartbeat, not a leftover `<pid>.json` of a
+            // dead claude whose pid this one reused (PresenceRowMatchesProcess — the exact procStart
+            // identity, else the startedAt window) — the same guard the Fleet Observer applies before
+            // publishing, so the CLI can never bind a live claude to a dead conversation's id/status.
+            if (const auto it = presByPid.find(e.pid); it != presByPid.end() && PresenceRowMatchesProcess(*it->second, lc.facts.startUnixMs))
             {
                 pres = it->second;
                 lc.presence = pres->status;

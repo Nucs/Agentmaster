@@ -631,9 +631,9 @@ namespace winrt::TerminalApp::implementation
             }
             // Kind-aware re-home: Codex resumes via `codex resume <uuid>` (rollout-gated on
             // SessionInfo.codexSessionId), Claude via `claude --resume <id>`. _LaunchClaudeSession resumes
-            // the NEWEST conversation in this ref's continuation chain (Claude splits ids on /clear,
-            // /compact, the plan->implement transition) and returns null when that conversation is ALREADY
-            // hosted by an earlier ref this restore — two archived refs that chained to one live
+            // EXACTLY the id this ref recorded (no "continuation tail" redirect: /compact is in-place and
+            // keeps its id, /clear leaves no link to its successor) and returns null when that
+            // conversation is ALREADY hosted by an earlier ref this restore — two refs recorded for one
             // conversation (a tab can't be two sessions). A null is NOT a new tab, so it must not advance
             // the resumed/focus accounting — count it skipped.
             const auto homed = isCodex

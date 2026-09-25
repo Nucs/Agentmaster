@@ -7,7 +7,7 @@
 //
 // One hook invocation -> one UTF-8, newline-terminated, TAB-separated record:
 //
-//     event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \t prompt \t ts \n
+//     event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \t prompt \t ts \t source \n
 //
 // Fields after `sessionId` are optional (older/edge forwarders may omit them). `cwd`,
 // `tool` and `tabToken` are assumed free of TAB/newline (true for Windows paths, Claude
@@ -20,7 +20,12 @@
 // path reads the transcript) — so the registry can ORDER events that arrive out of order
 // (a slow Stop landing after the next turn's UserPromptSubmit; see NextSessionStateOrdered).
 // It is appended LAST so an old 8-field line still parses (ts -> 0 == arrival-order
-// fallback) and an old parser simply ignores the extra field.
+// fallback) and an old parser simply ignores the extra field. The trailing `source` (the 10th
+// field, same append-last compatibility) is the hook payload's own discriminator — SessionStart
+// `source`, SessionEnd `reason`, Pre/PostCompact `trigger` — which lets the state machine tell a
+// compaction's SessionStart from a real (re)start (HOOKS.md "Compaction"). A 9-field line (an old
+// forwarder, e.g. a session launched before this build that still runs its pre-update hooks)
+// parses with source "" and takes the historical, source-blind path.
 // We deliberately avoid JSON on the wire so the bridge needs no JSON dependency; the
 // forwarder (which DOES have PowerShell's ConvertFrom-Json) does the parsing and emits
 // these few flat fields.
@@ -113,6 +118,34 @@ namespace Agentmaster
         return o;
     }
 
+    // The longest `source` token the wire accepts. The real vocabulary is a handful of short words
+    // (startup / resume / clear / compact / fork / manual / auto / logout / prompt_input_exit /
+    // other); anything longer is not a value the state machine could act on anyway.
+    inline constexpr size_t kWireSourceMaxChars = 32;
+
+    // Sanitize the `source` field to a plain identifier token: keep only ASCII letters, digits, '_'
+    // and '-', and return EMPTY for anything else (or when longer than kWireSourceMaxChars) rather than
+    // a trimmed guess — the state machine compares it LITERALLY against "compact" / "manual", so a
+    // mangled value must degrade to the historical source-blind path, never to a partial match. The
+    // PowerShell forwarder applies the SAME rule before sending (a case-sensitive
+    // '^[A-Za-z0-9_-]{0,32}\z' test, else empty — belt + suspenders). PURE + total.
+    inline std::wstring SanitizeWireSource(std::wstring_view s)
+    {
+        if (s.size() > kWireSourceMaxChars)
+        {
+            return {};
+        }
+        for (const wchar_t c : s)
+        {
+            const bool ok = (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') || c == L'_' || c == L'-';
+            if (!ok)
+            {
+                return {};
+            }
+        }
+        return std::wstring{ s };
+    }
+
     // Build a single wire line (used by tests and as the reference the forwarder mirrors).
     inline std::wstring BuildWireLine(const HookMessage& m)
     {
@@ -134,6 +167,8 @@ namespace Agentmaster
         s.append(WireEscape(m.promptText));
         s.push_back(kWireFieldSep);
         s.append(std::to_wstring(m.ts)); // hook fire time (unix ms) — the ordering key
+        s.push_back(kWireFieldSep);
+        s.append(SanitizeWireSource(m.source)); // the payload discriminator (source / reason / trigger) — "" when none
         return s;
     }
 
@@ -225,6 +260,13 @@ namespace Agentmaster
                     m.ts = v;
                 }
             }
+        }
+        if (fields.size() > 9)
+        {
+            // source: the payload discriminator (SessionStart source / SessionEnd reason / Pre-
+            // PostCompact trigger). Sanitized to a short identifier token — anything else reads "",
+            // i.e. the historical source-blind path (see SanitizeWireSource).
+            m.source = SanitizeWireSource(fields[9]);
         }
         return m;
     }

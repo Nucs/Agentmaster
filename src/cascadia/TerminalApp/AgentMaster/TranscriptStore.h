@@ -129,7 +129,7 @@ namespace Agentmaster
         bool sidechain{}; // isSidechain:true (inline subagent lines, old strata) — never main-chain state/stats
         bool meta{}; // isMeta / isCompactSummary / a noise prompt — not a human message
         int toolUses{}; // # of assistant tool_use blocks on this line
-        int64_t contextTokens{}; // Assistant only: message.usage sum (input + cache_creation + cache_read + output) ≈ this turn's context size; 0 when no usage block
+        int64_t contextTokens{}; // Assistant: message.usage sum (input + cache_creation + cache_read + output) ≈ this turn's context size; a system/compact_boundary line: its compactMetadata.postTokens (the context the compaction left — HOOKS.md "Compaction"); 0 otherwise / when absent
         std::wstring userText; // UserPrompt only (REAL prompts only), capped
         std::wstring agentText; // Assistant / UserToolResult / System searchable text, capped
         std::wstring title; // CustomTitle / AiTitle / Summary payload (collapsed to one line)
@@ -161,6 +161,22 @@ namespace Agentmaster
     // branch — the chain from the current leaf back to the root. SEARCH/index surfaces deliberately
     // DO NOT use this (the sidecar index + content scan keep indexing EVERY line, so a reverted
     // message stays findable — we just never DISPLAY it).
+    //
+    // COMPACTION IS CROSSED, NOT A ROOT (HOOKS.md "Compaction"). A /compact (manual or auto) is
+    // IN-PLACE: its `system/compact_boundary` line is written with a NULL parentUuid (the
+    // post-compaction chain starts there). A parentUuid-only walk therefore stopped at every boundary and
+    // orphaned the conversation before it (99.2% of the pre-compaction typed prompts over the 193
+    // compacted transcripts on this machine): every compacted session's summary panel, prompt list/title,
+    // copied Transcript and Followup lost everything before its last compaction. The walk is an UPWARD
+    // search over a multi-edge graph instead: every occurrence's parentUuid (a legacy resume re-appended
+    // whole histories; a partial compaction re-links preserved messages), plus, at a compaction root,
+    // edges to every preserved message it names (compactMetadata.preservedMessages / preservedSegment),
+    // to its logicalParentUuid, and to the leaf written just before it (the marker, or the node that
+    // followed the marker) — the last reaches the middle a "summarize from here" compaction folded away.
+    // A double-ESC rewind is still honored across all of it: an abandoned branch is an ancestor of none
+    // of these, so it stays excluded (the remaining 11.0% off-branch were measured to be 97% genuine
+    // rewinds; nothing the old walk kept is dropped). Consumers that want only the CURRENT compaction
+    // segment (the summary panel's Messages list) cut at the boundary themselves, in file order.
     //
     // Given a transcript's COMPLETE text, return the set of message `uuid`s on the active branch.
     // Returns EMPTY when the text carries no `leafUuid` marker (a pre-leaf-marker stratum, or a
@@ -218,6 +234,15 @@ namespace Agentmaster
     };
 
     inline constexpr size_t kMaxPathsAccessed = 512;
+
+    // Agentmaster (HOOKS.md "Compaction"): the SEMANTICS version of a sidecar's `ctxTokens`, stored as
+    // the sidecar's `ctxv` key. 1 (or absent) == the value predates compact-boundary awareness: a session
+    // compacted AFTER its last assistant line still carries the PRE-compaction size (the stale "Ctx"
+    // column). 2 == the fold also applies a compact_boundary's postTokens. A sidecar below this version
+    // (with assistant lines, i.e. a real value to correct) is rebuilt ONCE from offset 0 — the same
+    // one-time, in-window-only cost the original ctxTokens backfill paid — and rewritten at this version,
+    // so it never re-triggers. Bump it whenever the ctxTokens derivation changes again.
+    inline constexpr int64_t kSidecarCtxVersion = 2;
 
     // One incremental accumulate: scan [stats.parsedBytes, EOF) and fold into `stats`. Returns
     // false (stats.found=false) when the file is gone — the sweep deletes mid-listing; callers
@@ -373,7 +398,41 @@ namespace Agentmaster
         //   statusUpdatedAt — ms epoch of the last status transition (0 when absent).
         std::wstring waitingFor;
         int64_t statusUpdatedAtMs{};
+        // Agentmaster: the claude PROCESS's creation time (Unix ms), decoded from the file's `procStart`
+        // — claude >= 2.1.2xx writes the raw Windows FILETIME of its own process as a DECIMAL STRING
+        // (e.g. "134347853746656012"), which is EXACTLY the creation time GetProcessTimes reports
+        // (measured over every live row: identical to the tick). Decoded with the SAME truncating
+        // conversion ProcessStartUnixMs uses, so the same instant compares EQUAL. It is the exact
+        // PID-reuse guard (PresenceRowMatchesProcess): unlike startedAt — stamped 0.65-1.5 s AFTER
+        // creation, so it can only be matched within a window — it identifies THE process. 0 when absent
+        // (an older claude, POSIX) or unparseable, which falls back to the startedAt window.
+        int64_t procStartUnixMs{};
     };
+
+    // PID-reuse tolerances for trusting a presence row as THIS process's (PresenceRowMatchesProcess).
+    // procStart is the same FILETIME truncated the same way, so the tolerance only absorbs a rounding
+    // edge; the startedAt window is the legacy rule (claude writes startedAt after its own init — 0.65-
+    // 1.5 s measured — so a small early skew for clock granularity and a generous late bound for a slow
+    // start under load).
+    inline constexpr int64_t kPresenceProcStartToleranceMs = 1;
+    inline constexpr int64_t kPresenceStartedAtEarlySkewMs = 5000;
+    inline constexpr int64_t kPresenceStartedAtLateSkewMs = 60000;
+
+    // Decode a presence `procStart` (a Windows FILETIME — 100 ns ticks since 1601 — as a decimal string)
+    // to Unix ms, truncating exactly like FileTimeToUnixMs. 0 for an empty / non-digit / overflowing /
+    // pre-1970 value — never a guess, since a wrong value would REJECT a correct row. Pure + total.
+    int64_t PresenceProcStartToUnixMs(std::wstring_view procStart) noexcept;
+
+    // Is presence row `r` the heartbeat of the live process created at `procStartUnixMs`? Every consumer
+    // must ask this before trusting a row: a crashed claude's `<pid>.json` lingers, and Windows recycles
+    // PIDs, so "pid alive and a claude.exe" alone can pair a NEW claude with a DEAD one's conversation
+    // (mis-binding a tab, or painting the dead session with the stale file's status). Exact when both
+    // sides know the creation time (|r.procStartUnixMs - procStartUnixMs| <= kPresenceProcStartToleranceMs);
+    // else the legacy startedAt window [start - 5 s, start + 60 s] (a row with no startedAt fails it,
+    // as it always did). An UNKNOWN process start (0 — the PEB/handle query was denied) accepts: nothing
+    // to compare, and the caller already proved the pid is a live claude.exe. Pure.
+    bool PresenceRowMatchesProcess(const SessionPresenceRow& r, int64_t procStartUnixMs) noexcept;
+
     std::vector<SessionPresenceRow> ReadSessionPresenceIn(std::wstring_view sessionsDir);
     // Against the live `<claude home>/sessions` (the sibling of ClaudeProjectsDir()).
     std::vector<SessionPresenceRow> ReadSessionPresence();

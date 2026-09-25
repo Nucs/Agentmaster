@@ -1279,8 +1279,21 @@ namespace Agentmaster
         bool manualUnread{ false };
         // Transient (NOT persisted): turn accounting for the ordered state machine — see
         // TurnAccounting above / NextSessionStateOrdered (HookEvents.h). Reset on
-        // SessionStart / SessionEnd (a resume must not inherit stale turn identity).
+        // SessionStart / SessionEnd (a resume must not inherit stale turn identity) — EXCEPT a
+        // compaction's SessionStart(source="compact"), which continues the same conversation/turn.
         TurnAccounting turns{};
+        // Agentmaster (the COMPACTION WINDOW — HOOKS.md "Compaction"; Transient, NOT persisted —
+        // Persistence.cpp must not write it): the wire ts of the PreCompact hook that opened a
+        // compaction still in flight, 0 when none. Set by SessionRegistry::OnHookEvent on PreCompact,
+        // cleared by PostCompact / SessionStart / SessionEnd / Stop / an API-error synth. While it holds
+        // (CompactionInFlight, SessionScanner.h — bounded by claude's own at-rest heartbeat and a hard
+        // cap), the scanner treats the conversation as WORKING: its quiescence clock is forced to 0, the
+        // same way a "busy" heartbeat forces it — because a compaction runs 1-3+ minutes with the
+        // transcript completely SILENT (nothing is written until it finishes, the manual /compact echo
+        // included), so without this the missed-Stop reconcilers would read the old terminal tail as
+        // "the turn ended" and demote the compacting session back to Waiting within seconds (READY to
+        // the Tests Autorunner again — the very hazard PreCompact -> Running closes).
+        int64_t compactingSinceUnixMs{ 0 };
         // Transient (NOT persisted): the latest assistant message text the interval reconciler
         // (SessionScanner) tailed from this session's transcript. Hooks don't carry assistant
         // output — this captures it (the foundation for a live Auto-Testing "peek"). Written via

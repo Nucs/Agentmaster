@@ -33,7 +33,24 @@ namespace Agentmaster
         Stop,
         SubagentStop,
         SessionEnd,
+        // Agentmaster (the COMPACTION WINDOW — HOOKS.md "Compaction"): Claude Code fires PreCompact
+        // right BEFORE it summarizes the conversation (a manual `/compact`, or an auto-compaction when
+        // the context crosses the auto-compact window — mid-turn) and PostCompact right AFTER, then a
+        // SessionStart(source="compact") — verified against the installed 2.1.280 compaction routine.
+        // Both carry `trigger` ("manual" | "auto") on the wire's `source` field. Appended LAST so every
+        // pre-existing enumerator keeps its numeric value (the `cause` of a registry notify, logs).
+        PreCompact,
+        PostCompact,
     };
+
+    // Agentmaster (HOOKS.md "Compaction"): the hook payload discriminator values the state machine
+    // keys on, carried in HookMessage::source. SessionStart's `source` is one of startup / resume /
+    // clear / compact / fork; Pre/PostCompact's `trigger` is manual / auto (the Claude Code 2.1.280
+    // hook schemas). Only these three are behavior-bearing today; any other value (or an empty one
+    // from an old 9-field forwarder) takes the historical path.
+    inline constexpr std::wstring_view kHookSourceCompact = L"compact"; // SessionStart after a compaction (same conversation id, same file)
+    inline constexpr std::wstring_view kCompactTriggerManual = L"manual"; // a user-typed `/compact` (the session was AT REST before it)
+    inline constexpr std::wstring_view kCompactTriggerAuto = L"auto"; // an auto-compaction (normally MID-TURN: the turn continues after it)
 
     inline HookEvent ParseHookEvent(std::wstring_view name) noexcept
     {
@@ -69,6 +86,14 @@ namespace Agentmaster
         {
             return HookEvent::SessionEnd;
         }
+        if (name == L"PreCompact")
+        {
+            return HookEvent::PreCompact;
+        }
+        if (name == L"PostCompact")
+        {
+            return HookEvent::PostCompact;
+        }
         return HookEvent::Unknown;
     }
 
@@ -92,6 +117,10 @@ namespace Agentmaster
             return L"SubagentStop";
         case HookEvent::SessionEnd:
             return L"SessionEnd";
+        case HookEvent::PreCompact:
+            return L"PreCompact";
+        case HookEvent::PostCompact:
+            return L"PostCompact";
         default:
             return L"Unknown";
         }
@@ -122,6 +151,15 @@ namespace Agentmaster
         // hand-typed `claude` in a `+` tab) back to its ConPTY connection so it can bind a
         // stdin injector — i.e. ADOPT it into full observe+control. Empty when unavailable.
         std::wstring tabToken;
+        // Agentmaster (the wire's 10th field — HookWire.h): the hook payload's own DISCRIMINATOR, which
+        // the forwarder used to throw away: SessionStart `source` (startup / resume / clear / compact /
+        // fork), SessionEnd `reason` (clear / resume / logout / prompt_input_exit / other), Pre/PostCompact
+        // `trigger` (manual / auto). Empty for every other event and from an old 9-field forwarder (whose
+        // lines therefore take the historical, source-blind path). Sanitized to a short [A-Za-z0-9_-]
+        // token at parse (ParseWireLine), so the state machine can compare it literally. It is what lets
+        // NextSessionState tell a compaction's SessionStart (the SAME conversation continuing — often
+        // mid-turn) from a real (re)start, instead of demoting a Running turn to Idle.
+        std::wstring source;
         // Engine-internal (never on the wire): set ONLY by the SessionScanner's missed-Stop
         // reconciliation. That Stop is synthesized from a ≥2s-QUIESCENT transcript whose last
         // assistant message ended the turn, so it is authoritative "the conversation is idle
@@ -158,9 +196,10 @@ namespace Agentmaster
     // may stamp SessionInfo::lastTurnUnixMs (the hook-side half of the Triage-Board ⚡ hint).
     // Deliberately EXCLUDED:
     //   • SessionStart — fires at launch / `--resume` (restore, Sessions-page resume, ADOPT) /
-    //     an in-session /clear or /compact. NONE of those send an API request (a resume doesn't
-    //     touch the API until the next prompt), yet each stamps the decay anchor "now" — the exact
-    //     "⚡ right after adopting" false positive.
+    //     an in-session /clear or /compact. None of those WARMS this conversation's cache (a resume
+    //     doesn't touch the API until the next prompt; a /compact's summarization call replaces the
+    //     prefix it would have cached — see PreCompact/PostCompact below), yet each stamps the decay
+    //     anchor "now" — the exact "⚡ right after adopting" false positive.
     //   • SessionEnd — claude exiting; its last turn's Stop already counted.
     //   • A synthesized QUIESCENT Stop — reconciliation-TIMED, not turn-timed: recon-stop fires ≥2s
     //     after quiescence, the presence-idle release 5–30s late, and recon-error-release on a
@@ -198,6 +237,13 @@ namespace Agentmaster
         case HookEvent::SubagentStop: // a subagent/teammate turn — its API call is in ITS OWN context, never the lead's cache
         case HookEvent::SessionStart:
         case HookEvent::SessionEnd:
+        // Agentmaster (HOOKS.md "Compaction"): a compaction DOES make an API request (the summarization),
+        // but it REPLACES the conversation's prefix with a fresh summary — the next real request runs on a
+        // brand-new prefix whose server-side cache is COLD. So neither end of the window is evidence that
+        // this conversation's cache is warm; stamping them would light ⚡ on exactly the prefix that was
+        // just thrown away.
+        case HookEvent::PreCompact:
+        case HookEvent::PostCompact:
         case HookEvent::Unknown:
         default:
             return false;
@@ -241,9 +287,25 @@ namespace Agentmaster
             // current state resets to Idle (fresh launch — a new record starts Idle anyway — plus a
             // Running/Error/Done restart and a /clear from idle). Turn identity still resets in
             // NextSessionStateOrdered (turns = {}).
-            return (current == SessionState::WaitingForInput || current == SessionState::NeedsApproval)
-                       ? current
-                       : SessionState::Idle;
+            if (current == SessionState::WaitingForInput || current == SessionState::NeedsApproval)
+            {
+                return current;
+            }
+            // Agentmaster (HOOKS.md "Compaction" — the auto-compaction Running->Idle blip): a
+            // SessionStart(source="compact") is NOT a (re)start. Claude fires it right after a compaction
+            // (after PostCompact), on the SAME conversation id and file, and an AUTO-compaction happens
+            // MID-TURN — the turn carries straight on (the auto-continuation fires no UserPromptSubmit).
+            // Resetting to Idle here demoted every working session for the ~0.1-10 s until the scanner's
+            // recon re-lit it (proven live: NumSharp a3d777bf, 10 auto-compactions overnight, each logging
+            // `[SessionStart] ... state=0` then `[recon-subagent] Idle -> Running`), and Idle is READY to
+            // the Tests Autorunner — a queued prompt could be delivered into the continuing turn. So a
+            // compaction keeps a Running turn Running. Error/Done still normalize to Idle below (a
+            // compaction that completed means the conversation is usable again).
+            if (m.source == kHookSourceCompact && current == SessionState::Running)
+            {
+                return current;
+            }
+            return SessionState::Idle;
         case HookEvent::UserPromptSubmit:
             return SessionState::Running;
         case HookEvent::PreToolUse:
@@ -259,6 +321,27 @@ namespace Agentmaster
             return current; // informational only
         case HookEvent::SessionEnd:
             return SessionState::Done;
+        case HookEvent::PreCompact:
+            // Agentmaster (HOOKS.md "Compaction"): the conversation is being SUMMARIZED — an API call that
+            // takes 1-3+ minutes (measured durationMs up to 313 s). claude is WORKING, so the card must
+            // read Running for the whole window: a manual `/compact` at rest used to keep reading
+            // Waiting/Idle (READY to the Tests Autorunner — a queued prompt could be typed into the
+            // compacting TUI) because its echo is only written AFTER the compaction and no other hook
+            // fires. An auto-compaction arrives mid-turn, where this is already Running (a no-op).
+            // Deliberately trigger-independent and state-independent: an Error ("Prompt is too long")
+            // the user answers with `/compact` is working again the moment the compaction starts.
+            return SessionState::Running;
+        case HookEvent::PostCompact:
+            // Agentmaster (HOOKS.md "Compaction"): the summary is in. A MANUAL compaction returns claude
+            // to the prompt — the conversation is at rest, waiting for the user's next message, so land
+            // WaitingForInput (the "needs you" column; the flash/toast then tells a user who switched
+            // away during a multi-minute compaction that it finished). It is NOT a turn completion: the
+            // ordered layer leaves turnComplete false, so no question-guard fires and the Stop seam does
+            // not advance (the change-driven advance may, exactly as for any at-rest session). An AUTO
+            // compaction happened inside a turn that now CONTINUES — keep the current state (Running).
+            // An unknown/empty trigger (an old forwarder) keeps the current state too: the scanner's
+            // quiescence reconcilers settle it as they always did.
+            return (m.source == kCompactTriggerManual) ? SessionState::WaitingForInput : current;
         case HookEvent::Unknown:
         default:
             return current;
@@ -329,8 +412,36 @@ namespace Agentmaster
         switch (m.event)
         {
         case HookEvent::SessionStart:
+            // A (re)start settles turn identity — EXCEPT a compaction's SessionStart (source "compact"):
+            // the SAME conversation continues, and after an AUTO-compaction the very same TURN continues.
+            // Wiping the accounting there dropped a type-ahead count (the batch's Stop then read as a
+            // turn-complete — the autorunner advance firing into the running batch, the hazard this layer
+            // exists to close) and the newest-prompt stamp the stale/duplicate-Stop guards key on.
+            if (m.source != kHookSourceCompact)
+            {
+                turns = {};
+            }
+            break;
         case HookEvent::SessionEnd:
-            turns = {}; // a (re)start / end settles turn identity
+            turns = {}; // a session end settles turn identity
+            break;
+        // PreCompact deliberately falls through to `default`: opening a compaction window neither starts
+        // nor ends a turn, so it never touches the accounting (see NextSessionState).
+        case HookEvent::PostCompact:
+            // Agentmaster (HOOKS.md "Compaction" — type-ahead DURING a manual compaction): PreCompact set
+            // Running, so a prompt the user submitted while claude was summarizing was counted as
+            // type-ahead above (its UserPromptSubmit fires at Enter). Claude runs it as the NEXT turn the
+            // moment the compaction ends, with NO further UserPromptSubmit — the very batch consume a Stop
+            // performs. Landing WaitingForInput there read the session as READY while claude started that
+            // turn (the Tests Autorunner could deliver into it), so consume the batch and stay Running.
+            // Keyed on the WaitingForInput result, i.e. a MANUAL compaction only: an AUTO one kept
+            // Running (its turn continues), and its queued batch still belongs to that turn's own Stop.
+            // Still no turnComplete — a compaction is not a turn boundary.
+            if (turns.queuedPrompts > 0 && out.state == SessionState::WaitingForInput)
+            {
+                turns.queuedPrompts = 0;
+                out.state = SessionState::Running;
+            }
             break;
         case HookEvent::UserPromptSubmit:
             // Agentmaster (DELIVERY_PLAN.md R3 — phantom/duplicate UserPromptSubmit hardening): only a

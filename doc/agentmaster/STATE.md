@@ -44,8 +44,9 @@ optional low-latency *hint* during migration, then get deleted. Rule #13 already
 > or claude's idle heartbeat (`[recon-stop-idle]`) — so it cycles Idle→Running→WaitingForInput like a
 > hooked one. (Every `[recon-*]` synth + the `[decay-waiting]` cache-window demotion is traced to
 > `scanner.log` in the active profile dir — distinct from the hook bridge's `hooks.log`.) The
-> mechanism is **reconcilers on the hook machine**, not §5's `DeriveState`. The
-> API-error / compaction / Done process-fact arms (§5) did **not** ship.
+> mechanism is **reconcilers on the hook machine**, not §5's `DeriveState`. Of the §5 process-fact
+> arms, the **API-error** one shipped as `[recon-error]` (CLAUDE.md Engine M5) and **compaction** shipped
+> as a hook-driven WINDOW (below, §3), while the **Done** arm did **not** ship.
 
 ## 1. Decisions (locked — from design review)
 
@@ -135,9 +136,18 @@ flag-gated and format-unstable — so it is at most an *optional accelerator*, n
 
 > **Shipped: NOT yet.** `SessionState` is still the Core 6 — `Starting`/`Compacting` were not added.
 > "Starting" is surfaced as the OBSERVER §11d badge (a never-prompted claude has **no registry state** —
-> `_reconcileSession` early-returns on an empty `ResolveClaudeTranscriptPath`); a compaction is absorbed
-> as ordinary tail activity; `Done` is still the connection-Closed `_SweepClaudeLiveness`, not a `pid &&
-> !ProcessAlive` derive — so §10-Q6 stays open.
+> `_reconcileSession` early-returns on an empty `ResolveClaudeTranscriptPath`); `Done` is still the
+> connection-Closed `_SweepClaudeLiveness`, not a `pid && !ProcessAlive` derive — so §10-Q6 stays open.
+>
+> **Compaction shipped WITHOUT a `Compacting` value** — and the tail signal the row above keys on turned
+> out to be wrong: nothing is written to the transcript WHILE claude compacts (1–3+ minutes); the
+> `compact_boundary` + `isCompactSummary` lines land only when it is DONE, so "a boundary is the live
+> tail" never describes an in-flight compaction. The signal is the `PreCompact`/`PostCompact` HOOK pair
+> instead: `PreCompact` → `Running` + opens `SessionInfo::compactingSinceUnixMs`, during which the
+> scanner's `CompactionInFlight` stands every quiescence synth down; `PostCompact(manual)` →
+> `WaitingForInput`; `SessionStart(source="compact")` no longer resets a running turn to `Idle`
+> (HOOKS.md *Compaction*). A hook-less session still has no compaction signal — it reads as a quiet
+> tail, and presence `busy` is what holds it.
 
 ### 3b. Deferred — annotations, not states (this pass)
 

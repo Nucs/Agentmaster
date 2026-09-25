@@ -53,10 +53,14 @@ namespace Agentmaster
     // then writes one wire line to the pipe. `-Event <Name>` selects the event. `stateDir` (the
     // ACTIVE profile dir) is baked into the bridge-discovery fallback (<stateDir>\bridge.json) —
     // each profile runs its own engine + pipe, so a fixed ~/.agentmaster path would route a
-    // dev-profile session's hooks to the release instance's bridge.
+    // dev-profile session's hooks to the release instance's bridge. The line carries all TEN
+    // HookWire.h fields, the tenth being the payload discriminator (SessionStart `source`,
+    // Pre/PostCompact `trigger`, SessionEnd `reason`), validated to SanitizeWireSource's exact rule
+    // (else empty) — the compaction window depends on it (HookEvents.h / HOOKS.md "Compaction").
     std::wstring BuildForwarderScript(const std::wstring& stateDir);
 
-    // The Claude settings JSON: always wires each consumed hook event to the forwarder, and
+    // The Claude settings JSON: always wires each consumed hook event to the forwarder (SessionStart,
+    // UserPromptSubmit, Notification, Stop, SubagentStop, PreCompact, PostCompact, SessionEnd), and
     // additionally carries the optional Claude-session settings the user sets via the cog:
     //   * model              -> emits "model": "<v>"            (only when non-empty)
     //   * includeCoAuthoredBy -> emits "includeCoAuthoredBy": false (only when false)

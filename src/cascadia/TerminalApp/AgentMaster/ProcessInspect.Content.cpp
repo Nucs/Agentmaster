@@ -155,6 +155,7 @@ namespace Agentmaster
         // ActiveBranchUuids returns empty for it anyway. Empty on a truncated head read (no tail leaf
         // marker). SEARCH is a separate path (it keeps every line). See TranscriptStore::ActiveBranchUuids.
         const std::unordered_set<std::wstring> activeBranch = (!codex && !truncated) ? ActiveBranchUuids(wide) : std::unordered_set<std::wstring>{};
+        std::unordered_set<std::wstring> seenUuids; // message uuids already emitted — a later occurrence is a re-written copy
 
         std::wstring out;
         const auto emit = [&out](const wchar_t* who, std::wstring t) {
@@ -242,6 +243,13 @@ namespace Agentmaster
                 continue;
             }
 
+            // Agentmaster (HOOKS.md "Compaction" — re-appended history): a uuid seen earlier in the file is
+            // a re-written COPY (a legacy resume re-appended whole histories); emit each message once, at
+            // its first — authentic — position. (Kept in lockstep with ReadConversationFollowupTextImpl.)
+            if (const std::wstring uuid = obj.StrAt(L"uuid"); !uuid.empty() && !seenUuids.insert(uuid).second)
+            {
+                continue;
+            }
             // Agentmaster (revert-aware): skip a Claude line on a rewound-away branch (its uuid isn't on
             // the active leaf->root chain), so the copied transcript reflects the live conversation only.
             // Empty activeBranch (head read / no leaf marker) => keep all.
@@ -351,7 +359,7 @@ namespace Agentmaster
     // turns) are blank-line separated. Empty when no visible message exists (never legend-only).
     //
     // ⚠ The read + WALK + FILTERS below are ReadConversationTextImpl's, VERBATIM (the base64 scrub,
-    // the live-branch skip, type user/assistant only, no meta/compact/sidechain, tool_result turns
+    // the re-written-copy skip, the live-branch skip, type user/assistant only, no meta/compact/sidechain, tool_result turns
     // dropped, only `text` blocks visible, IsNoiseUserPrompt on user prompts, the Codex event_msg
     // user_message/agent_message pair) — a deliberate lockstep COPY, not a shared walker, so the
     // long-standing formatter above stays byte-identical (the AgentStatusColors/StateColor
@@ -382,6 +390,7 @@ namespace Agentmaster
         static constexpr const wchar_t* kUserMark = L"\u276F";
         static constexpr const wchar_t* kReplyMark = L"\u25CF";
 
+        std::unordered_set<std::wstring> seenUuids; // message uuids already emitted — a later occurrence is a re-written copy
         std::wstring turns; // the marker blocks; the legend is prepended at the end, only when a turn exists
         std::wstring lastReply; // the current turn's would-be FINAL reply (each later assistant text supersedes it)
         bool turnOpen = false; // a U+276F block emitted whose reply hasn't been — the U+25CF (or a batch's next U+276F) glues onto it
@@ -519,6 +528,12 @@ namespace Agentmaster
                 continue;
             }
 
+            // Agentmaster (HOOKS.md "Compaction" — re-appended history): each message once, at its first
+            // occurrence — ReadConversationTextImpl's copy skip, verbatim (the lockstep rule above).
+            if (const std::wstring uuid = obj.StrAt(L"uuid"); !uuid.empty() && !seenUuids.insert(uuid).second)
+            {
+                continue;
+            }
             // Agentmaster (revert-aware): skip a Claude line on a rewound-away branch (its uuid isn't on
             // the active leaf->root chain), so the copied brief reflects the live conversation only.
             // Empty activeBranch (head read / no leaf marker) => keep all.
@@ -1209,10 +1224,19 @@ namespace Agentmaster
         // each segment's REAL user prompts (deduped WITHIN the segment, like the live Messages list).
         // The boundary that ENDS a segment supplies its label. Segments are in file order — the LAST is
         // the current/active conversation; the earlier ones are the "previous session(s)" /compact
-        // summarized away. By POSITION (not the leaf chain — a boundary's parentUuid is null, so the
-        // pre-compaction turns are unreachable by a leaf walk). Pure.
+        // summarized away. By POSITION, deliberately NOT by the leaf chain: although ActiveBranchUuids
+        // now crosses a boundary (HOOKS.md "Compaction"), position needs no pointer at all — it survives
+        // every writer quirk (a logical parent never written to disk, a preserved tail written after the
+        // summary, a copied continuation file) that a chain walk has to work around. AnalyzeSessionTranscript
+        // restarts its Messages list at each boundary by the same file-order rule, so the two cannot
+        // disagree on where the current segment begins. Pure.
         std::vector<ConversationSegment> segs(1);
         std::unordered_set<std::wstring> seen; // dedup within the current segment; resets at each boundary
+        // Agentmaster (HOOKS.md "Compaction" — re-appended history): the FIRST occurrence of a uuid is its
+        // authentic position; a later one is a re-written copy (a legacy resume re-appended whole
+        // histories, boundaries included). Skipping copies keeps the segments chronological: a copied
+        // boundary would otherwise split a bogus extra "previous session" out of the copy.
+        std::unordered_set<std::wstring> seenUuids;
         size_t start = 0;
         for (size_t i = 0; i <= transcriptText.size(); ++i)
         {
@@ -1236,6 +1260,10 @@ namespace Agentmaster
                 continue;
             }
             const auto& obj = *parsed;
+            if (const std::wstring u = obj.StrAt(L"uuid"); !u.empty() && !seenUuids.insert(u).second)
+            {
+                continue; // a re-written copy of an earlier line (see seenUuids)
+            }
             const std::wstring type = obj.StrAt(L"type");
             if (type == L"system" && obj.StrAt(L"subtype") == L"compact_boundary")
             {
@@ -1552,6 +1580,7 @@ namespace Agentmaster
         const std::unordered_set<std::wstring> activeBranch = truncated ? std::unordered_set<std::wstring>{} : ActiveBranchUuids(wide);
 
         std::unordered_set<std::wstring> seenMsgs, seenRead, seenEdit, seenCreated, seenSkills;
+        std::unordered_set<std::wstring> seenUuids; // every message uuid processed so far — a later occurrence is a re-written copy (skipped)
         // A Write's created-vs-overwrote verdict is in its tool_result ("File created successfully at:"
         // for a NEW file, "...has been updated successfully" otherwise), which arrives in a later user
         // message — so defer Write classification: map the Write's tool_use id -> its file_path here,
@@ -1601,6 +1630,15 @@ namespace Agentmaster
             // the keep-all case (empty set — a head read / no marker) are active. Decided BEFORE the
             // timestamp capture so a discarded turn never sets first/last activity.
             const std::wstring lineUuid = obj.StrAt(L"uuid");
+            // Agentmaster (HOOKS.md "Compaction" — re-appended history): a uuid seen EARLIER in the file
+            // is a re-written COPY (a legacy resume, Claude Code <= 2.1.147, re-appended whole histories;
+            // a partial compaction can re-write a preserved message). Its content was already counted at
+            // its first occurrence, so skip it — else, with the live branch now crossing compactions, the
+            // copy would re-list every prompt and re-cut the Messages list at each copied boundary.
+            if (!lineUuid.empty() && !seenUuids.insert(lineUuid).second)
+            {
+                continue;
+            }
             const bool onActiveBranch = activeBranch.empty() || lineUuid.empty() || activeBranch.count(lineUuid) != 0;
             if (!onActiveBranch)
             {
@@ -1627,6 +1665,23 @@ namespace Agentmaster
 
             const std::wstring type = obj.StrAt(L"type");
             const bool externalUser = (type == L"user" && obj.StrAt(L"userType") == L"external");
+
+            // Agentmaster (HOOKS.md "Compaction"): the live branch now CROSSES a /compact boundary
+            // (ActiveBranchUuids follows its logical parent, its preserved messages and the leaf written
+            // before it), so the conversation before a compaction is on-branch here — which is what keeps the session's true first timestamp
+            // (duration), its pre-compaction Files Read/Edited/Created + Skills, and the plan-restart
+            // parent link (the TRUE first prompt; before the crossing, the first on-branch external user
+            // was the compact SUMMARY, whose "read the full transcript at: <self>.jsonl" named the session
+            // itself). The Messages list is the one field that must stay the CURRENT segment: the earlier
+            // segments are surfaced separately (out.previousSegments, by the same file-order split in
+            // CollectConversationSegments), so restart it at each on-branch boundary — an off-branch one
+            // (a rewind past it) never reaches here. Full reads only: a truncated HEAD read gets no
+            // previousSegments, so cutting there would drop the earlier prompts from every list.
+            if (!truncated && type == L"system" && obj.StrAt(L"subtype") == L"compact_boundary")
+            {
+                out.userMsgs.clear();
+                seenMsgs.clear(); // dedup is per segment, like CollectConversationSegments
+            }
 
             if (externalUser && isFirstUser)
             {
@@ -1996,7 +2051,8 @@ namespace Agentmaster
         }
 
         // Agentmaster (conversation lineage): split by in-file compaction boundaries. The LAST segment
-        // is the active conversation (== out.userMsgs, leaf-filtered above); the EARLIER ones are the
+        // is the active conversation (== out.userMsgs: leaf-filtered above AND restarted at each
+        // on-branch boundary, now that the live branch crosses compactions); the EARLIER ones are the
         // "previous session(s)" /compact summarized away — surfaced (oldest first) by the summary panel's
         // previous-sessions toggle. Skipped on a truncated head read (a boundary may be cut off). Only
         // non-empty previous segments are kept (an empty one — e.g. back-to-back compactions — is noise).

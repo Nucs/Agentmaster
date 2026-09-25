@@ -7059,6 +7059,17 @@ namespace winrt::TerminalApp::implementation
         // (now-archived) conversation's still-pinned tab title bleed onto the new conversation
         // (Rule #11: each session owns its title; the new id must show ITS name, not the archived one's).
         bool reHomedFromOtherId = false;
+        // Agentmaster (/clear provenance): the superseded conversation's provenance, captured for the
+        // carry below. A /clear or /resume in a MANAGED tab mints the new id through the registry's
+        // adoption path (an unknown SessionStart => a minimal record flagged `external`), but the
+        // ConPTY did not change owner — it is still OUR launch, not a shell the user typed `claude`
+        // into. Left `external`, the successor was refused by Deactivate ("adopted/external — its
+        // ConPTY is the user's shell"), and the dead-tab Restart fallback (which skips external
+        // records) resurrected the SUPERSEDED conversation from before the /clear instead of the one
+        // the tab was actually on.
+        bool supersededWasManaged = false;
+        bool supersededStarted = false;
+        std::wstring supersededForLog;
         for (const auto& [oldId, weakOld] : _claudeTabs)
         {
             if (const auto t = weakOld.get(); t && t == hostTab && oldId != id)
@@ -7083,6 +7094,12 @@ namespace winrt::TerminalApp::implementation
                 // would hash freed memory -> AV. (Latent use-after-free; the observer's more frequent
                 // re-homes exposed it.)
                 const std::wstring superseded = oldId;
+                if (const auto oldRec = _sessionRegistry->Get(superseded))
+                {
+                    supersededWasManaged = !oldRec->external; // read BEFORE the archive below (which leaves the flag untouched anyway)
+                    supersededStarted = oldRec->started;
+                }
+                supersededForLog = superseded;
                 _sessionRegistry->SetInjector(superseded, nullptr);
                 _sessionRegistry->SetPromptSubmitter(superseded, nullptr); // same lifetime as the injector (the new id re-registers below)
                 _sessionRegistry->SetEnterPresser(superseded, nullptr); // DELIVERY_PLAN.md R8
@@ -7092,14 +7109,42 @@ namespace winrt::TerminalApp::implementation
                 });
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + superseded + L" -> " + id + L" (same tab, new conversation id)\n");
                 // Nav audit: a TAB SWAPPED its bound session id (claude switched conversation in place
-                // — /clear, /resume into another conversation, or /compact). Surface it in the [nav]
-                // trail so "my tab is suddenly a different session" is followable, not just inferable
-                // from the deeper [rehome] line. The old id is archived (its Auto Testing stays restorable).
-                ::Agentmaster::LogNav(L"tab-swap " + ::Agentmaster::ShortId(superseded) + L" -> " + ::Agentmaster::ShortId(id) + L" (same tab; claude switched conversation \x2014 /clear, /resume or /compact)");
+                // — /clear, or /resume into another conversation; a /compact never lands here, it keeps
+                // the id). Surface it in the [nav] trail so "my tab is suddenly a different session" is
+                // followable, not just inferable from the deeper [rehome] line. The old id is archived
+                // (its Auto Testing stays restorable).
+                ::Agentmaster::LogNav(L"tab-swap " + ::Agentmaster::ShortId(superseded) + L" -> " + ::Agentmaster::ShortId(id) + L" (same tab; claude switched conversation \x2014 /clear or /resume)");
                 _claudeTabs.erase(superseded);
                 _claudeOverlays.erase(superseded);
                 reHomedFromOtherId = true; // the tab's pinned text is `superseded`'s title — don't bleed it onto `id`
                 break; // one tab hosts one session
+            }
+        }
+
+        // Agentmaster (/clear provenance carry): the successor of a MANAGED conversation on this same
+        // ConPTY is managed too — provenance belongs to the ConPTY (whose launch we own), not to the
+        // conversation id. Clear `external` so Restart / Deactivate / the dormant-dot rules treat it
+        // like the conversation it replaced, and carry `started` (same live connection) so the status
+        // dot seeded below never flashes the half-hollow "dormant" ring for a running claude. Only
+        // this direction: a successor of an EXTERNAL predecessor stays external (that ConPTY is the
+        // user's own shell), and a first bind with nothing superseded changes nothing.
+        if (reHomedFromOtherId && supersededWasManaged)
+        {
+            bool flipped = false;
+            _sessionRegistry->Update(id, [supersededStarted, &flipped](::Agentmaster::SessionInfo& s) {
+                if (s.external)
+                {
+                    s.external = false;
+                    flipped = true;
+                }
+                if (supersededStarted)
+                {
+                    s.started = true;
+                }
+            });
+            if (flipped)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + id + L" inherits MANAGED provenance from " + supersededForLog + L" (same ConPTY \x2014 not an adopted shell)\n");
             }
         }
 

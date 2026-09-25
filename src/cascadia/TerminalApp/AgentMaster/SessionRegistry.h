@@ -309,7 +309,8 @@ namespace Agentmaster
 
         // Agentmaster (one ConPTY = one live conversation; Rule #14 / session-id divergence): a single
         // claude.exe — one pid on one ConPTY (tabToken) — can be in exactly ONE conversation at a time.
-        // An in-session /clear, /compact, or /resume switches its conversation id, so the OLD id is no
+        // An in-session /clear or /resume switches its conversation id (a /compact does NOT — it is
+        // in-place, same id + same file; HOOKS.md "Compaction"), so the OLD id is no
         // longer live on that tab; but its record lingered `live`, leaving TWO live records claiming one
         // ConPTY. The tab reconciler matches purely by tabToken, so it churned re-homing the tab between
         // the two ids — flickering the tab header between the managed name and claude's live OSC title.

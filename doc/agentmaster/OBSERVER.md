@@ -434,15 +434,36 @@ resolved in this order, **most-authoritative first**: (1) Claude's own **presenc
 `sessions/<pid>.json` (pid-keyed) — its self-reported *current* conversation; (2) an explicit
 `--session-id` / `--resume <guid>` from the cmdline (`ResolveObservedId`); (3) the cwd→newest
 transcript fallback (§8b). Presence wins because a launched session's id can **diverge** from the
-cmdline `--session-id`: `/resume`, `/clear` and `/compact` switch the live conversation while the
-cmdline stays pinned at spawn — so binding by the cmdline showed the tab (and its tab-strip dot)
-the **stale launch id's** state (e.g. a phantom `NeedsApproval`/`Idle`) instead of the conversation
-actually running. Presence is pid-keyed, so it is immune to the cwd-density mis-bind Rule #14 warns
-of; bind-grade trust is **stricter** than the `presenceStatus` enrichment — the row must belong to
-the **same live process** (pid alive *and* its recorded `startedAt` within an init window of the OS
-process-create time), so a stale file from a **reused pid** can never mis-bind. A brand-new spawn
-that hasn't written presence yet (or a denied PEB start time) is absent and falls back to (2) — the
-launch id, which is correct until a divergence. (Same precedence the `agentmaster` CLI uses.)
+cmdline `--session-id`: `/resume` and `/clear` switch the live conversation while the cmdline stays
+pinned at spawn (a `/compact` does **not** — it is in-place, same id + same file; HOOKS.md
+*Compaction*) — so binding by the cmdline showed the tab (and its tab-strip dot) the **stale launch
+id's** state (e.g. a phantom `NeedsApproval`/`Idle`) instead of the conversation actually running.
+Presence is pid-keyed, so it is immune to the cwd-density mis-bind Rule #14 warns of.
+
+**Presence identity (`PresenceRowMatchesProcess`, `TranscriptStore.h`).** A row is trusted — for the
+published `Presence()` table, the `presenceStatus` enrichment, AND the bind — only when it belongs to
+the **same live process**: claude ≥ 2.1.2xx writes its own process creation time as `procStart` (a
+Windows FILETIME as a decimal string, e.g. `"134347853746656012"`), which is **exactly**
+`GetProcessTimes`' creation time (verified on every live row), so a row matches only within 1 ms of the
+OS process start (`PresenceProcStartToUnixMs` decodes it with `FileTimeToUnixMs`' own truncation).
+An older row without it falls back to the `startedAt` window `[start − 5 s, start + 60 s]` (claude
+stamps `startedAt` 0.65–1.5 s after creation), and an unknown process start (a denied query) accepts.
+Both stamps are written ONCE at registration and survive every later patch — a `/clear`/`/resume` only
+rewrites `sessionId` + `updatedAt` (read from claude 2.1.280's own writer) — so a switched session keeps
+matching, while a stale file from a **reused pid** can no longer lend a new claude a dead
+conversation's id or paint the dead session with its last status (the table filter previously checked
+only "pid alive and a claude.exe"). A brand-new spawn that hasn't written presence yet (or a denied PEB
+start time) is absent and falls back to (2) — the launch id, which is correct until a divergence.
+(Same precedence + the same identity check in the `agentmaster` CLI.)
+
+**External rows use the same precedence.** An external claude has no `--session-id`, so
+`ResolveObservedId` fell to the ctime-closest-to-start heuristic (Rule #14), which is structurally
+wrong after the external runs `/clear` (it keeps naming the conversation the process STARTED with) and
+empty for a `claude --continue` / picker `--resume` (the resumed transcript predates the process, so it
+is rejected) — the live census had 14 of 18 externals with no id at all. The presence override now
+applies to external rows too, so their title, timing, recap, read-only plan and **Adopt** (which now
+takes the row's id, falling back to the heuristic only when the observer has none) all follow the
+conversation the process is on NOW.
 
 ### 8c. Trigger & cadence
 

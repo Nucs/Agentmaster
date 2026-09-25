@@ -318,8 +318,17 @@ namespace Agentmaster
         const auto lines = ClassifyTranscriptLines(wide, /*maxUserTextChars*/ static_cast<size_t>(-1), /*maxAgentTextChars*/ 0, /*markActiveBranch*/ !truncated);
 
         std::wstring firstPrompt;
+        // Agentmaster (HOOKS.md "Compaction" — re-appended history): a uuid seen earlier is a re-written
+        // COPY (a legacy resume re-appended whole histories). The live branch now crosses compactions, so
+        // without this the prompt list (the External rows' read-only plan) would repeat every prompt once
+        // per copy. Title lines carry no uuid and are never skipped.
+        std::unordered_set<std::wstring> seenUuids;
         for (const auto& f : lines)
         {
+            if (!f.uuid.empty() && !seenUuids.insert(f.uuid).second)
+            {
+                continue;
+            }
             // Title lines win by precedence (custom > ai > legacy summary); the LAST of each kind wins
             // (a retitle appends a newer line). They carry no uuid, so a rewind never filters them — a
             // user's chosen title persists across one.

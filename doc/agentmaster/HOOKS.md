@@ -28,8 +28,9 @@ the registry are **one value**. The forwarder resolves the id **payload-first**:
 payload's `session_id` (Claude's *current* conversation) → else `CCMGR_SESSION_ID` (the
 launch-time fallback, and the only id a session we did **not** launch has when its payload lacks
 one). Payload-first is load-bearing because Claude's conversation id can **diverge** from the
-launch id — `/resume` (into another conversation), `/clear`, and `/compact` all switch the active
-`session_id`, while the env (and the cmdline `--session-id`) stay **pinned at spawn**. Env-FIRST
+launch id — `/resume` (into another conversation) and `/clear` switch the active `session_id`
+(a `/compact` does **not**: it is in-place, same id + same file — see *Compaction*), while the env
+(and the cmdline `--session-id`) stay **pinned at spawn**. Env-FIRST
 stranded such a session: every post-divergence hook fed the dead launch id, which owns no
 transcript of its own, so the missed-`Stop` reconciler (it reads a terminal `stop_reason` from
 the transcript tail) could never release it — it stuck in the last mis-attributed state (a
@@ -77,13 +78,13 @@ bridge needs no JSON dependency; the **PowerShell forwarder** — which *does* h
 ### The wire line
 
 ```
-event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \t prompt \t ts \n
+event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \t prompt \t ts \t source \n
 ```
 
 | # | Field | Notes |
 | --- | --- | --- |
-| 1 | `event` | `SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SubagentStop` / `SessionEnd` |
-| 2 | `sessionId` | Claude's **current** conversation id (payload `session_id`; == `--session-id` == `CCMGR_SESSION_ID` until `/resume`/`/clear`/`/compact` diverge it) (**required**) |
+| 1 | `event` | `SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SubagentStop` / `PreCompact` / `PostCompact` / `SessionEnd` |
+| 2 | `sessionId` | Claude's **current** conversation id (payload `session_id`; == `--session-id` == `CCMGR_SESSION_ID` until `/resume`/`/clear` diverge it — `/compact` keeps it) (**required**) |
 | 3 | `cwd` | the session's working directory |
 | 4 | `isQuestion` | `1`/`0` — set on `Stop`: did the agent's last message end in `?` (question-guard) |
 | 5 | `permission` | `1`/`0` — a `Notification` requesting tool permission (vs. an idle notice) |
@@ -91,6 +92,7 @@ event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \t pro
 | 7 | `tabToken` | the hosting `WT_SESSION` GUID (for adopting a hand-typed `claude`) |
 | 8 | `prompt` | **escaped**; set ONLY on `UserPromptSubmit` (so the Auto Testing records *every* message a session got) |
 | 9 | `ts` | the hook's **fire time** (unix ms, UTC) — the event-ORDERING key (see *State machine*) |
+| 10 | `source` | the payload's own **discriminator**: `SessionStart` `source` (`startup`/`resume`/`clear`/`compact`/`fork`), `Pre/PostCompact` `trigger` (`manual`/`auto`), `SessionEnd` `reason` (`clear`/`resume`/`logout`/`prompt_input_exit`/`other`); empty otherwise. Validated to a `[A-Za-z0-9_-]{0,32}` token (else empty — `SanitizeWireSource`, mirrored in the forwarder) because the state machine compares it LITERALLY (see *Compaction*) |
 
 Fields 1–2 are required; the rest are optional (a tolerant parser accepts older/edge forwarders
 that omit the tail). `cwd`, `tool`, and `tabToken` are assumed free of TAB/newline (true for
@@ -114,14 +116,22 @@ overlong value out (the parser is digits-only + bounded). The canonical format +
 `WireUnescape` — shared verbatim by the bridge and the unit tests so the format has one source of
 truth.
 
+The **10th field `source`** follows the same append-LAST rule: a 9-field line (an older forwarder)
+parses with `source == ""` and takes the historical, source-blind path, and a 9-field parser ignores
+it. The forwarder used to throw the payload discriminator away — which is why a compaction's
+`SessionStart` was indistinguishable from a real (re)start (it demoted a running turn to `Idle`;
+see *Compaction*).
+
 ## Events consumed
 
 The materialized `hooks-settings.json` (`BuildHooksSettingsJson`) registers the forwarder for
-**six** events:
+**eight** events:
 
 | Hook | Meaning | Effect in Agentmaster (`NextSessionState`) |
 | --- | --- | --- |
-| `SessionStart` | session began | create/confirm `SessionInfo`, state → `Idle` |
+| `SessionStart` | session began (or resumed / cleared / compacted — the wire `source`) | create/confirm `SessionInfo`, state → `Idle` (an at-rest Waiting/NeedsApproval is kept; `source=compact` keeps a `Running` turn `Running` and leaves the turn accounting alone) |
+| `PreCompact` | a compaction is starting (`trigger` manual/auto) | state → `Running`; opens the **compaction window** (`SessionInfo::compactingSinceUnixMs`) — see *Compaction* |
+| `PostCompact` | the compaction's summary is in | closes the window; `manual` → `WaitingForInput` (no `turnComplete`), or `Running` when a prompt typed during it is queued; `auto` → unchanged (the turn continues) |
 | `UserPromptSubmit` | a prompt was submitted (by user or by us) | state → `Running`; record the prompt in the Auto Testing; recognize + suppress the echo of a prompt **we** injected (idempotency) |
 | `Notification` (permission) | tool-permission prompt | state → `NeedsApproval`; run **Approval Policy** (NOT the prompt queue). A plain idle notice leaves state unchanged |
 | `Stop` | main agent finished the turn | state → `WaitingForInput`; **Tests Autorunner.tryAdvance()**; carries `isQuestion` for the question-guard |
@@ -142,12 +152,14 @@ standalone. It encodes Correctness Rule #1 — "waiting" is three distinct state
 `Stop` produces `WaitingForInput`:
 
 ```
-SessionStart      -> Idle
+SessionStart      -> Idle             # but Waiting/NeedsApproval stay; source=compact keeps Running
 UserPromptSubmit  -> Running
 Pre/PostToolUse   -> Running          # if ever enabled (not registered today)
 Notification      -> NeedsApproval if permissionRequest, else unchanged
 Stop              -> WaitingForInput  # question-guard (M7) Holds the next prompt if isQuestion
 SubagentStop      -> unchanged
+PreCompact        -> Running          # any trigger, any state (see Compaction)
+PostCompact       -> WaitingForInput if trigger=manual, else unchanged
 SessionEnd        -> Done
 Unknown           -> unchanged
 ```
@@ -190,7 +202,10 @@ showing `WaitingForInput`/`Idle` for an ENTIRE turn (the "second turn never show
 Self-healing by construction: every applied `Stop` zeroes `queuedPrompts` (drift cannot
 accumulate; a phantom `UserPromptSubmit` — e.g. a slash command that never starts an API turn —
 costs at most one wrong-`Running` interval, which the scanner's quiescence reconciliation ends),
-`SessionStart`/`SessionEnd` reset the accounting, and `ts == 0` events (an old forwarder) degrade
+`SessionStart`/`SessionEnd` reset the accounting (**except** `SessionStart(source=compact)`: the same
+conversation — after an auto-compaction, the same TURN — continues, so wiping it would turn a queued
+type-ahead batch's `Stop` into a false turn-complete), a manual compaction's `PostCompact` consumes a
+batch typed during it exactly like a `Stop` does, and `ts == 0` events (an old forwarder) degrade
 to plain arrival order. Only a `turnComplete` transition fires the Tests Autorunner advance; the wire
 `ts` also feeds `lastActivityUnixMs` (monotonic — a stale event can't regress the
 WaitingForInput→Idle decay anchor, which real hooks previously never refreshed at all).
@@ -202,8 +217,13 @@ an id it doesn't know creates a minimal `external`, `live` record; any *other* e
 id is ignored (there is no connection to bind). The **adoption** handler then fires on **every**
 `SessionStart` — not only when this call created the record — so the app can (a) bind a newly-seen
 hand-typed `claude` and (b) **re-home** a tab whose claude switched conversation id via `/resume`
-(the id changes, the `tabToken` does not); the reconcile is idempotent (an already-bound session
-fast-returns).
+or `/clear` (the id changes, the `tabToken` does not); the reconcile is idempotent (an already-bound session
+fast-returns). The successor record is minted by the adoption path, i.e. flagged `external` — but
+when the conversation it replaced on that ConPTY was a **managed** one, the re-home clears the flag
+(and carries `started`): provenance belongs to the ConPTY, not the conversation id. Left `external`,
+a `/clear`ed managed tab was refused by **Deactivate** ("its ConPTY is the user's shell"), and the
+dead-tab **Restart** fallback (which skips external records) resurrected the conversation from
+*before* the `/clear` (`_BindClaudeSessionToTab`, logged `[rehome] <id> inherits MANAGED provenance`).
 
 ### Forwarder-side enrichment
 
@@ -217,11 +237,99 @@ Two fields are computed in the forwarder, not just relayed:
   `(?i)permission|approve|allow|grant` — distinguishing a blocking tool-permission prompt from an
   idle notification.
 
+## Compaction
+
+A `/compact` (manual) or an auto-compaction is **in-place**: the SAME session id, the SAME `.jsonl`.
+Read from the installed Claude Code 2.1.280 bundle and measured over the 429 compact boundaries in the
+193 compacted transcripts on this machine, one compaction is:
+
+1. `PreCompact` hook (`trigger` = `manual` | `auto`; an auto-compaction fires **mid-turn**).
+2. The summarization API call — **1–3+ minutes** (`durationMs` up to 313 s measured) during which
+   **nothing is written to the transcript**, whose tail still shows the previous turn's terminal
+   `stop_reason`.
+3. A `system/compact_boundary` line: `parentUuid: null` (the post-compaction chain starts here),
+   `logicalParentUuid` = the last pre-compaction message (occasionally one never written to disk),
+   `compactMetadata{trigger, preTokens, postTokens, durationMs, …}`.
+4. The `isCompactSummary` user line ("This session is being continued…", parented to the boundary; its
+   text names the session's OWN transcript — "read the full transcript at: `<self>`.jsonl").
+5. Manual only: the `/compact` command echo + `<local-command-stdout>Compacted</local-command-stdout>`.
+6. `PostCompact` hook, then `SessionStart(source="compact")`.
+
+Newer writers add **partial compactions** that keep messages verbatim —
+`compactMetadata.preservedSegment{headUuid, anchorUuid, tailUuid}` / `preservedMessages{uuids, allUuids}`:
+an auto-compaction writes the preserved **tail** after the summary (a child of it); a "summarize from
+here" compaction keeps the **early** messages (its logical parent + preserved list name them) and
+summarizes the middle (`messagesSummarized`, `userContext`). And a legacy resume (Claude Code ≤ 2.1.147)
+**re-appended the whole history** verbatim — the same uuids again (6 transcripts on this machine).
+
+### State — the compaction window
+
+- **`PreCompact` → `Running`** (any trigger, any state — an `Error` "Prompt is too long" answered with
+  `/compact` is working again) and it **opens the window**: `SessionInfo::compactingSinceUnixMs` = the
+  hook's fire `ts` (transient). `PostCompact` closes it, and so does anything that proves it over or moot:
+  the trailing `SessionStart`, `SessionEnd`, a `Stop` (a real one cannot overtake the `PreCompact` that
+  follows it — claude awaits a `Stop` hook before it runs a queued `/compact`), or an API-error synth (a
+  failed compaction). A `UserPromptSubmit` does NOT close it (the user typed during the compaction;
+  claude is still summarizing).
+- **The scanner holds while the window is open** — `CompactionInFlight` (`SessionScanner.h`, pure) forces
+  the quiescence clock to 0, standing down every quiescence-gated synth together (recon-stop, the
+  presence-idle release, recon-block, recon-error, the error release). It ends on the closing hook,
+  claude's own `idle` heartbeat ≥ 5 s into the window (`kCompactionPresenceSettleMs` — a cancelled or
+  failed compaction fires no `PostCompact`; the settle keeps the stale pre-compaction `idle` from
+  releasing it), or the 15-minute cap (`kCompactionHoldMaxMs` — a lost closing hook).
+- **`SessionStart(source="compact")` keeps a `Running` turn `Running`** and leaves the turn accounting
+  intact. It used to reset to `Idle` — proven live on NumSharp `a3d777bf`: 10 overnight auto-compactions,
+  each logging `[SessionStart] … state=0` then `[recon-subagent] Idle -> Running` — and `Idle` is READY to
+  the Tests Autorunner, so a queued prompt could be delivered into the continuing turn.
+- **`PostCompact(manual)` → `WaitingForInput`** without a `turnComplete` (no question-guard, no Stop-seam
+  advance); the flash ring / toast then tell a user who switched away that the compaction finished. A
+  prompt typed DURING the compaction (counted as type-ahead, since `PreCompact` set `Running`) runs as the
+  next turn right after it with no further hook, so `PostCompact` consumes that batch and stays `Running`.
+  `PostCompact(auto)` keeps the current state (the turn continues). Before, a manual `/compact` at rest
+  read `Waiting`/`Idle` for the whole compaction (its echo is written only afterwards).
+- ⚡ **cache hint**: neither `PreCompact` nor `PostCompact` is API-turn evidence (`IsApiTurnEvidence`) — the
+  summarization replaces the prefix, so the next request's cache is cold.
+
+### Context size after a compaction
+
+The boundary's `compactMetadata.postTokens` IS the context the compaction left. The scanner folds it into
+`SessionInfo::contextTokens` when the boundary is the chunk's last context-bearing line
+(`TranscriptParse::compactPostTokens`), and the Sessions sidecar's Ctx does the same
+(`ClassifyTranscriptLine` → `TranscriptStats::contextTokens`; sidecar `ctxv` = `kSidecarCtxVersion` 2
+rebuilds a pre-fix sidecar once). Before, the card kept the pre-compaction size (e.g. `ctx 991k`) until the
+next assistant line — after a manual `/compact` at rest, the user's next prompt.
+
+### Display — the live branch crosses compactions
+
+`ActiveBranchUuids` (`TranscriptStore.cpp`) — behind the summary panel, the copied Transcript + Followup,
+titles and prompt lists — walked `parentUuid` only, so it stopped at every boundary and hid the whole
+conversation before it: **99.2%** of the pre-compaction typed prompts on this machine. It is now an upward
+search over a multi-edge graph — every occurrence's `parentUuid`, plus, at a compaction root, edges to
+every preserved message it names, to its `logicalParentUuid`, and to the **pre-boundary leaf** (the node
+written after the last leaf marker, else that marker's leaf — the one edge that reaches a "summarize from
+here" middle). Measured: **11.0%** remain hidden, 225 of those 233 hang off a live node (genuine
+rewinds), and no prompt the old walk kept is dropped. The display readers also skip a uuid's re-appended
+copy (first occurrence wins), so the legacy re-append files list every message once.
+
+The summary panel's **Messages** stay the CURRENT segment (restarted at each on-branch boundary, full
+reads only); earlier segments are the positional "previous session(s)". Every other field — Files,
+Skills, Tasks, the duration's start, the plan-parent link — spans the whole session, and the plan-parent
+link comes from the TRUE first prompt (before, the first on-branch prompt after a compaction was the
+summary, whose "read the full transcript at: `<self>`.jsonl" named the session itself).
+
+### Why auto-compaction stopped (2026-07 → 2026-09) — not an Agentmaster bug
+
+`~/.claude/settings.json`'s `autoCompactWindow` / `autoCompactEnabled` were added in the `~/.claude`
+repo's `c2b4753` (2026-07-12) and removed a day later in `9d4ce72`; with the 1M-context model the
+threshold then sat near the full window, so no session auto-compacted from week 28 to week 38. The
+user's `/autocompact` restored both keys on 2026-09-23 — as an **uncommitted** edit in that repo at the
+time of writing, so a checkout/reset there would bring the outage back.
+
 ## How a session gets the hook config
 
 - **Manager-Launched** (`BuildClaudeSpawn`): claude is spawned with
   `--settings <~/.agentmaster/hooks-settings.json>` plus `CCMGR_SESSION_ID` / `CCMGR_HOOK_PIPE` in
-  `spec.env`. The settings file (`BuildHooksSettingsJson`) carries the six hook blocks **and** the
+  `spec.env`. The settings file (`BuildHooksSettingsJson`) carries the eight hook blocks **and** the
   cog's optional Claude-session settings (`model`, `includeCoAuthoredBy`, `permissions.defaultMode`)
   — each emitted only when it differs from Claude's default, so an all-defaults config stays
   byte-for-byte the prior hooks-only file.

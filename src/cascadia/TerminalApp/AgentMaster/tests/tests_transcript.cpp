@@ -1920,9 +1920,10 @@ void TestTranscriptResolve()
     }
 
     // --- Conversation lineage: in-file /compact splits into previous + current segments -----------
-    // A /compact writes a system/compact_boundary (parentUuid:null => a NEW root, so the active leaf
-    // chain STOPS there) + an isCompactSummary "continued from a previous conversation" bridge. The
-    // pre-compaction turns stay in the file but OFF the active chain. The current Messages list is the
+    // A /compact writes a system/compact_boundary (parentUuid:null, logicalParentUuid = the
+    // pre-compaction tail) + an isCompactSummary "continued from a previous conversation" bridge. The
+    // active chain now CROSSES the boundary through logicalParentUuid (TestCompactionLifecycle pins
+    // that), but the Messages list still restarts at it: the current Messages list is the
     // post-compaction segment (leaf-filtered, the summary bridge excluded); the pre-compaction segment
     // surfaces as a numbered "previous session". Mirrors the real session 3751c455.
     {
@@ -3453,6 +3454,55 @@ void TestSessionSearch()
             CHECK(ecx3.valid && ecx3.stats.contextTokens == 2150, "index: an old (no-ctxTokens) sidecar is backfilled from the transcript on load");
         }
 
+        // Agentmaster (HOOKS.md "Compaction" — the stale "Ctx" column): a compact_boundary resets the
+        // context to its compactMetadata.postTokens when it is the LAST context-bearing line; a sidecar
+        // from before compaction awareness (ctxTokens present, ctxv absent) holding the stale
+        // pre-compaction value is rebuilt ONCE; and a later assistant usage supersedes the boundary.
+        {
+            const std::wstring sidK = L"dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+            const std::string big =
+                "{\"type\":\"assistant\",\"timestamp\":\"2026-06-01T10:00:05Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"a\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":990000,\"output_tokens\":999}}}\n";
+            const std::string boundary =
+                "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"parentUuid\":null,\"logicalParentUuid\":\"x\",\"uuid\":\"b1\",\"timestamp\":\"2026-06-01T10:02:00Z\",\"content\":\"Conversation compacted\",\"compactMetadata\":{\"trigger\":\"manual\",\"preTokens\":991000,\"postTokens\":12846}}\n";
+            const std::wstring pathK = projDir + L"\\" + sidK + L".jsonl";
+            MakeJsonl(pathK, "{\"type\":\"user\",\"timestamp\":\"2026-06-01T10:00:00Z\",\"message\":{\"content\":\"go\"}}\n" + big + boundary, 6000, 6000);
+            TranscriptRef rk;
+            rk.sessionId = sidK;
+            rk.path = pathK;
+            ::GetFileAttributesExW(pathK.c_str(), GetFileExInfoStandard, &fad);
+            rk.sizeBytes = (static_cast<int64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+            rk.mtimeMs = 6000;
+            rk.birthMs = 6000;
+            const auto ek1 = LoadOrRefreshSessionIndexIn(idxDir, rk);
+            CHECK(ek1.valid && ek1.stats.contextTokens == 12846, "index: a compact_boundary after the last assistant line resets ctx to its postTokens");
+            // A sidecar written BEFORE compaction awareness: stale ctx, a matching (size,mtime) key, no ctxv.
+            auto so = json::Value::MkObj();
+            so.Set(L"sid", json::Value::MkStr(sidK));
+            so.Set(L"size", json::Value::MkNum(static_cast<double>(rk.sizeBytes)));
+            so.Set(L"mtime", json::Value::MkNum(6000.0));
+            so.Set(L"parsedBytes", json::Value::MkNum(static_cast<double>(rk.sizeBytes)));
+            so.Set(L"assistantLines", json::Value::MkNum(1));
+            so.Set(L"ctxTokens", json::Value::MkNum(991000.0));
+            const std::wstring sdump = json::Dump(so); // ASCII content -> narrows to valid UTF-8
+            MakeJsonl(idxDir + L"\\" + sidK + L".json", std::string(sdump.begin(), sdump.end()), 6000, 6000);
+            const auto ek2 = LoadOrRefreshSessionIndexIn(idxDir, rk);
+            CHECK(ek2.valid && ek2.stats.contextTokens == 12846, "index: a pre-ctxv sidecar holding the stale pre-compaction ctx is rebuilt once on load");
+            const auto ek3 = LoadOrRefreshSessionIndexIn(idxDir, rk);
+            CHECK(ek3.valid && ek3.stats.contextTokens == 12846 && ek3.stats.parsedBytes == ek2.stats.parsedBytes, "index: the rewritten (ctxv) sidecar is a plain cache hit afterwards");
+            // An assistant line AFTER the boundary supersedes it (file order decides, never the line kind).
+            const std::string after =
+                "{\"type\":\"assistant\",\"timestamp\":\"2026-06-01T10:03:00Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"c\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":5,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":14000,\"output_tokens\":20}}}\n";
+            const HANDLE hk = ::CreateFileW(pathK.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            DWORD wk = 0;
+            ::WriteFile(hk, after.data(), static_cast<DWORD>(after.size()), &wk, nullptr);
+            ::CloseHandle(hk);
+            ::GetFileAttributesExW(pathK.c_str(), GetFileExInfoStandard, &fad);
+            rk.sizeBytes = (static_cast<int64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+            rk.mtimeMs = 7000; // changed key -> incremental resume over the appended line
+            const auto ek4 = LoadOrRefreshSessionIndexIn(idxDir, rk);
+            CHECK(ek4.valid && ek4.stats.contextTokens == 14025, "index: an assistant usage after the boundary supersedes the boundary's postTokens");
+        }
+
         // pathsAccessed flow into the index + the file/dir scopes end-to-end.
         {
             const std::wstring sidP = L"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
@@ -4931,4 +4981,461 @@ void TestConversationFollowup()
     std::filesystem::remove(std::filesystem::path{ p5 }, ec);
     std::filesystem::remove(std::filesystem::path{ pStale }, ec);
     std::filesystem::remove(std::filesystem::path{ pRewindStop }, ec);
+}
+
+// Agentmaster (HOOKS.md "Compaction") — the compaction / clear / resume lifecycle, pinned end to end.
+// A /compact (manual or auto) is IN-PLACE: same conversation id, same .jsonl, a system/compact_boundary
+// line whose parentUuid is NULL (the post-compaction chain starts there) and whose logicalParentUuid
+// names the pre-compaction tail. Before this pass: (a) every reader that walks the live branch stopped at
+// the boundary, so the summary panel, the prompt list/title, the copied Transcript + Followup and the
+// plan-parent link all lost EVERYTHING before the last compaction (measured over the 193 compacted
+// transcripts here: 99.2% of pre-compaction typed prompts off-branch; 11.0% after, and those are 97%
+// genuine rewinds — the partial-compaction / preserved-tail / never-written-parent / re-append shapes
+// below are all real, each taken from a live transcript); (b) the scanner read the silent 1-3+ minute compaction as a finished turn;
+// (c) the "ctx" stayed at the pre-compaction size until the next assistant line; and (d) claude's
+// presence heartbeat was trusted by pid alone (a recycled pid could lend a dead conversation its id) and
+// never consulted for EXTERNAL rows (which therefore could not follow their own /clear). Each part is
+// asserted here; the wire + state-machine halves live in TestWire / TestStateMachine /
+// TestOrderedStateMachine, the Ctx sidecar half in TestSessionSearch.
+void TestCompactionLifecycle()
+{
+    std::wprintf(L"Compaction / clear / resume lifecycle:\n");
+
+    // (1) CompactionInFlight — the scanner's hold over the SILENT compaction window (nothing is written
+    // to the transcript until the summary is in, while the tail still shows a terminal stop_reason).
+    {
+        const int64_t t0 = 1'790'000'000'000;
+        CHECK(!CompactionInFlight(0, t0, L"busy"), "compaction window: none open (0) -> not in flight");
+        CHECK(CompactionInFlight(t0, t0 + 1000, L"busy"), "compaction window: a just-opened window holds");
+        CHECK(CompactionInFlight(t0, t0 + 1000, L"idle"),
+              "compaction window: claude's 'idle' INSIDE the settle period does not release (it can be the stale pre-compaction heartbeat)");
+        CHECK(!CompactionInFlight(t0, t0 + kCompactionPresenceSettleMs, L"idle"),
+              "compaction window: 'idle' after the settle period releases (a cancelled / failed compaction fires no PostCompact)");
+        CHECK(CompactionInFlight(t0, t0 + kCompactionPresenceSettleMs, L"busy"), "compaction window: 'busy' after the settle period keeps holding (a long summarization)");
+        CHECK(CompactionInFlight(t0, t0 + kCompactionPresenceSettleMs, L"waiting"), "compaction window: 'waiting' is not at rest (only 'idle' releases)");
+        CHECK(CompactionInFlight(t0, t0 + kCompactionPresenceSettleMs, L""), "compaction window: an unknown heartbeat keeps holding");
+        CHECK(CompactionInFlight(t0, t0 + kCompactionHoldMaxMs - 1, L"busy"), "compaction window: just under the hard cap still holds");
+        CHECK(!CompactionInFlight(t0, t0 + kCompactionHoldMaxMs, L"busy"), "compaction window: the hard cap releases a window whose closing hook was lost");
+        CHECK(CompactionInFlight(t0, t0 - 500, L"idle"), "compaction window: a negative age (skewed clock) counts as just opened");
+        CHECK(kCompactionHoldMaxMs > 313000, "compaction window: the cap sits above the longest compaction measured (313 s)");
+    }
+
+    // (2) The registry opens/closes the window from the hooks (SessionInfo::compactingSinceUnixMs).
+    {
+        SessionRegistry reg;
+        auto s = MakeSession(L"cmpwin", SessionState::WaitingForInput);
+        s.live = true;
+        reg.Upsert(s);
+        HookMessage pre = Msg(L"cmpwin", HookEvent::PreCompact);
+        pre.source = L"manual";
+        pre.ts = 1'790'000'000'000;
+        reg.OnHookEvent(pre);
+        auto g = reg.Get(L"cmpwin");
+        CHECK(g.has_value() && g->state == SessionState::Running && g->compactingSinceUnixMs == pre.ts,
+              "registry: PreCompact(manual) at rest -> Running, and the window opens at the hook's FIRE time");
+        CHECK(g.has_value() && CompactionInFlight(g->compactingSinceUnixMs, pre.ts + 60000, L"busy"),
+              "registry: a minute into the compaction the scanner still holds it as working");
+        HookMessage ups = UPS(L"cmpwin", L"typed while it compacted");
+        ups.ts = pre.ts + 3000;
+        reg.OnHookEvent(ups);
+        g = reg.Get(L"cmpwin");
+        CHECK(g.has_value() && g->compactingSinceUnixMs == pre.ts, "registry: a prompt typed DURING the compaction keeps the window open (claude is still summarizing)");
+        HookMessage post = Msg(L"cmpwin", HookEvent::PostCompact);
+        post.source = L"manual";
+        post.ts = pre.ts + 90000;
+        reg.OnHookEvent(post);
+        g = reg.Get(L"cmpwin");
+        CHECK(g.has_value() && g->compactingSinceUnixMs == 0, "registry: PostCompact closes the window");
+        CHECK(g.has_value() && g->state == SessionState::Running, "registry: with the typed prompt queued behind it, the session stays Running (claude runs it next)");
+
+        // An AUTO compaction mid-turn: the window opens, and the trailing SessionStart(compact) closes it
+        // WITHOUT resetting the running turn to Idle (the blip that made the session READY mid-turn).
+        auto t = MakeSession(L"cmpauto", SessionState::Running);
+        t.live = true;
+        reg.Upsert(t);
+        HookMessage apre = Msg(L"cmpauto", HookEvent::PreCompact);
+        apre.source = L"auto";
+        apre.ts = 1'790'000'100'000;
+        reg.OnHookEvent(apre);
+        HookMessage astart = Msg(L"cmpauto", HookEvent::SessionStart);
+        astart.source = L"compact";
+        astart.ts = apre.ts + 120000;
+        reg.OnHookEvent(astart);
+        const auto a = reg.Get(L"cmpauto");
+        CHECK(a.has_value() && a->state == SessionState::Running && a->compactingSinceUnixMs == 0,
+              "registry: an auto-compaction's SessionStart(compact) closes the window and keeps the turn Running");
+    }
+
+    // (3) ParseTranscriptDelta reports the context a boundary reset to — only while it is the chunk's
+    // LAST context-bearing line — and the boundary is never a turn event (never a phantom prompt).
+    {
+        const std::wstring big =
+            LR"j({"type":"assistant","message":{"content":[{"type":"text","text":"a"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":990000,"output_tokens":999}}})j" L"\n";
+        const std::wstring boundary =
+            LR"j({"type":"system","subtype":"compact_boundary","uuid":"b1","parentUuid":null,"logicalParentUuid":"x","compactMetadata":{"trigger":"auto","preTokens":991000,"postTokens":12846}})j" L"\n";
+        const std::wstring after =
+            LR"j({"type":"assistant","message":{"content":[{"type":"text","text":"c"}],"stop_reason":"end_turn","usage":{"input_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":14000,"output_tokens":20}}})j" L"\n";
+        const auto r1 = ParseTranscriptDelta(big + boundary);
+        CHECK(r1.compactPostTokens == 12846, "delta: a compact_boundary after the last usage line reports its postTokens");
+        bool phantomPrompt = false;
+        for (const auto& ev : r1.events)
+        {
+            if (ev.kind == TranscriptEvent::Kind::UserPrompt)
+            {
+                phantomPrompt = true;
+            }
+        }
+        CHECK(!phantomPrompt, "delta: the boundary emits no UserPrompt event (the scanner's bare else would read any unlisted kind as a human prompt)");
+        CHECK(ParseTranscriptDelta(boundary + after).compactPostTokens == 0, "delta: a usage-bearing assistant line AFTER the boundary supersedes it (0 == keep the per-line value)");
+        CHECK(ParseTranscriptDelta(big).compactPostTokens == 0, "delta: no boundary -> 0");
+        const std::wstring oldBoundary =
+            LR"j({"type":"system","subtype":"compact_boundary","uuid":"b0","parentUuid":null,"compactMetadata":{"trigger":"manual","preTokens":5000}})j" L"\n";
+        CHECK(ParseTranscriptDelta(oldBoundary).compactPostTokens == 0, "delta: a boundary without postTokens (older Claude Code) reports 0 (the fold leaves the prior value)");
+    }
+
+    // (4) ActiveBranchUuids CROSSES compaction boundaries through logicalParentUuid.
+    {
+        const auto uuids = [](const std::string& s) { return ActiveBranchUuids(std::wstring{ s.begin(), s.end() }); };
+
+        // (4a) one boundary: the pre-compaction chain is live again.
+        const std::string one =
+            R"j({"type":"user","userType":"external","uuid":"o1","parentUuid":null,"message":{"content":"old one"},"timestamp":"2026-09-20T08:00:00.000Z"})j" "\n"
+            R"j({"type":"assistant","uuid":"o2","parentUuid":"o1","message":{"content":[{"type":"text","text":"old reply"}]},"timestamp":"2026-09-20T08:00:05.000Z"})j" "\n"
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"B","parentUuid":null,"logicalParentUuid":"o2","compactMetadata":{"trigger":"manual","preTokens":409797,"postTokens":5012},"timestamp":"2026-09-20T09:00:00.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","isCompactSummary":true,"uuid":"S","parentUuid":"B","message":{"content":"This session is being continued from a previous conversation..."},"timestamp":"2026-09-20T09:00:01.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"n1","parentUuid":"S","message":{"content":"new one"},"timestamp":"2026-09-20T09:05:00.000Z"})j" "\n"
+            R"j({"type":"last-prompt","lastPrompt":"new one","leafUuid":"n1"})j" "\n";
+        const auto a1 = uuids(one);
+        CHECK(a1.size() == 5 && a1.count(L"o1") && a1.count(L"o2") && a1.count(L"B") && a1.count(L"S") && a1.count(L"n1"),
+              "active branch: the walk crosses the boundary into the pre-compaction chain (o1/o2 live)");
+
+        // (4b) a branch REWOUND before the compaction stays excluded (the logical parent is the kept tail).
+        const std::string rewound =
+            R"j({"type":"user","userType":"external","uuid":"r1","parentUuid":null,"message":{"content":"q1"}})j" "\n"
+            R"j({"type":"assistant","uuid":"r2","parentUuid":"r1","message":{"content":[{"type":"text","text":"a1"}]}})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"x1","parentUuid":"r2","message":{"content":"abandoned"}})j" "\n"
+            R"j({"type":"assistant","uuid":"x2","parentUuid":"x1","message":{"content":[{"type":"text","text":"abandoned reply"}]}})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"r3","parentUuid":"r2","message":{"content":"kept"}})j" "\n"
+            R"j({"type":"assistant","uuid":"r4","parentUuid":"r3","message":{"content":[{"type":"text","text":"kept reply"}]}})j" "\n"
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"RB","parentUuid":null,"logicalParentUuid":"r4","compactMetadata":{"trigger":"auto"}})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"r5","parentUuid":"RB","message":{"content":"after"}})j" "\n"
+            R"j({"type":"last-prompt","leafUuid":"r5"})j" "\n";
+        const auto a2 = uuids(rewound);
+        CHECK(a2.count(L"r1") && a2.count(L"r2") && a2.count(L"r3") && a2.count(L"r4") && a2.count(L"RB") && a2.count(L"r5"),
+              "active branch: the kept pre-compaction chain is live across the boundary");
+        CHECK(a2.count(L"x1") == 0 && a2.count(L"x2") == 0, "active branch: a branch rewound away BEFORE the compaction stays excluded");
+
+        // (4c) a STALE marker written before an auto-compaction (the same turn streams on after it): the
+        // anchor extension now reaches the marked leaf THROUGH the boundary, so the live post-compaction
+        // tail is not orphaned (before, the whole post-compaction conversation read as off-branch).
+        const std::string stale =
+            R"j({"type":"user","userType":"external","uuid":"s1","parentUuid":null,"message":{"content":"long task"}})j" "\n"
+            R"j({"type":"assistant","uuid":"s2","parentUuid":"s1","message":{"content":[{"type":"text","text":"working"}]}})j" "\n"
+            R"j({"type":"last-prompt","lastPrompt":"long task","leafUuid":"s2"})j" "\n"
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"SB","parentUuid":null,"logicalParentUuid":"s2","compactMetadata":{"trigger":"auto"}})j" "\n"
+            R"j({"type":"user","userType":"external","isCompactSummary":true,"uuid":"SS","parentUuid":"SB","message":{"content":"This session is being continued..."}})j" "\n"
+            R"j({"type":"assistant","uuid":"s3","parentUuid":"SS","message":{"content":[{"type":"text","text":"done after compaction"}]}})j" "\n";
+        const auto a3 = uuids(stale);
+        CHECK(a3.count(L"s3") && a3.count(L"SS") && a3.count(L"SB") && a3.count(L"s2") && a3.count(L"s1"),
+              "active branch: a stale pre-compaction marker is extended THROUGH the boundary to the live tail");
+
+        // (4d) two compactions: both are crossed.
+        const std::string two =
+            R"j({"type":"user","userType":"external","uuid":"d1","parentUuid":null,"message":{"content":"first"},"timestamp":"2026-09-20T07:00:00.000Z"})j" "\n"
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"D1","parentUuid":null,"logicalParentUuid":"d1","compactMetadata":{"trigger":"auto","preTokens":170000,"postTokens":9000},"timestamp":"2026-09-20T07:30:00.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"d2","parentUuid":"D1","message":{"content":"second"},"timestamp":"2026-09-20T08:00:00.000Z"})j" "\n"
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"D2","parentUuid":null,"logicalParentUuid":"d2","compactMetadata":{"trigger":"manual","preTokens":150000,"postTokens":8000},"timestamp":"2026-09-20T08:30:00.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"d3","parentUuid":"D2","message":{"content":"third"},"timestamp":"2026-09-20T09:00:00.000Z"})j" "\n"
+            R"j({"type":"last-prompt","leafUuid":"d3"})j" "\n";
+        const auto a4 = uuids(two);
+        CHECK(a4.size() == 5 && a4.count(L"d1") && a4.count(L"d2") && a4.count(L"d3"), "active branch: every compaction on the chain is crossed");
+
+        // (4e) a boundary WITHOUT logicalParentUuid (1 of 405 measured, an older writer) crosses through
+        // its PRE-BOUNDARY LEAF — here the last node written before it (no marker precedes it).
+        const std::string legacy =
+            R"j({"type":"user","userType":"external","uuid":"l1","parentUuid":null,"message":{"content":"before"}})j" "\n"
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"LB","parentUuid":null,"compactMetadata":{"trigger":"manual"}})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"l2","parentUuid":"LB","message":{"content":"after"}})j" "\n"
+            R"j({"type":"last-prompt","leafUuid":"l2"})j" "\n";
+        const auto a5 = uuids(legacy);
+        CHECK(a5.size() == 3 && a5.count(L"LB") && a5.count(L"l2") && a5.count(L"l1"), "active branch: a boundary with no logicalParentUuid crosses via the node written before it");
+
+        // (4f) a malformed logical parent pointing at the boundary's own DESCENDANT (a copied continuation
+        // file really writes this: its preserved tail is re-written after the boundary) terminates —
+        // the visited set is the cycle guard — and a self-reference is ignored at parse.
+        const std::string cyc =
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"CB","parentUuid":null,"logicalParentUuid":"c2"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"c1","parentUuid":"CB","message":{"content":"x"}})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"c2","parentUuid":"c1","message":{"content":"y"}})j" "\n"
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"SELF","parentUuid":null,"logicalParentUuid":"SELF"})j" "\n"
+            R"j({"type":"last-prompt","leafUuid":"c2"})j" "\n";
+        const auto a6 = uuids(cyc);
+        CHECK(a6.size() == 3 && a6.count(L"c2") && a6.count(L"c1") && a6.count(L"CB") && a6.count(L"SELF") == 0,
+              "active branch: a logical parent that loops back into the chain terminates (cycle-guarded); an unrelated self-referencing root stays out");
+
+        // (4g) the CURRENT auto-compaction shape (Claude Code 2.1.280, measured on 2026-09-24): the
+        // preserved TAIL is written AFTER the summary (a child of it), and the logical parent == that
+        // tail — so neither leads back. The preserved LIST (and the pre-boundary leaf) do.
+        const std::string preservedTail =
+            R"j({"type":"user","userType":"external","uuid":"p1","parentUuid":null,"message":{"content":"early"}})j" "\n"
+            R"j({"type":"assistant","uuid":"p2","parentUuid":"p1","message":{"content":[{"type":"text","text":"ok"}]}})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"p3","parentUuid":"p2","message":{"content":"kept prompt"}})j" "\n"
+            R"j({"type":"assistant","uuid":"p4","parentUuid":"p3","message":{"content":[{"type":"text","text":"kept reply"}]}})j" "\n"
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"PB","parentUuid":null,"logicalParentUuid":"p5","compactMetadata":{"trigger":"auto","preservedSegment":{"headUuid":"p3","anchorUuid":"PS","tailUuid":"p5"},"preservedMessages":{"anchorUuid":"PS","uuids":["p3","p4","p5"]}}})j" "\n"
+            R"j({"type":"user","userType":"external","isCompactSummary":true,"uuid":"PS","parentUuid":"PB","message":{"content":"This session is being continued..."}})j" "\n"
+            R"j({"type":"attachment","uuid":"p5","parentUuid":"PS"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"p6","parentUuid":"p5","message":{"content":"after"}})j" "\n"
+            R"j({"type":"last-prompt","leafUuid":"p6"})j" "\n";
+        const auto a7 = uuids(preservedTail);
+        CHECK(a7.count(L"p1") && a7.count(L"p2") && a7.count(L"p3") && a7.count(L"p4") && a7.count(L"p5") && a7.count(L"p6"),
+              "active branch: a preserved tail written after the summary still reaches the history (via the preserved list)");
+
+        // (4h) a "summarize from here" PARTIAL compaction: it KEPT the early messages (logical parent + the
+        // preserved list name them) and summarized the MIDDLE — only the pre-boundary leaf reaches that.
+        const std::string partial =
+            R"j({"type":"user","userType":"external","uuid":"e1","parentUuid":null,"message":{"content":"kept early"}})j" "\n"
+            R"j({"type":"assistant","uuid":"e2","parentUuid":"e1","message":{"content":[{"type":"text","text":"early reply"}]}})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"m1","parentUuid":"e2","message":{"content":"summarized middle"}})j" "\n"
+            R"j({"type":"assistant","uuid":"m2","parentUuid":"m1","message":{"content":[{"type":"text","text":"middle reply"}]}})j" "\n"
+            R"j({"type":"last-prompt","leafUuid":"m2"})j" "\n"
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"QB","parentUuid":null,"logicalParentUuid":"e2","compactMetadata":{"trigger":"manual","messagesSummarized":2,"preservedMessages":{"anchorUuid":"QS","uuids":["e1","e2"]}}})j" "\n"
+            R"j({"type":"user","userType":"external","isCompactSummary":true,"uuid":"QS","parentUuid":"QB","message":{"content":"This session is being continued..."}})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"q1","parentUuid":"QS","message":{"content":"after partial"}})j" "\n"
+            R"j({"type":"last-prompt","leafUuid":"q1"})j" "\n";
+        const auto a8 = uuids(partial);
+        CHECK(a8.count(L"m1") && a8.count(L"m2") && a8.count(L"e1") && a8.count(L"e2") && a8.count(L"q1"),
+              "active branch: the middle a 'summarize from here' compaction folded away is reached through the pre-boundary leaf");
+
+        // (4i) the logical parent was never written to disk: the leaf MARKER in force before the boundary
+        // names the pre-compaction tip. A sidechain line written just before the boundary is never taken
+        // as that tip (an inlined subagent chain is not the conversation).
+        const std::string ghost =
+            R"j({"type":"user","userType":"external","uuid":"g1","parentUuid":null,"message":{"content":"before"}})j" "\n"
+            R"j({"type":"assistant","uuid":"g2","parentUuid":"g1","message":{"content":[{"type":"text","text":"reply"}]}})j" "\n"
+            R"j({"type":"last-prompt","leafUuid":"g2"})j" "\n"
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"GB","parentUuid":null,"logicalParentUuid":"NEVER-WRITTEN","compactMetadata":{"trigger":"manual"}})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"g3","parentUuid":"GB","message":{"content":"after"}})j" "\n"
+            R"j({"type":"last-prompt","leafUuid":"g3"})j" "\n";
+        const auto a9 = uuids(ghost);
+        CHECK(a9.count(L"g1") && a9.count(L"g2") && a9.count(L"g3"), "active branch: an absent logical parent falls back to the leaf marker written before the boundary");
+        const std::string side =
+            R"j({"type":"user","userType":"external","uuid":"h1","parentUuid":null,"message":{"content":"before"}})j" "\n"
+            R"j({"type":"user","userType":"external","isSidechain":true,"uuid":"sc1","parentUuid":null,"message":{"content":"subagent task"}})j" "\n"
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"HB","parentUuid":null,"compactMetadata":{"trigger":"auto"}})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"h2","parentUuid":"HB","message":{"content":"after"}})j" "\n"
+            R"j({"type":"last-prompt","leafUuid":"h2"})j" "\n";
+        const auto a10 = uuids(side);
+        CHECK(a10.count(L"h1") && a10.count(L"sc1") == 0, "active branch: the pre-boundary tail skips an inlined sidechain line");
+
+        // (4j) a legacy resume RE-APPENDED the whole history (the same uuids + parents again, Claude Code
+        // <= 2.1.147): the walk is unaffected (a set; duplicate edges collapse).
+        const std::string reappended = one + std::string{ R"j({"type":"user","userType":"external","uuid":"o1","parentUuid":null,"message":{"content":"old one"},"timestamp":"2026-09-20T08:00:00.000Z"})j" "\n" } +
+                                       R"j({"type":"assistant","uuid":"o2","parentUuid":"o1","message":{"content":[{"type":"text","text":"old reply"}]},"timestamp":"2026-09-20T08:00:05.000Z"})j" "\n"
+                                       R"j({"type":"last-prompt","leafUuid":"n1"})j" "\n";
+        const auto a11 = uuids(reappended);
+        CHECK(a11.size() == 5 && a11.count(L"o1") && a11.count(L"n1"), "active branch: a re-appended history changes nothing");
+    }
+
+    // (5) The DISPLAY readers over a compacted plan-restart child (the real shape: the compact SUMMARY
+    // also says "read the full transcript at: <SELF>.jsonl").
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring base = std::wstring{ tmp } + L"am_compactlife_" + std::to_wstring(::GetCurrentProcessId());
+        const std::string parentId = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+        const std::string selfId = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+        const std::string compacted =
+            R"j({"type":"user","userType":"external","uuid":"c1","parentUuid":null,"message":{"content":"Implement the plan\nread the full transcript at: C:\\Users\\x\\.claude\\projects\\K--p\\)j" + parentId + R"j(.jsonl"},"timestamp":"2026-09-20T08:00:00.000Z"})j" "\n"
+            R"j({"type":"assistant","uuid":"c2","parentUuid":"c1","message":{"content":[{"type":"text","text":"Reading it"},{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"K:\\proj\\PreCompact.cs"}}]},"timestamp":"2026-09-20T08:00:05.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"c3","parentUuid":"c2","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]},"timestamp":"2026-09-20T08:00:06.000Z"})j" "\n"
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"CB","parentUuid":null,"logicalParentUuid":"c3","compactMetadata":{"trigger":"auto","preTokens":180000,"postTokens":9000},"timestamp":"2026-09-20T09:00:00.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","isCompactSummary":true,"uuid":"CS","parentUuid":"CB","message":{"content":"This session is being continued from a previous conversation that ran out of context.\nIf you need specifics, read the full transcript at: C:\\Users\\x\\.claude\\projects\\K--p\\)j" + selfId + R"j(.jsonl"},"timestamp":"2026-09-20T09:00:01.000Z"})j" "\n"
+            R"j({"type":"assistant","uuid":"c4","parentUuid":"CS","message":{"content":[{"type":"text","text":"Continuing"},{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"K:\\proj\\PostCompact.cs"}}]},"timestamp":"2026-09-20T09:00:10.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"c5","parentUuid":"c4","message":{"content":"now the tests"},"timestamp":"2026-09-20T09:05:00.000Z"})j" "\n"
+            R"j({"type":"last-prompt","lastPrompt":"now the tests","leafUuid":"c5"})j" "\n";
+
+        const std::wstring p = base + L"_c.jsonl";
+        MakeJsonl(p, compacted, 3000, 1000);
+        const auto s = AnalyzeSessionTranscript(p, 0);
+        const std::wstring wParent{ parentId.begin(), parentId.end() };
+        CHECK(s.parentSessionId == wParent,
+              "summary: the plan-parent link comes from the TRUE first prompt (not the compact summary's read-the-transcript-at-<self>)");
+        CHECK(s.firstTs == L"2026-09-20T08:00:00.000Z", "summary: the session start (duration) spans the compaction");
+        // A plain scan (no <algorithm> dependency in this unity-built TU).
+        const auto listed = [](const std::vector<std::wstring>& list, const wchar_t* label) {
+            for (const auto& item : list)
+            {
+                if (item == label)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+        CHECK(listed(s.filesRead, L"PreCompact.cs"), "summary: a file read BEFORE the compaction stays in Files Read");
+        CHECK(listed(s.filesEdited, L"PostCompact.cs"), "summary: a file edited after the compaction is in Files Edited");
+        CHECK(s.userMsgs.size() == 1 && s.userMsgs[0] == L"now the tests",
+              "summary: Messages is still the CURRENT segment (restarted at the on-branch boundary — no duplicate of the previous session)");
+        CHECK(s.compacted && s.previousSegments.size() == 1 && !s.previousSegments[0].userMsgs.empty() &&
+                  s.previousSegments[0].userMsgs[0].rfind(L"Implement the plan", 0) == 0,
+              "summary: the pre-compaction prompt surfaces once, as the previous session");
+
+        // A truncated HEAD read never cuts (it gets no previousSegments, so a cut would drop prompts).
+        const auto h = AnalyzeSessionTranscript(p, 1u << 20);
+        CHECK(h.userMsgs.size() == 2 && h.previousSegments.empty(), "summary (head read): no segment cut — every prompt in the window stays listed");
+
+        // The copied Transcript + Followup span the whole conversation (the summary bridge excluded).
+        const std::wstring convo = ReadConversationText(p, false, 0);
+        CHECK(convo.find(L"Implement the plan") != std::wstring::npos && convo.find(L"Reading it") != std::wstring::npos &&
+                  convo.find(L"now the tests") != std::wstring::npos,
+              "transcript copy: the pre-compaction turns are included again");
+        CHECK(convo.find(L"being continued") == std::wstring::npos, "transcript copy: the compact summary bridge is still excluded");
+        const std::wstring fu = ReadConversationFollowupText(p, false, 0);
+        CHECK(fu.find(L"Implement the plan") != std::wstring::npos && fu.find(L"now the tests") != std::wstring::npos,
+              "followup copy: the pre-compaction turns are included again");
+
+        // The title + prompt list (the External rows, the read-only plan) keep the conversation's TRUE start.
+        const std::wstring projectsDir = base + L"_proj";
+        const std::wstring cwd = L"K:\\proj";
+        const std::wstring sub = projectsDir + L"\\" + EncodeCwdToProjectDir(cwd);
+        std::error_code ecMk;
+        std::filesystem::create_directories(std::filesystem::path{ sub }, ecMk);
+        const std::wstring wSelf{ selfId.begin(), selfId.end() };
+        MakeJsonl(sub + L"\\" + wSelf + L".jsonl", compacted, 3000, 1000);
+        const auto ti = ReadTranscriptInfoIn(projectsDir, cwd, wSelf, 0, 1000);
+        CHECK(TranscriptDisplayTitle(ti) == L"Implement the plan", "title: a compacted conversation keeps its TRUE first prompt as title");
+        CHECK(ti.userPrompts.size() == 2 && ti.userPrompts[1] == L"now the tests", "title: the prompt list spans the compaction");
+
+        // No leaf marker (keep-all): the Messages list restarts at the boundary too, so the previous
+        // session is never listed twice.
+        const std::string noMarker = compacted.substr(0, compacted.rfind(R"j({"type":"last-prompt")j"));
+        const std::wstring pn = base + L"_n.jsonl";
+        MakeJsonl(pn, noMarker, 3000, 1000);
+        const auto sn = AnalyzeSessionTranscript(pn, 0);
+        CHECK(sn.userMsgs.size() == 1 && sn.userMsgs[0] == L"now the tests" && sn.previousSegments.size() == 1,
+              "summary (no marker): the current segment + one previous session, no duplicate");
+
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::path{ p }, ec);
+        std::filesystem::remove(std::filesystem::path{ pn }, ec);
+        std::filesystem::remove_all(std::filesystem::path{ projectsDir }, ec);
+    }
+
+    // (5b) A legacy resume (Claude Code <= 2.1.147) RE-APPENDED the whole history — boundary included —
+    // before the conversation went on. Every display reader keeps each message ONCE, at its first
+    // (authentic) position: no doubled prompts/turns, and the copied boundary never splits off a bogus
+    // extra "previous session" nor re-cuts the current Messages list.
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring base = std::wstring{ tmp } + L"am_reappend_" + std::to_wstring(::GetCurrentProcessId());
+        const std::string history =
+            R"j({"type":"user","userType":"external","uuid":"r1","parentUuid":null,"message":{"content":"first prompt"},"timestamp":"2026-05-22T08:00:00.000Z"})j" "\n"
+            R"j({"type":"assistant","uuid":"r2","parentUuid":"r1","message":{"content":[{"type":"text","text":"first reply"}]},"timestamp":"2026-05-22T08:00:05.000Z"})j" "\n"
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"RB","parentUuid":null,"logicalParentUuid":"r2","compactMetadata":{"trigger":"manual","preTokens":150000,"postTokens":7000},"timestamp":"2026-05-22T09:00:00.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","isCompactSummary":true,"uuid":"RS","parentUuid":"RB","message":{"content":"This session is being continued..."},"timestamp":"2026-05-22T09:00:01.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"r3","parentUuid":"RS","message":{"content":"second prompt"},"timestamp":"2026-05-22T09:05:00.000Z"})j" "\n";
+        const std::string reappended = history + history + // the resume's verbatim re-append
+                                       R"j({"type":"assistant","uuid":"r4","parentUuid":"r3","message":{"content":[{"type":"text","text":"second reply"}]},"timestamp":"2026-05-23T10:00:00.000Z"})j" "\n"
+                                       R"j({"type":"user","userType":"external","uuid":"r5","parentUuid":"r4","message":{"content":"third prompt"},"timestamp":"2026-05-23T10:05:00.000Z"})j" "\n"
+                                       R"j({"type":"last-prompt","leafUuid":"r5"})j" "\n";
+        const std::wstring p = base + L"_r.jsonl";
+        MakeJsonl(p, reappended, 4000, 1000);
+
+        const auto segs = CollectConversationSegments(std::wstring{ reappended.begin(), reappended.end() });
+        CHECK(segs.size() == 2 && segs[0].userMsgs.size() == 1 && segs[1].userMsgs.size() == 2,
+              "re-append: the copied boundary splits no extra segment (2 segments: 1 previous + the current)");
+        const auto s = AnalyzeSessionTranscript(p, 0);
+        CHECK(s.userMsgs.size() == 2 && s.userMsgs[0] == L"second prompt" && s.userMsgs[1] == L"third prompt",
+              "re-append: the current Messages list is cut at the boundary's FIRST occurrence only");
+        CHECK(s.previousSegments.size() == 1 && s.previousSegments[0].userMsgs.size() == 1 && s.previousSegments[0].userMsgs[0] == L"first prompt",
+              "re-append: the previous session is listed once");
+        const std::wstring convo = ReadConversationText(p, false, 0);
+        const auto count = [](const std::wstring& hay, const wchar_t* needle) {
+            size_t n = 0;
+            for (size_t at = hay.find(needle); at != std::wstring::npos; at = hay.find(needle, at + 1))
+            {
+                ++n;
+            }
+            return n;
+        };
+        CHECK(count(convo, L"first prompt") == 1 && count(convo, L"second prompt") == 1 && count(convo, L"third prompt") == 1,
+              "re-append: the copied Transcript carries every message exactly once");
+        const std::wstring fu = ReadConversationFollowupText(p, false, 0);
+        CHECK(count(fu, L"first prompt") == 1 && count(fu, L"second prompt") == 1, "re-append: the Followup brief carries every turn exactly once");
+
+        const std::wstring projectsDir = base + L"_proj";
+        const std::wstring cwd = L"K:\\reappend";
+        const std::wstring sub = projectsDir + L"\\" + EncodeCwdToProjectDir(cwd);
+        std::error_code ecMk;
+        std::filesystem::create_directories(std::filesystem::path{ sub }, ecMk);
+        const std::wstring sid = L"cccccccc-3333-4333-8333-cccccccccccc";
+        MakeJsonl(sub + L"\\" + sid + L".jsonl", reappended, 4000, 1000);
+        const auto ti = ReadTranscriptInfoIn(projectsDir, cwd, sid, 0, 1000);
+        CHECK(ti.userPrompts.size() == 3 && ti.userPrompts[0] == L"first prompt" && ti.userPrompts[2] == L"third prompt",
+              "re-append: the prompt list has no duplicates");
+
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::path{ p }, ec);
+        std::filesystem::remove_all(std::filesystem::path{ projectsDir }, ec);
+    }
+
+    // (6) Presence identity: `procStart` (the raw process FILETIME claude writes as a decimal string)
+    // is decoded exactly like FileTimeToUnixMs, and a row is trusted only for ITS process.
+    {
+        // 134347853746656012 - 116444736000000000 = 17903117746656012 ticks -> /10000 (truncated).
+        CHECK(PresenceProcStartToUnixMs(L"134347853746656012") == 1790311774665, "presence: procStart decodes like FileTimeToUnixMs (a live row's value)");
+        CHECK(PresenceProcStartToUnixMs(L"") == 0 && PresenceProcStartToUnixMs(L"12a4") == 0 && PresenceProcStartToUnixMs(L"-1") == 0,
+              "presence: an empty / non-digit procStart reads 0 (unknown)");
+        CHECK(PresenceProcStartToUnixMs(L"99999999999999999999") == 0, "presence: an overflowing procStart reads 0 (never a wrapped value)");
+        CHECK(PresenceProcStartToUnixMs(L"123456789012345678901") == 0, "presence: a 21-digit procStart reads 0");
+        CHECK(PresenceProcStartToUnixMs(L"100") == 0, "presence: a pre-1970 FILETIME reads 0");
+
+        SessionPresenceRow r;
+        r.procStartUnixMs = 1790311774665;
+        r.startedAtMs = 1790311775872; // 1.2 s after creation, as measured live
+        CHECK(PresenceRowMatchesProcess(r, 1790311774665), "presence: the exact procStart matches its process");
+        CHECK(PresenceRowMatchesProcess(r, 1790311774666), "presence: a 1 ms rounding edge still matches");
+        CHECK(!PresenceRowMatchesProcess(r, 1790311774668),
+              "presence: a different process on the same pid is rejected even though startedAt would fit the legacy window");
+        CHECK(PresenceRowMatchesProcess(r, 0), "presence: an unknown process start (denied query) accepts");
+
+        SessionPresenceRow legacy; // an older claude: no procStart, startedAt only
+        const int64_t start = 1'000'000'000;
+        legacy.startedAtMs = start + 1200;
+        CHECK(PresenceRowMatchesProcess(legacy, start), "presence (legacy): startedAt shortly after creation matches");
+        legacy.startedAtMs = start - kPresenceStartedAtEarlySkewMs;
+        CHECK(PresenceRowMatchesProcess(legacy, start), "presence (legacy): the early-skew bound is inclusive");
+        legacy.startedAtMs = start - kPresenceStartedAtEarlySkewMs - 1;
+        CHECK(!PresenceRowMatchesProcess(legacy, start), "presence (legacy): a file started well BEFORE the process belongs to a previous pid owner");
+        legacy.startedAtMs = start + kPresenceStartedAtLateSkewMs + 1;
+        CHECK(!PresenceRowMatchesProcess(legacy, start), "presence (legacy): a file started long AFTER the process is not its registration");
+        legacy.startedAtMs = 0;
+        CHECK(!PresenceRowMatchesProcess(legacy, start), "presence (legacy): no startedAt and no procStart fails a known process start (as before)");
+
+        // The raw read decodes the string form, and never trusts a rounded numeric form.
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring presDir = std::wstring{ tmp } + L"am_presence_ps_" + std::to_wstring(::GetCurrentProcessId());
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path{ presDir }, ec);
+        MakeJsonl(presDir + L"\\4242.json", "{\"pid\":4242,\"sessionId\":\"s-str\",\"startedAt\":1790311775872,\"procStart\":\"134347853746656012\",\"status\":\"idle\"}", 1, 1);
+        MakeJsonl(presDir + L"\\4343.json", "{\"pid\":4343,\"sessionId\":\"s-num\",\"startedAt\":1790311775872,\"procStart\":134347853746656012,\"status\":\"busy\"}", 1, 1);
+        const auto rows = ReadSessionPresenceIn(presDir);
+        int64_t strMs = -1, numMs = -1;
+        for (const auto& row : rows)
+        {
+            if (row.pid == 4242)
+            {
+                strMs = row.procStartUnixMs;
+            }
+            if (row.pid == 4343)
+            {
+                numMs = row.procStartUnixMs;
+            }
+        }
+        CHECK(strMs == 1790311774665, "presence read: the string procStart is decoded onto the row");
+        CHECK(numMs == 0, "presence read: a numeric procStart (would be rounded by a double) reads 0 -> the startedAt fallback");
+        std::filesystem::remove_all(std::filesystem::path{ presDir }, ec);
+    }
 }

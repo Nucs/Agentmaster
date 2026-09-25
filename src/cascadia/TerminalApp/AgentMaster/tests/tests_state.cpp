@@ -45,6 +45,51 @@ void TestStateMachine()
         CHECK(NextSessionState(st, Msg(L"a", HookEvent::SessionStart)) == RestoredSessionState(st), "SessionStart mapping == RestoredSessionState mapping (a lazy-start SessionStart IS a resume)");
     }
 
+    // Agentmaster (HOOKS.md "Compaction"): a SessionStart(source="compact") is NOT a (re)start — the SAME
+    // conversation continues, and after an AUTO-compaction the very same turn carries on — so a Running
+    // turn stays Running instead of the Running->Idle blip every auto-compaction used to cause (proven
+    // live: NumSharp a3d777bf, `[SessionStart] ... state=0` at each of 10 boundaries). Every other state
+    // maps exactly as a plain SessionStart (the invariant above stays about resumes, not compactions).
+    {
+        HookMessage compactStart = Msg(L"a", HookEvent::SessionStart);
+        compactStart.source = L"compact";
+        CHECK(NextSessionState(SessionState::Running, compactStart) == SessionState::Running, "SessionStart(compact) keeps a Running turn Running (the auto-compaction blip fix)");
+        CHECK(NextSessionState(SessionState::WaitingForInput, compactStart) == SessionState::WaitingForInput, "SessionStart(compact) keeps WaitingForInput");
+        CHECK(NextSessionState(SessionState::NeedsApproval, compactStart) == SessionState::NeedsApproval, "SessionStart(compact) keeps NeedsApproval");
+        CHECK(NextSessionState(SessionState::Idle, compactStart) == SessionState::Idle, "SessionStart(compact) keeps Idle");
+        CHECK(NextSessionState(SessionState::Error, compactStart) == SessionState::Idle, "SessionStart(compact) from Error -> Idle (a completed compaction made the conversation usable again)");
+        CHECK(NextSessionState(SessionState::Done, compactStart) == SessionState::Idle, "SessionStart(compact) from Done -> Idle");
+        // Every OTHER source keeps the historical mapping: a /clear, resume, startup or fork mid-run resets.
+        for (const wchar_t* src : { L"startup", L"resume", L"clear", L"fork", L"" })
+        {
+            HookMessage other = Msg(L"a", HookEvent::SessionStart);
+            other.source = src;
+            CHECK(NextSessionState(SessionState::Running, other) == SessionState::Idle, "SessionStart(non-compact source) from Running -> Idle (unchanged)");
+        }
+    }
+    // The compaction WINDOW (PreCompact -> PostCompact): claude is summarizing for 1-3+ minutes — Running
+    // for the whole window; a MANUAL compaction then returns to the prompt (WaitingForInput); an AUTO one
+    // continues its turn (state kept); an unknown trigger (an old forwarder) keeps the state.
+    {
+        HookMessage pre = Msg(L"a", HookEvent::PreCompact);
+        pre.source = L"manual";
+        CHECK(NextSessionState(SessionState::WaitingForInput, pre) == SessionState::Running, "PreCompact(manual) at rest -> Running (a /compact is claude WORKING)");
+        CHECK(NextSessionState(SessionState::Idle, pre) == SessionState::Running, "PreCompact(manual) from Idle -> Running");
+        CHECK(NextSessionState(SessionState::Error, pre) == SessionState::Running, "PreCompact from Error ('Prompt is too long' answered by /compact) -> Running");
+        HookMessage preAuto = Msg(L"a", HookEvent::PreCompact);
+        preAuto.source = L"auto";
+        CHECK(NextSessionState(SessionState::Running, preAuto) == SessionState::Running, "PreCompact(auto) mid-turn stays Running");
+        HookMessage post = Msg(L"a", HookEvent::PostCompact);
+        post.source = L"manual";
+        CHECK(NextSessionState(SessionState::Running, post) == SessionState::WaitingForInput, "PostCompact(manual) -> WaitingForInput (back at the prompt)");
+        HookMessage postAuto = Msg(L"a", HookEvent::PostCompact);
+        postAuto.source = L"auto";
+        CHECK(NextSessionState(SessionState::Running, postAuto) == SessionState::Running, "PostCompact(auto) keeps the continuing turn Running");
+        CHECK(NextSessionState(SessionState::Running, Msg(L"a", HookEvent::PostCompact)) == SessionState::Running, "PostCompact with no trigger keeps the current state (the scanner settles it)");
+        // A compaction is never ⚡ evidence: it REPLACES the prefix, so the next request's cache is cold.
+        CHECK(!IsApiTurnEvidence(pre) && !IsApiTurnEvidence(post) && !IsApiTurnEvidence(postAuto), "Pre/PostCompact never stamp the server-cache turn evidence");
+    }
+
     CHECK(NextSessionState(SessionState::Idle, Msg(L"a", HookEvent::UserPromptSubmit)) == SessionState::Running, "UserPromptSubmit -> Running");
     CHECK(NextSessionState(SessionState::Running, Msg(L"a", HookEvent::PreToolUse)) == SessionState::Running, "PreToolUse -> Running");
     CHECK(NextSessionState(SessionState::Running, Msg(L"a", HookEvent::Stop)) == SessionState::WaitingForInput, "Stop -> WaitingForInput");
@@ -243,6 +288,69 @@ void TestOrderedStateMachine()
         CHECK(t.queuedPrompts == 1 && t.lastPromptUnixMs == 2000, "ordered: accounting accumulated");
         NextSessionStateOrdered(SessionState::Running, at(HookEvent::SessionStart, 3000), t);
         CHECK(t.queuedPrompts == 0 && t.lastPromptUnixMs == 0, "ordered: SessionStart resets turn accounting");
+    }
+    { // Agentmaster (HOOKS.md "Compaction"): a compaction's SessionStart does NOT reset the accounting — the
+      // same conversation (and, after an AUTO-compaction, the same TURN) continues. Wiping it dropped a
+      // type-ahead count, so the batch's Stop read as a turn-complete (the autorunner advancing into the
+      // running batch) and the stale/duplicate-Stop guards lost their newest-prompt reference.
+        TurnAccounting t;
+        NextSessionStateOrdered(SessionState::Idle, at(HookEvent::UserPromptSubmit, 1000), t);
+        NextSessionStateOrdered(SessionState::Running, at(HookEvent::UserPromptSubmit, 2000), t); // type-ahead
+        CHECK(t.queuedPrompts == 1 && t.lastPromptUnixMs == 2000, "compact: accounting accumulated");
+        HookMessage pre = at(HookEvent::PreCompact, 60000);
+        pre.source = L"auto";
+        const auto rp = NextSessionStateOrdered(SessionState::Running, pre, t);
+        HookMessage post = at(HookEvent::PostCompact, 150000);
+        post.source = L"auto";
+        const auto rq = NextSessionStateOrdered(rp.state, post, t);
+        HookMessage start = at(HookEvent::SessionStart, 150100);
+        start.source = L"compact";
+        const auto rs = NextSessionStateOrdered(rq.state, start, t);
+        CHECK(rp.state == SessionState::Running && rq.state == SessionState::Running && rs.state == SessionState::Running,
+              "compact: an auto-compaction window keeps the turn Running end to end");
+        CHECK(t.queuedPrompts == 1 && t.lastPromptUnixMs == 2000, "compact: SessionStart(compact) + the window leave the accounting intact");
+        CHECK(!rp.turnComplete && !rq.turnComplete && !rs.turnComplete, "compact: no turn boundary inside the window (no advance)");
+        // ...so the batch's Stop is still a type-ahead consume (stays Running), exactly as without a compaction.
+        const auto rb = NextSessionStateOrdered(rs.state, at(HookEvent::Stop, 200000), t);
+        CHECK(rb.state == SessionState::Running && !rb.turnComplete && t.queuedPrompts == 0, "compact: the type-ahead batch survives the compaction");
+    }
+    { // A MANUAL compaction at rest: Running for the window, then WaitingForInput — NOT a turn completion.
+        TurnAccounting t;
+        HookMessage pre = at(HookEvent::PreCompact, 1000);
+        pre.source = L"manual";
+        const auto rp = NextSessionStateOrdered(SessionState::WaitingForInput, pre, t);
+        CHECK(rp.state == SessionState::Running && !rp.turnComplete, "manual compact: PreCompact -> Running");
+        HookMessage post = at(HookEvent::PostCompact, 120000);
+        post.source = L"manual";
+        const auto rq = NextSessionStateOrdered(rp.state, post, t);
+        CHECK(rq.state == SessionState::WaitingForInput && !rq.turnComplete && !rq.staleStop,
+              "manual compact: PostCompact -> WaitingForInput without a turnComplete (no question-guard, no Stop-seam advance)");
+        HookMessage start = at(HookEvent::SessionStart, 120050);
+        start.source = L"compact";
+        const auto rs = NextSessionStateOrdered(rq.state, start, t);
+        CHECK(rs.state == SessionState::WaitingForInput, "manual compact: the trailing SessionStart(compact) keeps WaitingForInput");
+    }
+    { // Agentmaster (HOOKS.md "Compaction"): a prompt typed DURING a manual compaction — PreCompact set
+      // Running, so it counted as type-ahead — runs as the NEXT turn right after the compaction with no
+      // further UserPromptSubmit. PostCompact consumes that batch and stays Running (not READY), exactly
+      // like the type-ahead consume a Stop performs; the batch's own Stop then completes normally.
+        TurnAccounting t;
+        HookMessage pre = at(HookEvent::PreCompact, 1000);
+        pre.source = L"manual";
+        const auto rp = NextSessionStateOrdered(SessionState::WaitingForInput, pre, t);
+        const auto ru = NextSessionStateOrdered(rp.state, at(HookEvent::UserPromptSubmit, 5000), t);
+        CHECK(ru.state == SessionState::Running && t.queuedPrompts == 1, "manual compact: a prompt typed during the window is type-ahead");
+        HookMessage post = at(HookEvent::PostCompact, 120000);
+        post.source = L"manual";
+        const auto rq = NextSessionStateOrdered(ru.state, post, t);
+        CHECK(rq.state == SessionState::Running && !rq.turnComplete && t.queuedPrompts == 0,
+              "manual compact: PostCompact consumes the typed batch and stays Running (claude runs it next) instead of reading READY");
+        HookMessage start = at(HookEvent::SessionStart, 120050);
+        start.source = L"compact";
+        const auto rs = NextSessionStateOrdered(rq.state, start, t);
+        CHECK(rs.state == SessionState::Running && t.lastPromptUnixMs == 5000, "manual compact: the trailing SessionStart(compact) keeps the batch Running and the prompt stamp");
+        const auto rb = NextSessionStateOrdered(rs.state, at(HookEvent::Stop, 180000), t);
+        CHECK(rb.state == SessionState::WaitingForInput && rb.turnComplete, "manual compact: the typed batch's own Stop completes the turn");
     }
     { // The cap bounds a pathological type-ahead burst (collapse-on-Stop bounds drift anyway).
         TurnAccounting t;
@@ -568,6 +676,46 @@ void TestWire()
         up.ts = 42;
         auto urt = ParseWireLine(BuildWireLine(up));
         CHECK(urt && urt->promptText == L"a\tb\nc" && urt->ts == 42, "escaped prompt + trailing ts round-trip together");
+    }
+    {
+        // 10th field: `source` — the hook payload's own discriminator (SessionStart source / SessionEnd
+        // reason / Pre-PostCompact trigger), appended LAST after `ts` (HOOKS.md "Compaction").
+        HookMessage m;
+        m.event = HookEvent::SessionStart;
+        m.sessionId = L"sid";
+        m.ts = 1718000000999;
+        m.source = L"compact";
+        auto rt = ParseWireLine(BuildWireLine(m));
+        CHECK(rt && rt->source == L"compact" && rt->ts == 1718000000999, "wire source round-trips beside ts");
+        // The exact 10-field lines the forwarder emits for the compaction window.
+        auto pre = ParseWireLine(L"PreCompact\tsid\tK:/api\t0\t0\t\twt-1\t\t1718000000456\tmanual");
+        CHECK(pre && pre->event == HookEvent::PreCompact && pre->source == L"manual" && pre->ts == 1718000000456, "PreCompact line parses with its trigger");
+        auto post = ParseWireLine(L"PostCompact\tsid\t\t0\t0\t\t\t\t1\tauto");
+        CHECK(post && post->event == HookEvent::PostCompact && post->source == L"auto", "PostCompact line parses with its trigger");
+        auto end = ParseWireLine(L"SessionEnd\tsid\t\t0\t0\t\t\t\t1\tprompt_input_exit");
+        CHECK(end && end->source == L"prompt_input_exit", "SessionEnd reason rides the same field");
+        // A 9-field line (a pre-source forwarder) parses with source "" — the historical path.
+        auto old9 = ParseWireLine(L"SessionStart\tsid\tK:/api\t0\t0\t\twt-1\t\t1718000000456");
+        CHECK(old9 && old9->source.empty() && old9->ts == 1718000000456, "9-field line (old forwarder) -> source empty, ts intact");
+        // Anything that is not a short identifier token degrades to "" — never a partial match.
+        CHECK(SanitizeWireSource(L"compact") == L"compact", "sanitize keeps a plain token");
+        CHECK(SanitizeWireSource(L"prompt_input_exit") == L"prompt_input_exit", "sanitize keeps underscores");
+        CHECK(SanitizeWireSource(L"com pact").empty(), "sanitize rejects a space");
+        CHECK(SanitizeWireSource(L"compact\r").empty(), "sanitize rejects a control char");
+        CHECK(SanitizeWireSource(std::wstring(kWireSourceMaxChars + 1, L'a')).empty(), "sanitize rejects an over-long value");
+        CHECK(SanitizeWireSource(std::wstring(kWireSourceMaxChars, L'a')).size() == kWireSourceMaxChars, "sanitize keeps a max-length value");
+        auto junk = ParseWireLine(L"SessionStart\tsid\t\t0\t0\t\t\t\t1\tcompäct");
+        CHECK(junk && junk->source.empty(), "a non-ASCII source reads empty");
+        // BuildWireLine sanitizes too, so an unsanitary in-memory value can never split the record.
+        HookMessage h;
+        h.event = HookEvent::SessionStart;
+        h.sessionId = L"sid";
+        h.source = L"a\tb";
+        auto hr = ParseWireLine(BuildWireLine(h));
+        CHECK(hr && hr->source.empty() && hr->sessionId == L"sid", "BuildWireLine drops an unsanitary source");
+        // The two new event names round-trip.
+        CHECK(ParseHookEvent(L"PreCompact") == HookEvent::PreCompact && std::wstring{ HookEventName(HookEvent::PreCompact) } == L"PreCompact", "PreCompact name round-trips");
+        CHECK(ParseHookEvent(L"PostCompact") == HookEvent::PostCompact && std::wstring{ HookEventName(HookEvent::PostCompact) } == L"PostCompact", "PostCompact name round-trips");
     }
     {
         CHECK(HookPipeName(1234) == L"\\\\.\\pipe\\agentmaster.1234", "pipe name format");
@@ -1247,7 +1395,7 @@ void TestObserveClaude()
 
 // Agentmaster (one ConPTY = one live conversation; Rule #14 / session-id divergence): a single
 // claude.exe — one pid on one ConPTY (tabToken) — hosts exactly ONE conversation at a time. When it
-// switches conversation id in-session (/clear, /compact, /resume), the OLD id lingered `live`, so two
+// switches conversation id in-session (/clear, /resume — a /compact keeps its id, it is in-place), the OLD id lingered `live`, so two
 // live records claimed one tab and the reconciler churned re-homing between them — flickering the tab
 // header between the managed name and claude's live OSC title. ObserveClaude (which resolves the
 // CURRENT conversation from claude's pid-keyed presence heartbeat) must archive the stale same-process
