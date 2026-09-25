@@ -2961,12 +2961,16 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster (tab status-dot RED FLASH): the attention cue. When a hosted session goes from
     // Running to one of the "it's on you / at rest" states — Idle, WaitingForInput (waiting-for-you),
     // or NeedsApproval (approval-required) — while its tab is NOT the one you're looking at, that tab's
-    // status-dot OUTLINE flashes red until you switch to the tab. "The current tab is always considered
-    // visited", so the active tab never flashes. The trigger is precisely the Running -> {Idle /
-    // WaitingForInput / NeedsApproval} edge (NOT -> Done or -> Error), so we remember each hosted
-    // session's last state. Any move OUT of a target state — back to Running (working again), or to
-    // Done / Error — clears the flash; a target -> target move (e.g. the WaitingForInput -> Idle cache
-    // decay) keeps it flashing until you visit. UI thread (the observer hop).
+    // status-dot OUTLINE flashes red until you switch to the tab. "The current tab of the ACTIVE window
+    // is always considered visited", so the tab you are looking at never flashes — but the selected tab
+    // of a BACKGROUND window does (you were in another app when it finished), until the window is
+    // activated again (_OnAgentWindowActivated) — the same `_activated && focused` rule the toasts'
+    // "Skip when the tab is focused" uses, and what makes the taskbar unread count (NOTIFICATIONS.md
+    // section 8) count the session you were watching before you switched away. The trigger is precisely
+    // the Running -> {Idle / WaitingForInput / NeedsApproval} edge (NOT -> Done or -> Error), so we
+    // remember each hosted session's last state. Any move OUT of a target state — back to Running
+    // (working again), or to Done / Error — clears the flash; a target -> target move (e.g. the
+    // WaitingForInput -> Idle cache decay) keeps it flashing until you visit. UI thread (the observer hop).
     void TerminalPage::_EvaluateAgentFlash(const std::wstring& sessionId, const TerminalApp::Tab& tab, ::Agentmaster::SessionState newState, bool live)
     {
         using ::Agentmaster::SessionState;
@@ -2984,10 +2988,12 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Agentmaster (Waiting-for-you "unread" model): if this hosted session's tab is the one you're
-        // looking at (the window's focused tab), it counts as READ — so a turn that completes while you
-        // sit in the tab is read immediately (and may decay after the timeout, rather than waiting for a
-        // switch-away-and-back). Stamped on every update for the focused tab; cheap + quiet + monotonic.
-        if (tab == _GetFocusedTab())
+        // looking at (the focused tab of the ACTIVE window), it counts as READ — so a turn that completes
+        // while you sit in the tab is read immediately (and may decay after the timeout, rather than waiting
+        // for a switch-away-and-back). The `_activated` half keeps a BACKGROUND window's selected tab unread
+        // until you come back to it (_OnAgentWindowActivated stamps it then), consistent with the flash
+        // below. Stamped on every update for the watched tab; cheap + quiet + monotonic.
+        if (_activated && tab == _GetFocusedTab())
         {
             _MarkSessionRead(sessionId);
         }
@@ -3044,12 +3050,14 @@ namespace winrt::TerminalApp::implementation
             {
                 return; // leave any existing flash as-is, exactly like the old target -> target path
             }
-            if (tab == _GetFocusedTab())
+            if (_activated && tab == _GetFocusedTab())
             {
-                _StopAgentFlash(sessionId); // the current tab is always considered visited
+                _StopAgentFlash(sessionId); // the current tab of the ACTIVE window is always considered visited
             }
             else
             {
+                // An unvisited tab — or the selected tab of a window you are NOT looking at (another app is in
+                // front): flash, and count it on the taskbar, until a visit or the window's reactivation clears it.
                 _StartAgentFlash(sessionId);
             }
         }
@@ -3537,6 +3545,7 @@ namespace winrt::TerminalApp::implementation
         }
         _EnsureAgentFlashTimer();
         _ApplyAgentFlashRingForSession(sessionId);
+        _PublishAgentUnreadSessions(); // one more unread session: the taskbar count goes up (unless a manual mark already counted it)
     }
 
     // Agentmaster (tab status-dot red flash): stop this session's AUTOMATIC flash + hide its red ring;
@@ -3563,6 +3572,7 @@ namespace winrt::TerminalApp::implementation
         {
             _StopAgentFlashTimer();
         }
+        _PublishAgentUnreadSessions(); // read (or back to work): off the taskbar count, unless a manual mark keeps it
     }
 
     // Agentmaster (Mark Unread): the tab context-menu action. Force the red ring to flash on this
@@ -3583,6 +3593,7 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::LogNav(L"mark-unread " + ::Agentmaster::ShortId(sessionId));
         _EnsureAgentFlashTimer();
         _ApplyAgentFlashRingForSession(sessionId); // flash at the current shared phase NOW, even if focused
+        _PublishAgentUnreadSessions(); // a Mark Unread counts on the taskbar like any unread session (a re-mark is a no-op there)
         // Agentmaster (Waiting-for-you "unread" model): the manual mark is also an ENGINE fact, so the
         // Triage Board (in EVERY window) reads it — set the sticky manualUnread flag (the time-decay
         // never demotes it) and PROMOTE an at-rest session into Waiting-for-you (the user asked to be
@@ -3712,6 +3723,7 @@ namespace winrt::TerminalApp::implementation
         {
             _StopAgentFlashTimer();
         }
+        _PublishAgentUnreadSessions(); // the manual mark is gone: off the taskbar count, unless the automatic flash keeps it
     }
 
     // Agentmaster (tab status-dot red flash): visiting a tab marks it seen — switching to a flashing
@@ -3798,6 +3810,81 @@ namespace winrt::TerminalApp::implementation
         });
     }
 
+    // Agentmaster (taskbar unread badge; NOTIFICATIONS.md section 8): the number this window's taskbar button shows —
+    // the PROCESS-WIDE unread count (every window paints the same one, because the taskbar combines our windows into
+    // one button whose overlay is "the last one received"), or 0 while the cog's switch is off. Cached by
+    // _ApplyTaskbarUnreadCount, so the AppHost's re-read on every TaskbarUnreadCountChanged is a member load, never
+    // an engine lock. Returns the count to paint (0 = no badge).
+    uint32_t TerminalPage::TaskbarUnreadCount() const noexcept
+    {
+        return _taskbarUnreadCount;
+    }
+
+    // Agentmaster (taskbar unread badge): hand this window's unread set to the engine's census. The set is the union
+    // of _flashingSessions (the automatic "left Running while you weren't looking" ring) and _manualUnreadSessions
+    // (the sticky Mark Unread) — exactly the tabs whose status dot flashes, so the taskbar number and the rings on
+    // screen can never disagree. Sorted + deduped and compared with what was last published, so the 600 ms flash
+    // tick and every idempotent flash call cost one small sort and nothing more. UI thread only (both sets are
+    // UI-thread state). Throws std::bad_alloc only if the id list can't be allocated, like the set inserts that
+    // precede every call.
+    void TerminalPage::_PublishAgentUnreadSessions()
+    {
+        std::vector<std::wstring> ids;
+        ids.reserve(_flashingSessions.size() + _manualUnreadSessions.size());
+        ids.insert(ids.end(), _flashingSessions.begin(), _flashingSessions.end());
+        ids.insert(ids.end(), _manualUnreadSessions.begin(), _manualUnreadSessions.end());
+        std::sort(ids.begin(), ids.end());
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+        if (ids == _publishedUnreadSessions)
+        {
+            return;
+        }
+        _publishedUnreadSessions = ids;
+        // The census fans the new count out to EVERY window's sink, this one included, so this window's repaint
+        // arrives through the same dispatcher hop as everyone else's (_ApplyTaskbarUnreadCount) — never inline here,
+        // where it would re-enter the AppHost from the middle of the flash bookkeeping. Never throws (noexcept).
+        ::Agentmaster::PublishWindowUnreadSessions(_windowId, std::move(ids));
+    }
+
+    // Agentmaster (taskbar unread badge): re-read the census's count, gate it by the cog's switch, and tell the AppHost
+    // when THIS window's number changed. The count is read FRESH here rather than taken from the sink's argument, so
+    // two dispatcher hops landing out of order can never leave an older number painted. Called from the engine sink's
+    // hop, at engine init (a window opened while others already hold unread sessions starts with their count), and
+    // after a settings change (the cog Save + the cross-window broadcast carry the switch). UI thread.
+    void TerminalPage::_ApplyTaskbarUnreadCount()
+    {
+        const uint32_t count = _appSettings.taskbarUnreadBadge ? ::Agentmaster::CurrentUnreadCount() : 0u;
+        if (count == _taskbarUnreadCount)
+        {
+            return;
+        }
+        _taskbarUnreadCount = count;
+        TaskbarUnreadCountChanged.raise(*this, nullptr);
+    }
+
+    // Agentmaster (taskbar unread badge): the window was activated or deactivated (WM_ACTIVATE via the AppHost, from
+    // TerminalPage::WindowActivated). Activation means the user is now LOOKING at the focused tab, so it is read:
+    // stamp it (the Waiting-for-you decay gate) and drop its AUTOMATIC flash, which also takes it off the taskbar
+    // count. A manual Mark Unread stays — it is sticky by design and clears only on a real visit (a switch TO the
+    // tab). Deactivation needs nothing here: _EvaluateAgentFlash simply stops treating the focused tab as visited
+    // from then on. The Agent Manager page (no focused tab) and a shell tab (no session) have nothing to clear, and
+    // a page whose engine never initialized no-ops through the empty maps + the null-registry guard. UI thread.
+    void TerminalPage::_OnAgentWindowActivated(bool activated)
+    {
+        if (!activated)
+        {
+            return;
+        }
+        if (const auto tab = _GetFocusedTab())
+        {
+            if (const auto id = _ClaudeSessionForTab(tab); !id.empty())
+            {
+                _MarkSessionRead(id);
+                _StopAgentFlash(id);
+            }
+        }
+    }
+
     // Agentmaster (tab status-dot red flash): lazily build the ONE shared per-window flash timer and
     // (re)start it. One timer + one phase drive every flashing tab, so they blink together. A fresh
     // burst begins on the red ("on") phase. The Tick self-stops if the page is gone (weak), so a closed
@@ -3868,6 +3955,10 @@ namespace winrt::TerminalApp::implementation
         {
             _StopAgentFlashTimer();
         }
+        // A pruned session (its tab closed, or dragged to another window) leaves the taskbar count here — the
+        // tick is where a close that raced ahead of the observer hop is finally noticed. The publish compares
+        // against the last published set, so an unpruned tick (the 600 ms steady state) costs one small sort.
+        _PublishAgentUnreadSessions();
     }
 
     // Agentmaster (tab status-dot red flash): show/hide one flashing session's red ring at the current

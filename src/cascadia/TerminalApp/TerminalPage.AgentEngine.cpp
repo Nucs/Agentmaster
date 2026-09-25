@@ -498,6 +498,19 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::UnregisterSettingsChangedHandler(_settingsChangedToken);
         }
+        // Agentmaster (taskbar unread badge; NOTIFICATIONS.md section 8): drop this window's count sink (Rule #10), THEN
+        // withdraw its unread sessions from the census, so the windows that remain stop counting them on their taskbar
+        // buttons — the close's own archive notifications may never reach this dying page's flash bookkeeping, so the
+        // census can't rely on them. The order matters: the withdrawal fans the new count out to every REMAINING sink,
+        // and ours must already be gone (its dispatcher dies with this page). Gated on the token, so a window whose
+        // engine init never ran can't construct the shared engine from its destructor. Both calls are thread-safe and
+        // noexcept (this destructor may run on a pool thread), so they stay BARE like the other engine detaches.
+        if (_unreadCountToken)
+        {
+            ::Agentmaster::UnregisterUnreadCountHandler(_unreadCountToken);
+            _unreadCountToken = 0;
+            ::Agentmaster::PublishWindowUnreadSessions(_windowId, {});
+        }
         // Agentmaster (ui-stall escalation): drop this window's rescuer from the engine watchdog
         // (Rule #10 — a thread-safe engine detach, stays BARE so it can never be skipped), then
         // destroy the message-only rescue window ON ITS OWNING (UI) THREAD via a sent message —
@@ -1181,6 +1194,26 @@ namespace winrt::TerminalApp::implementation
             });
         }
 
+        // Taskbar unread-count sink (NOTIFICATIONS.md section 8): the engine's unread census calls this whenever the
+        // process-wide count changes — whichever window's flash / Mark-Unread change moved it, this one included — and
+        // this window repaints its own taskbar button with the SAME number (the taskbar combines our windows into one
+        // button whose overlay is "the last one received"). The hop carries no value on purpose: _ApplyTaskbarUnreadCount
+        // re-reads the census, so hops landing out of order can't regress the badge. The seed right after covers a
+        // window opened while others already hold unread sessions. Detached in ~TerminalPage (Rule #10).
+        {
+            const auto weakThis = get_weak();
+            const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
+            _unreadCountToken = ::Agentmaster::RegisterUnreadCountHandler(_windowId, [weakThis, dispatcher](uint32_t /*count*/) {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis]() {
+                    if (auto self = weakThis.get())
+                    {
+                        self->_ApplyTaskbarUnreadCount();
+                    }
+                });
+            });
+            _ApplyTaskbarUnreadCount();
+        }
+
         // Debounced autosave of the window record (750ms trailing): structural/lens churn (drag a
         // splitter, reorder tabs, resize the window) collapses to one write; never per keystroke.
         _saveWindowRecordThrottled = std::make_shared<ThrottledFunc<>>(
@@ -1746,6 +1779,9 @@ namespace winrt::TerminalApp::implementation
                 // (possibly changed) color/opacity so any currently-flashing tab recolors live; other windows
                 // pick it up via the broadcast below.
                 self->_RefreshFlashRingBrush();
+                // Taskbar unread count (NOTIFICATIONS.md section 8): the switch is GLOBAL — turning it off clears this
+                // window's overlay now (on repaints the census's current count); other windows follow via the broadcast.
+                self->_ApplyTaskbarUnreadCount();
                 // Per-tab overlay rest/hover opacities are GLOBAL (TAB_OVERLAY.md) — push the (possibly
                 // changed) pair to every hosted overlay so the badge/summary dim<->bright updates live; other
                 // windows pick it up via the broadcast below.
@@ -2049,6 +2085,9 @@ namespace winrt::TerminalApp::implementation
         // Status-dot flash-ring color is GLOBAL — re-point this window's shared flash-ring brush so a change
         // made in another window recolors this window's live flash too.
         _RefreshFlashRingBrush();
+        // Taskbar unread count (NOTIFICATIONS.md section 8): the switch is GLOBAL — a change made in another window
+        // clears (or repaints) THIS window's taskbar overlay too; every combined button must agree.
+        _ApplyTaskbarUnreadCount();
         // Per-tab overlay rest/hover opacities are GLOBAL (TAB_OVERLAY.md) — apply a change made in another
         // window to this window's overlays live too.
         _RefreshOverlayOpacities();

@@ -6574,6 +6574,10 @@ namespace winrt::TerminalApp::implementation
                 });
             }
         }
+
+        // Agentmaster (taskbar unread badge; NOTIFICATIONS.md section 8): coming back to the window means you now see
+        // its focused tab — clear that tab's "finished while you were away" flash (and its taskbar count).
+        _OnAgentWindowActivated(activated);
     }
 
     safe_void_coroutine TerminalPage::_ControlCompletionsChangedHandler(const IInspectable sender,

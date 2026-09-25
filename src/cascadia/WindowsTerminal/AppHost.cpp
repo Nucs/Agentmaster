@@ -111,6 +111,19 @@ void AppHost::SetTaskbarProgress(const winrt::Windows::Foundation::IInspectable&
     }
 }
 
+// Agentmaster (taskbar unread badge; NOTIFICATIONS.md section 8): the page raised TaskbarUnreadCountChanged, so its
+// count moved (or the Settings switch flipped). Re-read the number — the event carries none, the SetTaskbarProgress
+// idiom above — and let the IslandWindow paint or clear the overlay on this window's taskbar button. The page already
+// de-duplicates, so every call here is a real change. UI thread (the page raises it from its dispatcher).
+void AppHost::_TaskbarUnreadCountChanged(const winrt::Windows::Foundation::IInspectable& /*sender*/,
+                                         const winrt::Windows::Foundation::IInspectable& /*args*/)
+{
+    if (_windowLogic && _window)
+    {
+        _window->SetTaskbarBadge(_windowLogic.TaskbarUnreadCount());
+    }
+}
+
 // Method Description:
 // - Retrieve any commandline args passed on the commandline, and pass them to
 //   the WindowManager, to ask if we should become a window process.
@@ -254,6 +267,7 @@ void AppHost::Initialize()
     _revokers.TitleChanged = _windowLogic.TitleChanged(winrt::auto_revoke, { this, &AppHost::_AppTitleChanged });
     _revokers.CloseWindowRequested = _windowLogic.CloseWindowRequested(winrt::auto_revoke, { this, &AppHost::_CloseRequested });
     _revokers.SetTaskbarProgress = _windowLogic.SetTaskbarProgress(winrt::auto_revoke, { this, &AppHost::SetTaskbarProgress });
+    _revokers.TaskbarUnreadCountChanged = _windowLogic.TaskbarUnreadCountChanged(winrt::auto_revoke, { this, &AppHost::_TaskbarUnreadCountChanged }); // Agentmaster (taskbar unread badge)
     _revokers.IdentifyWindowsRequested = _windowLogic.IdentifyWindowsRequested(winrt::auto_revoke, { this, &AppHost::_IdentifyWindowsRequested });
     _revokers.WindowSizeChanged = _windowLogic.WindowSizeChanged(winrt::auto_revoke, { this, &AppHost::_WindowSizeChanged });
 

@@ -123,6 +123,7 @@ namespace winrt::TerminalApp::implementation
         void WindowVisibilityChanged(const bool showOrHide);
 
         winrt::TerminalApp::TaskbarState TaskbarState();
+        uint32_t TaskbarUnreadCount(); // Agentmaster (taskbar unread badge): the page's count, 0 before the page exists
         winrt::Windows::UI::Xaml::Media::Brush TitlebarBrush();
         winrt::Windows::UI::Xaml::Media::Brush FrameBrush();
         void WindowActivated(const bool activated);
@@ -230,6 +231,7 @@ namespace winrt::TerminalApp::implementation
         FORWARDED_TYPED_EVENT(AlwaysOnTopChanged, winrt::Windows::Foundation::IInspectable, winrt::Windows::Foundation::IInspectable, _root, AlwaysOnTopChanged);
         FORWARDED_TYPED_EVENT(RaiseVisualBell, winrt::Windows::Foundation::IInspectable, winrt::Windows::Foundation::IInspectable, _root, RaiseVisualBell);
         FORWARDED_TYPED_EVENT(SetTaskbarProgress, winrt::Windows::Foundation::IInspectable, winrt::Windows::Foundation::IInspectable, _root, SetTaskbarProgress);
+        FORWARDED_TYPED_EVENT(TaskbarUnreadCountChanged, winrt::Windows::Foundation::IInspectable, winrt::Windows::Foundation::IInspectable, _root, TaskbarUnreadCountChanged); // Agentmaster (taskbar unread badge)
         FORWARDED_TYPED_EVENT(IdentifyWindowsRequested, Windows::Foundation::IInspectable, Windows::Foundation::IInspectable, _root, IdentifyWindowsRequested);
         FORWARDED_TYPED_EVENT(SummonWindowRequested, Windows::Foundation::IInspectable, Windows::Foundation::IInspectable, _root, SummonWindowRequested);
         FORWARDED_TYPED_EVENT(FocusTabRequested, Windows::Foundation::IInspectable, winrt::TerminalApp::Tab, _root, FocusTabRequested);

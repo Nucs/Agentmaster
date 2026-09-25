@@ -190,6 +190,7 @@ namespace winrt::TerminalApp::implementation
         void DialogPresenter(winrt::TerminalApp::IDialogPresenter dialogPresenter);
 
         winrt::TerminalApp::TaskbarState TaskbarState() const;
+        uint32_t TaskbarUnreadCount() const noexcept; // Agentmaster (taskbar unread badge, NOTIFICATIONS.md section 8): the PROCESS-WIDE unread-session count to paint on this window's taskbar button, already gated by AppSettings::taskbarUnreadBadge (0 = no badge); re-read by the AppHost on every TaskbarUnreadCountChanged
 
         void ShowKeyboardServiceWarning() const;
         winrt::hstring KeyboardServiceDisabledText();
@@ -232,6 +233,7 @@ namespace winrt::TerminalApp::implementation
         til::typed_event<IInspectable, IInspectable> AlwaysOnTopChanged;
         til::typed_event<IInspectable, IInspectable> RaiseVisualBell;
         til::typed_event<IInspectable, IInspectable> SetTaskbarProgress;
+        til::typed_event<IInspectable, IInspectable> TaskbarUnreadCountChanged; // Agentmaster (taskbar unread badge): raised only when TaskbarUnreadCount() changes
         til::typed_event<IInspectable, IInspectable> Initialized;
         til::typed_event<IInspectable, IInspectable> IdentifyWindowsRequested;
         til::typed_event<IInspectable, winrt::TerminalApp::RenameWindowRequestedArgs> RenameWindowRequested;
@@ -446,6 +448,11 @@ namespace winrt::TerminalApp::implementation
         // Triage-Board sort toggle) hops to this window's UI thread and re-applies it live (the sort
         // toggles + a board/tree re-sort). Detached in ~TerminalPage (Rule #10).
         uint64_t _settingsChangedToken{ 0 };
+        // Agentmaster (taskbar unread badge; NOTIFICATIONS.md section 8): this window's count sink on the shared engine's
+        // unread census — ANY window's flash / Mark-Unread change that moves the process-wide count hops here, and this
+        // window repaints its own taskbar button with the same number (the taskbar combines our windows into one
+        // button whose overlay is "the last one received", so they must all agree). Detached in ~TerminalPage (Rule #10).
+        uint64_t _unreadCountToken{ 0 };
         ::Agentmaster::AppSettings _appSettings{}; // Agentmaster: global settings (the cog); loaded at engine init
         // Agentmaster: sessionId -> its terminal tab, so the Manager can Activate (jump) or
         // Kill a session. Weak so closing a tab the normal way doesn't keep it alive.
@@ -582,6 +589,13 @@ namespace winrt::TerminalApp::implementation
         // STICKY: the automatic state logic never clears it, and it flashes even the currently-FOCUSED tab
         // — only a VISIT (a switch TO the tab, _VisitTabClearFlash) or archive clears it.
         std::unordered_set<std::wstring> _manualUnreadSessions;
+        // Agentmaster (taskbar unread badge; NOTIFICATIONS.md section 8): the sorted, deduped union of _flashingSessions
+        // and _manualUnreadSessions as last handed to the engine's unread census — so the 600 ms flash tick and every
+        // idempotent flash call re-publish only on a REAL change (no census lock, no fan-out, no log line otherwise).
+        std::vector<std::wstring> _publishedUnreadSessions;
+        // The count this window last raised TaskbarUnreadCountChanged for (the census count, or 0 while the cog switch
+        // is off): the de-dupe that keeps the AppHost from re-rendering an identical overlay.
+        uint32_t _taskbarUnreadCount{ 0 };
         winrt::Windows::UI::Xaml::DispatcherTimer _agentFlashTimer{ nullptr };
         bool _agentFlashPhase{ false };
         // Agentmaster (System notifications): the toast tracker's per-session state — DELIBERATELY
@@ -1324,7 +1338,10 @@ namespace winrt::TerminalApp::implementation
         void _RefreshOverlayOpacities(); // Agentmaster (TAB_OVERLAY.md): push the (possibly changed) AppSettings::tabOverlayRest/HoverOpacity to every per-tab overlay (linked + observe) so the badge/summary dim<->bright opacities update live (cog Save / cross-window broadcast)
         void _MarkSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): force the red ring on this session's tab until VISITED — even if it is the focused tab (no active-tab skip); sticky vs automatic state changes; ALSO sets the engine manualUnread + promotes Idle/Done -> WaitingForInput (board state, every window)
         void _ClearSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): clear a manual unread mark + hide the ring if the automatic flash isn't also active (from _VisitTabClearFlash / archive); ALSO clears the engine manualUnread
-        void _MarkSessionRead(const std::wstring& sessionId); // Agentmaster (Waiting-for-you "unread" model): stamp readUnixMs=now (quiet) so a past-timeout WaitingForInput card may decay to Idle; from _VisitTabClearFlash (a visit) + _EvaluateAgentFlash (the focused tab)
+        void _MarkSessionRead(const std::wstring& sessionId); // Agentmaster (Waiting-for-you "unread" model): stamp readUnixMs=now (quiet) so a past-timeout WaitingForInput card may decay to Idle; from _VisitTabClearFlash (a visit) + _EvaluateAgentFlash (the focused tab of the ACTIVE window) + _OnAgentWindowActivated
+        void _PublishAgentUnreadSessions(); // Agentmaster (taskbar unread badge): hand this window's unread set (the union of _flashingSessions and _manualUnreadSessions) to the engine's census when it changed; called after every mutation of either set; UI thread
+        void _ApplyTaskbarUnreadCount(); // Agentmaster (taskbar unread badge): re-read the census count, gate it by AppSettings::taskbarUnreadBadge, and raise TaskbarUnreadCountChanged if this window's number changed (the sink hop, engine init, the cog Save, the settings broadcast); UI thread
+        void _OnAgentWindowActivated(bool activated); // Agentmaster (taskbar unread badge): the window came to the foreground — its focused tab is now being LOOKED AT, so stamp it read and drop its automatic flash (the flash ring's "current tab of the ACTIVE window is visited" rule; a manual Mark Unread stays sticky); from TerminalPage::WindowActivated; UI thread
         void _MoveSessionTriageState(const std::wstring& sessionId); // Agentmaster (Waiting-for-you + Error triage): the tab context-menu's status-adaptive move — demote a WaitingForInput session to Idle ("Move to Idle/Done"), DISMISS an Error one the same way (records the errorDismissed ack so the scanner's level-derived Error can't bounce it back), or plainly promote an Idle/Done one to WaitingForInput ("Move to Waiting-for-you"); direction re-derived from the live registry state. EXPLICITLY separate from _MarkSessionUnread (no sticky manualUnread, no ring flash)
         void _EvaluateAgentNotification(const std::wstring& sessionId, const TerminalApp::Tab& tab, ::Agentmaster::SessionState newState, bool live); // Agentmaster (System notifications): detect the Running -> X edge per registry update on a HOSTED tab and raise the Windows toast per the Notifications settings (per-state switches, focused-tab skip); tracks the Running-entry time for the "after <duration>" clause; HOLDS an Idle/Waiting toast while the external-work signal is live (spurious-completion suppression — SessionScanner's ShouldHoldCompletionToast) and DROPS the hold on a Running re-entry; forgets state on !live like _EvaluateAgentFlash; UI thread
         void _FireAgentCompletionToast(const std::wstring& sessionId, const TerminalApp::Tab& tab, ::Agentmaster::SessionState state, int64_t runningSinceMs, int64_t heldForMs); // Agentmaster (System notifications): the FIRE half shared by the immediate edge and the sweep's deferred fire — per-state cog switch, focused-tab skip, the kNotifyDuplicateToastMs double-toast guard, title/body build, the [notify] log (+ "held Ns" when deferred), the toast itself; UI thread

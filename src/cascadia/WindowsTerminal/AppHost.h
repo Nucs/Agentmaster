@@ -76,6 +76,9 @@ private:
     void _WindowMouseWheeled(const winrt::Windows::Foundation::Point coord, const winrt::Microsoft::Terminal::Core::Point delta);
     void _WindowActivated(bool activated);
     void _WindowMoved();
+    // Agentmaster (taskbar unread badge; NOTIFICATIONS.md section 8): the page's unread count changed — re-read it
+    // and hand it to the IslandWindow, which paints (or clears) the taskbar overlay. Both args are unused.
+    void _TaskbarUnreadCountChanged(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& args);
 
     void _IdentifyWindowsRequested(winrt::Windows::Foundation::IInspectable sender,
                                    winrt::Windows::Foundation::IInspectable args);
@@ -151,6 +154,7 @@ private:
         winrt::TerminalApp::TerminalWindow::TitleChanged_revoker TitleChanged;
         winrt::TerminalApp::TerminalWindow::CloseWindowRequested_revoker CloseWindowRequested;
         winrt::TerminalApp::TerminalWindow::SetTaskbarProgress_revoker SetTaskbarProgress;
+        winrt::TerminalApp::TerminalWindow::TaskbarUnreadCountChanged_revoker TaskbarUnreadCountChanged; // Agentmaster (taskbar unread badge)
         winrt::TerminalApp::TerminalWindow::IdentifyWindowsRequested_revoker IdentifyWindowsRequested;
         winrt::TerminalApp::TerminalWindow::IsQuakeWindowChanged_revoker IsQuakeWindowChanged;
         winrt::TerminalApp::TerminalWindow::SummonWindowRequested_revoker SummonWindowRequested;

@@ -768,6 +768,7 @@ namespace Agentmaster
         o.Set(L"notifyOnError", json::Value::MkBool(s.notifyOnError));
         o.Set(L"notifySuppressFocused", json::Value::MkBool(s.notifySuppressFocused));
         o.Set(L"notifySound", json::Value::MkBool(s.notifySound));
+        o.Set(L"taskbarUnreadBadge", json::Value::MkBool(s.taskbarUnreadBadge)); // the taskbar-button unread count (NOTIFICATIONS.md section 8)
         auto hidden = json::Value::MkArr();
         for (const auto& id : s.hiddenSessionIds)
         {
@@ -984,6 +985,9 @@ namespace Agentmaster
         s.notifyOnError = v.BoolAt(L"notifyOnError", true);
         s.notifySuppressFocused = v.BoolAt(L"notifySuppressFocused", true);
         s.notifySound = v.BoolAt(L"notifySound", true);
+        // The taskbar-button unread count (NOTIFICATIONS.md section 8): absent in every pre-feature settings.json, so
+        // missing => ON — the feature appears for existing installs too, with the cog switch to turn it off.
+        s.taskbarUnreadBadge = v.BoolAt(L"taskbarUnreadBadge", true);
         if (const auto* h = v.Find(L"hiddenSessionIds"); h && h->type == json::Value::Type::Arr)
         {
             for (const auto& e : h->arr)

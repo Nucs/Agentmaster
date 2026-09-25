@@ -1382,6 +1382,14 @@ namespace winrt::TerminalApp::implementation
         _setNotifySound.Header(winrt::box_value(L"Play the notification sound"));
         AgentSetTip(_setNotifySound, L"Play the Windows notification sound with the toast. Off shows the toast silently. Default on.");
         panel.Children().Append(_setNotifySound);
+        // TASKBAR — the unread COUNT on Agentmaster's taskbar button (NOTIFICATIONS.md section 8). Its own section,
+        // and deliberately NOT one of the master's greyed dependents: the count and the toasts are separate cues, and
+        // "a number on the icon but no popups" is a legitimate setup (the reverse too).
+        panel.Children().Append(SettingsSeparator(L"TASKBAR"));
+        _setTaskbarUnreadBadge = ToggleSwitch{};
+        _setTaskbarUnreadBadge.Header(winrt::box_value(L"Show the unread count on the taskbar icon"));
+        AgentSetTip(_setTaskbarUnreadBadge, L"Put a red number on Agentmaster's taskbar button: how many sessions finished while you weren't looking and are still unread \x2014 the tabs whose status dot is flashing, plus any you chose Mark Unread on, across every window. Each newly unread session adds one; visiting its tab (or switching back to the window it finished in) takes it off. Windows' own \x201CShow badges on taskbar apps\x201D (Settings \x203A Personalization \x203A Taskbar \x203A Taskbar behaviors) must be on too, and small taskbar buttons can't show it. Default on.");
+        panel.Children().Append(_setTaskbarUnreadBadge);
 
         // === COMMANDS tab (COMMANDS.md §6a) ===
         // The /handover slash-command family: rename + enable/disable each command. Everything
@@ -2583,6 +2591,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setNotifySound.IsOn(_appSettings.notifySound);
         }
+        if (_setTaskbarUnreadBadge)
+        {
+            _setTaskbarUnreadBadge.IsOn(_appSettings.taskbarUnreadBadge);
+        }
         // COMMANDS tab (COMMANDS.md §6a): seed the /handover-family controls, and capture the LIVE
         // names from DISK — the engine-owned materialized-name markers, RMW'd at engine init, are
         // what is actually bound/on-disk THIS RUN ("" == disabled) — so the status lines can stage
@@ -3206,6 +3218,10 @@ namespace winrt::TerminalApp::implementation
         if (_setNotifySound)
         {
             _appSettings.notifySound = _setNotifySound.IsOn();
+        }
+        if (_setTaskbarUnreadBadge)
+        {
+            _appSettings.taskbarUnreadBadge = _setTaskbarUnreadBadge.IsOn();
         }
         // COMMANDS tab (COMMANDS.md §6a): store the /handover-family names NORMALIZED +
         // COLLISION-HEALED (the same ResolveCommandNameTriple the Persistence load applies, so the

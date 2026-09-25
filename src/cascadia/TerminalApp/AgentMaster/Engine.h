@@ -25,6 +25,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -310,6 +311,31 @@ namespace Agentmaster
         std::mutex dockTargetMutex;
         std::vector<DockTargetSink> dockTargetSinks;
         uint64_t nextDockTargetToken{ 1 };
+
+        // Agentmaster (TASKBAR UNREAD BADGE; NOTIFICATIONS.md section 8): the process-wide UNREAD CENSUS behind the
+        // count every window paints on its taskbar button. "Unread" is the tab status dot's own definition: a
+        // session whose tab carries the flash ring (it left Running for a needs-you state while you weren't looking)
+        // or a manual Mark Unread — state that lives per window, in each TerminalPage's _flashingSessions /
+        // _manualUnreadSessions, because only the hosting window knows whether the tab was visited. Each window
+        // therefore PUBLISHES its set here (PublishWindowUnreadSessions), the census unions them (a session is
+        // counted once even while a moving tab briefly sits in two windows' sets), and every registered sink is
+        // told the new count when — and only when — it changes. Process-wide rather than per window because the
+        // taskbar combines every Agentmaster window into ONE button whose overlay is "the last one received"
+        // (TaskbarBadge.h): all windows must paint the same number. unreadByWindow holds only NON-empty sets (an
+        // empty publish erases its window), and unreadCount is the last count the sinks were told. Guarded by
+        // unreadMutex; sinks are invoked OUTSIDE it (each marshals into its own window's dispatcher). Placed LAST
+        // (layout-safe incremental rebuilds, like dockTargetSinks).
+        struct UnreadCountSink
+        {
+            uint64_t token{ 0 };
+            std::wstring windowId;
+            std::function<void(uint32_t count)> fn;
+        };
+        std::mutex unreadMutex;
+        std::map<std::wstring, std::vector<std::wstring>> unreadByWindow;
+        uint32_t unreadCount{ 0 };
+        std::vector<UnreadCountSink> unreadCountSinks;
+        uint64_t nextUnreadCountToken{ 1 };
     };
 
     // The one process-wide engine. The FIRST call constructs it (creates the registry, wires
@@ -564,6 +590,55 @@ namespace Agentmaster
     void UnregisterSettingsChangedHandler(uint64_t token);
     void BroadcastSettingsChanged(const AppSettings& settings, const std::wstring& sourceWindowId);
 
+    /// <summary>
+    /// Agentmaster (taskbar unread badge; NOTIFICATIONS.md section 8): how many DISTINCT sessions the windows' published
+    /// unread sets hold together — the number on the taskbar button.
+    /// </summary>
+    /// <param name="unreadByWindow">windowId -> that window's unread session ids (any order, duplicates tolerated).</param>
+    /// <returns>The size of the union; empty ids are not counted.</returns>
+    /// <remarks>
+    /// A UNION, not a sum: a tab being dragged to another window can sit in both windows' sets for a flash tick (the
+    /// source prunes it on its next 600 ms tick), and it is still one unread session. Pure; exported for the harness.
+    /// </remarks>
+    /// <exception cref="std::bad_alloc">If the scratch id list cannot be allocated.</exception>
+    uint32_t CountDistinctUnreadSessions(const std::map<std::wstring, std::vector<std::wstring>>& unreadByWindow);
+
+    /// <summary>
+    /// Agentmaster (taskbar unread badge): REPLACE this window's unread-session set in the process-wide census, and
+    /// tell every registered count sink when the union's size changed. Called by a TerminalPage whenever its flash /
+    /// Mark-Unread sets change, and with an EMPTY set from ~TerminalPage so a closed window stops counting.
+    /// </summary>
+    /// <param name="windowId">The publishing window's id (its WindowRecord id).</param>
+    /// <param name="sessionIds">The window's unread session ids; normalized here (empties dropped, sorted, deduped).</param>
+    /// <remarks>
+    /// Never throws: callable from a destructor running on a pool thread (the fire_and_forget teardown class — see
+    /// CLAUDE.md), so any failure is logged (Rule #18) and dropped. Sinks run OUTSIDE the census lock, each in its own
+    /// try, so one dead window's dispatcher can't stop the rest; a change logs one "[unread] N -> M" hooks.log line.
+    /// </remarks>
+    void PublishWindowUnreadSessions(const std::wstring& windowId, std::vector<std::wstring> sessionIds) noexcept;
+
+    /// <summary>
+    /// Agentmaster (taskbar unread badge): the census's current count — what a sink should paint. A sink reads THIS at
+    /// apply time rather than trusting the value it was called with, so out-of-order dispatcher hops can't regress it.
+    /// </summary>
+    /// <returns>The distinct unread-session count across every window.</returns>
+    uint32_t CurrentUnreadCount() noexcept;
+
+    /// <summary>
+    /// Agentmaster (taskbar unread badge): register THIS window's count sink, the registry-token pattern of the other
+    /// window sinks. Every census change is fanned out to EVERY sink (the source window included: its own taskbar
+    /// button needs the new number too).
+    /// </summary>
+    /// <param name="windowId">The registering window's id (diagnostics only).</param>
+    /// <param name="handler">Called with the new count, on the publishing thread; it must marshal to its own UI thread.</param>
+    /// <returns>A monotonic token for UnregisterUnreadCountHandler; 0 for an empty handler.</returns>
+    /// <exception cref="std::bad_alloc">If the sink list cannot grow.</exception>
+    uint64_t RegisterUnreadCountHandler(const std::wstring& windowId, std::function<void(uint32_t count)> handler);
+
+    /// <summary>Agentmaster (taskbar unread badge): detach a count sink (Rule #10); a stale or 0 token is a no-op.</summary>
+    /// <param name="token">The token RegisterUnreadCountHandler returned.</param>
+    void UnregisterUnreadCountHandler(uint64_t token) noexcept;
+
     // M10 Increment 3 (recover button). A saved window record that is NOT currently open, paired with
     // its `-s <idx>` (its index in the canonical sorted LoadWindowRecords order) so the Manager can
     // reopen it the same way the Emperor does at startup (wt -w -1 -s <idx>). See PERSISTENCE.md §13.5.
@@ -594,4 +669,9 @@ namespace Agentmaster
     std::vector<std::wstring> LiveWindowIdsIn(Engine& e);
     bool ReserveManagerOnlyCloseIn(Engine& e, const std::wstring& windowId);
     std::vector<RecoverableWindow> RecoverableWindowsIn(Engine& e);
+    // The taskbar unread census on a LOCAL Engine (tests_taskbar.cpp): same contracts as the SharedEngine() forms above.
+    void PublishWindowUnreadSessionsIn(Engine& e, const std::wstring& windowId, std::vector<std::wstring> sessionIds) noexcept;
+    uint32_t CurrentUnreadCountIn(Engine& e) noexcept;
+    uint64_t RegisterUnreadCountHandlerIn(Engine& e, const std::wstring& windowId, std::function<void(uint32_t count)> handler);
+    void UnregisterUnreadCountHandlerIn(Engine& e, uint64_t token) noexcept;
 }

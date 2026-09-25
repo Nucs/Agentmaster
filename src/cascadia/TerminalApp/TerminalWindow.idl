@@ -98,6 +98,9 @@ namespace TerminalApp
         void WindowVisibilityChanged(Boolean showOrHide);
 
         TaskbarState TaskbarState{ get; };
+        // Agentmaster (taskbar unread badge, NOTIFICATIONS.md section 8): forwarded from TerminalPage; the AppHost
+        // hands it to IslandWindow::SetTaskbarBadge whenever TaskbarUnreadCountChanged fires.
+        UInt32 TaskbarUnreadCount { get; };
         Windows.UI.Xaml.Media.Brush TitlebarBrush { get; };
         Windows.UI.Xaml.Media.Brush FrameBrush { get; };
         void WindowActivated(Boolean activated);
@@ -129,6 +132,7 @@ namespace TerminalApp
         event Windows.Foundation.TypedEventHandler<Object, Object> AlwaysOnTopChanged;
         event Windows.Foundation.TypedEventHandler<Object, Object> RaiseVisualBell;
         event Windows.Foundation.TypedEventHandler<Object, Object> SetTaskbarProgress;
+        event Windows.Foundation.TypedEventHandler<Object, Object> TaskbarUnreadCountChanged; // Agentmaster: re-read TaskbarUnreadCount
         event Windows.Foundation.TypedEventHandler<Object, Object> IdentifyWindowsRequested;
         event Windows.Foundation.TypedEventHandler<Object, Object> IsQuakeWindowChanged;
         event Windows.Foundation.TypedEventHandler<Object, Object> SummonWindowRequested;

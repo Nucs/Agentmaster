@@ -1121,6 +1121,14 @@ namespace winrt::TerminalApp::implementation
         return {};
     }
 
+    // Agentmaster (taskbar unread badge; NOTIFICATIONS.md section 8): the number the AppHost paints on this
+    // window's taskbar button, read on every TaskbarUnreadCountChanged. 0 (no badge) until the page exists —
+    // the page raises the event once its engine init seeds the fleet's current count, so nothing is missed.
+    uint32_t TerminalWindow::TaskbarUnreadCount()
+    {
+        return _root ? _root->TaskbarUnreadCount() : 0u;
+    }
+
     winrt::Windows::UI::Xaml::Media::Brush TerminalWindow::TitlebarBrush()
     {
         return _root ? _root->TitlebarBrush() : nullptr;

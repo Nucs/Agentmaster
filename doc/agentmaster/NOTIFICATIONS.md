@@ -1,5 +1,8 @@
 # System notifications — Windows toasts when a session leaves Running
 
+> **Also here: the taskbar unread count (§8)** — a red number on Agentmaster's taskbar button counting the
+> unread sessions across every window (an `ITaskbarList3` overlay icon). Written, NOT BUILT yet.
+
 > Status: **complete — the Settings cog "Notifications" tab + the Running → X toast pipe + click-to-surface
 > (bring the hosting window to the FRONT and jump to the session's tab), via a per-identity TOAST COM
 > ACTIVATOR (§4a) that also kills the shell's stray-window fallback.** Settings round-trip + the toast HOLD
@@ -73,6 +76,7 @@ broadcast already keep current — so a change applies **live**, no restart, in 
 | `notifyOnError` | "Error" checkbox | **ON** | notify on Running → Error (the recon-error API-failure capture) |
 | `notifySuppressFocused` | "Skip when the tab is focused" toggle | **ON** | skip the toast when the session's tab is the FOCUSED tab of the ACTIVE window (you watched it finish); a focused tab in a **background** window still notifies |
 | `notifySound` | "Play the notification sound" toggle | **ON** | OFF emits `<audio silent="true"/>` — a visual-only toast |
+| `taskbarUnreadBadge` | TASKBAR ▸ "Show the unread count on the taskbar icon" toggle | **ON** | the red unread-session count on Agentmaster's taskbar button (§8). **Not** greyed by the master: the count and the toasts are separate cues |
 
 - **The transition is always FROM Running** — the five checkboxes pick the *target* states. All checked
   == the requested default rule, "Running to anything else"; unchecking one mutes just that transition.
@@ -285,8 +289,124 @@ the track leak-proof:
   re-lights Running ~20 s later — the 513d1366 repro); when the background work finally quiets, the true
   settle fires ONE toast (`[notify] … (held Ns)` when it rode a hold); a W→R→W flap inside 20 s logs
   `[notify-dedupe]` for the second entry.
+- ⏳ **Taskbar unread count (§8) — written, NOT BUILT, harness not yet run.** New engine-harness suites
+  `TestTaskbarBadge` (the renderer, incl. the real GDI glyph pass and the icon drawn with `DrawIconEx` over a
+  green canvas) + `TestUnreadCensus` (the census on a local `Engine`), plus the `taskbarUnreadBadge` settings
+  round-trip. Runtime checklist, per §8.6.
 
-### Follow-ups (non-blocking)
+## 8. The taskbar unread count (the number on the taskbar button)
+
+A toast is gone after ~25 s and the tab rings are only visible inside the app. The **taskbar count** is the
+at-a-glance cue that survives both: a red disc with a white number on Agentmaster's taskbar button — the number
+of **unread sessions across every window**. Each newly unread session adds one; each one you look at takes one
+away.
+
+### 8.1 What counts
+
+Exactly the tabs whose status dot carries the **flash ring** (CLAUDE.md *The tab strip state dot*), so the number
+and the rings on screen can never disagree:
+
+- a session that left **Running** for Idle / Waiting-for-you / Needs-approval while you were not looking at its
+  tab — the automatic ring, with its existing edge rules (`→ Done` / `→ Error` never ring, so they never count;
+  the post-answer blip floor applies);
+- a session you **Mark Unread**-ed (sticky until you visit its tab).
+
+A session counts **once**, however many of its turns finished since you last looked. The number drops when the
+ring stops: you switch to the tab (a click, Ctrl+Tab, a toast click, a board Activate, …), the session goes back to
+Running, you Move it to Idle/Done, or its tab closes — and, new with this feature, when you **switch back to the
+window** it finished in (§8.2).
+
+### 8.2 The one semantic change: "looking at it" now needs the window to be ACTIVE
+
+Before, the **selected** tab of any window counted as visited, active window or not. So a turn that finished in
+the tab you had left on screen while you worked in another app never rang and never counted — the one completion
+a taskbar number exists for. The ring now uses the rule the toasts already used (`_activated && tab ==
+_GetFocusedTab()`, the "Skip when the tab is focused" gate, and upstream WT's own desktop-notification test):
+
+- the selected tab of a **background** window rings (and counts) when it finishes;
+- **activating the window** clears it — `TerminalPage::WindowActivated` → `_OnAgentWindowActivated`, which stamps
+  the session read and stops its automatic flash. A manual Mark Unread is left alone (it stays sticky until a tab
+  visit);
+- the Waiting-for-you "read" stamp follows the same rule: `_EvaluateAgentFlash` used to stamp a background
+  window's selected tab read on every update, so its card could time-decay to Idle without you ever seeing it;
+  now it is stamped when you come back to the window.
+
+### 8.3 Why an overlay icon, not a badge notification
+
+Windows has two ways to put a number on a taskbar button:
+
+| | Badge notification (`BadgeUpdateManager`, `<badge value="3"/>`) | Overlay icon (`ITaskbarList3::SetOverlayIcon`) |
+|---|---|---|
+| who draws the number | the shell | the app (a 16 px icon at 96 DPI) |
+| package identity | **required** — `CreateBadgeUpdaterForApplication()` throws `0x80070490` unpackaged, i.e. every **portable** install | not needed |
+| after the app exits | **stays** on a pinned icon (a stale number) | disappears with the window |
+| XAML-hosted desktop windows | open bug: the badge shows only once the window closes (WindowsAppSDK #3928) | works |
+| used by | UWP / Store apps | Discord, Slack, classic Teams |
+
+Both obey Windows' **Settings ▸ Personalization ▸ Taskbar ▸ Taskbar behaviors ▸ "Show badges on taskbar apps"**,
+and neither draws in small-taskbar-buttons mode. Windows Terminal already holds an `ITaskbarList3` per window for
+its progress indicator (`IslandWindow::_taskbar`), so the overlay rides existing plumbing.
+
+**The overlay is per GROUP, not per window.** Every Agentmaster window shares one AUMID, so the taskbar combines
+them into one button, and `SetOverlayIcon`'s contract is "the last overlay received is the overlay shown" (a NULL
+restores an earlier still-active one). A per-window count would show whichever window spoke last. So the count is
+**process-wide** and every window paints the **same** number on its own button — right when combined, merely
+repeated when the user un-combines taskbar buttons.
+
+### 8.4 The pipeline
+
+```
+per window (TerminalPage, UI thread): _flashingSessions ∪ _manualUnreadSessions
+  └─ _PublishAgentUnreadSessions — after every change of either set, + the 600 ms flash tick's prune
+       │  (sorted, deduped, compared with the last published set: an unchanged set costs one small sort)
+       └─ Engine::PublishWindowUnreadSessions — the census: windowId → set; count = |union|
+            ├─ "[unread] N -> M (window <id8>)" in hooks.log — only when the COUNT changes
+            └─ EVERY window's sink (the source included) → dispatcher hop → _ApplyTaskbarUnreadCount
+                 │  (re-reads CurrentUnreadCount — hops landing out of order can't regress it —
+                 │   gates by AppSettings::taskbarUnreadBadge, raises only on a change)
+                 └─ TaskbarUnreadCountChanged → TerminalWindow (forward) → AppHost::_TaskbarUnreadCountChanged
+                      └─ IslandWindow::SetTaskbarBadge(count)  (remembered)
+                           └─ TaskbarBadge::CreateBadgeIcon → SetOverlayIcon(hwnd, icon, "3 unread Agentmaster sessions")
+```
+
+- **Re-applied** on `TaskbarButtonCreated` — the first show (before it the button doesn't exist) and every
+  explorer.exe restart (which forgets all overlays) — with `ChangeWindowMessageFilterEx` so an **elevated** window
+  still receives it; **re-rendered** on `WM_DPICHANGED` at the new small-icon size.
+- **A closing window withdraws its set** in `~TerminalPage` (its sink unregistered first, so the fan-out never
+  reaches the dying page): its archive notifications may never reach the page's flash bookkeeping. A tab closed or
+  dragged to another window leaves through the flash tick's prune (≤ 600 ms).
+- **The census never throws** (`noexcept`, callable from a destructor on a pool thread), invokes the sinks outside
+  its lock, and contains each sink separately (a dying window's dispatcher can't keep the others stale).
+- **Rendering** (`AgentMaster/TaskbarBadge.h`, header-only, pure Win32 — the EXE and the harness both include it):
+  a full-bleed Fluent-red (`#D13438`) disc with white Segoe UI Bold digits — `1`…`99`, then `99+` (the shell's own
+  cap); glyphs drawn bilevel at 4× and box-filtered down (smooth at every size, independent of GDI's anti-aliasing
+  decisions), fitted in up to four passes so they never touch the disc edge, and optically centered on their INK
+  (digits have no descenders — a cell-centered "3" sits low). Straight-alpha 32-bpp DIB + `BITMAPV5HEADER`
+  alpha mask → `CreateIconIndirect`. The accessibility text carries the **exact** count ("150 unread Agentmaster
+  sessions").
+
+### 8.5 Setting + logs
+
+- `taskbarUnreadBadge` — Notifications tab ▸ TASKBAR ▸ "Show the unread count on the taskbar icon", default ON, a
+  missing key ⇒ ON. Applied live: the cog Save repaints this window, the settings broadcast every other one.
+- `[unread] N -> M (window <id8>)` — the census, once per count change (hooks.log).
+- `[taskbar-badge] overlay for count N failed (0x…)` — from the EXE (`Startup::Note`), once per distinct failure
+  after the button exists (a Group-Policy-disabled overlay would otherwise log at every change);
+  `[taskbar-badge] rendering the overlay threw (0x…)` for a contained exception.
+
+### 8.6 Limits + verification
+
+- Un-combined taskbar buttons each show the same global count (by design, §8.3).
+- Unread state is per run: the rings and Mark Unread are transient, so a restart starts at 0.
+- A tab dragged to another window loses its unread mark (the ring's existing behavior).
+- Only sessions whose tab is open somewhere count; a managed Codex tab rings at its 3-state floor, so it counts too.
+- Runtime checklist (pends a build/deploy — permission-gated): with a session running in a background tab, switch
+  tabs → on turn-complete the button shows **1** and hooks.log has `[unread] 0 -> 1`; a second one → **2**;
+  visiting one → **1**; leave a running session on screen, switch to another app, let it finish → the count rises,
+  and clicking back into the window clears it; Mark Unread adds one; the cog switch OFF clears the button in every
+  window; restarting explorer.exe brings the badge back; a 125%/150% DPI monitor shows crisp digits.
+
+## Follow-ups (non-blocking)
 
 - ~~Toast COM activator~~ — **shipped** (§4a): it was the fix for the stray-window-on-click bug, and it
   carries the click-after-exit deep-link as far as the SCM's activation timeout allows (§6).

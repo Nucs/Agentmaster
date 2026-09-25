@@ -1695,6 +1695,149 @@ namespace Agentmaster
         }
     }
 
+    // ---- Agentmaster (taskbar unread badge; NOTIFICATIONS.md section 8): the process-wide unread census ----
+
+    uint32_t CountDistinctUnreadSessions(const std::map<std::wstring, std::vector<std::wstring>>& unreadByWindow)
+    {
+        // Flatten + sort + unique rather than a std::set: the sets are tiny (a handful of ids per window) and a
+        // flat vector is one allocation instead of one per node.
+        std::vector<std::wstring> all;
+        for (const auto& [windowId, ids] : unreadByWindow)
+        {
+            (void)windowId;
+            for (const auto& id : ids)
+            {
+                if (!id.empty())
+                {
+                    all.push_back(id);
+                }
+            }
+        }
+        std::sort(all.begin(), all.end());
+        all.erase(std::unique(all.begin(), all.end()), all.end());
+        return static_cast<uint32_t>(all.size());
+    }
+
+    void PublishWindowUnreadSessions(const std::wstring& windowId, std::vector<std::wstring> sessionIds) noexcept
+    {
+        PublishWindowUnreadSessionsIn(SharedEngine(), windowId, std::move(sessionIds));
+    }
+
+    void PublishWindowUnreadSessionsIn(Engine& e, const std::wstring& windowId, std::vector<std::wstring> sessionIds) noexcept
+    {
+        try
+        {
+            // Normalize so the census stores a canonical set: the union counts by value, and an empty publish must
+            // ERASE the window's entry (a closed window or a fully-read one contributes nothing, not an empty row).
+            sessionIds.erase(std::remove_if(sessionIds.begin(), sessionIds.end(), [](const std::wstring& id) { return id.empty(); }), sessionIds.end());
+            std::sort(sessionIds.begin(), sessionIds.end());
+            sessionIds.erase(std::unique(sessionIds.begin(), sessionIds.end()), sessionIds.end());
+
+            uint32_t before = 0;
+            uint32_t after = 0;
+            std::vector<std::function<void(uint32_t)>> sinks;
+            {
+                std::lock_guard<std::mutex> lk(e.unreadMutex);
+                if (sessionIds.empty())
+                {
+                    e.unreadByWindow.erase(windowId);
+                }
+                else
+                {
+                    e.unreadByWindow[windowId] = std::move(sessionIds);
+                }
+                before = e.unreadCount;
+                after = CountDistinctUnreadSessions(e.unreadByWindow);
+                if (after == before)
+                {
+                    return; // the set moved but the COUNT didn't (e.g. one read, one new) — nothing to repaint
+                }
+                e.unreadCount = after;
+                // Snapshot under the lock, invoke outside it (the ActivateSessionInOtherWindows pattern): each sink
+                // hops into its own window's dispatcher, and holding the census lock across foreign-window
+                // marshaling would be a needless ordering hazard.
+                sinks.reserve(e.unreadCountSinks.size());
+                for (const auto& s : e.unreadCountSinks)
+                {
+                    if (s.fn)
+                    {
+                        sinks.push_back(s.fn);
+                    }
+                }
+            }
+            AppendStateLog(L"hooks.log", L"[unread] " + std::to_wstring(before) + L" -> " + std::to_wstring(after) + L" (window " + ShortId(windowId) + L")\n");
+            for (const auto& fn : sinks)
+            {
+                // Per-sink containment (the RaiseCommandActionInWindows rule): a tearing-down window's dispatcher
+                // throwing must not keep the LATER windows' buttons on a stale number.
+                try
+                {
+                    fn(after);
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"PublishWindowUnreadSessions sink");
+                }
+            }
+        }
+        catch (...)
+        {
+            // noexcept by contract (callable from ~TerminalPage on a pool thread): an allocation failure here costs
+            // one census update, never the process. The next publish recomputes the union from scratch.
+            LogSwallowedException(L"PublishWindowUnreadSessions");
+        }
+    }
+
+    uint32_t CurrentUnreadCount() noexcept
+    {
+        return CurrentUnreadCountIn(SharedEngine());
+    }
+
+    uint32_t CurrentUnreadCountIn(Engine& e) noexcept
+    {
+        std::lock_guard<std::mutex> lk(e.unreadMutex);
+        return e.unreadCount;
+    }
+
+    uint64_t RegisterUnreadCountHandler(const std::wstring& windowId, std::function<void(uint32_t count)> handler)
+    {
+        return RegisterUnreadCountHandlerIn(SharedEngine(), windowId, std::move(handler));
+    }
+
+    uint64_t RegisterUnreadCountHandlerIn(Engine& e, const std::wstring& windowId, std::function<void(uint32_t count)> handler)
+    {
+        if (!handler)
+        {
+            return 0;
+        }
+        std::lock_guard<std::mutex> lk(e.unreadMutex);
+        const auto token = e.nextUnreadCountToken++;
+        e.unreadCountSinks.push_back({ token, windowId, std::move(handler) });
+        return token;
+    }
+
+    void UnregisterUnreadCountHandler(uint64_t token) noexcept
+    {
+        UnregisterUnreadCountHandlerIn(SharedEngine(), token);
+    }
+
+    void UnregisterUnreadCountHandlerIn(Engine& e, uint64_t token) noexcept
+    {
+        if (token == 0)
+        {
+            return;
+        }
+        std::lock_guard<std::mutex> lk(e.unreadMutex);
+        for (auto it = e.unreadCountSinks.begin(); it != e.unreadCountSinks.end(); ++it)
+        {
+            if (it->token == token)
+            {
+                e.unreadCountSinks.erase(it); // vector::erase of a movable element: no allocation, no throw
+                return;
+            }
+        }
+    }
+
     std::vector<RecoverableWindow> RecoverableWindows()
     {
         return RecoverableWindowsIn(SharedEngine());

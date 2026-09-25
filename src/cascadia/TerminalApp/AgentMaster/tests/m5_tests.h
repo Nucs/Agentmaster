@@ -17,6 +17,7 @@
 //   tests_summary_anchor.cpp  - summary table-trim + user-msg noise / PromptAnchor (+ edge/corpus/benches) / pending-input
 //   tests_commands.cpp        - COMMANDS.md: slash-command bindings (ParseCommandEcho / CommandWatch / DeriveSuffixedTitle / initial-prompt arg / handover command file)
 //   tests_invisible.cpp       - DELIVERY.md §15: claude's invisible-character rule mirrored (the generated wZe oracle table, the paste sanitize, the prompt compare key, Hebrew, echo/pull-echo/dedupe, the draft guard, the forwarder's UTF-8 + BOM)
+//   tests_taskbar.cpp         - NOTIFICATIONS.md section 8: the taskbar unread badge (TaskbarBadge.h's label / size / disc + digit composition / GDI icon, drawn like the shell draws it) + the engine's process-wide unread census
 // ======================================================================================
 //
 // Agentmaster - M5 standalone test harness: SHARED declarations.
@@ -253,5 +254,8 @@ void TestClaudeInvisibleOracle(); // the mirror vs Claude 2.1.280's OWN outputs 
 void TestClaudeInputSanitize(); // the pure tables, SanitizeForClaudeInput (VS16/RLM kept, ZWSP/ESC/tags gone, NFC niqqud), PromptFillBody/BuildPromptFill, NormalizePromptTextForCompare, the compares (draft guard / merge / verify / undo) and CountGraphemeClusters (the undo budget)
 void TestInvisibleEchoAndDedupe(); // the registry half: push echo + NFC echo + pull-echo consume a sanitized delivery, the pull twin dedupes a Hebrew push row, the merge classifier sees through invisibles, and DecideEnterRetry presses for claude's cleaned box
 void TestForwarderEncoding(); // HOOKS.md "Encoding": the forwarder decodes stdin as UTF-8 (never the console code page), reads bridge.json + the transcript tail as UTF-8, stays pure ASCII, and is written with a UTF-8 BOM
+// tests_taskbar.cpp — NOTIFICATIONS.md section 8, the TASKBAR UNREAD BADGE: the overlay renderer and the count behind it.
+void TestTaskbarBadge(); // TaskbarBadge.h: Label (99+ cap) / Description (exact count) / IconSizeForDpi (SM_CXSMICON scaling, clamps), the disc coverage (centered, full-bleed, symmetric), ComposePixels (straight-alpha BGRA, white under ink, ink outside the disc dropped), FindInk, the real GDI glyph pass (inked, optically centered, never clipped by the disc) and CreateBadgeIcon drawn with DrawIconEx over a green canvas (transparent corners, opaque disc, white digits)
+void TestUnreadCensus(); // Engine.h's process-wide unread census on a LOCAL Engine: the distinct-session union, fan-out to EVERY sink (the source included), silence on an unchanged count, empty-publish withdrawal, unregister, and a throwing sink contained without starving the rest
 void BenchPromptAnchor();
 void BenchPromptAnchorRealSession();

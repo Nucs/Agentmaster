@@ -54,6 +54,7 @@ public:
 
     void FlashTaskbar();
     void SetTaskbarProgress(const size_t state, const size_t progress);
+    void SetTaskbarBadge(const uint32_t count); // Agentmaster (taskbar unread badge): paint `count` on this window's taskbar button (0 clears it)
 
     void SummonWindow(winrt::TerminalApp::SummonWindowBehavior args);
 
@@ -99,6 +100,18 @@ protected:
     winrt::Windows::UI::Xaml::Hosting::DesktopWindowXamlSource _source; // nulled in ctor
     winrt::Windows::UI::Xaml::Controls::Grid _rootGrid; // nulled in ctor
     wil::com_ptr<ITaskbarList3> _taskbar;
+
+    // Agentmaster (taskbar unread badge; NOTIFICATIONS.md section 8 / TaskbarBadge.h): the count this window's taskbar
+    // button should carry (0 = no overlay). REMEMBERED, not fire-and-forget, because Explorer forgets every overlay
+    // when it restarts and a button that doesn't exist yet ignores one: both cases are healed by re-applying this value
+    // when TaskbarButtonCreated arrives. _taskbarButtonReady flips on that first message — before it, a failed
+    // SetOverlayIcon is expected and silent. _taskbarBadgeLastHr de-duplicates the failure log (a policy-disabled
+    // overlay would otherwise log at every count change).
+    uint32_t _taskbarBadgeCount{ 0 };
+    bool _taskbarButtonReady{ false };
+    HRESULT _taskbarBadgeLastHr{ S_OK };
+    void _ApplyTaskbarBadge() noexcept;
+    static UINT _TaskbarButtonCreatedMessage() noexcept;
 
     std::function<void(const HWND, const til::rect&)> _pfnCreateCallback;
     std::function<float(bool, float)> _pfnSnapDimensionCallback;

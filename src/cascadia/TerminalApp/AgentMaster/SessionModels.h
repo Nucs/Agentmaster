@@ -2439,6 +2439,14 @@ namespace Agentmaster
         // Play the Windows notification sound with the toast; OFF adds <audio silent="true"/> so
         // the toast is visual-only. Default ON; a missing key => ON.
         bool notifySound{ true };
+        // Agentmaster (TASKBAR UNREAD BADGE; NOTIFICATIONS.md section 8): paint the number of UNREAD sessions — every
+        // tab whose status dot carries the flash ring or a manual Mark Unread, across ALL windows — onto Agentmaster's
+        // taskbar button (a red-disc overlay, ITaskbarList3::SetOverlayIcon; the count rises by one per newly unread
+        // session and drops as each is visited). INDEPENDENT of notificationsEnabled: the count and the toasts are two
+        // separate cues, and a user may want either without the other, so the cog never greys this with the master.
+        // OFF clears every window's overlay at once (the Save handler + the cross-window broadcast re-apply live).
+        // Windows' own "Show badges on taskbar apps" switch still has the last word. Default ON; a missing key => ON.
+        bool taskbarUnreadBadge{ true };
 
         // --- Slash commands (COMMANDS.md §6a; the cog's "Commands" tab) ---
         // Agentmaster's /handover command family is user-customizable: each command can be RENAMED

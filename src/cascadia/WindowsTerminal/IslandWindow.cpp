@@ -9,6 +9,10 @@
 #include <dwmapi.h>
 #include <TerminalThemeHelpers.h>
 #include <CoreWindow.h>
+// Agentmaster (taskbar unread badge; NOTIFICATIONS.md section 8): the header-only overlay renderer, and the EXE-safe
+// hooks.log writer (Startup::Note — the EXE links TerminalApp.dll, not the engine lib that owns AppendStateLog).
+#include "../TerminalApp/AgentMaster/TaskbarBadge.h"
+#include "../TerminalApp/AgentMaster/StartupTiming.h"
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
@@ -397,6 +401,15 @@ void IslandWindow::Initialize()
         }
     }
 
+    // Agentmaster (taskbar unread badge): an ELEVATED window never receives Explorer's (medium-integrity)
+    // TaskbarButtonCreated unless it is let through UIPI — without it an elevated Agentmaster would lose its badge
+    // after the first Explorer restart. A harmless no-op for a normal window. The button does not exist yet (the
+    // window is still hidden), so the filter is in place before the first message can arrive.
+    if (const auto taskbarButtonCreated = _TaskbarButtonCreatedMessage(); taskbarButtonCreated != 0)
+    {
+        ::ChangeWindowMessageFilterEx(_window.get(), taskbarButtonCreated, MSGFLT_ALLOW, nullptr);
+    }
+
     _systemMenuNextItemId = IDM_SYSTEM_MENU_BEGIN;
 
     // Enable vintage opacity by removing the XAML emergency backstop, GH#603.
@@ -481,12 +494,33 @@ void IslandWindow::_OnGetMinMaxInfo(const WPARAM /*wParam*/, const LPARAM lParam
         ShowCursorMaybe(message);
     }
 
+    // Agentmaster (taskbar unread badge): Explorer (re)created this window's taskbar button — its first show, or an
+    // explorer.exe restart, which forgets every overlay. Re-apply the remembered count. A registered message has no
+    // compile-time value (hence an if, not a case), and it continues on to the default handling like any other.
+    // The != 0 guard: a failed registration returns 0, which must not turn WM_NULL into a badge repaint.
+    if (const auto taskbarButtonCreated = _TaskbarButtonCreatedMessage(); taskbarButtonCreated != 0 && message == taskbarButtonCreated)
+    {
+        _taskbarButtonReady = true;
+        _ApplyTaskbarBadge();
+    }
+
     switch (message)
     {
     case WM_GETMINMAXINFO:
     {
         _OnGetMinMaxInfo(wparam, lparam);
         return 0;
+    }
+    case WM_DPICHANGED:
+    {
+        // Agentmaster (taskbar unread badge): let BaseWindow resize for the new DPI first, then re-render the overlay
+        // at the new small-icon size so the digits stay crisp instead of being rescaled by the shell.
+        const auto result = base_type::MessageHandler(message, wparam, lparam);
+        if (_taskbarBadgeCount != 0)
+        {
+            _ApplyTaskbarBadge();
+        }
+        return result;
     }
     case WM_CREATE:
     {
@@ -968,6 +1002,105 @@ void IslandWindow::SetTaskbarProgress(const size_t state, const size_t progress)
             break;
         }
     }
+}
+
+// Method Description:
+// - Agentmaster (taskbar unread badge; NOTIFICATIONS.md section 8): remember the unread-session count this window's
+//   taskbar button should carry and paint it now. The count is the PROCESS-WIDE one (every window gets the same
+//   number, since the taskbar combines our windows into one button whose overlay is "the last one received").
+// Arguments:
+// - count: the unread-session count; 0 removes the overlay.
+// Remarks:
+// - Remembered even when painting is impossible right now (the button doesn't exist before the first show): the
+//   TaskbarButtonCreated handler re-applies it. Never throws (_ApplyTaskbarBadge contains every failure).
+void IslandWindow::SetTaskbarBadge(const uint32_t count)
+{
+    if (count == _taskbarBadgeCount)
+    {
+        return;
+    }
+    _taskbarBadgeCount = count;
+    _ApplyTaskbarBadge();
+}
+
+// Method Description:
+// - Agentmaster (taskbar unread badge): push _taskbarBadgeCount to the shell — a freshly rendered red-disc overlay
+//   (TaskbarBadge.h, sized for this window's DPI, with the exact count as Narrator's description), or NULL to
+//   remove it. Called on every count change, on TaskbarButtonCreated (first show / Explorer restart), and on
+//   WM_DPICHANGED.
+// Remarks:
+// - noexcept because it runs inside MessageHandler (noexcept): anything the renderer throws (only bad_alloc) is
+//   logged and dropped — the button keeps its previous overlay until the next change.
+// - A NULL overlay on a COMBINED button restores whichever earlier overlay another window still holds; since every
+//   window paints the same process-wide count, all of them clear together when it drops to 0.
+// - A failed SetOverlayIcon before TaskbarButtonCreated is expected (no button yet) and silent; after it, the first
+//   occurrence of each distinct failure HRESULT is logged once (small taskbar buttons / a Group Policy that disables
+//   overlays would otherwise fail on every change).
+void IslandWindow::_ApplyTaskbarBadge() noexcept
+{
+    if (!_taskbar || !_window)
+    {
+        return;
+    }
+    try
+    {
+        HRESULT hr = S_OK;
+        if (_taskbarBadgeCount == 0)
+        {
+            hr = _taskbar->SetOverlayIcon(_window.get(), nullptr, nullptr);
+        }
+        else
+        {
+            const int size = ::Agentmaster::TaskbarBadge::IconSizeForDpi(::GetDpiForWindow(_window.get()));
+            // The shell keeps its own copy of the overlay, so ours can be destroyed as soon as the call returns.
+            const wil::unique_hicon icon{ ::Agentmaster::TaskbarBadge::CreateBadgeIcon(_taskbarBadgeCount, size) };
+            if (!icon)
+            {
+                hr = E_FAIL; // GDI refused the icon (e.g. handle exhaustion): reported like a failed SetOverlayIcon
+            }
+            else
+            {
+                const auto description = ::Agentmaster::TaskbarBadge::Description(_taskbarBadgeCount);
+                hr = _taskbar->SetOverlayIcon(_window.get(), icon.get(), description.c_str());
+            }
+        }
+        if (_taskbarButtonReady)
+        {
+            if (FAILED(hr) && hr != _taskbarBadgeLastHr)
+            {
+                wchar_t code[16]{};
+                ::swprintf(code, 16, L"0x%08X", static_cast<unsigned>(hr));
+                ::Agentmaster::Startup::Note(L"[taskbar-badge] overlay for count " + std::to_wstring(_taskbarBadgeCount) + L" failed (" + code + L"); logged once per distinct failure");
+            }
+            _taskbarBadgeLastHr = hr;
+        }
+    }
+    catch (...)
+    {
+        const HRESULT caught = LOG_CAUGHT_EXCEPTION(); // wil's trace, and the classified HRESULT for the line below
+        try
+        {
+            wchar_t code[16]{};
+            ::swprintf(code, 16, L"0x%08X", static_cast<unsigned>(caught));
+            ::Agentmaster::Startup::Note(L"[taskbar-badge] rendering the overlay threw (" + std::wstring{ code } + L"); the button keeps its previous badge until the next change");
+        }
+        catch (...)
+        {
+            // ⚠ DELIBERATELY BARE (Rule #18's logging-path exemption): only bad_alloc can land here, while building the
+            // log line itself, and the logger needs the same allocation. Degradation: no hooks.log line for this failure.
+        }
+    }
+}
+
+// Method Description:
+// - Agentmaster (taskbar unread badge): the id of Explorer's "TaskbarButtonCreated" message — registered once per
+//   process (RegisterWindowMessage returns the same id for the same string everywhere in the session).
+// Return Value:
+// - The message id, or 0 if registration failed (callers then simply never see the message).
+UINT IslandWindow::_TaskbarButtonCreatedMessage() noexcept
+{
+    static const UINT message = ::RegisterWindowMessageW(L"TaskbarButtonCreated");
+    return message;
 }
 
 // From GdiEngine::s_SetWindowLongWHelper
