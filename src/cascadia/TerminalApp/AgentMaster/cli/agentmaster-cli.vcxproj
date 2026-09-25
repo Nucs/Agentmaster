@@ -65,6 +65,12 @@
     <ClCompile Include="..\SessionSearch.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <!-- DELIVERY.md §15: SessionRegistry.cpp's echo/dedupe compares + the BuildPromptFill it links call
+         into ClaudeInvisibleChars (NormalizePromptTextForCompare / SanitizeForClaudeInput) — omitting
+         it fails at LINK, not compile (the CommandWatch.cpp lesson in _compile.bat). -->
+    <ClCompile Include="..\ClaudeInvisibleChars.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
   </ItemGroup>
 
   <Import Project="$(OpenConsoleDir)src\common.build.post.props" />
@@ -79,7 +85,9 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>ole32.lib;oleaut32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- icu.lib: the Windows SDK's ICU (ClaudeInvisibleChars.cpp — Unicode properties, NFC, grapheme
+           breaks). Also requested by that TU's #pragma comment(lib); listed here so the dependency is visible. -->
+      <AdditionalDependencies>ole32.lib;oleaut32.lib;user32.lib;icu.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 </Project>

@@ -335,6 +335,14 @@ namespace Agentmaster
         // runs its own engine + pipe + bridge.json) — a fixed ~/.agentmaster path would route
         // a dev-profile session's hooks to the release instance's bridge. The placeholders are
         // substituted below with the PowerShell-quoted per-profile paths.
+        //
+        // ENCODING (HOOKS.md "Encoding" — the Hebrew-prompt fix): every text the script READS is
+        // decoded as UTF-8 explicitly — the hook payload from the raw stdin stream (never
+        // [Console]::In, which uses the console's OEM code page and garbled every non-ASCII prompt on
+        // the wire), bridge.json and the transcript tail via Get-Content -Encoding UTF8 — and every
+        // text it WRITES to the pipe is UTF-8 bytes (the bridge's decoder). The file itself is written
+        // with a BOM by MaterializeSharedHookFiles so Windows PowerShell parses a non-ASCII profile
+        // path correctly.
         std::wstring script = LR"PSHOOK(param([string]$Event = "")
 $ErrorActionPreference = "SilentlyContinue"
 $AmErrLog = {{AM_FWD_ERRLOG}}
@@ -352,8 +360,23 @@ try {
   # `ts` field orders events even when this forwarder runs slow (the Stop path reads the
   # transcript below). Matches C++ NowMs(); see HookWire.h + NextSessionStateOrdered.
   $ts = [string][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  # The payload is UTF-8 JSON (claude writes it that way) - so it is DECODED as UTF-8, explicitly,
+  # from the raw stdin stream. [Console]::In decodes with the CONSOLE input code page (OEM 437/862/...,
+  # the ConPTY's), which turned every non-ASCII prompt - Hebrew, emoji, an em dash - into mojibake on
+  # the wire: the echo of such a prompt never matched what was sent, and each one was recorded twice
+  # (the garbled push row + its correct transcript twin). Setting [Console]::InputEncoding instead
+  # would re-code-page the whole SHARED console under claude, so the stream is wrapped, never the
+  # console. The legacy read is the fallback only when the stream read failed outright.
   $raw = ""
-  try { $raw = [Console]::In.ReadToEnd() } catch { }
+  $stdinOk = $false
+  try {
+    $stdinReader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), (New-Object System.Text.UTF8Encoding($false)))
+    $raw = $stdinReader.ReadToEnd()
+    $stdinOk = $true
+  } catch { }
+  if (-not $stdinOk) {
+    try { $raw = [Console]::In.ReadToEnd() } catch { }
+  }
 
   $j = $null
   if (-not [string]::IsNullOrEmpty($raw)) {
@@ -381,7 +404,7 @@ try {
     try {
       $disc = {{AM_BRIDGE_JSON}}
       if (Test-Path -LiteralPath $disc) {
-        $b = (Get-Content -LiteralPath $disc -Raw) | ConvertFrom-Json
+        $b = (Get-Content -LiteralPath $disc -Raw -Encoding UTF8) | ConvertFrom-Json
         if ($b.pipe) { $pipe = [string]$b.pipe }
       }
     } catch { }
@@ -421,7 +444,9 @@ try {
       $tp = ""
       if ($j.transcript_path) { $tp = [string]$j.transcript_path }
       if ((-not [string]::IsNullOrEmpty($tp)) -and (Test-Path -LiteralPath $tp)) {
-        $tail = @(Get-Content -LiteralPath $tp -Tail 60 -ErrorAction SilentlyContinue)
+        # -Encoding UTF8: the transcript is BOM-less UTF-8, which Windows PowerShell would otherwise
+        # read in the ANSI code page (the last assistant text of a Hebrew reply came back garbled).
+        $tail = @(Get-Content -LiteralPath $tp -Tail 60 -Encoding UTF8 -ErrorAction SilentlyContinue)
         for ($i = $tail.Length - 1; $i -ge 0; $i--) {
           $obj = $null
           try { $obj = $tail[$i] | ConvertFrom-Json } catch { continue }
@@ -1762,7 +1787,14 @@ try {
 
         const auto forwarderFwd = ToForwardSlashes(forwarderPath);
 
-        if (!WriteFileUtf8(forwarderPath, BuildForwarderScript(stateDir)))
+        // HOOKS.md "Encoding": the forwarder is written WITH a UTF-8 BOM (U+FEFF, which Utf16ToUtf8
+        // lays down as EF BB BF). Windows PowerShell 5.1 — what `powershell -File` runs — decodes a
+        // BOM-less .ps1 in the ANSI code page, and the script embeds this profile's paths (the
+        // bridge.json discovery + the drop log): under a non-ASCII Windows user name (a Hebrew one,
+        // say) those literals would parse garbled and the discovery fallback would look in a folder
+        // that does not exist. The BOM is the one encoding marker both 5.1 and pwsh honor; the body
+        // itself stays pure ASCII, so nothing else about the file changes.
+        if (!WriteFileUtf8(forwarderPath, std::wstring(1, static_cast<wchar_t>(0xFEFF)) + BuildForwarderScript(stateDir)))
         {
             return { std::wstring{}, std::wstring{} };
         }

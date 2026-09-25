@@ -501,12 +501,19 @@ namespace Agentmaster
                 // Newline-fold BOTH sides (DELIVERY.md RC6): a \r-composed multi-line prompt is
                 // injected \n-folded (BuildPromptFill), so its echo can only match folded. Folded
                 // once per event, per candidate — the scan is bounded by the Sent-unechoed set.
-                const std::wstring echoFolded = FoldCrToLf(msg.promptText);
+                const std::wstring echoFolded = FoldCrToLf(msg.promptText); // the [ups] fingerprint's input (unchanged: two deliveries of the same BYTES share a hash)
+                // DELIVERY.md §15: the MATCH uses the full compare key instead — invisible characters
+                // dropped + NFC on top of the fold. The prompt was pasted SANITIZED (claude's own
+                // invisible-character rule, PromptFillBody) and claude submits the NFC form its editor
+                // holds, so the echo of a prompt carrying a ZWSP, a stray RLM or non-canonical Hebrew
+                // niqqud differs from p.text byte-wise; an exact compare left such a prompt unechoed
+                // forever — the lost-send verdict's Failed + autorunner pause on a DELIVERED prompt.
+                const std::wstring echoKey = NormalizePromptTextForCompare(msg.promptText);
                 for (auto& p : s.queue)
                 {
                     if (p.origin == PromptOrigin::Autorun && p.status == PromptStatus::Sent && !p.echoed &&
                         p.sentAtUnixMs != 0 && (now - p.sentAtUnixMs) >= 0 &&
-                        (now - p.sentAtUnixMs) < kEchoWindowMs && FoldCrToLf(p.text) == echoFolded)
+                        (now - p.sentAtUnixMs) < kEchoWindowMs && NormalizePromptTextForCompare(p.text) == echoKey)
                     {
                         p.echoed = true; // consume exactly one echo per injected prompt
                         isEcho = true;
@@ -1105,11 +1112,18 @@ namespace Agentmaster
             // must not vouch for a NEW send, but a scanner that reads the line late (write-lag, a
             // catch-up pass) must still consume it, or the lost-send verdict would fire on a
             // demonstrably-delivered prompt. observedUnixMs==0 (no per-line ts) trusts the match.
-            const std::wstring textFolded = FoldCrToLf(text);
+            //
+            // DELIVERY.md §15: the compare is the full compare KEY (NormalizePromptTextForCompare —
+            // the RC6 newline fold plus invisible characters dropped plus NFC). The transcript line
+            // is claude's cleaned, NFC submit while an Autorun p.text is our raw queued text, and a
+            // push-recorded Typed row is claude's text again — so the key is what lets the pull-echo
+            // vouch for a sanitized delivery AND lets a Hebrew prompt's pull twin dedupe against its
+            // push row instead of recording it twice.
+            const std::wstring textFolded = NormalizePromptTextForCompare(text);
             bool alreadyRecorded = false;
             for (auto& p : s.queue)
             {
-                if (p.status != PromptStatus::Sent || FoldCrToLf(p.text) != textFolded)
+                if (p.status != PromptStatus::Sent || NormalizePromptTextForCompare(p.text) != textFolded)
                 {
                     continue;
                 }

@@ -65,7 +65,8 @@ bridge needs no JSON dependency; the **PowerShell forwarder** — which *does* h
 `ConvertFrom-Json` — parses Claude's hook JSON from stdin and emits the few flat fields.
 
 - **Forwarder:** `agentmaster-hook.ps1` (authored by `BuildForwarderScript`, written by
-  `MaterializeSharedHookFiles`). Pure-ASCII PowerShell, best-effort throughout — any failure is
+  `MaterializeSharedHookFiles` with a UTF-8 BOM). Pure-ASCII PowerShell that decodes everything it
+  reads as UTF-8 (see *Encoding* below), best-effort throughout — any failure is
   swallowed so a hook never breaks the Claude turn. A bounded `Connect(1000)` means a stale
   discovery file fails in ~1 s rather than stalling the turn; with the app running the local pipe
   answers in <50 ms.
@@ -121,6 +122,44 @@ parses with `source == ""` and takes the historical, source-blind path, and a 9-
 it. The forwarder used to throw the payload discriminator away — which is why a compaction's
 `SessionStart` was indistinguishable from a real (re)start (it demoted a running turn to `Idle`;
 see *Compaction*).
+
+### Encoding — every text the forwarder reads is decoded as UTF-8 (the Hebrew-prompt fix)
+
+Claude writes the hook payload to the forwarder's stdin as **UTF-8 JSON**. The forwarder used to
+read it with `[Console]::In.ReadToEnd()`, which Windows PowerShell decodes with the **console's
+input code page** — the OEM page of the ConPTY the hook runs under (437, 862, …). Every non-ASCII
+character in a prompt therefore reached the bridge as mojibake: `שלום` arrived as `╫⌐╫£╫ò╫¥`, an
+em dash as `ΓÇö`, an emoji as four junk characters. Measured over the release fleet: **481 of 1014**
+non-ASCII `Typed` rows were garbled, **405** of them recorded **twice** (the garbled push row + the
+scanner's correct transcript twin, which the dedupe could not match), and no non-ASCII prompt's push
+echo could ever match the prompt we had sent (the pull-echo carried those deliveries alone).
+
+Now (`BuildForwarderScript`, pure ASCII still):
+
+- **stdin** is read through `New-Object System.IO.StreamReader([Console]::OpenStandardInput(),
+  (New-Object System.Text.UTF8Encoding($false)))` — the raw stream, decoded as UTF-8 explicitly. The
+  console's code page is **never** changed (`[Console]::InputEncoding = …` would re-code-page the
+  console SHARED with claude and its shell). The old `[Console]::In` read survives only as the
+  fallback when the stream read throws.
+- **bridge.json** and the **transcript tail** (the `Stop` path's question test) are read with
+  `Get-Content -Encoding UTF8` — both files are BOM-less UTF-8, which Windows PowerShell would
+  otherwise read in the ANSI code page.
+- The **wire line** was already written as UTF-8 bytes (`[System.Text.Encoding]::UTF8.GetBytes`),
+  and the bridge decodes UTF-8 (`HooksBridge.cpp` `Utf8ToUtf16`) — unchanged.
+- The **script file** is written with a **UTF-8 BOM** (`MaterializeSharedHookFiles`). Windows
+  PowerShell 5.1 — what `powershell -File` runs — decodes a BOM-less `.ps1` in the ANSI code page,
+  and the script embeds this profile's paths (the bridge.json discovery fallback + the drop log).
+  Under a non-ASCII Windows user name (a Hebrew one, say) those literals parsed garbled and the
+  discovery fallback looked in a folder that does not exist — the hook was dropped. Measured on
+  Windows PowerShell 5.1 with the pre-fix script: *no delivery at all* from a Hebrew-named profile
+  folder; with the fix, delivered intact.
+
+Verification (no build needed): extract the script from `ClaudeSpawn.cpp`, write it with and
+without the BOM, run it under `powershell -File … -Event UserPromptSubmit` with a Hebrew/emoji
+payload on stdin, and capture the wire line on a throwaway pipe served by a second PowerShell —
+the pre-fix script delivers cp437 mojibake, the fixed one the exact prompt. `TestForwarderEncoding`
+(`tests_invisible.cpp`) pins the script shape + the BOM on disk. The prompt text itself then goes
+through the invisible-character compare key before any echo match (`DELIVERY.md` §15).
 
 ## Events consumed
 

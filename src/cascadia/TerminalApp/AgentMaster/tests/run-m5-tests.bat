@@ -16,7 +16,8 @@ if errorlevel 1 (
 )
 cd /d "K:\source\Agentmaster\src\cascadia\TerminalApp\AgentMaster\tests"
 REM user32 + oleaut32: ProcessInspect's BringClaudeWindowToFront (EnumWindows/ShowWindow/... + UIA BSTR names)
-cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE /Fe:m5_tests.exe m5_tests.cpp tests_state.cpp tests_spawn_sched.cpp tests_persistence.cpp tests_transcript.cpp tests_summary_anchor.cpp tests_commands.cpp tests_tabdrag.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\CommandWatch.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\SessionStore.cpp ..\Scheduler.cpp ..\Engine.cpp ..\ProcessObserver.cpp ole32.lib user32.lib oleaut32.lib
+REM icu.lib: ClaudeInvisibleChars.cpp (DELIVERY.md 15 - claude's invisible-character rule: Unicode properties, NFC, grapheme breaks)
+cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE /Fe:m5_tests.exe m5_tests.cpp tests_state.cpp tests_spawn_sched.cpp tests_persistence.cpp tests_transcript.cpp tests_summary_anchor.cpp tests_commands.cpp tests_tabdrag.cpp tests_invisible.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\CommandWatch.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\SessionStore.cpp ..\Scheduler.cpp ..\Engine.cpp ..\ProcessObserver.cpp ..\ClaudeInvisibleChars.cpp ole32.lib user32.lib oleaut32.lib icu.lib
 if errorlevel 1 (
   echo [error] compile failed
   exit /b 1

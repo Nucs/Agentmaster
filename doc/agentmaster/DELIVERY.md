@@ -689,3 +689,95 @@ the registry park (fresh-marker belt, idempotent, live-only, notify), the interr
 Stop advancing into the hold, the push resume matrix (typed / Send-now echo / noise / empty /
 pre-anchor), the pull twin (pre-anchor / unstamped / fresh / deduped), the user-set cancel, and the
 stop-on-error + push/pull merge precedence.
+
+## 15. Invisible characters — claude 2.1.277+ CANCELS an Enter that finds one (fixed: mirror the rule, fold it out of every compare) + Hebrew
+
+**The change (Claude Code 2.1.277; verified byte-for-byte in the 2.1.280 bundle, minified `wZe`).**
+Pressing Enter first runs the input through a cleanup that deletes "invisible" characters; when it
+deletes ANYTHING (`removedTotal > 0`) the submit is **cancelled**: the cleaned text goes back into
+the box with *"Removed N invisible characters · review and press Enter to send"*. A launch prompt
+(`claude … "<prompt>"`) is cleaned and SENT — the cancel is Enter-only (gate flag
+`tengu_tranquil_cloud`, default on).
+
+**What it did to us.** Every paste channel (autorunner, Send-now, the /handover paste tier, the
+standby and §10 re-fills) typed text that could hold such a character: the CR was swallowed by the
+review cancel, the prompt sat in the box as claude's CLEANED text, the Enter-retry watchdog's draft
+guard compared that box to the prompt EXACTLY and refused its rescue press (not "ours"), and 15 s
+later the lost-send verdict marked the prompt `Failed` and paused the autorunner — on a prompt that
+was one Enter from being delivered. The echo/pull-echo compares missed the same way. Not yet
+observed live on 2.1.280. ⚠ The obvious suspect is *not* a hazard: the VS16 of the warning-sign
+emoji (U+26A0 U+FE0F) is one of the characters the rule deliberately KEEPS. The real hazards are the removed ones — a web-pasted
+ZWSP, ZWNJ/ZWJ outside their scripts, bidi embeddings/overrides/isolates, an LRM/RLM on a line with
+no RTL letters, tag characters, a BOM, SHY, a lone CR / VT / FF / NEL / LS / PS, C0/C1 controls.
+
+**The rule** (`ClaudeInvisibleChars.h` documents every class; the `.cpp` names the bundle identifier
+each helper mirrors). Candidates are removed unless a CONTEXT rule keeps them: ZWJ/ZWNJ inside
+Indic/Arabic-family words and emoji ZWJ sequences · ZWSP between Khmer/Thai/Lao/Myanmar words ·
+VS15/VS16 after an emoji or keycap base · VS1–3 in the standardized sequences · CGJ between marks ·
+a few script-specific format controls · valid England/Scotland/Wales flag tags — and **the Hebrew
+rule**: an LRM/RLM (ALM for Arabic-family only) survives iff its LINE holds letters of an RTL script
+(Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic, Adlam, Hanifi Rohingya, Yezidi), it does
+not follow another kept candidate, what follows is the end / a line break / a visible non-mark, and
+it is not REDUNDANT between two same-direction letters (or two digits). So `שלום<RLM>.` keeps its RLM,
+`PR #12<RLM> בבקשה` keeps it, `של<RLM>ום` loses it, an RLM before niqqud loses it, and RLE/PDF/RLI/PDI
+embeddings always go.
+
+**The fix — two halves, both through `ClaudeInvisibleChars`:**
+
+1. **Before injecting — `SanitizeForClaudeInput` inside `PromptFillBody`**, the ONE paste
+   chokepoint (`BuildPromptFill` = ESC[200~ + body + ESC[201~; `BuildPromptSubmission` = that + CR).
+   NFC first — claude's editor NFC-normalizes whatever it holds (its `MeasuredText` constructor), so
+   that is the form its Enter-time cleanup sees — then the EXACT mirror, so the Enter finds nothing
+   to remove and submits. An exact mirror, not a blanket strip: what claude keeps (the emoji VS16,
+   a Persian ZWNJ, a Hebrew line's RLM) we keep, so the text arrives intact. It also removes every C0
+   control, ESC included — no byte of a body can terminate the paste early any more.
+2. **On both sides of every prompt compare — the compare KEY `NormalizePromptTextForCompare`**:
+   every line break → LF, every candidate DROPPED (kept-or-removed alike: our sanitized paste,
+   claude's cleaned submit and the terminal render each carry a different subset), lone surrogates →
+   U+FFFD, then NFC (Hebrew niqqud typed dagesh-before-vowel comes back canonically reordered). Wired
+   into: the push echo consume and the pull-echo + dedupe (`SessionRegistry` — whitespace stays
+   EXACT there: claude submits leading/trailing whitespace verbatim, measured 84 + 9 of 1514
+   corpus prompts); `FoldTrimPromptText`, and through it the draft guard (`DraftMatchesPromptText` —
+   `DecideEnterRetry` + the verified presser), the merge classifier (`PromptSwallowedByMessage`),
+   verified placement (`VerifyFillAgainstPrompt` / `DecideSendUndo`); and the draft swap
+   (`DraftSwapCompareKey`: the restore's verify-first + settle, the abort recovery, and — the one that
+   mattered most — the submit-await's "has the prompt left the box", where an exact compare read a
+   still-stuck prompt as GONE and would have restored the draft straight into it). Emptiness checks
+   keep the plain trim: an invisible-only box is not empty to claude, so it is not empty to the clear
+   ladder either.
+3. **The Foreign-undo budget counts what we actually typed, in claude's unit** — the grapheme
+   clusters (`CountGraphemeClusters`) of `PromptFillBody(text)`. Claude's editor steps and deletes by
+   `Intl.Segmenter` grapheme, so one Backspace removes a Hebrew letter with its niqqud, an emoji ZWJ
+   family, a surrogate pair; the historical UTF-16-unit budget over-counted every such cluster —
+   exactly the over-deletion (into the user's own text) the budget exists to prevent.
+
+**Deliberately NOT changed:** `PendingInput.h`'s compose-box pull classifier (`EvaluateDraftPull` —
+the Manager compose box vs the terminal draft). It is a UI convenience whose mismatch degrades to
+the safe path (the explicit pull button instead of an auto-extend), and it is shared with
+`ControlCore`, which stays ICU-free.
+
+**Hebrew, end to end.** Beyond the RLM/LRM rule and NFC above, the hook forwarder read the payload
+in the CONSOLE code page — every non-ASCII prompt reached the registry as cp437 mojibake
+(`╫⌐╫£╫ò╫¥` for `שלום`): 481 of 1014 non-ASCII `Typed` rows garbled, 405 of them recorded twice
+(the garbled push row + the correct pull twin), and no non-ASCII prompt's push echo could ever
+match. Fixed in the forwarder — see `HOOKS.md` *Encoding*.
+
+**Re-extracting the rule** (when a Claude Code release changes it): `tools/claude-invisible-oracle/`
+— `oracle.js` locates the cleanup inside the installed `claude.exe` by its stable anchors (the
+fast-path regex `/[^\t\n\x20-\x7e]/`, the `{tags:0,bidi:0,zeroWidth:0,selectors:0,other:0}`
+counter literal, the `"gbeng","gbsct","gbwls"` flag list), runs claude's OWN function over the
+vectors in `vectors.json` under node, and `gen_table.py` turns its output into the pure-ASCII C++
+rows of `tests_invisible.cpp`'s `kInvisibleOracle`. A changed row is a changed rule: update
+`ClaudeInvisibleChars.cpp` until the table passes again. Nothing of claude's code is stored in the
+repo — the tool reads it from the local install at run time.
+
+**Coverage** (`tests_invisible.cpp`): `TestClaudeInvisibleOracle` (93 rows of claude's own outputs,
+field for field, + idempotence + the delivery invariant: a sanitized paste never trips the cancel),
+`TestClaudeInputSanitize` (tables, sanitize incl. the Hebrew keep/remove cases and NFC niqqud,
+`PromptFillBody`/`BuildPromptFill`, the compare key, every compare consumer, the grapheme budget),
+`TestInvisibleEchoAndDedupe` (push echo, NFC echo, pull-echo, the Hebrew pull-twin dedupe, the merge
+classifier, `DecideEnterRetry` pressing for claude's cleaned box), `TestForwarderEncoding` (the UTF-8
+read ahead of the console fallback, `-Encoding UTF8`, the ASCII body, the BOM on disk). Before any
+of it was compiled, the port's control flow was also differentially fuzzed against claude's own
+function (a Python transliteration of the C++, 40 k random strings dense in candidates and their
+context characters — 0 mismatches).

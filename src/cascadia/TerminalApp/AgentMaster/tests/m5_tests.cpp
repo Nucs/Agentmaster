@@ -82,6 +82,10 @@ int wmain()
     TestLostSendReconciler();
     TestVerifiedPlacement();
     TestBuildPromptSubmission();
+    TestClaudeInvisibleOracle(); // DELIVERY.md §15 (tests_invisible.cpp)
+    TestClaudeInputSanitize();
+    TestInvisibleEchoAndDedupe();
+    TestForwarderEncoding();
     TestSchedulerIntegration();
     TestInterruptHold();
     TestUpdaterVersionLogic();

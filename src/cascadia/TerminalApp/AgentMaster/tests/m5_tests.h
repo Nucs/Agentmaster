@@ -16,6 +16,7 @@
 //   tests_transcript.cpp      - transcript scan + reconcilers / ProcessInspect tree+parse / transcript resolve / Codex / store / lineage / search / live / bring-to-front
 //   tests_summary_anchor.cpp  - summary table-trim + user-msg noise / PromptAnchor (+ edge/corpus/benches) / pending-input
 //   tests_commands.cpp        - COMMANDS.md: slash-command bindings (ParseCommandEcho / CommandWatch / DeriveSuffixedTitle / initial-prompt arg / handover command file)
+//   tests_invisible.cpp       - DELIVERY.md §15: claude's invisible-character rule mirrored (the generated wZe oracle table, the paste sanitize, the prompt compare key, Hebrew, echo/pull-echo/dedupe, the draft guard, the forwarder's UTF-8 + BOM)
 // ======================================================================================
 //
 // Agentmaster - M5 standalone test harness: SHARED declarations.
@@ -222,5 +223,14 @@ void TestCommandHandoverE2E();
 // (the /model false-Running invariant corpus-wide), carries timestamps; real Write tool_use lines
 // yield their file_path in fileWritePaths
 void TestCommandEchoRealCorpus();
+// tests_invisible.cpp — DELIVERY.md §15: Claude Code 2.1.277+ CANCELS an Enter whose text holds an
+// "invisible" character (the review prompt), which stranded every pasted delivery that carried one;
+// ClaudeInvisibleChars mirrors claude's own rule so the paste is pre-cleaned, and folds the same
+// characters (+ NFC) out of both sides of every prompt compare. Hebrew is covered throughout: the RLM/LRM
+// keep rules, NFC-reordered niqqud, and the forwarder's UTF-8 decoding of a Hebrew hook payload.
+void TestClaudeInvisibleOracle(); // the mirror vs Claude 2.1.280's OWN outputs (a generated table, field for field) + idempotence + the delivery invariant (a sanitized paste never trips the review cancel)
+void TestClaudeInputSanitize(); // the pure tables, SanitizeForClaudeInput (VS16/RLM kept, ZWSP/ESC/tags gone, NFC niqqud), PromptFillBody/BuildPromptFill, NormalizePromptTextForCompare, the compares (draft guard / merge / verify / undo) and CountGraphemeClusters (the undo budget)
+void TestInvisibleEchoAndDedupe(); // the registry half: push echo + NFC echo + pull-echo consume a sanitized delivery, the pull twin dedupes a Hebrew push row, the merge classifier sees through invisibles, and DecideEnterRetry presses for claude's cleaned box
+void TestForwarderEncoding(); // HOOKS.md "Encoding": the forwarder decodes stdin as UTF-8 (never the console code page), reads bridge.json + the transcript tail as UTF-8, stays pure ASCII, and is written with a UTF-8 BOM
 void BenchPromptAnchor();
 void BenchPromptAnchorRealSession();

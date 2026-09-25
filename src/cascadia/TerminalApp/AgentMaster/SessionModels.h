@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "Activity.h" // RunningApp (Fleet Observer live-enrichment field on SessionInfo)
+#include "ClaudeInvisibleChars.h" // DELIVERY.md §15: SanitizeForClaudeInput (the paste) + NormalizePromptTextForCompare (every prompt compare) — declarations only; ICU stays in the .cpp
 #include "PendingInput.h" // InputBoxState (the R5 tri-state box read) + the ws/normalize detail helpers
 #include "PendingPaste.h" // FindPasteMarkers + segment helpers (the R4 collapse-tolerant fill verify)
 
@@ -504,35 +505,62 @@ namespace Agentmaster
         return best;
     }
 
-    // Agentmaster (COMMANDS.md §5b — the /handover-standby FILL): build the ConPTY input that
-    // TYPES `text` into Claude's Ink TUI input box WITHOUT submitting it — BuildPromptSubmission's
-    // bracketed paste minus the trailing submit CR, so the draft sits in the box exactly one Enter
-    // away from sending. The bracketed-paste wrap (ESC[200~ … ESC[201~) is what keeps embedded
-    // newlines LITERAL (Ink would otherwise submit on the first line break), so a multi-line
-    // briefing lands as one multi-line draft. Embedded CR / CRLF normalize to LF for clean pasted
-    // lines. The delimiters also make the fill injection-proof for this channel the same way the
-    // submit path is: the text was C0-stripped upstream, so no ESC can terminate the paste early.
-    // PURE.
-    inline std::wstring BuildPromptFill(std::wstring_view text)
+    // Agentmaster (DELIVERY.md §15 — the invisible-character sanitize): the EXACT text BuildPromptFill
+    // pastes between the bracketed-paste delimiters. `text` first goes through SanitizeForClaudeInput —
+    // claude's OWN Enter-time cleanup, mirrored (ClaudeInvisibleChars.h) — because since Claude Code
+    // 2.1.277 an Enter that finds anything to remove CANCELS the submit for review, which strands a
+    // pasted delivery in the box (the Enter-retry draft guard then refused the rescue and the lost-send
+    // verdict failed the prompt). After the sanitize claude's cleanup is a no-op on what we paste, so
+    // the Enter submits; what it deliberately KEEPS (the VS16 of a warning-sign emoji, emoji/Indic
+    // joiners, an RLM on a Hebrew line) we keep too, so Hebrew and emoji text arrive intact. The
+    // sanitize also removes every C0 control (ESC included), which is what makes the paste
+    // injection-proof: no byte of the body can terminate the ESC[201~ delimiter early. The CR/CRLF ->
+    // LF fold below is kept as a belt (the sanitize already rewrote every CR the same way).
+    //   text    — the prompt/draft/briefing as queued (any line endings, any characters).
+    //   returns — the body to wrap; pure ASCII text comes back unchanged except for the CR fold.
+    //   throws  — std::bad_alloc on allocation failure (the sanitize's only failure mode).
+    // Exposed (not just an implementation detail of BuildPromptFill) so the Foreign-undo budget
+    // counts the editor characters we ACTUALLY typed rather than the queued text's.
+    inline std::wstring PromptFillBody(std::wstring_view text)
     {
+        const std::wstring clean = SanitizeForClaudeInput(text);
         std::wstring body;
-        body.reserve(text.size());
-        for (size_t i = 0; i < text.size(); ++i)
+        body.reserve(clean.size());
+        for (size_t i = 0; i < clean.size(); ++i)
         {
-            if (text[i] == L'\r')
+            if (clean[i] == L'\r')
             {
                 body.push_back(L'\n');
-                if (i + 1 < text.size() && text[i + 1] == L'\n')
+                if (i + 1 < clean.size() && clean[i + 1] == L'\n')
                 {
                     ++i; // collapse CRLF -> one LF
                 }
             }
             else
             {
-                body.push_back(text[i]);
+                body.push_back(clean[i]);
             }
         }
-        return L"\x1b[200~" + body + L"\x1b[201~";
+        return body;
+    }
+
+    // Agentmaster (COMMANDS.md §5b — the /handover-standby FILL): build the ConPTY input that
+    // TYPES `text` into Claude's Ink TUI input box WITHOUT submitting it — BuildPromptSubmission's
+    // bracketed paste minus the trailing submit CR, so the draft sits in the box exactly one Enter
+    // away from sending. The bracketed-paste wrap (ESC[200~ … ESC[201~) is what keeps embedded
+    // newlines LITERAL (Ink would otherwise submit on the first line break), so a multi-line
+    // briefing lands as one multi-line draft. Embedded CR / CRLF normalize to LF for clean pasted
+    // lines. The body is PromptFillBody — sanitized with claude's own invisible-character rule
+    // (DELIVERY.md §15), so the Enter that eventually submits it can never be cancelled for review,
+    // and C0-free, so no ESC can terminate the paste early. The ONE paste chokepoint: every channel
+    // that types text into a Claude box (autorunner, Send-now, the /handover paste tier, the standby
+    // and §10 re-fills, the draft-swap re-paste) goes through here.
+    //   text    — the text to type (never submitted by this builder).
+    //   returns — ESC[200~ + PromptFillBody(text) + ESC[201~ (never a CR outside the paste).
+    //   throws  — std::bad_alloc on allocation failure only.
+    inline std::wstring BuildPromptFill(std::wstring_view text)
+    {
+        return L"\x1b[200~" + PromptFillBody(text) + L"\x1b[201~";
     }
 
     // Agentmaster (DELIVERY.md RC6): newline-FOLD for prompt-text compares — CRLF and a lone CR
@@ -565,6 +593,23 @@ namespace Agentmaster
         return out;
     }
 
+    // Agentmaster (DELIVERY.md §15 — the ECHO/DEDUPE compare): do two prompt texts carry the same
+    // message, modulo exactly what the delivery path itself may change? Both sides go through
+    // NormalizePromptTextForCompare: CR/CRLF and claude's other line breaks fold to LF (the RC6 fold,
+    // generalized), every INVISIBLE character is dropped (our paste is sanitized, claude's submit is
+    // cleaned, the terminal renders some of them and not others), and both are NFC (claude's editor
+    // holds and submits NFC — Hebrew niqqud typed in non-canonical mark order comes back reordered).
+    // Whitespace is otherwise EXACT — claude submits a prompt's leading/trailing whitespace verbatim
+    // (measured over the transcript corpus), so the echo and dedupe compares need no trim; the
+    // box-read compares below add one.
+    //   a, b    — the two texts (a queued prompt and a hook/transcript echo, typically).
+    //   returns — true when the two normalize to the same compare key.
+    //   throws  — std::bad_alloc on allocation failure only.
+    inline bool PromptTextsEquivalent(std::wstring_view a, std::wstring_view b)
+    {
+        return NormalizePromptTextForCompare(a) == NormalizePromptTextForCompare(b);
+    }
+
     // Agentmaster (DELIVERY_PLAN.md R2 — the Enter-retry DRAFT GUARD's compare): does the input
     // box's observed draft READ AS the watched prompt's text? Newline-folded (above) + trailing
     // whitespace/newlines trimmed on both sides — the pending-input detector extracts the box
@@ -574,10 +619,17 @@ namespace Agentmaster
     // (never press — a lone Enter would submit it), and a prompt the TUI mangled beyond a
     // trailing-whitespace difference is not provably ours to submit. PURE.
     // The shared fold + trailing-trim normalization for prompt-text compares (the norm
-    // DraftMatchesPromptText always applied, factored out for the R4/R7 consumers below). PURE.
+    // DraftMatchesPromptText always applied, factored out for the R4/R7 consumers below).
+    // DELIVERY.md §15: the fold is now the full compare key (NormalizePromptTextForCompare —
+    // invisible characters dropped + NFC on top of the line-break fold), which is precisely what lets
+    // the draft guard PRESS for a prompt claude cleaned and put back in the box (the 2.1.277+ review
+    // cancel): the box then reads as our prompt minus its invisibles, which is still OUR prompt. PURE.
+    //   v       — a prompt text or a box read-back.
+    //   returns — the compare key with trailing LF/space/TAB removed.
+    //   throws  — std::bad_alloc on allocation failure only.
     inline std::wstring FoldTrimPromptText(std::wstring_view v)
     {
-        std::wstring f = FoldCrToLf(v);
+        std::wstring f = NormalizePromptTextForCompare(v);
         while (!f.empty() && (f.back() == L'\n' || f.back() == L' ' || f.back() == L'\t'))
         {
             f.pop_back();
@@ -585,6 +637,10 @@ namespace Agentmaster
         return f;
     }
 
+    //   boxDraft   — the input box's text as the pending-input detector read it.
+    //   promptText — the watched (queued/sent) prompt's text.
+    //   returns    — true when both FoldTrimPromptText to the same key (see above).
+    //   throws     — std::bad_alloc on allocation failure only.
     inline bool DraftMatchesPromptText(std::wstring_view boxDraft, std::wstring_view promptText)
     {
         return FoldTrimPromptText(boxDraft) == FoldTrimPromptText(promptText);
@@ -597,7 +653,14 @@ namespace Agentmaster
     // the foreign content, so our prompt is the message's TAIL. Guards: the prompt must be
     // non-trivial (kMergeDetectMinChars folded chars — a bare "y"/"ok" suffix proves nothing) and the
     // message STRICTLY longer (an exact match is the echo, handled upstream). Compared fold+trimmed
-    // (the wire echo is editor text, so no soft-wrap tolerance is needed here). PURE.
+    // (the wire echo is editor text, so no soft-wrap tolerance is needed here) — and, through
+    // FoldTrimPromptText, invisible-insensitive + NFC (DELIVERY.md §15): the message is claude's
+    // cleaned submit, the prompt our unsanitized queued text, so a raw suffix test would miss the
+    // merge of any prompt that carried an invisible character or non-NFC Hebrew. PURE.
+    //   messageText — the submitted message (hook echo or transcript user line).
+    //   promptText  — an awaited Sent+unechoed prompt's text.
+    //   returns     — true for the merge shape (prompt is the message's strict, non-trivial tail).
+    //   throws      — std::bad_alloc on allocation failure only.
     inline constexpr size_t kMergeDetectMinChars = 8;
     inline bool PromptSwallowedByMessage(std::wstring_view messageText, std::wstring_view promptText)
     {
@@ -683,6 +746,13 @@ namespace Agentmaster
     // therefore strips ALL whitespace from both sides (the PromptAnchor.h whitespace-tolerance
     // precedent — soft wrap mangles only whitespace, never content characters), which still catches
     // every FOREIGN shape: foreign content changes the character sequence itself.
+    //
+    // Invisible + NFC tolerance (DELIVERY.md §15): the fill that lands is PromptFillBody — our text
+    // SANITIZED with claude's invisible-character rule — and claude's editor holds (and renders) its NFC
+    // form, so the box can legitimately lack characters the queued prompt has (a ZWSP, a stray RLM on an
+    // English line) or show Hebrew niqqud in canonical order. Both sides go through FoldTrimPromptText,
+    // whose compare key drops every invisible candidate and applies NFC, so that box still VERIFIES —
+    // while visible foreign content still changes the character sequence and still reads Foreign.
     //
     // Collapse tolerance: claude re-collapses a large pasted fill into a "[Pasted text #N +M lines]"
     // placeholder AT PASTE TIME (or elides its middle: "head[...Truncated #N +M lines...]tail"), so

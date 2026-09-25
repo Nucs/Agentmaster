@@ -4718,6 +4718,43 @@ namespace winrt::TerminalApp::implementation
         return std::wstring{ s.substr(0, end) };
     }
 
+    // Agentmaster (DELIVERY.md §15): the key every swap-side EQUALITY compare goes through —
+    // DraftSwapNormalize's trailing trim on top of the full prompt compare key
+    // (::Agentmaster::NormalizePromptTextForCompare: line breaks folded, invisible characters dropped,
+    // NFC). "Both sides come out of the same detector" stopped being the whole story once the paste
+    // channel SANITIZES (PromptFillBody): a draft re-pasted by the fallback, or a prompt sitting in the
+    // box after claude's own cleanup, reads back without the invisible characters the text we hold
+    // still carries — and an exact compare would then (a) never see a restore land, and worse (b) read
+    // a prompt still stuck in the box as "gone" in the submit-await, which with any turn signal lit
+    // would restore the draft INTO that un-submitted prompt: the very merge the swap exists to prevent.
+    // Emptiness checks deliberately keep plain DraftSwapNormalize (an invisible-only box is not empty
+    // to claude, so it must not be to the clear ladder either).
+    //   s       — a box read or a draft/prompt text.
+    //   returns — the compare key, trailing whitespace trimmed.
+    //   throws  — std::bad_alloc on allocation failure only.
+    static std::wstring DraftSwapCompareKey(std::wstring_view s)
+    {
+        return DraftSwapNormalize(::Agentmaster::NormalizePromptTextForCompare(s));
+    }
+
+    // Agentmaster (DELIVERY.md §15): the [delivered] line's forensic note for a prompt the paste channel
+    // had to SANITIZE (claude's invisible-character rule + NFC, PromptFillBody) — so a delivery whose
+    // pasted text differs from the queued text is visible in hooks.log instead of silently different.
+    //   text    — the prompt as queued.
+    //   returns — "" when the pasted body is the queued text (modulo the CR fold), else
+    //             ", sanitized=<queued chars>-><pasted chars>".
+    //   throws  — std::bad_alloc on allocation failure only.
+    static std::wstring DeliverySanitizeNote(const std::wstring& text)
+    {
+        const std::wstring folded = ::Agentmaster::FoldCrToLf(text);
+        const std::wstring body = ::Agentmaster::PromptFillBody(text);
+        if (body == folded)
+        {
+            return {};
+        }
+        return L", sanitized=" + std::to_wstring(folded.size()) + L"->" + std::to_wstring(body.size());
+    }
+
     // Agentmaster (DELIVERY.md RC4): newline-fold for the submit-await's box-vs-sent-text compare —
     // CRLF and a lone CR both read as LF, the same fold BuildPromptFill applies at inject (a
     // compose-sourced submission carries \r; the box detector emits \n — without the fold the two
@@ -4851,7 +4888,7 @@ namespace winrt::TerminalApp::implementation
         {
             co_return winrt::hstring{};
         }
-        const auto wanted = DraftSwapNormalize(draft);
+        const auto wanted = DraftSwapCompareKey(draft); // §15: invisible-insensitive — the paste fallback below lands SANITIZED
         const auto sid8 = ::Agentmaster::ShortId(sessionId);
         bool stashPressedHere = false; // R6d: the disposition ledger — was the slot consumed by THIS restore?
 
@@ -4898,7 +4935,7 @@ namespace winrt::TerminalApp::implementation
         // (a stash pops back at turn end on some builds; the 07:26:59 incident's box re-population).
         // If the box already reads the draft, any press could only disturb it — a stash press on a
         // non-empty box STASHES it away again, a yank would append — so: already there ⇒ done.
-        if (DraftSwapNormalize(box) == wanted)
+        if (DraftSwapCompareKey(box) == wanted)
         {
             co_return winrt::hstring{ box };
         }
@@ -4914,9 +4951,9 @@ namespace winrt::TerminalApp::implementation
         {
             _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildInputYank());
         }
-        const auto afterUndo = co_await settle([&](const std::wstring& s) { return DraftSwapNormalize(s) == wanted; });
+        const auto afterUndo = co_await settle([&](const std::wstring& s) { return DraftSwapCompareKey(s) == wanted; });
         box.assign(afterUndo.c_str(), afterUndo.size());
-        if (DraftSwapNormalize(box) == wanted)
+        if (DraftSwapCompareKey(box) == wanted)
         {
             co_return winrt::hstring{ box }; // exact — the user's own bytes, TUI-round-tripped
         }
@@ -4945,7 +4982,7 @@ namespace winrt::TerminalApp::implementation
             stashPressedHere = true;
             const auto popped = co_await settle([&](const std::wstring& s) { return !s.empty(); });
             box.assign(popped.c_str(), popped.size());
-            if (DraftSwapNormalize(box) == wanted)
+            if (DraftSwapCompareKey(box) == wanted)
             {
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + L" restore: the un-stash rung recovered the draft (slot=consumed)\n");
                 co_return winrt::hstring{ box }; // the slot held the draft after all — recovered late
@@ -4968,8 +5005,8 @@ namespace winrt::TerminalApp::implementation
                                               L", slot=" + (viaStash ? (stashPressedHere ? L"consumed" : L"maybe-loaded") : L"n/a") + L")\n");
             co_return winrt::hstring{ box };
         }
-        _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildPromptFill(draft));
-        const auto afterPaste = co_await settle([&](const std::wstring& s) { return DraftSwapNormalize(s) == wanted; });
+        _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildPromptFill(draft)); // §15: lands sanitized — `wanted` is the invisible-insensitive key, so it still verifies
+        const auto afterPaste = co_await settle([&](const std::wstring& s) { return DraftSwapCompareKey(s) == wanted; });
         co_return afterPaste;
     }
 
@@ -4983,9 +5020,10 @@ namespace winrt::TerminalApp::implementation
     //   Partial  → OUR text, incomplete: discard it (the mail-clear's End+Ctrl+U ladder — a true,
     //              mid-turn-safe discard; nothing foreign is at risk) and re-fill (counts as a fill).
     //   Foreign  → the merge, caught BEFORE the commit: undo our insertion in verified backspace
-    //              batches (budget == the folded prompt length EXACTLY — backspaces delete editor
-    //              characters, soft wrap is render-only, and over-deletion would eat the foreign
-    //              text, which is the user's until proven otherwise), record what remains as
+    //              batches (budget == the grapheme-cluster count of the body we actually pasted
+    //              EXACTLY — backspaces delete editor characters, which claude segments by grapheme,
+    //              soft wrap is render-only, and over-deletion would eat the foreign text, which is
+    //              the user's until proven otherwise; DELIVERY.md §15), record what remains as
     //              pendingInput (the dots + memory now show what the reads had missed), strike.
     //   NoBox/MenuOpen/Unknown post-fill → cannot verify: no CR, no blind undo (an unreadable box
     //              must not be blind-backspaced), record the box state, strike.
@@ -5151,7 +5189,7 @@ namespace winrt::TerminalApp::implementation
                                               L"[delivered] " + sid8 + L" prompt " + ::Agentmaster::ShortId(promptId) +
                                                   L" (chars=" + std::to_wstring(text.size()) +
                                                   L", verified=" + (verdict == ::Agentmaster::FillVerify::Verified ? L"exact" : L"collapsed") +
-                                                  (fills > 1 ? L", fills=" + std::to_wstring(fills) : L"") + L")\n");
+                                                  (fills > 1 ? L", fills=" + std::to_wstring(fills) : L"") + DeliverySanitizeNote(text) + L")\n");
                 co_return 1;
             }
 
@@ -5245,10 +5283,18 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AppendStateLog(L"hooks.log",
                                               L"[send-verify] " + sid8 + L" FOREIGN read-back after the fill (box chars=" + std::to_wstring(box.size()) +
                                                   L" head=\"" + head + L"\") - the merge this would have submitted is refused; undoing our insertion\n");
-                // Undo our insertion in verified batches. Budget == the FOLDED prompt length exactly:
-                // a backspace deletes one editor character (soft wrap is render-only), so pressing
-                // more could only eat the foreign text.
-                size_t budget = ::Agentmaster::FoldCrToLf(text).size();
+                // Undo our insertion in verified batches. Budget == the number of editor characters we
+                // TYPED, exactly: a backspace deletes one editor character (soft wrap is render-only),
+                // so pressing more could only eat the foreign text. DELIVERY.md §15 made "what we typed"
+                // precise twice over: it is PromptFillBody(text) — the SANITIZED body BuildPromptFill
+                // actually pasted, never longer than the queued text — and claude's editor steps and
+                // deletes by GRAPHEME CLUSTER over its NFC text (Intl.Segmenter in its MeasuredText), so
+                // one Backspace removes a whole Hebrew letter with its niqqud, an emoji ZWJ family, a
+                // surrogate pair. The historical UTF-16-unit count over-budgeted every such cluster —
+                // the over-deletion this budget exists to prevent. (PromptFillBody is already NFC — the
+                // sanitize normalizes first — and a cluster count is invariant under the editor's own
+                // re-normalization, so the two agree on what "one character" is.)
+                size_t budget = ::Agentmaster::CountGraphemeClusters(::Agentmaster::PromptFillBody(text));
                 int32_t stalls = 0;
                 std::wstring cur = box;
                 const int64_t undoDeadline = TtNowMs() + kSendUndoBudgetMs;
@@ -5339,7 +5385,7 @@ namespace winrt::TerminalApp::implementation
                 _sessionRegistry->MarkPromptInjected(id, submission.promptId); // §12: injection evidence
                 ::Agentmaster::AppendStateLog(L"hooks.log",
                                               L"[delivered] " + sid8 + L" prompt " + ::Agentmaster::ShortId(submission.promptId) +
-                                                  L" (chars=" + std::to_wstring(submission.text.size()) + L")\n");
+                                                  L" (chars=" + std::to_wstring(submission.text.size()) + DeliverySanitizeNote(submission.text) + L")\n");
             }
             return ok;
         };
@@ -5656,7 +5702,7 @@ namespace winrt::TerminalApp::implementation
             // An abort must be a no-op for the USER too. The ladder may have erased PART of the draft
             // (a backspace round that ran out of budget), so put it back through the same verified
             // restore the success path uses rather than assuming the box was left untouched.
-            if (DraftSwapNormalize(box) != DraftSwapNormalize(draft))
+            if (DraftSwapCompareKey(box) != DraftSwapCompareKey(draft))
             {
                 const auto recovered = co_await _RestoreDraftAfterSwap(id, draft, allowPasteRestore, clearedByStash);
                 if (!_sessionRegistry)
@@ -5665,7 +5711,7 @@ namespace winrt::TerminalApp::implementation
                     co_return;
                 }
                 box.assign(recovered.c_str(), recovered.size());
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + (DraftSwapNormalize(box) == DraftSwapNormalize(draft) ? L" draft recovered after the aborted clear\n" : L" draft only PARTLY recovered after the aborted clear - the full text is kept in memory (Copy Current Prompt)\n"));
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-swap] " + sid8 + (DraftSwapCompareKey(box) == DraftSwapCompareKey(draft) ? L" draft recovered after the aborted clear\n" : L" draft only PARTLY recovered after the aborted clear - the full text is kept in memory (Copy Current Prompt)\n"));
             }
             _sessionRegistry->SetPendingInput(id, box.empty() ? draft : box);
             _EndDraftSwap(id, true);
@@ -5727,7 +5773,10 @@ namespace winrt::TerminalApp::implementation
         // end, a repaint the detector half-reads), and the empty-box demand held this await for its
         // FULL 18s budget on a send that had demonstrably submitted (echo at +2s, clean Stop at +8s)
         // — keeping the gate + latch held, deferring the restore, and feeding the advance livelock.
-        const auto sentNorm = DraftSwapNormalize(DraftSwapFoldCr(submission.text));
+        // §15: the sent text went in SANITIZED (PromptFillBody), and claude's own cleanup can reshape it
+        // further, so "does the box still read the prompt" must be invisible-insensitive — an exact
+        // compare reads a still-stuck prompt as GONE and would restore the draft straight into it.
+        const auto sentNorm = DraftSwapCompareKey(DraftSwapFoldCr(submission.text));
         bool submitted = false;
         for (int64_t waited = 0; waited <= kDraftSwapSubmitBudgetMs; waited += kDraftSwapPollMs)
         {
@@ -5744,7 +5793,7 @@ namespace winrt::TerminalApp::implementation
                                      ((now->state != ::Agentmaster::SessionState::Idle && now->state != ::Agentmaster::SessionState::WaitingForInput) ||
                                       now->turns.lastPromptUnixMs > sentAtMs ||
                                       now->convLastActivityUnixMs > sentAtMs);
-            const bool promptGone = box.empty() || DraftSwapNormalize(DraftSwapFoldCr(box)) != sentNorm;
+            const bool promptGone = box.empty() || DraftSwapCompareKey(DraftSwapFoldCr(box)) != sentNorm;
             if (promptGone && turnStarted)
             {
                 submitted = true;
@@ -5767,7 +5816,7 @@ namespace winrt::TerminalApp::implementation
                     ch = L' ';
                 }
             }
-            const bool boxIsPrompt = DraftSwapNormalize(DraftSwapFoldCr(box)) == sentNorm;
+            const bool boxIsPrompt = DraftSwapCompareKey(DraftSwapFoldCr(box)) == sentNorm;
             ::Agentmaster::AppendStateLog(L"hooks.log",
                                           L"[draft-swap] " + sid8 + L" restore DEFERRED: the prompt has not left the input box (box chars=" +
                                               std::to_wstring(box.size()) + L" matchesPrompt=" + (boxIsPrompt ? L"yes" : L"no") +
@@ -5785,7 +5834,7 @@ namespace winrt::TerminalApp::implementation
             co_return;
         }
         const std::wstring restored{ restoredH.c_str(), restoredH.size() };
-        const bool exact = DraftSwapNormalize(restored) == DraftSwapNormalize(draft);
+        const bool exact = DraftSwapCompareKey(restored) == DraftSwapCompareKey(draft);
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[draft-swap] " + sid8 +
                                           (exact ? L" prompt sent and the draft is back in the box, unsent (via " + std::wstring(clearedByStash ? L"Ctrl+S stash" : L"the kill-ring") + L", chars=" + std::to_wstring(restored.size()) + L")\n" :
