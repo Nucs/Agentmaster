@@ -31,6 +31,12 @@
 .EXAMPLE
   # Whole solution incl. tests (e.g. before running unit tests):
   .\tools\Build-Agentmaster.ps1 -Full
+
+.EXAMPLE
+  # HOT build of the release package while the installed release keeps running: write the
+  # package layout into the folder the app is NOT registered from (see -LayoutDir), then swap.
+  .\tools\Build-Agentmaster.ps1 -NoRestore -Configuration Release -ReleaseIdentity `
+      -LayoutDir .\src\cascadia\CascadiaPackage\bin\x64\Release-B
 #>
 [CmdletBinding()]
 param(
@@ -59,7 +65,21 @@ param(
     # so the .appxsym is never consumed — not locally, not in release.yml (which bundles the
     # .msix). Disabling it took the same build to ~20-50s (~4-10x). Pass -WithSymbolPackage to
     # restore it (e.g. if you ever genuinely need a Store symbol bundle).
-    [switch]$WithSymbolPackage
+    [switch]$WithSymbolPackage,
+    # Agentmaster: write the PACKAGE LAYOUT (the loose-registered folder an installed copy runs
+    # from) into this folder instead of CascadiaPackage\bin\<Platform>\<Configuration>\ — the
+    # "hot build". A running instance locks its own layout (loaded images + the memory-mapped
+    # resources.pri), so a build into the SAME folder must close the app first; pointing the
+    # layout at the folder the app is NOT registered from lets it keep running for the whole
+    # build, leaving only the swap (stop the GUI, Add-AppxPackage -Register the new folder's
+    # AppxManifest.xml with a bumped version, launch) as downtime. Only the layout moves — every
+    # other project still builds into its usual bin\ and obj\ trees. Passed to msbuild as
+    # /p:AgentmasterLayoutDir (see the comment in CascadiaPackage.wapproj). A relative path is
+    # resolved against the CURRENT location here (msbuild alone would resolve it against the
+    # wapproj's folder), and the trailing backslash is trimmed so it can't escape a closing quote
+    # on the native command line (the wapproj adds it back). Empty (the default) keeps the stock
+    # location. Does NOT register anything: registering, closing and relaunching stay separate.
+    [string]$LayoutDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -100,6 +120,14 @@ if ($ClMpCount -gt 0) { $msbuildArgs += "/p:CL_MPCount=$ClMpCount" }
 if ($ReleaseIdentity) { $msbuildArgs += '/p:AgentmasterPackageIdentity=Release' }
 # Agentmaster: skip the ~156s .appxsym symbol-package zip by default (see -WithSymbolPackage above).
 if (-not $WithSymbolPackage) { $msbuildArgs += '/p:AppxSymbolPackageEnabled=false' }
+# Agentmaster: the hot-build layout redirect (see -LayoutDir above). GetUnresolvedProviderPathFromPSPath
+# resolves against the PowerShell location (not the process cwd, which can differ) and accepts a
+# folder that doesn't exist yet — the build creates it.
+if ($LayoutDir) {
+    $layoutFull = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LayoutDir).TrimEnd('\')
+    $msbuildArgs += "/p:AgentmasterLayoutDir=$layoutFull"
+    Write-Host "Package layout -> $layoutFull\" -ForegroundColor DarkGray
+}
 if ($Clean) { $msbuildArgs += '/t:Clean' }
 elseif (-not $Full -and $Target) { $msbuildArgs += "/t:$Target" }
 

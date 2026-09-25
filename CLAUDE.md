@@ -901,6 +901,13 @@ bash tools/am-lock.sh release --token "$TOKEN"
 - Re-register **only** when `Package-Dev.appxmanifest` changes.
 - (VS F5 on `CascadiaPackage` also builds + deploys.) Runtime/session state lives in the dev install's **profile** (default `%USERPROFILE%\.agentmaster-dev\`, or wherever the picker pointed it — check `%USERPROFILE%\.agentmaster.profiles`); tail `hooks.log` there to confirm the engine is live (`[engine] bridge listening …`) and that spawned sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
 
+### Hot deploy of the local RELEASE install (build while it runs)
+
+- The registered release install (`Agentmaster`) runs from one of two **layout slots**: `…\CascadiaPackage\bin\x64\Release\` (A, the stock layout) or `…\bin\x64\Release-B\` (B). Read `(Get-AppxPackage Agentmaster).InstallLocation`; never assume A.
+- A running instance locks only its own layout (loaded images + the mapped `resources.pri`), never the intermediate `bin\x64\<Config>\<Project>\` / `obj\` trees. Building the package layout into the slot it is NOT registered from (`tools\Build-Agentmaster.ps1 … -LayoutDir <slot>` → `/p:AgentmasterLayoutDir`, which `CascadiaPackage.wapproj` turns into DesktopBridge's `OutputPath` before its props import) therefore needs no close.
+- The only downtime is the swap, `tools\Swap-AgentmasterLayout.ps1 -LayoutDir <slot>`: it stamps the registered version +1 revision, stops the GUI only (never `OpenConsole.exe`), waits for the ConPTY hosts to drain, re-registers, launches, and reports the measured downtime. If registering fails it relaunches the old version. Rolling back is the same script pointed at the previous slot.
+- Still hold the `build-launch` mutex across build + swap, and refresh it while a long build runs. Full runbook: the `build-install` skill §4a.
+
 ## Releasing a public version
 
 ### Only when the user agrees / requests it.

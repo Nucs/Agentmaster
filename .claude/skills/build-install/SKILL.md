@@ -6,7 +6,10 @@ description: |
   the engine test harness) and both local installs: the DEV instance (AgentmasterDev,
   Debug loose layout, close → build → relaunch) and the PRODUCTION instance (Agentmaster,
   Release loose layout: build -ReleaseIdentity → stamp version → register → launch →
-  profile picker). Encodes the machine map (two registered identities side by side, one
+  profile picker), including production's HOT deploy — build into the layout slot production is
+  NOT registered from (Build-Agentmaster.ps1 -LayoutDir, slots bin\x64\Release / Release-B) while
+  it keeps running, then a few-second swap (tools\Swap-AgentmasterLayout.ps1: GUI-only stop,
+  drain, re-register, launch, rollback). Encodes the machine map (two registered identities side by side, one
   repo tree, the Store WT to never touch) and the battle-tested troubleshooting: the
   self-kill check (is MY shell hosted in the instance I'm about to close?), PRI210
   mapped resources.pri, 0x80070020 same-full-name re-register collisions (orphaned
@@ -23,8 +26,8 @@ description: |
   in one session. Use when asked to build, rebuild, compile-check, deploy/reinstall/relaunch the
   dev or production instance, make the build faster, register the loose layout, or diagnose a
   build/registration/crash-on-launch failure.
-keywords: build, install, deploy, register, relaunch, msbuild, TerminalAppLib, ClCompile, loose layout, Add-AppxPackage, Remove-AppxPackage, AgentmasterDev, Agentmaster, profile picker, resources.pri, PRI210, 0x80070020, 0x80073CF6, am-lock, build mutex, run-m5-tests, appxsym, AppxSymbolPackageEnabled, build speed, faster build, slow build, D8040, GenerateAppxSymbolPackage, stale build, incremental build, LNK2019, unresolved external, heap corruption, 0xC0000374, STATUS_HEAP_CORRUPTION, RTC1, stack corruption, ClMpCount, PCH, C3859, C1076, crash on launch, purge Generated Files
-keywords-sparse: build the app, install it here, deploy dev, deploy production, reinstall agentmaster, relaunch the instance, compile check, register the layout, the build failed, make the build faster, build is slow, it crashes on launch, unresolved external symbol, heap corruption crash, deploy dev please, build and deploy dev
+keywords: build, install, deploy, register, relaunch, hot deploy, hot build, minimal downtime, zero downtime, blue green, layout slot, Release-B, LayoutDir, AgentmasterLayoutDir, Swap-AgentmasterLayout, InstallLocation, C1085, not enough space, obj junction, msbuild, TerminalAppLib, ClCompile, loose layout, Add-AppxPackage, Remove-AppxPackage, AgentmasterDev, Agentmaster, profile picker, resources.pri, PRI210, 0x80070020, 0x80073CF6, am-lock, build mutex, run-m5-tests, appxsym, AppxSymbolPackageEnabled, build speed, faster build, slow build, D8040, GenerateAppxSymbolPackage, stale build, incremental build, LNK2019, unresolved external, heap corruption, 0xC0000374, STATUS_HEAP_CORRUPTION, RTC1, stack corruption, ClMpCount, PCH, C3859, C1076, crash on launch, purge Generated Files
+keywords-sparse: build release without closing it, deploy release with minimal downtime, build while production runs, swap to the new build, roll back the release, build the app, install it here, deploy dev, deploy production, reinstall agentmaster, relaunch the instance, compile check, register the layout, the build failed, make the build faster, build is slow, it crashes on launch, unresolved external symbol, heap corruption crash, deploy dev please, build and deploy dev
 keywords-regex: \bbuild\b|\binstall\b|\bdeploy\b|\bregister\b|\brelaunch\b|\bmsbuild\b|PRI210|0x800704c8|0x80070020|0x80073CF6|resources\.pri|Add-AppxPackage|appxsym|AppxSymbolPackageEnabled|D8040|GenerateAppxSymbolPackage|LNK2019|0xC0000374|STATUS_HEAP_CORRUPTION|ClMpCount|C3859|C1076
 ---
 
@@ -44,14 +47,20 @@ these build recipes but adds the pipeline/draft/publish flow).
 |---|---|---|
 | Package | `AgentmasterDev_56k4f06dsfp9r` | `Agentmaster_56k4f06dsfp9r` |
 | Manifest source | `Package-Dev.appxmanifest` (default) | `Package-Rel.appxmanifest` (`/p:AgentmasterPackageIdentity=Release`) |
-| Registered from | `src\cascadia\CascadiaPackage\bin\x64\Debug\` | `src\cascadia\CascadiaPackage\bin\x64\Release\` |
+| Registered from | `src\cascadia\CascadiaPackage\bin\x64\Debug\` | **one of two slots** (§4a): `…\bin\x64\Release\` (A) or `…\bin\x64\Release-B\` (B) — always read `(Get-AppxPackage Agentmaster).InstallLocation` |
 | Launch | alias `agentmasterdev` · Start "Agentmaster Dev" · `shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App` | alias `agentmaster` · Start "Agentmaster" · `shell:appsFolder\Agentmaster_56k4f06dsfp9r!App` |
 | Profile (state) | `~\.agentmaster-dev` | `~\.agentmaster` |
 | Updated by | any full **Debug** package build | any full **Release** package build (incl. release pre-validation!) |
 
 - Both are **loose registrations over build-output trees** — a full package build of that
   configuration relinks the binaries UNDER the running instance, so the close→build→relaunch
-  rule applies to whichever configuration you're building.
+  rule applies to whichever configuration you're building. **Exception — production's HOT
+  deploy (§4a):** building the release layout into the slot production is NOT registered from
+  (`Build-Agentmaster.ps1 -LayoutDir`) touches nothing it has loaded, so it keeps running for the
+  whole build and only the few-second swap is downtime.
+- Build intermediates live on **Q:** through junctions (K: is chronically full — §5.9):
+  `obj\x64\Debug` → `Q:\tmp\agentmaster-dev-build`, `obj\x64\Release` →
+  `Q:\tmp\agentmaster-release-build` (both user-chosen).
 - The per-install profile choice lives in `~\.agentmaster.profiles` (`PFN=dir` lines).
 - The user's **Store Windows Terminal** (`Microsoft.WindowsTerminal_…8wekyb3d8bbwe`, under
   `Program Files\WindowsApps`) hosts their live shells — **NEVER close it**. The separate
@@ -167,11 +176,14 @@ Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"
 
 ## 4. Install/refresh PRODUCTION locally (the Release loose layout)
 
-What "install regular Agentmaster on this PC" means — no GitHub involved:
+What "install regular Agentmaster on this PC" means — no GitHub involved. **For a routine
+"build and deploy release" prefer the HOT deploy (§4a)** — this classic close-first flow keeps
+production down for the whole build (15–30 min when a header change forces a purge).
 
 ```bash
 # 0. self-kill check → 1. mutex
-# 2. close ONLY production if running (path filter on '*\bin\x64\Release\*')
+# 2. close ONLY production if running — GUI only (never OpenConsole.exe), path filter on its
+#    CURRENT InstallLocation (slot A or B — §4a), then wait for its ConPTY hosts to drain
 # 3. build the Release-identity package:
 pwsh -ExecutionPolicy Bypass -File ./tools/Build-Agentmaster.ps1 -NoRestore -Configuration Release -ReleaseIdentity
 ```
@@ -199,12 +211,71 @@ Start-Process "shell:appsFolder\Agentmaster_56k4f06dsfp9r!App"
   ```bash
   mkdir -p "$USERPROFILE/.agentmaster/terminal" && cp -n "$USERPROFILE/.agentmaster-dev/terminal/"{settings.json,state.json} "$USERPROFILE/.agentmaster/terminal/" 2>/dev/null
   ```
-- **Caveat**: this production install updates in place on ANY future Release package build
-  (including a `release-version` pre-validation) — close production first for those, then
-  re-stamp the version (step 4) since the build resets it to 0.0.1.0.
+- **Caveat**: a Release package build writes slot A (`bin\x64\Release`) unless given
+  `-LayoutDir` — including a `release-version` pre-validation. When production is registered
+  from slot A that relinks it in place (close it first, then re-stamp the version — the build
+  resets it to 0.0.1.0); when production runs from slot B, a default build is harmless to it.
 - The permanent alternative: install the signed `.msixbundle` from a GitHub release (cert
   import needs an admin/UAC step) — replaces the loose registration's coupling to the repo
   tree. Same-family replace may need `Remove-AppxPackage` of the loose one first (§5.3 risk).
+
+## 4a. HOT deploy of PRODUCTION — build while it runs, swap in seconds (the default)
+
+Production is a loose registration over a package LAYOUT folder, and it locks only THAT folder
+(loaded images + the mapped `resources.pri`). Nothing it loads comes from the intermediate
+`bin\x64\Release\<Project>\` / `obj\` trees (verified: its module list is 100% the layout; the
+layout holds plain copies, link count 1). So the layout alternates between two **slots**, and
+each deploy builds into the slot production is NOT registered from:
+
+| slot | folder | build it with |
+|---|---|---|
+| A | `src\cascadia\CascadiaPackage\bin\x64\Release\` | no `-LayoutDir` (stock) |
+| B | `src\cascadia\CascadiaPackage\bin\x64\Release-B\` | `-LayoutDir .\src\cascadia\CascadiaPackage\bin\x64\Release-B` |
+
+The mechanism: `CascadiaPackage.wapproj` sets DesktopBridge's `OutputPath` (the layout folder,
+defaulted only when empty) from `/p:AgentmasterLayoutDir` BEFORE the DesktopBridge props import;
+every referenced project still builds into its usual `bin\`/`obj\` (checked with msbuild
+`-getProperty:OutDir` — the wapproj moves, `TerminalApp` stays at `bin\x64\Release\TerminalApp\`).
+
+```bash
+# 0. self-kill check — your shell must NOT be inside production (the swap stops its GUI; the
+#    swap script refuses in that case). Hosted in dev / the Store WT = fine.
+# 1. mutex — and `am-lock.sh refresh --token` on EVERY poll: a cold Release build outlasts the
+#    30-min TTL, and an expired lock can be broken by the next agent's acquire.
+TOKEN=$(bash tools/am-lock.sh acquire --wait 600 --label "hot-release $(git rev-parse --short HEAD)") || exit 1
+# 2. target slot = the one production is NOT registered from:
+powershell -NoProfile -Command "(Get-AppxPackage Agentmaster).InstallLocation"
+# 3. space (K: AND Q:), the §5.8 purge check, and the target slot's resources.pri (§5.1):
+rm -f src/cascadia/CascadiaPackage/bin/x64/<target-slot>/resources.pri
+# 4. build into the target slot — production keeps serving the whole time:
+pwsh -ExecutionPolicy Bypass -File ./tools/Build-Agentmaster.ps1 -NoRestore -Configuration Release -ReleaseIdentity -ClMpCount 6 -LayoutDir ./src/cascadia/CascadiaPackage/bin/x64/Release-B   # (or no -LayoutDir for slot A)
+# 5. the swap — the ONLY downtime. Stamps registered+1, stops production's GUI (never its
+#    OpenConsole hosts), waits for them to drain, re-registers the new slot, launches, times it:
+pwsh -ExecutionPolicy Bypass -File ./tools/Swap-AgentmasterLayout.ps1 -LayoutDir ./src/cascadia/CascadiaPackage/bin/x64/Release-B   # -WhatIf = dry run
+# 6. verify (§6: bridge line for the new pid, restore lines, no crash dump) → release the mutex
+bash tools/am-lock.sh release --token "$TOKEN"
+```
+
+- **Measured (2026-09-26, first run, 0.6.8.11 → 0.6.8.12, a 3-window workspace):** production ran
+  through a cold 25-min Release build untouched; the swap's downtime was **14.5 s** — GUI stop
+  instant, **11.7 s** for every old ConPTY host to drain gracefully (0 left), register 2.5 s,
+  launch ~1 s. The drain is the bulk: each host ends its tab's pwsh + claude.exe with CTRL_CLOSE
+  (claude's SessionEnd hook runs), and it is what keeps the swap from orphaning sessions.
+- **The new instance can then PARK on the "Reopen your N previous Agentmaster windows?" dialog**
+  (a `#32770` window, nothing else — the engine/bridge start only after the answer; it appears when
+  >1 window was open at the stop). The measured downtime ends at the new GUI's START, not at the
+  answer, so tell the user to click it (or ask before clicking it for them).
+- **Rollback is one command**: the previous slot is untouched, so
+  `Swap-AgentmasterLayout.ps1 -LayoutDir <previous slot>` re-registers it (the next version
+  number) — seconds, no rebuild. If the swap's register step itself fails, the script relaunches
+  the still-registered old version on its own before rethrowing.
+- **Close / verify production by its InstallLocation, never by a hardcoded `bin\x64\Release`** —
+  a filter on `*\bin\x64\Release\*` does NOT match slot B (`Release-B\`).
+- The next deploy's target is the OTHER slot. Before building into a slot, make sure nothing
+  still runs from it (a straggler ConPTY host of the previous instance would lock it — the swap
+  prints `HostsLeft`).
+- The version keeps `Major.Minor.Build` and bumps the revision (0.6.8.11 → 0.6.8.12): the in-app
+  updater compares the first three against GitHub releases.
 
 ## 5. Troubleshooting (all field-verified on this machine)
 
@@ -293,6 +364,20 @@ Start-Process "shell:appsFolder\Agentmaster_56k4f06dsfp9r!App"
    reproduced a failure. **Default to purging whenever `git diff` on the commits since your last
    known-good deploy touches `SessionModels.h`, `SessionRegistry.{h,cpp}`, or any `.idl` file** —
    don't wait for the crash to prove it's needed.
+
+9. **`C1085` / `C1088` / `MSB3191` "There is not enough space on the disk"** (a different failure
+   from the PCH-*memory* `C3859`/`C1076`): K: is chronically near-full, and a cold/purged Release
+   build writes ~20 GB of intermediates. Both configurations' `obj\x64\<Config>` are therefore
+   **junctions to Q:** — `Debug` → `Q:\tmp\agentmaster-dev-build`, `Release` →
+   `Q:\tmp\agentmaster-release-build` (user-chosen; `cmd /c dir /AL obj\x64` shows them). If a
+   build dies on space anyway: check `Get-PSDrive K,Q`; confirm the junctions still exist (on
+   2026-09-26 the whole `obj\` folder — junctions included — was deleted by something outside
+   the build while K: sat at 0 bytes; the Q: targets survived); recreate a missing one with
+   `New-Item -ItemType Junction -Path K:\source\Agentmaster\obj\x64\<Config> -Target <Q: dir>`.
+   Before rebuilding after a disk-full failure, **purge every project the log names in a
+   disk-full error** (its `obj\x64\<Config>\<Project>`) plus any purged-and-regenerating project
+   and its `Generated Files` — a truncated `.pch`/`.obj` with a fresh timestamp can pass the
+   incremental up-to-date check.
 
 ## 6. Post-install verification checklist
 

@@ -5,6 +5,36 @@
   <PropertyGroup Label="NuGet Dependencies">
     <TerminalMUX>true</TerminalMUX>
   </PropertyGroup>
+  <!--
+    Agentmaster: an ALTERNATE package-layout folder (the "hot build" / blue-green deploy).
+
+    The package LAYOUT is the folder a loose-registered install actually runs from:
+    Agentmaster.exe, TerminalApp.dll, the OpenConsole.exe every tab hosts, the memory-mapped
+    resources.pri, ... . For this project type it is DesktopBridge's OutputPath, which
+    Microsoft.DesktopBridge.props (imported by wap-common.build.pre.props, just below) sets to
+    bin\$(Platform)\$(Configuration)\ ONLY WHEN IT IS STILL EMPTY. Setting it here, before that
+    import, therefore moves this project's layout and nothing else: every referenced project
+    keeps building into its usual bin\ and obj\ trees, and the payload items are
+    package-relative (TargetPath), so the whole layout lands in the new folder.
+
+    Why it exists: a running instance locks its own layout (loaded images can't be overwritten,
+    and MakePri can't replace a mapped resources.pri - the PRI210 / 0x800704c8 failure), so a
+    build into the SAME folder has to close the app first, which is a 15-30 minute outage when
+    a header change forces a clean rebuild. Building into the OTHER folder lets the installed app
+    keep running for the entire build; the only downtime left is the swap: stop the old GUI,
+    Add-AppxPackage -Register the new folder's AppxManifest.xml (with a bumped version), launch.
+    The previous folder stays intact, so re-registering it is an instant rollback.
+
+    Pass it as /p:AgentmasterLayoutDir=<folder> (tools\Build-Agentmaster.ps1 -LayoutDir resolves
+    a relative path against the caller's location first; a bare relative value given straight
+    to msbuild is resolved against THIS project's directory, like any OutputPath).
+    Empty (the default, and every CI / release.yml build) keeps the stock location byte-for-byte.
+    Footgun: the redirect changes WHERE the registered app lives - close / verify an instance by
+    Get-AppxPackage's InstallLocation, not by assuming bin\x64\<Configuration>.
+  -->
+  <PropertyGroup Condition="'$(AgentmasterLayoutDir)' != ''">
+    <OutputPath>$([MSBuild]::EnsureTrailingSlash('$(AgentmasterLayoutDir)'))</OutputPath>
+  </PropertyGroup>
   <Import Project="$(OpenConsoleDir)src\wap-common.build.pre.props" />
   <Import Project="$(OpenConsoleDir)src\common.nugetversions.props" />
   <PropertyGroup Label="Configuration">
