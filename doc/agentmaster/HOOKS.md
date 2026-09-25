@@ -245,8 +245,9 @@ Even the warm shell form sits near SessionEnd's 1.5 s budget, which any extra lo
 - Claude's own records in a transcript (`attachment` lines of type `hook_success` / `hook_cancelled`,
   with `durationMs`) show the forwarder's real run time.
 - **Without a build** — the *Encoding* recipe:
-  1. Extract the `PSHOOK` raw string from `ClaudeSpawn.cpp` and point its two placeholders at a
-     scratch folder.
+  1. Extract the `PSHOOK` script from `ClaudeSpawn.cpp`: it is **two adjacent raw-string pieces**
+     (MSVC's 16,380-byte per-literal limit, C2026), so concatenate ALL of them in file order. Point
+     its two placeholders at a scratch folder.
   2. Write it with a BOM and run it exec-form: `powershell.exe -NoProfile -NonInteractive
      -ExecutionPolicy Bypass -File <it> -Event Stop` with `CCMGR_HOOK_PIPE` naming a throwaway pipe
      served by the test.

@@ -417,7 +417,18 @@ try {
   }
   if ([string]::IsNullOrEmpty($pipe)) { NoteFwdDrop "drop: no pipe (env CCMGR_HOOK_PIPE unset; bridge.json missing or empty)"; return }
 
-  $cwd = ""
+)PSHOOK"
+        // Agentmaster: the forwarder is TWO adjacent raw literals, which the compiler concatenates
+        // into the one, byte-identical script. MSVC caps a single string literal at 16,380 bytes
+        // (error C2026 "string too big, trailing characters truncated"), and a WIDE literal spends
+        // two bytes per character, so one piece holds at most ~8,190 characters. The Stop fast path
+        // (df1eadea9) took the whole script to 8,731. Keep each piece well under ~8,000 characters,
+        // and split again the same way if one grows: a closing delimiter at the START of a line ends
+        // the piece right after the previous line's newline, and the next opening delimiter resumes
+        // with the following line's exact text (its leading spaces included), so nothing is added or
+        // lost. (This comment deliberately never spells the delimiters: a tool that extracts the
+        // script by scanning for them must see only the real pieces - concatenate ALL of them.)
+        LR"PSHOOK(  $cwd = ""
   $isQ = "0"
   $perm = "0"
   $tool = ""
