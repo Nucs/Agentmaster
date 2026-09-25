@@ -520,9 +520,10 @@ clipboard write and no chime** (an honest no-op, like copying an empty branch) p
 `[pending] <sid8> copy current prompt: nothing (box empty, no remembered draft)` — so a "why did nothing
 happen?" is answerable straight from hooks.log rather than being a silent dead click.
 
-**Not expanded (v1).** A draft containing a `[Pasted text #N +M lines]` placeholder copies **as rendered**,
-placeholder included — the §2b resolver identifies the backing cache file (and the board tip names it),
-but substituting content into a copy is a separate, deliberate step (see Follow-ups).
+**Pastes are expanded (§8e).** A draft containing a `[Pasted text #N +M lines]` /
+`[...Truncated text #N +M lines...]` placeholder copies as the **pasted text itself**, resolved from the
+paste-cache off-thread through the shared `CopyPromptTextExpandingPastes`, all-or-refuse — a placeholder
+that can't be proven is copied **as rendered**, never guessed. (v1 copied every placeholder as rendered.)
 
 ### 8a. Pull it into the Auto-Testing compose box (built)
 
@@ -798,6 +799,80 @@ current prompt: nothing (box empty, no remembered draft)`; a success chimes and 
 "<label>" (overlay draft, clear box|keep box)` plus `[pending] <sid8> queue current prompt:
 live|remembered chars=N`.
 
+### 8e. Copy hands over the PASTED TEXT, not its placeholder (built)
+
+**The report.** In the Manager's Auto Testing, right-click → **Copy** on a queued prompt that held a large
+paste put the literal `[Pasted text #1 +31 lines]` on the clipboard — a label that means nothing outside
+the one input box that rendered it.
+
+**Why a queued prompt holds a label at all.** Claude Code shows a large paste in its box as a one-line
+placeholder (§2b), and both draft consumers queue the box's text *as rendered*: the overlay's MAIL button
+(§8d) verbatim, and the compose box (§8a) through whatever was pulled into it. So the Auto-Testing row
+stores `[Pasted text #N +M lines]`, not the paste — measured in the release fleet: five mail-queued rows
+consisting of nothing but a placeholder (`[Pasted text #1 +11 lines]`, `[Pasted text #2 +6 lines]`, …).
+
+**The fix — ONE shared "copy a prompt" action.** `CopyPromptTextExpandingPastes` (`AgentCopyActions.h`,
+implemented beside `CopySessionField` in `AgentTabOverlay.Actions.cpp`) now backs BOTH prompt-copy
+surfaces, so they can never disagree about what a prompt holds:
+
+| surface | text | expanded? |
+|---|---|---|
+| Auto Testing row menu → **Copy** (`_MakePromptMenu`), row origin **Autorun** (we queued it) | `QueuedPrompt::text` | yes |
+| Auto Testing row menu → **Copy**, row origin **Typed** | `QueuedPrompt::text` | **no — verbatim** |
+| every **Copy Current Prompt** (overlay / Manager `Copy ▸` / WT tab `Copy ▸`, `CopySessionField` code 7) | the §8 live-else-remembered draft | yes |
+
+- **No placeholder** (the common case): one cheap pure `FindPasteMarkers` scan, then the historical
+  synchronous verbatim copy — no cache IO, no thread hop, byte-for-byte unchanged.
+- **A placeholder:** the text is newline-**folded** (`FoldCrToLf` — the compose `TextBox` stores a newline
+  as `\r` while the resolver's line model is `\n`-split, so unfolded, a placeholder alone on its line reads
+  as mid-line and is refused; pinned by `TestPendingPaste` §8), expanded **off the UI thread** by the §10
+  whole-draft adapter `ExpandPendingDraftPastes` (it reads the whole paste cache — ~6.7 MB / 415 files on
+  the dev box, capped at 64 MiB — which a click must never pay on the UI thread), and the clipboard write
+  hops back through the window's `DispatcherQueue` (so the copy lands a moment after the click; the copy
+  chime marks it).
+- **All-or-refuse, never a wrong expansion.** The same rules as §10: a collapsed label must be the only
+  visible content of its line and match exactly ONE cached file by line count; a truncated label must
+  match its head/tail content anchors at the exact segment offset; one unproven placeholder refuses the
+  whole text. A refusal (a cache file swept, two same-length pastes, typed words beside a collapsed
+  label), a throw, or a missing dispatcher copies the text **as rendered** — never nothing. The one path
+  that copies nothing: the window closed while its expansion was still reading the cache (traced).
+- **Typed rows are copied verbatim, deliberately.** A Typed row is recorded from the `UserPromptSubmit`
+  hook, i.e. AFTER claude expanded its own placeholders (measured: a delivered 25-char label arrived as a
+  437-char `[ups]` prompt), so a placeholder inside it is literal text the user actually sent — quoting
+  one — and "expanding" it would change what they sent.
+- **A newer copy wins.** Every call into the shared copy actions (`CopySessionField` too) takes a new
+  process-wide generation; an expansion that lands after the user already copied something else drops its
+  write (`superseded`), so the slow write can never bury the newer clipboard.
+
+**The decision the old follow-up left open — may a copy differ from the screen?** Yes. The placeholder is
+Claude's DISPLAY compression of one input box; outside it the label is inert — pasting it back into claude
+does not re-bind the content, it submits the literal label (the §9/§10 rule). So a copy yields what the
+prompt MEANS. Nothing on screen changes: the Auto-Testing row and the tab still show the label.
+
+**Limits (known, accepted for a copy).** The collapsed tier is only as strong as "exactly one cached paste
+has that many lines": a placeholder merely QUOTED alone on its own line whose count happens to match a
+cache file would be expanded (visible in the paste, and recoverable — never a SEND decision). A collapsed
+label with typed words on its own line refuses (the resolver replaces whole lines and never eats typed
+text) — which is also what keeps a handover brief that quotes a placeholder mid-sentence intact; every
+real draft observed puts the typed text on the NEXT line, which expands.
+
+**Observability.** `[nav] copy auto-testing-prompt <sid8> (auto|typed)` (the Auto-Testing Copy intent; Copy
+Current Prompt keeps its `[nav] copy current-prompt <sid8>`), then, only when a placeholder was present,
+one `[pending] <sid8> copy <what>: …` mechanism line naming the outcome — `expanded N paste
+placeholder(s) from the paste-cache chars=A->B` · `paste placeholder(s) NOT expanded (no proven paste-cache
+match) - copied as rendered` · `paste expansion threw (see the [exc] line) - copied as rendered` ·
+`superseded by a newer copy …` · `the window closed before the paste expansion finished (nothing copied)`.
+
+**Not fixed here — the SEND side of the same label** (see Follow-ups): a queued placeholder is also what
+the Tests Autorunner DELIVERS. In the release log all five placeholder-only mail-queued prompts were
+delivered as the bare 25–26-char label (`[delivered] … verified=exact`), with two outcomes, both wrong:
+- **four** — claude expanded the label through its still-bound paste (the MOVE-clear's discard leaves the
+  binding), so the `[ups]` echo carried the full text (437 / 650 / 1073 / 1622 chars) and was recorded as a
+  separate **Typed** row; our row never saw its echo, so after the turn the Enter-retry watchdog pressed
+  three times into an empty box and marked it **`Failed` — and PAUSED the session's autorunner**;
+- **one** (`d373b992`, the Ctrl+S-stash-era clear, which carried the binding away) — `[ups] chars=26 ->
+  echo consumed`: the model received the **literal label**, and the pasted content was silently lost.
+
 ## 9. The DRAFT SWAP — sending a prompt without eating your unsent draft (built)
 
 **The bug.** A queued prompt is delivered as a bracketed paste plus a submit CR
@@ -978,12 +1053,20 @@ arithmetic, temp-cache adapter round + missing-dir no-throw — TestPendingPaste
   still consult "has a pending draft" to **defer** an auto-send while the user is visibly mid-compose,
   rather than swapping around them. (It would also finally give that dead toggle a feeder — its
   `lastHumanInputUnixMs` gate has none.)
-- **Expand pastes on copy** (§8): "Copy Current Prompt" copies the draft as rendered, so a
-  `[Pasted text #N +M lines]` placeholder rides along as a placeholder. The whole-draft adapter the
-  earlier note asked for now **exists** (`ExpandPendingDraftPastes`, added for the §10 re-fill and used
-  by the §8c store), so what is left is an off-thread copy path like the Transcript/Summary cases plus
-  the decision of whether a *copy* should differ from what is on screen. A refusal must keep the
-  placeholder (never a wrong expansion).
+- ~~**Expand pastes on copy**~~ — **built as §8e** (`CopyPromptTextExpandingPastes`: the Auto-Testing row
+  Copy + every Copy Current Prompt; off-thread, all-or-refuse, as rendered on refusal).
+- **Expand pastes at QUEUE time — the SEND side of §8e.** The overlay MAIL button (§8d) and the compose
+  envelope (§8a → `_OnAddPrompt`) still store the RENDERED draft, so a queued `[Pasted text #N +M lines]`
+  is what the Tests Autorunner delivers — measured: 4/5 such sends ended `Failed` + the autorunner PAUSED
+  (claude expanded the label via a still-bound paste, so the echo never matched), and 1/5 reached the model
+  as the literal label (content lost) — §8e *Not fixed here*. The shape: queue as today (the click, the
+  label and the MOVE-clear ordering stay synchronous), then expand off-thread with the same
+  `ExpandPendingDraftPastes` and swap the row's `text` in place — by prompt id, only while it is still
+  `Pending` and still holds the exact rendered text (never under an in-flight delivery). An expanded text
+  is submit-faithful (claude re-collapses the large paste and re-binds it — the §10 property; the delivery
+  verify is already collapse-tolerant, R4), so the echo then matches and the row goes `Sent` normally. A
+  refusal keeps the label; there, the honest option is a visible warning on the row rather than a send
+  that loses the content.
 - **Wire the §8c store's READ side** — the accessors (`GetStoredSessionDraft` / `GetStoredSessionDraftAt`)
   are built + tested but unread, deliberately: for a registry-known session the registry is
   authoritative, so a fallback there could only surface a stale draft (§8c *Precedence*). The sound

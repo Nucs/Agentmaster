@@ -1968,8 +1968,10 @@ namespace winrt::TerminalApp::implementation
         return menu;
     }
 
-    // Agentmaster: the Auto-Testing message right-click menu. Copy (this prompt's text) is offered on
-    // EVERY row; the per-prompt queue ops (Move up / Move down / Delete) appear only on UPCOMING rows
+    // Agentmaster: the Auto-Testing message right-click menu. Copy (this prompt's text — on a row we
+    // queued, with any "[Pasted text #N +M lines]" placeholder copied as the pasted text itself,
+    // PENDING_INPUT.md §8e) is offered on EVERY row; the per-prompt queue ops (Move up / Move down /
+    // Delete) appear only on UPCOMING rows
     // (a sent/historical row can't be reordered or unqueued). The queue ops act on `promptId` (the
     // right-clicked row, selecting it first) and — like _MakeSessionMenu — defer one tick so the
     // closing flyout's focus restore doesn't race the list rebuild. (No session-level item here — the
@@ -1982,9 +1984,20 @@ namespace winrt::TerminalApp::implementation
 
         // Copy this prompt's text to the clipboard — every row, sent or upcoming. Reads the live
         // queue at click time so it copies the current body; no list rebuild, so no defer needed.
+        //
+        // PENDING_INPUT.md §8e — a pasted block is copied as the PASTED TEXT, not its label. A row WE
+        // queued (origin Autorun) holds the prompt in its DRAFT form: the overlay's MAIL button and the
+        // compose box queue the input box's text exactly as Claude RENDERS it, so a large paste is stored
+        // as its "[Pasted text #N +M lines]" placeholder (the reported case: the clipboard received that
+        // label). Those rows go through the shared CopyPromptTextExpandingPastes, which resolves each
+        // placeholder from Claude's paste cache off-thread (all-or-refuse; as rendered on any refusal).
+        // A TYPED row is copied VERBATIM: it is recorded from the UserPromptSubmit hook, i.e. AFTER
+        // claude expanded its own placeholders (measured: a 25-char label delivered -> a 437-char UPS
+        // prompt), so a placeholder in it is literal text the user actually sent — quoting one — and
+        // "expanding" it would change what they sent.
         MenuFlyoutItem copyItem;
         copyItem.Text(L"Copy");
-        AgentSetTip(copyItem, L"Copy this prompt's text to the clipboard.");
+        AgentSetTip(copyItem, L"Copy this prompt's text to the clipboard. A pasted block the terminal shows as \"[Pasted text #N +M lines]\" is copied as the pasted text itself.");
         copyItem.Click([weak, promptId](const IInspectable&, const RoutedEventArgs&) {
             auto self = weak.get();
             if (!self || !self->_registry || self->_selectedId.empty())
@@ -1992,6 +2005,7 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
             std::wstring text;
+            bool typed = false; // PromptOrigin::Typed — already what claude received, so never expanded (above)
             if (const auto s = self->_registry->Get(self->_selectedId))
             {
                 for (const auto& p : s->queue)
@@ -1999,14 +2013,20 @@ namespace winrt::TerminalApp::implementation
                     if (p.id == promptId)
                     {
                         text = p.text.empty() ? p.label : p.text;
+                        typed = (p.origin == PromptOrigin::Typed);
                         break;
                     }
                 }
             }
-            if (!text.empty())
+            if (text.empty())
             {
-                CopyTextToClipboard(text);
+                return; // the row vanished (trimmed / deleted since the menu opened) or holds nothing — honest no-op
             }
+            // Nav audit: the SAME "copy <field> <sid8>" shape every other copy menu logs (CopySessionField),
+            // tagged with the row's origin; the [pending] line naming how a placeholder resolved follows
+            // from the shared copy when the text carries one.
+            ::Agentmaster::LogNav(L"copy auto-testing-prompt " + ::Agentmaster::ShortId(self->_selectedId) + (typed ? L" (typed)" : L" (auto)"));
+            CopyPromptTextExpandingPastes(self->_dispatcher, text, self->_selectedId, L"auto-testing prompt", /*expandPastes*/ !typed);
         });
         menu.Items().Append(copyItem);
 

@@ -1935,4 +1935,35 @@ void TestPendingPaste()
                   "expand pure: truncated head-cut + tail-resume segments restored in full");
         }
     }
+    // 8. The COPY path's input contract (PENDING_INPUT.md §8e — CopyPromptTextExpandingPastes): the
+    // Auto-Testing Copy expands a QUEUED prompt, and a prompt queued from the Manager's compose box
+    // carries the UWP TextBox's '\r' newlines. The resolver's line model is '\n'-split, so UNFOLDED such
+    // a prompt is ONE line and its placeholder reads as mid-line (refused — the never-eat-typed-words
+    // rule); FoldCrToLf first is what lets the copy expand it. This pins WHY the copy path folds.
+    {
+        const std::vector<PasteFileText> files{ { L"a.txt", L"alpha" + NL + L"beta" + NL + L"gamma" } };
+        const std::wstring composed = L"[Pasted text #1 +3 lines]\rAre you sure?\r\nCheck that."; // lone CR + a CRLF, as a TextBox/clipboard mix can carry
+        {
+            const auto ex = ExpandDraftPasteMarkers(composed, files);
+            CHECK(!ex.complete, "copy fold: an UNFOLDED '\\r'-newline prompt reads as one line -> the placeholder is mid-line -> refused");
+        }
+        {
+            const auto ex = ExpandDraftPasteMarkers(FoldCrToLf(composed), files);
+            CHECK(ex.complete && ex.expandedCount == 1 && ex.text == L"alpha" + NL + L"beta" + NL + L"gamma" + NL + L"Are you sure?" + NL + L"Check that.",
+                  "copy fold: FoldCrToLf first -> the placeholder alone on its line expands, the typed lines after it kept verbatim");
+        }
+        {
+            // The reported shape itself: a prompt that IS only the placeholder (the overlay MAIL button
+            // queued a draft holding nothing but the paste) — expands to exactly the pasted text.
+            const auto ex = ExpandDraftPasteMarkers(FoldCrToLf(L"[Pasted text #1 +3 lines]"), files);
+            CHECK(ex.complete && ex.expandedCount == 1 && ex.text == L"alpha" + NL + L"beta" + NL + L"gamma",
+                  "copy fold: a placeholder-only queued prompt copies as exactly the pasted text");
+        }
+        {
+            // A prompt that merely QUOTES a placeholder mid-sentence (a handover brief discussing one)
+            // must stay intact — the refusal keeps the copy AS RENDERED.
+            const auto ex = ExpandDraftPasteMarkers(FoldCrToLf(L"Why is \"[Pasted text #1 +3 lines]\" not expanded?"), files);
+            CHECK(!ex.complete, "copy fold: a mid-sentence QUOTED placeholder is refused -> the copy keeps the text as written");
+        }
+    }
 }

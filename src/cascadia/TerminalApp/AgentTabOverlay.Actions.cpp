@@ -23,6 +23,7 @@
 #include "AgentStatusColors.h" // the ONE shared state->color palette (board / overlay / tab dot)
 #include "AgentTipHelpers.h" // AgentSetTip — the Dark-pinned, fast-open, stuck-proof hover tooltip recipe (vs raw ToolTipService)
 #include "AgentMaster/PendingInput.h" // PickCurrentPromptText — the pure live-vs-remembered draft rule ("Copy Current Prompt")
+#include "AgentMaster/PendingPaste.h" // FindPasteMarkers — the cheap pure "does this prompt carry a paste placeholder?" pre-check (PENDING_INPUT.md §8e)
 #include "AgentMaster/Scheduler.h" // kAnswersQuestionOk — the MAIL button's queued draft carries the question-guard opt-out (DELIVERY.md §8)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / BuildClaude|CodexCommandline (row 3 CLI + transcript)
@@ -45,6 +46,7 @@
 #pragma comment(lib, "winmm.lib")
 
 #include <algorithm> // std::clamp / std::min (summary-panel size fractions)
+#include <atomic> // the process-wide prompt-copy generation (CopyPromptTextExpandingPastes — a newer copy supersedes a slow expansion)
 #include <cmath> // NAN (summary-panel "auto" size sentinel on drag release)
 #include <chrono> // DispatcherTimer interval (summary times-line ticker)
 #include <string>
@@ -354,15 +356,208 @@ namespace winrt::TerminalApp::implementation
         PlayActionSound(); // same click feedback as the copy menu (Open Path)
     }
 
+    namespace
+    {
+        // Agentmaster (PENDING_INPUT.md §8e): the process-wide copy GENERATION. Every call into the shared
+        // copy actions (CopySessionField, CopyPromptTextExpandingPastes) takes the next number, and an
+        // off-thread paste expansion writes the clipboard ONLY if its number is still the newest when it
+        // lands back on the UI thread. Without it, copying a paste-bearing prompt (the expansion reads the
+        // whole paste cache — ~100 ms over a real one) and then anything else would leave the OLDER text on
+        // the clipboard, because the slow write lands last. Process-wide rather than per-window because the
+        // clipboard is; atomic because the count is bumped by whichever window's UI thread copies while the
+        // check runs on the expanding copy's own (the Emperor runs every window on one thread today —
+        // nothing here depends on that).
+        std::atomic<uint64_t> g_promptCopyGeneration{ 0 };
+
+        // How an off-thread prompt copy resolved. Decided on the worker thread, rendered into the trace on
+        // the UI thread — so the worker's catch handler never has to build (allocate) a message itself.
+        enum class PromptCopyOutcome
+        {
+            Expanded, // every placeholder proven + substituted: the pasted content is what gets copied
+            Refused, // the all-or-refuse resolver declined (no/ambiguous cache match, typed text around a collapsed label)
+            Failed, // the expansion threw (logged with its throw stack) — copied as rendered
+        };
+
+        // The UI-thread tail of an expanding prompt copy: honor the generation, write the clipboard (this
+        // TU's CopyTextToClipboard — the retry-looped Win32 writer + the confirmation chime on a real
+        // success), then trace how the copy resolved.
+        //   text          — what to copy: the expansion when `outcome` is Expanded, else the as-rendered original.
+        //   sessionId     — the owning session, for the trace only.
+        //   what          — the trace noun ("auto-testing prompt" / "current prompt").
+        //   outcome       — how the worker resolved (see PromptCopyOutcome).
+        //   expandedCount — placeholders substituted (meaningful for Expanded only).
+        //   renderedChars — the as-rendered text's length, for the chars=A->B trace.
+        //   generation    — this copy's number; if a newer copy started meanwhile, NOTHING is written.
+        // Throws std::bad_alloc only (building the trace line); the caller's lambda catches + logs it.
+        void CommitPromptCopy(const std::wstring& text,
+                              const std::wstring& sessionId,
+                              const std::wstring& what,
+                              PromptCopyOutcome outcome,
+                              int expandedCount,
+                              size_t renderedChars,
+                              uint64_t generation)
+        {
+            const std::wstring head = L"[pending] " + ::Agentmaster::ShortId(sessionId) + L" copy " + what + L": ";
+            if (generation != g_promptCopyGeneration.load())
+            {
+                // The user copied something else while the paste cache was being read: the NEWER copy owns
+                // the clipboard, so this stale result is dropped instead of being written over it.
+                ::Agentmaster::AppendStateLog(L"hooks.log", head + L"superseded by a newer copy before the paste expansion finished (not written)\n");
+                return;
+            }
+            CopyTextToClipboard(text);
+            std::wstring line = head;
+            switch (outcome)
+            {
+            case PromptCopyOutcome::Expanded:
+                line += L"expanded " + std::to_wstring(expandedCount) + L" paste placeholder(s) from the paste-cache chars=" +
+                        std::to_wstring(renderedChars) + L"->" + std::to_wstring(text.size());
+                break;
+            case PromptCopyOutcome::Refused:
+                // Honest, not an error: the resolver would rather hand over the label than risk the WRONG
+                // text (a cache file swept, two same-length pastes, typed words beside a collapsed label).
+                line += L"paste placeholder(s) NOT expanded (no proven paste-cache match) - copied as rendered chars=" + std::to_wstring(text.size());
+                break;
+            case PromptCopyOutcome::Failed:
+            default:
+                line += L"paste expansion threw (see the [exc] line) - copied as rendered chars=" + std::to_wstring(text.size());
+                break;
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log", line + L"\n");
+        }
+
+        // The off-thread half of CopyPromptTextExpandingPastes (AgentCopyActions.h): expand the text's paste
+        // placeholders against Claude's paste cache on a pool thread, then hop back to `disp` to write the
+        // clipboard via CommitPromptCopy. Parameters are BY VALUE on purpose — the coroutine outlives the
+        // caller's frame (the menu Click handler has long returned when the expansion finishes).
+        //   disp       — the calling window's UI-thread DispatcherQueue (the clipboard is written there).
+        //   rendered   — the prompt exactly as stored/rendered; also the fallback copy on any non-Expanded outcome.
+        //   sessionId  — for the trace.
+        //   what       — the trace noun.
+        //   generation — the number CopyPromptTextExpandingPastes took for this copy.
+        // Returns nothing (fire_and_forget). Never lets an exception escape: one escaping a fire_and_forget
+        // IS winrt::terminate() — the whole process, every window — so the expansion and the marshal each
+        // sit in their own try and log through AgentLogCaughtException (Rule #18).
+        winrt::fire_and_forget CopyPromptExpandingPastesAsync(DispatcherQueue disp,
+                                                              std::wstring rendered,
+                                                              std::wstring sessionId,
+                                                              std::wstring what,
+                                                              uint64_t generation)
+        {
+            std::wstring expanded;
+            PromptCopyOutcome outcome = PromptCopyOutcome::Refused;
+            int expandedCount = 0;
+            try
+            {
+                co_await winrt::resume_background(); // the paste-cache read (up to 64 MiB) must never run on the UI thread
+                // Fold '\r' / "\r\n" to '\n' FIRST: the resolver's line model is '\n'-split, while a prompt
+                // queued from the Manager's compose box carries '\r' newlines (the UWP TextBox quirk) — under
+                // which a placeholder standing alone on its own line would read as mid-line and be refused.
+                auto ex = ::Agentmaster::ExpandPendingDraftPastes(::Agentmaster::FoldCrToLf(rendered));
+                // expandedCount > 0 as well as complete: the caller only sends text that HAS a placeholder,
+                // so "complete with nothing substituted" can't really happen — but if it did, the original
+                // (unfolded) text is the faithful copy, not the folded one.
+                if (ex.complete && ex.expandedCount > 0 && !ex.text.empty())
+                {
+                    expanded = std::move(ex.text);
+                    expandedCount = ex.expandedCount;
+                    outcome = PromptCopyOutcome::Expanded;
+                }
+            }
+            catch (...)
+            {
+                // Rule #18: never lose a swallowed exception. Recovery = the as-rendered copy below.
+                ::Agentmaster::AgentLogCaughtException(L"CopyPromptTextExpandingPastes expand");
+                outcome = PromptCopyOutcome::Failed;
+            }
+            try
+            {
+                const size_t renderedChars = rendered.size();
+                // The expansion when every placeholder was proven, else the as-rendered original — so every
+                // outcome short of a closed window still copies SOMETHING. Moved, not copied: a prompt can
+                // be tens of KB and neither local is read again.
+                std::wstring payload = (outcome == PromptCopyOutcome::Expanded) ? std::move(expanded) : std::move(rendered);
+                const bool queued = disp && disp.TryEnqueue([toCopy = std::move(payload), sessionId, what, outcome, expandedCount, renderedChars, generation]() {
+                    // A throw escaping a DispatcherQueue handler is reported against the UI thread; contain
+                    // it here so a failed trace line can never cost more than this one copy.
+                    try
+                    {
+                        CommitPromptCopy(toCopy, sessionId, what, outcome, expandedCount, renderedChars, generation);
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"CopyPromptTextExpandingPastes commit");
+                    }
+                });
+                if (!queued)
+                {
+                    // TryEnqueue refuses once the window's dispatcher is shutting down: the window closed while
+                    // the paste cache was being read, so there is no UI thread left to write the clipboard from.
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(sessionId) + L" copy " + what +
+                                                                    L": the window closed before the paste expansion finished (nothing copied)\n");
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"CopyPromptTextExpandingPastes marshal");
+            }
+        }
+    }
+
+    // Agentmaster (PENDING_INPUT.md §8e): the shared "copy a PROMPT" action (declared + fully documented in
+    // AgentCopyActions.h) — the Auto-Testing row menu's Copy and every Copy Current Prompt (CopySessionField
+    // code 7) route through here, so a paste placeholder is copied as the pasted text itself everywhere.
+    // Placeholder-free text keeps the old synchronous copy; a placeholder sends the copy through
+    // CopyPromptExpandingPastesAsync (off-thread expansion, UI-thread write). The function-try is the
+    // "never throws" contract: a copy is best-effort UI feedback and must never escape into a Click handler.
+    void CopyPromptTextExpandingPastes(const DispatcherQueue& dispatcher, const std::wstring& text, const std::wstring& sessionId, const std::wstring& what, bool expandPastes)
+    try
+    {
+        if (text.empty())
+        {
+            return; // nothing to copy — no clipboard write, no chime (the callers' honest no-op)
+        }
+        // This copy is now the user's newest copy intent: any older prompt copy still expanding is superseded.
+        const uint64_t generation = ++g_promptCopyGeneration;
+        // The cheap, pure pre-check — the common case has no placeholder at all and costs one scan, no cache
+        // IO and no thread hop: copied synchronously, byte-for-byte as before. FindPasteMarkers inspects every
+        // '[' whatever the line endings, so the UNFOLDED text is fine for detection; only the expansion needs
+        // the fold (CopyPromptExpandingPastesAsync).
+        const bool hasPlaceholder = expandPastes && !::Agentmaster::FindPasteMarkers(text).empty();
+        if (!hasPlaceholder)
+        {
+            CopyTextToClipboard(text);
+            return;
+        }
+        if (!dispatcher)
+        {
+            // No UI thread to hop back to (never the case for the shipped callers, which all pass their
+            // window's queue): expanding here would read the paste cache ON the calling UI thread — the very
+            // stall the off-thread path exists to avoid — so copy as rendered, and say so.
+            CopyTextToClipboard(text);
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(sessionId) + L" copy " + what +
+                                                            L": no dispatcher - paste placeholder(s) copied as rendered chars=" + std::to_wstring(text.size()) + L"\n");
+            return;
+        }
+        CopyPromptExpandingPastesAsync(dispatcher, text, sessionId, what, generation);
+    }
+    catch (...)
+    {
+        // Rule #18: never lose a swallowed exception. Recovery = no copy (the click simply didn't chime).
+        ::Agentmaster::AgentLogCaughtException(L"CopyPromptTextExpandingPastes");
+    }
+
     // Agentmaster: the shared copy-field action (declared in AgentCopyActions.h) — the SINGLE
     // implementation behind both this overlay's copy menu (_CopyField, below) and the Triage Board /
     // Explorer-tree session menu's Copy submenu (AgentManagerContent::_MakeSessionMenu). It lives here
     // because the launch-CLI / transcript / summary helpers it leans on are this file's anon-namespace
     // helpers; both menus call it so they can never drift apart. `which` is the copy-menu code (see the
-    // header). Synchronous clipboard writes (cases 0-4 + 7) run on the calling UI thread; the transcript /
-    // summary cases (5/6) read off-thread and hop back via `dispatcher`. `liveDraft` is the optional
-    // live input-box reader used by case 7 alone (see the header) — absent/failing degrades to the
-    // observer's remembered draft, never to nothing.
+    // header). Synchronous clipboard writes (cases 0-4, and 7 when the draft has no paste placeholder) run
+    // on the calling UI thread; the transcript / summary cases (5/6/8) read off-thread and hop back via
+    // `dispatcher`, as does case 7 when a placeholder must first be expanded from the paste cache
+    // (CopyPromptTextExpandingPastes — PENDING_INPUT.md §8e). `liveDraft` is the optional live input-box
+    // reader used by case 7 alone (see the header) — absent/failing degrades to the observer's remembered
+    // draft, never to nothing.
     void CopySessionField(SessionRegistry& registry, const std::wstring& sessionId, int which, const DispatcherQueue& dispatcher, bool wrapNewlines, bool truncate, int tabColorMode, const std::function<std::wstring()>& liveDraft)
     {
         if (sessionId.empty())
@@ -381,6 +576,10 @@ namespace winrt::TerminalApp::implementation
         // here covers "what was picked" for every copy site at once.
         static const wchar_t* const kCopyFieldNames[] = { L"session-id", L"path", L"branch", L"claude-cli", L"codex-cli", L"transcript", L"summary", L"current-prompt", L"transcript-followup" };
         ::Agentmaster::LogNav(std::wstring{ L"copy " } + ((which >= 0 && which < 9) ? kCopyFieldNames[which] : L"?") + L" " + ::Agentmaster::ShortId(sessionId));
+        // This pick is the user's NEWEST copy intent: a prompt copy whose paste expansion is still reading
+        // the cache (CopyPromptTextExpandingPastes) must not land on top of it, so take a new generation —
+        // the stale expansion then drops its write when it comes back (PENDING_INPUT.md §8e).
+        ++g_promptCopyGeneration;
         switch (which)
         {
         case 0: // Session Id — the resumable conversation id (Codex: its rollout uuid)
@@ -477,7 +676,12 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(sessionId) + L" copy current prompt: nothing (box empty, no remembered draft)\n");
                 break;
             }
-            CopyTextToClipboard(pick.text); // verbatim + whole (multi-line drafts included); chimes on success
+            // Whole (multi-line drafts included) through the shared PROMPT copy (PENDING_INPUT.md §8e): a draft
+            // holding Claude's "[Pasted text #N +M lines]" / "[...Truncated text #N +M lines...]" label is
+            // copied as the pasted text itself — resolved off-thread from the paste cache, all-or-refuse, AS
+            // RENDERED on any refusal — while a placeholder-free draft (the common case) is still copied
+            // synchronously and verbatim. Chimes on success either way.
+            CopyPromptTextExpandingPastes(dispatcher, pick.text, sessionId, L"current prompt");
             // The SOURCE belongs in the mechanism layer next to the other [pending] traces: `live` == read
             // from the box this instant, `remembered` == the scan lane's value (possibly a restored memory,
             // which the age of pendingInputUnixMs is what makes honest).
