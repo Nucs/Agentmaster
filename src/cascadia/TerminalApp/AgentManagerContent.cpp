@@ -313,6 +313,12 @@ namespace winrt::TerminalApp::implementation
     {
         _hoverSessionHandler = std::move(handler);
     }
+    // Agentmaster (tab-strip reveal): store the page's "scroll this clicked session's tab into view"
+    // callback. handler: (sessionId); replaces any previous one (the page wires it once). No return, no throw.
+    void AgentManagerContent::SetRevealSessionTabHandler(std::function<void(winrt::hstring)> handler)
+    {
+        _revealSessionTabHandler = std::move(handler);
+    }
     void AgentManagerContent::SetArchiveHandler(std::function<void(winrt::hstring)> handler)
     {
         _archiveHandler = std::move(handler);

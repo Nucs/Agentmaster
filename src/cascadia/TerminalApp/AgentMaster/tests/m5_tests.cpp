@@ -125,6 +125,7 @@ int wmain()
     TestBringToFrontHeuristics();
     TestBridgeRoundTrip();
     TestTabDragMath();
+    TestTabStripReveal();
     TestTabCloseSuccessor();
 
     BenchPromptAnchor();

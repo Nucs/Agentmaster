@@ -17,10 +17,16 @@
 // band list from the realized containers only (ContainerFromIndex(i) != null), ascending index,
 // filtered to the visible strip — virtualized-out tabs simply have no band, which is the whole
 // point: nothing here ever needs an unrealized container.
+//
+// It also holds the strip's REVEAL decision (DecideTabStripRevealOffset — where the strip must
+// scroll so a selected tab's header is on screen; TerminalPage::_AdjustStripToRevealItem). That one
+// is in VIEWPORT-relative DIPs instead (see its own comment), because it is measured against the
+// strip's scroll viewport, not against the TabView.
 #pragma once
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <vector>
 
 namespace Agentmaster
@@ -147,5 +153,89 @@ namespace Agentmaster
             return stepDips;
         }
         return 0.0;
+    }
+
+    // The tab strip's REVEAL decision: the horizontal offset its ScrollViewer must move to so one tab
+    // header is on screen. Behind TerminalPage::_AdjustStripToRevealItem, which runs for EVERY tab
+    // selection (the funnel's _UpdatedSelectedTab), an Activate of the already-selected tab, and a
+    // Manager card / tree row / side-panel card click.
+    //
+    // Coordinates are VIEWPORT-relative DIPs: itemLeft is the header's left edge measured from the
+    // scroll viewport's left edge (negative == scrolled off to the left). MUX 2.8's TabScrollViewerStyle
+    // lays the `<` / `>` scroll buttons out in their OWN grid columns beside the viewport — they never
+    // cover it — so a header that lies inside [0, viewportWidth] is genuinely fully visible.
+    //
+    // Parameters:
+    //   itemLeft        - the header's left edge relative to the viewport's left edge, in DIPs.
+    //   itemWidth       - the header's width. Not > 0 (an unarranged or virtualized-out container)
+    //                     means no decision is possible.
+    //   viewportWidth   - the viewport's width. Not > 0 (the strip has not laid out, or is hidden)
+    //                     means no decision is possible.
+    //   currentOffset   - the ScrollViewer's HorizontalOffset right now.
+    //   scrollableWidth - the ScrollViewer's ScrollableWidth, i.e. the largest legal offset. A negative
+    //                     value is treated as 0 (nothing to scroll).
+    //   pad             - the breathing room kept between a header that HAD to be revealed and each
+    //                     viewport edge. When the header plus both pads do not fit, the spare room is
+    //                     split evenly instead, so the header never oscillates between the two edges.
+    //   leaveFullyVisibleInPlace - true: a header that already lies wholly inside the viewport answers
+    //                     "don't move". The selection funnel needs this — a tab the user just clicked
+    //                     is by definition on screen, and nudging the strip would slide it out from
+    //                     under the pointer (turning a double-click-to-rename into a click on its
+    //                     neighbor). false: the header is always placed inside [pad, viewport - pad]
+    //                     (the Manager's card-click reveal, where the pointer is not on the strip).
+    // Returns: the new offset, clamped to [0, scrollableWidth]. nullopt when nothing should move: no
+    //   decision is possible (degenerate or non-finite inputs), the header already sits where it
+    //   should, or the move would be under half a DIP (layout rounding, not a real misplacement). A
+    //   header WIDER than the viewport keeps its left edge — where the title starts — at the viewport's
+    //   left edge instead of chasing its right edge, so two reveals of the same header always agree.
+    // Never throws: pure arithmetic.
+    inline std::optional<double> DecideTabStripRevealOffset(double itemLeft, double itemWidth, double viewportWidth, double currentOffset, double scrollableWidth, double pad, bool leaveFullyVisibleInPlace) noexcept
+    {
+        // Sub-DIP layout rounding must neither read as "clipped" (leave-in-place) nor produce a move.
+        constexpr double kRevealEpsilonDips = 0.5;
+        if (!(itemWidth > 0.0) || !(viewportWidth > 0.0))
+        {
+            return std::nullopt;
+        }
+        // XAML never hands us these, but a NaN offset would reach ChangeView — refuse rather than guess.
+        if (!std::isfinite(itemLeft) || !std::isfinite(itemWidth) || !std::isfinite(viewportWidth) ||
+            !std::isfinite(currentOffset) || !std::isfinite(scrollableWidth) || !std::isfinite(pad))
+        {
+            return std::nullopt;
+        }
+        const double itemRight = itemLeft + itemWidth;
+        if (leaveFullyVisibleInPlace && itemLeft >= -kRevealEpsilonDips && itemRight <= viewportWidth + kRevealEpsilonDips)
+        {
+            return std::nullopt;
+        }
+        double target = currentOffset;
+        if (itemWidth >= viewportWidth)
+        {
+            // It can never fit: show where it starts.
+            target = currentOffset + itemLeft;
+        }
+        else
+        {
+            double padLeft = std::max(0.0, pad);
+            double padRight = padLeft;
+            if (padLeft + itemWidth + padRight > viewportWidth)
+            {
+                padLeft = padRight = (viewportWidth - itemWidth) / 2.0; // > 0: itemWidth < viewportWidth here
+            }
+            if (itemLeft < padLeft)
+            {
+                target = currentOffset + (itemLeft - padLeft); // clipped (or too close) on the left: scroll left
+            }
+            else if (itemRight > viewportWidth - padRight)
+            {
+                target = currentOffset + (itemRight - (viewportWidth - padRight)); // on the right: scroll right
+            }
+        }
+        target = std::clamp(target, 0.0, std::max(0.0, scrollableWidth));
+        if (std::abs(target - currentOffset) <= kRevealEpsilonDips)
+        {
+            return std::nullopt;
+        }
+        return target;
     }
 }

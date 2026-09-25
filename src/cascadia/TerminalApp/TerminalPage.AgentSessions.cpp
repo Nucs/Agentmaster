@@ -1165,12 +1165,20 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster (cross-window activate): select `sessionId`'s tab IN THIS WINDOW — the local
-    // half of _ActivateClaudeSession and the receiving half of the engine's activate fan-out.
-    // With `bringWindowToFront` (a remote window asked us to surface the session) also restore +
-    // foreground this window's HWND: the user's click happened in ANOTHER window of THIS process,
-    // so the process holds foreground and SetForegroundWindow may hand it over (the same
-    // restore/foreground/SwitchToThisWindow recipe ProcessInspect uses for foreign windows).
-    // Returns false when this window doesn't host the session's tab.
+    // half of _ActivateClaudeSession and the receiving half of the engine's activate fan-out —
+    // and make sure the tab strip shows it. With `bringWindowToFront` (a remote window asked us to
+    // surface the session) also restore + foreground this window's HWND: the user's click happened
+    // in ANOTHER window of THIS process, so the process holds foreground and SetForegroundWindow may
+    // hand it over (the same restore/foreground/SwitchToThisWindow recipe ProcessInspect uses for
+    // foreign windows).
+    // Parameters:
+    //   sessionId          - the managed session whose tab to select.
+    //   bringWindowToFront - true when the request came from ANOTHER window (the activate fan-out or
+    //                        a toast click): also restore + foreground this window.
+    // Returns: false when this window doesn't host the session's tab (the caller then fans out);
+    //   true once the tab is selected here.
+    // Throws: only if a XAML selection call throws on a torn-down TabView (the caller's event context
+    //   handles it like any other page call); the strip reveal itself never throws.
     bool TerminalPage::_FocusClaudeSessionTab(const std::wstring& sessionId, bool bringWindowToFront)
     {
         const auto it = _claudeTabs.find(sessionId);
@@ -1181,7 +1189,17 @@ namespace winrt::TerminalApp::implementation
         }
         if (const auto& item = tab.TabViewItem())
         {
+            // Agentmaster (tab-strip reveal): selecting the tab that is ALREADY selected raises no
+            // SelectionChanged, so the funnel's reveal (_UpdatedSelectedTab) never runs — a double-click,
+            // Jump or toast click for the session you are already in used to leave its tab wherever the
+            // strip had been scrolled to. Reveal it explicitly then (a no-op when it is wholly on screen).
+            // A different tab needs nothing here: the selection change runs the funnel, which reveals it.
+            const bool alreadySelected = (_tabView.SelectedItem() == item);
             _tabView.SelectedItem(item);
+            if (alreadySelected)
+            {
+                _RevealTabInStrip(tab, /*leaveFullyVisibleInPlace*/ true);
+            }
         }
         if (bringWindowToFront && _hostingHwnd)
         {

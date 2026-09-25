@@ -199,6 +199,18 @@ tab changes no selection, so it never woke anything and is untouched.
 Windows still ends a claude that is too busy to act on it at the 5-s mark. The `SessionEnd` hook
 processes (bash/powershell/node/git) can outlive claude.exe by design and finish on their own.
 
+**Follow-on (2026-09-25): the successor gets a real switch.** Upstream selects the successor with the
+selection funnel suppressed (`_removing`), so it got none of Agentmaster's per-selection effects:
+closing onto the Manager left the Manager lens flagged hidden (a board frozen until the next switch),
+the Home / Jump Back buttons were computed while the closed tab still held the selection, and the
+successor's overlay never learned it was focused. `_RemoveTab` now runs `_ApplyAgentTabSelection` —
+the funnel's own shared body — plus the funnel's tail (`_ScheduleWindowRecordSave`,
+`_UpdateManagerNavButtons`) for the successor, CATCH_LOG-wrapped and skipped once the window's
+teardown has begun. And `_UpdatedSelectedTab` scrolls the strip to the successor through
+`_RevealTabInStrip`: the rule above can pick a tab far from the closed slot (the nearest running tab,
+or the Manager at index 0), which the old `StartBringIntoView` could not reach in a long strip — the
+strip virtualizes far tabs (CLAUDE.md, "The tab strip VIRTUALIZES").
+
 ---
 
 ## 5. The Favorite verbs (where you toggle the star)

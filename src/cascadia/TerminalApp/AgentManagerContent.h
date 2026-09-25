@@ -71,6 +71,13 @@ namespace winrt::TerminalApp::implementation
         // while the Manager tab is active — a live preview that follows the mouse, falling back to the
         // selected session.
         void SetHoverSessionHandler(std::function<void(winrt::hstring, bool)> handler);
+        // Agentmaster (tab-strip reveal): (sessionId) -> a board card / tree row was CLICKED (a plain
+        // single click that selects it). The page scrolls the tab strip so that session's tab is on screen
+        // — also when the click did not CHANGE the selection (a re-click of the already-selected card),
+        // which the lens-changed push cannot express: _SelectSession early-outs on the same id, so the page
+        // would otherwise never hear about it. The page applies its own conditions (the Manager tab is the
+        // active tab; the tab lives in that window) — see TerminalPage::_RevealClickedSessionTab.
+        void SetRevealSessionTabHandler(std::function<void(winrt::hstring)> handler);
         void SetArchiveHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> Close (shut down, keep the record so it stays resumable in Sessions; FAVORITES.md)
         void SetCloseFolderHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (folder, excludeId) -> "Close ▸ Of Same Folder" / "Other of Same Folder": close every live managed session whose effective work dir == folder, SKIPPING excludeId when non-empty (the content shows the ONE confirm listing titles; the page does the cross-window batch)
         void SetRestoreHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> re-launch (resume) a closed session
@@ -336,6 +343,10 @@ namespace winrt::TerminalApp::implementation
         // absorbs the enter-B-before-leave-A ordering when sliding between rows) so the content holds
         // no hover state to desync.
         void _ReportHover(const std::wstring& id, bool entering);
+        // Agentmaster (tab-strip reveal): a board card / tree row single-click asks the page to scroll
+        // that session's tab into view (the page decides whether it applies). Called after the click's
+        // own _SelectSession + forced layout; stateless here, a no-op until the page wires the handler.
+        void _RequestSessionTabReveal(const std::wstring& id);
         void _SetScope(const std::wstring& dir);
         std::optional<::Agentmaster::SessionInfo> _Selected(const std::vector<::Agentmaster::SessionInfo>& sessions) const;
 
@@ -799,6 +810,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring)> _activateDormantHandler; // Agentmaster (eager-init): "Activate Tab" -> start a dormant session's claude in place (no focus change)
         std::function<void(bool)> _activateAllHandler; // Agentmaster (eager-init): "Activate All Tabs" -> wake every dormant tab (allWindows=false this window only / true + fan out)
         std::function<void(winrt::hstring, bool)> _hoverSessionHandler; // Agentmaster (Linked Lenses): push a managed card/row pointer enter/leave (id, entering) so the page pills its tab
+        std::function<void(winrt::hstring)> _revealSessionTabHandler; // Agentmaster (tab-strip reveal): a managed card/row single-click -> the page scrolls that session's tab into view, even on a re-click of the already-selected card (null until the page wires it)
         std::function<void(winrt::hstring)> _archiveHandler;
         std::function<void(winrt::hstring, winrt::hstring)> _closeFolderHandler; // Agentmaster ("Close ▸ Of Same Folder" / "Other of Same Folder"): (folder, excludeId) -> the page closes every live managed session in that folder (cross-window) SKIPPING excludeId, the content having already shown the one confirm
         std::function<void(winrt::hstring)> _restoreHandler;

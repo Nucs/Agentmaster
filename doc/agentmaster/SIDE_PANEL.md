@@ -82,6 +82,14 @@ which also flips the collapse chevron (`«` here — it always points toward the
   exact lazily-filled flyout the board card shows. Selection flows BOTH ways: the tab-switch
   funnel (`_SyncManagerSelectionToTab`) and the lens-changed push both select the card here,
   with same-id early-outs breaking the echo.
+- **The tab strip follows a click only on the Manager tab.** While the Manager tab is active, a
+  card click also scrolls the tab strip to that session's tab — like a board card click, and even
+  on a RE-click of the already-selected card (`_RevealClickedSessionTab`; the same-id early-outs
+  above would otherwise swallow it). On any other tab a click is a PEEK (§3) and never moves the
+  strip. A double-click's jump selects the tab, and the selection funnel scrolls it into view
+  (`_RevealTabInStrip`, virtualization-aware — the strip derealizes far tabs and a bare
+  `StartBringIntoView` can't reach them), including the tab you are already on, whose strip you
+  may have scrolled away.
 
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 

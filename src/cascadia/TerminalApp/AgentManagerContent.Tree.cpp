@@ -541,6 +541,10 @@ namespace winrt::TerminalApp::implementation
                         {
                             _treeHost.UpdateLayout();
                         }
+                        // Agentmaster (tab-strip reveal): the board-card twin — ask the page to scroll this
+                        // row's tab into view even on a re-click of the already-selected row (which pushes
+                        // no lens change); after the forced layout so a just-realizing tab is laid out.
+                        _RequestSessionTabReveal(id);
                     }
                 });
                 // Enter = Activate (jump to live tab) — NEVER inject (Correctness Rule #2).

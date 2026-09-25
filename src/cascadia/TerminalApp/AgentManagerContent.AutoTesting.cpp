@@ -580,6 +580,21 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (tab-strip reveal): a board card / tree row single-click asks the page to scroll that
+    // session's tab into view. The selection path alone can't carry the request: a re-click of the
+    // already-selected card early-outs in _SelectSession (no lens push), and the page only reveals on a
+    // selection CHANGE — so returning to the Manager from tab X and clicking X's highlighted card used to
+    // leave X's tab scrolled off the strip. The page applies its own conditions (Manager tab active, tab
+    // hosted in that window). id: the clicked managed session (empty is a no-op). No return. Throws only
+    // what the page's handler throws, and that handler catches + logs everything.
+    void AgentManagerContent::_RequestSessionTabReveal(const std::wstring& id)
+    {
+        if (!id.empty() && _revealSessionTabHandler)
+        {
+            _revealSessionTabHandler(winrt::hstring{ id });
+        }
+    }
+
     // Agentmaster: select an EXTERNAL (observe-only) row -> the Auto Testing shows its conversation
     // READ-ONLY. We host no ConPTY for it (Rule #9/#13), so this never binds an injector; it only
     // surfaces what was prompted. Clears the managed selection (one Auto-Testing surface).

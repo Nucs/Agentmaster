@@ -1340,6 +1340,12 @@ namespace winrt::TerminalApp::implementation
             if (const auto self = weakThis.get())
             {
                 self->_SidePanelSelectSession(id, /*driveManagerLens*/ true);
+                // Agentmaster (tab-strip reveal): while the Manager tab is active, a card click scrolls the
+                // session's tab into view like a board card click does — including a RE-click of the
+                // already-selected card, which _SidePanelSelectSession's same-id early-out and the lens's
+                // change-only reveal both swallow. Off the Manager it does nothing (the click is a PEEK —
+                // SIDE_PANEL.md §3); the gate lives in _RevealClickedSessionTab.
+                self->_RevealClickedSessionTab(id);
             }
         });
         card.DoubleTapped([weakThis, id](const IInspectable&, const DoubleTappedRoutedEventArgs& e) {

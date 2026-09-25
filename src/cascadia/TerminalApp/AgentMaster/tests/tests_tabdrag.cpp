@@ -3,8 +3,9 @@
 //
 // Agentmaster - M5 standalone test harness: the pure tab-strip decisions. TabDragMath.h — the brain
 // of the pointer-owned tab reorder/tear-out gesture (the native-MUX-drag replacement; CLAUDE.md "MUX
-// TabView drag-start null-deref" gotcha) — and TabCloseSuccessor.h — which tab takes focus after a
-// close without waking a dormant one (FAVORITES.md §4a). Shared CHECK/fixtures/decls live in m5_tests.h.
+// TabView drag-start null-deref" gotcha) plus the strip REVEAL decision (where the strip scrolls so a
+// selected tab is on screen) — and TabCloseSuccessor.h — which tab takes focus after a close without
+// waking a dormant one (FAVORITES.md §4a). Shared CHECK/fixtures/decls live in m5_tests.h.
 #include "m5_tests.h"
 
 #include "../TabCloseSuccessor.h"
@@ -81,6 +82,57 @@ void TestTabDragMath()
     CHECK(Agentmaster::TabDragAutoScrollStep(900, 800, 36, 28) == 28.0, "autoscroll: pointer right of the viewport (captured drag) => scroll right");
     CHECK(Agentmaster::TabDragAutoScrollStep(10, 60, 36, 28) == -28.0, "autoscroll: viewport narrower than both bands => nearer edge wins (left)");
     CHECK(Agentmaster::TabDragAutoScrollStep(50, 60, 36, 28) == 28.0, "autoscroll: viewport narrower than both bands => nearer edge wins (right)");
+
+    std::wprintf(L"\n");
+}
+
+// TabDragMath.h DecideTabStripRevealOffset: where the tab strip scrolls so a selected tab's header is
+// on screen (TerminalPage::_AdjustStripToRevealItem). Coordinates are viewport-relative (the `<`/`>`
+// buttons sit BESIDE the viewport in MUX 2.8, never over it). Unless a case says otherwise: a 1000-DIP
+// viewport scrolled to offset 2000 of a 5000-DIP scrollable range, with a 40-DIP pad.
+void TestTabStripReveal()
+{
+    std::wprintf(L"TabStripReveal (scroll a selected tab into view):\n");
+    // keep == leaveFullyVisibleInPlace: the selection funnel (true) vs the Manager card-click reveal (false).
+    const auto reveal = [](double left, double width, double viewport, double offset, double scrollable, double pad, bool keep) {
+        return Agentmaster::DecideTabStripRevealOffset(left, width, viewport, offset, scrollable, pad, keep);
+    };
+    const auto movesTo = [](const std::optional<double>& r, double expected) {
+        return r.has_value() && *r == expected;
+    };
+
+    // --- the selection funnel: a tab already on screen never moves the strip ---
+    CHECK(!reveal(100, 150, 1000, 2000, 5000, 40, true), "funnel: a fully visible tab stays put (a click must not slide it from under the pointer)");
+    CHECK(!reveal(830, 150, 1000, 2000, 5000, 40, true), "funnel: fully visible but inside the right pad still stays put");
+    CHECK(!reveal(850.3, 150, 1000, 2000, 5000, 40, true), "funnel: flush with the right edge within half a DIP counts as visible");
+    CHECK(!reveal(-0.3, 150, 1000, 2000, 5000, 40, true), "funnel: flush with the left edge within half a DIP counts as visible");
+
+    // --- ...but a clipped or off-screen tab is revealed WITH the pad ---
+    CHECK(movesTo(reveal(900, 150, 1000, 2000, 5000, 40, true), 2090), "funnel: clipped on the right => its right edge lands pad-inside the viewport");
+    CHECK(movesTo(reveal(-50, 150, 1000, 2000, 5000, 40, true), 1910), "funnel: clipped on the left => its left edge lands pad-inside the viewport");
+    CHECK(movesTo(reveal(3000, 150, 1000, 2000, 5000, 40, true), 4190), "funnel: far off to the right (a virtualized tab once realized) is brought in");
+    CHECK(movesTo(reveal(8000, 150, 1000, 2000, 5000, 40, true), 5000), "funnel: a target past the end clamps to ScrollableWidth");
+    CHECK(movesTo(reveal(-3000, 150, 1000, 2000, 5000, 40, true), 0), "funnel: a target before the start clamps to 0");
+    CHECK(!reveal(8000, 150, 1000, 5000, 5000, 40, true), "funnel: already scrolled to the end => nothing to do");
+
+    // --- the Manager card-click reveal: always lands inside [pad, viewport - pad] ---
+    CHECK(movesTo(reveal(830, 150, 1000, 2000, 5000, 40, false), 2020), "card click: visible but inside the right pad => nudged clear of it");
+    CHECK(movesTo(reveal(10, 150, 1000, 2000, 5000, 40, false), 1970), "card click: visible but inside the left pad => nudged clear of it");
+    CHECK(!reveal(100, 150, 1000, 2000, 5000, 40, false), "card click: already clear of both pads => nothing to do");
+    CHECK(!reveal(39.8, 100, 1000, 2000, 5000, 40, false), "card click: a sub-DIP correction is not a move (layout rounding)");
+
+    // --- geometry edge cases ---
+    CHECK(movesTo(reveal(100, 150, 200, 0, 1000, 40, false), 75), "narrow strip: header + both pads don't fit => the spare room is split evenly (25 each side)");
+    CHECK(movesTo(reveal(50, 300, 100, 500, 5000, 40, true), 550), "a header wider than the viewport => its LEFT edge (the title) at the viewport's left");
+    CHECK(movesTo(reveal(-20, 300, 100, 500, 5000, 40, false), 480), "a wider-than-viewport header scrolled past its start => its left edge brought back");
+    CHECK(movesTo(reveal(-5, 100, 1000, 2000, 5000, -10, false), 1995), "a negative pad is treated as 0");
+    CHECK(!reveal(-50, 150, 1000, 0, -1, 40, true), "no overflow (negative ScrollableWidth => 0) => nothing can move");
+
+    // --- degenerate input never moves the strip ---
+    CHECK(!reveal(100, 0, 1000, 2000, 5000, 40, false), "degenerate: a zero-width (unarranged / virtualized) header => no decision");
+    CHECK(!reveal(100, 150, 0, 2000, 5000, 40, false), "degenerate: a zero-width viewport (not laid out / hidden strip) => no decision");
+    CHECK(!reveal(100, 150, 1000, std::nan(""), 5000, 40, false), "degenerate: a non-finite offset => no decision (never a NaN ChangeView)");
+    CHECK(!reveal(std::nan(""), 150, 1000, 2000, 5000, 40, false), "degenerate: a non-finite position => no decision");
 
     std::wprintf(L"\n");
 }

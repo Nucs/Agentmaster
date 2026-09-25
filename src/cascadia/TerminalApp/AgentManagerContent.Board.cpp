@@ -752,6 +752,12 @@ namespace winrt::TerminalApp::implementation
                 {
                     _boardHost.UpdateLayout();
                 }
+                // Agentmaster (tab-strip reveal): ask the page to scroll THIS card's tab into view even when
+                // the click did not change the selection — a re-click of the already-selected card (the one
+                // the Manager highlights for the tab you just came from) never pushes a lens change, so its
+                // tab stayed scrolled off the strip. Last, after the forced layout above, so a tab that the
+                // lens-change reveal just started realizing is already laid out.
+                _RequestSessionTabReveal(id);
             }
         });
         // Right-click (or context key / long-press): the SAME menu as the Explorer-Tree session

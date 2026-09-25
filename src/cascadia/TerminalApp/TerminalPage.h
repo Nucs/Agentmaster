@@ -337,9 +337,18 @@ namespace winrt::TerminalApp::implementation
         // tree row click), the selected session's tab is revealed in the strip (_RevealTabInStrip) so
         // the selection pill isn't left scrolled off-screen. Tracked on EVERY highlight pass — also
         // off-Manager, where the selection follows tab switches via the funnel — so only an on-Manager
-        // selection CHANGE scrolls: hover previews, re-selects, and merely RETURNING to the Manager tab
-        // (after the selection moved underneath it) never yank the strip.
+        // selection CHANGE scrolls here: hover previews and merely RETURNING to the Manager tab (after the
+        // selection moved underneath it) never yank the strip. A deliberate RE-click of the already-
+        // selected card/row is the one exception, and it bypasses this tracking on purpose: the click
+        // itself asks for the reveal (_RevealClickedSessionTab).
         std::wstring _selectionBroughtIntoView;
+        // Agentmaster (tab-strip reveal): bumped by every _RevealTabInStrip call. A virtualized-out tab is
+        // revealed in two steps — ScrollIntoView now, then a precise pass on later Low-priority ticks
+        // (_RevealTabRetryAdjust) — and that retry chain carries the value it started with and stops the
+        // moment a newer reveal has run. Every tab selection reveals, so without it a quick run of
+        // selections (Ctrl+Tab held down, the tab switcher, a batch close) could have an older chain
+        // finish late and scroll the strip back to a tab you already moved past. UI thread only.
+        uint64_t _revealTabStripGeneration{ 0 };
 
         // Agentmaster: the session-management engine (see AgentMaster/). SessionRegistry is
         // the single source of truth; HooksBridge feeds it authoritative state from Claude
@@ -848,6 +857,15 @@ namespace winrt::TerminalApp::implementation
         std::optional<int> _rearrangeFrom{};
         std::optional<int> _rearrangeTo{};
         bool _removing{ false };
+        // Agentmaster (tab move): true only while _TryMoveTab has the moved TabViewItem OUT of TabItems.
+        // Taking the SELECTED item out makes the TabView select its nearest neighbor for that instant,
+        // and _OnTabSelectionChanged would otherwise run the whole selection funnel on a tab the user
+        // never visited — marking it read, clearing its red flash and any manual Mark Unread, waking it
+        // if it was Deactivated, logging a false [nav] tab-focus, and scrolling the strip to it (the
+        // hooks.log shows `tab-move` -> `tab-focus <neighbor>` -> `tab-focus <moved>`). The funnel ignores
+        // selection changes while this is set; the one real selection of the moved tab runs right after
+        // it clears. UI thread only.
+        bool _movingTab{ false };
 
         // Agentmaster (Shift+Click background-activate): a Shift+Click on a managed session tab must
         // ACTIVATE the session in place WITHOUT switching to it. A MUX TabViewItem drives its selection
@@ -1338,9 +1356,10 @@ namespace winrt::TerminalApp::implementation
         winrt::hstring _tagHoverPendingTag; // the tag to show when the open timer fires
         winrt::Windows::UI::Xaml::UIElement _tagHoverPendingAnchor{ nullptr }; // the hovered badge (transformed into Root() space for placement)
         void _UpdateManagerSelectionHighlight(); // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the pill — the hovered-or-selected managed session, only while the Manager tab is the active tab; called on lens change, hover, and tab switch
-        void _RevealTabInStrip(const winrt::TerminalApp::Tab& tab); // Agentmaster (Linked Lenses): scroll the tab strip so this tab is visible CLEAR of the `<`/`>` overlay scroll buttons; virtualization-aware — a derealized (scrolled-off) TabViewItem is realized via the TabListView's ScrollIntoView first, then fine-adjusted
-        bool _AdjustStripToRevealItem(const Microsoft::UI::Xaml::Controls::TabViewItem& tvi); // Agentmaster: the precise reveal pass — one ChangeView on _tabStripScrollViewer landing the item inside [pad, viewport-pad]; returns false while the item has no realized layout (virtualized out / pre-arrange) so the caller realizes it and retries
-        void _RevealTabRetryAdjust(Microsoft::UI::Xaml::Controls::TabViewItem tvi, int attempts); // Agentmaster: bounded Low-priority retries of _AdjustStripToRevealItem after ScrollIntoView — realization lands on a later layout pass, never this tick
+        void _RevealTabInStrip(const winrt::TerminalApp::Tab& tab, bool leaveFullyVisibleInPlace = false); // Agentmaster (tab-strip reveal): THE way to scroll a tab into view — every tab selection (_UpdatedSelectedTab), an Activate of the already-selected tab, the Manager's lens + card clicks. Virtualization-aware: a derealized (scrolled-far-off) TabViewItem is realized via the TabListView's ScrollIntoView first, then fine-adjusted — a bare StartBringIntoView silently NO-OPS on it. leaveFullyVisibleInPlace (the selection funnel) leaves a tab that is already wholly on screen exactly where it is; false (the card clicks) always lands it inside the pads
+        bool _AdjustStripToRevealItem(const Microsoft::UI::Xaml::Controls::TabViewItem& tvi, bool leaveFullyVisibleInPlace); // Agentmaster: the precise reveal pass — measures the header against the strip's scroll VIEWPORT and applies DecideTabStripRevealOffset (TabDragMath.h) with ONE instant ChangeView; returns false while the item has no realized layout (virtualized out / pre-arrange / strip not laid out) so the caller realizes it and retries, true otherwise (incl. "already placed, nothing to do")
+        void _RevealTabRetryAdjust(Microsoft::UI::Xaml::Controls::TabViewItem tvi, int attempts, uint64_t generation); // Agentmaster: bounded Low-priority retries of the precise pass after ScrollIntoView — realization lands on a later layout pass, never this tick. `generation` is the _revealTabStripGeneration the chain belongs to; a newer reveal ends it
+        void _RevealClickedSessionTab(const std::wstring& sessionId); // Agentmaster (tab-strip reveal): a board card / tree row / side-panel card CLICK asks for its session's tab to be scrolled into view even when the selection did not change (a re-click of the selected card) — bypassing _SelectSession's same-id early-out and the _selectionBroughtIntoView change gate. Only while the Manager tab is active (off it a side-panel click is a PEEK) and only for a tab hosted in THIS window
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab — local first, then fan out to the hosting window (ActivateSessionInOtherWindows)
         bool _ActivateDormantSession(const std::wstring& sessionId); // Agentmaster (eager-init): start a DORMANT session's claude IN PLACE (no focus change) via TermControl::InitializeWithSize + SetStarted(true); returns true if it woke one (false: not hosted here / already started). UI thread.
         void _ActivateAllDormantTabsLocal(); // Agentmaster (eager-init): DRIP-FEED-wake every dormant managed tab hosted in THIS window — 500ms between wakes, 4 wakes per 10s batch — so a many-tab activate never bursts N claude.exe spawns onto one UI pass. Merges into a running drip. The receiving half of the activate-all fan-out.
@@ -1384,6 +1403,27 @@ namespace winrt::TerminalApp::implementation
         std::wstring _ClaudeSessionForTab(const TerminalApp::Tab& tab); // Agentmaster: reverse-lookup _claudeTabs (which session, if any, hosts this tab)
         void _SyncManagerSelectionToTab(const TerminalApp::Tab& tab); // Agentmaster (Linked Lenses): on a tab switch, select that tab's managed session in the Manager lens, so returning to the Manager shows the session you were just in (no-op pre-startup / Manager tab / non-session tab)
         void _BringManagerSelectionIntoView(); // Agentmaster (Linked Lenses): on switching TO the Manager tab, scroll the selected board card / tree row into view — the selection followed tab switches while the Manager was hidden, so it can be off-screen (no-op pre-startup)
+        // Agentmaster (the SLOW TAB SWITCH stopwatch — TabManagement.cpp _OnTabSelectionChanged): the
+        // three lap instants _ApplyAgentTabSelection stamps, so the funnel's [tab-switch-slow] breakdown
+        // keeps its exact steps now that the steps live in the helper.
+        struct AgentTabSelectionLaps
+        {
+            std::chrono::steady_clock::time_point afterOverlayFocus{}; // lap 2 ends: lens visibility + tag popups + flash + deactivated wake + summary + overlay focus
+            std::chrono::steady_clock::time_point afterManagerSync{}; // lap 3 ends: pending-dots contrast + the Manager selection sync (a full lens rebuild when the Manager is on screen)
+            std::chrono::steady_clock::time_point afterManagerReveal{}; // lap 4 ends: selection pill + the Manager's bring-into-view
+        };
+        // Agentmaster: EVERY Agentmaster reaction to a tab becoming the selected one — the Manager lens's
+        // on-screen flag, the tag popups, the red flash (a visit), the Deactivated-tab wake, the summary
+        // refresh, the overlay focus gate, the pending dots, the Linked-Lenses selection sync, the pill, and
+        // the Manager's bring-into-view. ONE body shared by the tab-switch funnel (_OnTabSelectionChanged)
+        // and _RemoveTab's close-successor selection, which the funnel never sees (its _removing guard) —
+        // without it, closing the focused tab onto the Manager left the Manager lens flagged hidden (a
+        // board frozen until the next switch), and a successor never got its overlay focus or its lens
+        // selection. `tab` must be the newly selected tab; `laps` (nullable) receives the stopwatch lap
+        // instants. UI thread only. Exceptions: whatever a step lets escape propagates — exactly the
+        // exposure these steps had inline in the funnel (most catch + log their own failures); the
+        // _RemoveTab call site wraps it so a failure there can never abort the close's own bookkeeping.
+        void _ApplyAgentTabSelection(const winrt::TerminalApp::Tab& tab, AgentTabSelectionLaps* laps);
         void _ApplyBroadcastSettings(const ::Agentmaster::AppSettings& settings); // Agentmaster (cross-window settings broadcast): adopt GLOBAL settings changed in another window (cog Save / sort toggle) — update _appSettings + hand the Manager content the new settings (repaints the sort toggles + re-sorts). Runs on this window's UI thread (the engine sink marshals here)
         std::wstring _ClaudeSessionForConnection(const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn); // Agentmaster: which managed session is BOUND to this connection (by tabToken == WT_SESSION) — archive on pane-close + re-point injector on restartConnection
         winrt::Microsoft::Terminal::TerminalConnection::ConptyConnection _BuildAgentConnection(const std::wstring& commandline, const std::wstring& dir, const std::wstring& title, const std::vector<std::pair<std::wstring, std::wstring>>& env, bool inheritCursor = false); // Agentmaster: the shared managed-agent ConPTY builder (commandline + cwd + child env + this window's AM_SESSION stamp) — behind _LaunchClaudeSession / _LaunchCodexSession (fresh pane => inheritCursor false) AND the in-place restart (reuses the pane buffer => inheritCursor true)

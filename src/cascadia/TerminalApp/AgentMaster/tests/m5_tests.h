@@ -198,6 +198,12 @@ void TestPendingInput();
 // slot->_TryMoveTab target conversion (manager floor), release classification (reorder vs
 // tear-out slack), and edge auto-scroll steps
 void TestTabDragMath();
+// TabDragMath.h DecideTabStripRevealOffset: the strip REVEAL decision behind every tab selection —
+// a fully visible tab never moves under the funnel's leave-in-place rule, a clipped / far-off one is
+// brought in with the pad, the card-click reveal always lands inside the pads, clamping to
+// [0, ScrollableWidth], the even pad split on a narrow strip, wider-than-viewport headers, and
+// degenerate / non-finite inputs that must never reach ChangeView
+void TestTabStripReveal();
 // TabCloseSuccessor.h (FAVORITES.md §4a): the tab focused after the FOCUSED tab closes — upstream's pick
 // kept when it starts nothing; a DORMANT successor replaced by the nearest (in-order) / most recently
 // used (MRU) tab that starts nothing; right-first ties, the Manager fallback, hostile/empty inputs

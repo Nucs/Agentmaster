@@ -1349,6 +1349,15 @@ namespace winrt::TerminalApp::implementation
                 self->_UpdateManagerSelectionHighlight();
             }
         });
+        // Agentmaster (tab-strip reveal): a board card / tree row single-click -> scroll that session's
+        // tab into view, even when the click did not change the selection (the re-click the lens push
+        // can't express). _RevealClickedSessionTab applies the Manager-active + hosted-here conditions.
+        content->SetRevealSessionTabHandler([weakThis](winrt::hstring id) {
+            if (auto self = weakThis.get())
+            {
+                self->_RevealClickedSessionTab(std::wstring{ id });
+            }
+        });
         // Agentmaster (FAVORITES.md): the board/tree "Close" verb (formerly Archive) — shut the session
         // down but KEEP the record (always archived), so it stays resumable in the Sessions browser.
         content->SetArchiveHandler([weakThis](winrt::hstring id) {
@@ -1792,6 +1801,92 @@ namespace winrt::TerminalApp::implementation
         // the summary below). driveManagerLens=false — the lens was just driven above, and the
         // side panel's same-id early-out breaks any echo.
         _SidePanelSelectSession(id, /*driveManagerLens*/ false);
+    }
+
+    // Agentmaster: EVERY Agentmaster reaction to a tab becoming the selected one, in the order the
+    // tab-switch funnel always ran them (moved here verbatim from TabManagement.cpp's
+    // _OnTabSelectionChanged). One body, two callers:
+    //   - the funnel (_OnTabSelectionChanged), right after _UpdatedSelectedTab swapped the content in;
+    //   - _RemoveTab, after it hand-picks the tab that takes focus when the FOCUSED tab closes. Upstream
+    //     suppresses the funnel for that selection (its _removing guard), so before this was shared a
+    //     close successor got none of it: closing a tab onto the Manager left the Manager lens flagged
+    //     hidden (its board frozen until the next switch), the successor's overlay never learned it was
+    //     focused, and the Linked-Lenses selection kept pointing at the closed session.
+    // Parameters:
+    //   tab  - the tab that just became the selected one; must be non-null (both callers pass a tab
+    //          they just selected).
+    //   laps - nullable; when given, receives the stopwatch's lap instants (the funnel's
+    //          [tab-switch-slow] breakdown). _RemoveTab passes null.
+    // UI thread only. Exceptions: whatever a step lets escape propagates — the same exposure these
+    // steps had inline in the funnel (most catch + log their own failures); _RemoveTab wraps its call.
+    void TerminalPage::_ApplyAgentTabSelection(const winrt::TerminalApp::Tab& tab, AgentTabSelectionLaps* laps)
+    {
+        // Agentmaster (perf — the hidden-lens rebuild tax): tell the Manager lens whether it is
+        // now on screen. Hidden, it stops rebuilding its board/tree/plan on every registry
+        // notify / timing tick / selection sync (all of which land on THIS one UI thread, in
+        // the way of the terminal tab being used); shown again, it runs one catch-up rebuild
+        // — BEFORE the steps below that read its cards (selection highlight, bring-into-view).
+        if (const auto ipc = _agentManagerContent.get())
+        {
+            if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+            {
+                mgr->SetLensVisible(_managerTab && tab == _managerTab);
+            }
+        }
+        // Agentmaster (bookmark tags): a tab switch dismisses the Tags panel — it is anchored
+        // under the tab it was opened for, which the switch just left behind. The hover panel
+        // likewise (its badge anchor belongs to the strip layout that is about to change).
+        _CloseTagEditorPopup();
+        _CloseTagHoverPopup();
+        // Agentmaster (tab status-dot red flash): switching TO a tab is a "visit" — the current
+        // tab is always considered visited, so stop any red flash on the now-focused tab.
+        _VisitTabClearFlash(tab);
+        // Agentmaster (deactivate): focusing a DEACTIVATED tab resumes it — its control is
+        // already initialized (the one-shot lazy layout-init is spent), so only this explicit
+        // wake can Start the parked resume connection. A structural no-op for every other tab,
+        // incl. restored-dormant ones (their own lazy init owns the start the moment they lay
+        // out) and plain shells.
+        _WakeDeactivatedTab(tab);
+        // Agentmaster (TAB_OVERLAY.md summary panel): a "here-and-now lens" should be current the
+        // instant you look at it — kick a cheap, mtime-gated content re-read of the now-focused
+        // tab's summary panel so it isn't up to ~5 s stale (its own timer-backstop cadence).
+        _RefreshFocusedTabSummary(tab);
+        // Agentmaster (SUMMARY_JUMP.md §4, perf): mirror the new selection onto every linked
+        // overlay, so only the focused panel runs the expensive periodic jump-eligibility resolve
+        // (and the one we just switched TO resolves once, immediately).
+        _SyncOverlayFocusToTab(tab);
+        if (laps)
+        {
+            laps->afterOverlayFocus = std::chrono::steady_clock::now(); // lap 2: lens visibility + popups + flash + wake + summary + overlay focus
+        }
+        // Agentmaster (PENDING_INPUT.md): a colored tab's effective background shifts on
+        // selection (WT draws a deselected tab at 30% over the tab row, much darker), so the
+        // now-deselected and now-selected pending tabs must re-pick their "3 dots" light/dark
+        // color immediately instead of waiting for the next ~2s scan tick. Cheap (no buffer read).
+        _RefreshPendingDotsContrast();
+        // Agentmaster (Linked Lenses): follow the switch into the Manager lens — select this
+        // tab's managed session so returning to the Manager tab shows the session you were just
+        // in. No-op for the Manager tab, a non-session tab, or before startup completes.
+        _SyncManagerSelectionToTab(tab);
+        if (laps)
+        {
+            laps->afterManagerSync = std::chrono::steady_clock::now(); // lap 3: pending-dots contrast + the Manager selection sync (a full lens rebuild when the Manager is on screen)
+        }
+        // Agentmaster (Linked Lenses): re-evaluate the per-tab "selected/active" pill — it
+        // shows only while the Manager tab is active, so leaving the Manager clears it and
+        // returning re-applies it for the current hover/selection.
+        _UpdateManagerSelectionHighlight();
+        // Agentmaster (Linked Lenses): switching TO the Manager tab REVEALS the current
+        // selection — scroll the selected card/row into view, since it may have scrolled off
+        // while the selection followed tab switches with the Manager hidden. Manager tab only.
+        if (_managerTab && tab == _managerTab)
+        {
+            _BringManagerSelectionIntoView();
+        }
+        if (laps)
+        {
+            laps->afterManagerReveal = std::chrono::steady_clock::now(); // lap 4: selection highlight + bring-into-view
+        }
     }
 
     // Agentmaster (cross-window settings broadcast): a GLOBAL settings change in ANOTHER window reached

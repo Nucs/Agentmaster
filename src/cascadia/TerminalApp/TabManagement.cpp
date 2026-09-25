@@ -30,7 +30,7 @@
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions
 #include "AgentMaster/SessionStore.h" // SetSessionFavorite (FAVORITES.md: "Favorite & Close All" batch branch)
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
-#include "AgentManagerContent.h" // SetLensVisible — the tab-switch funnel tells the Manager lens whether it is on screen (perf)
+#include "AgentManagerContent.h" // the Manager content type (its SetLensVisible call moved with the funnel's other Agentmaster steps into _ApplyAgentTabSelection, TerminalPage.AgentEngine.cpp)
 
 #include <shlobj.h>
 
@@ -598,6 +598,12 @@ namespace winrt::TerminalApp::implementation
 
     // Removes the tab (both TerminalControl and XAML).
     // NOTE: Don't call this directly, but rather `tab.Close()`.
+    // Agentmaster: when the removed tab was the FOCUSED one, the successor is chosen so that selecting
+    // it starts nothing (_PickCloseSuccessorTab) and then gets the same Agentmaster selection effects a
+    // normal tab switch runs (_ApplyAgentTabSelection) — the selection funnel is suppressed during a
+    // removal. Parameters: tab — the tab being removed (already gone from the strip => no-op). Returns
+    // nothing. Exceptions: the Agentmaster effects are logged and swallowed (CATCH_LOG); the upstream
+    // strip/collection mutations throw only as they always did.
     void TerminalPage::_RemoveTab(const winrt::TerminalApp::Tab& tab)
     {
         uint32_t tabIndex{};
@@ -660,6 +666,9 @@ namespace winrt::TerminalApp::implementation
             // 2. In fullscreen (GH#5799) and focus (GH#7916) modes the _OnTabItemsChanged is not fired
             // 3. When rearranging tabs (GH#7916) _OnTabItemsChanged is suppressed
             const auto tabSwitchMode = _settings.GlobalSettings().TabSwitcherMode();
+            // Agentmaster: the successor picked below, kept for the Agentmaster selection effects after the
+            // branches (see the block following them).
+            winrt::TerminalApp::Tab agentCloseSuccessor{ nullptr };
 
             if (tabSwitchMode == TabSwitcherMode::MostRecentlyUsed)
             {
@@ -669,6 +678,7 @@ namespace winrt::TerminalApp::implementation
                 const auto newSelectedTab = _PickCloseSuccessorTab(_mruTabs.GetAt(0), tabIndex, /*mruMode*/ true);
                 _UpdatedSelectedTab(newSelectedTab);
                 _tabView.SelectedItem(newSelectedTab.TabViewItem());
+                agentCloseSuccessor = newSelectedTab;
             }
             else
             {
@@ -698,6 +708,27 @@ namespace winrt::TerminalApp::implementation
                 // selected item at all, which can make things like ClosePane not
                 // work correctly.
                 _tabView.SelectedItem(newSelectedTab.TabViewItem());
+                agentCloseSuccessor = newSelectedTab;
+            }
+
+            // Agentmaster: the successor is now the selected tab, but _OnTabSelectionChanged skipped the
+            // switch (the _removing guard), so run the same Agentmaster effects a normal switch gets —
+            // _ApplyAgentTabSelection's one shared body — plus the funnel's two tail steps. Without them, closing
+            // a tab onto the Manager left the Manager lens flagged hidden (its board frozen until the next
+            // switch), the Home / Jump Back buttons were computed while the closed tab still held the
+            // selection, the successor's overlay never learned it was focused, and the Linked-Lenses
+            // selection kept pointing at the closed session. Skipped once the window's teardown has begun
+            // (the deterministic close flush already captured the record, and the window is going away).
+            // Wrapped so a failure here is logged and can never abort this close's own remaining bookkeeping.
+            if (agentCloseSuccessor && !_windowRecordTeardownFlushed)
+            {
+                try
+                {
+                    _ApplyAgentTabSelection(agentCloseSuccessor, nullptr);
+                    _ScheduleWindowRecordSave();
+                    _UpdateManagerNavButtons();
+                }
+                CATCH_LOG();
             }
         }
 
@@ -1522,6 +1553,17 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Method Description:
+    // - Makes `tab` the visible, focused tab: swaps its content into the tab area, focuses it (unless
+    //   the tab switcher is previewing), and scrolls the tab strip so its header is on screen.
+    // - Agentmaster: the scroll is _RevealTabInStrip — upstream's StartBringIntoView could not reach a
+    //   header virtualized out of a long strip; a header already wholly on screen still never moves.
+    // Arguments:
+    // - tab: the newly selected tab.
+    // Return Value:
+    // - <none>
+    // Exceptions:
+    // - none escape: the body is CATCH_LOG-wrapped (upstream), and the strip reveal logs its own failures.
     void TerminalPage::_UpdatedSelectedTab(const winrt::TerminalApp::Tab& tab)
     {
         // Unfocus all the tabs.
@@ -1575,7 +1617,15 @@ namespace winrt::TerminalApp::implementation
                 _updateAllTabCloseButtons();
             }
 
-            tab.TabViewItem().StartBringIntoView();
+            // Agentmaster (tab-strip reveal): upstream's `tab.TabViewItem().StartBringIntoView()` silently
+            // NO-OPS on a tab scrolled far off the strip — the strip virtualizes, so such a tab's
+            // TabViewItem is not in the visual tree — and Agentmaster windows hold hundreds of tabs. Every
+            // selection of a far tab (a card double-click, Jump Back, a toast click, switchToTab, a close
+            // successor, Move to start/end, a restored window's focused tab) swapped the content in without
+            // scrolling the strip to it. _RevealTabInStrip realizes it first. leaveFullyVisibleInPlace
+            // keeps what StartBringIntoView did right: a tab already wholly on screen — the one you just
+            // clicked — never moves.
+            _RevealTabInStrip(tab, /*leaveFullyVisibleInPlace*/ true);
 
             // Raise an event that our title changed
             TitleChanged.raise(*this, nullptr);
@@ -1605,9 +1655,17 @@ namespace winrt::TerminalApp::implementation
     // Method Description:
     // - Responds to the TabView control's Selection Changed event (to move a
     //      new terminal control into focus) when not in in the middle of a tab rearrangement.
+    // - Agentmaster: also ignored while a tab is being removed (_removing — _RemoveTab applies the
+    //   successor's effects itself) or moved (_movingTab — the TabView's momentary neighbor pick is not a
+    //   switch); otherwise the Agentmaster reactions run through _ApplyAgentTabSelection.
     // Arguments:
     // - sender: the control that originated this event
     // - eventArgs: the event's constituent arguments
+    // Return Value:
+    // - <none>
+    // Exceptions:
+    // - whatever an Agentmaster step lets escape (_ApplyAgentTabSelection) — the same exposure those
+    //   steps had when they were written inline here; the content swap itself is CATCH_LOG-wrapped.
     void TerminalPage::_OnTabSelectionChanged(const IInspectable& sender, const WUX::Controls::SelectionChangedEventArgs& /*eventArgs*/)
     {
         // Agentmaster (Shift+Click background-activate): our own selection-revert (below) re-enters this
@@ -1617,7 +1675,9 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        if (!_rearranging && !_removing)
+        // Agentmaster: _movingTab — _TryMoveTab has the moved tab out of TabItems, and the TabView's
+        // momentary pick of its neighbor is not a switch the user made (see the flag's declaration).
+        if (!_rearranging && !_removing && !_movingTab)
         {
             // Agentmaster (Shift+Click background-activate): a Shift+Click on a managed session tab
             // ACTIVATES the session in place and must NOT switch to it. The MUX TabViewItem selected
@@ -1666,63 +1726,17 @@ namespace winrt::TerminalApp::implementation
                 const auto swT0 = std::chrono::steady_clock::now();
                 _UpdatedSelectedTab(tab);
                 const auto swT1 = std::chrono::steady_clock::now();
-                // Agentmaster (perf — the hidden-lens rebuild tax): tell the Manager lens whether it is
-                // now on screen. Hidden, it stops rebuilding its board/tree/plan on every registry
-                // notify / timing tick / selection sync (all of which land on THIS one UI thread, in
-                // the way of the terminal tab being used); shown again, it runs one catch-up rebuild
-                // — BEFORE the steps below that read its cards (selection highlight, bring-into-view).
-                if (const auto ipc = _agentManagerContent.get())
-                {
-                    if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
-                    {
-                        mgr->SetLensVisible(_managerTab && tab == _managerTab);
-                    }
-                }
-                // Agentmaster (bookmark tags): a tab switch dismisses the Tags panel — it is anchored
-                // under the tab it was opened for, which the switch just left behind. The hover panel
-                // likewise (its badge anchor belongs to the strip layout that is about to change).
-                _CloseTagEditorPopup();
-                _CloseTagHoverPopup();
-                // Agentmaster (tab status-dot red flash): switching TO a tab is a "visit" — the current
-                // tab is always considered visited, so stop any red flash on the now-focused tab.
-                _VisitTabClearFlash(tab);
-                // Agentmaster (deactivate): focusing a DEACTIVATED tab resumes it — its control is
-                // already initialized (the one-shot lazy layout-init is spent), so only this explicit
-                // wake can Start the parked resume connection. A structural no-op for every other tab,
-                // incl. restored-dormant ones (their own lazy init owns the start the moment they lay
-                // out) and plain shells.
-                _WakeDeactivatedTab(tab);
-                // Agentmaster (TAB_OVERLAY.md summary panel): a "here-and-now lens" should be current the
-                // instant you look at it — kick a cheap, mtime-gated content re-read of the now-focused
-                // tab's summary panel so it isn't up to ~5 s stale (its own timer-backstop cadence).
-                _RefreshFocusedTabSummary(tab);
-                // Agentmaster (SUMMARY_JUMP.md §4, perf): mirror the new selection onto every linked
-                // overlay, so only the focused panel runs the expensive periodic jump-eligibility resolve
-                // (and the one we just switched TO resolves once, immediately).
-                _SyncOverlayFocusToTab(tab);
-                const auto swT2 = std::chrono::steady_clock::now(); // lap 2: lens visibility + popups + flash + wake + summary + overlay focus
-                // Agentmaster (PENDING_INPUT.md): a colored tab's effective background shifts on
-                // selection (WT draws a deselected tab at 30% over the tab row, much darker), so the
-                // now-deselected and now-selected pending tabs must re-pick their "3 dots" light/dark
-                // color immediately instead of waiting for the next ~2s scan tick. Cheap (no buffer read).
-                _RefreshPendingDotsContrast();
-                // Agentmaster (Linked Lenses): follow the switch into the Manager lens — select this
-                // tab's managed session so returning to the Manager tab shows the session you were just
-                // in. No-op for the Manager tab, a non-session tab, or before startup completes.
-                _SyncManagerSelectionToTab(tab);
-                const auto swT3 = std::chrono::steady_clock::now(); // lap 3: pending-dots contrast + the Manager selection sync (a full lens rebuild when the Manager is on screen)
-                // Agentmaster (Linked Lenses): re-evaluate the per-tab "selected/active" pill — it
-                // shows only while the Manager tab is active, so leaving the Manager clears it and
-                // returning re-applies it for the current hover/selection.
-                _UpdateManagerSelectionHighlight();
-                // Agentmaster (Linked Lenses): switching TO the Manager tab REVEALS the current
-                // selection — scroll the selected card/row into view, since it may have scrolled off
-                // while the selection followed tab switches with the Manager hidden. Manager tab only.
-                if (_managerTab && tab == _managerTab)
-                {
-                    _BringManagerSelectionIntoView();
-                }
-                const auto swT4 = std::chrono::steady_clock::now(); // lap 4: selection highlight + bring-into-view
+                // Agentmaster: every Agentmaster reaction to the switch — the Manager lens's on-screen
+                // flag, the tag popups, the red flash, the Deactivated-tab wake, the summary, the overlay
+                // focus gate, the pending dots, the Linked-Lenses selection sync, the pill, the Manager's
+                // bring-into-view — lives in ONE helper (TerminalPage.AgentEngine.cpp), shared with
+                // _RemoveTab's close-successor selection, which this funnel never sees (the _removing
+                // guard above). It stamps laps 2-4 of the stopwatch.
+                AgentTabSelectionLaps laps{};
+                _ApplyAgentTabSelection(tab, &laps);
+                const auto swT2 = laps.afterOverlayFocus; // lap 2: lens visibility + popups + flash + wake + summary + overlay focus
+                const auto swT3 = laps.afterManagerSync; // lap 3: pending-dots contrast + the Manager selection sync (a full lens rebuild when the Manager is on screen)
+                const auto swT4 = laps.afterManagerReveal; // lap 4: selection highlight + bring-into-view
                 const double swTotal = swMs(swT0, swT4);
                 if (swTotal >= kSlowTabSwitchMs)
                 {
@@ -1811,11 +1825,18 @@ namespace winrt::TerminalApp::implementation
 
     // Method Description:
     // - Moves the tab to another index in the tabs row (if required).
+    // - Agentmaster: the moved tab ends up selected (upstream behavior) and its header is revealed at
+    //   its new position; while it is briefly out of TabItems the selection funnel is suppressed
+    //   (_movingTab), so the TabView's momentary pick of its neighbor never counts as visiting that
+    //   neighbor. The pinned Manager tab never moves and nothing moves ahead of it.
     // Arguments:
     // - currentTabIndex: the current index of the tab to move
     // - suggestedNewTabIndex: the new index of the tab, might get clamped to fit int the tabs row boundaries
     // Return Value:
     // - <none>
+    // Exceptions:
+    // - a failing TabItems / collection mutation propagates (upstream behavior); the suppression flag is
+    //   always cleared on the way out (scope_exit).
     void TerminalPage::_TryMoveTab(const uint32_t currentTabIndex,
                                    const int32_t suggestedNewTabIndex)
     {
@@ -1844,10 +1865,30 @@ namespace winrt::TerminalApp::implementation
             _tabs.InsertAt(newTabIndex, tab);
             _UpdateTabIndices();
 
-            _tabView.TabItems().RemoveAt(currentTabIndex);
-            _tabView.TabItems().InsertAt(newTabIndex, tabViewItem);
+            // Agentmaster (tab move): while the moved tab is OUT of TabItems, the TabView selects its nearest
+            // neighbor for that instant (when the moved tab was the selected one). That is not a switch the
+            // user made, so the selection funnel must not treat it as one — mark it read, clear its flash,
+            // wake it, log it (_movingTab; its declaration has the whole story). The SelectedItem below is
+            // the one real selection and runs the funnel as usual.
+            {
+                _movingTab = true;
+                auto clearMovingTab = wil::scope_exit([this]() noexcept { _movingTab = false; });
+                _tabView.TabItems().RemoveAt(currentTabIndex);
+                _tabView.TabItems().InsertAt(newTabIndex, tabViewItem);
+            }
+            // Did the TabView already put the selection back on the moved tab by itself (a selection the
+            // guard above just ignored)? Then SelectedItem changes nothing, raises no SelectionChanged, and
+            // the funnel won't run — so do its two strip-facing parts here: show the tab at its NEW
+            // position (a "Move to end" must visibly land there) and re-evaluate the nav buttons, which
+            // _OnTabItemsChanged last computed while the neighbor held the selection.
+            const bool selectionUnchanged = (_tabView.SelectedItem() == tabViewItem);
             _tabView.SelectedItem(tabViewItem);
             _ApplyTabDragPolicy(tabViewItem); // Agentmaster: the reinsert breaks the item->container map — settle it (+ re-pin CanDrag(false))
+            if (selectionUnchanged)
+            {
+                _RevealTabInStrip(tab, /*leaveFullyVisibleInPlace*/ true);
+                _UpdateManagerNavButtons();
+            }
 
             if (auto autoPeer = Automation::Peers::FrameworkElementAutomationPeer::FromElement(*this))
             {
