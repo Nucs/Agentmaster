@@ -1329,6 +1329,18 @@ namespace winrt::TerminalApp::implementation
         void _OnClaudeTabColorChanged(const TerminalApp::Tab& tab); // Agentmaster: user changed a tab color -> persist per the ACTIVE color mode (dir map + same-key fan-out; Individual writes the session record alone, no fan-out)
         winrt::Windows::Foundation::IAsyncAction _ArchiveAndCloseClaudeTab(TerminalApp::Tab tab, std::wstring sessionId, bool skipConfirm); // Agentmaster: confirm -> archive bookkeeping -> close
         void _ArchiveWindowSessionsOnTeardown(); // Agentmaster (lifecycle gap #1): on window close/quit, archive this window's live sessions (live=false + unbind injector -> claude.exe exits) so they don't linger as phantom cards / orphaned processes
+        // Agentmaster (FAVORITES.md §4a — "closing a tab never wakes a dormant one"): would SELECTING this
+        // tab start a process that is not running yet? True when any of its terminal panes still sits on a
+        // never-started connection (ConnectionState::NotConnected) — a window-restored tab spawns its
+        // claude.exe / shell lazily on its first layout, a Deactivated tab is woken by the selection funnel.
+        // False for non-terminal tabs (the Manager) and for started/ended panes. UI thread; never throws.
+        bool _TabSelectionWouldStartProcess(const TerminalApp::Tab& tab);
+        // Agentmaster (FAVORITES.md §4a): the tab _RemoveTab should focus after the FOCUSED tab closed —
+        // upstream's pick (`preferred`) when selecting it starts nothing, else the most-recently-used
+        // (MRU mode) / nearest (in-order) tab that starts nothing (the pure AgentMaster/TabCloseSuccessor.h
+        // rule), so a close can never spawn another session's claude.exe as a side effect. Logs
+        // [close-successor] when it overrides upstream. UI thread; never throws (falls back to `preferred`).
+        winrt::TerminalApp::Tab _PickCloseSuccessorTab(const winrt::TerminalApp::Tab& preferred, uint32_t closedSlot, bool mruMode);
         // Agentmaster (permanent remove — record-only, transcript on disk KEPT): the trash-icon seam
         // beside Archive everywhere it appears (close dialog, Manager menus, Archive page). Archive keeps
         // the session restorable; this DROPS the Agentmaster record. _RemoveSessionRecord does the shared

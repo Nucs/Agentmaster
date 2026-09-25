@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Agentmaster - M5 standalone test harness: TabDragMath.h — the pure brain of the pointer-owned
-// tab reorder/tear-out gesture (the native-MUX-drag replacement; CLAUDE.md "MUX TabView
-// drag-start null-deref" gotcha). Shared CHECK/fixtures/decls live in m5_tests.h.
+// Agentmaster - M5 standalone test harness: the pure tab-strip decisions. TabDragMath.h — the brain
+// of the pointer-owned tab reorder/tear-out gesture (the native-MUX-drag replacement; CLAUDE.md "MUX
+// TabView drag-start null-deref" gotcha) — and TabCloseSuccessor.h — which tab takes focus after a
+// close without waking a dormant one (FAVORITES.md §4a). Shared CHECK/fixtures/decls live in m5_tests.h.
 #include "m5_tests.h"
 
+#include "../TabCloseSuccessor.h"
 #include "../TabDragMath.h"
 
 using Agentmaster::TabDragBand;
@@ -79,6 +81,61 @@ void TestTabDragMath()
     CHECK(Agentmaster::TabDragAutoScrollStep(900, 800, 36, 28) == 28.0, "autoscroll: pointer right of the viewport (captured drag) => scroll right");
     CHECK(Agentmaster::TabDragAutoScrollStep(10, 60, 36, 28) == -28.0, "autoscroll: viewport narrower than both bands => nearer edge wins (left)");
     CHECK(Agentmaster::TabDragAutoScrollStep(50, 60, 36, 28) == 28.0, "autoscroll: viewport narrower than both bands => nearer edge wins (right)");
+
+    std::wprintf(L"\n");
+}
+
+// TabCloseSuccessor.h (FAVORITES.md §4a): which tab takes focus after the FOCUSED tab is closed,
+// without WAKING a dormant one. Strips below are POST-removal, index 0 = the pinned Manager tab
+// (never dormant) unless a case says otherwise; `wouldStart` true == selecting that tab would spawn
+// its claude.exe / shell (a never-shown restored tab or a Deactivated one).
+void TestTabCloseSuccessor()
+{
+    std::wprintf(L"TabCloseSuccessor (a close never wakes a dormant tab):\n");
+    using Agentmaster::PickCloseSuccessorIndex;
+    const std::vector<int> noMru;
+
+    // --- upstream's pick is kept verbatim whenever it starts nothing ---
+    CHECK(PickCloseSuccessorIndex(2, 2, { false, false, false, true }, noMru, false) == 2,
+          "in-order: a RUNNING right neighbor keeps upstream's choice (unchanged behavior)");
+    CHECK(PickCloseSuccessorIndex(2, 3, { false, false, true, false }, { 3, 2 }, true) == 3,
+          "mru: a running MRU head keeps upstream's choice");
+
+    // --- the incident: the tab that slid into the closed slot is DORMANT ---
+    CHECK(PickCloseSuccessorIndex(2, 2, { false, false, true, true }, noMru, false) == 1,
+          "in-order: dormant right neighbor => the running LEFT neighbor (distance 1), never the sleeper");
+    CHECK(PickCloseSuccessorIndex(2, 2, { false, true, true, false }, noMru, false) == 3,
+          "in-order: both neighbors dormant => the next running tab outward");
+    CHECK(PickCloseSuccessorIndex(2, 2, { false, true, true, false, true }, noMru, false) == 3,
+          "in-order: equal distance on both sides => right first (upstream's in-order preference)");
+    // A realistic Agentmaster strip: Manager + mostly dormant restored tabs, two running (4 and 9); the
+    // focused tab closed from old index 6 (slot 6 now holds its old right neighbor).
+    CHECK(PickCloseSuccessorIndex(6, 6, { false, true, true, true, false, true, true, true, true, false }, noMru, false) == 4,
+          "in-order: a sparse strip => the NEAREST running tab (4, two to the left) over the farther one (9)");
+    CHECK(PickCloseSuccessorIndex(3, 2, { false, true, true }, noMru, false) == 0,
+          "in-order: closing the LAST tab with only dormant tabs left => the Manager tab");
+
+    // --- MRU mode: the most recently used tab that starts nothing ---
+    CHECK(PickCloseSuccessorIndex(2, 3, { false, false, true, true }, { 3, 2, 1, 0 }, true) == 1,
+          "mru: dormant MRU head => the next MRU entry that starts nothing");
+    CHECK(PickCloseSuccessorIndex(2, 2, { false, true, true, true }, { 2, 3 }, true) == 0,
+          "mru: an MRU list of only sleepers (incomplete) => the positional belt finds the Manager");
+    CHECK(PickCloseSuccessorIndex(1, 2, { false, false, true }, { 9, -1, 2, 2, 1 }, true) == 1,
+          "mru: out-of-range / duplicate MRU entries are skipped");
+    CHECK(PickCloseSuccessorIndex(2, 2, { false, false, true, false }, { 3 }, false) == 1,
+          "in-order: the MRU list is ignored (the user chose positional switching)");
+
+    // --- degenerate inputs never throw and never leave the strip without a selection ---
+    CHECK(PickCloseSuccessorIndex(1, 1, { true, true, true }, noMru, false) == 1,
+          "every tab dormant (no Manager) => upstream's pick (wakes one, exactly the old behavior)");
+    CHECK(PickCloseSuccessorIndex(5, -1, { true, true }, noMru, false) == 1,
+          "every tab dormant + no usable preference => the clamped closed slot");
+    CHECK(PickCloseSuccessorIndex(1, -1, { false, true, false }, noMru, false) == 0,
+          "no usable preference (-1) => the positional scan still answers");
+    CHECK(PickCloseSuccessorIndex(0, 0, {}, noMru, false) == -1, "an empty strip => -1 (nothing to select)");
+    CHECK(PickCloseSuccessorIndex(-7, 99, { false }, noMru, false) == 0, "hostile slot/preference on a 1-tab strip => that tab");
+    CHECK(PickCloseSuccessorIndex(-7, 99, { true, false }, noMru, false) == 1,
+          "a hostile slot is clamped into the strip, so the scan still reaches the tab that starts nothing");
 
     std::wprintf(L"\n");
 }

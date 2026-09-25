@@ -663,7 +663,10 @@ namespace winrt::TerminalApp::implementation
 
             if (tabSwitchMode == TabSwitcherMode::MostRecentlyUsed)
             {
-                const auto newSelectedTab = _mruTabs.GetAt(0);
+                // Agentmaster (FAVORITES.md §4a): never WAKE a dormant tab as a side effect of a close —
+                // if the MRU head would start its claude.exe/shell on being shown, focus the most recent
+                // tab that starts nothing instead.
+                const auto newSelectedTab = _PickCloseSuccessorTab(_mruTabs.GetAt(0), tabIndex, /*mruMode*/ true);
                 _UpdatedSelectedTab(newSelectedTab);
                 _tabView.SelectedItem(newSelectedTab.TabViewItem());
             }
@@ -684,7 +687,10 @@ namespace winrt::TerminalApp::implementation
                 const auto newSelectedIndex = std::clamp<int32_t>(tabIndex, 0, _tabs.Size() - 1);
                 // _UpdatedSelectedTab will do the work of setting up the new tab as
                 // the focused one, and unfocusing all the others.
-                auto newSelectedTab{ _tabs.GetAt(newSelectedIndex) };
+                // Agentmaster (FAVORITES.md §4a): ...unless that neighbor is DORMANT — showing it would
+                // start its claude.exe (closing one session used to silently start the next). Then the
+                // nearest tab that starts nothing takes focus (the pinned Manager tab at worst).
+                auto newSelectedTab{ _PickCloseSuccessorTab(_tabs.GetAt(newSelectedIndex), tabIndex, /*mruMode*/ false) };
                 _UpdatedSelectedTab(newSelectedTab);
 
                 // Also, we need to _manually_ set the SelectedItem of the tabView

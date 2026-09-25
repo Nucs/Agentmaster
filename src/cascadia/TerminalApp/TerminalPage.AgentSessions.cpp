@@ -47,6 +47,7 @@
 #include "AgentMaster/ProcessObserver.h" // External() — an Adopt takes the external's CURRENT (presence-resolved) conversation id
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/SessionStore.h" // SetSessionFavorite (FAVORITES.md: "Favorite & Close" dialog branch)
+#include "AgentMaster/TabCloseSuccessor.h" // PickCloseSuccessorIndex — a close never wakes a dormant tab (FAVORITES.md §4a)
 
 using namespace winrt;
 using namespace winrt::Microsoft::Management::Deployment;
@@ -1734,6 +1735,146 @@ namespace winrt::TerminalApp::implementation
         _claudeTabs.clear();
         _claudeOverlays.clear(); // releases the overlays' com_ptrs (detaches their registry observers)
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+    }
+
+    // Agentmaster (FAVORITES.md §4a): would SELECTING `tab` start a process that isn't running yet?
+    // In Agentmaster selection is not neutral. A window-restored tab's control initializes, and so
+    // Start()s its connection (spawning pwsh + claude.exe), on its FIRST layout, which happens the
+    // moment the tab is shown. A Deactivated tab (initialized control, parked resume connection) is
+    // woken by the selection funnel's _WakeDeactivatedTab. Both shapes read
+    // ConnectionState::NotConnected, so that one test covers every pane that would start. EVERY pane
+    // is checked, not just the active one: showing a split tab lays out all of its panes.
+    //
+    // Parameters:
+    //   tab - the candidate tab (any kind; null is tolerated).
+    // Returns: true when at least one terminal pane is NotConnected. False for a null tab, a
+    //   non-terminal tab (the Manager, Settings), or when every pane is already Connecting /
+    //   Connected / Closed / Failed (a pane with no connection reads Closed — ControlCore's null rule).
+    // Never throws: a failed read is logged (Rule #18) and answers false. That can only make the
+    //   caller keep upstream's pick (wake the neighbor, the old behavior), never pick an unsafe tab.
+    bool TerminalPage::_TabSelectionWouldStartProcess(const TerminalApp::Tab& tab)
+    {
+        try
+        {
+            const auto tabImpl = _GetTabImpl(tab);
+            const auto root = tabImpl ? tabImpl->GetRootPane() : nullptr;
+            if (!root)
+            {
+                return false; // null / foreign / already shut down — nothing it could start
+            }
+            bool wouldStart = false;
+            root->WalkTree([&](const auto& pane) {
+                if (wouldStart)
+                {
+                    return; // one dormant pane settles it; the rest of the walk is moot
+                }
+                // A split (parent) pane carries no content, and a non-terminal leaf (the Manager's
+                // AgentManagerContent, Settings) has no connection that selection could start.
+                TerminalApp::TerminalPaneContent terminal{ nullptr };
+                if (const auto content = pane->GetContent())
+                {
+                    terminal = content.try_as<TerminalApp::TerminalPaneContent>();
+                }
+                if (!terminal)
+                {
+                    return;
+                }
+                if (const auto control = terminal.GetTermControl();
+                    control && control.ConnectionState() == TerminalConnection::ConnectionState::NotConnected)
+                {
+                    wouldStart = true;
+                }
+            });
+            return wouldStart;
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_TabSelectionWouldStartProcess");
+        }
+        return false;
+    }
+
+    // Agentmaster (FAVORITES.md §4a — "closing a tab never wakes a dormant one"): picks the tab
+    // _RemoveTab focuses after the FOCUSED tab was closed. Upstream hands focus to the tab that slid
+    // into the closed slot (in-order mode) or to the MRU head. In an Agentmaster strip that successor
+    // is usually a window-restored DORMANT tab, and its claude.exe spawns the moment it is shown. So
+    // closing one session used to START another: the closed tab's claude.exe exited ~1-2 s after the
+    // close while the neighbor's spawned ~0.4 s after it, and Task Manager's claude.exe count never
+    // dropped ("its claude.exe is not closed", 2026-09-25). This gathers the strip facts and asks the
+    // pure PickCloseSuccessorIndex (AgentMaster/TabCloseSuccessor.h) for a successor whose selection
+    // starts nothing. Upstream's pick is kept verbatim whenever it is already safe.
+    //
+    // Parameters:
+    //   preferred  - upstream's successor (the MRU head, or the tab now sitting in the closed slot).
+    //   closedSlot - the closed tab's FORMER index in _tabs (the removal has already happened).
+    //   mruMode    - the user's tabSwitcherMode is MostRecentlyUsed (selects the fallback order).
+    // Returns: the tab to select. That is `preferred` itself when selecting it starts nothing, when it
+    //   is null, or when every tab would start something (upstream behavior). Otherwise it is the chosen
+    //   replacement, logged as [close-successor].
+    // Never throws: any failure is logged (Rule #18) and returns `preferred`, the pre-fix behavior. A
+    //   bug here can at worst wake the neighbor again; it never leaves the strip without a selection.
+    winrt::TerminalApp::Tab TerminalPage::_PickCloseSuccessorTab(const winrt::TerminalApp::Tab& preferred, const uint32_t closedSlot, const bool mruMode)
+    {
+        if (!preferred)
+        {
+            return preferred;
+        }
+        try
+        {
+            // Per-tab "would selecting it start a process" facts in strip order, plus upstream's pick as
+            // an index. A strip of a few hundred tabs costs a few hundred cheap in-proc reads, once per
+            // close of the focused tab, never per frame.
+            const auto count = _tabs.Size();
+            std::vector<bool> wouldStart(count, false);
+            int preferredIndex = -1;
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                const auto candidate = _tabs.GetAt(i);
+                wouldStart[i] = _TabSelectionWouldStartProcess(candidate);
+                if (candidate == preferred)
+                {
+                    preferredIndex = static_cast<int>(i);
+                }
+            }
+            // Fast path: upstream's successor starts nothing, so keep it (no MRU walk, no log line).
+            if (preferredIndex >= 0 && !wouldStart[static_cast<size_t>(preferredIndex)])
+            {
+                return preferred;
+            }
+            // MRU order as strip indices. Only consulted in MRU mode; the list already excludes the
+            // closed tab (_RemoveTab dropped it from _mruTabs before selecting).
+            std::vector<int> mruOrder;
+            if (mruMode)
+            {
+                mruOrder.reserve(_mruTabs.Size());
+                for (const auto& candidate : _mruTabs)
+                {
+                    uint32_t idx{};
+                    if (_tabs.IndexOf(candidate, idx))
+                    {
+                        mruOrder.push_back(static_cast<int>(idx));
+                    }
+                }
+            }
+            const int chosen = ::Agentmaster::PickCloseSuccessorIndex(static_cast<int>(closedSlot), preferredIndex, wouldStart, mruOrder, mruMode);
+            if (chosen < 0 || chosen == preferredIndex)
+            {
+                return preferred; // every tab would start something: upstream's pick (the old behavior)
+            }
+            const auto replacement = _tabs.GetAt(static_cast<uint32_t>(chosen));
+            // Mechanism trace (not [nav]: the user asked to close, not to go anywhere). Names both tabs so
+            // "why did focus land THERE after my close" is answered straight off hooks.log.
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[close-successor] left dormant " + _DescribeTabForLog(preferred) +
+                                              L" asleep; focused " + _DescribeTabForLog(replacement) + L" idx=" + std::to_wstring(chosen) +
+                                              (mruMode ? L" (most recently used tab that starts nothing)" : L" (nearest tab that starts nothing)") + L"\n");
+            return replacement;
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_PickCloseSuccessorTab");
+        }
+        return preferred;
     }
 
     // Agentmaster: re-launch (resume) a closed session from the Sessions browser. The record is

@@ -197,6 +197,10 @@ void TestPendingInput();
 // slot->_TryMoveTab target conversion (manager floor), release classification (reorder vs
 // tear-out slack), and edge auto-scroll steps
 void TestTabDragMath();
+// TabCloseSuccessor.h (FAVORITES.md §4a): the tab focused after the FOCUSED tab closes — upstream's pick
+// kept when it starts nothing; a DORMANT successor replaced by the nearest (in-order) / most recently
+// used (MRU) tab that starts nothing; right-first ties, the Manager fallback, hostile/empty inputs
+void TestTabCloseSuccessor();
 void TestOrphanConsoleReaper(); // OBSERVER.md §13a: the dead-console reap decision + group walk (tests_transcript.cpp)
 void TestPendingPaste();
 

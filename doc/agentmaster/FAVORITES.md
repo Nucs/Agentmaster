@@ -135,6 +135,70 @@ toggle), deferred like the rest.
 - The tab/board liveness sweep + the window-teardown archive already keep the record — unchanged
   ("always archiving").
 
+## 4a. Closing a tab never wakes a dormant one (the "its claude.exe is not closed" report)
+
+**Report (2026-09-25):** "When we close a tab, its claude.exe process is not closed."
+
+**What actually happened — measured off `hooks.log` + the live process table, not guessed:**
+
+- **The closed tab's own `claude.exe` DOES exit.** The close routes `_ArchiveAndCloseClaudeTab` →
+  `tab.Close()` → `_RemoveTab` → `Tab::Shutdown` → `TermControl::Close` → `ConptyConnection::Close`.
+  That drops the pseudoconsole's signal pipe, and OpenConsole then sends `CTRL_CLOSE_EVENT` to every
+  attached client (`EndTask`; since Windows 11 26100, CSRSS force-ends a client that is still alive
+  after 5 s). Claude handles it as SIGHUP: its `SessionEnd` hook lands ~0.5–0.8 s after the close, and
+  the process is gone ~1–2.5 s after it (exit code 129). A claude that is too busy to act on the signal
+  is ended by Windows at the 5-s mark (`0xC000013A`, and no `SessionEnd`). Across 65 release instances'
+  census lines, no claude of ours ever outlived its tab's close.
+  Example: the reported close at 10:23:43.670 (`7b99c594`) — its claude.exe (pid 58332) fired
+  `SessionEnd` at +0.7 s and was absent from the census at +1.3 s.
+- **But a DIFFERENT `claude.exe` started 0.4 s later.** Upstream `_RemoveTab` hands focus to the tab
+  that slid into the closed slot (the default `tabSwitcherMode: inOrder`; the MRU head in `mru` mode).
+  In an Agentmaster window that successor is usually a window-restored **dormant** tab. A dormant tab's
+  claude spawns lazily on the control's first layout, i.e. the moment it is *shown* (a Deactivated tab
+  is woken by `_WakeDeactivatedTab` on selection). So closing one session silently **started** its
+  neighbor. In the example, `712cecb6` was the right neighbor at strip index 313; its pwsh appeared at
+  10:23:43 and its claude.exe (pid 239376) at 10:23:44. The claude.exe count never dropped, and one
+  claude.exe is indistinguishable from another in Task Manager, which reads as "it wasn't closed". The
+  same happened at 09:20:04 (`d24910f7` closed → `970d5540` woke). It is also plain waste: with 300+
+  mostly-dormant restored tabs, every close of the focused tab could spin up a session nobody asked for.
+
+**The rule:** a close is never an intent to open anything, so **the tab focused after closing the
+focused tab must be one whose selection starts nothing.**
+
+- Upstream's own pick is kept verbatim whenever it is already safe (a running neighbor, the Manager),
+  so ordinary closes behave exactly as before.
+- A dormant successor is replaced, honoring the user's switcher mode:
+  - **in-order** (default) — the **nearest** tab that starts nothing, scanning outward from the closed
+    slot. That is the tab that slid into it, then the old left neighbor, then alternating further out
+    (right first on ties, upstream's preference).
+  - **mru** — the **most recently used** tab that starts nothing (typically the tab you came from),
+    with the positional scan as a belt.
+- The pinned, non-closable Manager tab (index 0, not a terminal) never starts anything. So in an
+  Agentmaster window a safe successor always exists. With *every* tab dormant (a window without a
+  Manager) upstream's pick stands, and never a strip with no selection.
+
+**Where:** the pure decision is `AgentMaster/TabCloseSuccessor.h` `PickCloseSuccessorIndex` (header-only,
+no WinRT; harness `TestTabCloseSuccessor` in `tests/tests_tabdrag.cpp`). The UI layer is two
+`TerminalPage.AgentSessions.cpp` members:
+
+- `_TabSelectionWouldStartProcess(tab)` — true when **any** terminal pane of the tab sits on a
+  `ConnectionState::NotConnected` connection. Every pane is checked, since showing a split tab lays out
+  all of its panes.
+- `_PickCloseSuccessorTab(preferred, closedSlot, mruMode)` — gathers the strip facts, calls the pure
+  rule, and logs `[close-successor] left dormant <tab> asleep; focused <tab> idx=N (...)` whenever it
+  overrides upstream.
+
+Both are guarded no-throw (Rule #18); any failure falls back to upstream's pick, i.e. the old behavior.
+The one integration seam is `TabManagement.cpp` `_RemoveTab` (both switcher branches), the single
+funnel every close reaches: the tab X, middle-click, the closeTab action, the Manager/tree Close, the
+batch closes, close-on-exit, and a tear-out's removal from the source window. Closing a **background**
+tab changes no selection, so it never woke anything and is untouched.
+
+**Not changed:** the closed tab's own shutdown. Its claude.exe still gets the graceful `CTRL_CLOSE`
+(the `SessionEnd` hooks run: Agentmaster's forwarder, the user's `session-end.js` + autocommit), and
+Windows still ends a claude that is too busy to act on it at the 5-s mark. The `SessionEnd` hook
+processes (bash/powershell/node/git) can outlive claude.exe by design and finish on their own.
+
 ---
 
 ## 5. The Favorite verbs (where you toggle the star)
@@ -264,6 +328,16 @@ Explorer tree (a closed session simply leaves the board → appears in Sessions)
 | `TerminalPage.h` | declare `_RefreshAllFavoriteIcons` |
 | `AgentManagerContent.{h,cpp}` | the cog's **TABS ▸ Favorite marker** dropdown (`_setFavoriteIcon`: build/populate/save) |
 | `AgentMaster/tests/m5_tests.cpp` | `favoriteIcon` round-trip + default-on-empty + token-parse |
+
+**§4a Close never wakes a dormant tab (follow-on):**
+
+| File | Change |
+|---|---|
+| `AgentMaster/TabCloseSuccessor.h` | **new** — the pure `PickCloseSuccessorIndex` rule (header-only, no WinRT) |
+| `TerminalPage.AgentSessions.cpp` | `_TabSelectionWouldStartProcess` (any pane `NotConnected`) + `_PickCloseSuccessorTab` (strip facts → the pure rule → `[close-successor]` log) |
+| `TerminalPage.h` | declare both |
+| `TabManagement.cpp` | `_RemoveTab`: both switcher branches route their successor through `_PickCloseSuccessorTab` |
+| `AgentMaster/tests/{tests_tabdrag.cpp,m5_tests.h,m5_tests.cpp}` | `TestTabCloseSuccessor` (upstream kept when safe, nearest / MRU replacement, right-first ties, the Manager fallback, hostile + empty inputs) |
 
 ---
 
