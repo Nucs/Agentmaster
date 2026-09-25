@@ -173,9 +173,13 @@ focused tab must be one whose selection starts nothing.**
     (right first on ties, upstream's preference).
   - **mru** — the **most recently used** tab that starts nothing (typically the tab you came from),
     with the positional scan as a belt.
-- The pinned, non-closable Manager tab (index 0, not a terminal) never starts anything. So in an
-  Agentmaster window a safe successor always exists. With *every* tab dormant (a window without a
-  Manager) upstream's pick stands, and never a strip with no selection.
+- When *every* remaining tab would start something, `_RemoveTab` selects **no** tab and shows the
+  window's **Agent Manager page** instead, which starts nothing (logged `[close-successor] every
+  remaining tab would start a process ...`). Until 2026-09-25 that safe harbor was the pinned,
+  non-closable Manager tab at index 0; the Manager is now a page behind the tab strip's **Home**
+  button, so the page is the fallback. Closing the LAST tab shows the page too: the window stays
+  open, and the Manager-only check closes it unless it is the last window. A window without a
+  Manager page keeps upstream's pick.
 
 **Where:** the pure decision is `AgentMaster/TabCloseSuccessor.h` `PickCloseSuccessorIndex` (header-only,
 no WinRT; harness `TestTabCloseSuccessor` in `tests/tests_tabdrag.cpp`). The UI layer is two

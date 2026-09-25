@@ -29,14 +29,15 @@ namespace Agentmaster
     // so a close whose natural successor is already running behaves exactly as before; only a DORMANT
     // successor is replaced. The replacement honors the user's configured tab-switcher mode:
     //   * MRU mode      — the most-recently-used tab that starts nothing (typically the tab you came
-    //                     from, or the pinned Manager tab), then the positional scan as a belt.
+    //                     from), then the positional scan as a belt.
     //   * in-order mode — the nearest tab that starts nothing, scanning outward from the closed slot:
     //                     the tab that slid INTO it (the old right neighbor) first, then the old left
     //                     neighbor, then alternating further out (right-first on ties — upstream's own
     //                     in-order preference).
-    // The pinned, non-closable Manager tab (index 0, not a terminal) never starts anything, so in an
-    // Agentmaster window the scan always finds a tab; with EVERY tab dormant (a window with no Manager)
-    // the function falls back to `preferred` — upstream behavior, never a dead end with no selection.
+    // With EVERY tab dormant the function falls back to `preferred` — upstream behavior, never a dead end
+    // with no selection. The CALLER owns the no-wake guarantee for that case: TerminalPage::_RemoveTab
+    // sees the pick would still start a process and shows the Agent Manager page instead (the harbor the
+    // pinned, never-starting Manager tab used to be before the Manager became a page).
     //
     // Parameters:
     //   closedSlot — the removed tab's FORMER index. In the post-removal strip it is where the old right
@@ -83,7 +84,7 @@ namespace Agentmaster
                 }
             }
             // Every MRU entry is dormant or the list is incomplete: fall through to the positional scan
-            // (a belt — the MRU list normally holds every tab, including the never-dormant Manager).
+            // (a belt — the MRU list normally holds every tab).
         }
 
         // Positional, outward from the closed slot: step 0 -> the slot itself (old right neighbor),
@@ -99,8 +100,8 @@ namespace Agentmaster
             }
         }
 
-        // Every tab would start something: keep upstream's pick (it wakes one tab — exactly the old
-        // behavior) rather than leave the strip with no selection.
+        // Every tab would start something: keep upstream's pick rather than leave the strip with no
+        // selection (the Agentmaster caller then shows the Agent Manager page instead of waking it).
         if (preferred >= 0 && preferred < count)
         {
             return preferred;

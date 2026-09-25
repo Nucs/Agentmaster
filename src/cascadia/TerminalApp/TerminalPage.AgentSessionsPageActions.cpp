@@ -9,7 +9,7 @@
 // upstream TabManagement.cpp pattern) so TerminalPage.cpp stays close to upstream.
 //
 // Partial files in this group (★ marks THIS file):
-//   TerminalPage.AgentEngine.cpp               - ~TerminalPage, _InitAgentmasterEngine (consume the process-wide SharedEngine), the Manager tab, _WireAgentManagerContent
+//   TerminalPage.AgentEngine.cpp               - ~TerminalPage, _InitAgentmasterEngine (consume the process-wide SharedEngine), the Agent Manager page (+ its Home button), _WireAgentManagerContent
 //   TerminalPage.AgentSessions.cpp             - spawn/launch/restore/close/adopt for Claude + Codex; tab-title sync; smart naming + per-dir tab color
 //   TerminalPage.AgentObserver.cpp             - the per-tab overlay/badge bind/reconcile/liveness (incl. managed-Codex) + the Fleet Observer UI lane (_ObserverProbe)
 //   TerminalPage.AgentWindowRecord.cpp         - M10 per-window record capture/flush/restore + reopen saved windows (Claude + Codex tab refs)
@@ -1045,7 +1045,7 @@ namespace winrt::TerminalApp::implementation
 
     void TerminalPage::_RestoreAgentPageOverlays()
     {
-        // The counterpart to _DismissAgentPageOverlays: when the Manager tab is re-selected, bring back
+        // The counterpart to _DismissAgentPageOverlays: when the Agent Manager page is shown again, bring back
         // any full-window page (e.g. Sessions) that is logically OPEN (restoreOnReturn — set by the page's
         // Show, cleared by its Hide). The page was merely COLLAPSED (never rebuilt), so its in-memory tree
         // — typed search text, gathered rows, selection — is intact; onRestore re-applies the transient
@@ -1074,7 +1074,7 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_SetAgentPageOverlayOpenIntent(std::atomic<bool>* visibleMirror, bool open)
     {
         // A page's Show/Hide records whether _RestoreAgentPageOverlays should re-open it on return to the
-        // Manager tab. Keyed by the page's visibility mirror (its stable identity in the registry). This is
+        // Agent Manager page. Keyed by the page's visibility mirror (its stable identity in the registry). This is
         // the authoritative "logically open" bit — independent of the transient collapse/re-show, so an
         // explicit Hide (e.g. Resume landing on a new tab) always wins over a concurrent tab-switch.
         for (auto& p : _agentPageOverlays)

@@ -3,7 +3,7 @@
 > A small, glanceable HUD pinned to the **top-right of every Claude session tab's terminal**,
 > showing the **connection between that tab and Agentmaster**: its hook-driven status, whether
 > (and how) Tests Autorunner is driving it, and what's queued — with on-demand controls. This is the
-> per-tab counterpart to the Manager tab's Triage Board: the Board is the *fleet* view; this is
+> per-tab counterpart to the Agent Manager page's Triage Board: the Board is the *fleet* view; this is
 > the *here-and-now* view, visible while you actually work inside a session.
 > Companions: [`DESIGN.md`](./DESIGN.md) · [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) ·
 > [`HOOKS.md`](./HOOKS.md) · [`PERSISTENCE.md`](./PERSISTENCE.md).
@@ -220,7 +220,7 @@ Mirror the Manager's proven pattern (`AgentManagerContent.cpp:390-416`) but **id
 | Adopted Claude session — bound | **Yes** (full) |
 | Adopted Claude session — observe-only | **Yes** (observe style, controls disabled) |
 | Plain terminal (`pwsh`, `cmd`), a started-but-unprompted `claude`, or an external `codex` | **Yes — a dim `○ <kind> · unlinked` observe badge** that flips kind in place as activity changes, and is promoted to the full linked badge the instant a `claude` resolves a conversation id. *(Originally "No — slot stays empty"; superseded — see §13a.)* |
-| The Manager tab | **No** (it *is* the manager; and it's `AgentManagerContent`, not a `TerminalPaneContent`) |
+| The Agent Manager page | **No** (it *is* the manager — a page behind the tab strip's Home button, not a tab; `AgentManagerContent`, not a `TerminalPaneContent`) |
 
 When a session is **archived in place** by the liveness sweep (claude exited, tab left open —
 `_SweepClaudeLiveness`), the record flips `live=false` and the injector unbinds; the badge
@@ -381,8 +381,8 @@ before. Codex renders a reduced box
 ### 13f. Tab-strip status dot (companion, not the overlay)
 Independently of the in-terminal badge, every classified tab's header reads `[icon] ● <title>`: a
 state-colored `Ellipse` (thin black stroke) in `TabHeaderControl.xaml`'s indicator row — a managed
-session in its Triage-Board state color, an observed-but-unmanaged tab a dim gray, the Manager tab
-none. The palette lives once in `AgentStatusColors.h` (board dot + this overlay + the tab-strip dot
+session in its Triage-Board state color, an observed-but-unmanaged tab a dim gray (the Agent Manager is a page behind the Home button,
+not a tab, so it has no dot). The palette lives once in `AgentStatusColors.h` (board dot + this overlay + the tab-strip dot
 all read it).
 
 ### 13g. Settings

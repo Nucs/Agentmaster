@@ -93,10 +93,11 @@ namespace winrt::TerminalApp::implementation
         std::optional<winrt::Windows::UI::Color> GetRuntimeTabColor() const noexcept { return _runtimeTabColor; } // Agentmaster: the user-chosen override (drives per-dir color sync)
         // Agentmaster (tab color modes — NoColor/"Remove colors"): the color persistence should
         // record for this tab — the LIVE runtime color, or (while the NoColor mode has it
-        // suspended) the PARKED one. Read by the window-record capture (the Manager tab's
-        // per-window color) so a save taken while "Remove colors" is active persists the color the
-        // tab HAD instead of voiding it; BuildStartupActions applies the same fold for a shell
-        // tab's setColor action. Visual reads (GetTabColor) deliberately do NOT see the parked color.
+        // suspended) the PARKED one, so a save taken while "Remove colors" is active persists the
+        // color the tab HAD instead of voiding it. BuildStartupActions applies the same fold for a
+        // shell tab's setColor action; this accessor's other reader, the retired Manager tab's
+        // per-window color capture, went away with that tab (it is kept as the one public form of the
+        // fold). Visual reads (GetTabColor) deliberately do NOT see the parked color.
         std::optional<winrt::Windows::UI::Color> GetPersistableTabColor() const noexcept { return _runtimeTabColor ? _runtimeTabColor : _suspendedTabColor; }
         void SetTabColorSuspended(bool suspended); // Agentmaster (NoColor): park/restore the runtime color — shed the visual, KEEP the value for persistence; raises no TabColorChanged
         void SetRuntimeTabColor(const winrt::Windows::UI::Color& color);
@@ -139,8 +140,9 @@ namespace winrt::TerminalApp::implementation
         void SetDispatch(const winrt::TerminalApp::ShortcutActionDispatch& dispatch);
 
         // Agentmaster: reservedLeading = how many pinned, non-bulk-closable tabs occupy the front of
-        // the strip (the Manager tab => 1, else 0). They are skipped by _RemoveTabs, so they must not
-        // count as closable neighbors when enabling "Close tabs to the left" / "Close other tabs".
+        // the strip — they must not count as closable neighbors when enabling "Close tabs to the left"
+        // / "Close other tabs". 0 today: the pinned Manager tab (the one that counted) is now a page
+        // behind the tab strip's Home button.
         void UpdateTabViewIndex(const uint32_t idx, const uint32_t numTabs, const uint32_t reservedLeading = 0);
         void SetActionMap(const Microsoft::Terminal::Settings::Model::IActionMapView& actionMap);
 
@@ -151,8 +153,6 @@ namespace winrt::TerminalApp::implementation
         Microsoft::Terminal::Settings::Model::TabCloseButtonVisibility CloseButtonVisibility();
         void CloseButtonVisibility(Microsoft::Terminal::Settings::Model::TabCloseButtonVisibility visible);
 
-        void DisableCloseAndMoveMenuItems(); // Agentmaster
-        void DisableTabRename(); // Agentmaster
         void SetAgentCopyMenuVisible(bool visible, bool isCodex); // Agentmaster: show/hide the "Copy >" session-field submenu (managed agent-session tabs only; page-driven at flyout-open). isCodex (meaningful only when visible) offers ONLY the matching launch-CLI item — Codex CLI for a Codex session, Claude CLI otherwise — never both
         void SetAgentMarkUnreadVisible(bool visible); // Agentmaster: show/hide the "Mark Unread" item (managed agent-session tabs only; page-driven at flyout-open)
         void SetAgentOpenInExplorerVisible(bool visible); // Agentmaster: show/hide the "Open In Explorer" item (managed agent-session tabs only; page-driven at flyout-open) — opens the session's EFFECTIVE work dir (inferred → cwd), reusing the overlay's Open Path action
@@ -165,7 +165,7 @@ namespace winrt::TerminalApp::implementation
         void SetForkSessionModels(const std::vector<std::pair<std::wstring, std::wstring>>& models, bool isManagedClaude, std::function<void(std::function<void(winrt::hstring)>)> specify = nullptr); // Agentmaster (launch-model picker): same swap for "Fork session" — the submenu (Default + models) shows ONLY for a managed CLAUDE tab with a non-empty list (a fork is a launch, so --model applies); a Codex tab (codex fork takes no --model) and a plain shell tab (whose "Fork session" is really WT's duplicate-tab) keep the PLAIN item. Page-driven at flyout-open
         void SetFavoriteAndCloseAllVisible(bool visible); // Agentmaster (FAVORITES.md): show/hide the "★ Favorite & close all tabs" close-submenu item (shown only when the window hosts >=1 managed session; page-driven at flyout-open)
         void SetAgentFolderCloseVisible(bool visible); // Agentmaster: show/hide the "Close ▸ Of Same Folder" + "Other of Same Folder" close-submenu items (managed agent-session tabs only — they close every live session sharing THIS session's effective work dir; page-driven at flyout-open)
-        void SetColorPickerEnabled(bool enabled); // Agentmaster (tab color modes — NoColor/"Remove colors"): gray/restore the "Change tab color..." context-menu item AND gate AttachColorPicker (the openTabColorPicker action), so NO tab — managed, shell, or the Manager tab — can be recolored while the mode is NoColor. TOGGLEABLE (unlike the Manager tab's one-shot disables) — seeded at tab registration, swept strip-wide on a mode change (_ReapplyManagedTabColors), re-asserted by the managed paint seam (_ApplySessionTabColor) + at flyout-open
+        void SetColorPickerEnabled(bool enabled); // Agentmaster (tab color modes — NoColor/"Remove colors"): gray/restore the "Change tab color..." context-menu item AND gate AttachColorPicker (the openTabColorPicker action), so NO tab — managed or shell — can be recolored while the mode is NoColor. TOGGLEABLE (not a one-shot disable) — seeded at tab registration, swept strip-wide on a mode change (_ReapplyManagedTabColors), re-asserted by the managed paint seam (_ApplySessionTabColor) + at flyout-open
 
         til::event<winrt::delegate<void()>> RequestFocusActiveControl;
 
@@ -191,8 +191,8 @@ namespace winrt::TerminalApp::implementation
         til::event<winrt::delegate<>> TagBadgeHoverEnd; // Agentmaster (bookmark tags): the pointer left a header bookmark badge -> page schedules the hover panel's grace-timer close (canceled if the pointer crosses into the panel)
         til::event<winrt::delegate<>> ActivateSessionRequested; // Agentmaster (eager-init): context-menu "Activate Tab" -> page starts this tab's DORMANT session's claude IN PLACE (TermControl::InitializeWithSize), no focus change
         til::event<winrt::delegate<int32_t /*scope*/>> DeactivateTabsRequested; // Agentmaster (deactivate): context-menu "Deactivate ▸ ..." -> page parks tabs back in the DORMANT waiting-for-focus state a freshly reopened window's tabs sit in (claude shut down, tab kept in place; focusing/activating it resumes the conversation). scope: 0 == this tab · 1 == other tabs · 2 == all tabs (this window)
-        til::event<winrt::delegate<>> CloseTabsBeforeRequested; // Agentmaster: context-menu "Close > Close tabs to the left" -> page closes every tab left of this one (skipping the pinned Manager tab)
-        til::event<winrt::delegate<>> CloseAllTabsRequested; // Agentmaster: context-menu "Close > Close all tabs" -> page closes every tab in this window (skipping the pinned Manager tab)
+        til::event<winrt::delegate<>> CloseTabsBeforeRequested; // Agentmaster: context-menu "Close > Close tabs to the left" -> page closes every tab left of this one
+        til::event<winrt::delegate<>> CloseAllTabsRequested; // Agentmaster: context-menu "Close > Close all tabs" -> page closes every tab in this window (the window then stays on its Agent Manager page)
         til::event<winrt::delegate<>> FavoriteAndCloseAllTabsRequested; // Agentmaster (FAVORITES.md): context-menu "Close > ★ Favorite & close all tabs" -> page stars every managed session, then closes every tab
         til::event<winrt::delegate<>> CloseSessionsOfSameFolderRequested; // Agentmaster: context-menu "Close > Of Same Folder" -> page closes EVERY live managed session sharing THIS tab's session's effective work dir (incl. this one), cross-window, after one confirm listing the titles (_ConfirmAndCloseClaudeSessionsInFolder)
         til::event<winrt::delegate<>> CloseOtherSessionsOfSameFolderRequested; // Agentmaster: context-menu "Close > Other of Same Folder" -> the same folder batch MINUS this tab's session (it stays open)
@@ -253,20 +253,19 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _deactivateOtherTabsMenuItem{}; // Agentmaster (deactivate): "Deactivate ▸ Other Tabs" — every OTHER managed session tab in this window (this one keeps running)
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _deactivateAllTabsMenuItem{}; // Agentmaster (deactivate): "Deactivate ▸ All Tabs" — every managed session tab in this window ("as if the app had just opened")
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closePaneMenuItem{};
-        // Agentmaster: the "Move tab" / "Close" sub-menus and the "Close tab" item are kept
-        // as members (not locals in _CreateContextMenu) so the pinned Manager tab can gray
-        // them out via DisableCloseAndMoveMenuItems().
+        // Agentmaster: the "Move tab" / "Close" sub-menus and the "Close tab" item are members (not
+        // locals in _CreateContextMenu). They were promoted so the old pinned Manager tab could gray
+        // them out; the Manager is a page behind the tab strip's Home button now (never a tab), so
+        // nothing grays them any more — they simply stay members.
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem _moveSubMenu{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem _closeSubMenu{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeTabMenuItem{};
-        // Agentmaster: kept as a member (not a local in _CreateContextMenu) so the pinned Manager
-        // tab can gray out the "Rename Tab" item via DisableTabRename(). _renameDisabled also gates
-        // ActivateTabRenamer() so the double-tap / openTabRenamer-action paths are blocked too.
+        // Agentmaster: the "Rename Tab" item, a member for the same historical reason (every tab is
+        // renameable now — the fixed-title Manager tab that disabled it is gone).
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _renameTabMenuItem{};
-        bool _renameDisabled{ false };
         // Agentmaster (tab color modes — NoColor/"Remove colors"): the "Change tab color..." item, kept
         // as a member so SetColorPickerEnabled can gray/restore it per the GLOBAL tab-color mode (a
-        // TOGGLE, unlike the Manager tab's one-shot disables). _colorPickerDisabled also gates
+        // TOGGLE, not a one-shot disable). _colorPickerDisabled also gates
         // AttachColorPicker() so the openTabColorPicker action / command-palette path is blocked too.
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _chooseColorMenuItem{};
         bool _colorPickerDisabled{ false };
@@ -282,7 +281,7 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (PENDING_INPUT.md): "Copy Current Prompt" — the unsent-draft item, a member for the
         // same reason: SetAgentCopyMenuVisible shows it only for a CLAUDE session (Codex has no input box).
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _copyCurrentPromptItem{ nullptr };
-        uint32_t _reservedLeadingTabs{ 0 }; // Agentmaster: count of pinned, non-bulk-closable leading tabs (the Manager tab); fed by UpdateTabViewIndex, read by _EnableMenuItems
+        uint32_t _reservedLeadingTabs{ 0 }; // Agentmaster: count of pinned, non-bulk-closable leading tabs — 0 today (the pinned Manager tab it counted is now a page behind the Home button); fed by UpdateTabViewIndex, read by _EnableMenuItems
         winrt::TerminalApp::ShortcutActionDispatch _dispatch;
         Microsoft::Terminal::Settings::Model::IActionMapView _actionMap{ nullptr };
         winrt::hstring _keyChord{};

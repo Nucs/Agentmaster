@@ -245,7 +245,7 @@ warning, never the installed choice.
 
 ### Changing later
 
-Manager tab → **⚙ Settings → PROFILE**: shows the active folder (and a pending `current → new
+Agent Manager (the tab strip's Home button) → **⚙ Settings → PROFILE**: shows the active folder (and a pending `current → new
 (after restart)` when a change is staged) + **Change profile folder…** — the same picker, with the
 migrate-checkbox source being the ACTIVE profile, and a "applies on next start" note. The running
 engine never re-homes mid-run.

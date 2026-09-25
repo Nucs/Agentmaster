@@ -9,7 +9,7 @@
 // upstream TabManagement.cpp pattern) so TerminalPage.cpp stays close to upstream.
 //
 // Partial files in this group (★ marks THIS file):
-//   TerminalPage.AgentEngine.cpp               - ~TerminalPage, _InitAgentmasterEngine (consume the process-wide SharedEngine), the Manager tab, _WireAgentManagerContent
+//   TerminalPage.AgentEngine.cpp               - ~TerminalPage, _InitAgentmasterEngine (consume the process-wide SharedEngine), the Agent Manager page (+ its Home button), _WireAgentManagerContent
 //   TerminalPage.AgentSessions.cpp             - spawn/launch/restore/close/adopt for Claude + Codex; tab-title sync; smart naming + per-dir tab color
 // ★ TerminalPage.AgentObserver.cpp             - the per-tab overlay/badge bind/reconcile/liveness (incl. managed-Codex) + the Fleet Observer UI lane (_ObserverProbe)
 //   TerminalPage.AgentWindowRecord.cpp         - M10 per-window record capture/flush/restore + reopen saved windows (Claude + Codex tab refs)
@@ -3763,7 +3763,7 @@ namespace winrt::TerminalApp::implementation
     // linked overlay in the window — with ~19 live Claude tabs and 200+-prompt conversations that
     // saturated the UI thread outright (the 2026-07-19 release freeze). AgentTabOverlay::SetTabFocused
     // is the gate: the focused overlay resolves (once, on the transition, then on its interval floor) and
-    // the rest go quiet. `tab` may be the Manager tab / a shell tab / null — then NOTHING is focused,
+    // the rest go quiet. `tab` may be a shell tab / null (the Agent Manager page is up) — then NOTHING is focused,
     // which is exactly right. Cheap: one map walk over the window's overlays per tab switch.
     void TerminalPage::_SyncOverlayFocusToTab(const TerminalApp::Tab& tab)
     {
@@ -3982,7 +3982,7 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster (Linked Lenses): show/hide the "selected/active" pill behind a tab's header — the
     // filled accent background TabHeaderControl.xaml binds to TerminalTabStatus.AgentSelectionVisible
     // / AgentSelectionBrush. It makes a session's tab read as the active tab while you stay on the
-    // Manager tab, WITHOUT changing the real TabView selection or the per-dir tab color (Rule #12) —
+    // Agent Manager page, WITHOUT changing the real TabView selection or the per-dir tab color (Rule #12) —
     // a separate presentation layer, exactly like the status dot. UI thread only.
     void TerminalPage::_SetTabSelectionPill(const TerminalApp::Tab& tab, bool on)
     {
@@ -4021,35 +4021,28 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the "selected/active" pill.
     // The target is the managed session HOVERED in the Manager (a live preview that follows the
-    // mouse), else the SELECTED session — but ONLY while the Agent Manager tab is the active tab and
+    // mouse), else the SELECTED session — but ONLY while the Agent Manager page is on screen and
     // that session actually has a tab in THIS window. Otherwise nothing is pilled. Idempotent: a
     // no-op when the target is unchanged; on a change it clears the old tab's pill and sets the new.
-    // Called on a Manager lens change, a hover push, and a tab switch (so it clears when you leave
-    // the Manager tab and re-applies when you return). UI thread only.
+    // Called on a Manager lens change, a hover push, a tab switch and the page show (so it clears when
+    // you leave the page and re-applies when you return). UI thread only.
     void TerminalPage::_UpdateManagerSelectionHighlight()
     {
-        // Gate: the Manager tab must be the active (selected) tab.
-        bool onManager = false;
-        if (_managerTab && _tabView)
-        {
-            const auto idx = _tabView.SelectedIndex();
-            if (idx >= 0 && idx < static_cast<int32_t>(_tabs.Size()))
-            {
-                onManager = (_tabs.GetAt(idx) == _managerTab);
-            }
-        }
+        // Gate: the Agent Manager page must be on screen (_managerPageVisible — the page's one authority;
+        // with the strip deselected under it, no tab index could answer this).
+        const bool onManager = _managerPageVisible;
         if (!onManager)
         {
-            // Off the Manager tab, hover is meaningless. Clear it so returning to the Manager falls
-            // back to the SELECTION until a genuine PointerEntered re-arms hover — otherwise a hover
-            // left dangling by a keyboard tab-switch (no PointerExited) would wrongly pill on return.
+            // Off the Manager page, hover is meaningless. Clear it so returning to the page falls back
+            // to the SELECTION until a genuine PointerEntered re-arms hover — otherwise a hover left
+            // dangling by a keyboard tab-switch (no PointerExited) would wrongly pill on return.
             _managerHoverSessionId.clear();
         }
 
         // The pinned lens selection (independent of hover), read live so a restored/seeded selection is
-        // honored without caching. Read UNCONDITIONALLY — not just on the Manager tab: the reveal
-        // tracking below must follow selection changes that happen while the Manager is HIDDEN (the
-        // tab-switch funnel reselects the session you switch to), or merely RETURNING to the Manager
+        // honored without caching. Read UNCONDITIONALLY — not just on the Manager page: the reveal
+        // tracking below must follow selection changes that happen while the page is HIDDEN (the
+        // tab-switch funnel reselects the session you switch to), or merely RETURNING to the page
         // would read "selection changed" and surprise-scroll the strip.
         const std::wstring selection = _ManagerSelectedSessionId();
 
@@ -4067,7 +4060,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Agentmaster (Linked Lenses — selection follows into view): when the SELECTED session changes
-        // WHILE the Manager tab is up (a board card / tree row click), scroll the tab strip so its tab
+        // WHILE the Manager page is up (a board card / tree row click), scroll the tab strip so its tab
         // is visible — otherwise the selection pill can sit scrolled off-screen. (A RE-click of the
         // already-selected card is not a change; the click itself asks for that reveal —
         // _RevealClickedSessionTab.) Selection only — a hover preview must NOT scroll (it would jump the
@@ -4290,8 +4283,8 @@ namespace winrt::TerminalApp::implementation
     // and re-clicking the already-selected card changes nothing (_SelectSession early-outs, no lens push).
     // So after returning to the Manager from tab X — the lens auto-selects X, deliberately without
     // scrolling the strip — clicking X's card used to leave X's tab wherever the strip happened to be.
-    // This bypasses both of those gates, and keeps the implicit reveal's other two conditions: the Manager
-    // tab must be the active tab (the selection pill only shows there, and off the Manager a side-panel
+    // This bypasses both of those gates, and keeps the implicit reveal's other two conditions: the Agent
+    // Manager page must be on screen (the selection pill only shows there, and off the page a side-panel
     // click is a PEEK that must not move the strip — SIDE_PANEL.md §3), and the session's tab must live in
     // THIS window (a GLOBAL card can name a session hosted in another window, which isn't the one being
     // looked at). A reveal that was already right is free: the precise pass finds nothing to move.
@@ -4301,16 +4294,15 @@ namespace winrt::TerminalApp::implementation
     // Never throws: the body is CATCH_LOG-wrapped (it runs straight from XAML click handlers).
     void TerminalPage::_RevealClickedSessionTab(const std::wstring& sessionId)
     {
-        if (sessionId.empty() || !_managerTab || !_tabView)
+        if (sessionId.empty() || !_tabView)
         {
             return;
         }
         try
         {
-            const auto idx = _tabView.SelectedIndex();
-            if (idx < 0 || idx >= static_cast<int32_t>(_tabs.Size()) || _tabs.GetAt(static_cast<uint32_t>(idx)) != _managerTab)
+            if (!_managerPageVisible)
             {
-                return; // off the Manager: a side-panel click is a peek, and no pill marks the tab
+                return; // off the Manager page: a side-panel click is a peek, and no pill marks the tab
             }
             if (const auto it = _claudeTabs.find(sessionId); it != _claudeTabs.end())
             {
@@ -6231,7 +6223,7 @@ namespace winrt::TerminalApp::implementation
         {
             return false; // already started (Connecting/Connected) or ended (Closed) — not dormant
         }
-        // Placeholder size = the laid-out shared tab-content area (the Manager tab is showing, so this is
+        // Placeholder size = the laid-out shared tab-content area (the Manager page is showing, so this is
         // the size a terminal tab gets). A non-positive size would make InitializeWithSize no-op, so fall
         // back to a sane default; the control resizes to its true size via _SwapChainSizeChanged when shown.
         double w = _tabContent ? _tabContent.ActualWidth() : 0.0;
@@ -6366,8 +6358,8 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster (eager-init / "Activate All Tabs" pacing): flip THIS window's Manager content into / out
     // of its "busy" state (disabled "Activating N tabs…" button + disabled launch/cwd box) so a paced
-    // wake that runs for many seconds is visibly in progress. The Manager tab is non-closable, so the
-    // content outlives the drip; a null get() (mid-teardown) simply no-ops. UI thread only.
+    // wake that runs for many seconds is visibly in progress. The window owns its Manager page for its
+    // whole life, so the content outlives the drip; a null get() (mid-teardown) simply no-ops. UI thread only.
     void TerminalPage::_SetActivateAllBusy(bool busy)
     {
         if (const auto ipc = _agentManagerContent.get())
@@ -6540,7 +6532,7 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster (alt+up / alt+down prompt nav): the focused tab's managed CLAUDE sessionId, or empty.
     // Prompt nav resolves the conversation's SENT prompts from the transcript and finds them in the live
     // buffer (SUMMARY_JUMP.md), so it applies only to a managed Claude session; a Codex tab (no in-buffer
-    // prompt resolve in v1), a shell, the Manager tab, or an external all return empty, so the action falls
+    // prompt resolve in v1), a shell, the Agent Manager page (no focused tab), or an external all return empty, so the action falls
     // back to WT's default MoveFocus. UI thread.
     std::wstring TerminalPage::_FocusedPromptNavSession()
     {
@@ -9542,10 +9534,8 @@ namespace winrt::TerminalApp::implementation
         std::unordered_set<std::wstring> windowTokens;
         for (const auto& projectedTab : _tabs)
         {
-            if (projectedTab == _managerTab)
-            {
-                continue; // the Manager tab hosts no ConPTY
-            }
+            // (Every tab can host a ConPTY now — the Agent Manager is a page, not a tab in _tabs; a
+            // non-terminal tab such as Settings simply yields no connection from the walk below.)
             const auto tabImpl = _GetTabImpl(projectedTab);
             if (!tabImpl)
             {
@@ -9689,10 +9679,7 @@ namespace winrt::TerminalApp::implementation
         std::vector<::Agentmaster::TabRosterEntry> roster;
         for (const auto& projectedTab : _tabs)
         {
-            if (projectedTab == _managerTab)
-            {
-                continue;
-            }
+            // (No Manager tab to skip any more — a non-terminal tab just yields no connection below.)
             const auto tabImpl = _GetTabImpl(projectedTab);
             if (!tabImpl)
             {

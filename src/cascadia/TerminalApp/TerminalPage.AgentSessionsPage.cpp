@@ -9,7 +9,7 @@
 // upstream TabManagement.cpp pattern) so TerminalPage.cpp stays close to upstream.
 //
 // Partial files in this group (★ marks THIS file):
-//   TerminalPage.AgentEngine.cpp               - ~TerminalPage, _InitAgentmasterEngine (consume the process-wide SharedEngine), the Manager tab, _WireAgentManagerContent
+//   TerminalPage.AgentEngine.cpp               - ~TerminalPage, _InitAgentmasterEngine (consume the process-wide SharedEngine), the Agent Manager page (+ its Home button), _WireAgentManagerContent
 //   TerminalPage.AgentSessions.cpp             - spawn/launch/restore/close/adopt for Claude + Codex; tab-title sync; smart naming + per-dir tab color
 //   TerminalPage.AgentObserver.cpp             - the per-tab overlay/badge bind/reconcile/liveness (incl. managed-Codex) + the Fleet Observer UI lane (_ObserverProbe)
 //   TerminalPage.AgentWindowRecord.cpp         - M10 per-window record capture/flush/restore + reopen saved windows (Claude + Codex tab refs)
@@ -655,7 +655,7 @@ namespace winrt::TerminalApp::implementation
             host,
             &_sessionsPageVisible,
             [weak = get_weak()]() {
-                // onDismiss (tab-switch OFF the Manager tab): close the owned popup + tooltips (a
+                // onDismiss (a tab replaced the Manager page): close the owned popup + tooltips (a
                 // collapsed host does NOT hide those), and SNAPSHOT the table's scroll offset while the
                 // page is still laid out, so _RestoreAgentPageOverlays can bring it back "as I left it".
                 if (const auto self = weak.get())
@@ -675,11 +675,11 @@ namespace winrt::TerminalApp::implementation
                 }
             },
             [weak = get_weak()]() {
-                // onRestore (return TO the Manager tab, page was on-screen when left): the host was just
+                // onRestore (the Manager page came back, this page was on-screen when left): the host was just
                 // re-shown, but a Collapse drops transient view state — re-apply it. DEFER to a clean
                 // tick: the re-shown ScrollViewer's content extent isn't realized yet in this pass
                 // (ScrollableHeight reads 0, which would CLAMP the restore to the top — the board-column
-                // recipe), and the selection handler re-focuses the Manager tab AFTER us. On the tick:
+                // recipe), and the page show re-focuses the Manager page AFTER us. On the tick:
                 // force one layout so the extent is real, restore the saved scroll, then focus the search
                 // box so Up/Down + typing route through the page again (matching _ShowSessionsPage).
                 if (const auto self = weak.get())
@@ -792,7 +792,7 @@ namespace winrt::TerminalApp::implementation
             self->_sessionsPageHost.Visibility(Visibility::Visible);
             self->_sessionsLocalTip.Hide(); // fresh open: the description panel stays hidden until the first hover
             self->_sessionsPageVisible.store(true, std::memory_order_relaxed);
-            // Mark the page logically OPEN so leaving + returning to the Manager tab restores it as left
+            // Mark the page logically OPEN so leaving + returning to the Manager page restores it as left
             // (the tab-switch seam only collapses; this intent is what tells it to re-open on return).
             self->_SetAgentPageOverlayOpenIntent(&self->_sessionsPageVisible, true);
             ::Agentmaster::LogNav(L"sessions-page shown"); // END (pairs with open-begin): the page is up; rows render async next

@@ -172,13 +172,15 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: force a UI redraw (board/tree/plan) from the current data — the page calls this
         // after an out-of-band reload (the observer survey lands asynchronously) so fresh data shows.
         void RefreshNow();
-        // Agentmaster (perf — the hidden-lens rebuild tax): is this Manager's content ON SCREEN (its tab
-        // selected)? The page drives it from the one tab-switch funnel. While HIDDEN, every refresh
-        // trigger — a registry notify, the 30s timing tick, a tab-switch selection sync — only marks the
+        // Agentmaster (perf — the hidden-lens rebuild tax): is this Manager's content ON SCREEN (the
+        // window's Agent Manager page shown)? The page drives it from the page show/hide + the tab-switch
+        // funnel. While HIDDEN, every refresh trigger — a registry notify, the 30s timing tick, a
+        // tab-switch selection sync — only marks the
         // lens DIRTY instead of rebuilding the whole board + tree + plan (the full XAML teardown +
         // recreate of every card/row/menu, ~1-6s at fleet scale, measured on the ONE Emperor UI
         // thread that every window shares) for pixels nobody can see; becoming visible again runs the
-        // ONE catch-up rebuild. Defaults to visible (the Manager tab is selected at window creation).
+        // ONE catch-up rebuild. Defaults to visible; the page host hides it right at creation
+        // (TerminalPage::_CreateAgentManagerPage), since the page starts off screen until Home shows it.
         void SetLensVisible(bool visible);
         // Agentmaster (Linked Lenses — the per-tab -> Manager sync): select a managed session in the
         // lens from OUTSIDE. The page calls this when the user switches to that session's terminal tab,
@@ -212,10 +214,10 @@ namespace winrt::TerminalApp::implementation
         // Exposed so a side-panel card offers the identical action set with zero drift — every item
         // routes through this content's already-wired callbacks (activate / rename / close / spawn),
         // exactly as if the user had right-clicked the board card. CAVEAT for hosts outside the
-        // Manager tab: Rename opens the Explorer tree's in-place editor, which lives on the (possibly
-        // hidden) Manager tab — the rename works, but the editor is only visible after switching
-        // there. `id` = the managed session; `cwd` = its effective working dir (feeds the folder-wide
-        // items). Returns a menu the caller shows via ShowAt; never null. UI thread only.
+        // Manager page: Rename opens the Explorer tree's in-place editor, which lives on the (possibly
+        // hidden) Agent Manager page — the rename works, but the editor is only visible after opening
+        // the page (Home). `id` = the managed session; `cwd` = its effective working dir (feeds the
+        // folder-wide items). Returns a menu the caller shows via ShowAt; never null. UI thread only.
         winrt::Windows::UI::Xaml::Controls::MenuFlyout BuildSessionMenuFor(const std::wstring& id, const std::wstring& cwd)
         {
             return _MakeLazySessionMenu(id, cwd);
@@ -734,7 +736,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::DispatcherTimer _refreshDelayTimer{ nullptr };
 
         // Agentmaster (perf — the hidden-lens rebuild tax, SetLensVisible): _lensVisible mirrors "the
-        // Manager tab is the selected tab"; _refreshDirty records a refresh that was REQUESTED while
+        // Agent Manager page is on screen"; _refreshDirty records a refresh that was REQUESTED while
         // hidden, so the first SetLensVisible(true) runs exactly one catch-up _Refresh(). Every
         // refresh trigger (registry notify, timing tick, selection sync, RefreshNow) funnels through
         // _Refresh, which is where the gate lives — no caller needs to know.
@@ -1187,7 +1189,6 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _setRecentDirsLimit{ nullptr }; // how many recent Launch dirs the path-picker keeps
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setShowTabCloseButton{ nullptr }; // TABS: show the close (x) button on tabs (OFF => force every tab to "Never"); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCloseTabOnMiddleClick{ nullptr }; // TABS: close a tab on middle-mouse click (OFF => disable both the manual hook + WinUI's native middle-close); GLOBAL
-        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAlwaysShowHomeButton{ nullptr }; // TABS: always show the strip "Home" button (OFF => only when the Manager tab is scrolled off); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setShowTabIcon{ nullptr }; // TABS: show the profile icon on tabs (OFF, the default => IconStyle::Hidden, takes no strip space); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ComboBox _setTitleNaming{ nullptr }; // TABS: HOW an untitled session's tab title derives from its working dir — last word (default) / folder as-is / two folders / capitals (TabTitleNaming); GLOBAL, applies at the next launch/adopt
         winrt::Windows::UI::Xaml::Controls::ComboBox _setTitleCase{ nullptr }; // TABS: the case transform on the derived title — Default / Lowercase / Uppercase (TabTitleCase); GLOBAL

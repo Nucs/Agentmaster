@@ -533,11 +533,11 @@ namespace winrt::TerminalApp::implementation
     }
     // Agentmaster (Linked Lenses — selection VISIBILITY sync): scroll the currently-selected board card
     // (and its Explorer-tree row) into view within their scrolling regions. The page calls this when the
-    // user switches TO the Manager tab: while the Manager was hidden the selection followed the user's
+    // Agent Manager page comes on screen: while the page was hidden the selection followed the user's
     // tab switches (SelectSession from _SyncManagerSelectionToTab), or a state change moved the card into
     // a column where it sits below the fold — so on return the HIGHLIGHTED card can be scrolled
     // off-screen. Revealing it ON tab-entry — deliberately NOT on every _Refresh, which would fight the
-    // user's own scrolling while they sit on the Manager tab and undo _RebuildBoard's offset
+    // user's own scrolling while they sit on the Manager page and undo _RebuildBoard's offset
     // preservation — synchronizes the selection's visibility with its highlight. A no-op when nothing
     // managed is selected (an external selection has no tracked card) or the selected session has no
     // visible card/row (archived / out of the current scope / its directory group collapsed).
@@ -604,9 +604,9 @@ namespace winrt::TerminalApp::implementation
         {
             _cwdBox.Text(winrt::hstring{ settings.defaultLaunchDir });
             _ValidateLaunchBox(); // re-validate explicitly: don't lean on TextChanged for this programmatic
-                                  // set. It works today only because SetSettings runs while the Manager tab
-                                  // is active (attached), but a future detached caller (cross-window settings
-                                  // push) would otherwise leave the underline/button stale (see _SelectSession).
+                                  // set. The content is usually DETACHED here — the Agent Manager page is built
+                                  // and wired off screen, and a cross-window settings push lands while it is
+                                  // hidden — where TextChanged can't be relied on to re-validate (see _SelectSession).
         }
         // Reflect the (global, persisted) Explorer Tree + Triage Board sorts on their toggles. Safe
         // before the UI is built (each updater no-ops while its button is null); the views adopt the
@@ -738,10 +738,11 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::Focus(FocusState /*reason*/)
     {
         // Agentmaster: park keyboard focus on the INVISIBLE, caret-less sink (built in the ctor) — NOT the
-        // cwd box. The host calls IPaneContent::Focus whenever the Manager pane is activated (app open, tab
-        // open, tab switch). We must put focus SOMEWHERE inside the pane subtree, or the pane-root routed
-        // key handlers (_KeyDownHandler / _ManagerPaneNavPreviewKeyDown — alt+right, ctrl+tab,
-        // ctrl+alt+<n>) never fire (focus stays on the tab header), the bug where those chords did nothing
+        // cwd box. The host calls IPaneContent::Focus whenever the Manager is shown (the Agent Manager page
+        // coming on screen via Home, a dismissed palette/flyout handing focus back). We must put focus
+        // SOMEWHERE inside the page subtree, or the page-root routed key handlers (_KeyDownHandler /
+        // _ManagerPaneNavPreviewKeyDown — ctrl+tab, ctrl+alt+<n>) never fire (focus stays on the Home
+        // button or a tab header), the bug where those chords did nothing
         // until you clicked an element. Focusing the cwd box was the ORIGINAL behavior but it put a blinking
         // caret in it on every open (and popped the path-picker) — which the user disliked — so we focus a
         // 1x1, opacity-0, no-focus-visual Button instead: keyboard works immediately, NOTHING looks focused,
@@ -771,7 +772,8 @@ namespace winrt::TerminalApp::implementation
     }
     winrt::hstring AgentManagerContent::Title()
     {
-        // The Manager tab's title doubles as the at-a-glance which-install-am-I marker: the
+        // The Agent Manager page's title (the window title while the page is on screen — the Manager
+        // is no longer a tab) doubles as the at-a-glance which-install-am-I marker: the
         // DEV package (AgentmasterDev — the loose-layout deploy) reads "Agent Manager Dev",
         // the release install plain "Agent Manager". Runtime identity, not a build flag, so
         // one binary serves both installs; cached — the package family never changes mid-run.
@@ -1936,7 +1938,7 @@ namespace winrt::TerminalApp::implementation
             _root.Children().Append(hbar);
         }
 
-        // ---- LocalTooltip (AgentLocalTooltip.h): the Manager tab's designated-area tooltips ----
+        // ---- LocalTooltip (AgentLocalTooltip.h): the Manager page's designated-area tooltips ----
         // Hovering any tipped control in the toolbar / Triage Board / Explorer Tree / Auto Testing
         // renders its description (title + text) in ONE fixed panel nested in the BOARD's top-right
         // corner, instead of a floating ToolTip popping over the very card/row being aimed at (and
@@ -2052,13 +2054,13 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        // Agentmaster (perf — the hidden-lens rebuild tax): while this Manager's tab is NOT the selected
-        // tab, nothing below is visible, so the whole board+tree+plan teardown + recreate would be spent
-        // on pixels nobody sees — and it IS spent on the ONE UI thread every window shares, right in the
-        // path of the terminal tab the user is actually typing in. Record the request and return; the
-        // page's SetLensVisible(true) runs the single catch-up rebuild when the Manager comes back. The
-        // only _Refresh side effect that matters off-screen — the keep-awake hold (a SYSTEM state, not a
-        // pixel) — is re-evaluated here so WhileRunning keeps tracking the fleet while hidden.
+        // Agentmaster (perf — the hidden-lens rebuild tax): while this Manager's page is NOT on screen
+        // (a tab is shown instead), nothing below is visible, so the whole board+tree+plan teardown +
+        // recreate would be spent on pixels nobody sees — and it IS spent on the ONE UI thread every window
+        // shares, right in the path of the terminal tab the user is actually typing in. Record the request
+        // and return; the page's SetLensVisible(true) runs the single catch-up rebuild when the Manager page
+        // comes back. The only _Refresh side effect that matters off-screen — the keep-awake hold (a SYSTEM
+        // state, not a pixel) — is re-evaluated here so WhileRunning keeps tracking the fleet while hidden.
         if (!_lensVisible)
         {
             _refreshDirty = true;

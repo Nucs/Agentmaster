@@ -171,9 +171,19 @@ or be controllable. Therefore:
 
 This keeps a clean split and avoids double-spawning Claude tabs.
 
-### 5.5 The pinned Manager tab
+### 5.5 The pinned Manager tab — SUPERSEDED (2026-09-25): the Manager is a page, not a tab
 
-Today `_OpenAgentManagerTab()` force-creates the Manager tab at index 0 in
+> **Superseded.** The Agent Manager is no longer a tab. `_CreateAgentManagerPage()` builds the
+> window's one `AgentManagerContent` at first layout; it is owned by `_managerPage` and never
+> inserted into `_tabs`, and the tab strip's **Home** button shows it. So a window record never
+> holds a Manager tab ref (capture walks `_tabs`), and there is nothing to force-create or re-pin.
+> A window that was ON the Manager at close records no focused tab (`selectedSessionId` empty,
+> `selectedTabIndex` -1), and `_RestoreWindowTabs` shows the page again. `selectedTabIndex` was
+> always an index into `rec.tabs` (not a strip position), so older records keep working. The
+> lens (`ManagerState`) persists exactly as before; the retired `managerTabColor` key is still
+> read and written, unused. The original plan is kept below for history.
+
+Originally, `_OpenAgentManagerTab()` force-created the Manager tab at index 0 in
 `_OnFirstLayout`. With restore, the window's record already contains an `agentManager` tab.
 New rule: **only force-create when the record has none** (first run / `defaultProfile`);
 otherwise restore it from the record, then **re-pin it leftmost & non-closable** regardless
@@ -188,7 +198,8 @@ flow is superseded by an explicit restore, so a relaunch never avalanches into N
 1. Emperor starts → create the **singleton engine** (one registry + one pipe + scheduler).
 2. Load every `windows/<id>.json` (per-window UI state) **and** `sessions.json`; the sessions
    enter the registry **Archived** (`live=false`) — NOT auto-launched. The app opens to one
-   window with just its (pinned, non-closable) Manager tab.
+   window with no session tab (originally "just its pinned, non-closable Manager tab"; since
+   2026-09-25 the Manager is a page behind the tab strip's Home button).
 3. A **decide-prompt** offers to bring the workspace back — and the WindowRecord capture →
    restore wiring it was once *held* on is now **SHIPPED** (Increment 3/4, §13.5), so this is
    how launch actually behaves: when >1 record was open at last exit, a Yes/No "Reopen your N

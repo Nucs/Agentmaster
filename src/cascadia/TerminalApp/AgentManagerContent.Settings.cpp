@@ -1642,16 +1642,15 @@ namespace winrt::TerminalApp::implementation
         panel.Children().Append(SettingsSeparator(L"TAB STRIP", true)); // leading section (the tab itself is "Tabs & Overlay")
         _setShowTabCloseButton = ToggleSwitch{};
         _setShowTabCloseButton.Header(winrt::box_value(L"Show close (\x00D7) button on tabs"));
-        AgentSetTip(_setShowTabCloseButton, L"When off, the close (\x00D7) button is hidden on every tab (you can still close with the tab's right-click menu, the middle-mouse button below, or Ctrl+Shift+W). The pinned Manager tab is always X-less. Default on.");
+        AgentSetTip(_setShowTabCloseButton, L"When off, the close (\x00D7) button is hidden on every tab (you can still close with the tab's right-click menu, the middle-mouse button below, or Ctrl+Shift+W). Default on.");
         panel.Children().Append(_setShowTabCloseButton);
         _setCloseTabOnMiddleClick = ToggleSwitch{};
         _setCloseTabOnMiddleClick.Header(winrt::box_value(L"Close tab with middle-mouse click"));
         AgentSetTip(_setCloseTabOnMiddleClick, L"When off, middle-clicking a tab no longer closes it \x2014 handy if you keep closing tabs by accident. Default on.");
         panel.Children().Append(_setCloseTabOnMiddleClick);
-        _setAlwaysShowHomeButton = ToggleSwitch{};
-        _setAlwaysShowHomeButton.Header(winrt::box_value(L"Always display Home button"));
-        AgentSetTip(_setAlwaysShowHomeButton, L"Keep the tab-strip \x201CHome\x201D button (jump to the pinned Agent Manager tab) visible whenever you're on another tab. When off, it appears only once the Manager tab has scrolled out of view. Default on.");
-        panel.Children().Append(_setAlwaysShowHomeButton);
+        // (The "Always display Home button" toggle that sat here is retired: the Agent Manager is no longer
+        // a tab — the tab strip's Home button is the only way to open it, so it is always shown. Its
+        // AppSettings key still round-trips through settings.json; nothing reads it.)
         // TABS: show the profile ICON on tabs (the leftmost glyph, before the status dot + title).
         // GLOBAL (AppSettings::showTabIcon); applied live on Save via TerminalPage::_UpdateAllTabIcons +
         // the cross-window broadcast. DEFAULT OFF — this app hides tab icons by default so the strip
@@ -1745,7 +1744,7 @@ namespace winrt::TerminalApp::implementation
         // Tab color modes: HOW managed tabs get their color — shared per working dir (the classic
         // Rule-#12 behavior, default), individual per tab, shared per the INFERRED working dir
         // (detected from the files the session reads/edits/creates), or "Remove colors" (STRIP-WIDE:
-        // no tab is colored — shell + Manager tabs' colors are SUSPENDED, not voided — and "Change
+        // no tab is colored — shell tabs' colors are SUSPENDED, not voided — and "Change
         // tab color" is disabled on every tab; saved colors are kept, just not loaded). GLOBAL
         // (AppSettings::tabColorMode);
         // applied live on Save + cross-window broadcast (TerminalPage::_ReapplyManagedTabColors).
@@ -1756,7 +1755,7 @@ namespace winrt::TerminalApp::implementation
         _setTabColorMode.Items().Append(winrt::box_value(L"Individual per tab")); // index 1 == TabColorMode::Individual
         _setTabColorMode.Items().Append(winrt::box_value(L"Inferred working directory")); // index 2 == TabColorMode::InferredWorkingDirectory
         _setTabColorMode.Items().Append(winrt::box_value(L"Remove colors")); // index 3 == TabColorMode::NoColor
-        AgentSetTip(_setTabColorMode, L"How session tabs are colored.\n\x2022 Shared per working directory (default): every tab launched in a folder wears that folder's permanent color; picking a color recolors the whole folder.\n\x2022 Individual per tab: each session gets its own color (kept across close/reopen); picking a color changes only that tab.\n\x2022 Inferred working directory: like shared-per-directory, but keyed by where the session ACTUALLY works rather than where it was started. Every file it touches votes; the votes group into work areas \x2014 a git repository, or a top-level folder outside one \x2014 and the area with the most votes wins (a repo answers as the repo root, never deeper). Re-checked as the session works, so one that settles into another tree takes that tree's color. Scratch files under your temp folder never vote.\n\x2022 Remove colors: NO tab is colored \x2014 session tabs, shell tabs (e.g. a PowerShell tab that kept a color), and the Manager tab alike \x2014 and \x201C" L"Change tab color\x201D is disabled on every tab. Nothing is deleted: folder/session colors and a shell tab's own color are kept (just not shown) \x2014 switch back to any other mode and they return exactly as they were.\n\nOne exception, in every mode: a session launched straight in your home folder infers anyway \x2014 a bare \x201C" L"claude\x201D with no cd almost never works there, so its color follows the files it touches instead.");
+        AgentSetTip(_setTabColorMode, L"How session tabs are colored.\n\x2022 Shared per working directory (default): every tab launched in a folder wears that folder's permanent color; picking a color recolors the whole folder.\n\x2022 Individual per tab: each session gets its own color (kept across close/reopen); picking a color changes only that tab.\n\x2022 Inferred working directory: like shared-per-directory, but keyed by where the session ACTUALLY works rather than where it was started. Every file it touches votes; the votes group into work areas \x2014 a git repository, or a top-level folder outside one \x2014 and the area with the most votes wins (a repo answers as the repo root, never deeper). Re-checked as the session works, so one that settles into another tree takes that tree's color. Scratch files under your temp folder never vote.\n\x2022 Remove colors: NO tab is colored \x2014 session tabs and shell tabs (e.g. a PowerShell tab that kept a color) alike \x2014 and \x201C" L"Change tab color\x201D is disabled on every tab. Nothing is deleted: folder/session colors and a shell tab's own color are kept (just not shown) \x2014 switch back to any other mode and they return exactly as they were.\n\nOne exception, in every mode: a session launched straight in your home folder infers anyway \x2014 a bare \x201C" L"claude\x201D with no cd almost never works there, so its color follows the files it touches instead.");
         panel.Children().Append(_setTabColorMode);
         // Tab color modes — "Use .git folder to infer" (AppSettings::inferGitRoot, default ON): the
         // inferred working dir SNAPS to the enclosing git repository root (the folder holding .git —
@@ -2743,10 +2742,6 @@ namespace winrt::TerminalApp::implementation
         {
             _setCloseTabOnMiddleClick.IsOn(_appSettings.closeTabOnMiddleClick);
         }
-        if (_setAlwaysShowHomeButton)
-        {
-            _setAlwaysShowHomeButton.IsOn(_appSettings.alwaysShowHomeButton);
-        }
         if (_setShowTabIcon)
         {
             _setShowTabIcon.IsOn(_appSettings.showTabIcon);
@@ -3372,10 +3367,6 @@ namespace winrt::TerminalApp::implementation
         if (_setCloseTabOnMiddleClick)
         {
             _appSettings.closeTabOnMiddleClick = _setCloseTabOnMiddleClick.IsOn();
-        }
-        if (_setAlwaysShowHomeButton)
-        {
-            _appSettings.alwaysShowHomeButton = _setAlwaysShowHomeButton.IsOn();
         }
         if (_setShowTabIcon)
         {

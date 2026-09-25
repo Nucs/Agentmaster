@@ -20,8 +20,8 @@ directories — with full user interaction *and* full programmatic control.
 
 - **Design A — Native Graft.** The Claude-management "brain" lives *inside* the
   forked app in C++/WinRT. One process, native fidelity, deepest control.
-- **Manager tab = C1 "Linked Lenses".** A pinned, leftmost, non-closable tab
-  (tab 0, open by default) split into three synced regions:
+- **Agent Manager page = C1 "Linked Lenses".** A per-window page behind the tab strip's **Home**
+  button (a pinned, leftmost, non-closable tab 0 until 2026-09-25) split into three synced regions:
   - **Triage Board** (top) — sessions as cards in state columns
     (Running · Waiting-for-you · Needs-approval · Error · Idle/Done), plus an *External* column.
   - **Explorer Tree** (bottom-left) — `M` working directories → their `N` sessions.
@@ -122,8 +122,8 @@ events to sessions and drives the Triage Board + Tests Autorunner.
   checks pass (incl. JSON + round-trips + template apply). **Lifecycle = Open ⇄ Archived (no
   discard; transcripts are never deleted).** On startup `_RestoreClaudeSessions()` loads the
   persisted fleet into the registry as **Archived** and does **NOT** auto-launch it (Rule #6 — a
-  background `claude --resume` before the control initializes crashes the app); the app opens to
-  just the Manager tab. Restore is **on demand** (per-row or bulk, from the **Archive page**) and
+  background `claude --resume` before the control initializes crashes the app); no session tab is
+  re-opened at startup. Restore is **on demand** (per-row or bulk, from the **Archive page**) and
   **transcript-gated**: `claude --resume <id>` only when Claude has a conversation for that id, else
   a fresh session. Closing a tab **archives** (keeps the record, `live=false`) — there is no
   kill/discard. Verified live (`[restore]`/`[resume]`/`[restore-fresh]`/`SessionStart` in

@@ -213,7 +213,7 @@ namespace winrt::TerminalApp::implementation
 {
     // Build the whole side panel into ContentArea. Called ONCE from _OnFirstLayout, AFTER
     // _InitAgentmasterEngine (the registry + the claimed WindowRecord exist) and after
-    // _OpenAgentManagerTab (the AgentManagerContent the sort/menu/selection delegate to exists).
+    // _CreateAgentManagerPage (the AgentManagerContent the sort/menu/selection delegate to exists).
     // Seeds the per-window layout from the claimed record (per FIELD — a pre-feature record's unset
     // fields fall back to the AppSettings defaults, honoring "last one to resize seeds new
     // windows"), then docks, renders the first card list, and re-selects the lens's restored
@@ -1340,10 +1340,10 @@ namespace winrt::TerminalApp::implementation
             if (const auto self = weakThis.get())
             {
                 self->_SidePanelSelectSession(id, /*driveManagerLens*/ true);
-                // Agentmaster (tab-strip reveal): while the Manager tab is active, a card click scrolls the
+                // Agentmaster (tab-strip reveal): while the Manager page is up, a card click scrolls the
                 // session's tab into view like a board card click does — including a RE-click of the
                 // already-selected card, which _SidePanelSelectSession's same-id early-out and the lens's
-                // change-only reveal both swallow. Off the Manager it does nothing (the click is a PEEK —
+                // change-only reveal both swallow. Off the Manager page it does nothing (the click is a PEEK —
                 // SIDE_PANEL.md §3); the gate lives in _RevealClickedSessionTab.
                 self->_RevealClickedSessionTab(id);
             }
@@ -1479,9 +1479,10 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         const auto tab = _GetFocusedTab();
-        // The Manager tab (its content isn't a session) and "nothing focused" both leave the current
-        // selection alone — returning to the Manager tab should keep showing the last peek, not clear it.
-        if (!tab || tab == _managerTab)
+        // "Nothing focused" — the Agent Manager page is on screen (no tab is focused then) — leaves the
+        // current selection alone: returning to the Manager page should keep showing the last peek, not
+        // clear it.
+        if (!tab)
         {
             return;
         }

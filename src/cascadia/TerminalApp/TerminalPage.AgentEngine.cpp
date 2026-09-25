@@ -9,7 +9,7 @@
 // upstream TabManagement.cpp pattern) so TerminalPage.cpp stays close to upstream.
 //
 // Partial files in this group (★ marks THIS file):
-// ★ TerminalPage.AgentEngine.cpp               - ~TerminalPage, _InitAgentmasterEngine (consume the process-wide SharedEngine), the Manager tab, _WireAgentManagerContent
+// ★ TerminalPage.AgentEngine.cpp               - ~TerminalPage, _InitAgentmasterEngine (consume the process-wide SharedEngine), the Agent Manager page (+ its Home button), _WireAgentManagerContent
 //   TerminalPage.AgentSessions.cpp             - spawn/launch/restore/close/adopt for Claude + Codex; tab-title sync; smart naming + per-dir tab color
 //   TerminalPage.AgentObserver.cpp             - the per-tab overlay/badge bind/reconcile/liveness (incl. managed-Codex) + the Fleet Observer UI lane (_ObserverProbe)
 //   TerminalPage.AgentWindowRecord.cpp         - M10 per-window record capture/flush/restore + reopen saved windows (Claude + Codex tab refs)
@@ -18,11 +18,12 @@
 //   TerminalPage.AgentSessionsPage.Internal.h  - the Sessions-browser Sess* file-local helpers shared by the two SessionsPage TUs above (anonymous namespace)
 // ======================================================================================
 //
-// Agentmaster — TerminalPage's engine wiring + Manager-tab hosting (M9 / M6; see
+// Agentmaster — TerminalPage's engine wiring + Agent Manager page hosting (M9 / M6; see
 // doc/agentmaster/DESIGN.md and IMPLEMENTATION.md): consume the ONE process-wide
 // SharedEngine (registry / bridge / scheduler / scanner / observer), claim this
-// window's WindowRecord, open the pinned non-closable Manager tab, wire the
-// AgentManagerContent callbacks, and detach everything again in ~TerminalPage.
+// window's WindowRecord, build the Agent Manager PAGE (shown by the tab strip's Home
+// button — it is no longer a tab), wire the AgentManagerContent callbacks, and detach
+// everything again in ~TerminalPage.
 //
 // This file implements TerminalPage methods (same class, separate TU — the
 // TabManagement.cpp pattern) so the Agentmaster additions live in responsibility-
@@ -33,7 +34,7 @@
 
 #include "../../types/inc/utils.hpp" // GuidToString (mint a fresh windowId)
 
-#include "AgentManagerContent.h" // the Manager tab's content (C1 UI) — created + wired here
+#include "AgentManagerContent.h" // the Agent Manager page's content (C1 UI) — created, wired and shown here
 #include "AgentTabOverlay.h" // ~TerminalPage destroys the com_ptr<AgentTabOverlay> maps — needs the complete type
 #include "AgentCatchLog.h" // exception forensics: InstallAgentExceptionTrace (VEH throw-stack ring + wil failure logger, engine init below)
 #include "AgentToastActivator.h" // System notifications: the toast COM activator (registered once, process-wide, from the engine init below)
@@ -90,9 +91,9 @@ namespace winrt
 // Agentmaster: depth-first walk for the TabView's internal horizontal ScrollViewer — the template
 // part named "ScrollViewer" inside its TabViewListView (see Microsoft.UI.Xaml 2.8 Generic.xaml: the
 // TabScrollViewerStyle hosts the `<`/`>` ScrollDecrease/IncreaseButtons around it). That ScrollViewer
-// is what scrolls the tab strip, so its HorizontalOffset tells us when tab 0 (the pinned Manager tab)
-// has scrolled off the left edge. Each TabViewItem's content is just an empty Border (Tab.cpp), so the
-// strip subtree contains exactly one ScrollViewer and the first found in document order is correct.
+// is what scrolls the tab strip, so it is the instrument the strip reveal (_RevealTabInStrip) and the
+// drag gesture's edge auto-scroll move. Each TabViewItem's content is just an empty Border (Tab.cpp), so
+// the strip subtree contains exactly one ScrollViewer and the first found in document order is correct.
 static winrt::WUX::Controls::ScrollViewer _FindTabStripScrollViewer(const winrt::WUX::DependencyObject& root)
 {
     if (!root)
@@ -119,8 +120,8 @@ static winrt::WUX::Controls::ScrollViewer _FindTabStripScrollViewer(const winrt:
 }
 
 // Agentmaster: flip a tab-strip nav button's visibility, but only when it actually changes — the
-// updater runs on the high-frequency ViewChanged stream, so a no-op write would needlessly invalidate
-// the strip's layout each tick.
+// updater runs on every tab add/remove/switch (hundreds of times during a big window restore), so a
+// no-op write would needlessly invalidate the strip's layout each time.
 static void _SetTabStripButtonVisible(const winrt::WUX::Controls::Button& btn, bool visible)
 {
     if (!btn)
@@ -131,6 +132,50 @@ static void _SetTabStripButtonVisible(const winrt::WUX::Controls::Button& btn, b
     if (btn.Visibility() != desired)
     {
         btn.Visibility(desired);
+    }
+}
+
+// Agentmaster (the Agent Manager PAGE): paint the Home button as the strip's ACTIVE entry while the
+// Manager page is on screen — the Home button is where the Manager lives in the strip now that it is no
+// longer a tab, and with the tabs deselected under the page nothing else would say "you are here". The
+// fill is the system accent at ~40% alpha, the same "selected" tint the Linked-Lenses pill paints on a
+// tab (_SetTabSelectionPill), so the two read as one visual language. Idle restores the XAML's flat
+// Transparent. Only Background is written: the glyph keeps inheriting the button's {ThemeResource}
+// foreground, so a theme switch still re-colors it (overwriting Foreground would freeze the old theme's
+// brush). Change-gated through the button's Tag (nothing else uses it), because this runs from every tab
+// add/remove/switch. Parameters: btn — the Home button (null is a no-op); active — the page is on screen.
+// Never throws: a failed write is logged (Rule #18) and the button keeps its previous look.
+static void _PaintManagerHomeButton(const winrt::WUX::Controls::Button& btn, const bool active)
+{
+    if (!btn)
+    {
+        return;
+    }
+    try
+    {
+        // An unset Tag means "never painted" (first call) — always paint then, whatever `active` is.
+        if (const auto tag = btn.Tag(); tag && winrt::unbox_value_or<bool>(tag, !active) == active)
+        {
+            return;
+        }
+        auto fill = winrt::Windows::UI::ColorHelper::FromArgb(0x00, 0x00, 0x00, 0x00); // idle: the XAML's flat Transparent
+        if (active)
+        {
+            // Resolved like the pill / the active-pane border accent: HasKey-guarded, WT-blue fallback.
+            fill = winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x00, 0x78, 0xD4);
+            const auto res = winrt::WUX::Application::Current().Resources();
+            if (const auto accentKey = winrt::box_value(L"SystemAccentColor"); res.HasKey(accentKey))
+            {
+                fill = winrt::unbox_value_or<winrt::Windows::UI::Color>(res.Lookup(accentKey), fill);
+            }
+            fill.A = 0x66; // ~40% — reads "selected" without drowning the glyph
+        }
+        btn.Background(winrt::WUX::Media::SolidColorBrush{ fill });
+        btn.Tag(winrt::box_value(active));
+    }
+    catch (...)
+    {
+        ::Agentmaster::AgentLogCaughtException(L"_PaintManagerHomeButton");
     }
 }
 
@@ -481,101 +526,236 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: "#RRGGBB" -> an opaque WT tab color. Mirrors AgentSessions.cpp's ClaudeHexToColor;
-    // kept TU-local like the codebase's other per-file color converters. Used to re-apply the Manager
-    // tab's persisted per-window color on reopen. nullopt on anything malformed.
-    static std::optional<winrt::Windows::UI::Color> _ManagerHexToColor(const std::wstring& hexIn)
+    // Agentmaster (the Agent Manager PAGE): build this window's one Manager content — the fleet view that
+    // used to live in the pinned, leftmost, non-closable Manager TAB — wire it to the engine, and keep it
+    // OFF screen until the tab strip's Home button shows it (_ShowManagerPage). It is owned by _managerPage
+    // for the window's whole life and is NEVER inserted into _tabs, so no tab loop, drag, move, close,
+    // split or rename can ever reach it (every pinned-tab guard the old tab needed is gone with it). Its
+    // lens starts HIDDEN: every refresh until the first show only marks it dirty (the hidden-lens rebuild
+    // tax fix), and the first show runs the single catch-up rebuild.
+    // Called once from _OnFirstLayout, after _InitAgentmasterEngine (the registry the wiring hands over
+    // must exist) and before _InitAgentSidePanel (the side panel delegates sort/menu/selection to this
+    // content). Idempotent: a second call is a no-op. Never throws: a failed build is logged (Rule #18)
+    // and leaves the window page-less — Home stays hidden, and a window emptied of tabs then closes the
+    // upstream way instead of showing a page it doesn't have.
+    void TerminalPage::_CreateAgentManagerPage()
     {
-        std::wstring s = hexIn;
-        if (!s.empty() && s.front() == L'#')
-        {
-            s.erase(0, 1);
-        }
-        if (s.size() != 6)
-        {
-            return std::nullopt;
-        }
-        const auto byteAt = [&s](size_t i) {
-            return static_cast<uint8_t>(::wcstoul(s.substr(i, 2).c_str(), nullptr, 16));
-        };
-        winrt::Windows::UI::Color c{};
-        c.A = 255;
-        c.R = byteAt(0);
-        c.G = byteAt(2);
-        c.B = byteAt(4);
-        return c;
-    }
-
-    // Agentmaster: open the always-present Manager tab, pinned at the leftmost
-    // position (tab 0) and non-closable. Tracked in _managerTab.
-    void TerminalPage::_OpenAgentManagerTab()
-    {
-        if (_managerTab)
+        if (_managerPage)
         {
             return;
         }
-
-        const auto& managerPane{ winrt::make_self<AgentManagerContent>() };
-        // Route keys the content didn't handle back to the page (as other content panes do).
-        managerPane->GetRoot().KeyDown({ this, &TerminalPage::_KeyDownHandler });
-        // Agentmaster: ...but tab-switching chords (alt+right, ctrl+tab, ctrl+alt+<n>) must beat a focused
-        // Manager box, which would eat them before the bubbling KeyDown above. Tunnel them in.
-        managerPane->GetRoot().PreviewKeyDown({ this, &TerminalPage::_ManagerPaneNavPreviewKeyDown });
-
-        // Agentmaster: wire the Manager UI to the engine (registry + spawn/activate/kill).
-        _WireAgentManagerContent(managerPane);
-
-        const auto resultPane = std::make_shared<Pane>(*managerPane);
-        _managerTab = _CreateNewTabFromPane(resultPane, 0); // 0 == leftmost
-
-        if (_managerTab)
+        try
         {
-            // Non-closable: hide this tab's close button.
-            _managerTab.CloseButtonVisibility(winrt::Microsoft::Terminal::Settings::Model::TabCloseButtonVisibility::Never);
-
-            // Agentmaster: also gray out the right-click "Move tab" / "Close" / "Close tab"
-            // entries so the pinned Manager tab can't be relocated or closed from the menu, and
-            // disable rename (the Manager tab's title is fixed): grays the "Rename Tab" menu item
-            // and blocks the double-tap / openTabRenamer-action rename gestures.
-            if (const auto tabImpl{ _GetTabImpl(_managerTab) })
-            {
-                tabImpl->DisableCloseAndMoveMenuItems();
-                tabImpl->DisableTabRename();
-
-                // Agentmaster: re-apply the Manager tab's per-window color from the claimed window record
-                // (windows/<id>.json). The Manager tab is a per-window singleton, so unlike a session tab
-                // (dir-keyed, Rule #12) its color lives in the window record; a claimed record with a saved
-                // color re-tints this window's home tab on reopen. SetRuntimeTabColor raises TabColorChanged,
-                // but _ScheduleWindowRecordSave no-ops pre-Initialized, so this can't spuriously re-save.
-                if (_windowRecordClaimed && !_windowRecord.managerTabColor.empty())
-                {
-                    if (const auto c = _ManagerHexToColor(_windowRecord.managerTabColor))
-                    {
-                        tabImpl->SetRuntimeTabColor(*c);
-                    }
-                }
-            }
-            // Non-movable by drag, too: CanDrag(false) stops the tab being dragged/torn out;
-            // the drag/move seams additionally call _PinManagerTabFirst() to snap it back to
-            // index 0 if another tab is dropped before it. Best-effort (wrapped).
-            try
-            {
-                if (const auto tvi = _managerTab.TabViewItem())
-                {
-                    tvi.CanDrag(false);
-                    tvi.AllowDrop(false);
-                }
-            }
-            CATCH_LOG();
+            auto page = winrt::make_self<AgentManagerContent>();
+            // Route keys the content didn't handle back to the page's keybindings (as other content does).
+            // Weak: XAML can keep the root alive a beat past the page during teardown.
+            page->GetRoot().KeyDown({ get_weak(), &TerminalPage::_KeyDownHandler });
+            // ...but tab-switching chords (ctrl+tab, ctrl+alt+<n>) must beat a focused Manager box, which
+            // would eat them before the bubbling KeyDown above. Tunnel them in (Root carries a twin wiring).
+            page->GetRoot().PreviewKeyDown({ get_weak(), &TerminalPage::_ManagerPaneNavPreviewKeyDown });
+            // Off screen until the first show — set BEFORE the wiring, whose SetRegistry / SetManagerState
+            // already run refreshes (those now just mark the lens dirty for that first show).
+            page->SetLensVisible(false);
+            // Wire the Manager UI to the engine (registry + spawn/activate/close/... callbacks).
+            _WireAgentManagerContent(page);
+            _managerPage = std::move(page);
         }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_CreateAgentManagerPage");
+            _managerPage = nullptr;
+        }
+        // The tab row must stay reachable to host Home (see _UpdateTabView), and Home appears the moment
+        // there is a page to open.
+        _UpdateTabView();
+        _UpdateManagerNavButtons();
+    }
+
+    // Agentmaster (the Agent Manager PAGE): put the Manager on screen in place of the current tab — the one
+    // thing the tab strip's Home button does, and the fallback wherever the strip has nothing else to show
+    // (the last tab closed, a close whose every remaining tab is dormant, a Deactivate of the focused tab,
+    // a window reopened while it was on the Manager). It mirrors, step for step, what selecting the old
+    // Manager tab did: unfocus the tabs; swap the page's root into the tab-content host (_tabContent — the
+    // exact spot the tab's pane occupied, so the layout, the side panel beside it and the full-window pages
+    // over it are unchanged); DESELECT the strip, so no tab reads as focused (every tab-targeting action —
+    // close, split, rename, find — is then a no-op) and the Home button paints as the active entry; re-open
+    // a full-window page (Sessions) that was left open over the Manager; focus the page's invisible key
+    // sink (unless the command palette owns focus — GH#7409, the _UpdatedSelectedTab rule); refresh the
+    // title / theme / process priority; run the shared Agentmaster selection effects with a NULL tab (the
+    // lens goes on screen with its catch-up rebuild, no overlay is focused, the pill, the bring-into-view);
+    // and persist it (the window now reopens onto the Manager — its record names no focused tab).
+    // Parameters:
+    //   reason - which entry point asked; rides the [nav] line ("home", "last tab closed", ...).
+    // Idempotent: while the page is already up this does nothing — a double-clicked Home never flickers,
+    //   and a Sessions page open over the Manager keeps its keyboard focus. No page (a failed build) is a
+    //   no-op too. UI thread only.
+    // Never throws: every step is contained and logged (Rule #18); a failed step degrades only its effect.
+    void TerminalPage::_ShowManagerPage(const std::wstring_view reason)
+    {
+        if (!_managerPage || _managerPageVisible)
+        {
+            return;
+        }
+        // What we are leaving, read BEFORE the flag flips (_GetFocusedTabIndex answers nullopt once it is set)
+        // — only for the [nav] line. Not during a removal (_RemoveTab's fallbacks): the tab being left is
+        // the one just closed, and the strip's selection then is merely the neighbor MUX auto-picked (never
+        // shown), which would read as "from <neighbor>" and mislead a log reader.
+        const auto leaving = _removing ? winrt::TerminalApp::Tab{ nullptr } : _GetFocusedTab();
+        _managerPageVisible = true;
+        try
+        {
+            // The outgoing tab loses focus exactly as a tab switch unfocuses it (_UpdatedSelectedTab).
+            for (const auto& tab : _tabs)
+            {
+                tab.Focus(FocusState::Unfocused);
+            }
+            _tabContent.Children().Clear();
+            _tabContent.Children().Append(_managerPage->GetRoot());
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ShowManagerPage content swap");
+        }
+        _DeselectTabStripForManagerPage();
+        try
+        {
+            // A full-window page (Sessions) the user left open over the Manager comes back as it was left —
+            // the counterpart of the dismiss every tab switch runs (_UpdatedSelectedTab).
+            _RestoreAgentPageOverlays();
+            const auto palette = CommandPaletteElement();
+            if (!palette || palette.Visibility() != Visibility::Visible)
+            {
+                _managerPage->Focus(FocusState::Programmatic); // the invisible sink: the page's keys work, nothing looks focused
+            }
+            TitleChanged.raise(*this, nullptr);
+            _updateThemeColors();
+            _adjustProcessPriorityThrottled->Run(); // the tab we left drops its foreground boost, like any switch away
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ShowManagerPage restore/focus/title/theme");
+        }
+        try
+        {
+            _ApplyAgentTabSelection(nullptr, nullptr);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ShowManagerPage selection effects");
+        }
+        _ScheduleWindowRecordSave();
+        _UpdateManagerNavButtons();
+        ::Agentmaster::LogNav(L"manager-page show (" + std::wstring{ reason } + L")" + (leaving ? (L" from " + _DescribeTabForLog(leaving)) : std::wstring{}));
+    }
+
+    // Agentmaster (the Agent Manager PAGE): take the page off screen because a TAB is about to take its
+    // place. Callers (the tab-switch funnel, _LeaveManagerPageOntoSelectedTab) MUST follow with
+    // _UpdatedSelectedTab(toTab): that content swap is what removes the page's root from _tabContent and
+    // collapses the full-window pages opened over it, so this only flips the page's own state — the flag
+    // (tab-targeting actions see the focused tab again), the lens (hidden: refreshes go back to only
+    // marking it dirty), and the Home paint.
+    // Parameters:
+    //   toTab - the tab being shown instead (null tolerated); only named in the [nav] line.
+    // No-op when the page is not up. UI thread only. Never throws (contained + logged — Rule #18).
+    void TerminalPage::_HideManagerPage(const TerminalApp::Tab& toTab)
+    {
+        if (!_managerPageVisible)
+        {
+            return;
+        }
+        _managerPageVisible = false;
+        try
+        {
+            if (_managerPage)
+            {
+                _managerPage->SetLensVisible(false);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_HideManagerPage lens");
+        }
+        _UpdateManagerNavButtons();
+        ::Agentmaster::LogNav(L"manager-page hide -> " + (toTab ? _DescribeTabForLog(toTab) : std::wstring{ L"(no tab)" }));
+    }
+
+    // Agentmaster (the Agent Manager PAGE): clear the tab strip's selection so that, while the page is on
+    // screen, no tab is drawn as the active one and _GetFocusedTab has nothing to answer. The re-entrant
+    // SelectionChanged this raises is marked as ours (_managerPageDeselecting) so the funnel ignores it.
+    // Called by _ShowManagerPage, and again after any strip mutation the page survives: MUX TabView
+    // re-selects the nearest REALIZED neighbor when an item is removed from a strip with no selection
+    // (its OnItemsChanged "SelectedIndex might also already be -1" branch), which would leave a tab
+    // highlighted under the page. No-op when nothing is selected. UI thread only. Never throws: a failure
+    // is logged (Rule #18) and harmless — _GetFocusedTabIndex already answers nullopt while the page is up.
+    void TerminalPage::_DeselectTabStripForManagerPage()
+    {
+        if (!_tabView)
+        {
+            return;
+        }
+        try
+        {
+            if (!_tabView.SelectedItem())
+            {
+                return; // already nothing selected
+            }
+            _managerPageDeselecting = true;
+            auto clearDeselecting = wil::scope_exit([this]() noexcept { _managerPageDeselecting = false; });
+            _tabView.SelectedItem(nullptr);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_DeselectTabStripForManagerPage");
+        }
+    }
+
+    // Agentmaster (the Agent Manager PAGE): the belt for the one case the tab-switch funnel can't see. A
+    // caller is about to make `tab` the selected tab while the page is up; normally that raises
+    // SelectionChanged and _OnTabSelectionChanged leaves the page. But when `tab` is ALREADY the strip's
+    // selected item — MUX kept or re-acquired the selection under the page (see
+    // _DeselectTabStripForManagerPage) — selecting it again raises nothing, and the page would stay up over
+    // a tab the user just asked for (Jump Back to the tab you came from, a click on that tab's header, a
+    // toast click). Then this runs the switch the funnel would have run: hide the page, swap the tab in, the
+    // shared Agentmaster selection effects, the record save and the nav buttons.
+    // Parameters:
+    //   tab - the tab about to be selected (null tolerated).
+    // Returns: true when it switched to `tab` itself; false when the page is not up, `tab` is null, or the
+    //   caller's own selection change will do it.
+    // UI thread only. Never throws: a failure is logged (Rule #18) and answers false, so the caller carries
+    //   on with its normal selection path.
+    bool TerminalPage::_LeaveManagerPageOntoSelectedTab(const TerminalApp::Tab& tab)
+    {
+        if (!_managerPageVisible || !tab || !_tabView)
+        {
+            return false;
+        }
+        try
+        {
+            const auto tvi = tab.TabViewItem();
+            if (!tvi || _tabView.SelectedItem() != tvi)
+            {
+                return false; // the caller's selection change raises SelectionChanged -> the funnel leaves the page
+            }
+            _HideManagerPage(tab);
+            _UpdatedSelectedTab(tab);
+            _ApplyAgentTabSelection(tab, nullptr);
+            _ScheduleWindowRecordSave();
+            _UpdateManagerNavButtons();
+            return true;
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_LeaveManagerPageOntoSelectedTab");
+        }
+        return false;
     }
 
     // Agentmaster: lazily bind to the TabView's internal horizontal ScrollViewer. It isn't realized
     // until the strip's template is applied (and at least one tab exists), so the first attempts
     // (from _OnFirstLayout) may find nothing — later callers (_OnTabItemsChanged, every
-    // _UpdateManagerNavButtons) retry until it's there. Once bound we watch ViewChanged (the user
-    // scrolled — buttons, wheel or drag) and SizeChanged (the strip resized, so overflow appeared or
-    // vanished) to re-evaluate the Home button. The guard makes repeat calls cheap no-ops.
+    // _UpdateManagerNavButtons, the strip reveal, the drag gesture) retry until it's there. The strip
+    // reveal and the drag gesture's edge auto-scroll are its users now (the Home button no longer tracks
+    // the scroll offset — it is always shown). The guard makes repeat calls cheap no-ops.
     void TerminalPage::_EnsureTabStripScrollViewer()
     {
         if (_tabStripScrollViewer || !_tabView)
@@ -590,18 +770,6 @@ namespace winrt::TerminalApp::implementation
         }
 
         _tabStripScrollViewer = sv;
-        _tabStripViewChangedRevoker = sv.ViewChanged(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
-            if (auto page = weakThis.get())
-            {
-                page->_UpdateManagerNavButtons();
-            }
-        });
-        _tabStripSizeChangedRevoker = sv.SizeChanged(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
-            if (auto page = weakThis.get())
-            {
-                page->_UpdateManagerNavButtons();
-            }
-        });
     }
 
     // Agentmaster: the Manager lens's currently-selected managed session (the highlighted board card /
@@ -620,60 +788,28 @@ namespace winrt::TerminalApp::implementation
         return {};
     }
 
-    // Agentmaster: recompute the two tab-strip nav buttons. They are inverses and mutually exclusive:
-    //  - Home appears when you are NOT on the Manager tab — ALWAYS when the cog's "Always display Home
-    //    button" is on (the default), otherwise only once the Manager tab has scrolled off the left edge
-    //    of the strip (jump TO it). The Manager tab is index 0, content-x [~0, width); once the
-    //    ScrollViewer's horizontal offset passes that width it is fully off-screen (a few-px sliver hides
-    //    under the `<` arrow). The width is cached while the tab is realized because the ItemsStackPanel
-    //    virtualizes the container away once it's scrolled off (a live ActualWidth then reads 0). The
-    //    scroll-triggered path is gated on real overflow (ScrollableWidth > 0), so with few tabs (no
-    //    `<`/`>` arrows) it stays hidden.
-    //  - Jump Back appears when you ARE on the Manager tab and a managed session card is selected that
-    //    this window hosts as a live tab (jump BACK to it — the session you came from).
-    // Called from the strip's ViewChanged/SizeChanged (scroll/resize), tab add/remove, tab switch, the
-    // lens-changed push (selection), a settings change (always-show toggled), and once at first layout.
+    // Agentmaster: recompute the two tab-strip nav buttons — the Agent Manager's whole presence in the strip
+    // now that it is a page, not a tab:
+    //  - Home: shown whenever this window HAS a Manager page (always, once _CreateAgentManagerPage built
+    //    it) — it is the ONLY way to open the page, so it can never hide the way the old scroll-triggered
+    //    "the Manager tab scrolled off" Home did. While the page is on screen it paints as the active
+    //    entry of the strip (the tabs are deselected then — nothing else says "you are here").
+    //  - Jump Back: shown while the page IS on screen and a managed session card is selected that this
+    //    window hosts as a live tab (jump BACK to it — typically the session you came from, which the
+    //    Linked-Lenses sync auto-selected).
+    // Called from tab add/remove, tab switch, page show/hide, the lens-changed push (selection), and once
+    // at first layout. Cheap and idempotent (both writes are change-gated). UI thread only.
     void TerminalPage::_UpdateManagerNavButtons()
     {
         _EnsureTabStripScrollViewer();
 
-        // Is the pinned Manager tab the currently-focused tab? Home hides on it (you're already there);
-        // Jump Back shows only on it.
-        const bool onManager = _managerTab && (_GetFocusedTab() == _managerTab);
+        // --- Home: always present with a page; the active paint follows the page. ---
+        _SetTabStripButtonVisible(_managerHomeButton, static_cast<bool>(_managerPage));
+        _PaintManagerHomeButton(_managerHomeButton, _managerPageVisible);
 
-        // --- Home: always (cog setting), or only when the Manager scrolled off the left edge; never
-        //     while we're already on the Manager tab. ---
-        auto showHome = false;
-        if (!onManager && _managerTab)
-        {
-            if (_appSettings.alwaysShowHomeButton)
-            {
-                showHome = true; // a persistent jump-to-Manager affordance, regardless of scroll/overflow
-            }
-            else if (_tabStripScrollViewer)
-            {
-                const auto& sv = _tabStripScrollViewer;
-                if (sv.ScrollableWidth() > 0.5) // there's horizontal overflow (the scroll arrows are showing)
-                {
-                    if (const auto tvi = _managerTab.TabViewItem())
-                    {
-                        if (const auto w = tvi.ActualWidth(); w > 1.0)
-                        {
-                            _managerTabWidthCache = w;
-                        }
-                    }
-                    if (_managerTabWidthCache > 1.0)
-                    {
-                        showHome = sv.HorizontalOffset() >= (_managerTabWidthCache - 1.0);
-                    }
-                }
-            }
-        }
-        _SetTabStripButtonVisible(_managerHomeButton, showHome);
-
-        // --- Jump Back: on the Manager tab, with a selected managed session this window hosts live. ---
+        // --- Jump Back: on the page, with a selected managed session this window hosts live. ---
         auto showBack = false;
-        if (onManager)
+        if (_managerPageVisible)
         {
             if (const auto sel = _ManagerSelectedSessionId(); !sel.empty())
             {
@@ -684,30 +820,20 @@ namespace winrt::TerminalApp::implementation
         _SetTabStripButtonVisible(_managerJumpBackButton, showBack);
     }
 
-    // Agentmaster: the Home button's action — jump TO the pinned Manager tab and scroll the strip fully
-    // left so it's revealed (the ViewChanged that follows re-hides the button). Selecting the tab also
-    // gives it focus, which is the "jump to Agent Manager" the user asked for.
+    // Agentmaster: the Home button's action — open the Agent Manager page (the one and only user-facing
+    // way to reach it, now that the pinned Manager tab is gone). Idempotent: a click while the page is
+    // already up does nothing (so a double-click can't flicker, and a Sessions page open over the Manager
+    // keeps its focus); leaving the page is a click on any tab, Jump Back, or a tab-switching key.
     void TerminalPage::_OnManagerHomeButtonClick(const IInspectable& /*sender*/, const winrt::WUX::RoutedEventArgs& /*args*/)
     {
-        if (!_managerTab)
-        {
-            return;
-        }
-
-        uint32_t idx = 0;
-        if (_tabs.IndexOf(_managerTab, idx))
-        {
-            _SelectTab(idx);
-        }
-        if (_tabStripScrollViewer)
-        {
-            _tabStripScrollViewer.ChangeView(0.0, nullptr, nullptr, true);
-        }
+        _ShowManagerPage(L"home");
     }
 
     // Agentmaster: the Jump Back button's action — the inverse of Home. Return to the tab of the
     // session currently selected in the Manager lens (the card auto-selected when you came from it).
-    // _ActivateClaudeSession jumps locally, else fans out to the window that hosts the session.
+    // _ActivateClaudeSession jumps locally, else fans out to the window that hosts the session; either
+    // way the resulting tab selection is what takes the page off screen (the tab-switch funnel, or
+    // _LeaveManagerPageOntoSelectedTab when the strip still had that tab selected under the page).
     void TerminalPage::_OnManagerJumpBackButtonClick(const IInspectable& /*sender*/, const winrt::WUX::RoutedEventArgs& /*args*/)
     {
         if (const auto sel = _ManagerSelectedSessionId(); !sel.empty())
@@ -772,7 +898,7 @@ namespace winrt::TerminalApp::implementation
 
         // M10 (PERSISTENCE.md §13): claim this window's persisted record — an existing
         // windows/<id>.json (geometry + Manager lens + ordered tab refs), or a fresh GUID if none
-        // remains. Stashed in _windowRecord; its lens is seeded into the Manager tab in
+        // remains. Stashed in _windowRecord; its lens is seeded into the Manager page in
         // _WireAgentManagerContent, and changes are debounced-autosaved back to the same file.
         // Increment 3: when the Emperor assigned this window a specific record (multi-window
         // reopen), claim THAT id so geometry (TerminalWindow) and lens (here) come from the same
@@ -1237,7 +1363,7 @@ namespace winrt::TerminalApp::implementation
             {
                 self->_ScheduleWindowRecordSave();
                 // Agentmaster (discard Manager-only windows): a tab add/remove may have left this window
-                // holding only the Manager tab (its last terminal tab closed or torn out) — schedule the
+                // holding no tab at all, just the Manager page (its last tab closed or torn out) — schedule the
                 // debounced check that self-closes / un-persists such a window once its tab set settles.
                 self->_ScheduleManagerOnlyCheck();
             }
@@ -1333,7 +1459,7 @@ namespace winrt::TerminalApp::implementation
         // card/row (id, entering). Track the effective hovered session here — a leave only clears
         // when it's still the hovered id, which absorbs the enter-B-before-leave-A ordering when the
         // pointer slides between rows — then re-evaluate the per-tab "selected/active" pill (a live
-        // preview that follows the mouse while you're on the Manager tab).
+        // preview that follows the mouse while the Manager page is on screen).
         content->SetHoverSessionHandler([weakThis](winrt::hstring id, bool entering) {
             if (auto self = weakThis.get())
             {
@@ -1610,9 +1736,9 @@ namespace winrt::TerminalApp::implementation
                 // Apply the (possibly changed) "Show icons on tabs" setting to THIS window's tabs now
                 // (show/hide the profile icon on every tab); other windows get it via the broadcast.
                 self->_UpdateAllTabIcons();
-                // Apply the (possibly changed) "Always display Home button" setting to THIS window's
-                // tab-strip nav buttons immediately; other windows get it via the broadcast.
-                self->_UpdateManagerNavButtons();
+                // (The tab-strip Home button no longer has a setting: it is the Agent Manager's only entry
+                // point, so it is always shown — the retired "Always display Home button" cog toggle's key
+                // still round-trips in settings.json but nothing reads it.)
                 // FAVORITES.md §5a: the favorite marker (Crown <-> Star) is GLOBAL — re-assert it on every
                 // hosted favorited tab so a glyph change takes effect now; other windows get it via the broadcast.
                 self->_RefreshAllFavoriteIcons();
@@ -1737,7 +1863,7 @@ namespace winrt::TerminalApp::implementation
                 // selected session's tab (when nothing is hovered, the pill tracks the selection).
                 self->_UpdateManagerSelectionHighlight();
                 // Agentmaster: the Jump Back button targets the selected session, so a selection
-                // change while on the Manager tab flips whether it has somewhere to jump back to.
+                // change while the Manager page is up flips whether it has somewhere to jump back to.
                 self->_UpdateManagerNavButtons();
                 // Side panel: follow the lens selection (a board-card/tree click selects the same
                 // session's card + summary there). driveManagerLens=false — the lens IS the
@@ -1762,9 +1888,9 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster (Linked Lenses — the per-tab -> Manager half of the selection sync): when the user
     // switches to a managed session's terminal tab, drive the Manager lens to select that session, so
-    // moving to the Manager tab shows the session you were just in highlighted (board card + tree row +
-    // its Auto Testing). Equivalent to a single-click on the session's board card. Called from the one
-    // post-startup tab-switch funnel (_OnTabSelectionChanged), so a user click, Ctrl+Tab, or a
+    // opening the Agent Manager page (Home) shows the session you were just in highlighted (board card +
+    // tree row + its Auto Testing). Equivalent to a single-click on the session's board card. Called from
+    // the one post-startup tab-switch funnel (_OnTabSelectionChanged), so a user click, Ctrl+Tab, or a
     // switchToTab action all follow through here.
     void TerminalPage::_SyncManagerSelectionToTab(const TerminalApp::Tab& tab)
     {
@@ -1775,9 +1901,10 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        // The Manager tab itself (return to it = SEE the last selection) and non-session tabs
-        // (pwsh / cmd / external) leave the current Manager selection untouched.
-        if (!tab || tab == _managerTab)
+        // A null tab (the Agent Manager page came on screen — returning to it must SHOW the last
+        // selection, not change it) and non-session tabs (pwsh / cmd / external) leave the current
+        // Manager selection untouched.
+        if (!tab)
         {
             return;
         }
@@ -1803,22 +1930,25 @@ namespace winrt::TerminalApp::implementation
         _SidePanelSelectSession(id, /*driveManagerLens*/ false);
     }
 
-    // Agentmaster: EVERY Agentmaster reaction to a tab becoming the selected one, in the order the
-    // tab-switch funnel always ran them (moved here verbatim from TabManagement.cpp's
-    // _OnTabSelectionChanged). One body, two callers:
+    // Agentmaster: EVERY Agentmaster reaction to what just came on screen, in the order the tab-switch
+    // funnel always ran them (moved here verbatim from TabManagement.cpp's _OnTabSelectionChanged). One
+    // body, three callers:
     //   - the funnel (_OnTabSelectionChanged), right after _UpdatedSelectedTab swapped the content in;
     //   - _RemoveTab, after it hand-picks the tab that takes focus when the FOCUSED tab closes. Upstream
     //     suppresses the funnel for that selection (its _removing guard), so before this was shared a
-    //     close successor got none of it: closing a tab onto the Manager left the Manager lens flagged
-    //     hidden (its board frozen until the next switch), the successor's overlay never learned it was
-    //     focused, and the Linked-Lenses selection kept pointing at the closed session.
+    //     close successor got none of it: its overlay never learned it was focused, and the
+    //     Linked-Lenses selection kept pointing at the closed session;
+    //   - _ShowManagerPage, with a NULL tab: the Agent Manager page is what is on screen now. Every
+    //     tab-keyed step below (visit, wake, summary, Linked-Lenses sync) no-ops on null, the overlay gate
+    //     focuses nothing, and the page-only steps (the lens going on screen, the pill, the bring-into-
+    //     view) run — exactly what selecting the old Manager tab ran.
     // Parameters:
-    //   tab  - the tab that just became the selected one; must be non-null (both callers pass a tab
-    //          they just selected).
+    //   tab  - the tab that just became the selected one, or null for "the Agent Manager page".
     //   laps - nullable; when given, receives the stopwatch's lap instants (the funnel's
-    //          [tab-switch-slow] breakdown). _RemoveTab passes null.
+    //          [tab-switch-slow] breakdown). _RemoveTab and _ShowManagerPage pass null.
     // UI thread only. Exceptions: whatever a step lets escape propagates — the same exposure these
-    // steps had inline in the funnel (most catch + log their own failures); _RemoveTab wraps its call.
+    // steps had inline in the funnel (most catch + log their own failures); _RemoveTab and
+    // _ShowManagerPage wrap their calls.
     void TerminalPage::_ApplyAgentTabSelection(const winrt::TerminalApp::Tab& tab, AgentTabSelectionLaps* laps)
     {
         // Agentmaster (perf — the hidden-lens rebuild tax): tell the Manager lens whether it is
@@ -1826,11 +1956,13 @@ namespace winrt::TerminalApp::implementation
         // notify / timing tick / selection sync (all of which land on THIS one UI thread, in
         // the way of the terminal tab being used); shown again, it runs one catch-up rebuild
         // — BEFORE the steps below that read its cards (selection highlight, bring-into-view).
+        // _managerPageVisible is the page's own authority, set/cleared before this runs by
+        // _ShowManagerPage / _HideManagerPage.
         if (const auto ipc = _agentManagerContent.get())
         {
             if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
             {
-                mgr->SetLensVisible(_managerTab && tab == _managerTab);
+                mgr->SetLensVisible(_managerPageVisible);
             }
         }
         // Agentmaster (bookmark tags): a tab switch dismisses the Tags panel — it is anchored
@@ -1865,21 +1997,21 @@ namespace winrt::TerminalApp::implementation
         // color immediately instead of waiting for the next ~2s scan tick. Cheap (no buffer read).
         _RefreshPendingDotsContrast();
         // Agentmaster (Linked Lenses): follow the switch into the Manager lens — select this
-        // tab's managed session so returning to the Manager tab shows the session you were just
-        // in. No-op for the Manager tab, a non-session tab, or before startup completes.
+        // tab's managed session so opening the Manager page shows the session you were just
+        // in. No-op for the page itself (null), a non-session tab, or before startup completes.
         _SyncManagerSelectionToTab(tab);
         if (laps)
         {
             laps->afterManagerSync = std::chrono::steady_clock::now(); // lap 3: pending-dots contrast + the Manager selection sync (a full lens rebuild when the Manager is on screen)
         }
         // Agentmaster (Linked Lenses): re-evaluate the per-tab "selected/active" pill — it
-        // shows only while the Manager tab is active, so leaving the Manager clears it and
+        // shows only while the Manager page is up, so leaving the page clears it and
         // returning re-applies it for the current hover/selection.
         _UpdateManagerSelectionHighlight();
-        // Agentmaster (Linked Lenses): switching TO the Manager tab REVEALS the current
+        // Agentmaster (Linked Lenses): the Manager page coming on screen REVEALS the current
         // selection — scroll the selected card/row into view, since it may have scrolled off
-        // while the selection followed tab switches with the Manager hidden. Manager tab only.
-        if (_managerTab && tab == _managerTab)
+        // while the selection followed tab switches with the page hidden. Page show only.
+        if (!tab && _managerPageVisible)
         {
             _BringManagerSelectionIntoView();
         }
@@ -1893,7 +2025,7 @@ namespace winrt::TerminalApp::implementation
     // this window's engine sink, which marshaled us onto this UI thread. Adopt the merged settings for
     // this window's page copy (so future spawns / the cog's next open use the latest globals) and hand
     // them to the Manager content, which repaints its Explorer-Tree + Triage-Board sort toggles and
-    // re-sorts. A no-op for the content if the Manager tab isn't built yet (the page copy still updates).
+    // re-sorts. A no-op for the content if the Manager page isn't built yet (the page copy still updates).
     void TerminalPage::_ApplyBroadcastSettings(const ::Agentmaster::AppSettings& settings)
     {
         // Inferred-workdir inputs (mode / "Use .git folder to infer") — capture the change BEFORE
@@ -1908,8 +2040,6 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: "Show icons on tabs" is GLOBAL too — re-apply a change made in another window to
         // THIS window's tabs live (show/hide the profile icon on every tab).
         _UpdateAllTabIcons();
-        // Agentmaster: "Always display Home button" is GLOBAL too — re-evaluate this window's nav buttons.
-        _UpdateManagerNavButtons();
         // FAVORITES.md §5a: the favorite marker (Crown <-> Star) is GLOBAL — re-assert it on every hosted
         // favorited tab so a change made in another window switches the glyph live here too.
         _RefreshAllFavoriteIcons();
@@ -1941,12 +2071,12 @@ namespace winrt::TerminalApp::implementation
         _SidePanelApplySettings();
     }
 
-    // Agentmaster (Linked Lenses — the reveal half of the per-tab -> Manager sync): when the user
-    // switches TO the Manager tab, scroll the currently-selected board card / tree row into view. The
-    // lens selection follows tab switches (_SyncManagerSelectionToTab) while the Manager is hidden, so
-    // on return the highlighted card can be scrolled off-screen in a tall column (or after a state
-    // change moved it to another column); this synchronizes its visibility with its highlight. Called
-    // from the one tab-switch funnel (_OnTabSelectionChanged) only when the Manager tab is selected.
+    // Agentmaster (Linked Lenses — the reveal half of the per-tab -> Manager sync): when the Agent
+    // Manager page comes on screen, scroll the currently-selected board card / tree row into view. The
+    // lens selection follows tab switches (_SyncManagerSelectionToTab) while the page is hidden, so on
+    // return the highlighted card can be scrolled off-screen in a tall column (or after a state change
+    // moved it to another column); this synchronizes its visibility with its highlight. Called from
+    // _ApplyAgentTabSelection only for the page show (a null tab while _managerPageVisible).
     void TerminalPage::_BringManagerSelectionIntoView()
     {
         // Pre-startup the focused-tab restore is in flight (the lens selection is being seeded from the
@@ -1961,39 +2091,6 @@ namespace winrt::TerminalApp::implementation
             {
                 mgr->BringSelectedIntoView();
             }
-        }
-    }
-
-    // Agentmaster: keep the pinned, non-closable Manager tab at index 0 after any reorder. Tab
-    // creation appends (the Manager is created first), so the only ways it can drift are a tab
-    // drag-drop or a move-tab action; this snaps it back. No-op when it is already first.
-    void TerminalPage::_PinManagerTabFirst()
-    {
-        if (!_managerTab)
-        {
-            return;
-        }
-        uint32_t idx{};
-        if (_tabs.IndexOf(_managerTab, idx) && idx != 0)
-        {
-            auto tab = _managerTab;
-            const auto tvi = tab.TabViewItem();
-            _tabs.RemoveAt(idx);
-            _tabs.InsertAt(0, tab);
-            try
-            {
-                uint32_t viewIdx{};
-                if (tvi && _tabView.TabItems().IndexOf(tvi, viewIdx))
-                {
-                    // A drop displaced the pinned Manager tab — record where it landed before snapping back.
-                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[pin-manager] snap-back (manager was displaced to view idx=" + std::to_wstring(viewIdx) + L")\n");
-                    _tabView.TabItems().RemoveAt(viewIdx);
-                    _tabView.TabItems().InsertAt(0, tvi);
-                    _ApplyTabDragPolicy(tvi); // settle the map after the reinsert; the Manager stays CanDrag(false) like every tab
-                }
-            }
-            CATCH_LOG();
-            _UpdateTabIndices();
         }
     }
 
@@ -2064,8 +2161,7 @@ namespace winrt::TerminalApp::implementation
     // while the mapping is still uncommitted, and MUX's drag paths consult that mapping
     // (ContainerFromItem/IndexFromContainer). UpdateLayout() runs the pass NOW — the layout was going
     // to run next frame anyway, so this is re-ordered work, not added work. Called after EVERY
-    // TabItems() mutation (_InitializeTab / _RemoveTab / _TryMoveTab / _PinManagerTabFirst /
-    // _TabDragCompleted).
+    // TabItems() mutation (_InitializeTab / _RemoveTab / _TryMoveTab / _TabDragCompleted).
     void TerminalPage::_SettleTabStripLayout()
     {
         try
@@ -2271,10 +2367,8 @@ namespace winrt::TerminalApp::implementation
             {
                 return;
             }
-            if (_managerTab && tab == _managerTab)
-            {
-                return; // the pinned Manager tab is non-movable — never even arms
-            }
+            // (Every tab is movable: the Agent Manager is a page behind the Home button now, not a
+            // pinned tab this gesture had to refuse.)
             _tabReorder.armed = true;
             _tabReorder.pointerId = e.Pointer().PointerId();
             _tabReorder.pressPoint = pt.Position();
@@ -2424,14 +2518,13 @@ namespace winrt::TerminalApp::implementation
             _ClearDockPreview(); // back over our own strip — a foreign window's caret must not linger
             const auto bands = _TabReorderBands();
             const int itemCount = static_cast<int>(_tabView.TabItems().Size());
-            int slot = Agentmaster::DecideTabInsertionSlot(bands, pos.X, itemCount);
+            const int slot = Agentmaster::DecideTabInsertionSlot(bands, pos.X, itemCount);
             if (slot < 0)
             {
                 _HideTabDragIndicator(); // nothing realized to decide against — keep the previous slot
                 return;
             }
-            const int minSlot = _managerTab ? 1 : 0; // nothing inserts ahead of the pinned Manager tab
-            slot = std::max(slot, minSlot);
+            // Slot 0 is a legal drop: no pinned tab reserves the front of the strip any more.
             _tabReorder.lastSlot = slot;
             double boundaryX{};
             if (Agentmaster::InsertionSlotBoundaryX(bands, slot, boundaryX))
@@ -2521,11 +2614,11 @@ namespace winrt::TerminalApp::implementation
             // point), so an overlapped background window is never mis-targeted; our own window never
             // docks (a release over our OWN strip was classified Reorder above, and over our content
             // area it stays a tear-out — WindowFromPoint answers us and we exclude ourselves). The
-            // target's probe answers synchronously (one Emperor UI thread) with its Manager-floored
-            // insertion slot; the send then rides the EXACT native downstream — _sendDraggedTabToWindow
-            // -> _MoveContent -> AppHost::_handleMoveContent routes by the numeric window id -> the
+            // target's probe answers synchronously (one Emperor UI thread) with its insertion slot;
+            // the send then rides the EXACT native downstream — _sendDraggedTabToWindow ->
+            // _MoveContent -> AppHost::_handleMoveContent routes by the numeric window id -> the
             // target's AttachContent lands the tab + moves it into the slot (its own _TryMoveTab
-            // enforcing its Manager floor). Any failure falls through to the classic new-window
+            // clamping it into range). Any failure falls through to the classic new-window
             // tear-out — never guess a drop.
             bool dockCommitted = false; // once the send started, a throw must NOT fall through to a SECOND send (the tab may be half-consumed)
             try
@@ -2592,7 +2685,7 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::LogNav(L"tab-drag-end (no same-window reorder)");
             return;
         }
-        const int minIndex = _managerTab ? 1 : 0;
+        const int minIndex = 0; // no pinned tab owns index 0 (the Agent Manager is a page, not a tab)
         const int itemCount = static_cast<int>(_tabs.Size());
         const int target = Agentmaster::InsertionSlotToMoveTarget(slot, cur, minIndex, itemCount);
         if (target == cur)
@@ -2904,7 +2997,7 @@ namespace winrt::TerminalApp::implementation
             {
                 slot = itemCount; // over the strip but nothing realized to decide against -> append
             }
-            slot = std::max(slot, _managerTab ? 1 : 0); // nothing lands ahead of the pinned Manager tab
+            // (No floor: the target window's front slot is free — its Agent Manager is a page, not a tab.)
             if (mode == ::Agentmaster::DockProbeMode::Preview)
             {
                 double boundaryX{};

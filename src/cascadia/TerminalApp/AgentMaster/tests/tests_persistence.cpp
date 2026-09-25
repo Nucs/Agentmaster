@@ -407,7 +407,7 @@ void TestWindowRecord()
     // would otherwise mask a missing index).
     in.selectedSessionId = L"conv-abc";
     in.selectedTabIndex = 1;
-    in.managerTabColor = L"#3A6EA5"; // the pinned Manager tab's per-window color (non-default so a dropped field fails the round-trip)
+    in.managerTabColor = L"#3A6EA5"; // the RETIRED pinned-Manager-tab per-window color — the Manager is a page now and nothing reads it, but the key must still round-trip so an older record is never wiped (non-default so a dropped field fails the round-trip)
 
     in.manager.selectedId = L"conv-abc";
     in.manager.scopeDir = L"K:/api";
@@ -449,7 +449,7 @@ void TestWindowRecord()
 
     CHECK(out.selectedSessionId == L"conv-abc", "selected tab persisted by stable Claude id (round-trip)");
     CHECK(out.selectedTabIndex == 1, "selectedTabIndex shell fallback (round-trip)");
-    CHECK(out.managerTabColor == L"#3A6EA5", "managerTabColor (Manager tab's per-window color) round-trip");
+    CHECK(out.managerTabColor == L"#3A6EA5", "managerTabColor (retired Manager-tab color, kept for back-compat) round-trip");
 
     CHECK(out.manager.selectedId == L"conv-abc", "lens selectedId round-trip");
     CHECK(out.manager.scopeDir == L"K:/api", "lens scopeDir round-trip");

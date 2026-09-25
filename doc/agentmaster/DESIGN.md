@@ -59,7 +59,7 @@ The "brain" (orchestration, scheduling, state) lives **in-process in C++/WinRT**
 ```
 ┌── Agentmaster.exe  (forked WindowsTerminal.exe, C++/WinRT) ───────────────────┐
 │                                                                                │
-│  Tab 0: MANAGER (pinned, leftmost, non-closable)      Tab 1..n: live sessions  │
+│  Home button → MANAGER page (not a tab)               Tabs 0..n: live sessions │
 │  ┌─────────────────────────────────────────┐         ┌──────────────────────┐ │
 │  │ C1 "Linked Lenses" UI                    │         │ TermControl          │ │
 │  │  Triage Board / Explorer Tree / Flight   │ binds   │  └ ClaudeConnection ──┼─┼─► claude.exe (cwd=K:/api)
@@ -77,7 +77,7 @@ The "brain" (orchestration, scheduling, state) lives **in-process in C++/WinRT**
 ```
 
 Layers:
-- **UI** — the Manager tab (C1) + the normal session tabs. Pure XAML/WinRT, binds to the registry.
+- **UI** — the Agent Manager page (C1, opened by the tab strip's **Home** button — not a tab) + the normal session tabs. Pure XAML/WinRT, binds to the registry.
 - **SessionRegistry** — the single source of truth: one `SessionInfo` per session, across M dirs.
 - **ClaudeConnection** — a session's `ITerminalConnection` (ConPTY + `claude.exe`); the read/write channel.
 - **Hooks bridge** — receives authoritative state events from Claude Code hooks over a local pipe.
@@ -155,13 +155,13 @@ enriches facts, never sets `SessionState`; the Observer-owned PULL state engine 
 [`STATE.md`](./STATE.md)). Codex, which has no hooks at all, runs entirely on this PULL model (a
 3-state Running/Waiting/Idle floor — no approval/error event exists in a rollout).
 
-## 9. The Manager tab — C1 "Linked Lenses"
+## 9. The Agent Manager page — C1 "Linked Lenses"
 
-A pinned, leftmost, non-closable tab (tab 0, open by default), implemented as an `IPaneContent` (`AgentManagerContent`). Three regions over **one shared model**, with bidirectional selection sync.
+A per-window **page** behind the tab strip's **Home** button (the `TabStripHeader` glyph left of the `<` scroll arrow), implemented by `AgentManagerContent`. Until 2026-09-25 it was a pinned, leftmost, non-closable tab 0; it is now never a member of the tab list — Home swaps its root into the terminal content host (`_tabContent`) and deselects the tab strip, and clicking any tab (or **Jump Back**, beside Home) leaves it. The window shows it on its own when the strip has nothing else to show: the last tab closed, a close whose every remaining tab is dormant, a Deactivate of the focused tab, and a window reopened while it was on the Manager. Three regions over **one shared model**, with bidirectional selection sync.
 
 ### 9.1 Layout
 ```
-MANAGER (tab 0 · pinned · non-closable)
+AGENT MANAGER page (opened by the tab strip's Home button — not a tab)
 ┌─ TRIAGE BOARD ─────────────────────────────── [scope: K:/api] ─┐
 │ Running      │ Waiting-for-you │ Needs-approval │ Error          │
 │ api-test ⚙2/6│ api-fix ⚙4/10 ◄ │      —         │  ui-test        │
@@ -225,7 +225,7 @@ restart via the `WindowRecord` autosave.
 A2 Mission-Control Wall (live tiles + semantic zoom), A4 Command-Palette switcher, A5 Spatial graph — not built initially; C1 is the primary. They could become alternate views over the same registry later.
 
 ### 9.7 Per-tab link badge (the overlay) — *the here-and-now lens*
-The Manager tab is the *fleet* view; each Claude session tab also carries a small **link badge**
+The Agent Manager page is the *fleet* view; each Claude session tab also carries a small **link badge**
 pinned to the **top-right of its terminal**, so the tab ⇄ Agentmaster relationship is legible
 while you work *inside* a session: hook-driven status, whether/how Tests Autorunner is driving it
 (`Manual` / `Semi` / `Full`), link state (surfaced only when *not* linked), queued count, and — on
@@ -308,9 +308,9 @@ regardless of mode. (3) **Failed-inject rollback:** every inject path rolls a fa
 
 ## 12. Windows Terminal integration
 
-- **Content class:** `AgentManagerContent : IPaneContent` (no `.idl`, like `ScratchpadContent`); compiled in `TerminalAppLib.vcxproj`.
-- **Dispatch:** `TerminalPage::_MakePane` gains an `else if (paneType == L"agentManager")` branch.
-- **Pinned tab:** `_OpenAgentManagerTab()` from `_OnFirstLayout` inserts at index 0; `CloseButtonVisibility = Never`; tracked in `_managerTab` (nulled on close, mirroring `_settingsTab`). Follow-ups: prevent splitting it; window-close semantics when only the Manager remains.
+- **Content class:** `AgentManagerContent : IPaneContent` (no `.idl`, like `ScratchpadContent`); compiled in `TerminalAppLib.vcxproj`. It still implements `IPaneContent` (root, title, background brush, focus), but it is hosted directly in `_tabContent`, never inside a `Pane` or a `Tab`.
+- **Dispatch:** `TerminalPage::_MakePane`'s `agentManager` branch now **refuses** (logs `[manager-page] refused …` and returns null) — there is exactly one Manager per window and it is never a pane.
+- **Home-button page (was a pinned tab):** `_CreateAgentManagerPage()` from `_OnFirstLayout` builds the window's one content into `_managerPage` (its lens starts hidden); `_ShowManagerPage(reason)` / `_HideManagerPage(tab)` swap it in and out, with `_managerPageVisible` the one authority for "is the Manager on screen". Because it is not in `_tabs`, the pinned-tab guards (index-0 insert clamp, close-button skip, drag/move/dock floors, rename and middle-click guards) are gone. The old follow-ups are settled: it can't be split (not a pane), and a window with no tab left shows the page (the Manager-only check self-closes it unless it is the last window).
 - **Sessions:** each is a `TermControl` over a `ClaudeConnection` (a `ConptyConnection`, possibly wrapped to add session id + hook wiring). Previews reuse the renderer/buffer serialize.
 - **Identity:** ships as its own package, distinct from any Windows Terminal. **Shipped:** **two
   identities, one branding** ([`PROFILES.md`](./PROFILES.md)) — release `Agentmaster` /
@@ -327,7 +327,7 @@ regardless of mode. (3) **Failed-inject rollback:** every inject path rolls a fa
 - Per session: queue + autorunner state + metadata (title, dir, branch) saved as JSON under the app's state dir; reloaded **without replaying** sent prompts.
 - **Lifecycle = Open ⇄ Archived** (transient `SessionInfo::live`, never persisted). *Open* = a live tab/`claude.exe` this run (shown on the Board/Tree); *Archived* = shut down but kept restorable (listed behind the Manager's **Archived** button).
 - **Closing a session's tab archives it** (the X, tree `Del`, Manager Archive, Auto-Testing Archive — one seam, one consequence confirm): the record is **kept** (`live=false`), so it survives + lists under Archived. There is **no discard** — archive is terminal, and the Claude transcript on disk is never deleted.
-- **Startup ARCHIVES, never auto-launches** (reversal of the earlier "close == reopen"): persisted sessions load as Archived; the app opens to just the Manager tab. The user re-opens what they want via **Restore** → `claude --resume <id>` (transcript-gated; a missing transcript ⇒ a fresh id, and the stale archived record is dropped). Restore is **agent-aware** — a Codex record re-launches via `codex resume <uuid>`, transcript-gated on its rollout. Quitting therefore archives the open fleet for next launch.
+- **Startup ARCHIVES, never auto-launches** (reversal of the earlier "close == reopen"): persisted sessions load as Archived; no session tab is re-opened at startup. The user re-opens what they want via **Restore** → `claude --resume <id>` (transcript-gated; a missing transcript ⇒ a fresh id, and the stale archived record is dropped). Restore is **agent-aware** — a Codex record re-launches via `codex resume <uuid>`, transcript-gated on its rollout. Quitting therefore archives the open fleet for next launch.
 - Plan **templates** saved separately and reusable across sessions/machines.
 
 **Shipped — the per-window workspace layer + the full-window Archive page**
@@ -397,7 +397,11 @@ Claude session (not just managed ones) with two-phase search and Jump / Resume /
 ## 18. Open decisions
 
 - Window-close semantics when only the non-closable Manager tab remains (keep open as home vs allow close).
-- Prevent splitting the Manager tab (mirror the `_settingsTab` split guard) — likely yes.
+  **Resolved (2026-09-25):** the Manager is no longer a tab. A window whose last tab closes stays open on
+  its Agent Manager page; the Manager-only check then self-closes it unless it is the last window (the last
+  one stays open and discards its record, so a content-less window is never reopened).
+- Prevent splitting the Manager tab (mirror the `_settingsTab` split guard) — likely yes. **Resolved:** moot —
+  the Manager is a page behind the Home button, not a pane, and an `agentManager` pane request is refused.
 - Whether sessions are always git-worktree-isolated or optional per session.
 - Where Tests Autorunner confirmation UI lives (inline card vs toast). **Resolved:** a contextual confirm
   on the per-tab overlay + the SemiAuto one-click confirm in the Auto Testing (§9.4/§9.7).
@@ -408,7 +412,7 @@ Claude session (not just managed ones) with two-phase search and Jump / Resume /
 ## 19. Milestones
 
 Build sequence and current status live in [`IMPLEMENTATION.md`](./IMPLEMENTATION.md):
-**M0–M4.1 done** (fork, scaffold, builds, content wired, pinned Manager tab, own identity, deployed) →
+**M0–M4.1 done** (fork, scaffold, builds, content wired, pinned Manager tab — since 2026-09-25 a page behind the Home button, own identity, deployed) →
 **M5** SessionRegistry + ConPTY `claude.exe` + hooks bridge → **M6** C1 UI → **M7** Tests Autorunner → **M8** persistence/templates/apply-to-many.
 
 **Status: M0–M8 are all shipped + live-verified.** The original M9–M14 persistence ladder is

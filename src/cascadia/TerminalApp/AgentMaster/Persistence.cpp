@@ -721,7 +721,7 @@ namespace Agentmaster
         o.Set(L"tooltipTagsOpacity", json::Value::MkNum(s.tooltipTagsOpacity));
         o.Set(L"showTabCloseButton", json::Value::MkBool(s.showTabCloseButton));
         o.Set(L"closeTabOnMiddleClick", json::Value::MkBool(s.closeTabOnMiddleClick));
-        o.Set(L"alwaysShowHomeButton", json::Value::MkBool(s.alwaysShowHomeButton));
+        o.Set(L"alwaysShowHomeButton", json::Value::MkBool(s.alwaysShowHomeButton)); // RETIRED (nothing reads it — Home is the Agent Manager's only entry point, always shown); round-tripped so older settings stay byte-stable
         o.Set(L"showTabIcon", json::Value::MkBool(s.showTabIcon));
         o.Set(L"tabTitleNaming", json::Value::MkStr(ToString(s.tabTitleNaming)));
         o.Set(L"tabTitleCase", json::Value::MkStr(ToString(s.tabTitleCase)));
@@ -873,7 +873,7 @@ namespace Agentmaster
         s.tooltipTagsOpacity = ClampTooltipTagsOpacity(v.NumAt(L"tooltipTagsOpacity", 0.9));
         s.showTabCloseButton = v.BoolAt(L"showTabCloseButton", true); // absent => ON (theme-driven, the prior behavior)
         s.closeTabOnMiddleClick = v.BoolAt(L"closeTabOnMiddleClick", true); // absent => ON (close on middle click, the prior behavior)
-        s.alwaysShowHomeButton = v.BoolAt(L"alwaysShowHomeButton", true); // absent => ON (the Home button is always shown by default)
+        s.alwaysShowHomeButton = v.BoolAt(L"alwaysShowHomeButton", true); // RETIRED — read only to round-trip; the Home button is always shown now (absent => ON)
         s.showTabIcon = v.BoolAt(L"showTabIcon", false); // absent => OFF (tab icons HIDDEN by default — an Agentmaster override of stock WT, which shows them)
         s.tabTitleNaming = TabTitleNamingFromString(v.StrAt(L"tabTitleNaming", L"lastWord")); // tab title naming: absent/unknown => LastWord (the default technique)
         s.tabTitleCase = TabTitleCaseFromString(v.StrAt(L"tabTitleCase", L"default")); // absent/unknown => keep the derived casing
@@ -1232,7 +1232,7 @@ namespace Agentmaster
         o.Set(L"selectedSessionId", json::Value::MkStr(w.selectedSessionId)); // stable id of the focused Claude tab
         o.Set(L"selectedTabIndex", json::Value::MkNum(static_cast<double>(w.selectedTabIndex))); // fallback for a shell tab
         o.Set(L"manager", ToJson(w.manager));
-        o.Set(L"managerTabColor", json::Value::MkStr(w.managerTabColor)); // Agentmaster: the Manager tab's per-window color ("#RRGGBB"; "" => none)
+        o.Set(L"managerTabColor", json::Value::MkStr(w.managerTabColor)); // Agentmaster: RETIRED — the old Manager tab's per-window color ("#RRGGBB"; "" => none); round-tripped, never applied (the Manager is a page now)
         // Side panel (window chrome): this window's own layout. The UNSET sentinels are written only
         // conditionally — an unset field is OMITTED so the record keeps meaning "follow the global
         // default" instead of freezing a 0/-1 that a stricter future reader might misread.
@@ -1275,11 +1275,11 @@ namespace Agentmaster
             }
         }
         // Both unset (empty / -1) when absent — a record from before selected-tab persistence reopens
-        // with the Manager tab focused, exactly as it did then. selectedSessionId (stable Claude id) is
+        // on the Agent Manager (the page now, the pinned tab then). selectedSessionId (stable Claude id) is
         // preferred on restore; selectedTabIndex is the shell-tab fallback.
         w.selectedSessionId = v.StrAt(L"selectedSessionId");
         w.selectedTabIndex = static_cast<int>(v.I64At(L"selectedTabIndex", -1));
-        w.managerTabColor = v.StrAt(L"managerTabColor"); // empty when absent (a pre-feature record => no Manager-tab color)
+        w.managerTabColor = v.StrAt(L"managerTabColor"); // RETIRED — read only to round-trip (empty when absent)
         // Side panel (window chrome): absent keys stay at the UNSET sentinels (0 fraction / -1
         // collapsed) so a pre-feature record follows the GLOBAL defaults at open. A stored fraction is
         // band-checked with the SAME bands as the AppSettings defaults (width (0.10, 0.50], split

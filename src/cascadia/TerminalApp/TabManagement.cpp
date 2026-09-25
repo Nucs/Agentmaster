@@ -127,18 +127,6 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // Agentmaster: index 0 is permanently reserved for the pinned, non-closable Manager tab —
-        // NOTHING may insert ahead of it. This is the single hard chokepoint for every tab insertion
-        // (both _tabs and the TabView item list go through here), so it backs the NewTabPosition math
-        // above regardless of caller or setting. _managerTab is still null while the Manager tab
-        // itself is being created (it is assigned from the return of _CreateNewTabFromPane, AFTER this
-        // method runs), so this guard never displaces that one intentional insert at 0 — it only
-        // clamps every later tab.
-        if (_managerTab && insertPosition == 0)
-        {
-            insertPosition = 1;
-        }
-
         // Add the new tab to the list of our tabs.
         _tabs.InsertAt(insertPosition, *newTabImpl);
         _mruTabs.Append(*newTabImpl);
@@ -318,11 +306,16 @@ namespace winrt::TerminalApp::implementation
         // - we're not in focus mode
         // - we're not in full screen, or the user has enabled fullscreen tabs
         // - there is more than one tab, or the user has chosen to always show tabs
+        // - Agentmaster: or this window has an Agent Manager page — its Home button (the ONLY way to open
+        //   the page) lives in the tab row, so the row may never auto-hide under it (with one tab, or none,
+        //   and showTabsInTitlebar off, the upstream rule would strand the page). The old pinned Manager tab
+        //   kept the count above 1 for the same effect.
         const auto isVisible = !_isInFocusMode &&
                                (!_isFullscreen || _showTabsFullscreen) &&
                                (_settings.GlobalSettings().ShowTabsInTitlebar() ||
                                 (_tabs.Size() > 1) ||
-                                _settings.GlobalSettings().AlwaysShowTabs());
+                                _settings.GlobalSettings().AlwaysShowTabs() ||
+                                static_cast<bool>(_managerPage));
 
         if (_tabView)
         {
@@ -601,9 +594,14 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster: when the removed tab was the FOCUSED one, the successor is chosen so that selecting
     // it starts nothing (_PickCloseSuccessorTab) and then gets the same Agentmaster selection effects a
     // normal tab switch runs (_ApplyAgentTabSelection) — the selection funnel is suppressed during a
-    // removal. Parameters: tab — the tab being removed (already gone from the strip => no-op). Returns
-    // nothing. Exceptions: the Agentmaster effects are logged and swallowed (CATCH_LOG); the upstream
-    // strip/collection mutations throw only as they always did.
+    // removal. When no tab is left, or every remaining tab would start a process on being shown, the
+    // Agent Manager page is shown instead (it took over the "never wake anything" harbor the pinned
+    // Manager tab used to be) and the window stays open — the debounced Manager-only check then closes
+    // it unless it is the last Agentmaster window. A removal while the page is already up keeps the page
+    // and re-clears the selection MUX puts back on a neighbor. Parameters: tab — the tab being removed
+    // (already gone from the strip => no-op). Returns nothing. Exceptions: the Agentmaster effects are
+    // logged and swallowed (CATCH_LOG / their own guards); the upstream strip/collection mutations throw
+    // only as they always did.
     void TerminalPage::_RemoveTab(const winrt::TerminalApp::Tab& tab)
     {
         uint32_t tabIndex{};
@@ -635,11 +633,6 @@ namespace winrt::TerminalApp::implementation
             _settingsTab = nullptr;
         }
 
-        if (tab == _managerTab)
-        {
-            _managerTab = nullptr;
-        }
-
         if (_stashed.draggedTab && *_stashed.draggedTab == tab)
         {
             _stashed.draggedTab = nullptr;
@@ -653,11 +646,26 @@ namespace winrt::TerminalApp::implementation
         // To close the window here, we need to close the hosting window.
         if (_tabs.Size() == 0)
         {
-            // If we are supposed to save state, make sure we clear it out
-            // if the user manually closed all tabs.
-            // Do this only if we are the last window; the monarch will notice
-            // we are missing and remove us that way otherwise.
-            CloseWindowRequested.raise(*this, nullptr);
+            if (_managerPage)
+            {
+                // Agentmaster: an Agentmaster window never closes because its last tab did — it falls back
+                // to its Agent Manager page, exactly as it used to fall back to the pinned Manager tab (which
+                // could not be closed). The debounced Manager-only check (_tabs.VectorChanged) then decides:
+                // self-close if another Agentmaster window remains, else keep this last window open with its
+                // record discarded. Skipped once the window's own teardown began (the close is under way).
+                if (!_windowRecordTeardownFlushed)
+                {
+                    _ShowManagerPage(L"last tab closed");
+                }
+            }
+            else
+            {
+                // If we are supposed to save state, make sure we clear it out
+                // if the user manually closed all tabs.
+                // Do this only if we are the last window; the monarch will notice
+                // we are missing and remove us that way otherwise.
+                CloseWindowRequested.raise(*this, nullptr);
+            }
         }
         else if (focusedTabIndex.has_value() && focusedTabIndex.value() == gsl::narrow_cast<uint32_t>(tabIndex))
         {
@@ -669,16 +677,27 @@ namespace winrt::TerminalApp::implementation
             // Agentmaster: the successor picked below, kept for the Agentmaster selection effects after the
             // branches (see the block following them).
             winrt::TerminalApp::Tab agentCloseSuccessor{ nullptr };
+            // Agentmaster (FAVORITES.md §4a): set when even the picked successor would START a process on
+            // being shown (every remaining tab is dormant) — the Agent Manager page is shown instead, so a
+            // close never wakes another session (the pinned Manager tab used to be that safe harbor).
+            bool agentShowManagerInstead = false;
 
             if (tabSwitchMode == TabSwitcherMode::MostRecentlyUsed)
             {
                 // Agentmaster (FAVORITES.md §4a): never WAKE a dormant tab as a side effect of a close —
                 // if the MRU head would start its claude.exe/shell on being shown, focus the most recent
-                // tab that starts nothing instead.
+                // tab that starts nothing instead (or the Agent Manager page when there is none).
                 const auto newSelectedTab = _PickCloseSuccessorTab(_mruTabs.GetAt(0), tabIndex, /*mruMode*/ true);
-                _UpdatedSelectedTab(newSelectedTab);
-                _tabView.SelectedItem(newSelectedTab.TabViewItem());
-                agentCloseSuccessor = newSelectedTab;
+                if (_managerPage && _TabSelectionWouldStartProcess(newSelectedTab))
+                {
+                    agentShowManagerInstead = true;
+                }
+                else
+                {
+                    _UpdatedSelectedTab(newSelectedTab);
+                    _tabView.SelectedItem(newSelectedTab.TabViewItem());
+                    agentCloseSuccessor = newSelectedTab;
+                }
             }
             else
             {
@@ -699,26 +718,33 @@ namespace winrt::TerminalApp::implementation
                 // the focused one, and unfocusing all the others.
                 // Agentmaster (FAVORITES.md §4a): ...unless that neighbor is DORMANT — showing it would
                 // start its claude.exe (closing one session used to silently start the next). Then the
-                // nearest tab that starts nothing takes focus (the pinned Manager tab at worst).
+                // nearest tab that starts nothing takes focus — or, when every remaining tab is dormant,
+                // the Agent Manager page (which starts nothing).
                 auto newSelectedTab{ _PickCloseSuccessorTab(_tabs.GetAt(newSelectedIndex), tabIndex, /*mruMode*/ false) };
-                _UpdatedSelectedTab(newSelectedTab);
+                if (_managerPage && _TabSelectionWouldStartProcess(newSelectedTab))
+                {
+                    agentShowManagerInstead = true;
+                }
+                else
+                {
+                    _UpdatedSelectedTab(newSelectedTab);
 
-                // Also, we need to _manually_ set the SelectedItem of the tabView
-                // here. If we don't, then the TabView will technically not have a
-                // selected item at all, which can make things like ClosePane not
-                // work correctly.
-                _tabView.SelectedItem(newSelectedTab.TabViewItem());
-                agentCloseSuccessor = newSelectedTab;
+                    // Also, we need to _manually_ set the SelectedItem of the tabView
+                    // here. If we don't, then the TabView will technically not have a
+                    // selected item at all, which can make things like ClosePane not
+                    // work correctly.
+                    _tabView.SelectedItem(newSelectedTab.TabViewItem());
+                    agentCloseSuccessor = newSelectedTab;
+                }
             }
 
             // Agentmaster: the successor is now the selected tab, but _OnTabSelectionChanged skipped the
             // switch (the _removing guard), so run the same Agentmaster effects a normal switch gets —
-            // _ApplyAgentTabSelection's one shared body — plus the funnel's two tail steps. Without them, closing
-            // a tab onto the Manager left the Manager lens flagged hidden (its board frozen until the next
-            // switch), the Home / Jump Back buttons were computed while the closed tab still held the
-            // selection, the successor's overlay never learned it was focused, and the Linked-Lenses
-            // selection kept pointing at the closed session. Skipped once the window's teardown has begun
-            // (the deterministic close flush already captured the record, and the window is going away).
+            // _ApplyAgentTabSelection's one shared body — plus the funnel's two tail steps. Without them,
+            // the Home / Jump Back buttons were computed while the closed tab still held the selection, the
+            // successor's overlay never learned it was focused, and the Linked-Lenses selection kept
+            // pointing at the closed session. Skipped once the window's teardown has begun (the
+            // deterministic close flush already captured the record, and the window is going away).
             // Wrapped so a failure here is logged and can never abort this close's own remaining bookkeeping.
             if (agentCloseSuccessor && !_windowRecordTeardownFlushed)
             {
@@ -730,6 +756,23 @@ namespace winrt::TerminalApp::implementation
                 }
                 CATCH_LOG();
             }
+            // Agentmaster (FAVORITES.md §4a): every remaining tab would start a process — show the Agent
+            // Manager page rather than wake one. Its show clears the neighbor MUX auto-selected during the
+            // removal above (never swapped in: the funnel was suppressed, so nothing laid it out or started
+            // it) and runs the page's own selection effects + record save.
+            else if (agentShowManagerInstead && !_windowRecordTeardownFlushed)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[close-successor] every remaining tab would start a process on being shown \x2014 showing the Agent Manager instead of waking one\n");
+                _ShowManagerPage(L"close: every remaining tab is dormant");
+            }
+        }
+        else if (_managerPageVisible)
+        {
+            // Agentmaster: a tab closed while the Agent Manager page is on screen (its board's Close, a tab's
+            // X, a tear-out). The page stays, but MUX re-selected a neighbor when the item left the
+            // selection-less strip — clear it again so no tab reads as the active one under the page. The
+            // _removing guard keeps the resulting SelectionChanged from running the switch.
+            _DeselectTabStripForManagerPage();
         }
 
         // GH#5559 - If we were in the middle of a drag/drop, end it by clearing
@@ -744,10 +787,48 @@ namespace winrt::TerminalApp::implementation
 
     // Method Description:
     // - Sets focus to the tab to the right or left the currently selected tab.
+    // - Agentmaster: an Agentmaster window can have NO tabs (its Agent Manager page is what shows then), so
+    //   an empty strip is a no-op instead of the modulo-by-zero below. From the Agent Manager page (no tab
+    //   focused) the keystroke lands DIRECTLY on a tab without opening the tab switcher (whose live preview
+    //   would first switch to — and possibly wake — its start item): in-order / disabled modes land "next"
+    //   on the FIRST tab and "previous" on the LAST (the page sits before tab 0, the way the pinned Manager
+    //   tab did); most-recently-used mode lands "next" on the tab you left to open the page and "previous"
+    //   on the least recently used one. The cycle never lands back ON the page: the Home button is the one
+    //   way to open it.
     void TerminalPage::_SelectNextTab(const bool bMoveRight, const Windows::Foundation::IReference<Microsoft::Terminal::Settings::Model::TabSwitcherMode>& customTabSwitcherMode)
     {
+        if (_tabs.Size() == 0)
+        {
+            return;
+        }
         const auto index{ _GetFocusedTabIndex().value_or(0) };
         const auto tabSwitchMode = customTabSwitcherMode ? customTabSwitcherMode.Value() : _settings.GlobalSettings().TabSwitcherMode();
+        // Agentmaster: from the Agent Manager page there is no focused tab, so there is no "current" item for
+        // the tab switcher to start from. Opening it anyway would be wrong in a way the user can feel: the
+        // switcher SELECTS its start item the moment it becomes visible (its SelectionChanged raises
+        // SwitchToTabRequested — the live preview), so the keystroke would first switch to tab 0 (or the MRU
+        // head) and only then step once more — landing one tab too far, and starting tab 0's claude.exe on the
+        // way if it was dormant (FAVORITES.md §4a: nothing may wake as a side effect). Land directly instead:
+        //  - most-recently-used mode: "next" = the most recently used tab (the one you left to open the page —
+        //    the page itself is never in the MRU list), "previous" = the least recently used one;
+        //  - in-order and disabled modes: "next" = the first tab, "previous" = the last one (the page sits
+        //    before tab 0, where the pinned Manager tab used to be).
+        // The page is never a stop of the cycle: the Home button is the one way to open it.
+        if (_managerPageVisible)
+        {
+            if (tabSwitchMode == TabSwitcherMode::MostRecentlyUsed && _mruTabs.Size() > 0)
+            {
+                const auto target = _mruTabs.GetAt(bMoveRight ? 0u : _mruTabs.Size() - 1);
+                uint32_t targetIndex{};
+                if (_tabs.IndexOf(target, targetIndex))
+                {
+                    _SelectTab(targetIndex);
+                    return;
+                }
+            }
+            _SelectTab(bMoveRight ? 0u : _tabs.Size() - 1);
+            return;
+        }
         if (tabSwitchMode == TabSwitcherMode::Disabled)
         {
             auto tabCount = _tabs.Size();
@@ -781,14 +862,28 @@ namespace winrt::TerminalApp::implementation
     //   TerminalPage::_OnTabSelectionChanged
     // Return Value:
     // true iff we were able to select that tab index, false otherwise
+    // - Agentmaster: false on an EMPTY strip (an Agentmaster window lives on with no tabs — its Agent
+    //   Manager page shows — where upstream's clamp would underflow to UINT_MAX and GetAt would throw). A
+    //   selection made while the Agent Manager page is up leaves the page (see
+    //   _LeaveManagerPageOntoSelectedTab for the already-selected case the funnel can't see).
     bool TerminalPage::_SelectTab(uint32_t tabIndex)
     {
+        if (_tabs.Size() == 0)
+        {
+            return false;
+        }
         // GH#9369 - if the argument is out of range, then clamp to the number
         // of available tabs. Previously, we'd just silently do nothing if the
         // value was greater than the number of tabs.
         tabIndex = std::clamp(tabIndex, 0u, _tabs.Size() - 1);
 
         auto tab{ _tabs.GetAt(tabIndex) };
+        // Agentmaster: on the Agent Manager page with MUX still holding THIS tab selected under it, the
+        // SelectedItem below changes nothing and raises no SelectionChanged — switch explicitly.
+        if (_LeaveManagerPageOntoSelectedTab(tab))
+        {
+            return true;
+        }
         // GH#11107 - Always just set the item directly first so that if
         // tab movement is done as part of multiple actions following calls
         // to _GetFocusedTab will return the correct tab.
@@ -829,6 +924,15 @@ namespace winrt::TerminalApp::implementation
     // - the index of the currently focused tab if there is one, else nullopt
     std::optional<uint32_t> TerminalPage::_GetFocusedTabIndex() const noexcept
     {
+        // Agentmaster: while the Agent Manager page is on screen NO tab is focused — the page is. The strip
+        // is deselected for it, but MUX can quietly re-select a neighbor under the page (item removal on a
+        // selection-less strip), so the page flag, not the TabView, is the authority here: every
+        // tab-targeting action (close, split, rename, find, move, ...) then no-ops instead of acting on a
+        // tab the user can't see.
+        if (_managerPageVisible)
+        {
+            return std::nullopt;
+        }
         // GH#1117: This is a workaround because _tabView.SelectedIndex()
         //          sometimes return incorrect result after removing some tabs
         uint32_t focusedIndex;
@@ -1167,9 +1271,9 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster: close EVERY tab in this window — the whole-window close driven by the tab
     // context-menu "Close > Close all tabs" / "★ Favorite & close all tabs" items. Snapshots all tabs
-    // and hands them to _RemoveTabs, which owns the aggregate close confirmation, the per-session
-    // archive bookkeeping, AND the pinned-Manager-tab skip (it filters the Manager tab out, so it
-    // survives). favoriteFirst forwards to _RemoveTabs(forceFavorite): it stars every managed session
+    // and hands them to _RemoveTabs, which owns the aggregate close confirmation and the per-session
+    // archive bookkeeping. The window survives the empty strip on its Agent Manager page (_RemoveTab's
+    // last-tab fallback). favoriteFirst forwards to _RemoveTabs(forceFavorite): it stars every managed session
     // before archiving and confirms with a 2-button "★ Favorite & Close All / Cancel All" (the favorite
     // is already chosen), vs the neutral 3-way dialog for a plain close-all.
     void TerminalPage::_CloseAllTabs(const bool favoriteFirst)
@@ -1206,21 +1310,10 @@ namespace winrt::TerminalApp::implementation
     //   2-button confirm instead of re-offering it. Defaulted false for every existing caller.
     safe_void_coroutine TerminalPage::_RemoveTabs(const std::vector<winrt::TerminalApp::Tab> tabs, const bool forceFavorite)
     {
-        // Agentmaster: never bulk-close the pinned, non-closable Manager tab. Upstream's
-        // "Close other tabs" copies every tab but the focused one (which includes the Manager
-        // tab at index 0), and our "Close tabs to the left" targets [0, index) (likewise). This
-        // is the single chokepoint for every bulk close, so filtering the Manager tab out here
-        // keeps it alive no matter which direction the user closed from. (_managerTab is null when
-        // there is no Manager tab, in which case nothing is filtered — plain upstream behavior.)
-        std::vector<winrt::TerminalApp::Tab> closable;
-        closable.reserve(tabs.size());
-        for (const auto& tab : tabs)
-        {
-            if (tab != _managerTab)
-            {
-                closable.push_back(tab);
-            }
-        }
+        // Agentmaster: every tab in the batch is closable — the pinned Manager tab this chokepoint used to
+        // filter out is gone (the Manager is a page behind the Home button, never in _tabs). The copy keeps
+        // the name the confirm + close loop below read.
+        const std::vector<winrt::TerminalApp::Tab> closable{ tabs };
 
         if (closable.empty())
         {
@@ -1390,8 +1483,7 @@ namespace winrt::TerminalApp::implementation
         }
         _UpdateTabView();
 
-        // Agentmaster: adding/removing tabs can make the strip overflow (the `<`/`>` arrows appear) or
-        // stop overflowing (offset snaps back to 0), and can close the tab Jump Back targets — so
+        // Agentmaster: adding/removing tabs can close (or bring back) the tab Jump Back targets — so
         // re-evaluate the Manager nav buttons. Also a retry point for binding the internal scroller if
         // it wasn't realized at first layout.
         _UpdateManagerNavButtons();
@@ -1457,6 +1549,19 @@ namespace winrt::TerminalApp::implementation
                         return; // Shift+Click a managed session tab NEVER switches — activate only
                     }
                 }
+            }
+        }
+
+        // Agentmaster (the Agent Manager PAGE): a plain left press on a tab header while the page is on
+        // screen means "show me this tab". A header that is NOT the strip's selected item gets there through
+        // MUX's own release-driven selection -> SelectionChanged -> the funnel, which leaves the page. The one
+        // it can't: the header MUX kept (or re-acquired) as selected under the page — clicking it changes
+        // nothing, raises nothing, and the page would stay up. Leave the page onto it here instead.
+        if (pointerProps.IsLeftButtonPressed() && _managerPageVisible && _tabView.SelectedItem() == sender)
+        {
+            if (const auto tab = _GetTabByTabViewItem(sender))
+            {
+                _LeaveManagerPageOntoSelectedTab(tab);
             }
         }
 
@@ -1537,15 +1642,6 @@ namespace winrt::TerminalApp::implementation
             co_return;
         }
 
-        // Agentmaster: the manual middle-click hook fires for tabs whose X is hidden — but the pinned
-        // Manager tab is hidden-X because it is permanently NON-closable, not merely styled that way.
-        // Never middle-click-close it (the X button can't, so neither should middle click); other
-        // X-hidden tabs still close normally below.
-        if (_managerTab && tab == _managerTab)
-        {
-            co_return;
-        }
-
         // `tab.Shutdown()` in `_RemoveTab()` sets the content to null = This checks if the tab is closed.
         if (tab.Content())
         {
@@ -1577,27 +1673,20 @@ namespace winrt::TerminalApp::implementation
             _tabContent.Children().Clear();
             _tabContent.Children().Append(tab.Content());
 
-            // Agentmaster: the full-window pages (Archive, Sessions, any future one) are WINDOW-level
-            // overlays (mounted on Root, below the tab strip) opened from the Manager tab — they are
-            // NOT part of any tab's Content(), so the swap above doesn't remove them and they would
-            // keep covering the newly-selected tab (and still be there when returning to the Manager).
-            // Dismiss them ALL — generically, via the registry each page joins at build
-            // (_RegisterAgentPageOverlay), so a new page binds automatically — whenever the selection
-            // moves OFF the Manager tab. Collapse synchronously: this is a SelectionChanged handler
-            // (already mutating the tree just above), NOT an in-page pointer handler, so the hit-test
-            // AV that makes the in-page Hide paths defer doesn't apply — and a synchronous collapse
-            // avoids a one-frame bleed over the new tab. Symmetrically, RETURNING to the Manager tab
-            // re-shows any page still logically OPEN (its Show set the intent, a Hide would have cleared
-            // it) exactly as left — the collapse kept its typed search + rows in memory; onRestore re-
-            // applies scroll + focus. Pages otherwise open only from their Manager buttons.
-            if (tab != _managerTab)
-            {
-                _DismissAgentPageOverlays();
-            }
-            else
-            {
-                _RestoreAgentPageOverlays();
-            }
+            // Agentmaster: the full-window pages (Sessions, any future one) are WINDOW-level overlays
+            // (mounted on Root, below the tab strip) opened from the Agent Manager page — they are NOT
+            // part of any tab's Content(), so the swap above doesn't remove them and they would keep
+            // covering the newly-selected tab. Dismiss them ALL — generically, via the registry each
+            // page joins at build (_RegisterAgentPageOverlay), so a new page binds automatically —
+            // whenever a TAB comes on screen (every tab: the Manager is a page now, never a tab).
+            // Collapse synchronously: this is a SelectionChanged handler (already mutating the tree just
+            // above), NOT an in-page pointer handler, so the hit-test AV that makes the in-page Hide paths
+            // defer doesn't apply — and a synchronous collapse avoids a one-frame bleed over the new tab.
+            // The symmetric re-show of a page still logically OPEN (its Show set the intent, a Hide would
+            // have cleared it) runs when the Agent Manager page comes back (_ShowManagerPage), exactly as
+            // left — the collapse kept its typed search + rows in memory; onRestore re-applies scroll +
+            // focus. Pages otherwise open only from their Manager buttons.
+            _DismissAgentPageOverlays();
 
             // GH#7409: If the tab switcher is open, then we _don't_ want to
             // automatically focus the new tab here. The tab switcher wants
@@ -1657,7 +1746,10 @@ namespace winrt::TerminalApp::implementation
     //      new terminal control into focus) when not in in the middle of a tab rearrangement.
     // - Agentmaster: also ignored while a tab is being removed (_removing — _RemoveTab applies the
     //   successor's effects itself) or moved (_movingTab — the TabView's momentary neighbor pick is not a
-    //   switch); otherwise the Agentmaster reactions run through _ApplyAgentTabSelection.
+    //   switch), and for the strip deselect the Agent Manager page performs (_managerPageDeselecting);
+    //   otherwise the Agentmaster reactions run through _ApplyAgentTabSelection. A real tab selected while
+    //   the Agent Manager page is on screen takes the page down first (_HideManagerPage) — that is how a
+    //   tab click, Ctrl+Tab, a new tab or an Activate leaves the page.
     // Arguments:
     // - sender: the control that originated this event
     // - eventArgs: the event's constituent arguments
@@ -1669,8 +1761,9 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_OnTabSelectionChanged(const IInspectable& sender, const WUX::Controls::SelectionChangedEventArgs& /*eventArgs*/)
     {
         // Agentmaster (Shift+Click background-activate): our own selection-revert (below) re-enters this
-        // handler synchronously — no-op it so the revert doesn't run the switch side effects.
-        if (_revertingTabSelection)
+        // handler synchronously — no-op it so the revert doesn't run the switch side effects. Likewise the
+        // Agent Manager page's own strip deselect (_DeselectTabStripForManagerPage): bookkeeping, not a switch.
+        if (_revertingTabSelection || _managerPageDeselecting)
         {
             return;
         }
@@ -1690,7 +1783,15 @@ namespace winrt::TerminalApp::implementation
                 _suppressTabSelectForActivate = false;
                 const auto restore = _tabSelectRevertTo;
                 _tabSelectRevertTo = nullptr;
-                if (restore)
+                if (_managerPageVisible)
+                {
+                    // Agentmaster: the press happened on the Agent Manager page, where NO tab is the selected
+                    // one (the strip is deselected for it, whatever MUX may have re-selected under it) — so
+                    // "revert" means deselect again, and the Shift+Clicked tab doesn't stay highlighted
+                    // under the page.
+                    _DeselectTabStripForManagerPage();
+                }
+                else if (restore)
                 {
                     _revertingTabSelection = true;
                     auto clearReverting = wil::scope_exit([this]() noexcept { _revertingTabSelection = false; });
@@ -1708,6 +1809,10 @@ namespace winrt::TerminalApp::implementation
             if (selectedIndex >= 0 && selectedIndex < gsl::narrow_cast<int32_t>(_tabs.Size()))
             {
                 const auto tab{ _tabs.GetAt(selectedIndex) };
+                // Agentmaster (the Agent Manager PAGE): a tab coming on screen takes the page down first —
+                // flag, lens, Home paint — before _UpdatedSelectedTab swaps the tab's content into the
+                // page's place (which is also what removes the page's root). No-op when the page is not up.
+                _HideManagerPage(tab);
                 // Agentmaster (perf forensics — the SLOW TAB SWITCH stopwatch): a switch that stalls the UI
                 // thread for seconds (the 2026-09-04 release log shows a 45s one right after a
                 // `[nav] tab-focus`) leaves NOTHING behind that says which step ate the time — the 20s
@@ -1774,9 +1879,8 @@ namespace winrt::TerminalApp::implementation
             // _ScheduleWindowRecordSave no-ops until startup completes, so the tab-creation selection
             // churn during restore never thrashes a save, and rapid switching collapses to one write.
             _ScheduleWindowRecordSave();
-            // Agentmaster: the active tab just changed — re-evaluate the tab-strip nav buttons. Home
-            // hides when the Manager tab becomes active; Jump Back shows there (targeting the session
-            // the lens auto-selected for the tab you came from).
+            // Agentmaster: the active tab just changed — re-evaluate the tab-strip nav buttons (Home drops
+            // its active paint and Jump Back hides once a tab replaced the Agent Manager page).
             _UpdateManagerNavButtons();
         }
     }
@@ -1790,12 +1894,11 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_UpdateTabIndices()
     {
         const auto size = _tabs.Size();
-        // Agentmaster: the pinned Manager tab (index 0, non-closable) is skipped by every bulk
-        // close (_RemoveTabs), so it must NOT count as a closable neighbor when enabling
-        // "Close tabs to the left" / "Close other tabs". Tell each tab how many such reserved
-        // leading tabs precede the closable set (0 or 1). The Manager is always pinned first, so
-        // checking the front tab is sufficient.
-        const uint32_t reservedLeading = (_managerTab && size > 0 && _tabs.GetAt(0) == _managerTab) ? 1u : 0u;
+        // Agentmaster: how many non-closable tabs lead the strip ahead of the closable set — the count
+        // each tab uses to enable "Close tabs to the left" / "Close other tabs". It was 1 while the pinned
+        // Manager tab sat at index 0; the Manager is a page behind the Home button now, so every tab is
+        // closable and nothing is reserved (the parameter stays for a future pinned tab).
+        constexpr uint32_t reservedLeading = 0u;
         for (uint32_t i = 0; i < size; ++i)
         {
             auto tab{ _tabs.GetAt(i) };
@@ -1828,7 +1931,9 @@ namespace winrt::TerminalApp::implementation
     // - Agentmaster: the moved tab ends up selected (upstream behavior) and its header is revealed at
     //   its new position; while it is briefly out of TabItems the selection funnel is suppressed
     //   (_movingTab), so the TabView's momentary pick of its neighbor never counts as visiting that
-    //   neighbor. The pinned Manager tab never moves and nothing moves ahead of it.
+    //   neighbor. Because the moved tab ends up selected, moving a tab while the Agent Manager page is up
+    //   (a "Move to start/end" menu item, a drag) also leaves the page for that tab — upstream's "a moved
+    //   tab gets focus" rule, unchanged.
     // Arguments:
     // - currentTabIndex: the current index of the tab to move
     // - suggestedNewTabIndex: the new index of the tab, might get clamped to fit int the tabs row boundaries
@@ -1840,20 +1945,14 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_TryMoveTab(const uint32_t currentTabIndex,
                                    const int32_t suggestedNewTabIndex)
     {
-        // Agentmaster: the pinned Manager tab is non-movable, and nothing may move ahead of it.
-        // Bail with <=1 tab so the clamp below can never get lo>hi (lowerBound 1 vs hi 0 when the
-        // sole tab is the Manager) and so Size()-1 can't underflow.
+        // Agentmaster: with <=1 tab there is nowhere to move, and bailing keeps Size()-1 from underflowing
+        // on an EMPTY strip (an Agentmaster window lives on with no tabs — its Agent Manager page shows).
+        // Every tab is movable, to any index: the Manager is a page now, not a tab pinned at index 0.
         if (_tabs.Size() <= 1)
         {
             return;
         }
-        if (_managerTab && currentTabIndex < _tabs.Size() && _tabs.GetAt(currentTabIndex) == _managerTab)
-        {
-            ::Agentmaster::LogNav(L"tab-move refused (manager tab is pinned)"); // Agentmaster: a moveTab action aimed at the pinned tab
-            return; // can't move the Manager tab itself
-        }
-        const int32_t lowerBound = _managerTab ? 1 : 0; // keep index 0 reserved for the Manager tab
-        auto newTabIndex = gsl::narrow_cast<uint32_t>(std::clamp<int32_t>(suggestedNewTabIndex, lowerBound, _tabs.Size() - 1));
+        auto newTabIndex = gsl::narrow_cast<uint32_t>(std::clamp<int32_t>(suggestedNewTabIndex, 0, _tabs.Size() - 1));
         if (currentTabIndex != newTabIndex)
         {
             auto tab = _tabs.GetAt(currentTabIndex);
@@ -1884,7 +1983,12 @@ namespace winrt::TerminalApp::implementation
             const bool selectionUnchanged = (_tabView.SelectedItem() == tabViewItem);
             _tabView.SelectedItem(tabViewItem);
             _ApplyTabDragPolicy(tabViewItem); // Agentmaster: the reinsert breaks the item->container map — settle it (+ re-pin CanDrag(false))
-            if (selectionUnchanged)
+            // Agentmaster (the Agent Manager PAGE): the same no-SelectionChanged trap on the page — MUX put the
+            // selection on the moved tab under the page by itself, so the funnel never runs and the page would
+            // stay up over the tab this move just gave focus to. Leave the page onto it explicitly: the leave's
+            // content swap (_UpdatedSelectedTab) reveals the tab and the leave itself re-evaluates the nav
+            // buttons, so the two strip-facing steps below are only needed off the page.
+            if (selectionUnchanged && !_LeaveManagerPageOntoSelectedTab(tab))
             {
                 _RevealTabInStrip(tab, /*leaveFullyVisibleInPlace*/ true);
                 _UpdateManagerNavButtons();
@@ -1956,7 +2060,6 @@ namespace winrt::TerminalApp::implementation
         from = std::nullopt;
         to = std::nullopt;
 
-        _PinManagerTabFirst(); // Agentmaster: a tab dropped before the pinned Manager tab snaps it back to 0
         _SettleTabStripLayout(); // Agentmaster: MUX's own drag-reorder mutated TabItems — settle before the user can re-grab (drag-start AV guard)
     }
 
@@ -1984,6 +2087,12 @@ namespace winrt::TerminalApp::implementation
                 tab.Focus(FocusState::Programmatic);
                 _UpdateMRUTab(tab);
                 _updateAllTabCloseButtons();
+            }
+            else if (_managerPageVisible && _managerPage)
+            {
+                // Agentmaster: no tab is focused while the Agent Manager page is on screen — the page is
+                // what a dismissed transient UI (palette, new-tab flyout, renamer) hands focus back to.
+                _managerPage->Focus(FocusState::Programmatic);
             }
         }
     }

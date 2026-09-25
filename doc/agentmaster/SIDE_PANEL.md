@@ -2,7 +2,7 @@
 
 A non-terminal, non-tab panel docked LEFT (the default) or RIGHT of the tab content — part of
 the window itself (every tab shares it), giving the fleet + the current session a permanent home
-next to whatever terminal you are working in. It deliberately REUSES the Manager tab's and the
+next to whatever terminal you are working in. It deliberately REUSES the Agent Manager page's and the
 per-tab overlay's components, so it carries their business logic verbatim instead of a parallel copy.
 
 ## 1. Layout
@@ -82,7 +82,7 @@ which also flips the collapse chevron (`«` here — it always points toward the
   exact lazily-filled flyout the board card shows. Selection flows BOTH ways: the tab-switch
   funnel (`_SyncManagerSelectionToTab`) and the lens-changed push both select the card here,
   with same-id early-outs breaking the echo.
-- **The tab strip follows a click only on the Manager tab.** While the Manager tab is active, a
+- **The tab strip follows a click only on the Agent Manager page.** While the Manager page is on screen, a
   card click also scrolls the tab strip to that session's tab — like a board card click, and even
   on a RE-click of the already-selected card (`_RevealClickedSessionTab`; the same-id early-outs
   above would otherwise swallow it). On any other tab a click is a PEEK (§3) and never moves the
@@ -133,7 +133,7 @@ when you deliberately peek another.** Two inputs drive the one selection (`_side
   reliable "back to work" trigger.
 
 `_SidePanelFollowFocusedTab` is gated on `StartupState::Initialized` (never clobber the
-restore-seeded selection) and on the focused tab being a managed session (the Manager tab / a
+restore-seeded selection) and on the focused tab being a managed session (the Agent Manager page — no tab at all / a
 `pwsh`·`cmd`·external shell resolve empty → the current peek is kept, nothing to summarize). It
 passes `driveManagerLens=false`, so a terminal click moves ONLY the side panel — the Manager
 board/tree/Auto-Testing keeps its own deliberate selection. The same-id early-out in

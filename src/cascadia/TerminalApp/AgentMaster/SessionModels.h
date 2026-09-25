@@ -204,13 +204,13 @@ namespace Agentmaster
     //   * NoColor — the cog's "Remove colors": NO tab wears a color, STRIP-WIDE — managed tabs are
     //     reset (their color re-derives from the maps on exit), while every OTHER tab's runtime
     //     color (an ex-claude shell tab still wearing its exited session's dir paint, a
-    //     user-colored or restored pwsh tab, the Manager tab's per-window tint) is SUSPENDED:
+    //     user-colored or restored pwsh tab) is SUSPENDED:
     //     visual shed, value PARKED on the tab (Tab::SetTabColorSuspended) and still recorded by
     //     persistence (BuildStartupActions' setColor fold / GetPersistableTabColor), so leaving
     //     the mode restores it. "Change tab color" + the openTabColorPicker action are disabled on
     //     EVERY tab; a color that lands anyway (a restored tab's replayed setColor, a keybinding)
     //     is immediately parked by the _OnClaudeTabColorChanged chokepoint. The persisted colors
-    //     (dir-colors.json + SessionInfo::tabColorHex + the record's managerTabColor + a shell
+    //     (dir-colors.json + SessionInfo::tabColorHex + a shell
     //     tab's actionsJson) are deliberately KEPT — never read for painting, never dropped — so
     //     switching back to any other mode restores exactly the colors the fleet had
     //     (ResolveSessionColorHex answers empty). Grouping/dir semantics are the classic
@@ -2175,12 +2175,11 @@ namespace Agentmaster
         // close when the X is shown (suppressed in TerminalPage::_OnTabCloseRequested). GLOBAL across
         // windows; applied live like showTabCloseButton. Default true reproduces prior behavior.
         bool closeTabOnMiddleClick{ true };
-        // Agentmaster: ALWAYS show the tab-strip "Home" button (the affordance that jumps to the pinned
-        // Manager tab), not only when the Manager tab has scrolled out of view. ON (default) keeps a
-        // persistent Home button in the strip header whenever you're on a non-Manager tab; OFF restores
-        // the scroll-triggered behavior (Home appears only once the Manager tab is scrolled off the left
-        // edge). Either way it hides while the Manager tab itself is active. GLOBAL across windows;
-        // applied live on Save + cross-window broadcast. A missing key => true (checked by default).
+        // Agentmaster: RETIRED — nothing reads it. It chose whether the tab-strip "Home" button showed
+        // always or only once the pinned Manager tab had scrolled off the strip. The Manager is no
+        // longer a tab: it is a page the Home button opens (the ONLY way to reach it), so the button is
+        // always shown and this setting has nothing left to choose. Kept (and still (de)serialized) only
+        // so a settings.json written by an older build round-trips unchanged; its cog toggle is gone.
         bool alwaysShowHomeButton{ true };
         // Agentmaster: show the profile ICON on terminal tabs — the leftmost glyph in each tab, before
         // the status dot + title. OFF (the DEFAULT here) hides it entirely so it takes NO strip space,
@@ -2884,24 +2883,24 @@ namespace Agentmaster
     // NOT the session source of truth — that is sessions.json (the archive model).
     struct WindowRecord
     {
-        std::wstring windowId; // stable GUID, generated once per window and embedded in its Manager tab
+        std::wstring windowId; // stable GUID, generated once per window (claimed at engine init, before its Manager page is built)
         WindowGeometry geometry;
         std::vector<TabEntry> tabs; // ORDERED (left-to-right)
         // The focused tab, persisted by STABLE IDENTITY so it survives a restart (positions/indices
         // shift between runs — a session id does not). A Claude tab => selectedSessionId (the
         // conversation id, the same stable ref sessions.json uses). A non-Claude (shell) tab has no
         // cross-restart id (its WT session GUID is regenerated each run), so it falls back to
-        // selectedTabIndex (an index into `tabs`). Manager / none => both unset (empty / -1); the
-        // Manager tab is re-created at index 0, the natural default. On reopen the window re-selects this
-        // tab so closing/reopening preserves the ACTIVE tab, not just the set of tabs.
+        // selectedTabIndex (an index into `tabs`). The Agent Manager page on screen / none => both unset
+        // (empty / -1), which a reopen answers by showing the Manager page again. On reopen the window
+        // re-selects this tab so closing/reopening preserves what was ACTIVE, not just the set of tabs.
         std::wstring selectedSessionId; // selected Claude tab's conversation id (stable); empty otherwise
-        int selectedTabIndex{ -1 }; // fallback for a non-Claude selected tab: index into `tabs`; -1 = Manager/none
+        int selectedTabIndex{ -1 }; // fallback for a non-Claude selected tab: index into `tabs`; -1 = the Manager page / none
         ManagerState manager;
-        // Agentmaster: the pinned Manager tab's user-chosen color ("#RRGGBB"; empty => none/default),
-        // persisted PER WINDOW. Unlike a session tab's color (ONE value per working directory, Rule #12,
-        // owned by dir-colors.json), the Manager tab is a per-window singleton with no dir — so its color
-        // rides here in the window record, letting each Agentmaster window's home tab be color-coded
-        // independently. Empty/absent (an older record) => no override (the default tab look).
+        // Agentmaster: RETIRED — the old pinned Manager tab's user-chosen color ("#RRGGBB"; empty =>
+        // none), persisted PER WINDOW (that tab was a per-window singleton with no dir, so Rule #12's
+        // dir-colors map couldn't hold it). The Manager is a page behind the tab strip's Home button now
+        // and wears no tab color, so nothing writes or applies it; it is kept (and still (de)serialized)
+        // only so an older windows/<id>.json round-trips unchanged.
         std::wstring managerTabColor;
         // Agentmaster (SIDE PANEL): this window's fleet side-panel layout — persisted PER WINDOW (not
         // per tab), the window-local half of the AppSettings sidePanel* defaults. Each LAYOUT field is a

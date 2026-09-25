@@ -9,7 +9,7 @@
 // upstream TabManagement.cpp pattern) so TerminalPage.cpp stays close to upstream.
 //
 // Partial files in this group (★ marks THIS file):
-//   TerminalPage.AgentEngine.cpp               - ~TerminalPage, _InitAgentmasterEngine (consume the process-wide SharedEngine), the Manager tab, _WireAgentManagerContent
+//   TerminalPage.AgentEngine.cpp               - ~TerminalPage, _InitAgentmasterEngine (consume the process-wide SharedEngine), the Agent Manager page (+ its Home button), _WireAgentManagerContent
 // ★ TerminalPage.AgentSessions.cpp             - spawn/launch/restore/close/adopt for Claude + Codex; tab-title sync; smart naming + per-dir tab color
 //   TerminalPage.AgentObserver.cpp             - the per-tab overlay/badge bind/reconcile/liveness (incl. managed-Codex) + the Fleet Observer UI lane (_ObserverProbe)
 //   TerminalPage.AgentWindowRecord.cpp         - M10 per-window record capture/flush/restore + reopen saved windows (Claude + Codex tab refs)
@@ -110,7 +110,7 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster (native-exe-only policy): surface the "Claude Code (native) not found" notice from a
-    // FULL-WINDOW page (Archive / Sessions) or a tab/CLI entry point, where the Manager tab's rich
+    // FULL-WINDOW page (Archive / Sessions) or a tab/CLI entry point, where the Manager page's rich
     // install modal (_ShowClaudeMissing) can't render. The decision is still the synchronous
     // EnsureClaudeAvailable() gate at each launch choke point; this is only the user-facing prompt shown
     // when that returns false. Idempotent: _claudeMissingPromptShowing collapses a burst — e.g. a bulk
@@ -1073,7 +1073,7 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster: on startup, load every persisted session into the registry as CLOSED
     // (live=false) — and do NOT auto-launch any of them. This is the deliberate reversal of the
     // old "close == reopen" auto-relaunch (Correctness Rule #6): the app opens to just the
-    // Manager tab, the prior fleet arrives closed (resumable), and the user re-opens what they
+    // Manager page, the prior fleet arrives closed (resumable), and the user re-opens what they
     // want from the Sessions browser (which resumes via `claude --resume`, transcript-gated, in
     // _RestoreArchivedSession). No tabs are created here, so there is nothing to lay out / yield
     // for — the body runs synchronously. (FAVORITES.md: there is no separate "Archived" view.)
@@ -1195,6 +1195,13 @@ namespace winrt::TerminalApp::implementation
             // strip had been scrolled to. Reveal it explicitly then (a no-op when it is wholly on screen).
             // A different tab needs nothing here: the selection change runs the funnel, which reveals it.
             const bool alreadySelected = (_tabView.SelectedItem() == item);
+            // Agentmaster (the Agent Manager PAGE): the same no-SelectionChanged trap covers the page — a
+            // Jump Back / card double-click / toast click for the tab MUX still holds selected under the
+            // page would otherwise leave the page up. Switch explicitly then (a no-op off the page).
+            if (alreadySelected)
+            {
+                _LeaveManagerPageOntoSelectedTab(tab);
+            }
             _tabView.SelectedItem(item);
             if (alreadySelected)
             {
@@ -1772,7 +1779,7 @@ namespace winrt::TerminalApp::implementation
     // Parameters:
     //   tab - the candidate tab (any kind; null is tolerated).
     // Returns: true when at least one terminal pane is NotConnected. False for a null tab, a
-    //   non-terminal tab (the Manager, Settings), or when every pane is already Connecting /
+    //   non-terminal tab (Settings), or when every pane is already Connecting /
     //   Connected / Closed / Failed (a pane with no connection reads Closed — ControlCore's null rule).
     // Never throws: a failed read is logged (Rule #18) and answers false. That can only make the
     //   caller keep upstream's pick (wake the neighbor, the old behavior), never pick an unsafe tab.
@@ -1792,8 +1799,8 @@ namespace winrt::TerminalApp::implementation
                 {
                     return; // one dormant pane settles it; the rest of the walk is moot
                 }
-                // A split (parent) pane carries no content, and a non-terminal leaf (the Manager's
-                // AgentManagerContent, Settings) has no connection that selection could start.
+                // A split (parent) pane carries no content, and a non-terminal leaf (Settings) has no
+                // connection that selection could start.
                 TerminalApp::TerminalPaneContent terminal{ nullptr };
                 if (const auto content = pane->GetContent())
                 {
@@ -1833,8 +1840,9 @@ namespace winrt::TerminalApp::implementation
     //   closedSlot - the closed tab's FORMER index in _tabs (the removal has already happened).
     //   mruMode    - the user's tabSwitcherMode is MostRecentlyUsed (selects the fallback order).
     // Returns: the tab to select. That is `preferred` itself when selecting it starts nothing, when it
-    //   is null, or when every tab would start something (upstream behavior). Otherwise it is the chosen
-    //   replacement, logged as [close-successor].
+    //   is null, or when every tab would start something (then _RemoveTab shows the Agent Manager page
+    //   instead of selecting it — the page took over the no-wake harbor the pinned Manager tab was).
+    //   Otherwise it is the chosen replacement, logged as [close-successor].
     // Never throws: any failure is logged (Rule #18) and returns `preferred`, the pre-fix behavior. A
     //   bug here can at worst wake the neighbor again; it never leaves the strip without a selection.
     winrt::TerminalApp::Tab TerminalPage::_PickCloseSuccessorTab(const winrt::TerminalApp::Tab& preferred, const uint32_t closedSlot, const bool mruMode)
@@ -2615,7 +2623,7 @@ namespace winrt::TerminalApp::implementation
         const auto sid = _ClaudeSessionForTab(tab);
         if (sid.empty())
         {
-            return false; // not a managed session tab (a plain shell / the Manager tab) — nothing to deactivate
+            return false; // not a managed session tab (a plain shell / Settings) — nothing to deactivate
         }
         const auto sid8 = ::Agentmaster::ShortId(sid);
         const auto info = _sessionRegistry->Get(sid);
@@ -2829,9 +2837,9 @@ namespace winrt::TerminalApp::implementation
     // skips (adopted / already dormant / mid-delivery — logged by _DeactivateManagedTab). NO confirm
     // dialog by design: deactivate is non-destructive — the conversation stays on disk and a single
     // click resumes it — exactly like "Restart session", which also kills the process unconfirmed.
-    // If the FOCUSED tab was parked, selection jumps to the Manager tab: the wake hook fires on
+    // If the FOCUSED tab was parked, the Agent Manager page comes on screen: the wake hook fires on
     // selection CHANGE, so a dormant tab left focused would sit dead until a switch-away-and-back —
-    // and landing on the Manager mirrors what a fresh open shows. UI thread only.
+    // and landing on the Manager mirrors what the old Manager-tab jump showed. UI thread only.
     void TerminalPage::_DeactivateTabsFromMenu(const winrt::TerminalApp::Tab& anchorTab, int32_t scope)
     {
         if (!anchorTab)
@@ -2853,10 +2861,6 @@ namespace winrt::TerminalApp::implementation
         {
             for (const auto& t : _tabs)
             {
-                if (_managerTab && t == _managerTab)
-                {
-                    continue; // the pinned Manager tab hosts no session
-                }
                 if (scope == 1 && t == anchorTab)
                 {
                     continue; // "Other Tabs": this one keeps running
@@ -2883,13 +2887,11 @@ namespace winrt::TerminalApp::implementation
                 ++skipped;
             }
         }
-        if (focusedParked && _managerTab)
+        if (focusedParked)
         {
-            uint32_t managerIdx{};
-            if (_tabs.IndexOf(_managerTab, managerIdx))
-            {
-                _SelectTab(managerIdx);
-            }
+            // The just-parked tab must not stay focused (see above): show the Agent Manager page, which
+            // starts nothing — the page is where the old Manager-tab jump landed.
+            _ShowManagerPage(L"focused tab deactivated");
         }
         ::Agentmaster::LogNav(L"deactivate-done scope=" + scopeName + L" parked=" + std::to_wstring(parked) + L" skipped=" + std::to_wstring(skipped));
     }
@@ -2976,7 +2978,7 @@ namespace winrt::TerminalApp::implementation
     // drivable in the gap, and the session is not closing. The destination window correlates by
     // WT_SESSION (stable across the move) and RE-HOMES it on its next _ObserverProbe tick (re-points the
     // injector to its own tab + recreates the local binding + overlay — see the HasInjector branch in
-    // _ObserverProbe). A non-Claude tab (a plain pwsh/cmd tab, the Manager tab) reverse-looks-up to no
+    // _ObserverProbe). A non-Claude tab (a plain pwsh/cmd tab, Settings) reverse-looks-up to no
     // session and is left untouched.
     void TerminalPage::_DetachClaudeTabForMove(const winrt::com_ptr<Tab>& tab)
     {
@@ -3329,7 +3331,7 @@ namespace winrt::TerminalApp::implementation
     //     (dir-colors.json / tabColorHex) are deliberately untouched — the reset's synchronous
     //     _OnClaudeTabColorChanged re-entry is swallowed by that handler's NoColor guard, so nothing
     //     is dropped and switching back to a colored mode restores exactly the prior colors.
-    // Never called for the Manager tab (its color is per-window, in the WindowRecord).
+    // Managed session tabs only (the Agent Manager is a page, never a tab, and wears no tab color).
     void TerminalPage::_ApplySessionTabColor(const TerminalApp::Tab& tab, const std::wstring& sessionId, const std::wstring& dir)
     {
         if (!tab)
@@ -3419,8 +3421,8 @@ namespace winrt::TerminalApp::implementation
     // NoColor ("Remove colors") is STRIP-WIDE, so a sweep over ALL tabs runs first: "no tab is
     // colored" includes the tabs the managed loop can't see — an ex-claude pwsh tab still wearing
     // the dir paint its exited session left (archived sessions leave _claudeTabs, the tab lives
-    // on), a user-colored shell tab, a restored shell tab whose actionsJson replayed a setColor,
-    // and the pinned Manager tab (its per-window record color). Entering the mode SUSPENDS each
+    // on), a user-colored shell tab, and a restored shell tab whose actionsJson replayed a setColor.
+    // Entering the mode SUSPENDS each
     // one's runtime color (parked on the tab — persistence still records it via
     // GetPersistableTabColor / BuildStartupActions, nothing voided) and disables the color picker
     // on every tab; leaving restores every parked color and re-arms the picker. Managed session
@@ -3533,37 +3535,23 @@ namespace winrt::TerminalApp::implementation
         // Tab color modes — NoColor ("Remove colors"): NO tab wears a color — not just managed
         // ones — and this event (wired for EVERY tab) is the one chokepoint all color writes
         // funnel through. Whatever just landed on ANY tab — a restored shell tab's replayed
-        // setColor action, the Manager tab's record re-tint at claim, a stray setTabColor
-        // keybinding, a torn-out tab recreated in this window — is immediately SUSPENDED: the
-        // visual is shed while the value stays PARKED on the tab (Tab::_suspendedTabColor), so
-        // persistence — a shell tab's actionsJson via BuildStartupActions' fold, the Manager color
-        // via GetPersistableTabColor — still records it and leaving the mode restores it. Nothing
+        // setColor action, a stray setTabColor keybinding, a torn-out tab recreated in this
+        // window — is immediately SUSPENDED: the visual is shed while the value stays PARKED on
+        // the tab (Tab::_suspendedTabColor), so persistence — a shell tab's actionsJson via
+        // BuildStartupActions' fold — still records it and leaving the mode restores it. Nothing
         // is read from or written to dir-colors.json / tabColorHex here, so the one-color-per-key
         // maps survive the mode verbatim (the whole point — switching back restores exactly the
         // prior colors). Loop-safe: SetTabColorSuspended raises no TabColorChanged, and
         // re-suspending a colorless/parked tab is a no-op (our own ResetRuntimeTabColor repaints
-        // land here with nothing left to park). The Manager tab keeps its save-on-change semantics
-        // — the capture persists the PARKED value, exactly what it showed before the mode.
+        // land here with nothing left to park). (The pinned Manager tab's per-window color that
+        // this block and the next once special-cased is gone with the tab — the Agent Manager is a
+        // page behind the Home button, and pages wear no tab color.)
         if (_appSettings.tabColorMode == ::Agentmaster::TabColorMode::NoColor)
         {
             if (const auto impl = _GetTabImpl(tab))
             {
                 impl->SetTabColorSuspended(true);
             }
-            if (_managerTab && tab == _managerTab)
-            {
-                _ScheduleWindowRecordSave();
-            }
-            return;
-        }
-        // Agentmaster: the pinned Manager tab persists its color PER WINDOW (in the window record), not in
-        // the dir-color map — it is a per-window singleton with no working dir (Rule #12 is dir-keyed). A
-        // color change on it just schedules a window-record save (the capture reads the live color); there
-        // is no dir to fan the color out to. Handled before the session-tab path (which would early-return
-        // anyway, since the Manager tab has no _ClaudeSessionForTab id).
-        if (_managerTab && tab == _managerTab)
-        {
-            _ScheduleWindowRecordSave();
             return;
         }
         if (!_sessionRegistry)

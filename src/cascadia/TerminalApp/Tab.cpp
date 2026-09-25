@@ -285,7 +285,7 @@ namespace winrt::TerminalApp::implementation
 
         WUX::Controls::ToolTip toolTip{};
         // Agentmaster: pin the tooltip Dark, exactly as _UpdateAgentToolTip does for managed tabs. This
-        // is the DEFAULT tab-tooltip path — shell (pwsh/cmd) tabs, the Manager tab, and any tab before a
+        // is the DEFAULT tab-tooltip path — shell (pwsh/cmd) tabs, a Settings tab, and any tab before a
         // rich session tooltip is pushed — and it was the lone tab tooltip left rendering at the popup
         // root's (light) theme: a ToolTip lives in the popup root and does NOT inherit the host theme, and
         // ToolTipService theme propagation is unreliable under XAML Islands (see AgentTipHelpers /
@@ -716,7 +716,7 @@ namespace winrt::TerminalApp::implementation
                 // Agentmaster: a non-terminal pane (an IPaneContent — the Agent Manager / Settings /
                 // Scratchpad / tasks panes) has NO TermControl, so the terminal-only Focus above no-ops
                 // and NOTHING in the tab gets keyboard focus on a tab switch. Focus the active pane's
-                // CONTENT (-> IPaneContent::Focus) so its own key handlers work: the Manager tab's
+                // CONTENT (-> IPaneContent::Focus) so its own key handlers work: a content pane's
                 // tab-nav chords (alt+right, ctrl+tab) are routed KeyDown events that fire only from a focused
                 // element, and with NO focused element the whole tab swallowed them until the user
                 // clicked something. (Terminal tabs take the if-branch above and are unaffected.)
@@ -1448,14 +1448,6 @@ namespace winrt::TerminalApp::implementation
     {
         ASSERT_UI_THREAD();
 
-        // Agentmaster: the pinned Manager tab has rename disabled. This is the single funnel for
-        // every interactive rename gesture (double-tap, context-menu "Rename Tab", openTabRenamer
-        // action), so one guard here blocks them all.
-        if (_renameDisabled)
-        {
-            return;
-        }
-
         _headerControl.BeginRename();
     }
 
@@ -2007,8 +1999,8 @@ namespace winrt::TerminalApp::implementation
             _moveRightMenuItem.Text(RS_(L"TabMoveRight"));
         }
 
-        // Move to start (Agentmaster). The page computes the target slot (it reserves index 0 for
-        // the pinned Manager tab), so this only raises the request.
+        // Move to start (Agentmaster). The page computes the target slot (index 0 — no tab is pinned
+        // there any more), so this only raises the request.
         {
             _moveToStartMenuItem.Click([weakThis](auto&&, auto&&) {
                 if (auto tab{ weakThis.get() })
@@ -2031,8 +2023,8 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Create a sub-menu for our extended move tab items.
-        // Agentmaster: kept as a member (not a local) so the pinned Manager tab can gray
-        // out the whole "Move tab" sub-menu. See DisableCloseAndMoveMenuItems().
+        // Agentmaster: a member (not a local) — promoted for the old pinned Manager tab's graying,
+        // which is gone with that tab (see Tab.h).
         Controls::FontIcon moveSubMenuSymbol; // Agentmaster: a glyph on the "Move tab" submenu header
         moveSubMenuSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
         moveSubMenuSymbol.Glyph(L"\xE7C2"); // Move
@@ -2083,7 +2075,7 @@ namespace winrt::TerminalApp::implementation
 
         // All Tabs — every managed session tab in this window, this one included: the strip then
         // reads exactly as if the app had just opened (every session dormant, waiting for a
-        // focus/activate; you land on the Manager tab).
+        // focus/activate; you land on the Agent Manager page).
         _deactivateAllTabsMenuItem.Click([weakThis](auto&&, auto&&) {
             if (auto tab{ weakThis.get() })
             {
@@ -2091,12 +2083,11 @@ namespace winrt::TerminalApp::implementation
             }
         });
         _deactivateAllTabsMenuItem.Text(L"All Tabs");
-        WUX::Controls::ToolTipService::SetToolTip(_deactivateAllTabsMenuItem, box_value(winrt::hstring{ L"Deactivate EVERY managed session tab in this window \x2014 as if the app had just opened: all tabs parked dormant, each resuming when focused or activated. You land on the Manager tab." }));
+        WUX::Controls::ToolTipService::SetToolTip(_deactivateAllTabsMenuItem, box_value(winrt::hstring{ L"Deactivate EVERY managed session tab in this window \x2014 as if the app had just opened: all tabs parked dormant, each resuming when focused or activated. You land on the Agent Manager." }));
 
         // The submenu header. Moon glyph (QuietHours) — "asleep, waiting": deactivation is dormancy,
         // not an ending (that is Close's X). Kept as a member so the page can show/hide it
-        // (SetAgentDeactivateState) and the pinned Manager tab can gray it
-        // (DisableCloseAndMoveMenuItems).
+        // (SetAgentDeactivateState).
         Controls::FontIcon deactivateSymbol;
         deactivateSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
         deactivateSymbol.Glyph(L"\xE708"); // QuietHours (moon)
@@ -2124,8 +2115,8 @@ namespace winrt::TerminalApp::implementation
         // Close tabs before (Agentmaster: the left-hand twin of "Close tabs to the right").
         // Upstream only ships "close tabs after"; this adds the mirror. It raises an Agentmaster
         // event (like "New Session Here" / "Move to start") rather than dispatching a ShortcutAction,
-        // because there is no CloseTabsBefore action to bind — the page closes [0, index) directly,
-        // skipping the pinned Manager tab. Inserted FIRST so the submenu reads left-to-right.
+        // because there is no CloseTabsBefore action to bind — the page closes [0, index) directly.
+        // Inserted FIRST so the submenu reads left-to-right.
         _closeTabsBeforeMenuItem.Click([weakThis](auto&&, auto&&) {
             if (auto tab{ weakThis.get() })
             {
@@ -2169,9 +2160,9 @@ namespace winrt::TerminalApp::implementation
         Automation::AutomationProperties::SetHelpText(_closeOtherTabsMenuItem, closeOtherTabsToolTip);
 
         // Close all tabs (Agentmaster) — the whole-window twin of "Close other tabs": closes EVERY tab
-        // (this one included), skipping the pinned Manager tab. Raises an Agentmaster event; the page
-        // snapshots all tabs and routes them through the SAME _RemoveTabs chokepoint as "Close tabs to
-        // the left/right" (aggregate confirm + per-session archive bookkeeping + the Manager-tab skip).
+        // (this one included); the window then stays on its Agent Manager page. Raises an Agentmaster
+        // event; the page snapshots all tabs and routes them through the SAME _RemoveTabs chokepoint as
+        // "Close tabs to the left/right" (aggregate confirm + per-session archive bookkeeping).
         _closeAllTabsMenuItem.Click([weakThis](auto&&, auto&&) {
             if (auto tab{ weakThis.get() })
             {
@@ -2229,8 +2220,8 @@ namespace winrt::TerminalApp::implementation
         WUX::Controls::ToolTipService::SetToolTip(_closeOtherSessionsOfSameFolderMenuItem, box_value(winrt::hstring{ L"Close every OTHER open session whose working directory is the same as this one \x2014 this session stays open. You'll see the full list first and can cancel. Each stays in Sessions, resumable anytime (nothing on disk is deleted)." }));
 
         // Close
-        // Agentmaster: kept as a member (not a local) so the pinned Manager tab can gray
-        // out the "Close tab" entry. See DisableCloseAndMoveMenuItems().
+        // Agentmaster: a member (not a local) — promoted for the old pinned Manager tab's graying,
+        // which is gone with that tab (see Tab.h).
         Controls::FontIcon closeSymbol;
         closeSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
         closeSymbol.Glyph(L"\xE711");
@@ -2249,8 +2240,8 @@ namespace winrt::TerminalApp::implementation
         Automation::AutomationProperties::SetHelpText(_closeTabMenuItem, closeTabToolTip);
 
         // Create a sub-menu for our extended close items.
-        // Agentmaster: kept as a member (not a local) so the pinned Manager tab can gray
-        // out the whole "Close" sub-menu. See DisableCloseAndMoveMenuItems().
+        // Agentmaster: a member (not a local) — promoted for the old pinned Manager tab's graying,
+        // which is gone with that tab (see Tab.h).
         Controls::FontIcon closeSubMenuSymbol; // Agentmaster: a glyph on the "Close" submenu header (same Cancel/X as "Close tab")
         closeSubMenuSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
         closeSubMenuSymbol.Glyph(L"\xE711"); // Cancel
@@ -2303,8 +2294,8 @@ namespace winrt::TerminalApp::implementation
 
         {
             // "Rename tab"
-            // Agentmaster: kept as a member (_renameTabMenuItem) so the pinned Manager tab can gray
-            // it out via DisableTabRename().
+            // Agentmaster: a member (_renameTabMenuItem) — promoted for the old fixed-title Manager
+            // tab's graying, which is gone with that tab; every tab is renameable.
             Controls::FontIcon renameTabSymbol;
             renameTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
             renameTabSymbol.Glyph(L"\xE8AC"); // Rename
@@ -2733,25 +2724,22 @@ namespace winrt::TerminalApp::implementation
         const auto numOfTabs = TabViewNumTabs();
 
         // Agentmaster: enabled only if there is a CLOSABLE other tab — i.e. one besides this tab
-        // AND besides the reserved leading tabs (the pinned Manager tab, which _RemoveTabs skips).
-        // With the Manager present (_reservedLeadingTabs == 1) a strip of just [Manager, thisTab]
-        // leaves nothing to close, so this stays disabled (was: numOfTabs > 1, which lit up with
-        // only the Manager as the "other" tab).
+        // AND besides the reserved (non-closable) leading tabs. None are reserved today
+        // (_reservedLeadingTabs == 0 — the pinned Manager tab that once was one is now a page behind
+        // the Home button), so this is upstream's numOfTabs > 1.
         _closeOtherTabsMenuItem.IsEnabled(numOfTabs > _reservedLeadingTabs + 1);
 
         // Agentmaster: "Close all tabs" / "★ Favorite & close all tabs" — enabled when there is at
-        // least one CLOSABLE tab (one past the reserved leading tabs the Manager occupies). Since this
-        // menu only ever appears on a non-Manager tab, that holds whenever the menu is shown, but gate
-        // it for robustness (and so it greys out in the degenerate [Manager only] strip).
+        // least one CLOSABLE tab (one past the reserved leading tabs — none today). Since the menu is
+        // shown on a tab, that always holds; the gate stays for robustness.
         _closeAllTabsMenuItem.IsEnabled(numOfTabs > _reservedLeadingTabs);
         _favoriteAndCloseAllTabsMenuItem.IsEnabled(numOfTabs > _reservedLeadingTabs);
 
         // Agentmaster: enabled only if there is a CLOSABLE tab to the left — i.e. a tab past the
-        // reserved leading ones. From index 1 with the Manager at index 0 the only tab to the left
-        // is the Manager (skipped by _RemoveTabs), so this stays disabled.
+        // reserved leading ones (none today, so: not the left-most tab).
         _closeTabsBeforeMenuItem.IsEnabled(tabIndex > _reservedLeadingTabs);
 
-        // enabled if there are other tabs on the right (the Manager is never to the right)
+        // enabled if there are other tabs on the right
         _closeTabsAfterMenuItem.IsEnabled(tabIndex < numOfTabs - 1);
 
         // enabled if not left-most tab
@@ -2765,38 +2753,10 @@ namespace winrt::TerminalApp::implementation
         _moveToEndMenuItem.IsEnabled(tabIndex < numOfTabs - 1);
     }
 
-    // Agentmaster: permanently gray out the context-menu entries that would move or
-    // close this tab ("Move tab", "Close", "Close tab"). Used by the pinned, leftmost
-    // Manager tab, which must never be relocatable or closable (it mirrors the hidden
-    // close button). _EnableMenuItems() only ever touches the inner items, never these
-    // three, so a one-shot disable here is not undone on subsequent tab re-indexing.
-    void Tab::DisableCloseAndMoveMenuItems()
-    {
-        ASSERT_UI_THREAD();
-
-        _moveSubMenu.IsEnabled(false);
-        _closeSubMenu.IsEnabled(false);
-        _closeTabMenuItem.IsEnabled(false);
-        _deactivateSubMenu.IsEnabled(false); // Agentmaster (deactivate): belt — it never SHOWS on the Manager tab (no session), but gray it like the Close submenu anyway
-    }
-
-    // Agentmaster: permanently disable renaming for this tab. Used by the pinned Manager tab,
-    // whose title is fixed ("Agent Manager"). Grays out the context-menu "Rename Tab" entry and sets
-    // _renameDisabled, which ActivateTabRenamer() honors so the double-tap and openTabRenamer
-    // action are blocked too. Like DisableCloseAndMoveMenuItems(), this is a one-shot disable
-    // that nothing in the tab re-indexing path undoes.
-    void Tab::DisableTabRename()
-    {
-        ASSERT_UI_THREAD();
-
-        _renameDisabled = true;
-        _renameTabMenuItem.IsEnabled(false);
-    }
-
     // Agentmaster (tab color modes — NoColor/"Remove colors"): enable/disable recoloring this tab.
     // Grays the context-menu "Change tab color..." entry and sets _colorPickerDisabled, which
     // AttachColorPicker() honors so the openTabColorPicker action / command-palette path is blocked
-    // too. Unlike the Manager tab's one-shot disables this is a TOGGLE — the mode-aware paint seam
+    // too. It is a TOGGLE, not a one-shot disable — the mode-aware paint seam
     // (TerminalPage::_ApplySessionTabColor) re-arms it the moment a colored mode repaints the tab,
     // and the page refreshes it at flyout-open (the SetAgentCopyMenuVisible idiom).
     void Tab::SetColorPickerEnabled(bool enabled)
@@ -2811,7 +2771,7 @@ namespace winrt::TerminalApp::implementation
     // transcript). The page resolves whether THIS tab currently hosts a managed agent session and calls
     // this at flyout-open time (a '+' shell tab can become a claude after the menu is built), so the
     // submenu appears exactly where the per-tab overlay's copy button does — only on a linked Claude/Codex
-    // tab, never on a plain shell or the pinned Manager tab.
+    // tab, never on a plain shell tab.
     void Tab::SetAgentCopyMenuVisible(bool visible, bool isCodex)
     {
         ASSERT_UI_THREAD();
@@ -2840,7 +2800,7 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster: show/hide the "Mark Unread" item. Like SetAgentCopyMenuVisible, the page resolves
     // whether THIS tab hosts a managed agent session and calls this at flyout-open, so the item appears
-    // only on a linked Claude/Codex tab (never a plain shell / the pinned Manager tab).
+    // only on a linked Claude/Codex tab (never a plain shell tab).
     void Tab::SetAgentMarkUnreadVisible(bool visible)
     {
         ASSERT_UI_THREAD();
@@ -2850,7 +2810,7 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster: show/hide the "Open In Explorer" item. Like SetAgentMarkUnreadVisible, the page
     // resolves whether THIS tab hosts a managed agent session and calls this at flyout-open, so the item
-    // appears only on a linked Claude/Codex tab (never a plain shell / the pinned Manager tab) — matching
+    // appears only on a linked Claude/Codex tab (never a plain shell tab) — matching
     // where the per-tab overlay's Open Path folder button appears.
     void Tab::SetAgentOpenInExplorerVisible(bool visible)
     {
@@ -2911,7 +2871,7 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster (bookmark tags): show/hide the "Tag" item. Like SetAgentFavoriteState, the page
     // resolves whether THIS tab hosts a managed agent session and calls this at flyout-open, so the
-    // item appears only on a linked Claude/Codex tab (never a plain shell / the pinned Manager tab).
+    // item appears only on a linked Claude/Codex tab (never a plain shell tab).
     void Tab::SetAgentTagVisible(bool visible)
     {
         ASSERT_UI_THREAD();
@@ -2933,8 +2893,8 @@ namespace winrt::TerminalApp::implementation
     // while THIS session is already dormant (nothing running to stop — "Activate Tab" is the offered
     // verb then; the batch items stay enabled since OTHER tabs may be running). Page-driven at
     // flyout-open beside SetAgentActivateVisible — the two are complementary halves of one toggle: a
-    // dormant session offers Activate, a running one offers Deactivate. Hidden for a plain shell /
-    // the pinned Manager tab AND for an ADOPTED session (its ConPTY hosts the user's own shell — not
+    // dormant session offers Activate, a running one offers Deactivate. Hidden for a plain shell
+    // tab AND for an ADOPTED session (its ConPTY hosts the user's own shell — not
     // ours to swap a dormant connection into).
     void Tab::SetAgentDeactivateState(bool visible, bool thisTabDormant)
     {
@@ -3046,7 +3006,7 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster: show/hide the "Close ▸ Of Same Folder" + "Other of Same Folder" close-submenu items.
     // Managed agent-session tabs only (they close every live session sharing THIS session's effective
-    // work dir — a shell/Manager tab has no session/folder). Built collapsed in _AppendCloseMenuItems;
+    // work dir — a shell tab has no session/folder). Built collapsed in _AppendCloseMenuItems;
     // the page calls this at flyout-open (alongside SetAgentOpenInExplorerVisible etc.).
     void Tab::SetAgentFolderCloseVisible(bool visible)
     {

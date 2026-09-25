@@ -9,7 +9,7 @@
 // upstream TabManagement.cpp pattern) so TerminalPage.cpp stays close to upstream.
 //
 // Partial files in this group (★ marks THIS file):
-//   TerminalPage.AgentEngine.cpp               - ~TerminalPage, _InitAgentmasterEngine (consume the process-wide SharedEngine), the Manager tab, _WireAgentManagerContent
+//   TerminalPage.AgentEngine.cpp               - ~TerminalPage, _InitAgentmasterEngine (consume the process-wide SharedEngine), the Agent Manager page (+ its Home button), _WireAgentManagerContent
 //   TerminalPage.AgentSessions.cpp             - spawn/launch/restore/close/adopt for Claude + Codex; tab-title sync; smart naming + per-dir tab color
 //   TerminalPage.AgentObserver.cpp             - the per-tab overlay/badge bind/reconcile/liveness (incl. managed-Codex) + the Fleet Observer UI lane (_ObserverProbe)
 // ★ TerminalPage.AgentWindowRecord.cpp         - M10 per-window record capture/flush/restore + reopen saved windows (Claude + Codex tab refs)
@@ -94,17 +94,6 @@ namespace winrt::TerminalApp::implementation
             return L"focus";
         }
         return L"default";
-    }
-
-    // Agentmaster: a WT tab color -> "#RRGGBB" (alpha dropped — tab colors are opaque). Mirrors
-    // AgentSessions.cpp's ClaudeColorToHex; kept TU-local like the codebase's other per-file color
-    // converters (HexToColor / SessHexToColor / ClaudeColorToHex). Used to persist the Manager tab's
-    // per-window color into the window record.
-    static std::wstring _WindowRecordColorToHex(const winrt::Windows::UI::Color& c)
-    {
-        wchar_t buf[8];
-        ::swprintf(buf, 8, L"#%02X%02X%02X", static_cast<unsigned>(c.R), static_cast<unsigned>(c.G), static_cast<unsigned>(c.B));
-        return buf;
     }
 
     // Agentmaster: a shell (Other) tab's OSC-9;9 working dir (when shell integration reports one) +
@@ -235,9 +224,10 @@ namespace winrt::TerminalApp::implementation
         // --- ordered tab refs (+ which tab is focused) ---
         // The focused tab is persisted by STABLE IDENTITY so it survives a restart: a Claude tab by its
         // conversation id (selectedSessionId), a shell tab — which has no cross-restart id — by index
-        // into rec.tabs (selectedTabIndex, the fallback). Manager / none leaves both unset; the Manager
-        // tab is re-created at index 0, the natural default. On reopen the window re-selects this tab so
-        // closing/reopening preserves the ACTIVE tab, not just the set of tabs.
+        // into rec.tabs (selectedTabIndex, the fallback). The Agent Manager page being on screen (no tab
+        // focused — _GetFocusedTabIndex answers nullopt then) leaves both unset, and so does an unset
+        // focus; on reopen that means "show the Manager page" (_RestoreWindowTabs). On reopen the window
+        // re-selects this tab so closing/reopening preserves what was ACTIVE, not just the set of tabs.
         rec.tabs.clear();
         rec.selectedSessionId.clear();
         rec.selectedTabIndex = -1;
@@ -248,9 +238,9 @@ namespace winrt::TerminalApp::implementation
         }
         for (const auto& tab : _tabs)
         {
-            if ((_managerTab && tab == _managerTab) || (_settingsTab && tab == _settingsTab))
+            if (_settingsTab && tab == _settingsTab)
             {
-                continue; // the pinned Manager tab is re-created; the Settings tab is transient
+                continue; // the Settings tab is transient (the Agent Manager is a page — never in _tabs)
             }
             ::Agentmaster::TabEntry entry;
             const auto sessionId = _ClaudeSessionForTab(tab);
@@ -350,23 +340,10 @@ namespace winrt::TerminalApp::implementation
             rec.tabs.push_back(std::move(entry));
         }
 
-        // --- Manager tab's per-window color ---
-        // The pinned Manager tab is a per-window singleton with no working dir, so its user-chosen color
-        // is persisted HERE in the window record (NOT the dir-color map — Rule #12 is dir-keyed). Read it
-        // LIVE like geometry; if the Manager tab is gone (a teardown flush has no live tab), keep the value
-        // already copied from _windowRecord rather than wiping a good color (the geometry-fallback idiom).
-        // GetPersistableTabColor, not GetRuntimeTabColor: while the NoColor ("Remove colors") mode has the
-        // color SUSPENDED (visual shed, value parked on the tab), a save must still record the parked
-        // color — the mode hides colors, it never voids them (an autosave during the mode would otherwise
-        // wipe the Manager color from the record for good).
-        if (_managerTab)
-        {
-            if (const auto mgr = _GetTabImpl(_managerTab))
-            {
-                const auto c = mgr->GetPersistableTabColor();
-                rec.managerTabColor = c ? _WindowRecordColorToHex(*c) : std::wstring{};
-            }
-        }
+        // (--- The retired Manager tab's per-window color ---: nothing to capture — the Agent Manager is a
+        // page behind the Home button now and wears no tab color. rec.managerTabColor is whatever the
+        // claimed record carried — rec is a copy of _windowRecord — so an older record round-trips
+        // unchanged instead of being wiped.)
 
         // --- Side panel per-window layout ---
         // Read the LIVE members only once the panel actually built this run; a capture before/without
@@ -404,7 +381,7 @@ namespace winrt::TerminalApp::implementation
     {
         if (_windowId.empty())
         {
-            return; // engine not initialized (no Manager tab) — nothing to persist
+            return; // engine not initialized (no Manager page) — nothing to persist
         }
         // Anti-clobber (window-grouped restore): never overwrite a good record with a not-yet-started
         // window's nothing. A transient single-instance/handoff window (e.g. a quick reopen that opens
@@ -416,9 +393,9 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         auto rec = _CaptureWindowRecord();
-        const bool managerOnly = rec.tabs.empty(); // capture skips the Manager/Settings tabs -> empty == nothing but Manager
-        // Agentmaster (discard Manager-only windows): a window the user emptied to just the pinned
-        // Manager tab must NOT persist as a restorable window (the self-close requirement). When
+        const bool managerOnly = rec.tabs.empty(); // capture skips the Settings tab -> empty == no content tab (the Manager page alone)
+        // Agentmaster (discard Manager-only windows): a window the user emptied down to just its Agent
+        // Manager page must NOT persist as a restorable window (the self-close requirement). When
         // _CloseWindowIfManagerOnly latched the discard (it is the ONLY writer of this flag, and never
         // during restore — so an only-shells reopen that is briefly tab-empty is safe), DELETE the
         // on-disk record instead of saving it. Keep the in-memory copy current (empty, but its windowId +
@@ -437,7 +414,7 @@ namespace winrt::TerminalApp::implementation
         }
         //  (2) a capture with NEITHER content tabs NOR geometry is an un-laid-out window — keep the
         //      record on disk (the live window's real save follows). A legitimately session-less window
-        //      still has geometry, so an empty-but-positioned window (just the Manager tab) still saves
+        //      still has geometry, so an empty-but-positioned window (just the Manager page) still saves
         //      here UNLESS the discard latch above fired (a genuinely emptied window deletes its record).
         if (managerOnly && !rec.geometry.hasPosition && !rec.geometry.hasSize)
         {
@@ -465,29 +442,20 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::SaveWindowRecord(_windowRecord);
     }
 
-    // Agentmaster (discard Manager-only windows): true iff this window holds nothing but the pinned,
-    // non-closable Manager tab. A Settings tab (or any terminal tab) counts as real content, so the
-    // window is "Manager-only" only when the Manager tab is its sole tab. _managerTab is null on a
-    // window without one (a torn-out / pre-init shell), which is never Manager-only here.
+    // Agentmaster (discard Manager-only windows): true iff this window holds NO tab at all — just its
+    // Agent Manager page (the page is never in _tabs, so an empty strip is exactly "Manager-only"; it used
+    // to be "the pinned Manager tab is the sole tab"). A Settings tab (or any terminal tab) counts as real
+    // content. A window WITHOUT a Manager page (the page failed to build) is never Manager-only here — an
+    // empty page-less window already took upstream's close path instead (_RemoveTab /
+    // _CompleteInitialization). Returns: that predicate. Never throws.
     bool TerminalPage::_IsManagerOnlyWindow() const
     {
-        if (!_managerTab)
-        {
-            return false;
-        }
-        for (const auto& tab : _tabs)
-        {
-            if (tab != _managerTab)
-            {
-                return false; // a real tab (terminal / Settings) is present
-            }
-        }
-        return true;
+        return static_cast<bool>(_managerPage) && _tabs.Size() == 0;
     }
 
     // Agentmaster (discard Manager-only windows): the debounced decision. A window that ends up holding
-    // only the pinned Manager tab — by closing/tearing-out its last terminal tab, or by reopening from
-    // an empty/failed record — must not linger as a restorable, content-less window. Unless it is the
+    // no tab — only its Agent Manager page — by closing/tearing-out its last tab, or by reopening from
+    // an empty/failed record, must not linger as a restorable, content-less window. Unless it is the
     // LAST Agentmaster window it self-closes SILENTLY (there is nothing to confirm or lose); the last
     // window stays open (the app needs one) but discards its record so it isn't restored as Manager-only
     // next launch. Re-validates everything itself (it is reached via a debounce, so the state may have
@@ -546,9 +514,10 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster (M10 window-grouped restore; PERSISTENCE.md §13 Phase C): re-home THIS window's
     // persisted tabs. A window reopened from its WindowRecord (claimed by id at engine init) comes back
-    // with just the pinned Manager tab; this rebuilds the rest from the record's ORDERED tab refs, in
-    // place, so "close the window -> reopen it" brings the whole workspace back — not just geometry +
-    // lens. Per ref, in record order:
+    // with no tab (just its hidden Agent Manager page); this rebuilds the tabs from the record's ORDERED
+    // tab refs, in place, so "close the window -> reopen it" brings the whole workspace back — not just
+    // geometry + lens — and re-shows the Manager page when that is what was on screen at close (the
+    // record names no focused tab then). Per ref, in record order:
     //   • Claude -> resume its session INTO this window (claude --resume, the archived record's queue +
     //     autorunner intact) via _LaunchClaudeSession — the Archived-button path, targeted here. Lazy-
     //     start safe: the tab is created through the normal pane path (no eager connection.Start()), so
@@ -573,14 +542,18 @@ namespace winrt::TerminalApp::implementation
         // from under us mid-loop.
         const auto tabs = _windowRecord.tabs;
         const std::wstring selSessionId = _windowRecord.selectedSessionId; // stable Claude id (preferred)
-        const int selTabIndex = _windowRecord.selectedTabIndex; // shell-tab fallback; -1 = Manager/none
+        const int selTabIndex = _windowRecord.selectedTabIndex; // shell-tab fallback; -1 = the Manager page / none
+        // Neither focus field set => the Agent Manager page was on screen at close (or nothing was
+        // focused): show the page again once the tabs are back, instead of selecting any tab.
         const bool wantManager = selSessionId.empty() && selTabIndex < 0;
         size_t resumed = 0, shells = 0, skipped = 0;
-        // The focused tab's ABSOLUTE index in _tabs after re-home (Manager is index 0, then the Claude
-        // tabs in creation order, then the shell tabs). Computed LIVE from what actually got created —
-        // the persisted identity is the stable sessionId (Claude) / record index (shell), never a live
-        // position. -1 => unresolved (the selected session couldn't be restored) => leave default focus.
-        int targetAbs = wantManager ? 0 : -1;
+        // The focused tab's ABSOLUTE index in _tabs after re-home (the Claude tabs from index 0 in
+        // creation order, then the shell tabs — no pinned tab precedes them now that the Manager is a
+        // page). Computed LIVE from what actually got created — the persisted identity is the stable
+        // sessionId (Claude) / record index (shell), never a live position. -1 => no tab to select: the
+        // Manager page is wanted (wantManager), or the selected session couldn't be restored (leave the
+        // default focus — the last tab created).
+        int targetAbs = -1;
 
         // Restore-story trace (BEGIN): list every ref by kind + session id BEFORE re-homing, so a tab that
         // later skips or mis-resumes is pinpointable — the [rehome] end line is only counts. Pairs with the
@@ -648,7 +621,7 @@ namespace winrt::TerminalApp::implementation
             }
             if (!selSessionId.empty() && entry.sessionId == selSessionId)
             {
-                targetAbs = 1 + static_cast<int>(resumed); // this managed tab's index (Manager occupies 0)
+                targetAbs = static_cast<int>(resumed); // this managed tab's index (managed tabs lead the strip)
             }
             ::Agentmaster::AppendStateLog(L"hooks.log",
                                           L"[rehome] window " + _windowId + L" resume " + (isCodex ? L"codex " : L"claude ") + ::Agentmaster::ShortId(entry.sessionId) + L" \"" + info->title + L"\"\n");
@@ -680,7 +653,7 @@ namespace winrt::TerminalApp::implementation
                         }
                         if (selSessionId.empty() && selTabIndex == static_cast<int>(i))
                         {
-                            targetAbs = 1 + static_cast<int>(resumed) + static_cast<int>(shells); // this shell's index
+                            targetAbs = static_cast<int>(resumed) + static_cast<int>(shells); // this shell's index (after every managed tab)
                         }
                         ++shells;
                     }
@@ -693,6 +666,10 @@ namespace winrt::TerminalApp::implementation
         // SwitchToTab as the batch's LAST action so it runs AFTER the shells exist and overrides the
         // "focus the tab I just made" that each newTab does. With no shells the strip is already settled,
         // so select synchronously. targetAbs < 0 (selected session couldn't be restored) => leave default.
+        // Agentmaster (the Agent Manager PAGE): a window that was on the Manager at close (wantManager)
+        // re-shows the page instead of selecting any tab — after the async shells when there are some
+        // (each created shell selects itself, so the batch shows the page after its LAST one, via the
+        // one-shot latch it consumes in its synchronous prologue), else right now.
         if (!shellActions.empty())
         {
             if (targetAbs >= 0)
@@ -701,6 +678,10 @@ namespace winrt::TerminalApp::implementation
                 sel.Action(ShortcutAction::SwitchToTab);
                 sel.Args(SwitchToTabArgs{ static_cast<uint32_t>(targetAbs) });
                 shellActions.push_back(std::move(sel));
+            }
+            else if (wantManager)
+            {
+                _showManagerPageAfterStartupBatch = true; // consumed by exactly the batch started on the next line
             }
             ProcessStartupActions(std::move(shellActions));
         }
@@ -714,11 +695,15 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         }
+        else if (wantManager)
+        {
+            _ShowManagerPage(L"reopened on the Manager");
+        }
 
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[rehome] window " + _windowId + L" resumed=" + std::to_wstring(resumed) +
                                           L" shells=" + std::to_wstring(shells) + L" skipped=" + std::to_wstring(skipped) +
-                                          L" select=" + std::to_wstring(targetAbs) +
+                                          L" select=" + (wantManager ? std::wstring{ L"manager-page" } : std::to_wstring(targetAbs)) +
                                           L" of " + std::to_wstring(tabs.size()) + L" refs\n");
     }
 

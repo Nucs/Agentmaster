@@ -506,7 +506,7 @@ jump chime). It reuses this unit's resolve verbatim — only the trigger + the s
 - **Claude-only, else fall through**: the handler (`_HandleAgentScrollTo{Prev,Next}Prompt`,
   `TerminalPage.AgentObserver.cpp`) navigates only when the focused tab is a managed **Claude** session
   (`_FocusedPromptNavSession` — `_ClaudeSessionForTab` + `SessionInfo.kind == Claude`); on any other tab
-  (Codex — no in-buffer prompt resolve in v1, §5; a shell; the Manager tab; an external) it falls back
+  (Codex — no in-buffer prompt resolve in v1, §5; a shell; the Agent Manager page, which is no tab at all; an external) it falls back
   to `_MoveFocus`, preserving the default alt-arrow pane navigation **and** the GH#6129 keychord
   propagation when there is no pane to move to.
 - **Selection** (`TermControl::ScrollToAdjacentConversationPrompt`): one `ResolveConversationPromptRows`
