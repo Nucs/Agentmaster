@@ -6804,41 +6804,6 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (ctrl+home "home / jump-back" toggle): do EXACTLY what the tab-strip nav buttons do —
-    // they are the SOURCE OF TRUTH, so this routes through their click handlers instead of reinventing the
-    // logic (an earlier version used _mruTabs, which ignored the selected card). Off the Manager tab -> the
-    // "Home" button (_OnManagerHomeButtonClick): jump to the pinned Manager tab. On the Manager tab -> the
-    // "Jump Back" button (_OnManagerJumpBackButtonClick): return to the tab of the session SELECTED in the
-    // Manager lens (the card auto-selected when you came from it) via _ActivateClaudeSession — respecting
-    // the selected card, cross-window-safe, and a no-op when nothing is selected. Works everywhere: over a
-    // focused terminal the chord is intercepted by TermControl's ActionMap lookup, and on the Manager tab's
-    // own text boxes it is tunneled in by _ManagerPaneNavPreviewKeyDown (which lists AgentToggleManagerTab
-    // in its allow-list). UI thread. (nullptr for the RoutedEventArgs is idiomatic here — the handlers
-    // ignore both args, like TitleChanged.raise(*this, nullptr).)
-    void TerminalPage::_HandleAgentToggleManagerTab(const winrt::Windows::Foundation::IInspectable& sender, const ActionEventArgs& args)
-    {
-        // The Manager tab is pinned + non-closable, but it is null very early in startup and after a
-        // window's last teardown — be defensive so the chord just no-ops then.
-        if (!_managerTab)
-        {
-            args.Handled(false);
-            return;
-        }
-
-        if (_GetFocusedTab() == _managerTab)
-        {
-            // On the Manager tab -> the "Jump Back" button's action: return to the SELECTED session's tab.
-            _OnManagerJumpBackButtonClick(sender, nullptr);
-        }
-        else
-        {
-            // Off the Manager tab -> the "Home" button's action: jump to the pinned Manager tab.
-            _OnManagerHomeButtonClick(sender, nullptr);
-        }
-        // Consume the chord either way so it never falls through to the terminal's select-to-line-start.
-        args.Handled(true);
-    }
-
     // Agentmaster (TAB_OVERLAY.md summary panel): the per-tab pencil button toggles the summary panel's
     // visibility, which is a GLOBAL setting (AppSettings::showSummaryPanel) so the choice is shared across
     // windows and survives restart. Mirror the treeSort / archiveSplitFraction pattern: a freshest-disk
