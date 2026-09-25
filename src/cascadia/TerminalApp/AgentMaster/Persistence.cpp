@@ -708,6 +708,7 @@ namespace Agentmaster
         o.Set(L"draftSwapUseCtrlS", json::Value::MkBool(s.draftSwapUseCtrlS));
         o.Set(L"verifySendBeforeSubmit", json::Value::MkBool(s.verifySendBeforeSubmit));
         o.Set(L"restoreDraftOnResume", json::Value::MkBool(s.restoreDraftOnResume));
+        o.Set(L"carryDraftOnFork", json::Value::MkBool(s.carryDraftOnFork)); // PENDING_INPUT.md §11 — the fork carry
         o.Set(L"confirmBeforeKill", json::Value::MkBool(s.confirmBeforeKill));
         o.Set(L"reapOrphanedSessions", json::Value::MkBool(s.reapOrphanedSessions));
         o.Set(L"uiStallAutoRestart", json::Value::MkBool(s.uiStallAutoRestart));
@@ -852,6 +853,7 @@ namespace Agentmaster
         s.draftSwapUseCtrlS = v.BoolAt(L"draftSwapUseCtrlS", true);
         s.verifySendBeforeSubmit = v.BoolAt(L"verifySendBeforeSubmit", true);
         s.restoreDraftOnResume = v.BoolAt(L"restoreDraftOnResume", true);
+        s.carryDraftOnFork = v.BoolAt(L"carryDraftOnFork", true); // absent (a pre-§11 settings.json) => ON, the default
         s.confirmBeforeKill = v.BoolAt(L"confirmBeforeKill", true);
         s.reapOrphanedSessions = v.BoolAt(L"reapOrphanedSessions", true);
         s.uiStallAutoRestart = v.BoolAt(L"uiStallAutoRestart", true);

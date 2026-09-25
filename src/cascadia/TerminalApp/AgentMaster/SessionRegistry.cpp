@@ -151,6 +151,17 @@ namespace Agentmaster
             _submitters.erase(id); // PENDING_INPUT.md §9 — same lifetime as the injector
             _pressers.erase(id); // DELIVERY_PLAN.md R8 — same lifetime as the submitter
             _lastHumanInput.erase(id);
+            // PENDING_INPUT.md §2c: a removed session's pastes can never back a placeholder again —
+            // release them (and their share of the fleet-wide cap) with the record. A restore-fresh
+            // re-key MOVES the journal to the new id BEFORE this Remove (MovePasteJournal).
+            if (const auto jt = _pasteJournals.find(id); jt != _pasteJournals.end())
+            {
+                for (const auto& e : jt->second)
+                {
+                    _pasteJournalChars -= (std::min)(_pasteJournalChars, e.text.size());
+                }
+                _pasteJournals.erase(jt);
+            }
             _order.erase(std::remove(_order.begin(), _order.end(), id), _order.end());
         }
         // Agentmaster: notify like Upsert/Update do — a removal IS a fleet change. Remove was
@@ -1030,6 +1041,115 @@ namespace Agentmaster
             return;
         }
         it->second.pendingPasteRefs = refs;
+    }
+
+    // Agentmaster (PENDING_INPUT.md §2c — the PASTE JOURNAL): see the header. The caps are enforced in a
+    // fixed order so every exit leaves the per-session AND the fleet-wide invariants true: normalize +
+    // filter (inline pastes never back a placeholder; a giant one is refused outright), de-dupe the newest
+    // entry, append, trim this session (count, then chars), then evict fleet-wide oldest-first. Quiet —
+    // a journal is resolver input, not observable state, so nothing notifies.
+    void SessionRegistry::NotePastedText(const std::wstring& id, const std::wstring& rawText, int64_t unixMs)
+    {
+        std::wstring text = NormalizePastedTextLikeClaude(rawText);
+        if (text.empty() || text.size() > kPasteJournalMaxEntryChars || !ClaudeWouldCollapsePaste(text))
+        {
+            return; // nothing claude could render as a placeholder, or too big to hold on to
+        }
+        const int64_t stamp = unixMs != 0 ? unixMs : NowMs();
+        std::lock_guard guard{ _mtx };
+        if (_sessions.find(id) == _sessions.end())
+        {
+            return; // an unknown session — its pastes would be unreachable (and never pruned)
+        }
+        auto& journal = _pasteJournals[id];
+        if (!journal.empty() && journal.back().text == text)
+        {
+            journal.back().unixMs = stamp; // an identical re-paste: one entry, refreshed (resolution is content-equal either way)
+            return;
+        }
+        _pasteJournalChars += text.size();
+        journal.push_back(PasteJournalEntry{ std::move(text), stamp });
+        // This session's caps — oldest first (placeholders resolve against the NEWEST same-length pastes).
+        size_t sessionChars = 0;
+        for (const auto& e : journal)
+        {
+            sessionChars += e.text.size();
+        }
+        while (journal.size() > 1 && (journal.size() > kPasteJournalMaxEntriesPerSession || sessionChars > kPasteJournalMaxSessionChars))
+        {
+            sessionChars -= journal.front().text.size();
+            _pasteJournalChars -= (std::min)(_pasteJournalChars, journal.front().text.size());
+            journal.erase(journal.begin());
+        }
+        // The fleet-wide cap: evict the globally OLDEST entry (each journal is time-ordered, so the
+        // candidates are the fronts) until under — but never the entry just recorded.
+        while (_pasteJournalChars > kPasteJournalMaxTotalChars)
+        {
+            std::vector<PasteJournalEntry>* oldest = nullptr;
+            for (auto& [sid, entries] : _pasteJournals)
+            {
+                const bool isNewest = (&entries == &journal) && entries.size() == 1;
+                if (!entries.empty() && !isNewest && (!oldest || entries.front().unixMs < oldest->front().unixMs))
+                {
+                    oldest = &entries;
+                }
+            }
+            if (!oldest)
+            {
+                break; // only the just-recorded entry remains — it alone is under the per-entry cap
+            }
+            _pasteJournalChars -= (std::min)(_pasteJournalChars, oldest->front().text.size());
+            oldest->erase(oldest->begin());
+        }
+    }
+
+    std::vector<PasteJournalEntry> SessionRegistry::PasteJournal(const std::wstring& id) const
+    {
+        std::lock_guard guard{ _mtx };
+        const auto it = _pasteJournals.find(id);
+        return it != _pasteJournals.end() ? it->second : std::vector<PasteJournalEntry>{};
+    }
+
+    void SessionRegistry::ClearPasteJournal(const std::wstring& id)
+    {
+        std::lock_guard guard{ _mtx };
+        const auto it = _pasteJournals.find(id);
+        if (it == _pasteJournals.end())
+        {
+            return;
+        }
+        for (const auto& e : it->second)
+        {
+            _pasteJournalChars -= (std::min)(_pasteJournalChars, e.text.size());
+        }
+        _pasteJournals.erase(it);
+    }
+
+    void SessionRegistry::MovePasteJournal(const std::wstring& fromId, const std::wstring& toId)
+    {
+        if (fromId == toId)
+        {
+            return;
+        }
+        std::lock_guard guard{ _mtx };
+        const auto it = _pasteJournals.find(fromId);
+        if (it == _pasteJournals.end())
+        {
+            return;
+        }
+        auto moved = std::move(it->second);
+        _pasteJournals.erase(it);
+        auto& target = _pasteJournals[toId];
+        for (auto& e : moved)
+        {
+            target.push_back(std::move(e)); // the fleet total is unchanged — the chars only changed owner
+        }
+        // Re-apply the per-session count cap on the merged journal (chars follow the same entries).
+        while (target.size() > kPasteJournalMaxEntriesPerSession)
+        {
+            _pasteJournalChars -= (std::min)(_pasteJournalChars, target.front().text.size());
+            target.erase(target.begin());
+        }
     }
 
     // Agentmaster (DELIVERY_PLAN.md R5 — the tri-state box read): record the box's observed STATE.

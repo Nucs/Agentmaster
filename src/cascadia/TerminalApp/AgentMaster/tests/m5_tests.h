@@ -50,6 +50,7 @@
 // run-m5-tests.bat) so each keeps its own anonymous-namespace helpers.
 #include "../Activity.h"
 #include "../ClaudeSpawn.h"
+#include "../DraftCarry.h" // the fork carry + paste journal core (PENDING_INPUT.md §11 / §2c) - pure, header-only
 #include "../HookWire.h"
 #include "../HooksBridge.h"
 #include "../Json.h"
@@ -203,6 +204,12 @@ void TestTabDragMath();
 void TestTabCloseSuccessor();
 void TestOrphanConsoleReaper(); // OBSERVER.md §13a: the dead-console reap decision + group walk (tests_transcript.cpp)
 void TestPendingPaste();
+// tests_summary_anchor.cpp — PENDING_INPUT.md §11 (the FORK CARRY) + §2c (the PASTE JOURNAL): DraftCarry.h's claude-mirrored
+// paste normalization / newline count / collapse threshold, the wrap-tolerant placeholder scan (bare "[Pasted text #N]"
+// included), the journal-first resolver (chronological same-M assignment, whole-line cache tier, live-vs-strict unresolved
+// policy, image + duplicate-id refusals, the truncated middle), the piecewise fill plan, the fill verifier, the registry
+// journal (normalize / collapse-only / de-dupe / per-session cap / move / clear / remove) and the ResolvePendingDraftCarryIn adapter
+void TestDraftCarry();
 
 // tests_commands.cpp — COMMANDS.md: slash-command bindings (ParseCommandEcho + the parser's
 // Command/fileWritePaths events + the CommandWatch state machine incl. MULTI-FILE collect +

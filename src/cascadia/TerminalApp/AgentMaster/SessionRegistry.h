@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "DraftCarry.h" // PasteJournalEntry + the journal caps (PENDING_INPUT.md §2c — the paste journal)
 #include "HookEvents.h"
 #include "SessionModels.h"
 
@@ -147,6 +148,49 @@ namespace Agentmaster
         // draft (ResolvePendingPasteRefs' annotation — display only). QUIET (no notify) + change-gated;
         // dropped when the draft has meanwhile cleared. Thread-safe.
         void SetPendingPasteRefs(const std::wstring& id, const std::wstring& refs);
+
+        // Agentmaster (PENDING_INPUT.md §2c — the PASTE JOURNAL): record a paste Agentmaster itself just
+        // delivered into this session's input box — a user clipboard paste (TerminalPage's paste handler)
+        // or one of our own no-submit box fills (the §10 re-fill, the /handover-standby fill, the §9
+        // swap's re-paste fallback, the §11 fork carry). Current Claude Code keeps an unsent paste ONLY in
+        // its own process memory (the paste-cache is written at SUBMIT time), so this journal is the one
+        // place a draft's "[Pasted text #N +M lines]" placeholder can be resolved back to its content —
+        // what makes a fork carry, a Copy Current Prompt and the §8c store see the real text.
+        // The text is stored NormalizePastedTextLikeClaude-normalized (so "+M" and the entry agree by
+        // construction), ONLY when claude would collapse it (an inline paste never backs a placeholder),
+        // de-duplicated against the newest entry (an identical re-paste just refreshes its stamp), and
+        // BOUNDED: at most kPasteJournalMaxEntriesPerSession entries / kPasteJournalMaxSessionChars per
+        // session (oldest dropped), an entry over kPasteJournalMaxEntryChars is not recorded at all, and
+        // the whole fleet stays under kPasteJournalMaxTotalChars (the globally oldest entries evicted).
+        // TRANSIENT — never persisted, never part of a SessionInfo snapshot (a paste can be MBs, and
+        // snapshots are copied on hot UI paths). QUIET (no notify). A no-op for an unknown session.
+        //   id      — the session the paste went into.
+        //   rawText — the text as pasted (normalized here).
+        //   unixMs  — when (0 == now).
+        //   throws  — std::bad_alloc on allocation failure only.
+        void NotePastedText(const std::wstring& id, const std::wstring& rawText, int64_t unixMs = 0);
+
+        // Agentmaster (§2c): a COPY of the session's paste journal, oldest first — the resolver input
+        // (ResolveDraftCarry). Empty for an unknown session / nothing pasted since the draft last cleared.
+        // Thread-safe; returns by value so the caller can resolve off-thread without holding the lock.
+        //   id      — the session.
+        //   returns — the entries (may be several MB in the worst case — call on demand, never per tick).
+        //   throws  — std::bad_alloc on allocation failure only.
+        std::vector<PasteJournalEntry> PasteJournal(const std::wstring& id) const;
+
+        // Agentmaster (§2c): forget the session's paste journal — called when its draft CLEARS (the scan's
+        // appear/clear flip to empty: the prompt was sent or discarded, so nothing in the journal can be
+        // in the box any more). Without the prune, an old same-length paste could be assigned to a NEW
+        // placeholder whose own paste went unrecorded (a drag-dropped text). Thread-safe, idempotent.
+        //   id — the session.
+        void ClearPasteJournal(const std::wstring& id);
+
+        // Agentmaster (§2c): move a session's journal onto another id (appended after the target's own
+        // entries) — the restore-FRESH re-key, where the reopened draft memory moves to a newly minted
+        // conversation id and its placeholders must keep resolving. No-op when `fromId` has none or the
+        // ids are equal. Thread-safe.
+        //   fromId, toId — the old and the new session id.
+        void MovePasteJournal(const std::wstring& fromId, const std::wstring& toId);
 
         // Agentmaster (DELIVERY_PLAN.md R5 — the tri-state box read): record the input box's last
         // observed STATE (SessionInfo::pendingBoxState + its change stamp). Fed by the UI scan lane
@@ -332,6 +376,13 @@ namespace Agentmaster
         std::unordered_map<std::wstring, PromptSubmitter> _submitters; // PENDING_INPUT.md §9
         std::unordered_map<std::wstring, EnterPresser> _pressers; // DELIVERY_PLAN.md R8 — same lifetime as the submitter
         std::unordered_map<std::wstring, int64_t> _lastHumanInput;
+        // Agentmaster (PENDING_INPUT.md §2c): the per-session PASTE JOURNAL (NotePastedText), oldest entry
+        // first. A side map — never inside SessionInfo — because a paste can be megabytes and SessionInfo
+        // snapshots are deep-copied on hot UI paths (the 2026-09-04 lens-rebuild incident). Guarded by _mtx.
+        std::unordered_map<std::wstring, std::vector<PasteJournalEntry>> _pasteJournals;
+        // Total wchar_t count across every journal — what the fleet-wide kPasteJournalMaxTotalChars cap is
+        // enforced against without re-walking every entry per paste. Guarded by _mtx.
+        size_t _pasteJournalChars{ 0 };
         std::vector<std::pair<ObserverToken, RegistryObserver>> _observers;
         uint64_t _nextObserverId{ 1 };
         AdvanceHandler _advance;

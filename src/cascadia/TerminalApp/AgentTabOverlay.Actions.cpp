@@ -410,13 +410,13 @@ namespace winrt::TerminalApp::implementation
             switch (outcome)
             {
             case PromptCopyOutcome::Expanded:
-                line += L"expanded " + std::to_wstring(expandedCount) + L" paste placeholder(s) from the paste-cache chars=" +
+                line += L"expanded " + std::to_wstring(expandedCount) + L" paste placeholder(s) from the paste journal/paste-cache chars=" +
                         std::to_wstring(renderedChars) + L"->" + std::to_wstring(text.size());
                 break;
             case PromptCopyOutcome::Refused:
                 // Honest, not an error: the resolver would rather hand over the label than risk the WRONG
-                // text (a cache file swept, two same-length pastes, typed words beside a collapsed label).
-                line += L"paste placeholder(s) NOT expanded (no proven paste-cache match) - copied as rendered chars=" + std::to_wstring(text.size());
+                // text (a paste the journal never saw + no unique cache file, an [Image #N], a duplicate id).
+                line += L"paste placeholder(s) NOT expanded (no proven paste-journal/paste-cache match) - copied as rendered chars=" + std::to_wstring(text.size());
                 break;
             case PromptCopyOutcome::Failed:
             default:
@@ -435,6 +435,7 @@ namespace winrt::TerminalApp::implementation
         //   sessionId  — for the trace.
         //   what       — the trace noun.
         //   generation — the number CopyPromptTextExpandingPastes took for this copy.
+        //   journal    — the session's PASTE JOURNAL snapshot (PENDING_INPUT.md §2c; empty ⇒ the paste-cache tier alone).
         // Returns nothing (fire_and_forget). Never lets an exception escape: one escaping a fire_and_forget
         // IS winrt::terminate() — the whole process, every window — so the expansion and the marshal each
         // sit in their own try and log through AgentLogCaughtException (Rule #18).
@@ -442,7 +443,8 @@ namespace winrt::TerminalApp::implementation
                                                               std::wstring rendered,
                                                               std::wstring sessionId,
                                                               std::wstring what,
-                                                              uint64_t generation)
+                                                              uint64_t generation,
+                                                              std::vector<::Agentmaster::PasteJournalEntry> journal)
         {
             std::wstring expanded;
             PromptCopyOutcome outcome = PromptCopyOutcome::Refused;
@@ -453,15 +455,20 @@ namespace winrt::TerminalApp::implementation
                 // Fold '\r' / "\r\n" to '\n' FIRST: the resolver's line model is '\n'-split, while a prompt
                 // queued from the Manager's compose box carries '\r' newlines (the UWP TextBox quirk) — under
                 // which a placeholder standing alone on its own line would read as mid-line and be refused.
-                auto ex = ::Agentmaster::ExpandPendingDraftPastes(::Agentmaster::FoldCrToLf(rendered));
-                // expandedCount > 0 as well as complete: the caller only sends text that HAS a placeholder,
-                // so "complete with nothing substituted" can't really happen — but if it did, the original
-                // (unfolded) text is the faithful copy, not the folded one.
-                if (ex.complete && ex.expandedCount > 0 && !ex.text.empty())
+                // §2c: the journal answers first (an unsent paste exists nowhere else); the cache is read only
+                // when it can't. LIVE policy — an unbacked MID-LINE label is a quote and stays as written.
+                const auto plan = ::Agentmaster::ResolvePendingDraftCarry(::Agentmaster::FoldCrToLf(rendered), journal, /*unresolvedMidLineIsLiteral*/ true);
+                const int blocks = plan.fromJournal + plan.fromCache;
+                // blocks > 0 as well as complete: "complete with nothing substituted" means every placeholder
+                // was a kept quote — then the original (unfolded) text is the faithful copy, not the folded one.
+                if (plan.complete && blocks > 0)
                 {
-                    expanded = std::move(ex.text);
-                    expandedCount = ex.expandedCount;
-                    outcome = PromptCopyOutcome::Expanded;
+                    if (auto full = ::Agentmaster::DraftCarryExpandedText(plan); !full.empty())
+                    {
+                        expanded = std::move(full);
+                        expandedCount = blocks;
+                        outcome = PromptCopyOutcome::Expanded;
+                    }
                 }
             }
             catch (...)
@@ -510,7 +517,7 @@ namespace winrt::TerminalApp::implementation
     // Placeholder-free text keeps the old synchronous copy; a placeholder sends the copy through
     // CopyPromptExpandingPastesAsync (off-thread expansion, UI-thread write). The function-try is the
     // "never throws" contract: a copy is best-effort UI feedback and must never escape into a Click handler.
-    void CopyPromptTextExpandingPastes(const DispatcherQueue& dispatcher, const std::wstring& text, const std::wstring& sessionId, const std::wstring& what, bool expandPastes)
+    void CopyPromptTextExpandingPastes(const DispatcherQueue& dispatcher, const std::wstring& text, const std::wstring& sessionId, const std::wstring& what, bool expandPastes, const ::Agentmaster::SessionRegistry* registry)
     try
     {
         if (text.empty())
@@ -520,10 +527,10 @@ namespace winrt::TerminalApp::implementation
         // This copy is now the user's newest copy intent: any older prompt copy still expanding is superseded.
         const uint64_t generation = ++g_promptCopyGeneration;
         // The cheap, pure pre-check — the common case has no placeholder at all and costs one scan, no cache
-        // IO and no thread hop: copied synchronously, byte-for-byte as before. FindPasteMarkers inspects every
-        // '[' whatever the line endings, so the UNFOLDED text is fine for detection; only the expansion needs
-        // the fold (CopyPromptExpandingPastesAsync).
-        const bool hasPlaceholder = expandPastes && !::Agentmaster::FindPasteMarkers(text).empty();
+        // IO and no thread hop: copied synchronously, byte-for-byte as before. FindDraftPlaceholders inspects
+        // every '[' whatever the line endings (and knows claude's bare "[Pasted text #N]" form too), so the
+        // UNFOLDED text is fine for detection; only the resolve needs the fold (CopyPromptExpandingPastesAsync).
+        const bool hasPlaceholder = expandPastes && !::Agentmaster::FindDraftPlaceholders(text).empty();
         if (!hasPlaceholder)
         {
             CopyTextToClipboard(text);
@@ -539,7 +546,9 @@ namespace winrt::TerminalApp::implementation
                                                             L": no dispatcher - paste placeholder(s) copied as rendered chars=" + std::to_wstring(text.size()) + L"\n");
             return;
         }
-        CopyPromptExpandingPastesAsync(dispatcher, text, sessionId, what, generation);
+        // §2c: snapshot the session's paste journal HERE (the registry is thread-safe, but the coroutine must
+        // not hold a pointer that could outlive its owner) — it travels by value into the off-thread resolve.
+        CopyPromptExpandingPastesAsync(dispatcher, text, sessionId, what, generation, registry ? registry->PasteJournal(sessionId) : std::vector<::Agentmaster::PasteJournalEntry>{});
     }
     catch (...)
     {
@@ -678,10 +687,11 @@ namespace winrt::TerminalApp::implementation
             }
             // Whole (multi-line drafts included) through the shared PROMPT copy (PENDING_INPUT.md §8e): a draft
             // holding Claude's "[Pasted text #N +M lines]" / "[...Truncated text #N +M lines...]" label is
-            // copied as the pasted text itself — resolved off-thread from the paste cache, all-or-refuse, AS
-            // RENDERED on any refusal — while a placeholder-free draft (the common case) is still copied
-            // synchronously and verbatim. Chimes on success either way.
-            CopyPromptTextExpandingPastes(dispatcher, pick.text, sessionId, L"current prompt");
+            // copied as the pasted text itself — resolved off-thread from this session's PASTE JOURNAL (§2c —
+            // an unsent paste exists nowhere else) else the paste cache, AS RENDERED on any refusal — while a
+            // placeholder-free draft (the common case) is still copied synchronously and verbatim. Chimes on
+            // success either way.
+            CopyPromptTextExpandingPastes(dispatcher, pick.text, sessionId, L"current prompt", /*expandPastes*/ true, &registry);
             // The SOURCE belongs in the mechanism layer next to the other [pending] traces: `live` == read
             // from the box this instant, `remembered` == the scan lane's value (possibly a restored memory,
             // which the age of pendingInputUnixMs is what makes honest).

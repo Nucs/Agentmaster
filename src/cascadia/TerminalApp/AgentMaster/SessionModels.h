@@ -997,6 +997,12 @@ namespace Agentmaster
     // ids are GUIDs, so the leading '#' can never collide with a real delivery's tag.
     inline constexpr std::wstring_view kDeliveryGateClearTag = L"#draft-clear";
 
+    // The reserved gate tag for the §11 FORK CARRY's piecewise fill (PENDING_INPUT.md §11): while it
+    // types the source's draft into a fork's box — one bracketed paste per piece, each awaited until it
+    // shows — the box is exactly as "owned" as during a delivery, so an autorunner send (or a swap) must
+    // be declined rather than pasted between two pieces. Same '#'-prefix convention as above.
+    inline constexpr std::wstring_view kDeliveryGateFillTag = L"#draft-fill";
+
     // The ONE rule mapping a submission to its gate OWNER tag — SubmitPrompt (which opens the
     // gate) and the hosting window's swap (which closes it on resolve) must derive the SAME tag
     // from the same submission, or the close would be an owner-mismatch no-op and the gate would
@@ -2079,6 +2085,16 @@ namespace Agentmaster
         // "[Pasted text #N]" label would silently drop the content behind it on submit). OFF
         // restores the display-only memory behavior verbatim.
         bool restoreDraftOnResume{ true };
+        // Agentmaster (PENDING_INPUT.md §11 — the FORK CARRY): when a session is FORKED into a new tab
+        // (a tab's "Fork session" / Ctrl+Shift+D, the Manager's board/tree Fork, the Sessions page's Fork
+        // here), copy the message sitting UNSENT in the source session's input box into the fork's box
+        // once the fork's claude starts — pasted piecewise so the fork's box reads like the source's
+        // (typed text inline, each pasted block as its own bound "[Pasted text #K +M lines]"
+        // placeholder backed by the REAL content from the paste journal), never submitted. The source
+        // keeps its draft (a copy, not a move). A draft whose paste can't be resolved is not copied at
+        // all (a literal placeholder label would submit as junk). GLOBAL, not autorunner-gated (a
+        // release build forks too, so this lives in the cog's SESSIONS tab). OFF: forks start empty.
+        bool carryDraftOnFork{ true };
 
         // --- Behavior sugar ---
         bool confirmBeforeKill{ true }; // confirm before killing a session from the Manager

@@ -2026,7 +2026,9 @@ namespace winrt::TerminalApp::implementation
             // tagged with the row's origin; the [pending] line naming how a placeholder resolved follows
             // from the shared copy when the text carries one.
             ::Agentmaster::LogNav(L"copy auto-testing-prompt " + ::Agentmaster::ShortId(self->_selectedId) + (typed ? L" (typed)" : L" (auto)"));
-            CopyPromptTextExpandingPastes(self->_dispatcher, text, self->_selectedId, L"auto-testing prompt", /*expandPastes*/ !typed);
+            // §2c: the registry lets the copy resolve a queued placeholder against the session's PASTE JOURNAL
+            // (the MAIL button queues the draft as rendered — its content lives nowhere else until submitted).
+            CopyPromptTextExpandingPastes(self->_dispatcher, text, self->_selectedId, L"auto-testing prompt", /*expandPastes*/ !typed, self->_registry.get());
         });
         menu.Items().Append(copyItem);
 

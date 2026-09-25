@@ -81,9 +81,11 @@ namespace winrt::TerminalApp::implementation
     // lines]", or "head[...Truncated text #N +M lines...]tail"). A draft read off that box — and so any
     // prompt the overlay's MAIL button or the compose box queued from it — carries the label, not the
     // text, and a copied label means nothing outside that one input box (pasting it back into claude
-    // does NOT re-bind the content; it submits the literal label). The content is on disk — Claude
-    // writes every large paste to <claude home>\paste-cache at paste time — and the §2b resolver
-    // (ExpandPendingDraftPastes) proves which cache file each label stands for.
+    // does NOT re-bind the content; it submits the literal label). Where the content lives: current
+    // Claude Code keeps an UNSENT paste only in its own memory (its <claude home>\paste-cache file is
+    // written at SUBMIT time), so the first source is the session's PASTE JOURNAL — every paste
+    // Agentmaster itself passed into that session (PENDING_INPUT.md §2c) — and the paste-cache (a
+    // previously submitted identical paste) the fallback; ResolvePendingDraftCarry proves the match.
     //
     // HOW: text with NO placeholder (the common case) is copied synchronously, exactly as before.
     // Otherwise the text is newline-folded first (FoldCrToLf — the Manager's compose TextBox stores a
@@ -92,18 +94,18 @@ namespace winrt::TerminalApp::implementation
     // reads the WHOLE paste cache — capped at 64 MiB — which a UI-thread click must never pay), and the
     // clipboard write then hops back through `dispatcher`, so the copy lands a moment after the click.
     //
-    // SAFETY — never a wrong expansion, never a lost copy. The expansion is ALL-OR-REFUSE: a placeholder
-    // that can't be proven (a unique line-count match for a collapsed label; head/tail content anchors +
-    // exact line arithmetic for a truncated one) refuses the WHOLE text, and so does a collapsed label
-    // with typed words around it on its line (the resolver replaces whole lines and never eats typed
-    // text — which is also what keeps a document that merely QUOTES a placeholder mid-sentence intact).
-    // Any refusal, a throw, or a missing dispatcher degrades to copying the text AS RENDERED — never to
-    // nothing — and each case is traced as a [pending] line in hooks.log. The one path that copies
-    // nothing is a window closed while its expansion was still reading the cache (no UI thread is left
-    // to write from); it is traced too.
-    // ⚠ The collapsed tier is only as strong as "exactly one cached paste has that many lines": a
-    // placeholder merely QUOTED alone on its own line, whose count happens to match a cache file, would
-    // be expanded. Acceptable for a copy (visible + recoverable); never reuse this for a SEND decision.
+    // SAFETY — never a wrong expansion, never a lost copy. A journal match is the strong tier (the
+    // session's own recent pastes, assigned by line count in paste order); a cache match must be proven
+    // (a unique line-count match for a WHOLE-LINE collapsed label; head/tail content anchors + exact line
+    // arithmetic for a truncated one). A MID-LINE label nothing backs is kept as written — that is a
+    // document QUOTING a placeholder, not a paste — and any other unproven label (or an [Image #N])
+    // refuses the WHOLE expansion. Any refusal, a throw, or a missing dispatcher degrades to copying the
+    // text AS RENDERED — never to nothing — and each case is traced as a [pending] line in hooks.log.
+    // The one path that copies nothing is a window closed while its expansion was still resolving (no UI
+    // thread is left to write from); it is traced too.
+    // ⚠ The cache tier is only as strong as "exactly one cached paste has that many lines": a placeholder
+    // merely QUOTED alone on its own line, whose count happens to match a cache file, would be expanded.
+    // Acceptable for a copy (visible + recoverable); never reuse this for a SEND decision.
     //
     // ORDERING: every call (and every CopySessionField call) takes a new process-wide copy generation,
     // and an off-thread expansion writes the clipboard only if no newer copy started meanwhile — so
@@ -119,13 +121,17 @@ namespace winrt::TerminalApp::implementation
     //                  ALREADY what claude received (an Auto-Testing Typed row, recorded from the
     //                  UserPromptSubmit hook after claude expanded its own placeholders): a placeholder
     //                  in such a text is literal text the user sent, and "expanding" it would change it.
+    //   registry     — the engine registry, to snapshot `sessionId`'s PASTE JOURNAL (on the calling thread,
+    //                  before the off-thread expansion). Null ⇒ no journal tier: the paste-cache alone, i.e.
+    //                  the historical behavior. Every shipped caller passes it.
     // Returns nothing. Never throws: every failure is logged through AgentLogCaughtException (Rule #18)
     // and degrades to the as-rendered copy. Call from the UI thread.
     void CopyPromptTextExpandingPastes(const winrt::Windows::System::DispatcherQueue& dispatcher,
                                        const std::wstring& text,
                                        const std::wstring& sessionId,
                                        const std::wstring& what,
-                                       bool expandPastes = true);
+                                       bool expandPastes = true,
+                                       const ::Agentmaster::SessionRegistry* registry = nullptr);
 
     // Agentmaster (TAB_OVERLAY.md): open a session's EFFECTIVE working directory in explorer.exe — the
     // ONE shared "open path" action behind BOTH the per-tab overlay's folder button (Open Path) AND the

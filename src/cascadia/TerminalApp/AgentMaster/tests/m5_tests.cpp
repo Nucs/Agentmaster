@@ -53,6 +53,7 @@ int wmain()
     std::wprintf(L"=== Agentmaster engine tests ===\n");
     TestPendingInput();
     TestPendingPaste();
+    TestDraftCarry(); // PENDING_INPUT.md §11 / §2c — the fork carry + paste journal
     TestPromptAnchor();
     TestPromptAnchorEdgeCases();
     TestPromptAnchorCollisions();

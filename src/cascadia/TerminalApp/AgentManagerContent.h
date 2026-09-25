@@ -1095,6 +1095,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setDraftSwapCtrlS{ nullptr }; // PENDING_INPUT.md §9 — use Claude's Ctrl+S stash as the swap's first rung
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setVerifySend{ nullptr }; // DELIVERY_PLAN.md R4 — verified placement (fill → read-back → CR)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setRestoreDraft{ nullptr }; // PENDING_INPUT.md §10 — the restore RE-FILL: type a remembered unsent draft back into a reopened session's box
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCarryDraftOnFork{ nullptr }; // PENDING_INPUT.md §11 — the FORK CARRY: copy the source's unsent draft (pastes expanded) into a new fork's box; SESSIONS tab (not autorunner-gated — release builds fork too)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setConfirmKill{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setReapOrphans{ nullptr }; // OBSERVER.md §13a: shut down a session whose terminal host died (reapOrphanedSessions)
         // NOTIFICATIONS tab (System notifications): the Running -> X Windows-toast switches. The master

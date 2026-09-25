@@ -178,7 +178,13 @@ namespace winrt::TerminalApp::implementation
         const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(forkParentId) ? forkParentId : std::wstring{};
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[sessions-page->fork] source=" + forkParentId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
+        // PENDING_INPUT.md §11 — the FORK CARRY: snapshot the source's unsent draft + paste journal BEFORE the
+        // launch. A row can be any on-disk session: a live one hosted here (the live box answers), one in
+        // another window or a closed one with a persisted memory (the remembered draft answers), or one the
+        // registry never knew (nothing to carry — _CaptureDraftForFork returns empty).
+        auto carry = _CaptureDraftForFork(forkParentId);
         const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ forkDir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, static_cast<uint32_t>(-1), modelOverride);
+        _CarryDraftIntoFork(forkParentId, forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{}, std::move(carry));
         // Nav audit END (pairs with the fork-click BEGIN above): the NEW forked id — exactly "the id of the
         // new forked session" the user asked to be able to trace, alongside the source it forked from. A
         // fork-click with NO matching fork-done means the launch crashed/hung between the two (the

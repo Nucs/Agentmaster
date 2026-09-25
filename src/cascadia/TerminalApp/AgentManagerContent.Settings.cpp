@@ -1006,6 +1006,13 @@ namespace winrt::TerminalApp::implementation
         _setIncludeCoAuthored.Header(winrt::box_value(L"Include co-authored-by in commits"));
         AgentSetTip(_setIncludeCoAuthored, L"When off, commits Claude makes omit the \x201C" L"Co-authored-by\x201D trailer. Applies to new sessions.");
         panel.Children().Append(_setIncludeCoAuthored);
+        // Agentmaster (PENDING_INPUT.md §11 — the FORK CARRY). Lives here, not beside the §10 re-fill on the
+        // Tests Autorunner tab: that tab is dev-or-debug only, and forking (with its draft) is a release
+        // feature. Read live by the fork seams + the fill pump (_appSettings), so a Save applies to the next fork.
+        _setCarryDraftOnFork = ToggleSwitch{};
+        _setCarryDraftOnFork.Header(winrt::box_value(L"Copy my unsent prompt into a forked session"));
+        AgentSetTip(_setCarryDraftOnFork, L"When you fork a session \x2014 a tab's \x201C" L"Fork session\x201D (or Ctrl+Shift+D), the Manager's Fork, or the Sessions page's Fork here \x2014 the message sitting UNSENT in the source's input box is typed into the new fork's box as well, WITHOUT pressing Enter, so the fork starts one Enter away from the same prompt. The source keeps its copy.\n\nPasted blocks come across as the real pasted text: each [Pasted text #N +M lines] is rebuilt from what you actually pasted (Agentmaster records every paste it passes to Claude), so the fork's box shows the same placeholder backed by the same content \x2014 never the bare label, which Claude would send as literal text. A draft whose pasted block can't be matched for certain (or that holds an image) is not copied at all.\n\nNever fights you: if you start typing into the fork before it lands, your text wins. Off: forks start with an empty input box.");
+        panel.Children().Append(_setCarryDraftOnFork);
         // ENV_VARS.md: the two-tab "Environment variables" area (Global / Per-directory) replaces the old
         // single ;-delimited box. Built in its own method to keep this builder readable + the diff local.
         _BuildEnvVarsArea(panel);
@@ -2514,6 +2521,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setRestoreDraft.IsOn(_appSettings.restoreDraftOnResume);
         }
+        if (_setCarryDraftOnFork)
+        {
+            _setCarryDraftOnFork.IsOn(_appSettings.carryDraftOnFork); // PENDING_INPUT.md §11
+        }
         if (_setConfirmKill)
         {
             _setConfirmKill.IsOn(_appSettings.confirmBeforeKill);
@@ -3152,6 +3163,10 @@ namespace winrt::TerminalApp::implementation
         if (_setRestoreDraft)
         {
             _appSettings.restoreDraftOnResume = _setRestoreDraft.IsOn();
+        }
+        if (_setCarryDraftOnFork)
+        {
+            _appSettings.carryDraftOnFork = _setCarryDraftOnFork.IsOn(); // PENDING_INPUT.md §11
         }
         if (_setConfirmKill)
         {

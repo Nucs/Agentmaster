@@ -1335,6 +1335,32 @@ try {
         return ExpandPendingDraftPastesIn(draft, ClaudePasteCacheDir());
     }
 
+    // Agentmaster (PENDING_INPUT.md §11 / §2c): see the header. Two passes at most — journal-only, then
+    // (only when that refusal is one the cache could fix) journal + cache — so the common journal-backed
+    // draft never touches the disk, and a cache that turns out empty/missing simply repeats the refusal.
+    DraftCarryPlan ResolvePendingDraftCarryIn(const std::wstring& draft, const std::vector<PasteJournalEntry>& journal, bool unresolvedMidLineIsLiteral, const std::wstring& cacheDir)
+    try
+    {
+        DraftCarryPlan plan = ResolveDraftCarry(draft, journal, {}, unresolvedMidLineIsLiteral);
+        if (plan.complete || !plan.cacheMightHelp)
+        {
+            return plan;
+        }
+        return ResolveDraftCarry(draft, journal, ReadPasteCacheFileTexts(cacheDir), unresolvedMidLineIsLiteral);
+    }
+    catch (...)
+    {
+        LogSwallowedException(L"ResolvePendingDraftCarryIn");
+        DraftCarryPlan refused; // complete == false: the caller keeps the draft as rendered, never re-types a label
+        refused.refusal = L"resolver threw (see the [exc] line)";
+        return refused;
+    }
+
+    DraftCarryPlan ResolvePendingDraftCarry(const std::wstring& draft, const std::vector<PasteJournalEntry>& journal, bool unresolvedMidLineIsLiteral)
+    {
+        return ResolvePendingDraftCarryIn(draft, journal, unresolvedMidLineIsLiteral, ClaudePasteCacheDir());
+    }
+
     std::wstring ClaudeCwdForShell(uint32_t shellPid)
     {
         // Find the claude.exe serving this tab (descendant-or-self: the pid itself when a

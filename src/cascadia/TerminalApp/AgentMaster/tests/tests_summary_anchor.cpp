@@ -1967,3 +1967,225 @@ void TestPendingPaste()
         }
     }
 }
+
+// PENDING_INPUT.md §11 (the FORK CARRY) + §2c (the PASTE JOURNAL): DraftCarry.h's pure core — claude's own
+// paste normalization + newline arithmetic + collapse threshold (read from the 2.1.280 bundle), the
+// wrap-tolerant placeholder scan (incl. the bare "[Pasted text #N]" form the §2b grammar never knew), the
+// journal-first resolver (chronological same-M assignment, the whole-line cache tier, the live-vs-strict
+// unresolved policy, the image / duplicate-id refusals, the truncated middle), the piecewise fill plan
+// (inline-sized typed chunks, blocks alone, no split through a surrogate pair or a kept quote), the fill
+// verifier (Verified / Partial-at-a-boundary / Eaten / Foreign) — plus the registry journal and the adapter.
+void TestDraftCarry()
+{
+    std::wprintf(L"-- DraftCarry (fork carry + paste journal) --\n");
+    const std::wstring NL(1, static_cast<wchar_t>(10));
+    const std::wstring four = L"alpha" + NL + L"beta" + NL + L"gamma" + NL + L"delta"; // 3 newlines — collapse-eligible
+    const auto entry = [](std::wstring text, int64_t ms) { return PasteJournalEntry{ NormalizePastedTextLikeClaude(text), ms }; };
+
+    // 1. Claude's paste normalization / arithmetic / threshold.
+    {
+        std::wstring raw = L"a\r\nb\rc\nd";
+        raw += static_cast<wchar_t>(0x07); // BEL — a C0 WT's paste filter drops
+        raw += static_cast<wchar_t>(0x1B); // ESC — gone too (so claude's stripANSI has nothing left to strip)
+        raw += static_cast<wchar_t>(0x85); // NEL — a C1, dropped
+        raw += L"\tx";
+        raw += static_cast<wchar_t>(0x05D0); // Hebrew alef — ordinary text, kept
+        const std::wstring want = L"a" + NL + L"b" + NL + L"c" + NL + L"d    x" + std::wstring(1, static_cast<wchar_t>(0x05D0));
+        CHECK(NormalizePastedTextLikeClaude(raw) == want, "carry normalize: CRLF/CR/LF -> LF, TAB -> 4 spaces, C0/C1 dropped, text kept");
+        CHECK(ClaudePasteNewlineCount(L"a\r\nb\rc\nd") == 3, "carry count: CRLF counts once (claude's gM)");
+        CHECK(!ClaudeWouldCollapsePaste(L"a" + NL + L"b" + NL + L"c"), "carry collapse: 2 newlines + short stays inline");
+        CHECK(ClaudeWouldCollapsePaste(four), "carry collapse: 3 newlines collapses");
+        CHECK(!ClaudeWouldCollapsePaste(std::wstring(800, L'x')), "carry collapse: exactly 800 chars stays inline");
+        CHECK(ClaudeWouldCollapsePaste(std::wstring(801, L'x')), "carry collapse: 801 chars collapses (claude's y3)");
+    }
+    // 2. The placeholder scan: every claude form, soft-wrap tolerance, non-grammar ignored.
+    {
+        const auto ps = FindDraftPlaceholders(L"a [Pasted text #1] b [Pasted text #2 +31 lines] c [...Truncated text #3 +9 lines...] d [Image #4] e [Audio #5]");
+        CHECK(ps.size() == 5, "carry scan: five placeholder forms found");
+        CHECK(ps.size() == 5 && ps[0].kind == DraftPlaceholderKind::PastedText && ps[0].lines == -1 && ps[0].index == 1, "carry scan: the bare [Pasted text #N] (M == 0) form");
+        CHECK(ps.size() == 5 && ps[1].lines == 31 && ps[1].index == 2, "carry scan: +M lines parsed");
+        CHECK(ps.size() == 5 && ps[2].kind == DraftPlaceholderKind::TruncatedText && ps[2].lines == 9, "carry scan: truncated form");
+        CHECK(ps.size() == 5 && ps[3].kind == DraftPlaceholderKind::Image && ps[4].kind == DraftPlaceholderKind::Audio, "carry scan: image + audio forms");
+        const std::wstring wrapped = L"look at this [Pasted" + NL + L"text #1 +31" + NL + L"lines] now";
+        const auto pw = FindDraftPlaceholders(wrapped);
+        CHECK(pw.size() == 1 && pw[0].lines == 31 && wrapped.substr(pw[0].begin, 1) == L"[" && wrapped[pw[0].end - 1] == L']', "carry scan: a placeholder soft-wrapped at its spaces still parses");
+        CHECK(pw.size() == 1 && CanonicalDraftPlaceholderText(wrapped, pw[0]) == L"[Pasted text #1 +31 lines]", "carry scan: the canonical re-render drops the soft wrap");
+        CHECK(FindDraftPlaceholders(L"[Pasted" + NL + NL + L"text #1 +3 lines]").empty(), "carry scan: a REAL blank line inside is not one wrapped space");
+        CHECK(FindDraftPlaceholders(L"[Pasted text] [Pasted text #x +3 lines] [Pasted text #12345678 +3 lines]").empty(), "carry scan: non-grammar brackets ignored (no id / bad id / id too long)");
+        const std::wstring line = L"x" + NL + L"  [Pasted text #1 +3 lines]  " + NL + L"y [Pasted text #2 +3 lines]";
+        const auto pl = FindDraftPlaceholders(line);
+        CHECK(pl.size() == 2 && DraftPlaceholderIsWholeLine(line, pl[0]) && !DraftPlaceholderIsWholeLine(line, pl[1]), "carry scan: whole-line vs mid-line");
+    }
+    // 3. The journal tier.
+    {
+        const std::wstring draft = L"please look at this" + NL + L"[Pasted text #1 +3 lines]" + NL + L"thanks";
+        const auto plan = ResolveDraftCarry(draft, { entry(four, 1) }, {}, true);
+        CHECK(plan.complete && plan.fromJournal == 1 && plan.fromCache == 0 && plan.segments.size() == 3, "carry journal: typed + one placeholder resolves to [Typed, Block, Typed]");
+        CHECK(plan.complete && DraftCarryExpandedText(plan) == L"please look at this" + NL + four + NL + L"thanks", "carry journal: the expanded text is the whole prompt");
+        const auto two = ResolveDraftCarry(L"[Pasted text #1 +3 lines]" + NL + L"[Pasted text #2 +3 lines]",
+                                           { entry(L"A1" + NL + L"A2" + NL + L"A3" + NL + L"A4", 1), entry(L"x" + NL + L"x" + NL + L"x" + NL + L"x" + NL + L"x" + NL + L"x", 2), entry(L"B1" + NL + L"B2" + NL + L"B3" + NL + L"B4", 3) },
+                                           {}, true);
+        CHECK(two.complete && two.segments.size() == 3 && two.segments[0].text.rfind(L"A1", 0) == 0 && two.segments[2].text.rfind(L"B1", 0) == 0,
+              "carry journal: same-M placeholders take the same-M pastes in PASTE ORDER (#1 <- older, #2 <- newer), the other-M paste skipped");
+        const auto newest = ResolveDraftCarry(L"[Pasted text #5 +3 lines]", { entry(L"old" + NL + L"1" + NL + L"2" + NL + L"3", 1), entry(four, 2) }, {}, true);
+        CHECK(newest.complete && newest.segments.size() == 1 && newest.segments[0].text == four, "carry journal: one placeholder takes the NEWEST same-M paste");
+        const auto mid = ResolveDraftCarry(L"look at [Pasted text #1 +3 lines] please", { entry(four, 1) }, {}, false);
+        CHECK(mid.complete && DraftCarryExpandedText(mid) == L"look at " + four + L" please", "carry journal: a MID-LINE placeholder resolves by span (typed words kept on both sides)");
+        const auto bare = ResolveDraftCarry(L"[Pasted text #1]", { entry(std::wstring(900, L'q'), 1) }, {}, true);
+        CHECK(bare.complete && bare.fromJournal == 1 && bare.segments[0].text == std::wstring(900, L'q'), "carry journal: the bare form matches a 0-newline paste over 800 chars");
+        const auto bareShort = ResolveDraftCarry(L"[Pasted text #1]", { entry(L"short", 1) }, {}, true);
+        CHECK(!bareShort.complete, "carry journal: an inline-sized paste can never back a placeholder");
+        const auto wrap = ResolveDraftCarry(L"look at this [Pasted" + NL + L"text #1 +3 lines] now", { entry(four, 1) }, {}, true);
+        CHECK(wrap.complete && DraftCarryExpandedText(wrap) == L"look at this " + four + L" now", "carry journal: a soft-wrapped placeholder resolves and its wrap newline vanishes");
+    }
+    // 4. Unresolved policy + refusals.
+    {
+        const auto liveMid = ResolveDraftCarry(L"make sure the [Pasted text #1 +31 lines] are expanded", {}, {}, true);
+        CHECK(liveMid.complete && liveMid.keptLiteral == 1 && DraftCarryExpandedText(liveMid) == L"make sure the [Pasted text #1 +31 lines] are expanded",
+              "carry policy: LIVE — an unbacked MID-LINE placeholder is a quote, kept as typed text");
+        const auto strictMid = ResolveDraftCarry(L"make sure the [Pasted text #1 +31 lines] are expanded", {}, {}, false);
+        CHECK(!strictMid.complete && !strictMid.cacheMightHelp, "carry policy: STRICT — refused, and the cache can't help a mid-line placeholder");
+        const auto whole = ResolveDraftCarry(L"x" + NL + L"[Pasted text #1 +31 lines]", {}, {}, true);
+        CHECK(!whole.complete && whole.cacheMightHelp && !whole.refusal.empty(), "carry policy: an unbacked WHOLE-LINE placeholder refuses (a real paste would be lost) — the cache may still answer");
+        CHECK(!ResolveDraftCarry(L"see [Image #1]", {}, {}, true).complete, "carry policy: an image placeholder always refuses");
+        CHECK(!ResolveDraftCarry(L"[Pasted text #1 +3 lines] vs [Pasted text #1 +3 lines]", { entry(four, 1) }, {}, true).complete, "carry policy: a duplicate paste id refuses (one is a quote — nothing tells which)");
+        const auto none = ResolveDraftCarry(L"no placeholders at all", {}, {}, false);
+        CHECK(none.complete && none.segments.size() == 1 && none.placeholders == 0, "carry policy: a placeholder-free draft is its own plan");
+    }
+    // 5. The cache tier: whole-line + unique only.
+    {
+        const std::vector<PasteFileText> cache{ { L"a.txt", L"alpha" + NL + L"beta" + NL + L"gamma" + NL + L"delta" } };
+        const auto hit = ResolveDraftCarry(L"x" + NL + L"[Pasted text #1 +3 lines]", {}, cache, false);
+        CHECK(hit.complete && hit.fromCache == 1 && hit.segments.back().text == four, "carry cache: a whole-line placeholder with ONE matching file resolves");
+        CHECK(!ResolveDraftCarry(L"x" + NL + L"[Pasted text #1 +3 lines]", {}, { cache[0], { L"twin.txt", cache[0].text } }, false).complete, "carry cache: two same-count files refuse (never guess)");
+        const auto midLive = ResolveDraftCarry(L"x [Pasted text #1 +3 lines] y", {}, cache, true);
+        CHECK(midLive.complete && midLive.fromCache == 0 && midLive.keptLiteral == 1, "carry cache: never trusted for a mid-line placeholder (kept literal under the live policy)");
+    }
+    // 6. The truncated middle, journal-backed (the live 274-segment fixture shape from TestPendingPaste).
+    {
+        std::wstring paste;
+        for (int i = 1; i <= 274; ++i)
+        {
+            paste += (i == 8) ? std::wstring{ L"## The user's report (verbatim)" } :
+                     (i == 266) ? std::wstring{ L"  shells, or if the About-tab toggle's \"applies at next start\" story changes)." } :
+                                  (L"line " + std::to_wstring(i));
+            if (i != 274)
+            {
+                paste += NL;
+            }
+        }
+        const std::wstring draft = L"yooo" + NL + L"## The user[...Truncated text #2 +258 lines...]es).";
+        const auto plan = ResolveDraftCarry(draft, { PasteJournalEntry{ paste, 1 } }, {}, false);
+        std::wstring want = L"yooo";
+        const auto segs = paste_detail::SplitSegments(paste);
+        for (size_t k = 7; k <= 265; ++k)
+        {
+            want += NL + segs[k];
+        }
+        CHECK(plan.complete && plan.fromJournal == 1 && DraftCarryExpandedText(plan) == want, "carry truncated: the elided middle is cut from the journal paste — head + middle + tail == the original lines");
+    }
+    // 7. The piecewise fill plan.
+    {
+        std::wstring ten;
+        for (int i = 0; i < 10; ++i)
+        {
+            ten += (i ? NL : std::wstring{}) + L"l" + std::to_wstring(i);
+        }
+        const auto p = BuildDraftFillPastes(ResolveDraftCarry(ten, {}, {}, true));
+        bool inline2 = !p.empty();
+        std::wstring joined;
+        for (const auto& x : p)
+        {
+            inline2 = inline2 && !x.block && ClaudePasteNewlineCount(x.text) <= 2 && x.text.size() <= 800;
+            joined += x.text;
+        }
+        CHECK(p.size() == 5 && inline2 && joined == ten, "carry plan: typed text chunked into inline-sized pastes (<=2 newlines, <=800 chars) that re-join exactly");
+        const auto longLine = BuildDraftFillPastes(ResolveDraftCarry(std::wstring(1700, L'z'), {}, {}, true));
+        CHECK(longLine.size() == 3 && longLine[0].text.size() == 800 && longLine[2].text.size() == 100, "carry plan: a long line is cut at 800 chars");
+        std::wstring astral(799, L'a');
+        astral += static_cast<wchar_t>(0xD83D);
+        astral += static_cast<wchar_t>(0xDE00);
+        astral += L"b";
+        const auto sp = BuildDraftFillPastes(ResolveDraftCarry(astral, {}, {}, true));
+        CHECK(sp.size() == 2 && sp[0].text.size() == 799 && sp[1].text[0] == static_cast<wchar_t>(0xD83D), "carry plan: a cut never splits a surrogate pair");
+        const std::wstring quote = std::wstring(790, L'a') + L"[Pasted text #1 +31 lines]tail";
+        const auto qp = BuildDraftFillPastes(ResolveDraftCarry(quote, {}, {}, true));
+        CHECK(qp.size() == 2 && qp[0].text.size() == 790 && qp[1].text.rfind(L"[Pasted text #1 +31 lines]", 0) == 0, "carry plan: a cut never splits a kept quote");
+        const auto mixed = BuildDraftFillPastes(ResolveDraftCarry(L"please look at this" + NL + L"[Pasted text #1 +3 lines]" + NL + L"thanks", { entry(four, 1) }, {}, true));
+        CHECK(mixed.size() == 3 && !mixed[0].block && mixed[1].block && mixed[1].blockNewlines == 3 && !mixed[2].block, "carry plan: the block is pasted ALONE (so claude mints its own bound placeholder for it)");
+    }
+    // 8. The fill verifier.
+    {
+        const auto pastes = BuildDraftFillPastes(ResolveDraftCarry(L"please look at this" + NL + L"[Pasted text #3 +3 lines]" + NL + L"thanks", { entry(four, 1) }, {}, true));
+        const auto v = [&](const std::wstring& box) { return VerifyDraftFillPastes(box, pastes); };
+        CHECK(v(L"please look at this" + NL + L"[Pasted text #1 +3 lines]" + NL + L"thanks").verdict == DraftFillVerdict::Verified, "carry verify: the source rendering with claude's OWN re-minted id verifies");
+        CHECK(v(L"please look at" + NL + L"this [Pasted text #1 +3" + NL + L"lines] thanks").verdict == DraftFillVerdict::Verified, "carry verify: soft wrap anywhere (even inside the placeholder) is tolerated");
+        CHECK(v(L"").verdict == DraftFillVerdict::Eaten, "carry verify: an empty box is Eaten");
+        const auto partial = v(L"please look at this");
+        CHECK(partial.verdict == DraftFillVerdict::Partial && partial.landed == 1, "carry verify: a clean prefix is Partial at the paste boundary");
+        CHECK(v(L"please look at").verdict == DraftFillVerdict::Foreign, "carry verify: a paste cut mid-way is Foreign (re-typing it would duplicate)");
+        CHECK(v(L"please look at this" + NL + L"[Pasted text #1 +3 lines]" + NL + L"thanks and more").verdict == DraftFillVerdict::Foreign, "carry verify: text beyond the plan is Foreign");
+        CHECK(v(L"please look at this" + NL + L"[Pasted text #1 +4 lines]" + NL + L"thanks").verdict == DraftFillVerdict::Foreign, "carry verify: a placeholder of the wrong size is Foreign");
+        CHECK(v(L"please look at this" + NL + four + NL + L"thanks").verdict == DraftFillVerdict::Verified, "carry verify: a block claude INLINED instead of collapsing still verifies");
+        // The delivery's per-piece LANDED signal: the box must read as EXACTLY the first k pieces.
+        CHECK(VerifyDraftFillPastes(L"please look at this", pastes, 1).verdict == DraftFillVerdict::Verified, "carry verify prefix: piece 1 alone verifies against a 1-piece prefix");
+        CHECK(VerifyDraftFillPastes(L"please look at this" + NL + L"[Pasted text #1 +3 lines]", pastes, 2).verdict == DraftFillVerdict::Verified, "carry verify prefix: pieces 1..2 verify against a 2-piece prefix");
+        CHECK(VerifyDraftFillPastes(L"please look at this" + NL + L"[Pasted text #1 +3 lines]", pastes, 1).verdict == DraftFillVerdict::Foreign, "carry verify prefix: MORE than the prefix is not a landing of piece 1");
+        CHECK(VerifyDraftFillPastes(L"", pastes, 2).verdict != DraftFillVerdict::Verified, "carry verify prefix: a mid-repaint EMPTY read never counts as a landing");
+        const auto quoted = BuildDraftFillPastes(ResolveDraftCarry(L"make sure the [Pasted text #1 +31 lines] are expanded", {}, {}, true));
+        CHECK(VerifyDraftFillPastes(L"make sure the [Pasted text #1 +31 lines] are expanded", quoted).verdict == DraftFillVerdict::Verified, "carry verify: a kept quote re-renders and verifies EXACTLY (id + count)");
+        CHECK(VerifyDraftFillPastes(L"make sure the [Pasted text #2 +31 lines] are expanded", quoted).verdict == DraftFillVerdict::Foreign, "carry verify: a quote with another id is not ours");
+    }
+    // 9. The registry's paste journal.
+    {
+        SessionRegistry reg;
+        reg.Upsert(MakeSession(L"j1"));
+        reg.Upsert(MakeSession(L"j2"));
+        reg.NotePastedText(L"j1", L"inline sized");
+        CHECK(reg.PasteJournal(L"j1").empty(), "journal: an inline-sized paste is never recorded");
+        reg.NotePastedText(L"j1", L"a\r\nb\r\nc\r\nd", 100);
+        auto j = reg.PasteJournal(L"j1");
+        CHECK(j.size() == 1 && j[0].text == L"a" + NL + L"b" + NL + L"c" + NL + L"d" && j[0].unixMs == 100, "journal: stored normalized like claude, with its stamp");
+        reg.NotePastedText(L"j1", L"a\r\nb\r\nc\r\nd", 200);
+        j = reg.PasteJournal(L"j1");
+        CHECK(j.size() == 1 && j[0].unixMs == 200, "journal: an identical re-paste refreshes the newest entry (no duplicate)");
+        reg.NotePastedText(L"nope", four);
+        CHECK(reg.PasteJournal(L"nope").empty(), "journal: an unknown session records nothing");
+        for (int i = 0; i < 20; ++i)
+        {
+            reg.NotePastedText(L"j2", L"p" + std::to_wstring(i) + NL + L"1" + NL + L"2" + NL + L"3", 1000 + i);
+        }
+        j = reg.PasteJournal(L"j2");
+        CHECK(j.size() == kPasteJournalMaxEntriesPerSession && j.front().text.rfind(L"p4" + NL, 0) == 0 && j.back().text.rfind(L"p19" + NL, 0) == 0,
+              "journal: capped per session, oldest dropped first");
+        reg.MovePasteJournal(L"j1", L"j2");
+        CHECK(reg.PasteJournal(L"j1").empty() && reg.PasteJournal(L"j2").size() == kPasteJournalMaxEntriesPerSession && reg.PasteJournal(L"j2").back().text == L"a" + NL + L"b" + NL + L"c" + NL + L"d",
+              "journal: MovePasteJournal appends onto the new id (re-capped) and empties the old");
+        reg.ClearPasteJournal(L"j2");
+        CHECK(reg.PasteJournal(L"j2").empty(), "journal: ClearPasteJournal forgets it (the draft-clear prune)");
+        reg.NotePastedText(L"j2", four);
+        reg.Remove(L"j2");
+        CHECK(reg.PasteJournal(L"j2").empty(), "journal: removing the session drops its journal");
+    }
+    // 10. The impure adapter: journal-only needs no cache; the cache is the fallback; a missing dir refuses.
+    {
+        namespace fs = std::filesystem;
+        const auto dir = fs::temp_directory_path() / L"am-carry-test";
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        fs::create_directories(dir, ec);
+        {
+            std::ofstream f(dir / L"aabbccdd00112233.txt", std::ios::binary);
+            const std::string utf8 = "one\ntwo\nthree\nfour"; // 3 newlines
+            f.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+        }
+        const std::wstring draft = L"x" + NL + L"[Pasted text #1 +3 lines]";
+        const auto viaJournal = ResolvePendingDraftCarryIn(draft, { entry(four, 1) }, true, (dir / L"missing").wstring());
+        CHECK(viaJournal.complete && viaJournal.fromJournal == 1, "carry adapter: a journal-backed draft resolves without touching the cache");
+        const auto viaCache = ResolvePendingDraftCarryIn(draft, {}, false, dir.wstring());
+        CHECK(viaCache.complete && viaCache.fromCache == 1 && DraftCarryExpandedText(viaCache) == L"x" + NL + L"one" + NL + L"two" + NL + L"three" + NL + L"four",
+              "carry adapter: the paste-cache answers when the journal can't");
+        CHECK(!ResolvePendingDraftCarryIn(draft, {}, false, (dir / L"missing").wstring()).complete, "carry adapter: nothing anywhere -> refused, never a throw");
+        fs::remove_all(dir, ec);
+    }
+}

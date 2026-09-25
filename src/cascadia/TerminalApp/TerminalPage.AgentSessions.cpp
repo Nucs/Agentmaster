@@ -979,6 +979,10 @@ namespace winrt::TerminalApp::implementation
         // in Individual mode (the fresh conversation keeps the tab's color).
         if (restored && !restored->id.empty() && restored->id != spec.sessionId)
         {
+            // PENDING_INPUT.md §2c: the draft memory rode the *restored copy onto the new id, so the paste
+            // journal that backs its placeholders must follow it BEFORE Remove drops the old id's journal
+            // (a same-run close -> restore-fresh; after an app restart there is no journal to move).
+            _sessionRegistry->MovePasteJournal(restored->id, spec.sessionId);
             _sessionRegistry->Remove(restored->id);
         }
 
@@ -1017,10 +1021,12 @@ namespace winrt::TerminalApp::implementation
         // submitted at/after it (user, autorunner, /handover) means the session is owned and the
         // pump hands off (RestoredDraftSessionTakenOver). _ArmDraftRestore expands the memory's
         // paste placeholders off-thread first (or refuses — never a lossy literal re-type, the §9
-        // rule) and only then arms the pump's map on the dispatcher.
+        // rule) and only then arms the pump's map on the dispatcher. The resolve is STRICT here and
+        // consults the session's paste JOURNAL first (§2c — present for a same-run close -> resume,
+        // gone after an app restart, when the paste-cache is the only fallback).
         if (_appSettings.restoreDraftOnResume && !info.pendingInput.empty())
         {
-            _ArmDraftRestore(spec.sessionId, info.pendingInput);
+            _ArmDraftRestore(spec.sessionId, info.pendingInput, _sessionRegistry->PasteJournal(spec.sessionId), DraftFillOrigin::Resume, std::wstring{});
         }
 
         // Agentmaster: a session's title is ONE value — the Explorer-tree name, the persisted
@@ -2789,7 +2795,9 @@ namespace winrt::TerminalApp::implementation
         // and a deactivate->wake is a resume in every way that matters (the pump waits for started).
         if (!isCodex && _appSettings.restoreDraftOnResume && !info->pendingInput.empty())
         {
-            _ArmDraftRestore(sid, info->pendingInput);
+            // §2c: the parked claude took its in-memory pastes with it, but OUR journal kept them — so a
+            // draft holding a fresh "[Pasted text #N +M lines]" now comes back whole on wake (strict resolve).
+            _ArmDraftRestore(sid, info->pendingInput, _sessionRegistry->PasteJournal(sid), DraftFillOrigin::Resume, std::wstring{});
         }
 
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[deactivate] " + sid8 + (isCodex ? L" codex" : L" claude") + L" parked dormant \"" + title + L"\" cwd=" + dir + L" (resumes on focus/activate)\n");
@@ -2919,8 +2927,15 @@ namespace winrt::TerminalApp::implementation
         }
         const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(sourceId) ? sourceId : std::wstring{};
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-managed->fork] source=" + sourceId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
+        // PENDING_INPUT.md §11 — the FORK CARRY: snapshot the source's UNSENT draft (its live box when this
+        // window hosts it — the WT tab menu's case — else the observer's remembered draft) + its paste
+        // journal NOW, before the launch, so the fork receives the prompt as it stood at the click. The copy
+        // is keyed on the fork INTENT, not on a transcript: a never-prompted source still forks (fresh), and
+        // its draft still comes along.
+        auto carry = _CaptureDraftForFork(sourceId);
         const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition, modelOverride);
         const std::wstring forkedId = forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{};
+        _CarryDraftIntoFork(sourceId, forkedId, std::move(carry)); // a no-op for an empty draft / a failed launch
         ::Agentmaster::LogNav(L"fork-managed-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(sourceId) + (forkFrom.empty() ? std::wstring{ L" (fresh \x2014 no transcript)" } : std::wstring{}));
         return true;
     }

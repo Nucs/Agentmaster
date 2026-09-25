@@ -4038,6 +4038,12 @@ namespace winrt::TerminalApp::implementation
         const auto globalSettings = _settings.GlobalSettings();
         const auto bracketedPaste = eventArgs.BracketedPasteEnabled();
         const auto sourceId = sender.try_as<ControlInteractivity>().Id();
+        // Agentmaster (PENDING_INPUT.md §2c — the PASTE JOURNAL): which managed Claude session this paste
+        // is going into, resolved HERE on the UI thread (the control walk is UI-affine) before the handler
+        // hops to the background. Only a BRACKETED paste can become a claude "[Pasted text #N +M lines]"
+        // placeholder, so only those are journaled; a shell tab / any other pane resolves to "".
+        const std::wstring agentPasteSessionId = bracketedPaste ? _ClaudeSessionForContentId(sourceId) : std::wstring{};
+        const auto agentPasteRegistry = _sessionRegistry; // by-value shared_ptr — safe on the background thread below
 
         // GetClipboardData might block for up to 30s for delay-rendered contents.
         co_await winrt::resume_background();
@@ -4134,6 +4140,25 @@ namespace winrt::TerminalApp::implementation
             }
 
             co_await winrt::resume_background();
+        }
+
+        // Agentmaster (PENDING_INPUT.md §2c): record the paste BEFORE claude can render its placeholder — the
+        // one moment the content exists outside claude's process (current Claude Code writes its own
+        // paste-cache only at SUBMIT). After the warning dialogs on purpose: a paste the user rejected
+        // above never reached claude, so it must never back a placeholder. The registry normalizes it the
+        // way WT's paste filter + claude's paste handler will, and keeps it only if claude would collapse it.
+        if (!agentPasteSessionId.empty() && agentPasteRegistry)
+        {
+            try
+            {
+                agentPasteRegistry->NotePastedText(agentPasteSessionId, std::wstring{ text });
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: the paste proceeds un-journaled (a later fork/copy of this draft then
+                // falls back to the paste-cache tier) — never let the journal cost the user their paste.
+                ::Agentmaster::AgentLogCaughtException(L"_PasteFromClipboardHandler journal");
+            }
         }
 
         // This will end up calling ConptyConnection::WriteInput which calls WriteFile which may block for

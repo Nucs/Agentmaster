@@ -568,6 +568,7 @@ void TestAppSettings()
         in.draftSwapUseCtrlS = false; // non-default (default true = Ctrl+S stash is the swap's first rung)
         in.preserveDraftOnSend = false; // non-default (default true = the DRAFT SWAP is on) — PENDING_INPUT.md §9
         in.restoreDraftOnResume = false; // non-default (default true = the restore RE-FILL is on) — PENDING_INPUT.md §10
+        in.carryDraftOnFork = false; // non-default (default true = the FORK CARRY is on) — PENDING_INPUT.md §11
         in.confirmBeforeKill = false;
         in.reapOrphanedSessions = false; // non-default (default true = the §13a orphan reaper is armed) — OBSERVER.md
         in.uiStallAutoRestart = false; // non-default (default true = the ui-stall RESTART tier is armed) — Engine.h escalation
@@ -623,6 +624,8 @@ void TestAppSettings()
         CHECK(out.preserveDraftOnSend == false, "settings preserveDraftOnSend round-trip (draft swap OFF)");
         CHECK(out.draftSwapUseCtrlS == false, "settings draftSwapUseCtrlS round-trip (Ctrl+S stash rung OFF)");
         CHECK(out.restoreDraftOnResume == false, "settings restoreDraftOnResume round-trip (restore re-fill OFF)");
+        CHECK(out.carryDraftOnFork == false, "settings carryDraftOnFork round-trip (fork carry OFF)");
+        CHECK(DeserializeAppSettings(L"{\"version\":1,\"settings\":{}}").carryDraftOnFork == true, "settings carryDraftOnFork: an absent key (a pre-§11 settings.json) reads ON");
         CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
         CHECK(out.reapOrphanedSessions == false, "settings reapOrphanedSessions round-trip (orphan reaper OFF)");
         CHECK(out.uiStallAutoRestart == false, "settings uiStallAutoRestart round-trip (restart tier OFF)");

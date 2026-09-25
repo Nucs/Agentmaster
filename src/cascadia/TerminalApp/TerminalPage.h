@@ -41,6 +41,7 @@ namespace winrt::Microsoft::Terminal::Settings
 // src/cascadia/TerminalApp/AgentMaster/). The engine classes are forward-declared so
 // TerminalPage can hold them by shared_ptr; SessionModels.h (value types) is included
 // because restore passes a SessionInfo by value.
+#include "AgentMaster/DraftCarry.h" // Agentmaster (PENDING_INPUT.md §11): PasteJournalEntry / DraftFillPaste — the fork carry's by-value pump state
 #include "AgentMaster/SessionModels.h"
 #include "AgentMaster/SessionStore.h" // Agentmaster (bookmark tags): GlobalTagInfo (by-value member — the Tag panel's cached universe)
 #include "AgentMaster/TranscriptStore.h" // Agentmaster (Sessions page): SessionIndexEntry (by-value member)
@@ -1026,16 +1027,90 @@ namespace winrt::TerminalApp::implementation
         // Gated by AppSettings::restoreDraftOnResume (cog, default ON); OFF = the classic
         // display-only memory. Not restart-durable ITSELF — the registry memory is the durable copy,
         // and the next resume re-arms from it.
+        // Agentmaster (PENDING_INPUT.md §11 — the FORK CARRY shares this pump): WHY an entry is armed.
+        // The two origins differ in exactly three ways — the setting that gates them
+        // (restoreDraftOnResume vs carryDraftOnFork), the unresolved-placeholder policy (a restore across
+        // a restart is STRICT: the journal is gone, so an unresolved placeholder is most likely a real
+        // paste; a fork is LIVE: an unresolved MID-LINE placeholder is a typed quote, kept as text), and
+        // the fill shape (a restore types ONE paste — its historical, proven recipe; a fork types the
+        // PIECEWISE plan so the new box reads like the source box). Everything else — the started wait,
+        // the settle, the hands-off latch, the scan hold, the deadlines — is shared.
+        enum class DraftFillOrigin : uint8_t
+        {
+            Resume, // §10: a reopened session's own persisted draft memory, typed back
+            Fork, // §11: the SOURCE session's live/remembered draft, copied into a brand-new fork
+        };
         struct PendingDraftRestore
         {
-            std::wstring draftText; // the fill (markers expanded); the registry memory keeps the rendered form
+            std::wstring draftText; // the fill (markers expanded); the registry memory keeps the rendered form. Fork: the whole expanded text (logs only — the fill is fillPastes)
             int64_t armedUnixMs{ 0 }; // system-clock arm instant — RestoredDraftSessionTakenOver's baseline
             int64_t startedSeenMs{ 0 }; // tick clock: first pump tick that saw SessionInfo.started (settle + started-deadline anchor)
             int64_t injectedAtMs{ 0 }; // tick clock: when the last fill was injected (0 == not yet; drives the verify window)
             int32_t fillAttempts{ 0 }; // fills injected so far (capped)
+            DraftFillOrigin origin{ DraftFillOrigin::Resume }; // §11: which lane (gate / policy / fill shape — see the enum)
+            std::wstring sourceId; // §11 Fork: the session the draft was copied FROM (diagnostic — every [draft-fork] line names it)
+            std::vector<::Agentmaster::DraftFillPaste> fillPastes; // §11 Fork: the piecewise plan (BuildDraftFillPastes); empty == the Resume single fill of draftText
+            bool deliveryInFlight{ false }; // §11 Fork: a _DeliverDraftFillPastes coroutine owns the box — the pump leaves the entry ENTIRELY alone until it hands it back
+            // §11 Fork: how many LEADING pieces the last delivery SAW appear in the box. It separates the one
+            // safe retry from the unsafe ones: an EMPTY box with 0 seen means claude ate the first paste
+            // pre-raw-mode (re-type from piece 1 — the box is empty and the cursor at its start); an empty or
+            // shortened box AFTER pieces were seen means the USER cleared/edited it — never re-type over that.
+            size_t observedPieces{ 0 };
         };
         std::unordered_map<std::wstring, PendingDraftRestore> _pendingDraftRestores;
-        winrt::fire_and_forget _ArmDraftRestore(std::wstring sessionId, std::wstring draft); // Agentmaster (PENDING_INPUT.md §10): expand the memory's paste placeholders OFF-THREAD, then arm (or refuse) on the dispatcher; called from _LaunchClaudeSession for a restored record with a non-empty pendingInput
+        // Agentmaster (PENDING_INPUT.md §10 + §11): resolve `draft`'s paste placeholders (journal first, the
+        // paste-cache only when needed — OFF-THREAD whenever a placeholder is present), then arm the pump's
+        // entry on the dispatcher, or REFUSE (logged) so a literal placeholder label is never re-typed.
+        //   sessionId — the session whose box is filled (the reopened session, or the NEW fork).
+        //   draft     — the RENDERED draft (the memory, or the fork source's box).
+        //   journal   — the paste journal that backs `draft` (the session's own, or the fork SOURCE's).
+        //   origin    — Resume (strict, single fill) or Fork (live, piecewise; also SEEDS the fork's memory +
+        //               journals its blocks into the fork so the dots show and a later copy/restore resolves).
+        //   sourceId  — Fork: the source session id (logs); "" for Resume.
+        // Terminate-net: never throws (fire_and_forget); UI-thread state only touched on the dispatcher.
+        winrt::fire_and_forget _ArmDraftRestore(std::wstring sessionId, std::wstring draft, std::vector<::Agentmaster::PasteJournalEntry> journal, DraftFillOrigin origin, std::wstring sourceId);
+        // Agentmaster (PENDING_INPUT.md §11 — the FORK CARRY): what a fork copies from its source, captured
+        // at FORK TIME (before the launch), so "the prompt in the box when I clicked Fork" is what arrives.
+        struct ForkDraftCapture
+        {
+            std::wstring rendered; // the source's unsent draft AS RENDERED ("" == nothing to carry)
+            bool fromLive{ false }; // true: read off the source's live box in THIS window; false: the observer's remembered draft (another window / dormant / closed source)
+            std::vector<::Agentmaster::PasteJournalEntry> journal; // the SOURCE's paste journal — what its placeholders resolve against
+        };
+        // Snapshot a fork SOURCE's draft: the live box read (PickCurrentPromptText — live wins, else the
+        // observer's remembered draft, which also covers a source hosted in another window or a closed
+        // one's persisted memory) + a copy of its paste journal. Claude sources only (a Codex TUI has no
+        // ❯ box); an unknown source / no draft / the setting OFF reads as nothing to carry. UI thread.
+        //   sourceId — the session being forked.
+        //   returns  — the capture ({} rendered == nothing to carry).
+        //   throws   — nothing (the live read is wrapped; a failure reads as "no live draft").
+        ForkDraftCapture _CaptureDraftForFork(const std::wstring& sourceId);
+        // Hand a captured draft to the new fork: logs the intent and arms the Fork lane (_ArmDraftRestore).
+        // A no-op for an empty capture / an empty fork id (the launch failed). UI thread.
+        //   sourceId — the forked session (logs).
+        //   forkId   — the NEW fork's session id (resolved from its tab).
+        //   capture  — _CaptureDraftForFork's snapshot (moved in).
+        //   throws   — nothing (arming is a terminate-netted fire_and_forget).
+        void _CarryDraftIntoFork(const std::wstring& sourceId, const std::wstring& forkId, ForkDraftCapture capture);
+        // Agentmaster (PENDING_INPUT.md §11): type a Fork entry's piecewise plan into its box, starting at
+        // paste `fromIndex` — each piece a bracketed paste with NO submit CR, the next one sent only after
+        // the box VISIBLY changed (claude's paste handler reads React props, so back-to-back pastes in one
+        // input chunk could mint colliding paste ids). Owns the box for the duration exactly like the mail
+        // clear: the §9 box-mutex (_draftSwapsInFlight), the delivery gate (kDeliveryGateFillTag — an
+        // autorunner send declines instead of merging in), and a read-only lock (the user's keystrokes
+        // can't interleave; handed back FIRST on every path). Hands the entry back to the pump with
+        // injectedAtMs/fillAttempts stamped; the pump's verify phase judges the result. fire_and_forget
+        // => the terminate-net wrapper; the Impl does the work (and unlocks on its own failure paths).
+        winrt::fire_and_forget _DeliverDraftFillPastes(std::wstring sessionId, size_t fromIndex);
+        winrt::Windows::Foundation::IAsyncAction _DeliverDraftFillPastesImpl(std::wstring sessionId, size_t fromIndex);
+        // Agentmaster (PENDING_INPUT.md §2c — the paste journal's clipboard seam): which managed session's
+        // control has this content id? The paste handler only knows the pasting ControlInteractivity's Id()
+        // (== TermControl::ContentId()). Walks this window's _claudeTabs; "" for a shell tab / unknown id.
+        // UI thread (reads controls).
+        //   contentId — ControlInteractivity::Id() of the paste's sender.
+        //   returns   — the session id, or "".
+        //   throws    — nothing (a control torn down mid-walk reads as "no match").
+        std::wstring _ClaudeSessionForContentId(uint64_t contentId);
         winrt::Windows::Foundation::IAsyncAction _PumpDraftRestoresImpl(); // Agentmaster (terminate-net): the body, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
         winrt::fire_and_forget _PumpDraftRestores(); // ticked beside _PumpHandoverInjections (TerminalPage.AgentObserver.cpp); self-marshals to the UI thread
         winrt::fire_and_forget _RestoreClaudeSessions(); // Agentmaster: load persisted sessions as ARCHIVED (restorable) — does NOT auto-launch (Rule #6)

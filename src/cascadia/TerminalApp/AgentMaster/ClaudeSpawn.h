@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "DraftCarry.h" // DraftCarryPlan / PasteJournalEntry (the §11 journal-aware draft resolver's verdict + input)
 #include "PendingPaste.h" // DraftPasteExpansion (the §10 restore re-fill's whole-draft expansion verdict)
 #include "SessionModels.h" // AppSettings (spawn reads the Claude-session settings)
 
@@ -439,6 +440,24 @@ namespace Agentmaster
     // no-suffix overload expands against ClaudePasteCacheDir(). [Agentmaster]
     DraftPasteExpansion ExpandPendingDraftPastesIn(const std::wstring& draft, const std::wstring& cacheDir);
     DraftPasteExpansion ExpandPendingDraftPastes(const std::wstring& draft);
+
+    // Agentmaster (PENDING_INPUT.md §11 / §2c): the IMPURE half of the JOURNAL-AWARE draft resolver
+    // (DraftCarry.h's ResolveDraftCarry is the pure brain). Resolves against the session's paste
+    // journal FIRST — the only source for a paste that was never submitted, since current Claude Code
+    // writes paste-cache/<hash>.txt at SUBMIT time — and reads the paste-cache (the same enumeration +
+    // caps as the §2b resolver) ONLY when that first pass is refused for an unresolved placeholder the
+    // cache could still answer (plan.cacheMightHelp): a fully journal-backed draft costs no disk IO.
+    //   draft                      — the rendered draft (placeholders as the box shows them).
+    //   journal                    — the owning session's paste journal (SessionRegistry::PasteJournal).
+    //   unresolvedMidLineIsLiteral — ResolveDraftCarry's tier-3 policy: true for a LIVE carry (a fork),
+    //                                false for a restore across a restart (strict — never lose a paste).
+    //   cacheDir                   — the paste-cache root (the no-suffix overload uses ClaudePasteCacheDir()).
+    //   returns — the plan; a refusal carries its reason. Never throws: a throw is logged (Rule #18) and
+    //             reads as a refusal ("resolver threw"), so a caller never re-types a literal label.
+    //   Blocking file IO when the cache is consulted — call OFF the UI thread whenever the draft holds a
+    //   placeholder (a placeholder-free draft never reaches the cache).
+    DraftCarryPlan ResolvePendingDraftCarryIn(const std::wstring& draft, const std::vector<PasteJournalEntry>& journal, bool unresolvedMidLineIsLiteral, const std::wstring& cacheDir);
+    DraftCarryPlan ResolvePendingDraftCarry(const std::wstring& draft, const std::vector<PasteJournalEntry>& journal, bool unresolvedMidLineIsLiteral);
 
     // ---- Workspace trust (Agentmaster: never let the startup trust dialog wedge a managed tab) ----
     //

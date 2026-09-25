@@ -4703,6 +4703,14 @@ namespace winrt::TerminalApp::implementation
     static constexpr int32_t kSendVerifyMaxFills = 3; // fill attempts per delivery before giving up (was 2; raised per the confirm-and-retry directive, DELIVERY.md §12 — inner re-fills are livelock-free: they never touch the advance trigger)
     static constexpr int64_t kSendUndoBudgetMs = 5000; // wall-clock cap on the Foreign undo ladder
     static constexpr int64_t kDraftSwapRestoreHardCapMs = 4000; // R6a: the restore settle extends while the box is still CHANGING (a large stash pop's repaint outruns the fixed 1.2s), up to this
+    // Agentmaster (PENDING_INPUT.md §11 — the FORK CARRY's piecewise fill pacing). Each piece is a bracketed
+    // paste that must VISIBLY land before the next is sent (claude's classic paste handler reads React
+    // props, so two pastes arriving in one input chunk could both mint the same paste id — the second
+    // placeholder would then silently point at the wrong content). The waits bound a delivery that holds
+    // the tab read-only, so they are generous only where silence has a benign explanation:
+    static constexpr int64_t kDraftFillFirstPieceMs = 6000; // the FIRST piece doubles as the TUI-readiness probe: a box still empty after this == claude ate the paste pre-raw-mode (the pump retries from piece 1). Generous on purpose — the pump only starts once the box RENDERED empty, so silence here is far likelier a slow render (a big fork still loading) than a lost paste, and giving up early would strand a partial copy
+    static constexpr int64_t kDraftFillPieceMs = 8000; // a LATER piece: the TUI is proven ready, so a silence this long means it is wedged, not busy — stop typing (never guess past it)
+    static constexpr int64_t kDraftFillPieceGapMs = 90; // one render beat after a piece shows, before the next — the new props (and paste-id counter) are installed
     static constexpr int32_t kSendVerifyStrikeLimit = 2; // unverifiable deliveries per prompt before it FAILS terminally (a plain rollback would re-fire the same doomed verify forever — the RC2 livelock shape). §12: the terminal strike no longer pauses the autorunner — the prompt Fails (bounded forward progress, never the same doomed verify twice more) but the MODE stays the user's; a persistent wall is held upstream by the pre-flight decline + the recorded box state, which never strike.
 
     // Do two box reads describe the same draft? Both sides come out of the SAME detector on the same
@@ -5006,6 +5014,9 @@ namespace winrt::TerminalApp::implementation
             co_return winrt::hstring{ box };
         }
         _sessionRegistry->Inject(sessionId, ::Agentmaster::BuildPromptFill(draft)); // §15: lands sanitized — `wanted` is the invisible-insensitive key, so it still verifies
+        // PENDING_INPUT.md §2c: this re-paste of the user's (placeholder-free) draft is itself a paste — a
+        // long one comes back COLLAPSED into "[Pasted text #1 +M lines]", so journal it to keep it resolvable.
+        _sessionRegistry->NotePastedText(sessionId, draft);
         const auto afterPaste = co_await settle([&](const std::wstring& s) { return DraftSwapCompareKey(s) == wanted; });
         co_return afterPaste;
     }
@@ -7646,7 +7657,9 @@ namespace winrt::TerminalApp::implementation
             // a half-filled body as the draft). Drive the dots from the memory (the NotConnected
             // branch's rule below) and leave every stored fact + the streak alone until the pump
             // resolves the entry (verified / refused / abandoned); the next tick then revalidates
-            // against the live box as usual.
+            // against the live box as usual. The §11 FORK CARRY rides the same entry map, so a fork
+            // whose copied prompt is still being typed (piece by piece) is held exactly the same way —
+            // its SEEDED memory drives the dots, and no half-typed box is ever recorded as its draft.
             if (_pendingDraftRestores.count(id) != 0)
             {
                 if (hostTab)
@@ -7818,6 +7831,12 @@ namespace winrt::TerminalApp::implementation
                 if (!hasPending)
                 {
                     ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(id) + L" cleared\n");
+                    // PENDING_INPUT.md §2c: the box emptied (the prompt was sent or discarded), so no paste in
+                    // the journal can back a placeholder any more — prune it, or an OLD same-length paste could
+                    // later be assigned to a NEW placeholder whose own paste went unrecorded (a drag-dropped
+                    // text). Only a CONFIRMED clear lands here (the 2-tick debounce), and a §9 swap's deliberate
+                    // mid-send empty box never does (this scan skips a session while its swap is in flight).
+                    _sessionRegistry->ClearPasteJournal(id);
                 }
                 else
                 {
@@ -7928,11 +7947,23 @@ namespace winrt::TerminalApp::implementation
             }
             std::wstring text = draft;
             int expanded = 0;
-            const auto ex = ::Agentmaster::ExpandPendingDraftPastes(draft);
-            if (ex.complete && !ex.text.empty() && ex.expandedCount > 0)
+            // PENDING_INPUT.md §2c: resolve against this session's PASTE JOURNAL first — current Claude Code
+            // writes its paste-cache only at SUBMIT time, so for an unsent draft the journal is the only place
+            // a fresh paste's content exists. LIVE policy (this is the live box being mirrored): a mid-line
+            // placeholder nothing backs is a typed quote and stays as written; the cache is read only when the
+            // journal can't answer. A refusal keeps the rendered text (the store never loses the memory).
+            if (!::Agentmaster::FindDraftPlaceholders(draft).empty())
             {
-                text = ex.text;
-                expanded = ex.expandedCount;
+                const auto plan = ::Agentmaster::ResolvePendingDraftCarry(draft, registry->PasteJournal(sessionId), /*unresolvedMidLineIsLiteral*/ true);
+                const int blocks = plan.fromJournal + plan.fromCache;
+                if (plan.complete && blocks > 0)
+                {
+                    if (auto full = ::Agentmaster::DraftCarryExpandedText(plan); !full.empty())
+                    {
+                        text = std::move(full);
+                        expanded = blocks;
+                    }
+                }
             }
             if (!::Agentmaster::SetStoredSessionDraft(sessionId, text, TtNowMs()))
             {
@@ -8184,6 +8215,10 @@ namespace winrt::TerminalApp::implementation
                 const bool delivered = _sessionRegistry->Inject(id, ::Agentmaster::BuildPromptFill(entry.standbyText));
                 if (delivered)
                 {
+                    // PENDING_INPUT.md §2c: a briefing is usually big enough for claude to COLLAPSE into a
+                    // "[Pasted text #1 +M lines]" — journal it so a fork (or copy) of this standby draft
+                    // carries the briefing itself, not a label that would submit as junk.
+                    _sessionRegistry->NotePastedText(id, entry.standbyText);
                     entry.injectedAtMs = now;
                     entry.fillAttempts += 1;
                     ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-standby] " + ::Agentmaster::ShortId(id) + L" briefing FILLED into the input box (chars=" + std::to_wstring(entry.standbyText.size()) + L", attempt " + std::to_wstring(entry.fillAttempts) + L"/" + std::to_wstring(kStandbyMaxAttempts) + L") - NOT submitted, verifying\n");
@@ -8378,75 +8413,228 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (PENDING_INPUT.md §10 — the restore RE-FILL, arm half): prepare a reopened
-    // session's remembered unsent draft for the pump. The registry memory keeps the RENDERED form
-    // (paste placeholders as Claude showed them); the FILL must not re-type a placeholder literally
-    // (a "[Pasted text #N +M lines]" label pasted back is indistinguishable on screen from a real
-    // placeholder but submits as junk, silently dropping the content behind it — the §9 draft-swap
-    // rule), so a marker-carrying memory is EXPANDED against the paste-cache first —
-    // content-anchored + all-or-refuse (ExpandPendingDraftPastes) — and a refusal never arms:
-    // the memory then behaves exactly as before this feature (display-only until revalidation).
-    // The cache read is real IO (~hundreds of small files), so it runs OFF-THREAD like the §2b
-    // annotation resolve; the map write lands back on the dispatcher (UI-thread-only state). The
-    // takeover baseline (armedUnixMs) is captured BEFORE any await — it must be the resume-launch
-    // instant, not the post-expansion one, so a prompt racing the expansion still reads as "after
-    // arming" and hands the session off. Marker-free drafts (the common case) never leave the UI
-    // thread: no suspension point executes, the arm completes synchronously inside the launch.
-    winrt::fire_and_forget TerminalPage::_ArmDraftRestore(std::wstring sessionId, std::wstring draft)
+    // Agentmaster (PENDING_INPUT.md §10 + §11 — the ARM half of both lanes): prepare a draft for the
+    // pump. The input is always the RENDERED form (paste placeholders as Claude showed them); the FILL
+    // must never re-type a placeholder literally (a "[Pasted text #N +M lines]" label pasted back is
+    // indistinguishable on screen from a real placeholder but submits as junk, silently dropping the
+    // content behind it — the §9 draft-swap rule), so a placeholder-carrying draft is RESOLVED first
+    // (ResolvePendingDraftCarry — the session's PASTE JOURNAL first, since current Claude Code writes
+    // its paste-cache only at SUBMIT time; the cache as the fallback) and a refusal never arms. The
+    // resolve can read the cache (real IO), so it runs OFF-THREAD; the map + registry writes land back
+    // on the dispatcher (UI-thread-only state). The takeover baseline (armedUnixMs) is captured BEFORE
+    // any await — it must be the launch instant, not the post-resolve one, so a prompt racing the
+    // resolve still reads as "after arming" and hands the session off. Placeholder-free drafts (the
+    // common case) never leave the UI thread: the arm completes synchronously inside the launch.
+    //
+    // The two lanes (DraftFillOrigin):
+    //   * Resume (§10) — STRICT resolve (an unresolved placeholder refuses: after a restart the journal
+    //     is gone, so it is most likely a real paste whose content the fill would lose), ONE fill of
+    //     the expanded text (the historical, proven recipe). The memory is already on the record.
+    //   * Fork (§11) — LIVE resolve (an unresolved MID-LINE placeholder is kept as literal text: the
+    //     source's journal covers every real clipboard paste, so it is a typed quote), then SEED the
+    //     fork's memory with the source's rendered draft (the "3 dots" show on the fork tab at once and
+    //     the memory persists — a fork never visited before an app restart re-arms through §10 on
+    //     reopen), JOURNAL each block under the fork (its box will show claude's own placeholders for
+    //     them, which a later copy / fork-of-the-fork must resolve), and arm the PIECEWISE plan.
+    winrt::fire_and_forget TerminalPage::_ArmDraftRestore(std::wstring sessionId, std::wstring draft, std::vector<::Agentmaster::PasteJournalEntry> journal, DraftFillOrigin origin, std::wstring sourceId)
     {
         // Terminate-net (the _ResolvePendingPasteRefsFor idiom): the whole body is inside the try.
         auto strongThis{ get_strong() };
         try
         {
             const int64_t armedUnixMs = TtNowMs();
-            std::wstring fillText;
-            int expandedCount = 0;
-            if (::Agentmaster::FindPasteMarkers(draft).empty())
+            const bool isFork = origin == DraftFillOrigin::Fork;
+            const auto sid8 = ::Agentmaster::ShortId(sessionId);
+            ::Agentmaster::DraftCarryPlan plan;
+            if (::Agentmaster::FindDraftPlaceholders(draft).empty())
             {
-                fillText = std::move(draft);
+                // No placeholder: the draft IS its own plan — no resolve, no cache IO, no thread hop.
+                plan.complete = true;
+                plan.segments.push_back(::Agentmaster::DraftSegment{ ::Agentmaster::DraftSegmentKind::Typed, draft, ::Agentmaster::DraftBlockSource::None });
             }
             else
             {
-                std::wstring rendered = draft; // keep the rendered form for the refusal log
                 co_await winrt::resume_background();
-                auto expansion = ::Agentmaster::ExpandPendingDraftPastes(rendered);
+                plan = ::Agentmaster::ResolvePendingDraftCarry(draft, journal, /*unresolvedMidLineIsLiteral*/ isFork);
                 co_await wil::resume_foreground(Dispatcher());
-                if (!expansion.complete)
+                if (!plan.complete)
                 {
-                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(sessionId) + L" re-fill REFUSED: a paste placeholder did not resolve against the paste-cache (chars=" + std::to_wstring(rendered.size()) + L") - never a lossy literal re-type; the memory stays display-only (the cached paste content itself is preserved on disk)\n");
+                    ::Agentmaster::AppendStateLog(L"hooks.log",
+                                                  isFork ? (L"[draft-fork] " + sid8 + L" copy from " + ::Agentmaster::ShortId(sourceId) + L" REFUSED: " + plan.refusal + L" (chars=" + std::to_wstring(draft.size()) + L") - never a lossy literal re-type; the fork starts with an empty box, the source keeps its draft\n") :
+                                                           (L"[draft-restore] " + sid8 + L" re-fill REFUSED: " + plan.refusal + L" (chars=" + std::to_wstring(draft.size()) + L") - never a lossy literal re-type; the memory stays display-only\n"));
                     co_return;
                 }
-                fillText = std::move(expansion.text);
-                expandedCount = expansion.expandedCount;
-                // The expanded content came from FILES (the paste-cache), not the rendered buffer —
-                // unlike a buffer-read draft it can carry C0 controls, and an embedded ESC would
-                // terminate BuildPromptFill's bracketed paste early with the remainder interpreted
-                // as keystrokes. Strip C0 except \n and \t (CR dropped ⇒ CRLF→LF), the same
-                // normalization ReadHandoverDocumentPrompt applies for exactly this reason.
+            }
+            const int expandedCount = plan.fromJournal + plan.fromCache;
+            std::wstring expanded = ::Agentmaster::DraftCarryExpandedText(plan);
+            if (expandedCount > 0)
+            {
+                // Block content came from the journal / the paste-cache, not the rendered buffer — unlike a
+                // buffer-read draft it could in principle carry C0 controls (both sources are normalized, so
+                // this is the belt), and an embedded ESC would terminate BuildPromptFill's bracketed paste
+                // early with the remainder interpreted as keystrokes. Strip C0 except \n and \t (CR dropped ⇒
+                // CRLF→LF), the same normalization ReadHandoverDocumentPrompt applies for exactly this reason.
                 std::wstring clean;
-                clean.reserve(fillText.size());
-                for (const wchar_t c : fillText)
+                clean.reserve(expanded.size());
+                for (const wchar_t c : expanded)
                 {
                     if (c >= 0x20 || c == L'\n' || c == L'\t')
                     {
                         clean.push_back(c);
                     }
                 }
-                fillText = std::move(clean);
-                if (fillText.find_first_not_of(L" \t\n") == std::wstring::npos)
+                expanded = std::move(clean);
+            }
+            if (expanded.find_first_not_of(L" \t\n") == std::wstring::npos)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              isFork ? (L"[draft-fork] " + sid8 + L" copy from " + ::Agentmaster::ShortId(sourceId) + L" skipped: the draft resolved to no printable content\n") :
+                                                       (L"[draft-restore] " + sid8 + L" re-fill REFUSED: expansion yielded no printable content - memory stays display-only\n"));
+                co_return;
+            }
+
+            if (!isFork)
+            {
+                _pendingDraftRestores[sessionId] = PendingDraftRestore{ std::move(expanded), armedUnixMs, 0, 0, 0 };
+                const auto& armed = _pendingDraftRestores[sessionId];
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + sid8 + L" armed: remembered unsent draft will be typed back once the tab starts (chars=" + std::to_wstring(armed.draftText.size()) + (expandedCount ? (L", " + std::to_wstring(expandedCount) + L" paste placeholder(s) expanded") : std::wstring{}) + L")\n");
+                co_return;
+            }
+
+            // ---- the Fork lane (§11) ----
+            std::optional<::Agentmaster::SessionInfo> fork;
+            if (_sessionRegistry)
+            {
+                fork = _sessionRegistry->Get(sessionId);
+            }
+            if (!fork || !fork->live || fork->kind != ::Agentmaster::AgentKind::Claude)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-fork] " + sid8 + L" fork gone before the copy could arm - dropped (the source keeps its draft)\n");
+                co_return;
+            }
+            if (!fork->pendingInput.empty())
+            {
+                // The user typed into the fork while the resolve ran — their own draft wins, never overwrite it.
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-fork] " + sid8 + L" the fork's box already holds a draft of its own - the live draft wins, copy dropped\n");
+                co_return;
+            }
+            auto pastes = ::Agentmaster::BuildDraftFillPastes(plan);
+            if (pastes.empty())
+            {
+                co_return; // unreachable after the printable check — defensive
+            }
+            // SEED (see the function comment): the fork's box doesn't hold this yet, but it is exactly what
+            // the pump is about to type — the scan's hold branch drives the dots from it while armed, and the
+            // flip notify persists it (restart-safe through the §10 lane).
+            _sessionRegistry->SetPendingInput(sessionId, draft);
+            // JOURNAL the blocks under the FORK — after the fill its box shows claude's own placeholders for
+            // them, and those must resolve for a later copy / fork-of-the-fork / same-run restore.
+            for (const auto& seg : plan.segments)
+            {
+                if (seg.kind == ::Agentmaster::DraftSegmentKind::Block)
                 {
-                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(sessionId) + L" re-fill REFUSED: expansion yielded no printable content - memory stays display-only\n");
-                    co_return;
+                    _sessionRegistry->NotePastedText(sessionId, seg.text);
                 }
             }
-            _pendingDraftRestores[sessionId] = PendingDraftRestore{ std::move(fillText), armedUnixMs, 0, 0, 0 };
-            const auto& armed = _pendingDraftRestores[sessionId];
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(sessionId) + L" armed: remembered unsent draft will be typed back once the tab starts (chars=" + std::to_wstring(armed.draftText.size()) + (expandedCount ? (L", " + std::to_wstring(expandedCount) + L" paste placeholder(s) expanded") : std::wstring{}) + L")\n");
+            PendingDraftRestore entry;
+            entry.draftText = std::move(expanded);
+            entry.armedUnixMs = armedUnixMs;
+            entry.origin = DraftFillOrigin::Fork;
+            entry.sourceId = sourceId;
+            entry.fillPastes = std::move(pastes);
+            const size_t pieces = entry.fillPastes.size();
+            const size_t chars = entry.draftText.size();
+            _pendingDraftRestores[sessionId] = std::move(entry);
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[draft-fork] " + sid8 + L" armed: the unsent prompt from " + ::Agentmaster::ShortId(sourceId) +
+                                              L" will be typed into the fork's box once it starts (chars=" + std::to_wstring(chars) + L", pieces=" + std::to_wstring(pieces) +
+                                              (plan.placeholders > 0 ? (L", placeholders=" + std::to_wstring(plan.placeholders) + L": " + std::to_wstring(plan.fromJournal) + L" from the paste journal, " +
+                                                                        std::to_wstring(plan.fromCache) + L" from the paste-cache, " + std::to_wstring(plan.keptLiteral) + L" kept as typed text") :
+                                                                       std::wstring{}) +
+                                              L") - never submitted\n");
         }
         catch (...)
         {
             ::Agentmaster::AgentLogCaughtException(L"_ArmDraftRestore");
         }
+    }
+
+    // Agentmaster (PENDING_INPUT.md §11): see the header. The live read is the box AS OF THE CLICK (this
+    // window hosts the source's tab); the remembered value answers for everything else — a source hosted in
+    // another window (the board/tree span the fleet; ≤ one scan tick stale), a dormant tab, a closed session's
+    // persisted memory. The journal copy travels with the draft so the resolve can run off-thread later.
+    TerminalPage::ForkDraftCapture TerminalPage::_CaptureDraftForFork(const std::wstring& sourceId)
+    {
+        ForkDraftCapture capture;
+        try
+        {
+            if (!_sessionRegistry || sourceId.empty() || !_appSettings.carryDraftOnFork)
+            {
+                return capture;
+            }
+            const auto src = _sessionRegistry->Get(sourceId);
+            if (!src || src->kind != ::Agentmaster::AgentKind::Claude)
+            {
+                return capture; // unknown / Codex (no ❯ input box) — nothing to carry
+            }
+            auto pick = ::Agentmaster::PickCurrentPromptText(_ReadLiveDraftForSession(sourceId), src->pendingInput);
+            if (pick.text.empty())
+            {
+                return capture;
+            }
+            capture.rendered = std::move(pick.text);
+            capture.fromLive = pick.fromLive;
+            capture.journal = _sessionRegistry->PasteJournal(sourceId);
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: carry nothing — the fork itself proceeds untouched.
+            ::Agentmaster::AgentLogCaughtException(L"_CaptureDraftForFork");
+            capture = ForkDraftCapture{};
+        }
+        return capture;
+    }
+
+    // Agentmaster (PENDING_INPUT.md §11): see the header.
+    void TerminalPage::_CarryDraftIntoFork(const std::wstring& sourceId, const std::wstring& forkId, ForkDraftCapture capture)
+    {
+        if (capture.rendered.empty() || forkId.empty() || forkId == sourceId)
+        {
+            return; // nothing to carry, or the launch produced no fork to carry it into
+        }
+        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                      L"[draft-fork] " + ::Agentmaster::ShortId(forkId) + L" copying the unsent prompt from " + ::Agentmaster::ShortId(sourceId) +
+                                          L" (" + (capture.fromLive ? L"live box" : L"remembered draft") + L", chars=" + std::to_wstring(capture.rendered.size()) +
+                                          L", journal=" + std::to_wstring(capture.journal.size()) + L" paste(s))\n");
+        _ArmDraftRestore(forkId, std::move(capture.rendered), std::move(capture.journal), DraftFillOrigin::Fork, sourceId);
+    }
+
+    // Agentmaster (PENDING_INPUT.md §2c): see the header. Ids are snapshotted first — never read controls
+    // while iterating _claudeTabs (the _ScanPendingInput rule).
+    std::wstring TerminalPage::_ClaudeSessionForContentId(uint64_t contentId)
+    {
+        try
+        {
+            std::vector<std::wstring> ids;
+            ids.reserve(_claudeTabs.size());
+            for (const auto& [id, weakTab] : _claudeTabs)
+            {
+                ids.push_back(id);
+            }
+            for (const auto& id : ids)
+            {
+                if (const auto control = _ControlForSession(id); control && control.ContentId() == contentId)
+                {
+                    return id;
+                }
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: "no session" — the paste itself proceeds; only its journal entry is lost.
+            ::Agentmaster::AgentLogCaughtException(L"_ClaudeSessionForContentId");
+        }
+        return {};
     }
 
     // Agentmaster (PENDING_INPUT.md §10 — the restore RE-FILL, pump half): TYPE a reopened
@@ -8476,6 +8664,16 @@ namespace winrt::TerminalApp::implementation
     // resumed box is empty until this pump fills it) and drives the dots from the memory — so the
     // indicator never flickers across the restart→fill hand-off. SELF-MARSHALS to the UI thread
     // (the map is UI-thread-only state; the verify reads the tab's TermControl, which is UI-affine).
+    //
+    // Agentmaster (PENDING_INPUT.md §11 — the FORK CARRY rides the same pump): a Fork entry shares every
+    // gate above (gone / setting — carryDraftOnFork / memory cleared / not started / settle / 10-min cap /
+    // hands-off — "a prompt ran since the FORK"), then takes its own PIECEWISE branch: pre-fill, an EMPTY
+    // box (deep-probe read, R5 verdict-aware) launches _DeliverDraftFillPastes, which owns the entry
+    // (deliveryInFlight — the pump skips it entirely) until it hands back with the pieces it SAW land;
+    // post-fill, VerifyDraftFillPastes judges the box — Verified: done; inside the verify window: wait;
+    // EMPTY with nothing ever seen: claude ate the first paste, re-type from piece 1 (≤ kForkFillMaxDeliveries);
+    // anything else (a box the user cleared/edited after the copy landed, foreign text, a partial copy):
+    // give up and leave the box EXACTLY as it is — never type onto text we can't account for.
     winrt::fire_and_forget TerminalPage::_PumpDraftRestores()
     {
         // Terminate-net (the _SweepClaudeLiveness idiom).
@@ -8501,24 +8699,34 @@ namespace winrt::TerminalApp::implementation
         constexpr int64_t kRestoreFillSettleMs = 1500; // post-started settle before the paste (the standby lane's value)
         constexpr int64_t kRestoreFillVerifyMs = 12 * 1000; // a filled draft must show in the input box within this, else re-fill
         constexpr int32_t kRestoreFillMaxAttempts = 2; // fills injected before giving up (memory left to revalidation)
+        constexpr int32_t kForkFillMaxDeliveries = 2; // §11: piecewise deliveries before giving up — the one safe retry is "claude ate the first paste" (an empty box, nothing ever seen)
         constexpr int64_t kRestoreFillStartedDeadlineMs = 10 * 60 * 1000; // post-STARTED wedge cap (box unreadable forever); pre-start waits unbounded
         const int64_t now = static_cast<int64_t>(::GetTickCount64());
         for (auto it = _pendingDraftRestores.begin(); it != _pendingDraftRestores.end();)
         {
             const std::wstring& id = it->first;
             auto& entry = it->second;
+            if (entry.deliveryInFlight)
+            {
+                ++it; // §11: a piecewise delivery owns this entry AND the box right now — touch nothing until it hands back
+                continue;
+            }
+            const bool isFork = entry.origin == DraftFillOrigin::Fork;
             const auto s = _sessionRegistry->Get(id);
             if (!s || !s->live || s->kind != ::Agentmaster::AgentKind::Claude)
             {
                 // Closed/archived before its claude ever came up (or re-keyed away). The archived
                 // record KEEPS its pendingInput, so a later resume simply re-arms — nothing lost.
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" session gone before the re-fill - memory kept on the record\n");
+                // (A fork's record keeps the SEEDED memory the same way; its source never lost its own.)
+                ::Agentmaster::AppendStateLog(L"hooks.log", isFork ? (L"[draft-fork] " + ::Agentmaster::ShortId(id) + L" fork gone before the copy landed - the seeded memory stays on its record (the source keeps its own draft)\n") :
+                                                                     (L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" session gone before the re-fill - memory kept on the record\n"));
                 it = _pendingDraftRestores.erase(it);
                 continue;
             }
-            if (!_appSettings.restoreDraftOnResume)
+            if (!(isFork ? _appSettings.carryDraftOnFork : _appSettings.restoreDraftOnResume))
             {
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" re-fill disabled in settings while waiting - dropped (memory stays display-only)\n");
+                ::Agentmaster::AppendStateLog(L"hooks.log", isFork ? (L"[draft-fork] " + ::Agentmaster::ShortId(id) + L" copy disabled in settings while waiting - dropped (the seeded memory stays display-only)\n") :
+                                                                     (L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" re-fill disabled in settings while waiting - dropped (memory stays display-only)\n"));
                 it = _pendingDraftRestores.erase(it);
                 continue;
             }
@@ -8526,7 +8734,8 @@ namespace winrt::TerminalApp::implementation
             {
                 // The memory was cleared OUTSIDE this pump while armed — the restart-tab swap's
                 // deliberate eager clear is the one path (the scan holds while armed). Honor it.
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" memory cleared while waiting - re-fill dropped\n");
+                ::Agentmaster::AppendStateLog(L"hooks.log", isFork ? (L"[draft-fork] " + ::Agentmaster::ShortId(id) + L" memory cleared while waiting - copy dropped\n") :
+                                                                     (L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" memory cleared while waiting - re-fill dropped\n"));
                 it = _pendingDraftRestores.erase(it);
                 continue;
             }
@@ -8543,7 +8752,7 @@ namespace winrt::TerminalApp::implementation
             }
             if (now - entry.startedSeenMs >= kRestoreFillStartedDeadlineMs)
             {
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" gave up 10 min after start " + (entry.injectedAtMs == 0 ? L"(box never readable)" : L"(fill never verified)") + L" - memory left to revalidation\n");
+                ::Agentmaster::AppendStateLog(L"hooks.log", std::wstring{ isFork ? L"[draft-fork] " : L"[draft-restore] " } + ::Agentmaster::ShortId(id) + L" gave up 10 min after start " + (entry.injectedAtMs == 0 ? L"(box never readable)" : L"(fill never verified)") + L" - memory left to revalidation\n");
                 it = _pendingDraftRestores.erase(it);
                 continue;
             }
@@ -8559,9 +8768,85 @@ namespace winrt::TerminalApp::implementation
             // a session someone is driving is exactly the intrusion the standby contract forbids.
             // The memory is left to the scan's honest revalidation (it clears within ~5s unless the
             // live box actually holds text).
+            // (A FORK is the latch's easy case: a fresh record — no prompt stamp — whose own transcript
+            // does not exist until its first turn, so nothing but a real submit after the fork trips it.)
             if (::Agentmaster::RestoredDraftSessionTakenOver(s->state, s->turns.lastPromptUnixMs, s->convLastActivityUnixMs, entry.armedUnixMs))
             {
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + (entry.injectedAtMs == 0 ? L" session in use before the re-fill" : L" session took over before verification") + L" (a prompt ran since the resume) - hands off, memory left to revalidation\n");
+                ::Agentmaster::AppendStateLog(L"hooks.log", isFork ? (L"[draft-fork] " + ::Agentmaster::ShortId(id) + (entry.injectedAtMs == 0 ? L" fork in use before the copy" : L" fork took over before verification") + L" (a prompt ran since the fork) - hands off, memory left to revalidation\n") :
+                                                                     (L"[draft-restore] " + ::Agentmaster::ShortId(id) + (entry.injectedAtMs == 0 ? L" session in use before the re-fill" : L" session took over before verification") + L" (a prompt ran since the resume) - hands off, memory left to revalidation\n"));
+                it = _pendingDraftRestores.erase(it);
+                continue;
+            }
+            if (isFork)
+            {
+                // ---- §11: the PIECEWISE lane. The box is read FRESH through the deep probe (a fill can render
+                // taller than the scan's 120-row window) and verdict-aware (R5): only a PARSEABLE box
+                // (Empty/Draft) is known — a startup modal / an open menu / an unreadable control waits.
+                const auto [probeState, box] = _ReadInputBoxProbeForSession(id, kSendVerifyProbeRows);
+                const bool boxKnown = probeState == static_cast<int32_t>(::Agentmaster::InputBoxState::Empty) ||
+                                      probeState == static_cast<int32_t>(::Agentmaster::InputBoxState::Draft);
+                const auto fid8 = ::Agentmaster::ShortId(id);
+                if (entry.injectedAtMs == 0)
+                {
+                    if (!boxKnown)
+                    {
+                        ++it; // still settling / a modal is up — wait (the started-deadline caps)
+                        continue;
+                    }
+                    if (!box.empty())
+                    {
+                        // The user typed into the fork before the copy landed — theirs wins, permanently
+                        // (the scan records it as the fork's memory on its next tick).
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-fork] " + fid8 + L" the fork's box already holds text - the live draft wins, copy dropped\n");
+                        it = _pendingDraftRestores.erase(it);
+                        continue;
+                    }
+                    if (_sessionRegistry->DeliveryGateHeld(id) || _draftSwapsInFlight.count(id) != 0)
+                    {
+                        ++it; // a delivery / swap / clear owns the box this tick — the gate is short-lived + expiry-bounded
+                        continue;
+                    }
+                    entry.deliveryInFlight = true; // claimed NOW (synchronously) — the next tick can never launch a second delivery
+                    _DeliverDraftFillPastes(id, 0);
+                    ++it;
+                    continue;
+                }
+                // Verify phase — a delivery ran; judge what the box shows now.
+                const auto check = boxKnown ? ::Agentmaster::VerifyDraftFillPastes(box, entry.fillPastes) : ::Agentmaster::DraftFillCheck{};
+                if (boxKnown && check.verdict == ::Agentmaster::DraftFillVerdict::Verified)
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-fork] " + fid8 + L" draft COPIED + VERIFIED in the fork's input box (chars=" + std::to_wstring(box.size()) + L", pieces=" + std::to_wstring(entry.fillPastes.size()) + L", from " + ::Agentmaster::ShortId(entry.sourceId) + L") - one Enter away, the same prompt as the source\n");
+                    it = _pendingDraftRestores.erase(it);
+                    continue; // the scan re-reads the live box next tick and records it as the fork's memory
+                }
+                if (now - entry.injectedAtMs < kRestoreFillVerifyMs || !boxKnown)
+                {
+                    ++it; // a slow render is never mistaken for a lost paste; an unreadable box is never acted on
+                    continue;
+                }
+                if (check.verdict == ::Agentmaster::DraftFillVerdict::Eaten && entry.observedPieces == 0 && entry.fillAttempts < kForkFillMaxDeliveries)
+                {
+                    // The one safe retry: the box is EMPTY and no piece was ever seen in it — claude ate the
+                    // first paste before its input was ready. Empty box ⇒ cursor at its start ⇒ re-typing
+                    // from piece 1 can neither duplicate nor misplace anything.
+                    if (_sessionRegistry->DeliveryGateHeld(id) || _draftSwapsInFlight.count(id) != 0)
+                    {
+                        ++it;
+                        continue;
+                    }
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-fork] " + fid8 + L" the copy never appeared (claude ate the first paste) - re-typing from piece 1 (delivery " + std::to_wstring(entry.fillAttempts + 1) + L"/" + std::to_wstring(kForkFillMaxDeliveries) + L")\n");
+                    entry.deliveryInFlight = true;
+                    _DeliverDraftFillPastes(id, 0);
+                    ++it;
+                    continue;
+                }
+                // Anything else is NOT ours to fix: a box the user emptied or edited after the copy landed
+                // (observedPieces > 0), foreign text, a copy that stopped part-way, or the retry budget spent.
+                // Leave the box EXACTLY as it is — never type onto text we can't account for.
+                const wchar_t* why = check.verdict == ::Agentmaster::DraftFillVerdict::Eaten ?
+                                         (entry.observedPieces > 0 ? L"the box was emptied after the copy landed" : L"the copy never appeared") :
+                                         (check.verdict == ::Agentmaster::DraftFillVerdict::Partial ? L"the box holds only part of the copy" : L"the box holds text that does not match the copy");
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-fork] " + fid8 + L" " + why + L" (chars=" + std::to_wstring(box.size()) + L", seen=" + std::to_wstring(entry.observedPieces) + L"/" + std::to_wstring(entry.fillPastes.size()) + L" pieces, deliveries=" + std::to_wstring(entry.fillAttempts) + L") - giving up, the box is left as it is\n");
                 it = _pendingDraftRestores.erase(it);
                 continue;
             }
@@ -8659,12 +8944,248 @@ namespace winrt::TerminalApp::implementation
             const bool delivered = _sessionRegistry->Inject(id, ::Agentmaster::BuildPromptFill(entry.draftText));
             if (delivered)
             {
+                // PENDING_INPUT.md §2c: a big restored draft is COLLAPSED by claude into its own "[Pasted text
+                // #K +M lines]" — journal what we typed so that placeholder resolves (a later copy / fork).
+                _sessionRegistry->NotePastedText(id, entry.draftText);
                 entry.injectedAtMs = now;
                 entry.fillAttempts += 1;
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-restore] " + ::Agentmaster::ShortId(id) + L" remembered draft typed back into the input box (chars=" + std::to_wstring(entry.draftText.size()) + L", attempt " + std::to_wstring(entry.fillAttempts) + L"/" + std::to_wstring(kRestoreFillMaxAttempts) + L") - NOT submitted, verifying\n");
             }
             // Injector vanished mid-flight: nothing was typed — retry next tick (the deadline caps).
             ++it;
+        }
+    }
+
+    // Agentmaster (PENDING_INPUT.md §11): the terminate-net for the piecewise delivery (see the header). An
+    // exception escaping a fire_and_forget is std::terminate — the whole process. The Impl hands the box +
+    // the entry back on every path it controls; this net covers a throw it could not (e.g. a dead
+    // dispatcher mid-await): it un-flags the entry on the UI thread so the pump is never wedged on a
+    // delivery that no longer exists. It deliberately does NOT touch the read-only lock or the box-mutex —
+    // by then another swap may own them, and releasing someone else's lock is worse than a logged failure.
+    // (A co_await is illegal inside a handler, hence the flag + the recovery after the try.)
+    winrt::fire_and_forget TerminalPage::_DeliverDraftFillPastes(std::wstring sessionId, size_t fromIndex)
+    {
+        auto strongThis{ get_strong() };
+        bool failed = false;
+        try
+        {
+            co_await _DeliverDraftFillPastesImpl(sessionId, fromIndex);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_DeliverDraftFillPastes");
+            failed = true;
+        }
+        if (!failed)
+        {
+            co_return;
+        }
+        try
+        {
+            co_await wil::resume_foreground(Dispatcher());
+            if (const auto e = _pendingDraftRestores.find(sessionId); e != _pendingDraftRestores.end() && e->second.deliveryInFlight)
+            {
+                e->second.deliveryInFlight = false;
+                e->second.injectedAtMs = static_cast<int64_t>(::GetTickCount64()); // judge whatever landed after the verify window
+                e->second.fillAttempts += 1;
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_DeliverDraftFillPastes recovery");
+        }
+    }
+
+    // Agentmaster (PENDING_INPUT.md §11): the piecewise delivery itself — see the header for the contract.
+    // Order of operations (the mail-clear's, verbatim where it applies):
+    //   1. find the entry + COPY its plan (the map may rehash across the awaits below, so no reference into
+    //      it survives one);
+    //   2. CLAIM the box: the §9 box-mutex must be free, the engine delivery gate opens under the reserved
+    //      kDeliveryGateFillTag (a concurrent SubmitPrompt then declines synchronously, and DecideAdvance
+    //      holds), and the control is locked read-only (only if WE flip it — a user's own read-only stays);
+    //   3. RE-CHECK the box now that it is ours: a first delivery needs it EMPTY (the user may have typed in
+    //      the dispatcher hop since the pump looked — their text wins);
+    //   4. per piece: revalidate the gate claim, Inject(BuildPromptFill(piece)) — NO submit CR — then poll the
+    //      deep probe until the box VISIBLY changes (kDraftFillFirstPieceMs for the first piece — the
+    //      readiness probe — kDraftFillPieceMs after), then one render beat; a whitespace-only piece has
+    //      nothing visible to wait for and only gets the beat. A piece that never shows STOPS the delivery:
+    //      nothing is ever typed past a piece we can't see (so nothing can land out of order);
+    //   5. UNLOCK FIRST (the keyboard is the user's again the instant the typing is over), then close the gate
+    //      (its notify re-fires any advance it held), then hand the entry back to the pump with what was typed
+    //      and seen. The pump's verify phase judges the result.
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_DeliverDraftFillPastesImpl(std::wstring sessionId, size_t fromIndex)
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
+        const auto sid8 = ::Agentmaster::ShortId(sessionId);
+        // Hand the entry back to the pump: un-flag it, and when anything was typed, stamp the delivery so the
+        // verify window + the retry budget apply. UI thread (the map is UI-thread-only state).
+        const auto handBack = [this, &sessionId](bool typedAny, size_t seen) {
+            if (const auto e = _pendingDraftRestores.find(sessionId); e != _pendingDraftRestores.end())
+            {
+                e->second.deliveryInFlight = false;
+                if (typedAny)
+                {
+                    e->second.injectedAtMs = static_cast<int64_t>(::GetTickCount64());
+                    e->second.fillAttempts += 1;
+                    e->second.observedPieces = seen;
+                }
+            }
+        };
+
+        const auto found = _pendingDraftRestores.find(sessionId);
+        if (!_sessionRegistry || found == _pendingDraftRestores.end())
+        {
+            co_return; // the entry is gone — there is nothing to hand back
+        }
+        const std::vector<::Agentmaster::DraftFillPaste> pastes = found->second.fillPastes;
+        const std::wstring sourceId = found->second.sourceId;
+        if (fromIndex >= pastes.size())
+        {
+            handBack(false, 0);
+            co_return;
+        }
+
+        // 2. CLAIM THE BOX.
+        if (_draftSwapsInFlight.count(sessionId) != 0)
+        {
+            handBack(false, 0); // a swap/clear holds the box this instant — the pump retries next tick
+            co_return;
+        }
+        const std::wstring gateTag{ ::Agentmaster::kDeliveryGateFillTag };
+        if (!_sessionRegistry->TryOpenDeliveryGate(sessionId, gateTag))
+        {
+            handBack(false, 0); // a delivery owns the box — the pump retries next tick
+            co_return;
+        }
+        auto gateCloser = wil::scope_exit([gateRegistry = _sessionRegistry, sessionId, gateTag]() noexcept {
+            try
+            {
+                gateRegistry->CloseDeliveryGate(sessionId, gateTag);
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_DeliverDraftFillPastes gate close");
+            }
+        });
+        const auto control = _ControlForSession(sessionId);
+        if (!control || control.ConnectionState() == TerminalConnection::ConnectionState::NotConnected)
+        {
+            gateCloser.reset();
+            handBack(false, 0);
+            co_return;
+        }
+        bool wasAlreadyReadOnly = true;
+        try
+        {
+            wasAlreadyReadOnly = control.ReadOnly();
+            if (!wasAlreadyReadOnly)
+            {
+                control.SetReadOnly(true);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_DeliverDraftFillPastes lock");
+            wasAlreadyReadOnly = true; // never hand back a read-only we did not take
+        }
+        _draftSwapsInFlight[sessionId] = wasAlreadyReadOnly;
+
+        size_t typed = fromIndex; // pieces injected so far
+        size_t seen = fromIndex; // leading pieces SEEN in the box
+        std::wstring stop; // why the delivery stopped early ("" == every piece typed + seen)
+        try
+        {
+            // 3. RE-CHECK now that the box is ours. A first delivery needs a verified-EMPTY input box (R5):
+            //    text means the user typed meanwhile (theirs wins); any non-box verdict means a modal or a
+            //    menu surfaced in the hop — a paste there would feed IT, not the box.
+            auto probe = _ReadInputBoxProbeForSession(sessionId, kSendVerifyProbeRows);
+            std::wstring box = std::move(probe.second);
+            if (fromIndex == 0 && !box.empty())
+            {
+                stop = L"the box is no longer empty (the user's own text wins)";
+            }
+            else if (fromIndex == 0 && probe.first != static_cast<int32_t>(::Agentmaster::InputBoxState::Empty))
+            {
+                stop = L"the input box is not readable as empty right now (a modal/menu?) - retried next tick";
+            }
+            else if (fromIndex > 0 &&
+                     (probe.first != static_cast<int32_t>(::Agentmaster::InputBoxState::Draft) ||
+                      ::Agentmaster::VerifyDraftFillPastes(box, pastes, fromIndex).verdict != ::Agentmaster::DraftFillVerdict::Verified))
+            {
+                // A resumption appends at the cursor, so it is only safe onto EXACTLY the pieces already typed.
+                stop = L"the box no longer holds exactly the pieces already typed - not resuming onto it";
+            }
+            // 4. PER PIECE.
+            for (size_t i = fromIndex; stop.empty() && i < pastes.size(); ++i)
+            {
+                if (!_sessionRegistry->RevalidateDeliveryGate(sessionId, gateTag))
+                {
+                    stop = L"lost the delivery gate";
+                    break;
+                }
+                if (!_sessionRegistry->Inject(sessionId, ::Agentmaster::BuildPromptFill(pastes[i].text)))
+                {
+                    stop = L"no injector bound";
+                    break;
+                }
+                typed = i + 1;
+                const bool visible = pastes[i].block || !::Agentmaster::pending_detail::AllWhitespace(pastes[i].text);
+                if (!visible)
+                {
+                    co_await winrt::resume_after(std::chrono::milliseconds(kDraftFillPieceGapMs));
+                    co_await wil::resume_foreground(Dispatcher());
+                    seen = i + 1; // nothing visible to wait for — counted once reached
+                    continue;
+                }
+                // LANDED == the box now reads as EXACTLY pieces 1..i+1 (VerifyDraftFillPastes over that prefix) in
+                // a parseable Draft box — never merely "the text changed": a mid-repaint frame reads empty or
+                // box-less, and treating that as a landing would send the next paste before claude processed
+                // this one (the very paste-id collision the pacing exists to prevent).
+                const int64_t deadline = TtNowMs() + (i == fromIndex ? kDraftFillFirstPieceMs : kDraftFillPieceMs);
+                bool landed = false;
+                while (TtNowMs() < deadline)
+                {
+                    co_await winrt::resume_after(std::chrono::milliseconds(kDraftSwapPollMs));
+                    co_await wil::resume_foreground(Dispatcher());
+                    auto now = _ReadInputBoxProbeForSession(sessionId, kSendVerifyProbeRows);
+                    if (now.first == static_cast<int32_t>(::Agentmaster::InputBoxState::Draft) &&
+                        ::Agentmaster::VerifyDraftFillPastes(now.second, pastes, i + 1).verdict == ::Agentmaster::DraftFillVerdict::Verified)
+                    {
+                        box = std::move(now.second);
+                        landed = true;
+                        break;
+                    }
+                }
+                if (!landed)
+                {
+                    stop = L"piece " + std::to_wstring(i + 1) + L"/" + std::to_wstring(pastes.size()) + L" never appeared in the box";
+                    break;
+                }
+                seen = i + 1;
+                co_await winrt::resume_after(std::chrono::milliseconds(kDraftFillPieceGapMs));
+                co_await wil::resume_foreground(Dispatcher());
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: stop typing and fall through to the hand-back below — the lock and the gate
+            // are released on THIS (UI) thread, which is the whole point of catching here.
+            ::Agentmaster::AgentLogCaughtException(L"_DeliverDraftFillPastes inject loop");
+            stop = L"threw (see the [exc] line)";
+        }
+
+        // 5. UNLOCK FIRST, then the gate, then the bookkeeping.
+        _EndDraftSwap(sessionId, true);
+        gateCloser.reset();
+        handBack(typed > fromIndex, seen);
+        if (stop.empty())
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-fork] " + sid8 + L" typed " + std::to_wstring(pastes.size() - fromIndex) + L" piece(s) into the fork's input box (from " + ::Agentmaster::ShortId(sourceId) + L") - NOT submitted, verifying\n");
+        }
+        else
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[draft-fork] " + sid8 + L" delivery stopped: " + stop + L" (typed=" + std::to_wstring(typed) + L", seen=" + std::to_wstring(seen) + L"/" + std::to_wstring(pastes.size()) + L") - the pump judges the box next\n");
         }
     }
 

@@ -1,5 +1,17 @@
 # Pending-input monitor — detect an UNSENT draft in a Claude tab's input box
 
+> **2026-09-25 — the FORK CARRY (§11) + the PASTE JOURNAL (§2c).** Forking a session now copies the
+> message sitting unsent in the source's input box into the new fork's box (never submitted), pasted
+> PIECEWISE so the fork's box reads like the source's, every `[Pasted text #N +M lines]` backed by its
+> real content. That needed a new content source: current Claude Code (measured on 2.1.280) writes its
+> `paste-cache/<hash>.txt` only at **SUBMIT** time, so an unsent paste exists only in claude's memory —
+> §2b's "at paste time" no longer holds, and every recent `paste-refs` line in both profiles read
+> `unresolved`. Agentmaster is the terminal, so it now RECORDS every paste it passes to a Claude session
+> (§2c) and resolves placeholders against that journal first. Copy Current Prompt (§8e), the §8c store
+> and the §10 re-fill resolve through it too. Pure core `AgentMaster/DraftCarry.h` (unit-tested:
+> `TestDraftCarry`); cog toggle **SESSIONS ▸ "Copy my unsent prompt into a forked session"**
+> (`AppSettings::carryDraftOnFork`, default ON). Rides the next deploy.
+>
 > Status: **complete + BULLETPROOFED (2026-07-23) — detection + the "yes pending / no pending" observer
 > NOTIFY + the "3 dots" animation on BOTH surfaces, PLUS: the cross-version hardening pass (§2a — the NBSP
 > separator fix, the anchored-rule + menu-shape rejectors that killed the six live AskUserQuestion
@@ -149,6 +161,15 @@ the detector found it 17/17).
 
 ## 2b. The PASTE-CACHE resolver — what a `[Pasted text …]` placeholder really holds
 
+> ⚠ **Superseded as the PRIMARY source (2026-09-25) — see §2c.** On Claude Code **2.1.280** the cache
+> file is written at **SUBMIT** time, not paste time: every file's mtime equals its `history.jsonl`
+> submit timestamp to the second (checked on the four newest, 141 KB included), each history entry
+> references it as `pastedContents[N].contentHash`, and the unsent `+31 lines` drafts logged that day had
+> no file at all. So this resolver can only answer for content that was **submitted before** (an identical
+> re-paste — the leaf is content-addressed), and line-count ambiguity makes even that weak (on the dev box
+> 126 of the line counts 1..399 match more than one of the 415 cache files; `+31` matches **11**). It
+> remains the FALLBACK tier behind the journal. The text below describes the observation it was built on.
+
 Claude Code spills a large paste to **`<CLAUDE_CONFIG_DIR | ~/.claude>/paste-cache/<16-hex>.txt`** *at
 paste time* (content-addressed leaf — an identical re-paste reuses the same file; observed stable since
 2026-01, ~268 files on the fixture machine). The input box then renders a **placeholder**, in one of two
@@ -195,6 +216,63 @@ fire_and_forget; the registry takes the verdict QUIETLY via `SetPendingPasteRefs
 resolve whose draft meanwhile cleared), logs it (`[pending] <sid8> paste-refs: …`), and the board card's
 hover tip appends it. The annotation persists with the draft (§5) — the cache file itself is the durable
 content copy, so no blob is ever duplicated into our records.
+
+## 2c. The PASTE JOURNAL — the content of an UNSENT paste (built 2026-09-25)
+
+**Why.** An unsent paste's content lives only in claude's process memory (§2b's banner), so no file
+can resolve a fresh `[Pasted text #N +M lines]`. But every paste passes through Agentmaster — it is the
+terminal — so the registry now keeps a per-session **journal** of what was pasted:
+`SessionRegistry::NotePastedText` / `PasteJournal` / `ClearPasteJournal` / `MovePasteJournal`.
+
+**What claude does with a paste** (read from its 2.1.280 bundle — the prompt input's paste handler), which
+the journal mirrors exactly (`DraftCarry.h`):
+
+| step | claude's code | mirrored by |
+|---|---|---|
+| normalize | `Bun.stripANSI(t).replace(/\r\n\|\r/g,"\n").replaceAll("\t","    ")` (after WT's paste filter dropped C0/C1 and folded line ends) | `NormalizePastedTextLikeClaude` |
+| count | `M = (t.match(/\r\n\|\r\|\n/g) \|\| []).length` — newline SEQUENCES | `ClaudePasteNewlineCount` |
+| collapse | `t.length > 800 \|\| M > min(rows-10, 2)` | `ClaudeWouldCollapsePaste` (2 on any usable terminal) |
+| render | `M == 0 ? "[Pasted text #N]" : "[Pasted text #N +M lines]"` — the bare form §2b's grammar never knew | `FindDraftPlaceholders` |
+| id | minted past every id already referenced in the input — ids grow with time | the chronological assignment below |
+
+**Feeds** (everything that puts a paste into a Claude box):
+- **the clipboard** — `TerminalPage::_PasteFromClipboardHandler` (Ctrl+V, Ctrl+Shift+V, Shift+Ins, right-click,
+  the `paste` action, the text-menu Paste): the session is resolved on the UI thread from the pasting
+  control's content id (`_ClaudeSessionForContentId`), and the text is journaled after the multi-line / large
+  paste warnings (a rejected paste never reached claude) and right before `HandleClipboardData`. Bracketed
+  pastes only (only those can become placeholders).
+- **our own no-submit fills** — the §10 re-fill, the /handover-standby fill, the §9 swap's re-paste fallback,
+  and the §11 fork carry's blocks (journaled under the FORK at arm time). Submitted sends (the autorunner,
+  Send-now) are deliberately NOT journaled: they leave the box, and a journaled submission could be matched
+  to a later placeholder whose own paste went unrecorded.
+
+**Rules.** Only collapse-eligible pastes are kept (an inline paste never backs a placeholder); an identical
+consecutive re-paste refreshes the newest entry; ≤16 entries / 16 M chars per session (oldest dropped), an
+entry over 4 M chars is never kept, and the fleet stays under 64 M chars (globally oldest evicted). A side
+map, never inside `SessionInfo` (a paste can be megabytes and snapshots are copied on hot UI paths).
+**Transient** — an app restart forgets it (a restored draft then falls back to §2b, i.e. the pre-journal
+behavior). **Pruned** when the scan confirms the draft CLEARED (`_ScanPendingInput`'s flip to empty — the
+prompt was sent or discarded), moved onto the new id by a restore-fresh (`_LaunchClaudeSession`), dropped by
+`Remove`.
+
+**Resolution** (`ResolveDraftCarry`, pure; `ResolvePendingDraftCarry` the adapter — reads the cache only when
+the journal can't answer):
+1. **journal** — collapsed placeholders grouped by M; within a group, ordered by claude's id, they take the
+   most recent same-M entries in paste order (`#1 +31` ← the older 31-line paste, `#2 +31` ← the newer). A
+   truncated placeholder takes the newest entry its head/tail anchors validate against (the ELIDED MIDDLE is
+   cut out — the visible head/tail stay as typed text). Works MID-LINE: the substitution is by span, never
+   by line, so typed words beside a placeholder are never eaten.
+2. **paste-cache** (§2b) — whole-line collapsed placeholders with a unique count match, truncated by anchors.
+3. **unresolved** — policy per caller: **live** (a fork, a copy, the §8c store) keeps an unbacked
+   **mid-line** placeholder as literal text (that is prose QUOTING one — "make sure the [Pasted text #1 +31
+   lines] are expanded"), and refuses a whole-line one (a real paste whose content would be lost); **strict**
+   (the §10 re-fill across a restart) refuses any.
+Always refused: `[Image #N]` / `[Audio #N]` (the bytes can't be re-attached) and a duplicate paste id (one of
+the two is a quote and nothing tells which).
+
+**Known gaps.** Drag-and-dropped TEXT (`TermControl::_DragDropHandler` → `PasteText`, never through the
+clipboard handler) and pastes made before the journal existed (i.e. before this build) are not journaled —
+they fall to the cache tier. A user's own Ctrl+S stash→unstash cycle clears the box long enough for the prune.
 
 ## 3. Architecture (one pure brain, a thin adapter, a UI-lane poll)
 
@@ -801,6 +879,13 @@ live|remembered chars=N`.
 
 ### 8e. Copy hands over the PASTED TEXT, not its placeholder (built)
 
+> **2026-09-25:** the expansion now resolves through the §2c **paste journal** first (`ResolvePendingDraftCarry`,
+> LIVE policy — the journal snapshot is taken on the UI thread via the new optional `registry` argument of
+> `CopyPromptTextExpandingPastes`), the paste-cache second. Before this, a FRESH paste could never expand
+> (current Claude Code writes the cache only at submit), so the copy handed over the label. A mid-line label
+> nothing backs is now kept as written (a quote), claude's bare `[Pasted text #N]` is recognized, and the
+> span-based substitution no longer refuses a placeholder that shares its line with typed words.
+
 **The report.** In the Manager's Auto Testing, right-click → **Copy** on a queued prompt that held a large
 paste put the literal `[Pasted text #1 +31 lines]` on the clipboard — a label that means nothing outside
 the one input box that rendered it.
@@ -1040,7 +1125,91 @@ arithmetic, temp-cache adapter round + missing-dir no-throw — TestPendingPaste
 `restoreDraftOnResume` settings round-trip. The pump itself is the standby lane's recipe verbatim
 (page-side, WinRT — exercised by that feature's live verification).
 
+**2026-09-25:** the arm now resolves through the §2c journal-aware resolver (STRICT policy) — so a same-run
+close→resume or a Deactivate→wake brings back a draft holding a FRESH paste whole (its content is in the
+journal), and claude's bare `[Pasted text #N]` / an `[Image #N]` is recognized and refused instead of being
+re-typed as a literal label. After an app restart the journal is empty and the paste-cache is the only tier,
+exactly as before. The fill shape is unchanged (one paste).
+
+## 11. The FORK CARRY — the unsent prompt comes along into a fork (built 2026-09-25)
+
+**The ask.** *"When I fork a session and it opens into a new tab, have the prompt written in claude code's
+prompt box copied over. Make sure the [Pasted text #1 +31 lines] are being expanded."*
+
+**Which forks.** The two seams every fork funnels through: `_ForkManagedSessionById` (a tab's **Fork
+session** / Ctrl+Shift+D / its model submenu, and the Manager board/tree **Fork**) and `_ForkSessionFromDisk`
+(the Sessions page's **Fork here**, its detail-pane Fork, the double-click Resume/Fork dialog, the launch
+bar's Fork). Claude only (Codex has no ❯ box). An adopt-external fork is not carried (a foreign host's box
+is unreadable). The carry is keyed on the fork INTENT: a never-prompted source still forks (fresh) and its
+draft still comes along.
+
+**The pipeline.**
+1. **CAPTURE** (`_CaptureDraftForFork`, before the launch — the prompt as it stood at the click):
+   `PickCurrentPromptText` over the source's LIVE box (this window hosts it — the tab-menu case) else the
+   observer's remembered draft (a source in another window — ≤ one scan tick stale — a dormant tab, or a
+   closed session's persisted memory), plus a copy of the source's §2c journal.
+2. **LAUNCH** — unchanged (`_LaunchClaudeSession`, `--resume <src> --fork-session`).
+3. **ARM** (`_CarryDraftIntoFork` → `_ArmDraftRestore` with `DraftFillOrigin::Fork`): resolve (LIVE policy,
+   off-thread when a placeholder is present); refused ⇒ `[draft-fork] … REFUSED: <why>` and the fork starts
+   empty. Else SEED the fork's `pendingInput` with the source's rendered draft (the "3 dots" show on the fork
+   tab + board card at once; persisted, so a fork never visited before an app restart re-arms through §10),
+   JOURNAL each block under the fork (its box will show claude's own placeholders for them), and arm the
+   PIECEWISE plan in the §10 pump's map (so the scan HOLD, the started wait, the settle, the 10-min cap and
+   the hands-off latch are all shared — a fork is the latch's easy case: a fresh record whose own transcript
+   doesn't exist until its first turn).
+4. **FILL — piecewise** (`BuildDraftFillPastes` + `_DeliverDraftFillPastes`). One paste of the whole expanded
+   draft would make claude collapse the typed words into the same placeholder (`[Pasted text #1 +32 lines]`
+   — right content, a box that no longer shows what you wrote). Instead: typed text in chunks claude keeps
+   INLINE (≤2 newlines, ≤800 chars — never cut through a surrogate pair or a kept quote), each block pasted
+   ALONE so claude mints its own bound `[Pasted text #K +M lines]` for it. The fork's box then reads exactly
+   like the source's (ids may differ — claude numbers its own). Each piece is a bracketed paste with NO
+   submit CR, sent only after the previous one VERIFIABLY landed (`VerifyDraftFillPastes` over the prefix —
+   claude's classic paste handler reads React props, so two pastes in one input chunk could mint colliding
+   ids). The delivery owns the box like the mail-clear: the §9 box-mutex, the delivery gate under the
+   reserved `kDeliveryGateFillTag` (an autorunner send declines instead of merging in), and a read-only
+   lock handed back first on every path.
+5. **VERIFY** (the pump): Verified ⇒ `draft COPIED + VERIFIED`; an EMPTY box with no piece ever seen ⇒ claude
+   ate the first paste ⇒ ONE re-type from piece 1 (safe: empty box, cursor at its start); anything else — a
+   box you cleared/edited after the copy landed, foreign text, a copy that stopped part-way — is left EXACTLY
+   as it is, logged. Never typed onto text it can't account for; never submitted.
+
+**The source keeps its draft** (a copy, not a move). **You win every race**: text typed into the fork before
+the copy lands keeps the fork's box yours (pre-fill check, in-delivery re-check, the arm's seeded-memory
+check); a prompt sent from the fork hands the lane off.
+
+**Setting.** `AppSettings::carryDraftOnFork` (default ON), cog **SESSIONS ▸ "Copy my unsent prompt into a
+forked session"** — deliberately not on the TESTS AUTORUNNER tab beside §10's toggle: that tab is
+dev-or-debug only, and forks are a release feature.
+
+**Known limits.** Inherited from the detector (§2): a SOFT-wrapped line reads with a `\n` where the box
+wrapped it (Ink wraps the input itself, so the buffer can't tell a wrap from a newline) — the fork gets a
+hard line break there (same width ⇒ same look; the submitted text has a newline instead of a space). The
+§2c gaps (drag-dropped text, pre-journal pastes) fall to the cache tier, which refuses rather than guesses.
+In a Claude tab under 12 rows claude collapses 2-newline chunks too (content intact, collapsed).
+
+**Logs** (`hooks.log`, `[draft-fork] <fork8> …`): `copying the unsent prompt from <src8> (live box|remembered
+draft, chars, journal=N)` → `armed (chars, pieces, placeholders: J journal / C cache / K kept)` or `REFUSED:
+<why>` → `typed N piece(s)` / `delivery stopped: <why> (typed, seen)` → `COPIED + VERIFIED` or the give-up
+reason. The fork's own `[nav] fork-managed-*` / `sessions fork-*` lines are unchanged.
+
+**Coverage.** `TestDraftCarry` (engine harness): claude's normalization / count / threshold, the scan (all
+five forms, soft-wrap, whole-line), the journal tier (chronological same-M, newest-wins, mid-line by span,
+the bare form), the policy (live quote kept, strict refusal, image + duplicate-id refusals, `cacheMightHelp`),
+the cache tier (unique whole-line only), the truncated middle (the live 274-segment fixture), the plan
+(chunking, no surrogate/quote split, blocks alone), the verifier (re-minted ids, soft wrap, Eaten, Partial at
+a boundary vs Foreign mid-paste, inlined block, exact quotes, the delivery's prefix mode), the registry
+journal (normalize, collapse-only, de-dupe, cap, move, clear, remove) and the adapter (journal-only needs no
+cache, the cache fallback, a missing dir). `carryDraftOnFork` round-trips in `TestAppSettings`. The page-side
+delivery + pump are WinRT (verified live on the next deploy).
+
 ### Follow-ups (non-blocking)
+
+- **§11 / §2c:** journal DRAG-AND-DROPPED text (subscribe to the control's `StringSent` for managed panes);
+  persist the journal beside the §5 memory (so a restore after an app restart resolves fresh pastes too);
+  make the §2b `paste-refs` annotation journal-aware (the board tip still says `unresolved` for a paste the
+  journal can expand); let the §10 re-fill use the PIECEWISE fill (restored multi-line drafts would come back
+  inline instead of collapsed); the SEND side of §8e (expand a queued placeholder at queue time) can now use
+  the journal.
 
 - **Off-switch**: an `AppSettings` flag to disable the pulse (like `showTabOverlay`); v1 is always-on.
 - **Placeholder/dim filtering** (§4) — read the cells' faint attribute so a dim placeholder never reads as
