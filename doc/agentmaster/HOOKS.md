@@ -237,6 +237,43 @@ showing `WaitingForInput`/`Idle` for an ENTIRE turn (the "second turn never show
   only (idempotent). A pending **non-interactive** tool (a long `Bash`) stays `Running`. A
   `ToolResult` marker (the question was answered) or a new prompt clears the block; the turn's
   terminal/interrupt tail then exits it (above).
+- **The tail is judged only once the cursor has CAUGHT UP** (the 2026-09-25 stall, release
+  0.6.8.11, session `d1f3f198`). Every reconciler above reads *latest-wins* tail facts folded
+  from a byte cursor that reads at most `kScanMaxDeltaBytes` (1 MiB) per pass. The read gate
+  used to be `size != lastSize` alone, stamped after every read — capped ones included. So a
+  read that stopped at the window left complete lines unread that no later pass looked at
+  until the file grew again, and a **finished turn never grows its file again**. The live
+  case: a restored 3.8 MB transcript got one chunk per append; the queued prompt the autorunner
+  delivered 1 s after the dormant tab started was aborted by claude with **no assistant line
+  and no `Stop` hook** (the prompt was put back into its box); the cursor froze on a two-day-old
+  `stop_reason: tool_use`. `recon-stop` needs a terminal tail, and `recon-stop-idle` refuses a
+  Running pending `tool_use`. So the session showed `Running` for 7+ hours while claude's own
+  heartbeat read `idle`. The fix has three parts, all in `SessionScanner`:
+  - **Read gate** (`ShouldReadTranscriptDelta`, pure): read when the size changed **or** the last
+    read did not reach the stat'd end (a window-capped chunk, a failed open/seek/read, a short
+    grown re-read). Steady state stays one stat and no read. This also makes the "next pass
+    retries" promises of the `DecideDeltaNoNewline` grow path and the I/O-failure paths real.
+  - **First-sight tail seek** (`FirstSightReadOffset` + `FirstCompleteLineStart`, pure): a fresh
+    cursor (restore / resume / adopt / fork / truncation rewind) on a transcript bigger than one
+    window starts at its last 1 MiB, aligned to the first complete line, instead of replaying the
+    whole history. That window carries every latest-wins fact, so the facts are right on the first
+    pass. The cost is the same ≤ one window per session the first pass always paid; the measured
+    release fleet was 403 live transcripts / 1.3 GB, which the old replay would have parsed in
+    full. A window that lies inside one >1 MiB final line falls back to the classic replay from 0,
+    latched so it can never loop back to the seek. Tradeoffs: prompts older than the window are not
+    back-filled as Typed rows (the push hooks recorded them live; the 200-row history cap would
+    trim them anyway), and a recap buried deeper than 1 MiB waits for the next `away_summary`.
+  - **Tail-current gate** (`ScanState::readReachedEnd`): while a backlog is unread, the tail-judging
+    synths — `recon-error`, `recon-error-release`, `recon-stop`, `recon-stop-idle`, `recon-block`
+    and the lost-send verdict — hold, since the fold then describes a line mid-file (a false
+    `Error` off a historical API error, a false turn-end off a historical `end_turn`, a false
+    lost-send off a not-yet-read echo). The consumption-driven repairs (`recon-run`,
+    `recon-resume`) and the heartbeat-driven ones (presence block/resume, `recon-subagent`) key on
+    current facts and are not gated.
+
+  Pinned by `TestTranscriptScan` (the pure gates, with the incident's exact sizes) and
+  `TestScannerCatchUp` (a real scanner thread over staged transcripts: the incident, a >1 MiB
+  append burst, the alignment fallback).
 
 Self-healing by construction: every applied `Stop` zeroes `queuedPrompts` (drift cannot
 accumulate; a phantom `UserPromptSubmit` — e.g. a slash command that never starts an API turn —

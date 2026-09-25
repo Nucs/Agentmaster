@@ -86,7 +86,10 @@ order, mutex-guarded, handlers fired on the scanner thread (consumers marshal �
    small read DOES feed (its "history" is seconds old and live).
 2. **Line-timestamp freshness** (`kCommandSightingFreshMs`, 60s) — an adopted/restored session's
    one-shot history read primes during the same pass, but its old commands carry old stamps and
-   never arm. An absent stamp (0) never arms either.
+   never arm. An absent stamp (0) never arms either. That read is the transcript's **tail window**
+   (the scanner's first-sight tail seek — `FirstSightReadOffset`, HOOKS.md *State machine*):
+   the last 1 MiB, the same region the final catch-up chunk always covered, so a `/handover`
+   await revived across a restart re-arms exactly as before when its echo lies in that window.
 
 **The markdown await** (v1's one binding shape, `BindMarkdownAwait(name, preferLeafContains,
 handler)`) — **MULTI-FILE: one command consumes EVERY qualifying markdown written after it.**

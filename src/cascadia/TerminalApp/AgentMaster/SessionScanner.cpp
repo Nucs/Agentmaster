@@ -497,8 +497,9 @@ namespace Agentmaster
         if (!primedBeforePass)
         {
             // The cursor had NOT caught up with the file before this pass, so the consumed events
-            // are the initial HISTORY REPLAY (a restored/adopted session reads its whole transcript
-            // from offset 0) — not a live append. A window closed mid-turn leaves that history
+            // are the initial HISTORY REPLAY (a restored/adopted session's first read: its tail
+            // window — FirstSightReadOffset — or the whole file when it fits) — not a live append.
+            // A window closed mid-turn leaves that history
             // ending "turn in progress" with a FRESH mtime (and `--resume` can touch the file), so
             // the freshness check below cannot catch this case: without this gate a just-resumed,
             // actually-idle claude lit up Running and STUCK (recon-stop needs a terminal tail).
@@ -757,22 +758,48 @@ namespace Agentmaster
             // Truncated / rewritten under us (shouldn't happen for an append-only transcript, but
             // be safe): restart the tail from the top. The re-read is a fresh HISTORY REPLAY, so
             // the primed flag drops with it — its events must not feed the run-repair either.
+            // A rewritten file is also a fresh FIRST SIGHT: re-arm the tail seek (a big rewrite
+            // starts at its tail window like any other first sight) and mark the facts not-current
+            // until that read lands.
             st.offset = 0;
             st.lastSize = -1;
             st.primed = false;
+            st.readReachedEnd = false;
+            st.seekDecided = false;
+            st.alignSeek = false;
         }
         // Captured BEFORE the read: events consumed by a not-yet-primed cursor are the initial
-        // backlog replay (offset 0 -> end on a restored/adopted session), and the pass that
+        // backlog replay (the tail window -> end on a restored/adopted session, or offset 0 -> end on
+        // a transcript that fits one window / the alignment fallback), and the pass that
         // FINISHES the replay sets primed for the NEXT pass — so replayed history can never count
         // as the live append the run-repair keys on (no matter how fresh the file mtime is).
         const bool wasPrimed = st.primed;
         bool consumedTurnEvent = false;
         st.answeredInteractive = false; // per-pass scratch (see ScanState) — only THIS pass's reads count
-        if (size != st.lastSize)
+        // Agentmaster (the 2026-09-25 CATCH-UP STALL, session d1f3f198): read on a size change OR while
+        // the previous read left complete bytes unread (a window-capped chunk, a failed open, a short
+        // grown re-read). The old `size != lastSize` gate alone froze the cursor mid-history the moment
+        // the file went quiet: the stuck session's 3.8 MB transcript got one 1 MiB chunk per append,
+        // its last append arrived as the aborted turn ended, and the tail facts stayed parked on a
+        // two-day-old `tool_use`, which no pull release will ever end (see ShouldReadTranscriptDelta).
+        if (ShouldReadTranscriptDelta(size, st.lastSize, st.readReachedEnd))
         {
             consumedTurnEvent = _readDelta(st, s, size); // advances st.offset past the complete lines it consumed
             st.lastSize = size;
         }
+        // The TAIL-FACTS-CURRENT gate: the fold (lastStopReason / interrupted / pendingInteractiveTool /
+        // lastWasApiError / the active leaf) describes the file's END only once a read has reached the
+        // stat'd end. While a backlog of complete lines is still unread (a multi-pass catch-up, the
+        // alignment fallback's replay from 0, a retried I/O failure) it describes some line mid-file.
+        // So every synth that JUDGES the tail (recon-error / error-release / recon-stop /
+        // recon-stop-idle / recon-block / the lost-send verdict) holds until the catch-up lands. The
+        // alternative is a false Error off a historical API error, a false turn-end off a historical
+        // end_turn, or a false lost-send off a not-yet-read echo. Holding costs at most the few 300 ms
+        // passes a catch-up takes; acting on stale facts costs a wrong state that may never be undone.
+        // The consumption-driven repairs (recon-run / recon-resume) key on freshly appended events
+        // behind the primed-cursor gate, and the heartbeat-driven ones (presence block/resume,
+        // recon-subagent) key on current facts. They need no hold.
+        const bool tailCurrent = st.readReachedEnd;
 
         // Agentmaster (Error triage dismissal — expiry): the manual "Move to Idle/Done" on an Error
         // card acknowledged THE error that was standing when the user clicked; the ack lasts only
@@ -1032,7 +1059,8 @@ namespace Agentmaster
         // idempotence arm passed) but transcript evidence still ending at the 14:58 error line — re-fired
         // recon-error 38ms later, re-asserting a red card over a genuinely running retry turn.
         const int64_t tailWriteMs = FiletimeToUnixMs(fad.ftLastWriteTime);
-        if (ShouldSynthesizeError(s.state, errorIsActiveLeaf, quietForMs, s.turns.lastPromptUnixMs, tailWriteMs))
+        // tailCurrent: an error line consumed MID-catch-up is history, not the tail — never Error off it.
+        if (tailCurrent && ShouldSynthesizeError(s.state, errorIsActiveLeaf, quietForMs, s.turns.lastPromptUnixMs, tailWriteMs))
         {
             const auto fresh = _registry->Get(s.id);
             // Manual dismissal gate (the triage "Move to Idle/Done" on an Error card): the user
@@ -1086,7 +1114,7 @@ namespace Agentmaster
         // error is no longer "the last message". No turn event fired (recon-run / push own the user-RETRIED
         // case, which clears lastWasApiError -> Running), so release HERE to WaitingForInput. Quiescence-
         // gated like recon-stop; early-returns so recon-stop/idle/block don't also fire this pass.
-        if (ShouldReleaseErrorOnLeafMove(s.state, st.lastWasApiError, st.activeLeafUuid, st.errorEpochLeaf, st.errorBranchUuids, quietForMs))
+        if (tailCurrent && ShouldReleaseErrorOnLeafMove(s.state, st.lastWasApiError, st.activeLeafUuid, st.errorEpochLeaf, st.errorBranchUuids, quietForMs))
         {
             const auto fresh = _registry->Get(s.id);
             if (fresh && fresh->state == SessionState::Error)
@@ -1115,7 +1143,9 @@ namespace Agentmaster
         // externalOutlivesTurn HOLDS the Running->Waiting demotion while a teammate / background agent /
         // live shell provably outlives the finished turn — the exact expression the promotion above
         // fires on, so the two stay mutually exclusive (never oscillate); see ShouldSynthesizeStop.
-        const bool stopFromTail = ShouldSynthesizeStop(s.state, st.lastStopReason, st.interrupted, quietForMs, externalOutlivesTurn);
+        // tailCurrent (both arms): a mid-catch-up fold can read a historical end_turn as "the turn is
+        // over", or a historical tool_use as "still mid-tool"; only the caught-up tail may end a turn.
+        const bool stopFromTail = tailCurrent && ShouldSynthesizeStop(s.state, st.lastStopReason, st.interrupted, quietForMs, externalOutlivesTurn);
         // Agentmaster (presence-idle release): the missing IDLE half of the presence signal. The
         // tail-based backstop above needs a TERMINAL stop_reason or an interrupt — but a turn can end
         // with NEITHER: its last transcript line is a bare user prompt that cleared the tracked
@@ -1130,7 +1160,7 @@ namespace Agentmaster
         // than NeedsApproval: that shape is indistinguishable from a turn paused behind a "No response
         // from API · Retrying" backoff, so only sustained rest (no append AND no "busy" for the long
         // window — both reset quietForMs just below) releases it (the idle<->running flap fix).
-        const bool stopFromPresenceIdle = !stopFromTail && st.pendingInteractiveTool.empty() &&
+        const bool stopFromPresenceIdle = tailCurrent && !stopFromTail && st.pendingInteractiveTool.empty() &&
                                           ShouldSynthesizeStopFromPresenceIdle(s.state, s.presenceStatus, st.lastStopReason, st.interrupted, quietForMs);
         if (stopFromTail || stopFromPresenceIdle)
         {
@@ -1177,7 +1207,7 @@ namespace Agentmaster
         // from Running, so once it lands NeedsApproval it stays until the answer + the turn's end
         // release it via the missed-Stop reconciliation above. (Autorunner treats NeedsApproval as
         // NOT ready — Rule #1 — so it won't auto-answer the question with a queued prompt.)
-        if (ShouldSynthesizeBlockedOnUser(s.state, st.pendingInteractiveTool, st.interrupted, quietForMs))
+        if (tailCurrent && ShouldSynthesizeBlockedOnUser(s.state, st.pendingInteractiveTool, st.interrupted, quietForMs))
         {
             const auto fresh = _registry->Get(s.id);
             if (fresh && fresh->state == SessionState::Running)
@@ -1224,7 +1254,13 @@ namespace Agentmaster
             if (fresh)
             {
                 const int64_t verdictNow = NowMs();
-                const auto lostIds = DecideLostSend(*fresh, verdictNow);
+                // tailCurrent: the verdict's whole premise is "this pass just caught the cursor up, so
+                // any user line on disk already fed the pull echo-consume". While a backlog is unread,
+                // the delivered prompt's own echo line may still sit past the cursor, and a verdict now
+                // would Fail a prompt that DID become a message (and pause the autorunner for it). Hold
+                // until the catch-up lands. The undelivered reclaim below never reads the transcript,
+                // so it stays ungated.
+                const auto lostIds = tailCurrent ? DecideLostSend(*fresh, verdictNow) : std::vector<std::wstring>{};
                 for (const auto& lostId : lostIds)
                 {
                     bool applied = false;
@@ -1328,10 +1364,30 @@ namespace Agentmaster
 
     bool SessionScanner::_readDelta(ScanState& st, const SessionInfo& s, int64_t size)
     {
-        const int64_t avail = size - st.offset;
+        // Agentmaster (FIRST-SIGHT TAIL SEEK — FirstSightReadOffset): a fresh cursor (a restored /
+        // resumed / adopted / forked session, or a truncation rewind) on a transcript bigger than one
+        // window starts at the tail window instead of replaying the whole history. The tail window
+        // carries every latest-wins fact the reconcilers judge, so the facts are right on the very first
+        // pass, at the same ≤ one-window cost the first pass always paid. Decided exactly ONCE per cursor
+        // (seekDecided), so the alignment fallback to offset 0 below can never bounce back to the tail.
+        if (!st.seekDecided)
+        {
+            st.seekDecided = true;
+            if (st.offset == 0 && !st.primed)
+            {
+                if (const int64_t seek = FirstSightReadOffset(size); seek > 0)
+                {
+                    st.offset = seek;
+                    st.alignSeek = true; // the seek point is an arbitrary byte — drop the leading fragment below
+                }
+            }
+        }
+
+        int64_t avail = size - st.offset; // non-const: the first-sight alignment below trims the leading fragment off it
         if (avail <= 0)
         {
             st.primed = true; // nothing past the cursor: it IS the file end — caught up
+            st.readReachedEnd = true;
             return false;
         }
         const DWORD want = static_cast<DWORD>(avail < kScanMaxDeltaBytes ? avail : kScanMaxDeltaBytes);
@@ -1346,6 +1402,10 @@ namespace Agentmaster
                                        nullptr);
         if (h == INVALID_HANDLE_VALUE)
         {
+            // A transient open failure (an AV scanner / backup holding the file) must be RETRIED next
+            // pass. Under the old size-only gate it was retried only if the file grew again, so a turn
+            // that had just ended never got its end_turn read. readReachedEnd=false re-arms the read.
+            st.readReachedEnd = false;
             return false;
         }
         LARGE_INTEGER li{};
@@ -1353,6 +1413,7 @@ namespace Agentmaster
         if (!::SetFilePointerEx(h, li, nullptr, FILE_BEGIN))
         {
             ::CloseHandle(h);
+            st.readReachedEnd = false; // retry next pass (see the open failure above)
             return false;
         }
         std::string bytes;
@@ -1362,9 +1423,37 @@ namespace Agentmaster
         if (!ok || got == 0)
         {
             ::CloseHandle(h);
+            st.readReachedEnd = false; // retry next pass (see the open failure above)
             return false;
         }
         bytes.resize(got);
+
+        // Agentmaster (FIRST-SIGHT TAIL SEEK — alignment): the seek landed mid-line, so drop the leading
+        // fragment and start at the window's first COMPLETE line. The fragment is garbage to the parser,
+        // and a fragment of an embedded escaped object must never pass for a real line. A window with no
+        // usable boundary lies entirely inside one line that began before the seek point (a >1 MiB final
+        // line; rare, since a transcript normally ends in small trailer lines). There we fall back to the
+        // classic replay from byte 0: correct, only slower. ShouldReadTranscriptDelta keeps it moving one
+        // window per pass, and the tailCurrent gate keeps its mid-history facts from judging anything
+        // until it lands.
+        if (st.alignSeek)
+        {
+            const size_t start = FirstCompleteLineStart(std::string_view{ bytes.data(), bytes.size() });
+            if (start == std::string_view::npos)
+            {
+                ::CloseHandle(h);
+                st.offset = 0;
+                st.alignSeek = false;
+                st.readReachedEnd = false; // re-read from the top on the next pass
+                return false;
+            }
+            // FirstCompleteLineStart guarantees start < bytes.size(), so something complete remains.
+            bytes.erase(0, start);
+            st.offset += static_cast<int64_t>(start);
+            got -= static_cast<DWORD>(start);
+            avail -= static_cast<int64_t>(start);
+            st.alignSeek = false;
+        }
 
         // Consume only up to the last newline; a trailing partial line is an append in flight and
         // is re-read whole next tick. (Splitting on the '\n' BYTE is UTF-8-safe: 0x0A is never a
@@ -1405,13 +1494,20 @@ namespace Agentmaster
                 // cursor past the VERIFIED bytes only — never teleport to the file end, which would
                 // silently drop every complete line written beyond the run (they parse next pass).
                 st.offset += static_cast<int64_t>(got);
+                // SkipRead implies got < avail, so complete lines past the run still wait. Keep reading
+                // next pass even if the file never grows again (ShouldReadTranscriptDelta).
+                st.readReachedEnd = false;
                 break;
             case DeltaNoNewline::PartialInFlight:
                 st.primed = true; // the whole remainder is one partial line in flight — caught up on complete lines
+                st.readReachedEnd = true; // the in-flight line completes with its own append, which is a size change
                 break;
             default:
                 // Grow — the bigger re-read failed or came back short (an I/O hiccup): change
-                // nothing; the next pass retries from the same cursor.
+                // nothing; the next pass retries from the same cursor. readReachedEnd=false is what
+                // actually MAKES it retry: the old size-only gate skipped every later pass on an
+                // unchanged file, so the promised retry never came.
+                st.readReachedEnd = false;
                 break;
             }
             return false;
@@ -1419,7 +1515,13 @@ namespace Agentmaster
         const size_t completeBytes = nl + 1;
         const std::wstring wide = Utf8ToUtf16(bytes.data(), static_cast<int>(completeBytes));
         st.offset += static_cast<int64_t>(completeBytes);
-        if (static_cast<int64_t>(got) == avail)
+        // Did THIS read cover every byte up to the stat'd size? True even when a trailing partial line
+        // stays unconsumed (it completes with its own append, which the size gate sees). False for a
+        // window-capped chunk: complete lines remain past the cursor, and ShouldReadTranscriptDelta then
+        // makes the next pass continue WITHOUT waiting for the file to grow. That wait is the 2026-09-25
+        // stall: a finished turn's quiet file never grows again, so the catch-up froze mid-history.
+        st.readReachedEnd = static_cast<int64_t>(got) == avail;
+        if (st.readReachedEnd)
         {
             // This read reached the file's current end (everything available fit the window —
             // the 1 MiB default or the grown big-line one): the cursor is caught up — anything
@@ -1433,8 +1535,9 @@ namespace Agentmaster
         // Agentmaster: mirror the Claude Code idle RECAP (away_summary) onto the registry record so the
         // Triage-Board card tooltip can show it. QUIET (display-only, like lastAssistantText below) and
         // only when THIS chunk carried a recap — away_summary lines are rare, so this is a no-op on
-        // virtually every tick (no lock churn). On a first-sight replay-from-0 the last recap in the file
-        // wins; a live recap lands in its own delta. Never clears an existing recap (empty is ignored).
+        // virtually every tick (no lock churn). On a first-sight read (the tail window — FirstSightReadOffset
+        // — or the whole file when it fits one window) the last recap in that read wins; a live recap lands
+        // in its own delta. Never clears an existing recap (empty is ignored).
         if (!parsed.recap.empty())
         {
             const std::wstring recap = parsed.recap;

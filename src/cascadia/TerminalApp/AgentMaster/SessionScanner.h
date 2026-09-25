@@ -11,7 +11,9 @@
 // gets archived.
 //
 // SMART + PERFORMANT (the explicit ask): scope to live, non-archived sessions only; a cheap
-// size stat gates any read; only the byte DELTA past a saved offset is parsed; one coalesced
+// size stat (plus the unread-backlog flag — ShouldReadTranscriptDelta) gates any read; only the
+// byte DELTA past a saved offset is parsed, and a FIRST-SIGHT cursor on a big transcript starts at
+// its tail window instead of replaying the whole history (FirstSightReadOffset); one coalesced
 // pass per tick; cadence is ADAPTIVE (fast while a turn is Running, slow while Idle/Waiting) and
 // the loop SLEEPS on a condvar at zero cost when nothing is live — a registry observer Wake()s
 // it the instant a session goes live.
@@ -30,6 +32,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -94,6 +97,94 @@ namespace Agentmaster
             return DeltaNoNewline::Grow; // the FIRST unconsumed line outgrew this window — a bigger read can finish it
         }
         return DeltaNoNewline::SkipRead; // a force-cap read verified newline-less — skip the run, not the file
+    }
+
+    // PURE + total (the 2026-09-25 stuck-Running report, release 0.6.8.11, session d1f3f198 — the
+    // CATCH-UP STALL): should _reconcileSession READ the transcript on this pass at all?
+    //
+    // The read is WINDOWED (kScanMaxDeltaBytes, 1 MiB, per pass), but the gate in front of it used to
+    // be `size != lastSize` ALONE — and lastSize was stamped with the new size after EVERY read,
+    // including one the window CAPPED. So any read that stopped short of the stat'd end left complete,
+    // unread lines past the cursor that no later pass would ever look at — until the file happened to
+    // grow again. Three shapes hit it, all "the next pass retries" promises the size gate silently
+    // broke: (1) the initial replay of a >1 MiB history (a restored / resumed / adopted / forked
+    // session), (2) a >1 MiB append burst, (3) a transient failure (the file would not open, a grown
+    // re-read came back short). A FINISHED turn writes nothing more, so the one append that could
+    // unstick it never comes. The tail facts then stay mid-HISTORY for good; the live case parked on a
+    // `stop_reason: tool_use` line from two days earlier. recon-stop needs a terminal tail, and the
+    // presence-idle release deliberately never releases a Running session on a pending tool_use
+    // (the API-retry flap fix). So claude sat provably idle while the session showed Running for 7+ hours.
+    //
+    // Read when EITHER the size changed (new bytes landed) OR the previous read did not reach the
+    // size it was handed. Only a read that reached the stat'd end may go quiet; the remainder is then
+    // at most one unterminated line in flight, which the next append completes. Steady state stays one
+    // stat per pass and no read. A persistently failing open retries once per pass, which is cheap,
+    // bounded and self-healing, and far better than freezing on stale facts.
+    //   size               — the transcript's byte size from THIS pass's stat.
+    //   lastSize           — the size stamped by the previous read (-1 before the first read).
+    //   lastReadReachedEnd — whether that previous read covered every byte up to the size it was handed
+    //                        (ScanState::readReachedEnd; false before the first read).
+    // Returns true when this pass must call _readDelta. Never throws.
+    inline bool ShouldReadTranscriptDelta(int64_t size, int64_t lastSize, bool lastReadReachedEnd) noexcept
+    {
+        return size != lastSize || !lastReadReachedEnd;
+    }
+
+    // PURE + total (FIRST-SIGHT TAIL SEEK — the companion of ShouldReadTranscriptDelta): the byte
+    // offset a FRESH cursor starts reading a transcript at (a restored / resumed / adopted / forked
+    // session, or a truncation rewind).
+    //
+    // Every scanner decision reads LATEST-WINS tail facts: the last assistant stop_reason, whether the
+    // last human line was an interrupt, a pending AskUserQuestion, an unrecovered API error, the active
+    // leaf, the context size, the current model, the newest recap. The last `window` bytes establish all
+    // of those, so replaying the whole history from byte 0 buys nothing, and it is expensive. The
+    // measured release fleet had 403 live transcripts totalling 1.3 GB (293 over 1 MiB, the largest
+    // 87 MB), all read at startup. The old replay also re-fed ANCIENT history into the Auto-Testing
+    // back-fill, and while it was still catching up it let tail-judging synths act on mid-history facts.
+    // Starting at the tail window costs exactly what today's first pass already costs (≤ one window per
+    // session) and yields the CORRECT facts on the very first pass.
+    //
+    // Tradeoffs, all deliberate:
+    //   * prompts older than the window are not back-filled as Typed rows. The push hooks recorded them
+    //     live, and the bounded queue history (kMaxQueueHistoryEntries) would trim them anyway.
+    //   * a recap buried deeper than the window stays unseen until the next away_summary. Measured:
+    //     the median last recap sits ~1 KiB from EOF, so this is rare.
+    //   * CommandWatch / interrupt-hold feeds see this window exactly as they already saw the FINAL
+    //     catch-up chunk; their own line-timestamp freshness gates keep replayed lines inert.
+    // The caller aligns to the first COMPLETE line inside the window (FirstCompleteLineStart) and
+    // falls back to the classic replay from 0 when the window lies inside a single line.
+    //   size   — the transcript's byte size at first sight.
+    //   window — the tail window to start inside (kScanMaxDeltaBytes; overridable for tests).
+    // Returns 0 when the whole file fits the window (read it all — the classic behavior, unchanged
+    // for every transcript ≤ 1 MiB) or either input is non-positive; else `size - window`. Never throws.
+    inline int64_t FirstSightReadOffset(int64_t size, int64_t window = kScanMaxDeltaBytes) noexcept
+    {
+        if (size <= 0 || window <= 0 || size <= window)
+        {
+            return 0;
+        }
+        return size - window;
+    }
+
+    // PURE + total: the index of the first COMPLETE line inside a tail-seek window. A first-sight read
+    // starts at an arbitrary byte (FirstSightReadOffset), so the window opens mid-line. Its leading
+    // fragment must be dropped: it is garbage to the JSON parser, and a fragment of an embedded escaped
+    // object must never be taken for a real line.
+    //   window — the raw bytes read from the seek point (UTF-8; '\n' is never a continuation byte, so a
+    //            byte search is UTF-8-safe).
+    // Returns the offset just past the window's first '\n', where the first complete line begins.
+    // Returns npos when there is no usable boundary: no newline at all, or the only newline is the
+    // window's LAST byte (nothing follows it). In both cases the whole window lies inside one line that
+    // began before the seek point (a >1 MiB final line), so its facts cannot be read from here. The
+    // caller then falls back to the classic replay from byte 0. Never throws.
+    inline size_t FirstCompleteLineStart(std::string_view window) noexcept
+    {
+        const size_t nl = window.find('\n');
+        if (nl == std::string_view::npos || nl + 1 >= window.size())
+        {
+            return std::string_view::npos;
+        }
+        return nl + 1;
     }
 
     // One reconciled record extracted from a transcript .jsonl line (the PURE parser's output).
@@ -246,7 +337,8 @@ namespace Agentmaster
     // repair piggybacks on transcript appends, never on a quiet file); the cursor was PRIMED before
     // this pass (`primedBeforePass`: the tail had already caught up with the file end, so the
     // consumed events are a LIVE append — the initial history replay of a restored/adopted session
-    // reads the WHOLE transcript from offset 0, and a window closed mid-turn leaves that history
+    // reads its tail window (FirstSightReadOffset; the WHOLE file when it fits one window, or on the
+    // alignment fallback), and a window closed mid-turn leaves that history
     // ending "turn in progress" with a FRESH mtime, so without this gate a just-resumed, idle
     // claude lit up Running and STUCK there — recon-stop needs a terminal-stop tail to clear
     // it); the tail says a turn is IN PROGRESS (!IsTerminalStopReason(lastStopReason) — a user
@@ -1063,16 +1155,38 @@ namespace Agentmaster
         {
             std::wstring path; // resolved transcript path ("" until found / after it vanishes)
             int64_t offset{ 0 }; // BYTE offset already consumed (only complete lines advance it)
-            int64_t lastSize{ -1 }; // last observed file size (the cheap change-gate)
+            int64_t lastSize{ -1 }; // file size stamped by the last read — the cheap change-gate, paired with readReachedEnd (ShouldReadTranscriptDelta): alone it froze a window-capped catch-up
             std::wstring lastAssistantText; // latest assistant text seen (for the missed-Stop question)
             std::wstring lastStopReason; // latest assistant stop_reason (IsTerminalStopReason => turn complete)
-            // Has the cursor ever CAUGHT UP with the file end? False while the initial backlog
-            // (a restored/adopted session's whole history, read from offset 0 in 1 MiB chunks) is
-            // still being consumed; true from the first pass that reached the current end. Only
+            // Has the cursor ever CAUGHT UP with the file end? False while the initial backlog is
+            // still being consumed — a restored/adopted session's tail window (FirstSightReadOffset),
+            // or, on the alignment fallback, its whole history from offset 0 in 1 MiB chunks, one per
+            // pass; true from the first pass that reached the current end. Only
             // events consumed AFTER priming are a live append — the run-repair gate
             // (ShouldSynthesizeRunning) reads the value from BEFORE the pass, so the pass that
             // finishes the replay cannot itself synthesize. Reset with the truncation rewind.
             bool primed{ false };
+            // Agentmaster (the 2026-09-25 CATCH-UP STALL, session d1f3f198 — ShouldReadTranscriptDelta):
+            // did the LAST _readDelta cover every byte up to the size it was handed? True only when the
+            // read reached the stat'd end, possibly leaving one unterminated line in flight. False after a
+            // window-capped read (a backlog of complete lines remains), a failed open/seek/read, a grown
+            // re-read that came back short, or the first-sight alignment fallback. Two consumers: false
+            // forces the next pass to read even though the size did not change (without that, a finished
+            // turn's quiet file froze the cursor mid-history for good), and it is the "tail facts are
+            // CURRENT" gate that keeps every tail-judging synth from acting on facts that describe a line
+            // somewhere mid-file. Starts false: nothing has been read yet. Reset with the truncation rewind.
+            bool readReachedEnd{ false };
+            // Agentmaster (FIRST-SIGHT TAIL SEEK — FirstSightReadOffset): has this cursor's starting point
+            // been decided? Latched by the first _readDelta so the seek happens exactly once per fresh
+            // cursor. That keeps the alignment fallback (back to offset 0) from re-seeking to the tail on
+            // the next pass and looping. Reset by the truncation rewind, since a rewritten file gets a fresh
+            // first sight.
+            bool seekDecided{ false };
+            // Agentmaster (FIRST-SIGHT TAIL SEEK): the cursor sits at an ARBITRARY byte (the tail-seek
+            // point), mid-line. The next read must drop the leading fragment up to the first complete line
+            // (FirstCompleteLineStart) before parsing. Cleared once aligned, or on the fallback to offset 0,
+            // which is a line start by definition.
+            bool alignSeek{ false };
             // Tail facts that disambiguate "blocked on the user" / "interrupted" from "working" —
             // the missed-Stop backstop can't read either from stop_reason alone (HookEvents.h notes).
             std::wstring pendingInteractiveTool; // an UNANSWERED interactive tool_use (AskUserQuestion) is the latest assistant block; "" once answered / moved on
@@ -1148,8 +1262,25 @@ namespace Agentmaster
         void _worker() noexcept;
         int64_t _scanOnce(); // one coalesced pass; returns the next sleep ms (<0 == sleep until woken)
         void _reconcileSession(const SessionInfo& s);
+        // Reads (at most one window, or one grown window for a single 1-4 MiB line) of the transcript
+        // past st.offset and folds the complete lines into the tail facts. On a fresh cursor it first
+        // seeks to the tail window (FirstSightReadOffset) and aligns to a complete line, falling back to
+        // offset 0 when the window lies inside one line.
+        //   st   — the session's cursor + tail facts. offset/primed/readReachedEnd/seekDecided/alignSeek
+        //          are advanced here, and readReachedEnd is set on EVERY exit path: true only when this
+        //          read covered the stat'd size, false on a capped chunk, an I/O failure, a short grown
+        //          re-read, or the alignment fallback.
+        //   s    — the pass snapshot of the session: its id keys every registry mirror (recap / last
+        //          assistant text / context / model / the pull echo / the interrupt hold), and its
+        //          workingDir resolves the CommandWatch's relative Write/Edit paths.
+        //   size — the transcript size from THIS pass's stat (the read never goes past it).
         // Returns true when ≥1 turn event (user prompt / assistant line) was consumed this call —
         // the trigger for the missed-UserPromptSubmit repair in _reconcileSession.
+        // Throws only what an allocation can (std::bad_alloc from the byte/wide buffers or a registry
+        // mirror). The parse contains its own failures (ParseTranscriptDelta), and anything that
+        // escapes is caught and logged by _worker's top-level net. The cursor and readReachedEnd are
+        // stamped BEFORE the fold (the cursor always was), so a throw mid-fold costs at most that
+        // chunk's unfolded facts; the next append's lines re-establish them.
         bool _readDelta(ScanState& st, const SessionInfo& s, int64_t size);
         void _maybeSweepLiveness(int64_t nowMs, bool anyLive);
         void _maybeDecayWaiting(const SessionInfo& s, int64_t nowMs); // WaitingForInput older than the decay window -> Idle

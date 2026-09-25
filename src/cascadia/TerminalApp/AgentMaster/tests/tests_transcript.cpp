@@ -544,6 +544,48 @@ void TestTranscriptScan()
         // Read-to-end wins over the cap: got >= avail is caught-up even at exactly the force cap.
         CHECK(DecideDeltaNoNewline(kScanForceConsumeBytes, kScanForceConsumeBytes) == DeltaNoNewline::PartialInFlight, "read-to-end at the force cap -> PartialInFlight (not a skip)");
     }
+    // Agentmaster (the 2026-09-25 CATCH-UP STALL, release 0.6.8.11, session d1f3f198): the read gate.
+    // The live shape: a 3,792,283-byte restored transcript got ONE 1 MiB chunk per APPEND (the old
+    // gate was `size != lastSize` alone, stamped after every read — capped ones included). The
+    // aborted turn's last append landed, the file went quiet, and the cursor froze at 2,041,106 /
+    // 3,088,636 on a two-day-old `stop_reason: tool_use`. recon-stop needs a terminal tail and
+    // recon-stop-idle never releases a Running pending tool_use, so the session showed Running for 7+
+    // hours while claude's own heartbeat said "idle".
+    {
+        constexpr int64_t live = 3845791; // the transcript's size after the 10:41 append (never changed again)
+        CHECK(ShouldReadTranscriptDelta(live, -1, false), "read gate: a fresh cursor (lastSize -1) always reads");
+        CHECK(ShouldReadTranscriptDelta(live, 3792283, true), "read gate: the file grew -> read (the classic change-gate, unchanged)");
+        CHECK(!ShouldReadTranscriptDelta(live, live, true), "read gate: unchanged size + the last read reached the end -> no read (the steady state stays one stat, zero reads)");
+        CHECK(ShouldReadTranscriptDelta(live, live, false), "read gate (THE STALL): unchanged size but the last read was window-capped -> KEEP READING (was: frozen mid-history until a growth that never came)");
+        CHECK(ShouldReadTranscriptDelta(live + 10, live, false), "read gate: grown AND a backlog pending -> read");
+    }
+    // Agentmaster (FIRST-SIGHT TAIL SEEK): where a fresh cursor starts. Every transcript that fits one
+    // window still reads whole from byte 0 (the classic behavior, unchanged); a bigger one starts at its
+    // tail window so the latest-wins facts are right on the first pass at the same ≤ one-window cost.
+    {
+        constexpr int64_t MiB = 1 << 20;
+        CHECK(FirstSightReadOffset(0) == 0, "first sight: an empty transcript reads from 0");
+        CHECK(FirstSightReadOffset(-5) == 0, "first sight: a nonsense negative size never seeks");
+        CHECK(FirstSightReadOffset(512) == 0, "first sight: a small transcript reads WHOLE from 0 (classic)");
+        CHECK(FirstSightReadOffset(MiB) == 0, "first sight: exactly one window still reads whole (no seek at the boundary)");
+        CHECK(FirstSightReadOffset(MiB + 1) == 1, "first sight: one byte over the window -> seek to size - window");
+        CHECK(FirstSightReadOffset(3792283) == 3792283 - MiB, "first sight: the live d1f3f198 restore (3,792,283 bytes) starts at its last MiB, not byte 0");
+        CHECK(FirstSightReadOffset(87539800) == 87539800 - MiB, "first sight: the fleet's largest transcript (87.5 MB) costs one window, not 84");
+        CHECK(FirstSightReadOffset(100, 40) == 60, "first sight: the window is overridable (tests)");
+        CHECK(FirstSightReadOffset(100, 0) == 0, "first sight: a nonsense zero window never seeks");
+    }
+    // Agentmaster (FIRST-SIGHT TAIL SEEK — alignment): the seek lands mid-line; the first COMPLETE line
+    // starts after the window's first newline. No usable boundary (no newline, or only the LAST byte) ->
+    // npos, and the caller falls back to the classic replay from 0.
+    {
+        const auto at = [](const char* s) { return FirstCompleteLineStart(std::string_view{ s }); };
+        CHECK(at("ragment\"}\n{\"type\":\"user\"}\n") == 10, "align: drop the leading fragment, start at the first complete line");
+        CHECK(at("\n{\"a\":1}\n") == 1, "align: a seek that landed ON a newline starts right after it");
+        CHECK(at("frag\n{\"partial\"") == 5, "align: a complete boundary followed by a partial line in flight still aligns (the partial completes with its append)");
+        CHECK(at("no newline at all") == std::string_view::npos, "align: no newline -> npos (the window lies inside one giant line)");
+        CHECK(at("only the last byte\n") == std::string_view::npos, "align: the ONLY newline is the window's last byte -> npos (nothing complete follows it)");
+        CHECK(at("") == std::string_view::npos, "align: an empty window -> npos");
+    }
 }
 
 // Agentmaster — the CURRENT-MODEL adornment (the board card / per-tab overlay / tab tooltip model):
@@ -3021,6 +3063,191 @@ void TestConversationLineage()
         CHECK(lin.size() == 1, "lineage/disk: ONLY the solid plan parent P surfaces (Q's /clear timing link is gone)");
         CHECK(lin.size() == 1 && lin[0].userMsgs.size() == 1 && lin[0].userMsgs[0] == L"plan the feature",
               "lineage/disk: the plan PARENT P is the sole previous session; its would-be /clear predecessor Q stays invisible");
+    }
+
+    ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevCfg.empty() ? nullptr : prevCfg.c_str());
+    std::error_code ecCleanup;
+    std::filesystem::remove_all(std::filesystem::path{ cfg }, ecCleanup);
+}
+
+// Appends `content` to an existing fixture transcript and then stamps its mtime, which is how a test
+// simulates "claude appended a burst, then went quiet `quietForMs` ago". Unlike MakeJsonl it never
+// truncates, so the scanner's cursor sees a genuine APPEND.
+//   path    — the fixture transcript (must already exist; a missing file is a silent no-op, and the
+//             test's own CHECKs then fail loudly).
+//   content — the raw UTF-8 bytes to append (JSONL lines, each newline-terminated).
+//   mtimeMs — the last-write time to stamp AFTER the write (Unix ms), e.g. now - 120 s so every
+//             quiescence floor is already satisfied.
+// Never throws (plain Win32; failures leave the file as it was).
+static void AppendJsonl(const std::wstring& path, const std::string& content, int64_t mtimeMs)
+{
+    const HANDLE h = ::CreateFileW(path.c_str(), FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+    if (!content.empty())
+    {
+        DWORD w = 0;
+        ::WriteFile(h, content.data(), static_cast<DWORD>(content.size()), &w, nullptr);
+    }
+    const FILETIME m = UnixMsToFileTime(mtimeMs);
+    ::SetFileTime(h, nullptr, nullptr, &m);
+    ::CloseHandle(h);
+}
+
+// Agentmaster (the 2026-09-25 stuck-Running report, release 0.6.8.11, session d1f3f198): the scanner's
+// catch-up END TO END — a REAL SessionScanner worker thread tailing staged transcripts, not just its
+// pure gates. Each scenario is a shape that, under the old `size != lastSize` read gate, froze the
+// cursor mid-history on a `stop_reason: tool_use` and left a finished session Running forever
+// (recon-stop needs a terminal tail; recon-stop-idle deliberately never releases a pending tool_use):
+//   (a) THE INCIDENT — a >1 MiB transcript restored at rest whose last turn produced NO assistant output
+//       and fired NO Stop (the bare prompt is the tail), claude's heartbeat "idle". The first-sight tail
+//       seek reads the tail window, so the facts are right on the first pass and recon-stop-idle releases.
+//   (b) THE APPEND BURST — a primed cursor, then >1 MiB appended in one go ending in end_turn, then
+//       quiet. The catch-up must continue on an UNCHANGED size until the end_turn is read.
+//   (c) THE ALIGNMENT FALLBACK — the transcript ENDS in a single >1 MiB line, so the tail window lies
+//       inside it: the seek must fall back to the classic replay from 0, keep moving without growth,
+//       grow past the giant line and reach the end_turn — without looping back to the tail seek.
+// Every scenario sets its mtime minutes in the past, so each quiescence floor is already met: the only
+// thing that can hold the release is the cursor. Stages a throwaway CLAUDE_CONFIG_DIR (the scanner
+// resolves transcripts by id under <config>\projects) and restores it after. [Agentmaster]
+void TestScannerCatchUp()
+{
+    std::wprintf(L"SessionScanner catch-up end to end (the 2026-09-25 stall: tail seek + backlog reads + fallback):\n");
+
+    wchar_t tmp[MAX_PATH]{};
+    ::GetTempPathW(MAX_PATH, tmp);
+    const std::wstring cfg = std::wstring{ tmp } + L"am_scancatchup_cfg_" + std::to_wstring(::GetCurrentProcessId());
+    const std::wstring cwd = L"K:\\am_scan\\catchup";
+    const std::wstring dir = cfg + L"\\projects\\" + EncodeCwdToProjectDir(cwd);
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path{ dir }, ec);
+
+    wchar_t prevBuf[2048]{};
+    const DWORD prevN = ::GetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevBuf, 2048);
+    const std::wstring prevCfg{ prevBuf, prevN };
+    ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", cfg.c_str());
+
+    // --- fixture lines (the shapes ParseTranscriptDelta folds; ASCII padding keeps sizes exact) ---
+    // A mid-turn assistant step: stop_reason tool_use (a NON-interactive Bash, so no pending question).
+    const auto toolUse = [](int i, size_t pad) {
+        return std::string(R"j({"type":"assistant","uuid":"a)j") + std::to_string(i) +
+               R"j(","message":{"role":"assistant","model":"claude-test","stop_reason":"tool_use","content":[{"type":"text","text":")j" +
+               std::string(pad, 'x') + R"j("},{"type":"tool_use","id":"t)j" + std::to_string(i) +
+               R"j(","name":"Bash","input":{"command":"echo"}}]},"timestamp":"2026-09-23T07:00:00.000Z"})j" "\n";
+    };
+    // Its result: a user line carrying a tool_result block (a ToolResult event — never a human prompt).
+    const auto toolResult = [](int i, size_t pad) {
+        return std::string(R"j({"type":"user","uuid":"u)j") + std::to_string(i) +
+               R"j(","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t)j" + std::to_string(i) +
+               R"j(","content":")j" + std::string(pad, 'y') + R"j("}]},"timestamp":"2026-09-23T07:00:01.000Z"})j" "\n";
+    };
+    // `count` tool_use/tool_result pairs of ~2*pad bytes each: a busy history whose every assistant
+    // line is a pending tool_use — exactly what a mid-history cursor reads as "still mid-tool".
+    const auto history = [&](int first, int count, size_t pad) {
+        std::string h;
+        for (int i = first; i < first + count; ++i)
+        {
+            h += toolUse(i, pad);
+            h += toolResult(i, pad);
+        }
+        return h;
+    };
+    const auto endTurn = [](size_t pad) {
+        return std::string(R"j({"type":"assistant","uuid":"e1","message":{"role":"assistant","model":"claude-test","stop_reason":"end_turn","content":[{"type":"text","text":"All done)j") +
+               std::string(pad, '.') + R"j("}]},"timestamp":"2026-09-23T07:15:43.674Z"})j" "\n";
+    };
+    const std::string bareprompt =
+        R"j({"type":"user","uuid":"p1","message":{"role":"user","content":"Start working until you get a system reminder about context"},"timestamp":"2026-09-25T07:41:08.213Z"})j" "\n";
+    const std::string trailers =
+        R"j({"type":"last-prompt","lastPrompt":"Start working","leafUuid":"p1"})j" "\n"
+        R"j({"type":"mode","mode":"normal"})j" "\n"
+        R"j({"type":"permission-mode","permissionMode":"bypassPermissions"})j" "\n";
+
+    const int64_t quietMtime = NowMsTest() - 120000; // two minutes quiet: every quiescence floor (2 s / 5 s / 30 s) already met
+    constexpr int64_t MiB = 1 << 20;
+
+    // Runs one scenario: register a LIVE Running session with `presence` (claude's heartbeat as the
+    // S-lane would publish it), start a REAL scanner over it, run `afterStart` with the registry (the
+    // mid-test append + its sanity probe, if any), and poll until the session leaves Running or
+    // `budgetMs` elapses. Returns the final state. The scanner is stopped + joined before returning, so
+    // no worker outlives the scenario's fixture.
+    const auto runScenario = [&](const std::wstring& id, const std::wstring& presence, const std::function<void(SessionRegistry&)>& afterStart, int budgetMs) {
+        auto reg = std::make_shared<SessionRegistry>();
+        SessionInfo s = MakeSession(id, SessionState::Running);
+        s.workingDir = cwd;
+        s.live = true; // the scanner reconciles LIVE sessions only
+        s.presenceStatus = presence;
+        reg->Upsert(s);
+        SessionScanner scanner{ reg };
+        scanner.Start();
+        if (afterStart)
+        {
+            afterStart(*reg);
+        }
+        SessionState finalState = SessionState::Running;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (const auto cur = reg->Get(id); cur && cur->state != SessionState::Running)
+            {
+                finalState = cur->state;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        scanner.Stop();
+        return finalState;
+    };
+
+    // --- (a) THE INCIDENT: the restored, aborted no-output turn ---
+    {
+        const std::wstring id = L"d1f3f198-0000-4000-8000-00000000000a";
+        std::string t = history(0, 200, 4000); // ~1.6 MB of pending tool_use history
+        t += endTurn(0); // the previous turn DID end cleanly (two days earlier)
+        t += bareprompt; // the aborted turn: a prompt, then NOTHING — no assistant line, no Stop hook
+        t += trailers;
+        CHECK(static_cast<int64_t>(t.size()) > MiB + MiB / 2, "catch-up (a) fixture: the transcript is well past one window (the first 1 MiB is pure tool_use history)");
+        MakeJsonl(dir + L"\\" + id + L".jsonl", t, quietMtime, quietMtime - 1000);
+        const SessionState got = runScenario(id, L"idle", nullptr, 6000);
+        CHECK(got == SessionState::WaitingForInput,
+              "catch-up (a) THE INCIDENT: a restored >1 MiB transcript whose tail is a no-output turn + heartbeat idle -> released to WaitingForInput (was: first chunk parked on a mid-history tool_use, stuck Running forever)");
+    }
+
+    // --- (b) THE APPEND BURST: a primed cursor, then >1 MiB lands at once and the file goes quiet ---
+    {
+        const std::wstring id = L"d1f3f198-0000-4000-8000-00000000000b";
+        const std::wstring path = dir + L"\\" + id + L".jsonl";
+        MakeJsonl(path, history(0, 3, 2000), quietMtime, quietMtime - 1000); // small: fits one window, read whole, primed; tail = tool_use (mid-tool)
+        bool stillRunningBeforeBurst = false;
+        const SessionState got = runScenario(id, L"" /* no heartbeat: only the transcript can end it */, [&](SessionRegistry& r) {
+            // Let the first passes prime on the small file. Its tail is a pending tool_use, so NOTHING may
+            // end the turn yet — the sanity half of this scenario: the catch-up fix must not start
+            // ending genuinely mid-tool turns.
+            std::this_thread::sleep_for(std::chrono::milliseconds(900));
+            const auto before = r.Get(id);
+            stillRunningBeforeBurst = before && before->state == SessionState::Running;
+            std::string burst = history(10, 200, 4000); // ~1.6 MB appended in one write...
+            burst += endTurn(0); // ...ending the turn cleanly
+            AppendJsonl(path, burst, quietMtime); // then quiet: a finished turn never grows the file again
+        },
+                                             8000);
+        CHECK(stillRunningBeforeBurst, "catch-up (b) sanity: a primed cursor on a pending tool_use tail (no heartbeat) keeps the turn Running — nothing ends a genuinely mid-tool turn");
+        CHECK(got == SessionState::WaitingForInput,
+              "catch-up (b) THE BURST: >1 MiB appended then quiet -> the catch-up keeps reading on an UNCHANGED size, reaches end_turn, recon-stop releases (was: one 1 MiB chunk, parked on a mid-burst tool_use)");
+    }
+
+    // --- (c) THE ALIGNMENT FALLBACK: the transcript ENDS in one >1 MiB line ---
+    {
+        const std::wstring id = L"d1f3f198-0000-4000-8000-00000000000c";
+        std::string t = history(0, 60, 4000); // ~0.5 MB of tool_use history...
+        t += endTurn(static_cast<size_t>(MiB + MiB / 5)); // ...then ONE ~1.2 MiB end_turn line: the whole tail window lies inside it
+        CHECK(t.find('\n', t.size() - static_cast<size_t>(MiB)) == t.size() - 1, "catch-up (c) fixture: the last window's ONLY newline is its last byte (no alignable line)");
+        MakeJsonl(dir + L"\\" + id + L".jsonl", t, quietMtime, quietMtime - 1000);
+        const SessionState got = runScenario(id, L"", nullptr, 8000);
+        CHECK(got == SessionState::WaitingForInput,
+              "catch-up (c) THE FALLBACK: a window inside one giant final line falls back to replay-from-0, keeps moving without growth, grows past the 1.2 MiB line, reaches end_turn -> WaitingForInput (no tail-seek loop)");
     }
 
     ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevCfg.empty() ? nullptr : prevCfg.c_str());

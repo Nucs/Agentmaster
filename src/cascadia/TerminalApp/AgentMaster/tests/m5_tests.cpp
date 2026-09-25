@@ -113,6 +113,7 @@ int wmain()
     TestExtractPathsFromText();
     TestInferWorkingDirectory();
     TestConversationLineage();
+    TestScannerCatchUp(); // the 2026-09-25 catch-up stall end to end (tests_transcript.cpp)
     TestCompactionLifecycle();
     TestConversationFollowup();
     TestAnalyzeFootprint();
