@@ -22,6 +22,7 @@
 #include "AgentManagerContent.h"
 
 #include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
+#include "AgentCatchLog.h" // AgentLogCaughtException — the path-picker geometry's guarded steps (Rule #18: never a bare catch)
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
@@ -880,8 +881,25 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _pathPickerUserDismissed = false; // opening clears the dismiss latch
+        _LayoutPathPicker(); // anchor under the box + size against the window (the width rule + the 90%-of-height cap)
+        _RebuildPathPicker();
+        _pathPopup.IsOpen(true);
+    }
 
-        // Anchor the popup just under the cwd box (left-aligned with it). Capture its left edge in
+    // Agentmaster: the drop-down's geometry (contract on the declaration). Three independent steps —
+    // anchor, width, height cap — each guarded on its own, so a failed read keeps that step's previous
+    // value without skipping the others. Runs at every open and on a (deferred) window resize while open.
+    void AgentManagerContent::_LayoutPathPicker()
+    {
+        if (!_pathPopup || !_cwdBox)
+        {
+            return;
+        }
+        // The gap between the box's bottom edge and the drop-down's top edge. Shared by the anchor (1)
+        // and the height cap (3): the cap must measure the room below from where the panel really starts.
+        constexpr double kAnchorGapDips = 2.0;
+
+        // 1. Anchor the popup just under the cwd box (left-aligned with it). Capture its left edge in
         // _root coordinates so the width below can be measured against the window's right edge.
         double leftInRoot = 0.0;
         try
@@ -890,27 +908,121 @@ namespace winrt::TerminalApp::implementation
             const auto pt = xform.TransformPoint(Point{ 0.0f, static_cast<float>(_cwdBox.ActualHeight()) });
             leftInRoot = static_cast<double>(pt.X);
             _pathPopup.HorizontalOffset(leftInRoot);
-            _pathPopup.VerticalOffset(static_cast<double>(pt.Y) + 2.0);
+            _pathPopup.VerticalOffset(static_cast<double>(pt.Y) + kAnchorGapDips);
         }
         catch (...)
         {
+            // Rule #18: the popup keeps its previous offsets (a stale anchor still opens a usable list),
+            // but the failure is recorded instead of vanishing.
+            ::Agentmaster::AgentLogCaughtException(L"_LayoutPathPicker anchor");
         }
 
+        // 2. Width.
         if (_pathPanelBorder)
         {
-            // Width is set EXPLICITLY here, not left to content/MaxWidth: the rows are short folder
-            // leaf names, so a MaxWidth cap alone never grows the panel (it sizes to content and sits
-            // at the floor). Instead the panel fills from its left anchor out to 10% short of the
-            // window's right edge, with a readable floor when the window is narrow. The cwd box width
-            // is the lower bound so it's never narrower than the box it drops from.
-            const double minWidth = std::max<double>(560.0, _cwdBox.ActualWidth());
-            const double rootWidth = _root ? _root.ActualWidth() : 0.0;
-            const double rightLimit = rootWidth * 0.9; // leave a 10% gap on the window's right edge
-            const double width = std::max<double>(minWidth, rightLimit - leftInRoot);
-            _pathPanelBorder.Width(width);
+            try
+            {
+                // Width is set EXPLICITLY here, not left to content/MaxWidth: the rows are short folder
+                // leaf names, so a MaxWidth cap alone never grows the panel (it sizes to content and sits
+                // at the floor). Instead the panel fills from its left anchor out to 10% short of the
+                // window's right edge, with a readable floor when the window is narrow. The cwd box width
+                // is the lower bound so it's never narrower than the box it drops from.
+                const double minWidth = std::max<double>(560.0, _cwdBox.ActualWidth());
+                const double rootWidth = _root ? _root.ActualWidth() : 0.0;
+                const double rightLimit = rootWidth * 0.9; // leave a 10% gap on the window's right edge
+                const double width = std::max<double>(minWidth, rightLimit - leftInRoot);
+                _pathPanelBorder.Width(width);
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_LayoutPathPicker width"); // keeps the previous width
+            }
         }
-        _RebuildPathPicker();
-        _pathPopup.IsOpen(true);
+
+        // 3. Height cap: the list grows with its rows up to 90% of the WINDOW's height, never past the
+        // window's bottom edge. The cap lives on the scroller (_pathScroll.MaxHeight) — a short list stays
+        // short; a long one scrolls inside the cap.
+        if (_pathScroll && _pathPanelBorder && _root)
+        {
+            try
+            {
+                constexpr double kMaxWindowFraction = 0.9; // the drop-down takes up to 90% of the window's height
+                constexpr double kBottomGapDips = 8.0; // keeps the panel's rounded bottom edge visibly inside the window
+                constexpr double kMinPanelDips = 120.0; // ~Browse… + a section header + two rows
+
+                // "The window" is the XAML island: it fills the client area at (0,0), so XamlRoot().Size()
+                // is the window's client size in DIPs (tab row included — _root's own height is not), and
+                // TransformToVisual(nullptr) yields positions in those same coordinates. A missing island
+                // (not laid out yet) keeps the current cap rather than guessing.
+                const auto xamlRoot = _root.XamlRoot();
+                const double windowHeight = xamlRoot ? static_cast<double>(xamlRoot.Size().Height) : 0.0;
+                if (windowHeight > 0.0)
+                {
+                    const auto boxBottom = _cwdBox.TransformToVisual(nullptr).TransformPoint(Point{ 0.0f, static_cast<float>(_cwdBox.ActualHeight()) });
+                    const double panelTop = static_cast<double>(boxBottom.Y) + kAnchorGapDips;
+                    // Both limits, the tighter wins: 90% of the window, and the room left below the box.
+                    // The room limit matters because the popup is CLIPPED at the window edge, and a clipped
+                    // list strands its last rows (and its scrollbar's lower end) where no scroll can reach.
+                    const double roomBelow = windowHeight - panelTop - kBottomGapDips;
+                    const double panelMax = std::max<double>(kMinPanelDips, std::min<double>(windowHeight * kMaxWindowFraction, roomBelow));
+                    // The Border's padding + edge sit between the panel's outside and the scroller, so the
+                    // scroller's own cap is the panel cap minus that chrome (read live, never hard-coded).
+                    const auto pad = _pathPanelBorder.Padding();
+                    const auto edge = _pathPanelBorder.BorderThickness();
+                    const double chrome = pad.Top + pad.Bottom + edge.Top + edge.Bottom;
+                    _pathScroll.MaxHeight(std::max<double>(0.0, panelMax - chrome));
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_LayoutPathPicker height"); // keeps the previous cap
+            }
+        }
+    }
+
+    // Agentmaster: a window resize while the drop-down is open re-fits it on the NEXT tick (contract on
+    // the declaration). Called from _root's SizeChanged — a layout pass, which is exactly why the re-fit
+    // itself must not run here.
+    void AgentManagerContent::_QueuePathPickerRelayout()
+    {
+        try
+        {
+            if (_pathPickerRelayoutQueued || !_dispatcher || !_pathPopup || !_pathPopup.IsOpen())
+            {
+                return; // closed (the next open re-fits) or a re-fit is already queued (coalesced)
+            }
+            _pathPickerRelayoutQueued = true;
+            const bool queued = _dispatcher.TryEnqueue([weak = get_weak()]() {
+                auto self = weak.get();
+                if (!self)
+                {
+                    return; // the Manager content was torn down before the tick ran
+                }
+                try
+                {
+                    self->_pathPickerRelayoutQueued = false; // BEFORE the re-fit: a resize after its reads queues another
+                    if (self->_pathPopup && self->_pathPopup.IsOpen())
+                    {
+                        self->_LayoutPathPicker();
+                    }
+                }
+                catch (...)
+                {
+                    // Nothing may escape a dispatcher callback (it would take the window down); the list
+                    // keeps its previous geometry and the next resize/open re-fits.
+                    ::Agentmaster::AgentLogCaughtException(L"_QueuePathPickerRelayout tick");
+                }
+            });
+            if (!queued)
+            {
+                _pathPickerRelayoutQueued = false; // the dispatcher is shutting down with the window: re-arm, never latch
+            }
+        }
+        catch (...)
+        {
+            _pathPickerRelayoutQueued = false; // re-arm: a latch stuck true would freeze the open list's size
+            ::Agentmaster::AgentLogCaughtException(L"_QueuePathPickerRelayout");
+        }
     }
 
     void AgentManagerContent::_ClosePathPicker()

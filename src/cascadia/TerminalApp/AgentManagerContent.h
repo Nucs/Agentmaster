@@ -451,8 +451,36 @@ namespace winrt::TerminalApp::implementation
         // subfolders of the current path; clicking a row drives the box and re-lists. When the
         // box holds a bare token with NO root path (e.g. "agent"), the recent section instead
         // becomes case-insensitive fuzzy MATCHES ranked by Levenshtein closeness (closest first).
+        // Its size tracks the WINDOW (_LayoutPathPicker): out to 90% of the pane width, and as tall
+        // as its rows need up to 90% of the window's height.
         void _OpenPathPicker();
         void _ClosePathPicker();
+        // Agentmaster: anchor the drop-down under the cwd box and size it against the CURRENT window —
+        // the width rule (from the box's left edge out to 90% of the pane width, 560-DIP floor) plus the
+        // HEIGHT CAP: the list grows with its rows up to 90% of the window's height, but never past the
+        // window's bottom edge (less an 8-DIP gap). Why both height limits: the list starts below the tab
+        // row + toolbar, so on a short window a full 90% would run off the bottom, and an overflowing
+        // popup is CLIPPED — its last rows AND the lower end of its scrollbar land outside the window,
+        // where they can't be scrolled into view at all. So the bottom-edge clamp wins on a short window;
+        // a 120-DIP floor (~Browse… + a header + two rows) only overrides it on a window too short to fit
+        // even that. "Window" = the XAML island (XamlRoot().Size() — it fills the client area, tab row
+        // included, which _root's own height is not), measured in the island coordinates
+        // TransformToVisual(nullptr) yields. No parameters, no return value. Never throws: the anchor,
+        // width and height steps are guarded one by one and log via AgentLogCaughtException (Rule #18),
+        // each keeping its previous value, so one failed read can neither skip the other steps nor escape
+        // into the GotFocus / dispatcher caller. ⚠ It reads LIVE layout: never call it synchronously from
+        // a SizeChanged / LayoutUpdated handler (mid-pass geometry is stale, and mutating a parented
+        // Popup inside a layout pass is the E_LAYOUTCYCLE fail-fast the tab-strip tag badges hit) — go
+        // through _QueuePathPickerRelayout instead.
+        void _LayoutPathPicker();
+        // Agentmaster: re-fit the OPEN drop-down to a resized window on the next dispatcher tick (via
+        // _LayoutPathPicker). A no-op while the list is closed (every open re-fits anyway) or while a
+        // re-fit is already queued, so a drag-resize's burst of SizeChanged events costs at most one
+        // re-fit per tick. Deferred on purpose — see _LayoutPathPicker's ⚠. No parameters, no return
+        // value. Never throws: a failed enqueue (the dispatcher shutting down with the window) is logged
+        // and RE-ARMS the queued latch — a latch left stuck would silently stop the open list from ever
+        // following the window size again.
+        void _QueuePathPickerRelayout();
         void _RebuildPathPicker();
         void _PickPath(const std::wstring& dir);
         void _NormalizeCwdBox(); // platform-sensitive NormPath of the cwd box (on commit / blur / pick / launch)
@@ -934,9 +962,20 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Border _cwdUnderline{ nullptr }; // Agentmaster: validation underline (green=found session id, red=missing dir / unknown id, hidden=neutral)
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _pathPopup{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Border _pathPanelBorder{ nullptr };
+        // Agentmaster: the drop-down list's scroller. Its MaxHeight IS the list's height cap (the Border
+        // around it adds only fixed padding + a 1-DIP edge): seeded 380 at build, then re-capped by
+        // _LayoutPathPicker at every open and window resize (up to 90% of the window height). Write the cap
+        // ONLY there — a fixed value set anywhere else would quietly win until the next open.
+        winrt::Windows::UI::Xaml::Controls::ScrollViewer _pathScroll{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _pathListHost{ nullptr };
         std::vector<std::wstring> _recentDirs; // MRU of launched working dirs (persisted)
         bool _pathPickerUserDismissed{ false }; // Esc/Enter/blur dismiss the picker; (re)focusing/tapping the box clears it
+        // Agentmaster: true while a deferred window-resize re-fit of the open drop-down is queued
+        // (_QueuePathPickerRelayout) — coalesces a drag-resize's SizeChanged burst to one re-fit per tick.
+        // Cleared by the queued tick BEFORE it re-fits (so a resize landing after its reads still queues
+        // another) and on a failed enqueue; if it ever stuck true, the open list would stop following the
+        // window size.
+        bool _pathPickerRelayoutQueued{ false };
         winrt::Windows::UI::Xaml::Controls::TextBox _addPromptBox{ nullptr };
         // Agentmaster (prompt history): navigation state for the compose box's Up/Down recall.
         // _promptHistoryIndex == -1 means "not navigating" (the live draft); 0 == the newest sent

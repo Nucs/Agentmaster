@@ -1049,6 +1049,10 @@ namespace winrt::TerminalApp::implementation
                 _root.SizeChanged([this](const IInspectable&, const SizeChangedEventArgs& e) {
                     _lastRootWidth = e.NewSize().Width;
                     _ReflowLaunchBar();
+                    // An OPEN path-picker re-fits to the new window size (its width rule + the 90%-of-height
+                    // cap) — queued to the next tick, never done synchronously here: this is a layout pass
+                    // (see _LayoutPathPicker's ⚠). A closed picker costs nothing (every open re-fits anyway).
+                    _QueuePathPickerRelayout();
                 });
             }
 
@@ -1956,10 +1960,11 @@ namespace winrt::TerminalApp::implementation
             auto sv = ScrollViewer{};
             sv.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
             sv.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
-            sv.MaxHeight(380);
+            sv.MaxHeight(380); // seed only: _LayoutPathPicker re-caps it at every open + window resize (up to 90% of the window height)
             sv.AllowFocusOnInteraction(false); // scrollbar drags mustn't steal focus from the box either
             sv.IsTabStop(false); // ...and the scroll viewer must never become the focused element itself
             sv.Content(_pathListHost);
+            _pathScroll = sv; // kept so _LayoutPathPicker can re-cap the list's height against the window
 
             _pathPanelBorder = Border{};
             _pathPanelBorder.Background(Fill(0xFF, 0x20, 0x20, 0x20));
