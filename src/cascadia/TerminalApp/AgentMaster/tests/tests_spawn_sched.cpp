@@ -25,6 +25,9 @@
 #include "../PortableInstall.h" // the portable first-launch INSTALL question - the pure pieces (TestPortableInstall)
 #include "../CmdPathLimit.h" // the PATH-length guard behind the Ctrl+G fix - pure rule + Win32 probe (TestCmdPathLimit)
 
+#include <fstream> // TestHookInvocation reads the materialized settings file back
+#include <iterator> // std::istreambuf_iterator (the same read)
+
 // The updater tests odr-use RunStartupUpdateCheck (the fresh-launch latch-clear check), which pulls
 // ShowUpdatePrompt -> TaskDialogIndirect — imported from comctl32 BY ORDINAL (345), which only
 // exists in comctl32 v6. The APP declares v6 in WindowsTerminal.manifest; the bare harness exe would
@@ -4408,5 +4411,165 @@ void TestCmdPathLimit()
         CHECK(before != 0 && before != 0xFFFFFFFF, "e2e: with the overlong PATH cmd.exe cannot resolve even a System32 command (the Ctrl+G 'exit code 1')");
         CHECK(r.changed && !r.stillOverCmdLimit && r.path == livePath, "e2e: the guard compacts it to the live core");
         CHECK(after == 0, "e2e: with the compacted PATH cmd.exe resolves the command again");
+    }
+}
+
+// Agentmaster (HOOKS.md "Hook invocation" — the 2026-09-25 "hooks at end and launch go till timeout"
+// report): Claude ran every shell-form hook through Git Bash, which sources the user's BASH_ENV first
+// (0.2-0.7 s warm, 6-15 s on its cache rebuild — an 11.6 s SessionStart and a 15.3 s Stop on record), and
+// gave SessionEnd hooks only 1.5 s. The fix: EXEC FORM (PowerShell spawned directly, no shell) for a
+// claude >= 2.1.139, an explicit per-hook timeout (5 s for SessionEnd), and a Stop forwarder that takes the
+// payload's last_assistant_message instead of re-reading the transcript.
+void TestHookInvocation()
+{
+    std::wprintf(L"Hook invocation (exec form, timeouts, version gate, Stop fast path):\n");
+    using ::Agentmaster::json::Value;
+
+    // --- the version gate (pure) ---
+    CHECK(!ClaudeVersionSupportsExecFormHooks(ClaudeFileVersion{ 2, 1, 138, 0 }), "exec gate: 2.1.138 predates hook `args`");
+    CHECK(ClaudeVersionSupportsExecFormHooks(ClaudeFileVersion{ 2, 1, 139, 0 }), "exec gate: 2.1.139 introduced hook `args`");
+    CHECK(ClaudeVersionSupportsExecFormHooks(ClaudeFileVersion{ 2, 1, 282, 0 }), "exec gate: 2.1.282 (this fleet) supports it");
+    CHECK(ClaudeVersionSupportsExecFormHooks(ClaudeFileVersion{ 2, 2, 0, 0 }) && ClaudeVersionSupportsExecFormHooks(ClaudeFileVersion{ 3, 0, 0, 0 }),
+          "exec gate: any later minor / major supports it");
+    CHECK(!ClaudeVersionSupportsExecFormHooks(ClaudeFileVersion{ 2, 0, 999, 0 }) && !ClaudeVersionSupportsExecFormHooks(ClaudeFileVersion{ 1, 9, 999, 0 }),
+          "exec gate: an older minor / major does not, whatever its build number");
+
+    // --- the PE version read ---
+    CHECK(!ReadClaudeFileVersion(L"").has_value(), "version read: an empty path is unknown");
+    CHECK(!ReadClaudeFileVersion(L"C:\\definitely\\not\\here\\claude.exe").has_value(), "version read: a missing file is unknown");
+    {
+        wchar_t sys[MAX_PATH]{};
+        ::GetSystemDirectoryW(sys, MAX_PATH);
+        const auto k32 = ReadClaudeFileVersion(std::wstring{ sys } + L"\\kernel32.dll");
+        CHECK(k32.has_value() && k32->major >= 6, "version read: a real PE VERSIONINFO (kernel32.dll) decodes to its FileVersion");
+    }
+    {
+        // The installed claude.exe, when this box has one: the gate must read its stamp and pick exec form.
+        wchar_t prof[MAX_PATH]{};
+        ::GetEnvironmentVariableW(L"USERPROFILE", prof, MAX_PATH);
+        const std::wstring claudeExe = std::wstring{ prof } + L"\\.local\\bin\\claude.exe";
+        if (::GetFileAttributesW(claudeExe.c_str()) != INVALID_FILE_ATTRIBUTES)
+        {
+            const auto v = ReadClaudeFileVersion(claudeExe);
+            CHECK(v.has_value() && v->major == 2, "version read: the installed claude.exe carries its release version (2.x)");
+            if (v && ClaudeVersionSupportsExecFormHooks(*v))
+            {
+                const auto host = SelectHookExecHost(claudeExe);
+                CHECK(!host.empty(), "exec host: a modern installed claude selects EXEC-form hooks");
+                CHECK(SelectHookExecHost(claudeExe) == host, "exec host: the cached verdict is stable across calls");
+            }
+        }
+        else
+        {
+            std::wprintf(L"  [info] no %%USERPROFILE%%\\.local\\bin\\claude.exe here - the live exec-host pick is skipped\n");
+        }
+    }
+    CHECK(SelectHookExecHost(L"").empty(), "exec host: no launcher known -> classic shell form");
+    CHECK(SelectHookExecHost(L"C:\\definitely\\not\\here\\claude.exe").empty(), "exec host: a missing launcher -> classic shell form");
+    {
+        // Case-insensitive suffix test (the system directory's own casing varies: C:\WINDOWS\system32).
+        const auto endsWithNoCase = [](const std::wstring& s, std::wstring_view suffix) {
+            return s.size() >= suffix.size() &&
+                   ::CompareStringOrdinal(s.c_str() + (s.size() - suffix.size()), static_cast<int>(suffix.size()), suffix.data(), static_cast<int>(suffix.size()), TRUE) == CSTR_EQUAL;
+        };
+        const auto host = ResolveHookHostExe();
+        CHECK(!host.empty() && (endsWithNoCase(host, L"\\powershell.exe") || endsWithNoCase(host, L"\\pwsh.exe")),
+              "exec host: resolves a PowerShell by full path (Windows PowerShell 5.1 on any Windows 10/11)");
+    }
+
+    // Locates hooks.<evt>[0].hooks[0] in a parsed settings document (nullptr when the shape is off).
+    const auto hookOf = [](const Value* root, const wchar_t* evt) -> const Value* {
+        const Value* hooks = root ? root->Find(L"hooks") : nullptr;
+        const Value* list = hooks ? hooks->Find(evt) : nullptr;
+        if (!list || list->type != Value::Type::Arr || list->arr.empty())
+        {
+            return nullptr;
+        }
+        const Value* inner = list->arr[0].Find(L"hooks");
+        if (!inner || inner->type != Value::Type::Arr || inner->arr.empty())
+        {
+            return nullptr;
+        }
+        return &inner->arr[0];
+    };
+    static const wchar_t* const kEvents[] = { L"SessionStart", L"UserPromptSubmit", L"Notification", L"Stop", L"SubagentStop", L"PreCompact", L"PostCompact", L"SessionEnd" };
+
+    // --- EXEC form: PowerShell spawned directly with an args array (no shell, so no Git Bash / BASH_ENV) ---
+    {
+        const std::wstring host = L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+        const std::wstring fwd = L"C:/Users/Some User/.agentmaster/agentmaster-hook.ps1"; // a space: exec form needs no quoting
+        const auto json = BuildHooksSettingsJson(fwd, L"", true, true, host);
+        const auto parsed = ::Agentmaster::json::Parse(json);
+        const Value* root = parsed ? &*parsed : nullptr;
+        const Value* hooks = root ? root->Find(L"hooks") : nullptr;
+        CHECK(hooks && hooks->type == Value::Type::Obj && hooks->members.size() == 8, "exec form: the settings parse with all 8 wired events");
+        bool allExec = true;
+        bool allArgs = true;
+        bool allTimeouts = true;
+        for (const wchar_t* evt : kEvents)
+        {
+            const Value* h = hookOf(root, evt);
+            if (!h || h->StrAt(L"type") != L"command" || h->StrAt(L"command") != host)
+            {
+                allExec = false;
+                continue;
+            }
+            const Value* args = h->Find(L"args");
+            const bool argsOk = args && args->type == Value::Type::Arr && args->arr.size() == 8 && args->arr[0].str == L"-NoProfile" &&
+                                args->arr[1].str == L"-NonInteractive" && args->arr[2].str == L"-ExecutionPolicy" && args->arr[3].str == L"Bypass" &&
+                                args->arr[4].str == L"-File" && args->arr[5].str == fwd && args->arr[6].str == L"-Event" && args->arr[7].str == evt;
+            allArgs = allArgs && argsOk;
+            const Value* to = h->Find(L"timeout");
+            const double want = std::wstring_view{ evt } == L"SessionEnd" ? kSessionEndHookTimeoutSeconds : kHookForwarderTimeoutSeconds;
+            allTimeouts = allTimeouts && to && to->type == Value::Type::Num && to->num == want;
+        }
+        CHECK(allExec, "exec form: every event's command IS the PowerShell host (spawned directly)");
+        CHECK(allArgs, "exec form: every event carries [-NoProfile, -NonInteractive, -ExecutionPolicy, Bypass, -File, <forwarder>, -Event, <Event>] — the path with its space verbatim");
+        CHECK(allTimeouts, "exec form: every hook has its timeout — SessionEnd 5 s (lifts claude's 1.5 s budget), the rest 10 s");
+        CHECK(json.find(L"powershell -NoProfile") == std::wstring::npos, "exec form: no shell command string remains");
+    }
+
+    // --- SHELL form (older claude / unknown version): unchanged command, plus the timeouts ---
+    {
+        const auto json = BuildHooksSettingsJson(L"C:/x/agentmaster-hook.ps1", L"", true, true);
+        const auto parsed = ::Agentmaster::json::Parse(json);
+        const Value* root = parsed ? &*parsed : nullptr;
+        const Value* stop = hookOf(root, L"Stop");
+        const Value* end = hookOf(root, L"SessionEnd");
+        CHECK(stop && stop->StrAt(L"command") == L"powershell -NoProfile -ExecutionPolicy Bypass -File \"C:/x/agentmaster-hook.ps1\" -Event Stop" && stop->Find(L"args") == nullptr,
+              "shell form: the classic command string, no args");
+        const Value* stopTo = stop ? stop->Find(L"timeout") : nullptr;
+        const Value* endTo = end ? end->Find(L"timeout") : nullptr;
+        CHECK(stopTo && stopTo->num == kHookForwarderTimeoutSeconds && endTo && endTo->num == kSessionEndHookTimeoutSeconds,
+              "shell form: the timeouts ride along too (every Claude Code version honors `timeout`)");
+    }
+
+    // --- the Stop forwarder takes the payload's last message before any transcript read ---
+    {
+        const auto fwd = BuildForwarderScript(L"C:\\Users\\x\\.agentmaster-dev");
+        const auto lamAt = fwd.find(L"$lam = $j.last_assistant_message");
+        const auto fastAt = fwd.find(L"if ($Event -eq \"Stop\" -and $null -ne $lam)");
+        const auto tailAt = fwd.find(L"Get-Content -LiteralPath $tp -Tail 60");
+        CHECK(lamAt != std::wstring::npos && fastAt != std::wstring::npos && tailAt != std::wstring::npos && lamAt < fastAt && fastAt < tailAt,
+              "forwarder: Stop reads last_assistant_message first; the 60-line transcript scan is only the fallback");
+        CHECK(fwd.find(L"} elseif ($Event -eq \"Stop\") {") != std::wstring::npos, "forwarder: the transcript scan runs only when the payload lacked the field");
+    }
+
+    // --- MaterializeSharedHookFiles: a launcher it cannot read keeps shell form, and the file carries timeouts ---
+    {
+        std::error_code ec;
+        const auto dir = std::filesystem::temp_directory_path(ec) / L"agentmaster-m5-hook-invocation";
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir, ec);
+        const auto files = MaterializeSharedHookFiles(dir.wstring(), AppSettings{}, L"C:\\definitely\\not\\here\\claude.exe");
+        CHECK(!files.first.empty(), "materialize: the settings file was written");
+        if (!files.first.empty())
+        {
+            std::ifstream f(std::filesystem::path{ files.first }, std::ios::binary);
+            const std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            CHECK(bytes.find("\"timeout\": 5") != std::string::npos && bytes.find("\"timeout\": 10") != std::string::npos && bytes.find("\"args\"") == std::string::npos,
+                  "materialize: an unreadable launcher keeps shell form, with the SessionEnd + per-hook timeouts");
+        }
+        std::filesystem::remove_all(dir, ec);
     }
 }

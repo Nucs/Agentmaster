@@ -41,6 +41,11 @@
     <ClCompile Include="..\SessionScanner.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <!-- HOOKS.md "Transcript watcher": SessionScanner.cpp constructs the watcher in Start(), so the
+         CLI must link it even though it never runs a scanner (a LINK dependency, like CommandWatch). -->
+    <ClCompile Include="..\TranscriptWatcher.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\CommandWatch.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

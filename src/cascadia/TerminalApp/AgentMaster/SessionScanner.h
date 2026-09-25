@@ -18,6 +18,15 @@
 // the loop SLEEPS on a condvar at zero cost when nothing is live — a registry observer Wake()s
 // it the instant a session goes live.
 //
+// EVENT-DRIVEN (HOOKS.md "Transcript watcher", the 2026-09-25 35%-of-a-core finding): a
+// TranscriptWatcher holds ONE ReadDirectoryChangesW watch on <claude config>\projects (subtree on).
+// It answers "where is this session's transcript" from an index instead of walking every project
+// folder, tells each pass WHICH sessions' files changed (so an unchanged cold session costs no stat
+// and no side-folder walk), and Wake()s the worker the moment a transcript is appended. Sessions whose
+// tail can DEMOTE them (Running / NeedsApproval / a sent-but-unechoed prompt) keep their per-pass
+// stat as a belt, and every other session is re-stat'ed on a slow resync; if the watch cannot be
+// established the scanner simply polls as it always did.
+//
 // Plain C++ + Win32 (no WinRT), like the rest of AgentMaster/, so it is unit-testable standalone.
 // The transcript parse is a PURE function (ParseTranscriptDelta); the thread wraps it with the
 // filesystem read, the registry writes, and the liveness fan-out. The liveness CHECK itself is
@@ -45,6 +54,7 @@ namespace Agentmaster
 {
     class SessionRegistry;
     class CommandWatch; // COMMANDS.md — the slash-command binding/await engine the scanner feeds
+    class TranscriptWatcher; // HOOKS.md "Transcript watcher" — the ReadDirectoryChangesW change feed (TranscriptWatcher.h)
 
     // --- cadence + bound tunables (see DecideAdvance-style separation: values are explicit) ---
     inline constexpr int64_t kScanRunningMs = 300; // a turn is in progress: poll quickly
@@ -60,6 +70,86 @@ namespace Agentmaster
     inline constexpr int64_t kScanSubagentFreshMs = 15000; // a SUBAGENT/tool-result side file written within this window == the turn is actively working inside a Task/Agent subagent (the parent <id>.jsonl is quiescent) -> hold/synthesize Running (SubagentActivityUnixMs, ProcessInspect)
     inline constexpr int64_t kScanExternalWorkGraceMs = 20000; // "OUTLIVED the turn" proof margin: external work counts as OUTLIVING a FINISHED/aborted turn only when it postdates the parent transcript's last write by MORE than this — separating genuinely ongoing background work (an in-process TEAMMATE / a run_in_background Agent writing subagents/*.jsonl for minutes-hours after the lead's end_turn; a live SHELL job keeping presence "shell"/"busy") from turn-tail RESIDUE (a classic subagent's final flush lands us-before end_turn and post-Esc dying subagents keep flushing up to kScanSubagentFreshMs; "busy" lingers a ~2s S-lane tick after a real Stop). Must exceed kScanSubagentFreshMs so an interrupted turn's dying flushes can NEVER read as outliving it (the 291 MB-log oscillation class)
     static_assert(kScanExternalWorkGraceMs > kScanSubagentFreshMs, "outlive margin must exceed the dying-subagent flush window, or post-Esc residue promotes Waiting->Running and oscillates against recon-stop");
+
+    // --- the TranscriptWatcher-driven refresh (HOOKS.md "Transcript watcher") ---
+    // A COLD session (see ScanNeedsFreshTail) is re-stat'ed and has its side folders re-walked only when the
+    // watcher reports a change for it — plus this slow resync, the belt against a notification that never
+    // came (a writer that holds its handle open without flushing produces none until it does).
+    inline constexpr int64_t kScanColdResyncMs = 30000;
+    // A HOT session's side-folder activity (SubagentActivityUnixMs) is re-walked on a watcher change or at
+    // least this often. Its transcript stat stays per-pass; the side folders only feed the quiescence clock,
+    // whose shortest floor (kScanStopQuiescenceMs, 2 s) this belt stays well inside.
+    inline constexpr int64_t kScanHotSideRefreshMs = 1000;
+    // With NO healthy watcher (no projects folder yet, an access error), an unresolved session retries the
+    // classic every-project-folder walk (ResolveClaudeTranscriptPath) at most this often instead of every
+    // pass. That walk was 28% of the scanner's time on the 60-session release fleet.
+    inline constexpr int64_t kScanResolveRetryMs = 3000;
+    // With a healthy watcher, an unresolved session cross-checks the index against the classic walk at most
+    // this often — the belt against an index bug (a hit is logged as "[watch] index missed").
+    inline constexpr int64_t kScanIndexCrossCheckMs = 60000;
+    // The minimum gap between two passes, even when woken. A burst of wakes (registry notifies from dozens of
+    // sessions, watcher batches) collapses into ONE follow-up pass instead of back-to-back passes.
+    inline constexpr int64_t kScanMinPassGapMs = 100;
+
+    // PURE: must this pass re-stat the session's transcript (GetFileAttributesEx), or may it reuse the
+    // cached size + last-write time from the last stat?
+    //   watcherHealthy  — the TranscriptWatcher's index is authoritative (false => the classic every-pass stat).
+    //   statValid       — a cached stat exists for the current path.
+    //   epochChanged    — the watcher re-indexed since the cached stat (start / overflow / a re-opened watch).
+    //   seqChanged      — the watcher saw a change to this session's transcript since the cached stat.
+    //   hot             — ScanNeedsFreshTail: the session's tail can DEMOTE it, so it keeps a per-pass stat.
+    //   sinceLastStatMs — ms since the cached stat was taken (the cold resync).
+    // Returns true when any of those says the cache may be stale; false only for a cold, unchanged session
+    // inside its resync window. Never throws.
+    inline bool ShouldRefreshTranscriptStat(bool watcherHealthy, bool statValid, bool epochChanged, bool seqChanged, bool hot, int64_t sinceLastStatMs) noexcept
+    {
+        if (!watcherHealthy || !statValid || epochChanged || seqChanged || hot)
+        {
+            return true;
+        }
+        return sinceLastStatMs >= kScanColdResyncMs;
+    }
+
+    // PURE: must this pass re-walk the session's side folders (SubagentActivityUnixMs — two directory
+    // enumerations), or may it reuse the cached newest side-file write?
+    //   watcherHealthy  — as above (false => the classic every-pass walk).
+    //   sideValid       — a cached value exists for the current path.
+    //   epochChanged    — the watcher re-indexed since the cached walk.
+    //   seqChanged      — the watcher saw a change under this session's subagents/ or tool-results/.
+    //   hot             — ScanNeedsFreshTail (its belt is kScanHotSideRefreshMs, not the cold resync).
+    //   sinceLastScanMs — ms since the cached walk.
+    // Returns true when the cache may be stale. Never throws.
+    inline bool ShouldRefreshSideActivity(bool watcherHealthy, bool sideValid, bool epochChanged, bool seqChanged, bool hot, int64_t sinceLastScanMs) noexcept
+    {
+        if (!watcherHealthy || !sideValid || epochChanged || seqChanged)
+        {
+            return true;
+        }
+        return sinceLastScanMs >= (hot ? kScanHotSideRefreshMs : kScanColdResyncMs);
+    }
+
+    // PURE: is this session HOT — can a stale view of its transcript tail make a synth act WRONGLY on it?
+    // True while a turn can still be DEMOTED from the tail (Running / NeedsApproval: recon-stop, the
+    // presence-idle release, recon-block and recon-error all read the tail's quiet time), and while a sent
+    // prompt awaits its echo (the lost-send verdict fails it 15 s after delivery unless the echo line is read).
+    // A cold session's synths only PROMOTE on new lines, so a late notification can at worst delay them.
+    //   s — the pass snapshot of the session.
+    // Returns true for a hot session (it keeps the classic per-pass stat). Never throws.
+    inline bool ScanNeedsFreshTail(const SessionInfo& s) noexcept
+    {
+        if (s.state == SessionState::Running || s.state == SessionState::NeedsApproval)
+        {
+            return true;
+        }
+        for (const auto& p : s.queue)
+        {
+            if (p.status == PromptStatus::Sent && !p.echoed)
+            {
+                return true; // an unacknowledged delivery: its echo must be read the moment it lands
+            }
+        }
+        return false;
+    }
 
     // PURE + total (the 2026-08-14 stuck-Running WEDGE, session 6434e5f8): what to do when a delta
     // window read found NO newline. A SINGLE transcript line can outgrow the 1 MiB read window — a
@@ -1104,12 +1194,21 @@ namespace Agentmaster
     {
     public:
         explicit SessionScanner(std::shared_ptr<SessionRegistry> registry);
+        // Stops the worker and the transcript watcher (Stop()). Defined in the .cpp, where TranscriptWatcher
+        // is a complete type (the unique_ptr member needs it). Never throws.
         ~SessionScanner();
 
         SessionScanner(const SessionScanner&) = delete;
         SessionScanner& operator=(const SessionScanner&) = delete;
 
+        // Start the worker thread, and before it the TranscriptWatcher on ClaudeProjectsDir() (HOOKS.md
+        // "Transcript watcher") — its change callback is this scanner's Wake(). A watcher that cannot start
+        // (the OS refused its thread/event) is logged and skipped: the scanner then polls exactly as it did
+        // before the watcher existed. Idempotent. Throws std::system_error only if the WORKER thread cannot
+        // be created (the engine's init net catches it).
         void Start();
+        // Stop the worker (join) and then the watcher, in that order: the worker reads the watcher on every
+        // pass, and the watcher's callback only ever touches Wake(). Idempotent. Never throws.
         void Stop() noexcept;
 
         // Break the idle wait early (e.g. a session just went live). Wired to a registry observer
@@ -1154,6 +1253,27 @@ namespace Agentmaster
         struct ScanState
         {
             std::wstring path; // resolved transcript path ("" until found / after it vanishes)
+            // Agentmaster (HOOKS.md "Transcript watcher"): the CACHED stat of `path` — reused while the watcher
+            // reports no change for a cold session (ShouldRefreshTranscriptStat), so an unchanged session costs
+            // no GetFileAttributesEx. The seen* stamps record the watcher state the stat covers; they are taken
+            // BEFORE the stat, so a change landing after it bumps the sequence again and re-stats next pass.
+            bool statValid{ false }; // a stat of the CURRENT path is cached
+            int64_t statSize{ 0 }; // the transcript's size at that stat
+            int64_t statWriteUnixMs{ 0 }; // its last-write time at that stat (Unix ms) — every quiet-time computation reads this
+            int64_t lastStatMs{ 0 }; // when that stat was taken (the cold resync clock)
+            uint64_t seenStatEpoch{ 0 }; // watcher epoch the stat covers
+            uint64_t seenTranscriptSeq{ 0 }; // watcher transcript sequence the stat covers
+            // The CACHED newest side-file write (SubagentActivityUnixMs: subagents/ + tool-results/), with the
+            // same watcher bookkeeping (ShouldRefreshSideActivity).
+            bool sideValid{ false };
+            int64_t subagentActivityMs{ 0 };
+            int64_t lastSideScanMs{ 0 };
+            uint64_t seenSideEpoch{ 0 };
+            uint64_t seenSideSeq{ 0 };
+            // When the classic every-project-folder resolve may run next for this unresolved session: the
+            // retry back-off with no healthy watcher (kScanResolveRetryMs), the index cross-check with one
+            // (kScanIndexCrossCheckMs). 0 == now.
+            int64_t nextResolveMs{ 0 };
             int64_t offset{ 0 }; // BYTE offset already consumed (only complete lines advance it)
             int64_t lastSize{ -1 }; // file size stamped by the last read — the cheap change-gate, paired with readReachedEnd (ShouldReadTranscriptDelta): alone it froze a window-capped catch-up
             std::wstring lastAssistantText; // latest assistant text seen (for the missed-Stop question)
@@ -1304,6 +1424,12 @@ namespace Agentmaster
 
         // COMMANDS.md: the slash-command binding/await engine (set once before Start; may be null).
         std::shared_ptr<CommandWatch> _commandWatch;
+
+        // HOOKS.md "Transcript watcher": the ReadDirectoryChangesW change feed over <claude config>\projects.
+        // Created by Start() BEFORE the worker thread (the thread creation is the happens-before for the
+        // worker's unsynchronized reads of the pointer), stopped + destroyed by Stop() AFTER the worker has
+        // joined. Null when it could not start — every use then falls back to the classic polling.
+        std::unique_ptr<TranscriptWatcher> _watcher;
 
         // Waiting-for-you -> Idle timeout in minutes (see SetWaitingDecayMinutes). The default
         // mirrors AppSettings::waitingForYouTimeoutMinutes (3 days) so the behavior holds even before the seed lands.

@@ -7,6 +7,12 @@
 
 #include <windows.h>
 #include <objbase.h> // CoCreateGuid
+#include <winver.h> // GetFileVersionInfoW / VerQueryValueW — the claude.exe FileVersion behind the exec-form hook gate
+
+// Agentmaster (HOOKS.md "Hook invocation"): ReadClaudeFileVersion's GetFileVersionInfo* live in
+// version.lib. Linked from HERE (the Updater.h #pragma idiom) because every binary that compiles this
+// TU — TerminalApp.dll, the m5 test harness, agentmaster-cli — would otherwise need its own link edit.
+#pragma comment(lib, "version.lib")
 
 #include <atomic> // Agentmaster (perf): AgentmasterStateDir's rate-limited directory re-assert
 #include <cstdio>
@@ -357,8 +363,8 @@ function NoteFwdDrop([string]$why) {
 }
 try {
   # Hook FIRE time (unix ms, UTC) - stamped FIRST, before stdin/transcript work, so the wire
-  # `ts` field orders events even when this forwarder runs slow (the Stop path reads the
-  # transcript below). Matches C++ NowMs(); see HookWire.h + NextSessionStateOrdered.
+  # `ts` field orders events even when this forwarder runs slow (an older claude's Stop path
+  # still reads the transcript below). Matches C++ NowMs(); see HookWire.h + NextSessionStateOrdered.
   $ts = [string][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   # The payload is UTF-8 JSON (claude writes it that way) - so it is DECODED as UTF-8, explicitly,
   # from the raw stdin stream. [Console]::In decodes with the CONSOLE input code page (OEM 437/862/...,
@@ -440,7 +446,17 @@ try {
       if ($j.message) { $m = [string]$j.message }
       if ($m -match "(?i)permission|approve|allow|grant") { $perm = "1" }
     }
-    if ($Event -eq "Stop") {
+    # Stop's question flag. Claude Code >= 2.1.47 hands the final assistant text IN the payload
+    # (last_assistant_message - "avoids the need to read and parse the transcript file"), so a modern
+    # Stop never touches the transcript: that tail scan parsed up to 60 JSON lines per turn end while
+    # claude WAITED on this hook. The scan survives only for an older claude whose payload lacks the
+    # field (absent reads as $null here; an empty string is a real "no text" answer and stays "0").
+    $lam = $null
+    if ($Event -eq "Stop") { $lam = $j.last_assistant_message }
+    if ($Event -eq "Stop" -and $null -ne $lam) {
+      $lamTxt = ([string]$lam).TrimEnd()
+      if ($lamTxt.EndsWith("?")) { $isQ = "1" }
+    } elseif ($Event -eq "Stop") {
       $tp = ""
       if ($j.transcript_path) { $tp = [string]$j.transcript_path }
       if ((-not [string]::IsNullOrEmpty($tp)) -and (Test-Path -LiteralPath $tp)) {
@@ -514,13 +530,33 @@ try {
         return script;
     }
 
-    std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath, std::wstring_view model, bool includeCoAuthoredBy, bool skipPermissions)
+    std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath, std::wstring_view model, bool includeCoAuthoredBy, bool skipPermissions, std::wstring_view execHost)
     {
         const auto base = std::wstring{ L"powershell -NoProfile -ExecutionPolicy Bypass -File \"" } + std::wstring{ forwarderPath } + L"\"";
 
+        // One hook entry per event (HOOKS.md "Hook invocation"). Both forms carry an explicit `timeout`:
+        // SessionEnd's is what lifts claude's 1.5 s SessionEnd budget (the "hooks at end go till timeout"
+        // report), everyone else's bounds a wedged forwarder to seconds instead of claude's 10-minute default.
         const auto block = [&](std::wstring_view evt) -> std::wstring {
+            const int timeoutSeconds = (evt == L"SessionEnd") ? kSessionEndHookTimeoutSeconds : kHookForwarderTimeoutSeconds;
+            const std::wstring timeout = L", \"timeout\": " + std::to_wstring(timeoutSeconds);
+            if (!execHost.empty())
+            {
+                // EXEC FORM: claude spawns the PowerShell host DIRECTLY with these arguments — no shell. On
+                // Windows the shell is Git Bash, and a non-interactive bash sources the user's BASH_ENV before
+                // it runs anything: 0.2-0.7 s warm, 6-15 s when that environment rebuilds its cache (measured on
+                // this fleet: an 11.6 s SessionStart and a 15.3 s Stop, both with the BASH_ENV cache-miss
+                // error in stderr). Each argument is its own JSON string, so a path with spaces or quotes
+                // needs no shell quoting at all. -NonInteractive: a forwarder must never wait on a prompt.
+                const std::wstring args = L"[ \"-NoProfile\", \"-NonInteractive\", \"-ExecutionPolicy\", \"Bypass\", \"-File\", \"" +
+                                          JsonEscape(forwarderPath) + L"\", \"-Event\", \"" + JsonEscape(evt) + L"\" ]";
+                return L"    \"" + std::wstring{ evt } + L"\": [ { \"hooks\": [ { \"type\": \"command\", \"command\": \"" + JsonEscape(execHost) +
+                       L"\", \"args\": " + args + timeout + L" } ] } ]";
+            }
+            // SHELL FORM (claude < 2.1.139, or no readable version / no PowerShell host): the classic
+            // command string, which every Claude Code version runs through its shell.
             const auto cmd = base + L" -Event " + std::wstring{ evt };
-            return L"    \"" + std::wstring{ evt } + L"\": [ { \"hooks\": [ { \"type\": \"command\", \"command\": \"" + JsonEscape(cmd) + L"\" } ] } ]";
+            return L"    \"" + std::wstring{ evt } + L"\": [ { \"hooks\": [ { \"type\": \"command\", \"command\": \"" + JsonEscape(cmd) + L"\"" + timeout + L" } ] } ]";
         };
 
         std::wstring json = L"{\n  \"hooks\": {\n";
@@ -1806,7 +1842,7 @@ try {
         }
     }
 
-    std::pair<std::wstring, std::wstring> MaterializeSharedHookFiles(const std::wstring& stateDir, const AppSettings& settings)
+    std::pair<std::wstring, std::wstring> MaterializeSharedHookFiles(const std::wstring& stateDir, const AppSettings& settings, std::wstring_view claudeExePath)
     {
         const std::wstring forwarderPath = stateDir + L"\\agentmaster-hook.ps1";
         const std::wstring settingsPath = stateDir + L"\\hooks-settings.json";
@@ -1824,7 +1860,11 @@ try {
         {
             return { std::wstring{}, std::wstring{} };
         }
-        if (!WriteFileUtf8(settingsPath, BuildHooksSettingsJson(forwarderFwd, settings.model, settings.includeCoAuthoredBy, settings.skipPermissions)))
+        // HOOKS.md "Hook invocation": exec form (PowerShell spawned directly, no Git Bash / BASH_ENV) for a
+        // claude that supports it, else the classic shell form. Decided per write because this file is
+        // shared: whichever claude starts next snapshots it (hooks are captured at claude's start).
+        const std::wstring execHost = SelectHookExecHost(claudeExePath);
+        if (!WriteFileUtf8(settingsPath, BuildHooksSettingsJson(forwarderFwd, settings.model, settings.includeCoAuthoredBy, settings.skipPermissions, execHost)))
         {
             return { std::wstring{}, std::wstring{} };
         }
@@ -3293,6 +3333,141 @@ send - nothing is submitted until the user presses Enter in that tab.
         return {};
     }
 
+    bool ClaudeVersionSupportsExecFormHooks(const ClaudeFileVersion& v) noexcept
+    {
+        // Exec-form hooks (`args`) shipped in Claude Code 2.1.139. Compare major, then minor, then build;
+        // the fourth PE component carries no Claude Code meaning.
+        constexpr uint32_t kMajor = 2;
+        constexpr uint32_t kMinor = 1;
+        constexpr uint32_t kBuild = 139;
+        if (v.major != kMajor)
+        {
+            return v.major > kMajor;
+        }
+        if (v.minor != kMinor)
+        {
+            return v.minor > kMinor;
+        }
+        return v.build >= kBuild;
+    }
+
+    std::optional<ClaudeFileVersion> ReadClaudeFileVersion(std::wstring_view exePath)
+    {
+        if (exePath.empty())
+        {
+            return std::nullopt;
+        }
+        try
+        {
+            const std::wstring path{ exePath };
+            DWORD handle = 0;
+            const DWORD size = ::GetFileVersionInfoSizeW(path.c_str(), &handle);
+            if (size == 0)
+            {
+                return std::nullopt; // missing file, or no VERSIONINFO resource (a shim / custom build)
+            }
+            std::vector<unsigned char> data(size);
+            if (!::GetFileVersionInfoW(path.c_str(), 0, size, data.data()))
+            {
+                return std::nullopt;
+            }
+            VS_FIXEDFILEINFO* fixed = nullptr;
+            UINT fixedLen = 0;
+            if (!::VerQueryValueW(data.data(), L"\\", reinterpret_cast<void**>(&fixed), &fixedLen) || fixed == nullptr ||
+                fixedLen < sizeof(VS_FIXEDFILEINFO) || fixed->dwSignature != 0xFEEF04BD)
+            {
+                return std::nullopt; // no root block, or a malformed one (the signature guards a garbage read)
+            }
+            ClaudeFileVersion v;
+            v.major = HIWORD(fixed->dwFileVersionMS);
+            v.minor = LOWORD(fixed->dwFileVersionMS);
+            v.build = HIWORD(fixed->dwFileVersionLS);
+            v.revision = LOWORD(fixed->dwFileVersionLS);
+            return v;
+        }
+        catch (...)
+        {
+            // Only the version buffer allocation can throw (a corrupt size near 4 GB). An unreadable
+            // version keeps the classic shell-form hooks, which every Claude Code version runs.
+            LogSwallowedException(L"ReadClaudeFileVersion");
+            return std::nullopt;
+        }
+    }
+
+    std::wstring ResolveHookHostExe()
+    {
+        // Windows PowerShell 5.1 first: always present on Windows 10/11, and the forwarder's quickest,
+        // steadiest start (measured on this fleet: ~0.21-0.40 s vs pwsh 7's ~0.29-0.69 s). The forwarder
+        // is written for 5.1 anyway (its BOM + ASCII body exist for 5.1's parser).
+        wchar_t sys[MAX_PATH];
+        const UINT n = ::GetSystemDirectoryW(sys, MAX_PATH);
+        if (n > 0 && n < MAX_PATH)
+        {
+            std::wstring cand{ sys, n };
+            if (cand.back() != L'\\' && cand.back() != L'/')
+            {
+                cand.push_back(L'\\');
+            }
+            cand += L"WindowsPowerShell\\v1.0\\powershell.exe";
+            const DWORD attr = ::GetFileAttributesW(cand.c_str());
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            {
+                return cand;
+            }
+        }
+        // A trimmed Windows without 5.1 (rare): take whatever PowerShell the session host uses — pwsh.exe
+        // on PATH first, and ResolvePwshLauncher itself falls back to System32 (already missed above).
+        return ResolvePwshLauncher();
+    }
+
+    std::wstring SelectHookExecHost(std::wstring_view claudeExePath)
+    {
+        if (claudeExePath.empty())
+        {
+            return {}; // no launcher known here (claude not detected / an init-time write): classic shell form
+        }
+        // The version read maps a ~240 MB image, and this runs on EVERY spawn, so cache the verdict per
+        // (path, size, last-write time). The native installer REPLACES claude.exe in place when it updates
+        // (2.1.280 -> 2.1.282 happened mid-session on this fleet), and the new write time re-reads it.
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        const std::wstring path{ claudeExePath };
+        if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+        {
+            return {}; // the launcher vanished — the spawn will surface that; hooks stay on shell form
+        }
+        const uint64_t size = (static_cast<uint64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+        const uint64_t write = (static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) | fad.ftLastWriteTime.dwLowDateTime;
+
+        struct Cache
+        {
+            std::wstring path;
+            uint64_t size{};
+            uint64_t write{};
+            std::wstring host; // the decided exec host ("" == shell form)
+            bool valid{ false };
+        };
+        static std::mutex s_mtx;
+        static Cache s_cache;
+        std::lock_guard lk{ s_mtx };
+        if (s_cache.valid && s_cache.size == size && s_cache.write == write &&
+            ::CompareStringOrdinal(s_cache.path.c_str(), -1, path.c_str(), -1, TRUE) == CSTR_EQUAL) // filesystem-aware (Rule #8): case-variant spellings are one file
+        {
+            return s_cache.host;
+        }
+        const auto version = ReadClaudeFileVersion(path);
+        std::wstring host;
+        if (version && ClaudeVersionSupportsExecFormHooks(*version))
+        {
+            host = ResolveHookHostExe();
+        }
+        s_cache = Cache{ path, size, write, host, true };
+        // One line per decision change (engine init + each claude update), so hooks.log says which form the
+        // next sessions snapshot — the first thing to check when hooks look slow again.
+        const std::wstring ver = version ? (std::to_wstring(version->major) + L"." + std::to_wstring(version->minor) + L"." + std::to_wstring(version->build)) : std::wstring{ L"unknown" };
+        AppendStateLog(L"hooks.log", L"[hooks] claude " + ver + L" -> " + (host.empty() ? std::wstring{ L"SHELL-form hooks (runs through claude's shell: Git Bash + BASH_ENV on Windows)" } : (L"EXEC-form hooks via " + host)) + L"\n");
+        return host;
+    }
+
     std::wstring BuildPwshHostedCommandline(std::wstring_view pwshLauncher, std::wstring_view innerCommandline)
     {
         // The pwsh script: invoke the inner command line via the call operator (&) so a QUOTED exe
@@ -4227,7 +4402,8 @@ send - nothing is submitted until the user presses Enter in that tab.
                                                    NewSessionId();
 
         const auto stateDir = AgentmasterStateDir();
-        auto [settingsPath, forwarderPath] = MaterializeSharedHookFiles(stateDir, settings);
+        // The launcher picks the hook invocation (exec form for claude >= 2.1.139 — HOOKS.md "Hook invocation").
+        auto [settingsPath, forwarderPath] = MaterializeSharedHookFiles(stateDir, settings, claudeLauncher);
         spec.settingsPath = settingsPath;
         spec.forwarderPath = forwarderPath;
 
@@ -4269,7 +4445,8 @@ send - nothing is submitted until the user presses Enter in that tab.
         spec.sessionId = std::wstring{ sessionId }; // ALWAYS keep the conversation id (no re-key)
 
         const auto stateDir = AgentmasterStateDir();
-        auto [settingsPath, forwarderPath] = MaterializeSharedHookFiles(stateDir, settings);
+        // Same hook-invocation choice as BuildClaudeSpawn (the relaunched claude snapshots this file at start).
+        auto [settingsPath, forwarderPath] = MaterializeSharedHookFiles(stateDir, settings, claudeLauncher);
         spec.settingsPath = settingsPath;
         spec.forwarderPath = forwarderPath;
 

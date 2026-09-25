@@ -13,6 +13,7 @@
 #include "Scheduler.h" // DecideLostSend — the lost-send verdict this reconcile pass applies (DELIVERY_PLAN.md R1)
 #include "SessionRegistry.h"
 #include "TranscriptStore.h" // IsNoiseUserPrompt — keep control markers out of the Auto-Testing back-fill
+#include "TranscriptWatcher.h" // HOOKS.md "Transcript watcher" — the ReadDirectoryChangesW change feed that replaces per-pass polling
 
 #include <windows.h>
 
@@ -538,6 +539,24 @@ namespace Agentmaster
         {
             return;
         }
+        // HOOKS.md "Transcript watcher": the change feed comes up BEFORE the worker, so the worker's very first
+        // pass can already ask it (it answers "not healthy yet" until its first index lands a moment later,
+        // and the pass polls meanwhile). Its callback is Wake(): an append becomes a pass NOW instead of on the
+        // next poll tick. A watcher that cannot start costs nothing but the old polling.
+        if (const std::wstring projects = ClaudeProjectsDir(); !projects.empty())
+        {
+            try
+            {
+                auto watcher = std::make_unique<TranscriptWatcher>(projects);
+                watcher->Start([this]() { Wake(); });
+                _watcher = std::move(watcher);
+            }
+            catch (...)
+            {
+                // Forensics (Rule #18): the OS refused the watcher's thread or event. Keep scanning without it.
+                LogSwallowedException(L"SessionScanner::Start (transcript watcher)");
+            }
+        }
         _thread = std::thread([this]() noexcept { _worker(); });
     }
 
@@ -554,6 +573,14 @@ namespace Agentmaster
             {
                 _thread.join();
             }
+        }
+        // The worker is gone, so nothing reads the watcher any more: stop it (it cancels + drains its pending
+        // read before closing) and release it. Outside the _running guard so a watcher whose worker failed to
+        // start is still torn down.
+        if (_watcher)
+        {
+            _watcher->Stop();
+            _watcher.reset();
         }
     }
 
@@ -605,6 +632,16 @@ namespace Agentmaster
             {
                 return;
             }
+            // COALESCE (HOOKS.md "Transcript watcher"): never start the next pass sooner than kScanMinPassGapMs
+            // after this one, even when woken. The registry notifies on every hook of every session and the
+            // watcher on every append batch; with dozens of live sessions those wakes used to chain passes back
+            // to back. Only Stop() cuts the gap short; a Wake() landing inside it is kept (_woken) and makes the
+            // wait below return at once.
+            _cv.wait_for(lk, std::chrono::milliseconds(kScanMinPassGapMs), [this] { return !_running.load(); });
+            if (!_running.load())
+            {
+                return;
+            }
             if (sleepMs < 0)
             {
                 // Nothing live: sleep at zero cost until Wake()/Stop().
@@ -612,7 +649,10 @@ namespace Agentmaster
             }
             else
             {
-                _cv.wait_for(lk, std::chrono::milliseconds(sleepMs), [this] { return !_running.load() || _woken; });
+                // The gap already counted toward the cadence, so the adaptive tick (300 ms Running / 2.5 s idle)
+                // is unchanged.
+                const int64_t rest = sleepMs > kScanMinPassGapMs ? sleepMs - kScanMinPassGapMs : 0;
+                _cv.wait_for(lk, std::chrono::milliseconds(rest), [this] { return !_running.load() || _woken; });
             }
             _woken = false;
             if (!_running.load())
@@ -633,7 +673,11 @@ namespace Agentmaster
         // retired: the Fleet Observer's out-of-band PEB correlation subsumes it — O7.)
         const bool armed = _discoverArmed.load();
 
-        const auto sessions = _registry->Snapshot();
+        // LIVE sessions only (SnapshotLive): every use below — the reconcile loop, the cursor cleanup, the
+        // turn-in-flight probe — looks at live sessions alone, and the full Snapshot() deep-copied every
+        // record the profile ever held (1,348 on the 2026-09-25 release fleet, each with its prompt history)
+        // on every pass, i.e. several times a second while anything ran.
+        const auto sessions = _registry->SnapshotLive();
 
         bool anyLive = false;
         bool anyRunning = false;
@@ -736,22 +780,74 @@ namespace Agentmaster
     void SessionScanner::_reconcileSession(const SessionInfo& s)
     {
         ScanState& st = _scan[s.id];
+        const int64_t passNow = NowMs();
+        // HOOKS.md "Transcript watcher": what the change feed knows about this session. Taken ONCE, BEFORE any
+        // stat below, so the sequences a refresh records describe a state no later than what it reads. A
+        // change landing mid-pass bumps them again and the next pass refreshes. No watcher (or not yet
+        // indexed) reads as unhealthy, which is the classic poll-everything behavior.
+        const TranscriptWatchStamp watch = _watcher ? _watcher->Stamp(s.id) : TranscriptWatchStamp{};
         if (st.path.empty())
         {
-            st.path = ResolveClaudeTranscriptPath(s.id);
+            if (watch.healthy)
+            {
+                // The index answers from memory. "" is AUTHORITATIVE (no transcript exists yet: never prompted);
+                // the transcript's creation arrives as a notification that re-wakes this scanner.
+                st.path = _watcher->Resolve(s.id);
+                if (st.path.empty() && passNow >= st.nextResolveMs)
+                {
+                    // Belt, not a hot path: once a minute per still-unresolved session, check the index against
+                    // the classic walk. A hit means the index missed a file, so log it for the next investigation.
+                    st.nextResolveMs = passNow + kScanIndexCrossCheckMs;
+                    if (std::wstring walked = ResolveClaudeTranscriptPath(s.id); !walked.empty())
+                    {
+                        AppendStateLog(L"scanner.log", L"[watch] index missed " + s.id + L" (found by the folder walk: " + walked + L")\n");
+                        st.path = std::move(walked);
+                    }
+                }
+            }
+            else if (passNow >= st.nextResolveMs)
+            {
+                // No healthy watcher: the classic walk over every project folder, but BACKED OFF for a session
+                // that has no transcript yet. It used to run every 300 ms pass for each never-prompted session
+                // and was 28% of the scanner's time on the release fleet.
+                st.path = ResolveClaudeTranscriptPath(s.id);
+                if (st.path.empty())
+                {
+                    st.nextResolveMs = passNow + kScanResolveRetryMs;
+                }
+            }
             if (st.path.empty())
             {
                 return; // no transcript yet (never prompted) — nothing to tail
             }
+            st.statValid = false; // a newly resolved path: nothing cached describes it
+            st.sideValid = false;
         }
 
-        WIN32_FILE_ATTRIBUTE_DATA fad{};
-        if (!::GetFileAttributesExW(st.path.c_str(), GetFileExInfoStandard, &fad))
+        // HOT sessions keep the classic per-pass stat (their tail can demote them); COLD ones reuse the cached
+        // stat until the watcher reports a change or the slow resync comes due (ShouldRefreshTranscriptStat).
+        const bool hot = ScanNeedsFreshTail(s);
+        if (ShouldRefreshTranscriptStat(watch.healthy, st.statValid, watch.epoch != st.seenStatEpoch, watch.transcriptSeq != st.seenTranscriptSeq, hot, passNow - st.lastStatMs))
         {
-            st.path.clear(); // vanished / rotated -> re-resolve next pass
-            return;
+            st.seenStatEpoch = watch.epoch;
+            st.seenTranscriptSeq = watch.transcriptSeq;
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (!::GetFileAttributesExW(st.path.c_str(), GetFileExInfoStandard, &fad))
+            {
+                st.path.clear(); // vanished / rotated -> re-resolve next pass
+                st.statValid = false;
+                st.sideValid = false;
+                return;
+            }
+            st.statSize = (static_cast<int64_t>(fad.nFileSizeHigh) << 32) | static_cast<int64_t>(fad.nFileSizeLow);
+            st.statWriteUnixMs = FiletimeToUnixMs(fad.ftLastWriteTime);
+            st.statValid = true;
+            st.lastStatMs = passNow;
         }
-        const int64_t size = (static_cast<int64_t>(fad.nFileSizeHigh) << 32) | static_cast<int64_t>(fad.nFileSizeLow);
+        const int64_t size = st.statSize;
+        // The transcript's last write (the stat above, or the cached one while nothing changed): every quiet-time
+        // and freshness computation below reads THIS, exactly as it used to read the per-pass stat.
+        const int64_t lastWriteMs = st.statWriteUnixMs;
 
         if (size < st.offset)
         {
@@ -832,7 +928,7 @@ namespace Agentmaster
         // prompt back-fill, and the echo bookkeeping stays push-owned, so a late real
         // UserPromptSubmit lands on Running -> Running, a no-op). The re-Get mirrors the
         // missed-Stop's freshest-state re-check: a real hook that landed mid-pass wins.
-        if (ShouldSynthesizeRunning(s.state, consumedTurnEvent, wasPrimed, st.lastStopReason, NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime)))
+        if (ShouldSynthesizeRunning(s.state, consumedTurnEvent, wasPrimed, st.lastStopReason, NowMs() - lastWriteMs))
         {
             const auto fresh = _registry->Get(s.id);
             // Agentmaster (the stuck-Error report — session 2b34b07f, 2026-08-07): Error is one of the
@@ -870,7 +966,7 @@ namespace Agentmaster
         // type-ahead queue accounting (++queuedPrompts) and could strand the next real Stop as Running.
         // The re-Get mirrors the other synths' freshest-state re-check, so a real hook that landed
         // mid-pass wins.
-        if (ShouldSynthesizeResumed(s.state, consumedTurnEvent, wasPrimed, st.pendingInteractiveTool, st.lastStopReason, st.interrupted, NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime), st.answeredInteractive))
+        if (ShouldSynthesizeResumed(s.state, consumedTurnEvent, wasPrimed, st.pendingInteractiveTool, st.lastStopReason, st.interrupted, NowMs() - lastWriteMs, st.answeredInteractive))
         {
             const auto fresh = _registry->Get(s.id);
             if (fresh && fresh->state == SessionState::NeedsApproval)
@@ -959,9 +1055,20 @@ namespace Agentmaster
         // and a "busy" heartbeat forces quietForMs to 0 (claude says it is working — never synthesize
         // a turn-end). With neither signal present this is exactly the prior parent-only value, so a
         // genuinely idle session reconciles unchanged.
-        const int64_t parentWriteMs = FiletimeToUnixMs(fad.ftLastWriteTime);
+        const int64_t parentWriteMs = lastWriteMs;
         const int64_t parentQuietMs = NowMs() - parentWriteMs;
-        const int64_t subagentActivityMs = SubagentActivityUnixMs(st.path);
+        // HOOKS.md "Transcript watcher": the side-folder walk (two directory enumerations) runs only when the
+        // watcher saw a change under this session's subagents/ or tool-results/, or the belt comes due
+        // (ShouldRefreshSideActivity). Before, every live session paid it on every pass.
+        if (ShouldRefreshSideActivity(watch.healthy, st.sideValid, watch.epoch != st.seenSideEpoch, watch.sideSeq != st.seenSideSeq, hot, passNow - st.lastSideScanMs))
+        {
+            st.seenSideEpoch = watch.epoch;
+            st.seenSideSeq = watch.sideSeq;
+            st.subagentActivityMs = SubagentActivityUnixMs(st.path);
+            st.sideValid = true;
+            st.lastSideScanMs = passNow;
+        }
+        const int64_t subagentActivityMs = st.subagentActivityMs;
         const bool presenceWorking = PresenceIsWorking(s.presenceStatus); // "busy" OR a live "shell" job (claude's own heartbeat)
         const bool subagentActive = subagentActivityMs > 0 && (NowMs() - subagentActivityMs) <= kScanSubagentFreshMs;
         // Agentmaster (work that OUTLIVES the turn — teammates / background agents / shells): external
@@ -1058,7 +1165,7 @@ namespace Agentmaster
         // Error -> Running at 14:59:51.152 and this arm — state read fresh (no longer Error, so the
         // idempotence arm passed) but transcript evidence still ending at the 14:58 error line — re-fired
         // recon-error 38ms later, re-asserting a red card over a genuinely running retry turn.
-        const int64_t tailWriteMs = FiletimeToUnixMs(fad.ftLastWriteTime);
+        const int64_t tailWriteMs = lastWriteMs;
         // tailCurrent: an error line consumed MID-catch-up is history, not the tail — never Error off it.
         if (tailCurrent && ShouldSynthesizeError(s.state, errorIsActiveLeaf, quietForMs, s.turns.lastPromptUnixMs, tailWriteMs))
         {

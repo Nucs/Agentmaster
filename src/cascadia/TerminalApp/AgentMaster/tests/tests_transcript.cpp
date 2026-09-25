@@ -5666,3 +5666,230 @@ void TestCompactionLifecycle()
         std::filesystem::remove_all(std::filesystem::path{ presDir }, ec);
     }
 }
+
+// Polls `pred` every 20 ms until it holds or `budgetMs` elapses — the live-watcher assertions wait on a
+// background thread's notification (measured ~0.4 ms for Claude's write shape; the budget is generous so a
+// loaded CI box cannot flake). Returns the predicate's final value.
+static bool WaitUntil(const std::function<bool()>& pred, int budgetMs)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+    for (;;)
+    {
+        if (pred())
+        {
+            return true;
+        }
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+}
+
+// Agentmaster (HOOKS.md "Transcript watcher" — the 2026-09-25 35%-of-a-core scanner): the pure path
+// classification, the pure index bookkeeping, the scanner's refresh predicates, and a REAL
+// ReadDirectoryChangesW watcher on a scratch tree (subtree on) that must index what exists before it starts,
+// follow creates / appends / side files / deletes / folder renames, report per-session change sequences, and
+// stay unhealthy (the scanner then polls) on a root that does not exist.
+void TestTranscriptWatcher()
+{
+    std::wprintf(L"Transcript watcher (ReadDirectoryChangesW over projects\\, subtree) + the scanner's refresh gates:\n");
+
+    // --- ClassifyProjectsRelativePath (pure) ---
+    {
+        const auto t = ClassifyProjectsRelativePath(L"C--proj\\11111111-2222-3333-4444-555555555555.jsonl");
+        CHECK(t.kind == ProjectsPathKind::Transcript && t.projectDir == L"C--proj" && t.sessionId == L"11111111-2222-3333-4444-555555555555" &&
+                  t.fileName == L"11111111-2222-3333-4444-555555555555.jsonl",
+              "watch classify: <proj>\\<id>.jsonl is a transcript named by its stem");
+        const auto up = ClassifyProjectsRelativePath(L"C--proj\\ABCDEF00-2222-3333-4444-555555555555.JSONL");
+        CHECK(up.kind == ProjectsPathKind::Transcript && up.sessionId == L"abcdef00-2222-3333-4444-555555555555" &&
+                  up.fileName == L"ABCDEF00-2222-3333-4444-555555555555.JSONL",
+              "watch classify: the id is lowercased (the key), the file name keeps its case (the path)");
+        const auto slash = ClassifyProjectsRelativePath(L"C--proj/abc.jsonl");
+        CHECK(slash.kind == ProjectsPathKind::Transcript && slash.sessionId == L"abc", "watch classify: a forward slash separates too");
+        const auto sub = ClassifyProjectsRelativePath(L"C--proj\\ABC\\subagents\\agent-a1.jsonl");
+        CHECK(sub.kind == ProjectsPathKind::SideFile && sub.sessionId == L"abc", "watch classify: <proj>\\<id>\\subagents\\... is side activity of <id>");
+        const auto tr = ClassifyProjectsRelativePath(L"C--proj\\abc\\tool-results\\toolu_1.txt");
+        CHECK(tr.kind == ProjectsPathKind::SideFile && tr.sessionId == L"abc", "watch classify: <proj>\\<id>\\tool-results\\... is side activity of <id>");
+        const auto sideDir = ClassifyProjectsRelativePath(L"C--proj\\abc");
+        CHECK(sideDir.kind == ProjectsPathKind::SideFile && sideDir.sessionId == L"abc", "watch classify: the <id> side folder itself is side activity");
+        const auto proj = ClassifyProjectsRelativePath(L"C--proj");
+        CHECK(proj.kind == ProjectsPathKind::ProjectDir && proj.projectDir == L"C--proj", "watch classify: a single component is a project folder");
+        CHECK(ClassifyProjectsRelativePath(L"stray.jsonl").kind == ProjectsPathKind::Ignored, "watch classify: a .jsonl directly under projects\\ is not a transcript (the folder walk never looked there)");
+        CHECK(ClassifyProjectsRelativePath(L"C--proj\\abc\\memory\\x.md").kind == ProjectsPathKind::Ignored, "watch classify: deeper non-side content is ignored");
+        CHECK(ClassifyProjectsRelativePath(L"").kind == ProjectsPathKind::Ignored, "watch classify: an empty name is ignored");
+        CHECK(ClassifyProjectsRelativePath(L"C--proj\\.jsonl").kind != ProjectsPathKind::Transcript, "watch classify: a bare '.jsonl' has no stem, so it is not a transcript");
+        const auto dbl = ClassifyProjectsRelativePath(L"C--proj\\\\abc.jsonl\\");
+        CHECK(dbl.kind == ProjectsPathKind::Transcript && dbl.sessionId == L"abc", "watch classify: doubled / trailing separators are tolerated");
+    }
+
+    // --- TranscriptIndex (pure bookkeeping) ---
+    {
+        const std::wstring root = L"R:\\projects";
+        TranscriptIndex ix;
+        uint64_t ts = 0;
+        uint64_t ss = 0;
+        ix.SequencesFor(L"s1", ts, ss);
+        CHECK(ts == 0 && ss == 0 && ix.Resolve(L"s1").empty(), "watch index: an id never seen resolves to nothing, sequences 0/0");
+
+        CHECK(ix.Apply(ProjectsChangeAction::Added, L"P1\\s1.jsonl", root).empty(), "watch index: a transcript ADD needs no folder walk");
+        CHECK(ix.Resolve(L"s1") == L"R:\\projects\\P1\\s1.jsonl" && ix.Resolve(L"S1") == L"R:\\projects\\P1\\s1.jsonl", "watch index: ADD indexes root\\proj\\file, looked up case-insensitively");
+        ix.SequencesFor(L"s1", ts, ss);
+        const uint64_t afterAdd = ts;
+        CHECK(afterAdd > 0 && ss == 0 && ix.TranscriptCount() == 1, "watch index: ADD bumps the transcript sequence only");
+
+        ix.Apply(ProjectsChangeAction::Modified, L"P1\\s1.jsonl", root);
+        ix.SequencesFor(L"s1", ts, ss);
+        CHECK(ts > afterAdd && ix.Resolve(L"s1") == L"R:\\projects\\P1\\s1.jsonl" && ix.TranscriptCount() == 1, "watch index: an append (MODIFIED) bumps the sequence, keeps the path");
+
+        ix.Apply(ProjectsChangeAction::Modified, L"P2\\s2.jsonl", root);
+        CHECK(ix.Resolve(L"s2") == L"R:\\projects\\P2\\s2.jsonl", "watch index: a MODIFIED for a never-added file indexes it (a missed ADD is recovered, not dropped)");
+
+        ix.Apply(ProjectsChangeAction::Modified, L"P1\\s1\\subagents\\agent-x.jsonl", root);
+        uint64_t ts2 = 0;
+        uint64_t ss2 = 0;
+        ix.SequencesFor(L"s1", ts2, ss2);
+        CHECK(ts2 == ts && ss2 > 0, "watch index: side activity bumps ONLY the side sequence");
+
+        // The same id in two project folders (a resumed conversation copied across cwds): the pick is the
+        // case-insensitively smallest path, the order the legacy NTFS walk met its first match in.
+        ix.Apply(ProjectsChangeAction::Added, L"a-first\\s1.jsonl", root);
+        CHECK(ix.Resolve(L"s1") == L"R:\\projects\\a-first\\s1.jsonl" && ix.TranscriptCount() == 3, "watch index: a duplicate id resolves to the case-insensitively first folder");
+        ix.Apply(ProjectsChangeAction::Removed, L"a-first\\s1.jsonl", root);
+        CHECK(ix.Resolve(L"s1") == L"R:\\projects\\P1\\s1.jsonl" && ix.TranscriptCount() == 2, "watch index: removing that copy falls back to the other");
+
+        // Renames: the old name leaves, the new one arrives.
+        ix.Apply(ProjectsChangeAction::RenamedOld, L"P2\\s2.jsonl", root);
+        ix.Apply(ProjectsChangeAction::RenamedNew, L"P2\\s2b.jsonl", root);
+        CHECK(ix.Resolve(L"s2").empty() && ix.Resolve(L"s2b") == L"R:\\projects\\P2\\s2b.jsonl", "watch index: a rename moves the index from the old id to the new one");
+
+        // Folder-level events: removal drops every transcript inside; creation asks the caller to walk it;
+        // the folder's own last-write MODIFIED (every child change moves it) is ignored.
+        CHECK(ix.Apply(ProjectsChangeAction::Modified, L"P1", root).empty() && ix.Resolve(L"s1") == L"R:\\projects\\P1\\s1.jsonl",
+              "watch index: a project folder's MODIFIED record changes nothing");
+        CHECK(ix.Apply(ProjectsChangeAction::Added, L"P9", root) == L"P9", "watch index: a created project folder is handed back for a walk");
+        CHECK(ix.Apply(ProjectsChangeAction::RenamedNew, L"P8", root) == L"P8", "watch index: a folder renamed IN is handed back for a walk (its files report nothing)");
+        ix.SequencesFor(L"s1", ts, ss);
+        ix.Apply(ProjectsChangeAction::Removed, L"p1", root); // case-insensitive folder match
+        uint64_t tsGone = 0;
+        uint64_t ssGone = 0;
+        ix.SequencesFor(L"s1", tsGone, ssGone);
+        CHECK(ix.Resolve(L"s1").empty() && tsGone > ts, "watch index: a removed project folder drops its transcripts (and bumps their sequences)");
+
+        // A full re-index clears paths but must never REUSE a sequence the scanner already recorded.
+        ix.Apply(ProjectsChangeAction::Added, L"P3\\s3.jsonl", root);
+        ix.SequencesFor(L"s3", ts, ss);
+        ix.ClearPaths();
+        uint64_t tsClr = 0;
+        uint64_t ssClr = 0;
+        ix.SequencesFor(L"s3", tsClr, ssClr);
+        CHECK(ix.TranscriptCount() == 0 && ix.Resolve(L"s3").empty() && tsClr > ts, "watch index: ClearPaths empties the index and keeps sequences counting");
+        CHECK(ix.Apply(ProjectsChangeAction::Added, L"stray.jsonl", root).empty() && ix.TranscriptCount() == 0, "watch index: ignored names change nothing");
+    }
+
+    // --- the scanner's refresh predicates (pure) ---
+    {
+        // Unhealthy / no cache / an epoch or sequence change / a HOT session => refresh (the classic per-pass stat).
+        CHECK(ShouldRefreshTranscriptStat(false, true, false, false, false, 0), "stat gate: no healthy watcher -> stat every pass (the old behavior)");
+        CHECK(ShouldRefreshTranscriptStat(true, false, false, false, false, 0), "stat gate: nothing cached -> stat");
+        CHECK(ShouldRefreshTranscriptStat(true, true, true, false, false, 0), "stat gate: the watcher re-indexed -> stat");
+        CHECK(ShouldRefreshTranscriptStat(true, true, false, true, false, 0), "stat gate: the watcher saw a change -> stat");
+        CHECK(ShouldRefreshTranscriptStat(true, true, false, false, true, 0), "stat gate: a HOT session keeps its per-pass stat");
+        CHECK(!ShouldRefreshTranscriptStat(true, true, false, false, false, kScanColdResyncMs - 1), "stat gate: a cold, unchanged session reuses its cached stat");
+        CHECK(ShouldRefreshTranscriptStat(true, true, false, false, false, kScanColdResyncMs), "stat gate: ...until the cold resync comes due");
+        CHECK(ShouldRefreshSideActivity(false, true, false, false, false, 0) && ShouldRefreshSideActivity(true, false, false, false, false, 0) &&
+                  ShouldRefreshSideActivity(true, true, true, false, false, 0) && ShouldRefreshSideActivity(true, true, false, true, false, 0),
+              "side gate: unhealthy / uncached / re-indexed / changed -> walk the side folders");
+        CHECK(!ShouldRefreshSideActivity(true, true, false, false, true, kScanHotSideRefreshMs - 1) && ShouldRefreshSideActivity(true, true, false, false, true, kScanHotSideRefreshMs),
+              "side gate: a HOT session's belt is kScanHotSideRefreshMs");
+        CHECK(!ShouldRefreshSideActivity(true, true, false, false, false, kScanColdResyncMs - 1) && ShouldRefreshSideActivity(true, true, false, false, false, kScanColdResyncMs),
+              "side gate: a COLD session's belt is the cold resync");
+        SessionInfo s = MakeSession(L"hot-probe", SessionState::Idle);
+        CHECK(!ScanNeedsFreshTail(s), "hot: an Idle session with no pending delivery is cold");
+        s.state = SessionState::Running;
+        CHECK(ScanNeedsFreshTail(s), "hot: Running is hot (recon-stop / presence-idle / recon-block read its tail)");
+        s.state = SessionState::NeedsApproval;
+        CHECK(ScanNeedsFreshTail(s), "hot: NeedsApproval is hot");
+        s.state = SessionState::WaitingForInput;
+        QueuedPrompt p;
+        p.status = PromptStatus::Sent;
+        p.echoed = false;
+        s.queue.push_back(p);
+        CHECK(ScanNeedsFreshTail(s), "hot: a sent-but-unechoed prompt makes a Waiting session hot (the lost-send verdict must read the echo line)");
+        s.queue.back().echoed = true;
+        CHECK(!ScanNeedsFreshTail(s), "hot: once echoed, the Waiting session is cold again");
+    }
+
+    // --- the live watcher on a scratch tree ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring root = std::wstring{ tmp } + L"am_watch_" + std::to_wstring(::GetCurrentProcessId()) + L"\\projects";
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path{ root }.parent_path(), ec);
+        std::filesystem::create_directories(std::filesystem::path{ root } / L"C--pre", ec);
+        const std::wstring pre = root + L"\\C--pre\\aaaaaaaa-0000-4000-8000-000000000001.jsonl";
+        MakeJsonl(pre, "{\"type\":\"user\"}\n", NowMsTest(), NowMsTest());
+
+        std::atomic<int> wakes{ 0 };
+        TranscriptWatcher w{ root };
+        w.Start([&wakes]() { wakes.fetch_add(1); });
+        const bool healthy = WaitUntil([&] { return w.Healthy(); }, 5000);
+        CHECK(healthy, "live watch: the watcher comes up healthy on an existing projects folder");
+        CHECK(w.Resolve(L"aaaaaaaa-0000-4000-8000-000000000001") == pre, "live watch: a transcript that existed BEFORE Start is in the initial index");
+        CHECK(WaitUntil([&] { return wakes.load() > 0; }, 2000), "live watch: the initial index announces itself (the scanner re-checks everything)");
+
+        // A brand-new project folder and transcript (Claude's first prompt in a new cwd).
+        std::filesystem::create_directories(std::filesystem::path{ root } / L"C--new", ec);
+        const std::wstring fresh = root + L"\\C--new\\bbbbbbbb-0000-4000-8000-000000000002.jsonl";
+        MakeJsonl(fresh, "{\"type\":\"user\"}\n", NowMsTest(), NowMsTest());
+        CHECK(WaitUntil([&] { return w.Resolve(L"bbbbbbbb-0000-4000-8000-000000000002") == fresh; }, 3000),
+              "live watch: a transcript created after Start (in a new project folder) is indexed");
+
+        // An append (open, append, close — Claude's write shape) bumps the transcript sequence.
+        const auto before = w.Stamp(L"bbbbbbbb-0000-4000-8000-000000000002");
+        AppendJsonl(fresh, "{\"type\":\"assistant\"}\n", NowMsTest());
+        CHECK(WaitUntil([&] { return w.Stamp(L"bbbbbbbb-0000-4000-8000-000000000002").transcriptSeq > before.transcriptSeq; }, 3000),
+              "live watch: an append bumps the session's transcript sequence");
+        CHECK(w.Stamp(L"bbbbbbbb-0000-4000-8000-000000000002").healthy, "live watch: the stamp reports the watch healthy");
+
+        // A subagent side file bumps the SIDE sequence (and not the transcript's).
+        const auto beforeSide = w.Stamp(L"bbbbbbbb-0000-4000-8000-000000000002");
+        std::filesystem::create_directories(std::filesystem::path{ root } / L"C--new" / L"bbbbbbbb-0000-4000-8000-000000000002" / L"subagents", ec);
+        MakeJsonl(root + L"\\C--new\\bbbbbbbb-0000-4000-8000-000000000002\\subagents\\agent-a1.jsonl", "{\"x\":1}\n", NowMsTest(), NowMsTest());
+        CHECK(WaitUntil([&] { return w.Stamp(L"bbbbbbbb-0000-4000-8000-000000000002").sideSeq > beforeSide.sideSeq; }, 3000),
+              "live watch: a nested subagents\\ file bumps the session's side sequence (subtree watch)");
+
+        // A deleted transcript leaves the index.
+        std::filesystem::remove(std::filesystem::path{ pre }, ec);
+        CHECK(WaitUntil([&] { return w.Resolve(L"aaaaaaaa-0000-4000-8000-000000000001").empty(); }, 3000), "live watch: a deleted transcript leaves the index");
+
+        // A project folder RENAMED with content inside: only the folder reports, so the watcher must walk it.
+        const std::wstring moved = root + L"\\C--moved\\bbbbbbbb-0000-4000-8000-000000000002.jsonl";
+        // NTFS refuses to rename a folder while any file under it is open, and an antivirus scan of the files
+        // just written can hold one for a moment, so the fixture retries briefly instead of flaking.
+        const bool renamed = WaitUntil([&] { return ::MoveFileW((root + L"\\C--new").c_str(), (root + L"\\C--moved").c_str()) != FALSE; }, 3000);
+        CHECK(renamed, "live watch: fixture — the project folder was renamed");
+        CHECK(WaitUntil([&] { return w.Resolve(L"bbbbbbbb-0000-4000-8000-000000000002") == moved; }, 3000),
+              "live watch: a renamed project folder re-points its transcripts (the folder is walked, not just the records)");
+
+        w.Stop();
+        CHECK(!w.Healthy(), "live watch: a stopped watcher is not healthy (the scanner falls back to polling)");
+        std::filesystem::remove_all(std::filesystem::path{ root }.parent_path(), ec);
+    }
+
+    // --- a root that does not exist: the watcher stays unhealthy and stops cleanly ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring missing = std::wstring{ tmp } + L"am_watch_missing_" + std::to_wstring(::GetCurrentProcessId()) + L"\\projects";
+        TranscriptWatcher w{ missing };
+        w.Start({});
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        CHECK(!w.Healthy() && !w.Stamp(L"x").healthy, "missing root: the watcher is unhealthy, so the scanner keeps its classic lookups");
+        const auto t0 = std::chrono::steady_clock::now();
+        w.Stop();
+        CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2), "missing root: Stop() interrupts the retry back-off at once");
+    }
+}

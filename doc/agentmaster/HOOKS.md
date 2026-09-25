@@ -161,6 +161,108 @@ the pre-fix script delivers cp437 mojibake, the fixed one the exact prompt. `Tes
 (`tests_invisible.cpp`) pins the script shape + the BOM on disk. The prompt text itself then goes
 through the invisible-character compare key before any echo match (`DELIVERY.md` §15).
 
+## Hook invocation — exec form, timeouts, the Stop fast path
+
+**The 2026-09-25 report: "hooks at end and launch go till timeout".** Three things made a forwarder
+run slow, and claude WAITS on most of them (`SessionStart` before the first prompt, `UserPromptSubmit`
+before the prompt is sent, `Stop` before the turn ends, `PreCompact` before compacting):
+
+1. **Claude runs a shell-form hook through its shell, and on Windows that shell is Git Bash.** A
+   non-interactive bash sources `$BASH_ENV` before it runs anything. On this machine that is the
+   user's `~/.claude/bash-env.sh`, which rebuilds a cache every 30 minutes: measured **0.2–0.7 s warm
+   and 6–15 s on a rebuild**, paid by every forwarder run. Claude's own hook records in the
+   transcripts show it: a **SessionStart of 11.6 s** (2026-09-23 04:23) and a **Stop of 15.3 s**
+   (2026-09-23 15:01), both with `bash-env.sh: line 81: …/.env-cached-win-…: No such file or
+   directory` in their stderr (the cache-miss branch).
+2. **SessionEnd gets 1.5 s in total.** Claude (≥ 2.1.74) gives the whole SessionEnd phase 1.5 s
+   unless some SessionEnd hook declares a longer `timeout`; then it takes the largest, capped at
+   60 s (`CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` overrides both). Nothing declared one, so a
+   forwarder behind a Git Bash start was cancelled mid-flight, and so were the user's own
+   SessionEnd hooks.
+3. **The Stop forwarder re-read the transcript.** It parsed up to 60 JSONL lines of the tail on
+   every turn end, only to learn whether the last assistant text ends in `?`.
+
+**The fix** (`ClaudeSpawn.{h,cpp}`):
+
+- **Exec form** (`BuildHooksSettingsJson`'s `execHost`). Claude Code 2.1.139 added a hook `args`
+  array: with it, `command` is spawned **directly, with no shell**. Each forwarder hook is now
+  `"command": "<System32>\WindowsPowerShell\v1.0\powershell.exe", "args": ["-NoProfile",
+  "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "<forwarder>", "-Event", "<Event>"]`.
+  No bash, no `BASH_ENV`, no quoting (every argument is its own JSON string, so a profile path with
+  spaces needs nothing). The host is Windows PowerShell 5.1 by full path (`ResolveHookHostExe`),
+  measured the quickest steady start for the forwarder: ~0.21–0.40 s, against pwsh 7's
+  ~0.29–0.69 s. The forwarder is written for 5.1 anyway (its BOM and ASCII body exist for 5.1's
+  parser). `ResolvePwshLauncher`'s pick is the fallback on a Windows without 5.1.
+- **The version gate** (`SelectHookExecHost`). An older claude does not know `args`: it would run
+  `command` through its shell with **no arguments**, and the forwarder would never see its `-File`.
+  So exec form is written only when the resolved native `claude.exe` carries a PE FileVersion
+  ≥ 2.1.139 (`ReadClaudeFileVersion`, a data-only map, ~1 ms even on the 240 MB binary; this fleet
+  runs 2.1.282.0). The verdict is cached per (path, size, last-write time), because the native
+  installer replaces `claude.exe` in place on update. An unreadable version or no PowerShell host
+  keeps the classic shell form, which every Claude Code version runs. hooks.log records each
+  decision once: `[hooks] claude 2.1.282 -> EXEC-form hooks via C:\WINDOWS\system32\…\powershell.exe`
+  (or `SHELL-form hooks (…)`).
+- **Per-hook timeouts, in both forms.** `kHookForwarderTimeoutSeconds` (**10 s**) on every hook. The
+  forwarder's own worst case is a PowerShell start plus its bounded 1 s pipe connect; before, the
+  bound was claude's 10-minute default. SessionEnd carries `kSessionEndHookTimeoutSeconds` (**5 s**),
+  which lifts the 1.5 s phase budget. ⚠ That budget is **shared**: it is also the new ceiling for
+  the user's own SessionEnd hooks. They used to be cut at 1.5 s, and a slow one can now delay
+  claude's exit by up to 5 s.
+- **The Stop fast path** (`BuildForwarderScript`). Claude Code ≥ 2.1.47 puts the final assistant
+  text in the Stop payload (`last_assistant_message`), so the question flag comes from it and a
+  modern Stop never touches the transcript. The 60-line tail scan survives only when the field is
+  absent (an older claude). An empty string is a real "no text" answer and stays `isQuestion=0`.
+
+**Who writes the file, and why it is always the right form.** `hooks-settings.json` is ONE file per
+profile, shared by every managed session **and** by every hand-typed claude that reaches it through
+the PATH shim. Each claude snapshots it when it starts. All three writers pass the resolved
+`claude.exe` (`Engine::claudeExePath`):
+
+- engine init, now **after** `ResolveClaudeExe`. It used to run first with no launcher known, which
+  could only mean shell form;
+- every spawn (`BuildClaudeSpawn` / `BuildClaudeRestartSpec`);
+- the cog's Save (`TerminalPage.AgentEngine.cpp`), which re-materializes the file.
+
+The one mismatch left is a PATH claude **older than 2.1.139** beside a newer resolved `claude.exe`,
+which would read the exec-form file and lose its hook events. The pull floor (the scanner + the
+observer) still carries its state.
+
+**Measured A/B** (this machine, warm `BASH_ENV` cache, 6 runs each; one Stop delivered end to end to
+a throwaway pipe):
+
+| Form | Range | Median |
+| --- | --- | --- |
+| Shell form (`bash -c "powershell … -File …"`, what every forwarder run paid) | 0.79–1.32 s | 0.97 s |
+| Exec form (5.1 spawned directly) | 0.31–0.52 s | 0.36 s |
+
+The shell form's cold case, a cache rebuild, is the 6–15 s above; the exec form has no cold case.
+Even the warm shell form sits near SessionEnd's 1.5 s budget, which any extra load pushes it past.
+
+**Verifying it:**
+
+- hooks.log's `[hooks]` line names the form;
+- `hooks-settings.json` shows `"args"` arrays;
+- Claude's own records in a transcript (`attachment` lines of type `hook_success` / `hook_cancelled`,
+  with `durationMs`) show the forwarder's real run time.
+- **Without a build** — the *Encoding* recipe:
+  1. Extract the `PSHOOK` raw string from `ClaudeSpawn.cpp` and point its two placeholders at a
+     scratch folder.
+  2. Write it with a BOM and run it exec-form: `powershell.exe -NoProfile -NonInteractive
+     -ExecutionPolicy Bypass -File <it> -Event Stop` with `CCMGR_HOOK_PIPE` naming a throwaway pipe
+     served by the test.
+  3. Check the wire line. A `last_assistant_message` ending in `?` gives `isQuestion=1`; a statement
+     or an EMPTY field gives `0`, even beside a transcript that ends in a question (the field wins).
+     With NO field, the transcript fallback answers. A Hebrew question decodes intact.
+
+`TestHookInvocation` (`tests_spawn_sched.cpp`) pins the version gate, the PE read, both JSON shapes
+with their timeouts, the fast path's position ahead of the tail scan, and the materializer's
+shell-form fallback.
+
+**Not ours to change:** the user's own hooks in `~/.claude/settings.json` (a SessionEnd pair that
+starts `powershell -Command "node …"` and a PowerShell script, both in shell form, without
+`-NoProfile` or a `timeout`) still pay Git Bash + `BASH_ENV` + a PowerShell profile load. The same
+exec-form shape is their fix.
+
 ## Events consumed
 
 The materialized `hooks-settings.json` (`BuildHooksSettingsJson`) registers the forwarder for
@@ -301,14 +403,120 @@ a `/clear`ed managed tab was refused by **Deactivate** ("its ConPTY is the user'
 dead-tab **Restart** fallback (which skips external records) resurrected the conversation from
 *before* the `/clear` (`_BindClaudeSessionToTab`, logged `[rehome] <id> inherits MANAGED provenance`).
 
+### Transcript watcher — the scanner's change feed (ReadDirectoryChangesW)
+
+**The 2026-09-25 finding: the scanner thread used ~35% of a core.** On the release instance (~60 live
+sessions, 203 project folders, 1,348 registry records) it burned 10,535 s of CPU in 12.8 h. A 19.5 s
+stack walk (`tools/livesample.exe walk`, 300 samples, 6.89 s of CPU = 35.3% of a core) put:
+
+| Share of samples | Where |
+| --- | --- |
+| 28.3% | `ResolveClaudeTranscriptPath` |
+| 6.0% | `SubagentActivityUnixMs` |
+| 3.0% | `_readDelta` |
+| ~60% | waiting between passes |
+
+Every pass (300 ms while anything runs) did this for every live session:
+
+- stat the transcript;
+- enumerate the session's `subagents/` + `tool-results/` side folders;
+- for a session with **no transcript yet** (launched, never prompted), probe **every** project
+  folder for `<id>.jsonl`.
+
+Each pass also deep-copied the whole registry (`Snapshot()`), archived records included.
+
+**The watcher** (`TranscriptWatcher.{h,cpp}`) is ONE `ReadDirectoryChangesW` watch on the PARENT
+folder, `<claude config>\projects`, with `bWatchSubtree = TRUE`. That single handle covers every
+project folder, transcript and side file below it. Filter: file name + dir name + size +
+last-write. Overlapped I/O into a 256 KiB buffer (64 KiB on a network share). From the records it
+keeps three things:
+
+- **an index** `sessionId → transcript path`: one full enumeration at start, then incremental.
+  - ADDED / RENAMED_NEW index a file; REMOVED / RENAMED_OLD drop it.
+  - A MODIFIED for a file the index never saw indexes it (a missed ADDED is recovered, not dropped).
+  - A project folder's REMOVED / RENAMED_OLD drops everything in it, since the system reports only
+    the folder, never its children.
+  - A folder ADDED or renamed IN is enumerated.
+  - When one id exists in two folders, the pick is the case-insensitively smallest path, the order
+    the legacy NTFS walk met its first match in.
+
+  The classification (`ClassifyProjectsRelativePath`) mirrors `ResolveClaudeTranscriptPath`'s rule:
+  any `<proj>\<name>.jsonl` direct child is a transcript named by its stem, and
+  `<proj>\<id>\subagents|tool-results\…` is side activity of `<id>`.
+- **per-session change sequences**: one for the transcript, one for the side folders.
+- **an epoch** that bumps on every full re-index (start, a buffer overflow, a lost and re-opened
+  watch). Sequences never go backwards across a re-index (`ClearPaths` bumps them), so a scanner
+  can never mistake a new file state for one it already saw.
+
+Its callback is the scanner's `Wake()`, coalesced to one per 100 ms, so an append becomes a pass
+at once instead of on the next tick.
+
+**What the scanner does with it** (`SessionScanner::_reconcileSession`):
+
+- **Resolve from the index.** A healthy index answers from memory, and an empty answer is
+  authoritative: the transcript's creation arrives as a notification. Once a minute a still-
+  unresolved session cross-checks the index against the classic walk (`kScanIndexCrossCheckMs`).
+  A hit logs `[watch] index missed …`, the belt against an index bug. With **no** healthy watcher
+  the classic walk still runs, but backed off to once per 3 s per unresolved session
+  (`kScanResolveRetryMs`) instead of every pass.
+- **Skip the stat and the side walk for a cold, unchanged session.** A session is **HOT**
+  (`ScanNeedsFreshTail`) while its tail can demote it — `Running`, `NeedsApproval` — or while a sent
+  prompt awaits its echo (the lost-send verdict must read the echo line).
+  - A hot session keeps the classic per-pass stat.
+  - Everything else reuses the cached size and last-write time until the watcher reports a change
+    or the epoch moves (`ShouldRefreshTranscriptStat`), with a 30 s resync as the belt
+    (`kScanColdResyncMs`).
+  - The side-folder walk follows the same rule (`ShouldRefreshSideActivity`), with a 1 s belt for
+    hot sessions (`kScanHotSideRefreshMs`, well inside the 2 s stop quiescence it feeds).
+  - The watcher's stamp is taken **before** the stat, so a change landing mid-pass bumps the
+    sequence again and the next pass re-reads.
+- **Snapshot only the live sessions** (`SnapshotLive()`). Every use in the pass only ever looked at
+  `s.live`.
+- **Keep passes ≥ 100 ms apart** (`kScanMinPassGapMs`), even when woken. Registry notifies (every
+  hook of every session) and watcher batches used to chain passes back to back. The adaptive
+  cadence (300 ms Running / 2.5 s idle) is unchanged.
+
+**Why a cold session can safely trust the cache.** Claude writes its transcripts and side files the
+way the watch sees best: open, append, close. Measured on this machine, the notification lands
+~0.4 ms after the close, for transcripts and nested `subagents\` files alike. A writer that held its
+handle open without flushing would produce no records until it did. That is what the hot per-pass
+stat and the 30 s resync cover. A cold session's reconcilers only PROMOTE on new lines, so a late
+record can delay them but never make them act wrongly.
+
+**Failure modes.** The scanner then polls as it always did:
+
+- No projects folder yet, or an access error: the watcher is unhealthy and retries every 5 s
+  (`kTranscriptWatchRetryMs`). scanner.log gets `[watch] cannot watch … (err N)`, once per outage.
+- A buffer overflow (0 bytes / `ERROR_NOTIFY_ENUM_DIR`): the watcher re-arms first, then re-indexes
+  everything. More than `kTranscriptWatchMaxOverflowStreak` empty reads in a row mean the watch no
+  longer delivers changes, so it is closed and re-opened after the back-off instead of re-indexing
+  in a loop.
+- The watched folder deleted or renamed: the read fails, and the watcher re-opens after the
+  back-off.
+- Stop: cancels the pending read and **waits** for it (`CancelIoEx` + `GetOverlappedResult(TRUE)`)
+  before the buffer is freed. The kernel may write into it until the cancellation completes.
+
+scanner.log also records every full index: `[watch] watching <root> (subtree): N transcripts in M
+project folders indexed in T ms`.
+
+Pinned by `TestTranscriptWatcher` (`tests_transcript.cpp`):
+
+- the pure classification and index bookkeeping;
+- the refresh gates and the hot predicate;
+- a live watcher on a scratch tree: the initial index, a new folder + transcript, an append, a
+  nested side file, a delete, a folder rename;
+- a missing root, which stays unhealthy and stops at once.
+
 ### Forwarder-side enrichment
 
 Two fields are computed in the forwarder, not just relayed:
 
-- **`isQuestion`** (on `Stop`): the forwarder tails the transcript (`$j.transcript_path`, last
-  ~60 lines), finds the last `assistant` text message, trims it, and sets `1` if it ends with `?`.
-  This feeds the **question-guard**: Tests Autorunner **Holds** the next queued prompt rather than
-  auto-answering a clarifying question.
+- **`isQuestion`** (on `Stop`): set `1` when the turn's final assistant text, trimmed, ends with
+  `?`. The text comes from the payload's `last_assistant_message` (Claude Code ≥ 2.1.47 — see *Hook
+  invocation*); only when that field is absent does the forwarder tail the transcript
+  (`$j.transcript_path`, last ~60 lines) for the last `assistant` text message. This feeds the
+  **question-guard**: Tests Autorunner **Holds** the next queued prompt rather than auto-answering
+  a clarifying question.
 - **`permission`** (on `Notification`): set `1` when the notification `message` matches
   `(?i)permission|approve|allow|grant` — distinguishing a blocking tool-permission prompt from an
   idle notification.
@@ -590,11 +798,12 @@ they must agree — see Gotchas in `CLAUDE.md`:
 | File | Written by | Purpose |
 | --- | --- | --- |
 | `agentmaster-hook.ps1` | `MaterializeSharedHookFiles` | the PowerShell forwarder Claude invokes |
-| `hooks-settings.json` | `MaterializeSharedHookFiles` | the `--settings` config wiring the six hooks |
+| `hooks-settings.json` | `MaterializeSharedHookFiles` | the `--settings` config wiring the eight hooks (exec form for claude ≥ 2.1.139, each with its `timeout` — see *Hook invocation*) |
 | `bridge.json` | `WriteBridgeDiscovery` | live-bridge discovery (`{ pid, pipe }`) for the shim |
 | `forwarder-errors.log` | the forwarder | local trace of a hook delivery that never reached the bridge (no sid / no pipe / a dead-pipe connect timeout) — otherwise invisible, since the bridge-side `hooks.log` only sees lines that arrived |
 | `shim/claude.cmd`, `shim/claude` | `MaterializeClaudeShim` | the transparent `claude` PATH shim |
-| `hooks.log` | engine | runtime traces (`[engine] bridge listening …`, `[SessionStart]`, `[Stop]`, …) |
+| `hooks.log` | engine | runtime traces (`[engine] bridge listening …`, `[hooks] claude <ver> -> EXEC-form hooks …`, `[SessionStart]`, `[Stop]`, …) |
+| `scanner.log` | `SessionScanner` + `TranscriptWatcher` | the PULL reconciler's traces (`[recon-*]`, …) and the watcher's (`[watch] watching …`, `[watch] cannot watch …`, `[watch] index missed …`) |
 
 **Outside the profile** — the only two files we ever touch, both under Claude's own config, both
 additive and both gated:

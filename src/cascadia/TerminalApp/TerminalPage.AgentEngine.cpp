@@ -1784,9 +1784,12 @@ namespace winrt::TerminalApp::implementation
                 // Re-materialize the shared --settings file so model / co-authored-by /
                 // permission-mode changes also reach an adopted hand-typed `claude` (the PATH
                 // shim points at this file). Fresh spawns rebuild it from settings regardless.
+                // The resolved claude.exe keeps the hook invocation right (HOOKS.md "Hook invocation"):
+                // without it this write would drop the file back to the slow shell form (Git Bash +
+                // BASH_ENV per hook) until the next spawn. UI thread: claudeExePath's owning thread.
                 try
                 {
-                    ::Agentmaster::MaterializeSharedHookFiles(::Agentmaster::AgentmasterStateDir(), s);
+                    ::Agentmaster::MaterializeSharedHookFiles(::Agentmaster::AgentmasterStateDir(), s, ::Agentmaster::SharedEngine().claudeExePath);
                 }
                 CATCH_LOG();
                 // Cross-window settings broadcast: live-propagate the merged settings to every OTHER open

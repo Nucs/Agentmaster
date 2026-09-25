@@ -58,7 +58,72 @@ namespace Agentmaster
     // HookWire.h fields, the tenth being the payload discriminator (SessionStart `source`,
     // Pre/PostCompact `trigger`, SessionEnd `reason`), validated to SanitizeWireSource's exact rule
     // (else empty) — the compaction window depends on it (HookEvents.h / HOOKS.md "Compaction").
+    // The Stop question flag comes from the payload's `last_assistant_message` (Claude Code >= 2.1.47)
+    // and falls back to scanning the transcript's last 60 lines only when the field is absent, so a
+    // modern Stop hook never re-reads the transcript (HOOKS.md "Hook invocation").
     std::wstring BuildForwarderScript(const std::wstring& stateDir);
+
+    // Agentmaster (HOOKS.md "Hook invocation"): the per-hook `timeout` (seconds) every forwarder hook
+    // carries, except SessionEnd (below). Without it Claude applies its own default (10 minutes on
+    // 2.1.2xx), so a forwarder wedged on a dead pipe could stall a turn that long; the forwarder's
+    // own worst case is a PowerShell start plus its bounded 1 s pipe connect, so 10 s is generous.
+    inline constexpr int kHookForwarderTimeoutSeconds = 10;
+
+    // Agentmaster (HOOKS.md "Hook invocation"): the SessionEnd forwarder's `timeout` (seconds). Claude
+    // (>= 2.1.74) gives the whole SessionEnd phase only 1.5 s unless a SessionEnd hook declares a
+    // longer `timeout` (it then takes the largest, capped at 60 s). 1.5 s is less than a Git-Bash-
+    // hosted PowerShell start under load, which is exactly how SessionEnd deliveries were cancelled
+    // mid-flight ("hooks at end go till timeout"). 5 s covers a loaded machine.
+    // ⚠ The budget is SHARED: it also becomes the ceiling for the user's OWN SessionEnd hooks, so a
+    // slow hook of theirs can now delay claude's exit by up to this long (it used to be cut at 1.5 s).
+    inline constexpr int kSessionEndHookTimeoutSeconds = 5;
+
+    // Agentmaster (HOOKS.md "Hook invocation"): the four-part version stamped into a native claude.exe's
+    // PE VERSIONINFO (FileVersion), e.g. 2.1.282.0. Read by ReadClaudeFileVersion.
+    struct ClaudeFileVersion
+    {
+        uint32_t major{}; // the "2" of 2.1.282
+        uint32_t minor{}; // the "1" of 2.1.282
+        uint32_t build{}; // the "282" of 2.1.282 (Claude Code's patch number)
+        uint32_t revision{}; // the 4th PE component (0 in every release so far)
+    };
+
+    // PURE: can this Claude Code version run EXEC-FORM hooks — a command hook with an `args` array,
+    // spawned directly with no shell? Added in Claude Code 2.1.139 (CHANGELOG: "Added hook `args:
+    // string[]` field (exec form) that spawns the command directly without a shell"). An older claude
+    // does not know `args`, would run `command` through its shell with NO arguments, and the forwarder
+    // would never see its -File. So the settings builder emits exec form only when this is true.
+    //   v — the claude.exe FileVersion (ReadClaudeFileVersion).
+    // Returns true iff v >= 2.1.139 (major/minor/build compared in that order; revision ignored).
+    // Never throws.
+    bool ClaudeVersionSupportsExecFormHooks(const ClaudeFileVersion& v) noexcept;
+
+    // Read the FileVersion out of an executable's PE VERSIONINFO resource (GetFileVersionInfoW). Used on
+    // the resolved native claude.exe, which stamps its release version there (2.1.282 -> 2.1.282.0). It
+    // maps the file as a data image, never runs it, and costs ~1 ms even on the 240 MB binary.
+    //   exePath — full path of the executable (a claude.exe from ResolveClaudeExe).
+    // Returns nullopt when the path is empty, the file is missing, or it carries no VERSIONINFO (a
+    // shimmed or custom build). The caller then treats the version as unknown and keeps the classic
+    // shell-form hooks. Never throws (Win32 only; the buffer allocation is guarded).
+    std::optional<ClaudeFileVersion> ReadClaudeFileVersion(std::wstring_view exePath);
+
+    // The PowerShell host EXEC-FORM hooks spawn directly: Windows PowerShell 5.1 (<System32>\
+    // WindowsPowerShell\v1.0\powershell.exe, always present on Windows 10/11 and measured the quickest
+    // and steadiest start for the forwarder: ~0.21-0.40 s vs pwsh 7's ~0.29-0.69 s), falling back to
+    // ResolvePwshLauncher's pick (pwsh.exe on PATH) when System32's copy is missing.
+    // Returns a full path, or "" when no PowerShell exists at all (the caller then keeps shell form).
+    // Never throws.
+    std::wstring ResolveHookHostExe();
+
+    // Decide how the shared hooks file invokes the forwarder for sessions launched with `claudeExePath`:
+    // returns the PowerShell host to spawn directly (EXEC FORM — no shell, so no Git Bash and none of
+    // the user's BASH_ENV start-up; see HOOKS.md "Hook invocation"), or "" for the classic shell form.
+    // Exec form needs a readable claude version >= 2.1.139 AND a PowerShell host; anything unknown
+    // stays on shell form, which every Claude Code version runs. The version read is cached per
+    // (path, size, last-write time), so the per-spawn call is a single attribute read after the first.
+    //   claudeExePath — the native claude.exe the session will run (Engine::claudeExePath); "" => shell form.
+    // Returns the host path or "". Thread-safe (the cache is mutex-guarded). Never throws.
+    std::wstring SelectHookExecHost(std::wstring_view claudeExePath);
 
     // The Claude settings JSON: always wires each consumed hook event to the forwarder (SessionStart,
     // UserPromptSubmit, Notification, Stop, SubagentStop, PreCompact, PostCompact, SessionEnd), and
@@ -67,8 +132,20 @@ namespace Agentmaster
     //   * includeCoAuthoredBy -> emits "includeCoAuthoredBy": false (only when false)
     //   * skipPermissions    -> when FALSE, emits "permissions": { "defaultMode": "default" }
     //                           (the "other variation"; when TRUE the CLI flag handles bypass)
-    // `forwarderPath` should already be in a JSON-friendly (forward-slash) form.
-    std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath, std::wstring_view model, bool includeCoAuthoredBy, bool skipPermissions);
+    // HOW each hook runs (HOOKS.md "Hook invocation"):
+    //   * execHost non-empty -> EXEC FORM: `"command": "<execHost>", "args": [-NoProfile,
+    //     -NonInteractive, -ExecutionPolicy, Bypass, -File, <forwarder>, -Event, <Event>]`. Claude spawns
+    //     PowerShell directly. With no shell there is no Git Bash, and none of the user's BASH_ENV
+    //     start-up that measured 0.2-0.7 s warm and 6-15 s on its cache rebuild (the 11.6 s SessionStart /
+    //     15.3 s Stop records). Only for claude >= 2.1.139 (SelectHookExecHost decides).
+    //   * execHost empty     -> SHELL FORM: `"command": "powershell -NoProfile -ExecutionPolicy Bypass
+    //     -File \"<forwarder>\" -Event <Event>"`, byte-identical to the pre-exec-form file apart from the
+    //     timeout below. Every Claude Code version understands it.
+    //   * both forms carry `"timeout"`: kHookForwarderTimeoutSeconds, and kSessionEndHookTimeoutSeconds
+    //     for SessionEnd (which lifts claude's 1.5 s SessionEnd budget).
+    // `forwarderPath` should already be in a JSON-friendly (forward-slash) form; `execHost` may use
+    // backslashes (it is JSON-escaped). Pure. Never throws (beyond std::bad_alloc).
+    std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath, std::wstring_view model, bool includeCoAuthoredBy, bool skipPermissions, std::wstring_view execHost = {});
 
     // Assemble the claude command line. `settingsPath` should be forward-slash form.
     // `skipPermissions` ON => prepend --dangerously-skip-permissions (the app gates risk via
@@ -543,10 +620,19 @@ namespace Agentmaster
     std::wstring ClaudeCwdForShell(uint32_t shellPid);
 
     // Write the shared forwarder + hooks settings into `stateDir`. Idempotent (overwrites
-    // so they always match the running build). Returns {settingsPath, forwarderPath} in
-    // backslash form. Throws nothing meaningful for the caller; returns empty paths on I/O
-    // failure.
-    std::pair<std::wstring, std::wstring> MaterializeSharedHookFiles(const std::wstring& stateDir, const AppSettings& settings);
+    // so they always match the running build).
+    //   stateDir      — the ACTIVE profile dir (AgentmasterStateDir()); both files land directly in it.
+    //   settings      — the cog's Claude-session settings the hooks file carries (model / co-authored-by /
+    //                   permission mode).
+    //   claudeExePath — the native claude.exe the sessions will run (Engine::claudeExePath). It picks the
+    //                   hook invocation (SelectHookExecHost): EXEC FORM for a claude >= 2.1.139, else the
+    //                   classic shell form. "" (claude not detected, or a caller with no launcher at hand)
+    //                   => shell form. ⚠ The file is SHARED by every session of the profile, including a
+    //                   hand-typed claude reached through the PATH shim, so pass the real path wherever it
+    //                   is known; the last writer decides what the next claude snapshots at its start.
+    // Returns {settingsPath, forwarderPath} in backslash form, or empty paths on I/O failure. Throws
+    // nothing meaningful for the caller.
+    std::pair<std::wstring, std::wstring> MaterializeSharedHookFiles(const std::wstring& stateDir, const AppSettings& settings, std::wstring_view claudeExePath = {});
 
     // Resolve the real `claude` launcher on PATH (searched as claude.exe/.cmd/.bat, in that
     // order). MUST be called BEFORE the shim dir is prepended to PATH so it never resolves to

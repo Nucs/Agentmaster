@@ -87,6 +87,7 @@ int wmain()
     TestClaudeInputSanitize();
     TestInvisibleEchoAndDedupe();
     TestForwarderEncoding();
+    TestHookInvocation(); // exec-form hooks + per-event timeouts + the Stop fast path (tests_spawn_sched.cpp)
     TestSchedulerIntegration();
     TestInterruptHold();
     TestUpdaterVersionLogic();
@@ -114,6 +115,7 @@ int wmain()
     TestInferWorkingDirectory();
     TestConversationLineage();
     TestScannerCatchUp(); // the 2026-09-25 catch-up stall end to end (tests_transcript.cpp)
+    TestTranscriptWatcher(); // the scanner's ReadDirectoryChangesW change feed (tests_transcript.cpp)
     TestCompactionLifecycle();
     TestConversationFollowup();
     TestAnalyzeFootprint();

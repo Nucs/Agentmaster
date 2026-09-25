@@ -505,19 +505,24 @@ namespace Agentmaster
 
                 WriteBridgeDiscovery(pipeName);
                 const auto stateDir = AgentmasterStateDir();
-                uint64_t _ts = ::GetTickCount64();
-                const auto hookFiles = MaterializeSharedHookFiles(stateDir, LoadAppSettings());
-                Startup::Phase(L"  materialize hook files", ::GetTickCount64() - _ts);
                 // Resolve the NATIVE claude.exe NOW (native-exe-only policy), while PATH is still
                 // un-mutated so a claude.cmd on PATH is followed to its REAL binary, not the adoption
                 // shim we author next. Honors the Settings override; ALWAYS a real claude.exe (or
                 // empty). Empty => "Claude not detected" and the Manager gates every claude
                 // interaction. Launched by full path (CreateProcessW appends only ".exe", ignores
                 // PATHEXT — a bare `claude` would miss the npm install, the 0x80070002 bug).
-                _ts = ::GetTickCount64();
+                uint64_t _ts = ::GetTickCount64();
                 e->claudeExePath = ResolveClaudeExe(LoadAppSettings().claudeExePath);
                 Startup::Phase(L"  ResolveClaudeExe (PATH scan)", ::GetTickCount64() - _ts);
                 AppendStateLog(L"hooks.log", L"[engine] claude.exe: " + (e->claudeExePath.empty() ? std::wstring{ L"<not detected>" } : e->claudeExePath) + L"\n");
+                // The shared hook files come AFTER the claude resolve (HOOKS.md "Hook invocation"): the
+                // claude.exe version picks the invocation, and exec form (PowerShell spawned directly, no Git
+                // Bash / BASH_ENV) needs claude >= 2.1.139. The PATH shim below points every hand-typed claude
+                // at this same file, so this first write must already carry the right form. It used to be
+                // written first, with no launcher known, which always meant shell form.
+                _ts = ::GetTickCount64();
+                const auto hookFiles = MaterializeSharedHookFiles(stateDir, LoadAppSettings(), e->claudeExePath);
+                Startup::Phase(L"  materialize hook files", ::GetTickCount64() - _ts);
                 // Resolve the codex launcher too (managed-Codex support), while PATH is still pristine.
                 // Same CreateProcessW/PATHEXT hazard as claude (a bare `codex` misses an npm codex.cmd ->
                 // 0x80070002), but Codex is NOT native-exe-only — the observer finds codex.exe as a
