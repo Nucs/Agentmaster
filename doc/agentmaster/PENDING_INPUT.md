@@ -1355,4 +1355,9 @@ three things at once: that editor, that paste, and a queued prompt at rest while
   **`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`**. Claude's own message says that variable "forces the
   classic renderer any time".
 - Then restart the affected sessions, because claude chooses its renderer at start.
-- `/tui default` switches a single session back (a restart + resume of it).
+- **Where the setting lives.** Claude's settings schema describes the renderer preference as:
+  "fullscreen" uses the flicker-free alt-screen renderer with virtualized scrollback, equivalent to
+  `CLAUDE_CODE_NO_FLICKER=1`. `/tui default` saves the classic renderer to claude's preferences and
+  restarts and resumes the session.
+- **Unverified precedence.** Whether that saved preference beats a set `CLAUDE_CODE_NO_FLICKER=1` has not
+  been checked (claude's own messages call the variable an override), so drop the variable first.
