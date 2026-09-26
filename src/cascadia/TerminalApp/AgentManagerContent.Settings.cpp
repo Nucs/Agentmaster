@@ -3503,6 +3503,7 @@ namespace winrt::TerminalApp::implementation
             _appSettings.sidePanelWidthFraction = disk.sidePanelWidthFraction;
             _appSettings.sidePanelSplitFraction = disk.sidePanelSplitFraction;
             _appSettings.sidePanelCollapsed = disk.sidePanelCollapsed;
+            _appSettings.sidePanelScrollToSelectedTab = disk.sidePanelScrollToSelectedTab; // the header ⌖ toggle's own RMW — this form never edits it
         }
         if (_settingsSink)
         {

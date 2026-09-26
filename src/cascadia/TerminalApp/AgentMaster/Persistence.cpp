@@ -754,6 +754,8 @@ namespace Agentmaster
         o.Set(L"sidePanelWidthFraction", json::Value::MkNum(s.sidePanelWidthFraction));
         o.Set(L"sidePanelSplitFraction", json::Value::MkNum(s.sidePanelSplitFraction));
         o.Set(L"sidePanelCollapsed", json::Value::MkBool(s.sidePanelCollapsed));
+        // The header ⌖ toggle — a GLOBAL behavior preference (no per-window copy), not a new-window default.
+        o.Set(L"sidePanelScrollToSelectedTab", json::Value::MkBool(s.sidePanelScrollToSelectedTab));
         o.Set(L"allowUpdatePrerelease", json::Value::MkBool(s.allowUpdatePrerelease));
         o.Set(L"allowUpdateNightly", json::Value::MkBool(s.allowUpdateNightly)); // NIGHTLY opt-in (warning-gated; tag contains "nightly" — Updater.h)
         o.Set(L"debugMode", json::Value::MkBool(s.debugMode)); // About-tab "Enable Debug Mode" — the durable --debug twin (ProfileBootstrap.h IsDebugPackage)
@@ -965,6 +967,10 @@ namespace Agentmaster
             const double ps = v.NumAt(L"sidePanelSplitFraction", 0.5);
             s.sidePanelSplitFraction = (ps >= 0.15 && ps <= 0.85) ? ps : 0.5;
             s.sidePanelCollapsed = v.BoolAt(L"sidePanelCollapsed", false); // absent => expanded
+            // The ⌖ scroll-to-selected-tab toggle: absent => ON, the SAME value as the struct default, so a
+            // settings.json from before the toggle existed behaves exactly like a missing file. A PRESENT
+            // false is the user's explicit OFF and wins.
+            s.sidePanelScrollToSelectedTab = v.BoolAt(L"sidePanelScrollToSelectedTab", true);
         }
         // Updater (Updater.h): the prerelease + nightly opt-ins + the skip/postpone state (the latter
         // two are written OUTSIDE the cog form by the updater's JSON RMW; the cog's Save preserves them).

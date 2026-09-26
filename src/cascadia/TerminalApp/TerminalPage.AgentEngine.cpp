@@ -1742,6 +1742,12 @@ namespace winrt::TerminalApp::implementation
                     s.sidePanelWidthFraction = disk.sidePanelWidthFraction;
                     s.sidePanelSplitFraction = disk.sidePanelSplitFraction;
                     s.sidePanelCollapsed = disk.sidePanelCollapsed;
+                    // ...and the header's ⌖ scroll-to-tab toggle, written by its own RMW. It matters most
+                    // HERE: the board-sort cycle reaches this sink too, carrying the Manager content's
+                    // _appSettings, which never learns of THIS window's own flip (the toggle lives on the
+                    // page; the content only hears other windows' broadcasts) — without this line, the next
+                    // sort click in this window would silently turn the toggle back.
+                    s.sidePanelScrollToSelectedTab = disk.sidePanelScrollToSelectedTab;
 
                 }
                 // Inferred-workdir inputs (mode / "Use .git folder to infer") — capture the change
@@ -1930,7 +1936,9 @@ namespace winrt::TerminalApp::implementation
     // opening the Agent Manager page (Home) shows the session you were just in highlighted (board card +
     // tree row + its Auto Testing). Equivalent to a single-click on the session's board card. Called from
     // the one post-startup tab-switch funnel (_OnTabSelectionChanged), so a user click, Ctrl+Tab, or a
-    // switchToTab action all follow through here.
+    // switchToTab action all follow through here. The SIDE PANEL follows too: its selected card + summary
+    // move to this session, and — with its ⌖ scroll-to-tab toggle ON — its card list scrolls to the card
+    // (a shell tab, which has no card, instead cancels a scroll still owed to the previous tab).
     void TerminalPage::_SyncManagerSelectionToTab(const TerminalApp::Tab& tab)
     {
         // Only once startup/restore is done: during _RestoreWindowTabs the focused tab is re-selected,
@@ -1950,6 +1958,10 @@ namespace winrt::TerminalApp::implementation
         const auto id = _ClaudeSessionForTab(tab);
         if (id.empty())
         {
+            // Side panel (⌖ scroll-to-tab): this tab has no card — cancel a scroll still owed to the tab
+            // just LEFT (its card may not have rendered yet), so it can't fire later and scroll the list to
+            // a tab you are no longer on.
+            _SidePanelRevealTabCard(std::wstring{});
             return; // not a managed Claude/Codex session tab -> nothing to select
         }
         // Nav audit: the user switched FOCUS to this managed session's tab (a tab click, Ctrl+Tab, a
@@ -1967,6 +1979,11 @@ namespace winrt::TerminalApp::implementation
         // the summary below). driveManagerLens=false — the lens was just driven above, and the
         // side panel's same-id early-out breaks any echo.
         _SidePanelSelectSession(id, /*driveManagerLens*/ false);
+        // Side panel (⌖ scroll-to-tab, default ON): SELECTING a tab scrolls the card list to its card.
+        // Called even when the selection above was a same-id no-op (you peeked this very card, scrolled
+        // away, then picked its tab) — a tab selection is always an explicit "show me this one". Deferred
+        // + coalesced inside; a card already fully on screen never moves; a no-op with the toggle OFF.
+        _SidePanelRevealTabCard(id);
     }
 
     // Agentmaster: EVERY Agentmaster reaction to what just came on screen, in the order the tab-switch

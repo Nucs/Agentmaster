@@ -2369,6 +2369,18 @@ namespace Agentmaster
         double sidePanelWidthFraction{ 0.22 };
         double sidePanelSplitFraction{ 0.5 };
         bool sidePanelCollapsed{ false };
+        // Agentmaster (SIDE PANEL): the header's ⌖ "scroll to the selected tab" toggle. ON (the DEFAULT)
+        // == selecting a tab scrolls the panel's card list until THAT tab's card is on screen (a card that
+        // is already fully visible stays put; one scroll per selection, never a re-scroll on every list
+        // rebuild — so it can't fight you while you scroll the list yourself). OFF == the list keeps
+        // whatever scroll position you left it at, the pre-toggle behavior. A GLOBAL behavior preference,
+        // NOT a new-window default like the four above: there is no per-window copy, and the toggle's own
+        // freshest-disk RMW broadcasts it so every open window follows at once. Written OUTSIDE the cog
+        // form, so BOTH cog-Save preserve blocks restore it from disk (like the four above).
+        // ⚠ The default reaches only a settings.json that LACKS the key (AppSettingsFromJson's absent-key
+        // fallback is ON as well — the two must agree, or a pre-toggle file and a missing file would
+        // behave differently); a stored false is the user's explicit OFF and always wins.
+        bool sidePanelScrollToSelectedTab{ true };
         // Agentmaster (updater; Updater.h): the in-app GitHub-release updater's state. allowUpdatePrerelease
         // is the Settings cog's "Allow updating to pre-release versions" toggle (default OFF — the check
         // uses /releases/latest, which excludes prereleases; ON uses the list endpoint, newest published).

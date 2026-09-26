@@ -471,6 +471,11 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _sidePanelSearchBox{ nullptr }; // top-row filter box (ParseSessionQuery grammar over title/dir/branch/id)
         winrt::Windows::UI::Xaml::Controls::Button _sidePanelScopeBtn{ nullptr }; // top-row LOCAL/GLOBAL card-list scope toggle (between the search box and the sort toggle; the board's _boardScopeBtn accent look) — flips _sidePanelGlobal for THIS window only
         winrt::Windows::UI::Xaml::Controls::Button _sidePanelSortBtn{ nullptr }; // top-row order toggle — cycles the SHARED AppSettings::boardSort via AgentManagerContent::CycleBoardSort
+        // top-row ⌖ "scroll to the selected tab" icon toggle (between the sort toggle and the ⇄ dock flip):
+        // checked == AppSettings::sidePanelScrollToSelectedTab (GLOBAL, default ON). A REAL ToggleButton (the
+        // Sessions page's scope-toggle idiom), so its accent fill IS the on/off state — keep IsChecked pinned to
+        // the setting via _SidePanelUpdateScrollToTabButton (a click flips IsChecked itself before Click fires).
+        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sidePanelScrollToTabBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _sidePanelCollapseBtn{ nullptr }; // top-row collapse chevron (points TOWARD the docked edge; _SidePanelApplyLayout re-glyphs it on dock flips)
         winrt::Windows::UI::Xaml::Controls::Button _sidePanelStripBtn{ nullptr }; // the collapsed strip's expand chevron (points AWAY from the docked edge)
         winrt::Windows::UI::Xaml::Controls::StackPanel _sidePanelCards{ nullptr }; // the vertical card list (inside its own ScrollViewer)
@@ -515,6 +520,14 @@ namespace winrt::TerminalApp::implementation
         bool _sidePanelBuilt{ false }; // _InitAgentSidePanel completed — the master gate for every side panel entry point
         bool _sidePanelDirty{ false }; // a rebuild was deferred (min-gap throttle, or collapsed) — the periodic tick / expand catches up
         bool _sidePanelLayoutQueued{ false }; // a coalesced _SidePanelApplyLayout tick is queued (_SidePanelQueueLayout) — later triggers fold into it
+        // The ⌖ scroll-to-tab REVEAL, one-shot per tab selection: the session whose card the list still owes a
+        // scroll ("" == none owed). Set by _SidePanelRevealTabCard, consumed by the first reveal tick that finds
+        // the card RENDERED — it deliberately survives a card that doesn't exist yet (a just-launched session
+        // whose card lands on the next rebuild, a collapsed panel, a card the filter hides), so the NEXT rebuild
+        // or the expand pays it. Cleared by a card click (the user's own pick outranks it), by selecting a tab
+        // with no card, and by turning the toggle off — a stale one would yank the list somewhere you've left.
+        std::wstring _sidePanelRevealPendingId;
+        bool _sidePanelRevealQueued{ false }; // a coalesced reveal tick is queued (_SidePanelQueueReveal) — rapid Ctrl+Tab cycling folds into ONE scroll, to the LAST tab
         uint64_t _sidePanelLastRebuildMs{ 0 }; // GetTickCount64 of the last card rebuild (the min-gap throttle anchor)
         uint64_t _sidePanelNextTimingMs{ 0 }; // next GetTickCount64 at/after which the in-place timing-text refresh runs (~30s cadence)
         // Splitter drag state (one drag at a time; pointer captured on the splitter Border).
@@ -1669,7 +1682,8 @@ namespace winrt::TerminalApp::implementation
         // summary (a fill-hosted AgentTabOverlay summary panel). Layout persists PER WINDOW
         // (WindowRecord::sidePanel*) and every LAYOUT adjustment also RMWs the GLOBAL AppSettings
         // defaults so the last window to adjust seeds new windows — the card scope is the exception
-        // (per-window only, no global default: a new window always starts LOCAL).
+        // (per-window only, no global default: a new window always starts LOCAL). The header's ⌖ toggle
+        // (GLOBAL, default ON) makes selecting a tab scroll the list to that tab's card.
         void _InitAgentSidePanel(); // build the panel UI into ContentArea (once, from _OnFirstLayout after the engine + window-record claim); seeds layout from the claimed record, else the AppSettings defaults
         void _SidePanelApplyDock(); // assign TabContent / splitter / panel host to the ContentArea columns per the GLOBAL AppSettings::sidePanelOnLeft, then re-apply widths (a dock flip rotates which column is the star)
         void _SidePanelApplyLayout(); // re-derive the three column widths + the cards/summary row ratios from the live fractions + collapse state; safe pre-layout (a 0-width area defers to the next SizeChanged)
@@ -1689,6 +1703,11 @@ namespace winrt::TerminalApp::implementation
         void _SidePanelUpdateSortButton(); // reflect the current AppSettings::boardSort on the order button's label (the board's own label mapping)
         void _SidePanelToggleScope(); // flip the card list LOCAL <-> GLOBAL for THIS window: relabel, force a rebuild, persist via the window-record autosave ONLY — never _SidePanelPersistDefaults (the scope has no global default by design: every new window starts LOCAL) and never the Manager's own tree/board scope
         void _SidePanelUpdateScopeButton(); // reflect _sidePanelGlobal on the scope toggle's label (LOCAL / GLOBAL — the board's own words)
+        void _SidePanelToggleScrollToTab(); // the ⌖ header toggle's click: flip the GLOBAL AppSettings::sidePanelScrollToSelectedTab (freshest-disk RMW of that one field) + BROADCAST it so every open window follows at once; turning it ON scrolls to the focused tab's card right away, OFF drops any reveal still owed
+        void _SidePanelUpdateScrollToTabButton(); // pin the ⌖ toggle's IsChecked to _appSettings.sidePanelScrollToSelectedTab (after a click, a cog Save, or another window's broadcast) — the setting is the truth, the ToggleButton's self-flip is not
+        void _SidePanelRevealTabCard(const std::wstring& id); // the selected TAB now shows session `id`: when the ⌖ toggle is ON, owe the card list a one-shot scroll to that card (coalesced + deferred to a clean tick); an empty id (a shell tab — no card) or the toggle OFF drops any reveal still owed
+        void _SidePanelQueueReveal(); // coalesce the owed reveal onto ONE Low-priority dispatcher tick (after the rebuild/layout that may have just created the card); a no-op while collapsed or when nothing is owed — the expand path / next rebuild re-queues
+        void _SidePanelRevealPendingNow(); // the reveal tick's body: if the owed card is RENDERED, UpdateLayout + StartBringIntoView it (minimal scroll — a fully visible card never moves) and consume the debt; a card not rendered yet keeps it owed. Never throws (XAML failures are logged, Rule #18) and never moves keyboard focus
         std::unordered_set<std::wstring> _HostedSessionIds() const; // the ids of the managed sessions whose tab lives in THIS window (the live _claudeTabs entries) — the ONE "is this session here?" predicate the Explorer Tree's LOCAL scope provider (_WireAgentManagerContent) AND the side panel's LOCAL card list share, so the two surfaces can never disagree; defined in TerminalPage.AgentSidePanel.cpp
         winrt::Windows::UI::Xaml::Controls::Border _SidePanelMakeCard(const ::Agentmaster::SessionInfo& s); // build ONE compact session card (title band in the session's resolved color + state dot/label + pending dots + timing + dir/branch line), wired for select / activate / the shared lazy context menu
 

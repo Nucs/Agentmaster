@@ -612,6 +612,9 @@ void TestAppSettings()
         in.sidePanelWidthFraction = 0.35; // in-band (0.10..0.50); default 0.22
         in.sidePanelSplitFraction = 0.7; // in-band (0.15..0.85); default 0.5
         in.sidePanelCollapsed = true; // non-default (default false = expanded)
+        // The side panel header's scroll-to-tab toggle (a GLOBAL preference, not a new-window default):
+        // an explicit OFF must survive the round-trip (the default is ON).
+        in.sidePanelScrollToSelectedTab = false;
         const auto out = DeserializeAppSettings(SerializeAppSettings(in));
         CHECK(out.skipPermissions == false, "settings skipPermissions round-trip");
         CHECK(out.env == L"FOO=bar;BAZ=qux", "settings env round-trip");
@@ -668,6 +671,7 @@ void TestAppSettings()
         CHECK(out.sidePanelWidthFraction > 0.349 && out.sidePanelWidthFraction < 0.351, "settings sidePanelWidthFraction round-trip");
         CHECK(out.sidePanelSplitFraction > 0.699 && out.sidePanelSplitFraction < 0.701, "settings sidePanelSplitFraction round-trip");
         CHECK(out.sidePanelCollapsed == true, "settings sidePanelCollapsed round-trip (collapsed stored)");
+        CHECK(out.sidePanelScrollToSelectedTab == false, "settings sidePanelScrollToSelectedTab round-trip (the scroll-to-tab toggle's explicit OFF stored + honored)");
     }
 
     // Agentmaster (launch-model picker): launchModels gates its default on key PRESENCE — an
@@ -699,6 +703,20 @@ void TestAppSettings()
         CHECK(prePanel.model == L"opus" && prePanel.sidePanelOnLeft == true, "settings sidePanelOnLeft ABSENT key (a pre-side-panel settings.json) -> dock LEFT (the default)");
         const auto right = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"sidePanelOnLeft\":false}}");
         CHECK(right.sidePanelOnLeft == false, "settings sidePanelOnLeft PRESENT false == an explicit dock RIGHT -> kept (never migrated to the LEFT default)");
+    }
+
+    // Agentmaster (SIDE PANEL): the header's scroll-to-tab toggle defaults ON on BOTH load paths, like the
+    // dock side above: the struct default (a missing/corrupt file, the empty/garbage block below) AND the
+    // absent-key fallback (a VALID settings.json from before the toggle existed, which only this block
+    // reaches). If the two disagreed, upgrading would silently turn the feature off for every existing
+    // install. A PRESENT false is the user's explicit OFF and must be kept.
+    {
+        const auto preToggle = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"model\":\"opus\",\"sidePanelOnLeft\":false}}");
+        CHECK(preToggle.model == L"opus" && preToggle.sidePanelScrollToSelectedTab == true, "settings sidePanelScrollToSelectedTab ABSENT key (a pre-toggle settings.json) -> ON (the default)");
+        const auto off = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"sidePanelScrollToSelectedTab\":false}}");
+        CHECK(off.sidePanelScrollToSelectedTab == false, "settings sidePanelScrollToSelectedTab PRESENT false == the user's explicit OFF -> kept");
+        const auto on = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"sidePanelScrollToSelectedTab\":true}}");
+        CHECK(on.sidePanelScrollToSelectedTab == true, "settings sidePanelScrollToSelectedTab PRESENT true -> ON");
     }
 
     // Empty / garbage -> all defaults (a missing settings.json must change nothing).
@@ -743,6 +761,7 @@ void TestAppSettings()
         CHECK(out.sidePanelWidthFraction > 0.219 && out.sidePanelWidthFraction < 0.221, "settings sidePanelWidthFraction default 0.22 on empty");
         CHECK(out.sidePanelSplitFraction > 0.499 && out.sidePanelSplitFraction < 0.501, "settings sidePanelSplitFraction default 0.5 on empty");
         CHECK(out.sidePanelCollapsed == false, "settings sidePanelCollapsed default false (expanded) on empty");
+        CHECK(out.sidePanelScrollToSelectedTab == true, "settings sidePanelScrollToSelectedTab default true (scroll-to-tab ON) on empty");
         const auto out2 = DeserializeAppSettings(L"not json");
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");
         CHECK(out2.uiStallAutoRestart == true, "settings uiStallAutoRestart defaults ON on garbage (the restart tier is a default-armed backstop)");

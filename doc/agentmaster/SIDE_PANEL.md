@@ -14,7 +14,8 @@ which also flips the collapse chevron (`«` here — it always points toward the
 ┌ tab row ─────────────────────────────────────────────────┐
 ├──────────────────────┬──┬────────────────────────────────┤
 │ [search…] [LOCAL]    │ ▌│                                │  ← header row: filter + card SCOPE (LOCAL by
-│ [sort][⇄][«]         │ ▌│                                │    default, per window) / order / dock / collapse
+│ [sort][⌖][⇄][«]      │ ▌│                                │    default, per window) / order / scroll-to-tab /
+│                      │ ▌│                                │    dock / collapse
 │ N of M (this window) │ ▌│        terminal content        │  ← count line (names the scope)
 │ ┌──────────────────┐ │ ▌│          (TabContent)          │
 │ │ session CARDS    │ │ ▌│                                │  ← TOP area (own scroll)
@@ -35,7 +36,8 @@ which also flips the collapse chevron (`«` here — it always points toward the
   0 until `_InitAgentSidePanel` runs, so a build without the panel renders the pre-feature layout.
 - The whole panel forces the Agentmaster DARK theme (explicit fills, `RequestedTheme(Dark)`).
 - Collapse (the header chevron / the strip) shrinks the panel to a 20px expander strip; the
-  header also carries a `⇄` dock-side flip and the card list's **LOCAL / GLOBAL** scope toggle (§2).
+  header also carries a `⇄` dock-side flip, the card list's **LOCAL / GLOBAL** scope toggle (§2),
+  and the `⌖` **scroll-to-selected-tab** icon toggle (§2a).
 
 ## 2. TOP — the session cards (the Triage-Board integration, vertical)
 
@@ -90,6 +92,44 @@ which also flips the collapse chevron (`«` here — it always points toward the
   (`_RevealTabInStrip`, virtualization-aware — the strip derealizes far tabs and a bare
   `StartBringIntoView` can't reach them), including the tab you are already on, whose strip you
   may have scrolled away.
+
+### 2a. The `⌖` toggle — selecting a tab scrolls the list to its card
+
+The header's `⌖` icon toggle (a real `ToggleButton` between the sort button and `⇄` — the Sessions
+page's scope-toggle idiom, so its accent fill *is* the on/off state) makes **selecting a tab scroll
+the card list until that tab's card is on screen**. It is a GLOBAL preference,
+`AppSettings::sidePanelScrollToSelectedTab`, **ON by default**.
+
+- **What scrolls it.** A tab selection — the one funnel (`_OnTabSelectionChanged` →
+  `_ApplyAgentTabSelection` → `_SyncManagerSelectionToTab`, so a tab click, Ctrl+Tab, `switchToTab`,
+  a card double-click's jump and a close successor all count) calls `_SidePanelRevealTabCard(id)`,
+  even when the panel already had that card selected (you peeked it, scrolled away, then picked its
+  tab). And a terminal touch that ENDS a peek (`_SidePanelFollowFocusedTab` moving the selection back
+  to your tab — §3) scrolls back to your tab's card; a terminal touch that changes nothing never
+  scrolls, so clicking into the terminal can't snap back a list you scrolled by hand.
+- **What never scrolls it.** A rebuild (they follow every fleet change and would fight your own
+  scrolling), a card click (the card is already where you clicked it), a Manager-side selection (the
+  lens push), and the Agent Manager page itself (no tab is selected there).
+- **Minimal and one-shot.** The scroll is `UpdateLayout()` + `StartBringIntoView()` on the card — the
+  Manager board's own `BringSelectedIntoView` recipe — so a card already fully visible never moves
+  and a far one stops at the nearest edge. Keyboard focus never leaves the terminal.
+- **An owed reveal.** `_SidePanelRevealTabCard` records the id (`_sidePanelRevealPendingId`) and
+  queues ONE coalesced Low-priority tick (`_SidePanelQueueReveal` → `_SidePanelRevealPendingNow`), so
+  rapid Ctrl+Tab cycling folds into one scroll to the LAST tab, and the tick measures the list after
+  whatever rebuild/content swap ran first. The debt is consumed by the first tick that finds the card
+  **rendered**, and survives until then: a just-launched session's card (it lands on the NEXT
+  rebuild — `_SidePanelRebuildCards` re-queues), a collapsed panel (the expand re-queues), a card the
+  filter hides (paid when the filter admits it).
+- **Cancelling it.** A card click (the user's own pick outranks a pending scroll — cleared in
+  `_SidePanelSelectSession` when `driveManagerLens`), selecting a tab with no card (pwsh / cmd /
+  external), and turning the toggle off (here, or by another window's broadcast) all drop the debt,
+  so a stale reveal can never yank the list to a tab you have already left.
+- **Persistence + reach.** The click is a freshest-disk RMW of that ONE field (the `⇄` recipe) plus a
+  LIVE `BroadcastSettingsChanged` of the struct just read from disk — never this window's copy, which
+  can be stale on other out-of-cog fields — so every open window re-pins its toggle at once
+  (`_ApplyBroadcastSettings` → `_SidePanelApplySettings` → `_SidePanelUpdateScrollToTabButton`).
+  Turning it ON scrolls straight to the focused tab's card when that card is the selected one (a live
+  peek of another card is left alone).
 
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
@@ -153,6 +193,7 @@ GLOBAL-only; the **card scope is per-window ONLY** (no global default — see be
 | collapsed | `WindowRecord::sidePanelCollapsed` (-1 = unset) | `AppSettings::sidePanelCollapsed` (false) |
 | dock side | — | `AppSettings::sidePanelOnLeft` (true = **left, the default**; false = right) |
 | card scope (LOCAL/GLOBAL) | `WindowRecord::sidePanelGlobal` (absent = LOCAL; written only when GLOBAL) | — **none by design**: every new window starts LOCAL |
+| `⌖` scroll to the selected tab (§2a) | — | `AppSettings::sidePanelScrollToSelectedTab` (true = **ON, the default**; absent key = ON) — a GLOBAL preference, broadcast live to every open window |
 
 - **The card scope is the one field with NO last-one-wins export**: `_SidePanelToggleScope`
   persists it through the window-record autosave alone — never `_SidePanelPersistDefaults`, and
@@ -170,8 +211,13 @@ GLOBAL-only; the **card scope is per-window ONLY** (no global default — see be
 - Bands everywhere (drag clamps == load-time checks): width (0.10, 0.50], split (0.15, 0.85).
   A record's out-of-band value degrades to UNSET (the global default); a settings out-of-band
   value degrades to the shipped default — a corrupt file can never collapse the terminal.
-- All four AppSettings fields are written OUTSIDE the cog form, so BOTH cog-Save preserve
-  blocks (content + page sink) restore them from disk.
+- All five AppSettings fields are written OUTSIDE the cog form, so BOTH cog-Save preserve
+  blocks (content + page sink) restore them from disk. For the `⌖` toggle the page sink's line is
+  load-bearing beyond the cog: the board-sort cycle (the board header's AND this panel's sort
+  button) saves through that sink carrying the Manager content's `AppSettings` copy, which never
+  learns of THIS window's own `⌖` flip (the toggle lives on the page; the content only hears other
+  windows' broadcasts) — without the preserve line, the next sort click in this window would
+  silently turn the toggle back.
 - **The dock side defaults to LEFT** (it was RIGHT when the panel first landed). The struct
   default and `AppSettingsFromJson`'s absent-key fallback deliberately agree, so a fresh install
   and a settings.json from before the key both dock left. A PRESENT value always wins, `false`
@@ -186,6 +232,9 @@ GLOBAL-only; the **card scope is per-window ONLY** (no global default — see be
 - Rebuilds: batched-drain trigger + 500ms min gap + collapsed-defers + in-place timing refresh;
   no eager flyouts on cards (menus built at right-click); `SnapshotLive` only; the per-card
   color resolve rides the cached `LoadDirColors`.
+- The `⌖` reveal is one coalesced Low-priority tick per tab selection (a map lookup + one
+  `UpdateLayout` + `StartBringIntoView` when owed; nothing at all when not), never a per-rebuild
+  re-scroll, and never a focus move — the terminal keeps typing focus.
 - Layout mutations from layout-driven triggers (ContentArea/root SizeChanged) go through
   coalesced dispatcher ticks with change-gated writes (the E_LAYOUTCYCLE lesson); pointer-drag
   applies synchronously (input, not layout).
