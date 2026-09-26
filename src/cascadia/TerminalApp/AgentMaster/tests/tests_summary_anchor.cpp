@@ -1165,7 +1165,10 @@ void TestSummaryUserMsgNoise()
 // Agentmaster (PENDING_INPUT.md): the pure unsent-draft detector. Marker/rule glyphs are built from
 // code points (this TU compiles without /utf-8, so the source stays pure-ASCII -- no raw glyph, no \u
 // in a literal). Covers box identification, single/multi-line extraction, the empty box, a sent
-// prompt vs the live box, menu-selection rejection, and the rule classifier.
+// prompt vs the live box, menu-selection rejection, and the rule classifier. It also pins Claude Code's
+// FULLSCREEN (alt-buffer) layout against a full-screen CHILD app's screen (cases 28-29,
+// PENDING_INPUT.md §12). Those two are the content-level distinction that replaced the removed blanket
+// alt-buffer skip in ControlCore::ReadPendingInputDraft.
 void TestPendingInput()
 {
     std::wprintf(L"-- PendingInput (draft detection) --\n");
@@ -1729,6 +1732,117 @@ void TestPendingInput()
             }
             CHECK(stayedOnKillRung, "discard: collapsing consecutive blank rows stays on the kill rung (a row drop is progress, not a stall)");
             CHECK(DecideDraftDiscard(L"", p, /*boxMultiRow*/ false).action == DraftDiscardAction::Done, "discard: ...and the single-row empty box ends Done");
+        }
+    }
+    // 28. REAL CAPTURE: Claude Code 2.1.282's FULLSCREEN renderer (PENDING_INPUT.md §12). With
+    // CLAUDE_CODE_NO_FLICKER=1 (or `/tui fullscreen`) claude writes ESC[?1049h before its first frame
+    // and draws its whole UI in the terminal's ALTERNATE screen buffer. That buffer is viewport-sized,
+    // so ControlCore's scan hands the detector EVERY row of the screen (here 40 rows at 120 columns),
+    // not the tail of a scrollback. The rows are the pyte rendering of a real ConPTY session, captured
+    // 2026-09-26 with nothing ever submitted. Two environment-specific notice rows (5: a CLAUDE.md size
+    // warning, 7: the debug-log path) are left blank; no ❯ appears in either. The box is the same
+    // shape as the classic inline renderer's: full-width flush-left rules, the caret row ❯ + NBSP, the
+    // 2-space continuation indent. The FOOTER below the bottom rule is what this layout adds, and the
+    // detector already scans past it. These cases are what the removed alt-buffer skip hid: the
+    // detector always read this screen correctly; ControlCore simply never handed it over.
+    {
+        const std::wstring rule120(120, DASH);
+        const std::wstring footer = L"  ⏵⏵ bypass permissions on (shift+tab to cycle)";
+        auto withBanner = [](std::vector<std::wstring> screen) {
+            screen[1] = L" ▐▛███▛█   Claude Code v2.1.282";
+            screen[2] = L"▝▜██████▀  Opus 5.5 · Claude Max";
+            screen[3] = L" ▝▝   ▝▝   K:\\source\\Agentmaster";
+            return screen;
+        };
+        // (a) The focused EMPTY box. The reverse-video cursor cell after the NBSP is a plain space, and
+        // the row trim drops it, so the verdict must be Empty (safe to place into), never Draft.
+        {
+            auto screen = withBanner(std::vector<std::wstring>(40));
+            screen[35] = std::wstring(103, L' ') + L"◈ max · /effort";
+            screen[36] = rule120;
+            screen[37] = std::wstring(1, MARK) + NBSPs;
+            screen[38] = rule120;
+            screen[39] = footer;
+            const auto d = DetectPendingInput(screen);
+            CHECK(d.boxFound && d.state == InputBoxState::Empty && d.text.empty(), "pending fullscreen: the empty alt-buffer box reads Empty (safe to place into)");
+            CHECK(d.caretRow == 37 && d.bottomRuleRow == 38, "pending fullscreen: caret + bottom rule located ABOVE the footer row");
+        }
+        // (b) A 3-line UNSENT draft (two bracketed pastes, never submitted). The box grew upward by two
+        // rows and the hint row switched to the Ctrl+G editor hint.
+        {
+            auto screen = withBanner(std::vector<std::wstring>(40));
+            screen[33] = std::wstring(96, L' ') + L"ctrl+g to edit in Edit";
+            screen[34] = rule120;
+            screen[35] = std::wstring(1, MARK) + NBSPs + L"first line of an unsent draft";
+            screen[36] = L"  second line";
+            screen[37] = L"  third line";
+            screen[38] = rule120;
+            screen[39] = footer;
+            const auto d = DetectPendingInput(screen);
+            CHECK(d.boxFound && d.state == InputBoxState::Draft, "pending fullscreen: a draft in the alt-buffer box reads Draft");
+            CHECK(d.text == (L"first line of an unsent draft" + NL + L"second line" + NL + L"third line"),
+                  "pending fullscreen: the multi-line draft is extracted exactly (NBSP + continuation indent stripped)");
+            CHECK(d.caretRow == 35 && d.bottomRuleRow == 38, "pending fullscreen: body spans caret..bottom rule (3 visual rows)");
+        }
+    }
+    // 29. REAL CAPTURE: a full-screen CHILD app in the SAME alternate buffer, Microsoft Edit 1.2.1 (the
+    // editor Claude opens for Ctrl+G, "ctrl+g to edit in Edit" above). This is the case the removed
+    // blanket alt-buffer skip existed for, so it now rests on CONTENT: the detector must read NoBox, the
+    // verdict that makes the autorunner hold instead of delivering keystrokes into the editor. Edit
+    // draws a "N │ " line-number gutter in front of every line, so a caret can never be a row's first
+    // glyph. Captured 2026-09-26 at 120x40 under ConPTY, with the terminal queries Edit waits on
+    // answered. The 31 identical empty gutter rows are rebuilt by a loop. The scrollbar thumb glyph
+    // (U+2588) sits in the last column.
+    {
+        const std::wstring menuBar = L" File  Edit  View  Help";
+        const std::wstring statusBar = L" [CRLF]  [UTF-8]  [Spaces:4]  1:1" + std::wstring(71, L' ') + L"[edit_draft.md]";
+        const std::wstring thumb = L"█";
+        // (a) The draft from case 28 opened in Edit, exactly as Ctrl+G would hand it over.
+        {
+            std::vector<std::wstring> screen(40);
+            screen[0] = menuBar;
+            screen[1] = L"1 │ first line of an unsent draft" + std::wstring(86, L' ') + thumb;
+            screen[2] = L"2 │ second line" + std::wstring(104, L' ') + thumb;
+            screen[3] = L"3 │ third line" + std::wstring(105, L' ') + thumb;
+            screen[4] = L"4 │" + std::wstring(116, L' ') + thumb;
+            for (int r = 5; r <= 35; ++r)
+            {
+                screen[r] = L"  │" + std::wstring(116, L' ') + thumb;
+            }
+            screen[36] = L"  │" + std::wstring(116, L' ') + L"▆"; // the thumb's partial last cell
+            screen[37] = L"  │";
+            screen[38] = L"  │";
+            screen[39] = statusBar;
+            const auto d = DetectPendingInput(screen);
+            CHECK(!d.boxFound && d.state == InputBoxState::NoBox && d.text.empty(), "pending child-app: Microsoft Edit's alt-buffer screen reads NoBox (the autorunner holds)");
+        }
+        // (b) The adversarial draft: its text CONTAINS a pasted Claude input box (rule, ❯ + NBSP + text,
+        // rule), the one shape that could pass for Claude's own box if an editor drew it flush-left.
+        // Edit's gutter still keeps the ❯ from being the row's first glyph, so there is no caret
+        // candidate and still NoBox. (An editor with NO gutter would draw that snippet flush-left and
+        // read as a box. That residual case is written up in PENDING_INPUT.md §12.)
+        {
+            std::vector<std::wstring> screen(40);
+            screen[0] = menuBar;
+            screen[1] = L"1 │ Here is what I saw:" + std::wstring(96, L' ') + thumb;
+            screen[2] = L"2 │ " + std::wstring(40, DASH) + std::wstring(75, L' ') + thumb;
+            screen[3] = L"3 │ " + std::wstring(1, MARK) + NBSPs + L"foo bar" + std::wstring(106, L' ') + thumb;
+            screen[4] = L"4 │ " + std::wstring(40, DASH) + std::wstring(75, L' ') + thumb;
+            screen[5] = L"5 │ please fix" + std::wstring(105, L' ') + thumb;
+            screen[6] = L"6 │" + std::wstring(116, L' ') + thumb;
+            for (int r = 7; r <= 33; ++r)
+            {
+                screen[r] = L"  │" + std::wstring(116, L' ') + thumb;
+            }
+            screen[34] = L"  │" + std::wstring(116, L' ') + L"▃"; // the thumb's partial last cell
+            for (int r = 35; r <= 38; ++r)
+            {
+                screen[r] = L"  │";
+            }
+            screen[39] = statusBar;
+            CHECK(IsAnchoredPendingRuleRow(screen[2]), "pending child-app: the gutter-prefixed pasted rule IS rule-dense + anchored (so the caret test is what rejects it)");
+            const auto d = DetectPendingInput(screen);
+            CHECK(!d.boxFound && d.state == InputBoxState::NoBox && d.text.empty(), "pending child-app: a PASTED Claude box shown in Edit is not mistaken for the input box (gutter)");
         }
     }
 }

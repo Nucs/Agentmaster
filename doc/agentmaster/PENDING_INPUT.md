@@ -1,5 +1,15 @@
 # Pending-input monitor — detect an UNSENT draft in a Claude tab's input box
 
+> **2026-09-26 — Claude Code's FULLSCREEN renderer (§12).** With `CLAUDE_CODE_NO_FLICKER=1` (or
+> `/tui fullscreen`), Claude Code 2.1.282 draws its whole UI, input box included, in the terminal's
+> ALTERNATE screen buffer. A 2026-09-18 guard (`132e19b5d`) answered "no box" for any alt-buffer screen
+> without reading it. Release 0.6.8.12 was the first release build to carry that guard, and in it the
+> monitor went dark for every Claude tab: the mail button (§8d) never enabled, Copy Current Prompt came
+> back empty, the §10 re-fill gave up, and the Tests Autorunner held every advance on "input box not
+> visible". `ControlCore::ReadPendingInputDraft` now reads the active buffer, main or alt, and tells a
+> child full-screen app (the Ctrl+G editor) apart by content. Real-capture fixtures in
+> `TestPendingInput` cases 28–29 pin both sides. Rides the next deploy.
+>
 > **2026-09-25 — the FORK CARRY (§11) + the PASTE JOURNAL (§2c).** Forking a session now copies the
 > message sitting unsent in the source's input box into the new fork's box (never submitted), pasted
 > PIECEWISE so the fork's box reads like the source's, every `[Pasted text #N +M lines]` backed by its
@@ -281,7 +291,7 @@ TerminalPage::_ScanPendingInput()      (TerminalApp; UI thread, ticked by the sh
   └─ per bound, started CLAUDE tab:     liveness probe — alongside _SweepClaudeLiveness / _ObserverProbe)
        ├─ TermControl::ReadPendingInputDraft()                                     TerminalControl
        │    └─ ControlCore::ReadPendingInputDraft()   (read-only, under the read-lock)
-       │         ├─ copy the last ~120 buffer rows' text
+       │         ├─ copy the last ~120 rows' text of the ACTIVE buffer — main OR alt (§12)
        │         └─ Agentmaster::DetectPendingInput(rows)   ◄── PendingInput.h (PURE, header-only)
        ├─ clear-debounce (eager show / lazy hide) → effectiveDraft
        ├─ SessionRegistry::SetPendingInput(id, effectiveDraft)
@@ -411,6 +421,11 @@ tab/board pulse storyboards run **only while a tab is actually pending** — an 
   text un-stripped until a real sighting motivates full framed extraction (degraded-not-dark, by design).
 - **A draft first-line shaped exactly like a preview-menu option** (`N. …` AND a mid-line `│` with text
   after it) is rejected as a menu — the deliberate, vanishingly-rare §2a trade-off.
+- **A pasted Claude box inside a GUTTER-LESS external editor** (§12) reads as a box. Suppose the Ctrl+G
+  editor draws lines flush-left, and the draft it shows contains a copied Claude input box (a rule, a
+  `❯` line, a rule). Then that snippet passes the detector. Microsoft Edit, Claude's default Ctrl+G
+  editor, is immune: its `N │ ` gutter keeps the caret from being a row's first glyph (pinned by
+  `TestPendingInput` case 29).
 
 ## 5. Persist + reload on startup — the draft as a durable MEMORY
 
@@ -1247,3 +1262,97 @@ delivery + pump are WinRT (verified live on the next deploy).
   drift would make it appear on its own; same-window only, since the board spans the whole fleet.
 - **Explorer-tree row** + the per-tab overlay HUD could carry the same pulse (the board + tab cover the
   primary surfaces).
+
+## 12. Claude Code's FULLSCREEN renderer — the alt buffer is Claude's OWN screen (fixed 2026-09-26)
+
+### What broke
+
+In release **0.6.8.12** every Claude tab read as "no input box" (reported 2026-09-26 on session
+`986b7ff2`: text sitting in the prompt box, and the overlay's mail button would not queue it). The
+effects:
+
+- **Draft detection.** The last `[pending]` line in hooks.log was at 01:00. The build had started at
+  00:36, and nothing has been detected in any tab since.
+- **The mail button (§8d)** stayed disabled, and **Copy Current Prompt (§8)** found nothing.
+- **The §10 restore re-fill** logged `gave up 10 min after start (box never readable)`. The §11 fork
+  carry was the only reader still working (see below).
+- **The Tests Autorunner delivered nothing.** Every advance logged
+  `[advance-skip] <sid> (input box not visible)`. The last `[delivered]` line predates the deploy.
+
+### Why
+
+Two changes met:
+
+1. **Claude's side.** `~/.claude/settings.json` sets **`CLAUDE_CODE_NO_FLICKER=1`**. On Claude Code
+   2.1.282 that selects the **fullscreen renderer**. The same renderer is `/tui fullscreen` for a single
+   session, and a server-side "feature of the week" flag can turn it on too, so it can appear without
+   any local setting. It opens with `ESC[?1049h` and draws its whole UI in the terminal's **alternate
+   screen buffer**, and it turns mouse tracking on (`?1000h ?1002h ?1003h ?1006h`).
+   - The input box itself is unchanged: two full-width flush-left rules around the `❯` + NBSP caret row,
+     with the 2-space continuation indent.
+   - It sits at the bottom of a viewport-sized screen, with a footer row (`⏵⏵ bypass permissions on …`)
+     below the bottom rule.
+   - The conversation above it is virtual-scrolled by claude, so the terminal holds no scrollback of it.
+2. **Our side.** `132e19b5d` (2026-09-18, the Ctrl+G / `edit.exe` investigation) made
+   `ControlCore::ReadPendingInputDraft` answer **NoBox** for ANY alt-buffer screen, without reading it.
+   It assumed "Claude renders inline in the MAIN buffer, never the alt buffer", so the alt buffer had
+   to be a child full-screen app. Release 0.6.8.11's binaries were built on 2026-09-18 before that
+   commit, and 0.6.8.12 was the first release to carry it. The dev instance had it from 2026-09-18,
+   and dev's last `[pending] … draft` line is from that afternoon.
+
+### Measured proof (2026-09-26)
+
+- **The raw stream.** A fresh 2.1.282 session on a real ConPTY (the `claude-wrap-ConPTY` driver, nothing
+  submitted) emits `ESC[?1049h` once, before its first frame. Its rendered screen is TestPendingInput's
+  case 28 fixture.
+- **The live session.** `tests/pending_probe.exe`, run out-of-band against `986b7ff2`'s claude (pid
+  72364, a 183×51 screen), found the user's 9-char draft with the shipped detector (`boxFound=1`). So
+  the detector reads the fullscreen box fine; only the skip hid it.
+- **The one reader that kept working.** In the same hour, the §11 fork carry logged
+  `draft COPIED + VERIFIED`. It verifies through `ReadInputBoxProbe`, which never had the skip.
+
+### The fix
+
+`ReadPendingInputDraft` reads the **active** buffer, main or alt. A child full-screen app (the Ctrl+G
+editor, a pager) is told apart by **content**. That is the only discriminator left once Claude itself
+can own the alt buffer, and it is the one the delivery probe (DELIVERY.md §11) has always relied on.
+
+- **What counts as a box.** `DetectPendingInput` accepts only a `❯`/`›` caret that is a row's first glyph
+  (at most one vertical border before it), with anchored rules directly above and below. An editor or
+  pager screen reads NoBox, so the autorunner holds exactly as the skip intended.
+- **Cost.** One bounded 120-row read per scan tick for a redrawing full-screen app, the same as a busy
+  classic tab.
+- **The cache across buffer switches.** The mutation-id cache stays correct, because each `TextBuffer`
+  instance seeds its own id range 2^32 apart (`textBuffer.cpp`), so a switch always re-scans.
+- **`Terminal::IsInAltBuffer()`** stays, with a corrected comment. It must never gate reading Claude's
+  box.
+
+### Pinned
+
+`TestPendingInput` holds real 120×40 captures:
+
+- **Case 28:** the fullscreen screen with an empty box (must read **Empty**, caret above the footer), and
+  with a 3-line draft (must read **Draft**, text exact).
+- **Case 29:** Microsoft Edit 1.2.1 (Claude's default Ctrl+G editor) showing that draft, and Edit showing
+  a draft that CONTAINS a pasted Claude box. Both must read **NoBox**. Edit's `N │ ` gutter keeps the
+  caret from ever being a row's first glyph, even under a rule-dense, anchored pasted rule.
+
+### Residual limitation
+
+**A GUTTER-LESS external editor** showing a pasted Claude box would draw it flush-left, and it would read
+as a box (§4). That was equally true before `132e19b5d`, and for `ReadInputBoxProbe` all along. It needs
+three things at once: that editor, that paste, and a queued prompt at rest while the editor is open.
+
+### Elsewhere under fullscreen (not fixed here)
+
+- **The summary-panel JUMP** (SUMMARY_JUMP.md §5) can only reach prompts on claude's current screen.
+  The alt buffer has no scrollback to center on.
+- **Mouse tracking** is on, so a plain drag goes to claude. Shift+drag is the terminal's own selection.
+
+### Workaround on a build without the fix
+
+- Remove `CLAUDE_CODE_NO_FLICKER` from `~/.claude/settings.json`, or set
+  **`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`**. Claude's own message says that variable "forces the
+  classic renderer any time".
+- Then restart the affected sessions, because claude chooses its renderer at start.
+- `/tui default` switches a single session back (a restart + resume of it).

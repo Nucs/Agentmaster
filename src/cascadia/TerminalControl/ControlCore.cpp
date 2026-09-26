@@ -938,30 +938,30 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             return {};
         }
         const auto lock = _terminal->LockForReading();
+        // Agentmaster (PENDING_INPUT.md §12): read the ACTIVE buffer, whichever it is — the MAIN buffer
+        // OR the ALTERNATE screen buffer. Claude Code's FULLSCREEN renderer (CLAUDE_CODE_NO_FLICKER=1,
+        // or `/tui fullscreen` per session) draws its WHOLE UI, input box included, in the alt buffer:
+        // it writes ESC[?1049h before its first frame and keeps the ❯ box, between its two flush-left
+        // rules, at the bottom of that viewport-sized screen. An earlier guard here (132e19b5d) assumed
+        // the alt buffer could only ever hold a CHILD full-screen app (the Ctrl+G external editor, a
+        // pager) and answered NoBox for any alt-buffer screen without reading it. Under the fullscreen
+        // renderer that blanked EVERY Claude tab (release 0.6.8.12, 2026-09-26): no draft was ever
+        // detected, so the "3 dots" never showed, the overlay's mail button stayed disabled, Copy
+        // Current Prompt found nothing, the §10 restore re-fill gave up ("box never readable"), and the
+        // autorunner held every advance on "input box not visible" — nothing was delivered at all.
+        // A child full-screen app is therefore told apart by CONTENT, not by buffer: DetectPendingInput
+        // accepts only a ❯/› caret that is the row's first glyph (at most ONE vertical border before
+        // it) with anchored rules directly above and below. A real editor/pager screen yields NoBox
+        // (the autorunner then holds, as intended) — including Microsoft Edit, Claude's default Ctrl+G
+        // editor, which prefixes every line with a "N │ " gutter, so even a draft whose text contains
+        // a PASTED Claude box never presents a caret there (pinned by TestPendingInput's real-capture
+        // cases). The residual case is an editor with NO gutter showing such a pasted box. It reads
+        // as a box, as it always did through ReadInputBoxProbe, which never had the skip (PENDING_INPUT.md
+        // §12). The cost of reading a redrawing full-screen app is one bounded 120-row read per scan
+        // tick, the same as a busy classic-renderer tab. The mutation-id cache below cannot mix the two
+        // buffers up across a switch: every TextBuffer instance seeds its own id range 2^32 apart
+        // (textBuffer.cpp), so a switch always misses the cache and re-scans the newly active buffer.
         const auto& tb = _terminal->GetTextBuffer();
-        // Agentmaster (PENDING_INPUT.md): a full-screen app owns the ALTERNATE screen buffer — a TUI
-        // editor (Claude Code's Ctrl+G external editor / edit.exe), a pager, etc. Claude Code renders
-        // its `>` input box INLINE in the MAIN buffer, NEVER the alt buffer, so by construction there
-        // is no draft box to find here: the alt buffer IS the child app's own screen. Report NoBox and
-        // skip the read. This matters three ways: (1) a full-screen app redraws constantly, bumping
-        // GetLastMutationId every tick, so the mutation-id cache below would never skip and we'd
-        // read+parse the app's screen on every scan; (2) the app's box-drawing UI (menu/status bars,
-        // borders) can MISPARSE as a `>` input box — recording a phantom draft AND flipping the cached
-        // box-state to "box present", which stops the autorunner's "input box not visible" guard from
-        // firing and lets a queued prompt be delivered (the draft-swap: Ctrl+S/Ctrl+U, then the prompt
-        // + Enter) straight INTO the full-screen app; (3) the per-tick 120-row read contends the
-        // terminal lock with the app's rendering. Cache the verdict (mutation-id + NoBox) so the
-        // box-state / body-rows readers that share this scan also see NoBox, and so a return to the
-        // main buffer (a different mutation id) re-scans normally.
-        if (_terminal->IsInAltBuffer())
-        {
-            _pendingInputScanMutationId = tb.GetLastMutationId();
-            _pendingInputScanValid = true;
-            _pendingInputScanResult = {};
-            _pendingInputScanState = static_cast<int32_t>(::Agentmaster::InputBoxState::NoBox);
-            _pendingInputScanBodyRows = 0;
-            return {};
-        }
         // Agentmaster (perf): mutation-id gate — the buffer hasn't changed since the last poll, so the
         // rows (and therefore the detector's answer) are byte-identical; skip the 120-row read + parse.
         // A draft being typed IS buffer output (the TUI echoes it), so any draft change bumps the id.

@@ -429,8 +429,13 @@ resolves). Pattern: any app/overlay-layer buffer reader MUST guard on `_initiali
   of the needle (forward is always tried first, so LTR matching is never perturbed; the matched *row* is the
   same, so centering works). This fixes Hebrew/Arabic prompts not jumping. Mixed bidi (RTL + Latin/digits) is
   not a pure reversal and may still miss — a full BiDi (ICU `ubidi`) reorder is a future refinement.
-- **Alt screen buffer** — if a session ran in the alt buffer (no scrollback), the resolve finds nothing in
-  history → `-1`. Claude Code renders inline (real scrollback), so this is a guard, not the norm.
+- **Alt screen buffer** — if a session runs in the alt buffer (no scrollback), the resolve finds nothing in
+  history → `-1`. Claude Code's classic renderer draws inline, with real scrollback. Its **fullscreen
+  renderer** (`CLAUDE_CODE_NO_FLICKER=1` / `/tui fullscreen`; PENDING_INPUT.md §12) runs in the alt
+  buffer and virtual-scrolls the conversation inside claude, so the terminal only ever holds claude's
+  current screen. Under it, only the prompts rendered on that screen resolve, the rest dim, and there is
+  no scrollback to center within. Making jumps work there would mean driving claude's own scroll, which
+  is a separate design.
 - **Codex** — the summary's prompts list is wired for **Claude** (`AnalyzeSessionTranscript.userMsgs`);
   Codex rollouts get no jump buttons in v1 (the resolver itself is agent-agnostic — only the prompt-source
   wiring differs).

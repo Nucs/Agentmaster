@@ -223,13 +223,15 @@ public:
     bool IsUiaDataInitialized() const noexcept override;
 #pragma endregion
 
-    // Agentmaster: true while a full-screen app has switched to the ALTERNATE screen buffer (a TUI
-    // editor / pager — e.g. Claude Code's Ctrl+G external editor, or `edit.exe`). Claude Code draws
-    // its `>` prompt / input box INLINE in the MAIN buffer, never the alt buffer, so the alt buffer
-    // is by definition the CHILD app's screen. Exposed so ControlCore's pending-input draft scan can
-    // SKIP reading it (reading a full-screen app's screen as if it were an input box misparses its
-    // box-drawing UI as a draft box AND needlessly contends the terminal lock with the app's
-    // rendering every tick — PENDING_INPUT.md). Trivial wrapper over the private _inAltBuffer().
+    // Agentmaster: true while the ALTERNATE screen buffer is active (ESC[?1049h). A trivial wrapper
+    // over the private _inAltBuffer(), so it has the same contract: call it only while holding the
+    // terminal lock. ⚠ Being in the alt buffer does NOT mean "a child full-screen app owns the screen":
+    // Claude Code's FULLSCREEN renderer (CLAUDE_CODE_NO_FLICKER=1 / `/tui fullscreen`) runs its whole
+    // UI, input box included, in the alt buffer, just like a Ctrl+G external editor or a pager does.
+    // Never use this to skip reading Claude's input box. ControlCore::ReadPendingInputDraft once did,
+    // and every fullscreen session then read as "no box" (PENDING_INPUT.md §12). It has no caller
+    // today. It stays for code that genuinely needs the buffer's identity, e.g. the scrollback-less
+    // alt buffer SUMMARY_JUMP.md §5 describes.
     bool IsInAltBuffer() const noexcept { return _inAltBuffer(); }
 
     void SetWriteInputCallback(std::function<void(std::wstring_view)> pfn) noexcept;
