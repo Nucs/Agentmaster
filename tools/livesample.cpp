@@ -5,7 +5,18 @@
 //   sample <pid> <tid> <n> <ms>  - RIP-sample a thread n times every ms; symbol histogram +
 //                                  a few full StackWalkEx stacks (symbolized, PDBs from imageDir).
 // Symbols: pass the Release layout dir as the sym search path via env LIVESAMPLE_SYMDIR
-// (defaults to the CascadiaPackage Release layout). Suspends are microseconds; strictly read-only.
+// (defaults to the CascadiaPackage Release layout). Suspends are microseconds ONCE a module's symbols
+// are loaded; strictly read-only.
+// ⚠ NEVER put a symbol SERVER (srv*...) in LIVESAMPLE_SYMDIR, and never run it with a symsrv-capable
+// dbghelp.dll beside the exe, against a live instance's UI thread. `sample`/`walk`/`lockwatch` call
+// StackWalkEx(SymFunctionTableAccess64) while the target thread is SUSPENDED, and with
+// SYMOPT_DEFERRED_LOADS the first touch of each module loads its PDB right there, so a PDB DOWNLOAD
+// (tens of MB per OS module) happens with the target frozen. 2026-09-27 on the release instance:
+// 800 samples took 402 s instead of 20 s and the ui-stall watchdog logged 165 s + 36 s + 109 s
+// NOT-pumped episodes (one user tab switch took 108 s). Even a LOCAL first load (TerminalApp.pdb is
+// ~190 MB) costs a one-off multi-second freeze on the first sample that lands in the module. The safe
+// fix (not done yet) is to force-load every module's symbols BEFORE the sampling loop (outside any
+// suspend); until then use the in-box dbghelp + local Release PDBs only.
 #define _AMD64_
 #include <windows.h>
 #include <tlhelp32.h>
@@ -323,6 +334,10 @@ static int walk(DWORD pid, DWORD tid, int n, int periodMs, int episodeMs)
             fr.AddrFrame.Offset = wctx.Rbp; fr.AddrFrame.Mode = AddrModeFlat;
             fr.AddrStack.Offset = wctx.Rsp; fr.AddrStack.Mode = AddrModeFlat;
             s.pcs.push_back(wctx.Rip);
+            // ⚠ The target thread is SUSPENDED for this whole walk. SymFunctionTableAccess64 triggers the
+            // DEFERRED symbol load of every module the stack first touches (see the header warning): with a
+            // local PDB that is a one-off multi-second freeze, with a symbol server it is a download. Never
+            // widen the symbol path here without first force-loading all modules before the loop.
             for (int f = 0; f < 64; ++f)
             {
                 if (!StackWalkEx(IMAGE_FILE_MACHINE_AMD64, g_proc, h, &fr, &wctx, nullptr,
