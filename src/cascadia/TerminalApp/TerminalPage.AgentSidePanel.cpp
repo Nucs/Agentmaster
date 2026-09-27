@@ -104,6 +104,13 @@ namespace
     constexpr double kSidePanelMaxWidthFrac = 0.50; // never more than half the content area
     constexpr double kSidePanelMinSplitFrac = 0.15; // cards area never squeezed below 15% of the panel
     constexpr double kSidePanelMaxSplitFrac = 0.85; // summary area never squeezed below 15% either
+    // The header filter box's height FLOOR (DIPs), replacing the TextBox template's stock 32px
+    // (TextControlThemeMinHeight) for that one box only: its natural slim height at FontSize 11 — one line
+    // plus the tight 2/3 vertical padding plus the 1px borders — so it sits under the ~19px header buttons
+    // without towering over them. A floor, deliberately NOT a fixed Height: the box's parts still measure
+    // their own needs, so a larger text scale or DPI rounding grows the box instead of clipping it (a fixed
+    // Height below a template part's floor would cut off the bottom border).
+    constexpr double kSidePanelSearchBoxMinHeightPx = 22.0;
     constexpr uint64_t kSidePanelRebuildMinGapMs = 500; // registry-drain rebuild throttle (a storm folds into the periodic catch-up)
     constexpr uint64_t kSidePanelTimingRefreshMs = 30'000; // the in-place "ago" text refresh cadence
 
@@ -365,10 +372,21 @@ namespace winrt::TerminalApp::implementation
             _sidePanelExpandedRoot.RowDefinitions().Append(r2);
         }
 
-        // Header row: [ search * ][ scope ][ sort ][ ⌖ ][ ⇄ ][ chevron ] — the three icon buttons sit
-        // together at the end, the collapse chevron outermost.
+        // Header: TWO lines.
+        //   line 1 (row 0): [ spacer * ][ scope ][ sort ][ ⌖ ][ ⇄ ][ chevron ] — the buttons keep the
+        //     right-aligned places they had when the filter box shared this line (column 0, the star, is
+        //     now an empty spacer), the three icons together at the end, the collapse chevron outermost.
+        //   line 2 (row 1): the filter box across the FULL width. On a line of its own it no longer
+        //     competes with the buttons for room — sharing one line, a narrow panel squeezed the box down
+        //     to its minimum while the buttons kept their natural widths.
         Grid header{};
         {
+            RowDefinition hr0{};
+            hr0.Height(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            RowDefinition hr1{};
+            hr1.Height(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            header.RowDefinitions().Append(hr0);
+            header.RowDefinitions().Append(hr1);
             ColumnDefinition c0{};
             c0.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
             ColumnDefinition c1{};
@@ -389,9 +407,25 @@ namespace winrt::TerminalApp::implementation
             header.ColumnDefinitions().Append(c5);
             header.Padding(ThicknessHelper::FromLengths(4, 4, 4, 2));
             header.ColumnSpacing(3);
+            header.RowSpacing(3); // a little air between the buttons line and the filter line
         }
+        // The filter box — SLIM, so it sits cleanly under the ~19px header buttons instead of towering over
+        // them at the stock 32px: FontSize 11 (the buttons' size; was 12) and a tight padding (the stock
+        // TextControlThemePadding is 10,5,6,6). Left 8 keeps the text off the rounded border; the extra
+        // bottom pixel keeps the stock padding's bottom-heavy shape. Natural height: one 11px line (~15px)
+        // + 5 of padding + a 2px border ≈ 22px — the kSidePanelSearchBoxMinHeightPx floor below.
         _sidePanelSearchBox = TextBox{};
-        _sidePanelSearchBox.FontSize(12);
+        _sidePanelSearchBox.FontSize(11);
+        _sidePanelSearchBox.Padding(ThicknessHelper::FromLengths(8, 2, 6, 3));
+        // The TextBox TEMPLATE floors its border part at {ThemeResource TextControlThemeMinHeight} (32px, on
+        // BorderElement — checked in both the SDK's generic.xaml and the WinUI 2.8 resources WT loads), and
+        // a MinHeight on the TextBox itself cannot lower a template part's floor. So override that one key in
+        // THIS box's own Resources — lightweight styling, the PaintHoldButton idiom — which the template's
+        // ThemeResource lookup finds first when the template is applied (the box isn't in the tree yet, so
+        // it is applied after this). Scoped to this box: every other TextBox keeps the stock 32px. The local
+        // MinHeight(0) is a belt in case a style ever sets a floor on the control itself.
+        _sidePanelSearchBox.Resources().Insert(winrt::box_value(L"TextControlThemeMinHeight"), winrt::box_value(kSidePanelSearchBoxMinHeightPx));
+        _sidePanelSearchBox.MinHeight(0.0);
         _sidePanelSearchBox.PlaceholderText(L"filter sessions");
         _sidePanelSearchBox.VerticalAlignment(VerticalAlignment::Center);
         AgentSetTitledTip(_sidePanelSearchBox, L"Filter the cards", winrt::hstring{ L"Whitespace-split terms AND-match a session's title, working directory, branch, or id.\n\"quoted phrase\" matches exactly; a pasted whole session-id GUID matches that session and its forks by identity." });
@@ -408,7 +442,11 @@ namespace winrt::TerminalApp::implementation
             // User-driven — rebuild NOW (forced past the min-gap throttle) so typing filters live.
             self->_SidePanelScheduleRebuild(/*force*/ true);
         });
+        // Line 2, spanning EVERY column — counted, not hard-coded, so a button added to line 1 later (a new
+        // column) can't silently leave the box one column short of the right edge.
+        Grid::SetRow(_sidePanelSearchBox, 1);
         Grid::SetColumn(_sidePanelSearchBox, 0);
+        Grid::SetColumnSpan(_sidePanelSearchBox, static_cast<int32_t>(header.ColumnDefinitions().Size()));
         header.Children().Append(_sidePanelSearchBox);
 
         // The card-list SCOPE toggle — LOCAL (this window's tabs; the default, always) / GLOBAL

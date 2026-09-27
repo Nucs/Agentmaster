@@ -13,9 +13,9 @@ which also flips the collapse chevron (`«` here — it always points toward the
 ```
 ┌ tab row ─────────────────────────────────────────────────┐
 ├──────────────────────┬──┬────────────────────────────────┤
-│ [search…] [LOCAL]    │ ▌│                                │  ← header row: filter + card SCOPE (LOCAL by
-│ [sort][⌖][⇄][«]      │ ▌│                                │    default, per window) / order / scroll-to-tab /
-│                      │ ▌│                                │    dock / collapse
+│[LOCAL][sort][⌖][⇄][«]│ ▌│                                │  ← header line 1 (right-aligned): card SCOPE /
+│                      │ ▌│                                │    order / scroll-to-tab / dock / collapse
+│ [filter sessions…]   │ ▌│                                │  ← header line 2: the filter box, full width
 │ N of M (this window) │ ▌│        terminal content        │  ← count line (names the scope)
 │ ┌──────────────────┐ │ ▌│          (TabContent)          │
 │ │ session CARDS    │ │ ▌│                                │  ← TOP area (own scroll)
@@ -38,6 +38,9 @@ which also flips the collapse chevron (`«` here — it always points toward the
 - Collapse (the header chevron / the strip) shrinks the panel to a 20px expander strip; the
   header also carries a `⇄` dock-side flip, the card list's **LOCAL / GLOBAL** scope toggle (§2),
   and the `⌖` **scroll-to-selected-tab** icon toggle (§2a).
+- The header is **two lines** (one 2-row grid): the buttons, right-aligned in their original order,
+  over the filter box, which spans every column. Sharing one line with the buttons, the box was
+  squeezed toward its minimum on a narrow panel while the buttons kept their natural widths.
 
 ## 2. TOP — the session cards (the Triage-Board integration, vertical)
 
@@ -56,11 +59,14 @@ which also flips the collapse chevron (`«` here — it always points toward the
   stale. The ~30s "ago" refresh rewrites the timing TextBlocks IN PLACE — never a rebuild for a
   clock tick. The count line names the scope (`N of M sessions in this window` / `… across all
   windows`), so a short list reads as "this window", not "the fleet shrank".
-- **Search** (top row): the Sessions browser's grammar reused — `ParseSessionQuery` +
+- **Search** (the header's second line, full width — slim: FontSize 11 over a ~22px floor, the
+  TextBox template's stock 32px lifted for this box alone by overriding `TextControlThemeMinHeight`
+  in its own `Resources`, since a `MinHeight` on the control can't lower a template part's floor):
+  the Sessions browser's grammar reused — `ParseSessionQuery` +
   `MatchesQueryText`/`MatchesPathQuery` over title / effective dir / branch / id;
   whitespace-split AND terms, "quoted phrase" exact, a bare whole GUID matches the session +
   its forks by IDENTITY.
-- **Order** (top row): the SHARED `AppSettings::boardSort`, cycled through
+- **Order** (header, first line): the SHARED `AppSettings::boardSort`, cycled through
   `AgentManagerContent::CycleBoardSort` (a new public wrapper over the board's own
   `_CycleBoardSort`) and applied with the board's own `MakeSortKey`/`SortKeyLess` — one sort
   spec, two surfaces, zero drift. The cycle is MOST ACTIVE · **MOST RECENT** · NEWEST · OLDEST ·
