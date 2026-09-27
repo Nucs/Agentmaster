@@ -217,10 +217,17 @@ namespace winrt::TerminalApp::implementation
         // Manager page: Rename opens the Explorer tree's in-place editor, which lives on the (possibly
         // hidden) Agent Manager page — the rename works, but the editor is only visible after opening
         // the page (Home). `id` = the managed session; `cwd` = its effective working dir (feeds the
-        // folder-wide items). Returns a menu the caller shows via ShowAt; never null. UI thread only.
-        winrt::Windows::UI::Xaml::Controls::MenuFlyout BuildSessionMenuFor(const std::wstring& id, const std::wstring& cwd)
+        // folder-wide items); `anchor` = the element the menu was opened on (the side-panel card) —
+        // the menu's Tags item opens the tag panel right UNDER it, like a board card's; held weakly,
+        // so a card rebuilt away before the click just falls back to the panel's default spot (the
+        // window's top-left, which is also what an omitted anchor gets). Returns a menu the caller
+        // shows via ShowAt; never null. UI thread only. Throws winrt::hresult_error only if the empty
+        // flyout itself can't be created (the items are built later, guarded, at Opening).
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout BuildSessionMenuFor(const std::wstring& id,
+                                                                           const std::wstring& cwd,
+                                                                           const winrt::Windows::UI::Xaml::FrameworkElement& anchor = nullptr)
         {
-            return _MakeLazySessionMenu(id, cwd);
+            return _MakeLazySessionMenu(id, cwd, anchor);
         }
 
         // Agentmaster (Fleet Observer O6; OBSERVER.md §11c): the External (WindowsTerminal) claude

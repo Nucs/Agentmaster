@@ -80,16 +80,19 @@ which also flips the collapse chevron (`«` here — it always points toward the
   session with no turn evidence yet falls back to the hook decay anchor so it isn't stranded at
   the bottom. The pure extractor is `TurnBoundariesFromTranscriptChunk` (unit-tested).
 - **A card**: title on a band painted the session's `ResolveSessionColorHex` color
-  (WCAG-contrast text), state dot + `StateLabel` in the shared `AgentStatusColors` palette, a
+  (WCAG-contrast text), the session's **bookmark-tag ribbons in the band's top-right corner**
+  (§2b), state dot + `StateLabel` in the shared `AgentStatusColors` palette, a
   teal `codex` pill, the pending-draft `BuildPendingDots` cluster, the `TimingText` adornment,
   and a dim `leaf / branch` line.
 - **Interactions** (Linked Lenses): click = select (drives `AgentManagerContent::SelectSession`,
   so the board/tree/Auto-Testing follow); double-click = `_ActivateClaudeSession` (jump to the
   tab, cross-window); right-click = **the** session context menu —
   `AgentManagerContent::BuildSessionMenuFor` (a public wrapper over `_MakeLazySessionMenu`), the
-  exact lazily-filled flyout the board card shows. Selection flows BOTH ways: the tab-switch
-  funnel (`_SyncManagerSelectionToTab`) and the lens-changed push both select the card here,
-  with same-id early-outs breaking the echo.
+  exact lazily-filled flyout the board card shows, **anchored on the card** (its optional `anchor`
+  argument, held weakly) so the menu's **Tags** item opens the tag panel right under the card,
+  as on the board (without an anchor it opened at the window's top-left). Selection flows BOTH
+  ways: the tab-switch funnel (`_SyncManagerSelectionToTab`) and the lens-changed push both
+  select the card here, with same-id early-outs breaking the echo.
 - **The tab strip follows a click only on the Agent Manager page.** While the Manager page is on screen, a
   card click also scrolls the tab strip to that session's tab — like a board card click, and even
   on a RE-click of the already-selected card (`_RevealClickedSessionTab`; the same-id early-outs
@@ -136,6 +139,55 @@ the card list until that tab's card is on screen**. It is a GLOBAL preference,
   (`_ApplyBroadcastSettings` → `_SidePanelApplySettings` → `_SidePanelUpdateScrollToTabButton`).
   Turning it ON scrolls straight to the focused tab's card when that card is the selected one (a live
   peek of another card is left alone).
+
+### 2b. Bookmark tags — ribbons in the title bar's top-right corner
+
+A tagged session's card shows its **bookmark tags as ribbons in the title band's top-right corner**,
+hung from the band's top edge. The band becomes `[ title * ][ tag strip Auto ]`: the strip takes the
+width its ribbons need and the title takes the rest, trimming with its ellipsis, so a long title can
+never push the tags off the card. An untagged card's band is exactly the old title-only band.
+
+```
+┌──────────────────────────────┐
+│ Fix the flaky login…   ▮▮▮▮+2│  ← title band (folder color); ribbons hang from its top edge (6 tags: 4 + "+2")
+│ ● Waiting  -2m/12h/-3m       │
+│ Agentmaster / main           │
+└──────────────────────────────┘
+```
+
+- **Top-right on the bar, not below it** (the ask). The Triage-Board card hangs its ribbons out of
+  the band's BOTTOM edge (the tab badges' "bookmark out of the book" look); here they stay ON the
+  bar, where the eye already reads the card's name and folder color, and the compact card body
+  (a state row and a dir line, 10px text) keeps its spacing.
+- **The same ribbon as everywhere**: the 6.5×9.3 swallowtail `Polygon` with a thin black
+  outline (`SidePanelMakeTagRibbon`), in the order the tags were added, colored through the ONE
+  `ResolveTagDisplayColor` (a user-picked `tag-colors.json` color, else the stable name hash) —
+  a tag can never wear a different color here than on its tab or board card.
+- **A capped footprint**: at most `kSidePanelCardTagSlots` (5) slots. With more tags the last
+  slot becomes a `+N` in the title's own ink (dark on a light band, light on a dark one), whose
+  tip names the hidden tags. Tighter than the board card's 8 because this list can be dragged
+  down to 10% of the window — the Sessions browser Tags column's fixed-footprint idiom.
+- **Hover** a ribbon = the SAME rich per-tag panel the tab badges, the board card and the
+  Sessions Tags column open (`_OnTagBadgeHoverBegin/End`): every session carrying the tag (live
+  first, then closed), and a click on a live row jumps to its tab, cross-window.
+- **The card's tooltip names every tag** (a `tags: a · b · c` line) — the ribbons are colors only.
+- **⚠ The strip is a tooltip-free zone for the card.** The card's one `AgentSetTip` tooltip covers
+  its whole `Border`, pointer events bubble, and this panel has no LocalTooltip area — so without
+  help a ribbon would also arm the card tip, which then floats at the pointer ON TOP of the hover
+  panel. A ribbon's entry therefore cancels a pending card tip / closes an open one
+  (`AgentCloseTipsIn`) and marks the event handled; the strip swallows the moves bubbling up from
+  its children (each would re-arm the card tip); the `+N` hooks its own tip BEFORE marking its
+  entry handled, so its tip opens while the card's cannot. Leaving the strip re-arms the card tip
+  normally.
+- **Data + freshness**: `_SidePanelRebuildCards` reads `GetSessionTags` for exactly the cards it
+  renders (SessionStore's (size,mtime)-validated record cache: one file stat per card at rest)
+  and `LoadAllTagColors()` once, only when a rendered card is tagged — the board's per-rebuild
+  recipe. Tags live in the SessionStore, not the registry, so no drain reports a tag edit: the
+  Tags panel's two mutation paths (`_ToggleSessionTag`, `_CommitTagEditorAdd`) call
+  `_SidePanelNoteTagsChanged()` (rebuild NOW past the min-gap; collapsed → just dirty) beside the
+  board's `_RefreshManagerBoardTags`. Another window's side panel catches up on its own next
+  rebuild — the cross-window lag every tag surface shares. Deleting a 0-carrier tag needs no
+  refresh: no card can show a tag nothing carries.
 
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
@@ -237,7 +289,9 @@ GLOBAL-only; the **card scope is per-window ONLY** (no global default — see be
 
 - Rebuilds: batched-drain trigger + 500ms min gap + collapsed-defers + in-place timing refresh;
   no eager flyouts on cards (menus built at right-click); `SnapshotLive` only; the per-card
-  color resolve rides the cached `LoadDirColors`.
+  color resolve rides the cached `LoadDirColors`; the per-card tag read rides SessionStore's
+  (size,mtime) record cache (one stat per rendered card), with `tag-colors.json` read once per
+  rebuild and only when a rendered card is tagged (§2b).
 - The `⌖` reveal is one coalesced Low-priority tick per tab selection (a map lookup + one
   `UpdateLayout` + `StartBringIntoView` when owed; nothing at all when not), never a per-rebuild
   re-scroll, and never a focus move — the terminal keeps typing focus.
@@ -256,8 +310,9 @@ GLOBAL-only; the **card scope is per-window ONLY** (no global default — see be
   board's shared helpers), `TerminalPage.xaml` (the ContentArea wrapper), `TerminalPage.h`
   (members + decls), seams in `TerminalPage.cpp` (`_OnFirstLayout`),
   `TerminalPage.AgentEngine.cpp` (drain / liveness / funnels / sink / broadcast),
-  `TerminalPage.AgentObserver.cpp` (toggle loops), `TerminalPage.AgentWindowRecord.cpp`
-  (capture), `AgentManagerContent.h` (the two public wrappers),
+  `TerminalPage.AgentObserver.cpp` (toggle loops + the Tags panel's `_SidePanelNoteTagsChanged`
+  calls), `TerminalPage.AgentWindowRecord.cpp` (capture), `AgentManagerContent.h` (the two public
+  wrappers — `BuildSessionMenuFor` takes the card as its Tags-panel anchor),
   `AgentManagerContent.Settings.cpp` (cog preserve), `AgentTabOverlay.{h,Summary.cpp}`
   (fill-host mode), `AgentMaster/SessionModels.h` + `Persistence.cpp` (fields + JSON),
   `tests/tests_persistence.cpp` (round-trip / defaults / bands).

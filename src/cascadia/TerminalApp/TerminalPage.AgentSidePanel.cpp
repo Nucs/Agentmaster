@@ -62,11 +62,13 @@
 #include "AgentMaster/ProfileBootstrap.h" // (Internal.h convention — harmless here, keeps the include set board-identical)
 #include "AgentMaster/SessionRegistry.h" // SnapshotLive / Get
 #include "AgentMaster/SessionSearch.h" // ParseSessionQuery / MatchesQueryText / MatchesPathQuery — the Sessions grammar, reused
+#include "AgentMaster/SessionStore.h" // GetSessionTags / LoadAllTagColors — the cards' bookmark-tag strip (read once per rebuild)
 
 #include <algorithm>
 #include <chrono> // kCardTipDelay (the Internal.h card-tip hold-back) + the tip helpers' delay overrides
 #include <cmath>
 #include <cwctype> // towlower — the fold for the in-process matchers
+#include <map> // the per-rebuild tag-color map (folded tag name -> "#AARRGGBB") the cards' ribbons resolve against
 #include <shobjidl.h> // IFileOpenDialog — required BY AgentManagerContent.Internal.h's PickClaudeExe helper (per-TU anonymous-namespace copy)
 
 using namespace winrt::Windows::Foundation;
@@ -217,6 +219,46 @@ namespace
         {
             card.BorderBrush(SolidColorBrush{ ColorHelper::FromArgb(0x00, 0, 0, 0) });
         }
+    }
+
+    // --- The cards' bookmark-TAG strip (the title band's top-right corner) ---------------------
+    // How many SLOTS the strip may occupy. Up to this many tags each get a ribbon; with more, the
+    // LAST slot turns into a "+N" count of the rest — so the strip's footprint is capped however
+    // heavily a session is tagged, and the title (which owns the band and trims with an ellipsis)
+    // always keeps the rest. Deliberately tighter than the Triage-Board card's 8 ribbons: that card
+    // is a fixed 220px, while this list can be dragged down to 10% of the window. It is the
+    // Sessions browser's fixed-footprint idiom (its Tags column: 4 slots, "+N" in the last one).
+    constexpr size_t kSidePanelCardTagSlots = 5;
+
+    // Build ONE bookmark ribbon: the 6.5x9.3 swallowtail Polygon every tag surface draws (the tab
+    // badges, the Triage-Board card, the Sessions Tags column, the board's filter chips), so a tag
+    // reads as the same mark here as everywhere else. The thin black outline is what keeps a ribbon
+    // legible on ANY title-band color — the tab badges' answer to the same problem (a tag whose color
+    // is close to the band's would otherwise melt into it).
+    // `fill`: the tag's RESOLVED display color — the caller's ResolveTagDisplayColor (a user-picked
+    //         tag-colors.json color, else the stable name-hash palette color), never re-derived here,
+    //         so a tag can never wear a different color on this card than on its tab.
+    // Returns the unparented shape, hit-testable over its fill (the tag hover panel keys on its
+    // pointer enter/leave) and top-aligned (the strip hangs it from the band's top edge).
+    // Throws winrt::hresult_error only if XAML object creation fails (called off the UI thread, or on
+    // a torn-down XAML core) — the card rebuild that calls it always runs on the UI thread.
+    winrt::Windows::UI::Xaml::Shapes::Polygon SidePanelMakeTagRibbon(const Color& fill)
+    {
+        // Pinned by a block-scope using-DECLARATION (it outranks the file's using-directives): this
+        // helper sits at file scope, where several of those meet, unlike the board's copy, which lives
+        // in a member function.
+        using winrt::Windows::Foundation::Point;
+        winrt::Windows::UI::Xaml::Shapes::Polygon ribbon;
+        ribbon.Points().Append(Point{ 0.0f, 0.0f });
+        ribbon.Points().Append(Point{ 6.5f, 0.0f });
+        ribbon.Points().Append(Point{ 6.5f, 9.3f });
+        ribbon.Points().Append(Point{ 3.25f, 6.5f }); // the notch that makes it a bookmark, not a block
+        ribbon.Points().Append(Point{ 0.0f, 9.3f });
+        ribbon.Fill(SolidColorBrush{ fill });
+        ribbon.Stroke(SolidColorBrush{ Colors::Black() });
+        ribbon.StrokeThickness(0.75);
+        ribbon.VerticalAlignment(VerticalAlignment::Top);
+        return ribbon;
     }
 }
 
@@ -1276,6 +1318,44 @@ namespace winrt::TerminalApp::implementation
         _SidePanelRebuildCards();
     }
 
+    // A bookmark tag was added to, removed from, or recolored on a session FROM THIS WINDOW: the Tags
+    // panel's two mutation paths (_ToggleSessionTag, _CommitTagEditorAdd) call this right after the
+    // board's _RefreshManagerBoardTags. Tags live in the SessionStore, never the registry, so no
+    // registry drain will ever report the change — without this call the cards' top-right ribbons would
+    // keep showing the old tags until some unrelated session happened to change. Same-window instant,
+    // like the tab badges and the board; another window's side panel catches up on its own next rebuild
+    // (the cross-window lag every tag surface accepts). Deleting a 0-carrier tag (_RemoveGlobalTag) needs
+    // no call: no card can be showing a tag that nothing carries.
+    // While collapsed it only marks the list dirty (the expand path rebuilds). No-op before
+    // _InitAgentSidePanel. UI thread only.
+    // Never throws: a failed rebuild is logged (Rule #18) and left dirty for the periodic tick to retry.
+    void TerminalPage::_SidePanelNoteTagsChanged()
+    {
+        if (!_sidePanelBuilt)
+        {
+            return;
+        }
+        if (_sidePanelCollapsed)
+        {
+            _sidePanelDirty = true; // nothing on screen to repaint — the expand path runs the catch-up rebuild
+            return;
+        }
+        // A deliberate user edit, so NOW — past the registry-drain min-gap throttle (a throttled rebuild
+        // would only be replayed on the next periodic tick, seconds after the Tags panel click).
+        // Contained: this runs inside the Tags panel's click, which also repaints the tab badges, the
+        // Sessions page and the board — a failed card rebuild must cost only the side panel's freshness
+        // (it stays dirty, so the next tick retries), never that click or the window (Rule #18).
+        try
+        {
+            _SidePanelRebuildCards();
+        }
+        catch (...)
+        {
+            _sidePanelDirty = true;
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelNoteTagsChanged");
+        }
+    }
+
     // The page's batched registry drain calls this (UI thread) once per drained change set —
     // sessions changed somewhere in the fleet, so the card list may be stale.
     void TerminalPage::_SidePanelNoteRegistryChange()
@@ -1381,8 +1461,15 @@ namespace winrt::TerminalApp::implementation
     // the Manager-lens tax rule) -> the SCOPE (LOCAL, the default: only sessions hosted in THIS
     // window per _HostedSessionIds; GLOBAL: every window's) -> the search filter (the Sessions
     // grammar) -> the SHARED boardSort order (MakeSortKey/SortKeyLess — the board's own comparator)
-    // -> compact cards. Also refreshes the count line (which names the scope) and re-registers the
+    // -> the bookmark tags of exactly the cards that will render (+ the tag colors, only if any is
+    // tagged) -> compact cards. Also refreshes the count line (which names the scope) and re-registers the
     // selection highlight + timing-text maps + the hosted set the periodic LOCAL belt diffs against.
+    // Tags live in the SessionStore, not the registry, so a tag edit fires none of this list's
+    // rebuild triggers: this window's own edits call _SidePanelNoteTagsChanged, and an edit made in
+    // another window lands on the next rebuild here (the Triage Board's accepted cross-window lag).
+    // No-op before _InitAgentSidePanel (or without a registry). UI thread only.
+    // Throws winrt::hresult_error if XAML construction fails mid-rebuild (a torn-down or wrong-thread
+    // tree); the list may then be partially rebuilt, and the next rebuild starts from a Clear().
     void TerminalPage::_SidePanelRebuildCards()
     {
         if (!_sidePanelBuilt || !_sidePanelCards || !_sessionRegistry)
@@ -1427,12 +1514,31 @@ namespace winrt::TerminalApp::implementation
             return SortKeyLess(_appSettings.boardSort, MakeSortKey(*a), MakeSortKey(*b));
         });
 
+        // Bookmark tags for exactly the cards about to render, read ONCE per rebuild — the Triage
+        // Board's recipe (_RebuildBoard), so the two surfaces cost the same per card: GetSessionTags
+        // sits on SessionStore's (size,mtime)-validated record cache, i.e. one file stat per card in the
+        // steady state and a re-parse only when that session's store file actually changed (which is
+        // also how an edit made in ANOTHER window shows up here on this rebuild). The colors file is
+        // read only when a rendered card is tagged at all, so an untagged fleet pays nothing for it.
+        // Rows the filter hid are never read — they get no card.
+        std::unordered_map<std::wstring, std::vector<std::wstring>> tagsById;
+        for (const auto* s : rows)
+        {
+            if (auto tags = ::Agentmaster::GetSessionTags(s->id); !tags.empty())
+            {
+                tagsById.emplace(s->id, std::move(tags));
+            }
+        }
+        const std::map<std::wstring, std::wstring> tagColors = tagsById.empty() ? std::map<std::wstring, std::wstring>{} : ::Agentmaster::LoadAllTagColors();
+        const std::vector<std::wstring> noTags; // the shared "carries none" list for untagged cards (no per-card allocation)
+
         _sidePanelCards.Children().Clear();
         _sidePanelCardsById.clear();
         _sidePanelTimingTexts.clear();
         for (const auto* s : rows)
         {
-            _sidePanelCards.Children().Append(_SidePanelMakeCard(*s));
+            const auto tagIt = tagsById.find(s->id);
+            _sidePanelCards.Children().Append(_SidePanelMakeCard(*s, tagIt != tagsById.end() ? tagIt->second : noTags, tagColors));
         }
         if (_sidePanelCountText)
         {
@@ -1452,13 +1558,26 @@ namespace winrt::TerminalApp::implementation
 
     // Build ONE compact session card — the Triage-Board card's visual language re-hosted for a
     // narrow vertical list: the title on a band painted the session's RESOLVED color (the same
-    // ResolveSessionColorHex every color surface shares, contrast-picked text), then a state row
+    // ResolveSessionColorHex every color surface shares, contrast-picked text) with the session's
+    // bookmark-tag ribbons in the band's TOP-RIGHT corner (_SidePanelMakeTagStrip), then a state row
     // (dot + label in the shared AgentStatusColors palette, the pending-draft dots, the timing
     // adornment) and a dim dir/branch line. Interactions: click = select (Linked Lenses),
     // double-click = activate (jump to the tab, cross-window), right-click = the SHARED lazy
-    // session menu (AgentManagerContent::BuildSessionMenuFor — zero drift from the board's).
+    // session menu (AgentManagerContent::BuildSessionMenuFor — zero drift from the board's), anchored
+    // on this card so its Tags item opens the tag panel right under it.
     // `s`: the live session snapshot the card renders (values copied — the card never holds it).
-    winrt::Windows::UI::Xaml::Controls::Border TerminalPage::_SidePanelMakeCard(const ::Agentmaster::SessionInfo& s)
+    // `tags`: the session's bookmark tags in the order they were added (the SessionStore list the
+    //         rebuild read once for every rendered card); empty == untagged, and the band keeps its
+    //         plain title-only layout, byte-identical to a card from before tags existed.
+    // `tagColors`: the rebuild's one LoadAllTagColors() (folded tag name -> "#AARRGGBB"; empty when no
+    //         rendered card is tagged) that every ribbon resolves its color against.
+    // Returns the card Border, also registered in _sidePanelCardsById (selection restyle) and, when it
+    // has a timing line, in _sidePanelTimingTexts (the 30s in-place refresh).
+    // Throws winrt::hresult_error if XAML construction fails (off the UI thread / a torn-down tree) —
+    // _SidePanelRebuildCards calls it on the UI thread.
+    winrt::Windows::UI::Xaml::Controls::Border TerminalPage::_SidePanelMakeCard(const ::Agentmaster::SessionInfo& s,
+                                                                             const std::vector<std::wstring>& tags,
+                                                                             const std::map<std::wstring, std::wstring>& tagColors)
     {
         const std::wstring id = s.id;
         const std::wstring dir = ::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, s);
@@ -1492,7 +1611,33 @@ namespace winrt::TerminalApp::implementation
         title.TextTrimming(TextTrimming::CharacterEllipsis);
         const bool darkText = bandColor && PreferDarkTextOn(*bandColor);
         title.Foreground(darkText ? Fill(0xFF, 0x10, 0x10, 0x10) : Fill(0xFF, 0xF0, 0xF0, 0xF0));
-        band.Child(title);
+        if (tags.empty())
+        {
+            band.Child(title); // untagged: the band is exactly the title, as it always was
+        }
+        else
+        {
+            // Tagged: [ title * ][ tag strip Auto ]. The strip takes the width its (capped) ribbons
+            // need and the title takes the rest, trimming with its ellipsis — so the ribbons stay in
+            // the band's top-right corner and a long title can never push them off the card.
+            Grid bandGrid{};
+            ColumnDefinition titleCol{};
+            titleCol.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            ColumnDefinition tagCol{};
+            tagCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            bandGrid.ColumnDefinitions().Append(titleCol);
+            bandGrid.ColumnDefinitions().Append(tagCol);
+            Grid::SetColumn(title, 0);
+            bandGrid.Children().Append(title);
+            // Hang the strip from the band's TOP EDGE: lift it by exactly the band's top padding, so
+            // the ribbons start where the card's colored bar starts — bookmarks clipped to the top of
+            // the card rather than badges floating mid-bar. Read back from the band (not a literal) so
+            // a later padding change can't silently detach them from the edge.
+            auto strip = _SidePanelMakeTagStrip(tags, tagColors, darkText, band.Padding().Top, card);
+            Grid::SetColumn(strip, 1);
+            bandGrid.Children().Append(strip);
+            band.Child(bandGrid);
+        }
         v.Children().Append(band);
 
         // State row: dot + label (the shared palette), a teal `codex` pill for a managed Codex,
@@ -1550,7 +1695,19 @@ namespace winrt::TerminalApp::implementation
         }
 
         card.Child(v);
-        AgentSetTitledTip(card, winrt::hstring{ s.title }, winrt::hstring{ dir + (s.branch.empty() ? L"" : (L"\nbranch: " + s.branch)) + L"\n\nClick to select \x00B7 double-click to jump to its tab \x00B7 right-click for actions." }, kCardTipDelay);
+        // The card's tip names EVERY tag, in the order they were added — the ribbons are colors only,
+        // and a "+N" corner hides the overflow, so this is where the full set reads as words. (The tip
+        // yields while the pointer is on the strip itself; see _SidePanelMakeTagStrip.)
+        std::wstring tagsLine;
+        if (!tags.empty())
+        {
+            tagsLine = L"\ntags: ";
+            for (size_t i = 0; i < tags.size(); ++i)
+            {
+                tagsLine += (i ? L" \x00B7 " : L"") + tags[i];
+            }
+        }
+        AgentSetTitledTip(card, winrt::hstring{ s.title }, winrt::hstring{ dir + (s.branch.empty() ? L"" : (L"\nbranch: " + s.branch)) + tagsLine + L"\n\nClick to select \x00B7 double-click to jump to its tab \x00B7 right-click for actions." }, kCardTipDelay);
 
         const auto weakThis = get_weak();
         // Hover ring — guarded by PointerStillWithin so a child-bubbled exit (crossing between the
@@ -1635,7 +1792,10 @@ namespace winrt::TerminalApp::implementation
                                 cwd = ::Agentmaster::EffectiveWorkingDir(self->_appSettings.tabColorMode, *cur);
                             }
                         }
-                        auto menu = mgr->BuildSessionMenuFor(id, cwd);
+                        // Anchored on THIS card (the sender — the handler never captures the card
+                        // itself): the menu's "Tags" item then opens the tag panel right under the card
+                        // instead of at the window's top-left default. The menu holds it weakly.
+                        auto menu = mgr->BuildSessionMenuFor(id, cwd, sender.try_as<FrameworkElement>());
                         if (const auto fe = sender.try_as<UIElement>())
                         {
                             menu.ShowAt(fe, e.GetPosition(fe));
@@ -1651,6 +1811,123 @@ namespace winrt::TerminalApp::implementation
 
         _sidePanelCardsById[id] = card;
         return card;
+    }
+
+    // Build a card's bookmark-TAG strip: the ribbons in the title band's TOP-RIGHT corner. It is the
+    // side-panel twin of the Triage-Board card's ribbons, which hang BELOW that card's band instead —
+    // here the tags live ON the bar, where the eye already reads the card's name and folder color. One
+    // ribbon per tag, in the order the tags were added; with more tags than kSidePanelCardTagSlots, the
+    // last slot becomes a "+N" whose own tip names the hidden ones. Each ribbon opens the SAME rich
+    // hover panel the tab badges, the board card and the Sessions Tags column open
+    // (_OnTagBadgeHoverBegin/End: every session carrying the tag, live ones first; a click on a live
+    // row jumps to its tab, cross-window).
+    //
+    // ⚠ The strip is a TOOLTIP-FREE ZONE for the card. The card carries one AgentSetTip tooltip on its
+    // whole Border, and pointer events bubble, so a ribbon would otherwise ALSO arm that tip — which
+    // floats at the pointer (this panel has no LocalTooltip area) and would pop on top of the hover
+    // panel once the pointer rests on a ribbon. So: a ribbon's entry cancels any pending card tip,
+    // closes an open one, and stops the event there; the strip swallows the moves bubbling up from its
+    // children, which would re-arm it; and the "+N" wires its own tip BEFORE marking its entry handled,
+    // so ITS tip still opens while the card's cannot. Leaving the strip for the rest of the card re-arms
+    // the card tip as usual (the tip helper's nested-tip re-arm on the next PointerMoved).
+    //
+    // `tags`: the session's tags in the order they were added — non-empty (an untagged card builds no strip).
+    // `tagColors`: the rebuild's one LoadAllTagColors() map; every ribbon's color resolves through
+    //              ResolveTagDisplayColor against it (user-picked > name hash), exactly like the tab badges.
+    // `darkInk`: true when the band is light enough that the title uses dark ink; the "+N" count follows
+    //            the title's ink so it stays readable on any folder color.
+    // `hangPx`: the band's top padding — the strip is lifted by exactly this much, so the ribbons hang
+    //           from the band's top edge.
+    // `card`: the card Border whose tooltip must yield over the strip. The handlers hold it WEAKLY: the
+    //         strip lives inside the card, so a strong capture would be the element -> handler -> element
+    //         cycle that leaks one card per rebuild (the board's weak-capture rule).
+    // Returns the unparented strip (a horizontal StackPanel), right- and top-aligned for the band's
+    // Auto column.
+    // Throws winrt::hresult_error if XAML construction fails (off the UI thread / a torn-down tree); the
+    // pointer handlers themselves never throw out (weak refs that no longer resolve just no-op).
+    winrt::Windows::UI::Xaml::Controls::StackPanel TerminalPage::_SidePanelMakeTagStrip(const std::vector<std::wstring>& tags,
+                                                                                    const std::map<std::wstring, std::wstring>& tagColors,
+                                                                                    bool darkInk,
+                                                                                    double hangPx,
+                                                                                    const winrt::Windows::UI::Xaml::Controls::Border& card)
+    {
+        StackPanel strip{};
+        strip.Orientation(Orientation::Horizontal);
+        strip.Spacing(2); // the gap the tab badges and the board card leave between ribbons
+        strip.HorizontalAlignment(HorizontalAlignment::Right);
+        strip.VerticalAlignment(VerticalAlignment::Top);
+        // Left: 6px of air between the ellipsis-trimmed title and the first ribbon. Top: negative, to hang
+        // the ribbons from the band's top edge (`hangPx`). The negative margin also takes that much off the
+        // strip's desired height, so the strip can never make the band taller than its title line.
+        strip.Margin(ThicknessHelper::FromLengths(6, -hangPx, 0, 0));
+
+        const bool overflow = tags.size() > kSidePanelCardTagSlots;
+        const size_t ribbonCount = overflow ? (kSidePanelCardTagSlots - 1) : tags.size();
+        const auto weakThis = get_weak();
+        const auto cardWeak = winrt::make_weak(card);
+        for (size_t i = 0; i < ribbonCount; ++i)
+        {
+            auto ribbon = SidePanelMakeTagRibbon(ResolveTagDisplayColor(tags[i], tagColors));
+            const winrt::hstring tagName{ tags[i] };
+            ribbon.PointerEntered([weakThis, cardWeak, tagName](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+                // Keep the card's own tip off the hover panel: drop a pending open and close an open one
+                // (AgentCloseTipsIn does both, for the card and anything under it)...
+                if (const auto c = cardWeak.get())
+                {
+                    AgentCloseTipsIn(c);
+                }
+                // ...and end the event here — bubbling on, it would reach the card's tip handler and arm it again.
+                e.Handled(true);
+                const auto self = weakThis.get();
+                const auto el = sender.try_as<UIElement>();
+                if (self && el)
+                {
+                    self->_OnTagBadgeHoverBegin(tagName, el); // ~160ms open delay; re-targets if another ribbon is mid-delay
+                }
+            });
+            ribbon.PointerExited([weakThis](const IInspectable&, const PointerRoutedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_OnTagBadgeHoverEnd(); // cancels a pending open; an open panel gets the ~300ms grace close
+                }
+            });
+            strip.Children().Append(ribbon);
+        }
+
+        if (overflow)
+        {
+            const size_t hidden = tags.size() - ribbonCount;
+            auto more = Text(winrt::hstring{ L"+" + std::to_wstring(hidden) }, 9, true, 0.85);
+            more.Foreground(darkInk ? Fill(0xFF, 0x10, 0x10, 0x10) : Fill(0xFF, 0xF0, 0xF0, 0xF0)); // the title's ink
+            std::wstring hiddenList;
+            for (size_t i = ribbonCount; i < tags.size(); ++i)
+            {
+                hiddenList += (i > ribbonCount ? L" \x00B7 " : L"") + tags[i];
+            }
+            // ORDER MATTERS: the tip helper's own PointerEntered/Moved handlers must be hooked BEFORE the
+            // entry handler below, so they arm the "+N" tip before that handler marks the event handled.
+            AgentSetTitledTip(more,
+                              winrt::hstring{ std::to_wstring(hidden) + L" more tag" + (hidden == 1 ? L"" : L"s") },
+                              winrt::hstring{ hiddenList + L"\n\nRight-click the card \x2192 Tags to see or change them all." });
+            more.PointerEntered([cardWeak](const IInspectable&, const PointerRoutedEventArgs& e) {
+                // Close only the CARD's tip if it is up. Not AgentCloseTipsIn: that also cancels the
+                // pending open this element's own tip handler has just armed.
+                if (const auto c = cardWeak.get())
+                {
+                    AgentCloseTipOn(c);
+                }
+                e.Handled(true); // don't let the card's tip handler re-arm the card over this one
+            });
+            strip.Children().Append(more);
+        }
+
+        // Swallow the moves bubbling up from the ribbons and the "+N": on reaching the card, each one
+        // would re-arm the card's tip (the helper re-arms an un-armed outer element on any move). The
+        // children's own handlers have already run by the time a move bubbles here.
+        strip.PointerMoved([](const IInspectable&, const PointerRoutedEventArgs& e) {
+            e.Handled(true);
+        });
+        return strip;
     }
 
     // Select a card: restyle the old/new borders in place (no rebuild), bind the summary below,

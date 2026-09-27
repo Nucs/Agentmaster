@@ -1689,6 +1689,7 @@ namespace winrt::TerminalApp::implementation
             _RebuildSessionsTagChips();
             _RenderSessionsTable();
             _RefreshManagerBoardTags(); // Triage-Board card ribbons (tags never notify the registry)
+            _SidePanelNoteTagsChanged(); // ...and the side panel's cards, whose ribbons ride the title band's top-right corner (a recolor too)
             _RandomizeTagEditorColor(); // hand the picker a fresh random color for the NEXT add
         }
         _tagEditorBox.Text(L"");
@@ -1743,6 +1744,7 @@ namespace winrt::TerminalApp::implementation
             _RebuildSessionsTagChips();
             _RenderSessionsTable();
             _RefreshManagerBoardTags(); // Triage-Board card ribbons (tags never notify the registry)
+            _SidePanelNoteTagsChanged(); // ...and the side panel's cards, whose ribbons ride the title band's top-right corner
         }
         if (_tagEditorPopup && _tagEditorPopup.IsOpen())
         {

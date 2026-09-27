@@ -6,6 +6,7 @@
 
 #include <ThrottledFunc.h>
 #include <atomic>
+#include <map> // Agentmaster: the side panel's per-rebuild tag-color map (_SidePanelMakeCard / _SidePanelMakeTagStrip)
 #include <unordered_set>
 
 #include "TerminalPage.g.h"
@@ -1691,6 +1692,7 @@ namespace winrt::TerminalApp::implementation
         void _SidePanelRebuildCards(); // SnapshotLive -> search-filter (ParseSessionQuery/MatchesQueryText) -> boardSort order (MakeSortKey/SortKeyLess) -> rebuild the card list; also rebinds the selection highlight + timing-text registry
         void _SidePanelScheduleRebuild(bool force); // coalesced rebuild: force==true rebuilds now (user action); otherwise a rebuild within the min-gap only marks _sidePanelDirty (the periodic tick catches up) — and a COLLAPSED panel always defers (no pixels to show)
         void _SidePanelNoteRegistryChange(); // the registry batch-drain hook (UI thread): a session changed somewhere -> schedule a non-forced rebuild
+        void _SidePanelNoteTagsChanged(); // a bookmark tag changed from THIS window (the Tags panel's _ToggleSessionTag / _CommitTagEditorAdd): rebuild the cards NOW so their top-right ribbons follow (tags live in the SessionStore — no registry drain will report it); collapsed -> only marks dirty. Never throws (a failed rebuild is logged + left dirty for the periodic retry)
         winrt::fire_and_forget _SidePanelPeriodicTick(); // liveness-probe rider (SCANNER thread; self-marshals like _ScanCacheWarmTabs — a terminate-netted fire_and_forget over the awaitable Impl): run the deferred dirty rebuild + the ~30s in-place timing-text refresh (no rebuild churn for a clock tick)
         winrt::Windows::Foundation::IAsyncAction _SidePanelPeriodicTickImpl(); // the awaitable body (resume_foreground first) so an exception propagates to _SidePanelPeriodicTick's catch instead of std::terminate
         void _SidePanelSelectSession(const std::wstring& id, bool driveManagerLens); // select a card (highlight + bind the summary below); driveManagerLens==true (a card click) also drives AgentManagerContent::SelectSession so the Manager lens follows — false for calls that ORIGINATE from the lens/tab funnel (re-entrancy guard: an already-selected id is a no-op)
@@ -1709,7 +1711,14 @@ namespace winrt::TerminalApp::implementation
         void _SidePanelQueueReveal(); // coalesce the owed reveal onto ONE Low-priority dispatcher tick (after the rebuild/layout that may have just created the card); a no-op while collapsed or when nothing is owed — the expand path / next rebuild re-queues
         void _SidePanelRevealPendingNow(); // the reveal tick's body: if the owed card is RENDERED, UpdateLayout + StartBringIntoView it (minimal scroll — a fully visible card never moves) and consume the debt; a card not rendered yet keeps it owed. Never throws (XAML failures are logged, Rule #18) and never moves keyboard focus
         std::unordered_set<std::wstring> _HostedSessionIds() const; // the ids of the managed sessions whose tab lives in THIS window (the live _claudeTabs entries) — the ONE "is this session here?" predicate the Explorer Tree's LOCAL scope provider (_WireAgentManagerContent) AND the side panel's LOCAL card list share, so the two surfaces can never disagree; defined in TerminalPage.AgentSidePanel.cpp
-        winrt::Windows::UI::Xaml::Controls::Border _SidePanelMakeCard(const ::Agentmaster::SessionInfo& s); // build ONE compact session card (title band in the session's resolved color + state dot/label + pending dots + timing + dir/branch line), wired for select / activate / the shared lazy context menu
+        winrt::Windows::UI::Xaml::Controls::Border _SidePanelMakeCard(const ::Agentmaster::SessionInfo& s,
+                                                                      const std::vector<std::wstring>& tags,
+                                                                      const std::map<std::wstring, std::wstring>& tagColors); // build ONE compact session card (title band in the session's resolved color, its bookmark-tag ribbons in the band's top-right corner + state dot/label + pending dots + timing + dir/branch line), wired for select / activate / the shared lazy context menu (anchored on the card, so its Tags item opens under it); `tags` = the session's tags in add order (empty => the plain title-only band), `tagColors` = the rebuild's one LoadAllTagColors()
+        winrt::Windows::UI::Xaml::Controls::StackPanel _SidePanelMakeTagStrip(const std::vector<std::wstring>& tags,
+                                                                              const std::map<std::wstring, std::wstring>& tagColors,
+                                                                              bool darkInk,
+                                                                              double hangPx,
+                                                                              const winrt::Windows::UI::Xaml::Controls::Border& card); // a card's top-right tag strip: one ribbon per tag (capped at kSidePanelCardTagSlots, the last slot a "+N" with its own tip), each opening the shared tag hover panel; hung from the band's top edge by `hangPx`; a tooltip-FREE zone for `card` (held weakly) so the card's floating tip never stacks on the hover panel
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);
 
