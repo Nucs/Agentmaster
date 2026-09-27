@@ -199,7 +199,7 @@
 - The state palette is shared through **`AgentStatusColors.h`** (`AgentStatusColorFor`): the **per-tab overlay** (`AgentTabOverlay`) + the **tab-strip dot** (`TerminalTabStatus`) read it (the overlay's hand-synced copy folded in — the third consumer, the tab dot, was the cue to factor it).
 - **`AgentManagerContent.cpp` holds its own identical `StateColor` copy** for the board cards/columns, so a color change must be made in BOTH places.
 
-### Taskbar unread count ([`NOTIFICATIONS.md`](doc/agentmaster/NOTIFICATIONS.md) §8) — NOT BUILT yet
+### Taskbar unread count ([`NOTIFICATIONS.md`](doc/agentmaster/NOTIFICATIONS.md) §8) — built; in release 0.6.8.13 (2026-09-27), live behavior not yet verified
 
 - A red disc with a white number on Agentmaster's **taskbar button** = the **unread sessions across every window** — exactly the tabs whose status dot carries the flash ring (automatic, or a manual Mark Unread); +1 per newly unread session, −1 as each is visited. Default ON, the cog's Notifications ▸ TASKBAR switch (`AppSettings::taskbarUnreadBadge`, independent of the toast master).
 - **An `ITaskbarList3::SetOverlayIcon` overlay, not a `BadgeUpdateManager` badge**: badges need package identity (they throw `0x80070490` in every portable install), outlive the app on a pinned icon, and have an open XAML-desktop-window bug; the overlay works everywhere and rides WT's existing `IslandWindow::_taskbar`. The icon is rendered by the header-only `AgentMaster/TaskbarBadge.h`.
