@@ -92,6 +92,7 @@ int wmain()
     TestInterruptHold();
     TestUpdaterVersionLogic();
     TestCmdPathLimit();
+    TestStartupGuard(); // the startup-deadlock fix (StartupGuard.h, tests_spawn_sched.cpp)
     TestPortableInstall();
     TestTranscriptScan();
     TestCurrentModel();

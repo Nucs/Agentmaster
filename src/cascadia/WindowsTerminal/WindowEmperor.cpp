@@ -45,6 +45,9 @@
 // Agentmaster: [startup] phase timing — see where the (slow) launch spends its time. Header-only,
 // shares one process-creation clock with the dll-side TerminalPage/Engine lines in the same hooks.log.
 #include "../TerminalApp/AgentMaster/StartupTiming.h"
+// Agentmaster (doc/agentmaster/STARTUP_GUARD.md): the known-folder pre-warm that prevents the NVIDIA-driver startup
+// deadlock + the startup-hang watchdog around App{} + ReloadSettings. Header-only + pure Win32.
+#include "../TerminalApp/AgentMaster/StartupGuard.h"
 // Agentmaster: the launch SPLASH — a lightweight Win32 loading window on its OWN thread, so it keeps
 // animating while the UI thread is blocked in session/window restore. Header-only + pure Win32.
 #include "../TerminalApp/AgentMaster/Splash.h"
@@ -745,10 +748,40 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     }
     ::Agentmaster::Startup::Phase(L"update-check", ::GetTickCount64() - _amSw);
 
-    _amSw = ::GetTickCount64();
-    _app = winrt::TerminalApp::App{};
-    _app.Logic().ReloadSettings();
+    // Agentmaster (StartupGuard.h; doc/agentmaster/STARTUP_GUARD.md — the 2026-09-30 startup deadlock): `App{}` spawns
+    // XAML's GPU thread, which loads the display driver, and NVIDIA's NvMemMapStoragex.dll calls SHGetKnownFolderPath from
+    // its DLL init (loader held) — while ReloadSettings' PowerShell profile generator performs the process's FIRST
+    // known-folder lookup (definition-cache lock held, then needing the loader for a delay-loaded import). ABBA: no
+    // window, forever, and every re-launch silently fails the single-instance handoff. So, in this order:
+    //   1. the WATCHDOG arms over this whole UI-free phase (normally ~0.3 s), so any hang here — this one or an unknown
+    //      future one — logs [startup-hang] and frees the mutex instead of leaving a zombie (one-shot per episode: its
+    //      marker makes the next launch wait without a deadline, so a legitimately slow box is never locked out);
+    //   2. the known-folder PRE-WARM runs on this thread while NO other thread is loading DLLs, so every later lookup —
+    //      ours or the driver's — hits a warm cache and never needs the loader while holding the cache lock.
+    // Nothing inside the armed window writes the log: the prewarm result is logged after Disarm().
+    const std::filesystem::path _amProfileDir{ ::Agentmaster::Profiles::ResolveProfileDir() };
+    ::Agentmaster::StartupGuard::PrewarmResult _amPrewarm;
+    bool _amStartupDisarmedInTime = false;
+    {
+        // RAII: an exception out of App{} / ReloadSettings disarms + joins in the destructor and propagates unchanged.
+        ::Agentmaster::StartupGuard::HangWatchdog startupHangWatchdog{ L"known-folder prewarm + App{} + ReloadSettings",
+                                                                       ::Agentmaster::StartupGuard::kStartupHangTimeoutMs,
+                                                                       _amProfileDir };
+        _amPrewarm = ::Agentmaster::StartupGuard::PrewarmKnownFolders();
+
+        _amSw = ::GetTickCount64();
+        _app = winrt::TerminalApp::App{};
+        _app.Logic().ReloadSettings();
+        _amStartupDisarmedInTime = startupHangWatchdog.Disarm();
+    }
+    ::Agentmaster::Startup::Phase(::Agentmaster::StartupGuard::DescribePrewarm(_amPrewarm), _amPrewarm.elapsedMs);
     ::Agentmaster::Startup::Phase(L"App{} + ReloadSettings (WT settings parse)", ::GetTickCount64() - _amSw);
+    // A launch that got through in time after one the watchdog killed: clear the marker (restoring the deadline for the
+    // next launch) and say so, which closes the [startup-hang] episode in hooks.log.
+    if (_amStartupDisarmedInTime && ::Agentmaster::StartupGuard::ClearHangMarker(_amProfileDir))
+    {
+        ::Agentmaster::Startup::Note(L"[startup-hang] recovered: the previous launch was terminated by the startup watchdog; this one got through normally (marker cleared)");
+    }
 
     _amSw = ::GetTickCount64();
     _createMessageWindow(windowClassName.c_str());

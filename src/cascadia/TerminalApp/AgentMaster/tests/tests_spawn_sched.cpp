@@ -24,6 +24,7 @@
 #include "../Updater.h" // version parse/compare + the settings.json skip/postpone RMW (TestUpdaterVersionLogic)
 #include "../PortableInstall.h" // the portable first-launch INSTALL question - the pure pieces (TestPortableInstall)
 #include "../CmdPathLimit.h" // the PATH-length guard behind the Ctrl+G fix - pure rule + Win32 probe (TestCmdPathLimit)
+#include "../StartupGuard.h" // the startup-deadlock fix - known-folder pre-warm + startup-hang watchdog (TestStartupGuard)
 
 #include <fstream> // TestHookInvocation reads the materialized settings file back
 #include <iterator> // std::istreambuf_iterator (the same read)
@@ -4411,6 +4412,175 @@ void TestCmdPathLimit()
         CHECK(before != 0 && before != 0xFFFFFFFF, "e2e: with the overlong PATH cmd.exe cannot resolve even a System32 command (the Ctrl+G 'exit code 1')");
         CHECK(r.changed && !r.stillOverCmdLimit && r.path == livePath, "e2e: the guard compacts it to the live core");
         CHECK(after == 0, "e2e: with the compacted PATH cmd.exe resolves the command again");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// StartupGuard.h — the startup deadlock fix (doc/agentmaster/STARTUP_GUARD.md; the 2026-09-30 release
+// launch that hung forever: NVIDIA's NvMemMapStoragex DLL init vs the main thread's first known-folder
+// lookup). Pins: the locally-spelled FOLDERID constants really name the folders they claim (resolved
+// and compared with the environment), the pre-warm's counting + first-failure reporting, the kill
+// policy's truth table, the marker file round-trip, the log texts, and the watchdog's one-shot
+// Armed -> Disarmed | Fired state machine — including the deadline/disarm race, which must never
+// fire AND report "disarmed in time" for the same run. The PRODUCTION watchdog (whose action is
+// TerminateProcess) is only ever constructed here with the real 25 s deadline and disarmed at once,
+// so the suite can never kill itself.
+// ---------------------------------------------------------------------------------------------
+
+// Resolves `id` through SHGetKnownFolderPath (flags 0); empty on failure.
+static std::wstring KnownFolderPathForTest(const GUID& id)
+{
+    PWSTR raw = nullptr;
+    const HRESULT hr = ::SHGetKnownFolderPath(id, 0, nullptr, &raw);
+    std::wstring path = (SUCCEEDED(hr) && raw) ? std::wstring{ raw } : std::wstring{};
+    ::CoTaskMemFree(raw);
+    return path;
+}
+
+// Reads an environment variable (empty when unset) — the reference each FOLDERID constant is checked against.
+static std::wstring EnvForTest(const wchar_t* name)
+{
+    wchar_t buf[1024]{};
+    const DWORD n = ::GetEnvironmentVariableW(name, buf, 1024);
+    return (n > 0 && n < 1024) ? std::wstring{ buf, n } : std::wstring{};
+}
+
+void TestStartupGuard()
+{
+    namespace SG = ::Agentmaster::StartupGuard;
+    std::wprintf(L"StartupGuard (the known-folder pre-warm + startup-hang watchdog):\n");
+
+    // ---- the locally-spelled FOLDERID constants name the folders they claim ----
+    {
+        const auto same = [](const std::wstring& a, const std::wstring& b) {
+            return !a.empty() && ::CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
+        };
+        CHECK(same(KnownFolderPathForTest(SG::kFolderLocalAppData), EnvForTest(L"LOCALAPPDATA")), "kFolderLocalAppData resolves to %LOCALAPPDATA%");
+        CHECK(same(KnownFolderPathForTest(SG::kFolderRoamingAppData), EnvForTest(L"APPDATA")), "kFolderRoamingAppData resolves to %APPDATA%");
+        CHECK(same(KnownFolderPathForTest(SG::kFolderProgramData), EnvForTest(L"ProgramData")), "kFolderProgramData resolves to %ProgramData%");
+        CHECK(same(KnownFolderPathForTest(SG::kFolderProfile), EnvForTest(L"USERPROFILE")), "kFolderProfile resolves to %USERPROFILE%");
+    }
+
+    // ---- the pre-warm: every startup lookup issued, success counted, first failure named ----
+    {
+        const auto r = SG::PrewarmKnownFolders();
+        CHECK(r.attempted == std::size(SG::kStartupKnownFolderLookups), "prewarm: every startup lookup is issued");
+        CHECK(r.resolved == r.attempted && r.firstFailureLabel == nullptr && r.firstFailure == S_OK, "prewarm: every startup lookup resolves on a normal machine");
+        CHECK(r.elapsedMs < 5000, "prewarm: cheap (well under the watchdog's deadline)");
+        CHECK(SG::DescribePrewarm(r) == L"known-folder prewarm (" + std::to_wstring(r.resolved) + L"/" + std::to_wstring(r.attempted) + L" resolved)", "prewarm: the success label");
+
+        // A bogus folder id fails with an HRESULT; it must be reported, not fatal, and the rest still run.
+        static constexpr GUID kBogus{ 0x01234567, 0x89AB, 0xCDEF, { 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF } };
+        const SG::KnownFolderLookup mixed[] = {
+            { SG::kFolderLocalAppData, 0, L"good-1" },
+            { kBogus, 0, L"bogus" },
+            { SG::kFolderProfile, 0, L"good-2" },
+        };
+        const auto m = SG::PrewarmKnownFolders(mixed, std::size(mixed));
+        CHECK(m.attempted == 3 && m.resolved == 2, "prewarm: a failing lookup is counted and the later ones still run");
+        CHECK(m.firstFailureLabel != nullptr && std::wstring_view{ m.firstFailureLabel } == L"bogus" && FAILED(m.firstFailure), "prewarm: the first failure's label + HRESULT are kept");
+        const auto text = SG::DescribePrewarm(m);
+        CHECK(text.find(L"2/3 resolved; first failure bogus hr=0x") != std::wstring::npos, "prewarm: the failure label names the lookup and its HRESULT");
+    }
+
+    // ---- the kill policy: terminate only with no debugger AND no previous watchdog kill ----
+    {
+        CHECK(SG::DecideHangAction(false, false) == SG::HangAction::Terminate, "policy: a plain hang is terminated (frees the single-instance mutex)");
+        CHECK(SG::DecideHangAction(true, false) == SG::HangAction::LogOnly, "policy: never kill a debuggee");
+        CHECK(SG::DecideHangAction(false, true) == SG::HangAction::LogOnly, "policy: never kill twice in a row (a slow-but-healthy box must not be locked out)");
+        CHECK(SG::DecideHangAction(true, true) == SG::HangAction::LogOnly, "policy: both guards -> log only");
+    }
+
+    // ---- the log texts say what happened and what happens next ----
+    {
+        const auto kill = SG::DescribeHang(L"phase-x", 25000, SG::HangAction::Terminate, false);
+        const auto dbg = SG::DescribeHang(L"phase-x", 25000, SG::HangAction::LogOnly, true);
+        const auto again = SG::DescribeHang(L"phase-x", 25000, SG::HangAction::LogOnly, false);
+        CHECK(kill.rfind(L"[startup-hang] \"phase-x\" still running after 25000ms", 0) == 0, "text: tagged, names the phase and the deadline");
+        CHECK(kill.find(L"Terminating this instance (exit 1460)") != std::wstring::npos, "text: a kill says so, with the exit code");
+        CHECK(dbg.find(L"debugger is attached") != std::wstring::npos && dbg.find(L"Terminating") == std::wstring::npos, "text: the debugger case says why it does not kill");
+        CHECK(again.find(L"already terminated by this watchdog") != std::wstring::npos && again.find(L"Terminating") == std::wstring::npos, "text: the second-hang case says why it does not kill");
+    }
+
+    // ---- the marker round-trip (a scratch dir; the empty dir is a harmless no-op) ----
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::filesystem::path dir = std::filesystem::path{ tmp } / (L"am-startup-guard-test-" + std::to_wstring(::GetCurrentProcessId()));
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        SG::ClearHangMarker(dir); // a leftover from an aborted run must not skew the checks
+        CHECK(!SG::HangMarkerPresent(dir), "marker: absent in a fresh dir");
+        CHECK(SG::WriteHangMarker(dir) && SG::HangMarkerPresent(dir), "marker: written and then seen");
+        CHECK(SG::HangMarkerPath(dir).filename() == L"startup-hang.marker", "marker: the documented leaf name");
+        CHECK(SG::ClearHangMarker(dir) && !SG::HangMarkerPresent(dir), "marker: cleared (and the clear reports it existed)");
+        CHECK(!SG::ClearHangMarker(dir), "marker: clearing again reports nothing was there");
+        CHECK(!SG::HangMarkerPresent({}) && !SG::WriteHangMarker({}) && !SG::ClearHangMarker({}), "marker: an unknown (empty) profile dir is a no-op");
+
+        // The PRODUCTION watchdog reads the marker at arm time. Real 25 s deadline + an immediate disarm: it cannot
+        // fire here (its action would terminate the suite).
+        SG::WriteHangMarker(dir);
+        {
+            SG::HangWatchdog production{ L"test-phase", SG::kStartupHangTimeoutMs, dir };
+            CHECK(production.Armed() && production.PreviousLaunchKilled(), "production watchdog: sees the previous launch's marker");
+            CHECK(production.Disarm() && !production.Fired(), "production watchdog: disarmed in time, never fired");
+        }
+        SG::ClearHangMarker(dir);
+        {
+            SG::HangWatchdog production{ L"test-phase", SG::kStartupHangTimeoutMs, dir };
+            CHECK(production.Armed() && !production.PreviousLaunchKilled(), "production watchdog: no marker -> this launch keeps its deadline");
+        } // the destructor disarms + joins
+        std::filesystem::remove_all(dir, ec);
+    }
+
+    // ---- the watchdog's one-shot state machine ----
+    {
+        std::atomic<int> calls{ 0 };
+        {
+            SG::HangWatchdog wd{ 5000, [&calls] { ++calls; } };
+            CHECK(wd.Armed(), "watchdog: arms");
+            CHECK(wd.Disarm() && !wd.Fired(), "watchdog: a phase that finishes in time disarms it");
+            CHECK(!wd.Disarm(), "watchdog: disarming twice reports nothing new");
+        }
+        CHECK(calls == 0, "watchdog: a disarmed watchdog never runs its action");
+
+        {
+            SG::HangWatchdog wd{ 30, [&calls] { ++calls; } };
+            for (int i = 0; i < 300 && !wd.Fired(); ++i)
+            {
+                ::Sleep(10);
+            }
+            CHECK(wd.Fired(), "watchdog: fires once the deadline passes");
+            CHECK(!wd.Disarm(), "watchdog: a late disarm reports it had already fired");
+        }
+        CHECK(calls == 1, "watchdog: the action runs exactly once");
+
+        {
+            SG::HangWatchdog inert{ 30, SG::HangWatchdog::OnHang{} };
+            ::Sleep(80);
+            CHECK(!inert.Armed() && !inert.Fired() && !inert.Disarm(), "watchdog: an empty action leaves it inert (never armed, never fires)");
+        }
+
+        // The deadline/disarm race: with a ~1 ms deadline, every run must end EITHER disarmed-in-time OR fired —
+        // never both, never neither — and the action must run exactly as often as it fired.
+        int fired = 0, disarmed = 0, torn = 0;
+        std::atomic<int> raceCalls{ 0 };
+        for (int i = 0; i < 200; ++i)
+        {
+            SG::HangWatchdog wd{ 1, [&raceCalls] { ++raceCalls; } };
+            // Vary the timing so both outcomes actually occur.
+            if (i % 2)
+            {
+                ::Sleep(1);
+            }
+            const bool inTime = wd.Disarm();
+            const bool didFire = wd.Fired();
+            fired += didFire ? 1 : 0;
+            disarmed += inTime ? 1 : 0;
+            torn += (inTime == didFire) ? 1 : 0;
+        }
+        CHECK(torn == 0, "watchdog race: every run is disarmed-in-time XOR fired (a late timer never kills a healthy launch)");
+        CHECK(raceCalls == fired && fired + disarmed == 200, "watchdog race: the action ran exactly once per fire");
     }
 }
 
