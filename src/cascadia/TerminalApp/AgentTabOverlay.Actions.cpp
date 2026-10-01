@@ -29,6 +29,7 @@
 #include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / BuildClaude|CodexCommandline (row 3 CLI + transcript)
 #include "AgentMaster/ProcessInspect.h" // ReadProcessCommandLine / ReadConversationText / Codex rollout resolve (row 3)
 #include "AgentMaster/Persistence.h" // LoadAppSettings (skipPermissions, for the would-use CLI builder)
+#include "AgentMaster/TranscriptTurns.h" // RenderTranscriptTurnsFile — the Copy ▸ Transcript levels (codes 9-13)
 #include "AgentMaster/ProfileBootstrap.h" // Profiles::IsDevOrDebugPackage — the queue (mail) button is dev-or-debug, like the row-1 Autorunner control
 #include "AgentMaster/Engine.h" // SharedEngine (claudeExePath / codexExePath, for the real launch CLI)
 
@@ -245,8 +246,28 @@ namespace winrt::TerminalApp::implementation
             addItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
         }
         addItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files), including everything the displayed panel trims", 6);
-        addItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
-        addItem(L"Transcript Followup", L"Copy the conversation folded per turn \x2014 ❯ each of your messages + ● the agent's end-of-turn reply \x2014 with a legend header, ready to paste into a follow-up session", 8);
+        // Transcript ▸ Default / Max / Full / Compact / Minimal — the conversation as Markdown at a detail level
+        // (CopySessionField codes 9-13, TranscriptTurns.h). It replaced the flat "Transcript" (5) and "Transcript
+        // Followup" (8) items, and is built from the ONE shared table (AgentCopyActions.h kTranscriptCopyMenu) so
+        // this menu offers exactly the levels — and the descriptions — the Manager and WT tab menus do.
+        MenuFlyoutSubItem transcriptSub{};
+        transcriptSub.Text(kTranscriptCopyMenuLabel);
+        AgentSetTip(transcriptSub, winrt::hstring{ kTranscriptCopyMenuTip });
+        for (const auto& level : kTranscriptCopyMenu)
+        {
+            MenuFlyoutItem item{};
+            item.Text(level.label);
+            AgentSetTip(item, winrt::hstring{ level.tip });
+            const int which = level.which;
+            item.Click([weak, which](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    self->_CopyField(which);
+                }
+            });
+            transcriptSub.Items().Append(item);
+        }
+        flyout.Items().Append(transcriptSub);
         // The pointer must LEAVE the badge to reach the menu, so pin the expanded state while it's open.
         flyout.Opened([weak](const IInspectable&, const IInspectable&) {
             if (auto self = weak.get())
@@ -509,6 +530,107 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AgentLogCaughtException(L"CopyPromptTextExpandingPastes marshal");
             }
         }
+
+        // The off-thread half of the Copy ▸ Transcript levels (CopySessionField codes 9-13, AgentCopyActions.h):
+        // render the session's conversation at one detail level on a pool thread, then hop back to `disp` to write
+        // the clipboard. A Claude session renders through TranscriptTurns (RenderTranscriptTurnsFile — the turns
+        // view the am-agentmaster-cli skill prints, with the sessions it was forked / plan-restarted from and the
+        // subagents it spawned, times in local time). A Codex rollout has no turns view, so its levels fall back
+        // to the plain-text readers: Minimal and Compact copy the per-turn brief (ReadConversationFollowupText —
+        // the user's messages with each final reply, which is what Minimal means), Default / Full / Max the
+        // whole conversation text (ReadConversationText). Parameters are BY VALUE: the coroutine outlives the
+        // menu Click that started it.
+        //   disp       — the calling window's UI-thread DispatcherQueue (the clipboard is written there).
+        //   codex      — the session runs Codex (read its rollout, not a Claude transcript).
+        //   sessionId  — the managed session id: a Claude session's transcript id; for Codex only the trace's tag.
+        //   codexId    — the Codex rollout uuid (empty until its first prompt; unused for Claude).
+        //   level      — the TurnsLevel value 0-4 (the code minus kCopyFieldTranscriptLevelBase).
+        //   generation — the copy generation CopySessionField took: a newer copy (of anything) started while
+        //                this one rendered supersedes it, so a slow render never lands on top of a later copy.
+        // Returns nothing (fire_and_forget). Never lets an exception escape — one escaping a fire_and_forget IS
+        // winrt::terminate(), the whole process — and every outcome leaves a [transcript] line in hooks.log
+        // (the copy, how big and how slow; nothing to copy; superseded; the window closed first).
+        winrt::fire_and_forget CopyTranscriptTurnsAsync(DispatcherQueue disp,
+                                                        bool codex,
+                                                        std::wstring sessionId,
+                                                        std::wstring codexId,
+                                                        int level,
+                                                        uint64_t generation)
+        {
+            try
+            {
+                const auto turnsLevel = static_cast<::Agentmaster::TurnsLevel>(level);
+                const std::wstring head = L"[transcript] " + ::Agentmaster::ShortId(sessionId) + L" copy " + ::Agentmaster::TurnsLevelName(turnsLevel) + L": ";
+                co_await winrt::resume_background(); // reads the transcript, its chain and its agents' transcripts: never on the UI thread
+                const auto started = std::chrono::steady_clock::now();
+                std::wstring path;
+                if (codex)
+                {
+                    if (!codexId.empty())
+                    {
+                        path = ::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), codexId);
+                    }
+                }
+                else
+                {
+                    path = ::Agentmaster::ResolveClaudeTranscriptPath(sessionId);
+                }
+                if (path.empty())
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", head + L"nothing to copy (no transcript yet - the session was never prompted)\n");
+                    co_return;
+                }
+                std::wstring text;
+                if (codex)
+                {
+                    const bool brief = turnsLevel == ::Agentmaster::TurnsLevel::Minimal || turnsLevel == ::Agentmaster::TurnsLevel::Compact;
+                    text = brief ? ::Agentmaster::ReadConversationFollowupText(path, true, 0 /* whole file */) :
+                                   ::Agentmaster::ReadConversationText(path, true, 0 /* whole file */);
+                }
+                else
+                {
+                    text = ::Agentmaster::RenderTranscriptTurnsFile(path, ::Agentmaster::TurnsOptionsForLevel(turnsLevel), /*utc*/ false).value_or(std::wstring{});
+                }
+                const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+                if (text.empty())
+                {
+                    // An unreadable transcript, a render failure (already in hooks.log through Rule #18), or a
+                    // Codex rollout with no visible message: say so instead of a silent dead click.
+                    ::Agentmaster::AppendStateLog(L"hooks.log", head + L"nothing copied (the transcript could not be read or rendered) path=" + path + L"\n");
+                    co_return;
+                }
+                const size_t chars = text.size();
+                const bool queued = disp && disp.TryEnqueue([text = std::move(text), head, generation, chars, elapsedMs]() {
+                    // A throw escaping a DispatcherQueue handler is reported against the UI thread; contain it so a
+                    // failed trace line can never cost more than this one copy.
+                    try
+                    {
+                        if (generation != g_promptCopyGeneration.load())
+                        {
+                            // The user copied something else while this rendered: the NEWER copy owns the clipboard.
+                            ::Agentmaster::AppendStateLog(L"hooks.log", head + L"superseded by a newer copy before the render finished (not written)\n");
+                            return;
+                        }
+                        CopyTextToClipboard(text);
+                        ::Agentmaster::AppendStateLog(L"hooks.log", head + L"chars=" + std::to_wstring(chars) + L" rendered in " + std::to_wstring(elapsedMs) + L"ms\n");
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"CopyTranscriptTurnsAsync commit");
+                    }
+                });
+                if (!queued)
+                {
+                    // No dispatcher, or it refused: the window closed while the transcript was rendering.
+                    ::Agentmaster::AppendStateLog(L"hooks.log", head + L"the window closed before the render finished (nothing copied)\n");
+                }
+            }
+            catch (...)
+            {
+                // Rule #18: never lose a swallowed exception. Recovery = no copy (the click simply didn't chime).
+                ::Agentmaster::AgentLogCaughtException(L"CopyTranscriptTurnsAsync");
+            }
+        }
     }
 
     // Agentmaster (PENDING_INPUT.md §8e): the shared "copy a PROMPT" action (declared + fully documented in
@@ -562,7 +684,8 @@ namespace winrt::TerminalApp::implementation
     // because the launch-CLI / transcript / summary helpers it leans on are this file's anon-namespace
     // helpers; both menus call it so they can never drift apart. `which` is the copy-menu code (see the
     // header). Synchronous clipboard writes (cases 0-4, and 7 when the draft has no paste placeholder) run
-    // on the calling UI thread; the transcript / summary cases (5/6/8) read off-thread and hop back via
+    // on the calling UI thread; the transcript / summary cases (5/6/8, and the Copy ▸ Transcript levels 9-13 —
+    // CopyTranscriptTurnsAsync) read off-thread and hop back via
     // `dispatcher`, as does case 7 when a placeholder must first be expanded from the paste cache
     // (CopyPromptTextExpandingPastes — PENDING_INPUT.md §8e). `liveDraft` is the optional live input-box
     // reader used by case 7 alone (see the header) — absent/failing degrades to the observer's remembered
@@ -583,8 +706,12 @@ namespace winrt::TerminalApp::implementation
         // Nav audit: the user copied a session field to the clipboard. This ONE shared action backs BOTH
         // copy menus (the per-tab overlay's + the Triage Board / Explorer-tree Copy submenu), so logging
         // here covers "what was picked" for every copy site at once.
-        static const wchar_t* const kCopyFieldNames[] = { L"session-id", L"path", L"branch", L"claude-cli", L"codex-cli", L"transcript", L"summary", L"current-prompt", L"transcript-followup" };
-        ::Agentmaster::LogNav(std::wstring{ L"copy " } + ((which >= 0 && which < 9) ? kCopyFieldNames[which] : L"?") + L" " + ::Agentmaster::ShortId(sessionId));
+        // Indexed by code: 0-8 the classic fields, 9-13 the Copy ▸ Transcript levels (kCopyFieldTranscriptLevelBase
+        // + the TurnsLevel value), so `grep '\[nav\] copy transcript-'` shows which level a user picked.
+        static const wchar_t* const kCopyFieldNames[] = { L"session-id", L"path", L"branch", L"claude-cli", L"codex-cli", L"transcript", L"summary", L"current-prompt", L"transcript-followup",
+                                                          L"transcript-minimal", L"transcript-compact", L"transcript-default", L"transcript-full", L"transcript-max" };
+        constexpr int kCopyFieldNameCount = static_cast<int>(sizeof(kCopyFieldNames) / sizeof(kCopyFieldNames[0]));
+        ::Agentmaster::LogNav(std::wstring{ L"copy " } + ((which >= 0 && which < kCopyFieldNameCount) ? kCopyFieldNames[which] : L"?") + L" " + ::Agentmaster::ShortId(sessionId));
         // This pick is the user's NEWEST copy intent: a prompt copy whose paste expansion is still reading
         // the cache (CopyPromptTextExpandingPastes) must not land on top of it, so take a new generation —
         // the stale expansion then drops its write when it comes back (PENDING_INPUT.md §8e).
@@ -629,6 +756,15 @@ namespace winrt::TerminalApp::implementation
             break;
         case 8: // Transcript Followup — the per-turn ❯ user + ● final-reply brief (legend header), off-thread
             CopyConversationAsync(dispatcher, codex, s.id, s.codexSessionId, /*followup*/ true);
+            break;
+        case kCopyFieldTranscriptLevelBase + 0: // Transcript ▸ Minimal
+        case kCopyFieldTranscriptLevelBase + 1: // Transcript ▸ Compact
+        case kCopyFieldTranscriptLevelBase + 2: // Transcript ▸ Default
+        case kCopyFieldTranscriptLevelBase + 3: // Transcript ▸ Full
+        case kCopyFieldTranscriptLevelBase + 4: // Transcript ▸ Max
+            // The conversation as Markdown at that detail level (TranscriptTurns.h), rendered off-thread; this
+            // copy's generation (taken just above) lets a later copy supersede a slow render.
+            CopyTranscriptTurnsAsync(dispatcher, codex, s.id, s.codexSessionId, which - kCopyFieldTranscriptLevelBase, g_promptCopyGeneration.load());
             break;
         case 6: // Summary — the FULL textual session-end.js box (everything; the panel shows a trimmed view)
         {

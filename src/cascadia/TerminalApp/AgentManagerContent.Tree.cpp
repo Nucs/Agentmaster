@@ -1683,8 +1683,36 @@ namespace winrt::TerminalApp::implementation
             addCopyItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
         }
         addCopyItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files)", 6);
-        addCopyItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
-        addCopyItem(L"Transcript Followup", L"Copy the conversation folded per turn \x2014 ❯ each of your messages + ● the agent's end-of-turn reply \x2014 with a legend header, ready to paste into a follow-up session", 8);
+        // Transcript ▸ Default / Max / Full / Compact / Minimal — the conversation as Markdown at a detail level
+        // (CopySessionField codes 9-13, TranscriptTurns.h). It replaced the flat "Transcript" (5) and "Transcript
+        // Followup" (8) items, and is built from the ONE shared table (AgentCopyActions.h kTranscriptCopyMenu), so
+        // this menu offers exactly the levels the per-tab overlay and the WT tab menu do. Like every Copy item it
+        // only reads (off-thread) and writes the clipboard, so it needs no defer either.
+        MenuFlyoutSubItem transcriptSub;
+        transcriptSub.Text(kTranscriptCopyMenuLabel);
+        AgentSetTip(transcriptSub, kTranscriptCopyMenuTip);
+        for (const auto& level : kTranscriptCopyMenu)
+        {
+            MenuFlyoutItem item;
+            item.Text(level.label);
+            AgentSetTip(item, level.tip);
+            const int which = level.which;
+            item.Click([weak, id, which](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    if (self->_registry)
+                    {
+                        // A transcript level reads no live state (no draft provider) and ignores the summary
+                        // flags; they are passed only because the shared action takes them positionally.
+                        CopySessionField(*self->_registry, id, which, self->_dispatcher,
+                                         self->_appSettings.summaryPanelWrapNewlines, self->_appSettings.summaryPanelTruncate,
+                                         static_cast<int>(self->_appSettings.tabColorMode));
+                    }
+                }
+            });
+            transcriptSub.Items().Append(item);
+        }
+        copySub.Items().Append(transcriptSub);
         menu.Items().Append(copySub);
 
         // The three WT-tab-menu session ops (mirrored here at the user's request): New Session Here /

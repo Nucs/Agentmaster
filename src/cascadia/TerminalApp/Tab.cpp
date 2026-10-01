@@ -9,6 +9,7 @@
 #include "Tab.g.cpp"
 #include "TabHeaderControl.h" // Agentmaster (bookmark tags): get_self — the badge-hover til::events aren't projected
 #include "AgentCatchLog.h" // Agentmaster: AgentLogCaughtException — the tooltip hover/wheel hooks swallow, so they must still report (Rule #18)
+#include "AgentCopyActions.h" // Agentmaster: kTranscriptCopyMenu — the shared Copy ▸ Transcript submenu (its levels, tooltips and codes)
 #include "AgentModelMenu.h" // Agentmaster (launch-model picker): AgentFillModelPickItems — the shared "New Session Here ▸ <model>" submenu recipe
 #include "Utils.h"
 #include "AppLogic.h"
@@ -2389,8 +2390,8 @@ namespace winrt::TerminalApp::implementation
                 return item;
             };
             // The `which` codes + labels are the per-tab overlay copy menu's, verbatim (AgentCopyActions.h):
-            // 0 Session Id, 1 Path, 2 Branch, 7 Current Prompt, 3 Claude CLI, 4 Codex CLI, 6 Summary,
-            // 5 Transcript, 8 Transcript Followup.
+            // 0 Session Id, 1 Path, 2 Branch, 7 Current Prompt, 3 Claude CLI, 4 Codex CLI, 6 Summary, and the
+            // Transcript ▸ submenu's 9-13 (one per detail level; codes 5 / 8 are no longer offered here).
             addCopyItem(L"Session Id", L"Copy the resumable conversation id (Codex: its rollout uuid)", 0);
             addCopyItem(L"Copy Path", L"Copy the session's working-directory path", 1);
             addCopyItem(L"Copy Branch Name", L"Copy the session's current git branch name", 2);
@@ -2405,8 +2406,29 @@ namespace winrt::TerminalApp::implementation
             _copyClaudeCliItem = addCopyItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
             _copyCodexCliItem = addCopyItem(L"Codex Launch CLI", L"Copy the full codex launch command line", 4);
             addCopyItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files)", 6);
-            addCopyItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
-            addCopyItem(L"Transcript Followup", L"Copy the conversation folded per turn \x2014 ❯ each of your messages + ● the agent's end-of-turn reply \x2014 with a legend header, ready to paste into a follow-up session", 8);
+            // Transcript ▸ Default / Max / Full / Compact / Minimal — the conversation as Markdown at a detail level
+            // (codes 9-13, AgentMaster/TranscriptTurns.h). It replaced the flat "Transcript" (5) and "Transcript
+            // Followup" (8) items, and is built from the ONE shared table (AgentCopyActions.h kTranscriptCopyMenu),
+            // so this menu offers exactly the levels the per-tab overlay and the Manager menus do. Each item raises
+            // CopySessionFieldRequested with its code, like every other Copy item; the page does the rest.
+            Controls::MenuFlyoutSubItem transcriptSub;
+            transcriptSub.Text(kTranscriptCopyMenuLabel);
+            WUX::Controls::ToolTipService::SetToolTip(transcriptSub, box_value(winrt::hstring{ kTranscriptCopyMenuTip }));
+            for (const auto& level : kTranscriptCopyMenu)
+            {
+                Controls::MenuFlyoutItem item;
+                item.Text(level.label);
+                WUX::Controls::ToolTipService::SetToolTip(item, box_value(winrt::hstring{ level.tip }));
+                const int32_t which = level.which;
+                item.Click([weakThis, which](auto&&, auto&&) {
+                    if (auto tab{ weakThis.get() })
+                    {
+                        tab->CopySessionFieldRequested.raise(which);
+                    }
+                });
+                transcriptSub.Items().Append(item);
+            }
+            _copySessionSubMenu.Items().Append(transcriptSub);
         }
 
         {

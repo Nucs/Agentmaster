@@ -123,6 +123,7 @@ int wmain()
     TestTranscriptWatcher(); // the scanner's ReadDirectoryChangesW change feed (tests_transcript.cpp)
     TestCompactionLifecycle();
     TestConversationFollowup();
+    TestTranscriptTurns(); // the Copy > Transcript levels vs the transcript_turns.py goldens (tests_turns.cpp)
     TestAnalyzeFootprint();
     TestCommandWatch();
     TestCommandHandoverE2E();

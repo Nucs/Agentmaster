@@ -18,6 +18,7 @@
 //   tests_commands.cpp        - COMMANDS.md: slash-command bindings (ParseCommandEcho / CommandWatch / DeriveSuffixedTitle / initial-prompt arg / handover command file)
 //   tests_invisible.cpp       - DELIVERY.md §15: claude's invisible-character rule mirrored (the generated wZe oracle table, the paste sanitize, the prompt compare key, Hebrew, echo/pull-echo/dedupe, the draft guard, the forwarder's UTF-8 + BOM)
 //   tests_taskbar.cpp         - NOTIFICATIONS.md section 8: the taskbar unread badge (TaskbarBadge.h's label / size / disc + digit composition / GDI icon, drawn like the shell draws it) + the engine's process-wide unread census
+//   tests_turns.cpp           - the Copy > Transcript levels: TranscriptTurns (the C++ port of the am-agentmaster-cli skill's transcript_turns.py v9) vs the reference's own goldens in turns\expected, byte for byte
 // ======================================================================================
 //
 // Agentmaster - M5 standalone test harness: SHARED declarations.
@@ -262,5 +263,7 @@ void TestForwarderEncoding(); // HOOKS.md "Encoding": the forwarder decodes stdi
 // tests_taskbar.cpp — NOTIFICATIONS.md section 8, the TASKBAR UNREAD BADGE: the overlay renderer and the count behind it.
 void TestTaskbarBadge(); // TaskbarBadge.h: Label (99+ cap) / Description (exact count) / IconSizeForDpi (SM_CXSMICON scaling, clamps), the disc coverage (centered, full-bleed, symmetric), ComposePixels (straight-alpha BGRA, white under ink, ink outside the disc dropped), FindInk, the real GDI glyph pass (inked, optically centered, never clipped by the disc) and CreateBadgeIcon drawn with DrawIconEx over a green canvas (transparent corners, opaque disc, white digits)
 void TestUnreadCensus(); // Engine.h's process-wide unread census on a LOCAL Engine: the distinct-session union, fan-out to EVERY sink (the source included), silence on an unchanged count, empty-publish withdrawal, unregister, and a throwing sink contained without starving the rest
+// tests_turns.cpp — the session copy menus' Copy > Transcript > Default / Max / Full / Compact / Minimal.
+void TestTranscriptTurns(); // TranscriptTurns.{h,cpp}: the level ladder (TurnsOptionsForLevel == the reference's LEVELS), the timestamp + JSONL readers, a missing transcript -> nullopt, and all 11 skill fixtures x 5 levels rendered byte-identical to turns\expected (written by the reference script, turns\make_goldens.py) — chains + agents through RenderTranscriptTurnsFile with births.json's pinned creation times
 void BenchPromptAnchor();
 void BenchPromptAnchorRealSession();

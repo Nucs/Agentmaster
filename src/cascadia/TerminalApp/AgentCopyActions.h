@@ -38,6 +38,16 @@ namespace winrt::TerminalApp::implementation
     //   8 = Transcript Followup   (the conversation folded per turn — a "<Legend>" header, then each turn as
     //                              ❯ the user message + ● the assistant's END-of-turn reply — the paste-into-a-
     //                              follow-up-session brief; ReadConversationFollowupText, read off-thread)
+    //   9..13 = Transcript at a DETAIL LEVEL — the Copy ▸ Transcript submenu (kTranscriptCopyMenu below):
+    //                              code = kCopyFieldTranscriptLevelBase + the TurnsLevel value, i.e. 9 Minimal ·
+    //                              10 Compact · 11 Default · 12 Full · 13 Max. The conversation as Markdown, turn by
+    //                              turn (AgentMaster/TranscriptTurns.h — a C++ port of the am-agentmaster-cli
+    //                              skill's transcript_turns.py, so the app and the skill copy the SAME text),
+    //                              including the sessions it was forked / plan-restarted from and the subagents it
+    //                              spawned; rendered OFF-thread, times in local time. A Codex rollout has no turns
+    //                              view: Minimal / Compact copy code 8's per-turn brief, Default / Full / Max code
+    //                              5's whole conversation. These replaced the menus' "Transcript" (5) and
+    //                              "Transcript Followup" (8) items; codes 5 and 8 still work for any caller.
     // wrapNewlines / truncate are the GLOBAL summary-panel flags (AppSettings::summaryPanelWrapNewlines /
     // summaryPanelTruncate) that govern how the Summary (case 6) renders its messages; they are
     // ignored by the other cases. tabColorMode is the GLOBAL AppSettings::tabColorMode as an int
@@ -45,8 +55,8 @@ namespace winrt::TerminalApp::implementation
     // dir through it (EffectiveWorkingDir — the INFERRED dir under InferredWorkingDirectory, else
     // the launch cwd), matching the overlay subline / board card / tree group; the default 0
     // (WorkingDirectory) reproduces the prior launch-cwd copy. A no-op for an unknown session id or
-    // an empty field. The clipboard write happens on the UI thread (cases 0-4 synchronously; 5/6/8
-    // read off-thread and hop back via `dispatcher`; 7 is synchronous unless the draft carries a
+    // an empty field. The clipboard write happens on the UI thread (cases 0-4 synchronously; 5/6/8 and
+    // 9-13 read off-thread and hop back via `dispatcher`; 7 is synchronous unless the draft carries a
     // paste placeholder, which CopyPromptTextExpandingPastes — below — expands off-thread first and
     // then hops back the same way), so call this from the UI thread and pass that thread's
     // DispatcherQueue. Every call also SUPERSEDES a prompt copy whose paste expansion is still in
@@ -70,6 +80,50 @@ namespace winrt::TerminalApp::implementation
                           bool truncate,
                           int tabColorMode = 0,
                           const std::function<std::wstring()>& liveDraft = {});
+
+    // The first CopySessionField code of the Copy ▸ Transcript submenu: code = this + the TurnsLevel value
+    // (AgentMaster/TranscriptTurns.h: 0 Minimal · 1 Compact · 2 Default · 3 Full · 4 Max). Kept as a plain int
+    // so this header stays engine-include-free, like `tabColorMode` above.
+    inline constexpr int kCopyFieldTranscriptLevelBase = 9;
+
+    // One item of the Copy ▸ Transcript submenu: its label, the tooltip that says what that level copies, and
+    // the CopySessionField code it copies with.
+    struct TranscriptCopyMenuItem
+    {
+        const wchar_t* label;
+        const wchar_t* tip;
+        int which;
+    };
+
+    // The Copy ▸ Transcript submenu, in menu order — Default first (what the skill renders with no level
+    // flag), then from the most detail to the least. The ONE table every session copy menu builds its
+    // submenu from (the per-tab overlay's copy button, the Triage Board / Explorer-tree / side-panel session
+    // menu, the WT tab menu's Copy ▸), so the three can never offer different levels or describe them
+    // differently. Each level shows everything the one below it shows.
+    inline constexpr TranscriptCopyMenuItem kTranscriptCopyMenu[] = {
+        { L"Default",
+          L"Each of your messages, every tool call on one line with how it ended, the agent's remarks between calls, and each turn's final reply",
+          kCopyFieldTranscriptLevelBase + 2 },
+        { L"Max",
+          L"Everything in Full, plus the full content of every file the agent wrote and a stats line per turn (tool calls, duration, API calls, model, context size, output tokens)",
+          kCopyFieldTranscriptLevelBase + 4 },
+        { L"Full",
+          L"Everything in Default, plus the exact command under each Bash call, the first line each call returned, and how long each call took",
+          kCopyFieldTranscriptLevelBase + 3 },
+        { L"Compact",
+          L"Your messages and each turn's final reply, plus where the context was compacted, your answers to the agent's questions, the slash commands you ran, and each subagent's brief and final report",
+          kCopyFieldTranscriptLevelBase + 1 },
+        { L"Minimal",
+          L"Only your messages and each turn's final reply",
+          kCopyFieldTranscriptLevelBase + 0 },
+    };
+
+    // The submenu's own label and tooltip (shared for the same reason as the table).
+    inline constexpr const wchar_t* kTranscriptCopyMenuLabel = L"Transcript";
+    inline constexpr const wchar_t* kTranscriptCopyMenuTip =
+        L"Copy the conversation as Markdown, turn by turn, at the level of detail you pick. The sessions it was forked or restarted from, "
+        L"and the subagents it spawned, are included. A Codex session copies its plain conversation text: Minimal and Compact as your "
+        L"messages with each final reply, Default, Full and Max as the whole conversation.";
 
     // Agentmaster (PENDING_INPUT.md §8e): copy a PROMPT's text to the clipboard with Claude's paste
     // PLACEHOLDERS expanded back into the text they stand for — the ONE shared "copy a prompt" path
