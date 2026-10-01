@@ -897,6 +897,37 @@ namespace Agentmaster
         // recon-subagent) key on current facts. They need no hold.
         const bool tailCurrent = st.readReachedEnd;
 
+        // Agentmaster (DEACTIVATE == the window-restored state — ScanSessionIsDormant): a DORMANT session (a
+        // tab of ours whose connection has not started — a window-restored tab nobody entered, or one parked
+        // by "Deactivate ▸") HOLDS every promotion to Running below (recon-run / recon-resume /
+        // recon-resume-presence / recon-subagent). No process of ours can be running a turn in it; what
+        // those synths would read is residue of the claude a Deactivate just closed — its last transcript
+        // lines, consumed by this cursor that was primed while it ran, or its subagents' final side-file
+        // flushes, which keep `subagentActive` lit for kScanSubagentFreshMs. Without the hold a tab parked
+        // mid-turn re-lit Running on the very next pass and stayed Running until it was entered, where the
+        // resumed claude's SessionStart then made a false "completed" edge. The cursor still READS (so it is
+        // caught up the moment the tab is entered) and the at-rest synths still run, exactly as for a
+        // window-restored tab. Computed once from the pass snapshot; a wake that lands mid-pass is picked up
+        // by the next pass.
+        const bool dormant = ScanSessionIsDormant(s);
+        if (!dormant)
+        {
+            st.dormantHoldLogged = false; // the tab started — a later park is a new episode, worth its own log line
+        }
+        // Log a held promotion ONCE per dormancy episode (ScanState::dormantHoldLogged), so the evidence that
+        // the hold fired is in scanner.log without a line per pass while the residue lasts.
+        //   synth — the synth's log tag (e.g. L"recon-run"), named in the line.
+        // Never throws past AppendStateLog's own best-effort contract.
+        const auto holdDormant = [&](const wchar_t* synth) {
+            if (!st.dormantHoldLogged)
+            {
+                st.dormantHoldLogged = true;
+                AppendStateLog(L"scanner.log",
+                               L"[recon-dormant] " + s.id + L" held " + synth +
+                                   L" -> Running (the tab is dormant: deactivated, or restored and not yet entered \x2014 no process of ours can be running a turn)\n");
+            }
+        };
+
         // Agentmaster (Error triage dismissal — expiry): the manual "Move to Idle/Done" on an Error
         // card acknowledged THE error that was standing when the user clicked; the ack lasts only
         // until the conversation MOVES. A freshly consumed TURN event is that move — a retry (clears
@@ -928,7 +959,13 @@ namespace Agentmaster
         // prompt back-fill, and the echo bookkeeping stays push-owned, so a late real
         // UserPromptSubmit lands on Running -> Running, a no-op). The re-Get mirrors the
         // missed-Stop's freshest-state re-check: a real hook that landed mid-pass wins.
-        if (ShouldSynthesizeRunning(s.state, consumedTurnEvent, wasPrimed, st.lastStopReason, NowMs() - lastWriteMs))
+        // Agentmaster: held for a DORMANT session (ScanSessionIsDormant — the deactivate residue).
+        const bool runRepair = ShouldSynthesizeRunning(s.state, consumedTurnEvent, wasPrimed, st.lastStopReason, NowMs() - lastWriteMs);
+        if (runRepair && dormant)
+        {
+            holdDormant(L"recon-run");
+        }
+        else if (runRepair)
         {
             const auto fresh = _registry->Get(s.id);
             // Agentmaster (the stuck-Error report — session 2b34b07f, 2026-08-07): Error is one of the
@@ -966,7 +1003,13 @@ namespace Agentmaster
         // type-ahead queue accounting (++queuedPrompts) and could strand the next real Stop as Running.
         // The re-Get mirrors the other synths' freshest-state re-check, so a real hook that landed
         // mid-pass wins.
-        if (ShouldSynthesizeResumed(s.state, consumedTurnEvent, wasPrimed, st.pendingInteractiveTool, st.lastStopReason, st.interrupted, NowMs() - lastWriteMs, st.answeredInteractive))
+        // Agentmaster: held for a DORMANT session (ScanSessionIsDormant — the deactivate residue).
+        const bool resumeRepair = ShouldSynthesizeResumed(s.state, consumedTurnEvent, wasPrimed, st.pendingInteractiveTool, st.lastStopReason, st.interrupted, NowMs() - lastWriteMs, st.answeredInteractive);
+        if (resumeRepair && dormant)
+        {
+            holdDormant(L"recon-resume");
+        }
+        else if (resumeRepair)
         {
             const auto fresh = _registry->Get(s.id);
             if (fresh && fresh->state == SessionState::NeedsApproval)
@@ -992,7 +1035,14 @@ namespace Agentmaster
         // Same synthesis as recon-resume (PostToolUse -> Running through the ONE state machine, never
         // a UserPromptSubmit which would inflate ++queuedPrompts), same freshest-state re-Get, so
         // whichever belt is first wins and the loser is a no-op.
-        if (ShouldSynthesizeResumedFromPresence(s.state, s.presenceStatus, st.presenceWasWaiting, st.lastStopReason, st.interrupted))
+        // Agentmaster: held for a DORMANT session (ScanSessionIsDormant — a heartbeat it shows is the dead
+        // claude's last word, never a resumed turn of ours).
+        const bool presenceResume = ShouldSynthesizeResumedFromPresence(s.state, s.presenceStatus, st.presenceWasWaiting, st.lastStopReason, st.interrupted);
+        if (presenceResume && dormant)
+        {
+            holdDormant(L"recon-resume-presence");
+        }
+        else if (presenceResume)
         {
             const auto fresh = _registry->Get(s.id);
             if (fresh && fresh->state == SessionState::NeedsApproval)
@@ -1123,7 +1173,14 @@ namespace Agentmaster
         // end_turn) can bounce a just-Waiting session back to Running. The re-Get mirrors the other
         // synths' freshest-state re-check (a real hook landing mid-pass wins), and — gated to
         // Idle/Waiting — it self-limits: once it lands Running it stops re-firing.
-        if (ShouldSynthesizeRunningFromExternalWork(s.state, subagentActive, presenceWorking, st.lastStopReason, st.interrupted, externalOutlivesTurn))
+        // Agentmaster: held for a DORMANT session (ScanSessionIsDormant) — the side files a parked tab's
+        // closed claude left behind stay "fresh" for kScanSubagentFreshMs and would re-light it otherwise.
+        const bool externalWorkRun = ShouldSynthesizeRunningFromExternalWork(s.state, subagentActive, presenceWorking, st.lastStopReason, st.interrupted, externalOutlivesTurn);
+        if (externalWorkRun && dormant)
+        {
+            holdDormant(L"recon-subagent");
+        }
+        else if (externalWorkRun)
         {
             const auto fresh = _registry->Get(s.id);
             if (fresh && (fresh->state == SessionState::Idle || fresh->state == SessionState::WaitingForInput))

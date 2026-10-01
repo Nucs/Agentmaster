@@ -2057,11 +2057,12 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (tab status-dot red flash): switching TO a tab is a "visit" — the current
         // tab is always considered visited, so stop any red flash on the now-focused tab.
         _VisitTabClearFlash(tab);
-        // Agentmaster (deactivate): focusing a DEACTIVATED tab resumes it — its control is
-        // already initialized (the one-shot lazy layout-init is spent), so only this explicit
-        // wake can Start the parked resume connection. A structural no-op for every other tab,
-        // incl. restored-dormant ones (their own lazy init owns the start the moment they lay
-        // out) and plain shells.
+        // Agentmaster (deactivate): a DEACTIVATED tab — like a window-restored one — holds a
+        // never-initialized control, so laying it out (its content went into _tabContent in
+        // _UpdatedSelectedTab, just before this runs) is what starts its resume. This call is the
+        // belt for an INITIALIZED control parked on a never-started connection (its one-shot layout
+        // init is spent); a structural no-op for every other tab, incl. restored and deactivated ones
+        // and plain shells.
         _WakeDeactivatedTab(tab);
         // Agentmaster (TAB_OVERLAY.md summary panel): a "here-and-now lens" should be current the
         // instant you look at it — kick a cheap, mtime-gated content re-read of the now-focused

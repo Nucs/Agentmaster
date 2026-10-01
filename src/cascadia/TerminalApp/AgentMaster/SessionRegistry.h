@@ -72,6 +72,19 @@ namespace Agentmaster
     using ObserverToken = uint64_t;
     using AdoptionToken = uint64_t;
 
+    // Agentmaster (RETIRED HOSTS — SessionRegistry::RetireHostToken): how long a retired host token keeps
+    // vetoing its session's observations and hooks. A retired token names a ConPTY WE closed (Deactivate and
+    // Restart swap a fresh connection into the tab and close the old one), so the only thing that can still
+    // speak for it is the claude that ConPTY hosted, while it handles its close: Windows ends a CTRL_CLOSE
+    // handler after ~5 s, and a hook forwarder it already spawned can deliver even later (a SessionEnd
+    // arrived 29 s after the 2026-08-26 park, under the old shell-form hooks). Ten minutes covers both with
+    // a wide margin. A WT_SESSION GUID is never reused, so outliving the dying process costs only memory,
+    // which kRetiredHostTokensPerSession bounds.
+    inline constexpr int64_t kRetiredHostTokenTtlMs = 10 * 60 * 1000;
+    // Agentmaster (RETIRED HOSTS): at most this many retired host tokens are remembered per session, oldest
+    // dropped first. Each park/restart retires one; a handful covers rapid repeats on one tab.
+    inline constexpr size_t kRetiredHostTokensPerSession = 8;
+
     class SessionRegistry
     {
     public:
@@ -115,7 +128,35 @@ namespace Agentmaster
         // a steady-state re-observe with unchanged facts is a NO-OP (no observer / persist / UI
         // churn). No-op for an empty sessionId (a correlated-but-never-prompted claude has no
         // conversation id yet — §11d). Thread-safe.
+        // Agentmaster (RETIRED HOSTS): an observation whose (sessionId, tabToken) pair is retired
+        // (RetireHostToken) is DROPPED whole — it describes the dying claude of a connection we replaced.
         void ObserveClaude(const ObservedClaude& o);
+
+        // Agentmaster (RETIRED HOSTS — the deactivate/restart unbind race): record that the ConPTY
+        // `tabToken` no longer hosts `sessionId` because WE replaced it: Deactivate parks a fresh, never-
+        // started connection in the tab, Restart starts one. The claude the old ConPTY hosted keeps running
+        // for a few seconds while it handles the close, and until the window republishes its tab roster (its
+        // next ~2.5 s probe) the Fleet Observer still correlates that dying process to this session BY THE
+        // OLD TOKEN. Its ObserveClaude used to stamp tabToken / pid / presenceStatus back onto the record, so
+        // the liveness sweep found no pane holding that token and ARCHIVED the session — the 2026-08-26
+        // Deactivate that turned six tabs into plain shells, and 4 of the 8 release restarts — and its
+        // SessionEnd, no longer recognized as stale, marked a parked tab Done. From this call on, for
+        // kRetiredHostTokenTtlMs, every ObserveClaude and every hook naming this (session, token) pair is
+        // dropped whole and logged ([retired-host] in hooks.log). Scoped to the session: the same token on
+        // ANOTHER session is untouched. Call it BEFORE re-stamping the record's tabToken to the new
+        // connection; re-retiring a token refreshes its clock. A no-op for an empty id or token. Thread-safe.
+        //   sessionId — the session whose host connection was replaced.
+        //   tabToken  — the replaced connection's WT_SESSION (any case — matched with TabTokenEq).
+        //   throws    — std::bad_alloc on allocation failure only.
+        void RetireHostToken(const std::wstring& sessionId, const std::wstring& tabToken);
+
+        // Agentmaster (RETIRED HOSTS): is `tabToken` a host of `sessionId` retired by RetireHostToken, and is
+        // that retirement still within kRetiredHostTokenTtlMs? Case-insensitive token match. Thread-safe.
+        //   sessionId — the session to ask about.
+        //   tabToken  — a WT_SESSION as a hook or an observation reported it ("" is never retired).
+        //   returns   — true when observations and hooks from that host must be ignored for that session.
+        //   throws    — nothing beyond std::mutex::lock's std::system_error.
+        bool IsRetiredHostToken(const std::wstring& sessionId, const std::wstring& tabToken) const;
 
         // Mutate a session's Auto Testing / autorunner under the lock (used by the scheduler
         // and UI). The mutator runs while holding the lock; the post-change snapshot is
@@ -378,6 +419,24 @@ namespace Agentmaster
         // Caller holds _mtx; returns the archived snapshots so the caller can _notify them outside it.
         std::vector<SessionInfo> _SupersedeStaleTabSiblings(const std::wstring& winnerId, const std::wstring& tabToken, uint32_t pid, int64_t winnerFreshness);
 
+        // Agentmaster (RETIRED HOSTS): one retired host connection of a session (RetireHostToken).
+        struct RetiredHostToken
+        {
+            std::wstring token; // the replaced connection's WT_SESSION, as given
+            int64_t retiredAtUnixMs{ 0 }; // when it was retired — the kRetiredHostTokenTtlMs clock
+            // A dropped ObserveClaude for this token was already logged. The observer re-surveys every ~2 s
+            // while the dying process lingers, so this keeps the evidence to one line per token. Mutable:
+            // flipped through the const finder below, always under _mtx.
+            mutable bool observeDropLogged{ false };
+        };
+        // Agentmaster (RETIRED HOSTS): the unexpired retirement of `tabToken` for `sessionId`, or nullptr.
+        // Caller holds _mtx.
+        //   sessionId — the session whose retirements to search.
+        //   tabToken  — the token to look for (case-insensitive; "" never matches).
+        //   nowUnixMs — the TTL clock.
+        //   returns   — the matching entry (its log latch may be flipped) or nullptr. Never throws.
+        const RetiredHostToken* _FindRetiredHostTokenLocked(const std::wstring& sessionId, const std::wstring& tabToken, int64_t nowUnixMs) const noexcept;
+
         mutable std::mutex _mtx;
         // insertion-ordered storage so the UI shows a stable order
         std::vector<std::wstring> _order;
@@ -393,6 +452,10 @@ namespace Agentmaster
         // Total wchar_t count across every journal — what the fleet-wide kPasteJournalMaxTotalChars cap is
         // enforced against without re-walking every entry per paste. Guarded by _mtx.
         size_t _pasteJournalChars{ 0 };
+        // Agentmaster (RETIRED HOSTS): sessionId -> the host connections we replaced, oldest first (at most
+        // kRetiredHostTokensPerSession each; expired entries pruned on the next retire). Transient — a dying
+        // process cannot outlive an app restart. Dropped with the session by Remove. Guarded by _mtx.
+        std::unordered_map<std::wstring, std::vector<RetiredHostToken>> _retiredHostTokens;
         std::vector<std::pair<ObserverToken, RegistryObserver>> _observers;
         uint64_t _nextObserverId{ 1 };
         AdvanceHandler _advance;

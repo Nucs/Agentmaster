@@ -1027,6 +1027,102 @@ void TestForkSourceIdEcho()
     CHECK(reg.Get(L"re-started")->state == SessionState::Done, "stale-end: the current host's SessionEnd applies normally");
 }
 
+// Agentmaster (RETIRED HOSTS — SessionRegistry::RetireHostToken; the 2026-08-26 deactivate unbind and the
+// restart archives): once Deactivate/Restart replaces a session's connection, the CLOSING claude of the old
+// one keeps reporting for a few seconds — the Fleet Observer still correlates it to the session through the
+// not-yet-republished roster, and its hooks (a SessionEnd above all) still arrive. Every such report must be
+// dropped: it would put the dead ConPTY's token, pid and heartbeat back on the record (the liveness sweep then
+// archives the session) or move its state (SessionEnd -> Done). Pins: an observation and every hook kind from
+// a retired (session, token) pair change NOTHING (not even provenance); the case-insensitive match; the
+// retirement is per session; the NEW host is still heard; an empty token is never retired; Remove forgets
+// the retirements; the per-session bound drops the oldest.
+void TestRetiredHostToken()
+{
+    std::wprintf(L"SessionRegistry retired hosts (Deactivate/Restart: the closing claude cannot re-stamp the record):\n");
+    SessionRegistry reg;
+    {
+        SessionInfo s = MakeSession(L"parked", SessionState::WaitingForInput);
+        s.live = true;
+        s.started = false; // the Deactivate park: a never-started connection
+        s.tabToken = L"wt-new"; // the record already names the NEW connection
+        s.pid = 0;
+        reg.Upsert(s);
+    }
+    reg.RetireHostToken(L"parked", L"wt-old");
+    CHECK(reg.IsRetiredHostToken(L"parked", L"wt-old"), "retired: the replaced host is retired");
+    CHECK(reg.IsRetiredHostToken(L"parked", L"WT-OLD"), "retired: the token match is case-insensitive (hooks, the PEB and SessionId() format it differently)");
+    CHECK(!reg.IsRetiredHostToken(L"parked", L"wt-new"), "retired: the current host is not retired");
+    CHECK(!reg.IsRetiredHostToken(L"other", L"wt-old"), "retired: a retirement belongs to ONE session");
+    CHECK(!reg.IsRetiredHostToken(L"parked", L""), "retired: an empty token is never retired");
+
+    // (1) THE INCIDENT: the observer's survey, still on the pre-swap roster, reports the dying claude under
+    // the OLD token. Merged, it put wt-old / the dead pid / its heartbeat back on the record.
+    ObservedClaude o;
+    o.sessionId = L"parked";
+    o.tabToken = L"wt-old";
+    o.pid = 4242;
+    o.cwd = L"K:/x";
+    o.runningApp = RunningApp::Agentmaster;
+    o.presenceStatus = L"busy";
+    o.observedUnixMs = NowMsTest();
+    reg.ObserveClaude(o);
+    auto s = reg.Get(L"parked");
+    CHECK(s && s->tabToken == L"wt-new", "retired: the closing claude's observation does NOT re-stamp tabToken (the liveness sweep keeps finding the parked pane)");
+    CHECK(s && s->pid == 0, "retired: ...nor its pid");
+    CHECK(s && s->presenceStatus.empty(), "retired: ...nor its heartbeat (a stale \"busy\" would read the parked session as working)");
+
+    // (2) its hooks — a SessionEnd would mark the parked tab Done, a prompt would light Running.
+    for (const auto ev : { HookEvent::SessionEnd, HookEvent::Stop, HookEvent::Notification, HookEvent::UserPromptSubmit, HookEvent::PostToolUse })
+    {
+        HookMessage m = Msg(L"parked", ev);
+        m.tabToken = L"wt-old";
+        reg.OnHookEvent(m);
+    }
+    s = reg.Get(L"parked");
+    CHECK(s && s->state == SessionState::WaitingForInput, "retired: no hook from the retired host moves the parked state (SessionEnd / Stop / Notification / UserPromptSubmit / PostToolUse all dropped)");
+    CHECK(s && s->tabToken == L"wt-new", "retired: no hook from the retired host steals tabToken back");
+    CHECK(s && !s->hookWired, "retired: a dropped hook leaves no provenance either (it was never applied)");
+
+    // (3) the NEW host — the woken claude — is heard normally.
+    HookMessage start = Msg(L"parked", HookEvent::SessionStart);
+    start.tabToken = L"wt-new";
+    reg.OnHookEvent(start);
+    s = reg.Get(L"parked");
+    CHECK(s && s->hookWired && s->tabToken == L"wt-new", "retired: the new host's hook is applied");
+    o.tabToken = L"WT-NEW";
+    o.pid = 5151;
+    o.presenceStatus = L"idle";
+    reg.ObserveClaude(o);
+    s = reg.Get(L"parked");
+    CHECK(s && s->pid == 5151, "retired: the new host's observation enriches normally");
+
+    // (4) per session: the same token reported for ANOTHER session is not vetoed.
+    {
+        SessionInfo other = MakeSession(L"other", SessionState::Idle);
+        other.live = true;
+        other.tabToken = L"wt-elsewhere";
+        reg.Upsert(other);
+    }
+    HookMessage otherStop = Msg(L"other", HookEvent::Stop);
+    otherStop.tabToken = L"wt-old";
+    reg.OnHookEvent(otherStop);
+    CHECK(reg.Get(L"other") && reg.Get(L"other")->hookWired && reg.Get(L"other")->tabToken == L"wt-old", "retired: a token retired for one session still speaks for another");
+
+    // (5) Remove forgets the session's retirements; an empty token retires nothing.
+    reg.Remove(L"parked");
+    CHECK(!reg.IsRetiredHostToken(L"parked", L"wt-old"), "retired: Remove forgets the session's retirements");
+    reg.RetireHostToken(L"other", L"");
+    CHECK(!reg.IsRetiredHostToken(L"other", L""), "retired: retiring an empty token is a no-op");
+
+    // (6) the per-session bound: past kRetiredHostTokensPerSession the OLDEST retirement goes first.
+    for (size_t i = 0; i < kRetiredHostTokensPerSession + 3; ++i)
+    {
+        reg.RetireHostToken(L"other", L"wt-r" + std::to_wstring(i));
+    }
+    CHECK(!reg.IsRetiredHostToken(L"other", L"wt-r0"), "retired: the oldest retirement is dropped past the per-session bound");
+    CHECK(reg.IsRetiredHostToken(L"other", L"wt-r" + std::to_wstring(kRetiredHostTokensPerSession + 2)), "retired: the newest retirement is kept");
+}
+
 void TestTypedCapture()
 {
     std::wprintf(L"Auto Testing: record typed messages + suppress our own echoes:\n");

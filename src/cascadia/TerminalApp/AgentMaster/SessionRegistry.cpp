@@ -179,6 +179,7 @@ namespace Agentmaster
                 }
                 _pasteJournals.erase(jt);
             }
+            _retiredHostTokens.erase(id); // RETIRED HOSTS: a removed session has no host left to veto
             _order.erase(std::remove(_order.begin(), _order.end(), id), _order.end());
         }
         // Agentmaster: notify like Upsert/Update do — a removal IS a fleet change. Remove was
@@ -293,6 +294,28 @@ namespace Agentmaster
 
     void SessionRegistry::OnHookEvent(const HookMessage& msg)
     {
+        // Agentmaster (RETIRED HOSTS — RetireHostToken): a hook whose ConPTY WE replaced (a Deactivate parked
+        // a fresh connection in the tab, or a Restart started one) is the closing claude's last word about a
+        // session that now lives on a different connection. ANY event from it is noise — a SessionEnd would
+        // mark a parked tab Done, a Stop/Notification would move its state, and every one of them would
+        // write tabToken back to the dead ConPTY (the liveness sweep then finds no pane holding the token).
+        // Drop it whole, before every other rule. (The [stale-end] guard below stays for the supersedes we
+        // did not retire explicitly — an in-session re-home.) The in-lock re-check further down closes the
+        // microsecond window where a retirement lands between this check and the state mutation.
+        if (!msg.tabToken.empty())
+        {
+            bool fromRetiredHost = false;
+            {
+                std::lock_guard guard{ _mtx };
+                fromRetiredHost = _FindRetiredHostTokenLocked(msg.sessionId, msg.tabToken, NowMs()) != nullptr;
+            }
+            if (fromRetiredHost)
+            {
+                AppendStateLog(L"hooks.log", L"[retired-host] dropped " + std::wstring{ HookEventName(msg.event) } + L" for " + msg.sessionId + L" from replaced ConPTY " + msg.tabToken + L" (its closing claude \x2014 the session now lives on a new connection)\n");
+                return;
+            }
+        }
+
         // Agentmaster (--fork-session source-id echo, SessionModels.h SessionInfo::forkParentId): a
         // `claude --resume <src> --fork-session --session-id <new>` fork fires its FIRST SessionStart
         // hook under the SOURCE id <src>, NOT the freshly minted <new> we registered + bound to this
@@ -369,6 +392,13 @@ namespace Agentmaster
 
         {
             std::lock_guard guard{ _mtx };
+            // Agentmaster (RETIRED HOSTS): the race belt for the pre-check at the top — a Deactivate/Restart
+            // that retired this hook's host AFTER that check but before this lock. Silent: the window is
+            // microseconds wide and the pre-check logs every ordinary drop.
+            if (!msg.tabToken.empty() && _FindRetiredHostTokenLocked(msg.sessionId, msg.tabToken, NowMs()) != nullptr)
+            {
+                return;
+            }
             auto it = _sessions.find(msg.sessionId);
             if (it == _sessions.end())
             {
@@ -764,12 +794,49 @@ namespace Agentmaster
         {
             return; // a correlated-but-never-prompted claude has no conversation id yet (§11d)
         }
+        // Agentmaster (RETIRED HOSTS — RetireHostToken; the 2026-08-26 deactivate unbind): an observation
+        // of the claude a Deactivate/Restart just CLOSED. Until the hosting window republishes its tab
+        // roster (its next ~2.5 s probe), the observer's full survey — every 2 s — still finds that dying
+        // process under the OLD shell of the OLD roster entry and reports it for this session with the OLD
+        // token. Merging it would put tabToken / pid / presenceStatus of a dead process back on a record
+        // that now names the new connection: the liveness sweep then finds no pane holding that token and
+        // archives the session, and a stale "busy" heartbeat could keep the scanner reading it as working.
+        // Drop the whole observation; log it once per retired token (the survey repeats until the process
+        // is gone).
+        if (!o.tabToken.empty())
+        {
+            bool fromRetiredHost = false;
+            bool logDrop = false;
+            {
+                std::lock_guard guard{ _mtx };
+                if (const auto* retired = _FindRetiredHostTokenLocked(o.sessionId, o.tabToken, NowMs()))
+                {
+                    fromRetiredHost = true;
+                    logDrop = !retired->observeDropLogged;
+                    retired->observeDropLogged = true; // mutable latch, under _mtx
+                }
+            }
+            if (fromRetiredHost)
+            {
+                if (logDrop)
+                {
+                    AppendStateLog(L"hooks.log", L"[retired-host] dropped the observation of pid " + std::to_wstring(o.pid) + L" for " + o.sessionId + L" on replaced ConPTY " + o.tabToken + L" (its closing claude, seen through the not-yet-republished roster)\n");
+                }
+                return;
+            }
+        }
         SessionInfo snapshot;
         bool created = false;
         bool changed = false;
         std::vector<SessionInfo> superseded; // stale prior conversations of the same claude on this ConPTY (notified outside the lock)
         {
             std::lock_guard guard{ _mtx };
+            // Agentmaster (RETIRED HOSTS): the race belt for the pre-check above (a retirement that landed
+            // between that check and this lock). Silent — the pre-check logs the ordinary drops.
+            if (!o.tabToken.empty() && _FindRetiredHostTokenLocked(o.sessionId, o.tabToken, NowMs()) != nullptr)
+            {
+                return;
+            }
             auto it = _sessions.find(o.sessionId);
             if (it == _sessions.end())
             {
@@ -962,6 +1029,65 @@ namespace Agentmaster
         {
             _notify(gone, HookEvent::Unknown);
         }
+    }
+
+    // Agentmaster (RETIRED HOSTS): see the declaration. Pruning happens here, on the write path, so the read
+    // path (_FindRetiredHostTokenLocked, hit by every hook and every observation) never allocates.
+    void SessionRegistry::RetireHostToken(const std::wstring& sessionId, const std::wstring& tabToken)
+    {
+        if (sessionId.empty() || tabToken.empty())
+        {
+            return; // nothing names a host — nothing to retire
+        }
+        const int64_t now = NowMs();
+        {
+            std::lock_guard guard{ _mtx };
+            auto& retired = _retiredHostTokens[sessionId];
+            // Drop the expired entries, and any earlier entry for this same token: re-retiring a token (a
+            // second park of an already-parked host is refused upstream, but a restart racing a park is
+            // not) refreshes its clock instead of stacking a duplicate.
+            retired.erase(std::remove_if(retired.begin(), retired.end(), [&](const RetiredHostToken& r) {
+                              return now - r.retiredAtUnixMs >= kRetiredHostTokenTtlMs || TabTokenEq(r.token, tabToken);
+                          }),
+                          retired.end());
+            retired.push_back(RetiredHostToken{ tabToken, now, false });
+            // Bound the list: the oldest retirement goes first (its dying process is the longest gone).
+            while (retired.size() > kRetiredHostTokensPerSession)
+            {
+                retired.erase(retired.begin());
+            }
+        }
+        AppendStateLog(L"hooks.log", L"[retired-host] " + sessionId + L" no longer hosted by ConPTY " + tabToken + L" \x2014 its closing claude's observations and hooks are ignored for " + std::to_wstring(kRetiredHostTokenTtlMs / 60000) + L" min\n");
+    }
+
+    bool SessionRegistry::IsRetiredHostToken(const std::wstring& sessionId, const std::wstring& tabToken) const
+    {
+        std::lock_guard guard{ _mtx };
+        return _FindRetiredHostTokenLocked(sessionId, tabToken, NowMs()) != nullptr;
+    }
+
+    // Agentmaster (RETIRED HOSTS): see the declaration. A linear scan of at most
+    // kRetiredHostTokensPerSession entries for the one session — the per-hook cost is a map miss for every
+    // session that was never parked or restarted.
+    const SessionRegistry::RetiredHostToken* SessionRegistry::_FindRetiredHostTokenLocked(const std::wstring& sessionId, const std::wstring& tabToken, int64_t nowUnixMs) const noexcept
+    {
+        if (tabToken.empty())
+        {
+            return nullptr; // a token-less hook / observation names no host, so no retirement can apply
+        }
+        const auto it = _retiredHostTokens.find(sessionId);
+        if (it == _retiredHostTokens.end())
+        {
+            return nullptr;
+        }
+        for (const auto& r : it->second)
+        {
+            if (nowUnixMs - r.retiredAtUnixMs < kRetiredHostTokenTtlMs && TabTokenEq(r.token, tabToken))
+            {
+                return &r;
+            }
+        }
+        return nullptr; // expired entries are ignored here and pruned on the next RetireHostToken
     }
 
     bool SessionRegistry::Update(const std::wstring& id, const std::function<void(SessionInfo&)>& mutate)

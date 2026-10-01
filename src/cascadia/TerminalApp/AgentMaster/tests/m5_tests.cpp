@@ -69,6 +69,7 @@ int wmain()
     TestRegistryFanout();
     TestRegistrySnapshotLive();
     TestForkSourceIdEcho();
+    TestRetiredHostToken(); // Deactivate/Restart: the closing claude of a replaced connection cannot re-stamp the record (tests_state.cpp)
     TestTypedCapture();
     TestQueueHistoryTrim();
     TestTakeLastPendingPrompt();
@@ -118,6 +119,7 @@ int wmain()
     TestConversationLineage();
     TestScannerCatchUp(); // the 2026-09-25 catch-up stall end to end (tests_transcript.cpp)
     TestTurnStartRaceGuard(); // the 2026-10-01 turn-start race: the prompt-supersession guard, pure + end to end (tests_transcript.cpp)
+    TestScannerDormantHold(); // a parked/restored (dormant) session is never promoted to Running, end to end (tests_transcript.cpp)
     TestTranscriptWatcher(); // the scanner's ReadDirectoryChangesW change feed (tests_transcript.cpp)
     TestCompactionLifecycle();
     TestConversationFollowup();

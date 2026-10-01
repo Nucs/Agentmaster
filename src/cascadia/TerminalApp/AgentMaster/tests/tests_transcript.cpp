@@ -3480,6 +3480,123 @@ void TestTurnStartRaceGuard()
     std::filesystem::remove_all(std::filesystem::path{ cfg }, ecCleanup);
 }
 
+// Agentmaster (DEACTIVATE == the window-restored state — ScanSessionIsDormant): a DORMANT session (live, ours,
+// not started — a window-restored tab nobody entered, or a tab parked by "Deactivate ▸") must never be
+// promoted to Running by the scanner. The Deactivate shape END TO END on a REAL SessionScanner thread: a
+// session primes its cursor while its claude runs, is parked (started=false, state normalized to Idle), and
+// then the closed claude's RESIDUE lands — a fresh mid-turn transcript line (recon-run's input, consumed by
+// the already-primed cursor) and a fresh subagent side file (recon-subagent's input). Before the hold, either
+// one re-lit the parked tab Running on the next pass, where it stayed until the tab was entered. It must stay
+// Idle. Then the SAME residue with the tab started (the woken claude really working) must light Running —
+// proving the hold is what kept it at rest, not a quirk of the fixture. Plus the pure predicate's truth
+// table. Stages a throwaway CLAUDE_CONFIG_DIR like TestScannerCatchUp and restores it after. [Agentmaster]
+void TestScannerDormantHold()
+{
+    std::wprintf(L"SessionScanner dormant hold (a parked or restored tab is never promoted to Running):\n");
+
+    // --- the pure predicate ---
+    {
+        SessionInfo p = MakeSession(L"dormant-pure");
+        p.live = true;
+        p.started = false;
+        p.external = false;
+        CHECK(ScanSessionIsDormant(p), "dormant: live + ours + never started == dormant");
+        p.started = true;
+        CHECK(!ScanSessionIsDormant(p), "dormant: a started session is not dormant");
+        p.started = false;
+        p.external = true;
+        CHECK(!ScanSessionIsDormant(p), "dormant: an ADOPTED session is never dormant (its started flag is not maintained)");
+        p.external = false;
+        p.live = false;
+        CHECK(!ScanSessionIsDormant(p), "dormant: an archived session is not dormant (the scanner does not reconcile it anyway)");
+    }
+
+    wchar_t tmp[MAX_PATH]{};
+    ::GetTempPathW(MAX_PATH, tmp);
+    const std::wstring cfg = std::wstring{ tmp } + L"am_scandormant_cfg_" + std::to_wstring(::GetCurrentProcessId());
+    const std::wstring cwd = L"K:\\am_scan\\dormant";
+    const std::wstring dir = cfg + L"\\projects\\" + EncodeCwdToProjectDir(cwd);
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path{ dir }, ec);
+
+    wchar_t prevBuf[2048]{};
+    const DWORD prevN = ::GetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevBuf, 2048);
+    const std::wstring prevCfg{ prevBuf, prevN };
+    ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", cfg.c_str());
+
+    // A completed turn (prompt + end_turn): the transcript the running claude had written when it was parked.
+    const std::string completed =
+        R"j({"type":"user","uuid":"p1","message":{"role":"user","content":"work on the parser"},"timestamp":"2026-10-01T10:00:00.000Z"})j" "\n"
+        R"j({"type":"assistant","uuid":"a1","message":{"role":"assistant","model":"claude-test","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]},"timestamp":"2026-10-01T10:00:05.000Z"})j" "\n";
+    // A mid-turn assistant step (a NON-interactive Bash tool_use): a turn event whose tail says "in progress".
+    const auto toolUse = [](int i) {
+        return std::string(R"j({"type":"assistant","uuid":"m)j") + std::to_string(i) +
+               R"j(","message":{"role":"assistant","model":"claude-test","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu)j" +
+               std::to_string(i) + R"j(","name":"Bash","input":{"command":"echo"}}]},"timestamp":"2026-10-01T10:01:00.000Z"})j" "\n";
+    };
+
+    const std::wstring id = L"d0a7c1de-0000-4000-8000-0000000000d1";
+    const std::wstring path = dir + L"\\" + id + L".jsonl";
+    const std::wstring sideDir = dir + L"\\" + id + L"\\subagents";
+    std::filesystem::create_directories(std::filesystem::path{ sideDir }, ec);
+    const int64_t quiet = NowMsTest() - 120000;
+    MakeJsonl(path, completed, quiet, quiet - 1000);
+
+    auto reg = std::make_shared<SessionRegistry>();
+    {
+        SessionInfo s = MakeSession(id, SessionState::Idle);
+        s.workingDir = cwd;
+        s.live = true;
+        s.started = true; // the claude is running: the cursor primes on its transcript like any live tab's
+        reg->Upsert(s);
+    }
+    SessionScanner scanner{ reg };
+    scanner.Start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(900)); // the first pass reads the small file whole: the cursor is primed
+
+    // Polls the session for `budgetMs`; returns true as soon as it reads Running.
+    const auto becameRunningWithin = [&](int budgetMs) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (const auto cur = reg->Get(id); cur && cur->state == SessionState::Running)
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        return false;
+    };
+
+    // --- PARK: what _DeactivateManagedTab writes (started=false, state normalized) ---
+    reg->Update(id, [](SessionInfo& x) {
+        x.started = false;
+        x.state = SessionState::Idle;
+    });
+    scanner.Wake();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    // --- the closed claude's RESIDUE: its last mid-turn line + its subagent's final side-file write ---
+    AppendJsonl(path, toolUse(1), NowMsTest());
+    MakeJsonl(sideDir + L"\\agent-residue.jsonl", "{\"type\":\"assistant\"}\n", NowMsTest(), NowMsTest() - 500);
+    scanner.Wake();
+    const bool parkedLit = becameRunningWithin(3500); // > kScanLiveIdleMs: at least one pass consumes the residue even without a wake
+    CHECK(!parkedLit, "dormant hold: a PARKED session's residue (a fresh mid-turn line + a fresh subagent file) does NOT promote it to Running (was: recon-run / recon-subagent re-lit the parked tab until it was entered)");
+    const auto atRest = reg->Get(id);
+    CHECK(atRest && atRest->state == SessionState::Idle, "dormant hold: the parked session keeps the state the park normalized it to");
+
+    // --- WAKE: the tab is entered, its claude really works — the same shape now lights Running ---
+    reg->SetStarted(id, true);
+    AppendJsonl(path, toolUse(2), NowMsTest());
+    MakeJsonl(sideDir + L"\\agent-residue.jsonl", "{\"type\":\"assistant\"}\n{\"type\":\"assistant\"}\n", NowMsTest(), NowMsTest() - 500);
+    scanner.Wake();
+    CHECK(becameRunningWithin(5000), "dormant hold: once the tab is started, the same fresh activity lights Running (the hold is the gate, not the fixture)");
+
+    scanner.Stop();
+    ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevCfg.empty() ? nullptr : prevCfg.c_str());
+    std::error_code ecCleanup;
+    std::filesystem::remove_all(std::filesystem::path{ cfg }, ecCleanup);
+}
+
 void TestSessionSearch()
 {
     std::wprintf(L"SessionSearch (regex/match/snippet + fast phase + history + presence + index):\n");

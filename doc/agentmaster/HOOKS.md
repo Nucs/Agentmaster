@@ -482,6 +482,25 @@ a `/clear`ed managed tab was refused by **Deactivate** ("its ConPTY is the user'
 dead-tab **Restart** fallback (which skips external records) resurrected the conversation from
 *before* the `/clear` (`_BindClaudeSessionToTab`, logged `[rehome] <id> inherits MANAGED provenance`).
 
+**Retired hosts — the Deactivate/Restart unbind race.** Deactivate and Restart both REPLACE a session's
+connection: a new ConPTY (new `WT_SESSION`) goes into the tab and the old one is closed. The old claude does
+not vanish at once: it runs its close handling (its `SessionEnd` hook among it) for 1–5 s. Until the hosting
+window republishes its tab roster (its ~2.5 s liveness probe), the Fleet Observer's full survey (every 2 s)
+still finds that dying process under the **old** roster entry and reports it for the session with the
+**old** token. `ObserveClaude` merged it, putting the dead ConPTY's token, pid and heartbeat back on the
+record, and the liveness sweep, finding no pane holding that token, archived the session and unbound the
+tab. Measured in the release `hooks.log`:
+- 2026-08-26 22:05: "Deactivate ▸ Other Tabs" parked six tabs, and all six were `[liveness] dead -> archived`
+  5 s later. The census showed the six old claudes still "rostered" under their old tokens.
+- 4 of the 8 restarts in the log: each was archived 1.5–2.4 s after its `[restart]` line.
+
+`SessionRegistry::RetireHostToken(session, oldToken)` closes it at the source. Both replacements call it
+before re-stamping the record. From then on, for `kRetiredHostTokenTtlMs` (10 min), every observation and
+every hook naming that (session, token) pair is dropped whole and logged `[retired-host]` (one line per token
+for the observer's repeats). The retirement is per session, so the same token still speaks for any other
+session. The older `[stale-end]` guard (a `SessionEnd` from a token that is no longer the record's) stays for
+supersedes nobody retired explicitly, such as an in-session re-home.
+
 ### Transcript watcher — the scanner's change feed (ReadDirectoryChangesW)
 
 **The 2026-09-25 finding: the scanner thread used ~35% of a core.** On the release instance (~60 live

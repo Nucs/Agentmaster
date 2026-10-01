@@ -6344,12 +6344,13 @@ namespace winrt::TerminalApp::implementation
             ok = control.InitializeWithSize(w, h, scale);
         }
         CATCH_LOG();
-        // Agentmaster (deactivate): a DEACTIVATED tab is an ALREADY-INITIALIZED control parked on a
-        // not-started resume connection — InitializeWithSize refuses it (the core is built) and no
-        // layout init will ever re-run, so wake it by Starting the parked connection directly
-        // (TermControl::StartDormantConnection — the restart-path order: connection attached, buffer
-        // live). A genuine restored-dormant tab took the InitializeWithSize branch above; anything
-        // else (uninitialized core that failed init) reads false from both and stays untouched.
+        // Agentmaster (deactivate): a DEACTIVATED tab now holds a never-initialized control exactly like a
+        // window-restored one, so InitializeWithSize above wakes it. This fallback stays as the belt for
+        // the other shape — an ALREADY-INITIALIZED control parked on a never-started connection, which
+        // InitializeWithSize refuses (the core is built) and no layout init will re-run — by Starting that
+        // connection directly (TermControl::StartDormantConnection, the restart-path order: connection
+        // attached, buffer live). An uninitialized core that failed init reads false from both and stays
+        // untouched.
         if (!ok)
         {
             try
@@ -6366,14 +6367,17 @@ namespace winrt::TerminalApp::implementation
         return ok;
     }
 
-    // Agentmaster (deactivate — the wake half): focusing a DEACTIVATED tab resumes it. A deactivated
-    // tab is an ALREADY-INITIALIZED control parked on a not-started resume connection — the lazy
-    // layout-init that starts a window-restored dormant tab is one-shot and already spent on this
-    // control, so nothing else would ever Start it. Called from the tab-selection funnel
-    // (_OnTabSelectionChanged) for the newly-selected tab; TermControl::StartDormantConnection is the
-    // discriminating no-op for every other shape — false for an uninitialized core (a restored-dormant
-    // tab: its own lazy init owns the start the moment layout runs) and for any connection not sitting
-    // NotConnected (running / closed / shells). UI thread only.
+    // Agentmaster (deactivate — the wake BELT): start the parked connection of an ALREADY-INITIALIZED
+    // control that sits on a never-started connection — the one shape whose lazy layout-init (one-shot,
+    // already spent on that control) will never start it. Deactivate used to produce exactly that shape
+    // (it swapped a not-started connection into the running control); it now puts a NEVER-INITIALIZED
+    // control in the pane instead — a window-restored tab's state — whose first layout starts it when the
+    // tab is entered, so a deactivated tab no longer needs this. Kept in the tab-selection funnel
+    // (_OnTabSelectionChanged -> _ApplyAgentTabSelection) as a belt for any path that leaves an initialized
+    // control parked. TermControl::StartDormantConnection is the discriminating no-op for every other
+    // shape — false for an uninitialized core (restored AND deactivated tabs: their own lazy init owns the
+    // start the moment layout runs) and for any connection not sitting NotConnected (running / closed /
+    // shells). UI thread only.
     void TerminalPage::_WakeDeactivatedTab(const winrt::TerminalApp::Tab& tab)
     {
         if (!tab || !_sessionRegistry)
@@ -6535,8 +6539,21 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        const auto control = _ControlForSession(sessionId);
-        if (!control)
+        _TrackSessionStartedOn(sessionId, _ControlForSession(sessionId));
+    }
+
+    // Agentmaster: _TrackSessionStarted for a NAMED control (see TerminalPage.h). Deactivate passes the
+    // fresh, never-initialized control it just put into the session's own pane: in a split, the tab's
+    // first control (what _ControlForSession answers) can be a RUNNING sibling shell, and tracking that
+    // would mark the parked session started on the spot. Behavior is otherwise exactly
+    // _TrackSessionStarted's: an already-started control flips started now; a not-yet-started one flips it
+    // from its one-shot Initialized event (the first layout, or InitializeWithSize). UI thread only.
+    //   sessionId — the session whose SessionInfo::started this control drives.
+    //   control   — the session's control (null is a no-op).
+    // Never throws past the WinRT calls' own errors (ConnectionState / the event registration).
+    void TerminalPage::_TrackSessionStartedOn(const std::wstring& sessionId, const TermControl& control)
+    {
+        if (sessionId.empty() || !_sessionRegistry || !control)
         {
             return;
         }
@@ -7572,19 +7589,22 @@ namespace winrt::TerminalApp::implementation
                 // still-live terminal. (Never archive a tab whose content we couldn't read.)
                 isDead = sawTerminal && !anyAlive;
             }
-            // Agentmaster (deactivate unbind fix): NEVER archive a fully-DORMANT tab — one where every
-            // control sits on a NotConnected connection (anyStarted == false, so nothing is running).
-            // A DEACTIVATED session is parked exactly this way: the swap attaches a fresh, un-Started
-            // resume connection (pid=0), as does a window-restored tab not yet woken. There is no live
-            // claude to have DIED, so the strict "pane gone -> dead" arm above (foundSessionConn==false,
-            // reached transiently when the observer re-stamps tabToken off the dying OLD connection
-            // during the swap — the re-stamp alone can't win that race) must not fire here. Archiving a
-            // parked tab sets live=false, clears the injector, and ERASES it from _claudeTabs (below) ->
-            // the tab UNBINDS: _ClaudeSessionForTab / _DuplicateTab stop recognizing it, so a fork lands
-            // in %USERPROFILE% as a default-profile PowerShell and focusing it shows the pwsh host, not
-            // the session (the deactivate->"all tabs became a powershell terminal" bug). A GENUINE crash
-            // leaves the connection Closed (startedThis==true -> anyStarted true), so this never shields
-            // a real death; and restored-dormant tabs (empty tabToken) already took the safe else-branch.
+            // Agentmaster (deactivate unbind fix — now the BELT): NEVER archive a fully-DORMANT tab — one
+            // where every control sits on a NotConnected connection (anyStarted == false, so nothing is
+            // running). A DEACTIVATED session is parked exactly this way (a never-initialized control on a
+            // never-started resume connection, pid=0), as is a window-restored tab not yet entered. There
+            // is no live claude to have DIED, so the strict "pane gone -> dead" arm above
+            // (foundSessionConn==false) must not fire here. The ROOT cause of that arm firing — the Fleet
+            // Observer re-stamping tabToken off the dying OLD connection through the not-yet-republished
+            // roster — is closed at the source now (SessionRegistry::RetireHostToken drops the closing
+            // claude's observations and hooks); this guard stays for any other way a dormant record's token
+            // can go stale. Archiving a parked tab sets live=false, clears the injector, and ERASES it from
+            // _claudeTabs (below) -> the tab UNBINDS: _ClaudeSessionForTab / _DuplicateTab stop recognizing
+            // it, so a fork lands in %USERPROFILE% as a default-profile PowerShell and focusing it shows the
+            // pwsh host, not the session (the 2026-08-26 deactivate -> "all tabs became a powershell
+            // terminal" bug). A GENUINE crash leaves the connection Closed (startedThis==true -> anyStarted
+            // true), so this never shields a real death; and restored-dormant tabs (empty tabToken) already
+            // took the safe else-branch.
             if (isDead && !anyStarted)
             {
                 isDead = false;

@@ -1441,19 +1441,34 @@ namespace winrt::TerminalApp::implementation
         void _ActivateAllDormantTabsLocal(); // Agentmaster (eager-init): DRIP-FEED-wake every dormant managed tab hosted in THIS window — 500ms between wakes, 4 wakes per 10s batch — so a many-tab activate never bursts N claude.exe spawns onto one UI pass. Merges into a running drip. The receiving half of the activate-all fan-out.
         void _ActivateAllDripStep(); // Agentmaster (eager-init pacing): one drip step — pop queued ids until one actually wakes, then re-arm _activateAllTimer (500ms in-batch; the long post-batch gap after the 4th wake so batches start 10s apart); self-stops + logs the total when the queue drains
         void _SetActivateAllBusy(bool busy); // Agentmaster (eager-init pacing): tell THIS window's Manager content the drip is running (true at drip-start / false at drain) so it shows the "Activating N tabs…" busy state (disabled button + disabled cwd box)
-        void _TrackSessionStarted(const std::wstring& sessionId); // Agentmaster (eager-init): mark SessionInfo::started true the moment this session's control initializes (already started => now; else one-shot on TermControl.Initialized) so a focused tab's dot flips full without the ~2s liveness-sweep lag
+        void _TrackSessionStarted(const std::wstring& sessionId); // Agentmaster (eager-init): mark SessionInfo::started true the moment this session's control initializes (already started => now; else one-shot on TermControl.Initialized) so a focused tab's dot flips full without the ~2s liveness-sweep lag. Tracks the tab's FIRST terminal control (_ControlForSession); use _TrackSessionStartedOn to name the control
+        void _TrackSessionStartedOn(const std::wstring& sessionId, const winrt::Microsoft::Terminal::Control::TermControl& control); // Agentmaster: _TrackSessionStarted for an EXPLICIT control — Deactivate tracks the fresh control it just put in the session's own pane, which in a split need not be the tab's first one (tracking a running sibling shell would mark the parked session started at once)
         // Agentmaster (deactivate — the tab context menu's "Deactivate ▸", the inverse of "Activate
-        // Tab"): park managed session tabs back in the DORMANT waiting-for-focus state a freshly
-        // reopened window's tabs sit in — claude(/codex) shut down, the tab kept in place
-        // (title/color/queue/autorunner mode all preserved), the conversation resuming the moment the
-        // tab is focused or activated. _DeactivateManagedTab is _RestartManagedSession's swap recipe
-        // with the Start() WITHHELD (+ started=false, the display state normalized like a reopen, the
-        // buffer blanked); _WakeDeactivatedTab is the focus half, run from the tab-selection funnel:
-        // a deactivated tab's control is ALREADY initialized, so the one-shot lazy layout-init can
-        // never start its parked connection — TermControl::StartDormantConnection does. All UI thread.
-        void _DeactivateTabsFromMenu(const winrt::TerminalApp::Tab& anchorTab, int32_t scope); // scope: 0 == this tab · 1 == other tabs · 2 == all tabs (this window); jumps to the Manager tab when the FOCUSED tab was parked (a dormant tab left on screen would sit dead until a switch-away-and-back)
-        bool _DeactivateManagedTab(const winrt::TerminalApp::Tab& tab); // ONE tab -> dormant; false == skipped (not a managed session / adopted-external / already dormant / mid-delivery / connection build failed), each meaningful skip logged
-        void _WakeDeactivatedTab(const winrt::TerminalApp::Tab& tab); // the selection-funnel wake: Start the parked connection of a DEACTIVATED (initialized control + NotConnected conn) tab; a structural no-op for every other shape incl. restored-dormant tabs (their own lazy init owns the start)
+        // Tab"): put managed session tabs back in EXACTLY the state a window-restored tab is in before
+        // anyone enters it. The session's pane gets a brand-new, NEVER-INITIALIZED terminal control built
+        // by the restore path's own recipe (_MakePane(NewTerminalArgs{}, nullptr, <resume connection>))
+        // — no buffer, no renderer, no GPU device, a connection that has never started — while the tab,
+        // its title, color, tags, Auto-Testing queue and autorunner mode stay as they are. The old
+        // control closes, and with it the old claude(/codex) (a graceful ConPTY close); the registry
+        // retires the old connection as a host (RetireHostToken), so that dying process can no longer
+        // stamp its token, pid or heartbeat back onto the parked record. Entering the tab lays the control
+        // out, and its one-shot first-layout init starts the resume — the same wake every restored tab
+        // gets; "Activate Tab" / "Activate All Tabs (N)" initialize it in place (InitializeWithSize).
+        // All UI thread.
+        void _DeactivateTabsFromMenu(const winrt::TerminalApp::Tab& anchorTab, int32_t scope); // scope: 0 == this tab · 1 == other tabs · 2 == all tabs (this window). When the FOCUSED tab is among them, the Agent Manager page is shown FIRST, so the fresh control is never laid out on screen (laying it out would start it at once)
+        bool _DeactivateManagedTab(const winrt::TerminalApp::Tab& tab); // ONE tab -> dormant; false == skipped (not a managed session / adopted-external / already dormant / mid-delivery / no claude.exe / connection or pane build failed / the swap refused), each meaningful skip logged
+        // Agentmaster (deactivate): resolve what parking `tab` would act on, WITHOUT acting or logging. On
+        // true, `sessionId` / `info` / `pane` / `control` describe the session, its own leaf pane (the
+        // connection whose WT_SESSION is the record's tabToken, else the tab's first terminal pane) and that
+        // pane's current control. On false, `skipReason` says why (empty == not a managed live session at
+        // all — nothing to say; non-empty == a reason worth logging). UI thread only. Never throws.
+        bool _ResolveDeactivateTarget(const winrt::TerminalApp::Tab& tab,
+                                      std::wstring& sessionId,
+                                      std::optional<::Agentmaster::SessionInfo>& info,
+                                      std::shared_ptr<Pane>& pane,
+                                      winrt::Microsoft::Terminal::Control::TermControl& control,
+                                      std::wstring& skipReason);
+        void _WakeDeactivatedTab(const winrt::TerminalApp::Tab& tab); // the selection-funnel BELT: Start the parked connection of an INITIALIZED control sitting on a NotConnected connection. Deactivate no longer creates that shape (a parked tab now holds a never-initialized control that its first layout starts, like a restored tab), so this is a structural no-op today — a belt for any future path that leaves an initialized control parked on a never-started connection
         void _ScheduleSplashDismiss(); // Agentmaster (splash): start the deferred-dismiss watcher at the end of _OnFirstLayout — the restored tabs init LAZILY after, so dismissing there uncovers a blank window
         void _TickSplashDismiss(); // Agentmaster (splash): the watcher tick — dismiss the launch splash once the foreground terminal is connected AND the UI thread has been responsive ~1.5s (or a hard timeout)
         std::wstring _wid_NoThrow() const; // Agentmaster (splash/[startup]): the " [win <id>]" tag for log lines (empty until _windowId is set)

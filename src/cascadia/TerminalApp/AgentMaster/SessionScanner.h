@@ -166,6 +166,27 @@ namespace Agentmaster
         return false;
     }
 
+    // PURE: is this session DORMANT — a live session whose tab WE host but whose connection has never
+    // started? That is a window-restored tab nobody has entered yet, and (since Deactivate parks a tab in
+    // exactly that state) a tab parked by the tab menu's "Deactivate ▸". No process of ours can be running a
+    // turn in a dormant session, so the scanner must never PROMOTE one to Running — recon-run,
+    // recon-resume, recon-resume-presence and recon-subagent are held for it. Every signal those synths read
+    // can only be residue of a claude that is already gone: the last transcript lines the claude a
+    // Deactivate just closed wrote (consumed by a cursor that was primed while it ran), its subagents'
+    // final side-file flushes, a heartbeat it published while dying. A window-restored tab never shows
+    // that residue — its cursor primes on history and nothing writes — and the parked tab must read the
+    // same. The at-rest synths (recon-stop, recon-block, recon-error and their presence twins) are NOT
+    // gated, so both shapes keep refining their at-rest display state from the tail exactly as before.
+    // ADOPTED (external) sessions are excluded: `started` is never maintained for a session we only observe
+    // (its ConPTY is the user's shell, or no tab of ours hosts it at all), so it reads false for a session
+    // that is in fact running, and holding its promotions would freeze its card at rest.
+    //   s — the pass snapshot of the session.
+    // Returns true when the session is live, ours (not adopted) and not started. Never throws.
+    inline bool ScanSessionIsDormant(const SessionInfo& s) noexcept
+    {
+        return s.live && !s.started && !s.external;
+    }
+
     // PURE + total (the 2026-08-14 stuck-Running WEDGE, session 6434e5f8): what to do when a delta
     // window read found NO newline. A SINGLE transcript line can outgrow the 1 MiB read window — a
     // huge pasted / tool_result user line (the live wedge: two PDF-read tool_results of 1.51 MiB
@@ -1412,6 +1433,11 @@ namespace Agentmaster
             // tool_use (AskUserQuestion)? Per-pass scratch — reset before each _readDelta, read by the
             // recon-resume gate as the "the user just answered" signal. See ShouldSynthesizeResumed.
             bool answeredInteractive{ false };
+            // Agentmaster (ScanSessionIsDormant): has the CURRENT dormancy episode already logged a held
+            // Running promotion? It turns the per-pass hold into one [recon-dormant] line per episode, so a
+            // parked tab whose dying claude left a burst of residue reads as one line, not one per pass.
+            // Re-armed by the first pass that finds the session started again (a new park is a new episode).
+            bool dormantHoldLogged{ false };
             // Agentmaster (DELIVERY.md §12 — the box-not-visible WARNING's once-per-episode dedup):
             // the SessionInfo::pendingBoxStateUnixMs stamp this scanner already warned for. The R5
             // escalation used to pause the autorunner (mode → Off), which self-deduped; the §12

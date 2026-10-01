@@ -36,6 +36,25 @@ namespace winrt::TerminalApp::implementation
         std::shared_ptr<Pane> DetachPane();
         void AttachPane(std::shared_ptr<Pane> pane);
 
+        // Agentmaster (DEACTIVATE == the window-restored state): give one leaf of this tab brand-new content —
+        // `donor`'s (Pane::AdoptContentFrom) — while the tab and the pane stay exactly as they are: same tab
+        // object, strip position, title, color, tags, menu, pane id, split position, active pane. The old
+        // content is CLOSED (its control and its ConPTY). The tab's own subscriptions to its contents (title,
+        // taskbar progress, tab color, connection state, read-only, focus, bell, restart, notification, and
+        // the broadcast handlers) are taken off the old content BEFORE it closes — they must not react to
+        // the close — and put on the new one after; then everything the tab derives from its contents is
+        // refreshed (title, progress, the connection-closed mark, read-only, tab color, menu states) without
+        // raising ActivePaneChanged, because the active pane did not change. Deactivate uses this to put a
+        // NEVER-INITIALIZED control in a session's pane — the state a window-restored tab is created in.
+        // UI thread only.
+        //   target  — the LEAF pane of THIS tab whose content is replaced.
+        //   donor   — a LEAF pane that holds the new content (TerminalPage::_MakePane); left contentless.
+        //   returns — false, with nothing changed, when target is not a leaf of this tab or the donor is
+        //             unusable; true once the new content is hosted and wired.
+        //   throws  — whatever Pane::AdoptContentFrom or the handler re-attach throw (XAML/WinRT errors);
+        //             the caller contains it.
+        bool ReplacePaneContent(const std::shared_ptr<Pane>& target, const std::shared_ptr<Pane>& donor);
+
         void AttachColorPicker(winrt::TerminalApp::ColorPickupFlyout& colorPicker);
 
         std::pair<std::shared_ptr<Pane>, std::shared_ptr<Pane>> SplitPane(winrt::Microsoft::Terminal::Settings::Model::SplitDirection splitType,

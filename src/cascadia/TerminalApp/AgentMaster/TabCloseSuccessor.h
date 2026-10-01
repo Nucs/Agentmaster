@@ -5,8 +5,8 @@
 // (TerminalPage::_PickCloseSuccessorTab, called from TabManagement.cpp's _RemoveTab).
 //
 // Why this exists: a window-restored Agentmaster tab is DORMANT — its claude.exe (or shell) spawns
-// lazily on the control's first layout, i.e. the first time the tab is SHOWN — and a Deactivated tab
-// wakes on selection (_WakeDeactivatedTab). Upstream _RemoveTab hands focus to the tab that slid into
+// lazily on the control's first layout, i.e. the first time the tab is SHOWN — and a Deactivated tab is
+// in that very state (Deactivate gives it a never-initialized control). Upstream _RemoveTab hands focus to the tab that slid into
 // the closed slot (in-order) or to the MRU head; in a strip of hundreds of mostly-dormant tabs that
 // successor is usually asleep, so closing ONE session silently STARTED another: one claude.exe exited
 // and a new one spawned ~0.4 s later, and to a user watching Task Manager the closed tab's claude.exe

@@ -1592,10 +1592,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     }
 
     // Agentmaster (deactivate/reactivate — see TermControl.idl): Start an ALREADY-INITIALIZED
-    // control's parked, not-started connection. A "Deactivate Tab" swap leaves the core initialized
-    // with a dormant (never Start()ed) resume connection attached — a shape neither init path can
-    // wake: the lazy layout-init is one-shot (spent when this control first initialized) and
-    // InitializeWithSize refuses an initialized core. Start() is legal here precisely BECAUSE the
+    // control's parked, not-started connection — a shape neither init path can wake: the lazy
+    // layout-init is one-shot (spent when this control first initialized) and InitializeWithSize
+    // refuses an initialized core. (Deactivate no longer creates that shape — it parks a tab with a
+    // never-initialized control — so the app keeps this as a belt.) Start() is legal here precisely BECAUSE the
     // core is initialized — buffer + state machine are live, the same order the restart path uses
     // right after Connection(newConn) — and it is only ever pressed on a NotConnected connection
     // (Start() is not re-entrant; a second call would transition the connection to Failed).

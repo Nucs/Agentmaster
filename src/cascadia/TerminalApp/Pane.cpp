@@ -1756,6 +1756,43 @@ void Pane::_setPaneContent(IPaneContent content)
     }
 }
 
+// Agentmaster (DEACTIVATE == the window-restored state): see Pane.h. Mirrors what the leaf constructor wires
+// for its content (the border child + the two focus subscriptions; _setPaneContent owns the close request),
+// so the moved-in content is hosted exactly as if this pane had been built around it.
+bool Pane::AdoptContentFrom(const std::shared_ptr<Pane>& donor)
+{
+    if (!_IsLeaf() || !donor || donor.get() == this || !donor->_IsLeaf() || !donor->_content)
+    {
+        return false;
+    }
+
+    // Unhook the content from the donor first: its focus subscriptions point at the donor's handlers, its
+    // close request would close the DONOR (_takePaneContent revokes it), and its root is the donor border's
+    // child — a UIElement has exactly one parent, so it must leave the donor before it can join this pane.
+    donor->_gotFocusRevoker.revoke();
+    donor->_lostFocusRevoker.revoke();
+    auto content = donor->_takePaneContent();
+    donor->_borderFirst.Child(nullptr);
+
+    // Drop our subscriptions to the OLD content's root, then let _setPaneContent close the old content and
+    // subscribe the new one's close request. The old root is unparented first so it never sits in the tree
+    // beside a closed control.
+    _gotFocusRevoker.revoke();
+    _lostFocusRevoker.revoke();
+    _borderFirst.Child(nullptr);
+    _setPaneContent(std::move(content));
+
+    // Host the new content root where the old one was, and track its focus the way the constructor does.
+    const auto& root{ _content.GetRoot() };
+    _borderFirst.Child(root);
+    if (root)
+    {
+        _gotFocusRevoker = root.GotFocus(winrt::auto_revoke, { this, &Pane::_ContentGotFocusHandler });
+        _lostFocusRevoker = root.LostFocus(winrt::auto_revoke, { this, &Pane::_ContentLostFocusHandler });
+    }
+    return true;
+}
+
 // Method Description:
 // - Sets up row/column definitions for this pane. There are three total
 //   row/cols. The middle one is for the separator. The first and third are for

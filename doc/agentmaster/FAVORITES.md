@@ -154,8 +154,8 @@ toggle), deferred like the rest.
 - **But a DIFFERENT `claude.exe` started 0.4 s later.** Upstream `_RemoveTab` hands focus to the tab
   that slid into the closed slot (the default `tabSwitcherMode: inOrder`; the MRU head in `mru` mode).
   In an Agentmaster window that successor is usually a window-restored **dormant** tab. A dormant tab's
-  claude spawns lazily on the control's first layout, i.e. the moment it is *shown* (a Deactivated tab
-  is woken by `_WakeDeactivatedTab` on selection). So closing one session silently **started** its
+  claude spawns lazily on the control's first layout, i.e. the moment it is *shown* (a Deactivated tab is
+  in that very state: Deactivate parks a never-initialized control in its pane). So closing one session silently **started** its
   neighbor. In the example, `712cecb6` was the right neighbor at strip index 313; its pwsh appeared at
   10:23:43 and its claude.exe (pid 239376) at 10:23:44. The claude.exe count never dropped, and one
   claude.exe is indistinguishable from another in Task Manager, which reads as "it wasn't closed". The

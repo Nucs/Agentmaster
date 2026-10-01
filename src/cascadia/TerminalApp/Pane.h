@@ -131,6 +131,21 @@ public:
     void Shutdown();
     void Close();
 
+    // Agentmaster (DEACTIVATE == the window-restored state): move `donor`'s content into THIS leaf, CLOSING
+    // the content this leaf held (its control, and with it the ConPTY — the graceful CTRL_CLOSE a pane close
+    // performs). The donor is a freshly built leaf (TerminalPage::_MakePane — the exact recipe a window
+    // restore uses for a tab's pane); taking its content instead of swapping in the donor itself keeps THIS
+    // pane: its id, its place in a split, the active/zoom state and the tab's MRU entry. The content's root
+    // leaves the donor's border, its close-request and focus subscriptions move here, and the donor is left
+    // contentless (drop it). The CALLER must detach the tab's own content handlers before and re-attach them
+    // after — Tab::ReplacePaneContent does both; call that, not this, from outside Tab.
+    //   donor   — a LEAF pane that holds the new content.
+    //   returns — false, with nothing changed, when this pane or the donor is not a leaf, the donor is this
+    //             pane, or the donor has no content; true once the new content is hosted here.
+    //   throws  — whatever the XAML calls (Border::Child, the focus event registrations) or the old
+    //             content's Close() throw; the caller contains it.
+    bool AdoptContentFrom(const std::shared_ptr<Pane>& donor);
+
     std::shared_ptr<Pane> AttachPane(std::shared_ptr<Pane> pane,
                                      winrt::Microsoft::Terminal::Settings::Model::SplitDirection splitType);
     std::shared_ptr<Pane> DetachPane(std::shared_ptr<Pane> pane);

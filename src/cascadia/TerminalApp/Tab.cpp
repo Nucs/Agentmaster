@@ -1183,6 +1183,53 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (DEACTIVATE == the window-restored state): see Tab.h.
+    bool Tab::ReplacePaneContent(const std::shared_ptr<Pane>& target, const std::shared_ptr<Pane>& donor)
+    {
+        ASSERT_UI_THREAD();
+
+        if (!_rootPane || !target || !donor || !target->_IsLeaf() || !donor->_IsLeaf())
+        {
+            return false;
+        }
+        // The pane id is the key the tab's content subscriptions live under (_contentEvents), so the target
+        // must be one of THIS tab's identified leaves.
+        const auto id = target->Id();
+        if (!id || _rootPane->FindPane(id.value()) != target)
+        {
+            return false;
+        }
+
+        // Take the tab's handlers off the old content BEFORE it is closed: its connection-state, title and
+        // read-only notifications must not run for a content that is going away.
+        _DetachEventHandlersFromContent(id.value());
+        if (!target->AdoptContentFrom(donor))
+        {
+            // Refused with nothing changed — put the subscriptions back on the content the pane still holds.
+            if (const auto& kept{ target->GetContent() })
+            {
+                _AttachEventHandlersToContent(id.value(), kept);
+            }
+            return false;
+        }
+        if (const auto& adopted{ target->GetContent() })
+        {
+            _AttachEventHandlersToContent(id.value(), adopted);
+        }
+
+        // Re-derive what the tab reads from its contents — the set _UpdateActivePane refreshes, minus raising
+        // ActivePaneChanged (the active pane is the same object). The tab color pair mirrors the content
+        // TabColorChanged handler, so a runtime-colored managed tab keeps its color and the indicator agrees.
+        UpdateTitle();
+        _UpdateProgressState();
+        _UpdateConnectionClosedState();
+        _RecalculateAndApplyReadOnly();
+        _RecalculateAndApplyTabColor();
+        _tabStatus.TabColorIndicator(GetTabColor().value_or(Windows::UI::Colors::Transparent()));
+        _UpdateMenuItemStates();
+        return true;
+    }
+
     // Method Description:
     // - Attaches the given color picker to ourselves
     // - Typically will be called after we have sent a request for the color picker

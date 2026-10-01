@@ -130,10 +130,12 @@ namespace Microsoft.Terminal.Control
         Boolean InitializeWithSize(Double width, Double height, Single scale);
 
         // Agentmaster (deactivate/reactivate): START an ALREADY-INITIALIZED control's parked,
-        // not-started connection. The inverse-of-deactivate wake: "Deactivate Tab" swaps a managed
-        // tab's connection for a dormant (never Start()ed) resume connection while the control's core
-        // stays initialized — a shape the lazy layout-init can never start (it is one-shot and
-        // already spent) and InitializeWithSize refuses (the core is built). Start() here is safe
+        // not-started connection — a shape the lazy layout-init can never start (it is one-shot and
+        // already spent) and InitializeWithSize refuses (the core is built). "Deactivate Tab" used to
+        // create that shape (it swapped a never-started resume connection into the running control);
+        // it now puts a NEVER-INITIALIZED control in the pane instead (a window-restored tab's state,
+        // started by its first layout), so this stays only as the app's belt for any control parked
+        // that way (TerminalPage::_WakeDeactivatedTab / _ActivateDormantSession). Start() here is safe
         // BECAUSE the core is initialized (buffer/state machine live — the same order the restart
         // path uses after Connection(newConn)), and it is only ever pressed on a NotConnected
         // connection (Start() is not re-entrant). Returns true iff it started one; false for an

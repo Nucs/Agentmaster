@@ -10,9 +10,11 @@ round-trip in `tests_persistence.cpp`.
 ## 1. The problem — one GPU device per terminal, and a limit near 62
 
 - **Every terminal that has been shown owns its own Direct3D 11 device** (AtlasEngine creates one per
-  `TermControl`), and keeps it until its tab is CLOSED. Hidden tabs keep theirs, and so do
-  Deactivated ones (the control stays initialized). Only dormant tabs (restored, never focused) have
-  none.
+  `TermControl`), and keeps it until its tab is CLOSED. Hidden tabs keep theirs. Deactivated tabs should
+  give theirs back: "Deactivate ▸" now closes the tab's control the way a pane close does and parks a
+  never-initialized one in its place, which is the state a window-restored tab is in. (Expected from that
+  code path; not yet measured with §4's thread count.) Only dormant tabs (restored, or deactivated, and
+  not entered since) have none.
 - **NVIDIA's user-mode driver starts 20 `nvwgf2umx.dll` worker threads per device,** despite
   `D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS`. That is how a process's device count
   can be read from outside (§4).
@@ -48,6 +50,9 @@ round-trip in `tests_persistence.cpp`.
   rebuilds that surface.
 - **Workarounds before this setting existed:** restart the app (restored tabs come back dormant, with
   no device), or close enough viewed tabs to get under the limit and reopen the black one.
+  "Deactivate ▸ Other Tabs" should now do the same without closing anything: each parked tab's control
+  is closed (and with it, expectedly, its device — not yet measured), and the tab resumes its
+  conversation when it is next entered.
 
 ## 3. The setting — draw every terminal on the CPU
 
