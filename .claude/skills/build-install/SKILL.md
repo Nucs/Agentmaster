@@ -261,6 +261,19 @@ bash tools/am-lock.sh release --token "$TOKEN"
   instant, **11.7 s** for every old ConPTY host to drain gracefully (0 left), register 2.5 s,
   launch ~1 s. The drain is the bulk: each host ends its tab's pwsh + claude.exe with CTRL_CLOSE
   (claude's SessionEnd hook runs), and it is what keeps the swap from orphaning sessions.
+- **The drain grows with the number of LIVE tabs, and the register cannot start before it ends.**
+  Every old ConPTY host is a process of the OLD package, and `Add-AppxPackage -Register` refuses
+  while any of them lives (`0x80073D02`, "the following apps need to be closed
+  Agentmaster_<old>"). On 2026-10-01 (0.6.8.13 → 0.6.8.14, a 414-tab window with 72 live tabs, 88
+  claudes on the box), 72 hosts were still alive at the old 30 s drain cap and all were gone by
+  ~87 s. The register failed, the script rolled back, and the rollback instance (still on its
+  splash) had to be stopped for a second swap, which then took 1.5 s. Production was down ~2 min
+  in total. The script now drains up to `-DrainTimeoutSec` (default **120**) and then RETRIES the
+  register every 3 s while the old package still reads in use, for up to `-RegisterRetrySec`
+  (default **120**), before it rolls back. Its result reports `RegisterAttempts`. If a swap ever
+  rolls back anyway, re-check slot A/B for old `OpenConsole.exe` hosts. Once they are gone,
+  rerun the swap at once, while the rollback instance is still on its splash and has restored
+  nothing.
 - **The new instance can then PARK on the "Reopen your N previous Agentmaster windows?" dialog**
   (a `#32770` window, nothing else — the engine/bridge start only after the answer; it appears when
   >1 window was open at the stop). The measured downtime ends at the new GUI's START, not at the

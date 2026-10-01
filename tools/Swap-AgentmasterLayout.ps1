@@ -24,16 +24,21 @@
                    (development-mode re-registration refuses anything not newer; the build
                    itself always emits 0.0.1.0);
     3. stop      - end the running GUI process(es) from the OLD folder, and ONLY the GUI;
-    4. drain     - wait for the old folder's OpenConsole.exe ConPTY hosts to exit on their own;
-    5. register  - Add-AppxPackage -Register the new layout, which moves InstallLocation to it;
+    4. drain     - wait for the old folder's OpenConsole.exe ConPTY hosts to exit on their own
+                   (each is a process of the OLD package, so the register can't succeed before
+                   they are gone);
+    5. register  - Add-AppxPackage -Register the new layout, which moves InstallLocation to it,
+                   retried while Windows still reports the old package in use (0x80073D02);
     6. launch    - start the app by AUMID and wait for its new GUI process.
 
-  The downtime is steps 3-6, typically a few seconds plus the app's own window restore.
+  The downtime is steps 3-6, typically a few seconds plus the app's own window restore. It grows
+  with the number of tabs whose claude was running, because every host must end its tab's claude
+  before it exits (about 1.5 minutes for 72 live hosts on a loaded machine, 2026-10-01).
 
-  Rollback: the old folder is left untouched. If step 5 fails, the script relaunches the still
-  registered OLD version, so a failed swap costs a restart, never an outage. To undo a successful
-  swap later, run this script again with -LayoutDir pointing at the old folder; it gets the next
-  version number, just like any other swap.
+  Rollback: the old folder is left untouched. If step 5 still fails after its retries, the script
+  relaunches the still registered OLD version, so a failed swap costs a restart, never an outage.
+  To undo a successful swap later, run this script again with -LayoutDir pointing at the old
+  folder; it gets the next version number, just like any other swap.
 
   The caller must hold the build-launch mutex (tools\am-lock.sh) around build + swap. This script
   doesn't take it, so a caller can hold one lock across both halves.
@@ -54,12 +59,24 @@
   An explicit value must be greater than the registered version.
 
 .PARAMETER DrainTimeoutSec
-  How long to wait (default 30) for the old folder's OpenConsole.exe hosts to exit after the GUI
+  How long to wait (default 120) for the old folder's OpenConsole.exe hosts to exit after the GUI
   stops. Each host ends its own clients and exits by itself. They are NEVER killed, because
   killing a host skips its CTRL_CLOSE broadcast and leaves that tab's pwsh + claude.exe running
-  forever on a dead console (doc/agentmaster/OBSERVER.md section 13a). When the timeout passes
-  the swap goes ahead anyway: the new layout lives in a different folder, so a straggler locks
-  nothing it needs, and the new instance's orphan reaper handles whatever the straggler leaves.
+  forever on a dead console (doc/agentmaster/OBSERVER.md section 13a).
+  The drain has to finish before the register can: every host is a process of the OLD package,
+  and Add-AppxPackage refuses to re-register a package while any of its processes runs
+  (0x80073D02, "the following apps need to be closed"). A small workspace drains in seconds
+  (11.7 s for 3 windows, 2026-09-26), but the time grows with the number of live tabs and the
+  machine's load. On 2026-10-01, 72 hosts were still alive at 31.6 s and all were gone by about
+  87 s; the old 30 s default sent the register into that refusal and the swap rolled back. When
+  this timeout passes, the script still goes on to the register, whose retry window
+  (-RegisterRetrySec) covers the stragglers.
+
+.PARAMETER RegisterRetrySec
+  How long (default 120) to keep retrying the register while Windows reports the OLD package
+  still in use (0x80073D02: a ConPTY host, or another process of the old package, is still
+  exiting). Counted from the first register attempt, retried every 3 seconds. Any other register
+  failure, or this window running out, rolls back at once. 0 disables the retry.
 
 .PARAMETER LaunchTimeoutSec
   How long to wait (default 60) for the new GUI process to appear after the AUMID launch. It
@@ -72,8 +89,9 @@
 .OUTPUTS
   PSCustomObject with Package, OldVersion, OldLocation, NewVersion, NewLocation, StoppedPids,
   DrainSeconds, HostsLeft (old OpenConsole hosts still alive when the drain ended),
-  RegisterSeconds, NewPid (0 when not launched or not seen within LaunchTimeoutSec) and
-  DowntimeSeconds (from the GUI stop until the new GUI process started; null when unknown).
+  RegisterSeconds (including any in-use retries), RegisterAttempts, NewPid (0 when not launched
+  or not seen within LaunchTimeoutSec) and DowntimeSeconds (from the GUI stop until the new GUI
+  process started; null when unknown).
 
 .EXAMPLE
   # The whole hot deploy of the release package (hold the mutex around both lines):
@@ -95,15 +113,17 @@
     - the calling process runs INSIDE the instance being stopped (see the self-hosting guard
       below). Run the swap from a shell outside it: the other identity's app, Windows Terminal,
       or a plain console;
-    - Add-AppxPackage -Register fails. The old version is relaunched first, then the error is
-      rethrown.
+    - Add-AppxPackage -Register fails with anything other than "package in use", or still reports
+      the package in use when -RegisterRetrySec runs out. The old version is relaunched first,
+      then the error is rethrown.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)][string]$LayoutDir,
     [ValidateSet('Agentmaster', 'AgentmasterDev')][string]$PackageName = 'Agentmaster',
     [version]$Version,
-    [ValidateRange(0, 600)][int]$DrainTimeoutSec = 30,
+    [ValidateRange(0, 600)][int]$DrainTimeoutSec = 120,
+    [ValidateRange(0, 600)][int]$RegisterRetrySec = 120,
     [ValidateRange(1, 600)][int]$LaunchTimeoutSec = 60,
     [switch]$NoLaunch
 )
@@ -138,6 +158,25 @@ function Get-ProcessUnder([string]$Folder, [string[]]$Names) {
         $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -and
         (-not $Names -or $Names -contains $_.Name)
     }
+}
+
+<#
+.SYNOPSIS
+  Tells whether a failed Add-AppxPackage means "the package is still in use". That is the one
+  register failure worth waiting out, because it clears by itself as the old package's last
+  processes (its draining ConPTY hosts) exit. Every other failure is final.
+.PARAMETER ErrorRecord
+  The ErrorRecord caught from Add-AppxPackage.
+.OUTPUTS
+  $true for HRESULT 0x80073D02 (ERROR_PACKAGES_IN_USE), $false for anything else. The message is
+  checked as well as the HResult: the deployment error always prints the code in its text, while
+  the HResult is only as reliable as the PowerShell hosting of the Appx module that raised it.
+  (Under PowerShell 7, which this script requires, the literal 0x80073D02 is the Int32
+  -2147009278, the same signed value Exception.HResult holds.)
+#>
+function Test-PackageInUseError([System.Management.Automation.ErrorRecord]$ErrorRecord) {
+    return ($ErrorRecord.Exception.HResult -eq 0x80073D02) -or
+        ($ErrorRecord.Exception.Message -match '0x80073D02')
 }
 
 # --- 1. validate -------------------------------------------------------------------------------
@@ -230,7 +269,8 @@ if ($PSCmdlet.ShouldProcess($newManifest, "stamp Identity Version $Version")) {
 $result = [pscustomobject]@{
     Package = $PackageName; OldVersion = $oldVersion; OldLocation = $oldDir
     NewVersion = $Version; NewLocation = $newDir; StoppedPids = @($guiIds)
-    DrainSeconds = 0.0; HostsLeft = 0; RegisterSeconds = 0.0; NewPid = 0; DowntimeSeconds = $null
+    DrainSeconds = 0.0; HostsLeft = 0; RegisterSeconds = 0.0; RegisterAttempts = 0; NewPid = 0
+    DowntimeSeconds = $null
 }
 if (-not $PSCmdlet.ShouldProcess("$PackageName GUI pid(s) $($guiIds -join ',')", 'stop, then re-register and relaunch')) {
     return $result
@@ -258,19 +298,40 @@ $result.HostsLeft = $hosts.Count
 Write-Step ("drained  old ConPTY hosts in {0:n1}s ({1} still alive)" -f $drain.Elapsed.TotalSeconds, $hosts.Count)
 
 # --- 5. register -------------------------------------------------------------------------------
+# Retried while Windows reports the OLD package still in use (0x80073D02). The drain above can end
+# on its timeout with hosts still exiting, and while any process of the old package lives the
+# deployment refuses. Waiting it out is far cheaper than rolling back: the rollback relaunches the
+# old version, which restores its windows, and the next swap attempt then has to stop it (and drain
+# whatever it started) all over again. That is what happened on 2026-10-01 under the old 30 s
+# drain. Every other failure, or the retry window running out, rolls back at once.
 $reg = [Diagnostics.Stopwatch]::StartNew()
-try {
-    Add-AppxPackage -Register $newManifest -ForceUpdateFromAnyVersion
-}
-catch {
-    # The failed update left the OLD registration in place, so bring the old version back up
-    # before surfacing the error. A failed swap then costs one restart, not an outage.
-    Write-Step "REGISTER FAILED: $($_.Exception.Message)"
-    if ($oldDir -and -not $NoLaunch) {
-        Write-Step "rollback: relaunching the still-registered $oldVersion"
-        Start-Process $aumid
+while ($true) {
+    $result.RegisterAttempts++
+    try {
+        Add-AppxPackage -Register $newManifest -ForceUpdateFromAnyVersion
+        break
     }
-    throw
+    catch {
+        # Captured first: the process census below runs pipelines of its own, and the rollback
+        # message must describe THIS failure.
+        $registerError = $_
+        if ((Test-PackageInUseError $registerError) -and $reg.Elapsed.TotalSeconds -lt $RegisterRetrySec) {
+            # The census only reports progress. The deployment's own answer decides, because a
+            # process of the old package can also live outside the old folder.
+            $left = @(if ($oldDir) { Get-ProcessUnder $oldDir @() })
+            Write-Step ("register attempt {0}: the old package is still in use ({1} process(es) left under the old folder) - retrying" -f $result.RegisterAttempts, $left.Count)
+            Start-Sleep -Seconds 3
+            continue
+        }
+        # The failed update left the OLD registration in place, so bring the old version back up
+        # before surfacing the error. A failed swap then costs one restart, not an outage.
+        Write-Step "REGISTER FAILED: $($registerError.Exception.Message)"
+        if ($oldDir -and -not $NoLaunch) {
+            Write-Step "rollback: relaunching the still-registered $oldVersion"
+            Start-Process $aumid
+        }
+        throw
+    }
 }
 $reg.Stop()
 $result.RegisterSeconds = [math]::Round($reg.Elapsed.TotalSeconds, 1)
