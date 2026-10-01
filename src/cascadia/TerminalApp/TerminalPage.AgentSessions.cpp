@@ -3079,7 +3079,9 @@ namespace winrt::TerminalApp::implementation
     // must leave the screen BEFORE its control is replaced, or the replacement would be laid out within a
     // frame and restart claude at once. The Agent Manager page takes its place first (it starts nothing;
     // it is where a window reopened on a parked workspace lands, too); clicking the parked tab later is an
-    // ordinary selection that lays it out and starts it. UI thread only.
+    // ordinary selection that lays it out and starts it. And the strip stays where it was: the right-clicked
+    // tab, if it was wholly on screen, is checked again after the work (twice, see _KeepTabHeaderInView) and
+    // revealed in place if a re-layout moved it out of view. UI thread only.
     void TerminalPage::_DeactivateTabsFromMenu(const winrt::TerminalApp::Tab& anchorTab, int32_t scope)
     {
         if (!anchorTab)
@@ -3088,6 +3090,28 @@ namespace winrt::TerminalApp::implementation
         }
         const std::wstring scopeName = (scope == 0) ? L"this" : ((scope == 1) ? L"others" : L"all");
         ::Agentmaster::LogNav(L"deactivate-begin scope=" + scopeName + L" anchor=" + _DescribeTabForLog(anchorTab));
+        // Keep the tab you right-clicked in view. Parking a tab must leave the strip where it was, but on
+        // 2026-10-01 a Deactivate of the focused tab in a 416-tab window left the strip on an unrelated
+        // stretch of tabs (see _KeepTabHeaderInView for why a strip that size can shift under a re-layout).
+        // So snapshot BEFORE anything below re-lays it out: whether the anchor's header is wholly on
+        // screen, and the strip's offset + scrollable width (for the [strip] evidence line). A snapshot
+        // failure only costs the keeper — the deactivate itself goes ahead.
+        bool keepAnchorInView = false;
+        double stripOffsetBefore = -1.0;
+        double stripScrollableBefore = -1.0;
+        try
+        {
+            keepAnchorInView = _TabHeaderStripVisibility(anchorTab) == 2;
+            if (_tabStripScrollViewer)
+            {
+                stripOffsetBefore = _tabStripScrollViewer.HorizontalOffset();
+                stripScrollableBefore = _tabStripScrollViewer.ScrollableWidth();
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_DeactivateTabsFromMenu strip snapshot");
+        }
         const auto focusedTab = _GetFocusedTab();
         uint32_t parked = 0;
         uint32_t skipped = 0;
@@ -3153,6 +3177,12 @@ namespace winrt::TerminalApp::implementation
             }
         }
         ::Agentmaster::LogNav(L"deactivate-done scope=" + scopeName + L" parked=" + std::to_wstring(parked) + L" skipped=" + std::to_wstring(skipped));
+        // Only a tab that was wholly on screen is kept there: one already half off the edge was where the
+        // user had scrolled the strip, and pulling it in would move the strip for no reason.
+        if (keepAnchorInView)
+        {
+            _KeepTabHeaderInView(winrt::make_weak(anchorTab), stripOffsetBefore, stripScrollableBefore, L"deactivate");
+        }
     }
 
     // Agentmaster: fork a MANAGED session by id — the kind-aware fork shared by the WT tab's "Fork

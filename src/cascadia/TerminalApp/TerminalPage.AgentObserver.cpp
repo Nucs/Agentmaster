@@ -4370,6 +4370,132 @@ namespace winrt::TerminalApp::implementation
         });
     }
 
+    // Agentmaster (tab-strip reveal): how long _KeepTabHeaderInView waits before its SECOND check. The
+    // first check runs on the next low-priority tick, right after the layout pass the action triggered; the
+    // second covers what lands later — the tab context menu's close and its focus hand-back to the page
+    // (Tab's contextMenuFlyout.Closed -> RequestFocusActiveControl), a deferred board bring-into-view.
+    // Short enough that the user has not started scrolling the strip themselves yet.
+    static constexpr int kStripKeepLateCheckMs = 400;
+
+    // Agentmaster (tab-strip reveal): see TerminalPage.h. The measurement is _AdjustStripToRevealItem's —
+    // the header's left edge relative to the viewport (measured against the scrolled content minus the
+    // offset, because MUX puts the `<` / `>` scroll buttons in their own columns BESIDE the viewport) — and
+    // it never moves the strip. Used to remember what the user could see before an action and to check it
+    // afterwards.
+    //   tab     - the tab whose header to measure; null reads 0.
+    // Returns 0 when no part of the header is in the viewport OR it cannot be measured (its container is
+    //   virtualized out — the strip only realizes headers near the view — not loaded yet, or the strip
+    //   has no layout / no bound ScrollViewer); 1 when part of it is; 2 when all of it is.
+    // Throws: whatever a XAML read throws on a torn-down element (the caller contains it).
+    int TerminalPage::_TabHeaderStripVisibility(const winrt::TerminalApp::Tab& tab)
+    {
+        if (!tab)
+        {
+            return 0;
+        }
+        _EnsureTabStripScrollViewer();
+        const auto& sv = _tabStripScrollViewer;
+        const auto tvi = tab.TabViewItem();
+        if (!sv || !tvi || !tvi.IsLoaded())
+        {
+            return 0;
+        }
+        const double w = tvi.ActualWidth();
+        const double viewport = sv.ViewportWidth();
+        if (w <= 0.0 || viewport <= 0.0)
+        {
+            return 0; // derealized container or a strip that hasn't laid out — nothing on screen to speak of
+        }
+        double x = 0.0;
+        if (const auto content = sv.Content().try_as<UIElement>())
+        {
+            x = static_cast<double>(tvi.TransformToVisual(content).TransformPoint({ 0.0f, 0.0f }).X) - sv.HorizontalOffset();
+        }
+        else
+        {
+            x = static_cast<double>(tvi.TransformToVisual(sv).TransformPoint({ 0.0f, 0.0f }).X);
+        }
+        // Half a DIP of slack on each edge: layout rounding must not turn a header flush with an edge into
+        // "partly hidden".
+        if (x >= -0.5 && x + w <= viewport + 0.5)
+        {
+            return 2;
+        }
+        return (x + w > 0.0 && x < viewport) ? 1 : 0;
+    }
+
+    // Agentmaster (tab-strip reveal): see TerminalPage.h. Why the strip can move under an action that never
+    // scrolls it: a window with hundreds of tabs only LAYS OUT the headers near the view and ESTIMATES the
+    // width of the rest — measured 2026-10-01 on the release (416 tabs): ~175 DIP per header it had not
+    // laid out, against a real 130 — so a re-layout of the strip while the action runs can leave the same
+    // scroll offset showing a different stretch of tabs. That is the "tabs row jumped away to an
+    // ununderstandable index" a Deactivate produced that day (the strip offset log here is what will name
+    // the step that moves it). Each check: the tab is still WHOLLY on screen → nothing (logged only if the
+    // offset changed anyway); otherwise → [strip] line + _RevealTabInStrip(tab, true), the virtualization-
+    // aware reveal (a derealized header is realized first, then placed).
+    //   weakTab               - the tab to keep in view; weak, so a tab closed meanwhile simply ends this.
+    //   stripOffsetBefore     - the strip's HorizontalOffset before the action (-1 == unknown), for the log.
+    //   stripScrollableBefore - its ScrollableWidth before the action (-1 == unknown), for the log: a change
+    //                           there is the signature of the width estimate shifting.
+    //   why                   - the action, named in the log line (e.g. L"deactivate").
+    // Holds NO strong page/tab reference across the delay: if the window closes meanwhile, its last
+    // reference must not be released on the threadpool (the fire_and_forget teardown gotcha). Never throws:
+    // the body is caught and logged (Rule #18), and a failed check just leaves the strip where it is.
+    winrt::fire_and_forget TerminalPage::_KeepTabHeaderInView(winrt::weak_ref<winrt::TerminalApp::Tab> weakTab, const double stripOffsetBefore, const double stripScrollableBefore, std::wstring why)
+    {
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+        // Whole DIPs, "?" for unknown — a log value, nothing more.
+        const auto fmt = [](const double v) -> std::wstring {
+            return v < 0.0 ? std::wstring{ L"?" } : std::to_wstring(static_cast<long long>(v + 0.5)); // v >= 0 here, so +0.5 rounds to nearest
+        };
+        try
+        {
+            for (int check = 1; check <= 2; ++check)
+            {
+                if (check == 2)
+                {
+                    co_await winrt::resume_after(std::chrono::milliseconds(kStripKeepLateCheckMs));
+                }
+                // Low priority: runs after the layout pass the action queued, so the strip has settled.
+                co_await wil::resume_foreground(dispatcher, CoreDispatcherPriority::Low);
+                const auto self{ weakThis.get() };
+                const auto tab{ weakTab.get() };
+                if (!self || !tab)
+                {
+                    co_return; // the window or the tab is gone — nothing left to keep in view
+                }
+                uint32_t idx = 0;
+                if (!self->_tabs.IndexOf(tab, idx))
+                {
+                    co_return; // the tab left this window (closed / torn out) meanwhile
+                }
+                const auto& sv = self->_tabStripScrollViewer;
+                const double offsetNow = sv ? sv.HorizontalOffset() : -1.0;
+                const double scrollableNow = sv ? sv.ScrollableWidth() : -1.0;
+                const std::wstring numbers = L"strip offset " + fmt(stripOffsetBefore) + L" -> " + fmt(offsetNow) +
+                                             L", scrollable width " + fmt(stripScrollableBefore) + L" -> " + fmt(scrollableNow) +
+                                             L" (check " + std::to_wstring(check) + L")";
+                if (self->_TabHeaderStripVisibility(tab) == 2)
+                {
+                    // Still in view. A strip that moved anyway is logged once (check 1) as evidence; quiet otherwise.
+                    const double moved = offsetNow - stripOffsetBefore;
+                    if (check == 1 && stripOffsetBefore >= 0.0 && (moved > 1.0 || moved < -1.0))
+                    {
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[strip] " + why + L": " + self->_DescribeTabForLog(tab) + L" still on screen; " + numbers + L"\n");
+                    }
+                    continue;
+                }
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[strip] " + why + L": " + self->_DescribeTabForLog(tab) + L" (strip index " + std::to_wstring(idx) + L") was moved out of view; " + numbers + L" - revealing it again\n");
+                self->_RevealTabInStrip(tab, /*leaveFullyVisibleInPlace*/ true);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_KeepTabHeaderInView");
+        }
+    }
+
     // Agentmaster (tab-strip reveal — the explicit click half): a board card / tree row / side-panel card
     // click asks for its session's tab to be scrolled into view, whether or not the click CHANGED the
     // selection. The implicit reveal in _UpdateManagerSelectionHighlight fires only on a selection change,
