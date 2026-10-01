@@ -1185,6 +1185,8 @@ namespace Agentmaster
             // The lastPromptUnixMs re-check is the supersession guard's FRESH belt: the pure gate above
             // tested the pass-start snapshot's stamp, and a real prompt can land in the window between
             // that snapshot and this re-Get — the exact interleave that re-asserted 2b34b07f's Error.
+            // Same shared, bounded predicate as the gate (NewerPromptNotYetInTranscript), so the belt
+            // and the gate can never disagree about the grace.
             if (fresh && !fresh->errorDismissed && fresh->state != SessionState::Error &&
                 !NewerPromptNotYetInTranscript(fresh->turns.lastPromptUnixMs, tailWriteMs, NowMs()))
             {
@@ -1242,8 +1244,6 @@ namespace Agentmaster
         }
 
         // Missed/forced-Stop reconciliation: the turn is OVER — either the transcript's last
-            // Same shared, bounded predicate as the gate (NewerPromptNotYetInTranscript), so the belt
-            // and the gate can never disagree about the grace.
         // assistant message ended it (a TERMINAL stop_reason — end_turn / stop_sequence /
         // max_tokens / refusal) or the user INTERRUPTED it (Esc -> no clean Stop hook) — the file
         // has gone quiescent, yet we are STILL Running (or blocked in NeedsApproval whose
@@ -1343,6 +1343,10 @@ namespace Agentmaster
                 {
                     _commandWatch->OnTurnEnd(s.id);
                 }
+                // A prompt still newer than every transcript byte, yet the synth fired: the guard let go
+                // only because kScanPromptLandingGraceMs passed. Claude never recorded that prompt (an Esc
+                // during its hook phase, or a re-submit). Say so, so the log never reads like the race again.
+                const bool promptNeverLanded = tailWriteMs > 0 && fresh->turns.lastPromptUnixMs > tailWriteMs;
                 AppendStateLog(L"scanner.log",
                                (stopFromPresenceIdle ? L"[recon-stop-idle] " : L"[recon-stop] ") + s.id +
                                    L" q=" + (stop.lastMessageIsQuestion ? L"1" : L"0") +
@@ -1404,10 +1408,6 @@ namespace Agentmaster
                     lostCandidate = true;
                     break;
                 }
-                // A prompt still newer than every transcript byte, yet the synth fired: the guard let go
-                // only because kScanPromptLandingGraceMs passed. Claude never recorded that prompt (an Esc
-                // during its hook phase, or a re-submit). Say so, so the log never reads like the race again.
-                const bool promptNeverLanded = tailWriteMs > 0 && fresh->turns.lastPromptUnixMs > tailWriteMs;
             }
             const auto fresh = lostCandidate ? _registry->Get(s.id) : std::nullopt;
             if (fresh)

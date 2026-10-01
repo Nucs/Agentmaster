@@ -480,32 +480,6 @@ namespace Agentmaster
         return toolName == L"AskUserQuestion";
     }
 
-    // PURE + total: should the reconciler synthesize a missed/forced Stop (-> WaitingForInput)? The
-    // missed-Stop backstop, generalized. Fires from Running OR NeedsApproval — a session blocked on
-    // the user (a real permission approval, OR a synthesized AskUserQuestion block below) whose turn
-    // then ENDED must also be released; recon-stop being Running-ONLY left an approved session stuck
-    // in NeedsApproval when its post-approval Stop hook was dropped. The turn is OVER when the tail
-    // is a TERMINAL stop_reason (end_turn / …) or the user INTERRUPTED it. Requires the transcript
-    // to have gone quiescent first (a mid-turn pause is not the end).
-    // `externalWorkOngoing` (default false == the classic behavior): external work — an in-process
-    // TEAMMATE / background Agent still writing side files, or a live SHELL job per claude's own
-    // heartbeat — has provably OUTLIVED the turn's end (the kScanExternalWorkGraceMs proof, computed
-    // once in _reconcileSession and shared with ShouldSynthesizeRunningFromExternalWork so the two
-    // gates key on the SAME expression and stay MUTUALLY EXCLUSIVE — promotion active <=> demotion
-    // held, never both). While it holds, a RUNNING session is NOT demoted to WaitingForInput even on a
-    // terminal tail: "a shell or agent or teammate still running" reads Running. Scoped to Running
-    // ONLY — the NeedsApproval release (an answered/approved session whose post-turn Stop was dropped)
-    // still fires, landing Waiting, from where the external-work promotion re-lights Running on the
-    // next pass; holding orange "needs you" for the whole background run would be worse than a
-    // one-pass bounce.
-    // `lastPromptUnixMs` / `tailWriteUnixMs` / `nowUnixMs` (all default 0 == the classic behavior) feed
-    // the TURN-START RACE guard: the synth holds while NewerPromptNotYetInTranscript says the user
-    // submitted a prompt the transcript has not recorded yet. In that window the terminal tail is the
-    // PREVIOUS turn's; firing on it read Waiting ~220 ms into a turn that had just started.
-    // Returns true when the pass should synthesize the Stop. Never throws.
-    inline bool ShouldSynthesizeStop(SessionState state, std::wstring_view lastStopReason, bool interrupted, int64_t quietForMs, bool externalWorkOngoing = false, int64_t lastPromptUnixMs = 0, int64_t tailWriteUnixMs = 0, int64_t nowUnixMs = 0) noexcept
-    {
-        if (state != SessionState::Running && state != SessionState::NeedsApproval)
     // PURE + total: has the user submitted a prompt that the transcript has NOT recorded yet? While that
     // holds, the parsed tail still describes the PREVIOUS turn, so it must not be judged as the end of the
     // current one: recon-stop, recon-stop-idle and recon-error all hold.
@@ -555,12 +529,42 @@ namespace Agentmaster
         return true;
     }
 
+    // PURE + total: should the reconciler synthesize a missed/forced Stop (-> WaitingForInput)? The
+    // missed-Stop backstop, generalized. Fires from Running OR NeedsApproval — a session blocked on
+    // the user (a real permission approval, OR a synthesized AskUserQuestion block below) whose turn
+    // then ENDED must also be released; recon-stop being Running-ONLY left an approved session stuck
+    // in NeedsApproval when its post-approval Stop hook was dropped. The turn is OVER when the tail
+    // is a TERMINAL stop_reason (end_turn / …) or the user INTERRUPTED it. Requires the transcript
+    // to have gone quiescent first (a mid-turn pause is not the end).
+    // `externalWorkOngoing` (default false == the classic behavior): external work — an in-process
+    // TEAMMATE / background Agent still writing side files, or a live SHELL job per claude's own
+    // heartbeat — has provably OUTLIVED the turn's end (the kScanExternalWorkGraceMs proof, computed
+    // once in _reconcileSession and shared with ShouldSynthesizeRunningFromExternalWork so the two
+    // gates key on the SAME expression and stay MUTUALLY EXCLUSIVE — promotion active <=> demotion
+    // held, never both). While it holds, a RUNNING session is NOT demoted to WaitingForInput even on a
+    // terminal tail: "a shell or agent or teammate still running" reads Running. Scoped to Running
+    // ONLY — the NeedsApproval release (an answered/approved session whose post-turn Stop was dropped)
+    // still fires, landing Waiting, from where the external-work promotion re-lights Running on the
+    // next pass; holding orange "needs you" for the whole background run would be worse than a
+    // one-pass bounce.
+    // `lastPromptUnixMs` / `tailWriteUnixMs` / `nowUnixMs` (all default 0 == the classic behavior) feed
+    // the TURN-START RACE guard: the synth holds while NewerPromptNotYetInTranscript says the user
+    // submitted a prompt the transcript has not recorded yet. In that window the terminal tail is the
+    // PREVIOUS turn's; firing on it read Waiting ~220 ms into a turn that had just started.
+    // Returns true when the pass should synthesize the Stop. Never throws.
+    inline bool ShouldSynthesizeStop(SessionState state, std::wstring_view lastStopReason, bool interrupted, int64_t quietForMs, bool externalWorkOngoing = false, int64_t lastPromptUnixMs = 0, int64_t tailWriteUnixMs = 0, int64_t nowUnixMs = 0) noexcept
+    {
+        if (state != SessionState::Running && state != SessionState::NeedsApproval)
         {
             return false; // only a turn-in-progress / blocked-on-user state has a turn to end
         }
         if (state == SessionState::Running && externalWorkOngoing)
         {
             return false; // a teammate / background agent / live shell OUTLIVES the turn — keep Running (the promotion's hold mirror)
+        }
+        if (NewerPromptNotYetInTranscript(lastPromptUnixMs, tailWriteUnixMs, nowUnixMs))
+        {
+            return false; // the turn-start race: the tail is an EARLIER turn's — the prompt just submitted has not landed yet
         }
         if (quietForMs < kScanStopQuiescenceMs)
         {
@@ -583,10 +587,6 @@ namespace Agentmaster
     //       - "" (no last-prompt marker ever seen — older/subagent transcripts: positional flag governs), OR
     //       - == errorEpochLeaf (the leaf has not moved at all since the error appended — the common case), OR
     //       - in errorBranchUuids (the leaf advanced onto the error's bookkeeping descendant chain — the
-        if (NewerPromptNotYetInTranscript(lastPromptUnixMs, tailWriteUnixMs, nowUnixMs))
-        {
-            return false; // the turn-start race: the tail is an EARLIER turn's — the prompt just submitted has not landed yet
-        }
     //         error's uuid + every later line whose parent is already on the frontier, accumulated in
     //         _readDelta from Node events). A leaf that is NONE of these is a genuine rewind off the error.
     // (Equality with errorEpochLeaf was the ORIGINAL test; it MISSED the forward-advance case because the
@@ -1010,6 +1010,10 @@ namespace Agentmaster
         {
             return false; // only a turn-in-progress / blocked-on-user state has a turn to end
         }
+        if (NewerPromptNotYetInTranscript(lastPromptUnixMs, tailWriteUnixMs, nowUnixMs))
+        {
+            return false; // the turn-start race: the cleared tail is the EARLIER no-op turn's — the new prompt has not landed yet
+        }
         if (interrupted || IsTerminalStopReason(lastStopReason))
         {
             return false; // a terminal / interrupted tail is the plain missed-Stop's job (no double-fire)
@@ -1031,10 +1035,6 @@ namespace Agentmaster
     }
 
     // PURE + total: should the reconciler synthesize Running because EXTERNAL work is active while the
-        if (NewerPromptNotYetInTranscript(lastPromptUnixMs, tailWriteUnixMs, nowUnixMs))
-        {
-            return false; // the turn-start race: the cleared tail is the EARLIER no-op turn's — the new prompt has not landed yet
-        }
     // session sits Idle / WaitingForInput? The SUBAGENT/FORK mirror of ShouldSynthesizeRunning (which
     // keys on a PARENT-transcript append): a tab whose turn delegated to a subagent — so the parent
     // <id>.jsonl is quiescent while <id>/subagents/*.jsonl grows — or whose live conversation forked to
@@ -1419,6 +1419,12 @@ namespace Agentmaster
             // NoBox episode stands — this stamp keeps the [send-verify] warning to one line per
             // episode (a recovered-then-re-lost box mints a new stamp and warns afresh).
             int64_t boxNotVisibleWarnedStamp{ 0 };
+            // Agentmaster (the TURN-START RACE — NewerPromptNotYetInTranscript): the prompt stamp
+            // (TurnAccounting::lastPromptUnixMs) this scanner already logged a held turn end for. The hold
+            // repeats every pass until the prompt line lands (~0.2-0.5 s, at most
+            // kScanPromptLandingGraceMs), so this keeps the [recon-stop-hold] evidence to ONE line per
+            // prompt. 0 == nothing logged yet.
+            int64_t promptHoldLoggedFor{ 0 };
             // The latest consumed turn event was the synthetic API-error message (isApiErrorMessage),
             // i.e. the transcript tail is CURRENTLY an UNRECOVERED API error. Set by an apiError
             // assistant line; CLEARED by any later turn event (a new user prompt, a non-error assistant
@@ -1445,12 +1451,6 @@ namespace Agentmaster
             std::wstring activeLeafUuid;
             // The active leaf captured AT THE MOMENT the API error was consumed (= activeLeafUuid then).
             // The error is "the last message" while the leaf STAYS here OR advances onto the error's OWN
-            // Agentmaster (the TURN-START RACE — NewerPromptNotYetInTranscript): the prompt stamp
-            // (TurnAccounting::lastPromptUnixMs) this scanner already logged a held turn end for. The hold
-            // repeats every pass until the prompt line lands (~0.2-0.5 s, at most
-            // kScanPromptLandingGraceMs), so this keeps the [recon-stop-hold] evidence to ONE line per
-            // prompt. 0 == nothing logged yet.
-            int64_t promptHoldLoggedFor{ 0 };
             // descendant chain (errorBranchUuids below); a later last-prompt naming a leaf that is NEITHER
             // is a REWIND past the error -> the error is off the active branch -> leave Error. "" when no
             // marker had been seen yet (then activeLeafUuid is "" too, so the positional lastWasApiError
