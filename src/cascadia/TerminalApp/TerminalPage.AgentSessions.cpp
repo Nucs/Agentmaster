@@ -109,6 +109,20 @@ namespace winrt::TerminalApp::implementation
         return c;
     }
 
+    // Agentmaster (new-session sort placement): the wall-clock "now" a NEW session's activity anchor is
+    // stamped with at creation (_LaunchClaudeSession / _LaunchCodexSession — see the stamp sites for why).
+    // It MUST be the clock every other SessionInfo timestamp uses — Unix-epoch MILLISECONDS from the
+    // system clock: the hook wire `ts` the registry compares against (OnHookEvent's monotonic max), the
+    // engine TUs' NowMs, and the persisted sessions.json values. A steady_clock reading would be in a
+    // different epoch, so the max-compare against a later hook would silently keep the wrong value and
+    // the persisted number would be meaningless after a restart.
+    // Returns: milliseconds since 1970-01-01 UTC. Never throws (system_clock::now is noexcept and the
+    //   duration arithmetic cannot fail).
+    static int64_t SessionCreationNowUnixMs() noexcept
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
     // Agentmaster (native-exe-only policy): surface the "Claude Code (native) not found" notice from a
     // FULL-WINDOW page (Archive / Sessions) or a tab/CLI entry point, where the Manager page's rich
     // install modal (_ShowClaudeMissing) can't render. The decision is still the synchronous
@@ -943,6 +957,26 @@ namespace winrt::TerminalApp::implementation
             info.autorunner.maxAutoSends = _appSettings.maxAutoSends;
             info.autorunner.stopOnError = _appSettings.stopOnError;
             info.autorunner.pauseOnHumanInput = _appSettings.pauseOnHumanInput;
+            // Agentmaster (new-session sort placement): a NEW session — a fresh spawn ("Open New Session
+            // Here" / the launch bar / a /handover successor) or a FORK (the tab menu, a card menu, the
+            // Sessions page, an adopt-fork) — starts its activity anchor at its CREATION instant, so its
+            // card lands at the TOP of MOST ACTIVE (right under the Running cards that mode pins above
+            // everything) and MOST RECENT, and stays there until another session's activity overtakes it.
+            // Both orders read this value while the session has no transcript activity or turn stamps yet
+            // (MakeSortKey's fallback). Without it the new card sat at the BOTTOM — a fresh spawn until its
+            // first SessionStart hook landed, a fork until its OWN first hook, usually its first prompt
+            // (its startup SessionStart arrives under the SOURCE id and is dropped whole by the
+            // fork-echo guard) — and the side panel's ⌖ scroll-to-tab, which follows the newly selected
+            // tab, scrolled the card list all the way down to it. Restored/resumed sessions are
+            // deliberately NOT stamped: they keep their persisted anchor, and their transcript's own
+            // activity orders them.
+            // Monotonic max, the field's discipline everywhere (OnHookEvent): a later hook's wire ts
+            // overwrites it, and nothing here can move an existing value backward.
+            const int64_t createdNowMs = SessionCreationNowUnixMs();
+            if (createdNowMs > info.lastActivityUnixMs)
+            {
+                info.lastActivityUnixMs = createdNowMs;
+            }
         }
         else
         {
@@ -2085,6 +2119,22 @@ namespace winrt::TerminalApp::implementation
         info.live = true;
         info.autorunner.mode = ::Agentmaster::AutorunnerMode::Off; // no driving in this phase
         info.pendingConfirmPromptId.clear();
+        if (!restored)
+        {
+            // Agentmaster (new-session sort placement — the _LaunchClaudeSession twin): a NEW Codex (a fresh
+            // spawn or a `codex fork`) starts its activity anchor at its CREATION instant, so its card lands
+            // at the top of MOST ACTIVE / MOST RECENT instead of the bottom (where the side panel's ⌖
+            // scroll-to-tab then dragged the card list). For a Codex this stamp matters MORE than for
+            // Claude: a managed Codex has no hooks and _ReconcileManagedCodex writes only its rollout id,
+            // tab token and state, so this is the ONLY activity time it ever gets — the card holds its
+            // creation-time place until other sessions' activity overtakes it. A restore keeps its
+            // persisted value. Monotonic max (the field's discipline), so no existing value moves back.
+            const int64_t createdNowMs = SessionCreationNowUnixMs();
+            if (createdNowMs > info.lastActivityUnixMs)
+            {
+                info.lastActivityUnixMs = createdNowMs;
+            }
+        }
         _sessionRegistry->Upsert(info);
 
         if (tab)

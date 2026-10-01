@@ -1205,11 +1205,19 @@ namespace Agentmaster
         // by EVERY hook's wire `ts` — SessionStart included — and deliberately RESTARTED by the UI's
         // plain "Move to Waiting-for-you" triage promote (both the tab-menu and board-card surfaces),
         // so it means "when did this card last demand attention", NOT "when did Claude last talk to
-        // the API". Display surfaces fall back to it for the "-lastActivityAgo" adornment / MOST
-        // ACTIVE sort when the transcript timing is unresolved. It must NEVER feed the ⚡
+        // the API". ALSO stamped at CREATION for a NEW session — a fresh spawn or a fork, Claude or
+        // Codex (TerminalPage::_LaunchClaudeSession / _LaunchCodexSession; never a restore or resume,
+        // which keep their persisted value): a brand-new card has no transcript timing and no turn
+        // stamps, so the MOST ACTIVE / MOST RECENT sorts read THIS — and without the creation stamp it
+        // was 0 and the new card sat at the BOTTOM (a fork's startup SessionStart arrives under its
+        // SOURCE id and is dropped, so a fork stayed 0 until its own first hook, usually its first
+        // prompt; a managed Codex gets no hooks at all, so it stayed 0 for good), which made the side
+        // panel's ⌖ scroll-to-tab drag the card list down to it. Display surfaces fall back to it for
+        // the "-lastActivityAgo" adornment / MOST ACTIVE sort when the transcript timing is
+        // unresolved. It must NEVER feed the ⚡
         // server-cache hint (that is lastTurnUnixMs + convApiActivityUnixMs — ServerCacheStillWarm
-        // below): a launch/adopt/resume SessionStart or a triage move stamps this "now" with zero
-        // API traffic, which was exactly the reported ⚡ false positive.
+        // below): a launch/adopt/resume SessionStart, a creation stamp or a triage move stamps this
+        // "now" with zero API traffic, which was exactly the reported ⚡ false positive.
         int64_t lastActivityUnixMs{ 0 };
         // Agentmaster (⚡ server-cache hint): the last hook-time EVIDENCE OF A REAL API TURN —
         // stamped monotonically by SessionRegistry::OnHookEvent from the wire `ts`, but ONLY for
@@ -1249,7 +1257,8 @@ namespace Agentmaster
         // PERSISTED (unlike lastTurnUnixMs): a dormant restored session must keep its place in the order
         // before any hook or survey can refresh it. 0 == no turn evidence yet (a never-prompted session,
         // or a record from before the stamps existed); MakeSortKey then falls back to lastActivityUnixMs
-        // so such a session isn't stranded at the bottom until its first turn.
+        // — which a NEW session or fork is stamped with at its creation — so such a session isn't
+        // stranded at the bottom until its first turn.
         int64_t turnStartUnixMs{ 0 };
         int64_t turnEndUnixMs{ 0 };
         // True for a session ADOPTED from a claude we did NOT launch (typed into a `+` tab,

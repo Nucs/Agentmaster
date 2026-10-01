@@ -973,14 +973,17 @@ namespace
         int64_t created; // conversation creation (~age). INT64_MAX when unknown — a fresh / never-
                          // prompted session has no transcript yet, so it is treated as just-created
                          // (== newest), floating to the top of NEWEST and the bottom of OLDEST.
-        int64_t last; // last activity (mtime); 0 when unknown.
+        int64_t last; // last activity: the transcript's line-derived activity, else the decay anchor (lastActivityUnixMs — a NEW session/fork is stamped with its creation instant by the launch seam, so it starts at the top of MOST ACTIVE under the Running pin); 0 when unknown.
         // MOST RECENT key: the newest TURN BOUNDARY — the newer of SessionInfo::turnStartUnixMs (the user
         // last SENT a turn) and turnEndUnixMs (the assistant last FINISHED one). Never mid-turn tool or
         // subagent activity (that is `last`), never the Running pin. Falls back to the hook decay anchor
         // (lastActivityUnixMs) only when a session has NO turn evidence yet — a never-prompted / just-
         // launched session, or a record from before the stamps existed — so it isn't stranded at the
-        // bottom until its first turn. Externals carry no hook/tail boundary stamps: their line-derived
-        // last activity stands in (the best available; observe-only rows).
+        // bottom until its first turn. For a just-created session or fork that anchor is its CREATION
+        // instant (TerminalPage::_LaunchClaudeSession / _LaunchCodexSession stamp it), so a new card
+        // ranks at the very top here until another session's turn boundary overtakes it. Externals carry
+        // no hook/tail boundary stamps: their line-derived last activity stands in (the best available;
+        // observe-only rows).
         int64_t turn;
         bool active; // currently running (managed Running state) — floats to the top of MOST ACTIVE.
         std::wstring title; // display title for A-Z (case-insensitive).

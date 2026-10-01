@@ -387,7 +387,10 @@ type-ahead batch's `Stop` into a false turn-complete), a manual compaction's `Po
 batch typed during it exactly like a `Stop` does, and `ts == 0` events (an old forwarder) degrade
 to plain arrival order. Only a `turnComplete` transition fires the Tests Autorunner advance; the wire
 `ts` also feeds `lastActivityUnixMs` (monotonic — a stale event can't regress the
-WaitingForInput→Idle decay anchor, which real hooks previously never refreshed at all).
+WaitingForInput→Idle decay anchor, which real hooks previously never refreshed at all). The launch
+seam additionally stamps a NEW session's or fork's anchor with its creation instant, so a just-created
+card sorts at the top of MOST ACTIVE / MOST RECENT instead of the bottom (SIDE_PANEL.md §2); the
+first real hook then overwrites it through the same monotonic max.
 
 On any hook `OnHookEvent` also sets `s.hookWired = true` and `s.lastHookUnixMs` (provenance for
 the observer — see below) and remembers the `tabToken` (the stable ConPTY identity it reconciles

@@ -79,6 +79,19 @@ which also flips the collapse chevron (`«` here — it always points toward the
   move it, and there is no Running pin (a running session ranks by when its turn was sent). A
   session with no turn evidence yet falls back to the hook decay anchor so it isn't stranded at
   the bottom. The pure extractor is `TurnBoundariesFromTranscriptChunk` (unit-tested).
+- **A new session or fork starts at the TOP** (MOST ACTIVE and MOST RECENT). Both orders read the
+  decay anchor `SessionInfo::lastActivityUnixMs` while a session has no transcript activity and no
+  turn stamps — and a brand-new card has neither. So the launch seam (`_LaunchClaudeSession` /
+  `_LaunchCodexSession`) stamps a NEW session's anchor with its **creation instant**: a fresh spawn
+  ("Open New Session Here", the launch bar, a /handover successor) and every fork (the tab menu, a
+  card menu, the Sessions page, an adopt-fork), Claude and Codex. The card then sits at the top — in
+  MOST ACTIVE right under the Running cards that order pins above everything, in MOST RECENT at the
+  very top — until another session's activity overtakes it. Before the stamp the anchor was 0 and the
+  new card sat at the **bottom**: a fresh spawn until its first `SessionStart` hook, a fork until its
+  own first hook, usually its first prompt (its startup `SessionStart` arrives under the SOURCE id and
+  the fork-echo guard drops it whole), a managed Codex for good (no hooks; `_ReconcileManagedCodex` writes no time) — and since
+  creating a tab selects it, the `⌖` reveal (§2a) scrolled the card list all the way down to it. A
+  restore/resume is NOT stamped: it keeps its persisted anchor, and its transcript orders it.
 - **A card**: title on a band painted the session's `ResolveSessionColorHex` color
   (WCAG-contrast text), the session's **bookmark-tag ribbons in the band's top-right corner**
   (§2b), state dot + `StateLabel` in the shared `AgentStatusColors` palette, a
