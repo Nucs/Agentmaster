@@ -117,6 +117,7 @@ int wmain()
     TestInferWorkingDirectory();
     TestConversationLineage();
     TestScannerCatchUp(); // the 2026-09-25 catch-up stall end to end (tests_transcript.cpp)
+    TestTurnStartRaceGuard(); // the 2026-10-01 turn-start race: the prompt-supersession guard, pure + end to end (tests_transcript.cpp)
     TestTranscriptWatcher(); // the scanner's ReadDirectoryChangesW change feed (tests_transcript.cpp)
     TestCompactionLifecycle();
     TestConversationFollowup();

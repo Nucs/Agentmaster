@@ -3255,6 +3255,231 @@ void TestScannerCatchUp()
     std::filesystem::remove_all(std::filesystem::path{ cfg }, ecCleanup);
 }
 
+// Agentmaster (the TURN-START RACE — 2026-10-01, HOOKS.md "State machine", NewerPromptNotYetInTranscript):
+// a prompt's UserPromptSubmit sets Running and Wake()s the scanner ~6 ms later. Claude writes the prompt
+// line only after its hooks finish, so that pass saw the PREVIOUS turn's end_turn, a transcript quiet for
+// minutes and a heartbeat not yet refreshed off "idle". recon-stop (or, after a no-op turn,
+// recon-stop-idle) then synthesized a Stop: Running -> Waiting -> Running within ~220 ms. That hit about
+// 29% of the day's prompts, 92% of that day's false Waitings, and 1,840 times over 97 days of the
+// release log.
+// The guard: hold the tail-judging synths while the newest PROMPT-CARRYING UserPromptSubmit's stamp is
+// strictly newer than the transcript's last write, for at most kScanPromptLandingGraceMs.
+//   Part 1 pins the pure predicate and its wiring into the three gates.
+//   Part 2 drives a REAL SessionScanner thread over staged transcripts (the TestScannerCatchUp harness),
+//   waking it on every registry notify exactly as Engine.cpp does — the wake IS the race's trigger. It
+//   asserts four outcomes:
+//     (a) the race holds Running, and the prompt landing keeps it Running;
+//     (b) a genuine missed Stop still releases;
+//     (c) a prompt that never lands releases once the grace passes;
+//     (d) the race after a no-op turn (recon-stop-idle's shape) holds too.
+// Stages a throwaway CLAUDE_CONFIG_DIR and restores it after. [Agentmaster]
+void TestTurnStartRaceGuard()
+{
+    std::wprintf(L"Turn-start race guard (a prompt the transcript has not recorded yet holds the turn-end synths):\n");
+
+    // --- Part 1: the pure predicate, then its wiring into each gate ---
+    constexpr int64_t P = 1'000'000; // a prompt stamp (the forwarder's start time)
+    CHECK(NewerPromptNotYetInTranscript(P, P - 120'000, P + 6),
+          "guard: a prompt newer than every transcript byte, 6 ms on -> HOLD (the race)");
+    CHECK(!NewerPromptNotYetInTranscript(P, P + 300, P + 400),
+          "guard: the transcript was written after the prompt (its line landed) -> release");
+    CHECK(!NewerPromptNotYetInTranscript(P, P, P + 10),
+          "guard: stamp == last write -> not strictly newer -> release");
+    CHECK(!NewerPromptNotYetInTranscript(0, P, P + 10),
+          "guard: no prompt stamp (a hookless session) -> inert");
+    CHECK(!NewerPromptNotYetInTranscript(P, 0, P + 10),
+          "guard: unknown tail write (no stat yet) -> inert, never suppress blind");
+    CHECK(NewerPromptNotYetInTranscript(P, P - 120'000, P + kScanPromptLandingGraceMs - 1),
+          "guard: still inside the landing grace -> HOLD");
+    CHECK(!NewerPromptNotYetInTranscript(P, P - 120'000, P + kScanPromptLandingGraceMs),
+          "guard: the grace passed and the prompt never landed -> release (no stuck Running)");
+    CHECK(NewerPromptNotYetInTranscript(P, P - 120'000, 0),
+          "guard: no clock supplied (a legacy caller) -> unbounded hold, the old recon-error behavior");
+    CHECK(NewerPromptNotYetInTranscript(P, P - 120'000, P - 5),
+          "guard: a prompt stamped just after the pass read its clock -> HOLD");
+
+    const int64_t quiet = 120'000; // a transcript quiet for two minutes: every quiescence floor met
+    CHECK(!ShouldSynthesizeStop(SessionState::Running, L"end_turn", false, quiet, false, P, P - quiet, P + 6),
+          "recon-stop: the turn-start race (the previous turn's end_turn, the new prompt not landed) -> HOLD");
+    CHECK(ShouldSynthesizeStop(SessionState::Running, L"end_turn", false, quiet, false, P - 200'000, P - quiet, P + 6),
+          "recon-stop: a genuine missed Stop (the end_turn was written after the turn's own prompt) -> fires");
+    CHECK(ShouldSynthesizeStop(SessionState::Running, L"end_turn", false, quiet, false, P, P - quiet, P + kScanPromptLandingGraceMs),
+          "recon-stop: a prompt that never reached the transcript -> the classic verdict runs once the grace passes");
+    CHECK(!ShouldSynthesizeStop(SessionState::NeedsApproval, L"end_turn", false, quiet, false, P, P - quiet, P + 6),
+          "recon-stop: NeedsApproval with a new prompt in flight -> HOLD too");
+    CHECK(ShouldSynthesizeStop(SessionState::Running, L"end_turn", false, quiet),
+          "recon-stop: a legacy call (no stamps) -> the classic behavior, unchanged");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"", false, quiet, P, P - quiet, P + 6),
+          "recon-stop-idle: a new prompt after a no-op turn (cleared tail, stale idle heartbeat) -> HOLD");
+    CHECK(ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"", false, quiet, P - 200'000, P - quiet, P + 6),
+          "recon-stop-idle: the no-op turn's own prompt landed (the tail was written after it) -> releases as before");
+    CHECK(ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"", false, quiet, P, P - quiet, P + kScanPromptLandingGraceMs),
+          "recon-stop-idle: a prompt that never landed releases once the grace passes");
+    CHECK(!ShouldSynthesizeError(SessionState::Running, true, quiet, P, P - quiet, P + 6),
+          "recon-error: a retry not yet in the transcript -> HOLD (the 2b34b07f guard, unchanged inside the grace)");
+    CHECK(ShouldSynthesizeError(SessionState::Running, true, quiet, P, P - quiet, P + kScanPromptLandingGraceMs),
+          "recon-error: a retry that never reached the transcript re-asserts Error after the grace (so recon-stop cannot land Waiting first)");
+
+    // --- Part 2: END TO END over a REAL scanner thread ---
+    wchar_t tmp[MAX_PATH]{};
+    ::GetTempPathW(MAX_PATH, tmp);
+    const std::wstring cfg = std::wstring{ tmp } + L"am_turnstart_cfg_" + std::to_wstring(::GetCurrentProcessId());
+    const std::wstring cwd = L"K:\\am_scan\\turnstart";
+    const std::wstring dir = cfg + L"\\projects\\" + EncodeCwdToProjectDir(cwd);
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path{ dir }, ec);
+
+    wchar_t prevBuf[2048]{};
+    const DWORD prevN = ::GetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevBuf, 2048);
+    const std::wstring prevCfg{ prevBuf, prevN };
+    ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", cfg.c_str());
+
+    // The previous turn, finished cleanly: a prompt and its end_turn reply.
+    const std::string previousTurn =
+        R"j({"type":"user","uuid":"p0","message":{"role":"user","content":"the previous question"},"timestamp":"2026-10-01T17:35:00.000Z"})j" "\n"
+        R"j({"type":"assistant","uuid":"a0","parentUuid":"p0","message":{"role":"assistant","model":"claude-test","stop_reason":"end_turn","content":[{"type":"text","text":"Done."}]},"timestamp":"2026-10-01T17:35:05.000Z"})j" "\n";
+    // A no-op turn: a prompt that produced no assistant output (the presence-idle release's own shape).
+    const std::string noOpPrompt =
+        R"j({"type":"user","uuid":"p9","message":{"role":"user","content":"a prompt that produced nothing"},"timestamp":"2026-10-01T17:35:10.000Z"})j" "\n";
+    // The new prompt's own line, as claude writes it once its UserPromptSubmit hooks finish.
+    const std::string newPromptLine =
+        R"j({"type":"user","uuid":"p1","parentUuid":"a0","message":{"role":"user","content":"the new prompt"},"timestamp":"2026-10-01T17:37:13.045Z"})j" "\n";
+
+    const int64_t lastWriteMs = NowMsTest() - 120'000; // two minutes quiet: every quiescence floor (2 s / 5 s / 30 s) met
+
+    // What one scenario observed: did the session ever leave Running after it first read Running
+    // (recorded by a registry observer, so a ~220 ms flicker cannot slip between polls), and where did
+    // it end up.
+    struct Outcome
+    {
+        bool leftRunning;
+        SessionState finalState;
+    };
+    // Runs one scenario on a LIVE session (starting WaitingForInput) whose heartbeat reads `presence`.
+    //   id      — the session id (its transcript must already be staged under `dir`).
+    //   seed    — runs BEFORE the scanner starts (e.g. a UserPromptSubmit that already set Running).
+    //   act     — runs once the scanner has found and primed the transcript (~600 ms in): the mid-scenario
+    //             UserPromptSubmit / append, including its own observation sleeps.
+    //   watchMs — extra observation time after `act`.
+    // The observer also Wake()s the scanner on every notify, the production wiring (Engine.cpp). The
+    // scanner is stopped and the observer detached before returning, so nothing outlives the fixture.
+    const auto runScenario = [&](const std::wstring& id, const std::wstring& presence,
+                                 const std::function<void(SessionRegistry&)>& seed,
+                                 const std::function<void(SessionRegistry&)>& act, int watchMs) {
+        auto reg = std::make_shared<SessionRegistry>();
+        SessionInfo s = MakeSession(id, SessionState::WaitingForInput);
+        s.workingDir = cwd;
+        s.live = true; // the scanner reconciles LIVE sessions only
+        s.presenceStatus = presence;
+        reg->Upsert(s);
+        if (seed)
+        {
+            seed(*reg);
+        }
+        SessionScanner scanner{ reg };
+        std::atomic<bool> sawRunning{ false };
+        std::atomic<bool> leftRunning{ false };
+        const auto token = reg->AddObserver([&](const SessionInfo& si, HookEvent) {
+            if (si.id == id)
+            {
+                if (si.state == SessionState::Running)
+                {
+                    sawRunning = true;
+                }
+                else if (sawRunning)
+                {
+                    leftRunning = true;
+                }
+            }
+            scanner.Wake();
+        });
+        scanner.Start();
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        if (act)
+        {
+            act(*reg);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(watchMs));
+        scanner.Stop();
+        reg->RemoveObserver(token);
+        const auto cur = reg->Get(id);
+        return Outcome{ leftRunning.load(), cur ? cur->state : SessionState::Idle };
+    };
+    // A prompt-carrying UserPromptSubmit stamped `tsMs` (the forwarder's start time).
+    const auto submit = [](SessionRegistry& r, const std::wstring& id, const std::wstring& text, int64_t tsMs) {
+        HookMessage m = UPS(id, text);
+        m.ts = tsMs;
+        r.OnHookEvent(m);
+    };
+
+    // --- (a) THE RACE, then the prompt landing ---
+    {
+        const std::wstring id = L"cf273521-0000-4000-8000-0000000000a1";
+        const std::wstring path = dir + L"\\" + id + L".jsonl";
+        MakeJsonl(path, previousTurn, lastWriteMs, lastWriteMs - 5000);
+        bool runningBeforeLanding = false;
+        bool runningAfterLanding = false;
+        const Outcome o = runScenario(id, L"idle", nullptr, [&](SessionRegistry& r) {
+            submit(r, id, L"the new prompt", NowMsTest()); // Running; the observer wakes a pass at once, before the line lands
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500)); // the race window, and five Running-cadence passes past it
+            const auto before = r.Get(id);
+            runningBeforeLanding = before && before->state == SessionState::Running;
+            AppendJsonl(path, newPromptLine, NowMsTest()); // claude records the prompt once its hooks finish
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            const auto after = r.Get(id);
+            runningAfterLanding = after && after->state == SessionState::Running;
+        },
+                                      200);
+        CHECK(!o.leftRunning,
+              "e2e (a) THE RACE: a prompt the transcript has not recorded yet never lets the session leave Running (was: a synthesized Stop off the previous turn's end_turn ~6 ms after the UPS)");
+        CHECK(runningBeforeLanding, "e2e (a) 1.5 s on, the prompt line still unwritten: Running");
+        CHECK(runningAfterLanding, "e2e (a) the prompt line lands: still Running (the new turn is under way)");
+    }
+
+    // --- (b) THE CONTROL: a genuine missed Stop still releases ---
+    {
+        const std::wstring id = L"cf273521-0000-4000-8000-0000000000b2";
+        MakeJsonl(dir + L"\\" + id + L".jsonl", previousTurn, lastWriteMs, lastWriteMs - 5000);
+        const Outcome o = runScenario(id, L"idle", [&](SessionRegistry& r) {
+            submit(r, id, L"the previous question", lastWriteMs - 5000); // the turn's OWN prompt, submitted before its end_turn was written; its Stop hook then dropped
+        },
+                                      nullptr, 1500);
+        CHECK(o.finalState == SessionState::WaitingForInput,
+              "e2e (b) a genuine missed Stop (the end_turn written AFTER the turn's prompt) still releases to WaitingForInput: the guard never blocks the backstop");
+    }
+
+    // --- (c) A PROMPT THAT NEVER LANDED: released once the grace passes ---
+    {
+        const std::wstring id = L"cf273521-0000-4000-8000-0000000000c3";
+        MakeJsonl(dir + L"\\" + id + L".jsonl", previousTurn, lastWriteMs, lastWriteMs - 5000);
+        const Outcome o = runScenario(id, L"idle", [&](SessionRegistry& r) {
+            // Newer than every transcript byte, but submitted longer ago than the grace: an Esc during the
+            // hook phase, or a re-submit before the first one took.
+            submit(r, id, L"a prompt claude never recorded", NowMsTest() - (kScanPromptLandingGraceMs + 5'000));
+        },
+                                      nullptr, 1500);
+        CHECK(o.finalState == SessionState::WaitingForInput,
+              "e2e (c) a prompt that never reached the transcript releases once kScanPromptLandingGraceMs has passed: no stuck Running (the d1f3f198 shape)");
+    }
+
+    // --- (d) THE RACE after a no-op turn: recon-stop-idle's shape ---
+    {
+        const std::wstring id = L"cf273521-0000-4000-8000-0000000000d4";
+        MakeJsonl(dir + L"\\" + id + L".jsonl", previousTurn + noOpPrompt, lastWriteMs, lastWriteMs - 5000);
+        const Outcome o = runScenario(id, L"idle", nullptr, [&](SessionRegistry& r) {
+            submit(r, id, L"the new prompt", NowMsTest());
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        },
+                                      200);
+        CHECK(!o.leftRunning && o.finalState == SessionState::Running,
+              "e2e (d) THE RACE after a no-op turn: a cleared tail + a stale idle heartbeat no longer release a turn that just started (was: recon-stop-idle -> Waiting)");
+    }
+
+    ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevCfg.empty() ? nullptr : prevCfg.c_str());
+    std::error_code ecCleanup;
+    std::filesystem::remove_all(std::filesystem::path{ cfg }, ecCleanup);
+}
+
 void TestSessionSearch()
 {
     std::wprintf(L"SessionSearch (regex/match/snippet + fast phase + history + presence + index):\n");

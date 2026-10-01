@@ -398,10 +398,60 @@ showing `WaitingForInput`/`Idle` for an ENTIRE turn (the "second turn never show
   Pinned by `TestTranscriptScan` (the pure gates, with the incident's exact sizes) and
   `TestScannerCatchUp` (a real scanner thread over staged transcripts: the incident, a >1 MiB
   append burst, the alignment fallback).
+- **A prompt the transcript has not recorded yet holds every turn-end judgment** — the TURN-START
+  RACE, found 2026-10-01; the shared predicate is `NewerPromptNotYetInTranscript`.
+  - **How it happened.**
+    - A prompt-carrying `UserPromptSubmit` sets `Running`, and every registry notify `Wake()`s the
+      scanner (`Engine.cpp`), so a pass ran ~6 ms later (p90 83 ms).
+    - Claude writes the prompt line only after its `UserPromptSubmit` hooks finish. The line's own
+      `timestamp` is the submit time, but its bytes land ~0.2–0.5 s later.
+    - So that pass saw the PREVIOUS turn's terminal stop_reason, a transcript quiet for minutes, and
+      a heartbeat the ~2 s S-lane had not yet refreshed off `idle`: the exact missed-Stop shape.
+    - `recon-stop` (or, after a no-op turn, `recon-stop-idle`) synthesized a Stop. The session read
+      Waiting for ~220 ms until `recon-run` (logging "prompt hook missed/folded", though nothing was
+      missed) or `recon-subagent` undid it once the prompt line landed.
+    - A slash command was worse: its echo is not a turn event, so only the 20 s outlived-work
+      promotion undid it.
+    - Measured over the release log: 92% of 2026-10-01's false Waitings, about 29% of that day's
+      prompts, and 1,840 over 97 days. The tab dot and the board card flipped; the toast was already
+      masked by its 10 s minimum.
+  - **The guard.** Hold while the newest prompt-carrying `UserPromptSubmit`'s stamp
+    (`turns.lastPromptUnixMs`) is STRICTLY newer than the transcript's last write at this pass's stat.
+    - The stamp is the forwarder's start time (`$ts` is taken before it reads stdin), so it precedes
+      every byte claude can write for that prompt.
+    - Strictly newer therefore means not one byte has landed since the submit, and every turn end in
+      the tail belongs to an earlier turn.
+    - A genuine missed Stop is never held: its end line was written after its own turn's prompt.
+    - The hold ends the moment any byte lands.
+  - **Where it applies.** `recon-stop`, `recon-stop-idle` and `recon-error` all go through the one
+    predicate. Each re-checks it against the freshest record right before firing, because a prompt can
+    arrive mid-pass while a still-pending missed Stop keeps the session `Running` on both sides of it.
+    `recon-error` always had this guard (the 2b34b07f retry race), unbounded.
+  - **Bounded by `kScanPromptLandingGraceMs` (30 s) after the prompt.** A submit claude never records
+    (an Esc during the hook phase, or a re-submit before the first one took: 17 in 97 days) would
+    otherwise hold `Running` forever, the d1f3f198 shape.
+    - The bound covers the forwarder's own 10 s timeout and a slow user hook. Seen: a 15 s "cancel
+      window" hook; a 35 s landing in the shell-form era.
+    - When it expires the classic verdict runs, and its `[recon-stop]` line says "never reached the
+      transcript".
+    - `recon-error` shares the bound, so a never-landed retry re-asserts `Error` rather than letting the
+      bounded `recon-stop` land Waiting on the errored tail first.
+  - **The replay proof.** Over 97 days of the release log, 1,480 synthesized turn ends came under 2 s
+    of a prompt (under 30 s for the idle path), where the guard is GUARANTEED to hold, since a
+    quiescence floor of ≥ 2 s puts the last write before the prompt. 1,463 of them (98.9%) were false
+    and undid themselves. The 17 genuine ones are delayed by at most the bound; every one inspected
+    was a prompt that never reached the transcript.
+  - **Evidence and tests.** Each prevented synth logs one `[recon-stop-hold]` line per prompt in
+    scanner.log. Pinned by `TestTurnStartRaceGuard`: the truth table, plus a real scanner thread for the
+    race, the landing, a genuine missed Stop, a never-landed prompt, and the no-op-turn race.
+  - **Residual.** After a slash command's echo lands, the tail still reads the previous `end_turn`, so a
+    heartbeat that reads `idle` for 2 s before the first assistant line could still release it.
 
 Self-healing by construction: every applied `Stop` zeroes `queuedPrompts` (drift cannot
 accumulate; a phantom `UserPromptSubmit` — e.g. a slash command that never starts an API turn —
-costs at most one wrong-`Running` interval, which the scanner's quiescence reconciliation ends),
+costs at most one wrong-`Running` interval, which the scanner's quiescence reconciliation ends,
+waiting out the prompt-supersession hold above first: until anything reaches the transcript, at
+most `kScanPromptLandingGraceMs`),
 `SessionStart`/`SessionEnd` reset the accounting (**except** `SessionStart(source=compact)`: the same
 conversation — after an auto-compaction, the same TURN — continues, so wiping it would turn a queued
 type-ahead batch's `Stop` into a false turn-complete), and a manual compaction's `PostCompact` consumes

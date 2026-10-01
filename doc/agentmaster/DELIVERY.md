@@ -795,7 +795,8 @@ But "ready" is often momentary, and each lane that could catch it sees only half
   survey later);
 - an auto-compaction opens and closes its PreCompact/PostCompact window;
 - an API retry backs off;
-- `recon-stop` lands a beat before `recon-run` reverses it;
+- `recon-stop` lands a beat before `recon-run` reverses it (the turn-start race, since guarded at its
+  source — below);
 - a resumed tab spends its first seconds starting claude.
 
 The 20 s send spacing (§13) only covers the gap after OUR previous send. A status that flaps between
@@ -808,8 +809,10 @@ previous turn's terminal tail and synthesizes a false Waiting.
   p99, so its tail outlives the 20 s spacing.
 - The 40 s window covers it: the false Waiting stamps the clock, the return to Running restamps it,
   and nothing is sent until the status holds.
-- This hold does NOT fix the flicker itself. The board and tab still show it, and the root fix — a
-  prompt-supersession guard on recon-stop, like recon-error's — is separate.
+- This hold does NOT fix the flicker itself; the board and tab still showed it. The root fix landed
+  separately, the same day: `recon-stop` and `recon-stop-idle` now share `recon-error`'s
+  prompt-supersession guard, bounded at 30 s (`NewerPromptNotYetInTranscript`, HOOKS.md "State
+  machine"). This hold stays as defense in depth for the other flaps listed above.
 
 **The rule.** An AUTOMATIC send waits until the session has HELD a sendable status (Idle /
 WaitingForInput, open, launched or adopted) for `kStateSettleMs` (**40 s**, `Scheduler.h`). The

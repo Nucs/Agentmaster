@@ -1167,7 +1167,9 @@ namespace Agentmaster
         // recon-error 38ms later, re-asserting a red card over a genuinely running retry turn.
         const int64_t tailWriteMs = lastWriteMs;
         // tailCurrent: an error line consumed MID-catch-up is history, not the tail — never Error off it.
-        if (tailCurrent && ShouldSynthesizeError(s.state, errorIsActiveLeaf, quietForMs, s.turns.lastPromptUnixMs, tailWriteMs))
+        // NowMs() bounds the supersession hold (kScanPromptLandingGraceMs): a retry that never reached the
+        // transcript re-asserts Error once the grace passes, instead of being held forever.
+        if (tailCurrent && ShouldSynthesizeError(s.state, errorIsActiveLeaf, quietForMs, s.turns.lastPromptUnixMs, tailWriteMs, NowMs()))
         {
             const auto fresh = _registry->Get(s.id);
             // Manual dismissal gate (the triage "Move to Idle/Done" on an Error card): the user
@@ -1184,7 +1186,7 @@ namespace Agentmaster
             // tested the pass-start snapshot's stamp, and a real prompt can land in the window between
             // that snapshot and this re-Get — the exact interleave that re-asserted 2b34b07f's Error.
             if (fresh && !fresh->errorDismissed && fresh->state != SessionState::Error &&
-                fresh->turns.lastPromptUnixMs <= tailWriteMs)
+                !NewerPromptNotYetInTranscript(fresh->turns.lastPromptUnixMs, tailWriteMs, NowMs()))
             {
                 HookMessage err;
                 err.event = HookEvent::Notification; // neutral carrier; the apiError flag drives the transition
@@ -1240,6 +1242,8 @@ namespace Agentmaster
         }
 
         // Missed/forced-Stop reconciliation: the turn is OVER — either the transcript's last
+            // Same shared, bounded predicate as the gate (NewerPromptNotYetInTranscript), so the belt
+            // and the gate can never disagree about the grace.
         // assistant message ended it (a TERMINAL stop_reason — end_turn / stop_sequence /
         // max_tokens / refusal) or the user INTERRUPTED it (Esc -> no clean Stop hook) — the file
         // has gone quiescent, yet we are STILL Running (or blocked in NeedsApproval whose
@@ -1252,7 +1256,16 @@ namespace Agentmaster
         // fires on, so the two stay mutually exclusive (never oscillate); see ShouldSynthesizeStop.
         // tailCurrent (both arms): a mid-catch-up fold can read a historical end_turn as "the turn is
         // over", or a historical tool_use as "still mid-tool"; only the caught-up tail may end a turn.
-        const bool stopFromTail = tailCurrent && ShouldSynthesizeStop(s.state, st.lastStopReason, st.interrupted, quietForMs, externalOutlivesTurn);
+        // Agentmaster (the TURN-START RACE — NewerPromptNotYetInTranscript, HOOKS.md "State machine"):
+        // both arms also HOLD while the user has submitted a prompt the transcript has not recorded yet.
+        // The prompt's UserPromptSubmit Wake()s this pass ~6 ms after setting Running, before claude writes
+        // the prompt line (it does so only after its hooks finish), so the tail here is still the PREVIOUS
+        // turn's end. Firing on it flipped Running -> Waiting -> Running in ~220 ms on about 29% of prompts.
+        // The hold ends when ANY byte lands after the prompt (normally its own line, ~0.2-0.5 s), or
+        // kScanPromptLandingGraceMs after it for a prompt claude never records.
+        const int64_t promptCheckNowMs = NowMs();
+        const bool stopFromTail = tailCurrent && ShouldSynthesizeStop(s.state, st.lastStopReason, st.interrupted, quietForMs, externalOutlivesTurn,
+                                                                      s.turns.lastPromptUnixMs, tailWriteMs, promptCheckNowMs);
         // Agentmaster (presence-idle release): the missing IDLE half of the presence signal. The
         // tail-based backstop above needs a TERMINAL stop_reason or an interrupt — but a turn can end
         // with NEITHER: its last transcript line is a bare user prompt that cleared the tracked
@@ -1268,11 +1281,42 @@ namespace Agentmaster
         // from API · Retrying" backoff, so only sustained rest (no append AND no "busy" for the long
         // window — both reset quietForMs just below) releases it (the idle<->running flap fix).
         const bool stopFromPresenceIdle = tailCurrent && !stopFromTail && st.pendingInteractiveTool.empty() &&
-                                          ShouldSynthesizeStopFromPresenceIdle(s.state, s.presenceStatus, st.lastStopReason, st.interrupted, quietForMs);
+                                          ShouldSynthesizeStopFromPresenceIdle(s.state, s.presenceStatus, st.lastStopReason, st.interrupted, quietForMs,
+                                                                               s.turns.lastPromptUnixMs, tailWriteMs, promptCheckNowMs);
+        // Evidence that the guard did its job: re-ask both predicates WITHOUT the prompt stamps (their
+        // classic, guard-inert defaults). A synth that would have fired is exactly one false Waiting
+        // prevented. Logged ONCE per prompt (promptHoldLoggedFor), because the hold repeats every pass
+        // until the prompt line lands.
+        if (tailCurrent && st.promptHoldLoggedFor != s.turns.lastPromptUnixMs &&
+            NewerPromptNotYetInTranscript(s.turns.lastPromptUnixMs, tailWriteMs, promptCheckNowMs) &&
+            (ShouldSynthesizeStop(s.state, st.lastStopReason, st.interrupted, quietForMs, externalOutlivesTurn) ||
+             (st.pendingInteractiveTool.empty() &&
+              ShouldSynthesizeStopFromPresenceIdle(s.state, s.presenceStatus, st.lastStopReason, st.interrupted, quietForMs))))
+        {
+            st.promptHoldLoggedFor = s.turns.lastPromptUnixMs;
+            AppendStateLog(L"scanner.log",
+                           L"[recon-stop-hold] " + s.id + L" (a prompt submitted " + std::to_wstring(promptCheckNowMs - s.turns.lastPromptUnixMs) +
+                               L" ms ago is not in the transcript yet; its last write was " + std::to_wstring(promptCheckNowMs - tailWriteMs) +
+                               L" ms ago - the tail is the previous turn's, held)\n");
+        }
         if (stopFromTail || stopFromPresenceIdle)
         {
             const auto fresh = _registry->Get(s.id);
-            if (fresh && (fresh->state == SessionState::Running || fresh->state == SessionState::NeedsApproval))
+            // The prompt-stamp re-check is the guard's FRESH belt, the recon-error twin. The predicates
+            // above tested the pass-start snapshot, and a prompt can arrive between that snapshot and this
+            // re-Get. With the old turn's missed Stop still pending, the session is Running both before and
+            // after that prompt, so the state check alone cannot tell them apart. Same shared, bounded
+            // predicate, so the belt never outlives the grace.
+            const int64_t freshNowMs = NowMs();
+            const bool freshPromptNotLanded = fresh && NewerPromptNotYetInTranscript(fresh->turns.lastPromptUnixMs, tailWriteMs, freshNowMs);
+            if (freshPromptNotLanded && st.promptHoldLoggedFor != fresh->turns.lastPromptUnixMs)
+            {
+                st.promptHoldLoggedFor = fresh->turns.lastPromptUnixMs;
+                AppendStateLog(L"scanner.log",
+                               L"[recon-stop-hold] " + s.id + L" (a prompt arrived during this pass, " +
+                                   std::to_wstring(freshNowMs - fresh->turns.lastPromptUnixMs) + L" ms ago - the tail is the previous turn's, held)\n");
+            }
+            if (fresh && (fresh->state == SessionState::Running || fresh->state == SessionState::NeedsApproval) && !freshPromptNotLanded)
             {
                 HookMessage stop;
                 stop.event = HookEvent::Stop;
@@ -1303,7 +1347,11 @@ namespace Agentmaster
                                (stopFromPresenceIdle ? L"[recon-stop-idle] " : L"[recon-stop] ") + s.id +
                                    L" q=" + (stop.lastMessageIsQuestion ? L"1" : L"0") +
                                    (st.interrupted ? L" interrupted" : L"") +
-                                   (stopFromPresenceIdle ? (L" presence=" + s.presenceStatus) : std::wstring{}) + L"\n");
+                                   (stopFromPresenceIdle ? (L" presence=" + s.presenceStatus) : std::wstring{}) +
+                                   (promptNeverLanded ? (L" (a prompt submitted " + std::to_wstring(freshNowMs - fresh->turns.lastPromptUnixMs) +
+                                                         L" ms ago never reached the transcript)")
+                                                      : std::wstring{}) +
+                                   L"\n");
             }
         }
 
@@ -1356,6 +1404,10 @@ namespace Agentmaster
                     lostCandidate = true;
                     break;
                 }
+                // A prompt still newer than every transcript byte, yet the synth fired: the guard let go
+                // only because kScanPromptLandingGraceMs passed. Claude never recorded that prompt (an Esc
+                // during its hook phase, or a re-submit). Say so, so the log never reads like the race again.
+                const bool promptNeverLanded = tailWriteMs > 0 && fresh->turns.lastPromptUnixMs > tailWriteMs;
             }
             const auto fresh = lostCandidate ? _registry->Get(s.id) : std::nullopt;
             if (fresh)

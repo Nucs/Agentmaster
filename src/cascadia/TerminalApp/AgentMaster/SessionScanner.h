@@ -70,6 +70,21 @@ namespace Agentmaster
     inline constexpr int64_t kScanSubagentFreshMs = 15000; // a SUBAGENT/tool-result side file written within this window == the turn is actively working inside a Task/Agent subagent (the parent <id>.jsonl is quiescent) -> hold/synthesize Running (SubagentActivityUnixMs, ProcessInspect)
     inline constexpr int64_t kScanExternalWorkGraceMs = 20000; // "OUTLIVED the turn" proof margin: external work counts as OUTLIVING a FINISHED/aborted turn only when it postdates the parent transcript's last write by MORE than this — separating genuinely ongoing background work (an in-process TEAMMATE / a run_in_background Agent writing subagents/*.jsonl for minutes-hours after the lead's end_turn; a live SHELL job keeping presence "shell"/"busy") from turn-tail RESIDUE (a classic subagent's final flush lands us-before end_turn and post-Esc dying subagents keep flushing up to kScanSubagentFreshMs; "busy" lingers a ~2s S-lane tick after a real Stop). Must exceed kScanSubagentFreshMs so an interrupted turn's dying flushes can NEVER read as outliving it (the 291 MB-log oscillation class)
     static_assert(kScanExternalWorkGraceMs > kScanSubagentFreshMs, "outlive margin must exceed the dying-subagent flush window, or post-Esc residue promotes Waiting->Running and oscillates against recon-stop");
+    // Agentmaster (the TURN-START RACE — HOOKS.md "State machine", NewerPromptNotYetInTranscript): the
+    // longest a submitted prompt that the transcript has not recorded yet may hold the tail-judging synths
+    // (recon-stop, recon-stop-idle, recon-error), counted from the prompt's hook stamp.
+    // It must outlast a legitimate LANDING — claude writes the prompt line only after its UserPromptSubmit
+    // hooks finish:
+    //   * normally ~0.2-0.5 s (the exec-form forwarder);
+    //   * up to the forwarder's own 10 s timeout (kHookForwarderTimeoutSeconds) if it hangs;
+    //   * longer only with a slow user/project hook. Seen: a 15 s "cancel window" hook (2026-09-10), and a
+    //     35 s landing in the shell-form era, whose forwarder timeout was 30 s.
+    // It also caps the cost of a prompt that NEVER lands (a submit aborted with Esc during the hook phase,
+    // or re-submitted before the first one took: 17 in 97 days of the release log). Such a session reads
+    // Running this long before the classic verdict runs. The same order as
+    // kScanPresenceIdleRunningQuiescenceMs, the existing "how long a Running session with no evidence may
+    // sit" policy.
+    inline constexpr int64_t kScanPromptLandingGraceMs = 30000;
 
     // --- the TranscriptWatcher-driven refresh (HOOKS.md "Transcript watcher") ---
     // A COLD session (see ScanNeedsFreshTail) is re-stat'ed and has its side folders re-walked only when the
@@ -483,9 +498,63 @@ namespace Agentmaster
     // still fires, landing Waiting, from where the external-work promotion re-lights Running on the
     // next pass; holding orange "needs you" for the whole background run would be worse than a
     // one-pass bounce.
-    inline bool ShouldSynthesizeStop(SessionState state, std::wstring_view lastStopReason, bool interrupted, int64_t quietForMs, bool externalWorkOngoing = false) noexcept
+    // `lastPromptUnixMs` / `tailWriteUnixMs` / `nowUnixMs` (all default 0 == the classic behavior) feed
+    // the TURN-START RACE guard: the synth holds while NewerPromptNotYetInTranscript says the user
+    // submitted a prompt the transcript has not recorded yet. In that window the terminal tail is the
+    // PREVIOUS turn's; firing on it read Waiting ~220 ms into a turn that had just started.
+    // Returns true when the pass should synthesize the Stop. Never throws.
+    inline bool ShouldSynthesizeStop(SessionState state, std::wstring_view lastStopReason, bool interrupted, int64_t quietForMs, bool externalWorkOngoing = false, int64_t lastPromptUnixMs = 0, int64_t tailWriteUnixMs = 0, int64_t nowUnixMs = 0) noexcept
     {
         if (state != SessionState::Running && state != SessionState::NeedsApproval)
+    // PURE + total: has the user submitted a prompt that the transcript has NOT recorded yet? While that
+    // holds, the parsed tail still describes the PREVIOUS turn, so it must not be judged as the end of the
+    // current one: recon-stop, recon-stop-idle and recon-error all hold.
+    //
+    // THE TURN-START RACE (HOOKS.md "State machine"). Measured 2026-10-01: 1,840 false Waitings over 97 days
+    // of the release log, 92% of that day's false Waitings, about 29% of that day's prompts.
+    //   1. A prompt-carrying UserPromptSubmit sets Running, and every registry notify Wake()s the scanner,
+    //      so a pass runs ~6 ms later (p90 83 ms).
+    //   2. Claude writes the prompt line only after its UserPromptSubmit hooks finish. The line's own
+    //      `timestamp` is the submit time, but its bytes land ~0.2-0.5 s later.
+    //   3. So that pass sees the previous turn's terminal stop_reason, a transcript quiet for minutes, and
+    //      a heartbeat not yet refreshed off "idle" (the ~2 s S-lane): the exact missed-Stop shape.
+    //   4. recon-stop fired, the session read Waiting for ~220 ms, and recon-run undid it when the prompt
+    //      line landed. A slash command is worse: its echo is not a turn event, so only the 20 s
+    //      outlived-work promotion undid it.
+    //
+    // The proof is two timestamps whose order cannot lie:
+    //   lastPromptUnixMs — TurnAccounting's stamp of the newest PROMPT-CARRYING UserPromptSubmit: the
+    //                      forwarder's start time ($ts is taken before it even reads stdin), so it precedes
+    //                      every byte claude can write for that prompt. An EMPTY twin, or the recon-run
+    //                      synth, never stamps it (DELIVERY_PLAN.md R3).
+    //   tailWriteUnixMs  — the transcript's last-write time at this pass's stat: the newest byte the parse
+    //                      can possibly reflect.
+    // lastPrompt STRICTLY newer than tailWrite means not one byte was written since the prompt was submitted,
+    // so every turn end in the tail belongs to an EARLIER turn. A genuine missed Stop is never held: its
+    // turn's end line was written after that turn's prompt, so tailWrite > lastPrompt.
+    //
+    // BOUNDED by kScanPromptLandingGraceMs after the prompt. A submit claude never records (Esc during the
+    // hook phase, or a re-submit before the first one took) would otherwise hold Running forever, the
+    // d1f3f198 stuck-Running shape. When the hold expires, the classic verdict runs.
+    //   lastPromptUnixMs — the stamp above (0 = no prompt-carrying hook ever seen: a hookless session).
+    //   tailWriteUnixMs  — the stat's last-write time (0 = unknown: no stat yet, or the file vanished).
+    //   nowUnixMs        — the pass's clock. 0 skips the bound; that is the legacy, unbounded recon-error
+    //                      behavior its pre-existing callers relied on.
+    // Either stamp at 0 disables the guard (never suppress blind). Returns true while the synths must hold.
+    // Never throws.
+    inline bool NewerPromptNotYetInTranscript(int64_t lastPromptUnixMs, int64_t tailWriteUnixMs, int64_t nowUnixMs) noexcept
+    {
+        if (lastPromptUnixMs <= 0 || tailWriteUnixMs <= 0 || lastPromptUnixMs <= tailWriteUnixMs)
+        {
+            return false; // no prompt stamp, an unknown tail, or the transcript already moved past the prompt
+        }
+        if (nowUnixMs > 0 && nowUnixMs - lastPromptUnixMs >= kScanPromptLandingGraceMs)
+        {
+            return false; // the prompt never reached the transcript within the grace: stop holding the verdict
+        }
+        return true;
+    }
+
         {
             return false; // only a turn-in-progress / blocked-on-user state has a turn to end
         }
@@ -514,6 +583,10 @@ namespace Agentmaster
     //       - "" (no last-prompt marker ever seen — older/subagent transcripts: positional flag governs), OR
     //       - == errorEpochLeaf (the leaf has not moved at all since the error appended — the common case), OR
     //       - in errorBranchUuids (the leaf advanced onto the error's bookkeeping descendant chain — the
+        if (NewerPromptNotYetInTranscript(lastPromptUnixMs, tailWriteUnixMs, nowUnixMs))
+        {
+            return false; // the turn-start race: the tail is an EARLIER turn's — the prompt just submitted has not landed yet
+        }
     //         error's uuid + every later line whose parent is already on the frontier, accumulated in
     //         _readDelta from Node events). A leaf that is NONE of these is a genuine rewind off the error.
     // (Equality with errorEpochLeaf was the ORIGINAL test; it MISSED the forward-advance case because the
@@ -585,7 +658,13 @@ namespace Agentmaster
     // error line whose flush moves tailWrite past the prompt stamp, so a real re-error still fires).
     // A hookless session never stamps lastPromptUnixMs (0 -> guard inert), and tailWriteUnixMs == 0
     // (unknown — defaulted legacy callers) self-disables the guard rather than suppressing blind.
-    inline bool ShouldSynthesizeError(SessionState state, bool errorIsActiveLeaf, int64_t quietForMs, int64_t lastPromptUnixMs = 0, int64_t tailWriteUnixMs = 0) noexcept
+    // Since 2026-10-01 this is the SHARED NewerPromptNotYetInTranscript, the same predicate recon-stop and
+    // recon-stop-idle now hold on, and it is BOUNDED by `nowUnixMs` (default 0 = the old unbounded hold).
+    // All three gates hold together and release together. A retry that never reached the transcript
+    // re-asserts Error once kScanPromptLandingGraceMs passes; with this gate unbounded and recon-stop
+    // bounded, recon-stop would land Waiting on the errored tail first and hide the failure.
+    // Returns true when the pass should synthesize Error. Never throws.
+    inline bool ShouldSynthesizeError(SessionState state, bool errorIsActiveLeaf, int64_t quietForMs, int64_t lastPromptUnixMs = 0, int64_t tailWriteUnixMs = 0, int64_t nowUnixMs = 0) noexcept
     {
         if (!errorIsActiveLeaf)
         {
@@ -595,7 +674,7 @@ namespace Agentmaster
         {
             return false; // already Error — idempotent, never re-fires off the unchanged tail
         }
-        if (tailWriteUnixMs > 0 && lastPromptUnixMs > tailWriteUnixMs)
+        if (NewerPromptNotYetInTranscript(lastPromptUnixMs, tailWriteUnixMs, nowUnixMs))
         {
             return false; // a REAL prompt postdates every parsed transcript byte -> the error is superseded (retry in flight)
         }
@@ -919,7 +998,13 @@ namespace Agentmaster
     // recon-run (the reported "card bg" flap + "jumps to idle/waiting while the API is retrying" bug).
     // NeedsApproval is unaffected: it keeps the SHORT base floor (its pending tool_use is the
     // AskUserQuestion — once answered + idle, that turn really is settled, with no API-retry ambiguity).
-    inline bool ShouldSynthesizeStopFromPresenceIdle(SessionState state, std::wstring_view presenceStatus, std::wstring_view lastStopReason, bool interrupted, int64_t quietForMs) noexcept
+    // `lastPromptUnixMs` / `tailWriteUnixMs` / `nowUnixMs` (all default 0 == the classic behavior) feed
+    // the TURN-START RACE guard, NewerPromptNotYetInTranscript. A prompt submitted after the tail's no-op
+    // turn meets every condition above at once: a long-quiet transcript, a cleared tail, and a heartbeat
+    // still reading "idle" from before the submit. It held Waiting ~220 ms into the new turn (72 times
+    // in 97 days of the release log). Hold until the prompt lands, or the grace says it never will.
+    // Returns true when the pass should synthesize the Stop. Never throws.
+    inline bool ShouldSynthesizeStopFromPresenceIdle(SessionState state, std::wstring_view presenceStatus, std::wstring_view lastStopReason, bool interrupted, int64_t quietForMs, int64_t lastPromptUnixMs = 0, int64_t tailWriteUnixMs = 0, int64_t nowUnixMs = 0) noexcept
     {
         if (state != SessionState::Running && state != SessionState::NeedsApproval)
         {
@@ -946,6 +1031,10 @@ namespace Agentmaster
     }
 
     // PURE + total: should the reconciler synthesize Running because EXTERNAL work is active while the
+        if (NewerPromptNotYetInTranscript(lastPromptUnixMs, tailWriteUnixMs, nowUnixMs))
+        {
+            return false; // the turn-start race: the cleared tail is the EARLIER no-op turn's — the new prompt has not landed yet
+        }
     // session sits Idle / WaitingForInput? The SUBAGENT/FORK mirror of ShouldSynthesizeRunning (which
     // keys on a PARENT-transcript append): a tab whose turn delegated to a subagent — so the parent
     // <id>.jsonl is quiescent while <id>/subagents/*.jsonl grows — or whose live conversation forked to
@@ -1356,6 +1445,12 @@ namespace Agentmaster
             std::wstring activeLeafUuid;
             // The active leaf captured AT THE MOMENT the API error was consumed (= activeLeafUuid then).
             // The error is "the last message" while the leaf STAYS here OR advances onto the error's OWN
+            // Agentmaster (the TURN-START RACE — NewerPromptNotYetInTranscript): the prompt stamp
+            // (TurnAccounting::lastPromptUnixMs) this scanner already logged a held turn end for. The hold
+            // repeats every pass until the prompt line lands (~0.2-0.5 s, at most
+            // kScanPromptLandingGraceMs), so this keeps the [recon-stop-hold] evidence to ONE line per
+            // prompt. 0 == nothing logged yet.
+            int64_t promptHoldLoggedFor{ 0 };
             // descendant chain (errorBranchUuids below); a later last-prompt naming a leaf that is NEITHER
             // is a REWIND past the error -> the error is off the active branch -> leave Error. "" when no
             // marker had been seen yet (then activeLeafUuid is "" too, so the positional lastWasApiError
