@@ -138,7 +138,9 @@ namespace Agentmaster
         // Feeds the question-guard so Autorunner does not auto-answer a clarifying question.
         bool lastMessageIsQuestion{ false };
         // Notification specifically requesting tool permission (vs. an idle notification).
-        // Drives NeedsApproval / ApprovalPolicy rather than the prompt queue.
+        // Drives NeedsApproval — a "needs you" state the Tests Autorunner never sends into — rather
+        // than the prompt queue. (No auto-approval exists: AutorunnerState's ApprovalPolicy is a
+        // persisted placeholder nothing evaluates, so the user answers in the terminal.)
         bool permissionRequest{ false };
         std::wstring tool; // associated tool name, when applicable
         // The submitted prompt body, set ONLY on UserPromptSubmit (escaped on the wire). Lets
@@ -252,11 +254,13 @@ namespace Agentmaster
 
     // The hook-driven state machine (DESIGN §7). PURE — depends only on the current
     // state and the incoming event. This encodes Correctness Rule #1: "waiting" is three
-    // distinct states, and only a clean `Stop` produces WaitingForInput (ready for the
-    // next queued prompt). A `Notification(permission)` produces NeedsApproval, which the
-    // ApprovalPolicy handles — never the prompt queue. A `Stop` whose last message is a
-    // question is STILL WaitingForInput here; it is the scheduler's question-guard (M7),
-    // reading `lastMessageIsQuestion`, that Holds the next prompt.
+    // distinct states, and only a clean `Stop` (or a manual compaction's PostCompact, which
+    // hands the session back) produces WaitingForInput (ready for the next queued prompt). A
+    // `Notification(permission)` produces NeedsApproval, which the prompt queue never answers: every
+    // queued prompt waits until the user answers in the terminal (nothing auto-approves;
+    // ApprovalPolicy is a persisted placeholder). A `Stop` whose last message is a question is STILL
+    // WaitingForInput here; it is the scheduler's question-guard (M7), reading
+    // `lastMessageIsQuestion`, that keeps the next prompt Pending (never parked in Held).
     inline SessionState NextSessionState(SessionState current, const HookMessage& m) noexcept
     {
         // Agentmaster: an API-error turn-ender (a synthetic isApiErrorMessage transcript line the
@@ -428,15 +432,21 @@ namespace Agentmaster
         // PreCompact deliberately falls through to `default`: opening a compaction window neither starts
         // nor ends a turn, so it never touches the accounting (see NextSessionState).
         case HookEvent::PostCompact:
-            // Agentmaster (HOOKS.md "Compaction" — type-ahead DURING a manual compaction): PreCompact set
-            // Running, so a prompt the user submitted while claude was summarizing was counted as
-            // type-ahead above (its UserPromptSubmit fires at Enter). Claude runs it as the NEXT turn the
-            // moment the compaction ends, with NO further UserPromptSubmit — the very batch consume a Stop
-            // performs. Landing WaitingForInput there read the session as READY while claude started that
-            // turn (the Tests Autorunner could deliver into it), so consume the batch and stay Running.
+            // Agentmaster (HOOKS.md "Compaction" — a type-ahead count standing when a MANUAL compaction
+            // ends): consume it like a Stop's type-ahead batch and stay Running instead of landing
+            // WaitingForInput (READY to the Tests Autorunner while claude starts that batch's turn).
             // Keyed on the WaitingForInput result, i.e. a MANUAL compaction only: an AUTO one kept
             // Running (its turn continues), and its queued batch still belongs to that turn's own Stop.
             // Still no turnComplete — a compaction is not a turn boundary.
+            // ⚠ It was written for a prompt typed DURING the compaction, on the assumption that its
+            // UserPromptSubmit fires at Enter and is counted as type-ahead here. Measured on Claude Code
+            // 2.1.280 that does NOT happen: claude QUEUES the prompt (transcript `queue-operation`
+            // enqueue at Enter, dequeue when the compaction ends) and fires its UserPromptSubmit only at
+            // the DEQUEUE, after this PostCompact (session b5ba0337, 2026-09-25: PostCompact 11:16:34.568
+            // -> WaitingForInput, the prompt's UserPromptSubmit 11:16:35.206 -> Running). So in practice
+            // the count is 0 here, the session reads Waiting for ~0.6 s, and this branch is a belt for a
+            // claude that counts at Enter. That blip is why an automatic send waits out the STATE SETTLE
+            // hold (Scheduler.h kStateSettleMs, DELIVERY.md §16) instead of firing on the Waiting.
             if (turns.queuedPrompts > 0 && out.state == SessionState::WaitingForInput)
             {
                 turns.queuedPrompts = 0;

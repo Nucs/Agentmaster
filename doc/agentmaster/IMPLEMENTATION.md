@@ -80,13 +80,17 @@ events to sessions and drives the Triage Board + Tests Autorunner.
 1. **"Waiting-for-you" is three states.** A session is *ready* for an auto-send when it is
    turn-complete (`Stop` → `WaitingForInput`) **or** sitting **Idle** with no turn in progress (a
    freshly launched / just-resumed plan must start, not wait for a `Stop` it will never emit).
-   `Notification(permission)` → Approval Policy (NOT the queue). A `Stop` whose last message is a
-   question → **Held** by the question-guard.
+   `Notification(permission)` → `NeedsApproval`, which the prompt queue never answers: every queued
+   prompt waits until the user answers in the terminal (nothing auto-approves). A `Stop` whose last
+   message is a question keeps the next prompt
+   **Pending** (the question-guard — never parked in `Held`). An automatic send also waits until the
+   status has held steady for 40 s (the STATE SETTLE hold, DELIVERY.md §16).
 2. **Tree `Enter` = Activate** (jump to the session's live tab). It must **never** be
    forwarded to `ITerminalConnection::WriteInput` (that would submit a stray CR).
 3. **Bind queue → sessionId**, never "the selected session" at send time.
 4. **Idempotent sends.** Mark `Sent` atomically + persist; survive restart without replay.
-5. **Backstops.** `stopOnError`, `maxAutoSends`, global pause/kill, `pauseOnHumanInput`.
+5. **Backstops.** `stopOnError`, `maxAutoSends`, global pause/kill, `pauseOnHumanInput` (no feeder
+   yet — it never fires).
 
 ## Milestones (mirror the task list)
 
@@ -113,6 +117,15 @@ events to sessions and drives the Triage Board + Tests Autorunner.
   pause-on-human-input, maxAutoSends, stopOnError, and a global Pause-all backstop; sends
   are idempotent (atomic mark-Sent before inject). UI: per-session mode selector, confirm
   banner, Pause-Tests Autorunner toggle. 79/79 checks pass; runtime check pending deploy.
+  *(As of 2026-10-01 — this entry records M7 as shipped; since then:*
+  - *the question-guard keeps prompts **Pending** instead of `Held`;*
+  - *pause-on-human-input never got its keystroke feeder and is inert;*
+  - *every send goes through `SubmitPrompt`: the delivery gate, the draft swap and verified
+    placement;*
+  - *the pacing rules — the 20 s send spacing and the 40 s STATE SETTLE hold — and the interrupt
+    hold were added.*
+
+  *The current rules are in DELIVERY.md and in HOOKS.md's "Scheduler trigger" section.)*
 - **M8** ✅ Persistence + plan templates + apply-to-many (`AgentMaster/Json.h`,
   `AgentMaster/Persistence`): a tiny dependency-free JSON value/parser/printer; sessions
   (queue + autorunner + metadata) and named plan templates (de)serialize to JSON under

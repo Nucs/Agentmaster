@@ -110,9 +110,13 @@ mirroring C++ `NowMs()`). It exists because hooks are independent fire-and-forge
 arrival order is NOT their fire order: the `Stop` forwarder tails the transcript before connecting,
 so turn N's `Stop` can land *after* turn N+1's `UserPromptSubmit` — the ordered state machine
 (below) uses `ts` to detect that. Appended LAST deliberately: an old 8-field line parses with
-`ts == 0` (the registry then falls back to arrival order), and an old parser ignores the extra
-field — both skew directions across a deploy stay compatible. `ts == 0` also keeps a non-numeric /
-overlong value out (the parser is digits-only + bounded). The canonical format + the
+`ts == 0`, and an old parser ignores the extra field — both skew directions across a deploy stay
+compatible. `ts == 0` also keeps a non-numeric / overlong value out (the parser is digits-only +
+bounded). A `ts == 0` parse never reaches the state machine as 0: the bridge stamps the line's
+ARRIVAL time instead (`HooksBridge.cpp`, both dispatch paths — DELIVERY.md §13). A missing `ts` from
+a current forwarder means a truncated or garbled delivery, and a 0 would DISABLE the stale-Stop and
+too-fast-Stop checks below (both are gated on `ts != 0`) — the ea1dc3dd double-send. Arrival can only
+overstate the fire time, so a suspect event errs toward reading stale, the self-healing direction. The canonical format + the
 (de)serializers live in **`HookWire.h`**: `BuildWireLine` / `ParseWireLine` / `WireEscape` /
 `WireUnescape` — shared verbatim by the bridge and the unit tests so the format has one source of
 truth.
@@ -273,12 +277,12 @@ The materialized `hooks-settings.json` (`BuildHooksSettingsJson`) registers the 
 | --- | --- | --- |
 | `SessionStart` | session began (or resumed / cleared / compacted — the wire `source`) | create/confirm `SessionInfo`, state → `Idle` (an at-rest Waiting/NeedsApproval is kept; `source=compact` keeps a `Running` turn `Running` and leaves the turn accounting alone) |
 | `PreCompact` | a compaction is starting (`trigger` manual/auto) | state → `Running`; opens the **compaction window** (`SessionInfo::compactingSinceUnixMs`) — see *Compaction* |
-| `PostCompact` | the compaction's summary is in | closes the window; `manual` → `WaitingForInput` (no `turnComplete`), or `Running` when a prompt typed during it is queued; `auto` → unchanged (the turn continues) |
+| `PostCompact` | the compaction's summary is in | closes the window; `manual` → `WaitingForInput` (no `turnComplete`); `auto` → unchanged (the turn continues). A prompt typed DURING a manual compaction is queued by claude and fires its `UserPromptSubmit` only after this hook, so the session reads Waiting for a moment before going Running (see *Compaction*) |
 | `UserPromptSubmit` | a prompt was submitted (by user or by us) | state → `Running`; record the prompt in the Auto Testing; recognize + suppress the echo of a prompt **we** injected (idempotency) |
-| `Notification` (permission) | tool-permission prompt | state → `NeedsApproval`; run **Approval Policy** (NOT the prompt queue). A plain idle notice leaves state unchanged |
-| `Stop` | main agent finished the turn | state → `WaitingForInput`; **Tests Autorunner.tryAdvance()**; carries `isQuestion` for the question-guard |
+| `Notification` (permission) | tool-permission prompt | state → `NeedsApproval`: the queue holds (never an auto-send into a permission prompt) until you answer in the terminal. Nothing auto-approves — `ApprovalPolicy` is a persisted placeholder no code evaluates. A plain idle notice leaves state unchanged |
+| `Stop` | main agent finished the turn | a real, non-stale turn-complete → `WaitingForInput` + the Tests Autorunner advance (`RequestAdvance` → `DecideAdvance`); a stale, too-fast or type-ahead `Stop` keeps the state (see *State machine*); carries `isQuestion` (the last assistant text ends with `?`) for the question-guard |
 | `SubagentStop` | a subagent finished | informational only (state unchanged) |
-| `SessionEnd` | session ended | state → `Done`; stop Tests Autorunner |
+| `SessionEnd` | session ended | state → `Done` (never ready, so nothing is auto-sent; an unrecovered API-error tail still turns it into `Error`) |
 
 **`PreToolUse` / `PostToolUse` are defined in the protocol but intentionally NOT registered**
 (`HookEvents.h`): the session is already `Running` between `UserPromptSubmit` and `Stop`, and
@@ -291,14 +295,15 @@ heartbeats or `PreToolUse`-based auto-approval, but the shipped config does not 
 `NextSessionState(current, msg)` (`HookEvents.h`) is **pure** — it depends only on the current
 state and the incoming event, so the single most correctness-critical piece is unit-tested
 standalone. It encodes Correctness Rule #1 — "waiting" is three distinct states, and only a clean
-`Stop` produces `WaitingForInput`:
+`Stop` (or a manual compaction's `PostCompact`, which hands the session back) produces
+`WaitingForInput`:
 
 ```
 SessionStart      -> Idle             # but Waiting/NeedsApproval stay; source=compact keeps Running
 UserPromptSubmit  -> Running
-Pre/PostToolUse   -> Running          # if ever enabled (not registered today)
+Pre/PostToolUse   -> Running          # if ever enabled (not registered today; the scanner synthesizes PostToolUse)
 Notification      -> NeedsApproval if permissionRequest, else unchanged
-Stop              -> WaitingForInput  # question-guard (M7) Holds the next prompt if isQuestion
+Stop              -> WaitingForInput  # if isQuestion, the question-guard (M7) keeps the next prompt Pending
 SubagentStop      -> unchanged
 PreCompact        -> Running          # any trigger, any state (see Compaction)
 PostCompact       -> WaitingForInput if trigger=manual, else unchanged
@@ -323,6 +328,22 @@ showing `WaitingForInput`/`Idle` for an ENTIRE turn (the "second turn never show
   next non-quiescent `Stop` **consumes** the batch (`queuedPrompts -> 0`) and stays `Running` —
   no `turnComplete`, so Tests Autorunner does not inject into the already-starting turn (Rule #1's one
   prompt per turn).
+- **Too-fast `Stop`** (`kMinRealTurnSpanMs`, 2 s — DELIVERY.md §9) — a non-quiescent `Stop` whose
+  `ts` is less than 2 s past the newest prompt's `ts` is treated as stale too: state kept, no
+  question bit, no advance. A turn's `Stop` can fire twice. The duplicate's slow forwarder can stamp
+  its `ts` just AFTER the next prompt's `UserPromptSubmit`, beating the strict stale test and reading
+  as a 15 ms "turn-complete". No real turn completes that fast: the fastest trivial turn in the
+  incident corpus took 3.4 s.
+  - It is checked after the type-ahead branch, so a batch consume, which legitimately lands close
+    behind its prompt, stays floor-free.
+  - A genuinely sub-2 s turn self-heals, because the scanner's quiescent `Stop` is exempt.
+- **Only a PROMPT-CARRYING `UserPromptSubmit` counts** (DELIVERY.md §10) — an empty-prompt one moves
+  the state to `Running` but never stamps `turns.lastPromptUnixMs` and never counts as type-ahead.
+  Real hooks were measured trailed by late EMPTY twins (~0.5–2.6 s, no transcript message). Their
+  late stamp floor-suppressed the next real `Stop`, and a twin landing mid-turn made that `Stop` read
+  as a batch consume. The scanner's `recon-run` synth is empty by design and takes the same
+  state-only path. Every `UserPromptSubmit` logs one `[ups]` line naming its disposition (echo
+  consumed / recorded as Typed / noise / EMPTY).
 - **Quiescent `Stop`** — the scanner's synthesized missed-Stop (`HookMessage::quiescentStop`,
   never on the wire) comes from a ≥2 s-quiet transcript whose tail carries a **terminal**
   stop_reason (`IsTerminalStopReason`: `end_turn` / `stop_sequence` / `max_tokens` / `refusal`
@@ -383,9 +404,13 @@ accumulate; a phantom `UserPromptSubmit` — e.g. a slash command that never sta
 costs at most one wrong-`Running` interval, which the scanner's quiescence reconciliation ends),
 `SessionStart`/`SessionEnd` reset the accounting (**except** `SessionStart(source=compact)`: the same
 conversation — after an auto-compaction, the same TURN — continues, so wiping it would turn a queued
-type-ahead batch's `Stop` into a false turn-complete), a manual compaction's `PostCompact` consumes a
-batch typed during it exactly like a `Stop` does, and `ts == 0` events (an old forwarder) degrade
-to plain arrival order. Only a `turnComplete` transition fires the Tests Autorunner advance; the wire
+type-ahead batch's `Stop` into a false turn-complete), and a manual compaction's `PostCompact` consumes
+a type-ahead count still standing when it ends, like a `Stop` does. In practice that count is 0:
+claude holds a prompt typed DURING the compaction and fires its `UserPromptSubmit` only after
+`PostCompact` (see *Compaction*). A `ts`-less line never reaches the machine as 0 — the bridge stamps
+its arrival time (see *The wire line*). Only a `turnComplete` transition fires the `Stop`-seam
+advance; the scheduler separately re-checks any at-rest session with queued work on every registry
+change (see *Scheduler trigger*). The wire
 `ts` also feeds `lastActivityUnixMs` (monotonic — a stale event can't regress the
 WaitingForInput→Idle decay anchor, which real hooks previously never refreshed at all). The launch
 seam additionally stamps a NEW session's or fork's anchor with its creation instant, so a just-created
@@ -557,8 +582,9 @@ summarizes the middle (`messagesSummarized`, `userContext`). And a legacy resume
   hook's fire `ts` (transient). `PostCompact` closes it, and so does anything that proves it over or moot:
   the trailing `SessionStart`, `SessionEnd`, a `Stop` (a real one cannot overtake the `PreCompact` that
   follows it — claude awaits a `Stop` hook before it runs a queued `/compact`), or an API-error synth (a
-  failed compaction). A `UserPromptSubmit` does NOT close it (the user typed during the compaction;
-  claude is still summarizing).
+  failed compaction). A `UserPromptSubmit` does NOT close it: no submit proves the summarization is
+  over, and a prompt the user types meanwhile is held by claude until the compaction ends anyway
+  (its hook fires after `PostCompact` — see below).
 - **The scanner holds while the window is open** — `CompactionInFlight` (`SessionScanner.h`, pure) forces
   the quiescence clock to 0, standing down every quiescence-gated synth together (recon-stop, the
   presence-idle release, recon-block, recon-error, the error release). It ends on the closing hook,
@@ -570,11 +596,23 @@ summarizes the middle (`messagesSummarized`, `userContext`). And a legacy resume
   each logging `[SessionStart] … state=0` then `[recon-subagent] Idle -> Running` — and `Idle` is READY to
   the Tests Autorunner, so a queued prompt could be delivered into the continuing turn.
 - **`PostCompact(manual)` → `WaitingForInput`** without a `turnComplete` (no question-guard, no Stop-seam
-  advance); the flash ring / toast then tell a user who switched away that the compaction finished. A
-  prompt typed DURING the compaction (counted as type-ahead, since `PreCompact` set `Running`) runs as the
-  next turn right after it with no further hook, so `PostCompact` consumes that batch and stays `Running`.
-  `PostCompact(auto)` keeps the current state (the turn continues). Before, a manual `/compact` at rest
-  read `Waiting`/`Idle` for the whole compaction (its echo is written only afterwards).
+  advance); the flash ring / toast then tell a user who switched away that the compaction finished.
+  **A prompt typed DURING the compaction** is not counted as type-ahead, contrary to what this doc
+  used to say. Measured on Claude Code 2.1.280 (session `b5ba0337`, 2026-09-25; local times, UTC+3 —
+  the transcript itself stores UTC):
+  - claude QUEUES the prompt: the transcript records a `queue-operation` enqueue at Enter (11:13:23.750)
+    and a dequeue as the compaction ends (11:16:34.733);
+  - its `UserPromptSubmit` fires only at the dequeue, after `PostCompact`: `PostCompact` at 11:16:34.568
+    landed `WaitingForInput`, and the prompt's `UserPromptSubmit` at 11:16:35.206 landed `Running`.
+
+  So the session reads Waiting for ~0.6 s between the two — a blip the scanner's `recon-subagent`
+  can also cover (presence `busy`). `PostCompact` still consumes a type-ahead count standing when it
+  ends (a belt for a claude that counts at Enter), but here that count is 0. That at-rest blip is one
+  reason an automatic send waits out the STATE SETTLE hold (DELIVERY.md §16) rather than firing on
+  Waiting.
+- **`PostCompact(auto)`** keeps the current state (the turn continues). Before the window existed, a
+  manual `/compact` at rest read `Waiting`/`Idle` for the whole compaction (its echo is written only
+  afterwards).
 - ⚡ **cache hint**: neither `PreCompact` nor `PostCompact` is API-turn evidence (`IsApiTurnEvidence`) — the
   summarization replaces the prefix, so the next request's cache is cold.
 

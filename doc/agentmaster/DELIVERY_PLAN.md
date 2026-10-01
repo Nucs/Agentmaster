@@ -1,7 +1,8 @@
 # Delivery hardening — implementer plan
 
-> **Part 1 (R1–R3): IMPLEMENTED. Part 2 (R4–R8, verified placement): PLANNED** — motivated by
-> Incident 3 (DELIVERY.md §11), the invisible-content merged send.
+> **Part 1 (R1–R3): IMPLEMENTED. Part 2 (R4–R8, verified placement): IMPLEMENTED** (each part's
+> deviations are flagged `⚠ DEVIATION` inline) — Part 2 was motivated by Incident 3 (DELIVERY.md §11),
+> the invisible-content merged send.
 
 # Part 1 — R1–R3 (implemented)
 
@@ -325,6 +326,10 @@ between.
   ~21 s worst hold — still under `kDeliveryGateTimeoutMs` (45 s) with ≥1.6× margin; keep 45 s,
   re-assert the margin in the constant's comment. A normal empty-box send costs one settle
   (~60–300 ms) extra.
+  > **⚠ DEVIATION — raised to 75 s.** The implemented verify grew the swap's worst legitimate hold to
+  > ≈ 36 s: 2.4 s clear + ~3 s fill-verify (2 attempts) + ~4 s partial-discard + ~5 s foreign-undo +
+  > 18 s submit-await + ~4 s restore. So `kDeliveryGateTimeoutMs` is **75 s** (≈ 2× that), not 45 s
+  > (`SessionModels.h`; DELIVERY.md §3).
 - **⚠ The residual, stated honestly:** verify→CR remains ONE ~60 ms poll of blind window — an
   async TUI insert can still land inside it (no atomic read+write exists on a PTY). The verify
   shrinks the exposure from "unbounded trust in a 60 ms–2.4 s-stale precondition" to one poll;

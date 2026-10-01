@@ -251,8 +251,9 @@ Wiring (all existing seams):
   (Tests Autorunner cycle, Send now, Queue peek, Jump to Manager) + contextual Confirm / Skip. Delivers
   ask #2.
 - **Phase 3 — deferred.** Approve / Deny on `NeedsApproval` (today approvals go through the
-  in-terminal y/n; surfacing them on the badge means routing through the Approval Policy, not the
-  prompt queue — Rule #1); a live transcript "peek" (`SessionInfo::lastAssistantText`, already
+  in-terminal y/n; surfacing them on the badge means building a separate approval path — no Approval
+  Policy is implemented yet; `ApprovalPolicy` is only a persisted placeholder — never the prompt
+  queue, Rule #1); a live transcript "peek" (`SessionInfo::lastAssistantText`, already
   captured by the scanner); a per-session pause distinct from global pause.
 
 ## 11. Correctness rules to respect (do not regress)

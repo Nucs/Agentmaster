@@ -126,9 +126,9 @@ detected and bound; `CCMGR_SESSION_ID` / hooks remain the low-latency push.
    Idle ───────────────────────────────▶ Running
      ▲                                      │ Stop hook
      │ (next turn)                          ▼
-     └──────────────────────────── WaitingForInput ──▶ (Tests Autorunner.tryAdvance)
+     └──────────────────────────── WaitingForInput ──▶ (Tests Autorunner advance — DecideAdvance)
                                           │
-   Notification(permission) ──▶ NeedsApproval ──▶ ApprovalPolicy
+   Notification(permission) ──▶ NeedsApproval ──▶ the queue holds; you answer in the terminal
    turn ends in error ───────▶ Error      SessionEnd ──▶ Done
 ```
 
@@ -139,7 +139,7 @@ The crucial subtlety: **"the agent is waiting" is three different states**, and 
 Authoritative state with no screen-scraping. Full contract in [`HOOKS.md`](./HOOKS.md); summary:
 
 - On spawn, set `CCMGR_SESSION_ID=<guid>` on the child and write a hooks config whose commands post `{sessionId, cwd, event, …}` to a **local named pipe** (`\\.\pipe\agentmaster.<pid>`), read on a dedicated thread. (Fallback: the forwarder discovers the pipe via a `bridge.json` file when it didn't inherit the env; the always-on floor beneath the lossy push is the Fleet Observer — §8a.)
-- Event → effect: `SessionStart`→register/Idle; `UserPromptSubmit`→Running (also confirms our injected prompt landed → idempotency); `PreToolUse/PostToolUse`→activity; `Notification(permission)`→NeedsApproval + ApprovalPolicy; `Stop`→WaitingForInput + `Tests Autorunner.tryAdvance`; `SubagentStop`→info; `SessionEnd`→Done.
+- Event → effect: `SessionStart`→register/Idle; `UserPromptSubmit`→Running (also confirms our injected prompt landed → idempotency); `PreToolUse/PostToolUse`→activity; `Notification(permission)`→NeedsApproval (the queue holds until you answer; nothing auto-approves — `ApprovalPolicy` is a persisted placeholder); `Stop`→WaitingForInput + the Tests Autorunner advance (a real, non-stale turn-complete only — HOOKS.md *State machine*); `SubagentStop`→info; `SessionEnd`→Done.
 - The hook payload carries a best-effort `lastMessageIsQuestion` flag that feeds the question-guard.
 
 ### 8a. Fleet Observer — the PULL correlation/state floor (shipped)
@@ -253,7 +253,7 @@ dot (`[icon] ● <title>`).
 
 **Auto Testing** = a per-session ordered list of prompts. **Tests Autorunner** advances it.
 
-### The loop
+### The loop (the original sketch — the shipped gate order is in HOOKS.md *Scheduler trigger*)
 ```
 Stop hook ─▶ WaitingForInput ─▶ tryAdvance(session)
 tryAdvance(s):
@@ -273,15 +273,20 @@ tryAdvance(s):
 | Sub-state | Signal | Tests Autorunner |
 |---|---|---|
 | Turn complete, ready for next msg | `Stop` | ✅ dequeue + send next |
-| Needs tool approval ("y/n") | `Notification(permission)` | ❌ **ApprovalPolicy**, NOT the queue |
-| Asked a clarifying question | `Stop` + last msg is a question | ⛔ **Held** by the question-guard |
+| Needs tool approval ("y/n") | `Notification(permission)` | ❌ NOT the queue — it holds until you answer in the terminal |
+| Asked a clarifying question | `Stop` + last msg is a question | ⛔ the question-guard keeps the next prompt **Pending** until a non-question turn-complete |
 
 ### Policy & guards
-- **Default mode:** `Off` (the cog stamps a configurable default onto new sessions). `SemiAuto`
-  gives a one-click confirm per send; `Full` is hands-off.
+- **Default mode:** the cog's `defaultAutorunnerMode` — shipped as **`Full`** — is stamped onto every
+  new, adopted and reopened session (the bare `AutorunnerState` default is `Off`; a managed Codex stays
+  `Off`). `SemiAuto` gives a one-click confirm per send; `Full` is hands-off. The scheduler itself runs
+  only in a dev build or with debug mode on (`IsDevOrDebugPackage`).
 - **Question-guard ON** by default; per-item override `answers-a-question:ok` (set as the prompt's `guardPattern`).
-- **Approval policy** is separate: auto-approve an allowlist of safe tools, else pause for human.
-- **Backstops:** `stopOnError`, `maxAutoSends`, throttle, global **Pause-all**, `pauseOnHumanInput`.
+- **Approvals** are separate: `NeedsApproval` holds the queue until you answer in the terminal. An
+  `ApprovalPolicy` (`pauseForHuman` + an `autoApproveTools` allowlist) is in the data model and
+  persisted, but nothing evaluates it — there is no auto-approval.
+- **Backstops:** `stopOnError`, `maxAutoSends`, throttle, global **Pause-all**, `pauseOnHumanInput`
+  (⚠ no feeder yet — `NoteHumanInput` has no caller, so it never fires).
 - **Idempotency:** mark `Sent` atomically + persist; `UserPromptSubmit` confirms landing; survive restart without replay.
 - **Multiline:** a bare `\n` may submit early in the Ink input — use the paste/bracketed-paste path for multi-line bodies, then one submit.
 
@@ -293,7 +298,22 @@ per turn** by a pickup guard (the `echoed` flag) so a change-driven advance can'
 CR` faster than Claude's Ink TUI inits its input box, so the submit Enter is absorbed as a newline
 and the turn never starts; the scheduler re-presses a **lone Enter** (never the text) up to 3 times,
 regardless of mode. (3) **Failed-inject rollback:** every inject path rolls a failed send back to
-`Pending` rather than stranding a phantom `Sent` (invariant #4).
+`Pending` rather than stranding a phantom `Sent` (invariant #4). Later refinements, each written up
+in [`DELIVERY.md`](./DELIVERY.md):
+- **The question-guard keeps the prompt Pending.** It is never parked in `Held`, a legacy status
+  only rehabilitated.
+- **One send seam.** `Sent` is marked BEFORE the injection, and every send goes through
+  `SubmitPrompt`. That seam provides:
+  - a per-session **delivery gate** (one owner of the input box, §3);
+  - the **draft swap**, which moves your unsent draft out of the way and back (PENDING_INPUT.md §9);
+  - **verified placement**: paste, read the box back, and only then the Enter (§11).
+- **Evidence over clocks.** The pickup guard is released by the echo (push or pull), not a timer
+  (§9). A provably lost send is marked Failed and pauses the autorunner (`[lost-send]`), and a
+  never-typed one is retried (§12). A merged submit is named (`[merge-detected]`, R7).
+- **Pacing.** A **20 s minimum spacing** between automatic sends (§13), and the **40 s STATE SETTLE
+  hold**: the status must hold steady before an automatic send (§16).
+- **Esc parks the autorunner** until your next message (the interrupt hold, §14).
+- **Every paste is sanitized** with claude's own invisible-character rule (§15).
 
 ### Plans across the fleet
 - **Templates:** save a plan (e.g. *implement → test → fix → docs → commit → PR*) and apply to any session.
@@ -348,7 +368,8 @@ Claude session (not just managed ones) with two-phase search and Jump / Resume /
 
 - **No silent wrong actions:** approvals never consume planned prompts; question-guard catches clarifications.
 - **Runaway protection:** `maxAutoSends`, `stopOnError`, global **Pause-all**, optional per-session token/turn budget.
-- **Approvals:** default to pausing for human; only an explicit allowlist auto-approves.
+- **Approvals:** always pause for the human — nothing auto-approves (the `ApprovalPolicy` allowlist in
+  the data model is not implemented).
 - **Local-only IPC:** the hooks pipe is local; no network surface by default.
 - **Don't fight the OS:** never `taskkill` deploy locks or touch the user's running terminal (see Gotchas in `CLAUDE.md`).
 
@@ -357,11 +378,14 @@ Claude session (not just managed ones) with two-phase search and Jump / Resume /
 1. A session is *ready* for an auto-send when it is **turn-complete** (`Stop` → `WaitingForInput`)
    **or** sitting **Idle** with no turn in progress (a freshly launched / just-resumed plan must
    START, not wait for a `Stop` it will never emit); a change-driven advance is held to **one prompt
-   per turn** by the pickup guard. Approvals → ApprovalPolicy; question → Held.
+   per turn** by the pickup guard, and an automatic send waits until the status has held steady for
+   40 s (the STATE SETTLE hold, DELIVERY.md §16). Approvals hold the queue (nothing auto-approves); a
+   question keeps the next prompt Pending.
 2. Tree **`Enter` = Activate**, never `WriteInput` (no stray carriage return into an agent).
 3. Bind queue → **sessionId**, never "the selected session" at send time.
 4. **Idempotent** sends; persist; no replay on restart.
-5. Backstops always available: stop-on-error, maxAutoSends, global pause/kill, pause-on-human-input.
+5. Backstops always available: stop-on-error, maxAutoSends, global pause/kill (pause-on-human-input is
+   configured but has no feeder yet, so it never fires).
 6. State is **hook-derived**, not screen-scraped.
 
 ## 16. Edge cases & risks
