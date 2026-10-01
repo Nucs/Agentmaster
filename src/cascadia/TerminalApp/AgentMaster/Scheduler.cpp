@@ -393,7 +393,9 @@ namespace Agentmaster
             }
         }
 
-        auto plan = DecideAdvance(*s, NowMs(), _registry->LastHumanInputUnixMs(id), _globalPause.load());
+        // The configured STATE SETTLE window rides along (DELIVERY.md §16) — read per decision, so a
+        // SetStateSettleMs change applies at the next advance without touching any queued state.
+        auto plan = DecideAdvance(*s, NowMs(), _registry->LastHumanInputUnixMs(id), _globalPause.load(), _stateSettleMs.load());
 
         if (plan.action == AdvanceAction::Send)
         {
@@ -409,7 +411,9 @@ namespace Agentmaster
             {
                 return;
             }
-            auto plan2 = DecideAdvance(*s2, NowMs(), _registry->LastHumanInputUnixMs(id), _globalPause.load());
+            // Re-decided under the SAME rules after the throttle sleep — the settle window included, so a
+            // status change that landed during the sleep re-arms the hold instead of sending through it.
+            auto plan2 = DecideAdvance(*s2, NowMs(), _registry->LastHumanInputUnixMs(id), _globalPause.load(), _stateSettleMs.load());
             if (plan2.action == AdvanceAction::Send)
             {
                 std::wstring text;
@@ -555,11 +559,14 @@ namespace Agentmaster
             {
                 _noteAdvanceSkip(id, plan.reason);
             }
-            // Agentmaster (send spacing): a TIMED hold (retryAfterMs — today only the minimum send
-            // spacing) self-releases: schedule the re-decide for its expiry. Every OTHER None reason
-            // has an external re-trigger (a hook, a notify, the gate's close, the box-state release);
-            // the spacing window on a quiet session has none — without this the plan would stall
-            // until some unrelated registry mutation happened along.
+            // Agentmaster (send spacing / state settle): a TIMED hold (retryAfterMs — the minimum send
+            // spacing, and the STATE SETTLE window, DELIVERY.md §16) self-releases: schedule the
+            // re-decide for its expiry. Every OTHER None reason has an external re-trigger (a hook, a
+            // notify, the gate's close, the box-state release); a timed window on a quiet session has
+            // none — without this the plan would stall until some unrelated registry mutation happened
+            // along. A status change during a settle window needs nothing special here: the re-decide at
+            // the old expiry reads the moved anchor and schedules the new one (the deferred map keeps the
+            // EARLIEST due, so an early wake costs one cheap re-decide, never a late send).
             if (plan.retryAfterMs > 0)
             {
                 _scheduleDeferredAdvance(id, plan.retryAfterMs);

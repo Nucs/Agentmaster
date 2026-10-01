@@ -781,3 +781,115 @@ read ahead of the console fallback, `-Encoding UTF8`, the ASCII body, the BOM on
 of it was compiled, the port's control flow was also differentially fuzzed against claude's own
 function (a Python transliteration of the C++, 40 k random strings dense in candidates and their
 context characters — 0 mismatches).
+
+## 16. The STATE SETTLE hold — a status must hold steady for 40 s before an automatic send
+
+**The request (2026-10-01):** *"Can we have 40s delay between state change and the input time of the
+queued prompt (whichever later) because which might be changing states temporarily. so we have 40s
+that postpones itself on further status change until status stabilizes into a sendable status."*
+
+**Why.** The advance fired the INSTANT a session read "ready": the turn-complete seam runs on the
+`Stop` that lands `WaitingForInput`, and the idle-start trigger on any notify of an at-rest session.
+But "ready" is often momentary, and each lane that could catch it sees only half of the session:
+- a subagent or teammate outlives the turn (the scanner's `recon-subagent` re-lights Running a
+  survey later);
+- an auto-compaction opens and closes its PreCompact/PostCompact window;
+- an API retry backs off;
+- `recon-stop` lands a beat before `recon-run` reverses it;
+- a resumed tab spends its first seconds starting claude.
+
+The 20 s send spacing (§13) only covers the gap after OUR previous send. A status that flaps between
+turns, or a prompt queued into a just-settled session, still went out at once.
+
+The 2026-10-01 log sweep of the status flicker measured the commonest flap on the release log: the
+turn-start recon-stop race. A pass runs before claude flushes the new prompt's line, reads the
+previous turn's terminal tail and synthesizes a false Waiting.
+- It happened 1,938 times. The false Waiting lasted 0.4 s at the median, 1.5 s at p90 and 20.7 s at
+  p99, so its tail outlives the 20 s spacing.
+- The 40 s window covers it: the false Waiting stamps the clock, the return to Running restamps it,
+  and nothing is sent until the status holds.
+- This hold does NOT fix the flicker itself. The board and tab still show it, and the root fix — a
+  prompt-supersession guard on recon-stop, like recon-error's — is separate.
+
+**The rule.** An AUTOMATIC send waits until the session has HELD a sendable status (Idle /
+WaitingForInput, open, launched or adopted) for `kStateSettleMs` (**40 s**, `Scheduler.h`). The
+window is counted from the **later** of two registry-stamped instants:
+- `SessionInfo::stateChangedAtUnixMs` — when the session's sendability last changed: its `state`,
+  or `live` (open vs archived), or `started` (claude launched vs a dormant tab);
+- `QueuedPrompt::queuedAtUnixMs` — when the prompt entered the queue.
+
+So a prompt queued into a long-idle session still waits its own full window. **Every further status
+change restarts the window**, so the hold postpones itself until the status stabilizes.
+
+**Mechanics.**
+- **The registry owns both clocks**; callers never stamp them, and both are transient (never
+  persisted).
+- `CaptureSettleFacts` + `StampSettleClock` (`SessionModels.h`, pure) run at every seam that can move
+  a settle fact:
+  - `OnHookEvent`, after the ordered transition — a stale or type-ahead Stop that keeps the state
+    keeps the clock;
+  - `Update` and `UpdateQuiet` — every triage move, the Waiting→Idle decay, an archive;
+  - `Upsert` — a new record is stamped at creation; a replaced record KEEPS its clock unless its
+    state, `live` or `started` changed, so re-upserting a snapshot never moves it;
+  - `SetStarted`, the `ObserveClaude` create and revive paths, and the tab-sibling supersede;
+  - the hook-adopt creation path.
+- Stamps use the registry's ARRIVAL clock, never a wire `ts` (the §13 lesson).
+- `StampNewlyQueuedPrompts` stamps every Pending (or legacy Held) prompt still reading 0 after each
+  `Upsert` / `Update` / `UpdateQuiet`. That one seam covers every insertion path: the compose box,
+  the overlay mail button, a template apply and the /handover park all insert inside an `Update`.
+- A rollback to Pending keeps the original queue stamp, so a retry never waits a fresh window.
+
+**The decision.** `StateSettleRemainingMs` (`Scheduler.h`, pure) is applied in `DecideAdvance`.
+- **Placement:** after the question-guard (a question-parked plan schedules no timers) and before
+  the send spacing (the narrower, send-anchored belt answers once the status has settled).
+  Not-ready, the delivery gate, the box state, the pickup guard, a drained queue and a manual gate
+  all answer first.
+- **A TIMED hold:** `AdvancePlan::retryAfterMs` is the time left, and the existing deferred
+  re-advance (`_scheduleDeferredAdvance`) wakes the plan when the window ends — nothing polls. A
+  status change in between simply moves the anchor, and the re-decide at the old expiry holds again
+  and schedules the new one.
+- **Reasons:** two fixed literals, so the `[advance-skip]` dedup works and the log says which clock
+  is holding the queue: `status settle (...)` and `queue settle (...)`.
+- **Fail-open edges:** an unstamped anchor holds nothing. A FUTURE anchor (a backward clock step)
+  reads as settled, never a hold the size of the step.
+- **Not held:** Send-now and a SemiAuto Confirm click (the human's explicit sends bypass
+  `DecideAdvance`), and the /handover paste pump (its own ~1.5 s settle and Send-now recipe).
+- **Held:** the SemiAuto ARMING waits out the window too, like the spacing — an armed confirm races
+  status exactly like an auto-send.
+
+**Consequences (intended).**
+- Every automatic prompt now goes out at least 40 s after the turn before it ended. Once that turn's
+  echo has been consumed, the window starts at the real `Stop`.
+- A restored or activated tab's queue waits 40 s after its claude actually launched (the `started`
+  flip).
+- A prompt queued into an idle session waits 40 s from when it was queued.
+- The wait shows up as one `[advance-skip] … (status settle …)` line per turn in autorunner.log.
+
+**UI.** Row 3 of the per-tab overlay (the next queued prompt) shows a steel-blue `settling` cue
+beside the question-hold cue. Its tooltip states the rule, and Send now skips it.
+- It is computed by the same `StateSettleRemainingMs`, and only where the scheduler would otherwise
+  drive the session: open, launched or adopted, autorunner on, at rest, no question held.
+- A settle window running out changes nothing in the registry, so no notify would clear the cue. A
+  one-shot `DispatcherTimer` (`_ArmSettleRefresh`) re-runs `_Refresh` just past the window's end. It
+  captures only a weak ref and stops itself once the overlay is gone (the `_summaryTimer` idiom).
+- The Manager's Auto-Testing pane and the board are unchanged.
+
+**Knobs.** `kStateSettleMs` is the default. `Scheduler::SetStateSettleMs` changes the window the
+scheduler hands `DecideAdvance` (0 disables it); today only the test harness calls it. It is not a
+cog setting yet.
+
+**Coverage** (`tests_spawn_sched.cpp`):
+- `TestStateSettle`:
+  - the pure arithmetic: both anchors, the full-window boundary, a future anchor, a 0 / negative /
+    custom window;
+  - `DecideAdvance`: the hold, both reasons and exact `retryAfterMs`, release at the full window,
+    window 0, SemiAuto arming, the gates that answer first, and the hand-off to the send spacing;
+  - registry stamping at every seam: creation, keep on a no-op Update or a stale re-upsert, the
+    live and started flips, a real vs a stale Stop, queue insertion, rollback keeping the queue
+    stamp, ObserveClaude create and revive, hook adoption;
+  - the REAL scheduler on short windows: nothing sent inside the window, a mid-window status flap
+    postponing the send past the original window's end, the timed self-release with nothing else
+    touching the registry (and never sooner than one window after the LAST change), and the queue
+    anchor end to end.
+- The five pre-existing scheduler integration cases set the window to 0 — they pin other gates on
+  short polls.

@@ -359,6 +359,24 @@ namespace Agentmaster
         // delivered" (retryable — reclaimed to Pending). Reset to 0 at each fresh send/rollback;
         // deliberately NOT reset by an Enter-retry press (the fill it retries WAS injected).
         int64_t injectedAtUnixMs{ 0 };
+        // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): when this prompt ENTERED the queue as
+        // waiting work (system-clock ms; 0 == not stamped yet). The Tests Autorunner types a prompt in
+        // only once the session has held a sendable status for the whole settle window, counted from
+        // the LATER of the session's last status change (SessionInfo::stateChangedAtUnixMs) and THIS
+        // stamp — so a prompt queued into an already-idle session still waits out its own full window
+        // instead of firing the instant it lands (StateSettleRemainingMs, Scheduler.h).
+        // Stamped by the REGISTRY, never by callers: every Upsert / Update / UpdateQuiet stamps a
+        // Pending (or legacy Held) prompt still reading 0 (StampNewlyQueuedPrompts below). That one
+        // seam catches every queue-insertion path — the compose box, the overlay mail button, a
+        // template apply, the /handover park — because all of them insert inside a registry Update.
+        // ⚠ A caller must never COPY a prompt into a new queue slot with this stamp reset to 0
+        // expecting nothing to change: the copy is then "queued now" and waits a fresh window.
+        // Deliberately KEPT across a rollback to Pending (a declined / reclaimed send): the user's
+        // input time did not change, and re-stamping would add a full window to every retry.
+        // TRANSIENT (NOT persisted — Persistence.cpp must not write it): a prompt reloaded from disk
+        // reads 0 and is stamped by the load's Upsert, which is moot because reopening the session
+        // restarts its status clock anyway (a live/started flip — StampSettleClock).
+        int64_t queuedAtUnixMs{ 0 };
     };
 
     // Agentmaster (bounded queue history): the queue records EVERY message a session received
@@ -1201,6 +1219,24 @@ namespace Agentmaster
         // Persisted.
         std::wstring codexSessionId;
         SessionState state{ SessionState::Idle };
+        // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): when this session's SENDABILITY last
+        // changed (system-clock ms from the registry's own clock — never a wire ts, the send-spacing
+        // lesson; 0 == never stamped). "Sendability" is the three facts the Tests Autorunner's
+        // idle-start trigger keys on: `state` (the status — Idle / Running / WaitingForInput / …),
+        // `live` (open vs archived) and `started` (its claude launched vs a dormant tab). The
+        // autorunner types the next queued prompt in only after the session has held a sendable
+        // status for the whole settle window (kStateSettleMs, 40 s) since the LATER of this stamp and
+        // the prompt's own QueuedPrompt::queuedAtUnixMs — so a status that flaps
+        // (Running -> Waiting -> Running while a subagent, teammate, compaction or retry is still
+        // settling) never gets a prompt typed into a momentary "ready", and every further change
+        // restarts the wait. Stamped by the REGISTRY, never by callers, at every seam that can change
+        // one of the three facts (OnHookEvent, ObserveClaude, Upsert, Update, UpdateQuiet, SetStarted,
+        // the tab-sibling supersede) through StampSettleClock below; a record the registry CREATES is
+        // stamped at creation (its current status began then). An Upsert that changes none of the
+        // three KEEPS the existing stamp, whatever the incoming copy carries, so re-upserting a
+        // snapshot can never move the clock. TRANSIENT (NOT persisted — Persistence.cpp must not
+        // write it): a reopened session is stamped when it goes live again.
+        int64_t stateChangedAtUnixMs{ 0 };
         // The Waiting-for-you "unread" DECAY ANCHOR (wall-clock ms, PERSISTED). Stamped monotonically
         // by EVERY hook's wire `ts` — SessionStart included — and deliberately RESTARTED by the UI's
         // plain "Move to Waiting-for-you" triage promote (both the tab-menu and board-card surfaces),
@@ -1595,6 +1631,70 @@ namespace Agentmaster
         }
         const int64_t heldForMs = nowUnixMs - s.deliveryOpenedUnixMs;
         return heldForMs >= 0 && heldForMs < kDeliveryGateTimeoutMs;
+    }
+
+    // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): the three facts that decide whether the
+    // Tests Autorunner may type into a session at all — its status, open-vs-archived, and launched-vs-
+    // dormant — captured BEFORE a registry mutation so StampSettleClock can tell afterwards whether any
+    // of them moved. A plain value type: capturing it costs three loads under the registry lock.
+    struct SettleFacts
+    {
+        SessionState state{ SessionState::Idle };
+        bool live{ false };
+        bool started{ false };
+    };
+
+    // Snapshot the settle-relevant facts of `s` (see SettleFacts). PURE.
+    //   s       — the record about to be mutated.
+    //   returns — its current state / live / started.
+    inline SettleFacts CaptureSettleFacts(const SessionInfo& s) noexcept
+    {
+        return SettleFacts{ s.state, s.live, s.started };
+    }
+
+    // Restart the session's settle clock (SessionInfo::stateChangedAtUnixMs) when a mutation changed
+    // any settle-relevant fact — the status itself, or the session becoming open/archived or
+    // launched/dormant (a resumed or freshly activated tab is exactly as "just changed" as a Stop; its
+    // first seconds are when claude's own startup churn and the scanner's first reconcile pass land).
+    // A mutation that changed none of them leaves the stamp alone, so a busy registry (enrichment,
+    // drafts, queue edits) never pushes the hold forward. Called by SessionRegistry at every seam that
+    // can move one of the facts; PURE (no clock read — the caller passes `nowUnixMs`, which keeps it
+    // unit-testable and keeps the clock the registry's own).
+    //   s         — the record AFTER the mutation.
+    //   before    — CaptureSettleFacts(s) taken BEFORE the mutation.
+    //   nowUnixMs — the registry's clock (system-clock ms).
+    //   returns   — true iff the clock was restarted.
+    inline bool StampSettleClock(SessionInfo& s, const SettleFacts& before, int64_t nowUnixMs) noexcept
+    {
+        if (s.state == before.state && s.live == before.live && s.started == before.started)
+        {
+            return false;
+        }
+        s.stateChangedAtUnixMs = nowUnixMs;
+        return true;
+    }
+
+    // Stamp QueuedPrompt::queuedAtUnixMs on every prompt that is queued work (Pending, or a legacy Held
+    // an older build persisted) and has not been stamped yet — i.e. a prompt that entered the queue in
+    // the mutation that just ran. Already-stamped prompts keep their stamp (a rollback to Pending, a
+    // reorder and a re-upsert of the same prompt are not new input). Completed history (Sent / Skipped /
+    // Failed — including every Typed capture, born Sent) is never stamped: it is not waiting for anything.
+    // PURE; called by SessionRegistry after each Upsert / Update / UpdateQuiet.
+    //   queue     — the session's queue AFTER the mutation.
+    //   nowUnixMs — the registry's clock (system-clock ms).
+    //   returns   — how many prompts were stamped (0 in the steady state).
+    inline size_t StampNewlyQueuedPrompts(std::vector<QueuedPrompt>& queue, int64_t nowUnixMs) noexcept
+    {
+        size_t stamped = 0;
+        for (auto& p : queue)
+        {
+            if (p.queuedAtUnixMs == 0 && (p.status == PromptStatus::Pending || p.status == PromptStatus::Held))
+            {
+                p.queuedAtUnixMs = nowUnixMs;
+                ++stamped;
+            }
+        }
+        return stamped;
     }
 
     inline bool ServerCacheStillWarm(const SessionInfo& s, uint32_t cacheMinutes, int64_t nowMs) noexcept

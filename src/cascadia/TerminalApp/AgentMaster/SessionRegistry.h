@@ -80,6 +80,10 @@ namespace Agentmaster
         SessionRegistry& operator=(const SessionRegistry&) = delete;
 
         // Add a new session or replace an existing one with the same id. Returns the id.
+        // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): the registry OWNS the settle clocks —
+        // the incoming stateChangedAtUnixMs is ignored (a NEW record is stamped now; a replaced one keeps
+        // its clock unless this upsert changed its state / live / started), and every queued prompt still
+        // lacking a queuedAtUnixMs is stamped now (StampSettleClock / StampNewlyQueuedPrompts).
         std::wstring Upsert(SessionInfo info);
         void Remove(const std::wstring& id);
 
@@ -116,11 +120,15 @@ namespace Agentmaster
         // Mutate a session's Auto Testing / autorunner under the lock (used by the scheduler
         // and UI). The mutator runs while holding the lock; the post-change snapshot is
         // delivered to the observer afterwards. Returns false if the id is unknown.
+        // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): after the mutator runs, the registry
+        // restarts the session's settle clock if the mutator changed its state / live / started, and
+        // stamps queuedAtUnixMs on any prompt the mutator queued — callers never stamp either.
         bool Update(const std::wstring& id, const std::function<void(SessionInfo&)>& mutate);
 
         // Like Update but DOES NOT notify observers — for purely-transient fields (the interval
         // reconciler's captured assistant text) that must not trigger the persist / UI-refresh /
         // scheduler cascade on every byte of streamed output. No-op if the id is unknown.
+        // Applies the same settle-clock bookkeeping as Update (DELIVERY.md §16) — a field write, not a notify.
         void UpdateQuiet(const std::wstring& id, const std::function<void(SessionInfo&)>& mutate);
 
         // Agentmaster (eager-init / "Activate Tab"): set SessionInfo::started — "has this session's
@@ -128,7 +136,9 @@ namespace Agentmaster
         // CHANGE-GATED: notifies observers ONLY when the value actually flips, so the ~2s liveness
         // tick that re-asserts it for every hosted tab is free in steady state (it would otherwise
         // churn the persist / UI / scheduler cascade every tick). No-op for an unknown id. Maintained
-        // exclusively by TerminalPage (the controls' owner). Thread-safe.
+        // exclusively by TerminalPage (the controls' owner). Thread-safe. A flip also restarts the
+        // session's STATE SETTLE clock (DELIVERY.md §16): a tab whose claude just launched waits out a
+        // full settle window before its queue moves.
         void SetStarted(const std::wstring& id, bool started);
 
         // Agentmaster (PENDING_INPUT.md): record the session's UNSENT input-box DRAFT (read out-of-band

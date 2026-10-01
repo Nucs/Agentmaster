@@ -119,10 +119,27 @@ namespace Agentmaster
         {
             std::lock_guard guard{ _mtx };
             const auto it = _sessions.find(id);
+            // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): the registry OWNS the settle clocks,
+            // so the incoming record's stateChangedAtUnixMs is never trusted — it is usually a snapshot
+            // copy, and re-upserting a stale copy must not move the clock either way. A NEW record's
+            // current status begins now; a REPLACED record keeps the clock it had unless this upsert
+            // changed its status, or flipped it open/archived or launched/dormant (a resume Upserts the
+            // archived record back with live=true — exactly the "just changed" moment the hold is for).
+            const int64_t settleNow = NowMs();
             if (it == _sessions.end())
             {
                 _order.push_back(id);
+                info.stateChangedAtUnixMs = settleNow;
             }
+            else
+            {
+                const auto before = CaptureSettleFacts(it->second);
+                info.stateChangedAtUnixMs = it->second.stateChangedAtUnixMs;
+                StampSettleClock(info, before, settleNow);
+            }
+            // A prompt arriving with no queue stamp is new input as far as the hold is concerned (a
+            // freshly built queue, or one reloaded from disk — the field is transient).
+            StampNewlyQueuedPrompts(info.queue, settleNow);
             _sessions[id] = std::move(info);
             // Agentmaster (bounded queue history): a queue persisted before the cap existed (or one
             // carrying a long session's worth of Typed captures) trims on load; the append seams in
@@ -263,7 +280,11 @@ namespace Agentmaster
             {
                 continue;
             }
+            // Archiving flips a settle fact (live) — restart the record's settle clock like every other
+            // registry seam does (DELIVERY.md §16), so a later revival never inherits a pre-archive anchor.
+            const auto settleBefore = CaptureSettleFacts(s);
             s.live = false;
+            StampSettleClock(s, settleBefore, NowMs());
             s.pendingConfirmPromptId.clear();
             archived.push_back(s);
         }
@@ -376,11 +397,18 @@ namespace Agentmaster
                 // silently exempting exactly these sessions from the Tests Autorunner. Config only,
                 // creation only; never SessionState.
                 created.autorunner.mode = _defaultAutorunnerMode;
+                // The STATE SETTLE clock (DELIVERY.md §16): a record created here is a session whose
+                // current status begins now — an adopted claude's queue waits out a full window first.
+                created.stateChangedAtUnixMs = NowMs();
                 _order.push_back(msg.sessionId);
                 it = _sessions.emplace(msg.sessionId, std::move(created)).first;
             }
 
             auto& s = it->second;
+            // Captured BEFORE the ordered transition below, so a real status change restarts the settle
+            // clock (DELIVERY.md §16) while a no-op transition — a stale or type-ahead Stop that keeps the
+            // state, a duplicate UserPromptSubmit on a Running turn — leaves it alone.
+            const auto settleBefore = CaptureSettleFacts(s);
             // Provenance (Fleet Observer, OBSERVER.md §9): a hook is the authoritative PUSH. Record
             // that this session is hook-wired this run + when the last push arrived, so the observer
             // can LOG provenance (push vs pull) without ever overriding state.
@@ -414,6 +442,10 @@ namespace Agentmaster
             // NO further UserPromptSubmit — both used to wrongly land WaitingForInput mid-turn.
             const auto ordered = NextSessionStateOrdered(s.state, msg, s.turns);
             s.state = ordered.state;
+            // Stamped with the registry's ARRIVAL clock, not the hook's wire ts: the hold must measure
+            // from when WE learned of the change (the send-spacing lesson — never trust a wire-derived
+            // time to gate a send), and arrival can only start the window later, never earlier.
+            StampSettleClock(s, settleBefore, NowMs());
             // Agentmaster (the COMPACTION WINDOW — HOOKS.md "Compaction"): PreCompact OPENS it (the
             // scanner's CompactionInFlight then keeps the silent 1-3+ minute summarization from reading
             // as a finished turn); PostCompact CLOSES it, and so does anything that proves the window is
@@ -758,12 +790,18 @@ namespace Agentmaster
                 // only — enrichment merges below never touch autorunner state, and ObserveClaude
                 // still NEVER sets SessionState.
                 s.autorunner.mode = _defaultAutorunnerMode;
+                // The STATE SETTLE clock (DELIVERY.md §16): the hook-adopt twin — a first-sight session's
+                // current status begins now.
+                s.stateChangedAtUnixMs = NowMs();
                 _order.push_back(o.sessionId);
                 it = _sessions.emplace(o.sessionId, std::move(s)).first;
                 created = true;
             }
             auto& s = it->second;
             const auto prevPid = s.pid; // Agentmaster: the pid we last knew, captured BEFORE the enrichment below overwrites it
+            // ObserveClaude never sets SessionState, but it can REVIVE an archived record (live=false ->
+            // true, below) — a settle fact, so the clock restarts then (DELIVERY.md §16).
+            const auto settleBefore = CaptureSettleFacts(s);
 
             // Enrichment merge (facts, never state). Track whether anything MEANINGFUL changed so a
             // steady-state re-observe is a no-op (no observer / persist / UI churn each heartbeat).
@@ -822,6 +860,7 @@ namespace Agentmaster
                     changed = true;
                 }
             }
+            StampSettleClock(s, settleBefore, NowMs()); // a revival above restarts the settle clock; nothing else here moves a settle fact
             if (s.workingDir.empty() && !o.cwd.empty())
             {
                 s.workingDir = o.cwd; // the persisted M-axis; liveCwd alone tracks a live `cd`
@@ -935,7 +974,15 @@ namespace Agentmaster
             {
                 return false;
             }
+            // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): the generic mutator is where every
+            // UI triage move (Move to Waiting-for-you / Idle / Done), the scanner's Waiting -> Idle decay,
+            // an archive, the Codex reconcile AND every queue insertion land — so the registry stamps the
+            // settle clocks here, after the opaque mutate, instead of trusting each caller to remember.
+            const auto settleBefore = CaptureSettleFacts(it->second);
             mutate(it->second);
+            const int64_t settleNow = NowMs();
+            StampSettleClock(it->second, settleBefore, settleNow);
+            StampNewlyQueuedPrompts(it->second.queue, settleNow);
             snapshot = it->second;
         }
         _notify(snapshot, HookEvent::Unknown);
@@ -950,7 +997,14 @@ namespace Agentmaster
         {
             return;
         }
+        // Same settle bookkeeping as Update (DELIVERY.md §16) — today's quiet callers touch no settle fact
+        // and queue nothing, so this is a cheap no-op, but a quiet path that ever did must not slip past
+        // the hold. Stamping a field is not a notify, so the quiet contract below is unchanged.
+        const auto settleBefore = CaptureSettleFacts(it->second);
         mutate(it->second);
+        const int64_t settleNow = NowMs();
+        StampSettleClock(it->second, settleBefore, settleNow);
+        StampNewlyQueuedPrompts(it->second.queue, settleNow);
         // Deliberately NO _notify: this path exists precisely to avoid the persist / UI / advance
         // cascade for transient, high-frequency fields (e.g. streamed assistant text).
     }
@@ -965,7 +1019,12 @@ namespace Agentmaster
             {
                 return; // unknown id, or no change -> no observer churn on the re-assert tick
             }
+            // A dormant tab whose claude just launched (or a tab just parked by Deactivate) changed a
+            // settle fact: restart the settle clock (DELIVERY.md §16), so a freshly activated session's
+            // startup churn settles before its queue moves.
+            const auto settleBefore = CaptureSettleFacts(it->second);
             it->second.started = started;
+            StampSettleClock(it->second, settleBefore, NowMs());
             snapshot = it->second;
         }
         _notify(snapshot, HookEvent::Unknown);

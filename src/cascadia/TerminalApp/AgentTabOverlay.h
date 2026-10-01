@@ -246,6 +246,16 @@ namespace winrt::TerminalApp::implementation
         void _OpenFolder(); // row 3 folder button: open the session's working dir in Explorer (off-thread)
         void _QueueCurrentPrompt(bool clearBox); // row-1 MAIL button (between folder and copy): queue this session's UNSENT input-box draft into its Auto-Testing queue — the badge twin of the Manager compose row's envelope. Dev-or-debug + Claude only. clearBox (a PLAIN click) also REMOVES the draft from the input box after queueing (a move — PENDING_INPUT.md §8d); Shift+Click passes false to KEEP it (the historical copy, Rule #13)
         void _RefreshQueueButtonEnabled(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: enable the MAIL button only while a draft actually exists (mirrors the "3 dots" / pendingInput), so a prominent toolbar button never silently no-ops on an empty box (the "dead button" trap)
+        // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): keep row 3's "settling" cue honest when
+        // the window simply RUNS OUT. The cue is drawn by _Refresh, which runs on registry notifies — but
+        // the end of a settle window changes nothing in the registry, so without a wake-up the cue would
+        // stay up after the hold released (until the send itself notified, or forever if another hold
+        // took over). Arms a one-shot UI-thread timer that re-runs _Refresh just past the window's end;
+        // remainingMs <= 0 stops a pending one. Restarting it on every _Refresh is intended: the newest
+        // computation of the remaining time always wins. UI thread only; never throws (a timer failure
+        // only costs the cue's self-clear and is logged).
+        //   remainingMs — the settle time left for the next prompt (StateSettleRemainingMs), or 0.
+        void _ArmSettleRefresh(int64_t remainingMs);
         void _CopyField(int which); // row 3 copy menu: 0=Session Id 1=Copy Path 2=Copy Branch 3=Claude CLI 4=Codex CLI 5=Transcript 6=Summary (full textual box)
         void _BuildSummaryPanel(); // build the summary panel element (the 2nd slot), collapsed
         void _SetSummaryContent(const std::wstring& text); // fill the panel StackPanel: text runs -> TextBlocks (wrapping; the "* item" file/skill lists NoWrap + clipped), separator sentinels -> full-width Border rules
@@ -320,6 +330,10 @@ namespace winrt::TerminalApp::implementation
         // the menu, read by the menu's Opening to gate + fill "Copy Prompt".
         int _ctxPromptIndex{ -1 };
         winrt::Windows::UI::Xaml::DispatcherTimer _summaryTimer{ nullptr }; // drives the live times line; self-stops when the overlay is gone
+        // One-shot re-draw at the end of a STATE SETTLE window (_ArmSettleRefresh, DELIVERY.md §16). Built
+        // lazily on the first settling cue; like _summaryTimer its Tick captures only a weak ref and stops
+        // itself once the overlay is gone, so the destructor never has to Stop() it off the UI thread.
+        winrt::Windows::UI::Xaml::DispatcherTimer _settleTimer{ nullptr };
         std::wstring _summaryPath; // cached resolved transcript path (resolve once)
         int64_t _summaryMtime{ 0 }; // last-loaded transcript mtime — reload only when it grows
         int64_t _summaryCreatedMs{ 0 }; // times line: conversation start (unix ms) — "age"

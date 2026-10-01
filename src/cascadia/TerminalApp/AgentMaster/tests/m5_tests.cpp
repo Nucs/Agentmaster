@@ -89,6 +89,7 @@ int wmain()
     TestForwarderEncoding();
     TestHookInvocation(); // exec-form hooks + per-event timeouts + the Stop fast path (tests_spawn_sched.cpp)
     TestSchedulerIntegration();
+    TestStateSettle(); // DELIVERY.md §16 — the STATE SETTLE hold (tests_spawn_sched.cpp)
     TestInterruptHold();
     TestUpdaterVersionLogic();
     TestCmdPathLimit();

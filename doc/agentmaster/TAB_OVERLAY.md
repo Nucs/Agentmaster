@@ -414,6 +414,20 @@ full ≤300-char first line can show) but is `MaxWidth`-capped + right-anchored 
 balloon the HUD. The hourglass run is goldenrod (matching the row-1 `⏳N`); a hover tooltip names the row
 and reveals the **full** prompt behind the preview.
 
+Two **hold cues** can prefix the row, so a queue the Tests Autorunner is deliberately not sending never
+reads as stuck:
+- **`❓ held — answer the question`** (dark orange) — the question-guard holds the queue (DELIVERY.md §8).
+- **`settling`** (steel blue) — the STATE SETTLE hold (DELIVERY.md §16): the next prompt is typed in
+  only after the session has held a sendable status for 40 s, counted from the later of its last
+  status change and the prompt's queue time.
+  - It is computed by the same pure `StateSettleRemainingMs` the scheduler uses.
+  - It shows only where the scheduler would otherwise drive the session: open, launched or adopted,
+    autorunner on, Idle / Waiting-for-you, and no question held.
+  - The end of a settle window notifies nothing, so a one-shot timer (`_ArmSettleRefresh`) redraws
+    the row just past it, and the cue clears without waiting for the send.
+
+The tooltip explains the active hold and how to release it.
+
 ### 13j. The MAIL button — move the unsent draft to the queue (row 1, between folder and copy)
 A **mail** button (`\xE715`, the SAME Segoe Fluent glyph the Manager compose row's "Add to queue" envelope
 uses) takes this session's **UNSENT input-box draft**, **queues it** into that session's own

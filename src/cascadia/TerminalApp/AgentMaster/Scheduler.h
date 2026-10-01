@@ -76,6 +76,59 @@ namespace Agentmaster
     // self-resumes with no external notify needed.
     inline constexpr int64_t kMinSendSpacingMs = 20000;
 
+    // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): an automatic send waits until the session
+    // has HELD a sendable status (Idle / WaitingForInput, open, launched) for this long. The window is
+    // counted from the LATER of the session's last status change (SessionInfo::stateChangedAtUnixMs —
+    // the status itself, or the session going open/archived or launched/dormant) and the moment the
+    // prompt was queued (QueuedPrompt::queuedAtUnixMs), and ANY further status change restarts it — so
+    // the hold postpones itself until the status stabilizes. Why: a session's status flaps for reasons
+    // the push hooks and the pull reconcilers each see only half of — a subagent or teammate that
+    // outlives the turn, an auto-compaction (PreCompact/PostCompact), a retried API call, the scanner's
+    // recon-stop landing a beat before recon-run/recon-subagent re-light Running, a resumed tab's first
+    // seconds — and every one of those "ready" moments used to be an instant auto-send into a session
+    // that was about to be busy again (the turn-complete seam fires the advance the moment Waiting
+    // lands). Measured from the registry's OWN clock (never a wire ts — the kMinSendSpacingMs lesson).
+    // TIMED: DecideAdvance returns the remaining time as AdvancePlan::retryAfterMs, so a held plan
+    // re-decides on its own when the window ends (no other notify needed) and simply re-schedules if a
+    // change moved the anchor meanwhile. Applies to the automatic path only — Send-now and a SemiAuto
+    // Confirm click are the human's explicit sends and bypass DecideAdvance — but it DOES gate the
+    // SemiAuto ARMING, exactly like the send spacing (an armed suggestion races status just like an
+    // auto-send). The Scheduler's configured value (Scheduler::SetStateSettleMs) is what DecideAdvance
+    // is handed; this constant is its default.
+    inline constexpr int64_t kStateSettleMs = 40000;
+
+    // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): how much longer the settle hold keeps
+    // `prompt` from being typed into `s`; 0 == it may go now. The anchor is the LATER of the session's
+    // last status change and the prompt's queue time (both registry-stamped); an unstamped anchor (0 on
+    // both — a hand-built record, an old test) holds nothing, and a FUTURE anchor (the system clock
+    // stepped backwards) reads as settled rather than holding until the clock catches up — fail-open,
+    // the send-spacing idiom, because a backward clock step must never park a plan for its whole size.
+    // Shared by DecideAdvance and the per-tab overlay's "settling" cue, so the two can never disagree
+    // about whether the queue is settling. PURE.
+    //   s         — the session snapshot.
+    //   prompt    — the prompt DecideAdvance would fire next (the first Pending one).
+    //   nowUnixMs — the current time (system-clock ms).
+    //   settleMs  — the window (kStateSettleMs by default; <= 0 disables the hold).
+    //   returns   — milliseconds left in the window, or 0.
+    inline int64_t StateSettleRemainingMs(const SessionInfo& s, const QueuedPrompt& prompt, int64_t nowUnixMs, int64_t settleMs = kStateSettleMs) noexcept
+    {
+        if (settleMs <= 0)
+        {
+            return 0; // hold disabled
+        }
+        const int64_t anchor = s.stateChangedAtUnixMs > prompt.queuedAtUnixMs ? s.stateChangedAtUnixMs : prompt.queuedAtUnixMs;
+        if (anchor == 0)
+        {
+            return 0; // nothing stamped — nothing to settle against
+        }
+        const int64_t since = nowUnixMs - anchor;
+        if (since < 0)
+        {
+            return 0; // a future anchor (backward clock step): fail open, never a hold the size of the step
+        }
+        return since < settleMs ? settleMs - since : 0;
+    }
+
     // Enter-retry (the "the TUI ate my Enter" backstop). The ConPTY can deliver an injected
     // `prompt + CR` faster than Claude's Ink UI initializes its input handler, so the submit Enter
     // is absorbed as a NEWLINE instead of sending — the prompt sits typed-but-not-submitted and the
@@ -137,15 +190,20 @@ namespace Agentmaster
     //   nowUnixMs            — current time
     //   lastHumanInputUnixMs — when the human last typed into this session (0 if never)
     //   globalPause          — the scheduler's global Pause-all backstop
+    //   stateSettleMs        — the STATE SETTLE window (kStateSettleMs by default — the Scheduler
+    //                          passes its configured value; <= 0 disables the hold)
     // Encodes, in order: global pause; mode Off; not-ready (only Idle or WaitingForInput are
-    // ready — see below); pause-on-human-input; maxAutoSends; awaiting-injection-pickup guard;
-    // (no Pending => PlanDone); Manual-gate skip; question-guard (None — the prompt stays queued
-    // and waits, exactly like a Running mid-turn); minimum SEND SPACING (kMinSendSpacingMs — a
-    // TIMED hold, retryAfterMs set); SemiAuto => AwaitConfirm; Full => Send.
+    // ready — see below); pause-on-human-input; maxAutoSends; the delivery gate; the box state;
+    // awaiting-injection-pickup guard; (no Pending => PlanDone); Manual-gate skip; question-guard
+    // (None — the prompt stays queued and waits, exactly like a Running mid-turn); the STATE
+    // SETTLE hold (kStateSettleMs — a TIMED hold, retryAfterMs set); minimum SEND SPACING
+    // (kMinSendSpacingMs — a TIMED hold, retryAfterMs set); SemiAuto => AwaitConfirm; Full => Send.
+    // Never throws in practice (the reason strings are literals; only an allocation failure could).
     inline AdvancePlan DecideAdvance(const SessionInfo& s,
                                      int64_t nowUnixMs,
                                      int64_t lastHumanInputUnixMs,
-                                     bool globalPause)
+                                     bool globalPause,
+                                     int64_t stateSettleMs = kStateSettleMs)
     {
         AdvancePlan plan;
 
@@ -296,6 +354,27 @@ namespace Agentmaster
         {
             plan.reason = L"question pending — stay queued and wait (treated like running)";
             return plan; // None: the prompt stays Pending; a later non-question turn-complete fires it
+        }
+
+        // STATE SETTLE (kStateSettleMs above — DELIVERY.md §16): the session must have HELD this
+        // sendable status for the whole window, counted from the later of its last status change and
+        // this prompt's queue time — so a momentary "ready" between two busy spells (a subagent or
+        // teammate outliving the turn, an auto-compaction, a recon-stop the next pass reverses, a
+        // resumed tab's startup) never gets a prompt typed into it. TIMED: retryAfterMs is the time
+        // left, so the plan re-decides on its own when the window ends; a status change in between
+        // moves the anchor and the re-decide simply holds again — the hold postpones itself until the
+        // status is stable. Sits AFTER the question-guard (a question-parked plan schedules no timed
+        // re-checks) and BEFORE the send spacing (the spacing is the narrower, send-anchored belt; when
+        // both apply, this one answers first and the spacing re-checks at its expiry). Gates the
+        // SemiAuto arming too. The two anchors get distinct FIXED literals (the [advance-skip]
+        // change-dedup compares reasons exactly), so the log says which clock is holding the queue.
+        if (const int64_t settleLeftMs = StateSettleRemainingMs(s, item, nowUnixMs, stateSettleMs); settleLeftMs > 0)
+        {
+            plan.reason = item.queuedAtUnixMs > s.stateChangedAtUnixMs ?
+                              L"queue settle (the prompt was queued moments ago - it waits out the settle window first)" :
+                              L"status settle (the status changed moments ago - waiting for it to hold steady)";
+            plan.retryAfterMs = settleLeftMs;
+            return plan;
         }
 
         // MINIMUM SEND SPACING (kMinSendSpacingMs above — the ea1dc3dd double-send): never fire the
@@ -678,6 +757,18 @@ namespace Agentmaster
         void SetGlobalPause(bool paused) { _globalPause.store(paused); }
         bool GlobalPaused() const { return _globalPause.load(); }
 
+        // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): the settle window this scheduler hands
+        // DecideAdvance (kStateSettleMs unless changed). Thread-safe (atomic); takes effect at the next
+        // decision — a plan already waiting on a timed re-check simply re-decides under the new value
+        // when that check fires. Today only the test harness changes it (0 == the hold disabled, which
+        // keeps the integration tests that exercise OTHER gates on their short polls); a negative value
+        // is clamped to 0.
+        //   ms — the window in milliseconds.
+        void SetStateSettleMs(int64_t ms) noexcept { _stateSettleMs.store(ms < 0 ? 0 : ms); }
+        // The settle window currently applied (see SetStateSettleMs). Thread-safe.
+        //   returns — the window in milliseconds (0 == disabled).
+        int64_t StateSettleMs() const noexcept { return _stateSettleMs.load(); }
+
     private:
         void _worker() noexcept;
         void _process(const std::wstring& id);
@@ -719,5 +810,7 @@ namespace Agentmaster
         std::unordered_map<std::wstring, int64_t> _deferred;
         std::atomic<bool> _running{ false };
         std::atomic<bool> _globalPause{ false };
+        // The STATE SETTLE window handed to DecideAdvance (SetStateSettleMs; DELIVERY.md §16).
+        std::atomic<int64_t> _stateSettleMs{ kStateSettleMs };
     };
 }

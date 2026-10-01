@@ -2283,6 +2283,10 @@ void TestSchedulerIntegration()
     auto runToggleCase = [](bool external, bool bindInjector, bool started) -> bool {
         auto reg = std::make_shared<SessionRegistry>();
         Scheduler sched{ reg };
+        // These cases pin OTHER gates on short polls; the 40 s STATE SETTLE hold (DELIVERY.md §16) would
+        // hold every one of them (the Upsert below starts the settle clock), so it is disabled here and
+        // exercised on its own in TestStateSettle.
+        sched.SetStateSettleMs(0);
         sched.Start();
         reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
         const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
@@ -2356,6 +2360,10 @@ void TestSchedulerIntegration()
     {
         auto reg = std::make_shared<SessionRegistry>();
         Scheduler sched{ reg };
+        // These cases pin OTHER gates on short polls; the 40 s STATE SETTLE hold (DELIVERY.md §16) would
+        // hold every one of them (the Upsert below starts the settle clock), so it is disabled here and
+        // exercised on its own in TestStateSettle.
+        sched.SetStateSettleMs(0);
         sched.Start();
         reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
         const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
@@ -2413,6 +2421,10 @@ void TestSchedulerIntegration()
     {
         auto reg = std::make_shared<SessionRegistry>();
         Scheduler sched{ reg };
+        // These cases pin OTHER gates on short polls; the 40 s STATE SETTLE hold (DELIVERY.md §16) would
+        // hold every one of them (the Upsert below starts the settle clock), so it is disabled here and
+        // exercised on its own in TestStateSettle.
+        sched.SetStateSettleMs(0);
         sched.Start();
         reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
         const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
@@ -2468,6 +2480,10 @@ void TestSchedulerIntegration()
     {
         auto reg = std::make_shared<SessionRegistry>();
         Scheduler sched{ reg };
+        // These cases pin OTHER gates on short polls; the 40 s STATE SETTLE hold (DELIVERY.md §16) would
+        // hold every one of them (the Upsert below starts the settle clock), so it is disabled here and
+        // exercised on its own in TestStateSettle.
+        sched.SetStateSettleMs(0);
         sched.Start();
         reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
         const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
@@ -2538,6 +2554,10 @@ void TestSchedulerIntegration()
     {
         auto reg = std::make_shared<SessionRegistry>();
         Scheduler sched{ reg };
+        // These cases pin OTHER gates on short polls; the 40 s STATE SETTLE hold (DELIVERY.md §16) would
+        // hold every one of them (the Upsert below starts the settle clock), so it is disabled here and
+        // exercised on its own in TestStateSettle.
+        sched.SetStateSettleMs(0);
         sched.Start();
         reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
         const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
@@ -2596,6 +2616,438 @@ void TestSchedulerIntegration()
             CHECK(snap && snap->queue[1].status == PromptStatus::Pending, "pickup window: the second prompt stays Pending (queue not drained)");
         }
         reg->RemoveObserver(cntTok);
+        reg->RemoveObserver(obsTok);
+        sched.Stop();
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The STATE SETTLE hold (DELIVERY.md §16): an automatic send waits until the session has HELD a
+// sendable status for the settle window, counted from the LATER of its last status change and the
+// prompt's queue time, and every further status change restarts the wait. Covers the pure
+// StateSettleRemainingMs arithmetic (both anchors, disabled, fail-open on a future anchor), where
+// DecideAdvance applies it (reasons, the timed re-check, SemiAuto arming, the gates that answer
+// first, the hand-off to the send spacing), the registry stamping at every seam (creation, keep on a
+// no-op Update / a stale re-upsert, live and started flips, a real vs a stale Stop, ObserveClaude
+// create + revive, queue insertion, rollback keeps the queue stamp), and the REAL scheduler worker
+// end to end on short windows: the hold, a mid-window status change postponing the send, the timed
+// self-release with nothing else touching the registry, and the queue-time anchor.
+// ---------------------------------------------------------------------------------------------
+void TestStateSettle()
+{
+    std::wprintf(L"Autorunner STATE SETTLE hold (DELIVERY.md 16):\n");
+    const int64_t now = 10'000'000;
+
+    // ---- the pure window arithmetic ----
+    {
+        SessionInfo s;
+        QueuedPrompt p;
+        CHECK(StateSettleRemainingMs(s, p, now) == 0, "settle: nothing stamped -> no hold");
+        s.stateChangedAtUnixMs = now - 1000;
+        CHECK(StateSettleRemainingMs(s, p, now) == kStateSettleMs - 1000, "settle: the status anchor -> the window minus the time since the change");
+        p.queuedAtUnixMs = now - 200;
+        CHECK(StateSettleRemainingMs(s, p, now) == kStateSettleMs - 200, "settle: a LATER queue time is the anchor (whichever is later)");
+        p.queuedAtUnixMs = now - 5000;
+        CHECK(StateSettleRemainingMs(s, p, now) == kStateSettleMs - 1000, "settle: an EARLIER queue time leaves the status anchor in charge");
+        s.stateChangedAtUnixMs = now - kStateSettleMs;
+        p.queuedAtUnixMs = now - kStateSettleMs - 1;
+        CHECK(StateSettleRemainingMs(s, p, now) == 0, "settle: exactly the full window elapsed -> released");
+        s.stateChangedAtUnixMs = now + 5000;
+        CHECK(StateSettleRemainingMs(s, p, now) == 0, "settle: a FUTURE anchor (backward clock step) fails open");
+        s.stateChangedAtUnixMs = now - 10;
+        CHECK(StateSettleRemainingMs(s, p, now, 0) == 0, "settle: a 0 window disables the hold");
+        CHECK(StateSettleRemainingMs(s, p, now, -5) == 0, "settle: a negative window disables the hold");
+        CHECK(StateSettleRemainingMs(s, p, now, 100) == 90, "settle: a custom window is honored");
+    }
+
+    // ---- DecideAdvance: placement, reasons, the timed re-check ----
+    // A session whose status last changed `changedAgoMs` ago, with one prompt queued an hour ago (so the
+    // STATUS anchor decides unless a case overrides the queue stamp).
+    const auto mk = [now](AutorunnerMode mode, SessionState st, int64_t changedAgoMs) {
+        SessionInfo s;
+        s.id = L"settle";
+        s.state = st;
+        s.autorunner.mode = mode;
+        s.stateChangedAtUnixMs = now - changedAgoMs;
+        QueuedPrompt p;
+        p.id = L"p1";
+        p.text = L"next prompt";
+        p.queuedAtUnixMs = now - 3'600'000;
+        s.queue.push_back(p);
+        return s;
+    };
+    {
+        const auto plan = DecideAdvance(mk(AutorunnerMode::Full, SessionState::WaitingForInput, 1000), now, 0, false);
+        CHECK(plan.action == AdvanceAction::None, "advance: a status that changed 1 s ago holds the send");
+        CHECK(plan.reason.find(L"status settle") != std::wstring::npos, "advance: ...with the status-settle reason");
+        CHECK(plan.retryAfterMs == kStateSettleMs - 1000, "advance: ...and a TIMED re-check at the window's end");
+    }
+    {
+        auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput, 3'600'000);
+        s.queue[0].queuedAtUnixMs = now - 500;
+        const auto plan = DecideAdvance(s, now, 0, false);
+        CHECK(plan.action == AdvanceAction::None && plan.reason.find(L"queue settle") != std::wstring::npos,
+              "advance: a prompt queued 0.5 s ago into a long-settled session waits its own window (the queue anchor)");
+        CHECK(plan.retryAfterMs == kStateSettleMs - 500, "advance: ...re-checked when the QUEUE window ends");
+    }
+    {
+        const auto plan = DecideAdvance(mk(AutorunnerMode::Full, SessionState::Idle, kStateSettleMs), now, 0, false);
+        CHECK(plan.action == AdvanceAction::Send, "advance: a status held for the full window -> send");
+    }
+    {
+        const auto plan = DecideAdvance(mk(AutorunnerMode::Full, SessionState::WaitingForInput, 10), now, 0, false, 0);
+        CHECK(plan.action == AdvanceAction::Send, "advance: a 0 window (Scheduler::SetStateSettleMs(0)) disables the hold");
+    }
+    {
+        const auto held = DecideAdvance(mk(AutorunnerMode::SemiAuto, SessionState::WaitingForInput, 1000), now, 0, false);
+        CHECK(held.action == AdvanceAction::None && held.retryAfterMs > 0, "advance: the SemiAuto ARMING waits out the settle too");
+        const auto armed = DecideAdvance(mk(AutorunnerMode::SemiAuto, SessionState::WaitingForInput, kStateSettleMs + 1), now, 0, false);
+        CHECK(armed.action == AdvanceAction::AwaitConfirm, "advance: ...and arms once the status held");
+    }
+    {
+        // Gates that answer BEFORE the settle hold — none of them schedules a timed re-check.
+        const auto running = DecideAdvance(mk(AutorunnerMode::Full, SessionState::Running, 1000), now, 0, false);
+        CHECK(running.action == AdvanceAction::None && running.retryAfterMs == 0 && running.reason.find(L"not ready") != std::wstring::npos,
+              "advance: a Running session reads not-ready, not settling (no timed re-check)");
+        auto q = mk(AutorunnerMode::Full, SessionState::WaitingForInput, 1000);
+        q.lastMessageWasQuestion = true;
+        const auto question = DecideAdvance(q, now, 0, false);
+        CHECK(question.action == AdvanceAction::None && question.retryAfterMs == 0 && question.reason.find(L"question") != std::wstring::npos,
+              "advance: the question-guard answers before the settle hold");
+        auto m = mk(AutorunnerMode::Full, SessionState::WaitingForInput, 1000);
+        m.queue[0].gate = PromptGate::Manual;
+        const auto manual = DecideAdvance(m, now, 0, false);
+        CHECK(manual.reason == L"manual gate" && manual.retryAfterMs == 0, "advance: a manual gate answers before the settle hold");
+        auto d = mk(AutorunnerMode::Full, SessionState::WaitingForInput, 1000);
+        d.queue[0].status = PromptStatus::Sent;
+        d.queue[0].echoed = true;
+        CHECK(DecideAdvance(d, now, 0, false).action == AdvanceAction::PlanDone, "advance: a drained queue reports PlanDone even while the status is settling");
+    }
+    {
+        // The hand-off to the send spacing: while settling the settle reason answers; once settled, a send
+        // inside the spacing window still holds on the spacing's own clock.
+        auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput, 1000);
+        QueuedPrompt last;
+        last.id = L"p0";
+        last.text = L"previous";
+        last.status = PromptStatus::Sent;
+        last.echoed = true;
+        last.origin = PromptOrigin::Autorun;
+        last.sentAtUnixMs = now - 5000;
+        last.injectedAtUnixMs = now - 5000;
+        s.queue.insert(s.queue.begin(), last);
+        CHECK(DecideAdvance(s, now, 0, false).reason.find(L"status settle") != std::wstring::npos, "advance: the settle hold answers before the send spacing");
+        s.stateChangedAtUnixMs = now - kStateSettleMs;
+        const auto spaced = DecideAdvance(s, now, 0, false);
+        CHECK(spaced.action == AdvanceAction::None && spaced.reason.find(L"send spacing") != std::wstring::npos && spaced.retryAfterMs == kMinSendSpacingMs - 5000,
+              "advance: once settled, the send spacing still applies on its own clock");
+    }
+
+    // ---- the registry stamps the clocks at every seam ----
+    {
+        SessionRegistry reg;
+        // A sentinel the clocks are backdated to through the quiet path (which moves no settle fact, so the
+        // registry leaves explicit values alone) — every later check is then an exact comparison.
+        const int64_t kSentinel = 12345;
+        const auto backdate = [&reg, kSentinel](const std::wstring& id) {
+            reg.UpdateQuiet(id, [kSentinel](SessionInfo& s) {
+                s.stateChangedAtUnixMs = kSentinel;
+                for (auto& p : s.queue)
+                {
+                    if (p.queuedAtUnixMs != 0)
+                    {
+                        p.queuedAtUnixMs = kSentinel;
+                    }
+                }
+            });
+        };
+
+        const int64_t t0 = NowMsTest();
+        {
+            auto s = MakeSession(L"r1", SessionState::Idle);
+            s.live = true;
+            s.started = true;
+            s.stateChangedAtUnixMs = 42; // a stale copy's value: the registry owns the clock and ignores it
+            QueuedPrompt pending;
+            pending.id = L"q1";
+            pending.text = L"queued";
+            QueuedPrompt typed;
+            typed.id = L"t1";
+            typed.text = L"typed";
+            typed.status = PromptStatus::Sent;
+            typed.origin = PromptOrigin::Typed;
+            s.queue.push_back(pending);
+            s.queue.push_back(typed);
+            reg.Upsert(s);
+        }
+        auto r = reg.Get(L"r1");
+        CHECK(r && r->stateChangedAtUnixMs >= t0, "registry: a NEW record's settle clock starts at creation (the incoming value is ignored)");
+        CHECK(r && r->queue[0].queuedAtUnixMs >= t0, "registry: a Pending prompt is queue-stamped by the Upsert");
+        CHECK(r && r->queue[1].queuedAtUnixMs == 0, "registry: completed history (a Typed row) is never queue-stamped");
+
+        backdate(L"r1");
+        r = reg.Get(L"r1");
+        CHECK(r && r->stateChangedAtUnixMs == kSentinel && r->queue[0].queuedAtUnixMs == kSentinel, "registry: a quiet write that moves no settle fact keeps explicit stamps");
+
+        reg.Update(L"r1", [](SessionInfo& s) {
+            s.title = L"renamed";
+            s.pendingInput = L"a draft";
+            s.autorunner.mode = AutorunnerMode::Full;
+        });
+        r = reg.Get(L"r1");
+        CHECK(r && r->stateChangedAtUnixMs == kSentinel, "registry: an Update that moves no settle fact keeps the clock (a busy registry never pushes the hold)");
+
+        {
+            auto copy = *reg.Get(L"r1");
+            copy.stateChangedAtUnixMs = 0; // a snapshot copy carrying a stale clock
+            reg.Upsert(copy);
+        }
+        r = reg.Get(L"r1");
+        CHECK(r && r->stateChangedAtUnixMs == kSentinel, "registry: re-upserting an unchanged record keeps the registry's clock, whatever the copy carried");
+
+        int64_t t = NowMsTest();
+        reg.Update(L"r1", [](SessionInfo& s) { s.state = SessionState::WaitingForInput; });
+        r = reg.Get(L"r1");
+        CHECK(r && r->stateChangedAtUnixMs >= t, "registry: an Update that changes the status restarts the clock (a triage move / the decay)");
+
+        backdate(L"r1");
+        t = NowMsTest();
+        {
+            auto copy = *reg.Get(L"r1");
+            copy.live = false; // archived...
+            reg.Upsert(copy);
+        }
+        r = reg.Get(L"r1");
+        CHECK(r && r->stateChangedAtUnixMs >= t, "registry: an Upsert that archives (live flip) restarts the clock");
+        backdate(L"r1");
+        t = NowMsTest();
+        {
+            auto copy = *reg.Get(L"r1");
+            copy.live = true; // ...and resumed
+            reg.Upsert(copy);
+        }
+        r = reg.Get(L"r1");
+        CHECK(r && r->stateChangedAtUnixMs >= t, "registry: a resume (Upsert live=true) restarts the clock");
+
+        backdate(L"r1");
+        reg.SetStarted(L"r1", true); // already started: no flip
+        r = reg.Get(L"r1");
+        CHECK(r && r->stateChangedAtUnixMs == kSentinel, "registry: SetStarted with no flip keeps the clock");
+        t = NowMsTest();
+        reg.SetStarted(L"r1", false);
+        r = reg.Get(L"r1");
+        CHECK(r && r->stateChangedAtUnixMs >= t, "registry: a started flip (a parked / freshly launched tab) restarts the clock");
+        reg.SetStarted(L"r1", true);
+
+        // Hooks: a real status change stamps (the registry's arrival clock); a stale Stop that keeps the
+        // status does not.
+        backdate(L"r1");
+        t = NowMsTest();
+        {
+            auto ups = UPS(L"r1", L"a typed prompt");
+            ups.ts = t;
+            reg.OnHookEvent(ups); // WaitingForInput -> Running
+        }
+        r = reg.Get(L"r1");
+        CHECK(r && r->state == SessionState::Running && r->stateChangedAtUnixMs >= t, "registry: a UserPromptSubmit (-> Running) restarts the clock");
+        backdate(L"r1");
+        {
+            auto stale = Msg(L"r1", HookEvent::Stop);
+            stale.ts = t - 1000; // fired BEFORE the newest prompt: an older turn's Stop
+            reg.OnHookEvent(stale);
+        }
+        r = reg.Get(L"r1");
+        CHECK(r && r->state == SessionState::Running && r->stateChangedAtUnixMs == kSentinel, "registry: a stale Stop that keeps the status keeps the clock");
+        const int64_t tStop = NowMsTest();
+        {
+            auto stop = Msg(L"r1", HookEvent::Stop);
+            stop.ts = t + 5000; // a real turn-complete (past the kMinRealTurnSpanMs floor)
+            reg.OnHookEvent(stop);
+        }
+        r = reg.Get(L"r1");
+        CHECK(r && r->state == SessionState::WaitingForInput && r->stateChangedAtUnixMs >= tStop, "registry: a real Stop (-> WaitingForInput) restarts the clock");
+
+        // Queue insertion is stamped; an existing prompt keeps its stamp; a rollback keeps it too.
+        backdate(L"r1");
+        t = NowMsTest();
+        reg.Update(L"r1", [](SessionInfo& s) {
+            QueuedPrompt fresh;
+            fresh.id = L"q2";
+            fresh.text = L"queued later";
+            s.queue.push_back(fresh);
+        });
+        r = reg.Get(L"r1");
+        // Found BY ID: the UserPromptSubmit above appended its Typed capture, so positions shifted.
+        const QueuedPrompt* q2 = nullptr;
+        if (r)
+        {
+            for (const auto& p : r->queue)
+            {
+                if (p.id == L"q2")
+                {
+                    q2 = &p;
+                    break;
+                }
+            }
+        }
+        CHECK(q2 && q2->queuedAtUnixMs >= t, "registry: a prompt queued through Update is stamped at insertion");
+        CHECK(r && r->queue[0].queuedAtUnixMs == kSentinel && r->stateChangedAtUnixMs == kSentinel, "registry: ...without touching earlier prompts or the status clock");
+        reg.Update(L"r1", [](SessionInfo& s) {
+            s.queue[0].status = PromptStatus::Sent;
+            s.queue[0].sentAtUnixMs = NowMsTest();
+        });
+        reg.RollbackPromptToPending(L"r1", L"q1", false);
+        r = reg.Get(L"r1");
+        CHECK(r && r->queue[0].status == PromptStatus::Pending && r->queue[0].queuedAtUnixMs == kSentinel,
+              "registry: a rollback to Pending keeps the original queue time (a retry never waits a fresh window)");
+
+        // ObserveClaude: a first-sight record is stamped at creation; reviving an archived one restarts it.
+        t = NowMsTest();
+        {
+            ObservedClaude o;
+            o.sessionId = L"obs";
+            o.cwd = L"K:\\tmp";
+            o.pid = 100;
+            reg.ObserveClaude(o);
+        }
+        r = reg.Get(L"obs");
+        CHECK(r && r->stateChangedAtUnixMs >= t, "registry: an ObserveClaude first-sight record is stamped at creation");
+        reg.Update(L"obs", [](SessionInfo& s) { s.live = false; });
+        backdate(L"obs");
+        t = NowMsTest();
+        {
+            ObservedClaude o;
+            o.sessionId = L"obs";
+            o.cwd = L"K:\\tmp";
+            o.pid = 200; // a NEW pid: a real re-run -> revived live
+            reg.ObserveClaude(o);
+        }
+        r = reg.Get(L"obs");
+        CHECK(r && r->live && r->stateChangedAtUnixMs >= t, "registry: an ObserveClaude revival (live flip) restarts the clock");
+
+        // The hook-adopt creation path.
+        t = NowMsTest();
+        {
+            auto start = Msg(L"adopted", HookEvent::SessionStart);
+            start.cwd = L"K:\\tmp";
+            start.ts = t;
+            reg.OnHookEvent(start);
+        }
+        r = reg.Get(L"adopted");
+        CHECK(r && r->stateChangedAtUnixMs >= t, "registry: a hook-adopted record is stamped at creation");
+    }
+
+    // ---- the REAL scheduler end to end (short windows) ----
+    {
+        // The hold, a mid-window status flap postponing it, and the timed self-release.
+        auto reg = std::make_shared<SessionRegistry>();
+        Scheduler sched{ reg };
+        constexpr int64_t kWindowMs = 1200;
+        sched.SetStateSettleMs(kWindowMs);
+        CHECK(sched.StateSettleMs() == kWindowMs, "scheduler: SetStateSettleMs applies");
+        sched.Start();
+        reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
+        const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
+        const std::wstring id = L"settle-live";
+        std::atomic<int> injected{ 0 };
+        {
+            SessionInfo s;
+            s.id = id;
+            s.workingDir = L"K:\\tmp";
+            s.state = SessionState::WaitingForInput;
+            s.live = true;
+            s.started = true;
+            s.autorunner.mode = AutorunnerMode::Full;
+            s.autorunner.throttleMs = 0;
+            QueuedPrompt p;
+            p.id = L"p1";
+            p.text = L"the settled prompt";
+            p.origin = PromptOrigin::Autorun;
+            s.queue.push_back(p);
+            reg->Upsert(std::move(s)); // creation: the window starts NOW
+        }
+        reg->SetInjector(id, [&injected](const std::wstring&) { injected.fetch_add(1); });
+        reg->Update(id, [](SessionInfo&) {}); // an observed change runs the advance — which must HOLD
+        const auto isSent = [&reg, &id]() {
+            const auto snap = reg->Get(id);
+            return snap && !snap->queue.empty() && snap->queue[0].status == PromptStatus::Sent;
+        };
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        CHECK(!isSent() && injected.load() == 0, "scheduler: inside the settle window nothing is sent");
+        // The status flaps — busy for a beat, then ready again — so the window restarts from the flap.
+        reg->Update(id, [](SessionInfo& s) { s.state = SessionState::Running; });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const int64_t restartAt = NowMsTest();
+        reg->Update(id, [](SessionInfo& s) { s.state = SessionState::WaitingForInput; });
+        // The ORIGINAL window ends ~550 ms after the flap; at 900 ms the plan has re-decided at that end
+        // and must have HELD again (the anchor moved), not sent.
+        std::this_thread::sleep_for(std::chrono::milliseconds(900));
+        CHECK(!isSent(), "scheduler: a status change mid-window postpones the send (the original window's end does not fire it)");
+        // Nothing touches the registry from here: the timed re-advance alone must release the prompt.
+        int64_t sentSeenAt = 0;
+        for (int i = 0; i < 300 && sentSeenAt == 0; ++i)
+        {
+            if (isSent())
+            {
+                sentSeenAt = NowMsTest();
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        CHECK(sentSeenAt != 0 && injected.load() > 0, "scheduler: the held prompt self-releases once the status held for the full window");
+        CHECK(sentSeenAt == 0 || sentSeenAt - restartAt >= kWindowMs - 10, "scheduler: ...and never sooner than the window after the LAST status change");
+        reg->RemoveObserver(obsTok);
+        sched.Stop();
+    }
+    {
+        // The QUEUE anchor end to end: a session settled long ago, a prompt queued NOW waits its own window.
+        auto reg = std::make_shared<SessionRegistry>();
+        Scheduler sched{ reg };
+        constexpr int64_t kWindowMs = 800;
+        sched.SetStateSettleMs(kWindowMs);
+        sched.Start();
+        reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
+        const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
+        const std::wstring id = L"settle-queue";
+        std::atomic<int> injected{ 0 };
+        {
+            SessionInfo s;
+            s.id = id;
+            s.workingDir = L"K:\\tmp";
+            s.state = SessionState::Idle;
+            s.live = true;
+            s.started = true;
+            s.autorunner.mode = AutorunnerMode::Full;
+            s.autorunner.throttleMs = 0;
+            reg->Upsert(std::move(s)); // nothing queued yet
+        }
+        reg->UpdateQuiet(id, [](SessionInfo& s) { s.stateChangedAtUnixMs = 1; }); // the status settled long ago
+        reg->SetInjector(id, [&injected](const std::wstring&) { injected.fetch_add(1); });
+        const int64_t queuedAt = NowMsTest();
+        reg->Update(id, [](SessionInfo& s) {
+            QueuedPrompt p;
+            p.id = L"p1";
+            p.text = L"queued into a settled session";
+            p.origin = PromptOrigin::Autorun;
+            s.queue.push_back(p);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        const auto snap = reg->Get(id);
+        CHECK(snap && !snap->queue.empty() && snap->queue[0].status == PromptStatus::Pending && injected.load() == 0,
+              "scheduler: a prompt queued into a long-settled session is held by its OWN queue window");
+        int64_t sentSeenAt = 0;
+        for (int i = 0; i < 300 && sentSeenAt == 0; ++i)
+        {
+            const auto cur = reg->Get(id);
+            if (cur && !cur->queue.empty() && cur->queue[0].status == PromptStatus::Sent)
+            {
+                sentSeenAt = NowMsTest();
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        CHECK(sentSeenAt != 0 && injected.load() > 0, "scheduler: ...and sends once the queue window ran out");
+        CHECK(sentSeenAt == 0 || sentSeenAt - queuedAt >= kWindowMs - 10, "scheduler: ...never sooner than the window after it was queued");
         reg->RemoveObserver(obsTok);
         sched.Stop();
     }

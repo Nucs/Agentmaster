@@ -773,23 +773,31 @@ have both of its keys `false` and it never fires.
 ```
 onHook(sid, ev):
   s = registry[sid]
-  Stop:                 s.state = WaitingForInput; tryAdvance(s)
-  Notification(perm):   s.state = NeedsApproval;   applyApprovalPolicy(s)   // not the queue
+  Stop (a real, non-stale turn-complete): s.state = WaitingForInput; RequestAdvance(sid)
+  Notification(perm):   s.state = NeedsApproval      // "needs you" — never the queue
+  any registry change:  OnObserved(s) -> RequestAdvance(sid) when s is live, started (or adopted),
+                        injector-bound, autorunner on, Idle/WaitingForInput, with Pending work
 
-tryAdvance(s):
-  if s.autorunner.mode == Off:            return
-  if s.state not in {WaitingForInput, Idle}: return   // Rule #1: Idle is also "ready"
-  if humanTypedWithin(s, 1500ms):        return        // pauseOnHumanInput
-  item = s.queue.firstPending(); if !item: notifyPlanDone(s); return
-  if !passesGuard(s, item):  item.status = Held; flagCard(s); return  // e.g. lastMessageIsQuestion
-  if s.autorunner.mode == SemiAuto:       askConfirm(s, item); return
-  markSentAtomically(item); persist(s)                 // idempotent BEFORE inject (Rule #4)
-  s.connection.WriteInput(item.text + L"\r");          // inject + submit
+DecideAdvance(s)                                     // Scheduler.h — pure; first match wins
+  global pause / mode Off (incl. the interrupt hold)       -> hold
+  state not in {Idle, WaitingForInput}                     -> hold          // Rule #1: Idle is also "ready"
+  human typed < 1.5 s ago                                  -> hold          // pauseOnHumanInput — no feeder yet, inert
+  maxAutoSends / delivery gate open / box NoBox or menu    -> hold
+  our previous send not picked up yet (< 30 s)             -> hold          // the pickup guard
+  no Pending prompt                                        -> PlanDone
+  manual gate / last message was a question                -> hold          // stays Pending, never parked in Held
+  status or queue changed < 40 s ago (the later of both)   -> timed hold    // STATE SETTLE — DELIVERY.md §16
+  < 20 s since our previous automatic send                 -> timed hold    // send spacing — DELIVERY.md §13
+  SemiAuto                                                 -> arm a one-click confirm
+  Full                                                     -> mark Sent atomically (Rule #4), then
+                                                              SubmitPrompt: delivery gate + verified paste (DELIVERY.md)
 ```
 
 Advances fire on **two** triggers — the `Stop` seam *and* observed changes (`OnObserved`) — so a
 freshly launched / just-resumed session sitting `Idle` (which never emits a `Stop`) still starts
-consuming its queue; a time-bounded pickup guard holds it to one prompt per turn.
+consuming its queue. The pickup guard holds it to one prompt per turn. A timed hold (the settle
+window, the send spacing) re-decides on its own through the scheduler's deferred re-advance when it
+runs out, so a quiet session still moves.
 
 ## Files
 

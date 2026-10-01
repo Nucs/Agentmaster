@@ -18,6 +18,7 @@
 #include "pch.h"
 #include "AgentTabOverlay.h"
 
+#include "AgentCatchLog.h" // AgentLogCaughtException — Rule #18 forensics for the settle-cue re-draw timer
 #include "AgentCopyActions.h" // the shared CopySessionField (reused by the Triage Board's Copy submenu)
 #include "AgentStatusColors.h" // the ONE shared state->color palette (board / overlay / tab dot)
 #include "AgentTipHelpers.h" // AgentSetTip — the Dark-pinned, fast-open, stuck-proof hover tooltip recipe (vs raw ToolTipService)
@@ -510,6 +511,7 @@ namespace winrt::TerminalApp::implementation
             if (preview.empty())
             {
                 _promptLine.Visibility(Visibility::Collapsed); // nothing queued (or an empty prompt)
+                _ArmSettleRefresh(0); // nothing queued -> nothing settling: drop any pending re-draw
             }
             else
             {
@@ -521,12 +523,41 @@ namespace winrt::TerminalApp::implementation
                 // mode-cycling tried blind). Say so on the row itself, and teach the releases in the tip.
                 const bool heldByQuestion = s.lastMessageWasQuestion &&
                                             nextPrompt->guardPattern != ::Agentmaster::kAnswersQuestionOk;
+                // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): the same visibility for the settle
+                // hold — the Tests Autorunner is deliberately waiting for this session's status to hold
+                // steady (40 s from the later of its last status change and this prompt's queue time),
+                // and a 40-second pause per prompt with nothing on screen reads as "the autorunner is
+                // stuck" (the §8 lesson again). Computed by the SAME pure helper DecideAdvance uses, and
+                // only where the scheduler would otherwise be ready to drive the session (open, launched
+                // or adopted, autorunner on, Idle / Waiting-for-you) and the question-guard isn't the hold
+                // already shown — so the cue never claims a wait the scheduler isn't actually in. Gated on
+                // kDevAutoTesting (row 1's cached IsDevOrDebugPackage) because row 3 itself is NOT: a plain
+                // release never starts the scheduler, yet can briefly show a Pending prompt (the /handover
+                // park) on a session whose stamped mode reads Full — a "settling" claim there would describe
+                // a hold that does not exist.
+                int64_t settleLeftMs = 0;
+                if (kDevAutoTesting && !heldByQuestion && s.live && (s.started || s.external) && s.autorunner.mode != ::Agentmaster::AutorunnerMode::Off &&
+                    (s.state == ::Agentmaster::SessionState::Idle || s.state == ::Agentmaster::SessionState::WaitingForInput))
+                {
+                    const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::system_clock::now().time_since_epoch())
+                                              .count();
+                    settleLeftMs = ::Agentmaster::StateSettleRemainingMs(s, *nextPrompt, nowMs);
+                }
+                const bool settling = settleLeftMs > 0;
                 if (heldByQuestion)
                 {
                     Run held{};
                     held.Text(L"\x2753 held \x2014 answer the question  "); // ❓
                     held.Foreground(Fill(0xFF, 0xFF, 0x8C, 0x00)); // dark orange — the NeedsApproval "needs you" tone
                     _promptLine.Inlines().Append(held);
+                }
+                else if (settling)
+                {
+                    Run settle{};
+                    settle.Text(L"settling  ");
+                    settle.Foreground(Fill(0xFF, 0x8F, 0xB7, 0xD9)); // soft steel blue — a calm "waiting on the clock", deliberately NOT a "needs you" tone
+                    _promptLine.Inlines().Append(settle);
                 }
                 Run hg{};
                 hg.Text(winrt::hstring{ std::wstring{ kHourglass } + L" " });
@@ -542,19 +573,84 @@ namespace winrt::TerminalApp::implementation
                 {
                     full = full.substr(0, 4000) + L"\x2026"; // …
                 }
+                const std::wstring settleSeconds = std::to_wstring(::Agentmaster::kStateSettleMs / 1000);
                 const std::wstring tip = heldByQuestion ?
                                              std::wstring{ L"Queue HELD \x2014 the agent's last message ended with a QUESTION, so auto-send waits (a planned prompt must not answer it blindly).\n"
                                                            L"Release: answer in the terminal, Send now, or cycle the Tests Autorunner toggle to Semi/Full (an explicit re-arm clears the hold).\n\n"
                                                            L"Next queued prompt:\n" } +
                                                  full :
+                                         settling ?
+                                             std::wstring{ L"Queue SETTLING \x2014 Tests Autorunner types the next prompt only after this session has held a sendable status (Idle / Waiting-for-you) for " } +
+                                                 settleSeconds +
+                                                 L" s, counted from the later of its last status change and when this prompt was queued. Any status change restarts the wait, so a status that is only passing through never gets a prompt typed into it.\n"
+                                                 L"Send now skips the wait.\n\n"
+                                                 L"Next queued prompt:\n" +
+                                                 full :
                                              std::wstring{ L"Next queued prompt \x2014 sent on the next turn-complete (or via Send now).\n\n" } + full;
                 AgentSetTip(_promptLine, winrt::hstring{ tip });
                 _promptLine.Visibility(Visibility::Visible);
+                // Re-draw when the window runs out (a settle ending changes nothing in the registry, so no
+                // notify would clear the cue); 0 stops a pending re-draw once the cue is gone.
+                _ArmSettleRefresh(settleLeftMs);
             }
         }
 
         // Summary panel (2nd slot): show/hide per the persisted toggle + (re)load when the transcript grew.
         _UpdateSummary(s);
+    }
+
+    // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): see the header. The timer is one-shot by
+    // construction (its Tick stops it first), and every _Refresh re-arms it with the freshest remaining
+    // time — so a status change that restarted the window simply pushes the re-draw out with it.
+    void AgentTabOverlay::_ArmSettleRefresh(int64_t remainingMs)
+    {
+        try
+        {
+            if (remainingMs <= 0)
+            {
+                if (_settleTimer)
+                {
+                    _settleTimer.Stop(); // no settling cue on screen -> no re-draw due (UI thread, so Stop is safe)
+                }
+                return;
+            }
+            if (!_settleTimer)
+            {
+                _settleTimer = DispatcherTimer{};
+                // Weak capture (the _summaryTimer idiom): a closed tab's overlay must not be kept alive by a
+                // pending re-draw, and a Tick that finds it gone stops the timer itself — so the destructor
+                // never has to Stop() it, possibly off the UI thread (the destructor-cascade crash class).
+                _settleTimer.Tick([weak = get_weak()](const IInspectable& sender, const IInspectable&) {
+                    try
+                    {
+                        if (const auto t = sender.try_as<DispatcherTimer>())
+                        {
+                            t.Stop(); // one-shot: the _Refresh below re-arms it if a window is still running
+                        }
+                        if (auto self = weak.get())
+                        {
+                            self->_Refresh();
+                        }
+                    }
+                    catch (...)
+                    {
+                        // Rule #18. A throw out of a XAML event handler is an unhandled-exception path; here
+                        // the only cost of containing it is a cue that stays up until the next notify.
+                        ::Agentmaster::AgentLogCaughtException(L"AgentTabOverlay settle re-draw tick");
+                    }
+                });
+            }
+            // A small slack past the window's end, so the re-draw reads the hold as RELEASED instead of
+            // racing it by a millisecond and re-arming for a 1 ms remainder.
+            _settleTimer.Interval(std::chrono::milliseconds(remainingMs + 250));
+            _settleTimer.Start(); // Start on a running timer restarts it: the newest remaining time wins
+        }
+        catch (...)
+        {
+            // Rule #18: the recovery is "no self-clear" (the cue clears on the next registry notify, which a
+            // released hold's send produces anyway) — but the failure itself must not vanish.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTabOverlay::_ArmSettleRefresh");
+        }
     }
 
     void AgentTabOverlay::_WireHover()
