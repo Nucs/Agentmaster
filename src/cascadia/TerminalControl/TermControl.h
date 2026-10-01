@@ -51,6 +51,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         TermControl(IControlSettings settings, Control::IControlAppearance unfocusedAppearance, TerminalConnection::ITerminalConnection connection);
 
         static Control::TermControl NewControlByAttachingContent(Control::ControlInteractivity content);
+        // Agentmaster (RENDERING.md): the projected setter of the process-wide software-rendering
+        // override — see TermControl.idl and ControlCore::SetSoftwareRenderingOverride.
+        // Parameters: enabled — true draws every terminal on the CPU (WARP). Never throws.
+        static void SetSoftwareRenderingOverride(bool enabled) noexcept;
 
         void UpdateControlSettings(Control::IControlSettings settings);
         void UpdateControlSettings(Control::IControlSettings settings, Control::IControlAppearance unfocusedAppearance);
@@ -75,6 +79,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         void Close();
         bool InitializeWithSize(double width, double height, float scale); // Agentmaster (eager-init): see TermControl.idl
         bool StartDormantConnection(); // Agentmaster (deactivate/reactivate): Start an initialized control's parked NotConnected connection — see TermControl.idl
+        // Agentmaster (RENDERING.md): re-point this terminal's live renderer at the effective software
+        // flag — see TermControl.idl and ControlCore::ReapplySoftwareRendering. UI thread only. Can
+        // throw a winrt::hresult_error when a projected settings call fails (the caller catches).
+        void ReapplySoftwareRendering();
         Windows::Foundation::Size CharacterDimensions() const;
         Windows::Foundation::Size MinimumSize();
         float SnapDimensionToGrid(const bool widthOrHeight, const float dimension);

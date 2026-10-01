@@ -870,6 +870,25 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: publish the GLOBAL tab-rename commit mode to the (process-wide) tab headers.
         // Cross-window, so it lives in one process-static the headers read live, not per-tab state.
         SetTabRenameCommitMode(static_cast<int32_t>(_appSettings.tabRenameCommitMode));
+        // Agentmaster (RENDERING.md): publish the GLOBAL GPU/CPU rendering choice to the Control DLL
+        // BEFORE this window restores or creates any tab (_OnFirstLayout runs this first), so every
+        // terminal initializes on the chosen renderer — a CPU-rendering fleet never builds a single
+        // per-tab GPU device, which is the whole point. Process-wide and idempotent: every window sets
+        // the same value from the same settings.json.
+        try
+        {
+            winrt::Microsoft::Terminal::Control::TermControl::SetSoftwareRenderingOverride(_appSettings.softwareRendering);
+            if (_appSettings.softwareRendering)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[render] software rendering ON (settings.json) - terminals draw on the CPU (WARP)\n");
+            }
+        }
+        catch (...)
+        {
+            // Only the activation-factory hop can fail: terminals then start on the GPU, the historical
+            // renderer — degraded, never broken (Rule #18: logged).
+            ::Agentmaster::AgentLogCaughtException(L"_InitAgentmasterEngine(software rendering)");
+        }
         // Agentmaster: seed the tab-strip close affordances (show-X / middle-click close) from the
         // loaded settings now (the initial SetSettings pass ran with default _appSettings). No tabs
         // exist yet, so this just sets the hook flag + overlay mode; per-tab visibility is then applied
@@ -1754,6 +1773,9 @@ namespace winrt::TerminalApp::implementation
                 // BEFORE adopting `s`, for the scan-state reset below.
                 const bool inferInputsChanged = self->_appSettings.tabColorMode != s.tabColorMode ||
                                                 self->_appSettings.inferGitRoot != s.inferGitRoot;
+                // RENDERING.md: likewise for the software-rendering switch — re-point the terminals only on
+                // a real flip (this sink also carries the sort toggles' unrelated saves).
+                const bool softwareRenderingChanged = self->_appSettings.softwareRendering != s.softwareRendering;
                 self->_appSettings = s;
                 ::Agentmaster::SaveAppSettings(s);
                 // Adopt/re-home autorunner default: the registry stamps this MODE onto records it
@@ -1806,6 +1828,12 @@ namespace winrt::TerminalApp::implementation
                 {
                     self->_inferredColorScan.clear();
                     self->_ScanInferredTabColors();
+                }
+                // RENDERING.md: GPU <-> CPU drawing is GLOBAL — set the process-wide override and switch
+                // THIS window's terminals now; other windows switch theirs via the broadcast below.
+                if (softwareRenderingChanged)
+                {
+                    self->_ApplySoftwareRenderingSetting(s.softwareRendering, L"cog");
                 }
                 // Waiting-for-you "unread" model: push the (possibly changed) WaitingForInput -> Idle
                 // timeout to the process-wide scanner so it applies immediately, not next launch.
@@ -2088,6 +2116,9 @@ namespace winrt::TerminalApp::implementation
         // adopting the broadcast, for the scan-state reset below.
         const bool inferInputsChanged = _appSettings.tabColorMode != settings.tabColorMode ||
                                         _appSettings.inferGitRoot != settings.inferGitRoot;
+        // RENDERING.md: capture before adopting too — re-pointing every terminal is only worth doing (and
+        // only safe to do cheaply) on a real flip, not on every unrelated broadcast (a sort click).
+        const bool softwareRenderingChanged = _appSettings.softwareRendering != settings.softwareRendering;
         _appSettings = settings;
         // Agentmaster: the tab-strip close affordances (show-X / middle-click close) are GLOBAL, so a
         // change made in another window must re-apply to THIS window's tabs live (the source window
@@ -2128,6 +2159,84 @@ namespace winrt::TerminalApp::implementation
         // Side panel: adopt the broadcast globals here too (shared sort label, dock side, the
         // summary flags for its out-of-map overlay) + rebuild the cards under the new rules.
         _SidePanelApplySettings();
+        // RENDERING.md: a software-rendering flip saved in another window. The process-wide override is
+        // already set (one Control DLL per process), but only THIS window can re-point its own
+        // terminals, on its own UI thread.
+        if (softwareRenderingChanged)
+        {
+            _ApplySoftwareRenderingSetting(settings.softwareRendering, L"broadcast");
+        }
+    }
+
+    // Agentmaster (RENDERING.md): see TerminalPage.h. Runs on this window's UI thread (the cog's Save
+    // sink or the broadcast sink, both already marshaled here). ReapplySoftwareRendering takes each
+    // terminal's write lock, so it must not run on a background thread.
+    void TerminalPage::_ApplySoftwareRenderingSetting(const bool enabled, const std::wstring_view reason) noexcept
+    {
+        // 1. The process-wide flag FIRST, so a terminal that initializes between here and the walk
+        //    (a tab being created this very tick) already builds the right engine.
+        try
+        {
+            winrt::Microsoft::Terminal::Control::TermControl::SetSoftwareRenderingOverride(enabled);
+        }
+        catch (...)
+        {
+            // The projected static can only fail to reach the Control DLL's activation factory; keep going,
+            // the walk below still re-points what it can (Rule #18: never swallow it silently).
+            ::Agentmaster::AgentLogCaughtException(L"_ApplySoftwareRenderingSetting(override)");
+        }
+        // 2. Every terminal this window ALREADY initialized: every pane of every tab — the same walk
+        //    WindowVisibilityChanged uses. A dormant tab's control is visited too; its core ignores the
+        //    call (nothing built yet) and reads the override when it first initializes.
+        uint32_t visited = 0;
+        uint32_t failed = 0;
+        try
+        {
+            for (const auto& tab : _tabs)
+            {
+                if (auto tabImpl{ _GetTabImpl(tab) })
+                {
+                    tabImpl->GetRootPane()->WalkTree([&](auto&& pane) {
+                        if (const auto control = pane->GetTerminalControl())
+                        {
+                            ++visited;
+                            try
+                            {
+                                control.ReapplySoftwareRendering();
+                            }
+                            catch (...)
+                            {
+                                // One terminal's projected settings call failed: that terminal keeps its
+                                // current renderer, the rest still switch (no all-or-nothing). Logged.
+                                ++failed;
+                                ::Agentmaster::AgentLogCaughtException(L"_ApplySoftwareRenderingSetting(terminal)");
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        catch (...)
+        {
+            // The tab collection changed under the walk (a close racing the Save tick) or a pane walk
+            // threw: the terminals not reached keep their renderer until the next flip or restart, and
+            // every NEW terminal still follows the override set above.
+            ::Agentmaster::AgentLogCaughtException(L"_ApplySoftwareRenderingSetting(walk)");
+        }
+        // 3. One hooks.log line per window per flip — the evidence trail when a user reports "tabs went
+        //    black" / "the app got slow" after toggling it (grep '\[render\]').
+        try
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          std::wstring{ L"[render] software rendering " } + (enabled ? L"ON (CPU / WARP)" : L"OFF (GPU)") +
+                                              L" (" + std::wstring{ reason } + L") window " + ::Agentmaster::ShortId(_windowId) +
+                                              L": re-pointed " + std::to_wstring(visited - failed) + L" of " + std::to_wstring(visited) +
+                                              L" terminal(s)\n");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ApplySoftwareRenderingSetting(log)");
+        }
     }
 
     // Agentmaster (Linked Lenses — the reveal half of the per-tab -> Manager sync): when the Agent

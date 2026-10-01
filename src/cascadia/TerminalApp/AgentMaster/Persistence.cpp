@@ -712,6 +712,7 @@ namespace Agentmaster
         o.Set(L"confirmBeforeKill", json::Value::MkBool(s.confirmBeforeKill));
         o.Set(L"reapOrphanedSessions", json::Value::MkBool(s.reapOrphanedSessions));
         o.Set(L"uiStallAutoRestart", json::Value::MkBool(s.uiStallAutoRestart));
+        o.Set(L"softwareRendering", json::Value::MkBool(s.softwareRendering)); // RENDERING.md — CPU (WARP) instead of the GPU
         o.Set(L"tabRenameCommitMode", json::Value::MkStr(ToString(s.tabRenameCommitMode)));
         o.Set(L"defaultLaunchDir", json::Value::MkStr(s.defaultLaunchDir));
         o.Set(L"waitingForYouTimeoutMinutes", json::Value::MkNum(s.waitingForYouTimeoutMinutes));
@@ -860,6 +861,8 @@ namespace Agentmaster
         s.confirmBeforeKill = v.BoolAt(L"confirmBeforeKill", true);
         s.reapOrphanedSessions = v.BoolAt(L"reapOrphanedSessions", true);
         s.uiStallAutoRestart = v.BoolAt(L"uiStallAutoRestart", true);
+        // Absent (every settings.json before this setting existed) => the GPU, the historical renderer.
+        s.softwareRendering = v.BoolAt(L"softwareRendering", false);
         s.tabRenameCommitMode = TabRenameCommitModeFromString(v.StrAt(L"tabRenameCommitMode", L"shiftEnter"));
         s.defaultLaunchDir = v.StrAt(L"defaultLaunchDir");
         // A STORED 0 is meaningful (= never decay) — U32At only falls back when the key is absent.

@@ -2225,6 +2225,25 @@ namespace Agentmaster
         // human notices. OFF => the watchdog still detects/logs/rescues, but never restarts.
         // No cog UI (deliberately — a corrective backstop, not a preference); set in settings.json.
         bool uiStallAutoRestart{ true };
+        // Agentmaster (RENDERING.md — "Software rendering"): draw EVERY terminal on the CPU (Direct3D's
+        // WARP rasterizer) instead of the GPU, in every window, live (no restart). OFF (the default)
+        // keeps the GPU.
+        //
+        // Why it exists: every terminal that has been SHOWN owns its own D3D11 device until its tab is
+        // closed, and once one process holds ~62 of them the NVIDIA driver hang-recovers (System log
+        // nvlddmkm event 153, ~3 s each) at every new tab or focus. A tab opened then can stay black
+        // for good (2026-09-23 / 09-25 / 10-01). WARP builds no GPU device, so the limit cannot be hit.
+        //
+        // The cost, measured at a 178x51 terminal (1,602x969 px): a full frame takes ~1–6 ms of CPU
+        // instead of ~0.1–0.4 ms (tools/warpbench.cpp). The software path redraws the whole screen
+        // each frame, so only tabs that are PAINTING pay — a running claude repaints ~8–13 times/s,
+        // ~1–8% of one core — and an idle tab costs nothing. Each shown terminal also keeps ~19 MB of
+        // system RAM for its frame buffers (VRAM on the GPU path).
+        //
+        // OR'ed with Terminal's own profile `rendering.software`: OFF here never disables a user who
+        // turned WT's setting on. Applied through TermControl::SetSoftwareRenderingOverride (engine
+        // init, before any tab) and ReapplySoftwareRendering (cog Save + the cross-window broadcast).
+        bool softwareRendering{ false };
         // How the tab/session rename box commits via the keyboard (focus-loss always commits). GLOBAL
         // across windows. Default = Shift+Enter commits while a plain Enter still inserts a newline
         // (titles are multi-line). See TabRenameCommitMode.

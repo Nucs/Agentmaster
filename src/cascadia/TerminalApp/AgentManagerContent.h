@@ -1119,6 +1119,9 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCarryDraftOnFork{ nullptr }; // PENDING_INPUT.md §11 — the FORK CARRY: copy the source's unsent draft (pastes expanded) into a new fork's box; SESSIONS tab (not autorunner-gated — release builds fork too)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setConfirmKill{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setReapOrphans{ nullptr }; // OBSERVER.md §13a: shut down a session whose terminal host died (reapOrphanedSessions)
+        // RENDERING.md: draw every terminal on the CPU (WARP) instead of the GPU (AppSettings::softwareRendering,
+        // default OFF). Behavior tab -> RENDERING; the page applies a change live to every window on Save.
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setSoftwareRendering{ nullptr };
         // NOTIFICATIONS tab (System notifications): the Running -> X Windows-toast switches. The master
         // toggle gates the rest (the dependents grey out while it's off); the five checkboxes pick WHICH
         // target states notify (all checked == the "Running to anything else" default rule).

@@ -56,6 +56,13 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
     }
 
+    // Agentmaster (RENDERING.md): the process-wide "draw every terminal on the CPU" override behind
+    // ControlCore::SetSoftwareRenderingOverride. One copy per binary that links this file — which is
+    // what we want: every window of the WindowEmperor lives in this one process and loads this one
+    // Microsoft.Terminal.Control.dll, so the Settings cog flips it once for the whole fleet. Atomic
+    // because the UI thread writes it while a terminal on any window may be initializing.
+    static std::atomic<bool> s_softwareRenderingOverride{ false };
+
     TextColor SelectionColor::AsTextColor() const noexcept
     {
         if (IsIndex16())
@@ -448,7 +455,9 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             _renderEngine->SetPixelShaderImagePath(_settings.PixelShaderImagePath());
             _renderEngine->SetGraphicsAPI(parseGraphicsAPI(_settings.GraphicsAPI()));
             _renderEngine->SetDisablePartialInvalidation(_settings.DisablePartialInvalidation());
-            _renderEngine->SetSoftwareRendering(_settings.SoftwareRendering());
+            // Agentmaster (RENDERING.md): the profile's flag OR the cog's process-wide override, so a
+            // terminal created after the user chose software rendering never builds a GPU device.
+            _renderEngine->SetSoftwareRendering(_softwareRenderingEffective());
 
             _updateAntiAliasingMode();
 
@@ -1260,7 +1269,9 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         _renderEngine->SetGraphicsAPI(parseGraphicsAPI(_settings.GraphicsAPI()));
         _renderEngine->SetDisablePartialInvalidation(_settings.DisablePartialInvalidation());
-        _renderEngine->SetSoftwareRendering(_settings.SoftwareRendering());
+        // Agentmaster (RENDERING.md): keep the cog's override through a WT settings reload — passing
+        // the profile flag alone would put every software-rendered terminal back on the GPU.
+        _renderEngine->SetSoftwareRendering(_softwareRenderingEffective());
         // Inform the renderer of our opacity
         _renderEngine->EnableTransparentBackground(_isBackgroundTransparent());
         _renderFailures = 0; // We may have changed the engine; reset the failure counter.
@@ -2365,6 +2376,58 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         const auto lock = _terminal->LockForWriting();
         _renderFailures = 0;
         _renderer->EnablePainting();
+    }
+
+    // Agentmaster (RENDERING.md): see ControlCore.h. A plain relaxed store — the value only steers
+    // which adapter the NEXT engine (re)build picks, and every live terminal is re-pointed explicitly
+    // through ReapplySoftwareRendering, so no ordering with other memory is required.
+    void ControlCore::SetSoftwareRenderingOverride(const bool enabled) noexcept
+    {
+        s_softwareRenderingOverride.store(enabled, std::memory_order_relaxed);
+    }
+
+    // Agentmaster (RENDERING.md): see ControlCore.h.
+    bool ControlCore::SoftwareRenderingOverride() noexcept
+    {
+        return s_softwareRenderingOverride.load(std::memory_order_relaxed);
+    }
+
+    // Agentmaster (RENDERING.md): see ControlCore.h. OR, never "override wins": the cog setting
+    // can only ADD software rendering. A user who enabled WT's own `rendering.software` keeps it
+    // when the cog's switch is off.
+    bool ControlCore::_softwareRenderingEffective() const
+    {
+        return _settings.SoftwareRendering() || SoftwareRenderingOverride();
+    }
+
+    // Agentmaster (RENDERING.md): see ControlCore.h — the live half of the cog's switch, pressed
+    // on every already-initialized terminal of a window when the setting changes.
+    void ControlCore::ReapplySoftwareRendering()
+    {
+        // Not built yet => nothing to re-point: Initialize reads the override when it builds the
+        // engine. Closing => the terminal is about to be destroyed; don't wake its render thread for
+        // a frame no one will see.
+        if (!_initializedTerminal.load(std::memory_order_relaxed) || _IsClosing())
+        {
+            return;
+        }
+        // The lock must be held: the engine's settings are shared state the render thread reads
+        // while it paints (the same rule UpdateSettings and ResumeRendering follow).
+        const auto lock = _terminal->LockForWriting();
+        // Restore the configured API first: the one-shot failure fallback (_rendererEnteredErrorState)
+        // forces Direct2D, and a terminal leaving software rendering should get the backend its
+        // settings ask for. For WARP, AtlasEngine maps Automatic to Direct2D by itself.
+        _renderEngine->SetGraphicsAPI(parseGraphicsAPI(_settings.GraphicsAPI()));
+        // When this flips the value it changes the engine's target settings, so the next frame drops
+        // the old adapter/device/swap chain, builds new ones and re-attaches the new swap chain to the
+        // SwapChainPanel. An unchanged value is a no-op inside AtlasEngine.
+        _renderEngine->SetSoftwareRendering(_softwareRenderingEffective());
+        // A changed engine is a fresh start: give a terminal that fell back once a full retry budget
+        // again (the same reset UpdateSettings performs).
+        _renderFailures = 0;
+        // Wake the render thread for one frame. It may be idle forever otherwise (an idle claude
+        // writes nothing), and the rebuild only happens when it paints.
+        _renderer->TriggerRedrawAll();
     }
 
     bool ControlCore::IsVtMouseModeEnabled() const

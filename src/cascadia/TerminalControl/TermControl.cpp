@@ -1615,6 +1615,27 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         return false;
     }
 
+    // Agentmaster (RENDERING.md): see TermControl.idl. Forwards to the core's process-wide flag; a
+    // static, so the app can set it before any control exists (engine init, ahead of the first tab).
+    void TermControl::SetSoftwareRenderingOverride(const bool enabled) noexcept
+    {
+        ControlCore::SetSoftwareRenderingOverride(enabled);
+    }
+
+    // Agentmaster (RENDERING.md): see TermControl.idl. The core is always in-proc here, as for
+    // RestoreFromPath / PersistTo, so get_self reaches its implementation directly without widening
+    // ControlCore.idl.
+    void TermControl::ReapplySoftwareRendering()
+    {
+        // A closing control is on its way out — no frame it draws will be seen. A null core never built
+        // anything. The core repeats the closing check under its own flag.
+        if (_IsClosing() || !_core)
+        {
+            return;
+        }
+        winrt::get_self<ControlCore>(_core)->ReapplySoftwareRendering();
+    }
+
     safe_void_coroutine TermControl::_restoreInBackground()
     {
         const auto path = std::exchange(_restorePath, {});

@@ -40,6 +40,12 @@ namespace Microsoft.Terminal.Control
 
         static TermControl NewControlByAttachingContent(ControlInteractivity content);
 
+        // Agentmaster (RENDERING.md — the "Software rendering" setting): force EVERY terminal in this
+        // process to draw on the CPU (WARP) instead of the GPU, OR'ed with the profile's own
+        // `rendering.software`. Process-wide (all windows share one Control DLL); new terminals pick it
+        // up when they initialize, existing ones only after ReapplySoftwareRendering(). Any thread.
+        static void SetSoftwareRenderingOverride(Boolean enabled);
+
         static Windows.Foundation.Size GetProposedDimensions(IControlSettings settings,
                                                              UInt32 dpi,
                                                              Int32 commandlineCols,
@@ -134,6 +140,13 @@ namespace Microsoft.Terminal.Control
         // uninitialized core (the lazy/eager init paths own that case) or any non-dormant
         // connection state. UI thread only.
         Boolean StartDormantConnection();
+
+        // Agentmaster (RENDERING.md): re-point THIS terminal's live renderer at the effective software
+        // flag (the profile's `rendering.software` OR SetSoftwareRenderingOverride) and repaint once. A
+        // changed value rebuilds the engine's adapter, device and swap chain on the next frame, which
+        // also revives a terminal whose GPU surface stopped showing frames. No-op before the terminal
+        // initialized (it reads the override then) or while it closes. UI thread only.
+        void ReapplySoftwareRendering();
         Windows.Foundation.Size CharacterDimensions { get; };
         Windows.Foundation.Size MinimumSize { get; };
         Single SnapDimensionToGrid(Boolean widthOrHeight, Single dimension);

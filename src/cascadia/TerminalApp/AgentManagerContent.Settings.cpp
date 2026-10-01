@@ -1312,6 +1312,15 @@ namespace winrt::TerminalApp::implementation
         });
         panel.Children().Append(_setResetHidden);
 
+        // Agentmaster (RENDERING.md): GPU vs CPU drawing for every terminal. Live: the cog's Save hands
+        // the value to the page, which sets the process-wide override and re-points each window's
+        // already-shown terminals (TerminalPage::_ApplySoftwareRenderingSetting).
+        panel.Children().Append(SettingsSeparator(L"RENDERING"));
+        _setSoftwareRendering = ToggleSwitch{};
+        _setSoftwareRendering.Header(winrt::box_value(L"Software rendering (draw terminals on the CPU instead of the GPU)"));
+        AgentSetTip(_setSoftwareRendering, L"Off (the default): every terminal draws on the graphics card. Each tab you have opened or looked at keeps its own GPU device until the tab is closed, and once Agentmaster holds about 60 of them the NVIDIA driver starts failing to create new ones (\x201C" L"Error occurred on GPUID: 100\x201D in the System event log). From then on a new or newly-focused tab can stay black even though its claude is running. Restarting the app clears it.\n\nOn: every terminal in every window draws on the CPU (Windows' WARP renderer), so no GPU device is created per tab and that limit can't be reached. Applies immediately; terminals already on screen switch over (and a black one gets a fresh surface).\n\nThe cost: a frame takes about 1\x2013" L"6 ms of CPU instead of ~0.3 ms, but only tabs that are repainting pay \x2014 a working claude repaints ~10 times a second (roughly 1\x2013" L"8% of one core per such tab), an idle tab costs nothing. If other work saturates the CPU, software-drawn tabs repaint late. Each opened terminal also uses ~19 MB of RAM for its screen buffers (graphics memory when off).\n\nTerminal's own \x201Crendering.software\x201D setting still applies on its own: if that is on, terminals draw on the CPU even with this switch off.");
+        panel.Children().Append(_setSoftwareRendering);
+
         // === NOTIFICATIONS tab (System notifications) ===
         // A Windows TOAST when a managed session's status leaves Running — the "your agent finished /
         // needs you" cue for tabs (and windows) you're not looking at:
@@ -2235,7 +2244,7 @@ namespace winrt::TerminalApp::implementation
         {
             addSettingsTab(L"Tests Autorunner", L"Tests Autorunner defaults stamped onto every new session \x2014 the starting mode and its backstops.", autorunnerPanel);
         }
-        addSettingsTab(L"Behavior", L"Interaction + session-state behavior \x2014 close confirms, the rename commit key, and the Waiting-for-you \x201Cunread\x201D timeout.", behaviorPanel);
+        addSettingsTab(L"Behavior", L"Interaction + session-state behavior \x2014 close confirms, the rename commit key, the Waiting-for-you \x201Cunread\x201D timeout, and GPU or CPU rendering.", behaviorPanel);
         // COMMANDS is the first tab to offer a per-tab RESET: put every control back to the
         // SHIPPED DEFAULTS, read from a default-constructed AppSettings so there is ONE source of
         // truth (no hand-copied literals to drift). It touches the FORM only — Save commits it,
@@ -2539,6 +2548,10 @@ namespace winrt::TerminalApp::implementation
         if (_setReapOrphans)
         {
             _setReapOrphans.IsOn(_appSettings.reapOrphanedSessions);
+        }
+        if (_setSoftwareRendering)
+        {
+            _setSoftwareRendering.IsOn(_appSettings.softwareRendering); // RENDERING.md
         }
         // NOTIFICATIONS tab: seed the master + the five target-state checkboxes + the two behavior
         // toggles, then sync the dependents' enabled state explicitly (don't rely on the programmatic
@@ -3183,6 +3196,10 @@ namespace winrt::TerminalApp::implementation
         {
             _appSettings.reapOrphanedSessions = _setReapOrphans.IsOn();
         }
+        if (_setSoftwareRendering)
+        {
+            _appSettings.softwareRendering = _setSoftwareRendering.IsOn(); // RENDERING.md — applied live by the page's settings sink
+        }
         // NOTIFICATIONS tab. The checkboxes are read even while disabled (master off) — like
         // _setInferGitRoot, they still hold the user's stored preference, and dropping them here
         // would silently reset a mute to the default. IsChecked is an IReference<bool>; a null
@@ -3515,6 +3532,7 @@ namespace winrt::TerminalApp::implementation
                                   L" model=" + (_appSettings.model.empty() ? std::wstring{ L"(default)" } : _appSettings.model) +
                                   L" autorunner=" + (_appSettings.defaultAutorunnerMode == AutorunnerMode::Full ? L"Full" : _appSettings.defaultAutorunnerMode == AutorunnerMode::SemiAuto ? L"Semi" : L"Off") +
                                   L" claudeExe=" + (_appSettings.claudeExePath.empty() ? std::wstring{ L"(auto)" } : _appSettings.claudeExePath) +
+                                  L" softwareRendering=" + (_appSettings.softwareRendering ? L"1" : L"0") + /* RENDERING.md — the whole fleet's renderer */
                                   L" handover=" + (_appSettings.commandHandoverEnabled ? (L"/" + _appSettings.commandHandoverName) : std::wstring{ L"off" }) +
                                   L" here=" + (_appSettings.commandHandoverHereEnabled ? (L"/" + _appSettings.commandHandoverHereName) : std::wstring{ L"off" }) /* both apply at next start (COMMANDS.md §6a) */);
             _settingsSink(_appSettings); // page persists + applies to future spawns

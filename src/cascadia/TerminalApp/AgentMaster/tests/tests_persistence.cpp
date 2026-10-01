@@ -572,6 +572,7 @@ void TestAppSettings()
         in.confirmBeforeKill = false;
         in.reapOrphanedSessions = false; // non-default (default true = the §13a orphan reaper is armed) — OBSERVER.md
         in.uiStallAutoRestart = false; // non-default (default true = the ui-stall RESTART tier is armed) — Engine.h escalation
+        in.softwareRendering = true; // non-default (default false = the GPU) — RENDERING.md: every terminal on the CPU (WARP)
         in.tabRenameCommitMode = TabRenameCommitMode::ClickAwayOrEnter; // non-default (default is ClickAwayOrShiftEnter)
         in.favoriteIcon = FavoriteIcon::Star; // non-default (default is Crown)
         in.tabColorMode = TabColorMode::Individual; // non-default (default is WorkingDirectory) — tab color modes
@@ -633,6 +634,9 @@ void TestAppSettings()
         CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
         CHECK(out.reapOrphanedSessions == false, "settings reapOrphanedSessions round-trip (orphan reaper OFF)");
         CHECK(out.uiStallAutoRestart == false, "settings uiStallAutoRestart round-trip (restart tier OFF)");
+        CHECK(out.softwareRendering == true, "settings softwareRendering round-trip (CPU rendering ON)");
+        CHECK(DeserializeAppSettings(L"{\"version\":1,\"settings\":{}}").softwareRendering == false,
+              "settings softwareRendering: an absent key (every pre-RENDERING.md settings.json) reads OFF = the GPU");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter, "settings tabRenameCommitMode round-trip");
         CHECK(out.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon round-trip");
         CHECK(out.tabColorMode == TabColorMode::Individual, "settings tabColorMode round-trip");
@@ -766,6 +770,7 @@ void TestAppSettings()
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");
         CHECK(out2.uiStallAutoRestart == true, "settings uiStallAutoRestart defaults ON on garbage (the restart tier is a default-armed backstop)");
         CHECK(out2.reapOrphanedSessions == true, "settings reapOrphanedSessions defaults ON on garbage (a dead-console session is unreachable by construction)");
+        CHECK(out2.softwareRendering == false, "settings softwareRendering defaults OFF on garbage (an unreadable file must not move the fleet onto the CPU)");
     }
 
     // Agentmaster: the legacy "waitingDecayMinutes" key was RENAMED to "waitingForYouTimeoutMinutes"

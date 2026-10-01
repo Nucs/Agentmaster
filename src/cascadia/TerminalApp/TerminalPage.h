@@ -1501,6 +1501,20 @@ namespace winrt::TerminalApp::implementation
         // call sites wrap it so a failure there can never abort their own bookkeeping.
         void _ApplyAgentTabSelection(const winrt::TerminalApp::Tab& tab, AgentTabSelectionLaps* laps);
         void _ApplyBroadcastSettings(const ::Agentmaster::AppSettings& settings); // Agentmaster (cross-window settings broadcast): adopt GLOBAL settings changed in another window (cog Save / sort toggle) — update _appSettings + hand the Manager content the new settings (repaints the sort toggles + re-sorts). Runs on this window's UI thread (the engine sink marshals here)
+        // Agentmaster (RENDERING.md — "Software rendering"): switch the whole process to CPU (WARP) or
+        // GPU drawing NOW. It sets the process-wide TermControl override, so terminals initialized
+        // later pick it up themselves, then re-points every terminal THIS window has already
+        // initialized (every pane of every tab). Each window re-points only its own: the cog's Save
+        // handler calls this for the saving window, _ApplyBroadcastSettings for every other one.
+        // Call it only when the value CHANGED, because the re-point repaints each terminal and, on a
+        // real change, rebuilds its device + swap chain.
+        //
+        // Parameters:
+        // - enabled: true = draw on the CPU (WARP); false = the GPU (unless the profile's own
+        //   `rendering.software` is on).
+        // - reason: a short tag for the hooks.log `[render]` line ("cog" / "broadcast").
+        // Never throws: a terminal that fails to re-point is logged (Rule #18) and the loop moves on.
+        void _ApplySoftwareRenderingSetting(bool enabled, std::wstring_view reason) noexcept;
         std::wstring _ClaudeSessionForConnection(const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn); // Agentmaster: which managed session is BOUND to this connection (by tabToken == WT_SESSION) — archive on pane-close + re-point injector on restartConnection
         winrt::Microsoft::Terminal::TerminalConnection::ConptyConnection _BuildAgentConnection(const std::wstring& commandline, const std::wstring& dir, const std::wstring& title, const std::vector<std::pair<std::wstring, std::wstring>>& env, bool inheritCursor = false); // Agentmaster: the shared managed-agent ConPTY builder (commandline + cwd + child env + this window's AM_SESSION stamp) — behind _LaunchClaudeSession / _LaunchCodexSession (fresh pane => inheritCursor false) AND the in-place restart (reuses the pane buffer => inheritCursor true)
         std::wstring _ManagedSessionForConnection(const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn); // Agentmaster: which MANAGED session (Claude OR Codex) owns this connection, matched by connection IDENTITY across _claudeTabs (agent-agnostic; works for a Codex tab with no tabToken yet)

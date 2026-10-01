@@ -143,6 +143,47 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         void AdjustOpacity(const float adjustment);
         void ResumeRendering();
 
+        // Agentmaster (RENDERING.md — the "Software rendering" setting): force EVERY terminal in this
+        // PROCESS to draw on the CPU (Direct3D's WARP rasterizer, Direct2D backend) instead of the GPU.
+        // It exists because each initialized terminal owns its own D3D11 device, and past ~62 devices
+        // in one process the NVIDIA driver starts hang-recovering on every new one (a tab opened then
+        // can stay black for good). WARP creates no GPU device at all, at a measured ~1–6 ms of CPU
+        // per frame instead of ~0.1–0.4 ms, plus ~19 MB of system RAM per terminal for its frame
+        // buffers (tools/warpbench.cpp).
+        //
+        // The flag is OR'ed with the profile's own `rendering.software` (so turning it off never
+        // overrides a user who enabled WT's setting) and is read at every point a ControlCore hands
+        // the software flag to its engine: Initialize (a new terminal starts on the right renderer)
+        // and UpdateSettings (a WT settings reload keeps it). Flipping it does NOT touch terminals
+        // that already initialized — each needs ReapplySoftwareRendering() on its UI thread.
+        //
+        // Parameters:
+        // - enabled: true = draw every terminal on the CPU from now on; false = honor only the
+        //   profile's `rendering.software` again (the GPU unless the user enabled WT's setting).
+        // Thread safety: a relaxed atomic store, callable from any thread. Never throws.
+        static void SetSoftwareRenderingOverride(const bool enabled) noexcept;
+        // Agentmaster (RENDERING.md): the current process-wide override set by
+        // SetSoftwareRenderingOverride (false until a caller sets it).
+        // Returns: true when every terminal is forced onto the CPU renderer. Never throws.
+        static bool SoftwareRenderingOverride() noexcept;
+        // Agentmaster (RENDERING.md): push the EFFECTIVE software flag (the profile's
+        // `rendering.software` OR the process-wide override) into this terminal's live render
+        // engine and repaint once. When the effective value changes, AtlasEngine drops its adapter,
+        // device and swap chain and builds new ones on the first frame, and that new swap chain is
+        // re-attached to the SwapChainPanel. So this also revives a terminal whose GPU surface stopped
+        // showing frames, which none of WT's own paths ever rebuild.
+        //
+        // It mirrors UpdateSettings' renderer block: the graphics API is restored from the settings
+        // (undoing the one-shot WARP + Direct2D failure fallback of _rendererEnteredErrorState) and
+        // the failure counter is reset, so a terminal that fell back once gets a fresh hardware try
+        // when the override is switched off.
+        //
+        // A no-op for a not-yet-initialized terminal (Initialize reads the override itself) or a
+        // closing one. Call on the control's UI thread: it takes the terminal write lock, which the
+        // render thread also takes. Can throw a winrt::hresult_error if the projected settings object
+        // fails (the same calls UpdateSettings makes); the engine setters themselves are noexcept.
+        void ReapplySoftwareRendering();
+
         void SetHoveredCell(Core::Point terminalPosition);
         void ClearHoveredCell();
         winrt::hstring GetHyperlink(const Core::Point position) const;
@@ -376,6 +417,12 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         void _raiseReadOnlyWarning();
         void _updateAntiAliasingMode();
+        // Agentmaster (RENDERING.md): the software flag this terminal's engine should run with — the
+        // profile's `rendering.software` OR the process-wide SetSoftwareRenderingOverride. The ONE
+        // place both inputs meet, so Initialize, UpdateSettings and ReapplySoftwareRendering can never
+        // disagree. Returns true for the CPU (WARP) renderer. Can throw a winrt::hresult_error if the
+        // projected settings call fails.
+        bool _softwareRenderingEffective() const;
         void _connectionOutputHandler(winrt::array_view<const char16_t> str);
         void _connectionStateChangedHandler(const TerminalConnection::ITerminalConnection&, const Windows::Foundation::IInspectable&);
         void _updateHoveredCell(const std::optional<til::point> terminalPosition);
