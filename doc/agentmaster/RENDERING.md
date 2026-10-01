@@ -91,7 +91,8 @@ The machine was 45–60% busy with other work during the runs.
 | quiet screen (15% filled, 2 colors/row) | 0.10 ms CPU | 1.0–2.8 ms CPU |
 | busy Claude screen (60%, 4 colors/row) | 0.31–0.39 ms CPU | 1.9–5.9 ms CPU |
 | very dense (90%, 8 colors/row) | — | 5.2 ms CPU |
-| RAM per shown terminal | VRAM | ~19 MB system commit (3 × 6.2 MB frame buffers) |
+| RAM per shown terminal | VRAM | ~19–22 MB system commit (3 × 6.2 MB frame buffers + the device) |
+| threads | 20 driver threads per terminal | one shared pool: +11 for 1 terminal, +24 for 10, +26 for 30 |
 
 - **Only repainting tabs pay.** The Direct2D backend redraws the whole screen each frame
   (`BackendD2D::Render`: full background fill + every row's glyph runs), so the cost is frames × screen
@@ -103,9 +104,45 @@ The machine was 45–60% busy with other work during the runs.
   - A running claude adds roughly 1–8% of one core (8–13 frames/s × 1–6 ms).
   - 5 running tabs come to at most ~40% of one core, ~1% of this 32-thread machine.
   - A tab streaming fast output (~60 frames/s) costs ~6–36% of a core while it streams.
-- **RAM:** 65 shown terminals ≈ 1.2 GB of system memory, moved from VRAM to RAM.
+- **RAM:** 65 shown terminals ≈ 1.2–1.4 GB of system memory, moved from VRAM to RAM. Measured directly
+  for 30: +646 MB.
 - **Caveat:** when other jobs saturate the CPU (2026-09-27: pexport workers + a Docker benchmark),
   software-drawn tabs repaint late. The GPU path is immune to that, but not to §1.
+
+### 4a. Sizing a big fleet — e.g. 100+ tabs, 30 of them activated
+
+Three different counts matter, and only two of them cost anything:
+
+- **Dormant tabs cost nothing in either mode.** A restored, never-entered tab (or a Deactivated one)
+  has no text buffer, no renderer and no device. So 70+ dormant tabs add no rendering cost; they still
+  add the app's per-tab UI bookkeeping, which is the same in both modes.
+- **Activated terminals set the fixed cost.** Activated means initialized: started in place, entered,
+  or viewed since the last restart.
+  - On the GPU, 30 activated = 30 devices + XAML's 1. That is under the ~62 limit, but every OTHER tab
+    you view adds one more until it is closed (or deactivated). That leaves ~30 views of headroom in a
+    100+ tab window before §1's storm.
+  - On the GPU, the 30 devices also mean 600 NVIDIA threads plus VRAM.
+  - On WARP there is no limit. The 30 terminals cost ~650 MB of RAM (measured) and ~26 threads in
+    total.
+- **Working terminals set the CPU cost.** Working means repainting right now: a claude mid-turn, or
+  output streaming. Idle claudes repaint nothing; 63 of 66 terminals were silent in the 10-01 sample.
+  At ~8–13 frames/s each:
+
+| working at once | GPU | software (WARP) |
+|---|---|---|
+| 5 | ~0.02 core | 0.05–0.4 core |
+| 15 | ~0.06 core | 0.15–1.3 cores |
+| all 30 | ~0.1 core | 0.3–2.5 cores (1–8% of a 32-thread machine) |
+
+  Add 0.06–0.36 core while one tab streams at ~60 frames/s.
+
+**Rule of thumb:**
+- If the process routinely holds more than ~50 activated terminals, software rendering is the safe
+  mode: it trades ≤ ~2.5 cores in the all-busy worst case, plus ~20 MB per terminal, for never hitting
+  the storm.
+- Below that, the GPU is cheaper, as long as finished tabs get deactivated or closed. Restarting the app
+  also resets the count, because tabs come back dormant.
+- §6's per-window device or release-when-hidden would remove the trade-off altogether.
 
 ## 5. Diagnosing a black tab (read-only, nothing suspended)
 

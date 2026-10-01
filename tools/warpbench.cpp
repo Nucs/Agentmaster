@@ -18,17 +18,20 @@
 //       NOT say how fast the real renderer paints.
 //
 //   warpbench mem <count> <widthPx> <heightPx>
-//       RAM held per software-rendered terminal: <count> x (WARP device + AtlasEngine's swap chain —
-//       3 buffers, FLIP_SEQUENTIAL, on a DirectComposition surface handle — each buffer written once).
-//       Reported as SYSTEM COMMIT, not process private bytes: flip-model buffers are sections shared
-//       with DWM, so they never show up in the owning process's private bytes.
+//       RAM + threads held per software-rendered terminal: <count> x (WARP device + AtlasEngine's swap
+//       chain — 3 buffers, FLIP_SEQUENTIAL, on a DirectComposition surface handle — each buffer written
+//       once). RAM is reported as SYSTEM COMMIT, not process private bytes: flip-model buffers are
+//       sections shared with DWM, so they never show up in the owning process's private bytes.
 //
 // Measured 2026-10-01 (i9-13900K, RTX 4060 Ti, 178x51 cells = 1,602x969 px — Cascadia Mono 12 pt at
 // 96 DPI in a 1920x1032 window; the machine was 45–60% busy with other work, hence the spread over
 // repeated runs — WARP threads that land on E-cores or share a busy core cost more):
 //   GPU   0.10–0.39 ms CPU per frame
 //   WARP  1.0–2.8 ms (15% fill, 2 runs) / 1.9–5.9 ms (60%, 4 runs) / 5.2 ms (90%, 8 runs) CPU per frame
-//   RAM   ~19 MB of system commit per WARP terminal (3 x 6.2 MB buffers + ~1.2 MB private)
+//   RAM   ~19–22 MB of system commit per WARP terminal (3 x 6.2 MB buffers + ~1.2 MB private);
+//         30 terminals measured at +646 MB
+//   threads  WARP shares ONE process-wide worker pool: +11 for 1 terminal, +24 for 10, +26 for 30
+//         (the GPU path: NVIDIA's driver adds 20 per terminal — 600 for 30)
 //
 // Safety: `hw` creates ONE hardware device in THIS process — harmless (the per-process ~62-device
 // limit RENDERING.md describes is per process). Never point this at a running Agentmaster: it is a
@@ -43,6 +46,7 @@
 #include <dwrite.h>
 #include <dxgi1_2.h>
 #include <psapi.h>
+#include <tlhelp32.h>
 #include <wrl/client.h>
 
 #include <chrono>
@@ -103,6 +107,27 @@ static double PrivateMb()
     PROCESS_MEMORY_COUNTERS_EX pmc{};
     GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc));
     return static_cast<double>(pmc.PrivateUsage) / 1048576.0;
+}
+
+// How many threads this process has right now — the per-device worker-thread cost (NVIDIA's user-mode
+// driver starts ~20 per hardware device; WARP's rasterizer has its own pool). A Toolhelp snapshot.
+// Returns: the live thread count, or 0 if the snapshot fails. Never throws.
+static int ThreadCount()
+{
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+    {
+        return 0;
+    }
+    THREADENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    int count = 0;
+    for (BOOL ok = Thread32First(snapshot, &entry); ok; ok = Thread32Next(snapshot, &entry))
+    {
+        count += entry.th32OwnerProcessID == GetCurrentProcessId() ? 1 : 0;
+    }
+    CloseHandle(snapshot);
+    return count;
 }
 
 // One synthetic terminal screen, pre-shaped: glyph indices per row and the color runs covering it.
@@ -279,8 +304,8 @@ static void Bench(const char* label, const bool warp, const int cols, const int 
     }
     const double wallMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     const double cpuMs = ProcessCpuMs() - cpu0;
-    std::printf("%-5s %ux%u px (%dx%d cells, fill %d%%, %d runs/row, %ls): %.2f ms CPU/frame (%.2f ms wall/frame, %d frames)\n",
-                label, width, height, cols, rows, fillPercent, runsPerRow, faceName, cpuMs / frames, wallMs / frames, frames);
+    std::printf("%-5s %ux%u px (%dx%d cells, fill %d%%, %d runs/row, %ls): %.2f ms CPU/frame (%.2f ms wall/frame, %d frames; process threads now %d)\n",
+                label, width, height, cols, rows, fillPercent, runsPerRow, faceName, cpuMs / frames, wallMs / frames, frames, ThreadCount());
 }
 
 // Prints the RAM <count> software-rendered terminals hold (see the file header's `mem` mode).
@@ -301,6 +326,7 @@ static void MemPerTerminal(const int count, const UINT width, const UINT height)
     std::vector<Terminal> terminals(count);
     const double privateBefore = PrivateMb();
     const double commitBefore = CommitMb();
+    const int threadsBefore = ThreadCount();
     for (auto& t : terminals)
     {
         CHECK(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_SINGLETHREADED | D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &t.device, nullptr, &t.context));
@@ -341,8 +367,9 @@ static void MemPerTerminal(const int count, const UINT width, const UINT height)
     }
     const double privateAfter = PrivateMb();
     const double commitAfter = CommitMb();
-    std::printf("RAM   %d WARP terminals at %ux%u px: +%.1f MB private, +%.1f MB system commit (%.1f MB commit per terminal)\n",
-                count, width, height, privateAfter - privateBefore, commitAfter - commitBefore, (commitAfter - commitBefore) / count);
+    const int threadsAfter = ThreadCount();
+    std::printf("RAM   %d WARP terminals at %ux%u px: +%.1f MB private, +%.1f MB system commit (%.1f MB commit per terminal), +%d threads\n",
+                count, width, height, privateAfter - privateBefore, commitAfter - commitBefore, (commitAfter - commitBefore) / count, threadsAfter - threadsBefore);
     for (auto& t : terminals)
     {
         CloseHandle(t.surfaceHandle);
