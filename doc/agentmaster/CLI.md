@@ -5,10 +5,10 @@
 > tab* without ever seeing the UI. Plus a small, reversible **control** surface (`restore` /
 > `archive`).
 
-This is the textual twin of the Manager UI: the Triage Board, the per-tab overlay, and the Flight
-Plan, rendered as JSON (for agents) or a compact human table. It is built to **always work** — app
-running or not — by reading the *same persisted + OS-observable state the Fleet Observer already
-trusts*, never by depending on a live process to answer a query.
+This is the textual twin of the Manager UI: the Triage Board, the per-tab overlay, and the Auto
+Testing queue, rendered as JSON (for agents) or a compact human table. It is built to **always
+work** — app running or not — by reading the *same persisted + OS-observable state the Fleet
+Observer already trusts*, never by depending on a live process to answer a query.
 
 Related: [`DESIGN.md`](DESIGN.md), [`OBSERVER.md`](OBSERVER.md) (the pull model this reuses),
 [`SESSIONS.md`](SESSIONS.md) (the on-disk `~/.claude` map + `TranscriptStore`),
@@ -109,7 +109,7 @@ sink, no `SessionInfo` change — a small additive intercept in commandline pars
 agentmaster show <ref> [--tail N] [--json]   # full introspection of one session/tab — the heart
             list                              # fleet overview: windows → tabs → sessions, by state
             sessions [--state S] [--dir D] [--archived]   # --dir D: substring on workingDir, slash-INSENSITIVE (/ ≡ \)
-            tabs [--window W]                 # every tab across windows (claude + shells), kind, link
+            tabs [--window W]                 # every tab across windows (claude + shells), kind, link (--window: --json only, §11)
             windows                           # geometry, ordered tabs, Manager lens
             external                          # unmanaged-claude census (real-WT / bare console)
             restore <ref> [--window W]        # archived → live   (control; P2 — deferred, §9)
@@ -121,11 +121,16 @@ global: --json  --profile <dir>  --instance dev|release  --self  --help  --versi
 (All reads are already offline-style — persisted + OS-observable state only — so there is no
 distinct online mode; `--offline` is reserved as a shim dispatch token, not yet a parsed flag.)
 
+`--help` and `--version` reach the CLI only behind a verb or a CLI-only flag (`agentmaster tabs
+--help`, `agentmaster --json --version` → `agentmaster-cli schema 2`). As the FIRST token they are
+an ordinary non-CLI commandline, so the launcher forwards them to the running GUI (§7), which shows
+a message box.
+
 - **`<ref>`** resolves a conversation UUID / unique id-prefix / title substring (`ResolveSessionRef`;
   a live claude managed by the *other* instance also matches by id/prefix — see below); ambiguity prints
   the candidates and exits non-zero. (`w<N>:t<M>` tab-refs and `--pid <n>` are designed but not yet parsed.)
 - **`--self`** introspects the tab the agent is *calling from* (reads its own `WT_SESSION` and
-  correlates) — "what's my queue, am I being autopiloted, what window am I in".
+  correlates) — "what's my queue, is the Tests Autorunner driving me, what window am I in".
 - **`--profile` / `--instance`** retarget another install's state (release vs dev, or an explicit
   folder); default is the active profile resolved exactly as the engine resolves it.
 
@@ -145,6 +150,14 @@ A faithful render of the per-tab overlay + Auto Testing + Triage card combined:
 - **Conversation (the substance)** — the last *N* turn pairs, the **last assistant reply verbatim**
   (where it left off), **`lastUserPrompt`** (the human's last real ask), last-turn tool calls; if
   NeedsApproval → the pending interactive tool; if waiting on a question → the question text.
+  *As built* (§11): the tail is the last *N* TEXT BLOCKS (`--tail N`, default 8 — each user prompt
+  and each assistant text line is one entry, though the human view heads them "last N turns"), the
+  pending tool is only its NAME (`AskUserQuestion`), and the last turn's tool calls are collected but
+  never emitted. For the whole conversation turn by turn, the reference renderer is
+  `transcript_turns.py` in the user-local agent skill (§11): one choice of detail level, from
+  `--minimal` (each turn's message and final reply) through the default steps view (every tool call
+  on one line) to `--max` (verbatim Bash, first output lines, written files, a stats line per turn).
+  It is the baseline that any future CLI or in-app turns view is compared against.
 - **Auto Testing** — the full queue, each prompt `{label, text, status, origin (flight/typed), gate,
   sentAt}`, plus the sent history and the autorunner backstops
   (maxAutoSends / autoSendsThisRun / stopOnError / pauseOnHumanInput).
@@ -233,20 +246,17 @@ token), so `agentmaster --instance dev show …` dispatches too. Anything else (
 
 - **P1 — read (hybrid, standalone reader):** `show` / `list` / `sessions` / `tabs` / `windows` /
   `external` / `--self`. Zero engine edits. **Code COMPLETE + QA'd** (presence-authoritative binding,
-  host classification, activity/files/last-prompt). **Deployed to the DEV alias by an in-place binary
-  swap** (no instance closed) and **live-verified** end-to-end via the real `agentmasterdev` alias —
-  every verb returns valid JSON, auto-targeting the dev profile by package identity. **Packaging
-  authored, but the full build is unproven:** `agentmaster-cli.vcxproj` (console; links the engine
-  units) compiles clean and the `wt`/`wtd` shim is console-subsystem + dual-mode (`shim.cpp` +
-  `wt.vcxproj` `SubSystem=Console`), wired into `OpenConsole.slnx` + `CascadiaPackage.wapproj` so a
-  build *should* ship `agentmaster-cli.exe` beside the GUI exe — but this committed wiring
-  has only been **isolation-built + XML-validated**; a real full `Build-Agentmaster.ps1` / CI Release
-  build has NOT run, so the wapproj integration + a properly-branded `wtd.exe` are unconfirmed and the
-  live dev alias runs on **hand-copied binaries** until then. **Remaining: a destructive full package
-  build + deploy** (close → build → relaunch) to confirm the wiring and make a built-from-source
-  `agentmaster show` alias live — which must be run from OUTSIDE the dev instance being closed
-  (self-kill hazard); the **release** alias `agentmaster show` is **not deployed** (only
-  `agentmasterdev`).
+  host classification, activity/files/last-prompt), and **shipped by the full package build**:
+  `agentmaster-cli.vcxproj` (console; links the engine units) plus the console-subsystem, dual-mode
+  `wt`/`wtd` shim (`shim.cpp` + `wt.vcxproj` `SubSystem=Console`), wired into `OpenConsole.slnx` +
+  `CascadiaPackage.wapproj`, put `agentmaster-cli.exe` beside the GUI exe in both built layouts.
+  **Live on both aliases**, each auto-targeting its own profile by package identity — verified
+  2026-10-01: `agentmaster --json --version` (the release install, 0.6.8.13, from its Release layout)
+  and `agentmasterdev --json --version` (the dev install) both answer `agentmaster-cli schema 2`.
+  (History: it first went live on the dev alias through an in-place binary swap, before any full
+  build had run.) The JSON envelope is `schemaVersion` **2** since the Auto Testing rename
+  (2026-06-30: `autopilot` → `autorunner`, `autopilotDetail` → `autorunnerDetail`, `flightPlan` →
+  `autoTesting`). Where its answers differ from the app's, and what it leaves out: §11.
 - **P2 — control (designed + deferred):** the `--am-restore` / `--am-archive` handoff intercept +
   disk-poll confirm → `restore` / `archive`.
 - **P3 — designed + deferred:** a `watch` event stream, and **prompt control** (`enqueue` / `send-now` /
@@ -263,3 +273,42 @@ token), so `agentmaster --instance dev show …` dispatches too. Anything else (
   defterm (`-Embedding`), reopen (`-w -s`), and bare launch must all behave exactly as before.
 - **One profile, resolved once, headless-safe** (Rule #15) — the CLI reads through
   `AgentmasterStateDir()`; it never shows UI and never re-homes state.
+
+## 11. Known gaps (verified 2026-09-29 on release 0.6.8.13, schema 2)
+
+Where the CLI's answer differs from the app's, or leaves something out. They were found while
+writing a user-local agent skill over the CLI (`~/.claude/skills/am-agentmaster-cli`, not part of
+this repo). Its `am_inspect.py` helper works around each gap by reading what the CLI doesn't:
+`sessions.json`, `session-store/<id>.json`, `open-windows.json`, `hooks.log`, the transcript, and
+the visible screen. Its `transcript_turns.py` is the per-turn renderer §5 points to. Re-check this
+list when `agentcli.cpp` changes, and drop a gap once it is fixed.
+
+- **"Waiting for you" reads as Idle.** The presence heartbeat only says `idle`. Whether the user
+  has seen a finished turn is app state (`sessions.json` `state`). 25 of 35 open sessions differed
+  for exactly this reason.
+- **A stale "Needs approval", in the app too.** After a restart the transcript still ends on the
+  unanswered `AskUserQuestion` asked by a claude that has since exited. Claude Code writes nothing
+  when a question is declined or dropped, so the app and the CLI both read NeedsApproval forever,
+  while the resumed claude's screen says "User declined to answer questions". The signature:
+  heartbeat `idle` (not `waiting`) and a process start LATER than the question. Both open
+  NeedsApproval sessions on 2026-09-29 were like this.
+- **`model` is almost always blank** (0 of 35 open sessions had it). It comes only from a
+  `--model` on the claude command line; the transcript's assistant lines carry the real model.
+- **`live: false` / `linkState: "archived"` only means "no claude runs now".** A restored tab
+  that hasn't been focused yet (dormant) reads the same as a closed session.
+- **`tabs` lists closed windows too** (every saved `windows/<id>.json`) and doesn't mark them;
+  `open-windows.json` says which windows are open.
+- **`tabs --window W` filters only with `--json`.** The human view is the `windows` tree, printed
+  unfiltered (`CmdTabs` → `CmdWindows`).
+- **A title ref is a plain substring over every session, closed ones included** (`show cli` also
+  matches "bad click"), and an exact title that several sessions share stays ambiguous (exit 1).
+- **Designed in §5 but not emitted:** the pending question's text (`pendingInteractiveTool` is
+  only the tool's name), the last turn's tool calls (`lastTurnTools`, collected and never
+  written), and hook provenance (`hookWired`). The conversation tail counts text blocks, not
+  turns.
+- **Codex is mostly invisible** (read from the code; no Codex tab was open to test). A managed
+  Codex tab reads `kind: "shell"` with no id, and `external` lists claudes only.
+- **Not in the CLI at all:** unsent drafts, tags, favorites, API errors (an errored session reads
+  Idle or WaitingForInput), and a background shell job (heartbeat `shell` → Idle).
+- **`--help` / `--version` as the first token go to the GUI** (§5): the running app shows a
+  message box. Put a verb or a CLI-only flag first.
