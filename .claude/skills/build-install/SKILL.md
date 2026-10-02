@@ -236,6 +236,11 @@ The mechanism: `CascadiaPackage.wapproj` sets DesktopBridge's `OutputPath` (the 
 defaulted only when empty) from `/p:AgentmasterLayoutDir` BEFORE the DesktopBridge props import;
 every referenced project still builds into its usual `bin\`/`obj\` (checked with msbuild
 `-getProperty:OutDir` — the wapproj moves, `TerminalApp` stays at `bin\x64\Release\TerminalApp\`).
+The icon files move with it: `CopyAgentmasterImagesToLayout` copies `res\terminal\images-Dev\**`
+into `$(TargetDir)Images\`, i.e. into the slot. Until 2026-10-02 that target hard-coded
+`bin\x64\<Config>\`, so slot B never got its `Images\`. Production ran from B (0.6.8.12, 0.6.8.14)
+with a **blank taskbar and Start icon**, and its taskbar button showed nothing but the unread-count
+overlay. The swap now refuses a layout that is missing any icon file its manifest names.
 
 ```bash
 # 0. self-kill check — your shell must NOT be inside production (the swap stops its GUI; the
@@ -396,6 +401,10 @@ bash tools/am-lock.sh release --token "$TOKEN"
 
 - `Get-AppxPackage -Name Agentmaster` / `-Name AgentmasterDev` → expected `PackageFullName` +
   `InstallLocation`.
+- The registered layout (InstallLocation) has its `Images\` folder: 192 files from
+  `res\terminal\images-Dev`. Without it the app runs normally, but its taskbar and Start icons are
+  blank; a taskbar button showing ONLY the red unread-count disc means exactly this. The swap
+  script refuses such a layout; a plain `Add-AppxPackage -Register` does not.
 - `~\.agentmaster.profiles` has one line per install pointing at the right profile.
 - `<profile>\hooks.log` shows the bridge + observer alive; `<profile>\bridge.json` carries the
   CURRENT pid's pipe; the regenerated `<profile>\agentmaster-hook.ps1` discovery line points

@@ -18,8 +18,9 @@
   (tools\Build-Agentmaster.ps1 -LayoutDir <other folder>), then run this script to swap:
 
     1. validate  - the layout's AppxManifest.xml names the SAME package (a dev layout can never
-                   be registered over the release family or vice versa), and it isn't the folder
-                   the package already runs from;
+                   be registered over the release family or vice versa), every icon file it names
+                   is present (a layout without Images\ runs fine but has a BLANK taskbar and Start
+                   icon), and it isn't the folder the package already runs from;
     2. stamp     - write a version newer than the registered one into the layout's manifest
                    (development-mode re-registration refuses anything not newer; the build
                    itself always emits 0.0.1.0);
@@ -107,6 +108,9 @@
   Throws (exit code 1 when run as a script) when:
     - the layout folder or its AppxManifest.xml is missing, or the manifest can't be parsed;
     - the manifest's Identity Name differs from -PackageName;
+    - an image the manifest names (Images\X.png) is missing from the layout, both as that file and
+      as every resource variant (X.scale-200.png, ...): registering it would leave Agentmaster with
+      a blank taskbar and Start icon;
     - -LayoutDir is the folder the package is already registered from (nothing to swap to);
     - the requested/derived version isn't newer than the registered one (or the revision would
       overflow 65535);
@@ -194,6 +198,32 @@ if ($identity.Name -ne $PackageName) {
     # registered in place of the release app, or the reverse.
     throw "Layout '$newDir' is package '$($identity.Name)', not '$PackageName' - wrong identity (build it with$(if ($PackageName -eq 'Agentmaster') { '' } else { 'out' }) -ReleaseIdentity)."
 }
+
+# The app's ICONS. Every image the manifest names (Images\X.png: the Start, taskbar and tile logos
+# and the StoreLogo) must exist in the layout, either as that exact file or as a resource variant
+# (X.scale-200.png, X.targetsize-24_altform-unplated.png, ...), which is what resources.pri resolves
+# the reference to. A layout without them still registers and runs, but Windows has no file to
+# serve, so the taskbar and Start icons are BLANK. Production ran that way from slot B until
+# 2026-10-02: CascadiaPackage.wapproj's image copy ignored the slot redirect, and the taskbar
+# button showed nothing but the unread-count overlay. Checked here, before anything is stopped,
+# so a bad layout costs nothing; -WhatIf reports it too.
+$imageRefs = @([regex]::Matches((Get-Content -LiteralPath $newManifest -Raw), '(?i)Images\\[^"<>\s]+') |
+        ForEach-Object { $_.Value } | Sort-Object -Unique)
+$missingImages = @(foreach ($ref in $imageRefs) {
+        $refDir = Join-Path $newDir (Split-Path $ref -Parent)
+        $base = [IO.Path]::GetFileNameWithoutExtension($ref)
+        $ext = [IO.Path]::GetExtension($ref)
+        $exact = Test-Path -LiteralPath (Join-Path $newDir $ref) -PathType Leaf
+        # "X.*.png" = X, then one or more qualifier segments, then the extension: every MakePri
+        # variant name, and never a different logo that merely shares a prefix (X2.png).
+        $variant = (Test-Path -LiteralPath $refDir -PathType Container) -and
+            [bool](Get-ChildItem -LiteralPath $refDir -File -Filter "$base.*$ext" | Select-Object -First 1)
+        if (-not ($exact -or $variant)) { $ref }
+    })
+if ($missingImages.Count -gt 0) {
+    throw "Layout '$newDir' lacks the icon files its manifest names ($($missingImages -join ', ')), so Agentmaster would get a BLANK taskbar and Start icon. Rebuild it with the current CascadiaPackage.wapproj (its CopyAgentmasterImagesToLayout target fills Images\), or copy res\terminal\images-Dev\* into '$(Join-Path $newDir 'Images')'."
+}
+
 $apps = @($manifestXml.Package.Applications.Application)
 $appId = $apps[0].Id
 

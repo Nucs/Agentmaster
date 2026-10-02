@@ -400,6 +400,11 @@ per window (TerminalPage, UI thread): _flashingSessions ∪ _manualUnreadSession
 - Unread state is per run: the rings and Mark Unread are transient, so a restart starts at 0.
 - A tab dragged to another window loses its unread mark (the ring's existing behavior).
 - Only sessions whose tab is open somewhere count; a managed Codex tab rings at its 3-state floor, so it counts too.
+- **A button showing ONLY the red disc** (no Agentmaster icon under it) is not an overlay bug. The app icon itself is
+  missing: the registered layout has no `Images\` folder, so Windows has no file to serve for the manifest's logos.
+  The overlay is then the only thing left to draw. Production ran that way from hot-deploy slot B until 2026-10-02,
+  because `CascadiaPackage.wapproj`'s image copy ignored the slot redirect; it now copies into `$(TargetDir)`, and the
+  swap script refuses a layout without its icons (the `build-install` skill §4a).
 - Runtime checklist (pends a build/deploy — permission-gated): with a session running in a background tab, switch
   tabs → on turn-complete the button shows **1** and hooks.log has `[unread] 0 -> 1`; a second one → **2**;
   visiting one → **1**; leave a running session on screen, switch to another app, let it finish → the count rises,

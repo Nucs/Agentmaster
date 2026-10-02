@@ -231,16 +231,33 @@
   <!-- Agentmaster: copy package image assets to the deployment layout root so that
        Add-AppxPackage -Register finds them at Images\* relative to AppxManifest.xml.
        The standard WAP Deploy step (VS F5) copies content to AppX\ and registers from
-       there; the manual build + register workflow registers from bin\<Plat>\<Config>\
-       (where AppxManifest.xml lands), so images must be physically present in
-       bin\<Plat>\<Config>\Images\ as well.
+       there; the manual build + register workflow registers from the folder AppxManifest.xml
+       lands in, so the images must be physically present in its Images\ as well. Without
+       them the package registers and runs normally, but Windows has no file to serve for the
+       Square44x44Logo / StoreLogo / tile references: a BLANK taskbar and Start icon.
+
+       That folder is $(TargetDir) - the full path of OutDir, i.e. OutputPath - because the
+       AppxPackage targets write AppxManifest.xml and resources.pri to
+       $(TargetDir)$(AppxPackageArtifactsDir) (the artifacts dir is empty by default). It is
+       bin\<Plat>\<Config>\ for every ordinary build, and the hot-deploy slot when
+       AgentmasterLayoutDir redirected OutputPath (the top of this file). This target used to
+       hard-code bin\$(Platform)\$(Configuration)\, so a hot build into
+       bin\x64\Release-B copied the images into bin\x64\Release instead; while production ran
+       from slot B (0.6.8.12 and 0.6.8.14) its taskbar button showed nothing but the unread-
+       count overlay (2026-10-02). tools\Swap-AgentmasterLayout.ps1 now refuses a layout that
+       lacks the icon files its manifest names.
+
        $(WindowsTerminalAssetSuffix) is set above: -Dev for Dev/empty branding (both
        Agentmaster identities), -Pre/-Can for Preview/Canary. -->
   <Target Name="CopyAgentmasterImagesToLayout"
           AfterTargets="Build"
           Condition="Exists('$(OpenConsoleDir)res\terminal\images$(WindowsTerminalAssetSuffix)')">
     <PropertyGroup>
-      <_AgentmasterLayoutRoot>$(MSBuildProjectDirectory)\bin\$(Platform)\$(Configuration)\</_AgentmasterLayoutRoot>
+      <_AgentmasterLayoutRoot>$(TargetDir)</_AgentmasterLayoutRoot>
+      <!-- Belt only: TargetDir is empty solely when OutDir is, which DesktopBridge's OutputPath
+           default rules out. Falls back to the stock layout so the copy can never target the
+           drive root. -->
+      <_AgentmasterLayoutRoot Condition="'$(_AgentmasterLayoutRoot)' == ''">$(MSBuildProjectDirectory)\bin\$(Platform)\$(Configuration)\</_AgentmasterLayoutRoot>
     </PropertyGroup>
     <ItemGroup>
       <_AgentmasterImages Include="$(OpenConsoleDir)res\terminal\images$(WindowsTerminalAssetSuffix)\**\*" />
