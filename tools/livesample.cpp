@@ -17,6 +17,9 @@
 // ~190 MB) costs a one-off multi-second freeze on the first sample that lands in the module. The safe
 // fix (not done yet) is to force-load every module's symbols BEFORE the sampling loop (outside any
 // suspend); until then use the in-box dbghelp + local Release PDBs only.
+// PREFER tools/stacksnap.cpp on a live instance (2026-10-03): it never suspends a thread — it reads the
+// running thread's context, copies its stack, and walks the COPY in its own process — so a symbol load
+// or download costs the target nothing (doc/agentmaster/UI_THREAD.md §2).
 #define _AMD64_
 #include <windows.h>
 #include <tlhelp32.h>

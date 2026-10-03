@@ -236,7 +236,7 @@ is set (`LBe()` in its bundle), and every Agentmaster tab sets it.
 | CPU of all render threads | 9–22 ms/s |
 | NVIDIA threads | 12–16 ms/s CPU, 2,270 wakes/s |
 | XAML frame thread | 5–8 ms/s CPU, 62–68 wakes/s |
-| UI thread | 185–362 ms/s CPU, 450–580 wakes/s (not attributed: it needs an elevated ETW trace) |
+| UI thread | 185–362 ms/s CPU, 450–580 wakes/s (attributed later without ETW, in UI_THREAD.md: XAML's 60 Hz frame loop that the pulses keep running, plus per-tab layout fan-out) |
 
 Per-process GPU memory counters overlap. DWM's "Dedicated Usage" (9.9 GB) includes other processes'
 shared surfaces and was larger than the 7.2 GB in use on the whole card. Do not add them up.
@@ -324,8 +324,10 @@ of them shown since the start, two 10–15 s census windows):
   device, swap chain and glyph cache are rebuilt.
 - A tab hidden for less than the delay shows its last frame from before it was hidden for one frame
   (~16 ms), then the current screen.
-- XAML's own device, DWM, and the UI thread's cost (18–36% of a core in §4b, not attributed) are not
-  changed by §4c.
+- XAML's own device and DWM are not changed by §4c. The UI thread's cost (18–36% of a core in §4b) is
+  attributed in UI_THREAD.md: §4c removes only its part from off-screen and dormant pulses. A pulse
+  that stays on screen, the side panel's non-virtualized card list and the per-tab `LayoutUpdated`
+  handlers remain.
 - A control created while its window is minimized counts as visible until the next minimize/restore
   report (TerminalPage reports only a visible window to a new control).
 
