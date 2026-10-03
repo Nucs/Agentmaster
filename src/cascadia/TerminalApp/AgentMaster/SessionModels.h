@@ -274,6 +274,65 @@ namespace Agentmaster
         Upper = 2 // uppercase the whole title
     };
 
+    // Agentmaster (tab sizing): HOW the tab strip lays out tab WIDTHS — the cog's Tabs & Overlay
+    // "Tab width" dropdown. It overrides Windows Terminal's own "tabWidthMode" global (Terminal's
+    // settings.json / its Settings UI -> Appearance), except in the DEFAULT Terminal choice, which
+    // keeps following that setting — so an install that never touches this dropdown behaves exactly
+    // as before, including a user who set "titleLength" in Terminal's own settings.
+    //   * Terminal — whatever Terminal's tabWidthMode says (Equal unless the user changed it there).
+    //   * Equal — every tab the same width: MUX shares the strip between them, clamped into
+    //     [tabMinWidth, tabMaxWidth], and the strip scrolls once they reach the minimum.
+    //   * TitleLength — every tab as wide as its title (MUX's SizeToContent), bounded per tab by
+    //     tabMinWidth / tabMaxWidth (a title longer than the maximum is clipped; the tooltip shows it).
+    //   * Compact — an UNSELECTED tab shrinks to its icon (MUX hides its whole header, so with
+    //     showTabIcon off it shows only its color); the selected tab shows its title, up to tabMaxWidth.
+    //     tabMinWidth deliberately does NOT apply here — it would defeat the shrinking.
+    // The integer order is wire-irrelevant (serialized as a string token: Persistence ToString /
+    // TabStripWidthModeFromString; a missing or unknown token => Terminal). GLOBAL across windows,
+    // applied live on cog Save + the cross-window broadcast (TerminalPage::_ApplyTabSizingSettings).
+    // Named TabStripWidthMode (not TabWidthMode) so it can never collide with the TabView /
+    // GlobalAppSettings "TabWidthMode" members in TUs that pull those namespaces in.
+    enum class TabStripWidthMode
+    {
+        Terminal = 0, // default: follow Windows Terminal's own tabWidthMode setting
+        Equal = 1, // every tab the same width, clamped into [min, max]
+        TitleLength = 2, // every tab as wide as its title, bounded by [min, max]
+        Compact = 3 // unselected tabs shrink to their icon; the selected one shows its title (<= max)
+    };
+
+    // Agentmaster (tab sizing): the WEIGHT of the tab titles — the cog's "Title font weight"
+    // dropdown. Normal keeps the inherited TabViewItem weight (the header control's local value is
+    // CLEARED, so the default is byte-identical to before); SemiBold / Bold set it on the header.
+    // Serialized as a string token (Persistence ToString / TabTitleFontWeightFromString); a missing
+    // or unknown token => Normal. GLOBAL, applied live like the rest of the tab sizing.
+    enum class TabTitleFontWeight
+    {
+        Normal = 0, // default: the inherited weight (OpenType 400)
+        SemiBold = 1, // OpenType 600
+        Bold = 2 // OpenType 700
+    };
+
+    // Agentmaster (tab sizing): the shipped defaults + the valid bands of the four numeric tab-size
+    // settings (AppSettings::tabMinWidth / tabMaxWidth / tabTitleFontSize / tabMinHeight). Every
+    // default reproduces the strip exactly as it looked before the settings existed, so a missing
+    // settings.json changes nothing:
+    //   * min width 130 — App.xaml's fixed TabViewItemMinWidth floor (commit 466b09bc7).
+    //   * max width 240 — MUX 2.8's TabViewItemMaxWidth theme resource (TabView_themeresources.xaml).
+    //   * font size 12 — MUX 2.8's TabViewItemHeaderFontSize.
+    //   * min height 32 — MUX 2.8's TabViewItemMinHeight.
+    // The bands are the cog sliders' ranges AND what the load/save clamps enforce (ClampTab* below),
+    // so a hand-edited settings.json self-heals to the same values the cog would have produced.
+    inline constexpr uint32_t kDefaultTabMinWidth = 130;
+    inline constexpr uint32_t kDefaultTabMaxWidth = 240;
+    inline constexpr uint32_t kTabWidthBandMin = 40; // narrower than this a tab is a sliver no glyph fits in
+    inline constexpr uint32_t kTabWidthBandMax = 1000; // wider than this one tab hides the rest of the strip
+    inline constexpr uint32_t kDefaultTabTitleFontSize = 12;
+    inline constexpr uint32_t kTabTitleFontSizeBandMin = 8;
+    inline constexpr uint32_t kTabTitleFontSizeBandMax = 28;
+    inline constexpr uint32_t kDefaultTabMinHeight = 32;
+    inline constexpr uint32_t kTabMinHeightBandMin = 20; // below the tab's own content height (~30 px) anyway — a no-op floor
+    inline constexpr uint32_t kTabMinHeightBandMax = 120;
+
     // Agentmaster (tab title naming): the full recipe DeriveSessionTitle applies — the technique +
     // the output transforms (case; whitespace -> '_'; the unconditional '\' -> '/'). Defaults
     // mirror the AppSettings defaults, so TitleNamingOptions{} == the out-of-the-box naming (tests
@@ -2318,6 +2377,29 @@ namespace Agentmaster
         // hides tab icons by default so the strip reads on the status dot + title. Flip it on to restore
         // the profile icons. The pinned Manager tab follows this like any other tab.
         bool showTabIcon{ false };
+        // Agentmaster (tab sizing — the cog's Tabs & Overlay "TAB SIZE" section): how wide and tall every
+        // tab is and how its title reads. GLOBAL across windows; applied LIVE on cog Save + the
+        // cross-window broadcast by TerminalPage::_ApplyTabSizingSettings (and at engine init, before
+        // the first tab exists). Every default reproduces the pre-setting strip exactly — see the
+        // kDefaultTab* constants — and the defaults are applied by CLEARING Agentmaster's local values
+        // (the XAML styles govern again), so an untouched install is byte-identical to before.
+        //   * tabWidthMode — Terminal (default: follow Windows Terminal's own tabWidthMode) / Equal /
+        //     TitleLength / Compact. See TabStripWidthMode.
+        //   * tabMinWidth / tabMaxWidth — px bounds. Equal mode hands them to MUX as the
+        //     TabViewItemMinWidth / TabViewItemMaxWidth APPLICATION resources (the only knob its equal-
+        //     width math reads); TitleLength sets them on every TabViewItem; Compact sets only the max.
+        //     INVARIANT max >= min (NormalizeTabWidthRange — a crossed pair raises the max to the min).
+        //   * tabTitleFontSize — the title's font size (the rename box follows it); 12 == inherit.
+        //   * tabTitleFontWeight — Normal (inherit) / SemiBold / Bold.
+        //   * tabMinHeight — every TabViewItem's MinHeight in px; 32 == the style's own floor. A tab is
+        //     never shorter than its content (status dot + title + close button, ~30 px).
+        // Missing keys => the defaults; out-of-band values are clamped on load AND save (ClampTab*).
+        TabStripWidthMode tabWidthMode{ TabStripWidthMode::Terminal };
+        uint32_t tabMinWidth{ kDefaultTabMinWidth };
+        uint32_t tabMaxWidth{ kDefaultTabMaxWidth };
+        uint32_t tabTitleFontSize{ kDefaultTabTitleFontSize };
+        TabTitleFontWeight tabTitleFontWeight{ TabTitleFontWeight::Normal };
+        uint32_t tabMinHeight{ kDefaultTabMinHeight };
         // Agentmaster (tab title naming): HOW an untitled session's default tab title derives from
         // its working directory (TabTitleNaming — LastWord default / FolderName / TwoFolders /
         // Capitals), plus the output transforms: the case applied to the result (TabTitleCase) and
@@ -2754,6 +2836,77 @@ namespace Agentmaster
             return 0.1;
         }
         return v > 1.0 ? 1.0 : v;
+    }
+
+    // Agentmaster (tab sizing): the shared band clamp behind the four numeric tab-size settings. 0
+    // means "not set" (an absent key, a blank or garbage hand-edit) and falls back to the setting's
+    // default rather than pinning to the band's floor — a 0 px tab or a 0 pt title is never what was
+    // meant. Anything else is pinned into [lo, hi]. Shared by the Persistence load and the cog Save so
+    // a hand-edited settings.json self-heals to exactly what the cog would have stored.
+    // Parameters:
+    //   v   - the stored / typed value (0 == unset).
+    //   def - the setting's shipped default, returned for 0.
+    //   lo  - the band's inclusive floor.
+    //   hi  - the band's inclusive ceiling.
+    // Returns: def for 0, else v pinned into [lo, hi]. Never throws.
+    inline uint32_t ClampTabSizeSetting(uint32_t v, uint32_t def, uint32_t lo, uint32_t hi) noexcept
+    {
+        if (v == 0)
+        {
+            return def;
+        }
+        if (v < lo)
+        {
+            return lo;
+        }
+        return v > hi ? hi : v;
+    }
+
+    // Agentmaster (tab sizing): clamp AppSettings::tabMinWidth / tabMaxWidth into the shared
+    // [kTabWidthBandMin, kTabWidthBandMax] px band (0 -> the setting's own default). Use
+    // NormalizeTabWidthRange to also enforce the max >= min invariant across the pair.
+    // Parameters: v - the stored / typed px width (0 == unset).
+    // Returns: the clamped width. Never throws.
+    inline uint32_t ClampTabMinWidth(uint32_t v) noexcept
+    {
+        return ClampTabSizeSetting(v, kDefaultTabMinWidth, kTabWidthBandMin, kTabWidthBandMax);
+    }
+    inline uint32_t ClampTabMaxWidth(uint32_t v) noexcept
+    {
+        return ClampTabSizeSetting(v, kDefaultTabMaxWidth, kTabWidthBandMin, kTabWidthBandMax);
+    }
+
+    // Agentmaster (tab sizing): clamp BOTH width bounds and enforce max >= min. A crossed pair RAISES
+    // the maximum to the minimum — never lowers the minimum — because the minimum is the "a tab never
+    // gets narrower than this" promise the user typed, and MUX's equal-width clamp (std::clamp(w, min,
+    // max)) is undefined for min > max. The cog's two sliders push each other along so this only ever
+    // fires on a hand-edited settings.json; the Persistence load and the cog Save both run it.
+    // Parameters:
+    //   minWidth - in: the stored / typed minimum (0 == unset); out: the clamped minimum.
+    //   maxWidth - in: the stored / typed maximum (0 == unset); out: the clamped maximum, >= minWidth.
+    // Never throws.
+    inline void NormalizeTabWidthRange(uint32_t& minWidth, uint32_t& maxWidth) noexcept
+    {
+        minWidth = ClampTabMinWidth(minWidth);
+        maxWidth = ClampTabMaxWidth(maxWidth);
+        if (maxWidth < minWidth)
+        {
+            maxWidth = minWidth;
+        }
+    }
+
+    // Agentmaster (tab sizing): clamp AppSettings::tabTitleFontSize into [8, 28] (0 -> 12).
+    // Parameters: v - the stored / typed font size (0 == unset). Returns: the clamped size. Never throws.
+    inline uint32_t ClampTabTitleFontSize(uint32_t v) noexcept
+    {
+        return ClampTabSizeSetting(v, kDefaultTabTitleFontSize, kTabTitleFontSizeBandMin, kTabTitleFontSizeBandMax);
+    }
+
+    // Agentmaster (tab sizing): clamp AppSettings::tabMinHeight into [20, 120] px (0 -> 32).
+    // Parameters: v - the stored / typed minimum height (0 == unset). Returns: the clamped height. Never throws.
+    inline uint32_t ClampTabMinHeight(uint32_t v) noexcept
+    {
+        return ClampTabSizeSetting(v, kDefaultTabMinHeight, kTabMinHeightBandMin, kTabMinHeightBandMax);
     }
 
 

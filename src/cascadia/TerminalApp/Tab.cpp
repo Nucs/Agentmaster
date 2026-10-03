@@ -202,7 +202,16 @@ namespace winrt::TerminalApp::implementation
             // Make sure to try/catch this, because the LocalTests won't be
             // able to use this helper.
             const auto settings{ winrt::TerminalApp::implementation::AppLogic::CurrentAppSettings() };
-            if (settings.GlobalSettings().TabWidthMode() == winrt::Microsoft::UI::Xaml::Controls::TabViewWidthMode::SizeToContent)
+            auto widthMode = settings.GlobalSettings().TabWidthMode();
+            // Agentmaster (tab sizing): the cog's "Tab width" (unless left on "Windows Terminal setting")
+            // is the mode the strip ACTUALLY uses (TerminalPage::_EffectiveTabWidthMode), so the rename box
+            // must size by it too — else a strip forced to "Fit to title" would still cap its rename box at
+            // the Equal-mode width (and a forced "Equal" would let it run unbounded).
+            if (const auto overrideMode = GetTabWidthModeOverride(); overrideMode >= 0)
+            {
+                widthMode = static_cast<winrt::Microsoft::UI::Xaml::Controls::TabViewWidthMode>(overrideMode);
+            }
+            if (widthMode == winrt::Microsoft::UI::Xaml::Controls::TabViewWidthMode::SizeToContent)
             {
                 _headerControl.RenamerMaxWidth(HeaderRenameBoxWidthTitleLength);
             }
@@ -212,6 +221,15 @@ namespace winrt::TerminalApp::implementation
             }
         }
         CATCH_LOG()
+    }
+
+    // Agentmaster (tab sizing): re-derive the rename box's width ceiling after the cog's "Tab width"
+    // override changed (TerminalPage::_ApplyTabSizingSettings, per tab). UpdateSettings does the same on a
+    // Terminal settings reload, but it also pushes the settings into every pane — far too heavy for a
+    // cosmetic change — so this exposes just the header half.
+    void Tab::RefreshHeaderRenamerMaxWidth()
+    {
+        _UpdateHeaderControlMaxWidth();
     }
 
     void Tab::SetDispatch(const winrt::TerminalApp::ShortcutActionDispatch& dispatch)

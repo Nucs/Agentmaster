@@ -79,6 +79,11 @@ namespace winrt::TerminalApp::implementation
         bool FocusPane(const uint32_t id);
 
         void UpdateSettings(const winrt::Microsoft::Terminal::Settings::Model::CascadiaSettings& settings);
+        // Agentmaster (tab sizing): re-derive ONLY the rename box's width ceiling from the effective tab
+        // width mode (Terminal's setting, or the cog's GetTabWidthModeOverride). Called per tab when the
+        // cog's override changes — UpdateSettings would do it too, but also re-pushes every pane's settings.
+        // UI thread. Never throws (the underlying derive CATCH_LOGs).
+        void RefreshHeaderRenamerMaxWidth();
         void UpdateTitle();
 
         void Close();

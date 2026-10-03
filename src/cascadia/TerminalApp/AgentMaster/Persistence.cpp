@@ -373,6 +373,66 @@ namespace Agentmaster
         return TabTitleCase::Default; // default + unknown token -> keep the derived casing
     }
 
+    // Agentmaster (tab sizing): the tab-width-mode token. Equal / TitleLength / Compact reuse Windows
+    // Terminal's own settings.json words for the same modes (equal / titleLength / compact), so a user
+    // who knows one file reads the other; "terminal" is ours (= follow Terminal's setting).
+    // Parameters: m - the mode. Returns: its stable lowercase-camel token.
+    // Throws: std::bad_alloc only (building the returned string).
+    std::wstring ToString(TabStripWidthMode m)
+    {
+        switch (m)
+        {
+        case TabStripWidthMode::Equal:
+            return L"equal";
+        case TabStripWidthMode::TitleLength:
+            return L"titleLength";
+        case TabStripWidthMode::Compact:
+            return L"compact";
+        case TabStripWidthMode::Terminal:
+        default:
+            return L"terminal";
+        }
+    }
+    // Parameters: s - a stored token. Returns: its mode; an unknown/absent token -> Terminal (follow
+    // Windows Terminal's own setting — the pre-setting behavior). Never throws.
+    TabStripWidthMode TabStripWidthModeFromString(std::wstring_view s)
+    {
+        if (s == L"equal")
+            return TabStripWidthMode::Equal;
+        if (s == L"titleLength")
+            return TabStripWidthMode::TitleLength;
+        if (s == L"compact")
+            return TabStripWidthMode::Compact;
+        return TabStripWidthMode::Terminal;
+    }
+
+    // Agentmaster (tab sizing): the tab-title font-weight token.
+    // Parameters: w - the weight. Returns: its stable token.
+    // Throws: std::bad_alloc only (building the returned string).
+    std::wstring ToString(TabTitleFontWeight w)
+    {
+        switch (w)
+        {
+        case TabTitleFontWeight::SemiBold:
+            return L"semiBold";
+        case TabTitleFontWeight::Bold:
+            return L"bold";
+        case TabTitleFontWeight::Normal:
+        default:
+            return L"normal";
+        }
+    }
+    // Parameters: s - a stored token. Returns: its weight; an unknown/absent token -> Normal (the
+    // inherited weight — the pre-setting look). Never throws.
+    TabTitleFontWeight TabTitleFontWeightFromString(std::wstring_view s)
+    {
+        if (s == L"semiBold")
+            return TabTitleFontWeight::SemiBold;
+        if (s == L"bold")
+            return TabTitleFontWeight::Bold;
+        return TabTitleFontWeight::Normal;
+    }
+
     std::wstring ToString(PromptStatus s)
     {
         switch (s)
@@ -724,6 +784,14 @@ namespace Agentmaster
         o.Set(L"closeTabOnMiddleClick", json::Value::MkBool(s.closeTabOnMiddleClick));
         o.Set(L"alwaysShowHomeButton", json::Value::MkBool(s.alwaysShowHomeButton)); // RETIRED (nothing reads it — Home is the Agent Manager's only entry point, always shown); round-tripped so older settings stay byte-stable
         o.Set(L"showTabIcon", json::Value::MkBool(s.showTabIcon));
+        // Tab sizing (the cog's Tabs & Overlay "TAB SIZE" section) — the width mode + px bounds, the title
+        // font, and the tab's minimum height. Written already clamped (the cog Save + the load both clamp).
+        o.Set(L"tabWidthMode", json::Value::MkStr(ToString(s.tabWidthMode)));
+        o.Set(L"tabMinWidth", json::Value::MkNum(s.tabMinWidth));
+        o.Set(L"tabMaxWidth", json::Value::MkNum(s.tabMaxWidth));
+        o.Set(L"tabTitleFontSize", json::Value::MkNum(s.tabTitleFontSize));
+        o.Set(L"tabTitleFontWeight", json::Value::MkStr(ToString(s.tabTitleFontWeight)));
+        o.Set(L"tabMinHeight", json::Value::MkNum(s.tabMinHeight));
         o.Set(L"tabTitleNaming", json::Value::MkStr(ToString(s.tabTitleNaming)));
         o.Set(L"tabTitleCase", json::Value::MkStr(ToString(s.tabTitleCase)));
         o.Set(L"tabTitleSpacesToUnderscores", json::Value::MkBool(s.tabTitleSpacesToUnderscores));
@@ -881,6 +949,17 @@ namespace Agentmaster
         s.closeTabOnMiddleClick = v.BoolAt(L"closeTabOnMiddleClick", true); // absent => ON (close on middle click, the prior behavior)
         s.alwaysShowHomeButton = v.BoolAt(L"alwaysShowHomeButton", true); // RETIRED — read only to round-trip; the Home button is always shown now (absent => ON)
         s.showTabIcon = v.BoolAt(L"showTabIcon", false); // absent => OFF (tab icons HIDDEN by default — an Agentmaster override of stock WT, which shows them)
+        // Tab sizing: every absent key lands its default (== the strip before these settings existed:
+        // follow Terminal's own width mode, 130..240 px, a 12 pt Normal title, 32 px tall). The numbers
+        // are band-clamped (0/garbage -> the default) and the width pair normalized (max >= min), so a
+        // hand-edited settings.json can never hand MUX a crossed clamp range or a 0 px tab.
+        s.tabWidthMode = TabStripWidthModeFromString(v.StrAt(L"tabWidthMode", L"terminal"));
+        s.tabMinWidth = v.U32At(L"tabMinWidth", kDefaultTabMinWidth);
+        s.tabMaxWidth = v.U32At(L"tabMaxWidth", kDefaultTabMaxWidth);
+        NormalizeTabWidthRange(s.tabMinWidth, s.tabMaxWidth);
+        s.tabTitleFontSize = ClampTabTitleFontSize(v.U32At(L"tabTitleFontSize", kDefaultTabTitleFontSize));
+        s.tabTitleFontWeight = TabTitleFontWeightFromString(v.StrAt(L"tabTitleFontWeight", L"normal"));
+        s.tabMinHeight = ClampTabMinHeight(v.U32At(L"tabMinHeight", kDefaultTabMinHeight));
         s.tabTitleNaming = TabTitleNamingFromString(v.StrAt(L"tabTitleNaming", L"lastWord")); // tab title naming: absent/unknown => LastWord (the default technique)
         s.tabTitleCase = TabTitleCaseFromString(v.StrAt(L"tabTitleCase", L"default")); // absent/unknown => keep the derived casing
         s.tabTitleSpacesToUnderscores = v.BoolAt(L"tabTitleSpacesToUnderscores", false); // absent => OFF (titles keep their spaces)

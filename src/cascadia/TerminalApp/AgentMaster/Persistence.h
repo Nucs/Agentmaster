@@ -45,6 +45,13 @@ namespace Agentmaster
     TabTitleNaming TabTitleNamingFromString(std::wstring_view s);
     std::wstring ToString(TabTitleCase c);
     TabTitleCase TabTitleCaseFromString(std::wstring_view s);
+    // Agentmaster (tab sizing): the "tabWidthMode" / "tabTitleFontWeight" settings tokens — "terminal" /
+    // "equal" / "titleLength" / "compact" (Windows Terminal's own tabWidthMode words, plus "terminal")
+    // and "normal" / "semiBold" / "bold". An unknown token parses to the default (Terminal / Normal).
+    std::wstring ToString(TabStripWidthMode m);
+    TabStripWidthMode TabStripWidthModeFromString(std::wstring_view s);
+    std::wstring ToString(TabTitleFontWeight w);
+    TabTitleFontWeight TabTitleFontWeightFromString(std::wstring_view s);
 
     // ---- struct <-> json::Value ----
     json::Value ToJson(const QueuedPrompt& p);

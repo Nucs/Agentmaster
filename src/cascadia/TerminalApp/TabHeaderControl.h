@@ -19,6 +19,20 @@ namespace winrt::TerminalApp::implementation
     // TerminalPage.AgentEngine.cpp.
     void SetTabRenameCommitMode(int32_t mode) noexcept;
 
+    // Agentmaster (tab sizing): the process-global TAB WIDTH MODE OVERRIDE — the cog's "Tab width"
+    // (AppSettings::tabWidthMode) resolved to a MUX TabViewWidthMode value, or -1 for "follow Windows
+    // Terminal's own tabWidthMode setting" (the default). TerminalPage applies the effective mode to
+    // its TabView itself; this copy exists for Tab::_UpdateHeaderControlMaxWidth, which sizes the
+    // rename box by the width mode but only knows Terminal's settings — without it a tab in an
+    // overridden "Fit to title" strip would still cap its rename box at the Equal-mode width. GLOBAL
+    // across windows (one process), so one atomic rather than per-tab plumbing (the rename-commit idiom
+    // above). Written by TerminalPage::_ApplyTabSizingSettings (engine init, cog Save, broadcast).
+    // Parameters: mode - -1 (follow Terminal), or 0 Equal / 1 SizeToContent / 2 Compact (the MUX
+    //             TabViewWidthMode values); anything else is stored as -1.
+    void SetTabWidthModeOverride(int32_t mode) noexcept;
+    // Returns: the override set above — -1 when the strip follows Terminal's own setting.
+    int32_t GetTabWidthModeOverride() noexcept;
+
     struct TabHeaderControl : TabHeaderControlT<TabHeaderControl>
     {
         TabHeaderControl();
@@ -34,6 +48,21 @@ namespace winrt::TerminalApp::implementation
         // STABLE height regardless of which tabs the ListView has realized. TerminalPage pushes the max
         // title-line-count across ALL tabs here; <=1 collapses the shim (the slim single-line strip).
         void ReserveTitleLines(int32_t lines);
+
+        // Agentmaster (tab sizing): apply the cog's TITLE FONT to this header — the title (and the
+        // invisible multi-line height reserver, which must carry the title's exact font, or a reserved
+        // N-line strip would no longer measure N title lines) plus the rename box, so what you type reads
+        // at the size it will commit at. Set on those TextBlocks only — the indicator glyphs carry explicit sizes and
+        // the dot/star/crown are shapes, so nothing but the TEXT changes. A 0 argument means "the
+        // default" and CLEARS the TextBlocks' local value, so the TabViewItem's own
+        // TabViewItemHeaderFontSize / weight flow through by inheritance (an untouched install is
+        // byte-identical to before). Change-gated: an unchanged value touches nothing (every write
+        // re-measures the tab, and TerminalPage calls this for every tab on each settings apply).
+        // Parameters:
+        //   fontSize   - the title size in DIPs (> 0), or 0 to inherit the TabViewItem's size.
+        //   fontWeight - an OpenType weight (400 Normal / 600 SemiBold / 700 Bold), or 0 to inherit.
+        // UI thread only. Never throws: a XAML failure is logged (Rule #18) and leaves the old font.
+        void ApplyTitleFont(double fontSize, uint16_t fontWeight) noexcept;
 
         til::event<TerminalApp::TitleChangeRequestedArgs> TitleChangeRequested;
         til::typed_event<> RenameEnded;

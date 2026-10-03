@@ -119,6 +119,68 @@ static winrt::WUX::Controls::ScrollViewer _FindTabStripScrollViewer(const winrt:
     return nullptr;
 }
 
+// Agentmaster (tab sizing): depth-first walk for the TabView's inner TabViewListView — the template part
+// named "TabListView" (Microsoft.UI.Xaml 2.8 Generic.xaml: the list inside the TabView template's
+// TabContainerGrid). MUX's SizeToContent / Compact width pass caps that list's MaxWidth at the space then
+// available, and its Equal pass never resets it, so after a mode change the stale cap would keep the strip
+// from growing with the window (TerminalPage::_ClearTabStripListMaxWidth drops it). The walk returns at
+// the first match, which document order reaches before the selected tab's (far larger) content subtree,
+// so it stays cheap.
+// Parameters: root - where to start (the TabView); null is tolerated.
+// Returns: the list, or nullptr before the TabView's template is applied.
+static winrt::WUX::FrameworkElement _FindTabStripListView(const winrt::WUX::DependencyObject& root)
+{
+    if (!root)
+    {
+        return nullptr;
+    }
+    const auto count = winrt::WUX::Media::VisualTreeHelper::GetChildrenCount(root);
+    for (int32_t i = 0; i < count; ++i)
+    {
+        const auto child = winrt::WUX::Media::VisualTreeHelper::GetChild(root, i);
+        if (const auto fe = child.try_as<winrt::WUX::FrameworkElement>(); fe && fe.Name() == L"TabListView")
+        {
+            return fe;
+        }
+        if (auto found = _FindTabStripListView(child))
+        {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
+// Agentmaster (tab sizing): give `element` Agentmaster's LOCAL value for the double property `dp`, or —
+// with `clear` — drop that local value so the XAML style's own value governs again (how a setting left at
+// its default stays byte-identical to the strip before the setting existed). Writes only on a real change:
+// every write re-measures the strip, and the tab-sizing apply runs this for every tab on each settings
+// change. A style setter is not a LOCAL value, so a never-touched tab reads as "unset" here.
+// Parameters:
+//   element - the tab (TabViewItem) to size.
+//   dp      - a double-typed FrameworkElement property (MinHeight / MinWidth / MaxWidth).
+//   value   - the px value to hold (ignored with `clear`).
+//   clear   - true: remove the local value instead of setting one.
+// Throws: whatever the XAML property system throws (a winrt::hresult_error); callers catch + log.
+static void _SetOrClearLocalDouble(const winrt::WUX::FrameworkElement& element, const winrt::WUX::DependencyProperty& dp, const double value, const bool clear)
+{
+    const auto local = element.ReadLocalValue(dp);
+    const bool hasLocal = local != winrt::WUX::DependencyProperty::UnsetValue();
+    if (clear)
+    {
+        if (hasLocal)
+        {
+            element.ClearValue(dp);
+        }
+        return;
+    }
+    // -1 can never equal a real (positive) size, so an unboxing surprise just means "write it".
+    if (hasLocal && winrt::unbox_value_or<double>(local, -1.0) == value)
+    {
+        return;
+    }
+    element.SetValue(dp, winrt::box_value(value));
+}
+
 // Agentmaster: flip a tab-strip nav button's visibility, but only when it actually changes — the
 // updater runs on every tab add/remove/switch (hundreds of times during a big window restore), so a
 // no-op write would needlessly invalidate the strip's layout each time.
@@ -894,6 +956,10 @@ namespace winrt::TerminalApp::implementation
         // exist yet, so this just sets the hook flag + overlay mode; per-tab visibility is then applied
         // as each tab is created/selected (_UpdatedSelectedTab -> _updateAllTabCloseButtons).
         _updateAllTabCloseButtons();
+        // Agentmaster (tab sizing): publish the cog's TAB SIZE settings (width mode, width bounds, height,
+        // title font) BEFORE this window builds its first tab, so the strip's first layout already uses
+        // them. No forced relayout — no tab exists yet; every tab later gets its share in _InitializeTab.
+        _ApplyTabSizingSettings(false);
 
         // M9: consume the ONE process-wide engine. v1.24 WT is a WindowEmperor — every window
         // lives in a single process — so the SessionRegistry (single source of truth), the
@@ -1797,6 +1863,9 @@ namespace winrt::TerminalApp::implementation
                 // Apply the (possibly changed) "Show icons on tabs" setting to THIS window's tabs now
                 // (show/hide the profile icon on every tab); other windows get it via the broadcast.
                 self->_UpdateAllTabIcons();
+                // Agentmaster (tab sizing): apply the (possibly changed) TAB SIZE settings — width mode, width
+                // bounds, height, title font — to THIS window's strip now; other windows via the broadcast.
+                self->_ApplyTabSizingSettings(true);
                 // (The tab-strip Home button no longer has a setting: it is the Agent Manager's only entry
                 // point, so it is always shown — the retired "Always display Home button" cog toggle's key
                 // still round-trips in settings.json but nothing reads it.)
@@ -2128,6 +2197,10 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: "Show icons on tabs" is GLOBAL too — re-apply a change made in another window to
         // THIS window's tabs live (show/hide the profile icon on every tab).
         _UpdateAllTabIcons();
+        // Agentmaster (tab sizing): the TAB SIZE settings are GLOBAL — a change saved in another window
+        // resizes THIS window's strip live too (the width bounds are process-wide app resources, already in
+        // force; the mode + per-tab height / font are per window and applied here).
+        _ApplyTabSizingSettings(true);
         // FAVORITES.md §5a: the favorite marker (Crown <-> Star) is GLOBAL — re-assert it on every hosted
         // favorited tab so a change made in another window switches the glyph live here too.
         _RefreshAllFavoriteIcons();
@@ -2166,6 +2239,241 @@ namespace winrt::TerminalApp::implementation
         if (softwareRenderingChanged)
         {
             _ApplySoftwareRenderingSetting(settings.softwareRendering, L"broadcast");
+        }
+    }
+
+    // ---- Agentmaster (tab sizing — the cog's Tabs & Overlay "TAB SIZE" section) ---------------------------
+    // Four XAML levers, because MUX's TabView exposes no single "tab size" knob:
+    //   * WIDTH MODE — TabView.TabWidthMode, the same property Terminal's own tabWidthMode setting drives.
+    //   * WIDTH BOUNDS in Equal mode — MUX computes every tab's width itself (std::clamp(available / count,
+    //     min, max)) and reads min/max ONLY from the TabViewItemMinWidth / TabViewItemMaxWidth APPLICATION
+    //     resources, fresh on each of its width passes; per-tab MinWidth/MaxWidth would fight its explicit
+    //     Width and break its overflow (scroll-button) math. So Equal mode = the resources, nothing per tab.
+    //   * WIDTH BOUNDS in Fit to title / Compact — MUX leaves each tab content-sized (Width = NaN), so the
+    //     bounds go on every TabViewItem as MinWidth / MaxWidth (Compact: max only — a min would stop
+    //     unselected tabs from shrinking to their icon).
+    //   * HEIGHT + TITLE FONT — per tab: TabViewItem.MinHeight (overrides the style's ThemeResource floor)
+    //     and the header control's title TextBlocks (TabHeaderControl::ApplyTitleFont).
+    // Every default CLEARS Agentmaster's local value instead of writing the default, so an untouched
+    // install keeps exactly the values the XAML styles give (App.xaml's 130 px floor, MUX's 240 / 12 / 32).
+
+    // See TerminalPage.h. Reads _appSettings (default-constructed before engine init == "follow Terminal")
+    // and Terminal's own settings. Returns: the TabViewWidthMode the strip should be in. Never throws in
+    // practice (projected getters on a loaded settings object).
+    winrt::MUX::Controls::TabViewWidthMode TerminalPage::_EffectiveTabWidthMode() const
+    {
+        switch (_appSettings.tabWidthMode)
+        {
+        case ::Agentmaster::TabStripWidthMode::Equal:
+            return winrt::MUX::Controls::TabViewWidthMode::Equal;
+        case ::Agentmaster::TabStripWidthMode::TitleLength:
+            return winrt::MUX::Controls::TabViewWidthMode::SizeToContent;
+        case ::Agentmaster::TabStripWidthMode::Compact:
+            return winrt::MUX::Controls::TabViewWidthMode::Compact;
+        case ::Agentmaster::TabStripWidthMode::Terminal:
+        default:
+            break;
+        }
+        // "Windows Terminal setting": upstream's own source. Guarded only for a page torn down mid-call —
+        // _settings is set in Create(), before any caller can run.
+        return _settings ? _settings.GlobalSettings().TabWidthMode() : winrt::MUX::Controls::TabViewWidthMode::Equal;
+    }
+
+    // See TerminalPage.h. Called at engine init (relayoutStrip=false — no tab exists yet, and the strip's
+    // first width pass reads the bounds published here), from the cog's Save sink and from the cross-window
+    // broadcast (relayoutStrip=true). The application resources are PROCESS-wide (one XAML app hosts every
+    // window), so each window re-publishing the same values is a no-op after the first; the mode and the
+    // per-tab values are per window and re-applied here for this window only. UI thread. Never throws: a
+    // XAML failure is logged (Rule #18) and leaves the strip as it was — a cosmetic loss, never a crash.
+    void TerminalPage::_ApplyTabSizingSettings(bool relayoutStrip)
+    {
+        try
+        {
+            uint32_t minWidth = _appSettings.tabMinWidth;
+            uint32_t maxWidth = _appSettings.tabMaxWidth;
+            ::Agentmaster::NormalizeTabWidthRange(minWidth, maxWidth); // never hand MUX's std::clamp a crossed range
+
+            // (1) Tab::_UpdateHeaderControlMaxWidth sizes each rename box by the width mode but can only read
+            //     Terminal's settings — publish the override where it looks (-1 == follow Terminal).
+            SetTabWidthModeOverride(_appSettings.tabWidthMode == ::Agentmaster::TabStripWidthMode::Terminal ?
+                                        -1 :
+                                        static_cast<int32_t>(_EffectiveTabWidthMode()));
+
+            // (2) The Equal-mode bounds, where MUX's width pass reads them. The resources are PROCESS-wide, so
+            //     whether THIS window's strip still needs a width pass can't be read off them: in a second
+            //     window (the broadcast) they are already current — the saving window wrote them — yet its
+            //     tabs were sized with the old ones. Hence the per-window record of what this strip last got.
+            _PublishTabWidthBounds(static_cast<double>(minWidth), static_cast<double>(maxWidth));
+            const bool boundsChanged = minWidth != _tabSizingAppliedMinWidth || maxWidth != _tabSizingAppliedMaxWidth;
+            _tabSizingAppliedMinWidth = minWidth;
+            _tabSizingAppliedMaxWidth = maxWidth;
+
+            if (!_tabView)
+            {
+                return; // not built yet — Create() hasn't run; nothing on screen to size
+            }
+
+            // (3) The mode. A REAL change makes MUX re-run its width pass (with the bounds just published) and
+            //     _UpdateTabWidthMode re-applies every tab's mode-dependent bounds itself.
+            const auto modeBefore = _tabView.TabWidthMode();
+            _UpdateTabWidthMode();
+            const auto mode = _tabView.TabWidthMode();
+            if (mode == modeBefore)
+            {
+                // (4) Same mode: the per-tab parts (height, title font, Fit-to-title bounds) still need
+                //     re-applying — each write is change-gated, so an untouched setting costs only reads.
+                _ApplyTabSizingToAllTabs();
+                // (5) ...and in Equal, new bounds only reach the tabs on MUX's NEXT width pass (a resize, a
+                //     tab add/remove) — force one now so a Save is visibly live.
+                if (relayoutStrip && boundsChanged && mode == winrt::MUX::Controls::TabViewWidthMode::Equal)
+                {
+                    _ForceTabStripWidthPass();
+                }
+            }
+
+            const auto modeName = mode == winrt::MUX::Controls::TabViewWidthMode::SizeToContent ? L"titleLength" :
+                                  mode == winrt::MUX::Controls::TabViewWidthMode::Compact       ? L"compact" :
+                                                                                                 L"equal";
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[tab-size] mode=" + std::wstring{ modeName } +
+                                              L" (setting " + ::Agentmaster::ToString(_appSettings.tabWidthMode) + L")" +
+                                              L" width=" + std::to_wstring(minWidth) + L".." + std::to_wstring(maxWidth) +
+                                              L" font=" + std::to_wstring(::Agentmaster::ClampTabTitleFontSize(_appSettings.tabTitleFontSize)) +
+                                              L"/" + ::Agentmaster::ToString(_appSettings.tabTitleFontWeight) +
+                                              L" minHeight=" + std::to_wstring(::Agentmaster::ClampTabMinHeight(_appSettings.tabMinHeight)) +
+                                              L" tabs=" + std::to_wstring(_tabs.Size()) +
+                                              (relayoutStrip ? L"" : L" (init)") + L"\n");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ApplyTabSizingSettings");
+        }
+    }
+
+    // See TerminalPage.h. Per tab: the height / title font / bounds, then the rename box's width ceiling
+    // (it follows the width mode — Tab::RefreshHeaderRenamerMaxWidth reads the override published above).
+    // UI thread. Never throws: _ApplyTabSizingToTab catches per tab, and the ceiling refresh CATCH_LOGs.
+    void TerminalPage::_ApplyTabSizingToAllTabs()
+    {
+        for (const auto& tab : _tabs)
+        {
+            if (!tab)
+            {
+                continue;
+            }
+            _ApplyTabSizingToTab(tab.TabViewItem());
+            if (const auto tabImpl{ _GetTabImpl(tab) })
+            {
+                tabImpl->RefreshHeaderRenamerMaxWidth();
+            }
+        }
+    }
+
+    // See TerminalPage.h.
+    // Parameters: tabViewItem - the tab to size; null is tolerated (a tab mid-teardown).
+    // UI thread. Never throws: one tab's XAML failure is logged (Rule #18) and the loop moves on.
+    void TerminalPage::_ApplyTabSizingToTab(const winrt::MUX::Controls::TabViewItem& tabViewItem)
+    {
+        if (!tabViewItem)
+        {
+            return;
+        }
+        try
+        {
+            uint32_t minWidth = _appSettings.tabMinWidth;
+            uint32_t maxWidth = _appSettings.tabMaxWidth;
+            ::Agentmaster::NormalizeTabWidthRange(minWidth, maxWidth);
+            const auto minHeight = ::Agentmaster::ClampTabMinHeight(_appSettings.tabMinHeight);
+            const auto fontSize = ::Agentmaster::ClampTabTitleFontSize(_appSettings.tabTitleFontSize);
+
+            // HEIGHT — the style's own floor (TabViewItemMinHeight, 32) is the default, so 32 clears ours.
+            _SetOrClearLocalDouble(tabViewItem, winrt::WUX::FrameworkElement::MinHeightProperty(), static_cast<double>(minHeight), minHeight == ::Agentmaster::kDefaultTabMinHeight);
+
+            // WIDTH — by the mode the strip is ACTUALLY in (read off the TabView, so this stays right while
+            // a mode flip is mid-flight): Equal hands widths to MUX entirely (both cleared — the bounds ride
+            // the app resources); Compact keeps only the max (the selected tab's title); Fit to title gets both.
+            const auto mode = _tabView ? _tabView.TabWidthMode() : winrt::MUX::Controls::TabViewWidthMode::Equal;
+            const bool equal = mode == winrt::MUX::Controls::TabViewWidthMode::Equal;
+            const bool compact = mode == winrt::MUX::Controls::TabViewWidthMode::Compact;
+            _SetOrClearLocalDouble(tabViewItem, winrt::WUX::FrameworkElement::MinWidthProperty(), static_cast<double>(minWidth), equal || compact);
+            _SetOrClearLocalDouble(tabViewItem, winrt::WUX::FrameworkElement::MaxWidthProperty(), static_cast<double>(maxWidth), equal);
+
+            // TITLE FONT — the header control applies it to the title TextBlocks; 0 == inherit (the default).
+            if (const auto header = tabViewItem.Header().try_as<winrt::TerminalApp::TabHeaderControl>())
+            {
+                if (const auto impl = winrt::get_self<implementation::TabHeaderControl>(header))
+                {
+                    const uint16_t weight = _appSettings.tabTitleFontWeight == ::Agentmaster::TabTitleFontWeight::Bold     ? uint16_t{ 700 } :
+                                            _appSettings.tabTitleFontWeight == ::Agentmaster::TabTitleFontWeight::SemiBold ? uint16_t{ 600 } :
+                                                                                                                          uint16_t{ 0 };
+                    impl->ApplyTitleFont(fontSize == ::Agentmaster::kDefaultTabTitleFontSize ? 0.0 : static_cast<double>(fontSize), weight);
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ApplyTabSizingToTab");
+        }
+    }
+
+    // See TerminalPage.h.
+    // Parameters: minWidth / maxWidth - the normalized Equal-mode bounds in px (max >= min).
+    // Throws: a winrt::hresult_error from the resource dictionary; the caller catches + logs.
+    void TerminalPage::_PublishTabWidthBounds(double minWidth, double maxWidth)
+    {
+        // Application.Resources, not the TabView's own Resources: MUX's TabView::UpdateTabWidths looks the two
+        // keys up with SharedHelpers::FindInApplicationResources, so nothing else is consulted. Inserting at
+        // the dictionary's ROOT overrides App.xaml's merged TabViewItemMinWidth and MUX's merged
+        // TabViewItemMaxWidth alike, since a root key wins over merged dictionaries.
+        const auto res = winrt::WUX::Application::Current().Resources();
+        const auto publish = [&res](const wchar_t* name, const double value) {
+            const auto key = winrt::box_value(winrt::hstring{ name });
+            if (res.HasKey(key) && winrt::unbox_value_or<double>(res.Lookup(key), -1.0) == value)
+            {
+                return; // already in force — App.xaml's / MUX's own value, or this process's last write
+            }
+            res.Insert(key, winrt::box_value(value));
+        };
+        publish(L"TabViewItemMinWidth", minWidth);
+        publish(L"TabViewItemMaxWidth", maxWidth);
+    }
+
+    // See TerminalPage.h. A flip to SizeToContent and straight back runs MUX's private UpdateTabWidths twice
+    // within this one UI tick; no layout pass runs in between, so the intermediate mode never paints, and the
+    // second (Equal) pass sizes every tab with the bounds just published. It is the same runtime path
+    // Terminal itself takes when its tabWidthMode setting changes. UI thread. Throws: a winrt::hresult_error
+    // from the TabView; the caller (_ApplyTabSizingSettings) catches + logs.
+    void TerminalPage::_ForceTabStripWidthPass()
+    {
+        const auto equal = winrt::MUX::Controls::TabViewWidthMode::Equal;
+        if (!_tabView || _tabView.TabWidthMode() != equal)
+        {
+            return; // only Equal consumes the resource bounds; the other modes need no width pass
+        }
+        _tabView.TabWidthMode(winrt::MUX::Controls::TabViewWidthMode::SizeToContent);
+        _tabView.TabWidthMode(equal);
+        _ClearTabStripListMaxWidth(); // the intermediate SizeToContent pass capped the list; Equal never resets it
+    }
+
+    // See TerminalPage.h. UI thread. Never throws: a failed walk/clear is logged (Rule #18) and leaves the cap
+    // (a strip that can't grow past its old width until the next mode change — cosmetic).
+    void TerminalPage::_ClearTabStripListMaxWidth()
+    {
+        try
+        {
+            if (!_tabView)
+            {
+                return;
+            }
+            // ClearValue on a property with no local value is a no-op, so this is safe to repeat.
+            if (const auto list = _FindTabStripListView(_tabView.as<winrt::WUX::DependencyObject>()))
+            {
+                list.ClearValue(winrt::WUX::FrameworkElement::MaxWidthProperty());
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ClearTabStripListMaxWidth");
         }
     }
 

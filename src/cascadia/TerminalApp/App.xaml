@@ -55,8 +55,13 @@
                         of 48). MUX's TabView reads TabViewItemMinWidth from the application
                         resources, so in Equal width mode it sizes each tab to
                         clamp(available/count, min, max) and the strip scrolls once tabs hit
-                        this floor instead of shrinking to an unreadable sliver. Fixed for
-                        all tabs, all the time.
+                        this floor instead of shrinking to an unreadable sliver.
+                        This is only the DEFAULT now: the Settings cog's Tabs & Overlay ->
+                        TAB SIZE section (AppSettings::tabMinWidth / tabMaxWidth) re-publishes
+                        TabViewItemMinWidth + TabViewItemMaxWidth at the ROOT of
+                        Application.Resources at runtime (TerminalPage::_PublishTabWidthBounds),
+                        which outranks this merged entry. Keep the two in step:
+                        AgentMaster/SessionModels.h kDefaultTabMinWidth == 130.
                     -->
                     <x:Double x:Key="TabViewItemMinWidth">130</x:Double>
 

@@ -455,6 +455,12 @@ namespace winrt::TerminalApp::implementation
         // button whose overlay is "the last one received", so they must all agree). Detached in ~TerminalPage (Rule #10).
         uint64_t _unreadCountToken{ 0 };
         ::Agentmaster::AppSettings _appSettings{}; // Agentmaster: global settings (the cog); loaded at engine init
+        // Agentmaster (tab sizing): the Equal-mode width bounds THIS window's strip was last sized with (0 ==
+        // not yet applied). The bounds themselves live in process-wide app resources, so only this per-window
+        // record can tell a second window — reached by the broadcast after the saving window already wrote
+        // them — that its own tabs still need MUX's width pass (_ApplyTabSizingSettings).
+        uint32_t _tabSizingAppliedMinWidth{ 0 };
+        uint32_t _tabSizingAppliedMaxWidth{ 0 };
         // Agentmaster: sessionId -> its terminal tab, so the Manager can Activate (jump) or
         // Kill a session. Weak so closing a tab the normal way doesn't keep it alive.
         std::unordered_map<std::wstring, winrt::weak_ref<TerminalApp::Tab>> _claudeTabs;
@@ -1786,7 +1792,16 @@ namespace winrt::TerminalApp::implementation
         void _UpdateAllTabIcons(); // Agentmaster: re-apply the GLOBAL "Show icons on tabs" (AppSettings::showTabIcon) to every tab live (cog Save + cross-window broadcast — the _updateAllTabCloseButtons twin)
         void _UpdateReservedTabTitleLines(); // Agentmaster: push the MAX title-line-count across ALL tabs to every header's line-reserver, so the tab strip's height stays consistent regardless of virtualization (a multi-line title tab scrolled out of view no longer snaps the row shorter). Called on any title change + tab add/remove.
         void _UpdateTabView();
-        void _UpdateTabWidthMode();
+        void _UpdateTabWidthMode(); // Agentmaster: applies the EFFECTIVE mode (_EffectiveTabWidthMode — the cog's override, else Terminal's own tabWidthMode); a real change re-applies the mode-dependent per-tab width bounds (_ApplyTabSizingToAllTabs) and, entering Equal, drops the stale cap the other modes leave on the strip's list (_ClearTabStripListMaxWidth)
+        // Agentmaster (tab sizing — the cog's Tabs & Overlay "TAB SIZE" section; AppSettings::tabWidthMode /
+        // tabMinWidth / tabMaxWidth / tabTitleFontSize / tabTitleFontWeight / tabMinHeight). All UI thread.
+        winrt::Microsoft::UI::Xaml::Controls::TabViewWidthMode _EffectiveTabWidthMode() const; // the mode the strip should use: the cog's tabWidthMode, or Terminal's own GlobalSettings().TabWidthMode() while it is left on "Windows Terminal setting" (and before settings load)
+        void _ApplyTabSizingSettings(bool relayoutStrip); // THE apply: publish the width-mode override for Tab's rename box + the Equal-mode bounds as MUX's TabViewItemMin/MaxWidth APPLICATION resources (process-wide), apply the mode, then every tab's height / title font / mode-dependent bounds; relayoutStrip (cog Save + broadcast — not engine init, where no tab exists yet) forces MUX to re-run its equal-width pass when only the bounds changed
+        void _ApplyTabSizingToAllTabs(); // _ApplyTabSizingToTab for every tab + its rename box's width ceiling (Tab::RefreshHeaderRenamerMaxWidth)
+        void _ApplyTabSizingToTab(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& tabViewItem); // one tab: MinHeight, the mode-dependent MinWidth/MaxWidth (MUX owns widths in Equal — cleared there), and the header's title font. Defaults CLEAR Agentmaster's local values (the XAML styles govern — byte-identical to before). Called by _InitializeTab for every new tab and by _ApplyTabSizingToAllTabs
+        void _PublishTabWidthBounds(double minWidth, double maxWidth); // write the Equal-mode clamp bounds into Application.Resources (TabViewItemMinWidth / TabViewItemMaxWidth — the keys MUX's TabView::UpdateTabWidths re-reads on every pass); PROCESS-wide, and a no-op when already in force
+        void _ForceTabStripWidthPass(); // make MUX re-run its private equal-width pass NOW (a mode flip-and-back within one UI tick — nothing paints in between), so new bounds land without waiting for a resize / tab add
+        void _ClearTabStripListMaxWidth(); // drop the MaxWidth MUX's SizeToContent/Compact pass leaves on the inner TabListView (Equal mode never sets one, so a stale cap would keep the strip from growing with the window)
         void _SetBackgroundImage(const winrt::Microsoft::Terminal::Settings::Model::IAppearanceConfig& newAppearance);
 
         void _DuplicateFocusedTab();

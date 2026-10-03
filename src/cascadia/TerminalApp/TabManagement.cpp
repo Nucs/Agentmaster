@@ -179,6 +179,9 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: settle the item->container mapping + pin the new tab CanDrag(false) — native
         // MUX drag is permanently OFF (the drag-AV resolution; see TerminalPage.AgentEngine.cpp).
         _ApplyTabDragPolicy(tabViewItem);
+        // Agentmaster (tab sizing): give the new tab the cog's height / title font / width bounds before it
+        // first lays out (a default-valued setting leaves the style's own value in place).
+        _ApplyTabSizingToTab(tabViewItem);
         // Agentmaster: [tab-new] timestamps the strip INSERTION exactly — the v0.6.7 MUX AV lived in
         // the insert->drag window, so the gap between this line and a [nav] tab-drag-begin is the
         // forensic measurement. Covers every tab kind (managed launches also log [spawn]/[rehome]).
@@ -293,9 +296,25 @@ namespace winrt::TerminalApp::implementation
 
     // Method Description:
     // - Handle changes to the tab width set by the user
+    // - Agentmaster (tab sizing): the mode is the EFFECTIVE one — the cog's "Tab width" when set, else
+    //   Terminal's own tabWidthMode (the cog's default "Windows Terminal setting" choice, under which this
+    //   is upstream's line verbatim). The per-tab width bounds depend on the mode (MUX owns widths in
+    //   Equal; Fit to title / Compact are bounded per tab), so a REAL change re-applies them — this also
+    //   runs on a Terminal settings reload (_RefreshUIForSettingsReload), where Terminal's own mode may
+    //   be what changed. An unchanged mode is a no-op, as before (MUX ignores a same-value write).
     void TerminalPage::_UpdateTabWidthMode()
     {
-        _tabView.TabWidthMode(_settings.GlobalSettings().TabWidthMode());
+        const auto mode = _EffectiveTabWidthMode();
+        if (_tabView.TabWidthMode() == mode)
+        {
+            return;
+        }
+        _tabView.TabWidthMode(mode);
+        _ApplyTabSizingToAllTabs();
+        if (mode == MUX::Controls::TabViewWidthMode::Equal)
+        {
+            _ClearTabStripListMaxWidth();
+        }
     }
 
     // Method Description:

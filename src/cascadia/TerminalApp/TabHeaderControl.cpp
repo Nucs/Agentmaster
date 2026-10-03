@@ -30,6 +30,19 @@ namespace
     constexpr int32_t kRenameCommitShiftEnter = 1; // default: Shift+Enter commits; plain Enter inserts a newline
     constexpr int32_t kRenameCommitEnter = 2; // Enter commits; Shift+Enter inserts a newline
     std::atomic<int32_t> g_renameCommitMode{ kRenameCommitShiftEnter };
+
+    // Agentmaster (tab sizing): the process-global tab width mode override (SetTabWidthModeOverride) —
+    // -1 == follow Windows Terminal's own tabWidthMode (the default), else a MUX TabViewWidthMode value.
+    // atomic for the same reason as the rename mode: written from a window's settings apply, read when
+    // a Tab sizes its rename box.
+    constexpr int32_t kTabWidthModeFollowTerminal = -1;
+    std::atomic<int32_t> g_tabWidthModeOverride{ kTabWidthModeFollowTerminal };
+
+    // Agentmaster (tab sizing): the rename box's own font size in TabHeaderControl.xaml (FontSize="12").
+    // ApplyTitleFont puts it back when the title font returns to the default — the box carries an
+    // EXPLICIT size (unlike the title, which inherits), so clearing it would hand it the inherited
+    // TabViewItem size instead of restoring the XAML's 12.
+    constexpr double kRenamerDefaultFontSize = 12.0;
 }
 
 namespace winrt::TerminalApp::implementation
@@ -43,6 +56,23 @@ namespace winrt::TerminalApp::implementation
             mode = kRenameCommitShiftEnter;
         }
         g_renameCommitMode.store(mode, std::memory_order_relaxed);
+    }
+
+    void SetTabWidthModeOverride(int32_t mode) noexcept
+    {
+        // Only the three MUX TabViewWidthMode values are meaningful; anything else (incl. a future
+        // enum value this build doesn't know) means "follow Terminal" — the conservative reading,
+        // since Terminal's own setting is always a valid mode.
+        if (mode < 0 || mode > static_cast<int32_t>(winrt::Microsoft::UI::Xaml::Controls::TabViewWidthMode::Compact))
+        {
+            mode = kTabWidthModeFollowTerminal;
+        }
+        g_tabWidthModeOverride.store(mode, std::memory_order_relaxed);
+    }
+
+    int32_t GetTabWidthModeOverride() noexcept
+    {
+        return g_tabWidthModeOverride.load(std::memory_order_relaxed);
     }
 
     TabHeaderControl::TabHeaderControl()
@@ -367,6 +397,74 @@ namespace winrt::TerminalApp::implementation
         }
         reserver.Text(winrt::hstring{ text });
         reserver.Visibility(Windows::UI::Xaml::Visibility::Visible);
+    }
+
+    // Agentmaster (tab sizing): the cog's title font onto this header (see the declaration for the
+    // contract). Applied to the TWO TextBlocks that draw title text — the title itself and the invisible
+    // multi-line height reserver, which must keep the title's exact font or a reserved N-line strip would
+    // measure the wrong height — rather than to the whole UserControl, so the indicator glyphs (explicit
+    // 12 px FontIcons) and the shape-drawn dot/star/crown are untouched by construction.
+    void TabHeaderControl::ApplyTitleFont(double fontSize, uint16_t fontWeight) noexcept
+    {
+        try
+        {
+            // Drop a LOCAL value only when one exists — the default path runs for every tab of a big window
+            // restore, so it must not even touch a property it never set.
+            const auto clearIfLocal = [](const winrt::Windows::UI::Xaml::Controls::TextBlock& tb, const winrt::Windows::UI::Xaml::DependencyProperty& dp) {
+                if (tb.ReadLocalValue(dp) != winrt::Windows::UI::Xaml::DependencyProperty::UnsetValue())
+                {
+                    tb.ClearValue(dp);
+                }
+            };
+            const auto applyToText = [fontSize, fontWeight, &clearIfLocal](const winrt::Windows::UI::Xaml::Controls::TextBlock& tb) {
+                if (!tb)
+                {
+                    return;
+                }
+                // SIZE: set only on a real change (each write re-measures the tab); the default CLEARS the
+                // local value so the TabViewItem's inherited TabViewItemHeaderFontSize governs again.
+                if (fontSize > 0.0)
+                {
+                    if (tb.FontSize() != fontSize)
+                    {
+                        tb.FontSize(fontSize);
+                    }
+                }
+                else
+                {
+                    clearIfLocal(tb, winrt::Windows::UI::Xaml::Controls::TextBlock::FontSizeProperty());
+                }
+                // WEIGHT: the same, comparing the struct's OpenType number.
+                if (fontWeight > 0)
+                {
+                    if (tb.FontWeight().Weight != fontWeight)
+                    {
+                        tb.FontWeight(winrt::Windows::UI::Text::FontWeight{ fontWeight });
+                    }
+                }
+                else
+                {
+                    clearIfLocal(tb, winrt::Windows::UI::Xaml::Controls::TextBlock::FontWeightProperty());
+                }
+            };
+            applyToText(HeaderTextBlock());
+            applyToText(HeaderTitleLineReserver());
+
+            // The rename box carries an EXPLICIT size in the XAML (it doesn't inherit), so it is SET in both
+            // directions — to the title size, or back to its XAML 12 — never cleared. Its weight stays the
+            // XAML default: a bold editor would only make the caret harder to place.
+            const double boxSize = fontSize > 0.0 ? fontSize : kRenamerDefaultFontSize;
+            if (const auto box = HeaderRenamerTextBox(); box && box.FontSize() != boxSize)
+            {
+                box.FontSize(boxSize);
+            }
+        }
+        catch (...)
+        {
+            // A failed font write leaves the tab with its previous font — cosmetic, never fatal — but it
+            // must not escape: this runs inside TerminalPage's per-tab settings loop (Rule #18: logged).
+            ::Agentmaster::AgentLogCaughtException(L"TabHeaderControl::ApplyTitleFont");
+        }
     }
 
     // Agentmaster (PENDING_INPUT.md): (re)subscribe to the current TabStatus's PropertyChanged so the

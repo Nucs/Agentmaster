@@ -1201,6 +1201,19 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setShowTabCloseButton{ nullptr }; // TABS: show the close (x) button on tabs (OFF => force every tab to "Never"); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCloseTabOnMiddleClick{ nullptr }; // TABS: close a tab on middle-mouse click (OFF => disable both the manual hook + WinUI's native middle-close); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setShowTabIcon{ nullptr }; // TABS: show the profile icon on tabs (OFF, the default => IconStyle::Hidden, takes no strip space); GLOBAL
+        // TABS — the TAB SIZE section (AppSettings::tabWidthMode / tabMinWidth / tabMaxWidth /
+        // tabTitleFontSize / tabTitleFontWeight / tabMinHeight). GLOBAL; the page applies them live on Save
+        // (TerminalPage::_ApplyTabSizingSettings). The four sliders show their value in their Header
+        // (_UpdateTabSizeHeaders); the two width sliders push each other along so min <= max always holds.
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setTabWidthMode{ nullptr }; // "Tab width": Windows Terminal setting (default) / Equal width / Fit to title / Compact — items in TabStripWidthMode order
+        winrt::Windows::UI::Xaml::Controls::Slider _setTabMinWidth{ nullptr }; // the narrowest a tab may get, px (default 130); disabled while the mode is Compact (it doesn't apply there)
+        winrt::Windows::UI::Xaml::Controls::Slider _setTabMaxWidth{ nullptr }; // the widest a tab may get, px (default 240)
+        winrt::Windows::UI::Xaml::Controls::Slider _setTabTitleFontSize{ nullptr }; // the tab title font size (default 12; the rename box follows it)
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setTabTitleFontWeight{ nullptr }; // the tab title weight — Normal (default) / SemiBold / Bold — items in TabTitleFontWeight order
+        winrt::Windows::UI::Xaml::Controls::Slider _setTabMinHeight{ nullptr }; // the shortest a tab may get, px (default 32); never below the tab's own content height
+        bool _tabSizeSyncing{ false }; // reentrancy guard: one width slider pushing the other must not bounce back through the other's push
+        void _UpdateTabSizeHeaders(); // re-render the four sliders' "<label> — <value>" Headers from their CURRENT values (the build, every ValueChanged, the seed)
+        void _SyncTabMinWidthEnabled(); // enable the min-width slider unless the width combo says Compact (where a minimum would stop unselected tabs shrinking)
         winrt::Windows::UI::Xaml::Controls::ComboBox _setTitleNaming{ nullptr }; // TABS: HOW an untitled session's tab title derives from its working dir — last word (default) / folder as-is / two folders / capitals (TabTitleNaming); GLOBAL, applies at the next launch/adopt
         winrt::Windows::UI::Xaml::Controls::ComboBox _setTitleCase{ nullptr }; // TABS: the case transform on the derived title — Default / Lowercase / Uppercase (TabTitleCase); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setTitleUnderscores{ nullptr }; // TABS: convert any whitespace in the derived title to '_' (AppSettings::tabTitleSpacesToUnderscores); GLOBAL

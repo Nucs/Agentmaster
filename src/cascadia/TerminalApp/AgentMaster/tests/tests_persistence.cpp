@@ -592,6 +592,14 @@ void TestAppSettings()
         in.showTabCloseButton = false; // non-default (default true = show the X / theme-driven)
         in.closeTabOnMiddleClick = false; // non-default (default true = middle-click closes a tab)
         in.showTabIcon = true; // non-default (default false = tab icons HIDDEN)
+        // Tab sizing (the cog's TAB SIZE section): every field non-default AND in-band, so a lossy
+        // (de)serializer or an over-eager clamp would show up as a mismatch below.
+        in.tabWidthMode = TabStripWidthMode::TitleLength; // non-default (default Terminal = follow Terminal's own tabWidthMode)
+        in.tabMinWidth = 90; // non-default (default 130)
+        in.tabMaxWidth = 400; // non-default (default 240)
+        in.tabTitleFontSize = 15; // non-default (default 12)
+        in.tabTitleFontWeight = TabTitleFontWeight::SemiBold; // non-default (default Normal)
+        in.tabMinHeight = 44; // non-default (default 32)
         in.waitingForYouTimeoutMinutes = 0; // 0 = never decay — MUST round-trip as 0, not fall back to the default
         in.serverCacheMinutes = 17; // non-default (default 5) — the ⚡ "still cached" window
         in.treeSort = ExplorerSort::ByPid; // non-default (default Newest) — Explorer Tree sort
@@ -655,6 +663,11 @@ void TestAppSettings()
         CHECK(out.showTabCloseButton == false, "settings showTabCloseButton round-trip");
         CHECK(out.closeTabOnMiddleClick == false, "settings closeTabOnMiddleClick round-trip");
         CHECK(out.showTabIcon == true, "settings showTabIcon round-trip");
+        CHECK(out.tabWidthMode == TabStripWidthMode::TitleLength, "settings tabWidthMode round-trip (fit to title)");
+        CHECK(out.tabMinWidth == 90u && out.tabMaxWidth == 400u, "settings tabMinWidth / tabMaxWidth round-trip");
+        CHECK(out.tabTitleFontSize == 15u, "settings tabTitleFontSize round-trip");
+        CHECK(out.tabTitleFontWeight == TabTitleFontWeight::SemiBold, "settings tabTitleFontWeight round-trip");
+        CHECK(out.tabMinHeight == 44u, "settings tabMinHeight round-trip");
         CHECK(out.waitingForYouTimeoutMinutes == 0u, "settings waitingForYouTimeoutMinutes stored 0 (= never) round-trips as 0");
         CHECK(out.serverCacheMinutes == 17u, "settings serverCacheMinutes round-trip");
         CHECK(out.treeSort == ExplorerSort::ByPid, "settings treeSort round-trip");
@@ -737,6 +750,13 @@ void TestAppSettings()
         CHECK(out.showTabCloseButton == true, "settings showTabCloseButton default true (show X) on empty");
         CHECK(out.closeTabOnMiddleClick == true, "settings closeTabOnMiddleClick default true (middle-click closes) on empty");
         CHECK(out.showTabIcon == false, "settings showTabIcon default false (tab icons HIDDEN) on empty");
+        // Tab sizing: a missing settings.json must leave the strip exactly as it was before the TAB SIZE
+        // section existed — Terminal's own width mode, App.xaml's 130 px floor, MUX's 240 px cap, its
+        // 12 pt Normal title and its 32 px minimum height.
+        CHECK(out.tabWidthMode == TabStripWidthMode::Terminal, "settings tabWidthMode default (follow Terminal's own tabWidthMode) on empty");
+        CHECK(out.tabMinWidth == 130u && out.tabMaxWidth == 240u, "settings tab width bounds default 130..240 px on empty");
+        CHECK(out.tabTitleFontSize == 12u && out.tabTitleFontWeight == TabTitleFontWeight::Normal, "settings tab title font default 12 / Normal on empty");
+        CHECK(out.tabMinHeight == 32u, "settings tabMinHeight default 32 px on empty");
         CHECK(out.waitingForYouTimeoutMinutes == 4320u, "settings waitingForYouTimeoutMinutes default 4320 (3d Waiting-for-you timeout) on empty");
         CHECK(out.serverCacheMinutes == 5u, "settings serverCacheMinutes default 5 (server cache lifetime) on empty");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
@@ -826,6 +846,61 @@ void TestAppSettings()
         CHECK(star.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon 'star' honored");
         const auto bad = DeserializeAppSettings(L"{\"settings\":{\"favoriteIcon\":\"bogus\"}}");
         CHECK(bad.favoriteIcon == FavoriteIcon::Crown, "settings favoriteIcon unknown -> default (Crown)");
+    }
+
+    // Tab sizing (the cog's TAB SIZE section): each tabWidthMode / tabTitleFontWeight token parses to
+    // its value and an unknown one falls back to the default (Terminal / Normal); the numeric fields
+    // are band-clamped with 0 meaning "unset" (-> the default, never the band floor); and a crossed
+    // width pair RAISES the maximum to the minimum, so MUX's equal-width std::clamp(w, min, max) can
+    // never be handed min > max by a hand-edited settings.json.
+    {
+        const auto eq = DeserializeAppSettings(L"{\"settings\":{\"tabWidthMode\":\"equal\"}}");
+        CHECK(eq.tabWidthMode == TabStripWidthMode::Equal, "settings tabWidthMode 'equal' honored");
+        const auto tl = DeserializeAppSettings(L"{\"settings\":{\"tabWidthMode\":\"titleLength\"}}");
+        CHECK(tl.tabWidthMode == TabStripWidthMode::TitleLength, "settings tabWidthMode 'titleLength' honored");
+        const auto cp = DeserializeAppSettings(L"{\"settings\":{\"tabWidthMode\":\"compact\"}}");
+        CHECK(cp.tabWidthMode == TabStripWidthMode::Compact, "settings tabWidthMode 'compact' honored");
+        const auto term = DeserializeAppSettings(L"{\"settings\":{\"tabWidthMode\":\"terminal\"}}");
+        CHECK(term.tabWidthMode == TabStripWidthMode::Terminal, "settings tabWidthMode 'terminal' honored");
+        const auto badMode = DeserializeAppSettings(L"{\"settings\":{\"tabWidthMode\":\"bogus\"}}");
+        CHECK(badMode.tabWidthMode == TabStripWidthMode::Terminal, "settings tabWidthMode unknown -> default (follow Terminal)");
+
+        const auto bold = DeserializeAppSettings(L"{\"settings\":{\"tabTitleFontWeight\":\"bold\"}}");
+        CHECK(bold.tabTitleFontWeight == TabTitleFontWeight::Bold, "settings tabTitleFontWeight 'bold' honored");
+        const auto semi = DeserializeAppSettings(L"{\"settings\":{\"tabTitleFontWeight\":\"semiBold\"}}");
+        CHECK(semi.tabTitleFontWeight == TabTitleFontWeight::SemiBold, "settings tabTitleFontWeight 'semiBold' honored");
+        const auto badWeight = DeserializeAppSettings(L"{\"settings\":{\"tabTitleFontWeight\":\"heavy\"}}");
+        CHECK(badWeight.tabTitleFontWeight == TabTitleFontWeight::Normal, "settings tabTitleFontWeight unknown -> default (Normal)");
+
+        // Every ToString token parses back to the value it came from (all four modes, all three weights).
+        for (const auto m : { TabStripWidthMode::Terminal, TabStripWidthMode::Equal, TabStripWidthMode::TitleLength, TabStripWidthMode::Compact })
+        {
+            CHECK(TabStripWidthModeFromString(ToString(m)) == m, "settings tabWidthMode token round-trips through ToString");
+        }
+        for (const auto w : { TabTitleFontWeight::Normal, TabTitleFontWeight::SemiBold, TabTitleFontWeight::Bold })
+        {
+            CHECK(TabTitleFontWeightFromString(ToString(w)) == w, "settings tabTitleFontWeight token round-trips through ToString");
+        }
+
+        // 0 == unset -> the default (not the band floor); out-of-band values pin to the band edges.
+        const auto zeros = DeserializeAppSettings(L"{\"settings\":{\"tabMinWidth\":0,\"tabMaxWidth\":0,\"tabTitleFontSize\":0,\"tabMinHeight\":0}}");
+        CHECK(zeros.tabMinWidth == 130u && zeros.tabMaxWidth == 240u, "settings tab width bounds 0 (unset) -> the 130 / 240 defaults");
+        CHECK(zeros.tabTitleFontSize == 12u && zeros.tabMinHeight == 32u, "settings tab font size / min height 0 (unset) -> the 12 / 32 defaults");
+        const auto tiny = DeserializeAppSettings(L"{\"settings\":{\"tabMinWidth\":5,\"tabMaxWidth\":6,\"tabTitleFontSize\":2,\"tabMinHeight\":3}}");
+        CHECK(tiny.tabMinWidth == kTabWidthBandMin && tiny.tabMaxWidth == kTabWidthBandMin, "settings tab width bounds below the band -> pinned to its 40 px floor");
+        CHECK(tiny.tabTitleFontSize == kTabTitleFontSizeBandMin && tiny.tabMinHeight == kTabMinHeightBandMin, "settings tab font size / min height below the band -> pinned to the floor");
+        const auto huge = DeserializeAppSettings(L"{\"settings\":{\"tabMinWidth\":5000,\"tabMaxWidth\":9000,\"tabTitleFontSize\":99,\"tabMinHeight\":999}}");
+        CHECK(huge.tabMinWidth == kTabWidthBandMax && huge.tabMaxWidth == kTabWidthBandMax, "settings tab width bounds above the band -> pinned to its 1000 px ceiling");
+        CHECK(huge.tabTitleFontSize == kTabTitleFontSizeBandMax && huge.tabMinHeight == kTabMinHeightBandMax, "settings tab font size / min height above the band -> pinned to the ceiling");
+
+        // A crossed pair keeps the user's minimum and raises the maximum to it (never the reverse).
+        const auto crossed = DeserializeAppSettings(L"{\"settings\":{\"tabMinWidth\":300,\"tabMaxWidth\":200}}");
+        CHECK(crossed.tabMinWidth == 300u && crossed.tabMaxWidth == 300u, "settings crossed tab width pair -> the max is raised to the min");
+        uint32_t lo = 500, hi = 0; // hi unset -> the 240 default, which is below the min -> raised to 500
+        NormalizeTabWidthRange(lo, hi);
+        CHECK(lo == 500u && hi == 500u, "NormalizeTabWidthRange: an unset max below the min is raised to the min");
+        CHECK(ClampTabSizeSetting(0, 7, 1, 9) == 7u && ClampTabSizeSetting(10, 7, 1, 9) == 9u && ClampTabSizeSetting(5, 7, 1, 9) == 5u,
+              "ClampTabSizeSetting: 0 -> default, above -> ceiling, in-band -> unchanged");
     }
 
     // tabColorMode (tab color modes): each token parses to its mode; an unknown/absent token falls

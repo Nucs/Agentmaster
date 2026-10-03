@@ -1135,16 +1135,8 @@ namespace winrt::TerminalApp::implementation
         _setReapOrphans.Header(winrt::box_value(L"Shut down sessions whose terminal host has died"));
         AgentSetTip(_setReapOrphans, L"A session Agentmaster launched runs inside a hidden console host (OpenConsole.exe). If that host is killed outright \x2014 a force-kill of the app that also killed its console hosts, a crashed host \x2014 the session's pwsh + claude.exe never get the close signal a normal exit sends them, and they keep running with a DEAD console: no terminal can ever reach them again, they hold memory and their MCP servers, and their hooks can feed a newer instance phantom events for a conversation it has since resumed itself.\n\nWhen on (the default), the Fleet Observer ends such a session \x2014 only a process Agentmaster itself launched (its AM_SESSION stamp) whose console host is provably gone, after a 5-second grace \x2014 exactly what the missed close signal would have done. A hand-typed claude, a real Windows Terminal tab or any other program is never touched; a normal window close or app quit never trips this (the host exits AFTER its clients did).\n\nOff: such a session is still recognized as an orphan (it is not shown as an external) but is left running for you to end by hand. Logged as [orphan] / [orphan-reap] in hooks.log.");
         panel.Children().Append(_setReapOrphans);
-        // How the tab/session rename box commits via the keyboard. Clicking away (focus loss) ALWAYS
-        // commits; this only governs the Enter / Shift+Enter shortcut. The box is multi-line, so the
-        // key that ISN'T the commit key inserts a newline. GLOBAL across windows (TabRenameCommitMode).
-        _setRenameCommit = ComboBox{};
-        _setRenameCommit.Header(winrt::box_value(L"Tab rename: commit with"));
-        _setRenameCommit.Items().Append(winrt::box_value(L"Click away only"));
-        _setRenameCommit.Items().Append(winrt::box_value(L"Click away + Shift+Enter"));
-        _setRenameCommit.Items().Append(winrt::box_value(L"Click away + Enter"));
-        AgentSetTip(_setRenameCommit, L"Which key commits a tab rename: Shift+Enter (default) or Enter. The other inserts a line break (titles can be multi-line); clicking away always commits.");
-        panel.Children().Append(_setRenameCommit);
+        // (The "Tab rename: commit with" combo that sat here moved to the Tabs & Overlay tab's TAB TITLES
+        // section — renaming is a tab-strip interaction, and that tab is where users look for it.)
         // Agentmaster (Waiting-for-you "unread" model): the Waiting-for-you -> Idle timeout. A "Never"
         // toggle (stay Waiting until read), else a slider 1m .. 3d (default 1h). This is the "unread
         // inbox" lifetime; it was split from Claude's ~5-min server cache, which is now the separate
@@ -1676,6 +1668,128 @@ namespace winrt::TerminalApp::implementation
         _setShowTabIcon.Header(winrt::box_value(L"Show icons on tabs"));
         AgentSetTip(_setShowTabIcon, L"Show the profile icon at the left of each tab (before the status dot and title). When off (the default), the icon is hidden entirely and takes no space \x2014 the tab reads on its status dot + title. Default off.");
         panel.Children().Append(_setShowTabIcon);
+
+        // Agentmaster (tab sizing): the TAB SIZE section — how wide and tall every tab is and how its title
+        // reads (AppSettings::tabWidthMode / tabMinWidth / tabMaxWidth / tabTitleFontSize /
+        // tabTitleFontWeight / tabMinHeight). GLOBAL across windows; Save applies it live in every window
+        // (TerminalPage::_ApplyTabSizingSettings). Sliders rather than number boxes so the allowed range is
+        // visible at a glance; each slider's Header carries its live value (_UpdateTabSizeHeaders, the
+        // Tag-opacity slider's idiom). The defaults reproduce the strip as it was before these settings
+        // existed: Terminal's own width mode, 130..240 px wide, a 12 / Normal title, 32 px tall.
+        panel.Children().Append(SettingsSeparator(L"TAB SIZE"));
+        _setTabWidthMode = ComboBox{};
+        _setTabWidthMode.Header(winrt::box_value(L"Tab width"));
+        _setTabWidthMode.Items().Append(winrt::box_value(L"Windows Terminal setting (default)")); // index 0 == TabStripWidthMode::Terminal
+        _setTabWidthMode.Items().Append(winrt::box_value(L"Equal width")); // index 1 == TabStripWidthMode::Equal
+        _setTabWidthMode.Items().Append(winrt::box_value(L"Fit to title")); // index 2 == TabStripWidthMode::TitleLength
+        _setTabWidthMode.Items().Append(winrt::box_value(L"Compact")); // index 3 == TabStripWidthMode::Compact
+        AgentSetTip(_setTabWidthMode, L"How the tab strip sizes its tabs.\n\x2022 Windows Terminal setting (default): whatever Terminal's own \x201CTab width mode\x201D says (its Settings \x2192 Appearance page, or tabWidthMode in Terminal's settings.json) \x2014 Equal width unless you changed it there.\n\x2022 Equal width: every tab the same width. Tabs share the strip, shrinking toward the minimum below as you open more; past that the strip scrolls instead. A strip with only a few tabs stops widening them at the maximum.\n\x2022 Fit to title: each tab as wide as its title, kept between the minimum and the maximum (a longer title is cut off \x2014 hover the tab for all of it).\n\x2022 Compact: the tabs you are not on shrink to just their icon (turn on \x201CShow icons on tabs\x201D, or they show only their color); the selected tab shows its title, up to the maximum.\nApplies to every window when you press Save.");
+        // Compact ignores the minimum (it would stop unselected tabs shrinking), so grey that slider out
+        // while Compact is picked — the _setInferGitRoot enable-by-mode idiom.
+        _setTabWidthMode.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) { _SyncTabMinWidthEnabled(); });
+        panel.Children().Append(_setTabWidthMode);
+
+        // The four sliders share one shape: integer steps over a fixed band (the same ::Agentmaster::kTab*
+        // bands the Persistence load and the Save clamp to, so the slider can't offer a value the load would
+        // rewrite), seeded with the shipped default until _ShowSettings seeds the real value.
+        const auto makeTabSizeSlider = [&panel](Slider& slot, uint32_t minimum, uint32_t maximum, uint32_t initial, const wchar_t* tip) {
+            slot = Slider{};
+            slot.Minimum(static_cast<double>(minimum));
+            slot.Maximum(static_cast<double>(maximum));
+            slot.StepFrequency(1);
+            slot.Value(static_cast<double>(initial));
+            AgentSetTip(slot, winrt::hstring{ tip });
+            panel.Children().Append(slot);
+        };
+        makeTabSizeSlider(_setTabMinWidth, ::Agentmaster::kTabWidthBandMin, ::Agentmaster::kTabWidthBandMax, ::Agentmaster::kDefaultTabMinWidth, L"The narrowest a tab may get. In Equal width, tabs shrink toward this as you open more, then the strip scrolls instead of squeezing them further. In Fit to title, a short title still gets at least this much room. Not used in Compact. Default 130 px.\n\nIt can never pass the maximum \x2014 dragging it past pushes the maximum along.");
+        makeTabSizeSlider(_setTabMaxWidth, ::Agentmaster::kTabWidthBandMin, ::Agentmaster::kTabWidthBandMax, ::Agentmaster::kDefaultTabMaxWidth, L"The widest a tab may get. In Equal width, a strip with only a few tabs stops widening them at this size instead of stretching them across the window. In Fit to title and Compact, a longer title is cut off at this width (hover the tab for the whole title). Default 240 px.\n\nIt can never drop below the minimum \x2014 dragging it under pushes the minimum along.");
+        makeTabSizeSlider(_setTabTitleFontSize, ::Agentmaster::kTabTitleFontSizeBandMin, ::Agentmaster::kTabTitleFontSizeBandMax, ::Agentmaster::kDefaultTabTitleFontSize, L"How big the tab titles are, 8 to 28. Default 12. The rename box uses the same size, so what you type reads the way it will look. A bigger title makes the tabs taller; the status dot and the other tab icons keep their size.");
+        _setTabTitleFontWeight = ComboBox{};
+        _setTabTitleFontWeight.Header(winrt::box_value(L"Title font weight"));
+        _setTabTitleFontWeight.Items().Append(winrt::box_value(L"Normal (default)")); // index 0 == TabTitleFontWeight::Normal
+        _setTabTitleFontWeight.Items().Append(winrt::box_value(L"SemiBold")); // index 1 == TabTitleFontWeight::SemiBold
+        _setTabTitleFontWeight.Items().Append(winrt::box_value(L"Bold")); // index 2 == TabTitleFontWeight::Bold
+        AgentSetTip(_setTabTitleFontWeight, L"How heavy the tab titles are: Normal (the default), SemiBold, or Bold. The rename box keeps a normal weight, so the caret stays easy to place.");
+        panel.Children().Append(_setTabTitleFontWeight);
+        makeTabSizeSlider(_setTabMinHeight, ::Agentmaster::kTabMinHeightBandMin, ::Agentmaster::kTabMinHeightBandMax, ::Agentmaster::kDefaultTabMinHeight, L"The shortest a tab may get, 20 to 120 px \x2014 raise it for a taller, roomier tab strip. Default 32 px. A tab is never shorter than what it holds (the status dot, the title, the close button), so values below about 30 px change nothing; a bigger title font grows the tabs on its own.");
+        // The width pair can't cross: a slider dragged past its twin pushes the twin along (the guard keeps
+        // that push from bouncing back through the twin's own handler). Every slider refreshes the Headers.
+        _setTabMinWidth.ValueChanged([this](const IInspectable&, const Primitives::RangeBaseValueChangedEventArgs&) {
+            _UpdateTabSizeHeaders();
+            if (_tabSizeSyncing || !_setTabMinWidth || !_setTabMaxWidth)
+            {
+                return;
+            }
+            if (_setTabMinWidth.Value() > _setTabMaxWidth.Value())
+            {
+                _tabSizeSyncing = true;
+                _setTabMaxWidth.Value(_setTabMinWidth.Value());
+                _tabSizeSyncing = false;
+            }
+        });
+        _setTabMaxWidth.ValueChanged([this](const IInspectable&, const Primitives::RangeBaseValueChangedEventArgs&) {
+            _UpdateTabSizeHeaders();
+            if (_tabSizeSyncing || !_setTabMinWidth || !_setTabMaxWidth)
+            {
+                return;
+            }
+            if (_setTabMaxWidth.Value() < _setTabMinWidth.Value())
+            {
+                _tabSizeSyncing = true;
+                _setTabMinWidth.Value(_setTabMaxWidth.Value());
+                _tabSizeSyncing = false;
+            }
+        });
+        _setTabTitleFontSize.ValueChanged([this](const IInspectable&, const Primitives::RangeBaseValueChangedEventArgs&) { _UpdateTabSizeHeaders(); });
+        _setTabMinHeight.ValueChanged([this](const IInspectable&, const Primitives::RangeBaseValueChangedEventArgs&) { _UpdateTabSizeHeaders(); });
+        {
+            // Back to the shipped defaults — the six TAB SIZE controls only (the footer's per-tab Reset would
+            // reset the whole Tabs & Overlay tab). Read from a default-constructed AppSettings so there is ONE
+            // source of truth. Form only: Save commits it, Cancel discards it — hence no confirm.
+            auto reset = HyperlinkButton{};
+            reset.Content(winrt::box_value(L"Reset tab size to defaults"));
+            reset.Padding(Thickness{ 4, 2, 4, 2 });
+            reset.FontSize(12);
+            AgentSetTip(reset, L"Put the six TAB SIZE settings above back to their defaults \x2014 Windows Terminal setting, 130\x2013" L"240 px wide, a 12 / Normal title, 32 px tall. Nothing is written until you press Save; Cancel discards it.");
+            reset.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                const ::Agentmaster::AppSettings d{};
+                if (_setTabWidthMode)
+                {
+                    _setTabWidthMode.SelectedIndex(0); // TabStripWidthMode::Terminal (the default)
+                }
+                // Both widths under the guard: the defaults are already ordered, and a push-along on the
+                // FIRST write (e.g. min back to 130 while max still reads 100) would just be overwritten.
+                _tabSizeSyncing = true;
+                if (_setTabMinWidth)
+                {
+                    _setTabMinWidth.Value(static_cast<double>(d.tabMinWidth));
+                }
+                if (_setTabMaxWidth)
+                {
+                    _setTabMaxWidth.Value(static_cast<double>(d.tabMaxWidth));
+                }
+                _tabSizeSyncing = false;
+                if (_setTabTitleFontSize)
+                {
+                    _setTabTitleFontSize.Value(static_cast<double>(d.tabTitleFontSize));
+                }
+                if (_setTabTitleFontWeight)
+                {
+                    _setTabTitleFontWeight.SelectedIndex(0); // TabTitleFontWeight::Normal
+                }
+                if (_setTabMinHeight)
+                {
+                    _setTabMinHeight.Value(static_cast<double>(d.tabMinHeight));
+                }
+                // Explicit: never depend on a programmatic write raising the change events.
+                _UpdateTabSizeHeaders();
+                _SyncTabMinWidthEnabled();
+                ::Agentmaster::LogNav(L"settings-reset tab-size (form only \x2014 Save commits, Cancel discards)");
+            });
+            panel.Children().Append(reset);
+        }
+        _UpdateTabSizeHeaders(); // initial Headers (the shipped defaults until _ShowSettings seeds the real values)
+        _SyncTabMinWidthEnabled();
         // Tab title naming (Agentmaster): HOW an untitled session's default tab title derives from
         // its working directory — the technique dropdown + a case dropdown + a whitespace->'_'
         // toggle, with a LIVE example preview beneath (made-up paths run through the REAL
@@ -1684,6 +1798,18 @@ namespace winrt::TerminalApp::implementation
         // NEXT launch/adopt of an untitled session — existing and renamed titles never re-derive
         // (Rule #11).
         panel.Children().Append(SettingsSeparator(L"TAB TITLES"));
+        // How the tab/session rename box commits via the keyboard (moved here from the Behavior tab —
+        // renaming is a tab interaction, so this is where it is looked for). Clicking away (focus loss)
+        // ALWAYS commits; this only governs the Enter / Shift+Enter shortcut. The box is multi-line, so
+        // the key that ISN'T the commit key inserts a newline. GLOBAL across windows (TabRenameCommitMode);
+        // applied live on Save through the process-wide SetTabRenameCommitMode the headers read per keypress.
+        _setRenameCommit = ComboBox{};
+        _setRenameCommit.Header(winrt::box_value(L"Tab rename: commit with"));
+        _setRenameCommit.Items().Append(winrt::box_value(L"Click away only")); // index 0 == TabRenameCommitMode::ClickAwayOnly
+        _setRenameCommit.Items().Append(winrt::box_value(L"Click away + Shift+Enter")); // index 1 == ClickAwayOrShiftEnter (default)
+        _setRenameCommit.Items().Append(winrt::box_value(L"Click away + Enter")); // index 2 == ClickAwayOrEnter
+        AgentSetTip(_setRenameCommit, L"Which key commits a tab rename (double-click a tab, or its right-click \x2192 Rename Tab): Shift+Enter (default) or Enter. The other key inserts a line break (titles can be multi-line); clicking away always commits, and Esc cancels.");
+        panel.Children().Append(_setRenameCommit);
         _setTitleNaming = ComboBox{};
         _setTitleNaming.Header(winrt::box_value(L"Tab title naming"));
         _setTitleNaming.Items().Append(winrt::box_value(L"Last word in folder name")); // index 0 == TabTitleNaming::LastWord (default)
@@ -2244,7 +2370,7 @@ namespace winrt::TerminalApp::implementation
         {
             addSettingsTab(L"Tests Autorunner", L"Tests Autorunner defaults stamped onto every new session \x2014 the starting mode and its backstops.", autorunnerPanel);
         }
-        addSettingsTab(L"Behavior", L"Interaction + session-state behavior \x2014 close confirms, the rename commit key, the Waiting-for-you \x201Cunread\x201D timeout, and GPU or CPU rendering.", behaviorPanel);
+        addSettingsTab(L"Behavior", L"Interaction + session-state behavior \x2014 close confirms, cleaning up orphaned sessions, the Waiting-for-you \x201Cunread\x201D timeout, and GPU or CPU rendering.", behaviorPanel);
         // COMMANDS is the first tab to offer a per-tab RESET: put every control back to the
         // SHIPPED DEFAULTS, read from a default-constructed AppSettings so there is ONE source of
         // truth (no hand-copied literals to drift). It touches the FORM only — Save commits it,
@@ -2317,7 +2443,7 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::LogNav(L"settings-reset tab=Commands (form only \x2014 Save commits, Cancel discards)");
         });
         addSettingsTab(L"Notifications", L"Windows notifications when a session's status changes from Running to another state \x2014 which states notify, the focused-tab skip, and the sound.", notificationsPanel);
-        addSettingsTab(L"Tabs & Overlay", L"The terminal tab strip + the per-tab overlay badge \x2014 close affordances, the favorite marker, the status-flash color, and overlay opacity.", tabsPanel);
+        addSettingsTab(L"Tabs & Overlay", L"The terminal tab strip + the per-tab overlay badge \x2014 close affordances, tab size (width, height, title font), the rename key and title naming, the favorite marker, tab colors, the status-flash color, and overlay opacity.", tabsPanel);
         addSettingsTab(L"Claude", L"The Claude install Agentmaster drives \x2014 which native claude.exe, and how long Claude keeps session history.", claudePanel);
         addSettingsTab(L"About", L"Version + build, updates, the active profile folder, and uninstall.", aboutPanel);
 
@@ -2771,6 +2897,53 @@ namespace winrt::TerminalApp::implementation
         {
             _setShowTabIcon.IsOn(_appSettings.showTabIcon);
         }
+        // TAB SIZE: seed the two combos + the four sliders from the saved values — clamped / normalized the
+        // way the page applies them (TerminalPage::_ApplyTabSizingSettings), so the form never shows a value
+        // the strip isn't actually using (e.g. a hand-edited crossed width pair).
+        if (_setTabWidthMode)
+        {
+            // Items: 0 == Terminal (default), 1 == Equal, 2 == TitleLength, 3 == Compact.
+            _setTabWidthMode.SelectedIndex(_appSettings.tabWidthMode == TabStripWidthMode::Equal       ? 1 :
+                                           _appSettings.tabWidthMode == TabStripWidthMode::TitleLength ? 2 :
+                                           _appSettings.tabWidthMode == TabStripWidthMode::Compact     ? 3 :
+                                                                                                         0);
+        }
+        {
+            uint32_t minWidth = _appSettings.tabMinWidth;
+            uint32_t maxWidth = _appSettings.tabMaxWidth;
+            ::Agentmaster::NormalizeTabWidthRange(minWidth, maxWidth);
+            // Both widths under the guard: they are already ordered, so a push-along between the two writes
+            // (the new min landing while the OLD max is still shown) would only fight the second write.
+            _tabSizeSyncing = true;
+            if (_setTabMinWidth)
+            {
+                _setTabMinWidth.Value(static_cast<double>(minWidth));
+            }
+            if (_setTabMaxWidth)
+            {
+                _setTabMaxWidth.Value(static_cast<double>(maxWidth));
+            }
+            _tabSizeSyncing = false;
+        }
+        if (_setTabTitleFontSize)
+        {
+            _setTabTitleFontSize.Value(static_cast<double>(::Agentmaster::ClampTabTitleFontSize(_appSettings.tabTitleFontSize)));
+        }
+        if (_setTabTitleFontWeight)
+        {
+            // Items: 0 == Normal (default), 1 == SemiBold, 2 == Bold.
+            _setTabTitleFontWeight.SelectedIndex(_appSettings.tabTitleFontWeight == TabTitleFontWeight::SemiBold ? 1 :
+                                                 _appSettings.tabTitleFontWeight == TabTitleFontWeight::Bold     ? 2 :
+                                                                                                                   0);
+        }
+        if (_setTabMinHeight)
+        {
+            _setTabMinHeight.Value(static_cast<double>(::Agentmaster::ClampTabMinHeight(_appSettings.tabMinHeight)));
+        }
+        // Explicit: a re-seed of the SAME value raises no ValueChanged / SelectionChanged, and the Headers +
+        // the min-width enable must still reflect THIS open's values.
+        _UpdateTabSizeHeaders();
+        _SyncTabMinWidthEnabled();
         if (_setTitleNaming)
         {
             // Items: 0 == LastWord (default), 1 == FolderName, 2 == TwoFolders, 3 == Capitals,
@@ -3404,6 +3577,41 @@ namespace winrt::TerminalApp::implementation
         if (_setShowTabIcon)
         {
             _appSettings.showTabIcon = _setShowTabIcon.IsOn();
+        }
+        // TAB SIZE: the combos map index -> enum; the sliders already hold in-band integers, but they are
+        // clamped + normalized again with the Persistence load's own rules, so what is saved is exactly what
+        // the page will apply. The min-width slider is read back even while disabled (Compact): it still
+        // holds the user's preference, and dropping it would silently reset it to the default.
+        if (_setTabWidthMode)
+        {
+            const int idx = _setTabWidthMode.SelectedIndex();
+            _appSettings.tabWidthMode = idx == 1 ? TabStripWidthMode::Equal :
+                                        idx == 2 ? TabStripWidthMode::TitleLength :
+                                        idx == 3 ? TabStripWidthMode::Compact :
+                                                   TabStripWidthMode::Terminal;
+        }
+        if (_setTabMinWidth && _setTabMaxWidth)
+        {
+            uint32_t minWidth = static_cast<uint32_t>(_setTabMinWidth.Value() + 0.5);
+            uint32_t maxWidth = static_cast<uint32_t>(_setTabMaxWidth.Value() + 0.5);
+            ::Agentmaster::NormalizeTabWidthRange(minWidth, maxWidth);
+            _appSettings.tabMinWidth = minWidth;
+            _appSettings.tabMaxWidth = maxWidth;
+        }
+        if (_setTabTitleFontSize)
+        {
+            _appSettings.tabTitleFontSize = ::Agentmaster::ClampTabTitleFontSize(static_cast<uint32_t>(_setTabTitleFontSize.Value() + 0.5));
+        }
+        if (_setTabTitleFontWeight)
+        {
+            const int idx = _setTabTitleFontWeight.SelectedIndex();
+            _appSettings.tabTitleFontWeight = idx == 1 ? TabTitleFontWeight::SemiBold :
+                                              idx == 2 ? TabTitleFontWeight::Bold :
+                                                         TabTitleFontWeight::Normal;
+        }
+        if (_setTabMinHeight)
+        {
+            _appSettings.tabMinHeight = ::Agentmaster::ClampTabMinHeight(static_cast<uint32_t>(_setTabMinHeight.Value() + 0.5));
         }
         if (_setTitleNaming)
         {
@@ -4191,6 +4399,42 @@ namespace winrt::TerminalApp::implementation
             text += line;
         }
         _titleNamingPreview.Text(winrt::hstring{ text });
+    }
+
+    // Agentmaster (tab sizing): put each TAB SIZE slider's live value into its Header ("Minimum width — 130
+    // px") — the Tag-opacity slider's idiom, so the exact number reads without a separate box. Rendered from
+    // the sliders' CURRENT values, so it is right after a drag, a push-along from the twin slider, the cog-
+    // open seed and the Reset link alike. Null-safe per slider: the build calls it before the later sliders
+    // exist. UI thread. Throws only what a XAML property write throws (winrt::hresult_error) — every caller
+    // runs inside the cog's own UI-thread handlers.
+    void AgentManagerContent::_UpdateTabSizeHeaders()
+    {
+        const auto setHeader = [](const Slider& slider, const wchar_t* label, const wchar_t* unit) {
+            if (!slider)
+            {
+                return;
+            }
+            const auto value = static_cast<int>(slider.Value() + 0.5); // integer steps; round off float drift
+            slider.Header(winrt::box_value(winrt::hstring{ std::wstring{ label } + L" \x2014 " + std::to_wstring(value) + unit }));
+        };
+        setHeader(_setTabMinWidth, L"Minimum width", L" px");
+        setHeader(_setTabMaxWidth, L"Maximum width", L" px");
+        setHeader(_setTabTitleFontSize, L"Title font size", L"");
+        setHeader(_setTabMinHeight, L"Minimum height", L" px");
+    }
+
+    // Agentmaster (tab sizing): the minimum width has no effect in Compact mode (a minimum would stop the
+    // unselected tabs from shrinking to their icon — TerminalPage::_ApplyTabSizingToTab clears it there), so
+    // grey its slider out while the "Tab width" combo says Compact — the _setInferGitRoot enable-by-mode
+    // idiom. The value is kept (and still saved), so switching back restores it. Under the default
+    // "Windows Terminal setting" the slider stays enabled: Terminal's own mode isn't known here, and it is
+    // Equal unless the user changed it. UI thread; never throws in practice (two property reads + one write).
+    void AgentManagerContent::_SyncTabMinWidthEnabled()
+    {
+        if (_setTabMinWidth && _setTabWidthMode)
+        {
+            _setTabMinWidth.IsEnabled(_setTabWidthMode.SelectedIndex() != 3); // 3 == TabStripWidthMode::Compact
+        }
     }
 
     // Agentmaster (launch-model picker): the "Launch models" editor's live validation — the
