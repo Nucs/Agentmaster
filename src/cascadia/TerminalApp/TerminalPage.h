@@ -924,6 +924,33 @@ namespace winrt::TerminalApp::implementation
         // selection changes while this is set; the one real selection of the moved tab runs right after
         // it clears. UI thread only.
         bool _movingTab{ false };
+        // Agentmaster (tab-strip reveal — a NEW tab): true only while _InitializeTab makes a brand-new tab the
+        // strip's selection, BEFORE the strip's first layout pass with that tab in it. _OnTabSelectionChanged
+        // then HOLDS the switch (it records it in _tabSwitchHeldForNewTab and returns), and _InitializeTab runs
+        // the held switch right after that layout pass. Two orderings are forced here:
+        //   - the selection must come BEFORE the layout pass: the pass grows MUX's ItemsPresenter, and MUX
+        //     answers that by scrolling the SELECTED tab into view (TabView::OnItemsPresenterSizeChanged ->
+        //     BringSelectedTabIntoView). When the selection came after the pass, the selected tab during it was
+        //     still the tab the user had been on, so a tab opened from ANOTHER tab's context menu ("New Session
+        //     Here", "Fork session", "Duplicate tab") scrolled the strip back to the old tab and left the new
+        //     one, opened right under the mouse, off screen (2026-10-03, release: 28 tabs away in a 453-tab
+        //     window). MUX's request is processed after the switch already found the new tab on screen, so
+        //     nothing undid it.
+        //   - the switch must come AFTER the layout pass: the switch reveals the tab in the strip, and a tab the
+        //     strip has not laid out yet can only be revealed with ListView::ScrollIntoView, whose panel then
+        //     places it at an ESTIMATED position (it recycles every header and anchors the tab index-times-the-
+        //     average-width from the first realized one), far off on a strip of hundreds of tabs. The switch
+        //     also swaps the tab's content in, which must keep its first layout on the next tick (a terminal
+        //     control starts its connection on its first layout, and _LaunchClaudeSession wires the session up
+        //     after _InitializeTab returns).
+        // UI thread only.
+        bool _holdTabSwitchForNewTab{ false };
+        // Agentmaster (tab-strip reveal — a NEW tab): set by _OnTabSelectionChanged when it held a switch under
+        // _holdTabSwitchForNewTab. _InitializeTab reads and clears it, and runs the held switch only when one was
+        // actually raised: a selection that changed nothing raises no SelectionChanged, and running the funnel
+        // then would re-run the switch for the tab the user was ALREADY on — scrolling the strip to it, the very
+        // jump the hold prevents. UI thread only.
+        bool _tabSwitchHeldForNewTab{ false };
 
         // Agentmaster (Shift+Click background-activate): a Shift+Click on a managed session tab must
         // ACTIVATE the session in place WITHOUT switching to it. A MUX TabViewItem drives its selection

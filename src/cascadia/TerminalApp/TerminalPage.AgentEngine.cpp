@@ -2655,6 +2655,18 @@ namespace winrt::TerminalApp::implementation
     // (ContainerFromItem/IndexFromContainer). UpdateLayout() runs the pass NOW — the layout was going
     // to run next frame anyway, so this is re-ordered work, not added work. Called after EVERY
     // TabItems() mutation (_InitializeTab / _RemoveTab / _TryMoveTab / _TabDragCompleted).
+    // ⚠ The re-ordering is visible in one place: the pass raises the strip's SizeChanged NOW, and MUX
+    // answers a strip that GREW by scrolling its SELECTED tab into view (TabView::OnItemsPresenterSizeChanged
+    // -> BringSelectedTabIntoView; MUX skips it after a removal until the pointer leaves the strip). That
+    // request is routed asynchronously, so it lands after everything else this call stack does and nothing
+    // here can undo it. So settle with the tab that must end up on screen already SELECTED — _InitializeTab
+    // selects a new tab first for exactly this reason (2026-10-03: a tab opened from another tab's context
+    // menu scrolled the strip to the tab the user had been on). It is also a whole-window layout pass:
+    // content swapped in just before it gets its first layout HERE, synchronously, and a terminal control
+    // starts its connection on its first layout — for a brand-new tab that would be before
+    // _LaunchClaudeSession has wired the session up, which is why _InitializeTab also settles BEFORE its
+    // switch. (_TryMoveTab settles after its switch; a moved tab is an existing, already-wired one.)
+    // Never throws: a failure is logged ([tabdrag-guard] + [exc]) and the strip settles on the next frame.
     void TerminalPage::_SettleTabStripLayout()
     {
         try

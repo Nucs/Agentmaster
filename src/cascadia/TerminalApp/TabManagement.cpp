@@ -106,9 +106,27 @@ namespace winrt::TerminalApp::implementation
 
     // Method Description:
     // - Sets up state, event handlers, etc on a tab object that was just made.
+    // - Agentmaster: inserts the tab's header into the strip and — unless the tab opens in the background
+    //   (_openClaudeTabInBackground, the Sessions page's bulk open) — selects it and switches to it. The
+    //   strip's first layout pass with the new header (the settle, _ApplyTabDragPolicy) runs AFTER the tab
+    //   is selected and BEFORE the switch: MUX's own bring-into-view then goes to the new tab instead of the
+    //   tab the user was on, and the switch's strip reveal measures a header that has been laid out. A tab
+    //   opened beside a tab that is on screen (the tab menu's "New Session Here" / "Fork session" /
+    //   "Duplicate tab") therefore appears where it was asked for, and the strip stays on it instead of
+    //   scrolling back to the tab the user was on (_holdTabSwitchForNewTab in TerminalPage.h).
     // Arguments:
     // - newTabImpl: the uninitialized tab.
-    // - insertPosition: Optional parameter to indicate the position of tab.
+    // - insertPosition: Optional parameter to indicate the position of tab (-1, the default: the end of the
+    //   strip, or right after the focused tab under NewTabPosition::AfterCurrentTab).
+    // Return Value:
+    // - <none>
+    // Exceptions:
+    // - whatever a WinRT/XAML call here throws propagates to the caller (upstream behavior): the tab list or
+    //   strip insert, an event registration, or the selection. A throwing selection still settles the strip
+    //   before the exception leaves. A failure inside the switch itself (_OnTabSelectionChanged) does NOT
+    //   propagate: it is logged ([wil] in hooks.log) and contained. The switch used to run inside XAML's
+    //   SelectionChanged dispatch, never in this function's callers, so letting it out would hand every
+    //   caller a failure path it never had.
     void TerminalPage::_InitializeTab(winrt::com_ptr<Tab> newTabImpl, uint32_t insertPosition)
     {
         newTabImpl->Initialize();
@@ -176,11 +194,9 @@ namespace winrt::TerminalApp::implementation
 
         auto tabViewItem = newTabImpl->TabViewItem();
         _tabView.TabItems().InsertAt(insertPosition, tabViewItem);
-        // Agentmaster: settle the item->container mapping + pin the new tab CanDrag(false) — native
-        // MUX drag is permanently OFF (the drag-AV resolution; see TerminalPage.AgentEngine.cpp).
-        _ApplyTabDragPolicy(tabViewItem);
         // Agentmaster (tab sizing): give the new tab the cog's height / title font / width bounds before it
-        // first lays out (a default-valued setting leaves the style's own value in place).
+        // first lays out (a default-valued setting leaves the style's own value in place). The strip's first
+        // layout pass with this tab is the settle at the end of this function (_ApplyTabDragPolicy).
         _ApplyTabSizingToTab(tabViewItem);
         // Agentmaster: [tab-new] timestamps the strip INSERTION exactly — the v0.6.7 MUX AV lived in
         // the insert->drag window, so the gap between this line and a [nav] tab-drag-begin is the
@@ -229,9 +245,62 @@ namespace winrt::TerminalApp::implementation
         // selection so focus (and the tab-switch overlay-dismiss) stays put. The new tab's claude
         // then starts lazily on first focus (WT's background-tab behavior), exactly what bulk-open
         // wants. Every other caller leaves the flag false, so the normal foreground-select is intact.
+        //
+        // Agentmaster (tab-strip reveal): upstream's one SelectedItem call is three steps here, because the
+        // strip's first layout pass with the new tab (the settle below) has to sit between selecting the tab
+        // and switching to it (_holdTabSwitchForNewTab in TerminalPage.h has the full story):
+        //   1. select the tab, with the switch HELD: MUX now counts the new tab as the selected one, but
+        //      _OnTabSelectionChanged only records the switch;
+        //   2. settle: the layout pass. MUX answers the strip's growth by scrolling its SELECTED tab into view,
+        //      and that is the new tab now, not the tab the user was on — which, a few tabs away, is where the
+        //      strip used to jump when a tab was opened from another tab's context menu;
+        //   3. run the held switch: the content swap, focus, and the reveal of a tab the strip has now laid out
+        //      (a tab opened on screen, beside the one that was right-clicked, keeps the strip where it is —
+        //      the reveal moves it only to pull a tab sitting at the very edge inside its padding).
+        // The switch runs only when step 1 actually raised one, as the event would have.
+        bool switchHeld = false;
         if (!_openClaudeTabInBackground)
         {
-            _tabView.SelectedItem(tabViewItem);
+            _holdTabSwitchForNewTab = true;
+            _tabSwitchHeldForNewTab = false;
+            // Release the hold even if the selection throws, or every later selection would be swallowed.
+            auto releaseHold = wil::scope_exit([this]() noexcept {
+                _holdTabSwitchForNewTab = false;
+            });
+            try
+            {
+                _tabView.SelectedItem(tabViewItem);
+            }
+            catch (...)
+            {
+                // Not swallowed: rethrown to the caller, exactly as upstream let a failed selection out of this
+                // function. Only the settle below is pulled forward for this path — before the reorder it had
+                // always run by this point, and the drag-AV belt needs the strip settled before the message
+                // pump runs again, whatever happened here.
+                _ApplyTabDragPolicy(tabViewItem);
+                throw;
+            }
+            switchHeld = std::exchange(_tabSwitchHeldForNewTab, false);
+        }
+
+        // Agentmaster: settle the item->container mapping + pin the new tab CanDrag(false) — native
+        // MUX drag is permanently OFF (the drag-AV resolution; see TerminalPage.AgentEngine.cpp). ⚠ This
+        // is a whole layout pass, and it must stay AFTER step 1 above: run with the user's previous tab still
+        // selected, it scrolls the strip to THAT tab (see the step list above).
+        _ApplyTabDragPolicy(tabViewItem);
+
+        if (switchHeld)
+        {
+            // Step 3: the switch exactly as the SelectionChanged event runs it — the handler reads the selected
+            // tab off the TabView itself, and its event args are unused. Contained here: a step that throws used
+            // to fail inside XAML's event dispatch, never in this function's callers, so it is logged ([wil] in
+            // hooks.log, with the throw-site stack) and the tab stays as created — inserted, selected, the strip
+            // settled.
+            try
+            {
+                _OnTabSelectionChanged(_tabView, nullptr);
+            }
+            CATCH_LOG();
         }
     }
 
@@ -1769,9 +1838,15 @@ namespace winrt::TerminalApp::implementation
     //   otherwise the Agentmaster reactions run through _ApplyAgentTabSelection. A real tab selected while
     //   the Agent Manager page is on screen takes the page down first (_HideManagerPage) — that is how a
     //   tab click, Ctrl+Tab, a new tab or an Activate leaves the page.
+    // - Agentmaster: a brand-new tab's selection is HELD while _InitializeTab sets it
+    //   (_holdTabSwitchForNewTab): this handler only records it (_tabSwitchHeldForNewTab), and _InitializeTab
+    //   calls it again — directly, with the same sender — after the strip's first layout pass with the new
+    //   tab. That call reads the selection off the TabView like the event does, so the switch it runs is the
+    //   one the event would have run.
     // Arguments:
-    // - sender: the control that originated this event
-    // - eventArgs: the event's constituent arguments
+    // - sender: the control that originated this event (the TabView; _InitializeTab's direct call passes
+    //   _tabView)
+    // - eventArgs: the event's constituent arguments (unused — _InitializeTab's direct call passes null)
     // Return Value:
     // - <none>
     // Exceptions:
@@ -1784,6 +1859,16 @@ namespace winrt::TerminalApp::implementation
         // Agent Manager page's own strip deselect (_DeselectTabStripForManagerPage): bookkeeping, not a switch.
         if (_revertingTabSelection || _managerPageDeselecting)
         {
+            return;
+        }
+        // Agentmaster (tab-strip reveal — a NEW tab): _InitializeTab is selecting a tab the strip has not laid
+        // out yet. Record the switch and leave it to _InitializeTab, which runs it after that first layout
+        // pass — revealing the tab now could only go through an estimated ScrollIntoView, and swapping its
+        // content in now would let the layout pass start the terminal before the session is wired up (see
+        // _holdTabSwitchForNewTab in TerminalPage.h).
+        if (_holdTabSwitchForNewTab)
+        {
+            _tabSwitchHeldForNewTab = true;
             return;
         }
 
