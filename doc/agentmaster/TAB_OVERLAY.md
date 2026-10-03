@@ -361,7 +361,9 @@ capped to ≤20 % of the pane width), shown while the **GLOBAL** `AppSettings.sh
 read-modify-write + a live broadcast to every linked overlay in the window; the cog Save preserves
 it). It renders the `~/.claude/hooks/session-end.js` box — a faithful C++ port in
 `ProcessInspect::AnalyzeSessionTranscript` (user messages [deduped, noise-filtered via
-`SeIsCommandNoise`], files read / **created** / edited — each listed by **basename**, except that a
+`SeIsCommandNoise`; a message typed **while claude was working** is listed too, at the point the turn
+took it — claude stores it as a `queued_command` attachment, never as a user line, so before
+2026-10-03 the summary silently dropped it (SESSIONS.md §3)], files read / **created** / edited — each listed by **basename**, except that a
 file inside the session **scratchpad** (`<temp>\claude\<encoded-cwd>\<session-id>\scratchpad\…`, the
 exact Claude Code layout; any session's) reads **`scratchpad/<basename>`** and sorts LAST in its list
 (`SeSummaryFileLabel` / `SeSummaryLabelLess`), so a scratch file is never confused with a repo file of

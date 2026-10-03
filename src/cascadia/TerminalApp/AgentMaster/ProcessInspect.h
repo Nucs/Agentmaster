@@ -459,7 +459,7 @@ namespace Agentmaster
     struct ConversationSegment
     {
         std::wstring label; // the compaction that ENDED this segment, e.g. "compacted · manual · 409k→5k"; empty for a plain (cross-file) join
-        std::vector<std::wstring> userMsgs; // the segment's REAL user prompts, in order (SAME filter as SessionSummary.userMsgs)
+        std::vector<std::wstring> userMsgs; // the segment's REAL user prompts, in order (SAME filter as SessionSummary.userMsgs — so it includes the messages typed mid-turn too)
     };
 
     // A faithful C++ port of ~/.claude/hooks/session-end.js parseTranscript + its field mapping, so the
@@ -470,7 +470,12 @@ namespace Agentmaster
     struct SessionSummary
     {
         bool found{ false };
-        std::vector<std::wstring> userMsgs; // type=user, userType=external, text content; deduped; command/bash/Caveat/Overview/interrupt-skipped
+        // type=user, userType=external, text content; deduped; command/bash/Caveat/Overview/interrupt-skipped.
+        // Agentmaster (mid-turn messages): PLUS every message the user typed WHILE claude was working — the
+        // running turn absorbs it and claude records it as a human `queued_command` ATTACHMENT, never as a
+        // user line, so a user-lines-only list silently lost it. Listed at the point the turn took it, with
+        // the same filter + dedup as a typed prompt (ProcessInspect.Content.cpp SeQueuedHumanPromptRawText).
+        std::vector<std::wstring> userMsgs;
         // Agentmaster: the three file lists hold DISPLAY LABELS (SeSummaryFileLabel) — a bare basename, or
         // `scratchpad/<basename>` for a file inside a session scratchpad — each list unique + sorted with
         // the scratchpad labels LAST (SeSummaryLabelLess). Labels, not paths: two distinct files with one
@@ -489,7 +494,7 @@ namespace Agentmaster
         std::wstring awaySummary;
         std::wstring firstTs; // first entry.timestamp (ISO) — conversation start (age); spans every /compact (the live branch crosses them), so the duration is the whole session's, not the last segment's
         std::wstring lastTs; // last entry.timestamp (ISO) — last activity
-        std::wstring lastUserTs; // last real user INTERACTION's entry.timestamp (ISO) — "last user msg" ago: a typed external-user prompt OR the user's answer to an AskUserQuestion (a tool_result on an interactive tool_use), so answering a question advances the clock too
+        std::wstring lastUserTs; // last real user INTERACTION's entry.timestamp (ISO) — "last user msg" ago: a typed external-user prompt OR the user's answer to an AskUserQuestion (a tool_result on an interactive tool_use), so answering a question advances the clock too; a message typed mid-turn (a queued_command attachment) advances it to its Enter time, forward only (that line is written at absorption, after lines that can carry a later time)
         int tasksCompleted{ 0 };
         int tasksPending{ 0 }; // pending + in_progress, from the LAST TodoWrite
         bool hasExitPlanMode{ false }; // an ExitPlanMode tool_use (plan-end signal)

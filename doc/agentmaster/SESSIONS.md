@@ -190,8 +190,20 @@ fields.
 - **`system`** — `subtype` ∈ `turn_duration · away_summary · local_command · api_error ·
   compact_boundary · stop_hook_summary`.
 - **`attachment`** — context injections (`task_reminder`, `edited_text_file`,
-  `compact_file_reference`, `skill_listing`, `date_change`, `queued_command`, …) — **not** user
-  text.
+  `compact_file_reference`, `skill_listing`, `date_change`, …) — **not** user text. **One
+  exception: `queued_command`.** A message the user types WHILE claude works never becomes a `user`
+  line. Enter queues it (`queue-operation` enqueue); the running turn absorbs it at its next
+  tool-result boundary (`queue-operation` remove, `reason:"absorbed_mid_turn"`), and claude writes
+  `attachment {type:"queued_command", commandMode:"prompt", prompt, origin:{kind:"human"},
+  humanTurn:true}` on the live chain, stamped with the Enter time (builds up to 2.1.179 omit
+  `origin`; `prompt` is a string, or a content array when an image is pasted). The same type also
+  carries machine traffic: `commandMode:"task-notification"` (a background task finished) and
+  `origin.kind` `peer` (an agent or cross-session message, `isMeta`) or `task-notification`. Survey
+  2026-10-03: 2,192 `queued_command` lines in 478 transcripts — 1,983 task notices, 204 human
+  messages, 5 peer / task messages. The summary analyzer lists the human ones like typed prompts
+  (`ProcessInspect.Content.cpp` `SeQueuedHumanPromptRawText`); this page's index
+  (`ClassifyTranscriptLine`) still files every attachment as context, so the 👤 scope, the msgs
+  count and the External rows' read-only plan do not see them yet.
 - **Untimestamped session-state tail lines** (no uuid): `mode`, `permission-mode`,
   `last-prompt {lastPrompt, leafUuid}`, **`custom-title {customTitle}`** (from `/rename`, `-n`,
   the picker, plan-accept), **`ai-title {aiTitle}`** (async picker title),

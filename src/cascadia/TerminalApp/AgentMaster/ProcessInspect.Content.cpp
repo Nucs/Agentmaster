@@ -1142,21 +1142,97 @@ namespace Agentmaster
         return content;
     }
 
-    // Agentmaster (conversation lineage): the real human-prompt TEXT from a user line, or "" when it is
-    // NOT one (a tool-result turn, a slash-command/bash/notification noise marker, or whitespace-only).
-    // Mirrors the externalUser extraction in AnalyzeSessionTranscriptImpl (first text block / string
-    // content -> slash-command reconstruct -> strip leading whitespace -> SeIsCommandNoise), so the
-    // conversation-SEGMENT collector below can never drift from the live Messages list.
-    static std::wstring SeExtractRealUserPrompt(const json::Value& obj)
+    // Agentmaster (mid-turn messages): the RAW text of a message the user typed WHILE claude was still
+    // working — or "" when `obj` is not such a line. Claude Code does NOT write that message as a `user`
+    // line. Enter QUEUES it (a uuid-less `queue-operation` enqueue), and when the running turn absorbs it
+    // at its next tool-result boundary (a `queue-operation` remove — reason "absorbed_mid_turn" on recent
+    // builds) claude appends an ATTACHMENT line ON THE LIVE CHAIN, stamped with the Enter time:
+    //     {"type":"attachment","uuid":"…","parentUuid":"<the tool result>","timestamp":"<Enter>",
+    //      "userType":"external","attachment":{"type":"queued_command","commandMode":"prompt",
+    //      "prompt":"<the text>","origin":{"kind":"human"},"humanTurn":true,…}}
+    // (A queued message the turn did NOT absorb is dequeued and submitted later as an ordinary `user`
+    // line, so it never takes this shape.) Every reader that lists only `user` lines therefore dropped
+    // each mid-turn message: the summary of session f62a102b (2026-10-03, Claude Code 2.1.282) listed
+    // its first message but not the second one, typed while the first turn was still running.
+    //
+    // The same attachment type also carries MACHINE traffic, so only this shape counts as the user's own
+    // words (a survey of all 2,192 queued_command lines in 478 local transcripts, Claude Code
+    // 2.1.111-2.1.282):
+    //   * commandMode "prompt" — "task-notification" (1,983 lines) is a background task finishing;
+    //   * no origin (older builds wrote none: 92 lines, every one typed text) or origin.kind "human"
+    //     (112) — "peer" (an agent / cross-session message, also flagged isMeta) and
+    //     "task-notification" are not the user's words, and an origin of any other JSON shape is refused;
+    //   * not isMeta — neither on the attachment nor on the line — and not on a sidechain;
+    //   * userType absent or "external" (every observed line says "external").
+    // `prompt` is a string, or a content array (a pasted image beside its "[Image #N]" text) whose FIRST
+    // text block is taken — SeUserLineRawText's rule for a user line, so both shapes read alike.
+    // NO noise filtering, trimming or slash-command reconstruction here: SeExtractQueuedHumanPrompt
+    // (built on this) applies those.
+    //   obj — the parsed transcript line (any type; a non-attachment line simply answers "").
+    // Returns the raw prompt text, or "" when the line is not a human mid-turn message. Pure; never throws
+    // beyond std::bad_alloc (the string copy).
+    static std::wstring SeQueuedHumanPromptRawText(const json::Value& obj)
     {
-        // isCompactSummary == the synthetic "This session is being continued… Summary: …" bridge a
-        // /compact writes; it is NOT a human prompt (session-end.js treats it as meta). It rides a
-        // userType:"external" user line that SeIsCommandNoise doesn't catch, so guard it explicitly.
-        if (obj.BoolAt(L"isCompactSummary") || obj.BoolAt(L"isMeta"))
+        if (obj.StrAt(L"type") != L"attachment" || obj.BoolAt(L"isMeta") || obj.BoolAt(L"isSidechain"))
         {
             return {};
         }
-        std::wstring content = SeUserLineRawText(obj); // "" when there is no message / no text ("" for a tool_result-only line)
+        if (const std::wstring userType = obj.StrAt(L"userType"); !userType.empty() && userType != L"external")
+        {
+            return {}; // explicitly not the CLI's human user (never observed; refuse rather than guess)
+        }
+        const auto* att = obj.Find(L"attachment");
+        if (!att || att->type != json::Value::Type::Obj || att->StrAt(L"type") != L"queued_command" ||
+            att->StrAt(L"commandMode") != L"prompt" || att->BoolAt(L"isMeta"))
+        {
+            return {}; // another attachment kind, a background-task notice, or injected (meta) context
+        }
+        // origin: absent / null on older builds — those lines are all typed text. When present, only a
+        // HUMAN origin is the user's message: a peer's report or a task notice reaches the model through
+        // this same queue, and numbering it in the summary would credit the user with words they never
+        // typed.
+        if (const auto* origin = att->Find(L"origin"); origin && origin->type != json::Value::Type::Null)
+        {
+            if (origin->type != json::Value::Type::Obj || origin->StrAt(L"kind") != L"human")
+            {
+                return {};
+            }
+        }
+        std::wstring content;
+        if (const auto* prompt = att->Find(L"prompt"))
+        {
+            if (prompt->type == json::Value::Type::Str)
+            {
+                content = prompt->str;
+            }
+            else if (prompt->type == json::Value::Type::Arr)
+            {
+                for (const auto& blk : prompt->arr)
+                {
+                    if (blk.type == json::Value::Type::Obj && blk.StrAt(L"type") == L"text")
+                    {
+                        content = blk.StrAt(L"text");
+                        break;
+                    }
+                }
+            }
+        }
+        return content;
+    }
+
+    // Agentmaster (conversation lineage + mid-turn messages): the shared NORMALIZATION every summary
+    // prompt reader applies to a candidate prompt's raw text — slash-command reconstruct -> strip leading
+    // whitespace -> drop empty / whitespace-only / SeIsCommandNoise. Factored out of
+    // SeExtractRealUserPrompt (behavior unchanged) so the queued-message reader below applies the SAME
+    // steps: a mid-turn message is then listed exactly as a typed one would be, and the two can never
+    // drift apart. (AnalyzeSessionTranscriptImpl's externalUser branch keeps its own inline copy of these
+    // steps — the copy SeExtractRealUserPrompt has always mirrored.)
+    //   content — the raw text (SeUserLineRawText / SeQueuedHumanPromptRawText); taken by value and
+    //             normalized in place.
+    // Returns the prompt as the summary lists it, or "" when it is not a real human prompt. Pure; never
+    // throws beyond std::bad_alloc.
+    static std::wstring SeNormalizeHumanPromptText(std::wstring content)
+    {
         if (!content.empty() && content.find(L"<command-name>") != std::wstring::npos)
         {
             if (std::wstring cmd = SeReconstructCommandPrompt(content); !cmd.empty())
@@ -1177,6 +1253,41 @@ namespace Agentmaster
             return {};
         }
         return content;
+    }
+
+    // Agentmaster (conversation lineage): the real human-prompt TEXT from a user line, or "" when it is
+    // NOT one (a tool-result turn, a slash-command/bash/notification noise marker, or whitespace-only).
+    // Mirrors the externalUser extraction in AnalyzeSessionTranscriptImpl (first text block / string
+    // content -> slash-command reconstruct -> strip leading whitespace -> SeIsCommandNoise), so the
+    // conversation-SEGMENT collector below can never drift from the live Messages list.
+    //   obj — the parsed transcript line (the caller has already checked type "user" + userType "external").
+    // Returns the prompt as the summary lists it, or "" when the line is not a real human prompt. Pure;
+    // never throws beyond std::bad_alloc.
+    static std::wstring SeExtractRealUserPrompt(const json::Value& obj)
+    {
+        // isCompactSummary == the synthetic "This session is being continued… Summary: …" bridge a
+        // /compact writes; it is NOT a human prompt (session-end.js treats it as meta). It rides a
+        // userType:"external" user line that SeIsCommandNoise doesn't catch, so guard it explicitly.
+        if (obj.BoolAt(L"isCompactSummary") || obj.BoolAt(L"isMeta"))
+        {
+            return {};
+        }
+        // "" when there is no message / no text ("" for a tool_result-only line) — the normalizer drops it.
+        return SeNormalizeHumanPromptText(SeUserLineRawText(obj));
+    }
+
+    // Agentmaster (mid-turn messages): the real human-prompt TEXT of a message the user typed WHILE claude
+    // was working (a queued_command attachment line — see SeQueuedHumanPromptRawText for the shape and the
+    // corpus survey behind each test), or "" when the line is not one. The queued-message twin of
+    // SeExtractRealUserPrompt, through the SAME normalization (SeNormalizeHumanPromptText), so a mid-turn
+    // message is listed exactly as a typed prompt would be. Shared by AnalyzeSessionTranscriptImpl (the
+    // CURRENT Messages list) and CollectConversationSegments (the previous, /compact-ed segments): one rule
+    // in both places, or a mid-turn message could appear in one list and vanish from the other.
+    //   obj — the parsed transcript line (any type; only a human queued_command attachment yields text).
+    // Returns the prompt as the summary lists it, or "". Pure; never throws beyond std::bad_alloc.
+    static std::wstring SeExtractQueuedHumanPrompt(const json::Value& obj)
+    {
+        return SeNormalizeHumanPromptText(SeQueuedHumanPromptRawText(obj));
     }
 
     // Agentmaster (conversation lineage): a compact token count for a segment label (409797 -> "409k").
@@ -1275,6 +1386,19 @@ namespace Agentmaster
             if (type == L"user" && obj.StrAt(L"userType") == L"external")
             {
                 if (std::wstring p = SeExtractRealUserPrompt(obj); !p.empty() && seen.insert(p).second)
+                {
+                    segs.back().userMsgs.push_back(std::move(p));
+                }
+            }
+            // Agentmaster (mid-turn messages): a message the user typed while claude was still working is
+            // a queued_command ATTACHMENT line, not a user line (SeQueuedHumanPromptRawText). It belongs to
+            // the segment it was absorbed in — by file position, like every prompt here — and goes through
+            // the SAME rule AnalyzeSessionTranscriptImpl applies to the current segment, so a compaction
+            // never moves a mid-turn message out of sight (it was listed while current, so it must still be
+            // listed once it becomes a "previous session").
+            else if (type == L"attachment")
+            {
+                if (std::wstring p = SeExtractQueuedHumanPrompt(obj); !p.empty() && seen.insert(p).second)
                 {
                     segs.back().userMsgs.push_back(std::move(p));
                 }
@@ -1834,6 +1958,34 @@ namespace Agentmaster
                                 break;
                             }
                         }
+                    }
+                }
+            }
+
+            // Agentmaster (mid-turn messages): a message the user typed WHILE claude was working never
+            // becomes a user line — the running turn absorbs it at its next tool-result boundary and claude
+            // records it as a queued_command ATTACHMENT on the live chain (SeQueuedHumanPromptRawText: the
+            // shape, and why only a human prompt-mode one counts). Without this branch the Messages list
+            // dropped every such message — session f62a102b's second message, typed while its first turn
+            // ran, never reached the summary. It is listed like a typed prompt: in file order (the point the
+            // turn took it in), through the same normalization and the same per-segment dedup — which also
+            // folds an older build's rare double delivery (one text written as a user line AND as an
+            // attachment). It advances "last user msg" to its OWN timestamp (the Enter time), but only
+            // forward: the line is written at absorption, AFTER lines that may carry a later time (e.g. an
+            // AskUserQuestion answer given meanwhile), and an older stamp must never pull the clock back.
+            // Claude Code's timestamps are uniform ISO-8601 UTC ("YYYY-MM-DDTHH:MM:SS.mmmZ"), so the string
+            // order IS the time order.
+            if (type == L"attachment")
+            {
+                if (std::wstring queued = SeExtractQueuedHumanPrompt(obj); !queued.empty())
+                {
+                    if (!ts.empty() && ts > out.lastUserTs)
+                    {
+                        out.lastUserTs = ts;
+                    }
+                    if (seenMsgs.insert(queued).second)
+                    {
+                        out.userMsgs.push_back(std::move(queued));
                     }
                 }
             }

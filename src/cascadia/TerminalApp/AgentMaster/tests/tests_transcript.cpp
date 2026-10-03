@@ -1835,6 +1835,108 @@ void TestTranscriptResolve()
         std::filesystem::remove(std::filesystem::path{ pBash }, ec2);
     }
 
+    // --- AnalyzeSessionTranscript: a message typed WHILE claude worked (a mid-turn message) is listed ---
+    // Regression (session f62a102b, 2026-10-03, Claude Code 2.1.282): the user's SECOND message, typed
+    // while the first turn was still running, never reached the summary. Claude Code does not write such
+    // a message as a user line: the running turn absorbs it at its next tool-result boundary, and claude
+    // records it as a queued_command ATTACHMENT on the live chain — stamped with the Enter time, written
+    // after the tool result — while the analyzer read only user lines. A HUMAN prompt-mode queued_command
+    // is now listed like a typed prompt (file order, same filter + dedup); the machine traffic that the
+    // same attachment type carries stays out. The shapes are copied from a corpus survey (2,192
+    // queued_command lines in 478 transcripts, Claude Code 2.1.111-2.1.282).
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring base = std::wstring{ tmp } + L"am_queued_" + std::to_wstring(::GetCurrentProcessId());
+
+        // Case A: the f62a102b sequence, then every shape that must stay OUT of the Messages list.
+        const std::wstring pShapes = base + L"_shapes.jsonl";
+        MakeJsonl(pShapes,
+                  // (1) the turn's typed prompt -> LISTED
+                  R"j({"type":"user","userType":"external","message":{"content":"The summary in the side menu pane, learn all about it"},"timestamp":"2026-10-03T08:14:22.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_Q1","name":"Grep","input":{"pattern":"x"}}]},"timestamp":"2026-10-03T08:15:20.000Z"})j" "\n"
+                  // (2) the queue bookkeeping: uuid-less lines, never a message
+                  R"j({"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-03T08:15:22.592Z","content":"The summary there is the current session"})j" "\n"
+                  R"j({"type":"user","userType":"external","message":{"content":[{"type":"tool_result","content":"found","tool_use_id":"toolu_Q1"}]},"timestamp":"2026-10-03T08:15:26.000Z"})j" "\n"
+                  R"j({"type":"queue-operation","operation":"remove","reason":"absorbed_mid_turn","timestamp":"2026-10-03T08:15:26.567Z","content":"The summary there is the current session"})j" "\n"
+                  // (3) the mid-turn message (the 2.1.282 shape), written AFTER the 08:15:26 tool result but
+                  //     stamped with its 08:15:22 Enter time -> LISTED, second
+                  R"j({"type":"attachment","userType":"external","isSidechain":false,"attachment":{"type":"queued_command","prompt":"The summary there is the current session\nWe should be able to see the entire conversational history although compact.","commandMode":"prompt","origin":{"kind":"human"},"timestamp":"2026-10-03T08:15:22.592Z","humanTurn":true},"timestamp":"2026-10-03T08:15:22.592Z"})j" "\n"
+                  // (4) a background task finishing (commandMode task-notification) -> OUT
+                  R"j({"type":"attachment","userType":"external","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>","commandMode":"task-notification"},"timestamp":"2026-10-03T08:16:00.000Z"})j" "\n"
+                  // (5) an agent's message (origin peer, isMeta on the attachment) -> OUT
+                  R"j({"type":"attachment","userType":"external","attachment":{"type":"queued_command","prompt":"<agent-message from=\"finder\">\nreport\n</agent-message>","commandMode":"prompt","isMeta":true,"origin":{"kind":"peer","from":"finder"}},"timestamp":"2026-10-03T08:16:10.000Z"})j" "\n"
+                  // (6) a peer message WITHOUT the isMeta flag -> still OUT (the origin decides)
+                  R"j({"type":"attachment","userType":"external","attachment":{"type":"queued_command","prompt":"plain words from a teammate","commandMode":"prompt","origin":{"kind":"peer","from":"teammate"}},"timestamp":"2026-10-03T08:16:15.000Z"})j" "\n"
+                  // (7) a task notice delivered in prompt mode (origin task-notification) -> OUT
+                  R"j({"type":"attachment","userType":"external","attachment":{"type":"queued_command","prompt":"Build finished","commandMode":"prompt","origin":{"kind":"task-notification"}},"timestamp":"2026-10-03T08:16:20.000Z"})j" "\n"
+                  // (8) an older build's message (no origin, no attachment timestamp) -> LISTED, third
+                  R"j({"type":"attachment","userType":"external","attachment":{"type":"queued_command","prompt":"try again","commandMode":"prompt"},"timestamp":"2026-10-03T08:16:30.000Z"})j" "\n"
+                  // (9) a pasted image: a content array whose FIRST text block is the message -> LISTED, fourth
+                  R"j({"type":"attachment","userType":"external","attachment":{"type":"queued_command","prompt":[{"type":"text","text":"[Image #2] look at this"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}],"commandMode":"prompt","origin":{"kind":"human"}},"timestamp":"2026-10-03T08:16:40.000Z"})j" "\n"
+                  // (10) a sidechain line -> OUT
+                  R"j({"type":"attachment","userType":"external","isSidechain":true,"attachment":{"type":"queued_command","prompt":"subagent side text","commandMode":"prompt","origin":{"kind":"human"}},"timestamp":"2026-10-03T08:16:50.000Z"})j" "\n"
+                  // (11) a meta LINE -> OUT
+                  R"j({"type":"attachment","userType":"external","isMeta":true,"attachment":{"type":"queued_command","prompt":"injected context","commandMode":"prompt"},"timestamp":"2026-10-03T08:16:55.000Z"})j" "\n"
+                  // (12) another attachment kind -> OUT
+                  R"j({"type":"attachment","userType":"external","attachment":{"type":"task_reminder","prompt":"not a message","content":[]},"timestamp":"2026-10-03T08:17:00.000Z"})j" "\n"
+                  // (13) noise text in a human mid-turn message -> OUT (the same SeIsCommandNoise as a typed prompt)
+                  R"j({"type":"attachment","userType":"external","attachment":{"type":"queued_command","prompt":"<system-reminder>x</system-reminder>","commandMode":"prompt","origin":{"kind":"human"}},"timestamp":"2026-10-03T08:17:05.000Z"})j" "\n"
+                  // (14) a userType that is explicitly not "external" -> OUT
+                  R"j({"type":"attachment","userType":"internal","attachment":{"type":"queued_command","prompt":"internal text","commandMode":"prompt","origin":{"kind":"human"}},"timestamp":"2026-10-03T08:17:08.000Z"})j" "\n"
+                  // (15) an older build's double delivery (the typed prompt's text again, as an attachment) ->
+                  //      deduped, but it still advances "last user msg" (recency is what matters)
+                  R"j({"type":"attachment","userType":"external","attachment":{"type":"queued_command","prompt":"The summary in the side menu pane, learn all about it","commandMode":"prompt","origin":{"kind":"human"}},"timestamp":"2026-10-03T08:17:10.000Z"})j" "\n",
+                  1000, 1000);
+        const auto a = AnalyzeSessionTranscript(pShapes, 0);
+        CHECK(a.userMsgs.size() == 4, "queued: the typed prompt + the 3 HUMAN mid-turn messages are listed; machine traffic, sidechain, meta, other kinds, noise, a non-external user and the duplicate are not");
+        CHECK(a.userMsgs.size() == 4 && a.userMsgs[0] == L"The summary in the side menu pane, learn all about it", "queued: the typed prompt stays first");
+        CHECK(a.userMsgs.size() == 4 && a.userMsgs[1] == L"The summary there is the current session\nWe should be able to see the entire conversational history although compact.",
+              "queued: the f62a102b second message (2.1.282 shape) is listed second, in full");
+        CHECK(a.userMsgs.size() == 4 && a.userMsgs[2] == L"try again", "queued: an older build's message (no origin field) is listed");
+        CHECK(a.userMsgs.size() == 4 && a.userMsgs[3] == L"[Image #2] look at this", "queued: a pasted-image message lists its first text block");
+        CHECK(a.lastUserTs == L"2026-10-03T08:17:10.000Z", "queued: a mid-turn message advances last-user time (the newest human one, even a deduped text)");
+
+        // Case B: the "last user msg" clock only moves FORWARD. A mid-turn line is written when the turn
+        // absorbs it, so a line carrying a LATER user time (here an AskUserQuestion answer) can precede it;
+        // its older Enter time must not pull the clock back — but the message is still listed.
+        const std::wstring pClock = base + L"_clock.jsonl";
+        MakeJsonl(pClock,
+                  R"j({"type":"user","userType":"external","message":{"content":"do the thing"},"timestamp":"2026-10-03T18:00:00.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_ASKQ","name":"AskUserQuestion","input":{"questions":[]}}]},"timestamp":"2026-10-03T18:01:00.000Z"})j" "\n"
+                  R"j({"type":"user","userType":"external","message":{"content":[{"type":"tool_result","content":"User has answered your questions.","tool_use_id":"toolu_ASKQ"}]},"timestamp":"2026-10-03T18:05:00.000Z"})j" "\n"
+                  R"j({"type":"attachment","userType":"external","attachment":{"type":"queued_command","prompt":"and also this","commandMode":"prompt","origin":{"kind":"human"}},"timestamp":"2026-10-03T18:03:00.000Z"})j" "\n",
+                  1000, 1000);
+        const auto b = AnalyzeSessionTranscript(pClock, 0);
+        CHECK(b.userMsgs.size() == 2 && b.userMsgs[1] == L"and also this", "queued: a mid-turn message stamped before the previous line is still listed");
+        CHECK(b.lastUserTs == L"2026-10-03T18:05:00.000Z", "queued: an older Enter time never pulls last-user time back");
+
+        // Case C: a /compact keeps every mid-turn message in sight. The one typed before the compaction
+        // moves to the "previous session" segment (CollectConversationSegments — the same rule), the one
+        // typed after it is in the current Messages list.
+        const std::wstring pComp = base + L"_compact.jsonl";
+        MakeJsonl(pComp,
+                  R"j({"type":"user","userType":"external","message":{"content":"before compaction"},"timestamp":"2026-10-03T10:00:00.000Z"})j" "\n"
+                  R"j({"type":"attachment","userType":"external","attachment":{"type":"queued_command","prompt":"typed mid-turn before compaction","commandMode":"prompt","origin":{"kind":"human"}},"timestamp":"2026-10-03T10:01:00.000Z"})j" "\n"
+                  R"j({"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":409797,"postTokens":5000},"timestamp":"2026-10-03T10:02:00.000Z"})j" "\n"
+                  R"j({"type":"user","userType":"external","isCompactSummary":true,"message":{"content":"This session is being continued from a previous conversation."},"timestamp":"2026-10-03T10:02:01.000Z"})j" "\n"
+                  R"j({"type":"user","userType":"external","message":{"content":"after compaction"},"timestamp":"2026-10-03T10:03:00.000Z"})j" "\n"
+                  R"j({"type":"attachment","userType":"external","attachment":{"type":"queued_command","prompt":"typed mid-turn after compaction","commandMode":"prompt","origin":{"kind":"human"}},"timestamp":"2026-10-03T10:04:00.000Z"})j" "\n",
+                  1000, 1000);
+        const auto c = AnalyzeSessionTranscript(pComp, 0);
+        CHECK(c.compacted, "queued/compact: the session is flagged compacted");
+        CHECK(c.userMsgs.size() == 2 && c.userMsgs[0] == L"after compaction" && c.userMsgs[1] == L"typed mid-turn after compaction",
+              "queued/compact: the current segment lists the post-compaction prompt + its mid-turn message");
+        CHECK(c.previousSegments.size() == 1 && c.previousSegments[0].userMsgs.size() == 2 &&
+                  c.previousSegments[0].userMsgs[0] == L"before compaction" && c.previousSegments[0].userMsgs[1] == L"typed mid-turn before compaction",
+              "queued/compact: the previous segment keeps the pre-compaction mid-turn message (one rule for both lists)");
+
+        std::error_code ecQ;
+        std::filesystem::remove(std::filesystem::path{ pShapes }, ecQ);
+        std::filesystem::remove(std::filesystem::path{ pClock }, ecQ);
+        std::filesystem::remove(std::filesystem::path{ pComp }, ecQ);
+    }
+
     // --- Revert-aware DISPLAY: a double-ESC rewind orphans a branch; summary/title must skip it -----
     // Claude stores a conversation as a TREE (each message line carries uuid + parentUuid; a root's
     // parentUuid is null). A double-ESC REWIND (or /rewind) repoints the trailing `leafUuid` marker to
