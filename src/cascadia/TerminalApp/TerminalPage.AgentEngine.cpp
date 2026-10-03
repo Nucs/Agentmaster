@@ -36,6 +36,7 @@
 
 #include "AgentManagerContent.h" // the Agent Manager page's content (C1 UI) — created, wired and shown here
 #include "AgentTabOverlay.h" // ~TerminalPage destroys the com_ptr<AgentTabOverlay> maps — needs the complete type
+#include "AgentTranscriptOverlay.h" // ~TerminalPage destroys the com_ptr<AgentTranscriptOverlay> — needs the complete type
 #include "AgentCatchLog.h" // exception forensics: InstallAgentExceptionTrace (VEH throw-stack ring + wil failure logger, engine init below)
 #include "AgentToastActivator.h" // System notifications: the toast COM activator (registered once, process-wide, from the engine init below)
 #include "TabHeaderControl.h" // Agentmaster: SetTabRenameCommitMode (push the GLOBAL rename-commit mode to tab headers)
@@ -1677,6 +1678,15 @@ namespace winrt::TerminalApp::implementation
                 self->_OpenTagEditorForElement(std::wstring{ id }, anchor);
             }
         });
+        // Agentmaster (transcript overlay): the session menu's "Show Transcript" / "Copy ▸ Transcript ▸ Show"
+        // (board card, tree row, side-panel card) and the EXTERNAL menu's "Show Transcript" — open that
+        // conversation in this window's reading view, over the Agent Manager page the click came from.
+        content->SetShowTranscriptHandler([weakThis](winrt::hstring id, bool codex, winrt::hstring codexRolloutId, winrt::hstring title) {
+            if (auto self = weakThis.get())
+            {
+                self->_ShowTranscriptOverlay(std::wstring{ id }, codex, std::wstring{ codexRolloutId }, std::wstring{ title }, L"session menu");
+            }
+        });
         // Agentmaster (bookmark tags): a Triage-Board card ribbon's pointer enter/leave — route to
         // the SAME rich tag hover panel the tab badges + the Sessions Tags column use (every session
         // carrying the tag + its status dot; clicking a live row jumps to its tab). The Manager
@@ -2123,6 +2133,11 @@ namespace winrt::TerminalApp::implementation
         // likewise (its badge anchor belongs to the strip layout that is about to change).
         _CloseTagEditorPopup();
         _CloseTagHoverPopup();
+        // Agentmaster (transcript overlay): "moving a tab closes the overlay" — any change of what is on
+        // screen (a tab switch, a close successor, the Agent Manager page shown / left) closes it. A no-op
+        // when it isn't open. It also hands focus back to the tab now on screen: the overlay's focus guard
+        // refused the focus move _UpdatedSelectedTab made just before this ran.
+        _CloseTranscriptOverlay(tab ? std::wstring_view{ L"tab switch" } : std::wstring_view{ L"agent manager page" });
         // Agentmaster (tab status-dot red flash): switching TO a tab is a "visit" — the current
         // tab is always considered visited, so stop any red flash on the now-focused tab.
         _VisitTabClearFlash(tab);
@@ -2935,6 +2950,9 @@ namespace winrt::TerminalApp::implementation
         }
         CATCH_LOG();
         ::Agentmaster::LogNav(L"tab-drag-begin " + _DescribeTabForLog(_tabReorder.tab));
+        // Agentmaster (transcript overlay): a tab drag is "moving a tab" — it closes the overlay the
+        // moment the drag activates (a reorder, a tear-out and a dock all start here).
+        _CloseTranscriptOverlay(L"tab drag");
         try
         {
             _tabReorder.tvi.Opacity(0.55); // the "lifted" cue; restored in _TabReorderReset

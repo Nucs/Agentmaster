@@ -602,6 +602,28 @@ namespace winrt::TerminalApp::implementation
             });
             _summaryContextMenu.Items().Append(copyItem);
 
+            // Agentmaster (transcript overlay): "Show Transcript" — the WHOLE conversation behind this
+            // summary, rendered as Markdown in the window-level reading view (AgentTranscriptOverlay.h).
+            // The page owns that view, so this only fires the page-wired opener (inert when unwired).
+            MenuFlyoutItem showTranscriptItem{};
+            showTranscriptItem.Text(kShowTranscriptMenuLabel);
+            AgentSetTip(showTranscriptItem, winrt::hstring{ kShowTranscriptMenuTip });
+            showTranscriptItem.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                // Contained: a XAML event handler — an escape would be a process fail-fast for a menu click.
+                try
+                {
+                    if (const auto self = weak.get(); self && self->_onShowTranscript)
+                    {
+                        self->_onShowTranscript();
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"AgentTabOverlay summary Show Transcript");
+                }
+            });
+            _summaryContextMenu.Items().Append(showTranscriptItem);
+
             // View toggles — the SAME flips as the times-bar … / ↵ buttons, offered here for quick
             // right-click access. The Enable/Disable label reflects the live mirror flags (set in Opening,
             // seeded at build); _ToggleSummaryTruncate/Wrap invoke the page handler (global flip + broadcast).
@@ -1379,6 +1401,11 @@ namespace winrt::TerminalApp::implementation
     void AgentTabOverlay::SetClearDraftHandler(std::function<void()> handler)
     {
         _onClearDraft = std::move(handler);
+    }
+
+    void AgentTabOverlay::SetShowTranscriptHandler(std::function<void()> handler)
+    {
+        _onShowTranscript = std::move(handler);
     }
 
     // Agentmaster (SUMMARY_JUMP.md): resolve every numbered prompt against the live buffer in one pass and

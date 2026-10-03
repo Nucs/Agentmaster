@@ -1978,6 +1978,10 @@ namespace winrt::TerminalApp::implementation
             // Agentmaster: [nav] — a same-window tab move (moveTab action / drop routing), BEGIN-style
             // (logged before the mutations so a crash mid-move still shows what was being moved).
             ::Agentmaster::LogNav(L"tab-move " + _DescribeTabForLog(tab) + L" idx=" + std::to_wstring(currentTabIndex) + L" -> " + std::to_wstring(newTabIndex));
+            // Agentmaster (transcript overlay): "moving a tab closes the overlay". Explicit here because a
+            // move of the ALREADY-selected tab raises no SelectionChanged, so the tab-switch funnel's close
+            // never runs for it. Before the mutations, so the move's own selection + focus land normally.
+            _CloseTranscriptOverlay(L"tab move");
             auto tabViewItem = tab.TabViewItem();
             _tabs.RemoveAt(currentTabIndex);
             _tabs.InsertAt(newTabIndex, tab);

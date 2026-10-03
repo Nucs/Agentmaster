@@ -355,6 +355,10 @@ namespace winrt::TerminalApp::implementation
     {
         _tagsHandler = std::move(handler);
     }
+    void AgentManagerContent::SetShowTranscriptHandler(std::function<void(winrt::hstring, bool, winrt::hstring, winrt::hstring)> handler)
+    {
+        _showTranscriptHandler = std::move(handler);
+    }
     void AgentManagerContent::SetTagHoverHandlers(std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::UIElement)> begin, std::function<void()> end)
     {
         _tagHoverBeginHandler = std::move(begin);

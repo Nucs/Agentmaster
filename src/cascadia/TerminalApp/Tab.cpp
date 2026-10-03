@@ -2432,6 +2432,21 @@ namespace winrt::TerminalApp::implementation
             Controls::MenuFlyoutSubItem transcriptSub;
             transcriptSub.Text(kTranscriptCopyMenuLabel);
             WUX::Controls::ToolTipService::SetToolTip(transcriptSub, box_value(winrt::hstring{ kTranscriptCopyMenuTip }));
+            // Agentmaster (transcript overlay): "Show" FIRST, then a separator, then the copy levels — it
+            // opens the transcript in the reading view (the same as "Show Transcript" below "Copy >").
+            {
+                Controls::MenuFlyoutItem showItem;
+                showItem.Text(kTranscriptShowMenuLabel);
+                WUX::Controls::ToolTipService::SetToolTip(showItem, box_value(winrt::hstring{ kShowTranscriptMenuTip }));
+                showItem.Click([weakThis](auto&&, auto&&) {
+                    if (auto tab{ weakThis.get() })
+                    {
+                        tab->ShowTranscriptRequested.raise();
+                    }
+                });
+                transcriptSub.Items().Append(showItem);
+                transcriptSub.Items().Append(Controls::MenuFlyoutSeparator{});
+            }
             for (const auto& level : kTranscriptCopyMenu)
             {
                 Controls::MenuFlyoutItem item;
@@ -2447,6 +2462,27 @@ namespace winrt::TerminalApp::implementation
                 transcriptSub.Items().Append(item);
             }
             _copySessionSubMenu.Items().Append(transcriptSub);
+        }
+
+        {
+            // "Show Transcript" (Agentmaster — transcript overlay): directly below "Copy >", it opens this
+            // tab's session transcript in the reading view laid over the window (Default level first, a tab
+            // per level). Raises ShowTranscriptRequested; the page resolves THIS tab's session. Built
+            // COLLAPSED and shown together with "Copy >" (SetAgentCopyMenuVisible) — session tabs only.
+            Controls::FontIcon showTranscriptSymbol;
+            showTranscriptSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            showTranscriptSymbol.Glyph(kShowTranscriptMenuGlyph); // ReadingMode
+
+            _showTranscriptMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->ShowTranscriptRequested.raise();
+                }
+            });
+            _showTranscriptMenuItem.Text(kShowTranscriptMenuLabel);
+            _showTranscriptMenuItem.Icon(showTranscriptSymbol);
+            _showTranscriptMenuItem.Visibility(WUX::Visibility::Collapsed); // shown only on a managed agent-session tab (page-driven, with "Copy >")
+            WUX::Controls::ToolTipService::SetToolTip(_showTranscriptMenuItem, box_value(winrt::hstring{ kShowTranscriptMenuTip }));
         }
 
         {
@@ -2751,6 +2787,7 @@ namespace winrt::TerminalApp::implementation
         contextMenuFlyout.Items().Append(_activateSessionMenuItem); // Agentmaster (eager-init): "Activate Tab" — FIRST item, shown only when this tab's session is dormant
         contextMenuFlyout.Items().Append(_renameTabMenuItem);
         contextMenuFlyout.Items().Append(_copySessionSubMenu); // Agentmaster: "Copy >" directly below "Rename Tab" (hidden unless this tab hosts a managed session)
+        contextMenuFlyout.Items().Append(_showTranscriptMenuItem); // Agentmaster (transcript overlay): "Show Transcript" directly below "Copy >" (shown with it)
         contextMenuFlyout.Items().Append(_markUnreadMenuItem); // Agentmaster: "Mark Unread" — session-only, grouped under "Copy >"
         contextMenuFlyout.Items().Append(_openInExplorerMenuItem); // Agentmaster: "Open In Explorer" — session-only, beside "Mark Unread" (opens the session's working dir; the overlay Open Path twin)
         contextMenuFlyout.Items().Append(_triageMoveMenuItem); // Agentmaster (Waiting-for-you + Error triage): status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" — session-only, beside "Mark Unread"
@@ -2864,6 +2901,9 @@ namespace winrt::TerminalApp::implementation
         ASSERT_UI_THREAD();
 
         _copySessionSubMenu.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+        // Agentmaster (transcript overlay): "Show Transcript" sits right below "Copy >" and is session-only
+        // for the same reason, so it simply follows the submenu.
+        _showTranscriptMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
         // Reveal only the launch-CLI item matching this session's agent (meaningful only when the submenu
         // is visible) — Codex CLI for a Codex session, Claude CLI otherwise; never both.
         if (visible)

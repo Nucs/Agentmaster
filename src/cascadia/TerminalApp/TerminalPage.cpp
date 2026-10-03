@@ -19,6 +19,7 @@
 #include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
 #include "AgentManagerContent.h"
 #include "AgentTabOverlay.h"
+#include "AgentTranscriptOverlay.h" // the TerminalPage ctor (member cleanup on a throw) needs the complete com_ptr<AgentTranscriptOverlay> type
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (tab "Copy >" submenu routes through it, like the overlay + Manager menus)
 #include "AgentMaster/ClaudeSpawn.h"
 #include "AgentMaster/Engine.h"
@@ -2190,11 +2191,25 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // Agentmaster (transcript overlay): while the overlay is up it owns the keyboard, wherever focus
+        // happens to sit. Esc closes it HERE, at the tunneling root, so it can never fall through to a
+        // terminal behind the overlay — an Esc that reached claude would interrupt its turn. (An open
+        // command palette / suggestions box keeps its own Esc: it is checked first.) The tab-switching
+        // chords below then work on ANY page while the overlay is up, not only the Manager page: focus is
+        // inside the overlay, which never forwards keys to the app — and a tab switch is what closes it.
+        const bool transcriptOpen = _TranscriptOverlayIsOpen();
+        if (transcriptOpen && e.OriginalKey() == Windows::System::VirtualKey::Escape &&
+            !_commandPaletteIs(Visibility::Visible) && !_suggestionsControlIs(Visibility::Visible))
+        {
+            _CloseTranscriptOverlay(L"esc");
+            e.Handled(true);
+            return;
+        }
         // Reliable "is the Agent Manager page on screen?" check. This handler is wired to the page Root and
         // so fires for EVERY key; while a tab is shown we must do nothing and let the focused control / a
         // terminal's own ActionMap handle the key. (When invoked from the page-root wiring this is always
         // true; it matters for the Root wiring, which is what makes these chords work from a tab header.)
-        if (!_managerPageVisible)
+        if (!_managerPageVisible && !transcriptOpen)
         {
             return;
         }
@@ -2646,6 +2661,23 @@ namespace winrt::TerminalApp::implementation
             if (const auto sid = page->_ClaudeSessionForTab(*tab); !sid.empty())
             {
                 OpenSessionFolder(*page->_sessionRegistry, sid, static_cast<int>(page->_appSettings.tabColorMode));
+            }
+        });
+
+        // Agentmaster (transcript overlay): context-menu "Show Transcript" (below "Copy >") or "Copy >
+        // Transcript > Show" -> open THIS tab's managed session transcript in the reading view laid over
+        // the window — whichever tab or page is on screen ("wherever you are"; the right-clicked tab need
+        // not be the selected one). No-op on a non-session tab (both items are hidden there anyway).
+        hostingTab.ShowTranscriptRequested([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (!page || !tab)
+            {
+                return;
+            }
+            if (const auto sid = page->_ClaudeSessionForTab(*tab); !sid.empty())
+            {
+                page->_ShowTranscriptOverlayForSession(sid, L"tab menu");
             }
         });
 
@@ -7122,6 +7154,7 @@ namespace winrt::TerminalApp::implementation
         // window (_onTabDroppedOutside), else dropped into that window's strip at idx. The managed-
         // session side of the same event additionally logs [move-out] (_DetachClaudeTabForMove).
         ::Agentmaster::LogNav(L"tab-send-to-window " + _DescribeTabForLog(*_stashed.draggedTab) + L" win=" + std::wstring{ windowId } + L" idx=" + std::to_wstring(tabIndex));
+        _CloseTranscriptOverlay(L"tab moved to another window"); // Agentmaster (transcript overlay): a tab leaving the window is "moving a tab" (a no-op when the drag already closed it)
         _DetachClaudeTabForMove(_stashed.draggedTab); // Agentmaster: a Claude tab is being torn out / dragged to another window — evict our binding (keep the injector) so teardown can't archive it; the destination re-homes it
         _DetachTabFromWindow(_stashed.draggedTab);
 

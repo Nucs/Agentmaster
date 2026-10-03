@@ -96,6 +96,12 @@ namespace winrt::TerminalApp::implementation
         void SetForkManagedSessionHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, model) -> fork a managed session (kind-aware), like the WT tab's "Fork session"; model = the launch-model picker's per-LAUNCH `--model <id>` pick ("" = Default; always "" for Codex — its item is plain)
         void SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, newTitle) -> rename in the registry + retitle the WT tab (the one title)
         void SetTagsHandler(std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> handler); // Agentmaster (bookmark tags): (sessionId, anchor) -> the page opens its tag editor panel under the clicked board card / tree row (the WT tab menu's "Tags" twin)
+        // Agentmaster (transcript overlay — AgentTranscriptOverlay.h): the session menu's "Show Transcript"
+        // (below "Copy ▸") / "Copy ▸ Transcript ▸ Show" and the EXTERNAL menu's "Show Transcript" open a
+        // conversation in the page's window-level reading view. (sessionId, codex, codexRolloutId, title):
+        // the content passes the facts itself because an EXTERNAL row is not in the registry. Unwired =>
+        // the items are inert.
+        void SetShowTranscriptHandler(std::function<void(winrt::hstring, bool, winrt::hstring, winrt::hstring)> handler);
         // Agentmaster (bookmark tags): the pointer entered/left one of a board card's bookmark
         // ribbons. begin(tag, anchor) -> the page shows its rich tag hover panel (every session
         // carrying the tag + its status dot; clicking a live row jumps to its tab) anchored at the
@@ -795,6 +801,12 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeLazyExternalMenu(const ::Agentmaster::ExternalClaudeRow& ex);
         void _PopulateSessionMenu(winrt::Windows::UI::Xaml::Controls::MenuFlyout& menu, const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor);
         void _PopulateExternalTreeMenu(winrt::Windows::UI::Xaml::Controls::MenuFlyout& menu, const ::Agentmaster::ExternalClaudeRow& ex);
+        // Agentmaster (transcript overlay): append the EXTERNAL menu's "Show Transcript" (after "Copy Session
+        // Id") — the external's conversation in the page's reading view. Disabled, with a tip saying why,
+        // when the row has no id yet (a never-prompted claude / codex has no transcript or rollout).
+        // Parameters: menu — the external row's menu; sid — the conversation id (Claude) or rollout uuid
+        // (Codex), may be empty; codex — the row is a Codex rollout; title — the row's title (may be empty).
+        void _AppendExternalShowTranscriptItem(winrt::Windows::UI::Xaml::Controls::MenuFlyout& menu, const std::wstring& sid, bool codex, const std::wstring& title);
 
         // Agentmaster (Waiting-for-you countdown bar): the live 1px bottom bars to drain. Each holds the
         // bar's ScaleTransform (ScaleX = fraction of the waiting window still remaining, origin LEFT) +
@@ -829,6 +841,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring, winrt::hstring)> _forkManagedSessionHandler; // Agentmaster: Triage Board / Explorer-tree "Fork session" -> kind-aware fork of a managed session (the WT tab menu's fork), opening the fork in the acting window. (sessionId, model) — model "" = Default (the launch-model picker)
         std::function<void(winrt::hstring, winrt::hstring)> _renameHandler; // Agentmaster: Explorer-tree rename -> page (registry title + tab title in lockstep)
         std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> _tagsHandler; // Agentmaster (bookmark tags): board-card / tree-row "Tags" -> page opens the tag editor panel (sessionId, the clicked element as the anchor)
+        std::function<void(winrt::hstring, bool, winrt::hstring, winrt::hstring)> _showTranscriptHandler; // Agentmaster (transcript overlay): "Show Transcript" / "Transcript ▸ Show" -> page opens the reading view (sessionId, codex, codexRolloutId, title)
         std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::UIElement)> _tagHoverBeginHandler; // Agentmaster (bookmark tags): a card ribbon's pointer-enter -> the page's rich tag hover panel (tag, the ribbon as the anchor)
         std::function<void()> _tagHoverEndHandler; // Agentmaster (bookmark tags): the ribbon's pointer-exit -> cancel/grace-close that panel
         std::function<void(uint32_t, winrt::hstring, bool)> _adoptExternalHandler; // Agentmaster: EXTERNAL-tree Adopt (pid, cwd, fork) -> page forks/resumes the external's conversation into a managed tab

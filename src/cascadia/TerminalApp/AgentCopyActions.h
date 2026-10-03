@@ -125,6 +125,24 @@ namespace winrt::TerminalApp::implementation
         L"and the subagents it spawned, are included. A Codex session copies its plain conversation text: Minimal and Compact as your "
         L"messages with each final reply, Default, Full and Max as the whole conversation.";
 
+    // Agentmaster (transcript overlay — AgentTranscriptOverlay.h): the menu entries that OPEN the
+    // transcript in the reading view instead of copying it. Two placements, ONE wording, shared like the
+    // table above so every menu says the same thing:
+    //   * "Show" — the FIRST item of every Copy ▸ Transcript submenu, followed by a separator and then
+    //     the levels (kTranscriptCopyMenu);
+    //   * "Show Transcript" — a top-level item directly BELOW "Copy ▸" in the session menus (the WT tab
+    //     menu, the Agent Manager's board / tree / side-panel menu), below "Copy Session Id" in the
+    //     EXTERNAL tree menu, and in the summary panel's right-click menu.
+    // Both open the overlay over whatever is on screen, at the Default level, with a tab per level.
+    inline constexpr const wchar_t* kTranscriptShowMenuLabel = L"Show";
+    inline constexpr const wchar_t* kShowTranscriptMenuLabel = L"Show Transcript";
+    inline constexpr const wchar_t* kShowTranscriptMenuTip =
+        L"Read the conversation here, rendered as Markdown, in a view over this window \x2014 the Default level first, with tabs for "
+        L"Max, Full, Compact and Minimal. Esc or a click outside closes it.";
+    // The menus' icon for "Show Transcript" (Segoe Fluent Icons / MDL2 "ReadingMode"); the overlay's
+    // header shows the same glyph, so the item and the view it opens are visibly one thing.
+    inline constexpr const wchar_t* kShowTranscriptMenuGlyph = L"\xE736";
+
     // Agentmaster (PENDING_INPUT.md §8e): copy a PROMPT's text to the clipboard with Claude's paste
     // PLACEHOLDERS expanded back into the text they stand for — the ONE shared "copy a prompt" path
     // behind the Auto-Testing row menu's Copy (AgentManagerContent::_MakePromptMenu) and every session

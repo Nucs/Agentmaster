@@ -124,6 +124,7 @@ int wmain()
     TestCompactionLifecycle();
     TestConversationFollowup();
     TestTranscriptTurns(); // the Copy > Transcript levels vs the transcript_turns.py goldens (tests_turns.cpp)
+    TestMarkdownBlocks(); // the transcript overlay's Markdown flattener — a skip without the vcpkg cmark (tests_markdown.cpp)
     TestAnalyzeFootprint();
     TestCommandWatch();
     TestCommandHandoverE2E();

@@ -4766,6 +4766,15 @@ namespace winrt::TerminalApp::implementation
                     self->_ClearLiveDraftForSession(sessionId);
                 }
             });
+            // Agentmaster (transcript overlay): the badge copy menu's "Transcript ▸ Show" and the summary
+            // panel's "Show Transcript" open THIS session's transcript in the window-level reading view —
+            // a page-owned layer, so the overlay only fires this opener.
+            overlay->SetShowTranscriptHandler([weakThis, sessionId]() {
+                if (auto self = weakThis.get())
+                {
+                    self->_ShowTranscriptOverlayForSession(sessionId, L"tab badge");
+                }
+            });
         }
         if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(termContent))
         {

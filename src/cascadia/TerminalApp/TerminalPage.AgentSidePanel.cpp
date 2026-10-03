@@ -2146,6 +2146,14 @@ namespace winrt::TerminalApp::implementation
                     self->_ClearLiveDraftForSession(sid);
                 }
             });
+            // Agentmaster (transcript overlay): the summary panel's right-click "Show Transcript" opens
+            // the selected session's transcript in the window-level reading view.
+            overlay->SetShowTranscriptHandler([weakThis, sid]() {
+                if (auto self = weakThis.get())
+                {
+                    self->_ShowTranscriptOverlayForSession(sid, L"side panel summary");
+                }
+            });
             // NOT wired on purpose: SetSummaryToggleHandler (the pencil lives on the badge, which
             // is never mounted here — the bottom area's visibility is the split, not the global
             // pencil) and SetSummaryResizeHandler (fill mode builds no grips).

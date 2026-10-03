@@ -253,6 +253,30 @@ namespace winrt::TerminalApp::implementation
         MenuFlyoutSubItem transcriptSub{};
         transcriptSub.Text(kTranscriptCopyMenuLabel);
         AgentSetTip(transcriptSub, winrt::hstring{ kTranscriptCopyMenuTip });
+        // Agentmaster (transcript overlay): "Show" FIRST, then a separator, then the copy levels — it opens
+        // this session's transcript in the window-level reading view (AgentTranscriptOverlay.h) through the
+        // page-wired opener (inert when unwired).
+        {
+            MenuFlyoutItem showItem{};
+            showItem.Text(kTranscriptShowMenuLabel);
+            AgentSetTip(showItem, winrt::hstring{ kShowTranscriptMenuTip });
+            showItem.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                // Contained: a XAML event handler — an escape would be a process fail-fast for a menu click.
+                try
+                {
+                    if (const auto self = weak.get(); self && self->_onShowTranscript)
+                    {
+                        self->_onShowTranscript();
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"AgentTabOverlay copy menu Show Transcript");
+                }
+            });
+            transcriptSub.Items().Append(showItem);
+            transcriptSub.Items().Append(MenuFlyoutSeparator{});
+        }
         for (const auto& level : kTranscriptCopyMenu)
         {
             MenuFlyoutItem item{};

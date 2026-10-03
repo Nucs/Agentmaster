@@ -177,7 +177,7 @@ namespace winrt::TerminalApp::implementation
         Microsoft::Terminal::Settings::Model::TabCloseButtonVisibility CloseButtonVisibility();
         void CloseButtonVisibility(Microsoft::Terminal::Settings::Model::TabCloseButtonVisibility visible);
 
-        void SetAgentCopyMenuVisible(bool visible, bool isCodex); // Agentmaster: show/hide the "Copy >" session-field submenu (managed agent-session tabs only; page-driven at flyout-open). isCodex (meaningful only when visible) offers ONLY the matching launch-CLI item — Codex CLI for a Codex session, Claude CLI otherwise — never both
+        void SetAgentCopyMenuVisible(bool visible, bool isCodex); // Agentmaster: show/hide the "Copy >" session-field submenu AND the "Show Transcript" item below it (managed agent-session tabs only; page-driven at flyout-open). isCodex (meaningful only when visible) offers ONLY the matching launch-CLI item — Codex CLI for a Codex session, Claude CLI otherwise — never both
         void SetAgentMarkUnreadVisible(bool visible); // Agentmaster: show/hide the "Mark Unread" item (managed agent-session tabs only; page-driven at flyout-open)
         void SetAgentOpenInExplorerVisible(bool visible); // Agentmaster: show/hide the "Open In Explorer" item (managed agent-session tabs only; page-driven at flyout-open) — opens the session's EFFECTIVE work dir (inferred → cwd), reusing the overlay's Open Path action
         void SetAgentTriageMoveState(bool visible, bool toIdle, bool fromError); // Agentmaster (Waiting-for-you + Error triage): show/hide the status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" item + set its label/icon by direction (toIdle == this session is Waiting-for-you OR Error, so offer the demote — fromError picks the error-dismissal tooltip; else it is Idle/Done, so offer the plain promote). Managed agent-session tabs only; page-driven at flyout-open
@@ -221,6 +221,7 @@ namespace winrt::TerminalApp::implementation
         til::event<winrt::delegate<>> CloseSessionsOfSameFolderRequested; // Agentmaster: context-menu "Close > Of Same Folder" -> page closes EVERY live managed session sharing THIS tab's session's effective work dir (incl. this one), cross-window, after one confirm listing the titles (_ConfirmAndCloseClaudeSessionsInFolder)
         til::event<winrt::delegate<>> CloseOtherSessionsOfSameFolderRequested; // Agentmaster: context-menu "Close > Other of Same Folder" -> the same folder batch MINUS this tab's session (it stays open)
         til::event<winrt::delegate<int32_t /*which*/>> CopySessionFieldRequested; // Agentmaster: context-menu "Copy > <field>" -> page copies that field of this tab's managed session via the shared CopySessionField action (the same options as the per-tab overlay's copy button); `which` is the copy-menu code (see AgentCopyActions.h)
+        til::event<winrt::delegate<>> ShowTranscriptRequested; // Agentmaster (transcript overlay): context-menu "Show Transcript" (below "Copy >") or "Copy > Transcript > Show" -> page opens the transcript reading view over the window for this tab's managed session (TerminalPage::_ShowTranscriptOverlayForSession)
         til::event<winrt::delegate<winrt::hstring /*title*/, winrt::hstring /*body*/, winrt::TerminalApp::IPaneContent /*content*/>> TabToastNotificationRequested;
         til::typed_event<IInspectable, IInspectable> TaskbarProgressChanged;
 
@@ -305,6 +306,10 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (PENDING_INPUT.md): "Copy Current Prompt" — the unsent-draft item, a member for the
         // same reason: SetAgentCopyMenuVisible shows it only for a CLAUDE session (Codex has no input box).
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _copyCurrentPromptItem{ nullptr };
+        // Agentmaster (transcript overlay): "Show Transcript", directly below "Copy >". A member so
+        // SetAgentCopyMenuVisible shows / hides it TOGETHER with the Copy submenu — it is session-only for
+        // the same reason (a plain shell tab has no transcript). Raises ShowTranscriptRequested.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _showTranscriptMenuItem{};
         uint32_t _reservedLeadingTabs{ 0 }; // Agentmaster: count of pinned, non-bulk-closable leading tabs — 0 today (the pinned Manager tab it counted is now a page behind the Home button); fed by UpdateTabViewIndex, read by _EnableMenuItems
         winrt::TerminalApp::ShortcutActionDispatch _dispatch;
         Microsoft::Terminal::Settings::Model::IActionMapView _actionMap{ nullptr };

@@ -208,6 +208,13 @@ namespace winrt::TerminalApp::implementation
         // _AttachClaudeOverlay.
         void SetClearDraftHandler(std::function<void()> handler);
 
+        // Agentmaster (transcript overlay — AgentTranscriptOverlay.h): the copy menu's "Transcript ▸ Show"
+        // and the summary panel's right-click "Show Transcript" open THIS session's transcript in the
+        // window-level reading view. The overlay belongs to the PAGE (it covers the whole window, not this
+        // pane), so the page wires the opener (TerminalPage::_ShowTranscriptOverlayForSession). Unwired =>
+        // both items are simply inert. Set by _AttachClaudeOverlay and the side panel's summary host.
+        void SetShowTranscriptHandler(std::function<void()> handler);
+
         // Agentmaster (SUMMARY_JUMP.md): highlight the summary row for the message we just jumped to —
         // via the ▸ button OR alt+up / alt+down nav (the page passes the landed 0-based message index). A
         // translucent band behind the row; it persists across panel re-renders and moves to the new
@@ -406,6 +413,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(bool)> _onAdjacentPrompt; // row-2 ↑/↓ buttons -> page (_ScrollAdjacentPrompt: scroll to prev/next off-screen prompt + highlight + boundary sound)
         std::function<std::wstring()> _onReadLiveDraft; // copy menu "Copy Current Prompt" -> page (read this session's input box out of the live buffer; "" when unreadable — the remembered draft then wins)
         std::function<void()> _onClearDraft; // MAIL button (plain click) -> page (_ClearLiveDraftForSession: remove the draft from the input box after queueing — a move; Shift+Click skips this)
+        std::function<void()> _onShowTranscript; // copy menu "Transcript ▸ Show" + summary panel "Show Transcript" -> page (_ShowTranscriptOverlayForSession: the window-level transcript reading view)
         // The jump buttons of the currently-rendered panel, paired with their 0-based prompt index, so
         // _RefreshJumpEligibility can dim the ones whose prompt no longer resolves. Rebuilt each _SetSummaryContent.
         std::vector<std::pair<int, winrt::Windows::UI::Xaml::Controls::Button>> _jumpButtons;

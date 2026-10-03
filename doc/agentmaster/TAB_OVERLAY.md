@@ -340,7 +340,11 @@ every copy menu builds the submenu from the ONE shared `kTranscriptCopyMenu` tab
 readers: Minimal / Compact copy the per-turn `❯ user + ● final reply` brief
 (`ReadConversationFollowupText`), Default / Full / Max the whole conversation text
 (`ReadConversationText`). The submenu replaced the flat `Transcript` (code 5, `ReadConversationText`)
-and `Transcript Followup` (code 8) items; both codes still work for any caller. Every copy / Open Path plays a
+and `Transcript Followup` (code 8) items; both codes still work for any caller. The submenu's FIRST item
+is **`Show`** (then a separator, then the five levels): it opens the transcript in the window-level
+reading view instead of copying it — TRANSCRIPT_OVERLAY.md (the overlay fires the page-wired
+`SetShowTranscriptHandler`; the summary panel's right-click menu offers the same as **Show Transcript**,
+below Copy Summary). Every copy / Open Path plays a
 short confirmation chime (`PlaySoundW`). Built only for a LINKED session (never an observe badge); the
 buttons stay laid out, while the whole badge is dim at rest and brightens on hover.
 

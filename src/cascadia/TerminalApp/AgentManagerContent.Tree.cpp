@@ -928,6 +928,45 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (transcript overlay): the EXTERNAL menu's "Show Transcript" — read-only by nature (it only
+    // READS the external's transcript / rollout, never touches the running process — Rule #13), so it is
+    // offered for every external row that has an id. The click defers a tick (the closing flyout's focus
+    // hand-back must land before the reading view takes focus), then hands the row's facts to the page.
+    void AgentManagerContent::_AppendExternalShowTranscriptItem(MenuFlyout& menu, const std::wstring& sid, bool codex, const std::wstring& title)
+    {
+        MenuFlyoutItem show;
+        show.Text(kShowTranscriptMenuLabel);
+        if (sid.empty())
+        {
+            show.IsEnabled(false);
+            AgentSetTip(show, codex ? L"No rollout yet (this Codex session hasn't been prompted)" : L"No transcript yet (this Claude session hasn't been prompted)");
+            menu.Items().Append(show);
+            return;
+        }
+        AgentSetTip(show, kShowTranscriptMenuTip);
+        auto disp = _dispatcher;
+        auto weak = get_weak();
+        show.Click([weak, disp, sid, codex, title](const IInspectable&, const RoutedEventArgs&) {
+            auto act = [weak, sid, codex, title]() {
+                // Contained: a dispatcher item — an escape would be a crash for a menu click.
+                try
+                {
+                    if (auto self = weak.get(); self && self->_showTranscriptHandler)
+                    {
+                        // A Codex external's id IS its rollout uuid — the same value serves both fields.
+                        self->_showTranscriptHandler(winrt::hstring{ sid }, codex, codex ? winrt::hstring{ sid } : winrt::hstring{}, winrt::hstring{ title });
+                    }
+                }
+                catch (...)
+                {
+                    AgentLogCaughtException(L"AgentManagerContent external Show Transcript");
+                }
+            };
+            if (disp) { disp.TryEnqueue(act); } else { act(); }
+        });
+        menu.Items().Append(show);
+    }
+
     // Agentmaster: the EXTERNAL-tree row right-click menu. For a CLAUDE row: Adopt (resume the
     // conversation into a managed, controllable tab), Open New Session Here (spawn a managed session
     // in the cwd), and Bring Window To Front. For a CODEX row (kind=Codex, observe-only in Phase C1):
@@ -1014,6 +1053,7 @@ namespace winrt::TerminalApp::implementation
                 copyIdCx.Click([sid](const IInspectable&, const RoutedEventArgs&) { CopyTextToClipboard(sid); });
             }
             menu.Items().Append(copyIdCx);
+            _AppendExternalShowTranscriptItem(menu, sid, /*codex*/ true, adoptTitle);
         }
         else
         {
@@ -1113,6 +1153,7 @@ namespace winrt::TerminalApp::implementation
                 });
             }
             menu.Items().Append(copyId);
+            _AppendExternalShowTranscriptItem(menu, sid, /*codex*/ false, adoptTitle);
         }
 
         // Bring Window To Front — the LAST option, for BOTH agents: surface the window HOSTING this
@@ -1683,14 +1724,61 @@ namespace winrt::TerminalApp::implementation
             addCopyItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
         }
         addCopyItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files)", 6);
+        // Agentmaster (transcript overlay): the ONE opener behind both "Transcript ▸ Show" (below) and the
+        // top-level "Show Transcript" (after this Copy submenu): open this session's conversation in the
+        // page's window-level reading view (AgentTranscriptOverlay.h). Deferred a tick like the menu's
+        // other UI-opening items (the closing flyout's focus hand-back must land first), and the kind /
+        // rollout id / title are re-read at CLICK time — a rename or a Codex first prompt since the menu
+        // was built is honored.
+        const auto openTranscript = [weak, disp, id]() {
+            auto act = [weak, id]() {
+                // Contained: a dispatcher item — an escape would be a crash for a menu click.
+                try
+                {
+                    auto self = weak.get();
+                    if (!self || !self->_showTranscriptHandler)
+                    {
+                        return;
+                    }
+                    bool codex = false;
+                    std::wstring codexRolloutId;
+                    std::wstring title;
+                    if (self->_registry)
+                    {
+                        if (const auto now = self->_registry->Get(id))
+                        {
+                            codex = now->kind == AgentKind::Codex;
+                            codexRolloutId = now->codexSessionId;
+                            title = now->title;
+                        }
+                    }
+                    self->_showTranscriptHandler(winrt::hstring{ id }, codex, winrt::hstring{ codexRolloutId }, winrt::hstring{ title });
+                }
+                catch (...)
+                {
+                    AgentLogCaughtException(L"AgentManagerContent Show Transcript");
+                }
+            };
+            if (disp) { disp.TryEnqueue(act); } else { act(); }
+        };
         // Transcript ▸ Default / Max / Full / Compact / Minimal — the conversation as Markdown at a detail level
         // (CopySessionField codes 9-13, TranscriptTurns.h). It replaced the flat "Transcript" (5) and "Transcript
         // Followup" (8) items, and is built from the ONE shared table (AgentCopyActions.h kTranscriptCopyMenu), so
-        // this menu offers exactly the levels the per-tab overlay and the WT tab menu do. Like every Copy item it
-        // only reads (off-thread) and writes the clipboard, so it needs no defer either.
+        // this menu offers exactly the levels the per-tab overlay and the WT tab menu do. Like every Copy item a
+        // level only reads (off-thread) and writes the clipboard, so it needs no defer either. Its first item,
+        // "Show", opens the reading view instead (openTranscript, deferred).
         MenuFlyoutSubItem transcriptSub;
         transcriptSub.Text(kTranscriptCopyMenuLabel);
         AgentSetTip(transcriptSub, kTranscriptCopyMenuTip);
+        {
+            // "Show" FIRST, then a separator, then the copy levels.
+            MenuFlyoutItem showItem;
+            showItem.Text(kTranscriptShowMenuLabel);
+            AgentSetTip(showItem, kShowTranscriptMenuTip);
+            showItem.Click([openTranscript](const IInspectable&, const RoutedEventArgs&) { openTranscript(); });
+            transcriptSub.Items().Append(showItem);
+            transcriptSub.Items().Append(MenuFlyoutSeparator{});
+        }
         for (const auto& level : kTranscriptCopyMenu)
         {
             MenuFlyoutItem item;
@@ -1714,6 +1802,15 @@ namespace winrt::TerminalApp::implementation
         }
         copySub.Items().Append(transcriptSub);
         menu.Items().Append(copySub);
+
+        // Agentmaster (transcript overlay): "Show Transcript" — directly below "Copy" (the WT tab menu's
+        // twin): this session's conversation, rendered, in the reading view over the window.
+        MenuFlyoutItem showTranscript;
+        showTranscript.Text(kShowTranscriptMenuLabel);
+        showTranscript.Icon(glyphIcon(kShowTranscriptMenuGlyph));
+        AgentSetTip(showTranscript, kShowTranscriptMenuTip);
+        showTranscript.Click([openTranscript](const IInspectable&, const RoutedEventArgs&) { openTranscript(); });
+        menu.Items().Append(showTranscript);
 
         // The three WT-tab-menu session ops (mirrored here at the user's request): New Session Here /
         // Restart session / Fork session — kind-aware (a Codex card spawns + forks codex, a Claude card
