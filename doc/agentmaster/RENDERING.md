@@ -10,7 +10,7 @@ running instance — safe on production). Harness: the `softwareRendering` round
 `tests_persistence.cpp`.
 
 Hidden tabs (§4c): `AppSettings::pauseHiddenTerminals` / `releaseHiddenTerminalDevices` /
-`releaseHiddenTerminalDevicesAfterSeconds` (Behavior → RENDERING), `TermControl::SetHiddenRenderingPolicy`
+`releaseHiddenTerminalDevicesAfterSeconds` (Behavior → RENDERING), `TermControl::ConfigureHiddenRenderingPolicy`
 + `_UpdateRenderingSuspension`, `ControlCore::SetRenderingSuspended`, `Renderer::SetPaintingSuspended`,
 `IRenderEngine::ReleaseDeviceResources` / `AtlasEngine::ReleaseDeviceResources`; app side
 `TerminalPage::_ApplyHiddenRenderingSetting`. Harness: the hidden-terminal round-trip + the
@@ -21,7 +21,8 @@ Hidden tabs (§4c): `AppSettings::pauseHiddenTerminals` / `releaseHiddenTerminal
 - **Every terminal that has been shown owns its own Direct3D 11 device** (AtlasEngine creates one per
   `TermControl`), and kept it until its tab was CLOSED. Hidden tabs kept theirs. **§4c changes that:** a
   terminal hidden for 60 s (a setting) now gives its device back and rebuilds it when shown, so the count
-  stays near "on screen + recently viewed" (in source since 2026-10-03, not built yet). Deactivated tabs
+  stays near "on screen + recently viewed" (built and deployed to the dev instance 2026-10-03, not in a
+  release yet). Deactivated tabs
   should give theirs back too: "Deactivate ▸" closes the tab's control the way a pane close does and parks a
   never-initialized one in its place, which is the state a window-restored tab is in. (Expected from that
   code path; not yet measured with §4's thread count.) Only dormant tabs (restored, or deactivated, and
@@ -153,8 +154,8 @@ Three different counts matter, and only two of them cost anything:
   the storm.
 - Below that, the GPU is cheaper, as long as finished tabs get deactivated or closed. Restarting the app
   also resets the count, because tabs come back dormant.
-- §6's per-window device would remove the trade-off altogether. §4c's release-when-hidden (in source
-  since 2026-10-03, not built yet) already removes most of it: only terminals on screen or viewed in the
+- §6's per-window device would remove the trade-off altogether. §4c's release-when-hidden (built and
+  deployed to the dev instance 2026-10-03) already removes most of it: only terminals on screen or viewed in the
   last 60 s hold a device, so the ~62 limit is out of reach in normal use without WARP's CPU cost.
 
 ### 4b. One tab on screen, many in the strip — where the cost goes
@@ -250,7 +251,8 @@ shared surfaces and was larger than the 7.2 GB in use on the whole card. Do not 
 
 ### 4c. Hidden tabs: stop drawing, give the device back
 
-In source since 2026-10-03, **not built yet**. It acts on §4b's two biggest wastes: hidden terminals
+In source since 2026-10-03. **Built and deployed to the dev instance on 2026-10-03, not in a release
+yet** (first measurement below "Expected effect"). It acts on §4b's two biggest wastes: hidden terminals
 that draw, and devices kept by every tab ever viewed.
 
 **Settings** (Settings cog → Behavior → RENDERING; live in every window on Save):
@@ -274,7 +276,7 @@ that draw, and devices kept by every tab ever viewed.
 - `TermControl::_UpdateRenderingSuspension` pushes the state on each change, and also right before
   painting is first enabled. So a terminal initialized off screen ("Activate Tab") never paints.
 - `ControlCore::SetRenderingSuspended` combines it with the process-wide policy
-  (`TermControl::SetHiddenRenderingPolicy`) and calls `Renderer::SetPaintingSuspended`.
+  (`TermControl::ConfigureHiddenRenderingPolicy`) and calls `Renderer::SetPaintingSuspended`.
 - While suspended, the render thread parks in `Renderer::_waitWhileSuspended`. Invalidations still
   collect in the engine; only the frames stop. After the delay, the render thread calls each engine's
   `IRenderEngine::ReleaseDeviceResources()` once.
@@ -304,6 +306,17 @@ that draw, and devices kept by every tab ever viewed.
 - The XAML frame tick stops whenever no visible header animates.
 - To check: `dotnet run tools/threadcensus.cs -- <pid>`. Painting render threads should all be on
   screen. NVIDIA threads ÷ 20 should be about the number of windows + recently viewed tabs + 1 (XAML).
+
+**First measurement** (dev build, 2026-10-03, 3–4 min after the start: one window, 27 restored tabs, 3
+of them shown since the start, two 10–15 s census windows):
+- Frames: 3 initialized terminals, 1 painting (the tab on screen).
+- Devices: 40 NVIDIA threads, so 2 devices: XAML's (created at the process start) and the tab on
+  screen. The 2 hidden tabs had given their devices back (both were hidden for more than 60 s).
+  Without §4c they keep theirs: 4 devices.
+- XAML's frame thread (`Windows.UI.Xaml.dll+0x6F59C0`): 62 wake-ups/s while the on-screen tab's
+  unsent-draft dots pulsed (as designed), 3.2/s after the draft was sent.
+- Not measured yet: the release's workload (many claudes in many windows), the blank time when you go
+  back to a tab hidden longer than the delay, and the minimized-window path.
   `Windows.UI.Xaml.dll+0x6F59C0` should wake about 0 times/s when no visible header pulses.
 
 **Trade-offs and limits.**
@@ -348,7 +361,8 @@ livesample warning in `tools/livesample.cpp`.
   removes most of the pressure meanwhile.
 - Detect the storm (device creation slower than ~1 s, or event-153-shaped failures) and drop new
   terminals to WARP automatically.
-- Build and measure §4c (§4c "Expected effect" has the census checks), then tune the default delay.
+- Measure §4c on the release workload (the dev-build measurement and the census checks are in §4c
+  "Expected effect"), then tune the default delay.
 - Attribute the UI thread's 18–36% of a core (§4b) with an elevated ETW (WPR) CPU trace.
 - Done in §4c: paint nothing for an off-screen terminal; release a hidden terminal's device after a
   delay and rebuild it on show; run the tab-header storyboards only in the live tree, still dots for a

@@ -58,7 +58,12 @@ namespace Microsoft.Terminal.Control
         // 0xFFFFFFFF = never, 0 = at once. Declared LAST among the statics so no existing static
         // changes its slot. Terminals adopt it on their next visibility change, or at once through
         // ReapplyHiddenRenderingPolicy(). Any thread.
-        static void SetHiddenRenderingPolicy(Boolean pauseHidden, UInt32 releaseDelayMs);
+        // WARNING: do not rename this to Set<X>. On a XAML type such as TermControl, the XAML compiler
+        // reads a two-parameter static Set<X>(a, b) as the setter of an ATTACHED PROPERTY <X>. With no
+        // element target it writes SetAttachableMember_<X><TermControl, ..., ::winrt::System::Void> into
+        // XamlTypeInfo.g.cpp, and that file does not compile (C3083 / C2039 / C2737). The first name of
+        // this member, SetHiddenRenderingPolicy, did exactly that (the 2026-10-03 dev build).
+        static void ConfigureHiddenRenderingPolicy(Boolean pauseHidden, UInt32 releaseDelayMs);
 
         void UpdateControlSettings(IControlSettings settings);
         void UpdateControlSettings(IControlSettings settings, IControlAppearance unfocusedAppearance);
@@ -247,7 +252,7 @@ namespace Microsoft.Terminal.Control
         void Detach();
 
         // Agentmaster (RENDERING.md §4c): re-evaluate whether THIS terminal is on screen and push the
-        // current SetHiddenRenderingPolicy to its renderer — how a Settings change reaches terminals
+        // current ConfigureHiddenRenderingPolicy to its renderer — how a Settings change reaches terminals
         // that are already hidden. No-op while closing or after Detach. UI thread only. Appended LAST
         // so no existing member changes its vtable slot.
         void ReapplyHiddenRenderingPolicy();

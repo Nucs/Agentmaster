@@ -56,10 +56,12 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // Parameters: enabled — true draws every terminal on the CPU (WARP). Never throws.
         static void SetSoftwareRenderingOverride(bool enabled) noexcept;
         // Agentmaster (RENDERING.md §4c): the projected setter of the process-wide hidden-terminal
-        // policy — see TermControl.idl and ControlCore::SetHiddenRenderingPolicy.
+        // policy — see TermControl.idl and ControlCore::SetHiddenRenderingPolicy. It must not be named
+        // Set<X>: the XAML compiler reads a two-parameter static Set<X> on this XAML type as an attached
+        // property and generates type info that does not compile (the warning in TermControl.idl).
         // Parameters: pauseHidden — hidden terminals draw no frames; releaseDelayMs — hidden time
         // before the GPU device is released (0xFFFFFFFF = never). Never throws.
-        static void SetHiddenRenderingPolicy(bool pauseHidden, uint32_t releaseDelayMs) noexcept;
+        static void ConfigureHiddenRenderingPolicy(bool pauseHidden, uint32_t releaseDelayMs) noexcept;
 
         void UpdateControlSettings(Control::IControlSettings settings);
         void UpdateControlSettings(Control::IControlSettings settings, Control::IControlAppearance unfocusedAppearance);

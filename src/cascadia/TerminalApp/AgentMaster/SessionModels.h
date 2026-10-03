@@ -2868,7 +2868,7 @@ namespace Agentmaster
     }
 
     // Agentmaster (RENDERING.md §4c): the release delay the Control DLL takes
-    // (TermControl::SetHiddenRenderingPolicy), from the two settings that describe it. The ONE place
+    // (TermControl::ConfigureHiddenRenderingPolicy), from the two settings that describe it. The ONE place
     // the "switch off" and "seconds" settings combine, so the engine-init publish, the cog Save and the
     // cross-window broadcast can never disagree.
     // Parameters: s — the settings to read.

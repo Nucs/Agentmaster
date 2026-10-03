@@ -1660,7 +1660,9 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
     // Agentmaster (RENDERING.md §4c): see TermControl.idl. Forwards to the core's process-wide policy; a
     // static, so the app can set it before any control exists (engine init, ahead of the first tab).
-    void TermControl::SetHiddenRenderingPolicy(const bool pauseHidden, const uint32_t releaseDelayMs) noexcept
+    // The core's method keeps its Set prefix: it is a C++-only static that never reaches the .winmd the
+    // XAML compiler reads, so it cannot become an attached property (see the warning in TermControl.idl).
+    void TermControl::ConfigureHiddenRenderingPolicy(const bool pauseHidden, const uint32_t releaseDelayMs) noexcept
     {
         ControlCore::SetHiddenRenderingPolicy(pauseHidden, releaseDelayMs);
     }

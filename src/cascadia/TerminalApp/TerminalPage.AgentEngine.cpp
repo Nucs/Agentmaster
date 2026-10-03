@@ -958,8 +958,8 @@ namespace winrt::TerminalApp::implementation
         // "tabs flash blank when I switch back" can be matched to the active policy.
         try
         {
-            winrt::Microsoft::Terminal::Control::TermControl::SetHiddenRenderingPolicy(_appSettings.pauseHiddenTerminals,
-                                                                                       ::Agentmaster::HiddenTerminalReleaseDelayMs(_appSettings));
+            winrt::Microsoft::Terminal::Control::TermControl::ConfigureHiddenRenderingPolicy(_appSettings.pauseHiddenTerminals,
+                                                                                             ::Agentmaster::HiddenTerminalReleaseDelayMs(_appSettings));
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[render] hidden tabs (settings.json): " + _HiddenRenderingPolicyText() + L"\n");
         }
         catch (...)
@@ -2317,8 +2317,8 @@ namespace winrt::TerminalApp::implementation
         //    walk (a tab created this very tick) already reads the new values.
         try
         {
-            winrt::Microsoft::Terminal::Control::TermControl::SetHiddenRenderingPolicy(_appSettings.pauseHiddenTerminals,
-                                                                                       ::Agentmaster::HiddenTerminalReleaseDelayMs(_appSettings));
+            winrt::Microsoft::Terminal::Control::TermControl::ConfigureHiddenRenderingPolicy(_appSettings.pauseHiddenTerminals,
+                                                                                             ::Agentmaster::HiddenTerminalReleaseDelayMs(_appSettings));
         }
         catch (...)
         {
