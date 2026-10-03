@@ -6,8 +6,9 @@ rendering"**, default **OFF** = the GPU). Engine hook: `ControlCore::SetSoftware
 `TermControl`. App side: `TerminalPage::_ApplySoftwareRenderingSetting`
 (`TerminalPage.AgentEngine.cpp`). Benchmarks: `tools/warpbench.cpp` (CPU per frame, GPU vs WARP),
 `tools/devidle.cpp` (what an idle GPU device costs), `tools/threadcensus.cs` (a read-only census of a
-running instance — safe on production). Harness: the `softwareRendering` round-trip in
-`tests_persistence.cpp`.
+running instance — safe on production), `tools/renderwait.cs` (read-only: which `Renderer` flag each
+render thread waits on, the flags read from memory, and when the wait began). Harness: the
+`softwareRendering` round-trip in `tests_persistence.cpp`.
 
 Hidden tabs (§4c): `AppSettings::pauseHiddenTerminals` / `releaseHiddenTerminalDevices` /
 `releaseHiddenTerminalDevicesAfterSeconds` (Behavior → RENDERING), `TermControl::ConfigureHiddenRenderingPolicy`
@@ -252,7 +253,7 @@ shared surfaces and was larger than the 7.2 GB in use on the whole card. Do not 
 ### 4c. Hidden tabs: stop drawing, give the device back
 
 In source since 2026-10-03. **Built and deployed to the dev instance on 2026-10-03, not in a release
-yet** (first measurement below "Expected effect"). It acts on §4b's two biggest wastes: hidden terminals
+yet** (two measurements below "Expected effect"). It acts on §4b's two biggest wastes: hidden terminals
 that draw, and devices kept by every tab ever viewed.
 
 **Settings** (Settings cog → Behavior → RENDERING; live in every window on Save):
@@ -306,6 +307,9 @@ that draw, and devices kept by every tab ever viewed.
 - The XAML frame tick stops whenever no visible header animates.
 - To check: `dotnet run tools/threadcensus.cs -- <pid>`. Painting render threads should all be on
   screen. NVIDIA threads ÷ 20 should be about the number of windows + recently viewed tabs + 1 (XAML).
+  `Windows.UI.Xaml.dll+0x6F59C0` should wake about 0 times/s when no visible header pulses.
+  `dotnet run tools/renderwait.cs -- <pid>` shows each render thread's state: `_suspended (parked)` for
+  an off-screen terminal, `_redraw (idle, shown)` for a drawable one.
 
 **First measurement** (dev build, 2026-10-03, 3–4 min after the start: one window, 27 restored tabs, 3
 of them shown since the start, two 10–15 s census windows):
@@ -317,7 +321,31 @@ of them shown since the start, two 10–15 s census windows):
   unsent-draft dots pulsed (as designed), 3.2/s after the draft was sent.
 - Not measured yet: the release's workload (many claudes in many windows), the blank time when you go
   back to a tab hidden longer than the delay, and the minimized-window path.
-  `Windows.UI.Xaml.dll+0x6F59C0` should wake about 0 times/s when no visible header pulses.
+
+**Second check** (dev build, 2026-10-03 20:30–20:41, ~1 h after the start; read-only, with
+`tools/threadcensus.cs` and `tools/renderwait.cs`; one window, 29 tabs, 6 of them shown since the start,
+the user switching tabs normally):
+- Frames: 6 initialized terminals, 0 render-thread wake-ups in two 15 s windows. One hidden tab's
+  claude was working all the time: its ConPTY output thread woke ~9 times/s, its render thread never.
+- Wait state: the 5 hidden terminals' render threads wait on `Renderer::_suspended` (+0x26). Their
+  memory reads `_suspended` = 1, `_suspendedReleaseDelayMs` = 60000 and `_redraw` = 1 (the frame that
+  was due, drawn when the tab is shown again). The tab on screen waits on `_redraw` (+0x24), with
+  `_suspended` = 0. The window was not minimized.
+- Release timing: each parked thread entered its no-timeout wait 27–49 ms after "hidden + 60 s" (the
+  hide times are the `[nav] tab-focus` lines in hooks.log). An 8 s hide restarted the count, as
+  designed.
+- Devices: 40 NVIDIA threads, so 2 devices: XAML's and the tab on screen. That tab's device dates from
+  the tab's creation (19:32:11): it was never hidden for more than 35 s. The two devices' driver threads
+  woke 136–141 times/s (2 × ~68). Without §4c the 6 shown terminals keep 6 devices: 7 with XAML's,
+  ~476 wake-ups/s.
+- Video memory (`\GPU Process Memory(pid_<pid>*)\Dedicated Usage`): 57 MB. For scale, the production
+  instance (old code, hundreds of tabs) held 1,607 MB at the same time.
+- XAML's frame thread: 2.9–3.9 wake-ups/s. Two dormant tabs in the window keep a remembered draft;
+  before §4c their dots pulsed and kept this thread at ~60 wake-ups/s.
+- hooks.log since the start: no `[exc]`, `[wil]` or `[ui-stall]` line, and no `[tab-switch-slow]` when
+  the user went back to tabs whose devices had been released.
+- Still not measured: the blank time on a switch back, the minimized-window path, the release's
+  workload.
 
 **Trade-offs and limits.**
 - Going back to a tab hidden longer than the delay shows a blank terminal for about 0.1 s, while the
@@ -348,8 +376,12 @@ of them shown since the start, two 10–15 s census windows):
 4. **Renderer state.** NtQuerySystemInformation(5) gives each thread's state and wait reason, and
    ThreadLastSystemCall (class 21) gives its blocked syscall. For a `WaitOnAddress` waiter the first
    argument is the waited address (verified). In a 16-aligned `Renderer`, `_enable` (wil `slim_event`,
-   a `LONG`) is at +0x20 and `_redraw` at +0x24: an address ≡ 4 (mod 16) is idle-awaiting-a-frame,
-   ≡ 0 is painting disabled.
+   a `LONG`) is at +0x20, `_redraw` at +0x24 and `_suspended` at +0x26 (§4c): an address ≡ 4 (mod 16) is
+   idle-awaiting-a-frame, ≡ 0 is painting disabled, ≡ 6 is parked off screen.
+   - `dotnet run tools/renderwait.cs -- <pid>` prints this per render thread, the flags read at the
+     `Renderer`'s address, and when each wait began (SYSTEM_THREAD_INFORMATION.WaitTime). A black tab
+     whose thread waits on `_redraw` believes it presents fine (the 2026-10-01 storm); one on `_enable`
+     took the renderer's failure path.
 5. **Did anything fall back?** `(Get-Process -Id <pid>).Modules` containing `d3d10warp.dll` means some
    terminal went to WARP, by this setting or by WT's failure fallback.
 
@@ -363,8 +395,9 @@ livesample warning in `tools/livesample.cpp`.
   removes most of the pressure meanwhile.
 - Detect the storm (device creation slower than ~1 s, or event-153-shaped failures) and drop new
   terminals to WARP automatically.
-- Measure §4c on the release workload (the dev-build measurement and the census checks are in §4c
-  "Expected effect"), then tune the default delay.
+- Measure §4c on the release workload (the dev-build measurements and the census checks are in §4c
+  "Expected effect"), then tune the default delay. Also still open: the blank time on a switch back to a
+  released tab, and the minimized-window path.
 - Attribute the UI thread's 18–36% of a core (§4b) with an elevated ETW (WPR) CPU trace.
 - Done in §4c: paint nothing for an off-screen terminal; release a hidden terminal's device after a
   delay and rebuild it on show; run the tab-header storyboards only in the live tree, still dots for a
