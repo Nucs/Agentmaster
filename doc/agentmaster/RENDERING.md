@@ -4,8 +4,10 @@ Setting: `AppSettings::softwareRendering` (Settings cog → **Behavior → RENDE
 rendering"**, default **OFF** = the GPU). Engine hook: `ControlCore::SetSoftwareRenderingOverride` /
 `ReapplySoftwareRendering` (`src/cascadia/TerminalControl/ControlCore.{h,cpp}`), projected on
 `TermControl`. App side: `TerminalPage::_ApplySoftwareRenderingSetting`
-(`TerminalPage.AgentEngine.cpp`). Benchmark: `tools/warpbench.cpp`. Harness: the `softwareRendering`
-round-trip in `tests_persistence.cpp`.
+(`TerminalPage.AgentEngine.cpp`). Benchmarks: `tools/warpbench.cpp` (CPU per frame, GPU vs WARP),
+`tools/devidle.cpp` (what an idle GPU device costs), `tools/threadcensus.cs` (a read-only census of a
+running instance — safe on production). Harness: the `softwareRendering` round-trip in
+`tests_persistence.cpp`.
 
 ## 1. The problem — one GPU device per terminal, and a limit near 62
 
@@ -144,6 +146,94 @@ Three different counts matter, and only two of them cost anything:
   also resets the count, because tabs come back dormant.
 - §6's per-window device or release-when-hidden would remove the trade-off altogether.
 
+### 4b. One tab on screen, many in the strip — where the cost goes
+
+Measured 2026-10-03 on the release: 4 windows, 537 tabs, 30 running claudes. Tools: the Windows GPU
+performance counters, `tools/threadcensus.cs` on the live process (read-only; it never suspends a
+thread), and `tools/devidle.cpp` in a separate process. RTX 4060 Ti, driver 32.0.16.1656, 60 Hz.
+
+**How a frame reaches the screen.**
+- Each initialized terminal owns one `Renderer` thread ("Rendering Output Thread"), one AtlasEngine,
+  one D3D11 device and one swap chain. The swap chain has 3 BGRA buffers at the panel's pixel size,
+  `FLIP_SEQUENTIAL`, frame latency 1, and is bound to the control's `SwapChainPanel`.
+- The thread sleeps until output, a selection, a scroll or a timer asks for a frame. The timers are
+  the cursor blink (only on the focused terminal) and blinking text (1 s).
+- A frame re-shapes only the changed rows (DirectWrite). The D3D backend then draws one background
+  quad plus one quad per visible glyph, normally in one instanced draw call. It presents with a dirty
+  rectangle (`Present1`, sync interval 1).
+- A glyph is rasterized once, into the glyph atlas texture. The atlas starts small (128×128 px at the
+  release's font size), doubles when full, and stops at 2× the swap chain's area.
+- XAML draws the tab strip, the overlays and the side panel on the one UI thread. DWM composes each
+  window: the XAML visuals plus the swap chain of the terminal on screen.
+
+**Nothing pauses a hidden terminal.**
+- A tab switch only changes which content is the child of `_tabContent` (`TabManagement.cpp`).
+  `Renderer`, `AtlasEngine` and `TermControl` never check visibility. A minimized window
+  (`ControlCore::WindowVisibilityChanged`) only tells ConPTY.
+- So a hidden terminal whose claude works (spinner, elapsed timer, streamed text) keeps painting
+  frames that DWM never shows. Nothing throttles them: a swap chain that nothing shows presented
+  59 frames/s at 60 requested (`devidle`). A bare clear + `Present1` costs ~0.5 ms of CPU per frame.
+- An idle claude paints nothing. A hidden terminal is unfocused, so its cursor does not blink.
+
+| Tab state | Render thread | GPU device + VRAM | CPU and GPU time |
+|---|---|---|---|
+| Dormant (restored or deactivated, not entered since) | none | none | none |
+| Initialized, claude idle, shown or hidden | asleep | 1 device, ~20–27 MB (the swap chain alone is 18.6 MB at 1,602×969 px) | the driver's polling only (below) |
+| Initialized, claude working, **hidden** | ~3–11 frames/s | same | frames that no one sees |
+| On screen, claude working | ~3–11 frames/s | same | its frames + DWM composition |
+
+**The driver polls every device, all the time.**
+- 2 of the 20 NVIDIA threads of each device wake ~65–70 times/s, painting or not. A painting device
+  adds about 1 wake per frame.
+- `devidle` shows the same with no swap chain and no XAML in the process, after 2 s, 150 s and 15 min
+  of idleness, and under the exe names `WindowsTerminal.exe` and `Agentmaster.exe`.
+- The release: 680 NVIDIA threads (34 devices = 33 terminals + XAML's own), 2,270 wakes/s in total,
+  12–16 ms of CPU per second.
+- The idle Store Windows Terminal's 4 devices did not poll (0.9 wakes/s in total). The cause is
+  unknown: the same driver build, normal priority, no EcoQoS.
+
+**Claude tabs never show WT's progress ring.** Claude Code 2.1.x sends no OSC 9;4 when `WT_SESSION`
+is set (`LBe()` in its bundle), and every Agentmaster tab sets it.
+
+**Header animations keep XAML ticking.**
+- The tab header has two Forever storyboards: the unsent-draft dots and the cache-warm spark crown.
+  They start and stop on their flags only (`TabHeaderControl::_UpdatePendingAnimation` /
+  `_UpdateCacheWarmAnimation`). They do not follow `Loaded` / `Unloaded`, as the board and side-panel
+  dots do (`BuildPendingDots`).
+- A dormant tab with a remembered draft turns its dots on before its claude starts (the
+  `NotConnected` branch of `_ScanPendingInputImpl`, PENDING_INPUT.md §5). The release had 50 such tabs
+  among its 537. One of them sat two tabs from a selected tab, so its pulse ran all the time.
+- XAML's frame thread (`Windows.UI.Xaml.dll+0x6F59C0`) woke 62–68 times/s in both Agentmaster
+  instances, and 0 times/s in the idle Store Windows Terminal. While any animation runs, XAML and DWM
+  work on every display frame (60 Hz here).
+- A header outside the strip's realized range is not in the visual tree, so it draws nothing. Whether
+  its running storyboard still costs UI-thread work is not verified.
+
+**The release's numbers (10 s samples).**
+
+| Measure | Value |
+|---|---|
+| GPU 3D engine, Agentmaster | 0.95% average, 1.41% peak |
+| GPU 3D engine, DWM (every app, every monitor) | 3.3% |
+| GPU 3D engine, dev instance (12 devices, 1 working tab) | 0.07% |
+| Dedicated video memory | release 915 MB (≈27 MB per device); dev 340 MB |
+| Render threads that painted | 3–7 of 33–34; 6 sessions Running, 1 of them on screen |
+| CPU of all render threads | 9–22 ms/s |
+| NVIDIA threads | 12–16 ms/s CPU, 2,270 wakes/s |
+| XAML frame thread | 5–8 ms/s CPU, 62–68 wakes/s |
+| UI thread | 185–362 ms/s CPU, 450–580 wakes/s (not attributed: it needs an elevated ETW trace) |
+
+Per-process GPU memory counters overlap. DWM's "Dedicated Usage" (9.9 GB) includes other processes'
+shared surfaces and was larger than the 7.2 GB in use on the whole card. Do not add them up.
+
+**So, with 100 tabs and one on screen:**
+- GPU time = the frames of the terminals that work (shown or not) + XAML's and DWM's composition.
+  With nothing working and nothing animating, it is close to 0.
+- Each initialized terminal holds ~20–27 MB of video memory, a render thread, 20 NVIDIA threads (2 of
+  them polling ~68 times/s) and one of the ~62 device slots (§1), until its tab closes or is
+  deactivated.
+- Dormant tabs cost no rendering at all.
+
 ## 5. Diagnosing a black tab (read-only, nothing suspended)
 
 1. **Is claude up?** `am_inspect.py screen <ref>` reads the ConPTY's console buffer. A ready input box
@@ -156,6 +246,8 @@ Three different counts matter, and only two of them cost anything:
    - `RENDER + CONN + NV×20` in one burst is a healthy tab init.
    - `RENDER + CONN` alone, with `NV×19…NV×1` arriving seconds later, is the storm.
    - NVIDIA threads ÷ 20 ≈ devices.
+   - `dotnet run tools/threadcensus.cs -- <pid>` prints this grouping, each device's burst next to its
+     render thread, and which render threads painted (§4b).
 4. **Renderer state.** NtQuerySystemInformation(5) gives each thread's state and wait reason, and
    ThreadLastSystemCall (class 21) gives its blocked syscall. For a `WaitOnAddress` waiter the first
    argument is the waited address (verified). In a 16-aligned `Renderer`, `_enable` (wil `slim_event`,
@@ -174,3 +266,9 @@ livesample warning in `tools/livesample.cpp`.
 - Release a hidden terminal's device and swap chain after N minutes off-screen, and recreate on show.
 - Detect the storm (device creation slower than ~1 s, or event-153-shaped failures) and drop new
   terminals to WARP automatically.
+- Paint nothing for a terminal that is not on screen (§4b): disable its renderer when its content
+  leaves `_tabContent` and repaint all of it when it comes back. This removes the hidden working
+  terminals' frames; the device and its polling stay.
+- Start and stop the tab-header storyboards on `Loaded` / `Unloaded` too, as `BuildPendingDots` does,
+  and consider static dots for a dormant tab's remembered draft (§4b).
+- The driver's per-device polling (§4b) is one more reason for one shared device per process.
