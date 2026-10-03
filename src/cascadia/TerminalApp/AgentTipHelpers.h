@@ -519,6 +519,38 @@ namespace winrt::TerminalApp::implementation
         });
     }
 
+    // Show `tip` on `el` RIGHT NOW — the click-feedback twin of AgentSetTip (e.g. the summary panel's
+    // session separator confirming "Copied session id of up to here"). It records the text exactly like
+    // AgentSetTip (wiring the hover handlers on first use), then opens the ONE shared tip on `el` with no
+    // rest delay — or, when `el`'s tip is already showing, AgentSetTip has just swapped its content in
+    // place. Everything else is the normal hover model: leaving `el` closes it, the next hover shows
+    // whatever text `el` carries then (so a caller that wants its descriptive text back re-sets it on
+    // PointerExited). All of OnOpenTimerTick's guards apply: an element no longer in the tree, an empty
+    // text, or an element inside an active LocalTooltip scope (whose designated panel already shows the
+    // text) never opens a floating tip. UI thread only. Never throws: a failed open is contained and
+    // logged inside OnOpenTimerTick (Rule #18).
+    //   el  — the element the tip belongs to (normally the one just clicked, so the pointer is over it).
+    //   tip — the text to show; empty == no-op (AgentSetTip's contract).
+    inline void AgentShowTipNow(const winrt::Windows::UI::Xaml::UIElement& el, const winrt::hstring& tip)
+    {
+        namespace atd = agent_tip_details;
+        if (tip.empty())
+        {
+            return;
+        }
+        AgentSetTip(el, tip);
+        auto& h = atd::Host();
+        if (h.tip && h.openOwner == el)
+        {
+            return; // already open on el: AgentSetTip updated its content in place
+        }
+        // Arm el (ArmOpenTimer also CREATES the shared one-shot timer when nothing on this thread was ever
+        // hovered — OnOpenTimerTick stops it unconditionally) and run the tick NOW instead of after the rest
+        // delay: the tick is the single place that opens the shared tip, so every guard it carries applies.
+        atd::ArmOpenTimer(el);
+        atd::OnOpenTimerTick();
+    }
+
     // Opt `el`'s AgentSetTip tooltip into an explicit PLACEMENT (else the shared near-pointer default).
     // Used by the summary panel's thin resize grips (Top) so the tip is offset ABOVE the bar instead of
     // popping over it — a mouse-placed tip on a 6px grip covered the target and blocked the drag. The tip

@@ -987,6 +987,43 @@ void TestAppSettings()
     }
 }
 
+// Agentmaster (the summary's conversation chain): its two persisted pieces. A session's RECORDED predecessor
+// (SessionInfo::continuedFromId / continuedVia — the /clear predecessor or /handover origin no transcript
+// records) rides sessions.json, so a reopened session keeps its history; and the ⏮ whole-conversation toggle
+// (AppSettings::summaryPanelShowHistory) defaults ON under a NEW key, because the key it replaced
+// (summaryPanelShowPrevious) holds a stored `false` in every install.
+void TestSummaryHistoryPersistence()
+{
+    std::wprintf(L"Summary conversation chain (persistence):\n");
+    {
+        SessionInfo s = MakeSession(L"chain-successor");
+        s.continuedFromId = L"chain-origin";
+        s.continuedVia = L"handover";
+        const auto back = DeserializeSessions(SerializeSessions({ s }));
+        CHECK(back.size() == 1 && back[0].continuedFromId == L"chain-origin" && back[0].continuedVia == L"handover",
+              "chain: continuedFromId + continuedVia round-trip through sessions.json");
+        const std::wstring plainText = SerializeSessions({ MakeSession(L"chain-plain") });
+        const auto plain = DeserializeSessions(plainText);
+        CHECK(plain.size() == 1 && plain[0].continuedFromId.empty() && plain[0].continuedVia.empty(),
+              "chain: a session that continues nothing reads back with no link");
+        CHECK(plainText.find(L"continuedFromId") == std::wstring::npos && plainText.find(L"continuedVia") == std::wstring::npos,
+              "chain: an empty link is omitted from sessions.json");
+    }
+    {
+        CHECK(AppSettings{}.summaryPanelShowHistory, "chain: the whole-conversation view defaults ON");
+        CHECK(DeserializeAppSettings(L"{\"version\":1,\"settings\":{}}").summaryPanelShowHistory, "chain: an absent key reads ON");
+        CHECK(!DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"summaryPanelShowHistory\":false}}").summaryPanelShowHistory,
+              "chain: an explicit OFF is kept");
+        CHECK(DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"summaryPanelShowPrevious\":false}}").summaryPanelShowHistory,
+              "chain: the replaced key summaryPanelShowPrevious is not read (every install stored its false)");
+        AppSettings off;
+        off.summaryPanelShowHistory = false;
+        const std::wstring text = SerializeAppSettings(off);
+        CHECK(!DeserializeAppSettings(text).summaryPanelShowHistory, "chain: OFF round-trips through settings.json");
+        CHECK(text.find(L"summaryPanelShowPrevious") == std::wstring::npos, "chain: the replaced key is no longer written");
+    }
+}
+
 void TestTabNamingAndColor()
 {
     std::wprintf(L"[tab naming + per-dir color]\n");

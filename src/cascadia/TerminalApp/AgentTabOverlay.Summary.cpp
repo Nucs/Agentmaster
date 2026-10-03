@@ -11,10 +11,10 @@
 //   AgentTabOverlay.cpp          - CORE: ctor/dtor, Initialize/_Detach, ShowActivity (the observe badge), _Refresh (the linked badge), hover/expand, opacities, Autorunner
 //   AgentTabOverlay.Internal.h   - shared file-local helpers: StateColor/Glyph/Label, the summary-box renderers, time formatting, launch-CLI + clipboard (anonymous namespace, a per-TU copy)
 //   AgentTabOverlay.Actions.cpp  - the hover action row: the folder (Open Path) button, the copy menu, and the shared CopySessionField action
-// ★ AgentTabOverlay.Summary.cpp  - the pencil-toggled summary panel: build/render/load off-thread, the times bar, resize grips, wrap/truncate/previous, JUMP, copy-summary
+// ★ AgentTabOverlay.Summary.cpp  - the pencil-toggled summary panel: build/render/load off-thread, the times bar, resize grips, wrap/truncate/whole-conversation, JUMP, session separators, copy-summary
 // ======================================================================================
 //
-// Agentmaster per-tab overlay: the pencil-toggled SUMMARY PANEL -- build/render/load (off-thread), the times bar, resize grips, wrap/truncate/previous toggles, JUMP eligibility + highlight, and the copy-summary action. Partial TU of AgentTabOverlay.cpp.
+// Agentmaster per-tab overlay: the pencil-toggled SUMMARY PANEL -- build/render/load (off-thread), the times bar, resize grips, wrap/truncate/whole-conversation toggles, the conversation list (every prompt of the session's whole conversation chain, numbered as one, with clickable session separators), JUMP eligibility + highlight, and the copy-summary action. Partial TU of AgentTabOverlay.cpp.
 #include "pch.h"
 #include "AgentTabOverlay.h"
 
@@ -186,41 +186,47 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
-        // Agentmaster (conversation lineage): the PREVIOUS-SESSION toggle, LEFTMOST in the strip (left of
-        // truncate). Collapsed by default — shown only when the loaded summary has a pre-/compact segment.
-        // ON renders the previous session(s) above the current Messages. A GLOBAL setting
-        // (AppSettings::summaryPanelShowPrevious) flipped via the page (_onToggleSummaryPrevious) so it
-        // broadcasts to every linked overlay. Same glyph size + scale as the wrap/truncate toggles.
-        _summaryPrevIcon = FontIcon{};
-        _summaryPrevIcon.FontFamily(FontFamily{ L"Segoe UI Symbol" }); // carries U+23EE (the previous-track double-bar glyph)
-        _summaryPrevIcon.Glyph(L"\x23EE"); // ⏮ — "previous session(s)" (before /compact)
-        _summaryPrevIcon.FontSize(11);
-        _summaryPrevIcon.FontWeight(FontWeights::SemiBold());
-        _summaryPrevIcon.IsHitTestVisible(false); // CLICK-THROUGH: glyph clicks land on _summaryPrevBtn (see the action-row mkIconBtn note)
+        // Agentmaster (the summary's conversation chain): the WHOLE-CONVERSATION toggle, LEFTMOST in the
+        // strip (left of truncate). Collapsed until a load finds earlier history to show — an earlier session
+        // this one continues (a fork's parent, a plan-restart parent, a /clear predecessor, a /handover
+        // origin) or a part a /compact summarized away; with nothing earlier the toggle would change
+        // nothing. ON (the default) lists that history above the current part, numbered 1..N as ONE
+        // conversation with a session-id separator between sessions; OFF lists only the part after the last
+        // compaction. A GLOBAL setting (AppSettings::summaryPanelShowHistory) flipped via the page
+        // (_onToggleSummaryHistory) so it broadcasts to every linked overlay. Same glyph size + scale as the
+        // wrap/truncate toggles.
+        _summaryHistoryIcon = FontIcon{};
+        _summaryHistoryIcon.FontFamily(FontFamily{ L"Segoe UI Symbol" }); // carries U+23EE (the previous-track double-bar glyph)
+        _summaryHistoryIcon.Glyph(L"\x23EE"); // ⏮ — "from the beginning" (the earlier sessions + compacted parts)
+        _summaryHistoryIcon.FontSize(11);
+        _summaryHistoryIcon.FontWeight(FontWeights::SemiBold());
+        _summaryHistoryIcon.IsHitTestVisible(false); // CLICK-THROUGH: glyph clicks land on _summaryHistoryBtn (see the action-row mkIconBtn note)
         {
-            ScaleTransform prevScale{};
-            prevScale.ScaleX(1.18);
-            prevScale.ScaleY(1.18);
-            _summaryPrevIcon.RenderTransform(prevScale);
-            _summaryPrevIcon.RenderTransformOrigin(Point{ 0.5f, 0.5f });
+            ScaleTransform historyScale{};
+            historyScale.ScaleX(1.18);
+            historyScale.ScaleY(1.18);
+            _summaryHistoryIcon.RenderTransform(historyScale);
+            _summaryHistoryIcon.RenderTransformOrigin(Point{ 0.5f, 0.5f });
         }
-        _summaryPrevBtn = Button{};
-        _summaryPrevBtn.Background(Fill(0x00, 0, 0, 0)); // transparent — still hit-testable + hover highlight
-        _summaryPrevBtn.BorderThickness(ThicknessHelper::FromUniformLength(0));
-        _summaryPrevBtn.Padding(ThicknessHelper::FromLengths(3, 0, 1, 0));
-        _summaryPrevBtn.MinWidth(0);
-        _summaryPrevBtn.MinHeight(0);
-        _summaryPrevBtn.IsTabStop(false); // never pull keyboard focus off the ConPTY
-        _summaryPrevBtn.VerticalAlignment(VerticalAlignment::Top);
-        _summaryPrevBtn.HorizontalAlignment(HorizontalAlignment::Right);
-        _summaryPrevBtn.Content(_summaryPrevIcon);
-        _summaryPrevBtn.Visibility(Visibility::Collapsed); // shown only when the loaded summary has a previous segment
-        AgentSetTip(_summaryPrevBtn, winrt::hstring{
-            L"Show previous session(s): the pre-/compact conversation, numbered separately above the current messages" });
-        _summaryPrevBtn.Click([weak = get_weak()](const IInspectable&, const RoutedEventArgs&) {
+        _summaryHistoryBtn = Button{};
+        _summaryHistoryBtn.Background(Fill(0x00, 0, 0, 0)); // transparent — still hit-testable + hover highlight
+        _summaryHistoryBtn.BorderThickness(ThicknessHelper::FromUniformLength(0));
+        _summaryHistoryBtn.Padding(ThicknessHelper::FromLengths(3, 0, 1, 0));
+        _summaryHistoryBtn.MinWidth(0);
+        _summaryHistoryBtn.MinHeight(0);
+        _summaryHistoryBtn.IsTabStop(false); // never pull keyboard focus off the ConPTY
+        _summaryHistoryBtn.VerticalAlignment(VerticalAlignment::Top);
+        _summaryHistoryBtn.HorizontalAlignment(HorizontalAlignment::Right);
+        _summaryHistoryBtn.Content(_summaryHistoryIcon);
+        _summaryHistoryBtn.Visibility(Visibility::Collapsed); // shown only when the loaded summary HAS earlier history
+        AgentSetTip(_summaryHistoryBtn, winrt::hstring{
+            L"Whole conversation: list the earlier sessions this one continues (a fork, a plan-mode restart, "
+            L"/clear, /handover) and the parts a /compact summarized, numbered as one conversation with a "
+            L"session-id line between sessions. Off: only the part after the last compaction." });
+        _summaryHistoryBtn.Click([weak = get_weak()](const IInspectable&, const RoutedEventArgs&) {
             if (auto self = weak.get())
             {
-                self->_ToggleSummaryPrevious();
+                self->_ToggleSummaryHistory();
             }
         });
 
@@ -275,7 +281,7 @@ namespace winrt::TerminalApp::implementation
         toggles.Orientation(Orientation::Horizontal);
         toggles.VerticalAlignment(VerticalAlignment::Top);
         toggles.HorizontalAlignment(HorizontalAlignment::Right);
-        toggles.Children().Append(_summaryPrevBtn); // leftmost: previous-session (shown only when compacted)
+        toggles.Children().Append(_summaryHistoryBtn); // leftmost: whole conversation (shown only when there IS earlier history)
         toggles.Children().Append(truncBtn);
         toggles.Children().Append(wrapBtn);
         toggles.Children().Append(refreshBtn); // rightmost: re-read the transcript + rebuild now
@@ -309,7 +315,7 @@ namespace winrt::TerminalApp::implementation
 
         _UpdateSummaryWrapButtonVisual(); // seed the wrap toggle's color from _summaryWrapNewlines (default: dim/off)
         _UpdateSummaryTruncateButtonVisual(); // seed the truncate toggle's color from _summaryTruncate (default: lighter/on)
-        _UpdateSummaryPrevButtonVisual(); // seed the previous-session toggle's color from _summaryShowPrevious (default: dim/off)
+        _UpdateSummaryHistoryButtonVisual(); // seed the whole-conversation toggle's color from _summaryShowHistory (default: lighter/on)
 
         // The padded content sits in its own inner border so the resize grips (siblings below) can hug
         // the TRUE panel edges (outside the content's 8/6px inset) while the text keeps its padding.
@@ -549,10 +555,11 @@ namespace winrt::TerminalApp::implementation
             _summaryContextMenu.Items().Append(copySelSep);
 
             // Copy Prompt — right-click a NUMBERED message => copy THAT prompt, whole and EXACT: the raw
-            // text as it was typed (_summaryUserMsgs, straight off the transcript), never the panel's
-            // RENDERING of it, which escapes newlines to a literal "\n" while wrap is off and caps the
-            // message while truncate is on. Sits directly ABOVE "Copy Summary": both are copies, this the
-            // narrower/more specific one, so it reads first. Shown ONLY when the right-click landed on a
+            // text as it was typed (_summaryPromptRows[k].text, straight off the transcript — an earlier
+            // session's prompt included, since the conversation list spans the whole chain), never the
+            // panel's RENDERING of it, which escapes newlines to a literal "\n" while wrap is off and caps
+            // the message while truncate is on. Sits directly ABOVE "Copy Summary": both are copies, this
+            // the narrower/more specific one, so it reads first. Shown ONLY when the right-click landed on a
             // numbered message row (_ctxPromptIndex, set by _WireSummaryContextMenu before the menu opens);
             // like the selection above, the text is CAPTURED in Opening so the click copies exactly the
             // prompt the menu was opened for even if the panel reloads underneath it.
@@ -681,12 +688,14 @@ namespace winrt::TerminalApp::implementation
                 {
                     // "Copy Prompt": resolve the right-clicked row's prompt (_ctxPromptIndex, stamped by the
                     // element handler that showed this menu) and CAPTURE its exact text. Re-validated against
-                    // the live prompt list, so a stale index from an earlier render can never copy anything.
+                    // the live row list, so a stale index from an earlier render can never copy anything. The
+                    // row index IS the displayed number minus one: the k-th numbered line reads " k+1. ",
+                    // continuous across the sessions of the chain.
                     pendingPrompt->clear();
                     const int promptIdx = self->_ctxPromptIndex;
-                    if (promptIdx >= 0 && promptIdx < static_cast<int>(self->_summaryUserMsgs.size()))
+                    if (promptIdx >= 0 && promptIdx < static_cast<int>(self->_summaryPromptRows.size()))
                     {
-                        *pendingPrompt = self->_summaryUserMsgs[promptIdx];
+                        *pendingPrompt = self->_summaryPromptRows[promptIdx].text;
                         *pendingPromptNo = promptIdx + 1;
                     }
                     const bool hasPrompt = !pendingPrompt->empty();
@@ -1135,8 +1144,9 @@ namespace winrt::TerminalApp::implementation
     // it deliberately excludes: a numbered message that happens to end with ':' (" 1. do this:" — a
     // leading space + digits, so a wrap-ON prompt whose continuation lines are markdown "* " bullets
     // keeps wrapping), "Recap: <text>" / "Tasks:  3 done …" / "Parent: <id>" (text after the colon), and
-    // a "Previous session N · …" header. The section a list header opens renders its "* " items
-    // single-line + clipped instead of wrapped (see _SetSummaryContent).
+    // a session-separator line (it opens with the kSessionSepMark control character, not a letter). The
+    // section a list header opens renders its "* " items single-line + clipped instead of wrapped (see
+    // _SetSummaryContent).
     static bool IsSummaryListHeader(const std::wstring& line)
     {
         if (line.size() < 2 || line.back() != L':')
@@ -1159,6 +1169,29 @@ namespace winrt::TerminalApp::implementation
         return true;
     }
 
+    // Agentmaster (the summary's conversation chain): do two row lists describe the same render — every
+    // field of every row, in order? With the rendered text, this decides whether a reload may skip the
+    // panel rebuild: the rows carry what the text cannot show (a prompt's ▸ jump index, a separator's
+    // title + continuation for its hover text), so equal text alone is not enough.
+    //   a, b — the two row lists (prompt rows or separator rows).
+    // Returns true when they match field by field. Never throws.
+    static bool SameSummaryRows(const std::vector<SummaryConversationRow>& a, const std::vector<SummaryConversationRow>& b) noexcept
+    {
+        if (a.size() != b.size())
+        {
+            return false;
+        }
+        for (size_t k = 0; k < a.size(); ++k)
+        {
+            if (a[k].headIndex != b[k].headIndex || a[k].text != b[k].text || a[k].sessionId != b[k].sessionId ||
+                a[k].sessionTitle != b[k].sessionTitle || a[k].continuedBy != b[k].continuedBy)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     void AgentTabOverlay::_SetSummaryContent(const std::wstring& text)
     {
         if (!_summaryStack)
@@ -1168,6 +1201,10 @@ namespace winrt::TerminalApp::implementation
         _summaryStack.Children().Clear();
         _jumpButtons.clear(); // rebuilt below; stale Button refs from the prior render are dropped
         _summaryMsgRows.clear(); // rebuilt below; the highlight (_highlightedMsgIndex) is re-applied after
+        // Agentmaster (the summary's conversation chain): forget what the body showed until the build below
+        // COMPLETES — a build that throws half-way must not let the next identical load skip its rebuild
+        // (the publish compares against this) and strand a half-built body.
+        _summaryRenderedText.clear();
         std::wstring seg; // accumulated contiguous text lines
         // Agentmaster: a run has ONE line mode. false = the classic WRAPPING run (headers, Tasks, Recap,
         // message continuations). true = a LIST run — the "* item" lines of a Files Created / Edited /
@@ -1220,62 +1257,116 @@ namespace winrt::TerminalApp::implementation
             seg += lineStr;
             segNoWrap = noWrap;
         };
-        // Agentmaster (SUMMARY_JUMP.md): a numbered message renders as a 2-column Grid — a JUMP button
-        // (col 0, auto) + the wrapping message text (col 1, *) — so the text still wraps within the panel
-        // while the button stays put. The button asks the page to center the session's terminal view on
-        // where this prompt is rendered (a chime confirms a hit).
-        const auto makeJumpRow = [this](const std::wstring& lineStr, int idx) -> winrt::Windows::UI::Xaml::UIElement {
+        // Agentmaster (the summary's conversation chain): will ANY prompt row of this render carry a ▸ jump
+        // button? Only then do the rows reserve the button column (see makePromptRow) — a render with no
+        // jump target at all (a Codex session, no page jump handler) keeps the plain look.
+        bool anyJump = false;
+        if (_onJumpToPrompt)
+        {
+            for (const auto& row : _summaryPromptRows)
+            {
+                if (row.headIndex >= 0 && row.headIndex < static_cast<int>(_summaryUserMsgs.size()))
+                {
+                    anyJump = true;
+                    break;
+                }
+            }
+        }
+        // Agentmaster (SUMMARY_JUMP.md + the conversation chain): a numbered prompt renders as a 2-column
+        // Grid — a JUMP button (col 0, auto) + the wrapping message text (col 1, *) — so the text still
+        // wraps within the panel while the button stays put. The button asks the page to center the
+        // session's terminal view on where this prompt is rendered (a chime confirms a hit). Only a prompt
+        // the CURRENT session's terminal can show gets one: its row's headIndex, an index into
+        // _summaryUserMsgs (the list the jump resolver reads). An EARLIER session's prompt (or a part
+        // before this session's last /compact) gets an INVISIBLE stand-in of the button's exact size
+        // instead, so every prompt's text starts at the same x and the whole list reads as ONE
+        // conversation. When no row of the render can jump (anyJump false) the column is left out.
+        //   lineStr  — the rendered " N. <text>" line (its first line, when wrap keeps real newlines).
+        //   rowIndex — the row's index in _summaryPromptRows (== N - 1) — what this row's "Copy Prompt" copies.
+        // Returns the row element. Throws only what XAML element creation throws (the caller is on the UI thread).
+        const auto makePromptRow = [this, anyJump](const std::wstring& lineStr, int rowIndex) -> winrt::Windows::UI::Xaml::UIElement {
+            const SummaryConversationRow& row = _summaryPromptRows[static_cast<size_t>(rowIndex)];
+            // The jump target: the row's headIndex while the page can jump and the index is in the live list.
+            const int idx = (_onJumpToPrompt && row.headIndex >= 0 && row.headIndex < static_cast<int>(_summaryUserMsgs.size())) ? row.headIndex : -1;
             Grid g{};
-            ColumnDefinition c0{};
-            c0.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            // A transparent fill makes the WHOLE row (its gutter included, not only the glyphs) the
+            // right-click target of this row's "Copy Prompt"; a jumped-to row swaps it for the accent
+            // band (_ApplySummaryHighlight).
+            g.Background(Fill(0, 0, 0, 0));
+            if (anyJump)
+            {
+                ColumnDefinition c0{};
+                c0.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+                g.ColumnDefinitions().Append(c0);
+            }
             ColumnDefinition c1{};
             c1.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
-            g.ColumnDefinitions().Append(c0);
             g.ColumnDefinitions().Append(c1);
 
-            Button jb{};
-            jb.Background(Fill(0, 0, 0, 0)); // a TRANSPARENT brush (not null) — the whole content box is hit-testable
-            jb.BorderThickness(ThicknessHelper::FromUniformLength(0));
-            // Agentmaster: the bare ~10px ▸ glyph was a tiny click target. Enlarge the (invisible) hit
-            // area to the FULL HEIGHT OF ITS OWN ROW so the whole left gutter of the prompt is clickable —
-            // but it MUST be bounded BY the row. VerticalAlignment::Stretch fills the grid cell (whose
-            // height is driven by the message text) and CANNOT spill above/below it; an earlier attempt
-            // used a fixed "square" + negative top/bottom margins, which overflowed the row, so on short
-            // one-line prompts (tiny rows) adjacent buttons OVERLAPPED. Keep the glyph pinned to the row
-            // TOP (aligned with the first text line) via VerticalContentAlignment::Top, and keep the
-            // original horizontal layout (padding 0,0,4,0 => icon at column-0 left, 4px gap to the text,
-            // column-0 width 0+10+4 = 14) so NEITHER the icon position NOR the message-text start moves.
-            jb.Padding(ThicknessHelper::FromLengths(0, 0, 4, 0));
-            jb.Margin(ThicknessHelper::FromLengths(0, 0, 0, 0));
-            jb.VerticalAlignment(VerticalAlignment::Stretch); // fill THIS row's height, never overflow into neighbors
-            jb.VerticalContentAlignment(VerticalAlignment::Top); // glyph stays at the row top (its original Y)
-            jb.Opacity(0.7);
-            FontIcon ji{};
-            ji.FontFamily(FontFamily{ L"Segoe UI Symbol" }); // a text font carrying U+25B8 (the icon font would tofu it)
-            ji.Glyph(L"\x25B8"); // ▸ — "go to / jump"
-            ji.FontSize(10);
-            ji.IsHitTestVisible(false); // CLICK-THROUGH: a click on the tiny ▸ glyph must land on the jump button jb, not be eaten by the icon (see the action-row mkIconBtn note)
-            jb.Content(ji);
-            AgentSetTip(jb, winrt::hstring{ L"Jump to where this prompt is on screen" });
-            const auto weak = get_weak();
-            jb.Click([weak, idx](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::RoutedEventArgs&) {
-                if (const auto self = weak.get())
-                {
-                    if (self->_onJumpToPrompt && idx >= 0 && idx < static_cast<int>(self->_summaryUserMsgs.size()))
+            if (idx >= 0)
+            {
+                Button jb{};
+                jb.Background(Fill(0, 0, 0, 0)); // a TRANSPARENT brush (not null) — the whole content box is hit-testable
+                jb.BorderThickness(ThicknessHelper::FromUniformLength(0));
+                // Agentmaster: the bare ~10px ▸ glyph was a tiny click target. Enlarge the (invisible) hit
+                // area to the FULL HEIGHT OF ITS OWN ROW so the whole left gutter of the prompt is clickable —
+                // but it MUST be bounded BY the row. VerticalAlignment::Stretch fills the grid cell (whose
+                // height is driven by the message text) and CANNOT spill above/below it; an earlier attempt
+                // used a fixed "square" + negative top/bottom margins, which overflowed the row, so on short
+                // one-line prompts (tiny rows) adjacent buttons OVERLAPPED. Keep the glyph pinned to the row
+                // TOP (aligned with the first text line) via VerticalContentAlignment::Top, and keep the
+                // original horizontal layout (padding 0,0,4,0 => icon at column-0 left, 4px gap to the text,
+                // column-0 width 0+10+4 = 14) so NEITHER the icon position NOR the message-text start moves.
+                jb.Padding(ThicknessHelper::FromLengths(0, 0, 4, 0));
+                jb.Margin(ThicknessHelper::FromLengths(0, 0, 0, 0));
+                jb.VerticalAlignment(VerticalAlignment::Stretch); // fill THIS row's height, never overflow into neighbors
+                jb.VerticalContentAlignment(VerticalAlignment::Top); // glyph stays at the row top (its original Y)
+                jb.Opacity(0.7);
+                FontIcon ji{};
+                ji.FontFamily(FontFamily{ L"Segoe UI Symbol" }); // a text font carrying U+25B8 (the icon font would tofu it)
+                ji.Glyph(L"\x25B8"); // ▸ — "go to / jump"
+                ji.FontSize(10);
+                ji.IsHitTestVisible(false); // CLICK-THROUGH: a click on the tiny ▸ glyph must land on the jump button jb, not be eaten by the icon (see the action-row mkIconBtn note)
+                jb.Content(ji);
+                AgentSetTip(jb, winrt::hstring{ L"Jump to where this prompt is on screen" });
+                const auto weak = get_weak();
+                jb.Click([weak, idx](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::RoutedEventArgs&) {
+                    if (const auto self = weak.get())
                     {
-                        const int row = self->_onJumpToPrompt(self->_summaryUserMsgs, idx);
-                        if (row >= 0)
+                        if (self->_onJumpToPrompt && idx >= 0 && idx < static_cast<int>(self->_summaryUserMsgs.size()))
                         {
-                            ::PlaySoundW(L"SystemAsterisk", nullptr, SND_ALIAS | SND_ASYNC);
-                            self->HighlightSummaryMessage(idx); // mark the row we jumped to
+                            const int row = self->_onJumpToPrompt(self->_summaryUserMsgs, idx);
+                            if (row >= 0)
+                            {
+                                ::PlaySoundW(L"SystemAsterisk", nullptr, SND_ALIAS | SND_ASYNC);
+                                self->HighlightSummaryMessage(idx); // mark the row we jumped to
+                            }
+                            self->_RefreshJumpEligibility(true); // a click makes the others eligible to re-check (user action -> bypass the periodic floor; usually free via the epoch cache)
                         }
-                        self->_RefreshJumpEligibility(true); // a click makes the others eligible to re-check (user action -> bypass the periodic floor; usually free via the epoch cache)
                     }
-                }
-            });
-            _jumpButtons.emplace_back(idx, jb); // register for eligibility dimming
-            Grid::SetColumn(jb, 0);
-            g.Children().Append(jb);
+                });
+                _jumpButtons.emplace_back(idx, jb); // register for eligibility dimming
+                Grid::SetColumn(jb, 0);
+                g.Children().Append(jb);
+            }
+            else if (anyJump)
+            {
+                // The INVISIBLE stand-in: the jump button's own glyph + right padding at opacity 0, so this
+                // column measures exactly what a real button's does (whatever the font's ▸ advance is) and
+                // the text lines up with its neighbors'. Opacity 0 (not Collapsed) keeps it measured AND
+                // hit-testable: a right-click on the gutter still bubbles to the row's "Copy Prompt".
+                FontIcon ghost{};
+                ghost.FontFamily(FontFamily{ L"Segoe UI Symbol" });
+                ghost.Glyph(L"\x25B8");
+                ghost.FontSize(10);
+                ghost.VerticalAlignment(VerticalAlignment::Top);
+                Border gutter{};
+                gutter.Padding(ThicknessHelper::FromLengths(0, 0, 4, 0)); // the jump button's padding: the same 4-px gap to the text
+                gutter.Opacity(0.0);
+                gutter.Child(ghost);
+                Grid::SetColumn(gutter, 0);
+                g.Children().Append(gutter);
+            }
 
             TextBlock tb{};
             tb.FontFamily(FontFamily{ L"Cascadia Mono" });
@@ -1284,37 +1375,36 @@ namespace winrt::TerminalApp::implementation
             tb.IsTextSelectionEnabled(true);
             tb.Foreground(Fill(0xFF, 0xDC, 0xDC, 0xDC));
             tb.Text(winrt::hstring{ lineStr });
-            Grid::SetColumn(tb, 1);
+            Grid::SetColumn(tb, anyJump ? 1 : 0);
             g.Children().Append(tb);
             // Right-click anywhere on THIS row (its text, its gutter, or the ▸ button, which bubbles to
             // the row) => the shared menu WITH "Copy Prompt" bound to this row's prompt. Wire the text
             // block explicitly: a selectable TextBlock shadows its parent's menu, so the row Grid alone
             // would never see the request.
-            _WireSummaryContextMenu(tb, idx);
-            _WireSummaryContextMenu(g, idx);
-            _summaryMsgRows.emplace_back(idx, g); // register the row so HighlightSummaryMessage can band it
+            _WireSummaryContextMenu(tb, rowIndex);
+            _WireSummaryContextMenu(g, rowIndex);
+            if (idx >= 0)
+            {
+                _summaryMsgRows.emplace_back(idx, g); // register the row so HighlightSummaryMessage can band it
+            }
             return g;
         };
         size_t i = 0;
-        // RenderSummaryBox numbers the messages strictly sequentially (1..N, one per prompt). Only treat a
-        // line as a real message-START when its number is the NEXT expected one — so in wrap-ON mode a
-        // multi-line prompt's continuation line that merely LOOKS like "2. foo" isn't mis-detected as a
-        // numbered message (and mis-mapped to the wrong prompt). expectedMsg is the next 0-based index.
-        int expectedMsg = 0;
-        // Agentmaster: with the previous-session toggle ON, the renderer puts each pre-compaction /
-        // cross-file segment ABOVE the current conversation, under its own "Previous session N" header,
-        // and numbers ITS prompts 1.. independently. Those numbers do NOT index _summaryUserMsgs (the
-        // CURRENT segment's prompts only), so such a line must never become a jump / Copy-Prompt row — it
-        // would resolve to a different prompt entirely (and, by consuming expectedMsg, would also strip
-        // the real messages below of their buttons). The section's KIND is decided by the FIRST line after
-        // each separator — every section starts with one — so a wrapped message's continuation lines can
-        // never flip it, and a prompt whose text happens to start with "Previous session " is never a
-        // section's first line (the current messages' first line is always " 1. ...").
-        bool sectionIsPrevious = false;
+        // Agentmaster (the summary's conversation chain): the rendered lines are matched back to the rows
+        // they were rendered from, IN ORDER — RenderSummaryBox writes one " N. " line per prompt row and one
+        // kSessionSepMark line per separator row, both in row order:
+        //  * promptCursor — the next prompt row (0-based). The numbers count 1..N continuously across the
+        //    sessions of the chain, so a line is that row's START only when its number is exactly
+        //    promptCursor + 1: in wrap-ON mode a multi-line prompt's continuation line that merely LOOKS
+        //    like "2. foo" can never steal a row (and mis-map "Copy Prompt" / the ▸ jump).
+        //  * sepCursor — the next separator row. A kSessionSepMark line is that separator only when it
+        //    carries the row's id, so a prompt's own text can never pose as one.
+        int promptCursor = 0;
+        size_t sepCursor = 0;
         // Agentmaster: the section's first line is a bare "<Label>:" LIST header (IsSummaryListHeader —
         // Files Created / Edited / Read, Skills Loaded, …): its "* " item lines render as a NoWrap +
-        // clipped run instead of wrapping. Decided by the section's FIRST line like sectionIsPrevious, so
-        // a "* " bullet inside a wrapped message or the Recap can never be mistaken for a list item.
+        // clipped run instead of wrapping. Decided by the section's FIRST line after each rule, so a "* "
+        // bullet inside a wrapped message or the Recap can never be mistaken for a list item.
         bool sectionIsList = false;
         bool sectionKindPending = true; // the box's first section starts at the top, with no leading separator
         while (i <= text.size())
@@ -1325,10 +1415,8 @@ namespace winrt::TerminalApp::implementation
             const bool isSep = (lineStr.size() == 1 && lineStr[0] == kSepMark);
             if (!isSep && sectionKindPending)
             {
-                // A section's FIRST line names its kind: a "Previous session N · <label>" header opens a
-                // previous segment (its numbered prompts index ITS list); a bare "<Label>:" header opens a
-                // "* item" list section; anything else is a normal section.
-                sectionIsPrevious = (lineStr.rfind(L"Previous session ", 0) == 0);
+                // A section's FIRST line names its kind: a bare "<Label>:" header opens a "* item" list
+                // section; anything else is a normal section.
                 sectionIsList = IsSummaryListHeader(lineStr);
                 sectionKindPending = false;
             }
@@ -1341,15 +1429,21 @@ namespace winrt::TerminalApp::implementation
                 rule.Background(Fill(0x40, 0xFF, 0xFF, 0xFF));
                 rule.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4));
                 _summaryStack.Children().Append(rule);
-                sectionIsPrevious = false; // a new section opens below this rule; the next line names its kind
-                sectionIsList = false;
+                sectionIsList = false; // a new section opens below this rule; the next line names its kind
                 sectionKindPending = true;
             }
-            else if (const int mi = ParseSummaryMsgIndex(lineStr); _onJumpToPrompt && !sectionIsPrevious && mi == expectedMsg && mi < static_cast<int>(_summaryUserMsgs.size()))
+            else if (!lineStr.empty() && lineStr[0] == kSessionSepMark && sepCursor < _summarySeparatorRows.size() &&
+                     lineStr.compare(1, std::wstring::npos, _summarySeparatorRows[sepCursor].sessionId) == 0)
             {
-                flushSeg(); // close the run above this numbered message; render it with a jump button
-                _summaryStack.Children().Append(makeJumpRow(lineStr, mi));
-                ++expectedMsg; // the next message-start must be the following number
+                flushSeg(); // close the run above: the separator follows the earlier session's last prompt
+                _summaryStack.Children().Append(_MakeSessionSeparator(_summarySeparatorRows[sepCursor]));
+                ++sepCursor;
+            }
+            else if (promptCursor < static_cast<int>(_summaryPromptRows.size()) && ParseSummaryMsgIndex(lineStr) == promptCursor)
+            {
+                flushSeg(); // close the run above this numbered prompt; render it as its own row
+                _summaryStack.Children().Append(makePromptRow(lineStr, promptCursor));
+                ++promptCursor; // the next prompt-start must be the following number
             }
             else
             {
@@ -1371,6 +1465,130 @@ namespace winrt::TerminalApp::implementation
         // a button that resolves to nothing is still clickable and re-checks on click.
         _RefreshJumpEligibility();
         _ApplySummaryHighlight(); // re-apply the jumped-to band onto the freshly-rebuilt rows
+        _summaryRenderedText = text; // the body is complete: an identical later reload may skip the rebuild
+    }
+
+    // Agentmaster (the summary's conversation chain): the clickable SESSION SEPARATOR (see the declaration).
+    // Drawn as a rule — a short dash, the id's first 8 characters, a dash to the right edge — in the panel's
+    // own rule + dim-text colors, so it reads as a mark INSIDE one conversation rather than a new section.
+    // It is a Button with the jump buttons' recipe (a transparent but hit-testable fill whose stock
+    // hover/press highlight is the "clickable" cue; never a tab stop — keyboard focus stays on the ConPTY).
+    winrt::Windows::UI::Xaml::UIElement AgentTabOverlay::_MakeSessionSeparator(const SummaryConversationRow& row)
+    {
+        const std::wstring id = row.sessionId;
+        const std::wstring shortId = id.substr(0, std::min<size_t>(8, id.size()));
+
+        // The hover text: whose conversation it is up to here, how the session below continued it, and
+        // what a click does. A via the chain did not name ("" or an unexpected token) reads neutrally.
+        std::wstring how = L"The session below continues it.";
+        if (row.continuedBy == L"fork")
+        {
+            how = L"The session below is a fork of it.";
+        }
+        else if (row.continuedBy == L"plan")
+        {
+            how = L"The session below restarted it from plan mode.";
+        }
+        else if (row.continuedBy == L"clear")
+        {
+            how = L"The session below continued it after /clear.";
+        }
+        else if (row.continuedBy == L"handover")
+        {
+            how = L"The session below took it over with /handover.";
+        }
+        std::wstring hover = L"Session " + id;
+        if (!row.sessionTitle.empty())
+        {
+            hover += L"\n\x201C" + row.sessionTitle + L"\x201D";
+        }
+        hover += L"\nThe conversation up to here is this session. " + how;
+        hover += L"\nClick to copy its session id.";
+        const winrt::hstring hoverTip{ hover };
+
+        // [10-px dash][id][dash to the edge] — the dashes are 1-px rules centered on the id's line.
+        Grid g{};
+        {
+            ColumnDefinition lead{};
+            lead.Width(GridLengthHelper::FromPixels(10));
+            ColumnDefinition label{};
+            label.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            ColumnDefinition rest{};
+            rest.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            g.ColumnDefinitions().Append(lead);
+            g.ColumnDefinitions().Append(label);
+            g.ColumnDefinitions().Append(rest);
+        }
+        for (const int column : { 0, 2 })
+        {
+            Border dash{};
+            dash.Height(1);
+            dash.VerticalAlignment(VerticalAlignment::Center);
+            dash.Background(Fill(0x40, 0xFF, 0xFF, 0xFF)); // the section rules' color
+            Grid::SetColumn(dash, column);
+            g.Children().Append(dash);
+        }
+        TextBlock idText{};
+        idText.FontFamily(FontFamily{ L"Cascadia Mono" });
+        idText.FontSize(10);
+        idText.Foreground(Fill(0xFF, 0x9E, 0x9E, 0x9E)); // dim: a marker, not content
+        idText.Margin(ThicknessHelper::FromLengths(4, 0, 4, 0));
+        idText.VerticalAlignment(VerticalAlignment::Center);
+        idText.Text(winrt::hstring{ shortId });
+        Grid::SetColumn(idText, 1);
+        g.Children().Append(idText);
+
+        Button btn{};
+        btn.Background(Fill(0, 0, 0, 0)); // a TRANSPARENT brush (not null): the whole rule is hit-testable
+        btn.BorderThickness(ThicknessHelper::FromUniformLength(0));
+        btn.Padding(ThicknessHelper::FromUniformLength(0));
+        btn.MinWidth(0);
+        btn.MinHeight(0);
+        btn.IsTabStop(false); // never pull keyboard focus off the ConPTY
+        btn.HorizontalAlignment(HorizontalAlignment::Stretch); // border to border, like the section rules
+        btn.HorizontalContentAlignment(HorizontalAlignment::Stretch);
+        btn.VerticalContentAlignment(VerticalAlignment::Center);
+        btn.Margin(ThicknessHelper::FromLengths(0, 3, 0, 3));
+        btn.Content(g);
+        AgentSetTip(btn, hoverTip);
+        btn.Click([weak = get_weak(), id](const IInspectable& sender, const RoutedEventArgs&) {
+            // CONTAINED: a XAML event handler — an escape is a stowed-exception fail-fast of the whole app.
+            try
+            {
+                // The bool-returning writer (not CopyTextToClipboard, which only chimes) so the tooltip can
+                // tell the truth: a copy that never landed (the clipboard held by another app past the
+                // writer's retries) says so instead of claiming success.
+                const bool copied = RobustCopyTextToClipboard(id);
+                if (copied)
+                {
+                    PlayActionSound(); // the same "copy is done" chime every other copy plays
+                }
+                if (const auto el = sender.try_as<UIElement>())
+                {
+                    AgentShowTipNow(el, copied ? winrt::hstring{ L"Copied session id of up to here" } :
+                                                 winrt::hstring{ L"Could not copy the session id: another app holds the clipboard. Click again." });
+                }
+                if (const auto self = weak.get())
+                {
+                    ::Agentmaster::LogNav(L"copy summary-session-id " + ::Agentmaster::ShortId(self->_sessionId) + L" -> " + id +
+                                          (copied ? L"" : L" (clipboard busy, not copied)"));
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"AgentTabOverlay summary session separator copy");
+            }
+        });
+        // After a click the tip text is the confirmation; leaving gives the NEXT hover its description back
+        // (AgentSetTip's own PointerExited, attached first above, has already closed the open tip).
+        btn.PointerExited([hoverTip](const IInspectable& sender, const PointerRoutedEventArgs&) {
+            if (const auto el = sender.try_as<UIElement>())
+            {
+                AgentSetTip(el, hoverTip);
+            }
+        });
+        _WireSummaryContextMenu(btn, -1); // right-click => the shared menu (no "Copy Prompt": not a prompt)
+        return btn;
     }
 
     void AgentTabOverlay::SetSummaryToggleHandler(std::function<void()> handler)
@@ -1672,6 +1890,7 @@ namespace winrt::TerminalApp::implementation
     void AgentTabOverlay::_RefreshSummary()
     {
         _summaryMtime = 0; // invalidate the mtime gate so _LoadSummaryAsync re-reads the file
+        _summaryRenderedText.clear(); // "rebuild this panel now": never skip the rebuild, even for identical content
         if (_summaryLoading)
         {
             // A load is already in flight; mark dirty so its completion re-renders (the dirty-flag path
@@ -1688,32 +1907,33 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    void AgentTabOverlay::_ToggleSummaryPrevious()
+    void AgentTabOverlay::_ToggleSummaryHistory()
     {
-        // The previous-session icon flips the GLOBAL setting (AppSettings::summaryPanelShowPrevious), not
-        // per-session state: hand off to the page, which does the freshest-disk read-modify-write of
-        // settings.json AND applies it live to every linked overlay in the window (SetSummaryShowPrevious).
-        if (_onToggleSummaryPrevious)
+        // The ⏮ icon flips the GLOBAL setting (AppSettings::summaryPanelShowHistory), not per-session
+        // state: hand off to the page, which does the freshest-disk read-modify-write of settings.json AND
+        // applies it live to every linked overlay in the window (SetSummaryShowHistory).
+        if (_onToggleSummaryHistory)
         {
-            _onToggleSummaryPrevious();
+            _onToggleSummaryHistory();
         }
     }
 
-    // Recolor the previous-session icon to reflect the toggle: a dim gray when OFF (previous sessions
-    // hidden), a clearly lighter shade when ON (shown) — matching the wrap/truncate toggles.
-    void AgentTabOverlay::_UpdateSummaryPrevButtonVisual()
+    // Recolor the ⏮ icon to reflect the toggle: a dim gray when OFF (only the part after the last
+    // compaction), a clearly lighter shade when ON (the whole conversation) — matching the wrap/truncate
+    // toggles.
+    void AgentTabOverlay::_UpdateSummaryHistoryButtonVisual()
     {
-        if (!_summaryPrevIcon)
+        if (!_summaryHistoryIcon)
         {
             return;
         }
-        _summaryPrevIcon.Foreground(_summaryShowPrevious ? Fill(0xFF, 0xE6, 0xE6, 0xE6)  // ON: lighter (active)
-                                                         : Fill(0xFF, 0x8C, 0x8C, 0x8C)); // OFF: dim (inactive)
+        _summaryHistoryIcon.Foreground(_summaryShowHistory ? Fill(0xFF, 0xE6, 0xE6, 0xE6)  // ON: lighter (active)
+                                                           : Fill(0xFF, 0x8C, 0x8C, 0x8C)); // OFF: dim (inactive)
     }
 
     // Recolor the badge's PENCIL (the summary-panel toggle in the row-1 action strip) to reflect the
     // GLOBAL showSummaryPanel — dim when OFF, lighter when ON, the same state language as the panel's
-    // wrap/truncate/previous toggles. The pencil was the ONE toggle in the overlay with NO state
+    // wrap/truncate/whole-conversation toggles. The pencil was the ONE toggle in the overlay with NO state
     // visual: on a tab whose panel has nothing to render (below), a click changed nothing visible
     // anywhere — the "clicking the pencil does nothing / button not hit" report, where the diagnostic
     // trace showed every CLICK firing and the setting flipping, invisibly. Driven by SetSummaryEnabled
@@ -1757,24 +1977,26 @@ namespace winrt::TerminalApp::implementation
         _ApplySummaryVisibility(); // the body is non-empty now — the panel shows
     }
 
-    void AgentTabOverlay::SetSummaryShowPrevious(bool on)
+    void AgentTabOverlay::SetSummaryShowHistory(bool on)
     {
-        // The show-previous mode is a GLOBAL setting (AppSettings::summaryPanelShowPrevious), mirrored into
-        // the overlay here by the page — on attach (seed) and on every toggle (broadcast to every linked
-        // overlay in the window). The flag is BAKED into the rendered text (RenderSummaryBox), so a real
-        // change must force a re-analyze+render: reset the mtime gate and re-pull from the freshest
-        // snapshot. Always refresh the icon color (the seed may match the default but still needs painting).
-        const bool changed = (_summaryShowPrevious != on);
-        _summaryShowPrevious = on;
-        _UpdateSummaryPrevButtonVisual();
+        // The whole-conversation mode is a GLOBAL setting (AppSettings::summaryPanelShowHistory), mirrored
+        // into the overlay here by the page — on attach (seed) and on every toggle (broadcast to every
+        // linked overlay in the window). The flag decides which rows are rendered (BuildSummaryConversation),
+        // so a real change must force a re-analyze+render: reset the mtime gate and re-pull from the
+        // freshest snapshot (the earlier sessions come from CollectConversationUpstream's process-wide
+        // cache, so turning it back on re-reads nothing). Always refresh the icon color (the seed may match
+        // the default but still needs painting).
+        const bool changed = (_summaryShowHistory != on);
+        _summaryShowHistory = on;
+        _UpdateSummaryHistoryButtonVisual();
         if (!changed)
         {
-            return; // seed with the same value — nothing baked differently, no reload
+            return; // seed with the same value — nothing rendered differently, no reload
         }
         _summaryMtime = 0; // invalidate the mtime gate so _LoadSummaryAsync re-renders with the new flag
         if (_summaryLoading)
         {
-            _summaryPrevDirty = true; // a load is in flight with the OLD flag; re-render on completion (else the toggle wouldn't take until the transcript next grew)
+            _summaryHistoryDirty = true; // a load is in flight with the OLD flag; re-render on completion (else the toggle wouldn't take until the transcript next grew)
             return;
         }
         if (_summaryEnabled && _registry && !_sessionId.empty())
@@ -1786,9 +2008,9 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    void AgentTabOverlay::SetSummaryPreviousToggleHandler(std::function<void()> handler)
+    void AgentTabOverlay::SetSummaryHistoryToggleHandler(std::function<void()> handler)
     {
-        _onToggleSummaryPrevious = std::move(handler);
+        _onToggleSummaryHistory = std::move(handler);
     }
 
     void AgentTabOverlay::_ToggleSummaryTruncate()
@@ -1906,13 +2128,12 @@ namespace winrt::TerminalApp::implementation
         std::wstring liveGlyph{ StateGlyph(s.state) };
         std::wstring liveLabel{ StateLabel(s.state) };
         _summaryLoading = true;
-        // Cross-file lineage memo: reuse the already-resolved parents when they were computed for THIS
-        // conv id (parentage is immutable); a rebind to a new id recomputes. Avoids a per-write dir scan.
-        const bool lineageCached = (_summaryLineageId == convId);
-        _LoadSummaryAsync(_summaryPath, codex, convId, std::move(forkParent), std::move(cwd), std::move(liveGlyph), std::move(liveLabel), _summaryMtime, _summaryWrapNewlines, _summaryTruncate, _summaryShowPrevious, lineageCached, _summaryLineage);
+        // The earlier sessions need no memo here: CollectConversationUpstream caches them process-wide per
+        // transcript (+ its recorded link), so a quiet reload or a toggle re-reads nothing.
+        _LoadSummaryAsync(_summaryPath, codex, convId, std::move(forkParent), std::move(cwd), std::move(liveGlyph), std::move(liveLabel), _summaryMtime, _summaryWrapNewlines, _summaryTruncate, _summaryShowHistory, _registry);
     }
 
-    winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring forkParentId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime, bool wrapNewlines, bool truncate, bool showPrevious, bool lineageCached, std::vector<::Agentmaster::ConversationSegment> cachedLineage)
+    winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring forkParentId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime, bool wrapNewlines, bool truncate, bool showHistory, std::shared_ptr<::Agentmaster::SessionRegistry> registry)
     {
         auto strong = get_strong(); // keep the overlay alive across the co_await (it owns _summaryStack)
         // Agentmaster (contained): an exception escaping this fire_and_forget == winrt::terminate() ==
@@ -1960,16 +2181,15 @@ namespace winrt::TerminalApp::implementation
         }
 
         std::wstring text;
-        std::vector<std::wstring> userMsgs; // Agentmaster (SUMMARY_JUMP.md): the raw prompts, aligned with the rendered " N. " lines
+        std::vector<std::wstring> userMsgs; // Agentmaster (SUMMARY_JUMP.md): the CURRENT session's prompts — the ▸ jump list a row's headIndex indexes
+        // Agentmaster (the summary's conversation chain): the rows `text` was rendered from — prompts and
+        // session separators, in display order — published with it, so the panel can match each rendered
+        // line back to its row (Copy Prompt's text, the ▸ jump index, a separator's id + hover text).
+        std::vector<SummaryConversationRow> rows;
         int64_t mtime = prevMtime;
         int64_t createdMs = 0, lastUserMs = 0, lastActivityMs = 0; // times-line instants (computed on reload)
         bool timesComputed = false;
-        bool hasPrevious = false; // Agentmaster (conversation lineage): the analyzed session has a previous (pre-/compact OR cross-file) segment => reveal the toggle button
-        // Agentmaster (cross-file lineage): the /clear + plan-restart parents. Reuse the memo when it was
-        // computed for this session (lineageCached), else walk + memoize below (lineageComputed flags the
-        // writeback). Immutable per session, so a quiet reload never re-walks.
-        std::vector<::Agentmaster::ConversationSegment> lineage = std::move(cachedLineage);
-        bool lineageComputed = false;
+        bool hasHistory = false; // Agentmaster (the summary's conversation chain): there IS earlier history to list (an earlier session of the chain, or a part before a /compact) => reveal the ⏮ toggle
         if (!path.empty())
         {
             try
@@ -1996,23 +2216,26 @@ namespace winrt::TerminalApp::implementation
                     lastActivityMs = info.lastActivityUnixMs;
                     lastUserMs = 0; // a rollout carries no per-message timestamp for the last human prompt
                     text = RenderCodexSummary(info, sessionId, cwd, path, L"", liveGlyph, liveLabel, /*full*/ false, wrapNewlines, truncate);
+                    rows = ::Agentmaster::CodexSummaryConversation(info.userPrompts); // the rows RenderCodexSummary numbered (Copy Prompt per line; no jump, no chain)
                 }
                 else
                 {
                     auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
-                    // Cross-file lineage: PREPEND the /clear + plan-restart parents (oldest first), so the
-                    // panel's "Previous session N" list spans files. Computed once per session, then memoized.
-                    if (!lineageCached)
-                    {
-                        lineage = ::Agentmaster::CollectConversationLineage(sessionId, cwd, 16);
-                        lineageComputed = true; // cache it (even when empty) so a quiet reload won't re-walk
-                    }
-                    if (!lineage.empty())
-                    {
-                        a.previousSegments.insert(a.previousSegments.begin(), lineage.begin(), lineage.end());
-                    }
-                    userMsgs = a.userMsgs; // the prompts, in order — aligns with the rendered " N. " jump rows
-                    hasPrevious = !a.previousSegments.empty(); // a /compact'ed OR cross-file-continued session => the previous-session toggle is meaningful
+                    // Agentmaster (the summary's conversation chain): everything EARLIER in the conversation —
+                    // the sessions this one continues (a fork's parent, a plan-restart parent, a /clear
+                    // predecessor, a /handover origin), walked back link by link; never a session that
+                    // continued THIS one (that belongs to its own summary). Collected even while the ⏮ toggle
+                    // is OFF: whether the toggle is shown at all depends on it, and the walk is cached
+                    // process-wide per transcript (+ its recorded link), so a reload costs a stat + a lookup
+                    // and an ordinary session pays one head read, once. The /clear and /handover links are
+                    // not in any transcript — Agentmaster recorded them on the session records, which the
+                    // lookup reads.
+                    const auto upstream = ::Agentmaster::CollectConversationUpstream(std::filesystem::path{ path }, MakeRecordedPredecessorLookup(registry));
+                    hasHistory = !upstream.segments.empty() || !a.previousSegments.empty();
+                    rows = ::Agentmaster::BuildSummaryConversation(a, upstream, showHistory, [&registry](const std::wstring& sid) {
+                        return SummarySessionTitleOf(registry, sid);
+                    });
+                    userMsgs = a.userMsgs; // the current part's prompts, in order — the list each row's headIndex indexes
                     createdMs = IsoToUnixMs(a.firstTs);
                     lastUserMs = IsoToUnixMs(a.lastUserTs);
                     lastActivityMs = IsoToUnixMs(a.lastTs);
@@ -2027,7 +2250,7 @@ namespace winrt::TerminalApp::implementation
                             planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
                         }
                     }
-                    text = RenderSummaryBox(a, sessionId, cwd, path, L"", liveGlyph, liveLabel, planFile, /*full*/ false, wrapNewlines, truncate, showPrevious);
+                    text = RenderSummaryBox(a, sessionId, cwd, path, L"", liveGlyph, liveLabel, planFile, /*full*/ false, wrapNewlines, truncate, rows);
                 }
                 timesComputed = true;
             }
@@ -2039,9 +2262,9 @@ namespace winrt::TerminalApp::implementation
                 // isn't re-analyzed in a hot loop every 5s tick — only real growth retries.
                 text.clear();
                 userMsgs.clear();
-                lineage.clear();
+                rows.clear();
                 timesComputed = false;
-                lineageComputed = false;
+                hasHistory = false;
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[summary] contained _LoadSummaryAsync analyze throw (no crash)\n");
             }
         }
@@ -2049,36 +2272,50 @@ namespace winrt::TerminalApp::implementation
         // Hop back to the UI thread to publish (the StackPanel build + member writes are UI-thread only).
         if (auto disp = _dispatcher)
         {
-            disp.TryEnqueue([weak = get_weak(), text, userMsgs, path, cachePath, mtime, createdMs, lastUserMs, lastActivityMs, timesComputed, hasPrevious, sessionId, lineage, lineageComputed]() {
+            disp.TryEnqueue([weak = get_weak(), text, userMsgs, rows, path, cachePath, mtime, createdMs, lastUserMs, lastActivityMs, timesComputed, hasHistory]() {
                 if (auto self = weak.get())
                 {
                     // Agentmaster (contained): a XAML throw in this dispatcher callback would fail-fast
                     // the app (0xC000027B stowed exception) — contain it and keep _summaryLoading sane.
                     try
                     {
+                    bool sameRows = false; // this load's rows equal the ones the current body was built from
                     if (timesComputed)
                     {
-                        self->_summaryUserMsgs = userMsgs; // set BEFORE _SetSummaryContent so jump rows resolve the right prompt
-                        // Agentmaster (cross-file lineage): memoize the resolved parents so a quiet mtime-gated
-                        // reload OR a show-previous toggle reuses them (no re-walk). Keyed by conv id — a rebind
-                        // recomputes. Stored even when empty (a "no parents" verdict is also worth caching).
-                        if (lineageComputed)
+                        // Agentmaster (the summary's conversation chain): split the rows by kind, each kept in
+                        // display order — _SetSummaryContent matches the k-th numbered line to promptRows[k]
+                        // and the j-th session-separator line to sepRows[j]. Both, like the jump list, are set
+                        // BEFORE _SetSummaryContent so every rebuilt row resolves the right prompt.
+                        std::vector<SummaryConversationRow> promptRows;
+                        std::vector<SummaryConversationRow> sepRows;
+                        for (const auto& row : rows)
                         {
-                            self->_summaryLineageId = sessionId;
-                            self->_summaryLineage = lineage;
+                            (row.sessionId.empty() ? promptRows : sepRows).push_back(row);
                         }
-                        // Agentmaster (conversation lineage): reveal the previous-session toggle ONLY when this
-                        // (freshly analyzed) session actually has a previous (pre-/compact OR cross-file) segment;
-                        // hide it otherwise. Only touched on a real re-analyze, so a quiet reload keeps the last state.
-                        if (self->_summaryPrevBtn)
+                        sameRows = SameSummaryRows(promptRows, self->_summaryPromptRows) && SameSummaryRows(sepRows, self->_summarySeparatorRows);
+                        self->_summaryUserMsgs = userMsgs;
+                        self->_summaryPromptRows = std::move(promptRows);
+                        self->_summarySeparatorRows = std::move(sepRows);
+                        // Reveal the ⏮ toggle ONLY when there IS earlier history to list or hide (an earlier
+                        // session of the chain, or a part before a /compact) — with none it would change
+                        // nothing. Only touched on a real re-analyze, so a quiet reload keeps the last state.
+                        if (self->_summaryHistoryBtn)
                         {
-                            self->_summaryPrevBtn.Visibility(hasPrevious ? winrt::Windows::UI::Xaml::Visibility::Visible
-                                                                         : winrt::Windows::UI::Xaml::Visibility::Collapsed);
+                            self->_summaryHistoryBtn.Visibility(hasHistory ? winrt::Windows::UI::Xaml::Visibility::Visible
+                                                                           : winrt::Windows::UI::Xaml::Visibility::Collapsed);
                         }
                     }
                     if (!text.empty())
                     {
-                        self->_SetSummaryContent(text); // text runs -> TextBlocks, sentinels -> full-width rules
+                        // Agentmaster (the summary's conversation chain): skip the rebuild when the body
+                        // already shows exactly this — the same text AND the same rows. A reload runs on
+                        // every transcript write, most of them assistant-only (the prompts, files and tasks
+                        // read the same); with the whole conversation listed the body holds hundreds of rows,
+                        // and rebuilding them unchanged costs UI-thread time and resets the panel's scroll.
+                        if (!sameRows || text != self->_summaryRenderedText)
+                        {
+                            self->_SetSummaryContent(text); // text runs -> TextBlocks, sentinels -> full-width rules
+                        }
                     }
                     if (timesComputed)
                     {
@@ -2096,19 +2333,19 @@ namespace winrt::TerminalApp::implementation
                     self->_summaryLoading = false;
                     self->_UpdateTimesLine(); // reflect the (possibly refreshed) instants right away
                     self->_EnsureSummaryPlaceholder(); // a no-transcript session yields NO text/times — show the empty-state line instead of an invisible (dead-looking) toggle
-                    const bool flagDirty = self->_summaryWrapDirty || self->_summaryTruncateDirty || self->_summaryPrevDirty;
+                    const bool flagDirty = self->_summaryWrapDirty || self->_summaryTruncateDirty || self->_summaryHistoryDirty;
                     if (flagDirty || self->_summaryReloadPending)
                     {
                         // Re-run the load now. Two reasons can land here:
-                        //  • flagDirty: a wrap / truncate / show-previous toggle flipped mid-load, so this render
-                        //    used the OLD flag(s) — force a full re-render (invalidate the mtime gate).
+                        //  • flagDirty: a wrap / truncate / whole-conversation toggle flipped mid-load, so this
+                        //    render used the OLD flag(s) — force a full re-render (invalidate the mtime gate).
                         //  • _summaryReloadPending: a content refresh was requested while this load was in flight
                         //    (the transcript may have grown) — re-check WITHOUT forcing, so the mtime gate makes a
                         //    no-growth re-check a cheap no-op while real growth is picked up. This closes the
                         //    "dropped final refresh" gap (a turn's closing message arriving after the last notify).
                         self->_summaryWrapDirty = false;
                         self->_summaryTruncateDirty = false;
-                        self->_summaryPrevDirty = false;
+                        self->_summaryHistoryDirty = false;
                         self->_summaryReloadPending = false;
                         if (flagDirty)
                         {
@@ -2151,6 +2388,9 @@ namespace winrt::TerminalApp::implementation
             }
             catch (...)
             {
+                // Rule #18: never lose a swallowed exception. The latch-clear could not be posted either, so
+                // the panel stays "loading" until its overlay is rebuilt (the next selection / reattach).
+                ::Agentmaster::AgentLogCaughtException(L"AgentTabOverlay _LoadSummaryAsync latch-clear post");
             }
         }
     }

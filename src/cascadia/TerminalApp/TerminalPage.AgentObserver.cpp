@@ -4657,10 +4657,11 @@ namespace winrt::TerminalApp::implementation
         // (AppSettings::summaryPanelTruncate) — seed this overlay; the truncate toggle (left of the wrap
         // toggle) flips it via the handler below.
         overlay->SetSummaryTruncate(_appSettings.summaryPanelTruncate);
-        // Summary panel show-previous mode (conversation lineage): a GLOBAL setting
-        // (AppSettings::summaryPanelShowPrevious) — seed this overlay; the previous-session toggle
-        // (leftmost in the times bar, shown only when /compact'ed) flips it via the handler below.
-        overlay->SetSummaryShowPrevious(_appSettings.summaryPanelShowPrevious);
+        // Summary panel whole-conversation mode (the summary's conversation chain): a GLOBAL setting
+        // (AppSettings::summaryPanelShowHistory, default ON) — seed this overlay; the ⏮ toggle (leftmost
+        // in the times bar, shown only when there IS earlier history: an earlier session of the chain or
+        // a part before a /compact) flips it via the handler below.
+        overlay->SetSummaryShowHistory(_appSettings.summaryPanelShowHistory);
         // Per-tab overlay REST/HOVER opacities (TAB_OVERLAY.md): GLOBAL settings
         // (AppSettings::tabOverlayRestOpacity / tabOverlayHoverOpacity) — seed this overlay; the cog's
         // "Overlay opacity" slider re-applies them live via _RefreshOverlayOpacities (Save + broadcast).
@@ -4694,10 +4695,10 @@ namespace winrt::TerminalApp::implementation
                     self->_ToggleSummaryTruncate();
                 }
             });
-            overlay->SetSummaryPreviousToggleHandler([weakThis]() {
+            overlay->SetSummaryHistoryToggleHandler([weakThis]() {
                 if (auto self = weakThis.get())
                 {
-                    self->_ToggleSummaryPrevious();
+                    self->_ToggleSummaryHistory();
                 }
             });
             // A grip drag persists the new size GLOBALLY (the treeSort / archiveSplitFraction idiom): a
@@ -7128,27 +7129,31 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (conversation lineage): the previous-session toggle (leftmost in the panel's times bar,
-    // shown only when the session was /compact'ed) flips whether the pre-compaction segment(s) render
-    // above the current Messages. Same GLOBAL setting + freshest-disk RMW + live broadcast idiom as
-    // _ToggleSummaryWrap / _ToggleSummaryTruncate (AppSettings::summaryPanelShowPrevious).
-    void TerminalPage::_ToggleSummaryPrevious()
+    // Agentmaster (the summary's conversation chain): the ⏮ toggle (leftmost in the panel's times bar,
+    // shown only when there IS earlier history) flips whether the summary lists the WHOLE conversation —
+    // the earlier sessions this one continues (a fork's parent, a plan-restart parent, a /clear
+    // predecessor, a /handover origin) and the parts a /compact summarized, numbered as one with a
+    // session-id separator between sessions — or only the part after the last compaction. Same GLOBAL
+    // setting + freshest-disk RMW + live broadcast idiom as _ToggleSummaryWrap / _ToggleSummaryTruncate
+    // (AppSettings::summaryPanelShowHistory). The Sessions page's detail box is not touched: it renders no
+    // conversation chain, so this flag changes nothing there.
+    void TerminalPage::_ToggleSummaryHistory()
     {
         auto s = ::Agentmaster::LoadAppSettings();
-        const bool next = !s.summaryPanelShowPrevious;
-        s.summaryPanelShowPrevious = next;
+        const bool next = !s.summaryPanelShowHistory;
+        s.summaryPanelShowHistory = next;
         ::Agentmaster::SaveAppSettings(s);
-        _appSettings.summaryPanelShowPrevious = next;
+        _appSettings.summaryPanelShowHistory = next;
         for (const auto& [id, ov] : _claudeOverlays)
         {
             if (ov)
             {
-                ov->SetSummaryShowPrevious(next);
+                ov->SetSummaryShowHistory(next);
             }
         }
         if (_sidePanelSummaryOverlay)
         {
-            _sidePanelSummaryOverlay->SetSummaryShowPrevious(next); // the side panel's fill-hosted overlay sits outside _claudeOverlays
+            _sidePanelSummaryOverlay->SetSummaryShowHistory(next); // the side panel's fill-hosted overlay sits outside _claudeOverlays
         }
     }
 

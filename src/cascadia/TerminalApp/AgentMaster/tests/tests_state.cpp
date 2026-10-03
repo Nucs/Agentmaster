@@ -1027,6 +1027,124 @@ void TestForkSourceIdEcho()
     CHECK(reg.Get(L"re-started")->state == SessionState::Done, "stale-end: the current host's SessionEnd applies normally");
 }
 
+// Agentmaster (the summary's conversation chain — SessionInfo::continuedFromId): a /clear leaves no trace in
+// any transcript, so SessionRegistry::OnHookEvent records it: the SessionStart whose source is "clear" is
+// paired with the conversation whose SessionEnd(reason "clear") just arrived on the SAME ConPTY — else (that
+// SessionEnd lost) with the ConPTY's other record, live before archived. Pins: the exact pairing beats a
+// FRESHER record on the same tab (a child `claude -p` that inherited WT_SESSION); the fallback; a /resume, a
+// fresh start and a /compact continue nothing; no candidate => no link; a ConPTY's /clear never pairs on
+// another tab; an entry is consumed by its pairing; a SessionEnd for an id the registry never knew still
+// pairs; the first writer wins (a /handover origin recorded before the hook stays).
+void TestSummaryChainLinks()
+{
+    std::wprintf(L"SessionRegistry: /clear pairing for the summary's conversation chain:\n");
+    const auto hook = [](const std::wstring& id, HookEvent ev, const std::wstring& source, const std::wstring& token) {
+        HookMessage m = Msg(id, ev);
+        m.cwd = L"K:/x";
+        m.source = source;
+        m.tabToken = token;
+        return m;
+    };
+    const auto linkOf = [](const SessionRegistry& reg, const std::wstring& id) {
+        const auto s = reg.Get(id);
+        return s ? std::make_pair(s->continuedFromId, s->continuedVia) : std::make_pair(std::wstring{ L"<missing>" }, std::wstring{});
+    };
+
+    // (1) EXACT: the conversation the /clear ended — even beside a FRESHER live record on the same ConPTY.
+    {
+        SessionRegistry reg;
+        SessionInfo a = MakeSession(L"clr-a");
+        a.live = true;
+        a.tabToken = L"wt-c1";
+        reg.Upsert(a);
+        reg.OnHookEvent(hook(L"clr-a", HookEvent::SessionEnd, L"clear", L"wt-c1"));
+        SessionInfo child = MakeSession(L"clr-child"); // a `claude -p` a hook ran: same WT_SESSION, newest hook
+        child.live = true;
+        child.tabToken = L"wt-c1";
+        child.lastHookUnixMs = NowMsTest() + 60'000;
+        reg.Upsert(child);
+        reg.OnHookEvent(hook(L"clr-b", HookEvent::SessionStart, L"clear", L"wt-c1"));
+        CHECK(linkOf(reg, L"clr-b") == std::make_pair(std::wstring{ L"clr-a" }, std::wstring{ L"clear" }),
+              "/clear pairing: the new conversation continues the one whose SessionEnd(clear) arrived on its ConPTY");
+        CHECK(linkOf(reg, L"clr-a").first.empty() && linkOf(reg, L"clr-child").first.empty(),
+              "/clear pairing: only the NEW conversation records a link");
+        // The entry was consumed: a duplicate (twin) delivery of the same SessionStart changes nothing, and a
+        // LATER /clear on that ConPTY with no SessionEnd seen falls back to the ConPTY's records.
+        reg.OnHookEvent(hook(L"clr-b", HookEvent::SessionStart, L"clear", L"wt-c1"));
+        CHECK(linkOf(reg, L"clr-b").first == L"clr-a", "/clear pairing: a duplicate SessionStart keeps the first link");
+    }
+
+    // (2) FALLBACK (the SessionEnd was lost): the ConPTY's LIVE record beats an archived earlier conversation.
+    {
+        SessionRegistry reg;
+        SessionInfo old = MakeSession(L"fb-old");
+        old.live = false;
+        old.tabToken = L"wt-c2";
+        old.lastHookUnixMs = NowMsTest() + 60'000; // fresher, yet archived
+        reg.Upsert(old);
+        SessionInfo cur = MakeSession(L"fb-cur");
+        cur.live = true;
+        cur.tabToken = L"wt-c2";
+        reg.Upsert(cur);
+        reg.OnHookEvent(hook(L"fb-new", HookEvent::SessionStart, L"clear", L"WT-C2")); // tokens match case-insensitively
+        CHECK(linkOf(reg, L"fb-new") == std::make_pair(std::wstring{ L"fb-cur" }, std::wstring{ L"clear" }),
+              "/clear pairing: with no SessionEnd(clear) seen, the ConPTY's live record (an archived one loses)");
+    }
+
+    // (3) Other sources continue nothing; no candidate => no link.
+    {
+        SessionRegistry reg;
+        SessionInfo a = MakeSession(L"src-a");
+        a.live = true;
+        a.tabToken = L"wt-c3";
+        reg.Upsert(a);
+        reg.OnHookEvent(hook(L"src-resume", HookEvent::SessionStart, L"resume", L"wt-c3"));
+        reg.OnHookEvent(hook(L"src-startup", HookEvent::SessionStart, L"startup", L"wt-c3"));
+        reg.OnHookEvent(hook(L"src-compact", HookEvent::SessionStart, L"compact", L"wt-c3"));
+        reg.OnHookEvent(hook(L"src-empty", HookEvent::SessionStart, L"", L"wt-c3"));
+        CHECK(linkOf(reg, L"src-resume").first.empty() && linkOf(reg, L"src-startup").first.empty() &&
+                  linkOf(reg, L"src-compact").first.empty() && linkOf(reg, L"src-empty").first.empty(),
+              "/clear pairing: a /resume, a fresh start, a /compact and an old forwarder's empty source record no link");
+        reg.OnHookEvent(hook(L"src-lonely", HookEvent::SessionStart, L"clear", L"wt-nobody"));
+        CHECK(linkOf(reg, L"src-lonely").first.empty(), "/clear pairing: no record on the ConPTY => no link (never guess)");
+        reg.OnHookEvent(hook(L"src-tokenless", HookEvent::SessionStart, L"clear", L""));
+        CHECK(linkOf(reg, L"src-tokenless").first.empty(), "/clear pairing: a hook without a ConPTY token pairs with nothing");
+    }
+
+    // (4) Per ConPTY: one tab's /clear never pairs on another tab; a SessionEnd for an id the registry never
+    // knew still pairs (the chain walk finds its transcript by id, not through the registry).
+    {
+        SessionRegistry reg;
+        reg.OnHookEvent(hook(L"pc-unknown", HookEvent::SessionEnd, L"clear", L"wt-c4a")); // never registered
+        reg.OnHookEvent(hook(L"pc-other-tab", HookEvent::SessionStart, L"clear", L"wt-c4b"));
+        CHECK(linkOf(reg, L"pc-other-tab").first.empty(), "/clear pairing: a /clear on another ConPTY never takes this one's entry");
+        reg.OnHookEvent(hook(L"pc-next", HookEvent::SessionStart, L"clear", L"wt-c4a"));
+        CHECK(linkOf(reg, L"pc-next").first == L"pc-unknown", "/clear pairing: a SessionEnd(clear) pairs even for an id the registry never knew");
+        // The entry is consumed; the next /clear on the tab without its SessionEnd falls back to the record the
+        // previous /clear created (pc-next holds the ConPTY now).
+        reg.OnHookEvent(hook(L"pc-after", HookEvent::SessionStart, L"clear", L"wt-c4a"));
+        CHECK(linkOf(reg, L"pc-after").first == L"pc-next", "/clear pairing: a consumed entry is never reused; the fallback takes the ConPTY's record");
+    }
+
+    // (5) First writer wins: a /handover successor's origin, recorded at spawn, survives a later /clear hook.
+    {
+        SessionRegistry reg;
+        SessionInfo a = MakeSession(L"fw-a");
+        a.live = true;
+        a.tabToken = L"wt-c5";
+        reg.Upsert(a);
+        SessionInfo b = MakeSession(L"fw-b");
+        b.live = true;
+        b.continuedFromId = L"fw-origin";
+        b.continuedVia = L"handover";
+        reg.Upsert(b);
+        reg.OnHookEvent(hook(L"fw-a", HookEvent::SessionEnd, L"clear", L"wt-c5"));
+        reg.OnHookEvent(hook(L"fw-b", HookEvent::SessionStart, L"clear", L"wt-c5"));
+        CHECK(linkOf(reg, L"fw-b") == std::make_pair(std::wstring{ L"fw-origin" }, std::wstring{ L"handover" }),
+              "/clear pairing: an existing link is never overwritten (the first writer wins)");
+    }
+}
+
 // Agentmaster (RETIRED HOSTS — SessionRegistry::RetireHostToken; the 2026-08-26 deactivate unbind and the
 // restart archives): once Deactivate/Restart replaces a session's connection, the CLOSING claude of the old
 // one keeps reporting for a few seconds — the Fleet Observer still correlates it to the session through the

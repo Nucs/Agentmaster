@@ -15,6 +15,12 @@
 //   5. Chains                       — find_fork_parent / find_plan_parent / resolve_chain / load_history
 //   6. Agents                       — agent_files / agent_files_by_prompt / attach_agents / merged_turn
 //   7. Rendering                    — the Renderer class and render_history
+//   8. Conversation upstream        — NOT in the reference (Agentmaster): the summary panel's
+//                                     whole-conversation view, built on section 5's chain walk
+// Section 5 carries three Agentmaster-only additions the reference has no counterpart for, each
+// marked as such: ChainOptions (how the summary may deviate — a default-constructed one IS the
+// reference walk, which is all Copy ▸ Transcript ever passes), LooksForkCopied and
+// AttachRecordedParent.
 // The PUBLIC entry points (TranscriptTurns.h) close the file; they are the only never-throw seam.
 #define NOMINMAX
 #include "TranscriptTurns.h"
@@ -25,12 +31,14 @@
 #include <charconv>
 #include <climits>
 #include <cmath>
+#include <condition_variable> // section 8: the upstream cache's in-flight wait (one walk per transcript)
 #include <cstdio>
 #include <cstdlib>
 #include <cwchar>
 #include <cwctype>
 #include <deque>
 #include <memory>
+#include <mutex> // section 8: the upstream cache lock
 #include <system_error>
 #include <time.h> // _localtime64_s / _mkgmtime64 — the CRT clock the reference's astimezone() uses on Windows
 #include <tuple>
@@ -40,6 +48,7 @@
 
 #include "ClaudeSpawn.h" // LogSwallowedException — Rule #18: a contained render failure still reaches hooks.log
 #include "ProcessInspect.h" // ScrubLargeBase64Payloads — pasted-image payloads elided before parsing
+#include "SummaryConversation.h" // BuildSummaryConversation / CodexSummaryConversation — defined at the end of this file (the consumers of section 8)
 
 namespace Agentmaster
 {
@@ -2814,6 +2823,62 @@ namespace Agentmaster
             // parent. The slack absorbs clock and time-zone oddities.
             constexpr double kForkMtimeSlackSeconds = 86400.0;
 
+            // Agentmaster (NOT in the reference): how ResolveChain may deviate from resolve_chain() for
+            // the summary panel's conversation view (section 8). A DEFAULT-CONSTRUCTED value is exactly
+            // the reference walk — Copy ▸ Transcript passes none, so its output (and the goldens) cannot
+            // change through this struct.
+            struct ChainOptions
+            {
+                // Run the fork search for a link only when that link's transcript OPENS with a copied line
+                // (LooksForkCopied). The search reads the older transcripts of the whole project folder;
+                // the summary walks a chain on the first summary load of every session, where a search
+                // per ordinary (never-forked) session would be pure waste.
+                bool forkSearchOnlyWhenCopied = false;
+                // After the fork and plan-restart tests both fail, follow the predecessor Agentmaster
+                // recorded for the link (AttachRecordedParent). Null = none (the reference).
+                const RecordedPredecessorFn* recorded = nullptr;
+            };
+
+            // Agentmaster (NOT in the reference): how much older than its file a transcript's first line
+            // must be to count as COPIED. An ordinary session writes its first line as it creates the
+            // file — only the UserPromptSubmit hooks run between the Enter that stamps the line and that
+            // write (measured up to ~15 s on a slow hook host before the exec-form hooks) — while a fork
+            // copies lines minutes to days older than the fork's own first write. 30 s keeps every
+            // ordinary session out of the folder scan with room to spare; a fork made within 30 s of its
+            // parent's FIRST line (an un-compacted parent copies from its very start) is the one case it
+            // gives up, and Copy ▸ Transcript (which never uses this gate) still finds it.
+            constexpr double kForkCopySlackSeconds = 30.0;
+
+            // Agentmaster (NOT in the reference): does this transcript OPEN with a copied line? A fork
+            // copies its parent's context (from the parent's last /compact on) with the original lines'
+            // timestamps, so its first uuid line was written well before its own file was created; an
+            // ordinary session's first line is written as the file appears. Decides whether
+            // ChainOptions::forkSearchOnlyWhenCopied lets the fork search run for a link.
+            //   lines — the transcript's lines, in file order.
+            //   born  — its file's creation time, epoch seconds.
+            // Returns true when the first uuid line predates `born` by more than kForkCopySlackSeconds,
+            // AND when that line's time can't be read (searching is the answer that can't miss a fork);
+            // false when the transcript has no uuid line at all (nothing could have been copied).
+            // Throws std::bad_alloc only.
+            bool LooksForkCopied(const Lines& lines, double born)
+            {
+                for (const Value* line : lines)
+                {
+                    const Value* uuid = JGet(line, L"uuid");
+                    if (!IsStr(uuid) || uuid->str.empty())
+                    {
+                        continue; // a uuid-less bookkeeping line is never a copied conversation line
+                    }
+                    const auto stamp = AwareTs(JGet(line, L"timestamp"));
+                    if (!stamp)
+                    {
+                        return true; // no readable time: search rather than risk missing a fork
+                    }
+                    return static_cast<double>(*stamp) / static_cast<double>(kMicrosPerSecond) < born - kForkCopySlackSeconds;
+                }
+                return false;
+            }
+
             // Owns a Win32 file handle for the duration of a read (closed on every path, a throw included).
             struct FileHandle
             {
@@ -3343,10 +3408,131 @@ namespace Agentmaster
                 return {};
             }
 
+            // Agentmaster (NOT in the reference): attach the predecessor Agentmaster RECORDED for
+            // links[child] — a /clear in the same tab, a /handover origin (RecordedPredecessorFn) — the way
+            // ResolveChain attaches a plan-restart parent, since neither leaves a link in any transcript:
+            // the predecessor's lines written before the child's first line, grafted under the child's
+            // root so the live-branch walk crosses into it. Its transcript is looked for beside the
+            // child's first (a /clear stays in its project folder), then in every project folder (a
+            // handover successor may run in another directory) — FindPlanParent's search order.
+            // Deliberately a separate copy of the plan attach rather than a shared helper: the plan path
+            // is pinned byte for byte to the reference, and this one must never move it.
+            //   links    — the chain so far (child = the link asked about); the parent is appended on success.
+            //   child    — the index of the link whose predecessor is asked for.
+            //   seen     — the path identities already in the chain (the cycle guard); extended on success.
+            //   cache    — the walk's parsed files (the fork search may already hold the predecessor).
+            //   born     — file creation times.
+            //   recorded — the lookup (non-empty).
+            // Returns true when a parent was appended (the walk continues from it); false when nothing was
+            // recorded, it names the child itself, its transcript is gone / unreadable / already in the
+            // chain, or there is nothing to attach to. Throws std::bad_alloc only: a throwing lookup is
+            // contained and logged here (Rule #18) and reads as "nothing recorded".
+            bool AttachRecordedParent(std::vector<ChainLink>& links, size_t child, UuidSet& seen, ChainCache& cache, const TurnsBirthFn& born, const RecordedPredecessorFn& recorded)
+            {
+                std::optional<RecordedPredecessor> rec;
+                try
+                {
+                    rec = recorded(links[child].sessionId);
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"TranscriptTurns AttachRecordedParent lookup");
+                    return false;
+                }
+                if (!rec || rec->sessionId.empty() || LowerAscii(rec->sessionId) == LowerAscii(links[child].sessionId))
+                {
+                    return false; // nothing recorded, or a self-reference (malformed: never follow it)
+                }
+                const fs::path childPath = links[child].path; // a copy: the push_back below may move the vector
+                std::optional<fs::path> parentPath;
+                {
+                    std::vector<fs::path> candidates;
+                    candidates.push_back(childPath.parent_path() / (rec->sessionId + L".jsonl"));
+                    for (const auto& folder : ListSubdirsSorted(childPath.parent_path().parent_path()))
+                    {
+                        candidates.push_back(folder / (rec->sessionId + L".jsonl"));
+                    }
+                    for (const auto& cand : candidates)
+                    {
+                        if (IsFile(cand))
+                        {
+                            parentPath = cand;
+                            break;
+                        }
+                    }
+                }
+                if (!parentPath || seen.count(PathKey(*parentPath)) != 0)
+                {
+                    return false; // its transcript is gone (a never-prompted predecessor has none), or a cycle
+                }
+                LineFile every;
+                if (const auto cached = cache.find(PathKey(*parentPath)); cached != cache.end() && !cached->second->empty())
+                {
+                    every = cached->second;
+                }
+                else
+                {
+                    auto bytes = ReadAllBytes(*parentPath);
+                    if (!bytes)
+                    {
+                        return false; // there but unreadable: as good as gone
+                    }
+                    every = std::make_shared<const std::vector<Value>>(ParseTranscriptJsonl(std::move(*bytes)));
+                }
+                const auto parentBorn = born(*parentPath);
+                if (!parentBorn)
+                {
+                    return false;
+                }
+                // The child's first stamped line marks where the predecessor's part ends: a /clear
+                // predecessor ended there anyway, and a /handover origin's later work is ITS own future
+                // (downstream of the hand-off), never the successor's history.
+                std::wstring firstTs;
+                for (const Value* line : links[child].lines)
+                {
+                    if (Truthy(JGet(line, L"uuid")) && Truthy(JGet(line, L"timestamp")))
+                    {
+                        firstTs = StrOr(JGet(line, L"timestamp"));
+                        break;
+                    }
+                }
+                Lines kept = LinesBefore(PointersTo(*every), firstTs);
+                std::wstring leaf;
+                for (auto it = kept.rbegin(); it != kept.rend(); ++it)
+                {
+                    const Value* uuid = JGet(*it, L"uuid");
+                    if (IsStr(uuid) && !uuid->str.empty())
+                    {
+                        leaf = uuid->str;
+                        break;
+                    }
+                }
+                const std::wstring root = RootUuid(links[child].lines);
+                if (leaf.empty() || root.empty())
+                {
+                    return false; // nothing to attach to (an empty predecessor, or a child with no root)
+                }
+                links[child].via = rec->via;
+                links[child].graft = std::make_pair(root, leaf);
+                ChainLink parent;
+                parent.path = *parentPath;
+                parent.sessionId = parentPath->stem().wstring();
+                parent.born = *parentBorn;
+                parent.owner = every;
+                parent.lines = std::move(kept);
+                parent.title = TranscriptTitle(PointersTo(*every));
+                seen.insert(PathKey(parent.path));
+                links.push_back(std::move(parent));
+                return true;
+            }
+
             // resolve_chain(): the sessions a transcript continues, oldest first; the transcript itself
             // is last. One link at a time — a fork first, else a plan restart — until neither applies,
             // a parent is gone, or a file repeats. Throws TurnsReadError when the head can't be read.
-            std::vector<ChainLink> ResolveChain(const fs::path& head, const TurnsBirthFn& born)
+            // Agentmaster: `chainOpts` (NOT in the reference) lets the summary's walk skip the fork search
+            // for a link that opens with its own line and continue through a recorded predecessor; the
+            // default-constructed value Copy ▸ Transcript passes leaves the walk exactly the reference's.
+            std::vector<ChainLink> ResolveChain(const fs::path& head, const TurnsBirthFn& born, const ChainOptions& chainOpts = {})
             {
                 ChainCache cache;
                 auto headBytes = ReadAllBytes(head);
@@ -3374,7 +3560,13 @@ namespace Agentmaster
                 while (links.size() < kMaxChain)
                 {
                     const size_t child = links.size() - 1; // an index: push_back below may move the vector
-                    auto fork = FindForkParent(links[child].path, links[child].lines, born, cache);
+                    // Agentmaster (NOT in the reference): ChainOptions::forkSearchOnlyWhenCopied skips the
+                    // folder-wide search for a link whose transcript opens with its own (uncopied) line.
+                    std::optional<ForkParent> fork;
+                    if (!chainOpts.forkSearchOnlyWhenCopied || LooksForkCopied(links[child].lines, links[child].born))
+                    {
+                        fork = FindForkParent(links[child].path, links[child].lines, born, cache);
+                    }
                     if (fork)
                     {
                         if (seen.count(PathKey(fork->path)) != 0)
@@ -3401,6 +3593,13 @@ namespace Agentmaster
                     const auto plan = FindPlanParent(links[child].path, links[child].lines);
                     if (!plan)
                     {
+                        // Agentmaster (NOT in the reference): no on-disk link — a predecessor Agentmaster
+                        // recorded (a /clear in the same tab, a /handover origin) continues the walk.
+                        if (chainOpts.recorded != nullptr && *chainOpts.recorded &&
+                            AttachRecordedParent(links, child, seen, cache, born, *chainOpts.recorded))
+                        {
+                            continue;
+                        }
                         break;
                     }
                     if (!plan->path)
@@ -3479,7 +3678,9 @@ namespace Agentmaster
             // each ancestor's lines up to where its successor began, oldest first, a uuid rendered at
             // its FIRST occurrence while every copy still feeds the walk. Throws TurnsReadError when
             // the transcript can't be read.
-            History LoadHistory(const fs::path& path, const TurnsOptions& opt, const TurnsBirthFn& born)
+            // Agentmaster: `chainOpts` (NOT in the reference) is handed to ResolveChain unchanged — the
+            // summary's section-8 walk passes its options; every render passes the default.
+            History LoadHistory(const fs::path& path, const TurnsOptions& opt, const TurnsBirthFn& born, const ChainOptions& chainOpts = {})
             {
                 History history;
                 history.path = path;
@@ -3495,7 +3696,7 @@ namespace Agentmaster
                     history.edgeLines = history.lines;
                     return history;
                 }
-                history.links = ResolveChain(path, born);
+                history.links = ResolveChain(path, born, chainOpts);
                 for (size_t index = 0; index < history.links.size(); ++index)
                 {
                     const ChainLink& link = history.links[index];
@@ -5266,6 +5467,283 @@ namespace Agentmaster
                 Renderer renderer(opt, std::move(ids), utc);
                 return renderer.Document(session);
             }
+
+            // =====================================================================================
+            // 8. Conversation upstream — NOT in the reference (Agentmaster: the summary panel's
+            //    whole-conversation view, TranscriptTurns.h CollectConversationUpstream)
+            // =====================================================================================
+
+            // Turns a resolved chain into the summary's upstream: every EARLIER session's prompts, oldest
+            // session first, split at each session's own /compact boundaries. A prompt belongs to the
+            // session it FIRST appears in (History::origins — a fork's copies of its parent's lines carry
+            // the same uuids, so they count once, for the parent), only lines on the conversation's live
+            // branch are listed (the deep walk crosses every compaction and every fork / graft, so a prompt
+            // rewound away before the hand-off is dropped), and prompts are recognized + deduplicated per
+            // segment by the summary's OWN rule (ProcessInspect.h SummaryPromptOfLine), so an earlier
+            // session reads exactly like the current session's Messages list.
+            //   history — LoadHistory's merged chain (links oldest first, the head last).
+            // Returns the upstream; empty when the chain is the head alone. Throws std::bad_alloc only.
+            ConversationUpstream BuildUpstream(const History& history)
+            {
+                ConversationUpstream up;
+                const size_t count = history.links.size();
+                if (count < 2)
+                {
+                    return up; // the transcript continues nothing
+                }
+                const int head = static_cast<int>(count - 1);
+                for (const auto& [uuid, index] : history.origins)
+                {
+                    if (index < head)
+                    {
+                        up.uuids.insert(uuid); // owned by an earlier session: the caller drops the head's copies of it
+                    }
+                }
+                const EdgeMap* extra = history.extraEdges.empty() ? nullptr : &history.extraEdges;
+                const UuidSet live = DeepLiveUuids(history.edgeLines, extra);
+                std::vector<std::vector<ConversationSegment>> perLink(count - 1);
+                std::vector<std::unordered_set<std::wstring>> seenText(count - 1); // per link: its CURRENT segment's texts (the analyzer's per-segment dedup)
+                for (const Value* line : history.lines)
+                {
+                    const Value* uuid = JGet(line, L"uuid");
+                    if (!IsStr(uuid) || uuid->str.empty())
+                    {
+                        continue; // a uuid-less bookkeeping line carries no prompt and no boundary
+                    }
+                    const auto origin = history.origins.find(uuid->str);
+                    if (origin == history.origins.end() || origin->second >= head)
+                    {
+                        continue; // the head's own lines: AnalyzeSessionTranscript lists those (the caller)
+                    }
+                    if (!live.empty() && live.count(uuid->str) == 0)
+                    {
+                        continue; // on a branch a rewind abandoned: not part of the conversation
+                    }
+                    const size_t link = static_cast<size_t>(origin->second);
+                    auto& segs = perLink[link];
+                    if (segs.empty())
+                    {
+                        segs.emplace_back();
+                    }
+                    if (std::wstring label = ::Agentmaster::SummaryCompactionLabelOfLine(*line); !label.empty())
+                    {
+                        segs.back().label = std::move(label);
+                        segs.emplace_back();
+                        seenText[link].clear(); // dedup is per segment, like CollectConversationSegments
+                        continue;
+                    }
+                    if (std::wstring prompt = ::Agentmaster::SummaryPromptOfLine(*line); !prompt.empty() && seenText[link].insert(prompt).second)
+                    {
+                        segs.back().userMsgs.push_back(std::move(prompt));
+                        segs.back().uuids.push_back(uuid->str);
+                    }
+                }
+                for (size_t link = 0; link + 1 < count; ++link)
+                {
+                    auto& segs = perLink[link];
+                    // Empty segments between two compactions are noise (the in-file previous segments drop
+                    // them too) — but the session's LAST segment always stays, empty or not: it carries
+                    // continuedBy, which is what draws the session's separator.
+                    std::vector<ConversationSegment> kept;
+                    for (size_t i = 0; i < segs.size(); ++i)
+                    {
+                        if (!segs[i].userMsgs.empty() || i + 1 == segs.size())
+                        {
+                            kept.push_back(std::move(segs[i]));
+                        }
+                    }
+                    if (kept.empty())
+                    {
+                        kept.emplace_back(); // nothing of this session is listed, yet it IS a link of the chain
+                    }
+                    for (auto& seg : kept)
+                    {
+                        seg.sessionId = history.links[link].sessionId;
+                        seg.sessionTitle = history.links[link].title;
+                    }
+                    kept.back().continuedBy = history.links[link + 1].via; // how the next session continued from this one
+                    for (auto& seg : kept)
+                    {
+                        up.segments.push_back(std::move(seg));
+                    }
+                }
+                return up;
+            }
+
+            // How many lines of a transcript's head CollectUpstream's cheap gate reads: the plan-restart
+            // link rides the FIRST prompt, at most a few bookkeeping lines in.
+            constexpr size_t kUpstreamGateLines = 200;
+
+            // How many results the upstream cache keeps (least recently used out). One entry per session
+            // whose summary was shown; a result holds only prompt texts, so the cap bounds memory, not speed.
+            constexpr size_t kUpstreamCacheSlots = 32;
+
+            // How long after its creation a head transcript's answer is never cached. Claude writes a new
+            // transcript's opening lines — a fork's whole copied context, a session's first prompt — in
+            // the moments right after it creates the file, and the summary reloads on every write, so a
+            // load can catch the file mid-write: the gate then misses the copy or the plan-restart
+            // reference, or the walk sees a partial chain. Cached, that wrong answer would stay for the
+            // life of the process (the key cannot tell the partial file from the finished one). Past this
+            // age the opening lines are on disk and the answer cannot change any more; until then every
+            // reload decides again — a few cheap head reads at most.
+            constexpr double kUpstreamSettleSeconds = 10.0;
+
+            // One cached upstream: `key` = transcript identity + its creation time + its recorded link —
+            // everything the result depends on that can differ between calls (the earlier sessions' parts
+            // end where their successor began, so later growth never changes them).
+            struct UpstreamCacheEntry
+            {
+                std::wstring key;
+                ConversationUpstream result;
+                uint64_t lastUse = 0;
+            };
+
+            // The cache and its in-flight list, guarded by one mutex: a summary panel and a side panel that
+            // open the same session at the same moment wait for ONE walk instead of each reading the chain.
+            std::mutex g_upstreamMutex;
+            std::condition_variable g_upstreamCv;
+            std::vector<UpstreamCacheEntry> g_upstreamCache;
+            std::vector<std::wstring> g_upstreamInFlight;
+            uint64_t g_upstreamUseTick = 0;
+
+            // The body of CollectConversationUpstream (see TranscriptTurns.h): the cache, the cheap gate
+            // (walk only when a link can exist: a recorded predecessor, a plan-restart reference in the
+            // first prompt, or a copied first line), then the chain walk + BuildUpstream. Only a FINAL
+            // answer is cached: not one for a head without its first prompt yet, nor for a head younger
+            // than kUpstreamSettleSeconds (it may be mid-write).
+            //   transcript — the head transcript; recorded — the lookup (may be empty); bornIn — creation
+            //   times (empty = TranscriptFileBirth).
+            // Returns the upstream. Throws TurnsReadError when a transcript in the chain can't be read or
+            // stat'ed, and std::bad_alloc; nothing is cached on a throw (a later call retries).
+            ConversationUpstream CollectUpstream(const fs::path& transcript, const RecordedPredecessorFn& recorded, const TurnsBirthFn& bornIn)
+            {
+                const TurnsBirthFn born = bornIn ? bornIn : TurnsBirthFn{ [](const fs::path& path) { return TranscriptFileBirth(path); } };
+                const auto headBorn = born(transcript);
+                if (!headBorn)
+                {
+                    return {}; // gone or locked: nothing to say, and nothing worth caching
+                }
+                // The head's recorded link is part of the key: the registry may record it after a first
+                // summary load (the /clear pairing lands with the new session's SessionStart).
+                std::optional<RecordedPredecessor> rec;
+                if (recorded)
+                {
+                    try
+                    {
+                        rec = recorded(transcript.stem().wstring());
+                    }
+                    catch (...)
+                    {
+                        LogSwallowedException(L"CollectConversationUpstream recorded lookup"); // Rule #18; reads as "none"
+                    }
+                }
+                std::wstring key = PathKey(transcript);
+                key += L'|';
+                key += std::to_wstring(*headBorn);
+                key += L'|';
+                if (rec)
+                {
+                    key += rec->via;
+                    key += L':';
+                    key += rec->sessionId;
+                }
+                {
+                    std::unique_lock<std::mutex> lock{ g_upstreamMutex };
+                    for (;;)
+                    {
+                        for (auto& entry : g_upstreamCache)
+                        {
+                            if (entry.key == key)
+                            {
+                                entry.lastUse = ++g_upstreamUseTick;
+                                return entry.result; // a copy: callers own their result
+                            }
+                        }
+                        if (std::find(g_upstreamInFlight.begin(), g_upstreamInFlight.end(), key) == g_upstreamInFlight.end())
+                        {
+                            g_upstreamInFlight.push_back(key);
+                            break; // this call walks
+                        }
+                        g_upstreamCv.wait(lock); // another call is walking this chain: wait, then re-check the cache
+                    }
+                }
+                // RAII: ALWAYS release the in-flight key and wake the waiters — a throw below must never
+                // strand them (they then walk themselves; nothing was cached).
+                struct InFlightRelease
+                {
+                    std::wstring key;
+                    ~InFlightRelease()
+                    {
+                        std::lock_guard<std::mutex> guard{ g_upstreamMutex };
+                        g_upstreamInFlight.erase(std::remove(g_upstreamInFlight.begin(), g_upstreamInFlight.end(), key), g_upstreamInFlight.end());
+                        g_upstreamCv.notify_all();
+                    }
+                } release{ key };
+
+                bool walk = rec.has_value();
+                // Is the gate's answer FINAL? A recorded link is. A "no link" verdict is final only once
+                // the head holds its first prompt: before that the plan-restart reference (which rides
+                // the first prompt) may simply not be written yet.
+                bool settled = true;
+                if (!walk)
+                {
+                    // The cheap gate: an ordinary session opens with its own first prompt, carries no
+                    // plan-restart reference and has no recorded predecessor — it continues nothing, and
+                    // must not pay the chain walk (the fork search alone reads the whole project folder).
+                    auto headBytes = ReadHeadLines(transcript, kUpstreamGateLines);
+                    if (!headBytes)
+                    {
+                        return {}; // unreadable right now: answer "none", cache nothing (a later call retries)
+                    }
+                    const std::vector<Value> parsed = ParseTranscriptJsonl(std::move(*headBytes));
+                    const Lines lines = PointersTo(parsed);
+                    const std::wstring firstPrompt = FirstPromptText(lines);
+                    walk = MatchPlanParent(firstPrompt).has_value() || LooksForkCopied(lines, *headBorn);
+                    settled = walk || !firstPrompt.empty();
+                }
+                ConversationUpstream result;
+                if (walk)
+                {
+                    TurnsOptions opt; // LoadHistory reads only `chain` from it
+                    opt.chain = true;
+                    ChainOptions chainOpts;
+                    chainOpts.forkSearchOnlyWhenCopied = true;
+                    chainOpts.recorded = recorded ? &recorded : nullptr;
+                    const History history = LoadHistory(transcript, opt, born, chainOpts);
+                    result = BuildUpstream(history);
+                }
+                // Cache only a FINAL answer (kUpstreamSettleSeconds): an unsettled gate, or a head still
+                // young enough to be mid-write, is answered but not stored — the next reload decides again.
+                FILETIME nowFt{};
+                ::GetSystemTimePreciseAsFileTime(&nowFt);
+                if (!settled || FileTimeToEpochSeconds(nowFt) - *headBorn < kUpstreamSettleSeconds)
+                {
+                    return result;
+                }
+                {
+                    std::lock_guard<std::mutex> guard{ g_upstreamMutex };
+                    UpstreamCacheEntry* slot = nullptr;
+                    if (g_upstreamCache.size() < kUpstreamCacheSlots)
+                    {
+                        slot = &g_upstreamCache.emplace_back();
+                    }
+                    else
+                    {
+                        slot = &g_upstreamCache.front(); // evict the least recently used
+                        for (auto& entry : g_upstreamCache)
+                        {
+                            if (entry.lastUse < slot->lastUse)
+                            {
+                                slot = &entry;
+                            }
+                        }
+                    }
+                    slot->key = key;
+                    slot->result = result;
+                    slot->lastUse = ++g_upstreamUseTick;
+                }
+                return result;
+            }
         }
     }
 
@@ -5404,5 +5882,131 @@ namespace Agentmaster
             LogSwallowedException(L"RenderTranscriptTurnsFile");
             return std::nullopt;
         }
+    }
+
+    ConversationUpstream CollectConversationUpstream(const std::filesystem::path& transcript,
+                                                     const RecordedPredecessorFn& recorded,
+                                                     const TurnsBirthFn& born) noexcept
+    {
+        try
+        {
+            return tt::CollectUpstream(transcript, recorded, born);
+        }
+        catch (const tt::TurnsReadError&)
+        {
+            // Expected control flow, not a fault: a transcript of the chain (or its creation time) can't be
+            // read — gone, locked mid-write, or never written. The summary then shows the session alone,
+            // and nothing was cached, so its next reload tries again.
+            return {};
+        }
+        catch (...)
+        {
+            // Rule #18: never lose a swallowed exception (a std::bad_alloc on a huge chain is the realistic
+            // one). Recovery = no upstream: the summary shows the session alone instead of failing.
+            LogSwallowedException(L"CollectConversationUpstream");
+            return {};
+        }
+    }
+
+    // =============================================================================================
+    // Agentmaster — the summary panel's conversation list (SummaryConversation.h), built from section 8's
+    // upstream. Pure: no I/O; NOT part of the transcript_turns.py port.
+    // =============================================================================================
+
+    std::vector<SummaryConversationRow> BuildSummaryConversation(const SessionSummary& a,
+                                                                 const ConversationUpstream& up,
+                                                                 bool showHistory,
+                                                                 const std::function<std::wstring(const std::wstring&)>& titleOf)
+    {
+        std::vector<SummaryConversationRow> rows;
+        // The uuid of entry i of a lockstep list ("" past its end — a defensive bound; the analyzer keeps
+        // the lists equally long, but a short list must never index out of range).
+        const auto uuidAt = [](const std::vector<std::wstring>& uuids, size_t i) -> std::wstring {
+            return i < uuids.size() ? uuids[i] : std::wstring{};
+        };
+        const auto addPrompt = [&rows](const std::wstring& text, int headIndex) {
+            SummaryConversationRow row;
+            row.text = text;
+            row.headIndex = headIndex;
+            rows.push_back(std::move(row));
+        };
+        if (!showHistory)
+        {
+            for (size_t i = 0; i < a.userMsgs.size(); ++i)
+            {
+                addPrompt(a.userMsgs[i], static_cast<int>(i));
+            }
+            return rows;
+        }
+        // uuid -> index in a.userMsgs: an earlier session's prompt that this session's current part also
+        // holds (a fork's copy) keeps that index for its ▸ jump button.
+        std::unordered_map<std::wstring, int> headIndexOf;
+        for (size_t i = 0; i < a.userMsgs.size(); ++i)
+        {
+            if (const std::wstring u = uuidAt(a.userMsgUuids, i); !u.empty())
+            {
+                headIndexOf.emplace(u, static_cast<int>(i));
+            }
+        }
+        // (1) The earlier sessions, oldest first; a separator closes each one (after its LAST segment).
+        for (size_t s = 0; s < up.segments.size(); ++s)
+        {
+            const auto& seg = up.segments[s];
+            for (size_t k = 0; k < seg.userMsgs.size(); ++k)
+            {
+                const std::wstring u = uuidAt(seg.uuids, k);
+                const auto hit = u.empty() ? headIndexOf.end() : headIndexOf.find(u);
+                addPrompt(seg.userMsgs[k], hit != headIndexOf.end() ? hit->second : -1);
+            }
+            const bool lastOfSession = (s + 1 == up.segments.size()) || (up.segments[s + 1].sessionId != seg.sessionId);
+            if (lastOfSession && !seg.sessionId.empty())
+            {
+                SummaryConversationRow sep;
+                sep.sessionId = seg.sessionId;
+                sep.sessionTitle = titleOf ? titleOf(seg.sessionId) : std::wstring{};
+                if (sep.sessionTitle.empty())
+                {
+                    sep.sessionTitle = seg.sessionTitle; // the transcript's own custom / AI title
+                }
+                sep.continuedBy = seg.continuedBy;
+                rows.push_back(std::move(sep));
+            }
+        }
+        // A prompt an earlier session owns (a fork's copy of its parent's line) is listed above already.
+        const auto ownedUpstream = [&up](const std::wstring& u) { return !u.empty() && up.uuids.count(u) != 0; };
+        // (2) This session's own parts before its last /compact — no jump index: the analyzer's jump list
+        // (a.userMsgs) restarts at each compaction, so these were never in it.
+        for (const auto& seg : a.previousSegments)
+        {
+            for (size_t k = 0; k < seg.userMsgs.size(); ++k)
+            {
+                if (!ownedUpstream(uuidAt(seg.uuids, k)))
+                {
+                    addPrompt(seg.userMsgs[k], -1);
+                }
+            }
+        }
+        // (3) The current part (the jump list itself).
+        for (size_t i = 0; i < a.userMsgs.size(); ++i)
+        {
+            if (!ownedUpstream(uuidAt(a.userMsgUuids, i)))
+            {
+                addPrompt(a.userMsgs[i], static_cast<int>(i));
+            }
+        }
+        return rows;
+    }
+
+    std::vector<SummaryConversationRow> CodexSummaryConversation(const std::vector<std::wstring>& prompts)
+    {
+        std::vector<SummaryConversationRow> rows;
+        rows.reserve(prompts.size());
+        for (const auto& p : prompts)
+        {
+            SummaryConversationRow row;
+            row.text = p;
+            rows.push_back(std::move(row));
+        }
+        return rows;
     }
 }

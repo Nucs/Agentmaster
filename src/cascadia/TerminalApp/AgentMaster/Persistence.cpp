@@ -654,6 +654,16 @@ namespace Agentmaster
         {
             o.Set(L"forkParentId", json::Value::MkStr(s.forkParentId));
         }
+        // Agentmaster (the summary's conversation chain — SessionModels.h SessionInfo::continuedFromId):
+        // the session this one continues when Agentmaster SAW it happen (a /clear in the same tab, a
+        // /handover origin) — no transcript records it, so this record is the only durable copy, and the
+        // summary of a reopened session needs it to list its history. Omitted when empty, so a
+        // sessions.json without such sessions is byte-unchanged.
+        if (!s.continuedFromId.empty())
+        {
+            o.Set(L"continuedFromId", json::Value::MkStr(s.continuedFromId));
+            o.Set(L"continuedVia", json::Value::MkStr(s.continuedVia));
+        }
         // Agentmaster (PENDING_INPUT.md §5 — persist the unsent draft): the input-box draft trio, so
         // an unsent message SURVIVES an Agentmaster restart/crash as a staleness-labeled MEMORY (claude
         // itself never restores its input box — this record is the only durable copy). The observation
@@ -697,6 +707,8 @@ namespace Agentmaster
         s.kind = (v.StrAt(L"kind", L"Claude") == L"Codex") ? AgentKind::Codex : AgentKind::Claude; // absent => Claude (back-compat)
         s.codexSessionId = v.StrAt(L"codexSessionId");
         s.forkParentId = v.StrAt(L"forkParentId"); // PERSISTED: the fork SOURCE, for re-forking a never-messaged fork on restore (absent => "")
+        s.continuedFromId = v.StrAt(L"continuedFromId"); // PERSISTED (the summary's conversation chain): the /clear predecessor or /handover origin Agentmaster recorded (absent => "")
+        s.continuedVia = v.StrAt(L"continuedVia"); // how it continued: "clear" | "handover" (absent => "")
         s.pendingInput = v.StrAt(L"pendingInput"); // PERSISTED (PENDING_INPUT.md §5): the unsent input-box draft memory (absent => "")
         s.pendingInputUnixMs = v.I64At(L"pendingInputUnixMs"); // when it was last actually observed (absent => 0)
         s.pendingPasteRefs = v.StrAt(L"pendingPasteRefs"); // the paste-cache resolver's annotation (absent => "")
@@ -807,7 +819,7 @@ namespace Agentmaster
         o.Set(L"showSummaryPanel", json::Value::MkBool(s.showSummaryPanel));
         o.Set(L"summaryPanelWrapNewlines", json::Value::MkBool(s.summaryPanelWrapNewlines));
         o.Set(L"summaryPanelTruncate", json::Value::MkBool(s.summaryPanelTruncate));
-        o.Set(L"summaryPanelShowPrevious", json::Value::MkBool(s.summaryPanelShowPrevious));
+        o.Set(L"summaryPanelShowHistory", json::Value::MkBool(s.summaryPanelShowHistory)); // replaces "summaryPanelShowPrevious" (no longer written)
         o.Set(L"tabColorPickerCustomOpen", json::Value::MkBool(s.tabColorPickerCustomOpen));
         o.Set(L"tabColorPickerAdvancedOpen", json::Value::MkBool(s.tabColorPickerAdvancedOpen));
         o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
@@ -1001,7 +1013,10 @@ namespace Agentmaster
         s.showSummaryPanel = v.BoolAt(L"showSummaryPanel", true); // TAB_OVERLAY.md summary panel toggle (absent => ON by default)
         s.summaryPanelWrapNewlines = v.BoolAt(L"summaryPanelWrapNewlines", false); // TAB_OVERLAY.md: preserve message newlines (absent => OFF, the literal-\n look)
         s.summaryPanelTruncate = v.BoolAt(L"summaryPanelTruncate", true); // TAB_OVERLAY.md: truncate long messages (absent => ON by default, cap each message)
-        s.summaryPanelShowPrevious = v.BoolAt(L"summaryPanelShowPrevious", false); // conversation lineage: show pre-compaction previous session(s) (absent => OFF)
+        // The summary's conversation chain: list the WHOLE conversation (absent => ON). A NEW key on purpose —
+        // the former "summaryPanelShowPrevious" is deliberately NOT read: every install stored its `false`
+        // (a settings write serializes the whole struct), which would hide the new default view everywhere.
+        s.summaryPanelShowHistory = v.BoolAt(L"summaryPanelShowHistory", true);
         s.tabColorPickerCustomOpen = v.BoolAt(L"tabColorPickerCustomOpen", true); // tab color picker: open with the "Custom" color-picker panel expanded (absent => ON)
         s.tabColorPickerAdvancedOpen = v.BoolAt(L"tabColorPickerAdvancedOpen", true); // tab color picker: open with the picker's More/Less "advanced" RGB/HSV/Hex inputs expanded (absent => ON)
         s.treeSort = ExplorerSortFromString(v.StrAt(L"treeSort", L"newest"));

@@ -1408,6 +1408,25 @@ namespace Agentmaster
         // link right when the restart seam needed it). Re-armed (reset false) by the restart seam when
         // it re-forks. Always false after a load (a restored fork's re-fork spawns a fresh echo).
         bool forkEchoConsumed{ false };
+        // Agentmaster (PERSISTED — the summary's conversation chain): the session THIS one continues, when
+        // Agentmaster SAW it continue in a way no transcript records, and how:
+        //   continuedVia "clear"    — a /clear in the same terminal. SessionRegistry::OnHookEvent pairs the
+        //                             SessionStart whose payload source is "clear" with the conversation
+        //                             whose SessionEnd(reason "clear") just arrived on the same ConPTY
+        //                             (tabToken) — else, that SessionEnd lost, with the OTHER record that
+        //                             holds the ConPTY. Recorded on the hooks, not on the tab re-home: the
+        //                             Fleet Observer can re-home the tab before the hook lands, and a hook
+        //                             is what proves it was a /clear (a /resume switches the id the same
+        //                             way, and continues nothing).
+        //   continuedVia "handover" — a /handover, /handover-here or /handover-standby successor; its
+        //                             origin is recorded when TerminalPage::_HandleCommandHandover spawns it.
+        // The summary panel follows it as one more link of the chain upstream (TranscriptTurns.h
+        // CollectConversationUpstream), beside the on-disk links (a fork's copied lines, a plan restart's
+        // "read the full transcript at"). Set ONCE — the first writer wins (a session continues one
+        // session, decided when it starts) — and never cleared; both empty for every other session.
+        // Persisted in sessions.json (omitted when empty) so a reopened session keeps its history.
+        std::wstring continuedFromId;
+        std::wstring continuedVia;
         // Transient runtime flag (NOT persisted): is this session OPEN (has a live tab +
         // claude.exe this run) or ARCHIVED (shut down but kept restorable)? The Triage Board /
         // Explorer Tree show only Open (live) sessions; Archived (!live) ones are listed behind
@@ -2506,12 +2525,20 @@ namespace Agentmaster
         // written by the truncate toggle (left of the wrap toggle) in the panel's times bar, a freshest-
         // disk RMW, broadcast live to every linked overlay. Default true (truncate long messages).
         bool summaryPanelTruncate{ true };
-        // Agentmaster (conversation lineage): SHOW PREVIOUS SESSION(S) in the summary panel — when a
-        // session was `/compact`ed, the earlier (pre-compaction) segments are rendered ABOVE the current
-        // Messages, each numbered + labeled. GLOBAL like the wrap/truncate toggles (written by the
-        // previous-session toggle in the panel's times bar, freshest-disk RMW, broadcast live). Default
-        // false (hidden; the toggle only appears when the session actually has a previous segment).
-        bool summaryPanelShowPrevious{ false };
+        // Agentmaster (the summary's conversation chain): show the WHOLE CONVERSATION in the summary panel
+        // — the earlier sessions this one continues (a fork's parent, a plan-restart parent, a /clear
+        // predecessor or /handover origin Agentmaster recorded) and every part a /compact summarized away
+        // — as ONE list numbered 1..N above the session's newest prompts, with a clickable separator
+        // naming the session (its id's first 8 characters) wherever the session changes. OFF lists only
+        // the part after the session's last compaction (the classic view). GLOBAL like the wrap/truncate
+        // toggles: written by the ⏮ toggle in the panel's times bar (a freshest-disk RMW, broadcast live)
+        // and restored from disk by both cog-Save preserve blocks. Default TRUE.
+        // It REPLACES the former `summaryPanelShowPrevious` (default false, which showed only the
+        // pre-/compact segments, under "Previous session N" headers). The JSON key changed with it on
+        // purpose: every install stored that key's `false` (each settings write serializes the whole
+        // struct), so reusing the key would have hidden the new view everywhere. The old key is no
+        // longer read, and it disappears from settings.json on the next settings write.
+        bool summaryPanelShowHistory{ true };
         // Agentmaster (tab color picker): how the "Change tab color..." flyout OPENS — whether its
         // "Custom" panel (the muxc::ColorPicker) and that picker's own More/Less expander (the
         // "advanced" RGB/HSV/Hex text inputs) start EXPANDED. Both default TRUE, so the picker opens

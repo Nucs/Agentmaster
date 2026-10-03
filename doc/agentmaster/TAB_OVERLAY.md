@@ -392,6 +392,46 @@ messages and their wrap-ON continuations (even `* ` markdown bullets inside a pr
 before. Codex renders a reduced box
 (`RenderCodexSummary`: model/effort + prompts).
 
+**The WHOLE conversation (2026-10-03, the `⏮` toggle).** The Messages list is no longer only the current
+session's file: it lists **every prompt of the conversation the session continues**, oldest first,
+**numbered 1..N as ONE conversation**, and a **session separator** closes each earlier session's part — a
+thin rule carrying the session id's first 8 characters (`─ 1a2b3c4d ─────`). Clicking a separator copies
+that session's FULL id (with the copy chime) and pops **"Copied session id of up to here"**; hovering it
+names the session, its title, and how the session below continued it (a fork / a plan-mode restart /
+`/clear` / `/handover`). The chain is followed **upstream only** — a session that forked from, was handed
+over from, or `/clear`-ed out of THIS one belongs to its own summary — through four kinds of link:
+
+| Link | How it is found | Where |
+|---|---|---|
+| **fork** (`--fork-session`, Fork session, Fork here) | the transcript opens with lines COPIED from an older transcript in the same project folder (same uuids, stamped before the file existed) | on disk — `TranscriptTurns` `FindForkParent`, the Copy ▸ Transcript walk |
+| **plan-mode restart** | the first prompt says `read the full transcript at: <parent>.jsonl` | on disk — `FindPlanParent` |
+| **`/clear`** | the new conversation's `SessionStart(source "clear")` paired with the conversation whose `SessionEnd(reason "clear")` just arrived on the same ConPTY | recorded — `SessionInfo::continuedFromId/continuedVia`, `SessionRegistry::OnHookEvent` (HOOKS.md) |
+| **`/handover`** (+ `-here`, `-standby`) | the successor's origin, recorded when `_HandleCommandHandover` spawns it | recorded — the same fields (COMMANDS.md) |
+
+An earlier session contributes only its part **before** its successor began (a fork: up to the last line
+it copied; a restart / recorded link: the lines written before the successor's first line), split at its
+own `/compact`s, and only its **live branch** (a prompt rewound away is not listed). Each prompt is listed
+**once**, under the session that typed it first: a fork's copies of its parent's prompts (same transcript
+uuid — `SessionSummary::userMsgUuids`, `ConversationSegment::uuids`) appear under the parent, yet keep their
+**▸ jump** when this session's terminal also shows them. The session's own parts before its last
+`/compact` follow (no ▸: the jump list restarts at each compaction), then its current part.
+
+The pieces: `TranscriptTurns.h` **`CollectConversationUpstream`** (the chain walk, section 8 — a CHEAP GATE
+first: an ordinary session pays one head read; a process-wide 32-slot cache keyed by transcript + birth +
+recorded link, shared in-flight work, and only FINAL answers cached — never for a transcript without its
+first prompt yet, nor one created < 10 s ago), `SummaryConversation.h` **`BuildSummaryConversation`** (the
+rows: prompts + separators, pure, harness-tested), `RenderSummaryBox` (a prompt row = one ` N. ` line, a
+separator = a lone `\x1E<full id>` line), and `_SetSummaryContent`, which matches the lines back to the rows
+**in order** (`_summaryPromptRows` / `_summarySeparatorRows`) — so `Copy Prompt` works on every row, an
+earlier session's included, and a row without a ▸ keeps an invisible stand-in of the button's width so all
+prompt text lines up. A reload whose text and rows are unchanged **skips the rebuild** (the list can hold
+hundreds of rows; the scroll position stays). The `⏮` toggle (leftmost in the times bar, shown only when
+there IS earlier history) flips the GLOBAL `AppSettings::summaryPanelShowHistory` — **default ON**, a NEW
+key: the one it replaced (`summaryPanelShowPrevious`, default false, which showed only the pre-`/compact`
+parts under `Previous session N` headers) held a stored `false` in every install. OFF lists only the part
+after the last compaction. The copied `Summary` always carries the whole conversation, each separator as a
+plain `──── <full id> ────` rule.
+
 ### 13f. Tab-strip status dot (companion, not the overlay)
 Independently of the in-terminal badge, every classified tab's header reads `[icon] ● <title>`: a
 state-colored `Ellipse` (thin black stroke) in `TabHeaderControl.xaml`'s indicator row — a managed

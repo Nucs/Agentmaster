@@ -44,16 +44,27 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
+
+#include "AgentMaster/SummaryConversation.h" // SummaryConversationRow — the rows of the summary's current render (a light, WinRT-free engine header)
 
 namespace Agentmaster
 {
     class SessionRegistry;
     struct SessionInfo; // _UpdateSummary takes a const& (full type in the .cpp via SessionRegistry.h)
-    struct ConversationSegment; // cross-file lineage parents (full type in the .cpp via ProcessInspect.h)
 }
 
 namespace winrt::TerminalApp::implementation
 {
+    // Agentmaster (the summary's conversation chain): ONE row of the summary panel's conversation list —
+    // a numbered PROMPT, or a SESSION SEPARATOR (sessionId non-empty) drawn after the last prompt of an
+    // earlier session the current one continues. Built off-thread by BuildSummaryConversation, rendered to
+    // text by RenderSummaryBox (a prompt row is one " N. " line, numbered as ONE conversation; a separator
+    // is a lone kSessionSepMark + id line), then matched back to its line, in order, by _SetSummaryContent.
+    // The type is ENGINE-owned (AgentMaster/SummaryConversation.h — light, no WinRT) so the m5 harness can
+    // test the builder; the overlay keeps the rows of its current render as members under this name.
+    using SummaryConversationRow = ::Agentmaster::SummaryConversationRow;
+
     class AgentTabOverlay : public winrt::implements<AgentTabOverlay, winrt::Windows::Foundation::IInspectable>
     {
     public:
@@ -136,14 +147,17 @@ namespace winrt::TerminalApp::implementation
         // AppSettings, so it calls this handler (wired by the page) for the freshest-disk RMW + broadcast.
         void SetSummaryTruncateToggleHandler(std::function<void()> handler);
 
-        // Agentmaster (conversation lineage): SHOW PREVIOUS SESSION(S) — a GLOBAL setting
-        // (AppSettings::summaryPanelShowPrevious), mirrored in by the page (seed on attach, broadcast on
-        // toggle). When ON, a /compact'ed session renders its pre-compaction segment(s) ABOVE the current
-        // Messages. Re-renders the panel (the flag is baked into the rendered text). Call on the UI thread.
-        void SetSummaryShowPrevious(bool on);
-        // The previous-session toggle (leftmost in the times-bar strip) flips the GLOBAL setting; the
-        // overlay can't reach AppSettings, so it calls this page-wired handler for the RMW + broadcast.
-        void SetSummaryPreviousToggleHandler(std::function<void()> handler);
+        // Agentmaster (the summary's conversation chain): SHOW THE WHOLE CONVERSATION — a GLOBAL setting
+        // (AppSettings::summaryPanelShowHistory, default ON), mirrored in by the page (seed on attach,
+        // broadcast on toggle). ON lists every earlier session this one continues (a fork's parent, a
+        // plan-restart parent, a /clear predecessor or /handover origin) and every part a /compact
+        // summarized away, numbered 1..N as ONE conversation with a session-id separator between
+        // sessions; OFF lists only the part after the last compaction. Re-renders the panel (the flag
+        // decides which rows are rendered). Call on the UI thread.
+        void SetSummaryShowHistory(bool on);
+        // The ⏮ toggle (leftmost in the times-bar strip) flips the GLOBAL setting; the overlay can't reach
+        // AppSettings, so it calls this page-wired handler for the freshest-disk RMW + the broadcast.
+        void SetSummaryHistoryToggleHandler(std::function<void()> handler);
 
         // Agentmaster (SIDE PANEL): switch the summary panel from its native ANCHORED-top-right,
         // content-hugging, grip-resizable layout to a FILL-THE-HOST layout for embedding in a fixed
@@ -265,7 +279,15 @@ namespace winrt::TerminalApp::implementation
         void _ArmSettleRefresh(int64_t remainingMs);
         void _CopyField(int which); // row 3 copy menu: 0=Session Id 1=Copy Path 2=Copy Branch 3=Claude CLI 4=Codex CLI 5=Transcript 6=Summary (full textual box)
         void _BuildSummaryPanel(); // build the summary panel element (the 2nd slot), collapsed
-        void _SetSummaryContent(const std::wstring& text); // fill the panel StackPanel: text runs -> TextBlocks (wrapping; the "* item" file/skill lists NoWrap + clipped), separator sentinels -> full-width Border rules
+        void _SetSummaryContent(const std::wstring& text); // fill the panel StackPanel: text runs -> TextBlocks (wrapping; the "* item" file/skill lists NoWrap + clipped), separator sentinels -> full-width Border rules, each numbered conversation line -> a row matched IN ORDER to _summaryPromptRows (▸ jump button when its headIndex >= 0), each session-separator line -> the clickable id rule matched in order to _summarySeparatorRows
+        // Agentmaster (the summary's conversation chain): build the clickable SESSION SEPARATOR drawn after
+        // an earlier session's last prompt — a thin rule carrying the first 8 characters of `row.sessionId`.
+        // A click copies the FULL id (with the copy chime) and pops the tooltip "Copied session id of up to
+        // here"; hovering shows which session the conversation up to that point belongs to. UI thread only;
+        // throws only what XAML element creation throws (the caller renders on the UI thread).
+        //   row — the separator row (sessionId non-empty; title + continuedBy feed the hover text).
+        // Returns the element to append to the panel body.
+        winrt::Windows::UI::Xaml::UIElement _MakeSessionSeparator(const SummaryConversationRow& row);
         void _UpdateTimesLine(); // re-render the live "age / last user msg / last activity" ago line (DispatcherTimer-driven)
         void _ApplySummaryVisibility(); // show the 2nd pane only when enabled AND non-empty (content rows or a times line); else collapse it
         void _ApplySummarySize(bool forced = false); // re-apply the panel size from the size fractions + cached pane size: at rest MaxWidth/MaxHeight only (fit content); forced==true (mid grip-drag) ALSO pins explicit Width/Height so the panel grows PAST its own content up to the shared max, then snaps back on release
@@ -279,14 +301,14 @@ namespace winrt::TerminalApp::implementation
         void _ToggleSummaryTruncate(); // truncate button: invoke the page handler (flips the GLOBAL summaryPanelTruncate)
         void _UpdateSummaryTruncateButtonVisual(); // recolor the truncate icon: dim (off) / lighter (on), per _summaryTruncate
         std::wstring _SummarySelectedText(); // the text the user selected in the summary panel (title / times / body runs) — feeds + gates the context menu's "Copy Selected Text"
-        void _WireSummaryContextMenu(const winrt::Windows::UI::Xaml::FrameworkElement& el, int promptIndex); // attach the shared summary context menu to one panel element, remembering WHICH numbered prompt (-1 == none) a right-click there is about — gates + feeds the menu's "Copy Prompt"
-        void _ToggleSummaryPrevious(); // previous-session button: invoke the page handler (flips the GLOBAL summaryPanelShowPrevious)
-        void _UpdateSummaryPrevButtonVisual(); // recolor the previous-session icon: dim (off) / lighter (on), per _summaryShowPrevious
+        void _WireSummaryContextMenu(const winrt::Windows::UI::Xaml::FrameworkElement& el, int promptIndex); // attach the shared summary context menu to one panel element, remembering WHICH numbered conversation row (an index into _summaryPromptRows; -1 == none) a right-click there is about — gates + feeds the menu's "Copy Prompt"
+        void _ToggleSummaryHistory(); // ⏮ button: invoke the page handler (flips the GLOBAL summaryPanelShowHistory)
+        void _UpdateSummaryHistoryButtonVisual(); // recolor the ⏮ icon: dim (off) / lighter (on), per _summaryShowHistory
         void _UpdateSummaryPencilVisual(); // recolor the badge PENCIL: dim (panel off) / lighter (on), per _summaryEnabled — the pencil always visibly answers its click, even on a tab whose panel has nothing to render
         void _EnsureSummaryPlaceholder(); // when the panel is ENABLED but has NOTHING to render (a never-prompted session has no transcript; an unreconciled Codex has no rollout), show ONE dim placeholder line instead of collapsing — an invisible toggle reads as a dead button
         void _RefreshSummary(); // refresh button: force a re-analyze+render NOW (reset the mtime gate + re-pull) — a local action, no global setting
         void _UpdateSummary(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: show/hide (per _summaryEnabled) + (re)load when grown
-        winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring forkParentId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime, bool wrapNewlines, bool truncate, bool showPrevious, bool lineageCached, std::vector<::Agentmaster::ConversationSegment> cachedLineage); // analyze + render off-thread (wrapNewlines: preserve message newlines vs literal \n; truncate: limit each message; showPrevious: render pre-compaction previous session(s)), set text on the UI thread. lineageCached/cachedLineage: reuse the memoized cross-file (/clear + plan-restart) parents instead of re-walking. forkParentId: a never-messaged fork has no own transcript yet — fall back to the parent's (the fork inherits it verbatim until its first message)
+        winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring forkParentId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime, bool wrapNewlines, bool truncate, bool showHistory, std::shared_ptr<::Agentmaster::SessionRegistry> registry); // analyze + render off-thread (wrapNewlines: preserve message newlines vs literal \n; truncate: limit each message; showHistory: list the WHOLE conversation — the earlier sessions (TranscriptTurns.h CollectConversationUpstream, cached engine-side per transcript) and the pre-/compact parts — numbered as one), set text on the UI thread. registry: the recorded-predecessor + title lookups (the /clear and /handover links live on the session records). forkParentId: a never-messaged fork has no own transcript yet — fall back to the parent's (the fork inherits it verbatim until its first message)
 
         std::wstring _sessionId;
         bool _pending{ false }; // registry-less "observe" badge (a shell / unresolved claude — no linked session)
@@ -322,8 +344,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _summaryTimesText{ nullptr }; // pinned top (left): the live "ago" times line
         winrt::Windows::UI::Xaml::Controls::FontIcon _summaryWrapIcon{ nullptr }; // pinned top (right): the wrap-line toggle glyph — recolored by _UpdateSummaryWrapButtonVisual
         winrt::Windows::UI::Xaml::Controls::FontIcon _summaryTruncateIcon{ nullptr }; // pinned top (right, LEFT of the wrap toggle): the truncate toggle glyph — recolored by _UpdateSummaryTruncateButtonVisual
-        winrt::Windows::UI::Xaml::Controls::FontIcon _summaryPrevIcon{ nullptr }; // pinned top (right, LEFTMOST): the previous-session toggle glyph — recolored by _UpdateSummaryPrevButtonVisual
-        winrt::Windows::UI::Xaml::Controls::Button _summaryPrevBtn{ nullptr }; // the previous-session toggle button — Collapsed unless the loaded summary has a previous segment (a /compact'ed session)
+        winrt::Windows::UI::Xaml::Controls::FontIcon _summaryHistoryIcon{ nullptr }; // pinned top (right, LEFTMOST): the ⏮ whole-conversation toggle glyph — recolored by _UpdateSummaryHistoryButtonVisual
+        winrt::Windows::UI::Xaml::Controls::Button _summaryHistoryBtn{ nullptr }; // the ⏮ toggle button — Collapsed unless the loaded summary HAS earlier history (an earlier session in the chain, or a part before a /compact)
         winrt::Windows::UI::Xaml::Controls::FontIcon _summaryPencilIcon{ nullptr }; // the badge action-row PENCIL glyph (summary-panel toggle) — recolored by _UpdateSummaryPencilVisual so the toggle state reads at the click point
         winrt::Windows::UI::Xaml::Controls::StackPanel _summaryStack{ nullptr };
         // Right-click "Copy Summary" context menu — built once (_BuildSummaryPanel) and shared as the
@@ -332,9 +354,10 @@ namespace winrt::TerminalApp::implementation
         // the same action as the badge copy menu's "Summary" item). Right-clicking a NUMBERED message row
         // additionally offers "Copy Prompt" (that one prompt, verbatim) — see _WireSummaryContextMenu.
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _summaryContextMenu{ nullptr };
-        // The 0-based prompt index the LAST context-menu request landed on (-1 == the right-click wasn't on
-        // a numbered message row), written by _WireSummaryContextMenu's per-element handler BEFORE it shows
-        // the menu, read by the menu's Opening to gate + fill "Copy Prompt".
+        // The numbered conversation row the LAST context-menu request landed on — an index into
+        // _summaryPromptRows (-1 == the right-click wasn't on a numbered row) — written by
+        // _WireSummaryContextMenu's per-element handler BEFORE it shows the menu, read by the menu's
+        // Opening to gate + fill "Copy Prompt" (any row: an earlier session's prompt copies too).
         int _ctxPromptIndex{ -1 };
         winrt::Windows::UI::Xaml::DispatcherTimer _summaryTimer{ nullptr }; // drives the live times line; self-stops when the overlay is gone
         // One-shot re-draw at the end of a STATE SETTLE window (_ArmSettleRefresh, DELIVERY.md §16). Built
@@ -357,23 +380,19 @@ namespace winrt::TerminalApp::implementation
         bool _summaryLoading{ false }; // one analyze+render in flight at a time
         bool _summaryWrapDirty{ false }; // a wrap-mode toggle landed while a load was in flight — re-render when it completes
         bool _summaryTruncateDirty{ false }; // a truncate-mode toggle landed while a load was in flight — re-render when it completes
-        bool _summaryPrevDirty{ false }; // a previous-session toggle landed while a load was in flight — re-render when it completes
+        bool _summaryHistoryDirty{ false }; // a ⏮ (whole-conversation) toggle landed while a load was in flight — re-render when it completes
         bool _summaryReloadPending{ false }; // a content refresh was requested (the transcript may have grown) WHILE a load was in flight — re-check on completion so the growth isn't dropped (the early-return otherwise relies on a "next _Refresh" that may never come once the session goes idle)
         bool _summaryEnabled{ false }; // mirror of the GLOBAL AppSettings::showSummaryPanel (page-driven)
         bool _summaryWrapNewlines{ false }; // mirror of the GLOBAL AppSettings::summaryPanelWrapNewlines (page-driven): preserve message newlines vs literal \n
         bool _summaryTruncate{ true }; // mirror of the GLOBAL AppSettings::summaryPanelTruncate (page-driven, default ON): ON=cap each message (6 lines if wrapped, else 500 chars); OFF=show every message in full
-        bool _summaryShowPrevious{ false }; // mirror of the GLOBAL AppSettings::summaryPanelShowPrevious (page-driven, default OFF): ON=render pre-compaction previous session(s) above the current Messages
-        // Agentmaster (cross-file lineage): the resolved /clear + plan-restart PARENT segments
-        // (oldest-first), MEMOIZED — parentage is immutable, so compute once per bound session then
-        // reuse on every quiet mtime-gated reload + show-previous toggle (no per-write dir scan).
-        // _summaryLineageId is the conv id _summaryLineage was computed for ("" == not yet); a rebind
-        // to a new conv id recomputes. Folded into SessionSummary.previousSegments before render.
-        std::wstring _summaryLineageId;
-        std::vector<::Agentmaster::ConversationSegment> _summaryLineage;
+        bool _summaryShowHistory{ true }; // mirror of the GLOBAL AppSettings::summaryPanelShowHistory (page-driven, default ON): ON=list the WHOLE conversation (earlier sessions + pre-/compact parts) as one numbered list; OFF=only the part after the last compaction
+        // (The earlier sessions are NOT memoized here: TranscriptTurns.h CollectConversationUpstream keeps
+        // its own process-wide cache, keyed by the transcript and its recorded link — so the side panel,
+        // which builds a NEW overlay at every selection, and every per-tab panel share one walk per session.)
         std::function<void()> _onToggleSummary; // pencil -> page (flip the global setting + broadcast)
         std::function<void()> _onToggleSummaryWrap; // wrap-line icon -> page (flip the global newline setting + broadcast)
         std::function<void()> _onToggleSummaryTruncate; // truncate icon -> page (flip the global truncate setting + broadcast)
-        std::function<void()> _onToggleSummaryPrevious; // previous-session icon -> page (flip the global show-previous setting + broadcast)
+        std::function<void()> _onToggleSummaryHistory; // ⏮ icon -> page (flip the global whole-conversation setting + broadcast)
 
         // Agentmaster (SIDE PANEL): FILL-THE-HOST layout mode (SetSummaryFillHost — must be set before
         // Initialize builds the panel). true => stretch to the pushed pane (host slot) size, no grips,
@@ -403,19 +422,31 @@ namespace winrt::TerminalApp::implementation
         double _summaryDragStartH{ 0.0 }; // scroll viewport height px at press
         std::function<void(double, double)> _onResizeSummary; // grip release -> page (persist the fractions globally + broadcast)
 
-        // Agentmaster (SUMMARY_JUMP.md): the raw user prompts of the loaded summary, in order, so a
-        // numbered message's JUMP button resolves to the right prompt (index N-1). Refreshed by
-        // _LoadSummaryAsync alongside the rendered text; aligned with the " N. " lines _SetSummaryContent
-        // renders. Empty for Codex / no transcript (no jump buttons then).
+        // Agentmaster (SUMMARY_JUMP.md): the CURRENT session's analyzer prompt list (SessionSummary::userMsgs),
+        // in order — the list the JUMP resolver and alt+up/down navigate, so a row's headIndex resolves to
+        // the right prompt. Refreshed by _LoadSummaryAsync alongside the rendered text. Empty for Codex / no
+        // transcript (no jump buttons then).
         std::vector<std::wstring> _summaryUserMsgs;
+        // Agentmaster (the summary's conversation chain): the rows the CURRENT render was built from, split
+        // by kind but each in display order — the k-th numbered line ( " k+1. " ) is _summaryPromptRows[k],
+        // the j-th session-separator line is _summarySeparatorRows[j]. Set by _LoadSummaryAsync's publish
+        // BEFORE _SetSummaryContent, which matches the rendered lines back to them in order.
+        std::vector<SummaryConversationRow> _summaryPromptRows;
+        std::vector<SummaryConversationRow> _summarySeparatorRows;
+        // Agentmaster (the summary's conversation chain): the text the panel body was last built from. A
+        // reload whose text AND rows are unchanged (an assistant-only write: the prompts, files and tasks
+        // read the same) skips the rebuild — with the whole conversation listed the body can hold many
+        // hundreds of rows, and rebuilding them unchanged would also reset the panel's scroll position.
+        std::wstring _summaryRenderedText;
         std::function<int(const std::vector<std::wstring>&, int)> _onJumpToPrompt; // jump button -> page (resolve control + center the view); returns the row or -1
         std::function<std::vector<int>(const std::vector<std::wstring>&)> _onResolveEligibility; // -> page: a row per prompt (-1 == not on screen), for icon dimming
         std::function<void(bool)> _onAdjacentPrompt; // row-2 ↑/↓ buttons -> page (_ScrollAdjacentPrompt: scroll to prev/next off-screen prompt + highlight + boundary sound)
         std::function<std::wstring()> _onReadLiveDraft; // copy menu "Copy Current Prompt" -> page (read this session's input box out of the live buffer; "" when unreadable — the remembered draft then wins)
         std::function<void()> _onClearDraft; // MAIL button (plain click) -> page (_ClearLiveDraftForSession: remove the draft from the input box after queueing — a move; Shift+Click skips this)
         std::function<void()> _onShowTranscript; // copy menu "Transcript ▸ Show" + summary panel "Show Transcript" -> page (_ShowTranscriptOverlayForSession: the window-level transcript reading view)
-        // The jump buttons of the currently-rendered panel, paired with their 0-based prompt index, so
-        // _RefreshJumpEligibility can dim the ones whose prompt no longer resolves. Rebuilt each _SetSummaryContent.
+        // The jump buttons of the currently-rendered panel, paired with their prompt's index in _summaryUserMsgs
+        // (a row's headIndex), so _RefreshJumpEligibility can dim the ones whose prompt no longer resolves.
+        // Rebuilt each _SetSummaryContent.
         std::vector<std::pair<int, winrt::Windows::UI::Xaml::Controls::Button>> _jumpButtons;
         // Resolve all prompts -> set each jump button's opacity (match vs dim); SUMMARY_JUMP.md.
         // EXPENSIVE (O(prompts x 1.2M-char buffer window), ~0.3s on a 200+-prompt conversation), so the
@@ -430,8 +461,11 @@ namespace winrt::TerminalApp::implementation
         static constexpr int64_t kJumpEligibilityMinIntervalMs = 150'000;
         bool _tabFocused{ false }; // is this overlay's tab the window's selected one? (page-driven, SetTabFocused)
         std::chrono::steady_clock::time_point _lastJumpEligibilityRun{}; // last resolve; default == epoch, so the first call always runs
-        // The numbered-message ROW containers (the 2-col Grid), paired with their 0-based prompt index, so
-        // HighlightSummaryMessage can paint a band behind the jumped-to row. Rebuilt each _SetSummaryContent.
+        // The numbered-message ROW containers (the 2-col Grid) that HAVE a prompt index in _summaryUserMsgs
+        // (headIndex >= 0), paired with it, so HighlightSummaryMessage (fed by the ▸ button and alt+up/down,
+        // both in _summaryUserMsgs indices) can paint a band behind the jumped-to row. A row of an earlier
+        // session that this session's transcript does not hold is never a jump target, so it is not listed.
+        // Rebuilt each _SetSummaryContent.
         std::vector<std::pair<int, winrt::Windows::UI::Xaml::Controls::Grid>> _summaryMsgRows;
         int _highlightedMsgIndex{ -1 }; // the last jumped-to message (0-based), re-applied across re-renders; -1 == none
         void _ApplySummaryHighlight(); // paint the band on _highlightedMsgIndex's row, clear the rest (SUMMARY_JUMP.md)

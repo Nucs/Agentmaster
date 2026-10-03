@@ -1371,7 +1371,10 @@ namespace Agentmaster
                 continue;
             }
             const auto& obj = *parsed;
-            if (const std::wstring u = obj.StrAt(L"uuid"); !u.empty() && !seenUuids.insert(u).second)
+            // Kept past the copy check: it is also each prompt's identity in `uuids` (the summary's
+            // conversation chain drops a fork's copied prompts by uuid, never by text).
+            const std::wstring lineUuid = obj.StrAt(L"uuid");
+            if (!lineUuid.empty() && !seenUuids.insert(lineUuid).second)
             {
                 continue; // a re-written copy of an earlier line (see seenUuids)
             }
@@ -1388,6 +1391,7 @@ namespace Agentmaster
                 if (std::wstring p = SeExtractRealUserPrompt(obj); !p.empty() && seen.insert(p).second)
                 {
                     segs.back().userMsgs.push_back(std::move(p));
+                    segs.back().uuids.push_back(lineUuid); // lockstep with userMsgs
                 }
             }
             // Agentmaster (mid-turn messages): a message the user typed while claude was still working is
@@ -1401,10 +1405,47 @@ namespace Agentmaster
                 if (std::wstring p = SeExtractQueuedHumanPrompt(obj); !p.empty() && seen.insert(p).second)
                 {
                     segs.back().userMsgs.push_back(std::move(p));
+                    segs.back().uuids.push_back(lineUuid); // lockstep with userMsgs
                 }
             }
         }
         return segs;
+    }
+
+    // Agentmaster (the summary's conversation chain): see the header. Dispatches on the line's type to
+    // the SAME extractor each summary list already uses — SeExtractRealUserPrompt for a typed prompt (the
+    // type/userType gate is the analyzer's externalUser test), SeExtractQueuedHumanPrompt for a message
+    // typed mid-turn — so an earlier session's prompts can never be filtered differently from the current
+    // session's.
+    std::wstring SummaryPromptOfLine(const json::Value& line)
+    {
+        if (line.type != json::Value::Type::Obj)
+        {
+            return {};
+        }
+        const std::wstring type = line.StrAt(L"type");
+        if (type == L"user" && line.StrAt(L"userType") == L"external")
+        {
+            return SeExtractRealUserPrompt(line);
+        }
+        if (type == L"attachment")
+        {
+            return SeExtractQueuedHumanPrompt(line);
+        }
+        return {};
+    }
+
+    // Agentmaster (the summary's conversation chain): see the header. The boundary test and the label
+    // are CollectConversationSegments' own (SeFormatCompactionLabel), so a chained session splits at its
+    // compactions exactly as the current session does.
+    std::wstring SummaryCompactionLabelOfLine(const json::Value& line)
+    {
+        if (line.type != json::Value::Type::Obj || line.StrAt(L"type") != L"system" ||
+            line.StrAt(L"subtype") != L"compact_boundary")
+        {
+            return {};
+        }
+        return SeFormatCompactionLabel(line.Find(L"compactMetadata"));
     }
 
     static SessionSummary AnalyzeSessionTranscriptImpl(std::wstring_view transcriptPath, size_t maxBytes);
@@ -1804,6 +1845,7 @@ namespace Agentmaster
             if (!truncated && type == L"system" && obj.StrAt(L"subtype") == L"compact_boundary")
             {
                 out.userMsgs.clear();
+                out.userMsgUuids.clear(); // lockstep with userMsgs
                 seenMsgs.clear(); // dedup is per segment, like CollectConversationSegments
             }
 
@@ -1938,6 +1980,7 @@ namespace Agentmaster
                         if (seenMsgs.insert(content).second)
                         {
                             out.userMsgs.push_back(content);
+                            out.userMsgUuids.push_back(lineUuid); // lockstep with userMsgs
                         }
                     }
                     // Agentmaster: answering an AskUserQuestion is a real user interaction, so it advances
@@ -1986,6 +2029,7 @@ namespace Agentmaster
                     if (seenMsgs.insert(queued).second)
                     {
                         out.userMsgs.push_back(std::move(queued));
+                        out.userMsgUuids.push_back(lineUuid); // lockstep with userMsgs
                     }
                 }
             }

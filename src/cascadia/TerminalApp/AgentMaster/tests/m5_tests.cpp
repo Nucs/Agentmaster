@@ -69,6 +69,7 @@ int wmain()
     TestRegistryFanout();
     TestRegistrySnapshotLive();
     TestForkSourceIdEcho();
+    TestSummaryChainLinks(); // the summary's conversation chain: the /clear pairing (tests_state.cpp)
     TestRetiredHostToken(); // Deactivate/Restart: the closing claude of a replaced connection cannot re-stamp the record (tests_state.cpp)
     TestTypedCapture();
     TestQueueHistoryTrim();
@@ -103,6 +104,7 @@ int wmain()
     TestManagerLayout();
     TestWindowRecord();
     TestAppSettings();
+    TestSummaryHistoryPersistence(); // the summary's conversation chain: the persisted link + toggle (tests_persistence.cpp)
     TestTabNamingAndColor();
     TestTabColorModes();
     TestEngineWindowLifecycle();
@@ -124,6 +126,8 @@ int wmain()
     TestCompactionLifecycle();
     TestConversationFollowup();
     TestTranscriptTurns(); // the Copy > Transcript levels vs the transcript_turns.py goldens (tests_turns.cpp)
+    TestSummaryConversation(); // the summary's numbered conversation list, pure (tests_turns.cpp)
+    TestConversationUpstream(); // the summary's whole conversation: the chain walk end to end (tests_turns.cpp)
     TestMarkdownBlocks(); // the transcript overlay's Markdown flattener — a skip without the vcpkg cmark (tests_markdown.cpp)
     TestAnalyzeFootprint();
     TestCommandWatch();

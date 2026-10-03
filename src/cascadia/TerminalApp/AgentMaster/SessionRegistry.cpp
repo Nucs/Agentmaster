@@ -356,6 +356,26 @@ namespace Agentmaster
             }
         }
 
+        // Agentmaster (the summary's conversation chain — SessionInfo::continuedFromId): the /clear END half.
+        // Remember which conversation a /clear just ended on this ConPTY, BEFORE the stale-end guard below
+        // can drop the event: that guard drops a SessionEnd whose record now names another ConPTY, but the
+        // conversation still ENDED on this one. The SessionStart(source "clear") that follows on the same
+        // ConPTY pairs with this entry (the START half, inside the main lock below). One entry per ConPTY
+        // (a newer /clear there replaces it), expired entries pruned, the oldest dropped past the cap.
+        if (msg.event == HookEvent::SessionEnd && msg.source == kHookSourceClear && !msg.tabToken.empty() && !msg.sessionId.empty())
+        {
+            std::lock_guard guard{ _mtx };
+            const int64_t now = NowMs();
+            std::erase_if(_recentClearEnds, [&](const RecentClearEnd& e) {
+                return now - e.endedAtUnixMs > kRecentClearEndTtlMs || TabTokenEq(e.tabToken, msg.tabToken);
+            });
+            if (_recentClearEnds.size() >= kRecentClearEndsMax)
+            {
+                _recentClearEnds.erase(_recentClearEnds.begin());
+            }
+            _recentClearEnds.push_back(RecentClearEnd{ msg.tabToken, msg.sessionId, now });
+        }
+
         // Agentmaster (restart/re-home stale death notice): a SessionEnd arriving from a ConPTY that is
         // NO LONGER this session's host is the OLD process's dying breath after an in-place "Restart
         // session" (the restart seam re-stamped tabToken to the NEW connection before killing the old
@@ -389,6 +409,7 @@ namespace Agentmaster
         std::wstring upsTrace; // DELIVERY_PLAN.md R3: the [ups] disposition line, filled under the lock, logged after it
         std::wstring mergeTrace; // DELIVERY_PLAN.md R7: the [merge-detected] line (both logs), filled under the lock
         std::wstring holdTrace; // DELIVERY.md §14: the [interrupt-resume] line (both logs), filled under the lock
+        std::wstring lineageTrace; // the summary's conversation chain: the [lineage] /clear pairing line, filled under the lock
 
         {
             std::lock_guard guard{ _mtx };
@@ -449,6 +470,68 @@ namespace Agentmaster
             if (!msg.tabToken.empty())
             {
                 s.tabToken = msg.tabToken;
+            }
+            // Agentmaster (the summary's conversation chain — SessionInfo::continuedFromId): a SessionStart
+            // whose payload source is "clear" IS a /clear — a NEW conversation id on the SAME claude process
+            // and ConPTY. Pair it with the conversation it replaced and record the link ONCE, so the summary
+            // can list the conversation the /clear left behind: no transcript records it, and a /resume
+            // switches the id the same way while continuing nothing — the hook's source is the only proof.
+            // Recorded HERE rather than on the tab re-home: the Fleet Observer can re-home the tab before
+            // this hook lands. The pairing, in order of certainty:
+            //   1. EXACT — the conversation whose SessionEnd(reason "clear") just arrived on this ConPTY
+            //      (_recentClearEnds; Claude finishes the old conversation's SessionEnd hooks first). The
+            //      entry is consumed: one /clear ends one conversation.
+            //   2. FALLBACK (that SessionEnd was lost — a forwarder killed at its timeout) — the OTHER record
+            //      carrying this ConPTY: a live one beats an archived one (an archived record may still
+            //      carry the token of an earlier conversation in the same tab), then the most recent
+            //      hook/activity.
+            // No candidate => no link (never guess).
+            if (msg.event == HookEvent::SessionStart && msg.source == kHookSourceClear &&
+                !msg.tabToken.empty() && s.continuedFromId.empty())
+            {
+                std::wstring predecessorId;
+                bool exact = false;
+                const int64_t now = NowMs();
+                for (auto e = _recentClearEnds.begin(); e != _recentClearEnds.end(); ++e)
+                {
+                    if (TabTokenEq(e->tabToken, msg.tabToken) && e->sessionId != s.id && now - e->endedAtUnixMs <= kRecentClearEndTtlMs)
+                    {
+                        predecessorId = e->sessionId;
+                        exact = true;
+                        _recentClearEnds.erase(e); // consumed: the iterator is not used again
+                        break;
+                    }
+                }
+                if (predecessorId.empty())
+                {
+                    const SessionInfo* predecessor = nullptr;
+                    const auto rank = [](const SessionInfo& x) {
+                        return std::make_pair(x.live ? 1 : 0, std::max(x.lastHookUnixMs, x.lastActivityUnixMs));
+                    };
+                    for (const auto& [sid, other] : _sessions)
+                    {
+                        if (sid == s.id || !TabTokenEq(other.tabToken, msg.tabToken))
+                        {
+                            continue;
+                        }
+                        if (predecessor == nullptr || rank(other) > rank(*predecessor))
+                        {
+                            predecessor = &other;
+                        }
+                    }
+                    if (predecessor != nullptr)
+                    {
+                        predecessorId = predecessor->id;
+                    }
+                }
+                if (!predecessorId.empty())
+                {
+                    s.continuedFromId = predecessorId;
+                    s.continuedVia = std::wstring{ kHookSourceClear };
+                    lineageTrace = L"[lineage] " + ShortId(s.id) + L" continues " + ShortId(predecessorId) +
+                                   L" (/clear on ConPTY " + msg.tabToken +
+                                   (exact ? L", paired by its SessionEnd(clear))\n" : L", no SessionEnd(clear) seen: paired by the ConPTY's other record)\n");
+                }
             }
             // Agentmaster (--fork-session source-id echo): this hook is for the session's OWN id, so the
             // fork has settled past its startup window (where it echoed the SOURCE id). Retire the
@@ -704,6 +787,12 @@ namespace Agentmaster
             // §14: an autorunner MODE change — both logs, like the [interrupt-hold] that armed it.
             AppendStateLog(L"hooks.log", holdTrace);
             AppendStateLog(L"autorunner.log", holdTrace);
+        }
+        if (!lineageTrace.empty())
+        {
+            // The summary's conversation chain: which session a /clear continued (the link the summary's
+            // history then lists). Logged outside the lock, like every trace above.
+            AppendStateLog(L"hooks.log", lineageTrace);
         }
         if (found)
         {

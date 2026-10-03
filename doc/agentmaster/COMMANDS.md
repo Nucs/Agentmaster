@@ -230,6 +230,14 @@ them).
      (`(handover 2)`, …) — the generalized `DeriveForkTitle` (which now delegates to it) — then
      bumped past any title already in the registry (live or archived), so sibling handovers from
      one origin never collide;
+   * **origin link** (2026-10-03) — right after each successor spawns, its record gets
+     `continuedFromId = <origin>` + `continuedVia = "handover"` (`SessionInfo`, persisted in
+     `sessions.json`, the first writer wins). No transcript carries this link — the briefing reaches
+     the successor as fresh text — so the record is the only place it can live. The summary panel's
+     whole-conversation view follows it: the successor's summary lists the origin's conversation up to
+     the hand-off above its own, numbered as one, with a separator naming the origin (TAB_OVERLAY.md
+     §13e). Every variant records it: each fan-out successor, the `/handover-here` successor that took
+     the origin's tab, a standby one;
    * **FAN-OUT — one successor PER collected file** (`_HandleCommandHandover` splits the payload
      via `SplitWatchPaths`, re-asserts sanity + existence PER PATH — a vanished/insane subset is
      dropped with a log, only an empty survivor set drops the whole action): one typed

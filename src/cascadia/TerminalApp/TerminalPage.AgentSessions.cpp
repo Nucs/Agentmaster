@@ -470,6 +470,23 @@ namespace winrt::TerminalApp::implementation
                     ++nextInsert; // the next file's tab lands right of this one (write order == strip order)
                 }
             }
+            // Agentmaster (the summary's conversation chain — SessionInfo::continuedFromId): record that
+            // this successor CONTINUES the origin, so its summary lists the origin's conversation (up to the
+            // hand-off) above its own, numbered as one conversation. No transcript carries this link — the
+            // briefing reaches the successor as fresh text — so the session record is the only place it can
+            // live (persisted with it). Every variant records it: a /handover-here successor that took the
+            // origin's tab, each fan-out successor, a standby one. First writer wins: a successor continues
+            // exactly one session, decided here, at its birth.
+            if (!newId.empty())
+            {
+                _sessionRegistry->Update(newId, [&sessionId](::Agentmaster::SessionInfo& ss) {
+                    if (ss.continuedFromId.empty())
+                    {
+                        ss.continuedFromId = sessionId;
+                        ss.continuedVia = L"handover";
+                    }
+                });
+            }
             if (!newId.empty() && standby)
             {
                 // §5b: hand the WHOLE document (or the pointer text when unreadable) to the pump's

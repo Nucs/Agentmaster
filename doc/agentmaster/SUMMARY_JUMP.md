@@ -56,19 +56,22 @@ AgentTabOverlay (summary panel UI)                     TerminalApp
   Message-start detection is **sequence-number-guarded** (the renderer numbers prompts strictly 1..N, so a
   line is a real message only when its number is the next expected one) — so in **wrap-ON** mode a
   multi-line prompt's continuation line that merely looks like `2. foo` is not mis-detected as a numbered
-  message and mis-mapped to the wrong prompt. It is also **section-guarded**: with the previous-session
-  toggle ON the renderer puts each pre-compaction / cross-file segment ABOVE the current conversation under
-  a `Previous session N` header and numbers **its** prompts 1.. independently — those numbers do NOT index
-  `_summaryUserMsgs` (the current segment only), so a numbered line inside such a section is rendered as
-  plain text (no ▸, no Copy Prompt) instead of resolving to a different prompt entirely. The section's kind
-  is read off the FIRST line after each separator (every section starts with one), so a wrapped message's
-  continuation lines can never flip it.
+  message and mis-mapped to the wrong prompt. Since 2026-10-03 the list is the **whole conversation**
+  (TAB_OVERLAY.md §13e): earlier sessions' prompts come first and the numbers count 1..N straight through
+  them, so a number is NOT an index into `_summaryUserMsgs`. Each rendered line is matched, in order, to the
+  row it was rendered from (`_summaryPromptRows`), and the row carries `headIndex` — the prompt's index in
+  `_summaryUserMsgs`, or `-1` for a prompt this session's terminal does not hold (an earlier session's, or
+  a part before this session's last `/compact`). Only a row with an index gets the ▸ (and the jump band);
+  the others keep an invisible stand-in of the button's width so the text lines up. A fork's copies of its
+  parent's prompts are listed under the parent yet KEEP their index (matched by transcript uuid), so the
+  jump still lands in the fork's terminal.
 - **Right-click a numbered prompt → `Copy Prompt`** (`AgentTabOverlay.Summary.cpp`) — copies THAT prompt
-  **verbatim and whole**: the raw text off the transcript (`_summaryUserMsgs[i]`), never the panel's
+  **verbatim and whole**: the raw text off the transcript (`_summaryPromptRows[k].text` — an earlier
+  session's prompt included), never the panel's
   rendering of it (which escapes newlines to a literal `\n` while wrap is off, and caps the message while
   truncate is on). It sits directly ABOVE `Copy Summary` in the panel's shared context menu and is shown
   only when the right-click landed on a numbered message row. The ONE shared menu learns WHERE the click
-  landed from `_WireSummaryContextMenu`, which stamps the row's prompt index (`_ctxPromptIndex`, `-1` for
+  landed from `_WireSummaryContextMenu`, which stamps the row's index (`_ctxPromptIndex`, `-1` for
   the chrome) and then shows the menu **explicitly**, marking the event handled: routed events bubble
   innermost-first, so stamping at the element under the pointer is the one ordering that guarantees the
   index is already right when `Opening` reads it (an ancestor can never overwrite a row's stamp, and the

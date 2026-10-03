@@ -18,7 +18,7 @@
 //   tests_commands.cpp        - COMMANDS.md: slash-command bindings (ParseCommandEcho / CommandWatch / DeriveSuffixedTitle / initial-prompt arg / handover command file)
 //   tests_invisible.cpp       - DELIVERY.md §15: claude's invisible-character rule mirrored (the generated wZe oracle table, the paste sanitize, the prompt compare key, Hebrew, echo/pull-echo/dedupe, the draft guard, the forwarder's UTF-8 + BOM)
 //   tests_taskbar.cpp         - NOTIFICATIONS.md section 8: the taskbar unread badge (TaskbarBadge.h's label / size / disc + digit composition / GDI icon, drawn like the shell draws it) + the engine's process-wide unread census
-//   tests_turns.cpp           - the Copy > Transcript levels: TranscriptTurns (the C++ port of the am-agentmaster-cli skill's transcript_turns.py v9) vs the reference's own goldens in turns\expected, byte for byte
+//   tests_turns.cpp           - the Copy > Transcript levels: TranscriptTurns (the C++ port of the am-agentmaster-cli skill's transcript_turns.py v9) vs the reference's own goldens in turns\expected, byte for byte; + the summary's whole-conversation chain (CollectConversationUpstream / BuildSummaryConversation)
 //   tests_markdown.cpp        - the transcript overlay's Markdown flattener (MarkdownBlocks — cmark -> flat render blocks); compiled only when the vcpkg cmark of a full build is present (AM_HAVE_CMARK), else it reports a skip
 // ======================================================================================
 //
@@ -137,6 +137,7 @@ void TestRegistry();
 void TestRegistryFanout();
 void TestRegistrySnapshotLive();
 void TestForkSourceIdEcho();
+void TestSummaryChainLinks(); // the summary's conversation chain: a /clear's SessionStart(source "clear") paired with the conversation whose SessionEnd(clear) arrived on its ConPTY (beats a fresher child record), the ConPTY fallback (live before archived), other sources / no candidate / no token => no link, per-ConPTY + consumed entries, an unknown ended id, first writer wins
 void TestRetiredHostToken(); // RETIRED HOSTS (SessionRegistry::RetireHostToken — the 2026-08-26 deactivate unbind + the restart archives): an observation / any hook from a replaced connection changes NOTHING on the record (token, pid, heartbeat, state, provenance); case-insensitive; per session; the new host still heard; Remove forgets; the per-session bound
 void TestTypedCapture();
 void TestQueueHistoryTrim(); // bounded queue history: TrimQueueHistory (pure) + the registry append-seam cap
@@ -167,6 +168,7 @@ void TestPersistence();
 void TestManagerLayout();
 void TestWindowRecord();
 void TestAppSettings();
+void TestSummaryHistoryPersistence(); // the summary's conversation chain: continuedFromId/continuedVia round-trip (omitted when empty) + summaryPanelShowHistory (default ON, explicit OFF kept, the replaced summaryPanelShowPrevious neither read nor written)
 void TestTabNamingAndColor();
 void TestTabColorModes(); // tab color modes: enum/JSON round-trips + ChooseSessionAutoColor + SessionColorKeyDir/ResolveSessionColorHex
 void TestEngineWindowLifecycle(); // Engine window lifecycle (local-Engine `...In` seams — NEVER SharedEngine() in tests): claim-by-id vs front-pop + the open-at-exit manifest's skip-empty rule + the reclaimable pool + Manager-only record deletion + ReserveManagerOnlyClose (PERSISTENCE.md 13.5 / Rule #16)
@@ -265,6 +267,8 @@ void TestForwarderEncoding(); // HOOKS.md "Encoding": the forwarder decodes stdi
 void TestTaskbarBadge(); // TaskbarBadge.h: Label (99+ cap) / Description (exact count) / IconSizeForDpi (SM_CXSMICON scaling, clamps), the disc coverage (centered, full-bleed, symmetric), ComposePixels (straight-alpha BGRA, white under ink, ink outside the disc dropped), FindInk, the real GDI glyph pass (inked, optically centered, never clipped by the disc) and CreateBadgeIcon drawn with DrawIconEx over a green canvas (transparent corners, opaque disc, white digits)
 void TestUnreadCensus(); // Engine.h's process-wide unread census on a LOCAL Engine: the distinct-session union, fan-out to EVERY sink (the source included), silence on an unchanged count, empty-publish withdrawal, unregister, and a throwing sink contained without starving the rest
 // tests_turns.cpp — the session copy menus' Copy > Transcript > Default / Max / Full / Compact / Minimal.
+void TestSummaryConversation(); // SummaryConversation.h (pure): the summary's numbered conversation list — earlier sessions first, one separator per earlier session (titleOf, else the transcript's title), each prompt once (a fork's copy under its parent, keeping its jump index), own pre-/compact parts without one, the toggle OFF = the classic list, short uuid lists, Codex rows
+void TestConversationUpstream(); // TranscriptTurns.h section 8 end to end on synthetic transcripts: a fork family three deep, a plan restart, recorded /clear + cross-folder /handover links (self / gone / throwing lookups), never downstream, the analyzer's uuid lockstep, G's whole numbered list, and the cache keeping only FINAL answers (no first prompt yet / young head / settled)
 void TestTranscriptTurns(); // TranscriptTurns.{h,cpp}: the level ladder (TurnsOptionsForLevel == the reference's LEVELS), the timestamp + JSONL readers, a missing transcript -> nullopt, and all 11 skill fixtures x 5 levels rendered byte-identical to turns\expected (written by the reference script, turns\make_goldens.py) — chains + agents through RenderTranscriptTurnsFile with births.json's pinned creation times
 // tests_markdown.cpp — the transcript overlay ("Show Transcript") renders a level's Markdown through MarkdownBlocks.
 void TestMarkdownBlocks(); // MarkdownBlocks.{h,cpp} (cmark): block kinds + order, the container chain + ids (one quote's paragraphs share it, two quotes don't, a list inside a quote nests outermost-first), list markers (first block only, numbers kept, one marker width per list), MdGapAbove (heading / label / tight / loose / code), MdIsLabelParagraph (incl. the folded Full/Max stats line), raw HTML kept as text, soft breaks kept as line breaks, images never fetched, the block / character caps, and a real transcript_turns golden end to end. A skip (not a failure) when the build has no vcpkg cmark

@@ -365,9 +365,10 @@ projects/K--source-X/  ◄── enc(cwd)                                 ┌─
      pure-timing (no solid signal — `/compact` is in-place, `/clear` leaves no successor link, a
      plan-restart references its parent backward), so it chained the *next independent session* in a busy
      dir onto the prior one (proven on the real corpus: 21/198 redirects, 5 targets each "continuing" 2–4
-     unrelated predecessors). Picking a row now resumes/forks THAT conversation. (The SOLID plan-restart
-     **parent** link — the explicit `"read the full transcript at: <parent>.jsonl"` reference — is kept,
-     driving only the summary panel's backward "previous session(s)" lineage.)
+     unrelated predecessors). Picking a row now resumes/forks THAT conversation. (The SOLID links — a
+     plan-restart's explicit `"read the full transcript at: <parent>.jsonl"` reference, a fork's copied
+     lines, and the `/clear` + `/handover` links Agentmaster records — are followed only BACKWARD, by the
+     summary panel's whole-conversation view: TAB_OVERLAY.md §13e.)
      **Double-click** an OPEN row jumps to its tab (`_ActivateClaudeSession`); on any other row it
      resumes (`_ResumeSessionFromDisk`).
 7. **Fork grouping:** dedupe search hits by line `uuid` (forks duplicate content verbatim);

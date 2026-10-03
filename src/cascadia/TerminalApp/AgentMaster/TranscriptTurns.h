@@ -50,6 +50,11 @@
 //
 // Plain C++ + Win32 (file reads, file times, the CRT's local time zone), no WinRT and no PCH, so it
 // links into the standalone test harness unchanged. Every entry point is NEVER-THROW.
+//
+// ONE entry point is NOT part of the port: CollectConversationUpstream (the end of this header), the
+// summary panel's "whole conversation" view. It reuses the port's chain walk (fork + plan restart)
+// and adds the links only Agentmaster can know (a /clear in the same tab, a /handover origin) — a
+// default-constructed walk is exactly the reference's, so the Copy ▸ Transcript goldens are untouched.
 
 #pragma once
 
@@ -59,9 +64,11 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "Json.h"
+#include "ProcessInspect.h" // ConversationSegment — what CollectConversationUpstream returns
 
 namespace Agentmaster
 {
@@ -187,4 +194,73 @@ namespace Agentmaster
                                                           const TurnsOptions& opts,
                                                           bool utc,
                                                           const TurnsBirthFn& born = {}) noexcept;
+
+    // =============================================================================================
+    // Agentmaster — the summary panel's conversation chain. NOT part of the transcript_turns.py port.
+    // =============================================================================================
+
+    // A predecessor Agentmaster RECORDED for a session when it saw that session continue another one
+    // in a way no transcript records (SessionInfo::continuedFromId / continuedVia):
+    //   * "clear"    — a /clear in the same terminal: SessionRegistry pairs the SessionStart whose
+    //                  source is "clear" with the session that held the same tab;
+    //   * "handover" — a /handover, /handover-here or /handover-standby successor's origin, recorded
+    //                  when the successor is spawned.
+    // The chain follows it like a plan-restart parent: the predecessor's lines written before the
+    // successor's first line.
+    struct RecordedPredecessor
+    {
+        std::wstring sessionId; // the session the asked-about one continues
+        std::wstring via; // how: "clear" | "handover" (another token is carried through as-is)
+    };
+
+    // Answers the predecessor Agentmaster recorded for `sessionId`, or nullopt when none was. Called
+    // OFF the UI thread, once per link of the walk (the overlay passes a lookup over the thread-safe
+    // SessionRegistry). Must not throw; a throw is contained and logged, and reads as "none".
+    using RecordedPredecessorFn = std::function<std::optional<RecordedPredecessor>(const std::wstring& sessionId)>;
+
+    // Everything EARLIER in a session's conversation: what the summary panel lists ABOVE the session's
+    // own prompts, numbered as one conversation with a session-id separator between sessions.
+    struct ConversationUpstream
+    {
+        // The earlier sessions' prompts, OLDEST session first. Each session contributes its prompts
+        // split at its own /compact boundaries (ConversationSegment::label), every segment tagged with
+        // the session's sessionId + sessionTitle, and the session's LAST segment carries continuedBy
+        // (how the next session continued from it). A session whose part holds no prompt still
+        // contributes one empty segment, so its separator is still drawn. Only the part of a session
+        // BEFORE its successor began is listed — a fork: up to the last line the fork copied; a plan
+        // restart or a recorded link: the lines written before the successor's first line — and only
+        // the conversation's live branch (a prompt rewound away is not listed). Empty when the session
+        // continues nothing.
+        std::vector<ConversationSegment> segments;
+        // Every transcript-line uuid an EARLIER session owns. A fork copies its parent's lines with the
+        // SAME uuids; the summary drops the current session's prompts whose uuid is in here, so each
+        // prompt is listed once — under the session that typed it first.
+        std::unordered_set<std::wstring> uuids;
+    };
+
+    // Collects everything EARLIER in the conversation `transcript` belongs to — the summary panel's
+    // whole-conversation view. It follows the chain back, one link at a time:
+    //   * a FORK parent, found the way Copy ▸ Transcript finds it (an older transcript of the same
+    //     project folder holding the copied uuids) — but only when this transcript OPENS with a copied
+    //     line (one stamped well before the file was created: a fork keeps the copied lines' times),
+    //     so an ordinary session never pays the project-folder scan;
+    //   * a PLAN-RESTART parent: "read the full transcript at: <parent>.jsonl" in the first prompt;
+    //   * a RECORDED predecessor: `recorded` (a /clear in the same tab, a /handover origin).
+    // It never looks DOWNSTREAM: a session that forked from, was handed over from, or /clear-ed out of
+    // this one is never listed — that belongs to that session's own summary.
+    // COST: one read of the transcript's head, and — only when one of those links can exist — the
+    // chain's transcripts (the fork search reads the older transcripts of the folder written within a
+    // day of the copied line). The result is cached per (transcript, its creation time, its recorded
+    // link) — all immutable — and concurrent calls for one key share ONE walk, so the summary's
+    // per-growth reloads stay cheap. Only a FINAL answer is cached: a transcript without its first
+    // prompt yet, or one created less than 10 s ago (its opening lines may still be mid-write), is
+    // answered fresh on every call until it settles. Call it OFF the UI thread.
+    //   transcript — the session's .jsonl (ResolveClaudeTranscriptPath).
+    //   recorded   — the recorded-predecessor lookup; empty = follow on-disk links only.
+    //   born       — file creation times; empty = TranscriptFileBirth. The harness pins them.
+    // Returns the upstream; EMPTY when there is none, the transcript can't be read, or the walk failed
+    // (a failure other than an unreadable file is logged to hooks.log, Rule #18). Never throws.
+    ConversationUpstream CollectConversationUpstream(const std::filesystem::path& transcript,
+                                                     const RecordedPredecessorFn& recorded,
+                                                     const TurnsBirthFn& born = {}) noexcept;
 }

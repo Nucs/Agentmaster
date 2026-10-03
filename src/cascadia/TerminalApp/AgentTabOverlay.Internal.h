@@ -11,7 +11,7 @@
 //   AgentTabOverlay.cpp          - CORE: ctor/dtor, Initialize/_Detach, ShowActivity (the observe badge), _Refresh (the linked badge), hover/expand, opacities, Autorunner
 // ★ AgentTabOverlay.Internal.h   - shared file-local helpers: StateColor/Glyph/Label, the summary-box renderers, time formatting, launch-CLI + clipboard (anonymous namespace, a per-TU copy)
 //   AgentTabOverlay.Actions.cpp  - the hover action row: the folder (Open Path) button, the copy menu, and the shared CopySessionField action
-//   AgentTabOverlay.Summary.cpp  - the pencil-toggled summary panel: build/render/load off-thread, the times bar, resize grips, wrap/truncate/previous, JUMP, copy-summary
+//   AgentTabOverlay.Summary.cpp  - the pencil-toggled summary panel: build/render/load off-thread, the times bar, resize grips, wrap/truncate/whole-conversation, JUMP, session separators, copy-summary
 // ======================================================================================
 //
 // Agentmaster: AgentTabOverlay file-local helpers (StateColor/Glyph/Label, the summary-box
@@ -24,6 +24,10 @@
 #pragma once
 
 #include "AgentClipboard.h" // RobustCopyTextToClipboard — the retry-looped Win32 writer CopyTextToClipboard routes through
+#include "AgentMaster/SessionRegistry.h" // the recorded-predecessor + title lookups the conversation chain reads (thread-safe Get)
+#include "AgentMaster/SessionStore.h" // GetStoredSessionTitle — the durable title of a session the registry does not know
+#include "AgentMaster/TranscriptTurns.h" // CollectConversationUpstream / ConversationUpstream / RecordedPredecessorFn
+#include "AgentMaster/SummaryConversation.h" // BuildSummaryConversation / CodexSummaryConversation — the conversation rows RenderSummaryBox renders
 
 namespace
 {
@@ -35,6 +39,13 @@ namespace
     // COPYABLE summary turns each into a plain-text ─ rule. \x1F (ASCII Unit Separator) never occurs
     // in transcript content, so it's an unambiguous marker.
     constexpr wchar_t kSepMark = L'\x1F';
+    // Agentmaster (the summary's conversation chain): the SESSION-separator sentinel. RenderSummaryBox
+    // emits it as `\x1E<full session id>` on a line of its own, right after the last prompt of an EARLIER
+    // session the current one continues — "the conversation up to here is <id>". The displayed panel
+    // turns each into a clickable rule naming the id's first 8 characters (a click copies the full id);
+    // the copyable summary into a plain-text rule carrying the full id. \x1E (ASCII Record Separator)
+    // never occurs in transcript content, and a session id never contains it.
+    constexpr wchar_t kSessionSepMark = L'\x1E';
 
     // Summary-panel resize bounds (TAB_OVERLAY.md), as FRACTIONS of the pane. The panel is anchored
     // top-right: the left grip grows it leftward (width), the bottom grip downward (height). A 0 stored
@@ -552,6 +563,54 @@ namespace
         return o;
     }
 
+    // Agentmaster (the summary's conversation chain): the conversation-list row type (AgentMaster/
+    // SummaryConversation.h — engine-owned so the harness tests its builder), under a short local name for
+    // the helpers below.
+    using SummaryRow = ::Agentmaster::SummaryConversationRow;
+
+    // Agentmaster (the summary's conversation chain): the recorded-predecessor lookup the chain follows
+    // (TranscriptTurns.h RecordedPredecessorFn) — the /clear predecessor or /handover origin Agentmaster
+    // stored on a session's record (SessionInfo::continuedFromId / continuedVia). Holds the registry BY
+    // shared_ptr, so the lookup stays valid on the background thread the chain walk runs on.
+    //   registry — the process-wide session registry; null reads as "nothing recorded" for every session.
+    // Returns the lookup: nullopt for an unknown session or one with no recorded link. The lookup never
+    // throws beyond std::bad_alloc (SessionRegistry::Get copies one record under its lock).
+    ::Agentmaster::RecordedPredecessorFn MakeRecordedPredecessorLookup(std::shared_ptr<::Agentmaster::SessionRegistry> registry)
+    {
+        return [registry = std::move(registry)](const std::wstring& sessionId) -> std::optional<::Agentmaster::RecordedPredecessor> {
+            if (!registry)
+            {
+                return std::nullopt;
+            }
+            const auto s = registry->Get(sessionId);
+            if (!s || s->continuedFromId.empty())
+            {
+                return std::nullopt;
+            }
+            return ::Agentmaster::RecordedPredecessor{ s->continuedFromId, s->continuedVia };
+        };
+    }
+
+    // Agentmaster (the summary's conversation chain): the title an EARLIER session of the chain is named by
+    // on its separator — Agentmaster's own title when the registry knows the session (the ONE title of
+    // Rule #11: tab == Explorer name == persisted title), else the durable per-session title store (a
+    // session renamed from the Sessions page while closed), else "" (the caller then uses the
+    // transcript's own custom/AI title). Safe off the UI thread (thread-safe registry; a file read).
+    //   registry  — the session registry (may be null).
+    //   sessionId — the earlier session.
+    // Returns the title, or "". Never throws beyond std::bad_alloc.
+    std::wstring SummarySessionTitleOf(const std::shared_ptr<::Agentmaster::SessionRegistry>& registry, const std::wstring& sessionId)
+    {
+        if (registry)
+        {
+            if (const auto s = registry->Get(sessionId); s && !s->title.empty())
+            {
+                return s->title;
+            }
+        }
+        return ::Agentmaster::GetStoredSessionTitle(sessionId);
+    }
+
     // Render the session-end.js box, adapted to the narrow (20%) summary panel: the same labels +
     // section dividers + mapping, but wrapped (no fixed-width rules). plan-start/plan-end override the
     // header glyph+label; otherwise the live state glyph+label (passed in) is used.
@@ -563,7 +622,10 @@ namespace
     //    the value-add: Parent/Plan, Duration, Tasks, Messages, Skills Loaded, Files Created/Edited/Read.
     //  - full=true (the COPYABLE "Summary" — copy menu): the COMPLETE box, including everything trimmed
     //    above (id + resume CLI + Dir + Folder + Branch + the state header), so a copy loses nothing.
-    std::wstring RenderSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate, bool showPrevious)
+    // Agentmaster (the summary's conversation chain): `conversation` (BuildSummaryConversation) IS the
+    // Messages section — every prompt numbered 1..N as ONE conversation, each earlier session closed by a
+    // `kSessionSepMark + <full id>` line. It replaced the former per-segment "Previous session N" blocks.
+    std::wstring RenderSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate, const std::vector<SummaryRow>& conversation)
     {
         std::wstring glyph = liveGlyph, label = liveLabel;
         const bool isPlan = a.hasPlanContent || a.hasExitPlanMode;
@@ -628,42 +690,32 @@ namespace
         // messages — the "where we are / what's next" header over the prompt history. Honors the wrap /
         // truncate toggles like a message body. Present in the displayed panel (full=false) and the
         // copyable Summary (full=true).
-        // Agentmaster (conversation lineage): the PREVIOUS session(s) — the pre-compaction segment(s) a
-        // /compact summarized away — rendered ABOVE the recap + current Messages, OLDEST FIRST, each under
-        // its own separator + a "Previous session N · <label>" header, with ITS prompts numbered 1.. (an
-        // INDEPENDENT count per session). Shown only when the toggle is on (display) — the full copyable box
-        // passes showPrevious=true — and only when the session actually has a previous segment.
-        if (showPrevious && !a.previousSegments.empty())
-        {
-            int segNo = 1;
-            for (const auto& seg : a.previousSegments)
-            {
-                sep();
-                std::wstring hdr = L"Previous session " + std::to_wstring(segNo++);
-                if (!seg.label.empty())
-                {
-                    hdr += L" · " + seg.label;
-                }
-                line(hdr);
-                int i = 1;
-                for (const auto& m : seg.userMsgs)
-                {
-                    line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m, wrapNewlines, truncate));
-                }
-            }
-        }
         if (!a.awaySummary.empty())
         {
             sep();
             line(L"Recap: " + SummaryEscapeMsg(a.awaySummary, wrapNewlines, /*truncate*/ false)); // label INLINE; the recap is ALWAYS shown in FULL (never capped by the truncate toggle — only the numbered messages honor it)
         }
-        if (!a.userMsgs.empty())
+        // Agentmaster (the summary's conversation chain): the Messages section IS the conversation — every
+        // prompt of the whole conversation (or, with the ⏮ toggle off, of the part after the last /compact)
+        // numbered 1..N as ONE conversation: the numbers keep counting across sessions, and each earlier
+        // session the current one continues is closed by a lone `kSessionSepMark + <full id>` line. The
+        // display turns that line into a clickable rule naming the id's first 8 characters; the copy into a
+        // plain rule with the full id. Every prompt honors the wrap/truncate toggles alike — an earlier
+        // session's prompt reads exactly like this session's.
+        if (!conversation.empty())
         {
             sep();
-            int i = 1;
-            for (const auto& m : a.userMsgs)
+            int n = 1;
+            for (const auto& row : conversation)
             {
-                line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m, wrapNewlines, truncate));
+                if (!row.sessionId.empty())
+                {
+                    o += kSessionSepMark;
+                    o += row.sessionId;
+                    o += L"\n";
+                    continue;
+                }
+                line(L" " + std::to_wstring(n++) + L". " + SummaryEscapeMsg(row.text, wrapNewlines, truncate));
             }
         }
         // De-duplicate the file lists so each path appears in exactly ONE section. Precedence is
@@ -824,11 +876,15 @@ namespace
     // Folder + Branch + Model + Duration + Tasks + Messages + Files, i.e. everything the DISPLAYED panel
     // trims because the badge already shows it). Mirrors CopyConversationAsync: resolve + analyze OFF the
     // UI thread, render full=true, then hop back to copy. No-op if there's no transcript / nothing to copy.
-    winrt::fire_and_forget CopySummaryAsync(winrt::Windows::System::DispatcherQueue disp, bool codex, std::wstring claudeId, std::wstring codexId, std::wstring cwd, std::wstring resumeCmd, std::wstring glyph, std::wstring label, bool wrapNewlines, bool truncate)
+    // Agentmaster (the summary's conversation chain): the Messages are ALWAYS the whole conversation (the
+    // ⏮ toggle governs only the panel — a copy loses nothing), each earlier session closed by a plain
+    // "──── <full session id> ────" rule. `registry` feeds the recorded /clear + /handover links and the
+    // earlier sessions' titles; null = on-disk links only.
+    winrt::fire_and_forget CopySummaryAsync(winrt::Windows::System::DispatcherQueue disp, bool codex, std::wstring claudeId, std::wstring codexId, std::wstring cwd, std::wstring resumeCmd, std::wstring glyph, std::wstring label, bool wrapNewlines, bool truncate, std::shared_ptr<::Agentmaster::SessionRegistry> registry)
     {
         // Agentmaster (contained): an exception escaping this fire_and_forget == winrt::terminate() ==
-        // the whole app dies. The heavy helpers (analyze / lineage / plan-file) self-contain now, but
-        // this lane's own glue — the previous-segments splice, the times+box concat, the sentinel
+        // the whole app dies. The heavy helpers (analyze / upstream walk / plan-file) self-contain now, but
+        // this lane's own glue — the conversation build, the times+box concat, the sentinel
         // rewrite, the full-box capture COPY into TryEnqueue, and the OVERLAY-LOCAL RenderSummaryBox /
         // RenderCodexSummary (independent implementations, NOT the wrapped shared renderers) — did
         // not: a std::bad_alloc on the same huge transcripts that drove the v0.6.x resume crash-loop
@@ -864,15 +920,13 @@ namespace
         else
         {
             auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
-            // Cross-file lineage: the COMPLETE copyable box carries the /clear + plan-restart parents too
-            // (a one-shot click — walked fresh, no memo needed). Prepended oldest-first, like the panel.
-            {
-                auto lineage = ::Agentmaster::CollectConversationLineage(claudeId, cwd, 16);
-                if (!lineage.empty())
-                {
-                    a.previousSegments.insert(a.previousSegments.begin(), lineage.begin(), lineage.end());
-                }
-            }
+            // The whole conversation: every earlier session this one continues (CollectConversationUpstream —
+            // cached engine-side, so a copy right after the panel loaded costs nothing extra), numbered as one
+            // with the session's own parts. The COMPLETE copyable box always carries it.
+            const auto upstream = ::Agentmaster::CollectConversationUpstream(std::filesystem::path{ path }, MakeRecordedPredecessorLookup(registry));
+            const auto conversation = ::Agentmaster::BuildSummaryConversation(a, upstream, /*showHistory*/ true, [&registry](const std::wstring& sid) {
+                return SummarySessionTitleOf(registry, sid);
+            });
             // Agentmaster (subagent activity): fold the newest subagent side-file write into "last
             // activity" so a copy taken WHILE a Task/Agent subagent runs matches the live panel — the
             // parent transcript's a.lastTs stays quiescent then (the same fold ReadTranscriptLastActivityTail
@@ -892,7 +946,7 @@ namespace
                     planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
                 }
             }
-            text = RenderSummaryBox(a, id, cwd, path, resumeCmd, glyph, label, planFile, /*full*/ true, wrapNewlines, truncate, /*showPrevious*/ true); // the COMPLETE copyable box always carries the previous session(s)
+            text = RenderSummaryBox(a, id, cwd, path, resumeCmd, glyph, label, planFile, /*full*/ true, wrapNewlines, truncate, conversation); // the COMPLETE copyable box always carries the whole conversation
         }
         if (text.empty() || !disp)
         {
@@ -907,6 +961,19 @@ namespace
         for (size_t p = text.find(kSepMark); p != std::wstring::npos; p = text.find(kSepMark, p))
         {
             text.replace(p, 1, std::wstring(48, L'\x2500')); // ──────────────────────────────────────────────── (48)
+        }
+        // ...and each SESSION separator (`\x1E<full id>`, the end of an earlier session's part) into a plain
+        // rule that keeps the FULL id — in a pasted summary the id is the useful part (`claude --resume <id>`
+        // reopens that earlier session; a fork's parent may have gone on past the fork since), so it is never
+        // shortened here.
+        for (size_t p = text.find(kSessionSepMark); p != std::wstring::npos; p = text.find(kSessionSepMark, p))
+        {
+            const size_t eol = text.find(L'\n', p);
+            const size_t idEnd = (eol == std::wstring::npos) ? text.size() : eol;
+            const std::wstring sid = text.substr(p + 1, idEnd - (p + 1));
+            const std::wstring rule = std::wstring(4, L'\x2500') + L" " + sid + L" " + std::wstring(4, L'\x2500'); // ──── <id> ────
+            text.replace(p, idEnd - p, rule);
+            p += rule.size(); // resume after the replacement (the rule itself holds no sentinel)
         }
         disp.TryEnqueue([text]() { CopyTextToClipboard(text); });
         }

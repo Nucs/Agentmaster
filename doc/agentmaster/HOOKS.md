@@ -482,6 +482,24 @@ a `/clear`ed managed tab was refused by **Deactivate** ("its ConPTY is the user'
 dead-tab **Restart** fallback (which skips external records) resurrected the conversation from
 *before* the `/clear` (`_BindClaudeSessionToTab`, logged `[rehome] <id> inherits MANAGED provenance`).
 
+**The `/clear` link — what the summary's whole-conversation view follows (2026-10-03).** No transcript
+records that a `/clear` successor continues the conversation it cleared, and a `/resume` switches the id
+the same way while continuing nothing — the hook's discriminator is the only proof. A `/clear` fires
+`SessionEnd` with `reason "clear"` for the old conversation and then, after those hooks finish,
+`SessionStart` with `source "clear"` for the new id, both on the same ConPTY. `OnHookEvent` pairs them:
+- the `SessionEnd(clear)` is remembered per ConPTY (`_recentClearEnds`: token → ended id, 2 min, ≤ 16,
+  one per ConPTY) BEFORE the `[stale-end]` guard can drop the event;
+- the `SessionStart(clear)` takes that entry (consumed: one `/clear` ends one conversation) and records it
+  on the NEW record as `continuedFromId` + `continuedVia "clear"` — persisted in `sessions.json`, set once
+  (the first writer wins), never cleared;
+- when that `SessionEnd` was lost (a forwarder killed at its timeout), the fallback pairs with the ConPTY's
+  OTHER record — live before archived, then the most recent hook. The exact pairing matters because a child
+  `claude -p` a Bash tool or a hook ran inherits the tab's `WT_SESSION` and can hold a fresher hook on it.
+
+Logged `[lineage] <new8> continues <old8> (/clear on ConPTY <wt>, paired by its SessionEnd(clear))` — or
+`…no SessionEnd(clear) seen: paired by the ConPTY's other record)`. The summary panel then lists the cleared
+conversation above the new one (TranscriptTurns.h `CollectConversationUpstream`, TAB_OVERLAY.md §13e).
+
 **Retired hosts — the Deactivate/Restart unbind race.** Deactivate and Restart both REPLACE a session's
 connection: a new ConPTY (new `WT_SESSION`) goes into the tab and the old one is closed. The old claude does
 not vanish at once: it runs its close handling (its `SessionEnd` hook among it) for 1–5 s. Until the hosting
@@ -706,8 +724,10 @@ here" middle). Measured: **11.0%** remain hidden, 225 of those 233 hang off a li
 rewinds), and no prompt the old walk kept is dropped. The display readers also skip a uuid's re-appended
 copy (first occurrence wins), so the legacy re-append files list every message once.
 
-The summary panel's **Messages** stay the CURRENT segment (restarted at each on-branch boundary, full
-reads only); earlier segments are the positional "previous session(s)". Every other field — Files,
+The analyzer's **Messages** (`SessionSummary::userMsgs`, the ▸ jump list) stay the CURRENT segment
+(restarted at each on-branch boundary, full reads only); the earlier segments (`previousSegments`) and the
+earlier SESSIONS of the conversation are listed above them by the summary's whole-conversation view, numbered
+straight through (TAB_OVERLAY.md §13e). Every other field — Files,
 Skills, Tasks, the duration's start, the plan-parent link — spans the whole session, and the plan-parent
 link comes from the TRUE first prompt (before, the first on-branch prompt after a compaction was the
 summary, whose "read the full transcript at: `<self>`.jsonl" named the session itself).

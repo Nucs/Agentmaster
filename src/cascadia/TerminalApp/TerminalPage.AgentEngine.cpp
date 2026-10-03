@@ -1807,6 +1807,7 @@ namespace winrt::TerminalApp::implementation
                     s.showSummaryPanel = disk.showSummaryPanel;
                     s.summaryPanelWrapNewlines = disk.summaryPanelWrapNewlines; // wrap-line toggle (panel times bar), out-of-cog UI action
                     s.summaryPanelTruncate = disk.summaryPanelTruncate; // truncate toggle (panel times bar), out-of-cog UI action
+                    s.summaryPanelShowHistory = disk.summaryPanelShowHistory; // ⏮ whole-conversation toggle (panel times bar), out-of-cog UI action
                     // Tab color picker: the Custom / advanced (More) expansion states are written by
                     // the ColorPickupFlyout itself as the user toggles them (freshest-disk RMW), never
                     // by this form — preserve them so a cog Save can't reset how the picker opens.

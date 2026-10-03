@@ -49,6 +49,12 @@ namespace Agentmaster
     // hook schemas). Only these three are behavior-bearing today; any other value (or an empty one
     // from an old 9-field forwarder) takes the historical path.
     inline constexpr std::wstring_view kHookSourceCompact = L"compact"; // SessionStart after a compaction (same conversation id, same file)
+    // Agentmaster (the summary's conversation chain): a /clear — the SessionEnd `reason` of the conversation
+    // it ends AND the SessionStart `source` of the NEW conversation id it starts on the SAME claude process
+    // and ConPTY (Claude finishes the first's hooks before the second's). Not state-bearing:
+    // SessionRegistry::OnHookEvent pairs the two into the new session's continuedFromId/continuedVia link,
+    // so the summary panel can list the conversation the /clear left behind (no transcript records it).
+    inline constexpr std::wstring_view kHookSourceClear = L"clear";
     inline constexpr std::wstring_view kCompactTriggerManual = L"manual"; // a user-typed `/compact` (the session was AT REST before it)
     inline constexpr std::wstring_view kCompactTriggerAuto = L"auto"; // an auto-compaction (normally MID-TURN: the turn continues after it)
 

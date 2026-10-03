@@ -807,8 +807,11 @@ namespace winrt::TerminalApp::implementation
         {
             const std::wstring dir = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
             const std::wstring resume = BuildLaunchCli(s, codex); // the same REAL launch CLI as cases 3/4
+            // The process-wide registry (by shared_ptr: the copy runs off-thread) carries the /clear and
+            // /handover links + titles the copied whole conversation follows (SessionInfo::continuedFromId).
             CopySummaryAsync(dispatcher, codex, s.id, s.codexSessionId, dir, resume,
-                             std::wstring{ StateGlyph(s.state) }, std::wstring{ StateLabel(s.state) }, wrapNewlines, truncate);
+                             std::wstring{ StateGlyph(s.state) }, std::wstring{ StateLabel(s.state) }, wrapNewlines, truncate,
+                             ::Agentmaster::SharedEngine().registry);
             break;
         }
         case 7: // Current Prompt — the UNSENT draft sitting in this session's input box (PENDING_INPUT.md)

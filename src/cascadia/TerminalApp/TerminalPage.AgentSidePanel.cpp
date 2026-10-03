@@ -2090,7 +2090,7 @@ namespace winrt::TerminalApp::implementation
         // Seed the GLOBAL content flags before the first render (plain members — safe pre-build).
         overlay->SetSummaryWrapNewlines(_appSettings.summaryPanelWrapNewlines);
         overlay->SetSummaryTruncate(_appSettings.summaryPanelTruncate);
-        overlay->SetSummaryShowPrevious(_appSettings.summaryPanelShowPrevious);
+        overlay->SetSummaryShowHistory(_appSettings.summaryPanelShowHistory);
         overlay->Initialize(id, _sessionRegistry);
         // The side panel's summary is a primary surface, not a HUD floating over a terminal — it
         // is never dimmed (rest == hover == 1.0). Applied after Initialize so it re-paints the
@@ -2116,10 +2116,10 @@ namespace winrt::TerminalApp::implementation
                     self->_ToggleSummaryTruncate();
                 }
             });
-            overlay->SetSummaryPreviousToggleHandler([weakThis]() {
+            overlay->SetSummaryHistoryToggleHandler([weakThis]() {
                 if (auto self = weakThis.get())
                 {
-                    self->_ToggleSummaryPrevious();
+                    self->_ToggleSummaryHistory();
                 }
             });
             overlay->SetJumpHandler([weakThis, sid](const std::vector<std::wstring>& msgs, int index) -> int {
@@ -2195,7 +2195,7 @@ namespace winrt::TerminalApp::implementation
         {
             _sidePanelSummaryOverlay->SetSummaryWrapNewlines(_appSettings.summaryPanelWrapNewlines);
             _sidePanelSummaryOverlay->SetSummaryTruncate(_appSettings.summaryPanelTruncate);
-            _sidePanelSummaryOverlay->SetSummaryShowPrevious(_appSettings.summaryPanelShowPrevious);
+            _sidePanelSummaryOverlay->SetSummaryShowHistory(_appSettings.summaryPanelShowHistory);
             _sidePanelSummaryOverlay->SetTabColorMode(static_cast<int>(_appSettings.tabColorMode));
             _sidePanelSummaryOverlay->SetModelFamilies(_appSettings.modelFamilies);
         }

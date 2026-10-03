@@ -29,6 +29,15 @@
 
 namespace Agentmaster
 {
+    // Agentmaster (the summary's conversation chain): the per-line summary helpers below
+    // (SummaryPromptOfLine / SummaryCompactionLabelOfLine) take ONE parsed transcript line. Only a
+    // forward declaration is needed for their signatures, so this header stays as light as it was:
+    // Json.h (the full type) is included by the .cpp files that define and call them.
+    namespace json
+    {
+        struct Value;
+    }
+
     // One row of a Toolhelp process snapshot: pid, parent pid, and the leaf image name.
     struct ProcEntry
     {
@@ -452,14 +461,32 @@ namespace Agentmaster
 
     // ===== Session summary (TAB_OVERLAY.md summary panel) — the session-end.js analyzer, ported =====
     // Agentmaster (conversation lineage): ONE segment of a multi-part conversation — the run of
-    // messages between two compaction boundaries (a `/compact` splits a transcript into segments;
-    // a cross-file plan-restart join prepends the parent file's segments — a /clear is NOT joined: it
-    // leaves no on-disk link to its successor, see CollectConversationLineage). The summary panel
-    // renders a PREVIOUS segment exactly like the current Messages list, under a separator + `label`.
+    // messages between two compaction boundaries (a `/compact` splits a transcript into segments),
+    // or the part of an EARLIER session the current one continues (TranscriptTurns.h
+    // CollectConversationUpstream: a fork's parent, a plan-restart parent, or a /clear predecessor or
+    // /handover origin Agentmaster recorded). The summary panel lists every segment's prompts in ONE
+    // continuous numbered conversation, with a session-id separator wherever the session changes.
     struct ConversationSegment
     {
-        std::wstring label; // the compaction that ENDED this segment, e.g. "compacted · manual · 409k→5k"; empty for a plain (cross-file) join
+        std::wstring label; // the compaction that ENDED this segment, e.g. "compacted · manual · 409k→5k"; empty when the segment ended for any other reason (a cross-file join, or it is the session's last part)
         std::vector<std::wstring> userMsgs; // the segment's REAL user prompts, in order (SAME filter as SessionSummary.userMsgs — so it includes the messages typed mid-turn too)
+        // Agentmaster (the summary's conversation chain): the transcript-line uuid of each prompt, in
+        // lockstep with userMsgs (same length, same order; "" for a line that carried none). The uuid
+        // is what lets the chain attribute a prompt to the session it was FIRST typed in: a fork copies
+        // its parent's lines with the SAME uuids, so a copy is recognized exactly, never by its text.
+        std::vector<std::wstring> uuids;
+        // Agentmaster (the summary's conversation chain): set only on a segment of an EARLIER session
+        // (CollectConversationUpstream); empty for the current session's own segments.
+        //   sessionId    — the session these prompts were typed in (the transcript's file stem).
+        //   sessionTitle — that transcript's own title (its last custom title, else its AI title);
+        //                  "" when it records none. The overlay prefers Agentmaster's title when the
+        //                  registry knows the session.
+        //   continuedBy  — set on the LAST segment of that session only: how the NEXT session in the
+        //                  chain continued from it — "fork", "plan" (a plan-mode restart), or a kind
+        //                  Agentmaster recorded ("clear", "handover"). Empty on every other segment.
+        std::wstring sessionId;
+        std::wstring sessionTitle;
+        std::wstring continuedBy;
     };
 
     // A faithful C++ port of ~/.claude/hooks/session-end.js parseTranscript + its field mapping, so the
@@ -476,6 +503,12 @@ namespace Agentmaster
         // user line, so a user-lines-only list silently lost it. Listed at the point the turn took it, with
         // the same filter + dedup as a typed prompt (ProcessInspect.Content.cpp SeQueuedHumanPromptRawText).
         std::vector<std::wstring> userMsgs;
+        // Agentmaster (the summary's conversation chain): the transcript-line uuid of each userMsgs entry,
+        // in lockstep (same length, same order; "" for a line that carried none). Lets the summary drop
+        // the prompts a FORK merely copied from its parent (same uuids) out of the fork's own list — they
+        // are listed once, under the session that first typed them — while every index into userMsgs
+        // (the jump rows, alt+up/down) keeps meaning what it always meant.
+        std::vector<std::wstring> userMsgUuids;
         // Agentmaster: the three file lists hold DISPLAY LABELS (SeSummaryFileLabel) — a bare basename, or
         // `scratchpad/<basename>` for a file inside a session scratchpad — each list unique + sorted with
         // the scratchpad labels LAST (SeSummaryLabelLess). Labels, not paths: two distinct files with one
@@ -579,8 +612,30 @@ namespace Agentmaster
     // the label of the compaction that ended it. File order — the LAST segment is the active
     // conversation, the earlier ones are the "previous session(s)" /compact summarized away. Pure; the
     // segment-collector AnalyzeSessionTranscript uses for SessionSummary.previousSegments (exposed for
-    // tests + the higher-level cross-file lineage resolver).
+    // tests + the higher-level cross-file lineage resolver). Each segment's `uuids` are filled in
+    // lockstep with its prompts.
     std::vector<ConversationSegment> CollectConversationSegments(std::wstring_view transcriptText);
+
+    // Agentmaster (the summary's conversation chain): the summary's "is this line a prompt the USER
+    // typed?" rule for ONE parsed transcript line — the exact rule AnalyzeSessionTranscript and
+    // CollectConversationSegments apply, exposed so the cross-session chain (TranscriptTurns.h
+    // CollectConversationUpstream) lists an earlier session's prompts by the same filter as the current
+    // session's Messages list. A typed prompt (type "user", userType "external", not meta / a compaction
+    // summary / noise) and a message typed while claude worked (a human `queued_command` attachment)
+    // both count; a slash command reads as "/name args".
+    //   line — one parsed transcript line (any type).
+    // Returns the prompt as the summary lists it, or "" when the line is not one. Never throws beyond
+    // std::bad_alloc (the string copy).
+    std::wstring SummaryPromptOfLine(const json::Value& line);
+
+    // Agentmaster (the summary's conversation chain): the label a /compact boundary line gives the
+    // segment it ENDS — "compacted · manual · 409k→5k" (trigger + pre/post token counts when known) —
+    // the same label CollectConversationSegments writes. Exposed for the cross-session chain, which
+    // splits an earlier session's prompts at its own compactions.
+    //   line — one parsed transcript line (any type).
+    // Returns the label, or "" when the line is not a system/compact_boundary line. Never throws beyond
+    // std::bad_alloc.
+    std::wstring SummaryCompactionLabelOfLine(const json::Value& line);
 
     // Agentmaster (cross-file conversation lineage): walk `sessionId`'s PREDECESSOR chain backwards —
     // ONLY a plan-restart PARENT (the "read the full transcript at: <parent>.jsonl" link the child's
@@ -594,6 +649,11 @@ namespace Agentmaster
     // parent transcripts). `maxDepth` bounds the walk (cycle-safe via a visited set). Empty when there
     // is no cross-file parent. Composes with AnalyzeSessionTranscript's IN-FILE previousSegments — the
     // higher-level lineage layer the SessionSummary header refers to. [Agentmaster]
+    // NOTE (the summary's conversation chain): the summary panel no longer calls this — it lists the
+    // WHOLE upstream chain (fork parents, plan-restart parents, and the /clear + /handover predecessors
+    // Agentmaster records) through TranscriptTurns.h CollectConversationUpstream, which needs the fork
+    // walk that lives in TranscriptTurns.cpp (a TU the agentmaster CLI does not link). This plan-only
+    // walker stays here, CLI-linkable, for any caller that needs the cheap explicit link alone.
     std::vector<ConversationSegment> CollectConversationLineage(const std::wstring& sessionId,
                                                                 const std::wstring& cwd,
                                                                 int maxDepth = 16);

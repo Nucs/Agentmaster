@@ -456,6 +456,23 @@ namespace Agentmaster
         // kRetiredHostTokensPerSession each; expired entries pruned on the next retire). Transient — a dying
         // process cannot outlive an app restart. Dropped with the session by Remove. Guarded by _mtx.
         std::unordered_map<std::wstring, std::vector<RetiredHostToken>> _retiredHostTokens;
+        // Agentmaster (the summary's conversation chain — SessionInfo::continuedFromId): one conversation a
+        // /clear just ENDED — a SessionEnd whose reason is "clear" (kHookSourceClear).
+        struct RecentClearEnd
+        {
+            std::wstring tabToken; // the ConPTY (WT_SESSION) the cleared conversation ran on
+            std::wstring sessionId; // the conversation the /clear ended
+            int64_t endedAtUnixMs{ 0 }; // when its SessionEnd arrived — the kRecentClearEndTtlMs clock
+        };
+        // The conversations /clear recently ended, oldest first. Claude runs the old conversation's
+        // SessionEnd hooks to completion BEFORE the new one's SessionStart, so the SessionStart(source
+        // "clear") that follows on the same ConPTY pairs with EXACTLY the entry for that ConPTY — a precise
+        // signal a token match alone lacks: a child `claude -p` (a Bash tool's or a hook's) inherits the
+        // tab's WT_SESSION and can hold a fresher hook on it. An entry is consumed by its pairing. Bounded
+        // (kRecentClearEndsMax, oldest out, one per ConPTY) and short-lived; transient. Guarded by _mtx.
+        std::vector<RecentClearEnd> _recentClearEnds;
+        static constexpr size_t kRecentClearEndsMax = 16; // ConPTYs with a /clear still waiting for its SessionStart — 16 is far past any real burst
+        static constexpr int64_t kRecentClearEndTtlMs = 120'000; // the SessionEnd -> SessionStart gap is milliseconds; 2 min absorbs any hook latency
         std::vector<std::pair<ObserverToken, RegistryObserver>> _observers;
         uint64_t _nextObserverId{ 1 };
         AdvanceHandler _advance;

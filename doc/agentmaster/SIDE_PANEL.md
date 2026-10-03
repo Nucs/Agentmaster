@@ -207,8 +207,8 @@ never push the tags off the card. An untagged card's band is exactly the old tit
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new
 **fill-host mode** (`SetSummaryFillHost`, called before `Initialize`): the per-tab pencil
 panel's entire pipeline — off-thread `AnalyzeSessionTranscript` + `RenderSummaryBox`/
-`RenderCodexSummary`, the live times bar, the wrap/truncate/previous toggles, the JUMP buttons,
-the context menus — reused verbatim, with three differences:
+`RenderCodexSummary`, the live times bar, the wrap/truncate/whole-conversation toggles, the JUMP
+buttons, the context menus — reused verbatim, with three differences:
 
 - it stretches to the HOST slot (fractions + the 50%-of-pane cap ignored; the body viewport's
   MaxHeight tracks the slot height minus the panel's own chrome, change-gated + re-applied on a
@@ -219,10 +219,19 @@ the context menus — reused verbatim, with three differences:
   per-tab pencil global.
 
 It is DELIBERATELY not in `_claudeOverlays` (that map is keyed by session id and may already
-hold the session's own per-tab overlay), so `_ToggleSummaryWrap`/`Truncate`/`Previous` and the
+hold the session's own per-tab overlay), so `_ToggleSummaryWrap`/`Truncate`/`History` and the
 settings broadcast push the flags to it explicitly (`_SidePanelApplySettings`). Rebinding to a
 new session replaces the overlay (the old one's registry observer detaches on release); a
 same-id rebind just kicks the cheap mtime-gated `RefreshSummaryContent`.
+
+**The whole conversation.** The Messages list reads as ONE conversation: every prompt of the
+sessions this one continues — a fork's parent, a plan-mode restart's parent, a `/clear`
+predecessor, a `/handover` origin, followed **upstream only** — numbered 1..N straight through,
+with a thin separator naming each earlier session's id (first 8 characters) after its last
+prompt. Clicking a separator copies that full id and pops "Copied session id of up to here".
+Because the side panel builds a NEW overlay at every selection, the chain walk is cached
+engine-side (`CollectConversationUpstream`'s process-wide cache), never per overlay — re-selecting
+a card re-reads nothing. TAB_OVERLAY.md §13e has the rules.
 
 ### Which session the summary shows — FOLLOW the terminal vs PEEK a card
 
