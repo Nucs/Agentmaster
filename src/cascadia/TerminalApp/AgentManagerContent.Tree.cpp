@@ -1626,8 +1626,8 @@ namespace winrt::TerminalApp::implementation
         // Copy — a submenu mirroring the per-tab link badge's copy button (DESIGN §9.7 / TAB_OVERLAY.md).
         // Placed directly below Rename (at the user's request). It routes through the SAME shared
         // CopySessionField action the overlay's copy menu uses, so the two menus can never drift: Session
-        // Id / Path / Branch / the REAL Claude & Codex launch CLIs / the full Summary box / the whole
-        // Transcript. Each item is a pure clipboard write (cases 0-4) or an off-thread read that hops back
+        // Id / Path / Branch / the REAL Claude & Codex launch CLIs / the full Summary box / the Transcript ▸
+        // detail levels. Each item is a pure clipboard write (cases 0-4) or an off-thread read that hops back
         // to copy (Transcript/Summary) — none mutate the tree, so unlike the rename/spawn/archive items
         // elsewhere in this menu they need no defer (matches the old single "Copy Session Id").
         MenuFlyoutSubItem copySub;

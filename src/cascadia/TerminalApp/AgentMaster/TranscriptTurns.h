@@ -37,8 +37,16 @@
 //     before parsing (ScrubLargeBase64Payloads) — it keeps huge image-bearing transcripts cheap.
 //   - A timestamp without a time zone (Claude Code always writes "Z") is compared as UTC and
 //     printed as its own wall-clock time in both clocks (the reference converts it from local time
-//     when printing UTC).
+//     when printing UTC). Only the "YYYY-MM-DD" date form is read (Python also takes ISO week
+//     dates and the compact "YYYYMMDD"), and a stamp CPython 3.12 accepts by accident — a stray
+//     character just before its zone, a fraction after the hour or the minutes — reads as unknown.
 //   - \d / \w in the reference's regexes match ASCII digits / iswalnum here, not every Unicode digit.
+//   - The repr() of a JSON list or object (shown only where a malformed argument holds one where a
+//     string belongs) escapes the ASCII control characters as Python does, but not the non-ASCII
+//     characters Python's repr also escapes (U+00A0, U+200D, ...): those are printed as they are.
+//   - With the chain feature OFF, the reference reads a transcript's lines split at "\n" alone (a
+//     stray "\r" inside a line keeps it whole); the port splits at "\r" too, as both do with the
+//     chain feature on — which every level is.
 //
 // Plain C++ + Win32 (file reads, file times, the CRT's local time zone), no WinRT and no PCH, so it
 // links into the standalone test harness unchanged. Every entry point is NEVER-THROW.

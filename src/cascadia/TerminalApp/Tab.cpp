@@ -2361,7 +2361,7 @@ namespace winrt::TerminalApp::implementation
         {
             // "Copy >" (Agentmaster) — a submenu mirroring the per-tab link badge's copy button
             // (TAB_OVERLAY.md / DESIGN §9.7): Session Id / Path / Branch / the REAL Claude & Codex launch
-            // CLIs / the full Summary box / the whole Transcript. Each item raises CopySessionFieldRequested
+            // CLIs / the full Summary box / the Transcript ▸ detail levels. Each item raises CopySessionFieldRequested
             // with the copy-menu code; the page resolves THIS tab's managed session and routes the copy
             // through the SAME shared CopySessionField action the overlay + Manager menus use, so the three
             // copy menus can never drift apart. Labels match the overlay verbatim. Built COLLAPSED — the

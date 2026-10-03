@@ -549,7 +549,8 @@ namespace winrt::TerminalApp::implementation
         //                this one rendered supersedes it, so a slow render never lands on top of a later copy.
         // Returns nothing (fire_and_forget). Never lets an exception escape — one escaping a fire_and_forget IS
         // winrt::terminate(), the whole process — and every outcome leaves a [transcript] line in hooks.log
-        // (the copy, how big and how slow; nothing to copy; superseded; the window closed first).
+        // (the copy, how big and how slow; nothing to copy; superseded; the clipboard refused the write; the
+        // window closed first).
         winrt::fire_and_forget CopyTranscriptTurnsAsync(DispatcherQueue disp,
                                                         bool codex,
                                                         std::wstring sessionId,
@@ -611,8 +612,20 @@ namespace winrt::TerminalApp::implementation
                             ::Agentmaster::AppendStateLog(L"hooks.log", head + L"superseded by a newer copy before the render finished (not written)\n");
                             return;
                         }
-                        CopyTextToClipboard(text);
-                        ::Agentmaster::AppendStateLog(L"hooks.log", head + L"chars=" + std::to_wstring(chars) + L" rendered in " + std::to_wstring(elapsedMs) + L"ms\n");
+                        // The robust writer itself rather than CopyTextToClipboard (which is it + the chime), so this
+                        // trace can say whether the copy LANDED: a clipboard another program holds past the writer's
+                        // ~10 s retry budget fails the write (the writer logs that as a [wil] line), and a "chars=N"
+                        // line then would claim a copy that never happened.
+                        if (RobustCopyTextToClipboard(text))
+                        {
+                            PlayActionSound(); // the same "copy is done" chime every other copy plays
+                            ::Agentmaster::AppendStateLog(L"hooks.log", head + L"chars=" + std::to_wstring(chars) + L" rendered in " + std::to_wstring(elapsedMs) + L"ms\n");
+                        }
+                        else
+                        {
+                            ::Agentmaster::AppendStateLog(L"hooks.log", head + L"rendered chars=" + std::to_wstring(chars) + L" in " + std::to_wstring(elapsedMs) +
+                                                                            L"ms, but the clipboard could not be opened (nothing copied)\n");
+                        }
                     }
                     catch (...)
                     {

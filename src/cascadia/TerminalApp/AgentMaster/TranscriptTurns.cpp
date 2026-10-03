@@ -616,8 +616,11 @@ namespace Agentmaster
                 return PyFloatRepr(x);
             }
 
-            // repr() of a Python str: single quotes unless the text holds a ' and no ", with the
-            // backslash escapes CPython uses for the characters a transcript can realistically hold.
+            // repr() of a Python str: single quotes unless the text holds a ' and no ", with CPython's
+            // backslash escapes for the quote, the backslash and the ASCII control characters. ⚠ CPython
+            // also escapes every NON-ASCII character Unicode calls non-printable (U+00A0, U+200D, a lone
+            // surrogate, ...); this keeps those as they are — a documented divergence (TranscriptTurns.h)
+            // that only shows inside a malformed, container-valued argument.
             std::wstring PyStrRepr(std::wstring_view s)
             {
                 const bool hasSingle = s.find(L'\'') != std::wstring_view::npos;
@@ -1162,11 +1165,66 @@ namespace Agentmaster
                 return texts;
             }
 
-            // A file name's suffix the way PurePath.suffix reads it (".py"; "" for "x", ".bashrc", "x."), lowercased.
+            // Path(path).suffix.lower() on Windows: a file name's suffix (".py"; "" for "x", ".bashrc", "x."),
+            // lowercased (ASCII: every _LANG key is). The drive and root are split off first exactly as
+            // ntpath.splitroot does it ("X:", "\\server\share", "\\?\UNC\server\share" — any '/' read as '\'),
+            // then the NAME is the last part that is neither empty nor "." (pathlib drops both, so "x.py\" and
+            // "x.py\." still name x.py, and "C:x.py" names x.py), and its suffix starts at the name's last '.'
+            // unless that dot leads or ends the name.
+            //   path — the path as written in a tool argument (anything; never touched on disk).
+            // Returns the lowercased suffix, or "" when there is none. Throws std::bad_alloc only.
             std::wstring LowerSuffixOf(std::wstring_view path)
             {
-                const size_t cut = path.find_last_of(L"\\/");
-                const std::wstring_view name = cut == std::wstring_view::npos ? path : path.substr(cut + 1);
+                std::wstring norm{ path };
+                std::replace(norm.begin(), norm.end(), L'/', L'\\');
+                size_t relStart = 0;
+                if (!norm.empty() && norm[0] == L'\\')
+                {
+                    if (norm.size() >= 2 && norm[1] == L'\\')
+                    {
+                        // A UNC or device path: the drive runs through "\\server\share" (counted after a
+                        // leading "\\?\UNC\" when there is one). Without both parts it is ALL drive: no name.
+                        const size_t start = (norm.size() >= 8 && StartsWithCi(norm, L"\\\\?\\UNC\\")) ? 8 : 2;
+                        const size_t index = norm.find(L'\\', start);
+                        if (index == std::wstring::npos)
+                        {
+                            return {};
+                        }
+                        const size_t index2 = norm.find(L'\\', index + 1);
+                        if (index2 == std::wstring::npos)
+                        {
+                            return {};
+                        }
+                        relStart = index2 + 1;
+                    }
+                    else
+                    {
+                        relStart = 1; // rooted without a drive ("\Windows")
+                    }
+                }
+                else if (norm.size() >= 2 && norm[1] == L':')
+                {
+                    relStart = (norm.size() >= 3 && norm[2] == L'\\') ? 3 : 2; // "X:\..." or the drive-relative "X:..."
+                }
+                const std::wstring_view rel = std::wstring_view{ norm }.substr(relStart);
+                std::wstring_view name;
+                size_t end = rel.size();
+                while (end > 0)
+                {
+                    const size_t sep = rel.rfind(L'\\', end - 1);
+                    const size_t begin = sep == std::wstring_view::npos ? 0 : sep + 1;
+                    const std::wstring_view part = rel.substr(begin, end - begin);
+                    if (!part.empty() && part != L".")
+                    {
+                        name = part;
+                        break;
+                    }
+                    if (sep == std::wstring_view::npos)
+                    {
+                        break;
+                    }
+                    end = sep;
+                }
                 const size_t dot = name.rfind(L'.');
                 if (dot == std::wstring_view::npos || dot == 0 || dot + 1 == name.size())
                 {
@@ -2258,6 +2316,11 @@ namespace Agentmaster
                 TurnsSession session; // its transcript(s), parsed
                 std::vector<fs::path> paths;
                 bool completed = false; // the spawning call's result says it finished (status "completed")
+                // The parsed lines of `paths`, kept alive for as long as this run exists. ⚠ `session` holds
+                // RAW POINTERS into them (each call's arguments and result, each message's usage), and the
+                // render reads those long after the agent search that parsed them has returned and dropped
+                // its own cache — without this, every agent entry would read freed memory.
+                std::vector<LineFile> owners;
             };
 
             // ---- the parse ----
@@ -3485,9 +3548,20 @@ namespace Agentmaster
             };
 
             // The per-render caches the agent search shares (the reference's meta_cache, line_cache,
-            // head_cache), keyed by path identity.
+            // head_cache), keyed by path identity. It lives only as long as the search: anything the
+            // render reads later must not point into these caches (AgentRun::owners keeps the lines).
             struct AgentContext
             {
+                // A context for one agent search (an explicit constructor rather than an aggregate: a
+                // reference member in an aggregate draws MSVC's level-4 "can never be instantiated"
+                // family of warnings, which the app build treats as errors).
+                //   source — the history being rendered; it outlives the search (the search runs inside the render).
+                //   opt    — the render's options; agentOpts starts as a copy (AttachAgents adjusts its rules).
+                AgentContext(const History& source, const TurnsOptions& opt) :
+                    history(source), agentOpts(opt)
+                {
+                }
+
                 const History& history;
                 TurnsOptions agentOpts;
                 std::unordered_map<std::wstring, std::vector<AgentMeta>> metaCache;
@@ -3533,33 +3607,37 @@ namespace Agentmaster
                 return cx.metaCache.emplace(key, std::move(found)).first->second;
             }
 
-            // lines_of(): a transcript's lines, read once; null when it can't be read (not cached, so a
-            // later ask retries — the reference re-raises on every ask).
-            const std::vector<Value>* LinesOf(AgentContext& cx, const fs::path& path)
+            // lines_of(): a transcript's lines, read once per render.
+            //   cx   — the agent search's caches.
+            //   path — the agent transcript.
+            // Returns the SHARED owner of the parsed lines, or null when the file can't be read (a failure
+            // is not cached, so a later ask retries — the reference re-raises on every ask). A caller that
+            // keeps pointers into the lines past the search (AttachIn, for the run it builds) must keep this
+            // owner too: the cache dies with the search. Throws std::bad_alloc only.
+            LineFile LinesOf(AgentContext& cx, const fs::path& path)
             {
                 const std::wstring key = PathKey(path);
                 const auto cached = cx.lineCache.find(key);
                 if (cached != cx.lineCache.end())
                 {
-                    return cached->second.get();
+                    return cached->second;
                 }
                 auto bytes = ReadAllBytes(path);
                 if (!bytes)
                 {
                     return nullptr;
                 }
-                auto lines = std::make_shared<const std::vector<Value>>(ParseTranscriptJsonl(std::move(*bytes)));
-                const std::vector<Value>* out = lines.get();
-                cx.lineCache.emplace(key, std::move(lines));
-                return out;
+                LineFile lines = std::make_shared<const std::vector<Value>>(ParseTranscriptJsonl(std::move(*bytes)));
+                cx.lineCache.emplace(key, lines);
+                return lines;
             }
 
             // first_stamp(): a transcript's earliest timestamp (by instant, then text); "" when it is
             // unreadable or unstamped.
             std::wstring FirstStamp(AgentContext& cx, const fs::path& path)
             {
-                const std::vector<Value>* lines = LinesOf(cx, path);
-                if (lines == nullptr)
+                const LineFile lines = LinesOf(cx, path);
+                if (!lines)
                 {
                     return {};
                 }
@@ -3930,15 +4008,17 @@ namespace Agentmaster
                         return AwareTs(FirstStamp(cx, a)).value_or(INT64_MIN) < AwareTs(FirstStamp(cx, b)).value_or(INT64_MIN);
                     });
                     std::deque<Turn> turns;
+                    std::vector<LineFile> owners; // the lines `turns` points into; handed to the run below
                     bool unreadable = false;
                     for (const auto& file : files)
                     {
-                        const std::vector<Value>* all = LinesOf(cx, file);
-                        if (all == nullptr)
+                        const LineFile all = LinesOf(cx, file);
+                        if (!all)
                         {
                             unreadable = true; // vanished or locked meanwhile: the call keeps its line, no entry
                             break;
                         }
+                        owners.push_back(all);
                         // Without the walk, a repeated line would render twice: keep each uuid's first copy.
                         Lines lines;
                         UuidSet seenUuids;
@@ -3995,6 +4075,9 @@ namespace Agentmaster
                     run->session.turns = std::move(turns);
                     run->session.sessionId = files[0].stem().wstring();
                     run->paths = files;
+                    // The run owns the lines its turns point into: this search's cache (cx) is gone before
+                    // the render reads them.
+                    run->owners = std::move(owners);
                     run->completed = StrEq(JGet(op.tur, L"status"), L"completed");
                     op.agent = run;
                     if (depth + 1 < kMaxAgentDepth)
@@ -4019,7 +4102,7 @@ namespace Agentmaster
                 {
                     return; // lines alone: there is no folder to look in
                 }
-                AgentContext cx{ history, opt, {}, {}, {} };
+                AgentContext cx{ history, opt };
                 cx.agentOpts.skipSidechains = false;
                 cx.agentOpts.liveBranch = false;
                 const SessionPathOf sessionPathOf = [&history](const TurnOp& op) -> fs::path {
@@ -4738,8 +4821,9 @@ namespace Agentmaster
                         }
                         int64_t out = 0;
                         int64_t thinking = 0;
-                        for (const auto& [mid, usage] : turn.usage)
+                        for (const auto& entry : turn.usage)
                         {
+                            const Value* usage = entry.second; // (entry.first is the message id: de-duplication already happened in the parse)
                             out += PyIntOrZero(JGet(usage, L"output_tokens"));
                             thinking += PyIntOrZero(JGet(ObjOrEmpty(JGet(usage, L"output_tokens_details")), L"thinking_tokens"));
                         }
