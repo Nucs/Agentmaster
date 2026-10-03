@@ -26,7 +26,6 @@
 #include "AgentCatchLog.h" // AgentLogCaughtException — Rule #18 forensics
 #include "AgentMaster/ClaudeSpawn.h" // LogNav / ShortId
 #include "AgentMaster/SessionRegistry.h" // the managed session's kind / rollout id / title
-#include "AgentMaster/TranscriptTurns.h" // TurnsLevel::Default — the level every menu opens with
 
 using namespace winrt::Windows::UI::Core; // CoreDispatcherPriority
 
@@ -77,7 +76,9 @@ namespace winrt::TerminalApp::implementation
                     page->_EnsureTranscriptOverlay();
                     ::Agentmaster::LogNav(L"transcript-show " + ::Agentmaster::ShortId(source.sessionId) +
                                           (source.codex ? L" codex" : L"") + L" (from " + originText + L")");
-                    page->_transcriptOverlay->Show(source, static_cast<int>(::Agentmaster::TurnsLevel::Default));
+                    // At the level the user last picked, in any window (settings.json, read by the overlay
+                    // as it opens) — Default until a first pick.
+                    page->_transcriptOverlay->Show(source, AgentTranscriptOverlay::kRememberedLevel);
                 }
                 catch (...)
                 {

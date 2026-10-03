@@ -1829,6 +1829,9 @@ namespace winrt::TerminalApp::implementation
                     // by this form — preserve them so a cog Save can't reset how the picker opens.
                     s.tabColorPickerCustomOpen = disk.tabColorPickerCustomOpen;
                     s.tabColorPickerAdvancedOpen = disk.tabColorPickerAdvancedOpen;
+                    // The transcript overlay's remembered level: written by the overlay itself on every
+                    // tab pick (freshest-disk RMW), never by this form — a Save must not reset it.
+                    s.transcriptOverlayLevel = disk.transcriptOverlayLevel;
                     // Updater (Updater.h): ALL update state is written outside the cog form —
                     // skip/postpone by the prompt's JSON RMW (possibly from another window or the
                     // startup check), the prerelease + nightly opt-ins by each switch's own

@@ -2568,6 +2568,15 @@ namespace Agentmaster
         // template part, so if a future WinUI renames it the picker simply opens collapsed as before.
         bool tabColorPickerCustomOpen{ true };
         bool tabColorPickerAdvancedOpen{ true };
+        // Agentmaster (TRANSCRIPT_OVERLAY.md): the detail level the transcript overlay OPENS at — the name
+        // of the LAST level tab the user picked, in any window ("minimal" / "compact" / "default" / "full"
+        // / "max", TranscriptTurns' TurnsLevelName). Stored as the name rather than the TurnsLevel number
+        // so a future reorder of the levels can't silently remap a saved choice. GLOBAL + persisted like
+        // the tab color picker states: each pick is a freshest-disk RMW written by the overlay itself
+        // (never the cog form — so both cog-Save preserve blocks restore it), and every open re-reads it
+        // from disk, so a pick in one window decides the next open in every window. The engine stores it
+        // opaquely; the overlay maps it, and an unknown or empty name opens at Default. Default "default".
+        std::wstring transcriptOverlayLevel{ L"default" };
         // Agentmaster: Explorer Tree sort order (the toggle after the scope toggle). GLOBAL — it
         // applies to every window's tree and persists here. Default Newest. See ExplorerSort.
         ExplorerSort treeSort{ ExplorerSort::Newest };

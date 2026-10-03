@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility> // std::pair (MdToolArea::tools)
 #include <vector>
 
 namespace Agentmaster
@@ -200,4 +201,86 @@ namespace Agentmaster
     // The renderer tints the label line (and dims the rest of that paragraph) and keeps the next block
     // close (MdGapAbove). Never throws.
     bool MdIsLabelParagraph(const MdBlock& b) noexcept;
+
+    // ---------------------------------------------------------------------------------------------
+    // TOOL AREAS — the part of a transcript_turns speaker block the transcript overlay FOLDS.
+    //
+    // In the turns view (TranscriptTurns / transcript_turns.py) every speaker part reads
+    //     **● Claude**                      <- the SPEAKER HEADER (or an agent entry's "**● name** · …")
+    //     - 💬 a remark between calls        <- the TOOL AREA: ONE bullet list —
+    //     - **Bash** — List files · ok           tool calls, remarks, the messages that reached an
+    //       - ⇢ first output line                agent, its brief, compaction markers; the output /
+    //     - **Write** `x.py` · created           background / answer lines nest under their call
+    //
+    //     > the final reply                 <- the reply quote — never part of the area
+    // Compact drops the calls and the remarks and keeps the reply, so folding each area into one
+    // summary row ("▸ 3 tool calls: Bash ×2, Write · 1 remark") makes the Default / Full / Max views
+    // read like Compact while every call stays one click away. These helpers find the areas and say
+    // what is in them; the overlay owns the XAML.
+    // ---------------------------------------------------------------------------------------------
+
+    // One tool area: the blocks [first, end) — every block of ONE top-level list that starts right
+    // under a "●" speaker header — and a count of its items by kind.
+    struct MdToolArea
+    {
+        // Index of the area's first block (its first item's first block) in the parsed block list.
+        size_t first = 0;
+        // One past the area's last block. The block at `end` (when there is one) is what follows the
+        // list — the reply quote, the next header, a note.
+        size_t end = 0;
+        // Top-level items that start with a BOLD tool name ("**Bash** — …", "**SendMessage** → …").
+        size_t toolCalls = 0;
+        // Top-level "💬 …" items: what the agent said between calls.
+        size_t remarks = 0;
+        // Top-level "✉ **sender** …" items: a message that reached the agent (a teammate's, the lead's).
+        size_t messages = 0;
+        // Top-level "❯ …" items: a prompt / brief the agent was given (or, at the Compact level, an
+        // answer — but a Compact list holds no call, so it is never folded).
+        size_t prompts = 0;
+        // Top-level "🗜 …" items: a context compaction in the middle of the turn.
+        size_t compactions = 0;
+        // "❯ …" items NESTED directly under a call: the user's answer to a question, or a rejection.
+        size_t answers = 0;
+        // Top-level items of any other shape (counted so a summary never claims fewer lines than it hides).
+        size_t others = 0;
+        // The list is exactly one "(no tool calls)" / "(no remarks)" item: nothing to fold. The overlay
+        // writes a one-line note instead of a bullet.
+        bool empty = false;
+        // Each called tool's name and its call count, in the order of the tool's FIRST call.
+        std::vector<std::pair<std::wstring, size_t>> tools;
+    };
+
+    // Find every tool area in `blocks` (ParseMarkdownBlocks' output for a turns-view level).
+    // A SPEAKER HEADER is a top-level, non-HTML Paragraph whose first visible character is '●' (U+25CF)
+    // and sits in a BOLD run — "**● Claude**" (a label, possibly with the Max stats line folded in) and
+    // "**● finder-a** · teammate · …" (an agent entry, bold name + plain details) both qualify. The area
+    // is the top-level list whose first item starts at the very next block; it runs while the blocks stay
+    // inside that list. A list anywhere else — the "Session chain" list under a plain paragraph, a list
+    // inside a quoted message — is not an area.
+    // Parameters:
+    //   blocks — the parsed level, top to bottom.
+    // Returns the areas in document order: non-overlapping, `first` ascending, each `end` > `first`.
+    // Empty for a text with no speaker header followed by a list (a Minimal level, a Codex rollout).
+    // Never throws: on an allocation failure it returns the areas found so far (logged, Rule #18).
+    // Pure: safe on any thread (the overlay calls it on its render thread, right after the parse).
+    std::vector<MdToolArea> MdFindToolAreas(const std::vector<MdBlock>& blocks) noexcept;
+
+    // Whether the overlay folds `area`: it holds at least one tool call or remark — exactly what Compact
+    // leaves out. A list of only messages / prompts / compactions / answers IS Compact's content (the
+    // Compact level shows it) and stays open; an `empty` area gets the one-line note instead.
+    // Never throws.
+    bool MdToolAreaFoldable(const MdToolArea& area) noexcept;
+
+    // The text of a folded area's summary row, e.g. "4 tool calls: Bash ×2, Write, Read · 1 remark ·
+    // 1 answer". Every non-zero count is named once ("1 remark" / "2 remarks"), joined by " · ", in the
+    // order calls · remarks · messages · prompts · answers · compactions · others. Tool names follow the
+    // call count, most-called first (ties keep the first-call order), each with "×N" past one call;
+    // past `maxTools` names the rest collapse into "+N more". A name longer than 40 characters is cut
+    // with an ellipsis.
+    // Parameters:
+    //   area     — the area to describe (MdFindToolAreas).
+    //   maxTools — how many tool names to list before "+N more" (0 == list none, only the count).
+    // Returns the summary; "" for an area with nothing counted, or on an allocation failure (logged).
+    // Never throws.
+    std::wstring MdToolAreaSummary(const MdToolArea& area, size_t maxTools = 5) noexcept;
 }

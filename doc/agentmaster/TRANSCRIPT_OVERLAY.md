@@ -1,7 +1,8 @@
 # Agentmaster — the Transcript Overlay ("Show Transcript")
 
 A session's conversation, rendered as Markdown, in a reading view laid over the window. Status:
-**written 2026-10-03, NOT BUILT** (no compile, no deploy — see §9 for the verification checklist).
+**written 2026-10-03, NOT BUILT** (no compile, no deploy — see §9 for the verification checklist). Same day,
+second pass: 85% wide, folded tool calls (§3b), the remembered level (§3a) — also not built.
 
 ## 1. The ask (verbatim)
 
@@ -13,10 +14,18 @@ A session's conversation, rendered as Markdown, in a reading view laid over the 
 > In menu items, add below Copy, "Show Transcript" which opens the overlay where ever you are.
 > Moving a tab closes the overlay, clicking outside the overlay closes the overloay.
 
+The follow-up, same day:
+
+> 1. Make wider to 85%
+> 2. The area below "Claude · * Bash — Read memory notes on past release CPU and GPU issues: cat "…"; echo =… · ok"
+>    all bash area (not last turn text content) needs to be collapsible so its closer looking to Compact version.
+> 3. If user picks Compact, persist the Compact globally as the picked and next transcript opened is going
+>    to be opened at Compact tab in any window.
+
 ## 2. Where it opens
 
 Every entry opens the overlay over **whatever is on screen** (a terminal tab, the Agent Manager page, the
-Sessions page), at the **Default** level:
+Sessions page), at the level the user **last picked**, in any window (§3a — Default until a first pick):
 
 | Menu | Entry |
 |---|---|
@@ -32,19 +41,74 @@ Labels, tooltip and glyph (`\xE736` ReadingMode) are shared constants in `AgentC
 
 ## 3. What it looks like
 
-- A card **60% of the window wide and 80% tall**, centered, over a 40%-black backdrop that covers the whole
-  page (all of Root's rows). The size comes from a 3×3 star grid (1:8:1 rows, 2:6:2 columns) — no size
-  code, it follows every resize through layout.
+- A card **85% of the window wide and 80% tall**, centered, over a 40%-black backdrop that covers the whole
+  page (all of Root's rows). The size comes from a 3×3 star grid (1:8:1 rows, 7.5:85:7.5 columns) — no
+  size code, it follows every resize through layout. (60% wide until the follow-up asked for 85%.)
 - **Header**: reading-mode icon · "Transcript" · the session line (title · short id · "Codex") · Copy ·
   Refresh · Close (✕).
 - **Tabs**, one per level in the Copy menu's order — **Default · Max · Full · Compact · Minimal** — the
   current one bright with an accent underline. Tooltips are the levels' descriptions
   (`kTranscriptCopyMenu`) plus the digit shortcut. A status line to the right shows progress, then
-  "N lines · rendered in X".
+  "N lines · rendered in X". At the far right, **Expand all / Collapse all** (link-colored) — shown only
+  while the current level has folded tool calls (§3b).
 - **Body**: one scroll view per level (each keeps its own scroll position; switching back is instant).
 - **Keyboard**: Esc closes; 1–5 pick a tab by position; PageUp / PageDown / Home / End / arrows scroll;
-  Tab cycles inside the card; the app's tab-switching chords (Ctrl+Tab, …) still work — and close it.
+  Tab cycles inside the card (through the fold rows too — Enter / Space opens one); the app's
+  tab-switching chords (Ctrl+Tab, …) still work — and close it.
 - Always dark (the Agentmaster surface convention), explicit brushes.
+
+### 3a. The remembered level
+
+- Every tab pick — a click or a digit key, **the tab already showing included** — is written to
+  settings.json as `AppSettings::transcriptOverlayLevel`: the level's NAME (`minimal` / `compact` /
+  `default` / `full` / `max`, `TurnsLevelName`), so a future reorder of the levels can't remap a saved
+  choice. The write is a **freshest-disk read-modify-write of that one field**
+  (`AgentTranscriptOverlay::_RememberLevel`, the `ColorPickupFlyout` idiom), skipped when the file already
+  holds it — never a stale in-memory copy over a cog Save or another window's change.
+- Every open (`Show(source, kRememberedLevel)` — what every menu passes) **reads it fresh from disk**
+  (`_RememberedLevel`), so a pick in one window decides the next open in every window, and survives a
+  restart. An empty / unknown name (absent key, hand edit) or a failed read opens at **Default**.
+- Opening never remembers anything; only a pick does. The cog form never edits the field, so **both cog-Save
+  preserve blocks restore it from disk** (`AgentManagerContent.Settings.cpp`, the page's settings handler
+  in `TerminalPage.AgentEngine.cpp`) — a Save made with the modal open can't reset a pick.
+
+### 3b. Folded tool calls
+
+In the turns view every speaker part is a header (`**● Claude**`, or an agent entry's
+`**● finder-a** · teammate · …`), then ONE bullet list — the tool calls, the remarks between them, the
+messages that reached an agent, its brief, compaction markers, with each call's output / background /
+answer lines nested under it — then the reply quote. Compact leaves out the calls and the remarks, so the
+overlay **folds each such list into one summary row** and keeps the reply open:
+
+    ● Claude
+      ▸ 4 tool calls: Bash ×3, Write · 2 remarks
+    │ Done: 2 files; the scan failed …
+
+- The areas are found off the UI thread with the parse (`MdFindToolAreas`, `MarkdownBlocks.h`): a
+  top-level list whose first item starts right after a **speaker header** — a top-level paragraph whose
+  first visible character is `●` in a bold run. The "Session chain" list (under a plain paragraph) and any
+  list inside a quoted message are never areas.
+- Items are counted by their leading mark (`TranscriptTurns.cpp` `EventLines`): a bold tool name = a call
+  (the name is the bold run), `💬` a remark, `✉` a message, a top-level `❯` a prompt / brief, `🗜` a
+  compaction, a `❯` nested under a call an answer. `MdToolAreaSummary` names every non-zero count —
+  "N tool calls: Bash ×3, Write, … +N more · 2 remarks · 1 answer · 1 compaction" (5 tool names at most,
+  most-called first, a name over 40 characters cut with an ellipsis).
+- **Folded** (`MdToolAreaFoldable`): a list holding at least one call or remark — what Compact drops. A list
+  of only messages / prompts / compactions / answers IS Compact's content (the Compact level's own lists)
+  and stays open; so the Compact and Minimal levels never fold anything.
+- A list that is only "(no tool calls)" becomes a one-line dim note ("no tool calls"), lined up with the
+  fold rows' text.
+- A click on a row (or Enter / Space) opens / closes that list (chevron ▸ / ▾). **Expand all** opens every
+  fold of the current level and makes the folds built after it start open; **Collapse all** undoes it. Each
+  level keeps its own Expand-all state (kept across ↻ Refresh); every open starts folded.
+- Build mechanics (`_BuildNext` / `_BuildFold`): the summary row and a Collapsed panel go into the level's
+  chunks; the area's blocks go into the panel, itself chunked by 200 (one real turn held 243 calls — over
+  1,000 elements at Max), so an append to an open fold never re-measures a thousand siblings. A collapsed
+  panel is never measured, which makes a folded Default / Full / Max view cheaper to lay out than before.
+- Checked without a compile (2026-10-03): a Python port of the flattener's shape (markdown-it, CommonMark)
+  plus a line-by-line port of the three area functions agreed with every expectation in
+  `tests_markdown.cpp`, classified every item of all 55 goldens and of the 12 most recent real sessions at
+  Default and Max (zero unknown items), and folded nothing at Compact / Minimal.
 
 ## 4. Rendering
 
@@ -52,7 +116,8 @@ Labels, tooltip and glyph (`\xE736` ReadingMode) are shared constants in `AgentC
    level's text is exactly what **Copy ▸ Transcript ▸ <level>** copies — `RenderTranscriptTurnsFile` for a
    Claude transcript (local time), and for a Codex rollout `ReadConversationFollowupText` (Minimal /
    Compact) or `ReadConversationText` (Default / Full / Max). Then `ParseMarkdownBlocks`
-   (`AgentMaster/MarkdownBlocks.{h,cpp}`, cmark) flattens it into render blocks.
+   (`AgentMaster/MarkdownBlocks.{h,cpp}`, cmark) flattens it into render blocks, and `MdFindToolAreas`
+   marks the tool-call lists to fold (§3b).
 2. **On the UI thread, time-sliced** (`_Pump`): low-priority dispatcher items build blocks into XAML for
    ~12 ms each (at least 16 blocks), then yield. The top of a long transcript shows at once; the window
    keeps answering while the rest lays out. Only the CURRENT level builds; a level left mid-build resumes
@@ -112,6 +177,9 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   `tab moved to another window`.
 - `[transcript] <sid8> show <Level>: chars=N blocks=M rendered in Xms` (+ `(capped)` /
   `(parse failed part-way)`), or `: nothing to show (<why>) path=…`.
+- A level pick is the `transcript-level` line (the remembered-level write adds no line; a failed write is
+  an `[exc]` line). Opening / closing a fold and Expand all are pure view toggles and are deliberately
+  unlogged (the CLAUDE.md logging convention).
 
 ## 7. Files
 
@@ -126,24 +194,41 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   (`SetShowTranscriptHandler`, the session + external menus), `AgentTabOverlay.*`
   (`SetShowTranscriptHandler`, the badge submenu + the summary menu), `TerminalPage.AgentObserver.cpp` /
   `TerminalPage.AgentSidePanel.cpp` (the badge / side-panel wiring), `AgentCopyActions.h` (the labels).
-- Harness: `tests/tests_markdown.cpp` (`TestMarkdownBlocks`) — compiled by `run-m5-tests.bat` only when
-  `obj\x64\vcpkg\x64-windows-static` holds cmark (defines `AM_HAVE_CMARK`); otherwise it reports a skip.
+- The remembered level: `AgentMaster/SessionModels.h` (`AppSettings::transcriptOverlayLevel`),
+  `AgentMaster/Persistence.cpp` (the `transcriptOverlayLevel` key), and the two cog-Save preserve blocks
+  (`AgentManagerContent.Settings.cpp`, `TerminalPage.AgentEngine.cpp`).
+- Harness: `tests/tests_markdown.cpp` (`TestMarkdownBlocks`, incl. the tool areas over an inline fixture and
+  five goldens) — compiled by `run-m5-tests.bat` only when `obj\x64\vcpkg\x64-windows-static` holds cmark
+  (defines `AM_HAVE_CMARK`); otherwise it reports a skip. `tests/tests_persistence.cpp` pins the setting's
+  round trip and its "default" default.
 
 ## 8. Known limits / follow-ups
 
 - Text selection is per block (a paragraph, a code panel); the header Copy is the whole-level copy.
 - No live refresh: the view is a snapshot; ↻ re-renders (a working session keeps writing).
 - No find-in-transcript yet.
-- A Codex rollout is plain conversation text parsed as Markdown (Codex has no turns view).
-- Not virtualized: a level is fully built (time-sliced) — fine at the measured sizes, capped beyond.
+- A Codex rollout is plain conversation text parsed as Markdown (Codex has no turns view) — it has no
+  speaker headers, so nothing folds.
+- Not virtualized: a level is fully built (time-sliced) — fine at the measured sizes, capped beyond. A
+  folded list's elements are built too (only their layout is skipped); building them lazily on first open
+  would make a big Max level faster still, at the cost of an "Expand all" that builds hundreds of blocks
+  at once.
+- Which folds are open, and Expand all, are not remembered across opens (every open starts folded); only
+  the level is remembered.
 
 ## 9. Verification checklist (nothing here has been built)
 
 1. `tests\run-m5-tests.bat` → `[MarkdownBlocks]` passes (or `[info] skipped` without the vcpkg tree).
 2. Lib compile-check, then a dev deploy (user's permission first — CLAUDE.md *Development Rules*).
 3. Open from each entry in §2: a Claude tab, a forked tab, a team lead (agents), a Codex tab, an external
-   row. Check: Default selected, the 60% × 80% size, the five tabs, scrolling, the status line.
+   row. Check: the remembered level selected (Default on a first run), the 85% × 80% size, the five tabs,
+   scrolling, the status line.
 4. Close with Esc, a click outside, ✕, Ctrl+Tab, a click on another tab, a tab drag, Move to start.
    Each time keyboard focus must land back in the terminal (type a key) — or on the Manager page.
 5. A Max level of a big session: the top appears at once and the window stays responsive while it fills.
 6. hooks.log: the `[nav] transcript-*` and `[transcript] … show …` lines.
+7. Folds: at Default every turn reads "● Claude · ▸ N tool calls: … · reply"; a click opens one list, a
+   second click folds it; Expand all / Collapse all flip every list of the level; a "(no tool calls)" turn
+   shows the dim note; the Compact and Minimal tabs fold nothing; an agent entry folds its own list.
+8. Remembered level: pick Compact, close, reopen from another window → Compact; restart the app → still
+   Compact; open the cog, Save → still Compact (`transcriptOverlayLevel` in settings.json).

@@ -8,10 +8,21 @@
 // first item of every Transcript submenu, the per-tab badge's included). doc/agentmaster/
 // TRANSCRIPT_OVERLAY.md is the full description (entries, rendering rules, closing, logs, limits).
 //
-// Shape: a card 60% of the window wide and 80% tall, centered over a dimmed backdrop that covers the
+// Shape: a card 85% of the window wide and 80% tall, centered over a dimmed backdrop that covers the
 // page (the terminal, the Agent Manager page, or the Sessions page — "wherever you are"). The card has a
 // header (title · Copy · Refresh · Close), one TAB per transcript detail level in the Copy menu's order
-// (Default · Max · Full · Compact · Minimal — Default selected on open), and a scrolling body.
+// (Default · Max · Full · Compact · Minimal), an "Expand all" switch for the level's folded tool calls,
+// and a scrolling body. It opens at the level the user LAST PICKED, in any window: every tab pick is
+// remembered in settings.json (AppSettings::transcriptOverlayLevel, a freshest-disk read-modify-write
+// done here) and every open reads it back fresh — Default until a first pick.
+//
+// FOLDED TOOL CALLS: in every turn the list of tool calls and remarks under "**● Claude**" (and under an
+// agent entry's header) — the part Compact leaves out — is folded into ONE summary row ("▸ 4 tool calls:
+// Bash ×3, Write · 2 remarks", AgentMaster/MarkdownBlocks.h MdFindToolAreas); the reply under it stays
+// open, so the Default / Full / Max views read like Compact with every call one click away. A click on
+// the row opens / closes that list; "Expand all" opens every list of the level (and the lists built after
+// it). A list with only Compact's own content (answers, compactions, an agent's messages) stays open, and
+// a "(no tool calls)" list becomes a one-line note.
 //
 // How it renders (the expensive part, all of it off the UI thread except the XAML itself):
 //   1. a pool thread renders the level — TranscriptTurns for a Claude transcript (the very text
@@ -79,6 +90,10 @@ namespace winrt::TerminalApp::implementation
     class AgentTranscriptOverlay : public winrt::implements<AgentTranscriptOverlay, winrt::Windows::Foundation::IInspectable>
     {
     public:
+        // Show's `level` for "open at the level the user last picked" (AppSettings::transcriptOverlayLevel,
+        // read fresh from settings.json at that moment) — what every menu passes.
+        static constexpr int kRememberedLevel = -1;
+
         AgentTranscriptOverlay();
         // Drops the XAML references only — never calls a UI-affine method, because a page torn down
         // off the UI thread (the fire_and_forget last-ref gotcha) destroys its members wherever it
@@ -101,8 +116,11 @@ namespace winrt::TerminalApp::implementation
         // dispatcher tick later, once the view is laid out). UI thread. No-op before Attach.
         // Parameters:
         //   source — the conversation (see TranscriptOverlaySource).
-        //   level  — a TurnsLevel value 0..4 (Minimal..Max); out of range is clamped. The menus open
-        //            with Default.
+        //   level  — a TurnsLevel value 0..4 (Minimal..Max; above 4 is clamped), or kRememberedLevel (any
+        //            negative value) for the level last picked in any window — read from settings.json
+        //            right now, Default when nothing was picked yet or the stored name is unknown. The
+        //            menus pass kRememberedLevel. Opening does NOT itself remember anything: only a tab
+        //            pick does.
         // Never throws: a XAML failure is logged (Rule #18) and the overlay stays closed.
         void Show(const TranscriptOverlaySource& source, int level) noexcept;
 
@@ -137,6 +155,14 @@ namespace winrt::TerminalApp::implementation
             Building, // blocks are being turned into XAML, a time slice per dispatcher tick
             Done, // fully laid out
             Empty, // nothing to show (no transcript yet / unreadable / an empty level) — `message` says which
+        };
+
+        // One folded tool area as built: the panel holding the area's blocks (Collapsed while folded) and
+        // the summary row's chevron (▸ folded / ▾ open). Kept per level so "Expand all" can flip them all.
+        struct FoldParts
+        {
+            winrt::Windows::UI::Xaml::Controls::StackPanel panel{ nullptr };
+            winrt::Windows::UI::Xaml::Controls::FontIcon chevron{ nullptr };
         };
 
         // One detail level's state + view. Indexed by TurnsLevel value (0 Minimal .. 4 Max).
@@ -175,6 +201,28 @@ namespace winrt::TerminalApp::implementation
             // blue, "**● Claude**" → orange, "**✉ name**" → purple); null == the neutral bar. Reset by
             // a heading (a new turn). Carried across time slices because the build is sequential.
             winrt::Windows::UI::Xaml::Media::Brush speakerBar{ nullptr };
+            // The level's tool areas (MdFindToolAreas, found with the parse), in block order; freed once
+            // the level is Done. The build walks them alongside the blocks:
+            std::vector<::Agentmaster::MdToolArea> areas;
+            // the next area the build has not reached yet;
+            size_t nextArea = 0;
+            // the FOLD panel the build is filling — set from an area's first block to its last, and every
+            // block in between goes into it instead of the level's chunks (null outside a folded area);
+            winrt::Windows::UI::Xaml::Controls::StackPanel areaPanel{ nullptr };
+            // one past that area's last block (meaningful while areaPanel is set);
+            size_t areaEnd = 0;
+            // the chunk of that fold panel being filled, and how many elements it holds — a fold is
+            // chunked like the level itself (one real turn held 243 calls, 1,000+ elements at Max), so an
+            // append to an OPEN fold never re-measures a thousand siblings (_AppendToFold).
+            winrt::Windows::UI::Xaml::Controls::StackPanel areaChunk{ nullptr };
+            size_t areaChunkFill = 0;
+            // "Expand all" is on for this level: every fold flips open, and folds built from now on start
+            // open. A single fold's own click never changes it. Kept across a Refresh.
+            bool expandAll = false;
+            // The level has at least one foldable area — shows the "Expand all" switch while current.
+            bool hasFolds = false;
+            // Every fold built so far, for "Expand all" / "Collapse all".
+            std::vector<FoldParts> folds;
         };
 
         // What the background render hands the UI thread for one level.
@@ -188,6 +236,7 @@ namespace winrt::TerminalApp::implementation
             int64_t elapsedMs = 0; // render + parse time
             std::wstring message; // why there is nothing to show (blocks empty), or empty
             std::wstring path; // the transcript / rollout read, for the log ("" when none was found)
+            std::vector<::Agentmaster::MdToolArea> areas; // the tool areas among `blocks` (MdFindToolAreas)
         };
 
         // Build every piece of the overlay's XAML (Attach). Throws winrt::hresult_error on a XAML failure.
@@ -196,8 +245,20 @@ namespace winrt::TerminalApp::implementation
         // (focusBody) move keyboard focus into its scroll view on the next tick.
         void _SelectLevel(int level, bool focusBody);
         // A tab button / digit key: select the level at TAB POSITION `position` (0 == the first tab,
-        // Default) and log the switch. Out-of-range positions are ignored.
+        // Default), log the switch, and REMEMBER the level for the next open in any window
+        // (_RememberLevel — on every pick, the tab already showing included). Out-of-range positions are
+        // ignored.
         void _SelectTabPosition(size_t position);
+        // The level the user last picked (AppSettings::transcriptOverlayLevel, read fresh from
+        // settings.json) as a TurnsLevel value; Default when the stored name is empty / unknown or the
+        // read fails (logged). UI thread (a small file read, the ColorPickupFlyout idiom).
+        static int _RememberedLevel() noexcept;
+        // Store `level` as the level the next open uses: a FRESHEST-DISK read-modify-write of just that
+        // field (never a stale in-memory copy — a cog Save or another window's pick is never clobbered),
+        // skipped when the file already holds it. Best-effort: a failed write (logged) costs only the
+        // remembered level, never the switch the user just made.
+        // Parameters: level — the TurnsLevel value picked (0..4).
+        static void _RememberLevel(int level) noexcept;
         // Create `level`'s scroll view + content stack (once) and put it in the body.
         void _EnsureLevelView(int level);
         // Show `text` in place of `level`'s content (Loading / Empty), creating the placeholder once.
@@ -224,10 +285,39 @@ namespace winrt::TerminalApp::implementation
         // One build slice: turn blocks of the CURRENT level into XAML for ~kSliceBudget, then queue the
         // next slice if blocks remain. Stale (`generation` mismatch) or closed: does nothing.
         void _Pump(uint64_t generation);
+        // Build the level's next block (view.built) — or, at the start of a tool area, its fold row first
+        // (then the block goes into the fold's panel), or for an empty area its one-line note (skipping
+        // the "(no tool calls)" item) — and advance view.built past what was built.
+        void _BuildNext(LevelView& view);
+        // Start a folded tool area: append its summary row (a button: chevron + MdToolAreaSummary) and
+        // the panel its blocks go into (Collapsed unless the level's expandAll is on) to the level's
+        // chunks, and record both in view.folds.
+        // Parameters:
+        //   view       — the level being built.
+        //   area       — the area (MdToolAreaFoldable).
+        //   firstBlock — the area's first block (for the gap above the row).
+        //   above      — the block just above the area (its speaker header), or nullptr.
+        // Returns the panel the area's blocks are appended to.
+        winrt::Windows::UI::Xaml::Controls::StackPanel _BuildFold(LevelView& view, const ::Agentmaster::MdToolArea& area, const ::Agentmaster::MdBlock& firstBlock, const ::Agentmaster::MdBlock* above);
+        // The one-line note an EMPTY area becomes ("no tool calls", from its single item, lined up with
+        // the fold rows' text).
+        // Parameters: firstBlock — the area's only block; above — the block above it (the gap), or nullptr.
+        winrt::Windows::UI::Xaml::FrameworkElement _BuildEmptyAreaNote(const ::Agentmaster::MdBlock& firstBlock, const ::Agentmaster::MdBlock* above);
+        // Open or close one fold: its panel's visibility and its chevron (▾ open / ▸ folded). Static so the
+        // row's click handler needs no reference to the overlay.
+        static void _SetFoldOpen(const winrt::Windows::UI::Xaml::Controls::StackPanel& panel, const winrt::Windows::UI::Xaml::Controls::FontIcon& chevron, bool open);
+        // The "Expand all" switch: flip the current level's expandAll and open / close every fold of it.
+        void _ToggleExpandAll();
+        // Show the "Expand all" switch only while the current level has folds, labelled for what a click
+        // does next ("Expand all" / "Collapse all").
+        void _UpdateExpandAllButton();
         // The level ran out of blocks: add the closing notes (cut / failed), free the blocks, mark Done.
         void _FinishLevel(LevelView& view);
         // Append one built element to the level's current chunk (opening a new chunk when full).
         void _AppendElement(LevelView& view, const winrt::Windows::UI::Xaml::UIElement& element);
+        // Append one built element to the fold being filled (view.areaPanel), in chunks of the same size.
+        // Only while view.areaPanel is set.
+        void _AppendToFold(LevelView& view, const winrt::Windows::UI::Xaml::UIElement& element);
         // Build the XAML for one block, wrapped in its containers (quote bars, list indents + markers),
         // with the gap above it from MdGapAbove placed so shared quote bars run through it.
         winrt::Windows::UI::Xaml::FrameworkElement _BuildBlockElement(LevelView& view, const ::Agentmaster::MdBlock& block, const ::Agentmaster::MdBlock* prev);
@@ -259,7 +349,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Grid _pageRoot{ nullptr }; // the page's Root (the focus guard's boundary)
         winrt::Windows::UI::Xaml::Controls::Grid _host{ nullptr }; // the full-page layer (backdrop + card), Collapsed while closed
         winrt::Windows::UI::Xaml::Controls::Border _backdrop{ nullptr }; // the dim surface outside the card — a press here closes
-        winrt::Windows::UI::Xaml::Controls::Border _card{ nullptr }; // the reading card (60% x 80% via the host's star grid)
+        winrt::Windows::UI::Xaml::Controls::Border _card{ nullptr }; // the reading card (85% x 80% via the host's star grid)
         winrt::Windows::UI::Xaml::Controls::Grid _headerRow{ nullptr }; // icon · title · session line · Copy / Refresh / Close
         winrt::Windows::UI::Xaml::Controls::TextBlock _subtitleText{ nullptr }; // the session line
         winrt::Windows::UI::Xaml::Controls::Grid _tabsRow{ nullptr }; // the level tabs + the status line
@@ -268,6 +358,8 @@ namespace winrt::TerminalApp::implementation
         std::vector<winrt::Windows::UI::Xaml::Controls::Border> _tabUnderlines; // each tab's underline (accent when current)
         std::vector<int> _tabLevels; // the TurnsLevel value behind each tab position
         winrt::Windows::UI::Xaml::Controls::TextBlock _statusText{ nullptr }; // right of the tabs: progress / size / timing
+        winrt::Windows::UI::Xaml::Controls::Button _expandAllButton{ nullptr }; // far right of the tabs row: "Expand all" / "Collapse all" (only while the level has folds)
+        winrt::Windows::UI::Xaml::Controls::TextBlock _expandAllLabel{ nullptr }; // that switch's text
         winrt::Windows::UI::Xaml::Controls::Grid _bodyHost{ nullptr }; // holds every level's scroll view (one visible)
         winrt::Microsoft::Terminal::UI::TextMenuFlyout _textMenu{ nullptr }; // ONE shared Copy / Select All menu for every text block
 

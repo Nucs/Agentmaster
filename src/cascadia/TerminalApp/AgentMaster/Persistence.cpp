@@ -827,6 +827,7 @@ namespace Agentmaster
         o.Set(L"summaryPanelShowHistory", json::Value::MkBool(s.summaryPanelShowHistory)); // replaces "summaryPanelShowPrevious" (no longer written)
         o.Set(L"tabColorPickerCustomOpen", json::Value::MkBool(s.tabColorPickerCustomOpen));
         o.Set(L"tabColorPickerAdvancedOpen", json::Value::MkBool(s.tabColorPickerAdvancedOpen));
+        o.Set(L"transcriptOverlayLevel", json::Value::MkStr(s.transcriptOverlayLevel)); // the level the transcript overlay opens at (the overlay's own RMW)
         o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
         o.Set(L"boardSort", json::Value::MkStr(ToString(s.boardSort)));
         o.Set(L"autoTestingShowsSummary", json::Value::MkBool(s.autoTestingShowsSummary));
@@ -1030,6 +1031,9 @@ namespace Agentmaster
         s.summaryPanelShowHistory = v.BoolAt(L"summaryPanelShowHistory", true);
         s.tabColorPickerCustomOpen = v.BoolAt(L"tabColorPickerCustomOpen", true); // tab color picker: open with the "Custom" color-picker panel expanded (absent => ON)
         s.tabColorPickerAdvancedOpen = v.BoolAt(L"tabColorPickerAdvancedOpen", true); // tab color picker: open with the picker's More/Less "advanced" RGB/HSV/Hex inputs expanded (absent => ON)
+        // The transcript overlay's remembered level, kept verbatim: the overlay maps the name and opens an
+        // unknown one at Default, so a hand-edited value can never break an open (absent => "default").
+        s.transcriptOverlayLevel = v.StrAt(L"transcriptOverlayLevel", L"default");
         s.treeSort = ExplorerSortFromString(v.StrAt(L"treeSort", L"newest"));
         // Triage Board sort (a separate global from treeSort). Absent => the board's MostActive default
         // (most-recently-active first). A stored "pid" would deserialize fine but the board never

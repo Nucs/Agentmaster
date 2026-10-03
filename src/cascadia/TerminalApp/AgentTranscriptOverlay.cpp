@@ -3,10 +3,13 @@
 //
 // Agentmaster — the transcript overlay (AgentTranscriptOverlay.h has the design: what it shows, how it
 // renders, what closes it). This file is the whole implementation:
-//   * _BuildUi            — the host layer (backdrop + card), header, level tabs, body;
-//   * Show / Close        — open / retarget / close, the focus hand-offs;
-//   * _LoadLevelAsync     — the pool-thread render (TranscriptTurns / the Codex readers + MarkdownBlocks);
-//   * _Pump               — the UI-thread, time-sliced block -> XAML build;
+//   * _BuildUi            — the host layer (backdrop + card), header, level tabs + "Expand all", body;
+//   * Show / Close        — open / retarget / close, the focus hand-offs; the remembered level
+//                           (_RememberedLevel on open, _RememberLevel on every tab pick — settings.json);
+//   * _LoadLevelAsync     — the pool-thread render (TranscriptTurns / the Codex readers + MarkdownBlocks,
+//                           and the tool areas to fold, MdFindToolAreas);
+//   * _Pump / _BuildNext  — the UI-thread, time-sliced block -> XAML build, which folds each tool area
+//                           into a summary row + a hidden panel (_BuildFold) or a one-line note;
 //   * _BuildBlockElement  — one MdBlock -> one element: text / code / rule, wrapped in its quote bars
 //                           and list indents.
 #include "pch.h"
@@ -17,6 +20,7 @@
 #include "AgentCopyActions.h" // kTranscriptCopyMenu — the levels (order, labels, descriptions) the tabs mirror
 #include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the islands-safe tooltip host
 #include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / LogNav / ShortId / AppendStateLog
+#include "AgentMaster/Persistence.h" // Load/SaveAppSettings — the remembered level (AppSettings::transcriptOverlayLevel)
 #include "AgentMaster/ProcessInspect.h" // ReadConversationText / ReadConversationFollowupText / the Codex rollout resolve
 #include "AgentMaster/TranscriptTurns.h" // RenderTranscriptTurnsFile / TurnsOptionsForLevel / TurnsLevelName
 
@@ -81,6 +85,70 @@ namespace
 
     // The text appended where a block was cut at kMaxBlockChars.
     constexpr const wchar_t* kCutNote = L"\n\x2026 (cut here \x2014 the header's Copy button copies the whole text)";
+
+    // A FOLD's summary row (a folded tool area): the chevron glyphs (Segoe Fluent Icons ChevronRight /
+    // ChevronDown), the row text size, and where the row's text starts — the button's left padding (2)
+    // + the chevron's width (12) + the gap after it (6). The "(no tool calls)" note starts at the same
+    // x, so every turn's line under "● Claude" lines up whether it folds or not.
+    constexpr const wchar_t* kFoldClosedGlyph = L"\xE76C";
+    constexpr const wchar_t* kFoldOpenGlyph = L"\xE70D";
+    constexpr double kFoldFontSize = 13.0;
+    constexpr double kFoldChevronWidth = 12.0;
+    constexpr double kFoldChevronGap = 6.0;
+    constexpr double kFoldRowPaddingLeft = 2.0;
+    constexpr double kFoldRowPaddingTop = 2.0;
+    constexpr double kFoldTextIndent = kFoldRowPaddingLeft + kFoldChevronWidth + kFoldChevronGap;
+
+    // The view keeps one LevelView per TurnsLevel value in a fixed array of 5, and settings.json stores
+    // the remembered level by NAME (TurnsLevelName) — both assume TranscriptTurns' five levels.
+    static_assert(::Agentmaster::kTurnsLevelCount == 5, "AgentTranscriptOverlay::_levels holds 5 views; update it with the TurnsLevel set");
+
+    // The TurnsLevel value whose TurnsLevelName is `name`, compared case-insensitively (a hand-edited
+    // settings.json may say "Compact"); -1 when no level has that name (empty included).
+    int LevelFromName(std::wstring_view name) noexcept
+    {
+        for (int level = 0; level < ::Agentmaster::kTurnsLevelCount; ++level)
+        {
+            const std::wstring_view known{ ::Agentmaster::TurnsLevelName(static_cast<::Agentmaster::TurnsLevel>(level)) };
+            if (known.size() != name.size())
+            {
+                continue;
+            }
+            bool same = true;
+            for (size_t i = 0; i < known.size(); ++i)
+            {
+                if (towlower(name[i]) != towlower(known[i]))
+                {
+                    same = false;
+                    break;
+                }
+            }
+            if (same)
+            {
+                return level;
+            }
+        }
+        return -1;
+    }
+
+    // The note an EMPTY tool area becomes: its single item's text without the surrounding blanks and
+    // parentheses — "(no tool calls)" -> "no tool calls". Falls back to "no tool calls" for an item with
+    // no text. Throws std::bad_alloc only.
+    std::wstring EmptyAreaNoteText(const ::Agentmaster::MdBlock& block)
+    {
+        std::wstring text;
+        for (const auto& run : block.runs)
+        {
+            text += run.text;
+        }
+        const auto first = text.find_first_not_of(L" \t\r\n(");
+        const auto last = text.find_last_not_of(L" \t\r\n)");
+        if (first == std::wstring::npos || last == std::wstring::npos || last < first)
+        {
+            return L"no tool calls";
+        }
+        return text.substr(first, last - first + 1);
+    }
 
     // One solid brush from ARGB bytes. The overlay makes each color ONCE (in _BuildUi) and shares the
     // brush across every element — a brush per element would multiply objects by the block count.
@@ -244,7 +312,7 @@ namespace winrt::TerminalApp::implementation
         _pageRoot = pageRoot;
         _BuildUi();
         // Span EVERY row of the page (tab row when it isn't in the titlebar, infobars, content) so the
-        // card's 60% x 80% is of the window, and the backdrop catches every click outside it.
+        // card's 85% x 80% is of the window, and the backdrop catches every click outside it.
         const auto rows = pageRoot.RowDefinitions().Size();
         Grid::SetRow(_host, 0);
         Grid::SetRowSpan(_host, static_cast<int32_t>(std::max<uint32_t>(rows, 1)));
@@ -288,18 +356,18 @@ namespace winrt::TerminalApp::implementation
         _monoFont = FontFamily{ L"Cascadia Mono, Cascadia Code, Consolas" };
         _textMenu = winrt::Microsoft::Terminal::UI::TextMenuFlyout{};
 
-        // --- the host: a 3x3 star grid whose middle cell IS the card's 60% x 80% (no size math, no
+        // --- the host: a 3x3 star grid whose middle cell IS the card's 85% x 80% (no size math, no
         // SizeChanged handler — it follows every window resize through layout alone) ---
         _host = Grid{};
         _host.RequestedTheme(ElementTheme::Dark); // Agentmaster surfaces are always dark (CLAUDE.md conventions)
         _host.Visibility(Visibility::Collapsed);
-        for (const double weight : { 1.0, 8.0, 1.0 })
+        for (const double weight : { 1.0, 8.0, 1.0 }) // 10% · 80% · 10% of the height
         {
             RowDefinition row;
             row.Height(GridLength{ weight, GridUnitType::Star });
             _host.RowDefinitions().Append(row);
         }
-        for (const double weight : { 2.0, 6.0, 2.0 })
+        for (const double weight : { 7.5, 85.0, 7.5 }) // 7.5% · 85% · 7.5% of the width
         {
             ColumnDefinition column;
             column.Width(GridLength{ weight, GridUnitType::Star });
@@ -464,9 +532,9 @@ namespace winrt::TerminalApp::implementation
         Grid::SetRow(_headerRow, 0);
         layout.Children().Append(_headerRow);
 
-        // --- the level tabs (the Copy menu's order — Default first) + the status line ---
+        // --- the level tabs (the Copy menu's order — Default first) + the status line + "Expand all" ---
         _tabsRow = Grid{};
-        for (const auto width : { GridLength{ 0, GridUnitType::Auto }, GridLength{ 1, GridUnitType::Star } })
+        for (const auto width : { GridLength{ 0, GridUnitType::Auto }, GridLength{ 1, GridUnitType::Star }, GridLength{ 0, GridUnitType::Auto } })
         {
             ColumnDefinition column;
             column.Width(width);
@@ -536,6 +604,39 @@ namespace winrt::TerminalApp::implementation
         _statusText.Margin(Thickness{ 12, 0, 0, 0 });
         Grid::SetColumn(_statusText, 1);
         _tabsRow.Children().Append(_statusText);
+        // "Expand all" / "Collapse all": opens (or folds back) every tool-call list of the CURRENT level.
+        // Link-colored text, so it reads as an action next to the dim status; Collapsed until the current
+        // level turns out to have folds (_UpdateExpandAllButton).
+        _expandAllLabel = TextBlock{};
+        _expandAllLabel.FontSize(kStatusFontSize);
+        _expandAllLabel.Foreground(_linkBrush);
+        _expandAllLabel.Text(L"Expand all");
+        _expandAllButton = Button{};
+        _expandAllButton.Background(_transparentBrush); // transparent (not null) — hit-testable, hover still highlights
+        _expandAllButton.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        _expandAllButton.Padding(Thickness{ 10, 4, 0, 4 });
+        _expandAllButton.MinWidth(0);
+        _expandAllButton.MinHeight(0);
+        _expandAllButton.VerticalAlignment(VerticalAlignment::Center);
+        _expandAllButton.Visibility(Visibility::Collapsed);
+        _expandAllButton.Content(_expandAllLabel);
+        AgentSetTip(_expandAllButton, winrt::hstring{ L"Open or fold back every turn's tool calls at this level. A click on one turn's summary line opens just that turn." });
+        winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(_expandAllButton, winrt::hstring{ L"Expand all" });
+        _expandAllButton.Click([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            try
+            {
+                if (const auto self = weak.get())
+                {
+                    self->_ToggleExpandAll();
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay expand all"); // the folds stay as they were
+            }
+        });
+        Grid::SetColumn(_expandAllButton, 2);
+        _tabsRow.Children().Append(_expandAllButton);
         Grid::SetRow(_tabsRow, 1);
         layout.Children().Append(_tabsRow);
 
@@ -643,7 +744,10 @@ namespace winrt::TerminalApp::implementation
             _open = true;
             _UpdateTitle();
             _host.Visibility(Visibility::Visible);
-            _SelectLevel(std::clamp(level, 0, ::Agentmaster::kTurnsLevelCount - 1), true);
+            // kRememberedLevel (any negative value): the level last picked in ANY window, read fresh from
+            // settings.json now — a pick made in another window since this one last opened counts.
+            const int wanted = level < 0 ? _RememberedLevel() : level;
+            _SelectLevel(std::clamp(wanted, 0, ::Agentmaster::kTurnsLevelCount - 1), true);
         }
         catch (...)
         {
@@ -734,6 +838,49 @@ namespace winrt::TerminalApp::implementation
                                   ::Agentmaster::TurnsLevelName(static_cast<::Agentmaster::TurnsLevel>(level)));
         }
         _SelectLevel(level, true);
+        // Every pick — the tab already showing included — is the level the next open uses, in any window
+        // ("if the user picks Compact, the next transcript opens at Compact"). Another window may have
+        // remembered a different level since this overlay opened, so even a re-pick writes.
+        _RememberLevel(level);
+    }
+
+    int AgentTranscriptOverlay::_RememberedLevel() noexcept
+    {
+        try
+        {
+            const int level = LevelFromName(::Agentmaster::LoadAppSettings().transcriptOverlayLevel);
+            if (level >= 0)
+            {
+                return level;
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: open at Default — a failed settings read never blocks the overlay.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay remembered level");
+        }
+        return static_cast<int>(::Agentmaster::TurnsLevel::Default);
+    }
+
+    void AgentTranscriptOverlay::_RememberLevel(int level) noexcept
+    {
+        try
+        {
+            const std::wstring name{ ::Agentmaster::TurnsLevelName(static_cast<::Agentmaster::TurnsLevel>(level)) };
+            // FRESHEST disk, one field (the ColorPickupFlyout idiom): never write a stale in-memory copy
+            // over a cog Save or another window's settings change.
+            auto settings = ::Agentmaster::LoadAppSettings();
+            if (settings.transcriptOverlayLevel != name)
+            {
+                settings.transcriptOverlayLevel = name;
+                ::Agentmaster::SaveAppSettings(settings);
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: nothing — the switch already happened; only the remembered level is lost.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay remember level");
+        }
     }
 
     void AgentTranscriptOverlay::_SelectLevel(int level, bool focusBody)
@@ -915,6 +1062,9 @@ namespace winrt::TerminalApp::implementation
             out.truncated = out.truncated || parsed.truncatedBlocks;
             out.failed = parsed.failed;
             out.markdown = std::move(text); // after the parse — `toParse` viewed it
+            // The tool-call lists the build folds (here, off the UI thread, with the parse: one linear pass
+            // over the blocks, and the UI thread then only follows the indices).
+            out.areas = ::Agentmaster::MdFindToolAreas(out.blocks);
             if (out.blocks.empty())
             {
                 // A failed parse already logged its exception (ParseMarkdownBlocks, Rule #18) — say so
@@ -963,6 +1113,16 @@ namespace winrt::TerminalApp::implementation
         {
             view.blocks = std::move(render.blocks);
             view.built = 0;
+            view.areas = std::move(render.areas);
+            view.nextArea = 0;
+            view.areaPanel = nullptr;
+            view.areaEnd = 0;
+            view.areaChunk = nullptr;
+            view.areaChunkFill = 0;
+            view.folds.clear();
+            view.hasFolds = std::any_of(view.areas.begin(), view.areas.end(), [](const ::Agentmaster::MdToolArea& area) {
+                return ::Agentmaster::MdToolAreaFoldable(area);
+            });
             view.state = LevelState::Building;
             // The placeholder gives way to content.
             if (view.messageText && view.content)
@@ -1036,9 +1196,7 @@ namespace winrt::TerminalApp::implementation
             size_t madeThisSlice = 0;
             while (view.built < view.blocks.size())
             {
-                const ::Agentmaster::MdBlock* prev = view.built > 0 ? &view.blocks[view.built - 1] : nullptr;
-                _AppendElement(view, _BuildBlockElement(view, view.blocks[view.built], prev));
-                ++view.built;
+                _BuildNext(view); // one block (plus a fold row before an area's first one), or an empty area's note
                 ++madeThisSlice;
                 if (madeThisSlice >= kMinBlocksPerSlice && std::chrono::steady_clock::now() - sliceStart >= kSliceBudget)
                 {
@@ -1078,6 +1236,14 @@ namespace winrt::TerminalApp::implementation
         view.state = LevelState::Done;
         std::vector<::Agentmaster::MdBlock>{}.swap(view.blocks); // the XAML holds the content now
         view.built = 0;
+        // The area walk is over too: drop its state (a level that ENDS on a tool list still holds that
+        // fold's panel here). The folds themselves stay in view.folds for "Expand all".
+        std::vector<::Agentmaster::MdToolArea>{}.swap(view.areas);
+        view.nextArea = 0;
+        view.areaPanel = nullptr;
+        view.areaEnd = 0;
+        view.areaChunk = nullptr;
+        view.areaChunkFill = 0;
         if (view.truncated || view.failed)
         {
             auto note = _MakeTextBlock(kStatusFontSize);
@@ -1100,6 +1266,198 @@ namespace winrt::TerminalApp::implementation
         }
         view.chunk.Children().Append(element);
         ++view.chunkFill;
+    }
+
+    void AgentTranscriptOverlay::_AppendToFold(LevelView& view, const UIElement& element)
+    {
+        if (!view.areaChunk || view.areaChunkFill >= kChunkSize)
+        {
+            view.areaChunk = StackPanel{};
+            view.areaPanel.Children().Append(view.areaChunk);
+            view.areaChunkFill = 0;
+        }
+        view.areaChunk.Children().Append(element);
+        ++view.areaChunkFill;
+    }
+
+    void AgentTranscriptOverlay::_BuildNext(LevelView& view)
+    {
+        const size_t index = view.built;
+        // Past the folded area being filled: the blocks after it (the reply quote, the next turn) go back
+        // to the level's chunks.
+        if (view.areaPanel && index >= view.areaEnd)
+        {
+            view.areaPanel = nullptr;
+            view.areaEnd = 0;
+            view.areaChunk = nullptr;
+            view.areaChunkFill = 0;
+        }
+        // A belt: skip any area the walk has passed (areas are found on these very blocks, in order and
+        // without overlaps, so this never fires — but a stale index must never stall the build).
+        while (view.nextArea < view.areas.size() && view.areas[view.nextArea].first < index)
+        {
+            ++view.nextArea;
+        }
+        const ::Agentmaster::MdBlock* above = index > 0 ? &view.blocks[index - 1] : nullptr;
+        bool firstInFold = false;
+        if (!view.areaPanel && view.nextArea < view.areas.size() && view.areas[view.nextArea].first == index)
+        {
+            const auto& area = view.areas[view.nextArea];
+            ++view.nextArea;
+            if (area.empty)
+            {
+                // "(no tool calls)": the note says the same in one dim line, lined up with the fold rows —
+                // the bullet item itself is not built.
+                _AppendElement(view, _BuildEmptyAreaNote(view.blocks[index], above));
+                view.built = std::max(area.end, index + 1);
+                return;
+            }
+            if (::Agentmaster::MdToolAreaFoldable(area))
+            {
+                view.areaPanel = _BuildFold(view, area, view.blocks[index], above);
+                view.areaEnd = area.end;
+                view.areaChunk = nullptr; // the new fold's first append opens its first chunk
+                view.areaChunkFill = 0;
+                firstInFold = true;
+            }
+            // Otherwise (Compact's own content: answers, compactions, an agent's messages) the list is
+            // built open, exactly as before folding existed.
+        }
+        // The first block inside a fold starts its panel flush: the summary row above took the gap.
+        const auto element = _BuildBlockElement(view, view.blocks[index], firstInFold ? nullptr : above);
+        if (view.areaPanel)
+        {
+            _AppendToFold(view, element);
+        }
+        else
+        {
+            _AppendElement(view, element);
+        }
+        ++view.built;
+    }
+
+    StackPanel AgentTranscriptOverlay::_BuildFold(LevelView& view, const ::Agentmaster::MdToolArea& area, const ::Agentmaster::MdBlock& firstBlock, const ::Agentmaster::MdBlock* above)
+    {
+        const bool open = view.expandAll;
+        std::wstring summary = ::Agentmaster::MdToolAreaSummary(area);
+        if (summary.empty())
+        {
+            summary = L"Tool calls"; // the summary failed (already logged): still a row that opens the list
+        }
+
+        // The panel the area's blocks are appended to — hidden while folded. A hair of air above its first
+        // item so an opened list does not touch the row.
+        StackPanel panel;
+        panel.Visibility(open ? Visibility::Visible : Visibility::Collapsed);
+        panel.Margin(Thickness{ 0, 3, 0, 0 });
+
+        // The row: [chevron | summary], the summary wrapping in its own column on a narrow window. Neither
+        // child takes hits — the button must be the only target (the badge's mkIconBtn lesson).
+        FontIcon chevron;
+        chevron.FontFamily(FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+        chevron.Glyph(open ? kFoldOpenGlyph : kFoldClosedGlyph);
+        chevron.FontSize(9);
+        chevron.Width(kFoldChevronWidth);
+        chevron.Foreground(_dimBrush);
+        chevron.VerticalAlignment(VerticalAlignment::Top);
+        chevron.Margin(Thickness{ 0, 4, kFoldChevronGap, 0 }); // centered on the summary's FIRST line
+        chevron.IsHitTestVisible(false);
+        Grid::SetColumn(chevron, 0);
+
+        TextBlock label;
+        label.Text(winrt::hstring{ summary });
+        label.FontSize(kFoldFontSize);
+        label.Foreground(_dimBrush);
+        label.TextWrapping(TextWrapping::Wrap);
+        label.IsHitTestVisible(false);
+        Grid::SetColumn(label, 1);
+
+        Grid content;
+        ColumnDefinition chevronColumn;
+        chevronColumn.Width(GridLength{ 0, GridUnitType::Auto });
+        ColumnDefinition labelColumn;
+        labelColumn.Width(GridLength{ 1, GridUnitType::Star });
+        content.ColumnDefinitions().Append(chevronColumn);
+        content.ColumnDefinitions().Append(labelColumn);
+        content.Children().Append(chevron);
+        content.Children().Append(label);
+
+        Button row;
+        row.Background(_transparentBrush); // transparent (not null): hit-testable, and the template still shows hover
+        row.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        row.Padding(Thickness{ kFoldRowPaddingLeft, kFoldRowPaddingTop, 8, kFoldRowPaddingTop });
+        row.MinWidth(0);
+        row.MinHeight(0);
+        row.HorizontalAlignment(HorizontalAlignment::Left);
+        row.HorizontalContentAlignment(HorizontalAlignment::Left);
+        row.Content(content);
+        // The gap the area's first block would have had under its header sits above the row instead.
+        row.Margin(Thickness{ 0, ::Agentmaster::MdGapAbove(above, firstBlock), 0, 0 });
+        winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(row, winrt::hstring{ L"Tool calls: " + summary });
+        // WEAK references: the handler lives on the row, and the panel / chevron must never be kept alive
+        // by a handler past the level's release (_ReleaseLevels drops the whole view).
+        row.Click([weakPanel = winrt::make_weak(panel), weakChevron = winrt::make_weak(chevron)](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            try
+            {
+                const auto foldPanel = weakPanel.get();
+                const auto foldChevron = weakChevron.get();
+                if (foldPanel && foldChevron)
+                {
+                    _SetFoldOpen(foldPanel, foldChevron, foldPanel.Visibility() != Visibility::Visible);
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay fold toggle"); // the fold stays as it was
+            }
+        });
+
+        _AppendElement(view, row);
+        _AppendElement(view, panel);
+        view.folds.push_back(FoldParts{ panel, chevron });
+        return panel;
+    }
+
+    FrameworkElement AgentTranscriptOverlay::_BuildEmptyAreaNote(const ::Agentmaster::MdBlock& firstBlock, const ::Agentmaster::MdBlock* above)
+    {
+        TextBlock note;
+        note.Text(winrt::hstring{ EmptyAreaNoteText(firstBlock) });
+        note.FontSize(kFoldFontSize);
+        note.Foreground(_dimBrush);
+        note.TextWrapping(TextWrapping::Wrap);
+        // Where a fold row's TEXT starts (past its padding + chevron), and as far down as that text sits.
+        note.Margin(Thickness{ kFoldTextIndent, ::Agentmaster::MdGapAbove(above, firstBlock) + kFoldRowPaddingTop, 0, kFoldRowPaddingTop });
+        return note;
+    }
+
+    void AgentTranscriptOverlay::_SetFoldOpen(const StackPanel& panel, const FontIcon& chevron, bool open)
+    {
+        panel.Visibility(open ? Visibility::Visible : Visibility::Collapsed);
+        chevron.Glyph(open ? kFoldOpenGlyph : kFoldClosedGlyph);
+    }
+
+    void AgentTranscriptOverlay::_ToggleExpandAll()
+    {
+        auto& view = _levels[_current];
+        view.expandAll = !view.expandAll;
+        for (const auto& fold : view.folds)
+        {
+            _SetFoldOpen(fold.panel, fold.chevron, view.expandAll);
+        }
+        _UpdateExpandAllButton();
+    }
+
+    void AgentTranscriptOverlay::_UpdateExpandAllButton()
+    {
+        if (!_expandAllButton || !_expandAllLabel)
+        {
+            return;
+        }
+        const auto& view = _levels[_current];
+        _expandAllButton.Visibility(view.hasFolds ? Visibility::Visible : Visibility::Collapsed);
+        const winrt::hstring label{ view.expandAll ? L"Collapse all" : L"Expand all" };
+        _expandAllLabel.Text(label);
+        winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(_expandAllButton, label);
     }
 
     TextBlock AgentTranscriptOverlay::_MakeTextBlock(double fontSize) const
@@ -1365,6 +1723,9 @@ namespace winrt::TerminalApp::implementation
 
     void AgentTranscriptOverlay::_UpdateStatus()
     {
+        // The "Expand all" switch follows the same moments the status does: a level switch, a render
+        // landing, a build slice.
+        _UpdateExpandAllButton();
         if (!_statusText)
         {
             return;
@@ -1500,7 +1861,17 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::LogNav(L"transcript-refresh " + ::Agentmaster::ShortId(_source.sessionId) + L" " +
                               ::Agentmaster::TurnsLevelName(static_cast<::Agentmaster::TurnsLevel>(_current)));
         ++_generation; // a render still running for the old views is dropped when it lands
+        // A refresh re-renders the text, not the reader's choice: each level keeps its "Expand all".
+        std::array<bool, static_cast<size_t>(::Agentmaster::kTurnsLevelCount)> expandAll{}; // == _levels.size() (static_assert above)
+        for (size_t i = 0; i < _levels.size(); ++i)
+        {
+            expandAll[i] = _levels[i].expandAll;
+        }
         _ReleaseLevels();
+        for (size_t i = 0; i < _levels.size(); ++i)
+        {
+            _levels[i].expandAll = expandAll[i];
+        }
         _SelectLevel(_current, true);
     }
 

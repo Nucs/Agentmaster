@@ -782,4 +782,296 @@ namespace Agentmaster
         }
         return codeInvolved ? kGapAroundCode : kGapParagraph;
     }
+
+    // ---- tool areas (MarkdownBlocks.h): what the transcript overlay folds -----------------------
+    namespace
+    {
+        // The marks transcript_turns starts its speaker headers and list items with (TranscriptTurns.cpp
+        // SpeakerBlock / EventLines). The two emoji are astral, so each is matched as its UTF-16
+        // surrogate pair: one shared high half, a distinct low half.
+        constexpr wchar_t kSpeakerMark = L'\x25CF'; // ● — a speaker header (Claude, an agent entry)
+        constexpr wchar_t kPromptMark = L'\x276F'; // ❯ — a prompt / brief, or (nested) an answer
+        constexpr wchar_t kMessageMark = L'\x2709'; // ✉ — a message that reached the agent
+        constexpr wchar_t kAstralHigh = L'\xD83D'; // the high surrogate both emoji below share
+        constexpr wchar_t kRemarkLow = L'\xDCAC'; // 💬 U+1F4AC — a remark between calls
+        constexpr wchar_t kCompactionLow = L'\xDDDC'; // 🗜 U+1F5DC — a context compaction
+
+        // The longest tool name a summary shows; a longer one (an MCP tool's qualified name) is cut
+        // and ends in an ellipsis.
+        constexpr size_t kToolNameMaxChars = 40;
+
+        // A block's first VISIBLE UTF-16 unit: where an item's marker glyph (or its bold tool name) is.
+        struct LeadUnit
+        {
+            wchar_t unit = L'\0'; // L'\0' == the block shows no text (an empty item, a code block)
+            wchar_t next = L'\0'; // the unit right after it in the same run — a surrogate pair's low half
+            uint8_t style = 0; // the kMd* bits of the run that holds it
+            size_t run = 0; // that run's index in MdBlock::runs
+        };
+
+        // Scan `block`'s runs for the first non-blank unit. Never throws.
+        LeadUnit FirstVisibleUnit(const MdBlock& block) noexcept
+        {
+            LeadUnit lead;
+            for (size_t r = 0; r < block.runs.size(); ++r)
+            {
+                const std::wstring& text = block.runs[r].text;
+                for (size_t i = 0; i < text.size(); ++i)
+                {
+                    if (iswspace(text[i]))
+                    {
+                        continue;
+                    }
+                    lead.unit = text[i];
+                    lead.next = i + 1 < text.size() ? text[i + 1] : L'\0';
+                    lead.style = block.runs[r].style;
+                    lead.run = r;
+                    return lead;
+                }
+            }
+            return lead;
+        }
+
+        // A SPEAKER HEADER (MdFindToolAreas): top-level, not raw HTML, first visible unit '●' in a bold
+        // run. Never throws.
+        bool IsSpeakerHeader(const MdBlock& block) noexcept
+        {
+            if (block.kind != MdBlockKind::Paragraph || block.rawHtml || !block.containers.empty())
+            {
+                return false;
+            }
+            const LeadUnit lead = FirstVisibleUnit(block);
+            return lead.unit == kSpeakerMark && (lead.style & kMdBold) != 0;
+        }
+
+        // `block` is the FIRST block of a top-level list item — the only block of the item that carries
+        // its marker (MdContainer::marker). Never throws.
+        bool StartsTopLevelItem(const MdBlock& block) noexcept
+        {
+            return !block.containers.empty() && block.containers[0].kind == MdContainerKind::Item && !block.containers[0].marker.empty();
+        }
+
+        // `block` is the first block of an item NESTED directly inside a top-level item (depth 2): the
+        // shape of the answer / output / background lines transcript_turns puts under a call. Never throws.
+        bool StartsNestedItem(const MdBlock& block) noexcept
+        {
+            return block.containers.size() >= 2 && block.containers[1].kind == MdContainerKind::Item && !block.containers[1].marker.empty();
+        }
+
+        // The block's whole text without surrounding blanks — for the "(no tool calls)" test only.
+        // Throws std::bad_alloc only (the caller's catch logs it).
+        std::wstring TrimmedText(const MdBlock& block)
+        {
+            std::wstring text;
+            for (const auto& run : block.runs)
+            {
+                text += run.text;
+            }
+            const auto first = text.find_first_not_of(L" \t\r\n");
+            if (first == std::wstring::npos)
+            {
+                return {};
+            }
+            const auto last = text.find_last_not_of(L" \t\r\n");
+            return text.substr(first, last - first + 1);
+        }
+
+        // Count one top-level item (its first block) into `area` by its leading mark. A bold lead is a
+        // tool call: OpSummary writes "**Name**" first, so the bold run's text IS the tool name.
+        // Throws std::bad_alloc only (a new tool name entry).
+        void CountTopLevelItem(const MdBlock& block, MdToolArea& area)
+        {
+            const LeadUnit lead = FirstVisibleUnit(block);
+            if (lead.unit == kAstralHigh && lead.next == kRemarkLow)
+            {
+                ++area.remarks;
+            }
+            else if (lead.unit == kAstralHigh && lead.next == kCompactionLow)
+            {
+                ++area.compactions;
+            }
+            else if (lead.unit == kMessageMark)
+            {
+                ++area.messages;
+            }
+            else if (lead.unit == kPromptMark)
+            {
+                ++area.prompts;
+            }
+            else if (lead.unit != L'\0' && (lead.style & kMdBold) != 0)
+            {
+                ++area.toolCalls;
+                std::wstring name = block.runs[lead.run].text;
+                const auto from = name.find_first_not_of(L" \t\r\n");
+                const auto to = name.find_last_not_of(L" \t\r\n");
+                name = from == std::wstring::npos ? std::wstring{} : name.substr(from, to - from + 1);
+                if (CutAt(name, kToolNameMaxChars - 1))
+                {
+                    name += L'\x2026';
+                }
+                for (auto& [known, calls] : area.tools)
+                {
+                    if (known == name)
+                    {
+                        ++calls;
+                        return;
+                    }
+                }
+                area.tools.emplace_back(std::move(name), size_t{ 1 });
+            }
+            else
+            {
+                ++area.others;
+            }
+        }
+
+        // "1 remark" / "3 remarks" — the summary's count phrases. Throws std::bad_alloc only.
+        std::wstring CountPhrase(size_t count, std::wstring_view singular, std::wstring_view plural)
+        {
+            return std::to_wstring(count) + L" " + std::wstring{ count == 1 ? singular : plural };
+        }
+    }
+
+    std::vector<MdToolArea> MdFindToolAreas(const std::vector<MdBlock>& blocks) noexcept
+    {
+        std::vector<MdToolArea> areas;
+        try
+        {
+            for (size_t i = 0; i + 1 < blocks.size(); ++i)
+            {
+                if (!IsSpeakerHeader(blocks[i]) || !StartsTopLevelItem(blocks[i + 1]))
+                {
+                    continue;
+                }
+                MdToolArea area;
+                area.first = i + 1;
+                // Every block of the list shares its OUTERMOST container's list id: the items themselves,
+                // their continuation blocks, and the lists / code blocks nested inside them.
+                const uint32_t listId = blocks[i + 1].containers[0].listId;
+                size_t j = i + 1;
+                for (; j < blocks.size(); ++j)
+                {
+                    const MdBlock& block = blocks[j];
+                    if (block.containers.empty() || block.containers[0].kind != MdContainerKind::Item || block.containers[0].listId != listId)
+                    {
+                        break;
+                    }
+                    if (StartsTopLevelItem(block))
+                    {
+                        CountTopLevelItem(block, area);
+                    }
+                    else if (StartsNestedItem(block) && FirstVisibleUnit(block).unit == kPromptMark)
+                    {
+                        ++area.answers;
+                    }
+                }
+                area.end = j;
+                // A speaker with no call and no remark: transcript_turns writes the single item
+                // "(no tool calls)" (or "(no remarks)") — nothing to fold.
+                if (area.end - area.first == 1 && area.others == 1 && area.toolCalls == 0)
+                {
+                    const std::wstring text = TrimmedText(blocks[area.first]);
+                    if (text == L"(no tool calls)" || text == L"(no remarks)")
+                    {
+                        area.empty = true;
+                        area.others = 0;
+                    }
+                }
+                areas.push_back(std::move(area));
+                i = j - 1; // resume after the list (the loop's ++i lands on the block that ended it)
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery = the areas found so far: the overlay folds those and shows the rest as
+            // plain lists, which is the pre-fold rendering — nothing is lost.
+            LogSwallowedException(L"MdFindToolAreas");
+        }
+        return areas;
+    }
+
+    bool MdToolAreaFoldable(const MdToolArea& area) noexcept
+    {
+        return !area.empty && area.toolCalls + area.remarks > 0;
+    }
+
+    std::wstring MdToolAreaSummary(const MdToolArea& area, size_t maxTools) noexcept
+    {
+        try
+        {
+            std::vector<std::wstring> parts;
+            if (area.toolCalls > 0)
+            {
+                std::wstring calls = CountPhrase(area.toolCalls, L"tool call", L"tool calls");
+                if (maxTools > 0 && !area.tools.empty())
+                {
+                    // Most-called first; a STABLE sort keeps the first-call order among equal counts.
+                    auto byCalls = area.tools;
+                    std::stable_sort(byCalls.begin(), byCalls.end(), [](const auto& a, const auto& b) {
+                        return a.second > b.second;
+                    });
+                    const size_t shown = std::min(maxTools, byCalls.size());
+                    calls += L": ";
+                    for (size_t k = 0; k < shown; ++k)
+                    {
+                        if (k > 0)
+                        {
+                            calls += L", ";
+                        }
+                        calls += byCalls[k].first;
+                        if (byCalls[k].second > 1)
+                        {
+                            calls += L" \x00D7"; // the multiplication sign: "Bash ×3"
+                            calls += std::to_wstring(byCalls[k].second);
+                        }
+                    }
+                    if (byCalls.size() > shown)
+                    {
+                        calls += L" +" + std::to_wstring(byCalls.size() - shown) + L" more";
+                    }
+                }
+                parts.push_back(std::move(calls));
+            }
+            if (area.remarks > 0)
+            {
+                parts.push_back(CountPhrase(area.remarks, L"remark", L"remarks"));
+            }
+            if (area.messages > 0)
+            {
+                parts.push_back(CountPhrase(area.messages, L"message", L"messages"));
+            }
+            if (area.prompts > 0)
+            {
+                parts.push_back(CountPhrase(area.prompts, L"prompt", L"prompts"));
+            }
+            if (area.answers > 0)
+            {
+                parts.push_back(CountPhrase(area.answers, L"answer", L"answers"));
+            }
+            if (area.compactions > 0)
+            {
+                parts.push_back(CountPhrase(area.compactions, L"compaction", L"compactions"));
+            }
+            if (area.others > 0)
+            {
+                parts.push_back(CountPhrase(area.others, L"other line", L"other lines"));
+            }
+            std::wstring summary;
+            for (size_t k = 0; k < parts.size(); ++k)
+            {
+                if (k > 0)
+                {
+                    summary += L" \x00B7 "; // the middle dot transcript_turns separates its facts with
+                }
+                summary += parts[k];
+            }
+            return summary;
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery = no summary text; the overlay then falls back to a generic label.
+            LogSwallowedException(L"MdToolAreaSummary");
+            return {};
+        }
+    }
 }

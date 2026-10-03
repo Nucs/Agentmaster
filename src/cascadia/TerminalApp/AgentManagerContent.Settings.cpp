@@ -3823,6 +3823,7 @@ namespace winrt::TerminalApp::implementation
             _appSettings.summaryPanelShowHistory = disk.summaryPanelShowHistory; // ⏮ whole-conversation toggle (panel times bar), out-of-cog UI action
             _appSettings.tabColorPickerCustomOpen = disk.tabColorPickerCustomOpen; // tab color picker Custom-panel expansion, written by the flyout's own RMW
             _appSettings.tabColorPickerAdvancedOpen = disk.tabColorPickerAdvancedOpen; // ditto for the picker's More/Less "advanced" inputs
+            _appSettings.transcriptOverlayLevel = disk.transcriptOverlayLevel; // the transcript overlay's last-picked level, written by the overlay's own RMW
             _appSettings.allowUpdatePrerelease = disk.allowUpdatePrerelease; // updater pre-release opt-in (instant-applied by the switch itself)
             _appSettings.allowUpdateNightly = disk.allowUpdateNightly; // updater NIGHTLY opt-in (instant-applied by its warning-gated switch)
             _appSettings.updateSkippedVersion = disk.updateSkippedVersion; // updater "Skip this version" (out-of-cog JSON RMW)

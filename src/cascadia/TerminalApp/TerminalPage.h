@@ -1757,12 +1757,12 @@ namespace winrt::TerminalApp::implementation
 
         // --- Agentmaster TRANSCRIPT OVERLAY (TerminalPage.AgentTranscript.cpp; AgentTranscriptOverlay.h) ---
         // A session's conversation, rendered as Markdown at a detail level, in a reading card laid over
-        // the WHOLE page (60% x 80% of the window). One per window, built on first use. Opened by every
+        // the WHOLE page (85% x 80% of the window). One per window, built on first use. Opened by every
         // "Show Transcript" / "Copy ▸ Transcript ▸ Show" item; closed by Esc / a click outside / its ✕,
         // and by the page on any tab switch (_ApplyAgentTabSelection), tab move (_TryMoveTab) or tab drag
         // (_TabReorderActivate / _sendDraggedTabToWindow).
         void _EnsureTranscriptOverlay(); // build the overlay into Root() once and wire its focus hand-back (_FocusCurrentTab); throws winrt::hresult_error when the XAML can't be built (callers contain it)
-        void _ShowTranscriptOverlay(const std::wstring& sessionId, bool codex, const std::wstring& codexRolloutId, const std::wstring& title, std::wstring_view origin); // open (or retarget) the overlay on one conversation at the Default level — DEFERRED one tick past the invoking menu's close (its focus hand-back must land first); `origin` names the menu for the [nav] transcript-show line. Never throws
+        void _ShowTranscriptOverlay(const std::wstring& sessionId, bool codex, const std::wstring& codexRolloutId, const std::wstring& title, std::wstring_view origin); // open (or retarget) the overlay on one conversation at the level the user last picked in any window (AgentTranscriptOverlay::kRememberedLevel — Default until a first pick) — DEFERRED one tick past the invoking menu's close (its focus hand-back must land first); `origin` names the menu for the [nav] transcript-show line. Never throws
         void _ShowTranscriptOverlayForSession(const std::wstring& sessionId, std::wstring_view origin); // the managed-session form: kind / Codex rollout id / title resolved from the registry (an id it doesn't know opens as a Claude transcript). Never throws
         void _CloseTranscriptOverlay(std::wstring_view reason) noexcept; // close it if open (no-op otherwise) and hand focus back to the current tab / the Manager page — the overlay's focus guard refused the focus move the closing tab switch itself made
         bool _TranscriptOverlayIsOpen() const noexcept; // is the overlay up? (_ManagerPaneNavPreviewKeyDown routes Esc + the tab-switch chords to it while it is)
