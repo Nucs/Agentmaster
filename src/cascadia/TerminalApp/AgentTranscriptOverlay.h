@@ -8,7 +8,7 @@
 // first item of every Transcript submenu, the per-tab badge's included). doc/agentmaster/
 // TRANSCRIPT_OVERLAY.md is the full description (entries, rendering rules, closing, logs, limits).
 //
-// Shape: a card 85% of the window wide and 80% tall, centered over a dimmed backdrop that covers the
+// Shape: a card 90% of the window wide and 80% tall, centered over a dimmed backdrop that covers the
 // page (the terminal, the Agent Manager page, or the Sessions page — "wherever you are"). The card has a
 // header (title · Copy · Refresh · Close), one TAB per transcript detail level in the Copy menu's order
 // (Default · Max · Full · Compact · Minimal), an "Expand all" switch for the level's folded tool calls,
@@ -349,7 +349,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Grid _pageRoot{ nullptr }; // the page's Root (the focus guard's boundary)
         winrt::Windows::UI::Xaml::Controls::Grid _host{ nullptr }; // the full-page layer (backdrop + card), Collapsed while closed
         winrt::Windows::UI::Xaml::Controls::Border _backdrop{ nullptr }; // the dim surface outside the card — a press here closes
-        winrt::Windows::UI::Xaml::Controls::Border _card{ nullptr }; // the reading card (85% x 80% via the host's star grid)
+        winrt::Windows::UI::Xaml::Controls::Border _card{ nullptr }; // the reading card (90% x 80% via the host's star grid)
         winrt::Windows::UI::Xaml::Controls::Grid _headerRow{ nullptr }; // icon · title · session line · Copy / Refresh / Close
         winrt::Windows::UI::Xaml::Controls::TextBlock _subtitleText{ nullptr }; // the session line
         winrt::Windows::UI::Xaml::Controls::Grid _tabsRow{ nullptr }; // the level tabs + the status line

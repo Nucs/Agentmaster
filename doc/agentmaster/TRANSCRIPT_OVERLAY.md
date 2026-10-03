@@ -2,7 +2,8 @@
 
 A session's conversation, rendered as Markdown, in a reading view laid over the window. Status:
 **written 2026-10-03, NOT BUILT** (no compile, no deploy — see §9 for the verification checklist). Same day,
-second pass: 85% wide, folded tool calls (§3b), the remembered level (§3a) — also not built.
+second pass: 85% wide, folded tool calls (§3b), the remembered level (§3a) — also not built; then 90% wide
+(third ask, same day, not built).
 
 ## 1. The ask (verbatim)
 
@@ -21,6 +22,10 @@ The follow-up, same day:
 >    all bash area (not last turn text content) needs to be collapsible so its closer looking to Compact version.
 > 3. If user picks Compact, persist the Compact globally as the picked and next transcript opened is going
 >    to be opened at Compact tab in any window.
+
+And the third:
+
+> The card is now 85% of the window wide. do 90%.
 
 ## 2. Where it opens
 
@@ -41,9 +46,9 @@ Labels, tooltip and glyph (`\xE736` ReadingMode) are shared constants in `AgentC
 
 ## 3. What it looks like
 
-- A card **85% of the window wide and 80% tall**, centered, over a 40%-black backdrop that covers the whole
-  page (all of Root's rows). The size comes from a 3×3 star grid (1:8:1 rows, 7.5:85:7.5 columns) — no
-  size code, it follows every resize through layout. (60% wide until the follow-up asked for 85%.)
+- A card **90% of the window wide and 80% tall**, centered, over a 40%-black backdrop that covers the whole
+  page (all of Root's rows). The size comes from a 3×3 star grid (1:8:1 rows, 5:90:5 columns) — no size
+  code, it follows every resize through layout. (60% wide at first, then 85%, then 90% — the follow-ups.)
 - **Header**: reading-mode icon · "Transcript" · the session line (title · short id · "Codex") · Copy ·
   Refresh · Close (✕).
 - **Tabs**, one per level in the Copy menu's order — **Default · Max · Full · Compact · Minimal** — the
@@ -221,7 +226,7 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
 1. `tests\run-m5-tests.bat` → `[MarkdownBlocks]` passes (or `[info] skipped` without the vcpkg tree).
 2. Lib compile-check, then a dev deploy (user's permission first — CLAUDE.md *Development Rules*).
 3. Open from each entry in §2: a Claude tab, a forked tab, a team lead (agents), a Codex tab, an external
-   row. Check: the remembered level selected (Default on a first run), the 85% × 80% size, the five tabs,
+   row. Check: the remembered level selected (Default on a first run), the 90% × 80% size, the five tabs,
    scrolling, the status line.
 4. Close with Esc, a click outside, ✕, Ctrl+Tab, a click on another tab, a tab drag, Move to start.
    Each time keyboard focus must land back in the terminal (type a key) — or on the Manager page.

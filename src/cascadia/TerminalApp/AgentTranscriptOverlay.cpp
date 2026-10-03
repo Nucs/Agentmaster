@@ -312,7 +312,7 @@ namespace winrt::TerminalApp::implementation
         _pageRoot = pageRoot;
         _BuildUi();
         // Span EVERY row of the page (tab row when it isn't in the titlebar, infobars, content) so the
-        // card's 85% x 80% is of the window, and the backdrop catches every click outside it.
+        // card's 90% x 80% is of the window, and the backdrop catches every click outside it.
         const auto rows = pageRoot.RowDefinitions().Size();
         Grid::SetRow(_host, 0);
         Grid::SetRowSpan(_host, static_cast<int32_t>(std::max<uint32_t>(rows, 1)));
@@ -356,7 +356,7 @@ namespace winrt::TerminalApp::implementation
         _monoFont = FontFamily{ L"Cascadia Mono, Cascadia Code, Consolas" };
         _textMenu = winrt::Microsoft::Terminal::UI::TextMenuFlyout{};
 
-        // --- the host: a 3x3 star grid whose middle cell IS the card's 85% x 80% (no size math, no
+        // --- the host: a 3x3 star grid whose middle cell IS the card's 90% x 80% (no size math, no
         // SizeChanged handler — it follows every window resize through layout alone) ---
         _host = Grid{};
         _host.RequestedTheme(ElementTheme::Dark); // Agentmaster surfaces are always dark (CLAUDE.md conventions)
@@ -367,7 +367,7 @@ namespace winrt::TerminalApp::implementation
             row.Height(GridLength{ weight, GridUnitType::Star });
             _host.RowDefinitions().Append(row);
         }
-        for (const double weight : { 7.5, 85.0, 7.5 }) // 7.5% · 85% · 7.5% of the width
+        for (const double weight : { 5.0, 90.0, 5.0 }) // 5% · 90% · 5% of the width
         {
             ColumnDefinition column;
             column.Width(GridLength{ weight, GridUnitType::Star });

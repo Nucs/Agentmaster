@@ -1757,7 +1757,7 @@ namespace winrt::TerminalApp::implementation
 
         // --- Agentmaster TRANSCRIPT OVERLAY (TerminalPage.AgentTranscript.cpp; AgentTranscriptOverlay.h) ---
         // A session's conversation, rendered as Markdown at a detail level, in a reading card laid over
-        // the WHOLE page (85% x 80% of the window). One per window, built on first use. Opened by every
+        // the WHOLE page (90% x 80% of the window). One per window, built on first use. Opened by every
         // "Show Transcript" / "Copy ▸ Transcript ▸ Show" item; closed by Esc / a click outside / its ✕,
         // and by the page on any tab switch (_ApplyAgentTabSelection), tab move (_TryMoveTab) or tab drag
         // (_TabReorderActivate / _sendDraggedTabToWindow).
