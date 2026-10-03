@@ -88,15 +88,25 @@ namespace winrt::TerminalApp::implementation
         // _HookTabStatusForPending (re)subscribes to its PropertyChanged whenever TabStatus changes.
         // (The same one subscription also feeds the bookmark-tag badges below.)
         void _HookTabStatusForPending();
+        // RENDERING.md §4c: also gated on this header being in the live tree (IsLoaded — re-evaluated on
+        // Loaded / Unloaded), on a STARTED tab (a dormant tab's remembered draft shows still dots) and on
+        // Windows' animation effects (AgentAnimationsEnabled). Never throws (logged).
         void _UpdatePendingAnimation();
         winrt::Windows::UI::Xaml::Media::Animation::Storyboard _pendingDotsStoryboard{ nullptr };
+        // RENDERING.md §4c: whether _pendingDotsStoryboard is currently running — the change gate, because
+        // Begin() on a running storyboard restarts it (a visible jump) and the callers re-assert often.
+        bool _pendingDotsRunning{ false };
         // Agentmaster (SPARK CROWN — the cache-warm hint): the glow breath + the three rising embers,
         // built imperatively in the constructor beside the pending-dots pulse and run ONLY while
         // TabStatus.AgentCacheWarmVisible is true. Same start/stop discipline, and for the same reason: a
         // cache stays warm for MINUTES, so an always-on storyboard would hold the compositor awake across
         // every recently-used tab in the fleet. Fed by the one _HookTabStatusForPending subscription.
+        // RENDERING.md §4c: also gated on IsLoaded and Windows' animation effects (a still crown = the steady
+        // glow, embers hidden). Never throws (logged).
         void _UpdateCacheWarmAnimation();
         winrt::Windows::UI::Xaml::Media::Animation::Storyboard _cacheWarmStoryboard{ nullptr };
+        // RENDERING.md §4c: whether _cacheWarmStoryboard is currently running — the same change gate.
+        bool _cacheWarmRunning{ false };
         winrt::TerminalApp::TerminalTabStatus _pendingHookedStatus{ nullptr };
         winrt::Windows::UI::Xaml::Data::INotifyPropertyChanged::PropertyChanged_revoker _pendingStatusRevoker{};
 

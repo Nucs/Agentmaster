@@ -159,10 +159,66 @@ namespace
         }
         return anyDigit ? ::Agentmaster::ClampCommandHandoverDeleteDeadlineMinutes(v) : 1440;
     }
+
+    // Agentmaster (RENDERING.md §4c): read the Behavior tab's "release a hidden tab's GPU memory after
+    // this many seconds" box. The ReadDeleteDeadlineMinutesBox rule: a BLANK box means the default (60),
+    // a typed 0 is a REAL value (release as soon as the tab is hidden), so the two must never collapse
+    // onto one meaning — hence the anyDigit flag. Digits are scraped (anything else is ignored), the
+    // accumulator stops growing past 8 digits, and the result is clamped to one day.
+    // Parameters: box — the seconds TextBox; null reads as the default.
+    // Returns: the seconds to store (0..86400).
+    uint32_t ReadHiddenReleaseSecondsBox(const winrt::Windows::UI::Xaml::Controls::TextBox& box)
+    {
+        if (!box)
+        {
+            return 60;
+        }
+        const std::wstring t{ box.Text() };
+        bool anyDigit = false;
+        uint32_t v = 0;
+        for (const wchar_t c : t)
+        {
+            if (c >= L'0' && c <= L'9')
+            {
+                anyDigit = true;
+                if (v < 10000000)
+                {
+                    v = v * 10 + static_cast<uint32_t>(c - L'0');
+                }
+            }
+        }
+        return anyDigit ? ::Agentmaster::ClampHiddenTerminalReleaseSeconds(v) : 60;
+    }
 }
 
 namespace winrt::TerminalApp::implementation
 {
+    // Agentmaster (RENDERING.md §4c): see AgentManagerContent.h. The release switch needs the pause (a
+    // terminal that keeps drawing keeps its device), and the seconds box needs both, so greying them
+    // out makes "this does nothing now" legible at a glance (the notifications master-toggle idiom).
+    void AgentManagerContent::_SyncHiddenRenderingControls()
+    {
+        // Inside a try: the two switches' Toggled handlers call this, and an exception that escapes a
+        // XAML event handler ends the process. A failed property call only leaves a control's enabled
+        // state stale until the next toggle or cog open (Rule #18: logged, never silent).
+        try
+        {
+            const bool pauseOn = _setPauseHiddenTerminals && _setPauseHiddenTerminals.IsOn();
+            if (_setReleaseHiddenDevices)
+            {
+                _setReleaseHiddenDevices.IsEnabled(pauseOn);
+            }
+            if (_setReleaseHiddenSeconds)
+            {
+                _setReleaseHiddenSeconds.IsEnabled(pauseOn && _setReleaseHiddenDevices && _setReleaseHiddenDevices.IsOn());
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SyncHiddenRenderingControls");
+        }
+    }
+
     void AgentManagerContent::_CycleKeepAwake()
     {
         switch (_keepAwakeMode)
@@ -1312,6 +1368,29 @@ namespace winrt::TerminalApp::implementation
         _setSoftwareRendering.Header(winrt::box_value(L"Software rendering (draw terminals on the CPU instead of the GPU)"));
         AgentSetTip(_setSoftwareRendering, L"Off (the default): every terminal draws on the graphics card. Each tab you have opened or looked at keeps its own GPU device until the tab is closed, and once Agentmaster holds about 60 of them the NVIDIA driver starts failing to create new ones (\x201C" L"Error occurred on GPUID: 100\x201D in the System event log). From then on a new or newly-focused tab can stay black even though its claude is running. Restarting the app clears it.\n\nOn: every terminal in every window draws on the CPU (Windows' WARP renderer), so no GPU device is created per tab and that limit can't be reached. Applies immediately; terminals already on screen switch over (and a black one gets a fresh surface).\n\nThe cost: a frame takes about 1\x2013" L"6 ms of CPU instead of ~0.3 ms, but only tabs that are repainting pay \x2014 a working claude repaints ~10 times a second (roughly 1\x2013" L"8% of one core per such tab), an idle tab costs nothing. If other work saturates the CPU, software-drawn tabs repaint late. Each opened terminal also uses ~19 MB of RAM for its screen buffers (graphics memory when off).\n\nTerminal's own \x201Crendering.software\x201D setting still applies on its own: if that is on, terminals draw on the CPU even with this switch off.");
         panel.Children().Append(_setSoftwareRendering);
+
+        // Agentmaster (RENDERING.md §4c, "Hidden tabs"): what an OFF-SCREEN terminal costs. Live: the
+        // cog's Save hands the values to the page, which publishes the policy to the Control DLL and
+        // re-applies it to every terminal of every window (TerminalPage::_ApplyHiddenRenderingSetting).
+        // The release switch and its seconds box only matter while the pause is on (a terminal that
+        // keeps drawing keeps its device), so they grey out with it (_SyncHiddenRenderingControls).
+        _setPauseHiddenTerminals = ToggleSwitch{};
+        _setPauseHiddenTerminals.Header(winrt::box_value(L"Stop drawing tabs you can't see"));
+        AgentSetTip(_setPauseHiddenTerminals, L"On (the default): a terminal that is not on screen \x2014 a tab you are not looking at, a pane hidden by zoom, every tab of a minimized window \x2014 draws no frames. Its program keeps running and its text keeps arriving. The screen is drawn again, in one frame, when you look at it.\n\nWhy: a working claude redraws its screen about 3-11 times a second (spinner, timer, streamed text). Without this, every working claude in every hidden tab does that for nobody (measured: 5 of 6 working tabs were hidden).\n\nOff: the Windows Terminal behavior, hidden tabs keep drawing. The two settings below then do nothing.");
+        _setPauseHiddenTerminals.Toggled([this](const IInspectable&, const RoutedEventArgs&) { _SyncHiddenRenderingControls(); });
+        panel.Children().Append(_setPauseHiddenTerminals);
+
+        _setReleaseHiddenDevices = ToggleSwitch{};
+        _setReleaseHiddenDevices.Header(winrt::box_value(L"Give back the GPU memory of a hidden tab"));
+        AgentSetTip(_setReleaseHiddenDevices, L"On (the default): a tab that stays hidden for the time below gives back its GPU device, its screen buffers and its glyph cache. It gets them back the next time you look at it, which shows a blank terminal for about 0.1 s.\n\nWhy: otherwise each tab you have looked at keeps its own GPU device until you close it \x2014 about 20-27 MB of graphics memory, 20 NVIDIA driver threads (2 of them wake about 68 times a second, even when the tab is idle), and one of the ~60 devices one app can hold before the NVIDIA driver starts failing (new tabs that stay black). With this on, only the tabs on screen and the ones you looked at recently hold a device.\n\nNeeds \x201CStop drawing tabs you can't see\x201D.");
+        _setReleaseHiddenDevices.Toggled([this](const IInspectable&, const RoutedEventArgs&) { _SyncHiddenRenderingControls(); });
+        panel.Children().Append(_setReleaseHiddenDevices);
+
+        _setReleaseHiddenSeconds = TextBox{};
+        _setReleaseHiddenSeconds.Header(winrt::box_value(L"\x2026 after the tab has been hidden this many seconds"));
+        _setReleaseHiddenSeconds.PlaceholderText(L"60");
+        AgentSetTip(_setReleaseHiddenSeconds, L"How long a tab must stay hidden before it gives back its GPU memory. The default 60 seconds keeps quick back-and-forth switching instant. 0 = as soon as you switch away (then every switch back shows the ~0.1 s blank). A blank box restores 60; the most is 86400 (one day). Applies at once, also to tabs that are already hidden.");
+        panel.Children().Append(_setReleaseHiddenSeconds);
 
         // === NOTIFICATIONS tab (System notifications) ===
         // A Windows TOAST when a managed session's status leaves Running — the "your agent finished /
@@ -2679,6 +2758,21 @@ namespace winrt::TerminalApp::implementation
         {
             _setSoftwareRendering.IsOn(_appSettings.softwareRendering); // RENDERING.md
         }
+        // RENDERING.md §4c ("Hidden tabs"): seed, then sync the dependents' enabled state explicitly —
+        // a programmatic IsOn does not reliably raise Toggled (the _setInferGitRoot seeding rule).
+        if (_setPauseHiddenTerminals)
+        {
+            _setPauseHiddenTerminals.IsOn(_appSettings.pauseHiddenTerminals);
+        }
+        if (_setReleaseHiddenDevices)
+        {
+            _setReleaseHiddenDevices.IsOn(_appSettings.releaseHiddenTerminalDevices);
+        }
+        if (_setReleaseHiddenSeconds)
+        {
+            _setReleaseHiddenSeconds.Text(winrt::hstring{ std::to_wstring(_appSettings.releaseHiddenTerminalDevicesAfterSeconds) });
+        }
+        _SyncHiddenRenderingControls();
         // NOTIFICATIONS tab: seed the master + the five target-state checkboxes + the two behavior
         // toggles, then sync the dependents' enabled state explicitly (don't rely on the programmatic
         // IsOn firing Toggled — the _setInferGitRoot seeding rule).
@@ -3373,6 +3467,21 @@ namespace winrt::TerminalApp::implementation
         {
             _appSettings.softwareRendering = _setSoftwareRendering.IsOn(); // RENDERING.md — applied live by the page's settings sink
         }
+        // RENDERING.md §4c ("Hidden tabs"): read even while disabled (pause off) — the controls still
+        // hold the user's stored preference, which must survive a Save (the _setInferGitRoot rule).
+        // Applied live by the page's settings sink (_ApplyHiddenRenderingSetting).
+        if (_setPauseHiddenTerminals)
+        {
+            _appSettings.pauseHiddenTerminals = _setPauseHiddenTerminals.IsOn();
+        }
+        if (_setReleaseHiddenDevices)
+        {
+            _appSettings.releaseHiddenTerminalDevices = _setReleaseHiddenDevices.IsOn();
+        }
+        if (_setReleaseHiddenSeconds)
+        {
+            _appSettings.releaseHiddenTerminalDevicesAfterSeconds = ReadHiddenReleaseSecondsBox(_setReleaseHiddenSeconds);
+        }
         // NOTIFICATIONS tab. The checkboxes are read even while disabled (master off) — like
         // _setInferGitRoot, they still hold the user's stored preference, and dropping them here
         // would silently reset a mute to the default. IsChecked is an IReference<bool>; a null
@@ -3742,6 +3851,8 @@ namespace winrt::TerminalApp::implementation
                                   L" autorunner=" + (_appSettings.defaultAutorunnerMode == AutorunnerMode::Full ? L"Full" : _appSettings.defaultAutorunnerMode == AutorunnerMode::SemiAuto ? L"Semi" : L"Off") +
                                   L" claudeExe=" + (_appSettings.claudeExePath.empty() ? std::wstring{ L"(auto)" } : _appSettings.claudeExePath) +
                                   L" softwareRendering=" + (_appSettings.softwareRendering ? L"1" : L"0") + /* RENDERING.md — the whole fleet's renderer */
+                                  L" pauseHidden=" + (_appSettings.pauseHiddenTerminals ? L"1" : L"0") + /* RENDERING.md §4c */
+                                  L" releaseHidden=" + (_appSettings.releaseHiddenTerminalDevices ? std::to_wstring(_appSettings.releaseHiddenTerminalDevicesAfterSeconds) + L"s" : std::wstring{ L"off" }) +
                                   L" handover=" + (_appSettings.commandHandoverEnabled ? (L"/" + _appSettings.commandHandoverName) : std::wstring{ L"off" }) +
                                   L" here=" + (_appSettings.commandHandoverHereEnabled ? (L"/" + _appSettings.commandHandoverHereName) : std::wstring{ L"off" }) /* both apply at next start (COMMANDS.md §6a) */);
             _settingsSink(_appSettings); // page persists + applies to future spawns

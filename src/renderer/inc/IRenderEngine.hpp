@@ -94,6 +94,21 @@ namespace Microsoft::Console::Render
         [[nodiscard]] virtual HRESULT IsGlyphWideByFont(std::wstring_view glyph, _Out_ bool* pResult) noexcept = 0;
         [[nodiscard]] virtual HRESULT UpdateTitle(std::wstring_view newTitle) noexcept = 0;
         virtual void UpdateHyperlinkHoveredId(const uint16_t hoveredId) noexcept = 0;
+
+        // Agentmaster (RENDERING.md §4c, "Hidden tabs"): give back the GPU-side resources (device,
+        // swap chain, glyph cache) of an engine whose host has been OFF SCREEN for a while. On this
+        // machine every live Direct3D 11 device costs ~20-27 MB of video memory, 20 NVIDIA driver
+        // threads (2 of them waking ~68 times/s forever) and one of the ~62 per-process device slots,
+        // so releasing a hidden terminal's device is what keeps a big fleet cheap.
+        // Contract:
+        // - The Renderer calls it ON ITS OWN RENDER THREAD, and only while painting is suspended
+        //   (Renderer::SetPaintingSuspended), so an engine may touch its render-thread-only state
+        //   without locks. It is never called concurrently with Present().
+        // - The engine must rebuild whatever it dropped LAZILY, on its next Present(), and must
+        //   tolerate being called when it holds nothing yet (a terminal that never painted).
+        // - Engines with nothing worth releasing (GDI, UIA, ...) keep this default no-op.
+        // Never throws.
+        virtual void ReleaseDeviceResources() noexcept {}
     };
 }
 #pragma warning(pop)

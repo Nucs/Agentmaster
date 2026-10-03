@@ -61,7 +61,13 @@ namespace
     // tree re-Begins. dotPx sizes the dots (cards: 5px). `color` is the contrast-picked pending-dots
     // color (PendingDotsColorFor) — defaulting to the historical gold so a caller that doesn't care is
     // unchanged.
-    StackPanel BuildPendingDots(double dotPx = 5.0, Color color = ColorHelper::FromArgb(0xFF, 0xE0, 0xA9, 0x2B))
+    // RENDERING.md §4c: `animated` = false builds STILL dots (full opacity, no storyboard at all) — for a
+    // session whose tab has not started (a dormant tab's REMEMBERED draft), matching the tab strip. Still
+    // dots are also built whenever Windows' animation effects are off (AgentAnimationsEnabled): every
+    // running Forever storyboard keeps XAML and DWM working on every display frame.
+    // Parameters: dotPx — dot diameter; color — dot fill; animated — pulse (true) or still (false).
+    // Returns: the 3-dot row, ready to append.
+    StackPanel BuildPendingDots(double dotPx = 5.0, Color color = ColorHelper::FromArgb(0xFF, 0xE0, 0xA9, 0x2B), bool animated = true)
     {
         namespace MA = winrt::Windows::UI::Xaml::Media::Animation;
         StackPanel row;
@@ -77,6 +83,11 @@ namespace
             e.Fill(SolidColorBrush{ color });
             row.Children().Append(e);
             dots.push_back(e);
+        }
+        if (!animated || !winrt::TerminalApp::implementation::AgentAnimationsEnabled())
+        {
+            // Still dots: no storyboard, so nothing ticks and nothing needs the Loaded/Unloaded pair.
+            return row;
         }
         MA::Storyboard sb;
         for (int i = 0; i < 3; ++i)

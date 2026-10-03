@@ -1669,7 +1669,9 @@ namespace winrt::TerminalApp::implementation
             // Unsent-draft indicator — the same BuildPendingDots cluster the board card pulses,
             // in the user's configured LIGHT color (card bodies are always dark here).
             const auto dotsColor = ParseArgbHexColor(_appSettings.pendingDotsLightColor, ColorHelper::FromArgb(0xFF, 0xE0, 0xA9, 0x2B));
-            row1.Children().Append(BuildPendingDots(4.0, dotsColor));
+            // RENDERING.md §4c: still dots for a session whose tab has not started (a dormant tab's
+            // remembered draft), as on its tab; an external session (no control of ours) keeps the pulse.
+            row1.Children().Append(BuildPendingDots(4.0, dotsColor, s.started || s.external));
         }
         {
             const int64_t last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;

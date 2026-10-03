@@ -573,6 +573,9 @@ void TestAppSettings()
         in.reapOrphanedSessions = false; // non-default (default true = the §13a orphan reaper is armed) — OBSERVER.md
         in.uiStallAutoRestart = false; // non-default (default true = the ui-stall RESTART tier is armed) — Engine.h escalation
         in.softwareRendering = true; // non-default (default false = the GPU) — RENDERING.md: every terminal on the CPU (WARP)
+        in.pauseHiddenTerminals = false; // non-default (default true) — RENDERING.md §4c: hidden terminals keep drawing
+        in.releaseHiddenTerminalDevices = false; // non-default (default true) — RENDERING.md §4c: hidden terminals keep their GPU device
+        in.releaseHiddenTerminalDevicesAfterSeconds = 0; // non-default (default 60) — 0 is meaningful: release at once
         in.tabRenameCommitMode = TabRenameCommitMode::ClickAwayOrEnter; // non-default (default is ClickAwayOrShiftEnter)
         in.favoriteIcon = FavoriteIcon::Star; // non-default (default is Crown)
         in.tabColorMode = TabColorMode::Individual; // non-default (default is WorkingDirectory) — tab color modes
@@ -645,6 +648,34 @@ void TestAppSettings()
         CHECK(out.softwareRendering == true, "settings softwareRendering round-trip (CPU rendering ON)");
         CHECK(DeserializeAppSettings(L"{\"version\":1,\"settings\":{}}").softwareRendering == false,
               "settings softwareRendering: an absent key (every pre-RENDERING.md settings.json) reads OFF = the GPU");
+        // RENDERING.md §4c ("Hidden tabs"): both switches + the seconds round-trip, a stored 0 survives
+        // (it means "release at once", not "unset"), absent keys read the new defaults (ON, ON, 60 — an
+        // existing install gets the savings without visiting the cog), and a hand-edited huge value
+        // pins to the one-day ceiling.
+        CHECK(out.pauseHiddenTerminals == false, "settings pauseHiddenTerminals round-trip (OFF)");
+        CHECK(out.releaseHiddenTerminalDevices == false, "settings releaseHiddenTerminalDevices round-trip (OFF)");
+        CHECK(out.releaseHiddenTerminalDevicesAfterSeconds == 0, "settings releaseHiddenTerminalDevicesAfterSeconds round-trip keeps a stored 0 (release at once)");
+        {
+            const auto absent = DeserializeAppSettings(L"{\"version\":1,\"settings\":{}}");
+            CHECK(absent.pauseHiddenTerminals == true && absent.releaseHiddenTerminalDevices == true && absent.releaseHiddenTerminalDevicesAfterSeconds == 60,
+                  "settings hidden-terminal keys: absent keys read ON / ON / 60 s");
+            const auto huge = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"releaseHiddenTerminalDevicesAfterSeconds\":9999999}}");
+            CHECK(huge.releaseHiddenTerminalDevicesAfterSeconds == 86400, "settings releaseHiddenTerminalDevicesAfterSeconds clamps to one day on load");
+        }
+        // The ONE combiner the engine-init publish, the cog Save and the broadcast all use.
+        {
+            AppSettings s{};
+            CHECK(HiddenTerminalReleaseDelayMs(s) == 60000u, "HiddenTerminalReleaseDelayMs: defaults = 60 s");
+            s.releaseHiddenTerminalDevicesAfterSeconds = 0;
+            CHECK(HiddenTerminalReleaseDelayMs(s) == 0u, "HiddenTerminalReleaseDelayMs: 0 s = release at once");
+            s.releaseHiddenTerminalDevicesAfterSeconds = 4000000000u;
+            CHECK(HiddenTerminalReleaseDelayMs(s) == 86400000u, "HiddenTerminalReleaseDelayMs: an out-of-band value pins to one day (never reads as INFINITE)");
+            s.releaseHiddenTerminalDevices = false;
+            CHECK(HiddenTerminalReleaseDelayMs(s) == 0xFFFFFFFFu, "HiddenTerminalReleaseDelayMs: release switch OFF = never");
+            s.releaseHiddenTerminalDevices = true;
+            s.pauseHiddenTerminals = false;
+            CHECK(HiddenTerminalReleaseDelayMs(s) == 0xFFFFFFFFu, "HiddenTerminalReleaseDelayMs: pause OFF = never (a terminal that keeps drawing keeps its device)");
+        }
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter, "settings tabRenameCommitMode round-trip");
         CHECK(out.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon round-trip");
         CHECK(out.tabColorMode == TabColorMode::Individual, "settings tabColorMode round-trip");
@@ -791,6 +822,8 @@ void TestAppSettings()
         CHECK(out2.uiStallAutoRestart == true, "settings uiStallAutoRestart defaults ON on garbage (the restart tier is a default-armed backstop)");
         CHECK(out2.reapOrphanedSessions == true, "settings reapOrphanedSessions defaults ON on garbage (a dead-console session is unreachable by construction)");
         CHECK(out2.softwareRendering == false, "settings softwareRendering defaults OFF on garbage (an unreadable file must not move the fleet onto the CPU)");
+        CHECK(out2.pauseHiddenTerminals == true && out2.releaseHiddenTerminalDevices == true && out2.releaseHiddenTerminalDevicesAfterSeconds == 60,
+              "settings hidden-terminal keys default ON / ON / 60 s on garbage");
     }
 
     // Agentmaster: the legacy "waitingDecayMinutes" key was RENAMED to "waitingForYouTimeoutMinutes"

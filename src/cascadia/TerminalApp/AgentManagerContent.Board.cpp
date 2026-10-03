@@ -291,7 +291,10 @@ namespace winrt::TerminalApp::implementation
             const auto dotsColor = PendingDotsColorFor(ColorHelper::FromArgb(0xFF, 0x2E, 0x2E, 0x2E),
                                                        _appSettings.pendingDotsLightColor,
                                                        _appSettings.pendingDotsDarkColor);
-            auto dots = BuildPendingDots(5.0, dotsColor);
+            // RENDERING.md §4c: a session whose tab has not started (a dormant tab's REMEMBERED draft)
+            // shows still dots, as its tab does; `started` is meaningless for an external session (no
+            // control of ours), which keeps the pulse.
+            auto dots = BuildPendingDots(5.0, dotsColor, s.started || s.external);
             std::wstring tip = L"A message is typed into this session's input box but hasn't been sent yet \x2014 the same dots ride its tab. It stays waiting until you (or Send now) submit it.";
             auto firstLine = s.pendingInput.substr(0, s.pendingInput.find(L'\n'));
             if (firstLine.size() > 120)

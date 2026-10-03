@@ -458,7 +458,12 @@ unsent message, and the design embraces that honestly:
   exists would be noise, not memory.
 - **Restore display** — a restored record's draft shows the dots **before its tab ever starts**: the
   scan's NotConnected branch drives `_SetTabPending` from the stored value (the board card reads the
-  registry directly and needs nothing). The board tip appends *"last seen \<ago\> — remembered from
+  registry directly and needs nothing). Since RENDERING.md §4c (in source 2026-10-03, not built yet)
+  these remembered-draft dots are **still** (no pulse) until the tab's claude starts — the tab header
+  reads the dormant half-hollow dot (`AgentStatusHalfVisible`), the board and side-panel cards read
+  `SessionInfo::started` — and every pulse runs only while its header or card is on screen and Windows'
+  "Animation effects" is on. A running pulse keeps XAML and DWM working on every display frame, and the
+  release had 50 dormant tabs carrying a remembered draft. The board tip appends *"last seen \<ago\> — remembered from
   before this session's tab (re)started; it clears automatically once the live input box reads empty"*
   once the stamp's age passes ~15s (a live draft's stamp never ages that far), plus the §2b paste-refs
   annotation naming the cached content file(s).

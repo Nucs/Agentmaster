@@ -63,6 +63,13 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     // because the UI thread writes it while a terminal on any window may be initializing.
     static std::atomic<bool> s_softwareRenderingOverride{ false };
 
+    // Agentmaster (RENDERING.md §4c): the process-wide "hidden terminals" policy behind
+    // ControlCore::SetHiddenRenderingPolicy — one copy per process for the same reason as the override
+    // above. The defaults equal AppSettings' defaults (pause on, release after 60 s), so a terminal that
+    // initializes before the app publishes settings.json already behaves as configured by default.
+    static std::atomic<bool> s_pauseHiddenRendering{ true };
+    static std::atomic<uint32_t> s_hiddenDeviceReleaseDelayMs{ 60 * 1000 };
+
     TextColor SelectionColor::AsTextColor() const noexcept
     {
         if (IsIndex16())
@@ -2428,6 +2435,38 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // Wake the render thread for one frame. It may be idle forever otherwise (an idle claude
         // writes nothing), and the rebuild only happens when it paints.
         _renderer->TriggerRedrawAll();
+    }
+
+    // Agentmaster (RENDERING.md §4c): see ControlCore.h. Two relaxed stores: a terminal that reads the
+    // pair between them pushes one mixed policy, which the next visibility change or reapply corrects.
+    void ControlCore::SetHiddenRenderingPolicy(const bool pauseHidden, const uint32_t releaseDelayMs) noexcept
+    {
+        s_pauseHiddenRendering.store(pauseHidden, std::memory_order_relaxed);
+        s_hiddenDeviceReleaseDelayMs.store(releaseDelayMs, std::memory_order_relaxed);
+    }
+
+    // Agentmaster (RENDERING.md §4c): see ControlCore.h.
+    void ControlCore::SetRenderingSuspended(const bool hidden)
+    {
+        // A closing terminal is about to be torn down; its renderer state no longer matters.
+        if (_IsClosing())
+        {
+            return;
+        }
+        // The policy decides whether "hidden" means "stop drawing". With the pause off, the call still
+        // goes through as "not suspended", so switching the policy off resumes every hidden terminal.
+        const auto suspend = hidden && s_pauseHiddenRendering.load(std::memory_order_relaxed);
+        const auto releaseDelayMs = s_hiddenDeviceReleaseDelayMs.load(std::memory_order_relaxed);
+        // _renderer exists from the constructor on, so this is safe before Initialize (the render thread
+        // reads the flag when it starts) and after Detach (TriggerTeardown cleared it).
+        if (_renderer->SetPaintingSuspended(suspend, releaseDelayMs))
+        {
+            // Shown again: repaint everything once. The swap chain still shows the frame from before the
+            // terminal was hidden, or it was released and the next frame must rebuild it. The engines'
+            // invalidation calls run under the terminal lock, which the render thread takes to paint.
+            const auto lock = _terminal->LockForWriting();
+            _renderer->TriggerRedrawAll();
+        }
     }
 
     bool ControlCore::IsVtMouseModeEnabled() const

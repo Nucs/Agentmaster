@@ -952,6 +952,22 @@ namespace winrt::TerminalApp::implementation
             // renderer — degraded, never broken (Rule #18: logged).
             ::Agentmaster::AgentLogCaughtException(L"_InitAgentmasterEngine(software rendering)");
         }
+        // Agentmaster (RENDERING.md §4c, "Hidden tabs"): publish the GLOBAL off-screen policy before any
+        // tab exists, so every terminal this window creates or restores follows it from its first
+        // visibility change on. No walk is needed: there are no terminals yet. Logged so a report of
+        // "tabs flash blank when I switch back" can be matched to the active policy.
+        try
+        {
+            winrt::Microsoft::Terminal::Control::TermControl::SetHiddenRenderingPolicy(_appSettings.pauseHiddenTerminals,
+                                                                                       ::Agentmaster::HiddenTerminalReleaseDelayMs(_appSettings));
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[render] hidden tabs (settings.json): " + _HiddenRenderingPolicyText() + L"\n");
+        }
+        catch (...)
+        {
+            // Only the activation-factory hop can fail: terminals then keep the Control DLL's built-in
+            // defaults (pause on, release after 60 s) — the same as the shipped settings (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_InitAgentmasterEngine(hidden rendering)");
+        }
         // Agentmaster: seed the tab-strip close affordances (show-X / middle-click close) from the
         // loaded settings now (the initial SetSettings pass ran with default _appSettings). No tabs
         // exist yet, so this just sets the hook flag + overlay mode; per-tab visibility is then applied
@@ -1853,6 +1869,10 @@ namespace winrt::TerminalApp::implementation
                 // RENDERING.md: likewise for the software-rendering switch — re-point the terminals only on
                 // a real flip (this sink also carries the sort toggles' unrelated saves).
                 const bool softwareRenderingChanged = self->_appSettings.softwareRendering != s.softwareRendering;
+                // RENDERING.md §4c: the hidden-tab policy is compared the same way (and through the ONE
+                // combiner, so "release off" vs "pause off" changes are both seen).
+                const bool hiddenRenderingChanged = self->_appSettings.pauseHiddenTerminals != s.pauseHiddenTerminals ||
+                                                    ::Agentmaster::HiddenTerminalReleaseDelayMs(self->_appSettings) != ::Agentmaster::HiddenTerminalReleaseDelayMs(s);
                 self->_appSettings = s;
                 ::Agentmaster::SaveAppSettings(s);
                 // Adopt/re-home autorunner default: the registry stamps this MODE onto records it
@@ -1914,6 +1934,13 @@ namespace winrt::TerminalApp::implementation
                 if (softwareRenderingChanged)
                 {
                     self->_ApplySoftwareRenderingSetting(s.softwareRendering, L"cog");
+                }
+                // RENDERING.md §4c: the hidden-tab policy is GLOBAL too — publish it and re-apply it to
+                // THIS window's terminals now (an already-hidden terminal adopts a new delay at once);
+                // other windows do theirs via the broadcast below.
+                if (hiddenRenderingChanged)
+                {
+                    self->_ApplyHiddenRenderingSetting(L"cog");
                 }
                 // Waiting-for-you "unread" model: push the (possibly changed) WaitingForInput -> Idle
                 // timeout to the process-wide scanner so it applies immediately, not next launch.
@@ -2205,6 +2232,9 @@ namespace winrt::TerminalApp::implementation
         // RENDERING.md: capture before adopting too — re-pointing every terminal is only worth doing (and
         // only safe to do cheaply) on a real flip, not on every unrelated broadcast (a sort click).
         const bool softwareRenderingChanged = _appSettings.softwareRendering != settings.softwareRendering;
+        // RENDERING.md §4c: same for the hidden-tab policy (through the ONE combiner).
+        const bool hiddenRenderingChanged = _appSettings.pauseHiddenTerminals != settings.pauseHiddenTerminals ||
+                                            ::Agentmaster::HiddenTerminalReleaseDelayMs(_appSettings) != ::Agentmaster::HiddenTerminalReleaseDelayMs(settings);
         _appSettings = settings;
         // Agentmaster: the tab-strip close affordances (show-X / middle-click close) are GLOBAL, so a
         // change made in another window must re-apply to THIS window's tabs live (the source window
@@ -2255,6 +2285,96 @@ namespace winrt::TerminalApp::implementation
         if (softwareRenderingChanged)
         {
             _ApplySoftwareRenderingSetting(settings.softwareRendering, L"broadcast");
+        }
+        // RENDERING.md §4c: a hidden-tab policy change saved in another window. The policy statics are
+        // process-wide (already set there), but only THIS window can re-apply them to its own terminals.
+        if (hiddenRenderingChanged)
+        {
+            _ApplyHiddenRenderingSetting(L"broadcast");
+        }
+    }
+
+    // Agentmaster (RENDERING.md §4c): see TerminalPage.h.
+    std::wstring TerminalPage::_HiddenRenderingPolicyText() const
+    {
+        if (!_appSettings.pauseHiddenTerminals)
+        {
+            return L"pause OFF (hidden terminals keep drawing and keep their GPU device)";
+        }
+        if (!_appSettings.releaseHiddenTerminalDevices)
+        {
+            return L"pause ON, GPU release OFF (hidden terminals draw nothing but keep their device)";
+        }
+        return L"pause ON, GPU release after " + std::to_wstring(::Agentmaster::ClampHiddenTerminalReleaseSeconds(_appSettings.releaseHiddenTerminalDevicesAfterSeconds)) + L" s hidden";
+    }
+
+    // Agentmaster (RENDERING.md §4c): see TerminalPage.h. Runs on this window's UI thread (the cog's Save
+    // sink or the broadcast sink, both already marshaled here): ReapplyHiddenRenderingPolicy reads each
+    // control's IsLoaded() and may take its terminal lock, so it must not run on a background thread.
+    void TerminalPage::_ApplyHiddenRenderingSetting(const std::wstring_view reason) noexcept
+    {
+        // 1. The process-wide policy FIRST, so a terminal that changes visibility between here and the
+        //    walk (a tab created this very tick) already reads the new values.
+        try
+        {
+            winrt::Microsoft::Terminal::Control::TermControl::SetHiddenRenderingPolicy(_appSettings.pauseHiddenTerminals,
+                                                                                       ::Agentmaster::HiddenTerminalReleaseDelayMs(_appSettings));
+        }
+        catch (...)
+        {
+            // The projected static can only fail to reach the Control DLL's activation factory; the walk
+            // below still pushes the old policy, which is harmless (Rule #18: never swallowed silently).
+            ::Agentmaster::AgentLogCaughtException(L"_ApplyHiddenRenderingSetting(policy)");
+        }
+        // 2. Every terminal of this window: every pane of every tab (WindowVisibilityChanged's walk).
+        //    A hidden one adopts the new delay (or resumes, if the pause was switched off); the visible
+        //    one is unaffected. A dormant tab's control is visited too; with no render thread yet the
+        //    push only records the state.
+        uint32_t visited = 0;
+        uint32_t failed = 0;
+        try
+        {
+            for (const auto& tab : _tabs)
+            {
+                if (auto tabImpl{ _GetTabImpl(tab) })
+                {
+                    tabImpl->GetRootPane()->WalkTree([&](auto&& pane) {
+                        if (const auto control = pane->GetTerminalControl())
+                        {
+                            ++visited;
+                            try
+                            {
+                                control.ReapplyHiddenRenderingPolicy();
+                            }
+                            catch (...)
+                            {
+                                // One terminal failed: it keeps its previous policy until its next
+                                // visibility change; the rest still adopt the new one. Logged.
+                                ++failed;
+                                ::Agentmaster::AgentLogCaughtException(L"_ApplyHiddenRenderingSetting(terminal)");
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        catch (...)
+        {
+            // The tab collection changed under the walk (a close racing the Save tick): terminals not
+            // reached adopt the policy at their next visibility change, which reads the statics above.
+            ::Agentmaster::AgentLogCaughtException(L"_ApplyHiddenRenderingSetting(walk)");
+        }
+        // 3. One hooks.log line per window per change (grep '\[render\]').
+        try
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[render] hidden tabs (" + std::wstring{ reason } + L") window " + ::Agentmaster::ShortId(_windowId) +
+                                              L": " + _HiddenRenderingPolicyText() + L"; re-applied " + std::to_wstring(visited - failed) +
+                                              L" of " + std::to_wstring(visited) + L" terminal(s)\n");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ApplyHiddenRenderingSetting(log)");
         }
     }
 

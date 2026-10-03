@@ -184,6 +184,33 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // fails (the same calls UpdateSettings makes); the engine setters themselves are noexcept.
         void ReapplySoftwareRendering();
 
+        // Agentmaster (RENDERING.md §4c, "Hidden tabs"): the process-wide policy for terminals that
+        // are OFF SCREEN (a tab that is not selected, a pane hidden by zoom, a minimized window).
+        // Measured on the release (537 tabs): 5 of its 6 painting terminals were hidden, and every
+        // shown-once terminal kept a GPU device whose driver threads poll ~68 times/s. The app sets
+        // this from settings.json at engine init and again on every Settings change; each terminal
+        // reads it when its control reports a visibility change (SetRenderingSuspended), and an
+        // already-hidden terminal only adopts a new value through TermControl's
+        // ReapplyHiddenRenderingPolicy.
+        // Parameters:
+        // - pauseHidden: true = a hidden terminal draws no frames (the default); false = the upstream
+        //   behavior, hidden terminals keep drawing (and the release below never happens either).
+        // - releaseDelayMs: how long a terminal stays hidden before its renderer gives back the GPU
+        //   device, swap chain and glyph cache (rebuilt when it is shown again, ~0.1 s of blank).
+        //   INFINITE (0xFFFFFFFF) = never; 0 = as soon as it is hidden.
+        // Thread safety: relaxed atomic stores, callable from any thread. Never throws.
+        static void SetHiddenRenderingPolicy(const bool pauseHidden, const uint32_t releaseDelayMs) noexcept;
+
+        // Agentmaster (RENDERING.md §4c): tell this terminal's renderer whether its control is on
+        // screen. Hidden + the policy's pause on => no frames, and the device is released after the
+        // policy's delay. Shown again => one full repaint is queued (the swap chain may hold a stale
+        // frame, or may have been released and must be rebuilt).
+        // Parameters:
+        // - hidden: true when the control is not in the visual tree or its window is minimized.
+        // Call on the control's UI thread. A no-op while the core is closing. Can throw only if the
+        // terminal lock throws (it does not in practice); the renderer calls are noexcept.
+        void SetRenderingSuspended(const bool hidden);
+
         void SetHoveredCell(Core::Point terminalPosition);
         void ClearHoveredCell();
         winrt::hstring GetHyperlink(const Core::Point position) const;

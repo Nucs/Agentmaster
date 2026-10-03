@@ -2322,6 +2322,24 @@ namespace Agentmaster
         // turned WT's setting on. Applied through TermControl::SetSoftwareRenderingOverride (engine
         // init, before any tab) and ReapplySoftwareRendering (cog Save + the cross-window broadcast).
         bool softwareRendering{ false };
+        // Agentmaster (RENDERING.md §4c, "Hidden tabs"): a terminal that is OFF SCREEN (its tab is not
+        // selected, a zoom hides its pane, its window is minimized) draws no frames. ON (the default).
+        // Measured 2026-10-03 on the release (537 tabs, 6 claudes working): 5 of the 6 painting
+        // terminals were hidden, each drawing ~3–11 full frames per second that nobody saw. A shown-
+        // again terminal repaints everything once. OFF = the upstream behavior (hidden terminals keep
+        // drawing), and then releaseHiddenTerminalDevices never applies either (it needs the pause).
+        bool pauseHiddenTerminals{ true };
+        // Agentmaster (RENDERING.md §4c): a terminal that stays hidden for
+        // releaseHiddenTerminalDevicesAfterSeconds gives back its GPU device, swap chain and glyph
+        // cache. ON (the default). Each live device costs ~20–27 MB of video memory, 20 NVIDIA driver
+        // threads (2 of them waking ~68 times/s, forever) and one of the ~62 per-process device slots
+        // (§1), and without this every tab ever looked at keeps one until it is closed. The price:
+        // going back to a released tab shows a blank terminal for ~0.1 s while the device is rebuilt.
+        bool releaseHiddenTerminalDevices{ true };
+        // Agentmaster (RENDERING.md §4c): how long a terminal must stay hidden before the release above.
+        // 60 (the default) keeps quick back-and-forth tab switching instant; 0 = as soon as it is
+        // hidden. Clamped to 0..86400 (ClampHiddenTerminalReleaseSeconds) on load and Save.
+        uint32_t releaseHiddenTerminalDevicesAfterSeconds{ 60 };
         // How the tab/session rename box commits via the keyboard (focus-loss always commits). GLOBAL
         // across windows. Default = Shift+Enter commits while a plain Enter still inserts a newline
         // (titles are multi-line). See TabRenameCommitMode.
@@ -2835,6 +2853,36 @@ namespace Agentmaster
             return 20;
         }
         return v > 40 ? 40 : v;
+    }
+
+    // Agentmaster (RENDERING.md §4c): clamp AppSettings::releaseHiddenTerminalDevicesAfterSeconds into
+    // 0..86400 (one day). 0 is MEANINGFUL (release as soon as the terminal is hidden), so it is not
+    // folded back to the default; only a value past the ceiling is pinned (a longer wait is "never" in
+    // practice, which the separate releaseHiddenTerminalDevices switch already expresses). Shared by the
+    // Persistence load and the cog Save so a hand-edited settings.json self-heals identically.
+    // Parameters: v — the stored or typed seconds. Returns: v, at most 86400.
+    inline uint32_t ClampHiddenTerminalReleaseSeconds(uint32_t v) noexcept
+    {
+        constexpr uint32_t kMax = 24u * 60u * 60u; // one day
+        return v > kMax ? kMax : v;
+    }
+
+    // Agentmaster (RENDERING.md §4c): the release delay the Control DLL takes
+    // (TermControl::SetHiddenRenderingPolicy), from the two settings that describe it. The ONE place
+    // the "switch off" and "seconds" settings combine, so the engine-init publish, the cog Save and the
+    // cross-window broadcast can never disagree.
+    // Parameters: s — the settings to read.
+    // Returns: the delay in milliseconds; 0xFFFFFFFF (Win32 INFINITE) = never release, which is also the
+    // answer while the pause itself is off (a terminal that keeps drawing must keep its device).
+    inline uint32_t HiddenTerminalReleaseDelayMs(const AppSettings& s) noexcept
+    {
+        constexpr uint32_t kNever = 0xFFFFFFFFu;
+        if (!s.pauseHiddenTerminals || !s.releaseHiddenTerminalDevices)
+        {
+            return kNever;
+        }
+        // At most 86,400,000 ms after the clamp: far below kNever, so no real delay reads as "never".
+        return ClampHiddenTerminalReleaseSeconds(s.releaseHiddenTerminalDevicesAfterSeconds) * 1000u;
     }
 
     // Agentmaster (COMMANDS.md §6b): clamp AppSettings::commandHandoverDeleteDeadlineMinutes into

@@ -1135,6 +1135,19 @@ namespace winrt::TerminalApp::implementation
         // RENDERING.md: draw every terminal on the CPU (WARP) instead of the GPU (AppSettings::softwareRendering,
         // default OFF). Behavior tab -> RENDERING; the page applies a change live to every window on Save.
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setSoftwareRendering{ nullptr };
+        // RENDERING.md §4c ("Hidden tabs"): Behavior tab -> RENDERING. Stop drawing off-screen terminals
+        // (AppSettings::pauseHiddenTerminals), give back their GPU device (releaseHiddenTerminalDevices)
+        // after this many seconds hidden (releaseHiddenTerminalDevicesAfterSeconds; blank = 60, 0 = at
+        // once). The page applies a change live to every window on Save.
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setPauseHiddenTerminals{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setReleaseHiddenDevices{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _setReleaseHiddenSeconds{ nullptr };
+        // Agentmaster (RENDERING.md §4c): grey out the release switch while the pause is off, and the
+        // seconds box while either is off — the settings they set then do nothing. Called from both
+        // switches' Toggled and from the cog's seed (a programmatic IsOn may not raise Toggled). UI
+        // thread. Never throws: null-safe on every control, and a failed XAML property call is logged
+        // (Rule #18) and leaves the enabled state stale until the next toggle or cog open.
+        void _SyncHiddenRenderingControls();
         // NOTIFICATIONS tab (System notifications): the Running -> X Windows-toast switches. The master
         // toggle gates the rest (the dependents grey out while it's off); the five checkboxes pick WHICH
         // target states notify (all checked == the "Running to anything else" default rule).

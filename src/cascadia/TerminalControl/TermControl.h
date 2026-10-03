@@ -55,6 +55,11 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // override — see TermControl.idl and ControlCore::SetSoftwareRenderingOverride.
         // Parameters: enabled — true draws every terminal on the CPU (WARP). Never throws.
         static void SetSoftwareRenderingOverride(bool enabled) noexcept;
+        // Agentmaster (RENDERING.md §4c): the projected setter of the process-wide hidden-terminal
+        // policy — see TermControl.idl and ControlCore::SetHiddenRenderingPolicy.
+        // Parameters: pauseHidden — hidden terminals draw no frames; releaseDelayMs — hidden time
+        // before the GPU device is released (0xFFFFFFFF = never). Never throws.
+        static void SetHiddenRenderingPolicy(bool pauseHidden, uint32_t releaseDelayMs) noexcept;
 
         void UpdateControlSettings(Control::IControlSettings settings);
         void UpdateControlSettings(Control::IControlSettings settings, Control::IControlAppearance unfocusedAppearance);
@@ -83,6 +88,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // flag — see TermControl.idl and ControlCore::ReapplySoftwareRendering. UI thread only. Can
         // throw a winrt::hresult_error when a projected settings call fails (the caller catches).
         void ReapplySoftwareRendering();
+        // Agentmaster (RENDERING.md §4c): push this terminal's current on-screen state with the current
+        // process-wide policy to its renderer (a Settings change) — see TermControl.idl. UI thread only.
+        // Never throws: a failure is logged and the terminal keeps its previous state.
+        void ReapplyHiddenRenderingPolicy();
         Windows::Foundation::Size CharacterDimensions() const;
         Windows::Foundation::Size MinimumSize();
         float SnapDimensionToGrid(const bool widthOrHeight, const float dimension);
@@ -347,6 +356,19 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         bool _isBackgroundLight{ false };
         bool _detached{ false };
+        // Agentmaster (RENDERING.md §4c): false while the hosting window is minimized
+        // (WindowVisibilityChanged). One of the two inputs of "is this terminal on screen?"; the other
+        // is IsLoaded() (in the window's visual tree). Starts true: a control created in a minimized
+        // window gets no call (TerminalPage::_SetupControl only reports a visible window), and the
+        // next restore reports true anyway.
+        bool _windowVisible{ true };
+        // Agentmaster (RENDERING.md §4c): suspend this terminal's renderer while it is off screen and
+        // resume it with one full repaint when it is back (see ControlCore::SetRenderingSuspended).
+        // Called on Loaded, Unloaded, a window minimize/restore, right before painting is first
+        // enabled, and on a policy reapply. A no-op while closing or after Detach (the core may then
+        // belong to another window's control). Never throws (logged), because it runs inside XAML
+        // event handlers.
+        void _UpdateRenderingSuspension() noexcept;
         til::CoordType _searchScrollOffset = 0;
         double _searchBoxRightInset = 0; // Agentmaster: right margin applied to the search box so it sits left of the per-tab overlay badge
         void _applySearchBoxInset(); // Agentmaster: (re)apply _searchBoxRightInset to the (lazily-created) search box
@@ -518,6 +540,11 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             Control::ControlInteractivity::ScrollPositionChanged_revoker interactivityScrollPositionChanged;
             Control::ControlInteractivity::PasteFromClipboard_revoker PasteFromClipboard;
             Control::ControlInteractivity::ContextMenuRequested_revoker ContextMenuRequested;
+
+            // Agentmaster (RENDERING.md §4c): this control's own tree membership drives the renderer's
+            // suspension. Kept here so Close() and Detach() (both reset _revokers) also stop it.
+            Windows::UI::Xaml::FrameworkElement::Loaded_revoker Loaded;
+            Windows::UI::Xaml::FrameworkElement::Unloaded_revoker Unloaded;
         } _revokers{};
     };
 }

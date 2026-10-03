@@ -253,6 +253,11 @@ namespace winrt::TerminalApp::implementation
                 {
                     ::Agentmaster::AgentLogCaughtException(L"tab-header tag popup close (unload)");
                 }
+                // RENDERING.md §4c: a header out of the live tree (virtualized away by the strip, its tab
+                // closed or torn out) stops its pulse / embers — each update reads IsLoaded() and is
+                // exception-safe on its own.
+                self->_UpdatePendingAnimation();
+                self->_UpdateCacheWarmAnimation();
             }
         });
         // ... and (re)assert the badges the moment the header ENTERS a live tree: the popup open is
@@ -266,6 +271,10 @@ namespace winrt::TerminalApp::implementation
                 {
                     self->_PositionTagBadges();
                 }
+                // RENDERING.md §4c: back in the live tree (scrolled into the strip's realized range, a
+                // re-parented header) — resume the pulse / embers if their flags still want them.
+                self->_UpdatePendingAnimation();
+                self->_UpdateCacheWarmAnimation();
             }
         });
 
@@ -490,7 +499,10 @@ namespace winrt::TerminalApp::implementation
                 if (auto self = weakThis.get())
                 {
                     const auto n = args.PropertyName();
-                    if (n.empty() || n == L"AgentPendingVisible")
+                    // AgentStatusHalfVisible == "this tab's terminal has not started" (the dormant
+                    // half-hollow dot): a remembered draft on a dormant tab shows still dots, and the
+                    // pulse starts the moment the tab's claude starts (RENDERING.md §4c).
+                    if (n.empty() || n == L"AgentPendingVisible" || n == L"AgentStatusHalfVisible")
                     {
                         self->_UpdatePendingAnimation();
                     }
@@ -514,17 +526,33 @@ namespace winrt::TerminalApp::implementation
         _UpdateTagBadges();
     }
 
-    // Agentmaster (PENDING_INPUT.md): run the 3-dot pulse iff this tab currently has a pending draft.
+    // Agentmaster (PENDING_INPUT.md + RENDERING.md §4c): run the 3-dot pulse iff the dots are shown AND
+    // the motion is worth its cost. A running Forever storyboard keeps XAML and DWM working on every display
+    // frame, so the pulse also needs: this header in the live tree (IsLoaded — the strip virtualizes far
+    // tabs away, and a hidden header must not tick), a STARTED tab (a dormant tab's REMEMBERED draft shows
+    // still dots; AgentStatusHalfVisible is the published "this tab's terminal has not started" fact, so
+    // the pulse begins the moment the tab's claude starts), and Windows' animation effects on. Still dots
+    // keep their full base opacity, so the draft stays visible in every case. Called on every relevant
+    // TabStatus change, on hook, and on Loaded / Unloaded.
     void TabHeaderControl::_UpdatePendingAnimation()
     {
         if (!_pendingDotsStoryboard)
         {
             return;
         }
-        const auto status = TabStatus();
-        const bool on = status && status.AgentPendingVisible();
+        // Everything, the WinRT reads included, inside the try: this runs from XAML event handlers
+        // (Loaded / Unloaded / PropertyChanged), where an escaping exception is a fail-fast.
         try
         {
+            const auto status = TabStatus();
+            const bool on = status && status.AgentPendingVisible() && !status.AgentStatusHalfVisible() &&
+                            IsLoaded() && AgentAnimationsEnabled();
+            // Begin() on a running storyboard RESTARTS it (a visible jump), and the callers re-assert
+            // often: act only on a real change.
+            if (on == _pendingDotsRunning)
+            {
+                return;
+            }
             if (on)
             {
                 _pendingDotsStoryboard.Begin();
@@ -533,9 +561,11 @@ namespace winrt::TerminalApp::implementation
             {
                 _pendingDotsStoryboard.Stop();
             }
+            _pendingDotsRunning = on;
         }
         catch (...)
         {
+            // The flag keeps its old value, so the next call retries the transition.
             ::Agentmaster::AgentLogCaughtException(L"tab-header pending-dots storyboard");
         }
     }
@@ -545,16 +575,25 @@ namespace winrt::TerminalApp::implementation
     // cache lasts MINUTES and a busy fleet can have many warm tabs at once, so leaving these running would
     // hold the compositor awake long after the hint stopped being true. Stop() also returns each ember to
     // its base Opacity="0", so a stopped storyboard leaves nothing frozen on screen.
+    // RENDERING.md §4c: it also runs only while this header is in the live tree (IsLoaded) and Windows'
+    // animation effects are on. A still crown is the steady glow alone (its base Opacity 0.45), embers
+    // hidden — the hint stays readable without a frame of motion.
     void TabHeaderControl::_UpdateCacheWarmAnimation()
     {
         if (!_cacheWarmStoryboard)
         {
             return;
         }
-        const auto status = TabStatus();
-        const bool on = status && status.AgentCacheWarmVisible();
+        // Everything inside the try, as in _UpdatePendingAnimation (XAML event handlers call this).
         try
         {
+            const auto status = TabStatus();
+            const bool on = status && status.AgentCacheWarmVisible() && IsLoaded() && AgentAnimationsEnabled();
+            // Begin() on a running storyboard restarts it: act only on a real change (see the pending pulse).
+            if (on == _cacheWarmRunning)
+            {
+                return;
+            }
             if (on)
             {
                 _cacheWarmStoryboard.Begin();
@@ -563,9 +602,11 @@ namespace winrt::TerminalApp::implementation
             {
                 _cacheWarmStoryboard.Stop();
             }
+            _cacheWarmRunning = on;
         }
         catch (...)
         {
+            // The flag keeps its old value, so the next call retries the transition.
             ::Agentmaster::AgentLogCaughtException(L"tab-header cache-warm storyboard");
         }
     }

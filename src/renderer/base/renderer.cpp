@@ -96,6 +96,14 @@ void Renderer::TriggerTeardown() noexcept
         // The render thread first waits for the event and then checks _threadKeepRunning. By doing it
         // in reverse order here, we ensure that it's impossible for the render thread to miss this.
         _threadKeepRunning.store(false, std::memory_order_relaxed);
+        // Agentmaster (RENDERING.md §4c): a SUSPENDED render thread sleeps on _suspended, not on _redraw
+        // or _enable, so it must be woken there too, or the join below would wait forever. Clearing the
+        // flag BEFORE the wake makes it reliable: WaitOnAddress only blocks while the value still equals
+        // the compared one, so a thread that reaches its wait after this store returns at once instead of
+        // missing the notify. Dropping the suspension is harmless: a re-attached host pushes its own
+        // on-screen state before it enables painting again.
+        _suspended.store(false);
+        til::atomic_notify_all(_suspended);
         NotifyPaintFrame();
         _enable.SetEvent();
 
@@ -122,6 +130,9 @@ DWORD Renderer::_renderThread() noexcept
     while (_threadKeepRunning.load(std::memory_order_relaxed))
     {
         _enable.wait();
+        // Agentmaster (RENDERING.md §4c): park here while the host is off screen. This is also where a
+        // long suspension releases the engines' device resources.
+        _waitWhileSuspended();
         _waitUntilCanRender();
         _waitUntilTimerOrRedraw();
 
@@ -133,10 +144,89 @@ DWORD Renderer::_renderThread() noexcept
             break;
         }
 
+        // Agentmaster (RENDERING.md §4c): the host left the screen during the waits above (a suspend
+        // request ends _waitUntilTimerOrRedraw at once). Draw nothing and loop back to park. _redraw
+        // stays set, so the frame that was due is drawn as soon as the host is shown again.
+        if (_suspended.load())
+        {
+            continue;
+        }
+
         LOG_IF_FAILED(PaintFrame());
     }
 
     return S_OK;
+}
+
+// Agentmaster (RENDERING.md §4c): see renderer.hpp.
+bool Renderer::SetPaintingSuspended(const bool suspended, const DWORD releaseDelayMs) noexcept
+{
+    // The delay first: a thread woken by the flag change below must already read the new value.
+    _suspendedReleaseDelayMs.store(releaseDelayMs);
+    const auto wasSuspended = _suspended.exchange(suspended);
+    if (suspended)
+    {
+        // An idle terminal (no output, no timers: a hidden tab never blinks) sleeps in
+        // _waitUntilTimerOrRedraw. Move it on to _waitWhileSuspended, where the release timer runs.
+        // NotifyPaintFrame CHANGES _redraw before it wakes, so this wake-up cannot be lost.
+        NotifyPaintFrame();
+        // A thread already parked in _waitWhileSuspended (the flag was already true: only the delay
+        // changed) gets a plain wake to re-read the delay. That one can be missed in a narrow race,
+        // which only postpones the release to the old deadline, where the loop re-reads the delay.
+        til::atomic_notify_all(_suspended);
+    }
+    else if (wasSuspended)
+    {
+        // The flag changed from true to false, so the parked thread's WaitOnAddress returns even if it
+        // reaches its wait after this notify.
+        til::atomic_notify_all(_suspended);
+    }
+    return wasSuspended && !suspended;
+}
+
+// Agentmaster (RENDERING.md §4c): see renderer.hpp.
+void Renderer::_waitWhileSuspended() noexcept
+{
+    auto released = false;
+    const auto suspendedSince = GetTickCount64();
+    while (_suspended.load() && _threadKeepRunning.load(std::memory_order_relaxed))
+    {
+        DWORD timeoutMs = INFINITE;
+        if (!released)
+        {
+            const auto delayMs = _suspendedReleaseDelayMs.load();
+            if (delayMs != INFINITE)
+            {
+                const auto elapsedMs = GetTickCount64() - suspendedSince;
+                if (elapsedMs >= delayMs)
+                {
+                    // Once per suspension: the engines rebuild lazily on their next Present, so a
+                    // second call would release nothing anyway.
+                    _releaseEngineDeviceResources();
+                    released = true;
+                    continue; // re-check the flag, then sleep without a timeout
+                }
+                timeoutMs = gsl::narrow_cast<DWORD>(delayMs - elapsedMs);
+            }
+        }
+        // Sleep while the flag still reads "suspended". It returns on a resume (the flag changed), on
+        // teardown (TriggerTeardown clears the flag), on a plain wake (a new delay) or on the timeout.
+        // The loop re-evaluates in every case.
+        constexpr auto stillSuspended = true;
+        til::atomic_wait(_suspended, stillSuspended, timeoutMs);
+    }
+}
+
+// Agentmaster (RENDERING.md §4c): see renderer.hpp. Runs on the render thread only, between frames.
+// It iterates _engines without the console lock, exactly like the Present() loop in _PaintFrame does
+// on every frame (engines are added/removed under that lock, by the UIA attach/detach). Holding the
+// lock here would block this terminal's output parser while the GPU driver tears a device down.
+void Renderer::_releaseEngineDeviceResources() noexcept
+{
+    for (const auto pEngine : _engines)
+    {
+        pEngine->ReleaseDeviceResources();
+    }
 }
 
 void Renderer::_waitUntilCanRender() noexcept
@@ -241,6 +331,15 @@ void Renderer::_waitUntilTimerOrRedraw() noexcept
     // point and the instant we know everyone else is blocked. See PaintFrame().
     while (!_redraw.load(std::memory_order_relaxed))
     {
+        // Agentmaster (RENDERING.md §4c): a suspend request also ends this wait, so the thread parks in
+        // _waitWhileSuspended (where the device-release timer runs) instead of sleeping here until the
+        // next output. SetPaintingSuspended sets _redraw too; this check covers the moment between its
+        // two stores.
+        if (_suspended.load())
+        {
+            break;
+        }
+
         // Otherwise calculate when the next timer expires.
         const auto wait = _calculateTimerMaxWait();
         if (wait == 0)

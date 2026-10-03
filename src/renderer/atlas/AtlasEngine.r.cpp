@@ -94,6 +94,31 @@ void AtlasEngine::WaitUntilCanRender() noexcept
     _waitUntilCanRender();
 }
 
+// Agentmaster (RENDERING.md §4c): see AtlasEngine.h. Measured with tools/devidle.cpp on the RTX 4060 Ti:
+// releasing a device this way ends its 20 NVIDIA driver threads within 3 s, and with them the 2 that
+// poll ~68 times/s. Everything touched here (_p's device members, _b) is render-thread-only state, and
+// the Renderer only calls this between frames, so no lock is needed. The CPU-side rows, color bitmaps
+// and font settings in _p stay, so the rebuilt frame is identical without asking the Renderer for a
+// repaint (_recreateBackend marks everything dirty).
+void AtlasEngine::ReleaseDeviceResources() noexcept
+try
+{
+    // The swap chain first, while the device that owns it still exists. _destroySwapChain also drops
+    // the backend's render target views and flushes D3D11's deferred destruction ("only one swap chain
+    // per surface"). It is a no-op for a terminal that never presented.
+    _destroySwapChain();
+    // The backend owns the device's shaders, buffers, the glyph atlas texture and its Direct2D target.
+    // Dropping it here (and not just its views) is what lets the device itself go away.
+    _b.reset();
+    _p.deviceContext.reset();
+    _p.device.reset();
+    // Forget the adapter too, so the next frame enumerates it again: a GPU change while the tab sat
+    // hidden (a driver update, a dock, a TDR) then picks the right adapter, as after a device-removed
+    // error (Present's catch does the same `_p.dxgi = {}`).
+    _p.dxgi = {};
+}
+CATCH_LOG()
+
 #pragma endregion
 
 void AtlasEngine::_recreateAdapter()

@@ -1566,6 +1566,21 @@ namespace winrt::TerminalApp::implementation
         // - reason: a short tag for the hooks.log `[render]` line ("cog" / "broadcast").
         // Never throws: a terminal that fails to re-point is logged (Rule #18) and the loop moves on.
         void _ApplySoftwareRenderingSetting(bool enabled, std::wstring_view reason) noexcept;
+        // Agentmaster (RENDERING.md §4c, "Hidden tabs"): publish the GLOBAL off-screen policy from
+        // _appSettings (pauseHiddenTerminals + HiddenTerminalReleaseDelayMs) to the Control DLL, then
+        // re-apply it to every terminal of THIS window (every pane of every tab), so a terminal that is
+        // already hidden adopts a new delay — or resumes drawing when the pause was switched off — at
+        // once. The cog's Save handler calls it for the saving window, _ApplyBroadcastSettings for every
+        // other one, ONLY when the policy changed (each re-apply takes a terminal lock).
+        //
+        // Parameters:
+        // - reason: a short tag for the hooks.log `[render]` line ("cog" / "broadcast").
+        // Never throws: a terminal that fails to re-apply is logged (Rule #18) and the walk moves on.
+        void _ApplyHiddenRenderingSetting(std::wstring_view reason) noexcept;
+        // Agentmaster (RENDERING.md §4c): the human-readable policy for the `[render]` log lines, from
+        // _appSettings ("pause ON, GPU release after 60 s hidden", ...). Returns the text; can throw
+        // std::bad_alloc only (callers log inside a try).
+        std::wstring _HiddenRenderingPolicyText() const;
         std::wstring _ClaudeSessionForConnection(const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn); // Agentmaster: which managed session is BOUND to this connection (by tabToken == WT_SESSION) — archive on pane-close + re-point injector on restartConnection
         winrt::Microsoft::Terminal::TerminalConnection::ConptyConnection _BuildAgentConnection(const std::wstring& commandline, const std::wstring& dir, const std::wstring& title, const std::vector<std::pair<std::wstring, std::wstring>>& env, bool inheritCursor = false); // Agentmaster: the shared managed-agent ConPTY builder (commandline + cwd + child env + this window's AM_SESSION stamp) — behind _LaunchClaudeSession / _LaunchCodexSession (fresh pane => inheritCursor false) AND the in-place restart (reuses the pane buffer => inheritCursor true)
         std::wstring _ManagedSessionForConnection(const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn); // Agentmaster: which MANAGED session (Claude OR Codex) owns this connection, matched by connection IDENTITY across _claudeTabs (agent-agnostic; works for a Codex tab with no tabToken yet)

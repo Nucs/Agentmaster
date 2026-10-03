@@ -66,6 +66,32 @@ namespace Microsoft::Console::Render
 
         void EnablePainting();
 
+        // Agentmaster (RENDERING.md §4c, "Hidden tabs"): stop or restart drawing frames for a host
+        // that left or re-entered the screen (a tab that is not selected, a minimized window).
+        // Without this, a hidden terminal whose program keeps writing (a working claude: spinner,
+        // timer, streamed text) draws ~3-11 full frames per second that nobody ever sees.
+        // Behavior:
+        // - While suspended, invalidations still accumulate in the engines (they run under the
+        //   console lock as usual); only the frames stop. Timers (cursor blink, blinking text) stop
+        //   too, because they tick inside a frame.
+        // - After `releaseDelayMs` of continuous suspension, the render thread calls every engine's
+        //   ReleaseDeviceResources() once (the GPU device, swap chain and glyph cache go away).
+        //   INFINITE = never release; 0 = release as soon as the thread notices the suspension.
+        // - Calling it again while suspended only updates the delay (a Settings change); the waiting
+        //   thread recomputes its timeout. Safe to call before EnablePainting (the thread reads the
+        //   flag when it starts) and after TriggerTeardown (which clears the flag).
+        // Parameters:
+        // - suspended: true = the host is off screen, draw nothing; false = draw again.
+        // - releaseDelayMs: how long a suspension lasts before the engines release their device
+        //   resources (see above).
+        // Returns:
+        // - true only when this call ENDED a suspension. The caller must then queue one full repaint
+        //   (TriggerRedrawAll, under the console lock), because the swap chain may hold a stale frame
+        //   or may have been released.
+        // Thread safety: callable from any thread; sequentially consistent atomics + WaitOnAddress
+        // wake-ups (rare calls, so the stronger ordering costs nothing). Never throws.
+        [[nodiscard]] bool SetPaintingSuspended(bool suspended, DWORD releaseDelayMs) noexcept;
+
         void AddRenderEngine(_In_ IRenderEngine* const pEngine);
         void RemoveRenderEngine(_In_ IRenderEngine* const pEngine);
 
@@ -100,6 +126,13 @@ namespace Microsoft::Console::Render
         static DWORD WINAPI s_renderThread(void*) noexcept;
         DWORD _renderThread() noexcept;
         void _waitUntilCanRender() noexcept;
+        // Agentmaster (RENDERING.md §4c): block the render thread while painting is suspended. It
+        // returns when the suspension ends or the thread is torn down. While it waits, it releases the
+        // engines' device resources once, after the configured delay (_releaseEngineDeviceResources).
+        void _waitWhileSuspended() noexcept;
+        // Agentmaster (RENDERING.md §4c): call every engine's ReleaseDeviceResources(). Render thread
+        // only (the engines' contract); never throws.
+        void _releaseEngineDeviceResources() noexcept;
 
         // Timer handling
         void _startTimer(TimerHandle handle, TimerRepr delay, TimerRepr interval);
@@ -148,6 +181,13 @@ namespace Microsoft::Console::Render
         wil::slim_event_manual_reset _enable;
         std::atomic<bool> _redraw;
         std::atomic<bool> _threadKeepRunning{ false };
+        // Agentmaster (RENDERING.md §4c): true while the host is off screen (SetPaintingSuspended).
+        // The render thread WaitOnAddress-es on this flag in _waitWhileSuspended, so every writer that
+        // must wake it changes the value first (a wake-up with an unchanged value can be lost).
+        std::atomic<bool> _suspended{ false };
+        // Agentmaster (RENDERING.md §4c): how long a suspension lasts before the engines release their
+        // device resources, in ms. INFINITE = never.
+        std::atomic<DWORD> _suspendedReleaseDelayMs{ INFINITE };
         til::small_vector<IRenderEngine*, 2> _engines;
         til::small_vector<TimerRoutine, 4> _timers;
         size_t _nextTimerId = 0;

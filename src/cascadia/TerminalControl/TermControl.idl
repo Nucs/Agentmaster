@@ -51,6 +51,15 @@ namespace Microsoft.Terminal.Control
                                                              Int32 commandlineCols,
                                                              Int32 commandlineRows);
 
+        // Agentmaster (RENDERING.md §4c, "Hidden tabs"): the process-wide policy for terminals that
+        // are off screen (a tab that is not selected, a pane hidden by zoom, a minimized window).
+        // pauseHidden: true = a hidden terminal draws no frames. releaseDelayMs: how long it stays
+        // hidden before its renderer gives back the GPU device + swap chain (rebuilt on show, ~0.1 s);
+        // 0xFFFFFFFF = never, 0 = at once. Declared LAST among the statics so no existing static
+        // changes its slot. Terminals adopt it on their next visibility change, or at once through
+        // ReapplyHiddenRenderingPolicy(). Any thread.
+        static void SetHiddenRenderingPolicy(Boolean pauseHidden, UInt32 releaseDelayMs);
+
         void UpdateControlSettings(IControlSettings settings);
         void UpdateControlSettings(IControlSettings settings, IControlAppearance unfocusedAppearance);
 
@@ -236,5 +245,11 @@ namespace Microsoft.Terminal.Control
         void ClearQuickFix();
 
         void Detach();
+
+        // Agentmaster (RENDERING.md §4c): re-evaluate whether THIS terminal is on screen and push the
+        // current SetHiddenRenderingPolicy to its renderer — how a Settings change reaches terminals
+        // that are already hidden. No-op while closing or after Detach. UI thread only. Appended LAST
+        // so no existing member changes its vtable slot.
+        void ReapplyHiddenRenderingPolicy();
     }
 }

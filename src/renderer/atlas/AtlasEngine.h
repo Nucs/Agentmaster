@@ -57,6 +57,12 @@ namespace Microsoft::Console::Render::Atlas
         [[nodiscard]] HRESULT IsGlyphWideByFont(std::wstring_view glyph, _Out_ bool* pResult) noexcept override;
         [[nodiscard]] HRESULT UpdateTitle(std::wstring_view newTitle) noexcept override;
         void UpdateHyperlinkHoveredId(uint16_t hoveredId) noexcept override;
+        // Agentmaster (RENDERING.md §4c): drop the swap chain, the backend (shaders, buffers, glyph
+        // atlas, Direct2D target), the D3D11 device and the adapter of a terminal that has been off
+        // screen for a while. The next Present() rebuilds all of them (the same path a device-removed
+        // error takes), creates a new composition surface and reports it through the swap-chain
+        // callback, so the SwapChainPanel is re-pointed. Render thread only (IRenderEngine contract).
+        void ReleaseDeviceResources() noexcept override;
 
         // getter
         [[nodiscard]] std::wstring_view GetPixelShaderPath() noexcept;

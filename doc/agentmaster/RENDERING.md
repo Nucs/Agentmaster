@@ -9,11 +9,20 @@ rendering"**, default **OFF** = the GPU). Engine hook: `ControlCore::SetSoftware
 running instance — safe on production). Harness: the `softwareRendering` round-trip in
 `tests_persistence.cpp`.
 
+Hidden tabs (§4c): `AppSettings::pauseHiddenTerminals` / `releaseHiddenTerminalDevices` /
+`releaseHiddenTerminalDevicesAfterSeconds` (Behavior → RENDERING), `TermControl::SetHiddenRenderingPolicy`
++ `_UpdateRenderingSuspension`, `ControlCore::SetRenderingSuspended`, `Renderer::SetPaintingSuspended`,
+`IRenderEngine::ReleaseDeviceResources` / `AtlasEngine::ReleaseDeviceResources`; app side
+`TerminalPage::_ApplyHiddenRenderingSetting`. Harness: the hidden-terminal round-trip + the
+`HiddenTerminalReleaseDelayMs` checks in `tests_persistence.cpp`.
+
 ## 1. The problem — one GPU device per terminal, and a limit near 62
 
 - **Every terminal that has been shown owns its own Direct3D 11 device** (AtlasEngine creates one per
-  `TermControl`), and keeps it until its tab is CLOSED. Hidden tabs keep theirs. Deactivated tabs should
-  give theirs back: "Deactivate ▸" now closes the tab's control the way a pane close does and parks a
+  `TermControl`), and kept it until its tab was CLOSED. Hidden tabs kept theirs. **§4c changes that:** a
+  terminal hidden for 60 s (a setting) now gives its device back and rebuilds it when shown, so the count
+  stays near "on screen + recently viewed" (in source since 2026-10-03, not built yet). Deactivated tabs
+  should give theirs back too: "Deactivate ▸" closes the tab's control the way a pane close does and parks a
   never-initialized one in its place, which is the state a window-restored tab is in. (Expected from that
   code path; not yet measured with §4's thread count.) Only dormant tabs (restored, or deactivated, and
   not entered since) have none.
@@ -144,9 +153,14 @@ Three different counts matter, and only two of them cost anything:
   the storm.
 - Below that, the GPU is cheaper, as long as finished tabs get deactivated or closed. Restarting the app
   also resets the count, because tabs come back dormant.
-- §6's per-window device or release-when-hidden would remove the trade-off altogether.
+- §6's per-window device would remove the trade-off altogether. §4c's release-when-hidden (in source
+  since 2026-10-03, not built yet) already removes most of it: only terminals on screen or viewed in the
+  last 60 s hold a device, so the ~62 limit is out of reach in normal use without WARP's CPU cost.
 
 ### 4b. One tab on screen, many in the strip — where the cost goes
+
+This section is the measurement BEFORE §4c: it explains why §4c exists. After §4c, hidden terminals
+stop drawing and give back their device; the numbers below are the baseline to compare against.
 
 Measured 2026-10-03 on the release: 4 windows, 537 tabs, 30 running claudes. Tools: the Windows GPU
 performance counters, `tools/threadcensus.cs` on the live process (read-only; it never suspends a
@@ -166,7 +180,7 @@ thread), and `tools/devidle.cpp` in a separate process. RTX 4060 Ti, driver 32.0
 - XAML draws the tab strip, the overlays and the side panel on the one UI thread. DWM composes each
   window: the XAML visuals plus the swap chain of the terminal on screen.
 
-**Nothing pauses a hidden terminal.**
+**Nothing paused a hidden terminal (before §4c).**
 - A tab switch only changes which content is the child of `_tabContent` (`TabManagement.cpp`).
   `Renderer`, `AtlasEngine` and `TermControl` never check visibility. A minimized window
   (`ControlCore::WindowVisibilityChanged`) only tells ConPTY.
@@ -234,6 +248,74 @@ shared surfaces and was larger than the 7.2 GB in use on the whole card. Do not 
   deactivated.
 - Dormant tabs cost no rendering at all.
 
+### 4c. Hidden tabs: stop drawing, give the device back
+
+In source since 2026-10-03, **not built yet**. It acts on §4b's two biggest wastes: hidden terminals
+that draw, and devices kept by every tab ever viewed.
+
+**Settings** (Settings cog → Behavior → RENDERING; live in every window on Save):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| "Stop drawing tabs you can't see" (`pauseHiddenTerminals`) | ON | A terminal that is off screen draws no frames. |
+| "Give back the GPU memory of a hidden tab" (`releaseHiddenTerminalDevices`) | ON | After the delay below, the hidden terminal drops its device, swap chain and glyph cache. Needs the first switch. |
+| "… after the tab has been hidden this many seconds" (`releaseHiddenTerminalDevicesAfterSeconds`) | 60 | 0 = at once; a blank box = 60; at most 86400. |
+
+- The engine init publishes the policy before any tab exists. The cog's Save and the cross-window
+  broadcast publish it again and re-apply it to every terminal, so an already-hidden terminal adopts a new
+  delay at once.
+- hooks.log: `[render] hidden tabs (settings.json|cog|broadcast) …`. The `[nav] settings-save` line
+  carries `pauseHidden=` and `releaseHidden=`.
+
+**How it works.**
+- **On screen** means: the `TermControl` is in its window's visual tree (`IsLoaded()`, re-read on
+  `Loaded` / `Unloaded`) AND its window is not minimized (`WindowVisibilityChanged`). A tab switch, a
+  zoom, the Agent Manager page and a minimize all change it.
+- `TermControl::_UpdateRenderingSuspension` pushes the state on each change, and also right before
+  painting is first enabled. So a terminal initialized off screen ("Activate Tab") never paints.
+- `ControlCore::SetRenderingSuspended` combines it with the process-wide policy
+  (`TermControl::SetHiddenRenderingPolicy`) and calls `Renderer::SetPaintingSuspended`.
+- While suspended, the render thread parks in `Renderer::_waitWhileSuspended`. Invalidations still
+  collect in the engine; only the frames stop. After the delay, the render thread calls each engine's
+  `IRenderEngine::ReleaseDeviceResources()` once.
+- `AtlasEngine::ReleaseDeviceResources` drops the swap chain, the backend (shaders, buffers, glyph
+  atlas, Direct2D target), the device, the context and the adapter. The next `Present()` rebuilds them
+  through the device-removed path and hands the `SwapChainPanel` a new surface. `devidle` measured that
+  a released device's 20 NVIDIA threads, and their polling, end within 3 s.
+- Shown again: the core queues one full repaint (`TriggerRedrawAll`). On a released terminal, that
+  frame first rebuilds the device.
+- `TriggerTeardown` clears the flag before it wakes the thread, so a close or a tear-out never waits on
+  a parked thread.
+
+**The animations.**
+- The tab header's draft dots and spark crown run only while the header is in the live tree, and only
+  with Windows' "Animation effects" on (`AgentAnimationsEnabled`, `SPI_GETCLIENTAREAANIMATION`).
+- A dormant tab's REMEMBERED draft shows still dots. The header reads `AgentStatusHalfVisible` (the
+  dormant half-hollow dot) as "this tab has not started", so the pulse begins when its claude starts.
+  The board and side-panel cards follow the same rule (`BuildPendingDots(…, animated)`).
+- A still spark crown is the steady glow, without embers.
+- A change gate (`_pendingDotsRunning` / `_cacheWarmRunning`) keeps re-asserts from restarting a
+  running storyboard.
+
+**Expected effect** (projected from §4b; measure it after the build):
+- Frames: only on-screen terminals paint. On the release that removes 5 of the 6 painting terminals.
+- Devices: from "every tab viewed since start" (34 on the release) to "on screen + viewed in the last
+  60 s". Each device dropped saves ~27 MB of video memory, 20 driver threads and ~68 wake-ups/s.
+- The XAML frame tick stops whenever no visible header animates.
+- To check: `dotnet run tools/threadcensus.cs -- <pid>`. Painting render threads should all be on
+  screen. NVIDIA threads ÷ 20 should be about the number of windows + recently viewed tabs + 1 (XAML).
+  `Windows.UI.Xaml.dll+0x6F59C0` should wake about 0 times/s when no visible header pulses.
+
+**Trade-offs and limits.**
+- Going back to a tab hidden longer than the delay shows a blank terminal for about 0.1 s, while the
+  device, swap chain and glyph cache are rebuilt.
+- A tab hidden for less than the delay shows its last frame from before it was hidden for one frame
+  (~16 ms), then the current screen.
+- XAML's own device, DWM, and the UI thread's cost (18–36% of a core in §4b, not attributed) are not
+  changed by §4c.
+- A control created while its window is minimized counts as visible until the next minimize/restore
+  report (TerminalPage reports only a visible window to a new control).
+
 ## 5. Diagnosing a black tab (read-only, nothing suspended)
 
 1. **Is claude up?** `am_inspect.py screen <ref>` reads the ConPTY's console buffer. A ready input box
@@ -262,13 +344,12 @@ livesample warning in `tools/livesample.cpp`.
 ## 6. Follow-ups (not done)
 
 - One shared D3D11 device per process (or per window) instead of one per terminal: the real fix, an
-  AtlasEngine change.
-- Release a hidden terminal's device and swap chain after N minutes off-screen, and recreate on show.
+  AtlasEngine change. The driver's per-device polling (§4b) is one more reason for it. §4c's release
+  removes most of the pressure meanwhile.
 - Detect the storm (device creation slower than ~1 s, or event-153-shaped failures) and drop new
   terminals to WARP automatically.
-- Paint nothing for a terminal that is not on screen (§4b): disable its renderer when its content
-  leaves `_tabContent` and repaint all of it when it comes back. This removes the hidden working
-  terminals' frames; the device and its polling stay.
-- Start and stop the tab-header storyboards on `Loaded` / `Unloaded` too, as `BuildPendingDots` does,
-  and consider static dots for a dormant tab's remembered draft (§4b).
-- The driver's per-device polling (§4b) is one more reason for one shared device per process.
+- Build and measure §4c (§4c "Expected effect" has the census checks), then tune the default delay.
+- Attribute the UI thread's 18–36% of a core (§4b) with an elevated ETW (WPR) CPU trace.
+- Done in §4c: paint nothing for an off-screen terminal; release a hidden terminal's device after a
+  delay and rebuild it on show; run the tab-header storyboards only in the live tree, still dots for a
+  dormant tab's remembered draft.

@@ -338,6 +338,24 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             RefreshQuickFixMenu();
         });
 
+        // Agentmaster (RENDERING.md §4c, "Hidden tabs"): draw nothing while this control is off screen.
+        // XAML raises Loaded / Unloaded when the control enters / leaves the window's visual tree: a tab
+        // switch moves a whole tab's content into or out of TerminalPage::_tabContent, a zoom takes the
+        // other panes out, the Agent Manager page takes the tab out. Weak captures, because a delegate
+        // on our own event must not keep us alive; Close() and Detach() revoke both (_revokers).
+        _revokers.Loaded = Loaded(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
+            if (const auto control = weakThis.get())
+            {
+                control->_UpdateRenderingSuspension();
+            }
+        });
+        _revokers.Unloaded = Unloaded(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
+            if (const auto control = weakThis.get())
+            {
+                control->_UpdateRenderingSuspension();
+            }
+        });
+
         // Initialize the terminal only once the swapchainpanel is loaded - that
         //      way, we'll be able to query the real pixel size it got on layout
         _layoutUpdatedRevoker = SwapChainPanel().LayoutUpdated(winrt::auto_revoke, [this](auto /*s*/, auto /*e*/) {
@@ -1525,6 +1543,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             }
         }
 
+        // Agentmaster (RENDERING.md §4c): push the on-screen state BEFORE the render thread starts, so a
+        // terminal initialized off screen (the eager "Activate Tab" path, or a layout that ran before
+        // Loaded was raised) never draws a frame nobody sees. A visible one resumes on Loaded.
+        _UpdateRenderingSuspension();
         _core.EnablePainting();
 
         auto bufferHeight = _core.BufferHeight();
@@ -1635,6 +1657,40 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
         winrt::get_self<ControlCore>(_core)->ReapplySoftwareRendering();
     }
+
+    // Agentmaster (RENDERING.md §4c): see TermControl.idl. Forwards to the core's process-wide policy; a
+    // static, so the app can set it before any control exists (engine init, ahead of the first tab).
+    void TermControl::SetHiddenRenderingPolicy(const bool pauseHidden, const uint32_t releaseDelayMs) noexcept
+    {
+        ControlCore::SetHiddenRenderingPolicy(pauseHidden, releaseDelayMs);
+    }
+
+    // Agentmaster (RENDERING.md §4c): see TermControl.idl. The same push a visibility change makes; the
+    // core reads the (possibly changed) policy while doing it.
+    void TermControl::ReapplyHiddenRenderingPolicy()
+    {
+        _UpdateRenderingSuspension();
+    }
+
+    // Agentmaster (RENDERING.md §4c): see TermControl.h.
+    void TermControl::_UpdateRenderingSuspension() noexcept
+    try
+    {
+        // A closing control is on its way out. A detached one handed its core to a control in another
+        // window, which owns the core's renderer state from now on.
+        if (_IsClosing() || _detached || !_core)
+        {
+            return;
+        }
+        // IsLoaded, not the event that brought us here: XAML can deliver a stale Unloaded AFTER the next
+        // Loaded when an element is re-parented within one tick (a zoom, a pane move), and IsLoaded is
+        // the live answer either way.
+        const auto onScreen = IsLoaded() && _windowVisible;
+        // The core is always in-proc here (as for ReapplySoftwareRendering), so get_self reaches its
+        // implementation without widening ControlCore.idl.
+        winrt::get_self<ControlCore>(_core)->SetRenderingSuspended(!onScreen);
+    }
+    CATCH_LOG()
 
     safe_void_coroutine TermControl::_restoreInBackground()
     {
@@ -3355,6 +3411,11 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     void TermControl::WindowVisibilityChanged(const bool showOrHide)
     {
         _core.WindowVisibilityChanged(showOrHide);
+        // Agentmaster (RENDERING.md §4c): a minimized window shows none of its terminals, so they draw
+        // nothing either. TerminalPage reports this for every control of every tab; a hidden tab's
+        // control was already suspended, so only the selected tab's control changes state.
+        _windowVisible = showOrHide;
+        _UpdateRenderingSuspension();
     }
 
     // Method Description:

@@ -117,6 +117,25 @@ namespace winrt::TerminalApp::implementation
         return out;
     }
 
+    // Agentmaster (RENDERING.md §4c): may Agentmaster's decorative status animations (the unsent-draft
+    // dots pulse, the cache-warm spark crown) run at all? False when the user switched off Windows'
+    // "Animation effects" (Settings > Accessibility > Visual effects), the switch that
+    // SPI_GETCLIENTAREAANIMATION reports. Every running Forever storyboard keeps XAML and DWM working on
+    // every display frame (measured: XAML's frame thread woke 62-68 times/s in Agentmaster against 0 in
+    // an idle Windows Terminal), so honoring the setting is both an accessibility rule and a cost rule.
+    // Read at each start/stop decision (a cheap user-setting read, no allocation); a change made while an
+    // animation runs applies at that indicator's next decision.
+    // Returns: true when animations may run — also when the setting cannot be read (the historical look).
+    inline bool AgentAnimationsEnabled() noexcept
+    {
+        BOOL enabled = TRUE;
+        if (!SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0))
+        {
+            return true;
+        }
+        return enabled != FALSE;
+    }
+
     // Agentmaster (PENDING_INPUT.md, pending-dots contrast pick): is `bg` a LIGHT color? Uses the same
     // WCAG relative-luminance crossover (~0.179) AgentManagerContent's PreferDarkTextOn uses to ink the
     // title band: ABOVE it the background is light (dark ink/dots read better against it), BELOW it dark
