@@ -2,26 +2,58 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — the ambient animations (AgentAmbientAnimation.h has the design: why composition, why the
-// two paths, why every loop begins and ends on its still value). This file is the whole implementation, and
-// the ONE translation unit that includes the full Windows.UI.Composition projection:
-//   * AgentCompositorOf / AgentMakeScalarLoop — the compositor lookup and the linear forever-loop builder;
+// three paths, why every loop begins and ends on its still value, why one compositor per thread). This file is
+// the whole implementation, and the ONE translation unit that includes the full Windows.UI.Composition
+// projection:
+//   * AgentAmbientThread                     — the per-UI-thread state (cached compositor, blink clock);
+//   * AgentCompositorOf / AgentMakeScalarLoop — the cached compositor lookup and the linear forever-loop builder;
 //   * AgentOpacityLoop                       — one XAML element's Opacity, through UIElement::StartAnimation;
 //   * AgentDotsPulse                         — the three staggered dot loops of an unsent-draft cluster;
+//   * AgentLockstepBlink                     — the flash ring's blink, every ring following ONE shared clock;
 //   * AgentEmberSparks                       — the spark crown's rising embers, as composition visuals.
 #include "pch.h"
 #include "AgentAmbientAnimation.h"
 
-#include "AgentCatchLog.h" // AgentLogCaughtException — Rule #18 forensics for the one swallowing site (SetColor)
+#include "AgentCatchLog.h" // AgentLogCaughtException / AppendStateLog — Rule #18 forensics for the swallowing sites
 
 #include <exception> // std::exception_ptr — "try every element, rethrow the first failure"
+#include <utility> // std::exchange — hand over a blink's hold on the clock exactly once
 
 #include <winrt/Windows.Foundation.Numerics.h>
 #include <winrt/Windows.UI.Composition.h>
 #include <winrt/Windows.UI.Xaml.Hosting.h>
 
+namespace winrt::TerminalApp::implementation
+{
+    // The per-UI-thread state (declared in the header). Created by CurrentAmbientThread() on the thread's first
+    // use, never freed; the composition members are touched on that thread only.
+    struct AgentAmbientThread
+    {
+        // The owning thread, and its DispatcherQueue (null if the thread has none). Both are written once, when
+        // the state is created, and never change, so another thread may read them: an AgentLockstepBlink
+        // destroyed off this thread compares the id and posts its clock release to the queue.
+        DWORD threadId{ 0 };
+        winrt::Windows::System::DispatcherQueue queue{ nullptr };
+        // XAML's compositor of this thread, taken from the first anchor that asks (AgentCompositorOf) and kept
+        // for the life of the process: the thread's XAML core lives as long as App's WindowsXamlManager.
+        winrt::Windows::UI::Composition::Compositor compositor{ nullptr };
+        // The lockstep blink clock (AgentLockstepBlink), built on the thread's first blink:
+        //   blinkClock  - the property set whose scalar "Opacity" every blinking element follows;
+        //   blinkLoop   - the key-frame loop that animates that scalar (on, then off, forever);
+        //   blinkFollow - the expression the elements run ("clock.Opacity", Target "Opacity"); one object for
+        //                 every element, since Composition copies an animation when it starts it;
+        //   blinkUsers  - how many blinks follow the clock now; the loop runs only while it is above 0.
+        winrt::Windows::UI::Composition::CompositionPropertySet blinkClock{ nullptr };
+        winrt::Windows::UI::Composition::ScalarKeyFrameAnimation blinkLoop{ nullptr };
+        winrt::Windows::UI::Composition::ExpressionAnimation blinkFollow{ nullptr };
+        size_t blinkUsers{ 0 };
+    };
+}
+
 namespace
 {
     namespace WUC = winrt::Windows::UI::Composition;
+    using winrt::TerminalApp::implementation::AgentAmbientThread;
 
     // The spark crown's embers: the places and sizes of the XAML ellipses they replace (TabHeaderControl.xaml,
     // the 18x18 sparks canvas), unchanged so the crown looks exactly as before.
@@ -44,13 +76,149 @@ namespace
     // cell; anything higher is clipped by the tab header (the trap that once squared the flash ring).
     constexpr float kEmberRiseFrom = 1.4f;
     constexpr float kEmberRiseTo = -1.6f;
+
+    // The name of the blink clock's scalar: the clock's property set holds it, its loop animates it, and the
+    // elements' expression reads it as "clock.<name>". One constant, so those three can never drift apart.
+    constexpr wchar_t kBlinkClockProperty[] = L"Opacity";
+    // The blink's edges: each takes this share of the cycle (0.05%, i.e. 0.6 ms of the 1200 ms cycle) — shorter
+    // than one display frame, so the blink reads as the hard on / off of the Visibility timer it replaces, while
+    // the key frames still rise strictly (Composition needs increasing progress values).
+    constexpr float kBlinkEdge = 0.0005f;
+
+    // The calling thread's AgentAmbientThread, created on first use. Heap-allocated and DELIBERATELY LEAKED (one
+    // small struct per UI thread, alive for the process) — the AgentTipHelpers idiom: a plain thread_local object
+    // would release its composition objects in a CRT thread-exit destructor, possibly after the thread's XAML
+    // core is gone (a shutdown-crash class), and a never-freed state is also what lets an AgentLockstepBlink
+    // destroyed on another thread post a release that runs later. Throws only if the allocation does.
+    AgentAmbientThread& CurrentAmbientThread()
+    {
+        static thread_local AgentAmbientThread* state = [] {
+            auto* created = new AgentAmbientThread{};
+            created->threadId = ::GetCurrentThreadId();
+            // The UI thread has one (App creates its XAML on a DispatcherQueue thread); null elsewhere, which
+            // only matters to a blink destroyed off-thread (its release then has nowhere to go — logged there).
+            created->queue = winrt::Windows::System::DispatcherQueue::GetForCurrentThread();
+            return created;
+        }();
+        return *state;
+    }
+
+    // The thread's compositor for an owner that holds its anchor WEAKLY: the cached one when the thread already
+    // has it (no element touched), else the anchor's (AgentCompositorOf, which then caches it).
+    // Parameters:
+    //   anchor - the owner's weak anchor.
+    //   owner  - the owner's name, for the error text.
+    // Returns: the compositor.
+    // Throws winrt::hresult_error E_ABORT when the anchor is gone and nothing is cached (an owner torn down before
+    // its first start: there is no compositor to build from), or whatever AgentCompositorOf throws.
+    WUC::Compositor CompositorForWeakAnchor(const winrt::weak_ref<winrt::Windows::UI::Xaml::UIElement>& anchor, const wchar_t* owner)
+    {
+        if (const auto& cached = CurrentAmbientThread().compositor)
+        {
+            return cached;
+        }
+        const auto strong = anchor.get();
+        if (!strong)
+        {
+            // Thrown like every other refusal, so the owner logs it and keeps its "not running" state.
+            throw winrt::hresult_error(E_ABORT, winrt::hstring{ std::wstring{ owner } + L": the anchor element is gone" });
+        }
+        return winrt::TerminalApp::implementation::AgentCompositorOf(strong);
+    }
+
+    // Build the thread's blink clock if it does not exist yet: the property set, its loop, and the expression the
+    // elements run. The members are assigned only once all three exist, so a refusal part-way leaves the thread
+    // without a clock and the next start retries the whole build.
+    // Parameters:
+    //   thread     - the calling thread's state.
+    //   compositor - that thread's compositor.
+    // Throws winrt::hresult_error when Composition refuses.
+    void EnsureBlinkClock(AgentAmbientThread& thread, const WUC::Compositor& compositor)
+    {
+        if (thread.blinkFollow)
+        {
+            return;
+        }
+        auto clock = compositor.CreatePropertySet();
+        // 1 at rest: an element that still follows a stopped clock (a blink torn down without its Stop) shows
+        // steadily instead of vanishing.
+        clock.InsertScalar(kBlinkClockProperty, 1.0f);
+        // On for the first half of the cycle, off for the second, ending where it began (on) so the cycles join
+        // without a seam. The edges are kBlinkEdge wide (see there): a step to the eye.
+        auto loop = winrt::TerminalApp::implementation::AgentMakeScalarLoop(compositor,
+                                                                            { { 0.0f, 1.0f },
+                                                                              { 0.5f - kBlinkEdge, 1.0f },
+                                                                              { 0.5f, 0.0f },
+                                                                              { 1.0f - kBlinkEdge, 0.0f },
+                                                                              { 1.0f, 1.0f } },
+                                                                            winrt::TerminalApp::implementation::kAgentBlinkHalfPeriod * 2,
+                                                                            std::chrono::milliseconds{ 0 },
+                                                                            nullptr);
+        // The elements' side: their Opacity equals the clock's scalar on every compositor frame. "clock" is the
+        // reference parameter's name inside the expression; the property name is the constant above.
+        auto follow = compositor.CreateExpressionAnimation(winrt::hstring{ std::wstring{ L"clock." } + kBlinkClockProperty });
+        follow.SetReferenceParameter(L"clock", clock);
+        follow.Target(L"Opacity");
+        thread.blinkClock = std::move(clock);
+        thread.blinkLoop = std::move(loop);
+        thread.blinkFollow = std::move(follow);
+    }
+
+    // Count one more follower of the thread's blink clock. The first follower of a burst (re)starts the loop at the
+    // START of its cycle — the "on" half — so the first ring of a burst shows at once, as the timer it replaces did
+    // (its fresh burst began on "on").
+    // Parameters: thread - the calling thread's state; its clock is built.
+    // Throws winrt::hresult_error when Composition refuses the start; nothing is counted then.
+    void AcquireBlinkClock(AgentAmbientThread& thread)
+    {
+        if (thread.blinkUsers == 0)
+        {
+            thread.blinkClock.StartAnimation(kBlinkClockProperty, thread.blinkLoop);
+        }
+        ++thread.blinkUsers;
+    }
+
+    // Count one follower less. The last one stops the loop (the scalar lands on the loop's final key frame, 1), so
+    // an idle fleet leaves the compositor nothing to animate. On the owning UI thread only.
+    // Parameters: thread - the state whose clock is released.
+    // Never throws: a refused stop is logged (Rule #18); the loop then keeps running until the next burst restarts
+    // it — compositor work for nothing, but never a wrong pixel.
+    void ReleaseBlinkClock(AgentAmbientThread& thread) noexcept
+    {
+        if (thread.blinkUsers == 0)
+        {
+            return; // never below zero (a release with no matching acquire would otherwise wrap around)
+        }
+        if (--thread.blinkUsers != 0)
+        {
+            return; // other rings still follow the clock
+        }
+        try
+        {
+            thread.blinkClock.StopAnimation(kBlinkClockProperty);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"AgentLockstepBlink clock stop");
+        }
+    }
 }
 
 namespace winrt::TerminalApp::implementation
 {
     WUC::Compositor AgentCompositorOf(const winrt::Windows::UI::Xaml::UIElement& anchor)
     {
-        return winrt::Windows::UI::Xaml::Hosting::ElementCompositionPreview::GetElementVisual(anchor).Compositor();
+        auto& thread = CurrentAmbientThread();
+        if (!thread.compositor)
+        {
+            // The FIRST request of this thread: the anchor's hand-out visual is the documented way to XAML's
+            // compositor under Islands. Cached, so this anchor is the only element of the thread that ever gets a
+            // hand-out visual (each one forces a composition node on its element for life, and the per-frame
+            // walk visits every node — UI_THREAD.md §10h). Assigned only after the call succeeds, so a refusal
+            // caches nothing.
+            thread.compositor = winrt::Windows::UI::Xaml::Hosting::ElementCompositionPreview::GetElementVisual(anchor).Compositor();
+        }
+        return thread.compositor;
     }
 
     WUC::ScalarKeyFrameAnimation AgentMakeScalarLoop(const WUC::Compositor& compositor,
@@ -105,18 +273,10 @@ namespace winrt::TerminalApp::implementation
         }
         if (!_animation)
         {
-            // Built on the FIRST start only: most indicators never run (a cold cache, no draft), so a
-            // header or card that never animates allocates nothing, and the anchor gets its hand-out visual
-            // only when something really runs.
-            const auto anchor = _anchor.get();
-            if (!anchor)
-            {
-                // The anchor went away before the first start (a torn-down card): there is no compositor
-                // to build from. Throw like every other refusal, so the owner logs it and keeps its
-                // "not running" state.
-                throw winrt::hresult_error(E_ABORT, L"AgentOpacityLoop: the anchor element is gone");
-            }
-            _animation = AgentMakeScalarLoop(AgentCompositorOf(anchor), _keyFrames, _cycle, _delay, L"Opacity");
+            // Built on the FIRST start only: most indicators never run (a cold cache, no draft), so a header or
+            // card that never animates allocates nothing. The thread's cached compositor serves when it exists;
+            // only the thread's first animation asks its anchor (see CompositorForWeakAnchor).
+            _animation = AgentMakeScalarLoop(CompositorForWeakAnchor(_anchor, L"AgentOpacityLoop"), _keyFrames, _cycle, _delay, L"Opacity");
         }
         // XAML's own composition path: it marks the element as opacity-animating (so an element whose static
         // Opacity is 0 is still rendered) and adds no per-frame UI-thread work (no listener on Opacity).
@@ -198,6 +358,139 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    AgentLockstepBlink::AgentLockstepBlink(const winrt::Windows::UI::Xaml::UIElement& anchor, winrt::Windows::UI::Xaml::UIElement element) :
+        _anchor{ anchor ? winrt::make_weak(anchor) : winrt::weak_ref<winrt::Windows::UI::Xaml::UIElement>{} },
+        _element{ std::move(element) }
+    {
+    }
+
+    AgentLockstepBlink::~AgentLockstepBlink()
+    {
+        // Normally a no-op: the owner's Unloaded / flag change already ran Stop(). This is the belt for an owner
+        // destroyed while its ring still blinked (see the declaration). The element is NOT touched — it is being
+        // torn down with its owner, possibly on another thread.
+        _ReleaseClock();
+    }
+
+    AgentLockstepBlink::AgentLockstepBlink(AgentLockstepBlink&& other) noexcept :
+        _anchor{ std::move(other._anchor) },
+        _element{ std::move(other._element) },
+        _clockOwner{ std::exchange(other._clockOwner, nullptr) }
+    {
+    }
+
+    AgentLockstepBlink& AgentLockstepBlink::operator=(AgentLockstepBlink&& other) noexcept
+    {
+        if (this != &other)
+        {
+            // A blink overwritten while it held the clock would otherwise leave one follower counted forever.
+            _ReleaseClock();
+            _anchor = std::move(other._anchor);
+            _element = std::move(other._element);
+            _clockOwner = std::exchange(other._clockOwner, nullptr);
+        }
+        return *this;
+    }
+
+    void AgentLockstepBlink::Start()
+    {
+        if (!_element)
+        {
+            return; // inert
+        }
+        auto& thread = CurrentAmbientThread();
+        if (!thread.blinkFollow)
+        {
+            // The thread's first blink: build its clock. Throws before anything is counted.
+            EnsureBlinkClock(thread, CompositorForWeakAnchor(_anchor, L"AgentLockstepBlink"));
+        }
+        // Join the clock once per Start/Stop pair: a restart of a running blink must not count it twice (one
+        // Stop() would then leave the clock running for no one).
+        const bool joining = (_clockOwner == nullptr);
+        if (joining)
+        {
+            AcquireBlinkClock(thread);
+            _clockOwner = &thread;
+        }
+        try
+        {
+            // XAML's own composition path, as for AgentOpacityLoop: the element is marked opacity-animating and
+            // gets no per-frame UI-thread work. A running blink hands over to this start (same Target), so a
+            // restart does not jump: the expression reads the same clock either way.
+            _element.StartAnimation(thread.blinkFollow);
+        }
+        catch (...)
+        {
+            if (joining)
+            {
+                // The element follows nothing: do not keep the clock running for it. A restart that failed keeps
+                // its earlier hold — the element may still follow from that earlier start.
+                _ReleaseClock();
+            }
+            throw;
+        }
+    }
+
+    void AgentLockstepBlink::Stop()
+    {
+        if (!_element || _clockOwner == nullptr)
+        {
+            return; // inert, or not blinking
+        }
+        std::exception_ptr failure;
+        try
+        {
+            // A STATIC set of the still value ends the expression: XAML cancels a running facade animation when its
+            // property is set, and pushes no value back (CUIElement::OnSetLocalOpacity -> CancelSingleAnimation;
+            // in the WinUI source this holds even for an unchanged value). Deliberately NOT
+            // UIElement::StopAnimation: an expression has no stop behavior, and XAML would write the clock's value
+            // of that moment (0 in the "off" half) into UIElement.Opacity, leaving an element that is invisible
+            // whenever it later shows without a blink.
+            _element.Opacity(1.0);
+        }
+        catch (...)
+        {
+            failure = std::current_exception();
+        }
+        // Released even when the set failed: a torn-down element follows nothing any more, and a clock held for it
+        // would keep the compositor animating for no one.
+        _ReleaseClock();
+        if (failure)
+        {
+            std::rethrow_exception(failure);
+        }
+    }
+
+    void AgentLockstepBlink::_ReleaseClock() noexcept
+    {
+        // Taken out first, so the hold is given up exactly once whatever happens below.
+        auto* const owner = std::exchange(_clockOwner, nullptr);
+        if (owner == nullptr)
+        {
+            return;
+        }
+        if (owner->threadId == ::GetCurrentThreadId())
+        {
+            ReleaseBlinkClock(*owner);
+            return;
+        }
+        // Another thread (an owner destroyed off its UI thread): the clock's composition objects belong to the UI
+        // thread, so the release is posted there. `owner` is never freed, so the posted call may outlive this
+        // object. threadId / queue are read-only after creation, so reading them here is safe.
+        try
+        {
+            if (!owner->queue || !owner->queue.TryEnqueue([owner]() noexcept { ReleaseBlinkClock(*owner); }))
+            {
+                // No queue, or it is shut down (the app is exiting): the clock goes with the process.
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[anim] blink clock release not posted: the UI thread's queue is gone\n");
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"AgentLockstepBlink clock release (post)");
+        }
+    }
+
     AgentEmberSparks::AgentEmberSparks(winrt::Windows::UI::Xaml::UIElement host) :
         _host{ std::move(host) }
     {
@@ -223,6 +516,7 @@ namespace winrt::TerminalApp::implementation
 
     void AgentEmberSparks::_Build()
     {
+        // The thread's cached compositor; the host is asked only by the thread's first animation.
         const auto compositor = AgentCompositorOf(_host);
         auto brush = compositor.CreateColorBrush(_color);
         auto container = compositor.CreateContainerVisual();

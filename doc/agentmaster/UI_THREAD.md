@@ -556,7 +556,7 @@ differ between the two measurements.
 | Source | Rate | Note |
 |---|---|---|
 | A running storyboard (draft dots, spark crown) | every display frame | fix #1 (c751ed257, not built) |
-| The unread flash ring (`_OnAgentFlashTick`): it toggles the ring's **Visibility** | every 600 ms in each window with an unread tab | A Visibility change is a layout pass too. 2 unread tabs in the big window during §10e. After #1 this is the steadiest frame source. |
+| The unread flash ring (`_OnAgentFlashTick`): it toggles the ring's **Visibility** | every 600 ms in each window with an unread tab | A Visibility change is a layout pass too. 2 unread tabs in the big window during §10e. After #1 this is the steadiest frame source. Fixed in the code (§10i, not built): a composition blink, no XAML change per blink. |
 | Side-panel rebuild (`_SidePanelRebuildCards`): Clear, then re-create every card | at most every 500 ms (`kSidePanelRebuildMinGapMs`) while the fleet changes | ~470 cards and ~940 nodes in the big window, rebuilt each time |
 | Side-panel timing refresh | every 30 s | a full `Get` per card, and every card's text is set even when it did not change, so every card is measured again |
 | Registry-driven property changes (status dot, pending dots, crown, overlay badge) | on change | change-gated (`_SetTabAgentDot` / `_SetTabPending` / `_SetTabCacheWarm`) |
@@ -571,7 +571,7 @@ rate to lower (§10f).
 
 | Fix | Win | Ease |
 |---|---|---|
-| Flash ring by `Opacity` (or a composition opacity loop) instead of `Visibility` | no layout pass every 600 ms; with a composition loop, no frames either | Easy |
+| Flash ring by `Opacity` (or a composition opacity loop) instead of `Visibility` | no layout pass every 600 ms; with a composition loop, no frames either | Easy. Done in the code (§10i, not built) |
 | Side-panel timing text: set it only when it changed, from a lean read | no re-measure of every card every 30 s | Very easy |
 | Card and title band: move the rounded corners to a childless background element behind the content | ~2 fewer nodes per card, ~1,100 in all: likely the largest share of every frame | Easy to medium (check the look) |
 | Summary ▸ jump and separators: no stock rounded `Button` template (a `CornerRadius` 0 style, or a tap handler on the row) | tens of nodes per window | Easy |
@@ -579,3 +579,81 @@ rate to lower (§10f).
 
 To measure the side panel's share before any build: collapse the big window's side panel for one minute,
 and sample again (`stacksnap sample`, §9). The walk's cost should drop by its share of the nodes.
+
+### 10i. The flash ring in the code (2026-10-04, not built yet)
+
+The unread flash ring blinks on the Composition API. Nothing changes a XAML property per blink, so the ring
+causes no layout pass and no XAML frame while it flashes. It still blinks 600 ms on and 600 ms off, in
+lockstep across tabs, and a tab that starts flashing mid-cycle takes the current phase.
+
+- **Before:** `_OnAgentFlashTick` toggled `_agentFlashPhase` and set `AgentFlashRingVisible` on every
+  flashing tab, every 600 ms, in each window with an unread tab. Every flip was a `Visibility` change:
+  a layout pass and a XAML frame.
+- **Now:**
+  - `AgentAmbientAnimation`:
+    - `AgentLockstepBlink` runs a composition `ExpressionAnimation` `clock.Opacity` on the ring's
+      `Opacity` (`UIElement::StartAnimation`).
+    - ONE `CompositionPropertySet` per UI thread is the clock: a key-frame loop of its scalar, 1 for
+      600 ms, then 0 for 600 ms. Each edge takes 0.6 ms, under one display frame.
+    - The clock is reference-counted. The first ring of a burst restarts it at the "on" half, so the
+      first ring shows at once, as the timer's fresh burst did. The last ring stops it.
+    - All windows run on one UI thread, so all rings of all windows blink together.
+  - `TabHeaderControl::_UpdateFlashRingAnimation` runs the blink while `AgentFlashRingVisible` is set
+    and the header is loaded.
+    - It is fed by the same `TabStatus` subscription and `Loaded` / `Unloaded` handlers as the pulses.
+    - Unlike the pulses, it is NOT gated on Windows' animation effects or on a started tab: the ring is
+      an alert, the timer blink ran under every setting, and Mark Unread flashes dormant tabs too.
+  - `TerminalPage`:
+    - `_SetTabFlashRing(tab, true)` now means "this ring flashes": it is set once when a flash starts and
+      cleared when it ends.
+    - `_agentFlashPhase` is gone.
+    - The 600 ms timer stays for its bookkeeping: it re-asserts each flashing ring (idempotent: an
+      unchanged property raises nothing), prunes sessions whose tab went away (the taskbar count), and
+      re-publishes the unread census.
+  - `AgentCompositorOf` caches the thread's compositor (`AgentAmbientThread`, heap-allocated per thread
+    and never freed, like the tip host).
+    - Each `GetElementVisual` forces a composition node on its element for life
+      (`m_isUsingHandOffVisual`), and the walk visits every node (§10h).
+    - Before, every pulsing dots panel and every crown's canvas got one. Without the cache, every header
+      that ever flashed would have got one. Now only the thread's first anchor does.
+- **Read in the WinUI source** (`FacadeAnimationHelper.cpp`, `FacadeStorage.cpp`, `UIElement.cpp`,
+  `xcpcore.cpp`):
+  - The facade takes expression animations. It waits for them with a `CompositionBatchTypes_AllAnimations`
+    scoped batch, and it starts through `StartAnimationWithIAnimationObject`, which handles expressions.
+  - `UIElement::StopAnimation` lets the scoped batch complete, and then
+    `PullFacadePropertyValueFromCompositionObject` writes the stopped value into the property. An
+    expression has no stop behavior, so that value could be 0. So a blink ends with a STATIC
+    `Opacity(1.0)`:
+    - `BeforeSetLocalOpacity` sees the explicit animation (`HasExplicitAnimation` = the bookkeeping entry
+      exists).
+    - `OnSetLocalOpacity` then calls `CancelSingleAnimation`: it stops the animation and unregisters the
+      completion handler, so nothing is written back.
+    - This holds even when the value is unchanged, and even after an earlier `StopAnimation` whose batch
+      had not completed yet.
+  - Leaving the live tree does not drop a facade animation. Only the element's destruction does
+    (`StopAllFacadeAnimations` in `~CUIElement`). The header still stops on `Unloaded`, so the last
+    flashing header to leave the tree stops the clock.
+  - The core's active-facade-animation count (`IncrementActiveFacadeAnimationCount`) only signals test
+    idle events. It does not keep XAML's frame loop running. This also confirms #1's premise.
+- **Lifetime:**
+  - A blink holds the clock from `Start()` to `Stop()`. Its destructor releases a clock it still holds,
+    for example when a header is destroyed before its `Unloaded` handler runs.
+  - On another thread (a page destroyed on a pool thread, see the CLAUDE.md teardown gotcha), the
+    release is posted to the UI thread's `DispatcherQueue`, because the clock's composition objects
+    belong to that thread.
+  - A clock that is never released would keep the compositor animating for no one.
+- **Limits:**
+  - A system XAML older than the WinUI source would not cancel on an unchanged value. Then a stopped
+    ring keeps a collapsed expression until its next start: no wrong pixel, but a node kept.
+  - A failed start leaves the ring shown steadily. It is logged (`[exc] tab-header flash-ring blink`).
+  - The compositor (DWM) works on every frame while a ring flashes, as for #1. That cost is off our UI
+    thread.
+- **Check after the build:**
+  - Leave a background tab's turn to end, or Mark Unread two tabs in two windows. The rings blink 600 ms
+    on / 600 ms off, together, in both windows.
+  - A third ring that starts mid-cycle joins the beat at once.
+  - Visiting the tab ends its ring at once. A ring scrolled out of the strip and back still blinks in
+    phase.
+  - With only rings flashing (no pulse, no crown), XAML's frame thread stays at ~3 wake-ups/s, and a
+    stacksnap profile shows no layout pass every 600 ms.
+  - No `[exc]` line with "flash-ring blink" or "AgentLockstepBlink".

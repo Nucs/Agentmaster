@@ -118,9 +118,13 @@
               The ring is a 13px red ellipse drawn FIRST (behind), centred with ~2.5px clearance in the
               18px wrap; the 10px dot, centred on top, covers its centre so only a ~1.5px red ring peeks
               out AROUND the dot's black stroke — reading outside-in: red ring, then black stroke, then
-              the status-colour fill. The ring shows only while the shared flash timer toggles
-              AgentFlashRingVisible (every 600ms) on an unvisited Running->resting tab; the dot's own
-              black stroke + status fill never change. IsHitTestVisible=False: decorative.  -->
+              the status-colour fill. The ring shows only while AgentFlashRingVisible is set, on an unvisited
+              Running->resting tab (or a Mark Unread one); the dot's own black stroke + status fill never
+              change. UI_THREAD.md §10i: the page sets that flag ONCE per flash (it used to flip it every
+              600ms, a layout pass + a XAML frame per flip), and the BLINK is the header's: a composition
+              expression on the ring's Opacity that follows the UI thread's one shared clock
+              (TabHeaderControl::_UpdateFlashRingAnimation / AgentLockstepBlink), so every flashing ring
+              blinks in lockstep, 600ms on / 600ms off as before. IsHitTestVisible=False: decorative.  -->
         <Grid x:Name="HeaderAgentStatusDotWrap"
               Width="18"
               Margin="0,1,0,-1"
@@ -149,7 +153,10 @@
                   (its alpha channel = the ring opacity). Was a hardcoded Fill="Red"; the brush defaults
                   to fully-opaque red so the look is unchanged until the user picks another color. The
                   brush is set just before AgentFlashRingVisible flips true (single chokepoint
-                  _SetTabFlashRing), so the ring is never momentarily shown with a null brush.  -->
+                  _SetTabFlashRing), so the ring is never momentarily shown with a null brush.
+                  UI_THREAD.md §10i: never set this ring's Opacity in XAML or code — the blink is a
+                  composition expression on it, a static set cancels the blink, and its end
+                  (AgentLockstepBlink::Stop) is exactly such a set back to the default 1.0.  -->
             <!--  Agentmaster (SPARK CROWN — the cache-warm hint): the GLOW half. A soft amber halo behind
                   the status dot, shown while TabStatus.AgentCacheWarmVisible (ServerCacheStillWarm — the
                   same predicate behind the Triage-Board card's amber glyph). Drawn FIRST so it sits behind

@@ -6,7 +6,7 @@
 
 #include "winrt/Microsoft.UI.Xaml.Controls.h"
 
-#include "AgentAmbientAnimation.h" // Agentmaster (UI_THREAD.md §10a #1): the draft-dots pulse + spark crown on the Composition API
+#include "AgentAmbientAnimation.h" // Agentmaster (UI_THREAD.md §10a #1, §10i): the draft-dots pulse, spark crown and flash-ring blink on the Composition API
 
 #include "TabHeaderControl.g.h"
 
@@ -87,7 +87,8 @@ namespace winrt::TerminalApp::implementation
         // the constructor on the 3 named dot ellipses (by ref — no resource lookup) and started ONLY while
         // TabStatus.AgentPendingVisible is true. TabStatus is assigned by the Tab AFTER construction, so
         // _HookTabStatusForPending (re)subscribes to its PropertyChanged whenever TabStatus changes.
-        // (The same one subscription also feeds the spark crown and the bookmark-tag badges below.)
+        // (The same one subscription also feeds the spark crown, the flash ring's blink and the bookmark-tag
+        // badges below.)
         void _HookTabStatusForPending();
         // RENDERING.md §4c: also gated on this header being in the live tree (IsLoaded — re-evaluated on
         // Loaded / Unloaded), on a STARTED tab (a dormant tab's remembered draft shows still dots) and on
@@ -124,6 +125,23 @@ namespace winrt::TerminalApp::implementation
         // crown turns on, and again on a real color change), and _UpdateCacheWarmAnimation calls it before
         // a start. A null or non-solid brush keeps the embers' current color. Never throws (logged).
         void _SyncCacheWarmEmberColor() noexcept;
+        // Agentmaster (tab status-dot RED FLASH RING, UI_THREAD.md §10i): blink the ring iff the page shows it
+        // (TabStatus.AgentFlashRingVisible — set once when a flash starts, cleared when it ends) AND this header
+        // is in the live tree (IsLoaded — re-evaluated on Loaded / Unloaded; a header the strip virtualized
+        // away resumes in phase when it comes back). Deliberately NOT gated on Windows' animation effects or on
+        // a started tab, unlike the pulses: the ring is an ALERT, the timer blink it replaces ran under every
+        // setting, and a manual Mark Unread flashes a dormant tab too. Fed by the one _HookTabStatusForPending
+        // subscription. Never throws (logged); a failed start leaves the ring shown steadily, never hidden.
+        void _UpdateFlashRingAnimation();
+        // The ring's blink: a composition expression on HeaderAgentStatusFlashRing's Opacity that follows the UI
+        // thread's ONE shared blink clock (AgentLockstepBlink), so every flashing tab in every window blinks in
+        // lockstep and nothing flips a XAML property per blink. Replaces the page timer's Visibility flip every
+        // 600 ms, which cost a layout pass and a XAML frame each time. The dot's wrap grid is the anchor (used
+        // only while the thread has no compositor cached; the ring itself must never get a hand-out visual).
+        AgentLockstepBlink _flashRingBlink;
+        // Whether _flashRingBlink is running — the change gate: the callers re-assert often, and each start is a
+        // XAML commit.
+        bool _flashRingBlinking{ false };
         winrt::TerminalApp::TerminalTabStatus _pendingHookedStatus{ nullptr };
         winrt::Windows::UI::Xaml::Data::INotifyPropertyChanged::PropertyChanged_revoker _pendingStatusRevoker{};
 

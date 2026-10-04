@@ -33,10 +33,11 @@ namespace winrt::TerminalApp::implementation
         // AgentStatusVisible (the full dot): _SetTabAgentDot drives exactly one true. Shares AgentStatusBrush.
         WINRT_OBSERVABLE_PROPERTY(bool, AgentStatusHalfVisible, PropertyChanged.raise);
         // Agentmaster (status-dot RED FLASH RING): a separate ring (an ellipse behind the dot,
-        // peeking out around its constant black outline) that the TerminalPage shared timer blinks
-        // on/off when a hosted session goes from Running to a resting state (Idle / WaitingForInput /
-        // NeedsApproval) on an unvisited tab. The dot keeps its black outline + status fill; only this
-        // ring flashes.
+        // peeking out around its constant black outline) that flashes when a hosted session goes from
+        // Running to a resting state (Idle / WaitingForInput / NeedsApproval) on an unvisited tab, or is
+        // marked unread. The dot keeps its black outline + status fill; only this ring flashes. True for the
+        // whole flash (UI_THREAD.md §10i): TabHeaderControl blinks the ring on a shared composition clock
+        // while this is set, so the page sets it once per flash rather than toggling it every 600 ms.
         WINRT_OBSERVABLE_PROPERTY(bool, AgentFlashRingVisible, PropertyChanged.raise);
         // Agentmaster (status-dot flash-ring COLOR): the brush the ring is painted with — the
         // user-configurable "status flashing color" (Settings cog -> AppSettings::flashRingColor),

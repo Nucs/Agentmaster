@@ -1,20 +1,21 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Agentmaster (UI_THREAD.md §10a #1): AMBIENT animations on the Composition API — the looping, decorative
-// motions (the unsent-draft "3 dots" pulse on tab headers and on board / side-panel cards, and the spark
-// crown's glow breath + rising embers on tab headers) run as Windows.UI.Composition animations, never as
-// XAML storyboards.
+// Agentmaster (UI_THREAD.md §10a #1, §10i): AMBIENT animations on the Composition API — the looping,
+// decorative motions (the unsent-draft "3 dots" pulse on tab headers and on board / side-panel cards, and the
+// spark crown's glow breath + rising embers on tab headers) and the unread FLASH RING's blink on tab headers
+// run as Windows.UI.Composition animations, never as XAML storyboards or as a timer that flips a XAML property.
 //
 // WHY: XAML draws a frame on EVERY display refresh while ANY storyboard runs, and each frame walks the
 // window's whole composition tree on the UI thread. On the 555-tab release (0.6.8.15, measured 2026-10-04,
 // UI_THREAD.md §10) a handful of Forever storyboards kept that loop at 65 frames/s, ~2.7 ms per frame: 50-70%
 // of the UI thread's busy time. The storyboard tick itself was only ~9 ms/s — the cost is the loop, so a
-// single running storyboard costs as much as a hundred. A composition animation runs in the compositor, and
-// XAML's frame loop does not tick for it.
+// single running storyboard costs as much as a hundred. A timer that flips a XAML property costs a frame per
+// flip, plus a layout pass when the property is Visibility (the flash ring's 600 ms timer, UI_THREAD.md §10h).
+// A composition animation runs in the compositor, and XAML's frame loop does not tick for it.
 //
-// TWO PATHS, picked per property by what XAML does with it (read in the WinUI source — FacadeAnimationHelper,
-// PropertySetListener and UIElement.cpp, the code behind UIElement::StartAnimation):
+// THREE PATHS, picked per property by what XAML does with it (read in the WinUI source — FacadeAnimationHelper,
+// FacadeStorage, PropertySetListener and UIElement.cpp, the code behind UIElement::StartAnimation):
 //   - OPACITY of a XAML element (AgentOpacityLoop): UIElement::StartAnimation with Target "Opacity" (the RS5
 //     "XAML property animation"). XAML attaches NO per-frame listener to Opacity — it only follows properties
 //     that move hit-testing — and it marks the element as opacity-animating, so it keeps rendering an element
@@ -23,16 +24,33 @@
 //     StopBehavior (SetToFinalValue here) and XAML then writes the stopped value back into UIElement.Opacity,
 //     so every loop BEGINS AND ENDS on its element's still value: a stopped indicator shows exactly the
 //     still look, and the write-back changes nothing.
+//   - LOCKSTEP BLINK of several XAML elements (AgentLockstepBlink — the flash rings of every unread tab, which
+//     must blink TOGETHER): each element runs a composition ExpressionAnimation "clock.Opacity" through the
+//     same UIElement::StartAnimation, and ONE key-frame loop per UI thread animates that clock (a
+//     CompositionPropertySet). Every element reads one value, so they are in exact lockstep, and an element
+//     that starts later takes the current phase at once. XAML treats an expression like a key-frame
+//     animation here (no per-frame listener on Opacity). An expression has no stop behavior, and
+//     UIElement::StopAnimation would let XAML write the clock's value of that moment (0 in the "off" half)
+//     into UIElement.Opacity; so a blink is ended by a STATIC Opacity set instead, which XAML defines as
+//     "cancel the running animation and push no value back" (CUIElement::OnSetLocalOpacity ->
+//     FacadeAnimationHelper::CancelSingleAnimation).
 //   - MOTION never runs on a XAML element (AgentEmberSparks). XAML follows an animated Translation (and a
 //     hand-out visual's transform) on every frame for hit-testing, which would bring the per-frame UI-thread
 //     work back. Moving content is a composition visual of our own, attached with
 //     ElementCompositionPreview::SetElementChildVisual: XAML neither hit-tests it nor watches it.
 //
+// ONE COMPOSITOR PER UI THREAD: XAML's compositor belongs to the thread's core services (DCompTreeHost), which
+// every island of the thread shares — every Agentmaster window. AgentCompositorOf therefore asks XAML ONCE per
+// thread and keeps the answer, so a single element per thread gets a hand-out visual. A hand-out visual
+// forces a composition node on its element for life, and the per-frame walk visits every node
+// (UI_THREAD.md §10h); asking per anchor gave a node to every pulsing dots panel and every flashing tab.
+//
 // This header is LIGHT on purpose: it declares only. The bodies live in AgentAmbientAnimation.cpp, the one
 // translation unit that pays for the full winrt/Windows.UI.Composition.h projection (1.1 MB), so the seven
 // TUs that include AgentManagerContent.Internal.h and the four that include TabHeaderControl.h do not.
 // The member types below are complete through the TerminalApp pch (the Xaml projection pulls in the
-// Composition type definitions). Every member runs on the UI thread that owns the elements.
+// Composition type definitions). Every member runs on the UI thread that owns the elements, except
+// AgentLockstepBlink's destructor (see there).
 #pragma once
 
 #include <array>
@@ -51,14 +69,24 @@ namespace winrt::TerminalApp::implementation
         float value;
     };
 
+    // The per-UI-thread state behind these animations: the thread's cached compositor and the lockstep blink
+    // clock. Defined in AgentAmbientAnimation.cpp. One per UI thread, created on first use and never freed
+    // (the AgentTipHelpers idiom — a destructing thread_local would release composition objects at thread
+    // exit), so a pointer to it stays valid on any thread for the life of the process.
+    struct AgentAmbientThread;
+
     // The compositor that renders `anchor` — the one compositor of its UI thread, which every animation and
-    // visual used on that thread's elements must come from (Composition refuses a mix). Under XAML Islands
-    // there is no Window::Current() to ask, so the anchor's hand-out visual is the documented way in. That
-    // gives the ANCHOR a composition node for the rest of its life, so pass a container (the dots' panel, the
-    // sparks' canvas), never an element whose UIElement properties are animated.
-    // Parameters: anchor - any element on the calling UI thread, in a live tree or not.
+    // visual used on that thread's elements must come from (Composition refuses a mix).
+    //   - The FIRST call on a thread asks XAML through the anchor's hand-out visual (under XAML Islands there
+    //     is no Window::Current() to ask); that gives the anchor a composition node for the rest of its life.
+    //     So the anchor must be a container (a dots panel, a sparks canvas, a status-dot grid), never an
+    //     element whose UIElement properties are animated.
+    //   - Every later call on that thread returns the cached compositor and does not touch `anchor`.
+    // Parameters: anchor - any element on the calling UI thread, in a live tree or not; used only while the
+    //             thread has no cached compositor.
     // Returns: the compositor (never null for a valid element).
-    // Throws winrt::hresult_error when XAML refuses (a torn-down element, a call off its UI thread).
+    // Throws winrt::hresult_error when XAML refuses on the first call (a torn-down element, a call off its UI
+    // thread); nothing is cached then, so the next call asks again.
     winrt::Windows::UI::Composition::Compositor AgentCompositorOf(const winrt::Windows::UI::Xaml::UIElement& anchor);
 
     // Build an endless, LINEAR key-frame loop of one scalar property.
@@ -73,7 +101,7 @@ namespace winrt::TerminalApp::implementation
     //   cycle      - the length of one cycle; at least 1 ms (Composition refuses shorter).
     //   delay      - the one-time delay before the first cycle; 0 for none.
     //   target     - the property for UIElement::StartAnimation ("Opacity"), or nullptr when the animation
-    //                is started on a visual (Visual::StartAnimation names its property itself).
+    //                is started on a visual or a property set (their StartAnimation names the property).
     // Returns: the animation, not started; one object per element (a restart reuses it).
     // Throws winrt::hresult_error when Composition refuses a value (a progress outside [0, 1], a zero cycle).
     winrt::Windows::UI::Composition::ScalarKeyFrameAnimation AgentMakeScalarLoop(const winrt::Windows::UI::Composition::Compositor& compositor,
@@ -113,7 +141,8 @@ namespace winrt::TerminalApp::implementation
         // Start (or restart) the loop. A restart of a running loop jumps it back to the start of its cycle,
         // so an owner should start only on a real change (each owner keeps a "running" flag for that).
         // Throws winrt::hresult_error when XAML or Composition refuses (a torn-down element), or E_ABORT when
-        // the anchor is gone before the first start (nothing to take the compositor from).
+        // the anchor is gone before the first start AND the thread has no cached compositor (nothing to take
+        // the compositor from).
         void Start();
 
         // Stop the loop: the element lands on the loop's last key frame (its still Opacity), and XAML writes
@@ -123,7 +152,8 @@ namespace winrt::TerminalApp::implementation
         void Stop();
 
     private:
-        // The element whose hand-out visual supplies the compositor (never `_element`); weak (see the ctor).
+        // The element that supplies the compositor while the thread has none cached (never `_element`); weak
+        // (see the ctor).
         winrt::weak_ref<winrt::Windows::UI::Xaml::UIElement> _anchor;
         // The element whose Opacity loops; null for an inert loop.
         winrt::Windows::UI::Xaml::UIElement _element{ nullptr };
@@ -173,6 +203,88 @@ namespace winrt::TerminalApp::implementation
         std::array<AgentOpacityLoop, 3> _dots{};
     };
 
+    // The flash ring's beat: on for this long, then off for this long — the SAME 600 ms at which the per-window
+    // DispatcherTimer it replaces toggled the ring's Visibility (TerminalPage::_OnAgentFlashTick).
+    inline constexpr std::chrono::milliseconds kAgentBlinkHalfPeriod{ 600 };
+
+    // A hard on / off blink of ONE XAML element's Opacity (1 for kAgentBlinkHalfPeriod, then 0 for as long), in
+    // LOCKSTEP with every other AgentLockstepBlink of the same UI thread — the tab strip's unread flash rings,
+    // in every window.
+    //   - HOW: the element runs a composition ExpressionAnimation "clock.Opacity" (UIElement::StartAnimation,
+    //     Target "Opacity"), and ONE key-frame loop per UI thread animates the clock. All elements read one
+    //     value: exact lockstep, and an element that starts mid-cycle shows the current phase at once.
+    //   - The clock runs only while at least one blink follows it. The first Start() of a burst restarts it at
+    //     the START of its cycle — the "on" half, so the first ring shows at once — and the last Stop() stops
+    //     it, so an idle fleet leaves the compositor nothing to animate.
+    //   - WHY not a timer: the DispatcherTimer this replaces flipped the ring's XAML Visibility every 600 ms —
+    //     a layout pass and a frame each time, in every window with an unread tab (UI_THREAD.md §10h). A
+    //     composition animation needs neither: no layout pass, no XAML frame, no UI-thread work per blink.
+    //   - Stop() ends the expression with a STATIC Opacity set of 1.0 (see the file header), so the element's
+    //     XAML Opacity must stay at the default 1.0, and nothing else may set it.
+    // UI thread only (the thread that owns the element), except the destructor (see there).
+    class AgentLockstepBlink
+    {
+    public:
+        // An inert blink: Start() / Stop() do nothing until a real one is moved over it. Exists so an owner can
+        // declare the member before its XAML elements exist.
+        AgentLockstepBlink() = default;
+
+        // Parameters:
+        //   anchor  - an element of the same UI thread that is NOT `element`; it supplies the compositor only
+        //             while the thread has none cached (see AgentCompositorOf). Held WEAKLY, like
+        //             AgentOpacityLoop's anchor.
+        //   element - the element whose Opacity blinks; its XAML Opacity must stay at the default 1.0.
+        AgentLockstepBlink(const winrt::Windows::UI::Xaml::UIElement& anchor, winrt::Windows::UI::Xaml::UIElement element);
+
+        // Gives up this blink's hold on the clock if it still has one (an owner torn down without a Stop() —
+        // e.g. a tab header destroyed before its Unloaded handler ran). On the owning UI thread the release is
+        // immediate. On any other thread (a page destroyed on a pool thread — the CLAUDE.md teardown gotcha) it
+        // is posted to the UI thread's DispatcherQueue, because the clock's composition objects belong to that
+        // thread; a held clock that is never released would keep the compositor animating for no one. Does not
+        // touch the element. Never throws (a failure is logged).
+        ~AgentLockstepBlink();
+
+        // Not copyable: two copies would release the clock twice. Movable: the source gives up its hold on the
+        // clock, so exactly one object releases it.
+        AgentLockstepBlink(const AgentLockstepBlink&) = delete;
+        AgentLockstepBlink& operator=(const AgentLockstepBlink&) = delete;
+        // Parameters: other - the blink to take over; left inert (holding no clock, no element).
+        AgentLockstepBlink(AgentLockstepBlink&& other) noexcept;
+        // Releases a clock this object still holds (as the destructor does), then takes over `other`'s.
+        // Parameters: other - the blink to take over; left inert.
+        // Returns: *this.
+        AgentLockstepBlink& operator=(AgentLockstepBlink&& other) noexcept;
+
+        // Start (or restart) the blink: join the thread's clock (restarting it at "on" when no other blink
+        // follows it) and make the element follow it. Builds the clock on the first start of the thread. A
+        // restart is harmless — the element follows the same clock again, with no jump — but costs a XAML
+        // commit, so an owner keeps a "running" flag and starts only on a real change.
+        // Throws winrt::hresult_error when XAML or Composition refuses (a torn-down element), or E_ABORT when the
+        // anchor is gone and the thread has no cached compositor. A failed Start() holds no clock and leaves the
+        // element at its static Opacity 1.0: shown steadily, not blinking.
+        void Start();
+
+        // Stop the blink: a static Opacity of 1.0 ends the element's expression (XAML pushes no value back), and
+        // the clock is released (stopped when no blink follows it any more). Safe when not started, on an inert
+        // blink, and twice in a row.
+        // Throws winrt::hresult_error when XAML refuses the Opacity set (a torn-down element); the clock is
+        // released even then.
+        void Stop();
+
+    private:
+        // Give up this blink's hold on the clock, if it has one: at once on the owning UI thread, else posted to
+        // it. Never throws (logged).
+        void _ReleaseClock() noexcept;
+
+        // The element that supplies the compositor while the thread has none cached (never `_element`); weak.
+        winrt::weak_ref<winrt::Windows::UI::Xaml::UIElement> _anchor;
+        // The element whose Opacity blinks; null for an inert blink.
+        winrt::Windows::UI::Xaml::UIElement _element{ nullptr };
+        // The thread state whose clock this blink counts as a follower of, or null while it follows none — so
+        // this pointer IS the "blinking" state that Stop() and the destructor undo.
+        AgentAmbientThread* _clockOwner{ nullptr };
+    };
+
     // One ember of the spark crown: its place inside the host element (the Canvas.Left / Canvas.Top of the
     // XAML ellipse it replaced, in DIPs) and its diameter.
     struct AgentEmberSpec
@@ -196,7 +308,8 @@ namespace winrt::TerminalApp::implementation
         AgentEmberSparks() = default;
 
         // Parameters: host - the XAML element the embers draw on (the 18x18 sparks canvas); it also supplies
-        //             the compositor, and it must hold no other child visual (SetElementChildVisual replaces it).
+        //             the compositor while the thread has none cached, and it must hold no other child visual
+        //             (SetElementChildVisual replaces it).
         explicit AgentEmberSparks(winrt::Windows::UI::Xaml::UIElement host);
 
         // Set the embers' color (the tab's contrast-picked fire color, TabStatus.AgentCacheWarmBrush). Kept

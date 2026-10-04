@@ -588,10 +588,11 @@ namespace winrt::TerminalApp::implementation
         // switch to it (the current tab is always considered visited, so it never flashes).
         // _agentFlashLastState remembers each hosted session's last state so the registry-observer
         // reaction can detect the Running -> {Idle/WaitingForInput/NeedsApproval} edge; _flashingSessions is the set of
-        // sessions whose tab is currently flashing. ONE shared per-window DispatcherTimer toggles
-        // _agentFlashPhase every 600ms and shows/hides EVERY flashing tab's red ring together, so
-        // multiple flashing tabs blink in lockstep (the synchronization requirement) — and a tab that
-        // starts flashing mid-cycle joins at the current phase. UI thread only.
+        // sessions whose tab is currently flashing. Multiple flashing tabs blink in LOCKSTEP (the synchronization
+        // requirement) and a tab that starts flashing mid-cycle joins at the current phase — since UI_THREAD.md
+        // §10i because each tab header blinks its ring on the UI thread's ONE shared composition clock
+        // (AgentLockstepBlink); a per-window DispatcherTimer used to toggle a phase and flip every ring's
+        // Visibility every 600ms (a layout pass + a XAML frame per flip). UI thread only.
         std::unordered_map<std::wstring, ::Agentmaster::SessionState> _agentFlashLastState;
         // Agentmaster: per-session record of the CURRENT Running span — when it started, and whether it
         // was entered from NeedsApproval (i.e. the user answering a question released it). Feeds the
@@ -617,8 +618,12 @@ namespace winrt::TerminalApp::implementation
         // The count this window last raised TaskbarUnreadCountChanged for (the census count, or 0 while the cog switch
         // is off): the de-dupe that keeps the AppHost from re-rendering an identical overlay.
         uint32_t _taskbarUnreadCount{ 0 };
+        // Agentmaster (tab status-dot RED FLASH): the per-window 600 ms flash timer, running while any session of this
+        // window flashes. BOOKKEEPING only since UI_THREAD.md §10i (_OnAgentFlashTick): it re-asserts each flashing
+        // tab's ring, prunes sessions whose tab went away and re-publishes the taskbar unread census. The blink
+        // itself is the tab headers' composition animation; the phase this timer used to toggle
+        // (_agentFlashPhase) is gone with the Visibility flip it drove.
         winrt::Windows::UI::Xaml::DispatcherTimer _agentFlashTimer{ nullptr };
-        bool _agentFlashPhase{ false };
         // Agentmaster (System notifications): the toast tracker's per-session state — DELIBERATELY
         // separate from _agentFlashLastState (the flash erases/holds its map on its own rules; coupling
         // the two would let a flash change silently break the toast edge detection, and vice versa).
@@ -1366,20 +1371,21 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (tab status-dot RED FLASH): a hosted session that goes from Running to a resting
         // state (Idle / WaitingForInput / NeedsApproval — NOT Done or Error) on an UNVISITED tab blinks a
         // RED RING around that tab's status dot (a separate ellipse behind the dot, peeking out around
-        // its constant black stroke; synchronized across tabs via one shared timer) until you switch to
-        // it. _EvaluateAgentFlash detects the Running -> {Idle/Waiting/NeedsApproval} edge per registry
-        // update; _Set/_Stop/_Start/_Ensure drive the shared 600ms timer + per-tab ring. UI thread only.
+        // its constant black stroke; blinking in lockstep across tabs on one shared composition clock —
+        // UI_THREAD.md §10i) until you switch to it. _EvaluateAgentFlash detects the Running ->
+        // {Idle/Waiting/NeedsApproval} edge per registry update; _Set/_Stop/_Start/_Ensure show or hide the
+        // per-tab ring (the header blinks it) and drive the shared 600ms bookkeeping timer. UI thread only.
         void _EvaluateAgentFlash(const std::wstring& sessionId, const TerminalApp::Tab& tab, ::Agentmaster::SessionState newState, bool live); // detect the Running -> {Idle/WaitingForInput/NeedsApproval} edge + start/stop the flash (never the active/visited tab; not for ->Done/->Error); forgets state on !live so a later restore re-tracks fresh
-        void _StartAgentFlash(const std::wstring& sessionId); // begin blinking this session's tab-dot red RING; joins the shared timer in-phase with any others
+        void _StartAgentFlash(const std::wstring& sessionId); // begin blinking this session's tab-dot red RING; its header joins the shared composition blink clock in-phase with any others (UI_THREAD.md §10i)
         void _StopAgentFlash(const std::wstring& sessionId); // stop flashing + hide the red ring; stops the shared timer when none remain
         void _VisitTabClearFlash(const TerminalApp::Tab& tab); // visiting (selecting) a tab marks it seen -> stop its red flash (from _OnTabSelectionChanged)
         void _RefreshFocusedTabSummary(const TerminalApp::Tab& tab); // Agentmaster (TAB_OVERLAY.md summary panel): on a tab switch, kick a cheap mtime-gated content re-read of that tab's summary panel so a focused "here-and-now lens" is current instead of up to ~5s stale (from _OnTabSelectionChanged; no-op for a non-session tab / panel off / unchanged transcript)
         void _SyncOverlayFocusToTab(const TerminalApp::Tab& tab); // Agentmaster (SUMMARY_JUMP.md §4, perf): on a tab switch, mirror the selection onto every linked overlay so ONLY the focused panel runs the expensive periodic jump-eligibility resolve (from _OnTabSelectionChanged; a Manager/shell/null tab focuses none)
-        void _EnsureAgentFlashTimer(); // lazily create + (re)start the shared 600ms flash timer (a fresh burst begins on the red phase)
+        void _EnsureAgentFlashTimer(); // lazily create + (re)start the shared 600ms flash timer — bookkeeping only since UI_THREAD.md §10i (the blink is the headers' composition clock, which starts a fresh burst on its "on" half)
         void _StopAgentFlashTimer(); // stop the shared flash timer (no flashing tabs remain)
-        void _OnAgentFlashTick(); // shared-timer tick: toggle the phase + show/hide every flashing tab's red RING together (the synchronized blink)
-        void _ApplyAgentFlashRingForSession(const std::wstring& sessionId); // show/hide one flashing session's red ring at the CURRENT shared phase (used when it joins mid-flash)
-        void _SetTabFlashRing(const TerminalApp::Tab& tab, bool on); // show/hide a tab's flash RING (the ellipse behind the dot) via Tab.TabStatus().AgentFlashRingVisible, painting it with the shared _flashRingBrush when shown; the dot's own black stroke + fill stay constant
+        void _OnAgentFlashTick(); // shared-timer tick: re-assert every flashing tab's ring as SHOWN (idempotent — no XAML change in the steady state), prune sessions whose tab went away, re-publish the unread census; it no longer blinks anything (UI_THREAD.md §10i)
+        void _ApplyAgentFlashRingForSession(const std::wstring& sessionId); // show one flashing session's red ring; its header blinks it on the shared composition clock, so it joins the current phase at once
+        void _SetTabFlashRing(const TerminalApp::Tab& tab, bool on); // show/hide a tab's flash RING (the ellipse behind the dot) via Tab.TabStatus().AgentFlashRingVisible, painting it with the shared _flashRingBrush when shown; `on` = the ring FLASHES (the header blinks it — UI_THREAD.md §10i), so it changes only when a flash starts or ends; the dot's own black stroke + fill stay constant
         winrt::Windows::UI::Color _FlashRingColorFromSettings() const; // Agentmaster: parse AppSettings::flashRingColor ("#AARRGGBB", alpha = opacity) -> Color, falling back to opaque red on a malformed value
         void _EnsureFlashRingBrush(); // Agentmaster: lazily build the per-window shared flash-ring brush (_flashRingBrush) from the current setting, on the first flash
         void _RefreshFlashRingBrush(); // Agentmaster: re-point the shared flash-ring brush at the (possibly changed) AppSettings::flashRingColor — mutates its Color in place so every tab sharing it updates live (cog Save / cross-window broadcast)

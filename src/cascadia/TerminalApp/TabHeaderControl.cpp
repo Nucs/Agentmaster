@@ -118,6 +118,16 @@ namespace winrt::TerminalApp::implementation
                                            std::chrono::milliseconds{ 2800 },
                                            std::chrono::milliseconds{ 0 } };
         _cacheWarmEmbers = AgentEmberSparks{ HeaderCacheWarmSparks() };
+
+        // Agentmaster (tab status-dot RED FLASH RING, UI_THREAD.md §10i): set up the ring's blink, wired (like
+        // the two above) to run ONLY while TabStatus.AgentFlashRingVisible — which the page now sets once per
+        // flash instead of flipping it every 600 ms. A composition expression on the ring's Opacity that follows
+        // the UI thread's ONE shared clock (AgentLockstepBlink): every flashing tab, in every window, blinks in
+        // lockstep, a tab that starts flashing mid-cycle joins the current phase, and nothing flips a XAML
+        // property per blink (no layout pass, no XAML frame). The dot's wrap grid is the anchor, so the ring
+        // never gets a hand-out visual. Nothing composition-side is created here: the clock is built on the
+        // thread's first blink.
+        _flashRingBlink = AgentLockstepBlink{ HeaderAgentStatusDotWrap(), HeaderAgentStatusFlashRing() };
         PropertyChanged([weakThis = get_weak()](auto&&, const winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs& args) {
             if (auto self = weakThis.get())
             {
@@ -196,6 +206,9 @@ namespace winrt::TerminalApp::implementation
                 // exception-safe on its own.
                 self->_UpdatePendingAnimation();
                 self->_UpdateCacheWarmAnimation();
+                // UI_THREAD.md §10i: and lets go of the shared blink clock — the last ring to stop stops the clock,
+                // so the compositor animates nothing while no flashing header is on any strip.
+                self->_UpdateFlashRingAnimation();
             }
         });
         // ... and (re)assert the badges the moment the header ENTERS a live tree: the popup open is
@@ -217,6 +230,8 @@ namespace winrt::TerminalApp::implementation
                 // re-parented header) — resume the pulse / embers if their flags still want them.
                 self->_UpdatePendingAnimation();
                 self->_UpdateCacheWarmAnimation();
+                // UI_THREAD.md §10i: a still-flashing ring rejoins the shared blink clock, in phase with every other.
+                self->_UpdateFlashRingAnimation();
             }
         });
 
@@ -419,7 +434,8 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster (PENDING_INPUT.md): (re)subscribe to the current TabStatus's PropertyChanged so the
-    // unsent-draft pulse starts/stops with AgentPendingVisible. TabStatus is set by the Tab AFTER this
+    // unsent-draft pulse starts/stops with AgentPendingVisible (and the crown, the flash ring's blink and the
+    // tag badges follow their own flags). TabStatus is set by the Tab AFTER this
     // control is constructed (and could, in principle, be re-assigned), so this runs both from the
     // control's own "TabStatus" change notification and once at construction. The auto-revoke revoker
     // detaches from a superseded TabStatus; same-status re-hooks are a cheap no-op.
@@ -430,6 +446,7 @@ namespace winrt::TerminalApp::implementation
         {
             _UpdatePendingAnimation();
             _UpdateCacheWarmAnimation();
+            _UpdateFlashRingAnimation();
             _UpdateTagBadges();
             return; // already hooked to this exact status (or both null)
         }
@@ -461,6 +478,13 @@ namespace winrt::TerminalApp::implementation
                     {
                         self->_UpdateCacheWarmAnimation();
                     }
+                    // Agentmaster (RED FLASH RING, UI_THREAD.md §10i): the same one subscription starts / stops the
+                    // ring's composition blink when the page shows or hides the ring. The ring's color needs no
+                    // copying: it stays a XAML Fill (x:Bind AgentFlashRingBrush), only its Opacity is composed.
+                    if (n.empty() || n == L"AgentFlashRingVisible")
+                    {
+                        self->_UpdateFlashRingAnimation();
+                    }
                     // Agentmaster (bookmark tags): the same one subscription also rebuilds the
                     // bookmark badges when the tag spec changes (no second revoker to juggle).
                     if (n.empty() || n == L"AgentTagsSpec")
@@ -475,6 +499,9 @@ namespace winrt::TerminalApp::implementation
         // through a re-hook, so the turn-on belt in _UpdateCacheWarmAnimation would not see it).
         _SyncCacheWarmEmberColor();
         _UpdateCacheWarmAnimation();
+        // A new TabStatus carries its own flash flag: a ring that flashes there starts blinking, one that does not
+        // stops (UI_THREAD.md §10i).
+        _UpdateFlashRingAnimation();
         _UpdateTagBadges();
     }
 
@@ -586,6 +613,58 @@ namespace winrt::TerminalApp::implementation
         {
             // The embers keep their previous color; the next brush change retries (Rule #18: logged).
             ::Agentmaster::AgentLogCaughtException(L"tab-header cache-warm ember color");
+        }
+    }
+
+    // Agentmaster (tab status-dot RED FLASH RING, UI_THREAD.md §10i): run the ring's blink iff the page shows the
+    // ring (TabStatus.AgentFlashRingVisible) and this header is in the live tree. The page sets that flag ONCE
+    // when a flash starts and clears it when the flash ends (a visit, a window activation, a triage move, an
+    // archive) — the blink itself is entirely here, on the Composition API, following the UI thread's one shared
+    // clock (AgentLockstepBlink), so every flashing ring of every window blinks together and a ring that starts
+    // mid-cycle joins the current phase.
+    // Gates, and why each is (not) there:
+    //   - IsLoaded(): a header out of the live tree (the strip virtualized it away, its tab closed or torn out)
+    //     releases the clock, so the last flashing header to leave stops it; back in the tree, it rejoins in
+    //     phase. The live answer, never the event that called (a stale Unloaded can follow the next Loaded).
+    //   - NO AgentAnimationsEnabled() gate, unlike the pulses: the ring is an ALERT. The timer blink it replaces
+    //     ran whatever Windows' animation effects said, and a steady ring would read as "nothing new".
+    //   - NO "started tab" gate: a manual Mark Unread flashes a dormant (never-started) tab too.
+    // A stop ends the blink with the ring at full opacity (AgentLockstepBlink::Stop), and the page's flag then
+    // collapses it. Called on every relevant TabStatus change, on hook, and on Loaded / Unloaded.
+    void TabHeaderControl::_UpdateFlashRingAnimation()
+    {
+        // Everything, the WinRT reads included, inside the try: this runs from XAML event handlers (Loaded /
+        // Unloaded / PropertyChanged), where an escaping exception is a fail-fast.
+        try
+        {
+            const auto status = TabStatus();
+            const bool on = status && status.AgentFlashRingVisible() && IsLoaded();
+            // Act only on a real change: the callers re-assert often, and each start is a XAML commit.
+            if (on == _flashRingBlinking)
+            {
+                return;
+            }
+            if (on)
+            {
+                _flashRingBlink.Start();
+                // Recorded only after a successful start: a failed one leaves the flag false, so the next call
+                // retries it.
+                _flashRingBlinking = true;
+            }
+            else
+            {
+                // Recorded BEFORE the stop: Stop() releases the clock even when it throws, so the blink has
+                // stopped either way, and a flag left true would make the next flash skip its start.
+                _flashRingBlinking = false;
+                _flashRingBlink.Stop();
+            }
+        }
+        catch (...)
+        {
+            // A failed start leaves the ring shown steadily (its static Opacity stays 1.0) and the flag false, so
+            // the alert is still visible — it just does not blink until the next call retries. A failed stop
+            // (a torn-down ring) has released the clock already.
+            ::Agentmaster::AgentLogCaughtException(L"tab-header flash-ring blink");
         }
     }
 

@@ -3537,8 +3537,9 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster (tab status-dot red flash): add this session to the flashing set + ensure the shared
-    // timer runs, then paint its outline at the CURRENT phase so it blinks in lockstep with any tabs
-    // already flashing (no per-tab phase drift). No-op if already flashing.
+    // timer runs (it prunes + re-publishes; UI_THREAD.md §10i), then show its ring: the tab header blinks it
+    // on the UI thread's one shared composition clock, so it blinks in lockstep with any ring already
+    // flashing, in any window (no per-tab phase drift). No-op if already flashing.
     void TerminalPage::_StartAgentFlash(const std::wstring& sessionId)
     {
         if (!_flashingSessions.insert(sessionId).second)
@@ -3888,9 +3889,13 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster (tab status-dot red flash): lazily build the ONE shared per-window flash timer and
-    // (re)start it. One timer + one phase drive every flashing tab, so they blink together. A fresh
-    // burst begins on the red ("on") phase. The Tick self-stops if the page is gone (weak), so a closed
-    // window never leaks a ticking timer.
+    // (re)start it. UI_THREAD.md §10i: the timer no longer BLINKS anything — it flipped every flashing ring's
+    // Visibility every 600 ms, a layout pass and a XAML frame per flip. The blink now runs in the compositor:
+    // each tab header blinks its own ring on the UI thread's ONE shared clock (AgentLockstepBlink), which keeps
+    // every ring of every window in lockstep and starts a fresh burst on the "on" half. What the timer still
+    // does is the bookkeeping in _OnAgentFlashTick: re-assert each flashing tab's ring, prune sessions whose tab
+    // went away, re-publish the taskbar unread census. The Tick self-stops if the page is gone (weak), so a
+    // closed window never leaks a ticking timer.
     void TerminalPage::_EnsureAgentFlashTimer()
     {
         if (!_agentFlashTimer)
@@ -3910,30 +3915,33 @@ namespace winrt::TerminalApp::implementation
         }
         if (!_agentFlashTimer.IsEnabled())
         {
-            _agentFlashPhase = true; // a fresh burst begins on the red "on" phase
+            // No phase to reset any more (UI_THREAD.md §10i): a fresh burst begins on the "on" half because the
+            // FIRST ring to follow the shared composition clock restarts it at the start of its cycle.
             _agentFlashTimer.Start();
         }
     }
 
     // Agentmaster (tab status-dot red flash): stop the shared timer (called when the flashing set empties).
+    // The rings' blink needs nothing here: each header stops its own as its ring hides, and the last one to
+    // stop stops the shared clock (UI_THREAD.md §10i).
     void TerminalPage::_StopAgentFlashTimer()
     {
         if (_agentFlashTimer)
         {
             _agentFlashTimer.Stop();
         }
-        _agentFlashPhase = false;
     }
 
-    // Agentmaster (tab status-dot red flash): the shared-timer tick. Toggle the one phase and show/hide
-    // EVERY flashing tab's red ring together (ring ON on the "on" phase, OFF otherwise) — this is what
-    // keeps multiple flashing tabs synchronized. Prunes any session whose tab has gone away, and stops
-    // the timer once none remain.
+    // Agentmaster (tab status-dot red flash): the shared-timer tick — BOOKKEEPING ONLY since UI_THREAD.md
+    // §10i. It used to toggle a phase and show/hide every flashing tab's ring (a Visibility flip: a layout
+    // pass and a XAML frame every 600 ms); the blink is now each header's composition animation on one shared
+    // clock. Each tick re-asserts every flashing tab's ring as SHOWN — idempotent: an unchanged TabStatus
+    // property raises nothing, so the steady state changes no XAML property at all — prunes any session whose
+    // tab has gone away, and stops the timer once none remain.
     void TerminalPage::_OnAgentFlashTick()
     {
-        _agentFlashPhase = !_agentFlashPhase;
-        // Apply the current phase to EVERY flashing tab — the automatic set AND the manual Mark-Unread
-        // set (a session in both is set twice, idempotently). Prune any whose tab has gone away.
+        // Re-assert the ring of EVERY flashing tab — the automatic set AND the manual Mark-Unread set (a
+        // session in both is set twice, idempotently). Prune any whose tab has gone away.
         const auto applyAndPrune = [this](std::unordered_set<std::wstring>& set) {
             for (auto it = set.begin(); it != set.end();)
             {
@@ -3947,7 +3955,9 @@ namespace winrt::TerminalApp::implementation
                     it = set.erase(it); // tab closed / re-homed — drop it
                     continue;
                 }
-                _SetTabFlashRing(tab, _agentFlashPhase); // ring ON on the red phase, OFF otherwise
+                // A member of either set must show its ring: re-asserting it heals a ring something hid while
+                // the session still flashes, and costs nothing when it is already shown (no change, no event).
+                _SetTabFlashRing(tab, true);
                 ++it;
             }
         };
@@ -3963,27 +3973,37 @@ namespace winrt::TerminalApp::implementation
         _PublishAgentUnreadSessions();
     }
 
-    // Agentmaster (tab status-dot red flash): show/hide one flashing session's red ring at the current
-    // shared phase. Used when a tab joins an in-progress flash so it lands on the same on/off beat as the rest.
+    // Agentmaster (tab status-dot red flash): show one flashing session's red ring — called when a session starts
+    // flashing (automatically or by Mark Unread). It lands on the same on/off beat as every ring already
+    // flashing because the beat is not kept here any more (UI_THREAD.md §10i): the tab header blinks the ring on
+    // the UI thread's ONE shared composition clock, so a ring that starts mid-cycle shows the current phase at
+    // once (it may start in the "off" half, as a ring joining the old timer's phase did).
     void TerminalPage::_ApplyAgentFlashRingForSession(const std::wstring& sessionId)
     {
         if (const auto it = _claudeTabs.find(sessionId); it != _claudeTabs.end())
         {
             if (const auto tab = it->second.get())
             {
-                _SetTabFlashRing(tab, _agentFlashPhase);
+                _SetTabFlashRing(tab, true);
             }
         }
     }
 
     // Agentmaster (tab status-dot flash): show/hide a tab's FLASH RING — the ellipse behind the dot
     // (TabHeaderControl.xaml, bound to AgentFlashRingVisible) whose edge peeks out as a colored ring
-    // around the dot's black stroke. The dot's own stroke + fill are untouched. When SHOWING it, the
+    // around the dot's black stroke. The dot's own stroke + fill are untouched. `on` means "this tab's ring
+    // FLASHES": shown, and blinking — the blink is the header's own composition animation (UI_THREAD.md §10i:
+    // TabHeaderControl::_UpdateFlashRingAnimation starts it when this flag turns on and ends it when it turns
+    // off), so the flag changes only when a flash starts or ends, never per blink. When SHOWING it, the
     // ring is painted with this window's shared flash-ring brush — the user-configurable "status
     // flashing color" (Settings cog -> AppSettings::flashRingColor; its alpha = opacity) — BEFORE the
     // ring becomes visible, so it is never shown with a null Fill; the same brush instance is reused
-    // across tabs + the 600ms blink, so the observable no-ops after the first set (no binding churn).
+    // across tabs + the tick's re-asserts, so the observable no-ops after the first set (no binding churn).
     // Idempotent (the WINRT_OBSERVABLE_PROPERTY no-ops on an unchanged value). UI thread only.
+    // Parameters:
+    //   tab - the tab whose ring changes; a null tab is a no-op.
+    //   on  - true to show the ring (and so start its blink), false to hide it.
+    // Never throws: a TabStatus failure is logged (CATCH_LOG) and leaves the ring as it was.
     void TerminalPage::_SetTabFlashRing(const TerminalApp::Tab& tab, bool on)
     {
         if (!tab)

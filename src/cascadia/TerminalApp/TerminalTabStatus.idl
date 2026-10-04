@@ -31,10 +31,12 @@ namespace TerminalApp
         Boolean AgentStatusHalfVisible { get; set; };
 
         // Agentmaster (status-dot RED FLASH RING): when a hosted session goes from Running to a resting
-        // state (Idle / WaitingForInput / NeedsApproval) while its tab is unvisited, TerminalPage's
-        // shared 600ms timer toggles this so a RING — a separate ellipse drawn BEHIND the dot, its
-        // edge peeking out AROUND the dot's black outline — blinks on and off for attention. The dot
-        // itself keeps its constant black outline + status-colour fill; only the ring flashes.
+        // state (Idle / WaitingForInput / NeedsApproval) while its tab is unvisited (or is marked unread),
+        // TerminalPage sets this so a RING — a separate ellipse drawn BEHIND the dot, its edge peeking out
+        // AROUND the dot's black outline — blinks on and off for attention. The dot itself keeps its
+        // constant black outline + status-colour fill; only the ring flashes. True for the WHOLE flash
+        // (UI_THREAD.md §10i): the blink is the tab header's composition animation on the ring's Opacity,
+        // in lockstep across tabs; the page's 600ms timer no longer toggles this per blink.
         Boolean AgentFlashRingVisible { get; set; };
 
         // Agentmaster (status-dot flash-ring COLOR): the brush the flash ring is painted with — the
