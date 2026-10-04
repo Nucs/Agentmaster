@@ -68,6 +68,7 @@ int wmain()
     TestRegistry();
     TestRegistryFanout();
     TestRegistrySnapshotLive();
+    TestRegistryLeanReads(); // UI_THREAD.md §10a #4 — the lean registry reads (tests_state.cpp)
     TestForkSourceIdEcho();
     TestSummaryChainLinks(); // the summary's conversation chain: the /clear pairing (tests_state.cpp)
     TestRetiredHostToken(); // Deactivate/Restart: the closing claude of a replaced connection cannot re-stamp the record (tests_state.cpp)

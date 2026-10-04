@@ -1157,13 +1157,13 @@ namespace Agentmaster
         // EXCLUDE them from the observe-only External census — else a launched codex DOUBLE-shows (a
         // managed card AND an external row). A hand-typed codex in our tab has no such record and stays
         // observe-only (External). (Codex-launch.)
+        // Agentmaster (UI_THREAD.md §10a #4): the registry hands over just these tokens. The full Snapshot() this
+        // loop used to take deep-copied every record (the archived ones and every prompt-queue history
+        // included) on each survey, ~5 ms/s of this thread on the 555-tab release (UI_THREAD.md §10e).
         std::unordered_set<std::wstring> managedCodexTokens;
-        for (const auto& s : _registry->Snapshot())
+        for (auto& token : _registry->ManagedCodexTabTokens())
         {
-            if (s.kind == AgentKind::Codex && s.live && !s.external && !s.tabToken.empty())
-            {
-                managedCodexTokens.insert(s.tabToken);
-            }
+            managedCodexTokens.insert(std::move(token));
         }
         int codexCount = 0;
         for (const auto& [pid, f] : codexByPid)

@@ -7639,8 +7639,10 @@ namespace winrt::TerminalApp::implementation
             // terminal in the tab" — so a Claude pane closed/dead beside a still-live shell sibling (a
             // user split) is archived instead of lingering live=true (the sibling kept anyAlive true,
             // so the old rule never fired -> the card lingered until the WHOLE tab died).
-            const auto info = _sessionRegistry->Get(id);
-            std::wstring sessionWt = info ? info->tabToken : std::wstring{};
+            // The token alone (UI_THREAD.md §10a #4): this sweep reads no other field, and a full Get per tab per
+            // tick copied each record's prompt-queue history (~2 ms/s of the release UI thread at 555 tabs).
+            // An unknown id reads empty, exactly like the null Get it replaces.
+            std::wstring sessionWt = _sessionRegistry->GetTabToken(id);
             for (auto& c : sessionWt)
             {
                 if (c >= L'A' && c <= L'Z')
@@ -7859,7 +7861,9 @@ namespace winrt::TerminalApp::implementation
         }
         for (const auto& id : ids)
         {
-            const auto info = _sessionRegistry->Get(id);
+            // Without the prompt queue (UI_THREAD.md §10a #4): ServerCacheStillWarm and the spark color read the
+            // state, the turn stamps and the color fields, never the queue — the costliest part of a Get.
+            const auto info = _sessionRegistry->GetWithoutQueue(id);
             if (!info)
             {
                 continue;
@@ -9558,7 +9562,9 @@ namespace winrt::TerminalApp::implementation
             {
                 continue;
             }
-            const auto info = _sessionRegistry->Get(id);
+            // Without the prompt queue (UI_THREAD.md §10a #4): this candidate pass reads live, kind, the
+            // working-dir fields and forkParentId, never the queue — the costliest part of a Get.
+            const auto info = _sessionRegistry->GetWithoutQueue(id);
             if (!info || !info->live || info->kind != ::Agentmaster::AgentKind::Claude)
             {
                 continue; // Codex rollouts aren't path-parsed — its color keys on the cwd
@@ -9824,13 +9830,17 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        const auto sessions = _sessionRegistry->SnapshotLive(); // perf: this ~2.5s tick only ever looks at live + tabToken'd sessions — no need to deep-copy 800+ archived records per tick per window
+        // perf: this ~2.5 s tick, run in every window, reads three fields of each LIVE session — id, tabToken,
+        // workingDir — so it takes exactly those (UI_THREAD.md §10a #4). The SnapshotLive it used to take deep-
+        // copied every live record with its prompt-queue history: ~9 ms/s of the release UI thread at 555 tabs
+        // (UI_THREAD.md §10e). LiveTabBindings returns live sessions only, in the same order.
+        const auto sessions = _sessionRegistry->LiveTabBindings();
         size_t attempts = 0;
         for (const auto& s : sessions)
         {
-            if (!s.live || s.tabToken.empty())
+            if (s.tabToken.empty())
             {
-                continue; // archived, or no hook has revealed a hosting ConPTY yet
+                continue; // no hook has revealed a hosting ConPTY yet
             }
             // Only a session whose hosting ConPTY lives in THIS window is bindable here — skip the rest
             // of the (process-wide) fleet so a window never re-attempts another window's sessions (the

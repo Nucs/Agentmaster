@@ -59,6 +59,115 @@ namespace
     // TabTokenEq (the case-insensitive WT_SESSION/tabToken compare this TU leans on everywhere)
     // moved to SessionModels.h — the restart seam's tabToken fallback needed it too.
 
+    // Agentmaster (UI_THREAD.md §10a #4 — the lean reads): is `p` an OPEN prompt — one the SessionScanner can
+    // still act on? Pending and the legacy Held wait to be sent; a Sent prompt that is not yet echoed is a
+    // delivery the scanner must confirm or judge lost. Everything else is completed history.
+    //   p       — a queued prompt.
+    //   returns — true for Pending, Held, and Sent-but-unechoed. Never throws.
+    bool IsOpenScanPrompt(const Agentmaster::QueuedPrompt& p) noexcept
+    {
+        using Agentmaster::PromptStatus;
+        return p.status == PromptStatus::Pending || p.status == PromptStatus::Held ||
+               (p.status == PromptStatus::Sent && !p.echoed);
+    }
+
+    // Agentmaster (UI_THREAD.md §10a #4): moves the members a lean copy must not copy OUT of a stored session
+    // record, and moves them back when it goes out of scope — also when the copy made in between throws.
+    // Copying a SessionInfo while its queue (and, for the scan copy, its four display texts) is parked here
+    // copies every other member exactly as Get does, so a member added to SessionInfo later is carried by the
+    // lean reads without anyone listing it. std::vector / std::wstring move construction and move assignment
+    // are noexcept with std::allocator, so parking and restoring cannot fail; each parked member is cleared
+    // after its move, so the copy sees it EMPTY whatever state the move left. Use it only under the registry
+    // lock: the members are out of the record while the guard lives.
+    class ParkedSessionMembers
+    {
+    public:
+        // Parks `owner.queue`, and also its lastAssistantText, recap, pendingInput and pendingPasteRefs when
+        // `parkTexts` is true.
+        //   owner     — the stored record; the parked members move out now and back in the destructor.
+        //   parkTexts — also park the four display texts (the SessionScanner snapshot).
+        ParkedSessionMembers(Agentmaster::SessionInfo& owner, bool parkTexts) noexcept :
+            _owner{ owner },
+            _parkTexts{ parkTexts },
+            _queue(std::move(owner.queue))
+        {
+            owner.queue.clear();
+            if (_parkTexts)
+            {
+                _lastAssistantText = std::move(owner.lastAssistantText);
+                owner.lastAssistantText.clear();
+                _recap = std::move(owner.recap);
+                owner.recap.clear();
+                _pendingInput = std::move(owner.pendingInput);
+                owner.pendingInput.clear();
+                _pendingPasteRefs = std::move(owner.pendingPasteRefs);
+                owner.pendingPasteRefs.clear();
+            }
+        }
+
+        // Puts every parked member back into the stored record (noexcept moves), on the normal path and
+        // during unwinding alike.
+        ~ParkedSessionMembers()
+        {
+            _owner.queue = std::move(_queue);
+            if (_parkTexts)
+            {
+                _owner.lastAssistantText = std::move(_lastAssistantText);
+                _owner.recap = std::move(_recap);
+                _owner.pendingInput = std::move(_pendingInput);
+                _owner.pendingPasteRefs = std::move(_pendingPasteRefs);
+            }
+        }
+
+        ParkedSessionMembers(const ParkedSessionMembers&) = delete;
+        ParkedSessionMembers& operator=(const ParkedSessionMembers&) = delete;
+
+        // The parked queue in its stored order — what the scan copy picks its open prompts from.
+        //   returns — a view that is valid until the guard is destroyed. Never throws.
+        const std::vector<Agentmaster::QueuedPrompt>& Queue() const noexcept
+        {
+            return _queue;
+        }
+
+    private:
+        Agentmaster::SessionInfo& _owner;
+        bool _parkTexts;
+        std::vector<Agentmaster::QueuedPrompt> _queue;
+        std::wstring _lastAssistantText;
+        std::wstring _recap;
+        std::wstring _pendingInput;
+        std::wstring _pendingPasteRefs;
+    };
+
+    // Agentmaster (UI_THREAD.md §10a #4): a copy of a stored record that never copies its prompt queue — the
+    // shared body of SessionRegistry::GetWithoutQueue (forScan false) and SnapshotLiveForScan (forScan true:
+    // the four display texts are not copied either, and the copy's queue is refilled with the stored record's
+    // OPEN prompts, IsOpenScanPrompt, in their order).
+    // The caller must hold the registry mutex: the stored record is a non-const element of the registry's map,
+    // reached through a const accessor, and the const_cast lets the parking guard move its members out and
+    // back. Every reader of a stored record takes that same mutex, so no thread can observe the parked state.
+    //   stored  — the registry's own record.
+    //   forScan — false: leave out the queue only. true: also leave out the texts, then keep the open prompts.
+    //   returns — the lean copy.
+    //   throws  — std::bad_alloc; the guard's destructor restores the stored record first.
+    Agentmaster::SessionInfo CopyLeanSessionLocked(const Agentmaster::SessionInfo& stored, bool forScan)
+    {
+        auto& owner = const_cast<Agentmaster::SessionInfo&>(stored);
+        ParkedSessionMembers parked{ owner, forScan };
+        Agentmaster::SessionInfo copy = owner; // every member except the parked ones, which read empty right now
+        if (forScan)
+        {
+            for (const auto& p : parked.Queue())
+            {
+                if (IsOpenScanPrompt(p))
+                {
+                    copy.queue.push_back(p);
+                }
+            }
+        }
+        return copy; // the guard restores the stored members after the return value is built
+    }
+
     // Agentmaster: a session's CONVERSATION-activity freshness — the newest of its real activity
     // signals (an authoritative hook, the transcript mtime, the hook-driven activity anchor).
     // Deliberately EXCLUDES lastObservedUnixMs (which only means "the survey looked at it just now",
@@ -233,12 +342,105 @@ namespace Agentmaster
     {
         std::lock_guard guard{ _mtx };
         std::vector<SessionInfo> out;
+        // Size the vector once (UI_THREAD.md §10a #4): growing it by doubling MOVES every record already
+        // copied (~30 members each) on each reallocation — ~21% of the scanner thread's time when it used this
+        // read. Counting the live records first is a walk over flags, no copies.
+        size_t liveCount = 0;
+        for (const auto& entry : _sessions)
+        {
+            if (entry.second.live)
+            {
+                ++liveCount;
+            }
+        }
+        out.reserve(liveCount);
         for (const auto& id : _order)
         {
             const auto it = _sessions.find(id);
             if (it != _sessions.end() && it->second.live)
             {
                 out.push_back(it->second);
+            }
+        }
+        return out;
+    }
+
+    std::optional<SessionInfo> SessionRegistry::GetWithoutQueue(const std::wstring& id) const
+    {
+        std::lock_guard guard{ _mtx };
+        const auto it = _sessions.find(id);
+        if (it == _sessions.end())
+        {
+            return std::nullopt;
+        }
+        return CopyLeanSessionLocked(it->second, false);
+    }
+
+    std::wstring SessionRegistry::GetTabToken(const std::wstring& id) const
+    {
+        std::lock_guard guard{ _mtx };
+        const auto it = _sessions.find(id);
+        return it == _sessions.end() ? std::wstring{} : it->second.tabToken;
+    }
+
+    std::vector<SessionTabBinding> SessionRegistry::LiveTabBindings() const
+    {
+        std::lock_guard guard{ _mtx };
+        std::vector<SessionTabBinding> out;
+        for (const auto& id : _order)
+        {
+            const auto it = _sessions.find(id);
+            if (it != _sessions.end() && it->second.live)
+            {
+                const SessionInfo& s = it->second;
+                out.push_back(SessionTabBinding{ s.id, s.workingDir, s.tabToken });
+            }
+        }
+        return out;
+    }
+
+    std::vector<std::wstring> SessionRegistry::ManagedCodexTabTokens() const
+    {
+        std::lock_guard guard{ _mtx };
+        std::vector<std::wstring> out;
+        for (const auto& id : _order)
+        {
+            const auto it = _sessions.find(id);
+            if (it == _sessions.end())
+            {
+                continue;
+            }
+            const SessionInfo& s = it->second;
+            // The same filter the observer applied to its full snapshot: a codex WE launched (not external),
+            // still open, whose ConPTY is known. An external codex stays in the census on purpose.
+            if (s.kind == AgentKind::Codex && s.live && !s.external && !s.tabToken.empty())
+            {
+                out.push_back(s.tabToken);
+            }
+        }
+        return out;
+    }
+
+    std::vector<SessionInfo> SessionRegistry::SnapshotLiveForScan() const
+    {
+        std::lock_guard guard{ _mtx };
+        std::vector<SessionInfo> out;
+        // Size once, as in SnapshotLive: a reallocation would move every lean record already built.
+        size_t liveCount = 0;
+        for (const auto& entry : _sessions)
+        {
+            if (entry.second.live)
+            {
+                ++liveCount;
+            }
+        }
+        out.reserve(liveCount);
+        for (const auto& id : _order)
+        {
+            const auto it = _sessions.find(id);
+            if (it != _sessions.end() && it->second.live)
+            {
+                out.push_back(CopyLeanSessionLocked(it->second, true));
             }
         }
         return out;

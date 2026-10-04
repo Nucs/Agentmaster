@@ -136,6 +136,7 @@ void TestWire();
 void TestRegistry();
 void TestRegistryFanout();
 void TestRegistrySnapshotLive();
+void TestRegistryLeanReads(); // UI_THREAD.md §10a #4 — the lean registry reads: GetWithoutQueue (no queue, everything else), GetTabToken, LiveTabBindings (the SnapshotLive set + order, three fields), ManagedCodexTabTokens (live + ours + tokened Codex only), SnapshotLiveForScan (open prompts only, the four display texts empty, the scanner predicates unchanged); every read leaves the stored record byte-for-byte intact
 void TestForkSourceIdEcho();
 void TestSummaryChainLinks(); // the summary's conversation chain: a /clear's SessionStart(source "clear") paired with the conversation whose SessionEnd(clear) arrived on its ConPTY (beats a fresher child record), the ConPTY fallback (live before archived), other sources / no candidate / no token => no link, per-ConPTY + consumed entries, an unknown ended id, first writer wins
 void TestRetiredHostToken(); // RETIRED HOSTS (SessionRegistry::RetireHostToken — the 2026-08-26 deactivate unbind + the restart archives): an observation / any hook from a replaced connection changes NOTHING on the record (token, pid, heartbeat, state, provenance); case-insensitive; per session; the new host still heard; Remove forgets; the per-session bound

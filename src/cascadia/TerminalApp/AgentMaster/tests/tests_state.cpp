@@ -1783,3 +1783,196 @@ void TestRegistrySnapshotLive()
     CHECK(SessionRegistry{}.SnapshotLive().empty(), "empty registry -> empty live snapshot");
 }
 
+// Agentmaster (UI_THREAD.md §10a #4 — the lean registry reads): each lean read must return what its periodic
+// caller reads and nothing it does not, and none may change the stored record. GetWithoutQueue and
+// SnapshotLiveForScan move members OUT of the stored record for the length of a copy and back, so this test
+// also proves the record reads the same after many such reads. The scanner predicates that read the queue
+// (ScanNeedsFreshTail, ShouldWarnOnBoxNotVisible) must answer the same on the lean copy as on the full one.
+void TestRegistryLeanReads()
+{
+    std::wprintf(L"SessionRegistry lean reads (UI_THREAD.md 10a #4):\n");
+    // One queued prompt; a Sent one gets a send time, as the real send path stamps it.
+    const auto prompt = [](const wchar_t* id, PromptStatus status, bool echoed, PromptOrigin origin) {
+        QueuedPrompt p;
+        p.id = id;
+        p.label = id;
+        p.text = std::wstring{ L"text of " } + id;
+        p.status = status;
+        p.echoed = echoed;
+        p.origin = origin;
+        p.sentAtUnixMs = (status == PromptStatus::Sent) ? 1000 : 0;
+        return p;
+    };
+    // A Codex session record for the ManagedCodexTabTokens filter.
+    const auto codex = [](const wchar_t* id, bool live, bool external, const wchar_t* token) {
+        SessionInfo s;
+        s.id = id;
+        s.kind = AgentKind::Codex;
+        s.live = live;
+        s.external = external;
+        s.tabToken = token;
+        return s;
+    };
+
+    SessionRegistry reg;
+    {
+        SessionInfo a;
+        a.id = L"arch";
+        a.live = false;
+        a.tabToken = L"TOK-ARCH";
+        a.queue.push_back(prompt(L"h0", PromptStatus::Sent, true, PromptOrigin::Autorun));
+        reg.Upsert(a);
+    }
+    {
+        SessionInfo s;
+        s.id = L"live-a";
+        s.title = L"Title A";
+        s.workingDir = L"C:\\a";
+        s.tabToken = L"TOK-A";
+        s.live = true;
+        s.started = true;
+        s.state = SessionState::WaitingForInput;
+        s.lastAssistantText = L"a long assistant reply";
+        s.recap = L"the recap";
+        s.pendingInput = L"an unsent draft";
+        s.pendingInputUnixMs = 1234;
+        s.pendingPasteRefs = L"paste #1 -> unresolved";
+        s.presenceStatus = L"idle";
+        s.pid = 4242;
+        s.autorunner.mode = AutorunnerMode::Full;
+        s.pendingBoxState = InputBoxState::NoBox;
+        s.pendingBoxStateUnixMs = 1; // long ago: the box warning's window has elapsed
+        s.queue.push_back(prompt(L"done", PromptStatus::Sent, true, PromptOrigin::Autorun)); // completed history
+        s.queue.push_back(prompt(L"typed", PromptStatus::Sent, true, PromptOrigin::Typed)); // completed history
+        s.queue.push_back(prompt(L"pend", PromptStatus::Pending, false, PromptOrigin::Autorun)); // open
+        s.queue.push_back(prompt(L"held", PromptStatus::Held, false, PromptOrigin::Autorun)); // open (legacy)
+        s.queue.push_back(prompt(L"flight", PromptStatus::Sent, false, PromptOrigin::Autorun)); // open: no echo yet
+        s.queue.push_back(prompt(L"failed", PromptStatus::Failed, false, PromptOrigin::Autorun)); // completed history
+        s.queue.push_back(prompt(L"skipped", PromptStatus::Skipped, false, PromptOrigin::Autorun)); // completed history
+        reg.Upsert(s);
+    }
+    {
+        SessionInfo b;
+        b.id = L"live-b";
+        b.workingDir = L"C:\\b";
+        b.live = true; // no host token yet
+        b.queue.push_back(prompt(L"b-done", PromptStatus::Sent, true, PromptOrigin::Typed));
+        reg.Upsert(b);
+    }
+    reg.Upsert(codex(L"codex-managed", true, false, L"TOK-C"));
+    reg.Upsert(codex(L"codex-external", true, true, L"TOK-X"));
+    reg.Upsert(codex(L"codex-archived", false, false, L"TOK-Z"));
+    reg.Upsert(codex(L"codex-notoken", true, false, L""));
+
+    const auto fullA = reg.Get(L"live-a");
+    CHECK(fullA && fullA->queue.size() == 7, "fixture: the stored record holds all 7 prompts");
+
+    // --- GetWithoutQueue: everything but the queue ---
+    const auto noQueue = reg.GetWithoutQueue(L"live-a");
+    CHECK(noQueue && noQueue->queue.empty(), "GetWithoutQueue: the queue comes back empty");
+    CHECK(noQueue && noQueue->title == L"Title A" && noQueue->workingDir == L"C:\\a" && noQueue->tabToken == L"TOK-A" &&
+              noQueue->state == SessionState::WaitingForInput && noQueue->pid == 4242 && noQueue->started,
+          "GetWithoutQueue: every other field as Get copies it");
+    CHECK(noQueue && noQueue->lastAssistantText == L"a long assistant reply" && noQueue->recap == L"the recap" &&
+              noQueue->pendingInput == L"an unsent draft" && noQueue->pendingPasteRefs == L"paste #1 -> unresolved",
+          "GetWithoutQueue: the display texts are KEPT (only the scan read leaves them out)");
+    CHECK(!reg.GetWithoutQueue(L"nope").has_value(), "GetWithoutQueue: unknown id -> nullopt");
+
+    // --- GetTabToken: the token alone ---
+    CHECK(reg.GetTabToken(L"live-a") == L"TOK-A", "GetTabToken: the stored token");
+    CHECK(reg.GetTabToken(L"live-b").empty(), "GetTabToken: a session no hook tied to a ConPTY reads empty");
+    CHECK(reg.GetTabToken(L"nope").empty(), "GetTabToken: an unknown id reads empty (like the null Get it replaced)");
+    CHECK(reg.GetTabToken(L"arch") == L"TOK-ARCH", "GetTabToken: an archived record still answers (Get did too)");
+
+    // --- LiveTabBindings: the SnapshotLive set and order, three fields ---
+    const auto liveFull = reg.SnapshotLive();
+    const auto bindings = reg.LiveTabBindings();
+    bool sameBindings = bindings.size() == liveFull.size();
+    for (size_t i = 0; sameBindings && i < bindings.size(); ++i)
+    {
+        sameBindings = bindings[i].id == liveFull[i].id && bindings[i].workingDir == liveFull[i].workingDir &&
+                       bindings[i].tabToken == liveFull[i].tabToken;
+    }
+    CHECK(sameBindings, "LiveTabBindings: one binding per live session, SnapshotLive order, the same three fields");
+    CHECK(bindings.size() == 5 && bindings[0].id == L"live-a" && bindings[1].id == L"live-b" && bindings[1].tabToken.empty(),
+          "LiveTabBindings: a live session without a token is included, so the size is the live count");
+    bool bindsArchived = false;
+    for (const auto& b : bindings)
+    {
+        bindsArchived = bindsArchived || b.id == L"arch" || b.id == L"codex-archived";
+    }
+    CHECK(!bindsArchived, "LiveTabBindings: archived records are left out");
+
+    // --- ManagedCodexTabTokens: live + ours + tokened Codex only ---
+    const auto codexTokens = reg.ManagedCodexTabTokens();
+    CHECK(codexTokens.size() == 1 && codexTokens[0] == L"TOK-C",
+          "ManagedCodexTabTokens: an external, an archived, a token-less Codex and every Claude session are left out");
+
+    // --- SnapshotLiveForScan: open prompts only, four texts empty, the rest as SnapshotLive ---
+    const auto scan = reg.SnapshotLiveForScan();
+    bool sameOrder = scan.size() == liveFull.size();
+    for (size_t i = 0; sameOrder && i < scan.size(); ++i)
+    {
+        sameOrder = scan[i].id == liveFull[i].id;
+    }
+    CHECK(sameOrder, "SnapshotLiveForScan: the SnapshotLive set and order");
+    const SessionInfo* leanA = nullptr;
+    const SessionInfo* leanB = nullptr;
+    for (const auto& s : scan)
+    {
+        leanA = (s.id == L"live-a") ? &s : leanA;
+        leanB = (s.id == L"live-b") ? &s : leanB;
+    }
+    const SessionInfo* fullLiveA = nullptr;
+    for (const auto& s : liveFull)
+    {
+        fullLiveA = (s.id == L"live-a") ? &s : fullLiveA;
+    }
+    CHECK(leanA && leanA->queue.size() == 3 && leanA->queue[0].id == L"pend" && leanA->queue[1].id == L"held" &&
+              leanA->queue[2].id == L"flight",
+          "SnapshotLiveForScan: the queue keeps the open prompts only (Pending, Held, Sent-unechoed), in queue order");
+    CHECK(leanA && leanA->queue.size() == 3 && leanA->queue[2].text == L"text of flight" && leanA->queue[2].sentAtUnixMs == 1000 &&
+              !leanA->queue[2].echoed && leanA->queue[2].origin == PromptOrigin::Autorun,
+          "SnapshotLiveForScan: an open prompt is copied whole");
+    CHECK(leanA && leanA->lastAssistantText.empty() && leanA->recap.empty() && leanA->pendingInput.empty() && leanA->pendingPasteRefs.empty(),
+          "SnapshotLiveForScan: lastAssistantText, recap, pendingInput and pendingPasteRefs come back empty");
+    CHECK(leanA && leanA->title == L"Title A" && leanA->tabToken == L"TOK-A" && leanA->presenceStatus == L"idle" && leanA->pid == 4242 &&
+              leanA->pendingInputUnixMs == 1234 && leanA->autorunner.mode == AutorunnerMode::Full &&
+              leanA->pendingBoxState == InputBoxState::NoBox && leanA->state == SessionState::WaitingForInput,
+          "SnapshotLiveForScan: every other field as SnapshotLive copies it");
+    CHECK(leanA && fullLiveA && ScanNeedsFreshTail(*leanA) && ScanNeedsFreshTail(*leanA) == ScanNeedsFreshTail(*fullLiveA),
+          "ScanNeedsFreshTail reads the same on the lean copy (the unechoed delivery is kept)");
+    const int64_t now = NowMsTest();
+    CHECK(leanA && fullLiveA && ShouldWarnOnBoxNotVisible(*leanA, now) && ShouldWarnOnBoxNotVisible(*leanA, now) == ShouldWarnOnBoxNotVisible(*fullLiveA, now),
+          "ShouldWarnOnBoxNotVisible reads the same on the lean copy (the waiting prompt is kept)");
+    CHECK(leanB && leanB->queue.empty() && !ScanNeedsFreshTail(*leanB),
+          "SnapshotLiveForScan: a queue of completed history only scans as empty, and not hot");
+
+    // --- every lean read leaves the stored record intact ---
+    for (int i = 0; i < 3; ++i)
+    {
+        (void)reg.SnapshotLiveForScan();
+        (void)reg.GetWithoutQueue(L"live-a");
+    }
+    const auto afterA = reg.Get(L"live-a");
+    bool queueIntact = afterA && fullA && afterA->queue.size() == fullA->queue.size();
+    for (size_t i = 0; queueIntact && i < afterA->queue.size(); ++i)
+    {
+        queueIntact = afterA->queue[i].id == fullA->queue[i].id && afterA->queue[i].text == fullA->queue[i].text &&
+                      afterA->queue[i].status == fullA->queue[i].status && afterA->queue[i].echoed == fullA->queue[i].echoed;
+    }
+    CHECK(queueIntact, "after repeated lean reads the stored queue is intact (parked and put back each time)");
+    CHECK(afterA && afterA->lastAssistantText == L"a long assistant reply" && afterA->recap == L"the recap" &&
+              afterA->pendingInput == L"an unsent draft" && afterA->pendingPasteRefs == L"paste #1 -> unresolved",
+          "after repeated lean reads the stored display texts are intact");
+    const auto liveAgain = reg.SnapshotLive();
+    CHECK(!liveAgain.empty() && liveAgain[0].id == L"live-a" && liveAgain[0].queue.size() == 7 && liveAgain[0].pendingInput == L"an unsent draft",
+          "SnapshotLive still copies whole records");
+
+    // --- an empty registry ---
+    SessionRegistry empty;
+    CHECK(empty.LiveTabBindings().empty() && empty.ManagedCodexTabTokens().empty() && empty.SnapshotLiveForScan().empty() &&
+              !empty.GetWithoutQueue(L"x").has_value() && empty.GetTabToken(L"x").empty(),
+          "empty registry: every lean read is empty");
+}
+

@@ -673,11 +673,17 @@ namespace Agentmaster
         // retired: the Fleet Observer's out-of-band PEB correlation subsumes it — O7.)
         const bool armed = _discoverArmed.load();
 
-        // LIVE sessions only (SnapshotLive): every use below — the reconcile loop, the cursor cleanup, the
-        // turn-in-flight probe — looks at live sessions alone, and the full Snapshot() deep-copied every
-        // record the profile ever held (1,348 on the 2026-09-25 release fleet, each with its prompt history)
-        // on every pass, i.e. several times a second while anything ran.
-        const auto sessions = _registry->SnapshotLive();
+        // LIVE sessions only: every use below — the reconcile loop, the cursor cleanup, the turn-in-flight
+        // probe — looks at live sessions alone, and the full Snapshot() deep-copied every record the profile
+        // ever held (1,348 on the 2026-09-25 release fleet, each with its prompt history) on every pass, i.e.
+        // several times a second while anything ran.
+        // And LEAN (UI_THREAD.md §10a #4): even SnapshotLive's copy of the live records was ~79% of this
+        // thread's time on the 555-tab release (~28 ms/s; the reconcile itself ~3 ms/s), most of it the
+        // prompt-queue history. SnapshotLiveForScan keeps only the OPEN prompts and leaves lastAssistantText,
+        // recap, pendingInput and pendingPasteRefs empty. ⚠ Code below must read this snapshot's queue only for
+        // open prompts (ScanNeedsFreshTail, the lost-send pre-filter, ShouldWarnOnBoxNotVisible) and never read
+        // those four texts from it; it Gets the fresh record before it changes anything (the existing pattern).
+        const auto sessions = _registry->SnapshotLiveForScan();
 
         bool anyLive = false;
         bool anyRunning = false;

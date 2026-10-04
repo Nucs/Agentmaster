@@ -85,6 +85,19 @@ namespace Agentmaster
     // dropped first. Each park/restart retires one; a handful covers rapid repeats on one tab.
     inline constexpr size_t kRetiredHostTokensPerSession = 8;
 
+    // Agentmaster (UI_THREAD.md §10a #4 — the lean registry reads): the three facts that tie one LIVE session
+    // to the tab that hosts it, copied WITHOUT the rest of the record. The tab reconcile
+    // (TerminalPage::_ReconcileClaudeTabsImpl) runs every ~2.5 s in every window and used to take a full
+    // SnapshotLive for exactly these three fields: a deep copy of every live session with its prompt-queue
+    // history and transcript texts, ~9 ms/s of the release UI thread at 555 tabs (measured 2026-10-04,
+    // UI_THREAD.md §10e). Returned by SessionRegistry::LiveTabBindings.
+    struct SessionTabBinding
+    {
+        std::wstring id; // the session id (the registry key)
+        std::wstring workingDir; // the launch working directory — the adopt path's fallback cwd
+        std::wstring tabToken; // the hosting ConPTY's WT_SESSION as stored (any case); EMPTY until a hook or the Fleet Observer reveals it
+    };
+
     class SessionRegistry
     {
     public:
@@ -111,6 +124,64 @@ namespace Agentmaster
         // thread, several times per refresh. Callers that need archived records (persistence, the
         // Sessions browser, restore) keep using Snapshot().
         std::vector<SessionInfo> SnapshotLive() const;
+
+        // --- Agentmaster (UI_THREAD.md §10a #4): the LEAN reads ---------------------------------------------
+        // Get, Snapshot and SnapshotLive deep-copy whole records: every prompt of the queue history (up to
+        // kMaxQueueHistoryEntries per session) and every transcript text. On the 555-tab release those copies
+        // cost ~48 ms/s (UI thread ~15, SessionScanner ~28, ProcessObserver ~5; UI_THREAD.md §10e), while the
+        // periodic paths that made them read a handful of fields. A periodic path should use the narrowest
+        // read below that still holds everything it reads. All are thread-safe and copy under the lock, so
+        // each costs what it returns.
+
+        // One record WITHOUT its prompt queue: every other field is copied as Get copies it, and `queue`
+        // comes back EMPTY. For a reader that never looks at the queue (the cache-warm and inferred-color
+        // sweeps), it skips the most expensive part of the copy.
+        // ⚠ An empty queue here means "not copied", never "nothing queued": a caller that reads the queue, or
+        // anything derived from it (a pending count, the next prompt), must use Get.
+        //   id      — the session id.
+        //   returns — the record minus its queue, or nullopt for an unknown id.
+        //   throws  — std::bad_alloc on allocation failure; the stored record is left intact.
+        std::optional<SessionInfo> GetWithoutQueue(const std::wstring& id) const;
+
+        // The session's host token (SessionInfo::tabToken) alone — the one field the ~2.5 s liveness sweep
+        // reads per tab, without a copy of the record around it.
+        //   id      — the session id.
+        //   returns — the WT_SESSION as stored (any case). EMPTY both for an unknown id and for a session that
+        //             no hook or observation has tied to a ConPTY yet; use Contains to tell the two apart.
+        //   throws  — std::bad_alloc on allocation failure only.
+        std::wstring GetTabToken(const std::wstring& id) const;
+
+        // One SessionTabBinding per LIVE session, in insertion order (the SnapshotLive set and order). A live
+        // session that has no host token yet is included with an empty tabToken, so the size is the live count.
+        //   returns — the bindings; empty when nothing is live.
+        //   throws  — std::bad_alloc on allocation failure only.
+        std::vector<SessionTabBinding> LiveTabBindings() const;
+
+        // The host tokens of the MANAGED Codex sessions — live, launched by us (not external), with a token —
+        // in insertion order. The Fleet Observer leaves these codex processes out of its observe-only External
+        // census, because each already has a managed card; it used to take a FULL Snapshot() of every record
+        // (the archived ones and every queue included) on each 2 s survey to collect exactly this.
+        //   returns — the tokens as stored (any case); empty when no managed Codex session is live.
+        //   throws  — std::bad_alloc on allocation failure only.
+        std::vector<std::wstring> ManagedCodexTabTokens() const;
+
+        // The SessionScanner's per-pass snapshot: the LIVE sessions (the SnapshotLive set and order), each
+        // copied without two parts the scanner never reads:
+        //   - The queue keeps only its OPEN prompts — Pending, the legacy Held, and Sent but not yet echoed —
+        //     complete and in their order. The completed history (echoed Sent prompts, Typed captures, Skipped,
+        //     Failed) is not copied. The scanner reads the queue to find an unacknowledged delivery
+        //     (ScanNeedsFreshTail, the lost-send pre-filter) and a waiting prompt (ShouldWarnOnBoxNotVisible),
+        //     and it re-reads the full record with Get before it changes a prompt.
+        //   - lastAssistantText, recap, pendingInput and pendingPasteRefs come back EMPTY. The scanner writes the
+        //     first two into the live record (UpdateQuiet) and never reads any of the four from its snapshot.
+        // Before this, the full copy was ~79% of the scanner thread's time on the release (~28 ms/s at 555 tabs),
+        // against ~3 ms/s for its own reconcile work (UI_THREAD.md §10e).
+        // ⚠ Contract: a reader of this snapshot may look at the queue only for open prompts, and must never read
+        // the four emptied texts from it. Anything else needs Get.
+        //   returns — the lean live records, insertion order.
+        //   throws  — std::bad_alloc on allocation failure; the stored records are left intact.
+        std::vector<SessionInfo> SnapshotLiveForScan() const;
+
         size_t Count() const;
 
         // The single entry point that applies an authoritative hook event and mutates

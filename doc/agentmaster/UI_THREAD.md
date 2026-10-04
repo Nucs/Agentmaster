@@ -468,3 +468,43 @@ What this adds to §10:
 - The terminals already draw only on change, with vsync (`Present1(1, 0)` in AtlasEngine), and hidden
   tabs draw nothing (RENDERING.md §4c): 21 terminals drew 0 frames in 30 s.
 - A lower refresh rate for the monitor would halve the loop, but for every app on that display.
+
+### 10g. #4 in the code (2026-10-04, the engine part tested, the UI part not built yet)
+
+The periodic paths that copied whole session records now copy only what they read. A whole record carries
+every prompt of the queue history (up to 200 per session) and every transcript text. §10e measured these
+copies at ~48 ms/s.
+
+- **New in `SessionRegistry`:**
+
+  | Read | What it copies | Caller (before → after) | Measured cost it removes |
+  |---|---|---|---|
+  | `LiveTabBindings()` | id, working dir and host token of each live session (`SessionTabBinding`) | `_ReconcileClaudeTabsImpl`: `SnapshotLive` → this | ~9 ms/s, UI thread |
+  | `GetTabToken(id)` | the host token alone | the liveness sweep: `Get` → this | ~2 ms/s, UI thread |
+  | `GetWithoutQueue(id)` | the record without its queue | the cache-warm and inferred-color sweeps: `Get` → this | ~3 ms/s, UI thread (most of it) |
+  | `ManagedCodexTabTokens()` | the host tokens of the managed Codex sessions | the observer survey: `Snapshot()` → this | ~5 ms/s, observer |
+  | `SnapshotLiveForScan()` | live records with only the OPEN prompts (Pending, Held, Sent-unechoed), and lastAssistantText, recap, pendingInput and pendingPasteRefs empty | the scanner pass: `SnapshotLive` → this | most of ~28 ms/s, scanner |
+
+- **How a lean copy is made.** `ParkedSessionMembers` moves the members the copy must not contain out of
+  the stored record, the record is copied, and the guard moves them back, also when the copy throws.
+  Moving a `std::vector` or `std::wstring` is noexcept and constant time. So every other member, a member
+  added to `SessionInfo` later included, is copied exactly as `Get` copies it, and no field list can fall
+  behind. The parking happens under the registry mutex, which every reader takes, so no thread can see the
+  parked state.
+- **`SnapshotLive` reserves once.** It counts the live records first. Before, each reallocation of the
+  result moved every record already copied: ~21% of the scanner thread.
+- **The scanner's contract** (comment at the call): it reads the queue only for open prompts
+  (`ScanNeedsFreshTail`, the lost-send pre-filter, `ShouldWarnOnBoxNotVisible`), never the four emptied
+  texts, and it `Get`s the fresh record before it changes anything, as before.
+- **Not changed:** the Manager lens, the side panel and the pending-input sweep keep `SnapshotLive` / `Get`.
+  They read the queue or the draft, and the profiles in §10 and §10e did not show them.
+- **Checked:** `TestRegistryLeanReads` in the m5 harness (each read's content and order, the open-prompt
+  filter, the emptied texts, the scanner predicates answer the same on the lean copy, and the stored
+  record is intact after repeated reads). The three changed engine files compile cleanly with the app's
+  warning settings (/W4 /WX, the five always-error warnings, /sdl /permissive-). The harness: 5,325
+  checks, 3 failures, the known taskbar-badge baseline. The four `TerminalPage.AgentObserver.cpp` call
+  sites are not built.
+- **Check after the build:** in a stacksnap profile, `SessionRegistry::SnapshotLive` gone from the UI
+  thread and from the scanner, `SessionRegistry::Snapshot` gone from the observer, and the scanner thread
+  at a few ms/s while sessions sit idle. The tab reconcile, the liveness sweep (archives a dead claude's
+  tab), the spark crown, the inferred tab colors and the managed Codex cards behave as before.
