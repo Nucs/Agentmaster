@@ -6,6 +6,8 @@
 
 #include "winrt/Microsoft.UI.Xaml.Controls.h"
 
+#include "AgentAmbientAnimation.h" // Agentmaster (UI_THREAD.md §10a #1): the draft-dots pulse + spark crown on the Composition API
+
 #include "TabHeaderControl.g.h"
 
 namespace winrt::TerminalApp::implementation
@@ -81,32 +83,47 @@ namespace winrt::TerminalApp::implementation
         WINRT_OBSERVABLE_PROPERTY(winrt::TerminalApp::TerminalTabStatus, TabStatus, PropertyChanged.raise);
 
     private:
-        // Agentmaster (PENDING_INPUT.md): the UNSENT-DRAFT "3 dots" pulse below the status dot. Built
-        // imperatively in the constructor (so it targets the 3 named dot ellipses by ref — no resource
-        // lookup) and started ONLY while TabStatus.AgentPendingVisible is true, so an idle fleet never
-        // holds the compositor at 60fps. TabStatus is assigned by the Tab AFTER construction, so
+        // Agentmaster (PENDING_INPUT.md): the UNSENT-DRAFT "3 dots" pulse below the status dot. Set up in
+        // the constructor on the 3 named dot ellipses (by ref — no resource lookup) and started ONLY while
+        // TabStatus.AgentPendingVisible is true. TabStatus is assigned by the Tab AFTER construction, so
         // _HookTabStatusForPending (re)subscribes to its PropertyChanged whenever TabStatus changes.
-        // (The same one subscription also feeds the bookmark-tag badges below.)
+        // (The same one subscription also feeds the spark crown and the bookmark-tag badges below.)
         void _HookTabStatusForPending();
         // RENDERING.md §4c: also gated on this header being in the live tree (IsLoaded — re-evaluated on
         // Loaded / Unloaded), on a STARTED tab (a dormant tab's remembered draft shows still dots) and on
         // Windows' animation effects (AgentAnimationsEnabled). Never throws (logged).
         void _UpdatePendingAnimation();
-        winrt::Windows::UI::Xaml::Media::Animation::Storyboard _pendingDotsStoryboard{ nullptr };
-        // RENDERING.md §4c: whether _pendingDotsStoryboard is currently running — the change gate, because
-        // Begin() on a running storyboard restarts it (a visible jump) and the callers re-assert often.
+        // UI_THREAD.md §10a #1: the pulse runs as three composition Opacity loops (AgentDotsPulse), NOT a
+        // XAML storyboard. While ANY storyboard runs, XAML walks the window's whole composition tree on every
+        // display frame (~2.7 ms a frame, 50-70% of the release UI thread with a handful of pulses running);
+        // a composition loop costs the UI thread nothing per frame. The animations are built on the first
+        // start, so a header that never pulses allocates nothing.
+        AgentDotsPulse _pendingDotsPulse;
+        // RENDERING.md §4c: whether _pendingDotsPulse is currently running — the change gate, because a
+        // restart of a running pulse jumps the wave back to its start and the callers re-assert often.
         bool _pendingDotsRunning{ false };
-        // Agentmaster (SPARK CROWN — the cache-warm hint): the glow breath + the three rising embers,
-        // built imperatively in the constructor beside the pending-dots pulse and run ONLY while
-        // TabStatus.AgentCacheWarmVisible is true. Same start/stop discipline, and for the same reason: a
-        // cache stays warm for MINUTES, so an always-on storyboard would hold the compositor awake across
-        // every recently-used tab in the fleet. Fed by the one _HookTabStatusForPending subscription.
+        // Agentmaster (SPARK CROWN — the cache-warm hint): the glow breath + the three rising embers, set up
+        // in the constructor beside the pending-dots pulse and run ONLY while TabStatus.AgentCacheWarmVisible
+        // is true. Same start/stop discipline, and for the same reason: a cache stays warm for MINUTES, so an
+        // always-on animation would keep the compositor busy across every recently-used tab in the fleet.
+        // Fed by the one _HookTabStatusForPending subscription.
         // RENDERING.md §4c: also gated on IsLoaded and Windows' animation effects (a still crown = the steady
         // glow, embers hidden). Never throws (logged).
         void _UpdateCacheWarmAnimation();
-        winrt::Windows::UI::Xaml::Media::Animation::Storyboard _cacheWarmStoryboard{ nullptr };
-        // RENDERING.md §4c: whether _cacheWarmStoryboard is currently running — the same change gate.
+        // UI_THREAD.md §10a #1: the glow breathes through a composition Opacity loop on the XAML glow grid
+        // (0.45 -> 0.62 -> 0.28 -> 0.45, begun and ended on its still 0.45), and the embers are composition
+        // visuals of our own on the sparks canvas (AgentEmberSparks) — a MOVING XAML element would make XAML
+        // track it every frame for hit-testing, which is the per-frame UI-thread work this removes.
+        AgentOpacityLoop _cacheWarmGlow;
+        AgentEmberSparks _cacheWarmEmbers;
+        // RENDERING.md §4c: whether the glow + embers are currently running — the same change gate.
         bool _cacheWarmRunning{ false };
+        // UI_THREAD.md §10a #1: copy TabStatus.AgentCacheWarmBrush's color onto the embers. The XAML ellipses
+        // they replace bound that brush in XAML; composition visuals cannot, so the TabStatus subscription
+        // calls this on every brush change (TerminalPage::_SetTabCacheWarm sets the brush just before the
+        // crown turns on, and again on a real color change), and _UpdateCacheWarmAnimation calls it before
+        // a start. A null or non-solid brush keeps the embers' current color. Never throws (logged).
+        void _SyncCacheWarmEmberColor() noexcept;
         winrt::TerminalApp::TerminalTabStatus _pendingHookedStatus{ nullptr };
         winrt::Windows::UI::Xaml::Data::INotifyPropertyChanged::PropertyChanged_revoker _pendingStatusRevoker{};
 

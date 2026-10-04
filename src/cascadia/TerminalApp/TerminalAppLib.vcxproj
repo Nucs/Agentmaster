@@ -169,6 +169,7 @@
     </ClInclude>
     <!-- Agentmaster -->
     <ClInclude Include="AgentManagerContent.h" />
+    <ClInclude Include="AgentAmbientAnimation.h" />
     <ClInclude Include="AgentClipboard.h" />
     <ClInclude Include="AgentCopyActions.h" />
     <ClInclude Include="AgentLocalTooltip.h" />
@@ -363,6 +364,9 @@
     <ClCompile Include="AgentTabOverlay.Summary.cpp" />
     <!-- Agentmaster: the transcript overlay ("Show Transcript") — the window-level Markdown reading view. -->
     <ClCompile Include="AgentTranscriptOverlay.cpp" />
+    <!-- Agentmaster (UI_THREAD.md §10a #1): the draft-dots pulse + spark crown on the Composition API — the one
+         TU that pays for the full Windows.UI.Composition projection (AgentAmbientAnimation.h stays light). -->
+    <ClCompile Include="AgentAmbientAnimation.cpp" />
     <!-- The engine is plain C++ (no WinRT): opt out of the WinRT precompiled header. -->
     <ClCompile Include="AgentMaster\SessionRegistry.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

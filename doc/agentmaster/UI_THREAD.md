@@ -330,3 +330,56 @@ All in `TabHeaderControl.cpp` / `.h`; no other file changed:
 - **Check after the build.** Tag a tab, then reorder, scroll and resize the strip, and rename the tab:
   the ribbons must follow every time. In a stacksnap profile during session churn,
   `_PositionTagBadgesNow` and `CEventManager::RemoveObject` must be gone or near zero.
+
+### 10c. #1 in the code (2026-10-04, not built yet)
+
+Every looping indicator now runs on the Composition API. No XAML storyboard runs forever any more, so
+XAML's frame loop can stop while a pulse or a crown is on screen.
+
+- **New:** `AgentAmbientAnimation.h` / `.cpp` (the `.cpp` added to `TerminalAppLib.vcxproj`).
+  - `AgentOpacityLoop`: one XAML element's `Opacity`, run through `UIElement::StartAnimation` (Target
+    "Opacity"). The loop is linear, repeats forever, and begins and ends on the element's still value.
+  - `AgentDotsPulse`: the three staggered dot loops of a draft cluster.
+  - `AgentEmberSparks`: the crown's three embers as composition ellipse visuals of our own, attached to
+    the sparks canvas with `ElementCompositionPreview::SetElementChildVisual`.
+  - The header only declares; the `.cpp` is the one translation unit that includes the 1.1 MB
+    `winrt/Windows.UI.Composition.h`.
+- **Changed:**
+  - `TabHeaderControl.cpp` / `.h`: the two storyboards became `_pendingDotsPulse`, `_cacheWarmGlow` and
+    `_cacheWarmEmbers`. The RENDERING.md §4c gates and the change gates are unchanged. The embers copy
+    `AgentCacheWarmBrush`'s color through the `TabStatus` subscription (`_SyncCacheWarmEmberColor`).
+  - `TabHeaderControl.xaml`: the three spark ellipses are gone; the canvas only hosts the embers.
+  - `AgentManagerContent.Internal.h` `BuildPendingDots` (board and side-panel cards): the same
+    `AgentDotsPulse`, started on `Loaded` and stopped on `Unloaded`. The two empty `catch (...)` blocks
+    now log (Rule #18).
+- **The look is the same.**
+  - Dots: 1.0 → 0.3 → 1.0 per 1 s, 160 ms apart. The storyboard ran 0.3 → 1.0 → 0.3, the same wave half
+    a cycle later.
+  - Glow: 0.45 → 0.62 → 0.28 → 0.45 per 2.8 s, the storyboard's 0.28 ↔ 0.62 breath around the still
+    0.45.
+  - Embers: the same places, sizes, +1.4 → −1.6 DIP rise, 1150 ms cycle and 0 / 380 / 760 ms stagger.
+- **Why these two paths** (read in the WinUI source, the lifted system XAML):
+  - `Opacity` through `UIElement::StartAnimation`: `PropertySetListener::ShouldTrackFacadeProperty`
+    excludes `Opacity`, so XAML gets no per-frame callback. `HasWUCOpacityAnimation` stops
+    `hwwalk.cpp` from culling an element whose static `Opacity` is 0.
+  - A hand-out visual (`GetElementVisual`) would be culled at `Opacity` 0. XAML also writes
+    `UIElement.Opacity` into it whenever that property changes, and a direct set cancels a running
+    composition animation.
+  - Motion is never on a XAML element. A `Translation` animation makes XAML dirty the element on every
+    frame (`NotifyVector3PropertyChanged` → `NWSetTransformDirty`), for hit-testing.
+  - `UIElement::StopAnimation` applies `SetToFinalValue`, then XAML writes the stopped value back into
+    the property. Because every loop ends on the still value, a stopped pulse shows exactly the still
+    dots, and the write-back changes nothing.
+- **Limits:**
+  - The embers are composition visuals: no XAML high-contrast opacity override, and positions that
+    are not rounded to pixels, at a 2.4 DIP size.
+  - The compositor (DWM) still works on every frame while something animates. That cost is off our UI
+    thread.
+- **Check after the build:**
+  - With a draft in a started tab, or a warm crown on screen, XAML's frame thread
+    (`Windows.UI.Xaml.dll+0x6F59C0` in `threadcensus`) wakes ~3 times/s, not ~65.
+  - In a stacksnap profile, `SubmitPrimitiveCompositionCommands` and `CTimeManager::Tick` drop to near
+    zero.
+  - The dots pulse in the header and in the side panel. Still dots and the still crown look as before.
+  - The embers follow the tab's color, also after a tab-color change.
+  - No `[exc]` line with "pending-dots pulse", "cache-warm crown" or "ember color".

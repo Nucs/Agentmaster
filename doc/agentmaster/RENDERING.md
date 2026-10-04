@@ -224,6 +224,9 @@ is set (`LBe()` in its bundle), and every Agentmaster tab sets it.
   work on every display frame (60 Hz here).
 - A header outside the strip's realized range is not in the visual tree, so it draws nothing. Whether
   its running storyboard still costs UI-thread work is not verified.
+- Later: §4c (below) gated these storyboards, and UI_THREAD.md §10c (2026-10-04, not built yet) replaced
+  them with composition animations, because even a few running storyboards kept XAML's frame loop at
+  60 Hz with a ~2.7 ms tree walk per frame (UI_THREAD.md §10).
 
 **The release's numbers (10 s samples).**
 
@@ -299,6 +302,8 @@ that draw, and devices kept by every tab ever viewed.
 - A still spark crown is the steady glow, without embers.
 - A change gate (`_pendingDotsRunning` / `_cacheWarmRunning`) keeps re-asserts from restarting a
   running storyboard.
+- Since UI_THREAD.md §10c (not built yet) the pulse and the crown are composition animations
+  (`AgentAmbientAnimation`), started and stopped by these same gates.
 
 **Expected effect** (projected from §4b; measure it after the build):
 - Frames: only on-screen terminals paint. On the release that removes 5 of the 6 painting terminals.

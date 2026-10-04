@@ -161,8 +161,11 @@
                   wrapped in ONE Grid so a SINGLE Opacity animation breathes the whole halo (nested opacity
                   multiplies) instead of one animation per disc. 16px stays inside the 18px cell, so nothing
                   is clipped by the tab header. IsHitTestVisible=False: decorative. Tune knobs: the two
-                  Widths/Heights (halo spread), their Opacity ratio (falloff steepness), and the storyboard's
-                  Opacity range in TabHeaderControl.cpp (breath depth).  -->
+                  Widths/Heights (halo spread), their Opacity ratio (falloff steepness), and the glow loop's
+                  key frames in TabHeaderControl.cpp (breath depth). UI_THREAD.md §10a #1: the breath is a
+                  COMPOSITION Opacity loop (AgentOpacityLoop), not a storyboard, and it begins and ends on
+                  this Opacity="0.45" — keep the two in step, and never set this Opacity from code while the
+                  crown runs (a static set cancels the loop).  -->
             <Grid x:Name="HeaderCacheWarmGlow"
                   HorizontalAlignment="Center"
                   VerticalAlignment="Center"
@@ -296,68 +299,46 @@
                   Triage state colour reads exactly as before — the whole point of this design.
                   Drawn LAST, i.e. ON TOP of every other glyph INCLUDING the favourite crown: the crown owns
                   the cell's top-left and the centre spark would otherwise flicker behind it; over it, the
-                  embers simply read as sparks coming off the crown. A Canvas (not margins on a Grid) so each
-                  spark's position is stated as plain Left/Top instead of an alignment-plus-margin puzzle.
-                  Each carries its own TranslateTransform, which the storyboard drives (Y) alongside an
-                  opacity keyframe — built + started/stopped in code-behind (_UpdateCacheWarmAnimation), so a
-                  fleet whose caches are all cold animates NOTHING. Base Opacity="0" so a spark is invisible
-                  until the storyboard actually runs it (a warm tab whose storyboard failed to start shows
-                  the glow alone, never three frozen dots). The rise is bounded to keep the visible part
-                  inside the 18px cell — anything above it is CLIPPED by the tab header (the same trap that
-                  once truncated the 13px flash ring into a square). IsHitTestVisible=False: decorative.
-                  Tune knobs: Canvas.Left/Top (the cluster's shape), Width/Height (ember size), and the
-                  storyboard's Y range / duration / stagger in TabHeaderControl.cpp.  -->
+                  embers simply read as sparks coming off the crown.
+                  UI_THREAD.md §10a #1: the embers are NOT XAML elements any more. This empty Canvas is only
+                  their HOST: AgentEmberSparks (AgentAmbientAnimation.cpp) attaches three composition ellipse
+                  visuals of its own to it (ElementCompositionPreview::SetElementChildVisual) and runs each one's
+                  rise + fade as composition animations. A moving XAML element made XAML track its position on
+                  every display frame (hit-testing), and any running storyboard made XAML walk the window's
+                  whole composition tree every frame; composition visuals cost the UI thread nothing per frame.
+                  The embers keep the look of the XAML ellipses they replace: the same Canvas.Left / Canvas.Top
+                  spots (3.8,2.8 / 7.6,1.6 / 11.8,2.8), sizes (2.4 / 2.8 / 2.4), +1.4 -> -1.6 rise over 1150 ms
+                  and 0 / 380 / 760 ms stagger; their color is copied from TabStatus.AgentCacheWarmBrush
+                  (TabHeaderControl::_SyncCacheWarmEmberColor), since a composition visual cannot x:Bind. They are
+                  built on the tab's first warm moment, so a fleet whose caches are all cold creates NOTHING; at
+                  rest each ember is hidden (a warm tab whose embers failed to start shows the glow alone, never
+                  three frozen dots). The rise is bounded to keep the visible part inside the 18px cell —
+                  anything above it is CLIPPED by the tab header (the same trap that once truncated the 13px
+                  flash ring into a square). Collapsing this Canvas hides the embers with it.
+                  IsHitTestVisible=False: decorative. Tune knobs: kEmbers / kEmberCycle / kEmberStagger /
+                  kEmberRiseFrom / kEmberRiseTo in AgentAmbientAnimation.cpp. Nothing else may call
+                  SetElementChildVisual on this Canvas: an element holds ONE child visual, and a second call
+                  would replace the embers.  -->
             <Canvas x:Name="HeaderCacheWarmSparks"
                     Width="18"
                     Height="18"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Top"
                     IsHitTestVisible="False"
-                    Visibility="{x:Bind TabStatus.AgentCacheWarmVisible, Mode=OneWay}">
-                <Ellipse x:Name="HeaderCacheSpark0"
-                         Canvas.Left="3.8"
-                         Canvas.Top="2.8"
-                         Width="2.4"
-                         Height="2.4"
-                         Opacity="0"
-                         Fill="{x:Bind TabStatus.AgentCacheWarmBrush, Mode=OneWay}">
-                    <Ellipse.RenderTransform>
-                        <TranslateTransform />
-                    </Ellipse.RenderTransform>
-                </Ellipse>
-                <Ellipse x:Name="HeaderCacheSpark1"
-                         Canvas.Left="7.6"
-                         Canvas.Top="1.6"
-                         Width="2.8"
-                         Height="2.8"
-                         Opacity="0"
-                         Fill="{x:Bind TabStatus.AgentCacheWarmBrush, Mode=OneWay}">
-                    <Ellipse.RenderTransform>
-                        <TranslateTransform />
-                    </Ellipse.RenderTransform>
-                </Ellipse>
-                <Ellipse x:Name="HeaderCacheSpark2"
-                         Canvas.Left="11.8"
-                         Canvas.Top="2.8"
-                         Width="2.4"
-                         Height="2.4"
-                         Opacity="0"
-                         Fill="{x:Bind TabStatus.AgentCacheWarmBrush, Mode=OneWay}">
-                    <Ellipse.RenderTransform>
-                        <TranslateTransform />
-                    </Ellipse.RenderTransform>
-                </Ellipse>
-            </Canvas>
+                    Visibility="{x:Bind TabStatus.AgentCacheWarmVisible, Mode=OneWay}" />
             <!--  Agentmaster (PENDING_INPUT.md): the UNSENT-DRAFT "3 dots" indicator. When the observer
                   detects text typed but NOT yet submitted in this tab's Claude input box (the debounced
                   SessionInfo.pendingInput -> TabStatus.AgentPendingVisible), a tiny 3-dot cluster pulses
                   at the BOTTOM of the status-dot wrap, just below the dot — a calm "you have a message
                   waiting here" cue. Its color is user-configurable as a LIGHT/DARK pair, contrast-picked
                   from the tab's per-dir color so it's never invisible (TabStatus.AgentPendingBrush, set by
-                  TerminalPage::_SetTabPending). The staggered opacity pulse storyboard is BUILT and
+                  TerminalPage::_SetTabPending). The staggered opacity pulse is set up and
                   started/stopped in code-behind (TabHeaderControl.cpp _UpdatePendingAnimation), so it
-                  runs ONLY while this tab is actually pending — an idle fleet never holds the compositor
-                  at 60fps. The dots are 2.5px on a 1.5px gap (~10px), centred in the reserved Row 1 band
+                  runs ONLY while this tab is actually pending — an idle fleet animates nothing.
+                  UI_THREAD.md §10a #1: the pulse is three COMPOSITION Opacity loops (AgentDotsPulse), not a
+                  storyboard, so a pulsing tab costs the UI thread nothing per frame; each loop begins and ends
+                  on the dots' still Opacity 1.0 — never set a dot's Opacity in XAML or code (a static set
+                  cancels its loop). The dots are 2.5px on a 1.5px gap (~10px), centred in the reserved Row 1 band
                   (strictly BELOW the 18px glyph cell, so they clear the dot AND the favorite star's lower
                   points without any per-favorite offset). IsHitTestVisible=False: decorative.  -->
             <StackPanel x:Name="HeaderPendingDots"

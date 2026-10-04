@@ -27,6 +27,8 @@
 #pragma once
 
 #include "AgentClipboard.h" // RobustCopyTextToClipboard — the retry-looped Win32 writer CopyTextToClipboard routes through
+#include "AgentAmbientAnimation.h" // AgentDotsPulse — the unsent-draft dots' pulse on the Composition API (BuildPendingDots)
+#include "AgentCatchLog.h" // AgentLogCaughtException — Rule #18 forensics for a refused pulse start / stop (BuildPendingDots)
 
 namespace
 {
@@ -51,25 +53,30 @@ namespace
     }
 
     // Agentmaster (PENDING_INPUT.md): a small animated "3 dots" cluster for a board card / row that has
-    // an UNSENT draft — three goldenrod dots pulsing their opacity 0.3<->1.0 in a 160ms-phase-shifted
-    // wave (the classic "typing"/waiting cue), mirroring the per-tab strip pulse. The storyboard targets
-    // the dots by ref (no name/resource lookup), BEGINS on Loaded and STOPS on Unloaded. The Unloaded
-    // Stop() is load-bearing: a STARTED Forever storyboard is held by the XAML animation clock (it
-    // never completes), and that hold pins its target Ellipses — so a board rebuild alone did NOT
-    // release a dropped card's dots (one leaked cluster per unsent-draft card per rebuild). The Loaded
-    // closure keeps the storyboard alive by design; the pair is symmetric, so a row re-entering the
-    // tree re-Begins. dotPx sizes the dots (cards: 5px). `color` is the contrast-picked pending-dots
-    // color (PendingDotsColorFor) — defaulting to the historical gold so a caller that doesn't care is
-    // unchanged.
-    // RENDERING.md §4c: `animated` = false builds STILL dots (full opacity, no storyboard at all) — for a
+    // an UNSENT draft — three goldenrod dots pulsing their opacity 1.0 -> 0.3 -> 1.0 in a 160ms-phase-shifted
+    // wave (the classic "typing"/waiting cue), mirroring the per-tab strip pulse. The pulse drives the dots
+    // by ref (no name/resource lookup), STARTS on Loaded and STOPS on Unloaded; the pair is symmetric, so a
+    // row re-entering the tree restarts it. dotPx sizes the dots (cards: 5px). `color` is the contrast-picked
+    // pending-dots color (PendingDotsColorFor) — defaulting to the historical gold so a caller that doesn't
+    // care is unchanged.
+    // UI_THREAD.md §10a #1: the pulse is three COMPOSITION Opacity loops (AgentDotsPulse, the same one the
+    // tab header runs), not a storyboard. While ANY storyboard runs, XAML walks the window's whole
+    // composition tree on every display frame — and the side panel keeps ALL its cards loaded, so one
+    // started session's draft kept the release's UI thread busy 50-70% of the time (UI_THREAD.md §10). A
+    // composition loop costs the UI thread nothing per frame. Each loop ends on the still 1.0, so a stopped
+    // card shows still dots. The Unloaded stop is still kept: it ends the compositor's work for a card that
+    // left the tree (a dropped card's pulse is released with its handlers either way — the pulse holds its
+    // panel only weakly, so the handlers it lives in close no reference cycle).
+    // RENDERING.md §4c: `animated` = false builds STILL dots (full opacity, no animation at all) — for a
     // session whose tab has not started (a dormant tab's REMEMBERED draft), matching the tab strip. Still
-    // dots are also built whenever Windows' animation effects are off (AgentAnimationsEnabled): every
-    // running Forever storyboard keeps XAML and DWM working on every display frame.
+    // dots are also built whenever Windows' animation effects are off (AgentAnimationsEnabled): honoring
+    // that switch is an accessibility rule, and an animation still costs the compositor (DWM) every frame.
     // Parameters: dotPx — dot diameter; color — dot fill; animated — pulse (true) or still (false).
     // Returns: the 3-dot row, ready to append.
+    // Throws winrt::hresult_error only when XAML refuses to build the elements (off the UI thread); a refused
+    // pulse start / stop is caught and logged in the handlers, leaving still dots.
     StackPanel BuildPendingDots(double dotPx = 5.0, Color color = ColorHelper::FromArgb(0xFF, 0xE0, 0xA9, 0x2B), bool animated = true)
     {
-        namespace MA = winrt::Windows::UI::Xaml::Media::Animation;
         StackPanel row;
         row.Orientation(Orientation::Horizontal);
         row.Spacing(3);
@@ -86,42 +93,34 @@ namespace
         }
         if (!animated || !winrt::TerminalApp::implementation::AgentAnimationsEnabled())
         {
-            // Still dots: no storyboard, so nothing ticks and nothing needs the Loaded/Unloaded pair.
+            // Still dots: no animation, so nothing runs and nothing needs the Loaded/Unloaded pair.
             return row;
         }
-        MA::Storyboard sb;
-        for (int i = 0; i < 3; ++i)
-        {
-            MA::DoubleAnimation a;
-            a.From(0.3);
-            a.To(1.0);
-            a.Duration(Duration{ std::chrono::milliseconds(500) });
-            a.BeginTime(TimeSpan{ std::chrono::milliseconds(160 * i) });
-            a.AutoReverse(true);
-            MA::RepeatBehavior forever;
-            forever.Type = MA::RepeatBehaviorType::Forever; // a value struct — its members are fields, not setters
-            a.RepeatBehavior(forever);
-            MA::Storyboard::SetTarget(a, dots[i]);
-            MA::Storyboard::SetTargetProperty(a, L"Opacity");
-            sb.Children().Append(a);
-        }
-        row.Loaded([sb](auto&&, auto&&) {
+        // One pulse per cluster, shared by the two handlers below (they are its only owners). The row is the
+        // compositor anchor, so the dots never get a hand-out visual; the pulse builds its composition
+        // animations on its first start, so a card that never enters the tree allocates none.
+        const auto pulse = std::make_shared<winrt::TerminalApp::implementation::AgentDotsPulse>(
+            row, std::array<winrt::Windows::UI::Xaml::UIElement, 3>{ dots[0], dots[1], dots[2] });
+        row.Loaded([pulse](auto&&, auto&&) {
             try
             {
-                sb.Begin();
+                pulse->Start();
             }
             catch (...)
             {
+                // The dots stay still (full opacity) — the draft stays visible; Rule #18: logged.
+                ::Agentmaster::AgentLogCaughtException(L"card pending-dots pulse start");
             }
         });
-        // Release the animation clock's hold on the storyboard + its dot targets (header note above).
-        row.Unloaded([sb](auto&&, auto&&) {
+        // Stop when the card leaves the tree, so the compositor stops animating a card nobody can see.
+        row.Unloaded([pulse](auto&&, auto&&) {
             try
             {
-                sb.Stop();
+                pulse->Stop();
             }
             catch (...)
             {
+                ::Agentmaster::AgentLogCaughtException(L"card pending-dots pulse stop");
             }
         });
         return row;

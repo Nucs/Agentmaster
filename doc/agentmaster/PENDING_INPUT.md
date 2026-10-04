@@ -354,14 +354,15 @@ TerminalPage::_ScanPendingInput()      (TerminalApp; UI thread, ticked by the sh
   - **Tab strip** — `TerminalTabStatus::AgentPendingVisible` (set by `_SetTabPending`) drives a tiny 3-dot
     cluster at the bottom of the status-dot wrap in `TabHeaderControl.xaml` (below the dot), painted with
     `TerminalTabStatus::AgentPendingBrush` (the contrast-picked color, also set by `_SetTabPending`). The
-    pulse storyboard is built imperatively and **started/stopped on the flag** (`TabHeaderControl::_Update-
-    PendingAnimation`, hooked to `TabStatus.PropertyChanged`) so an **idle fleet animates nothing** — no
-    perpetual 60fps compositor wakeups.
+    pulse is set up imperatively and **started/stopped on the flag** (`TabHeaderControl::_Update-
+    PendingAnimation`, hooked to `TabStatus.PropertyChanged`) so an **idle fleet animates nothing**. Since
+    UI_THREAD.md §10c it is three composition `Opacity` loops (`AgentDotsPulse`), not a storyboard: a
+    running storyboard made XAML walk the window's whole composition tree on every display frame.
   - **Triage-Board cards** — `AgentManagerContent::_MakeCard` appends a 3-dot pulse (`BuildPendingDots`,
     passed the picked color) when `!s.pendingInput.empty()`. The board rebuilds on the flip `_notify` (the
     lens observer), so it appears/clears with the draft, **cross-window** (a session hosted in window A
-    animates on window B's GLOBAL board too). The storyboard begins on `Loaded` (runs only while carded; a
-    rebuild drops it).
+    animates on window B's GLOBAL board too). The pulse (the same `AgentDotsPulse`) starts on `Loaded` and
+    stops on `Unloaded` (runs only while carded; a rebuild drops it).
 
 ### Dots color — a LIGHT/DARK contrast pair, auto-picked by background
 
@@ -400,7 +401,7 @@ Steady state is cheap: once per ~2 s liveness tick, per **bound Claude tab**, a 
 rows** (not the whole scrollback) under the read-lock → a linear scan of those rows. Microseconds per tab;
 Codex tabs and dormant/never-started tabs are skipped. A text-only edit is quiet (no persist/UI churn); a
 `_notify` + board rebuild + a `[pending]` line happen **only on the appear/clear flip** (turn-cadence). The
-tab/board pulse storyboards run **only while a tab is actually pending** — an idle fleet animates nothing.
+tab/board pulses run **only while a tab is actually pending** — an idle fleet animates nothing.
 
 ## 4. Scope (v1) & known limitations
 
@@ -540,7 +541,8 @@ never invisible (see *Dots color* in §3):
 - **Tab strip** — a tiny cluster **below** the status dot (`TabHeaderControl.xaml` `HeaderPendingDots`,
   bound to `TerminalTabStatus::AgentPendingVisible`, painted via `AgentPendingBrush`). Driven by
   `TerminalPage::_SetTabPending` straight from the UI-lane scan (the hosting window holds the tab). The
-  pulse storyboard is **started/stopped on the flag**, so idle tabs animate nothing.
+  pulse (composition `Opacity` loops since UI_THREAD.md §10c) is **started/stopped on the flag**, so idle
+  tabs animate nothing.
   **Contrast follows the SELECTED state, not just the dir color.** WT renders a colored tab very
   differently by state (`Tab::_ApplyTabColorOnUIThread`): a **selected/focused** tab shows the full per-dir
   color, but a **deselected/unfocused** tab shows it at **30% opacity over the dark tab-row color** — far
@@ -564,8 +566,8 @@ never invisible (see *Dots color* in §3):
   +3px star-only nudge is gone — it was what pushed the dots out of the wrap to begin with).
 - **Triage-Board cards** — a pulse at the top of the card body (`AgentManagerContent::_MakeCard` →
   `BuildPendingDots`, passed the picked color), driven by the flip `_notify` rebuilding the board, so it
-  works **cross-window** (a draft in window A shows on window B's GLOBAL board). The storyboard begins on
-  `Loaded` (runs only while carded).
+  works **cross-window** (a draft in window A shows on window B's GLOBAL board). The pulse starts on
+  `Loaded` and stops on `Unloaded` (runs only while carded).
 
 ## 8. "Copy Current Prompt" — the draft as a COPYABLE value (built)
 

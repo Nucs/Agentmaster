@@ -86,103 +86,38 @@ namespace winrt::TerminalApp::implementation
         // for tabs Agentmaster doesn't classify, so there's no stray tip on a plain tab).
         AgentSetTip(HeaderAgentStatusDotWrap(), L"Session status \x2014 the dot's color is the agent's Triage state: blue Running \xB7 goldenrod Waiting-for-you \xB7 orange-red Needs-approval \xB7 crimson Error \xB7 green Done \xB7 gray Idle. A dim gray dot marks an observed (unmanaged) tab; a flashing red ring means a background session needs you.");
 
-        // Agentmaster (PENDING_INPUT.md): build the unsent-draft "3 dots" pulse and wire it to run ONLY
-        // while this tab has a pending draft. The storyboard targets the 3 named dot ellipses directly
-        // (no name/resource lookup); each dot pulses its Opacity 0.3<->1.0 forever, phase-shifted by
-        // 160ms, for the classic "typing"/waiting wave. _HookTabStatusForPending (re)subscribes to
-        // TabStatus's PropertyChanged — TabStatus is assigned by the Tab AFTER construction — and
-        // starts/stops the storyboard on AgentPendingVisible, so idle tabs animate nothing (no perpetual
-        // compositor wakeups across the fleet).
-        {
-            namespace MA = winrt::Windows::UI::Xaml::Media::Animation;
-            _pendingDotsStoryboard = MA::Storyboard{};
-            const winrt::Windows::UI::Xaml::UIElement dots[3]{ HeaderPendingDot0(), HeaderPendingDot1(), HeaderPendingDot2() };
-            for (int i = 0; i < 3; ++i)
-            {
-                MA::DoubleAnimation a{};
-                a.From(0.3);
-                a.To(1.0);
-                a.Duration(winrt::Windows::UI::Xaml::Duration{ std::chrono::milliseconds(500) });
-                a.BeginTime(winrt::Windows::Foundation::TimeSpan{ std::chrono::milliseconds(160 * i) });
-                a.AutoReverse(true);
-                MA::RepeatBehavior forever;
-                forever.Type = MA::RepeatBehaviorType::Forever; // a value struct — its members are fields, not setters
-                a.RepeatBehavior(forever);
-                MA::Storyboard::SetTarget(a, dots[i]);
-                MA::Storyboard::SetTargetProperty(a, L"Opacity");
-                _pendingDotsStoryboard.Children().Append(a);
-            }
-        }
+        // Agentmaster (PENDING_INPUT.md): set up the unsent-draft "3 dots" pulse and wire it to run ONLY
+        // while this tab has a pending draft. It drives the 3 named dot ellipses directly (no name/resource
+        // lookup); each dot pulses its Opacity 1.0 -> 0.3 -> 1.0 forever, phase-shifted by 160ms, for the
+        // classic "typing"/waiting wave. _HookTabStatusForPending (re)subscribes to TabStatus's
+        // PropertyChanged — TabStatus is assigned by the Tab AFTER construction — and starts/stops the pulse
+        // on AgentPendingVisible, so idle tabs animate nothing.
+        // UI_THREAD.md §10a #1: composition Opacity loops, not a storyboard — a running storyboard makes XAML
+        // walk the window's whole composition tree on every display frame, a composition loop does not. The
+        // dots' panel is the anchor that supplies the compositor, so the dots themselves never get a hand-out
+        // visual. Nothing composition-side is created here: the loops are built on the first start.
+        _pendingDotsPulse = AgentDotsPulse{ HeaderPendingDots(), { HeaderPendingDot0(), HeaderPendingDot1(), HeaderPendingDot2() } };
 
-        // Agentmaster (SPARK CROWN — the cache-warm hint): build the glow breath + the three rising
+        // Agentmaster (SPARK CROWN — the cache-warm hint): set up the glow breath + the three rising
         // embers, wired (like the pending pulse above) to run ONLY while TabStatus.AgentCacheWarmVisible.
-        // Seven animations total: one Opacity breath on the glow Grid (which drives BOTH its discs at once
-        // — nested opacity multiplies), plus a rise + a fade per ember. Each ember uses a KEYFRAME opacity
-        // (0 -> 1 -> 0) rather than an AutoReverse: a spark must restart at the BOTTOM of its arc, not sail
-        // back down it. The stagger is a positive BeginTime (0 / 380 / 760ms) — XAML has no negative delay,
-        // so the first cycle ramps in one-by-one and every later cycle is evenly phased, exactly as the
-        // pending dots do with their 160ms offsets.
-        {
-            namespace MA = winrt::Windows::UI::Xaml::Media::Animation;
-            using winrt::Windows::Foundation::TimeSpan;
-            using winrt::Windows::UI::Xaml::Duration;
-
-            MA::RepeatBehavior forever;
-            forever.Type = MA::RepeatBehaviorType::Forever; // a value struct — members are fields, not setters
-
-            _cacheWarmStoryboard = MA::Storyboard{};
-
-            // The halo's slow breath. Range is deliberately gentle: the glow must read as heat behind the
-            // dot, never as a second status indicator competing with it.
-            {
-                MA::DoubleAnimation g{};
-                g.From(0.28);
-                g.To(0.62);
-                g.Duration(Duration{ TimeSpan{ std::chrono::milliseconds(1400) } });
-                g.AutoReverse(true);
-                g.RepeatBehavior(forever);
-                MA::Storyboard::SetTarget(g, HeaderCacheWarmGlow());
-                MA::Storyboard::SetTargetProperty(g, L"Opacity");
-                _cacheWarmStoryboard.Children().Append(g);
-            }
-
-            // The embers. Y runs +1.4 -> -1.6 (a 3px rise): the sparks sit at Canvas.Top 1.6/2.8, so the
-            // TOP of the highest one lands at 0 — flush with the 18px cell, never clipped by the header.
-            constexpr int64_t kCycleMs = 1150;
-            const winrt::Windows::UI::Xaml::UIElement sparks[3]{ HeaderCacheSpark0(), HeaderCacheSpark1(), HeaderCacheSpark2() };
-            constexpr int64_t kStaggerMs[3]{ 0, 380, 760 };
-            for (int i = 0; i < 3; ++i)
-            {
-                const TimeSpan begin{ std::chrono::milliseconds(kStaggerMs[i]) };
-
-                MA::DoubleAnimation rise{};
-                rise.From(1.4);
-                rise.To(-1.6);
-                rise.Duration(Duration{ TimeSpan{ std::chrono::milliseconds(kCycleMs) } });
-                rise.BeginTime(begin);
-                rise.RepeatBehavior(forever);
-                MA::Storyboard::SetTarget(rise, sparks[i]);
-                MA::Storyboard::SetTargetProperty(rise, L"(UIElement.RenderTransform).(TranslateTransform.Y)");
-                _cacheWarmStoryboard.Children().Append(rise);
-
-                // Fade in fast (an ember appears already glowing), then out over the rest of the arc.
-                MA::DoubleAnimationUsingKeyFrames fade{};
-                const auto key = [](int64_t ms, double v) {
-                    MA::LinearDoubleKeyFrame k{};
-                    k.KeyTime(MA::KeyTime{ TimeSpan{ std::chrono::milliseconds(ms) } });
-                    k.Value(v);
-                    return k;
-                };
-                fade.KeyFrames().Append(key(0, 0.0));
-                fade.KeyFrames().Append(key(kCycleMs / 4, 1.0));
-                fade.KeyFrames().Append(key(kCycleMs, 0.0));
-                fade.BeginTime(begin);
-                fade.RepeatBehavior(forever);
-                MA::Storyboard::SetTarget(fade, sparks[i]);
-                MA::Storyboard::SetTargetProperty(fade, L"Opacity");
-                _cacheWarmStoryboard.Children().Append(fade);
-            }
-        }
+        // UI_THREAD.md §10a #1: both on the Composition API, so a warm tab costs the UI thread nothing per
+        // frame (a running storyboard made XAML walk the window's whole composition tree every frame).
+        //   - The glow: one Opacity loop on the glow Grid (which drives BOTH its discs at once — nested
+        //     opacity multiplies). Range deliberately gentle: the glow must read as heat behind the dot, never
+        //     as a second status indicator competing with it. 0.45 -> 0.62 -> 0.28 -> 0.45 over 2.8 s is the
+        //     storyboard's 0.28 <-> 0.62 breath (1.4 s each way), begun and ended on the still 0.45 (the
+        //     Grid's XAML Opacity), so a stopped crown lands on its still look.
+        //   - The embers: composition visuals of our own on the sparks canvas (AgentEmberSparks — the places,
+        //     sizes, 3 DIP rise, 1150 ms cycle and 0 / 380 / 760 ms stagger of the XAML ellipses they
+        //     replace). Not XAML elements: XAML follows a moving element on every frame for hit-testing.
+        // The canvas is the anchor for both (the glow Grid itself never gets a hand-out visual). Nothing
+        // composition-side is created here: the loop and the ember visuals are built on the first start.
+        _cacheWarmGlow = AgentOpacityLoop{ HeaderCacheWarmSparks(),
+                                           HeaderCacheWarmGlow(),
+                                           { { 0.0f, 0.45f }, { 0.25f, 0.62f }, { 0.75f, 0.28f }, { 1.0f, 0.45f } },
+                                           std::chrono::milliseconds{ 2800 },
+                                           std::chrono::milliseconds{ 0 } };
+        _cacheWarmEmbers = AgentEmberSparks{ HeaderCacheWarmSparks() };
         PropertyChanged([weakThis = get_weak()](auto&&, const winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs& args) {
             if (auto self = weakThis.get())
             {
@@ -508,6 +443,13 @@ namespace winrt::TerminalApp::implementation
                     }
                     // Agentmaster (SPARK CROWN): the same one subscription starts/stops the cache-warm
                     // glow + embers — no second revoker to juggle (the bookmark badges ride it too).
+                    // UI_THREAD.md §10a #1: the embers are composition visuals, which cannot bind the brush in
+                    // XAML, so a brush change is copied onto them here. The page sets the brush BEFORE it turns
+                    // the crown on, so this branch runs first and the embers start in the right color.
+                    if (n.empty() || n == L"AgentCacheWarmBrush")
+                    {
+                        self->_SyncCacheWarmEmberColor();
+                    }
                     if (n.empty() || n == L"AgentCacheWarmVisible")
                     {
                         self->_UpdateCacheWarmAnimation();
@@ -522,24 +464,25 @@ namespace winrt::TerminalApp::implementation
             });
         }
         _UpdatePendingAnimation();
+        // A new TabStatus carries its own crown brush: copy its color first (a running crown keeps running
+        // through a re-hook, so the turn-on belt in _UpdateCacheWarmAnimation would not see it).
+        _SyncCacheWarmEmberColor();
         _UpdateCacheWarmAnimation();
         _UpdateTagBadges();
     }
 
     // Agentmaster (PENDING_INPUT.md + RENDERING.md §4c): run the 3-dot pulse iff the dots are shown AND
-    // the motion is worth its cost. A running Forever storyboard keeps XAML and DWM working on every display
+    // the motion is worth its cost. A running animation keeps the compositor (DWM) working on every display
     // frame, so the pulse also needs: this header in the live tree (IsLoaded — the strip virtualizes far
-    // tabs away, and a hidden header must not tick), a STARTED tab (a dormant tab's REMEMBERED draft shows
+    // tabs away, and a hidden header must not animate), a STARTED tab (a dormant tab's REMEMBERED draft shows
     // still dots; AgentStatusHalfVisible is the published "this tab's terminal has not started" fact, so
     // the pulse begins the moment the tab's claude starts), and Windows' animation effects on. Still dots
     // keep their full base opacity, so the draft stays visible in every case. Called on every relevant
     // TabStatus change, on hook, and on Loaded / Unloaded.
+    // UI_THREAD.md §10a #1: the pulse is composition Opacity loops (AgentDotsPulse), so a running pulse
+    // costs the UI thread nothing per frame; a stopped pulse lands every dot back on its still opacity 1.0.
     void TabHeaderControl::_UpdatePendingAnimation()
     {
-        if (!_pendingDotsStoryboard)
-        {
-            return;
-        }
         // Everything, the WinRT reads included, inside the try: this runs from XAML event handlers
         // (Loaded / Unloaded / PropertyChanged), where an escaping exception is a fail-fast.
         try
@@ -547,67 +490,95 @@ namespace winrt::TerminalApp::implementation
             const auto status = TabStatus();
             const bool on = status && status.AgentPendingVisible() && !status.AgentStatusHalfVisible() &&
                             IsLoaded() && AgentAnimationsEnabled();
-            // Begin() on a running storyboard RESTARTS it (a visible jump), and the callers re-assert
-            // often: act only on a real change.
+            // A start on a running pulse RESTARTS it (the wave visibly jumps back), and the callers
+            // re-assert often: act only on a real change.
             if (on == _pendingDotsRunning)
             {
                 return;
             }
             if (on)
             {
-                _pendingDotsStoryboard.Begin();
+                _pendingDotsPulse.Start();
             }
             else
             {
-                _pendingDotsStoryboard.Stop();
+                _pendingDotsPulse.Stop();
             }
             _pendingDotsRunning = on;
         }
         catch (...)
         {
             // The flag keeps its old value, so the next call retries the transition.
-            ::Agentmaster::AgentLogCaughtException(L"tab-header pending-dots storyboard");
+            ::Agentmaster::AgentLogCaughtException(L"tab-header pending-dots pulse");
         }
     }
 
     // Agentmaster (SPARK CROWN): run the cache-warm glow + embers iff this tab's session is still inside
     // Claude's server-side prompt-cache window. Stopping matters more here than for most indicators: a warm
     // cache lasts MINUTES and a busy fleet can have many warm tabs at once, so leaving these running would
-    // hold the compositor awake long after the hint stopped being true. Stop() also returns each ember to
-    // its base Opacity="0", so a stopped storyboard leaves nothing frozen on screen.
+    // keep the compositor busy long after the hint stopped being true. A stop returns the glow to its still
+    // Opacity 0.45 and hides every ember, so a stopped crown leaves nothing frozen on screen.
     // RENDERING.md §4c: it also runs only while this header is in the live tree (IsLoaded) and Windows'
     // animation effects are on. A still crown is the steady glow alone (its base Opacity 0.45), embers
     // hidden — the hint stays readable without a frame of motion.
+    // UI_THREAD.md §10a #1: the glow is a composition Opacity loop and the embers are composition visuals
+    // (see the constructor), so a warm tab costs the UI thread nothing per frame.
     void TabHeaderControl::_UpdateCacheWarmAnimation()
     {
-        if (!_cacheWarmStoryboard)
-        {
-            return;
-        }
         // Everything inside the try, as in _UpdatePendingAnimation (XAML event handlers call this).
         try
         {
             const auto status = TabStatus();
             const bool on = status && status.AgentCacheWarmVisible() && IsLoaded() && AgentAnimationsEnabled();
-            // Begin() on a running storyboard restarts it: act only on a real change (see the pending pulse).
+            // A start on a running crown restarts it: act only on a real change (see the pending pulse).
             if (on == _cacheWarmRunning)
             {
                 return;
             }
             if (on)
             {
-                _cacheWarmStoryboard.Begin();
+                // Belt for the color: the brush branch of the TabStatus subscription normally ran first, but a
+                // re-hook to a new TabStatus or a Loaded re-start passes through here alone.
+                _SyncCacheWarmEmberColor();
+                _cacheWarmGlow.Start();
+                _cacheWarmEmbers.Start();
             }
             else
             {
-                _cacheWarmStoryboard.Stop();
+                _cacheWarmGlow.Stop();
+                _cacheWarmEmbers.Stop();
             }
             _cacheWarmRunning = on;
         }
         catch (...)
         {
-            // The flag keeps its old value, so the next call retries the transition.
-            ::Agentmaster::AgentLogCaughtException(L"tab-header cache-warm storyboard");
+            // The flag keeps its old value, so the next call retries the transition (a half-started crown is
+            // restarted whole; a half-stopped one is stopped again — both are safe to repeat).
+            ::Agentmaster::AgentLogCaughtException(L"tab-header cache-warm crown");
+        }
+    }
+
+    // UI_THREAD.md §10a #1: copy the crown brush's color onto the composition embers (see the declaration).
+    void TabHeaderControl::_SyncCacheWarmEmberColor() noexcept
+    {
+        try
+        {
+            const auto status = TabStatus();
+            if (!status)
+            {
+                return;
+            }
+            // The page always sets a SolidColorBrush (TerminalPage::_SetTabCacheWarm); anything else (null
+            // before the tab's first warm moment) leaves the embers' color as it is.
+            if (const auto brush = status.AgentCacheWarmBrush().try_as<winrt::Windows::UI::Xaml::Media::SolidColorBrush>())
+            {
+                _cacheWarmEmbers.SetColor(brush.Color());
+            }
+        }
+        catch (...)
+        {
+            // The embers keep their previous color; the next brush change retries (Rule #18: logged).
+            ::Agentmaster::AgentLogCaughtException(L"tab-header cache-warm ember color");
         }
     }
 
