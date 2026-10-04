@@ -225,23 +225,20 @@ namespace winrt::TerminalApp::implementation
         });
         // ... and on EVERY layout pass: a tab REORDER (or the strip re-laying out around a
         // closed/opened sibling) MOVES this header without resizing it or its TabViewItem, which no
-        // SizeChanged sees — the popup-hosted badges would float at the stale spot. LayoutUpdated
-        // fires per tree-wide layout pass; the no-badges early-out + _PositionTagBadges' absolute-
-        // position change-gate keep it O(one transform compare) when nothing tag-related moved.
-        HeaderRootGrid().LayoutUpdated([weakThis = get_weak()](auto&&, auto&&) {
-            if (auto self = weakThis.get())
-            {
-                if (!self->_renderedTagsSpec.empty())
-                {
-                    self->_PositionTagBadges();
-                }
-            }
-        });
+        // SizeChanged sees — the popup-hosted badges would float at the stale spot. That
+        // LayoutUpdated hook is NOT subscribed here any more: _UpdateBadgeLayoutHook arms it only
+        // while this header shows badges AND is in the live tree (UI_THREAD.md §10a #2). XAML calls
+        // every LayoutUpdated handler of the thread after every layout pass — headers outside any
+        // tree included — so an always-on subscription on all ~550 headers made each layout pass, in
+        // any window, run ~550 handlers that almost always had no badges to place.
         // A popup-root child isn't torn down with the tab's subtree — close it explicitly when this
-        // header unloads (tab closed / torn out; a re-parented header's next layout pass reopens it).
+        // header unloads (tab closed / torn out; a re-parented header's Loaded places + reopens it).
         Unloaded([weakThis = get_weak()](auto&&, auto&&) {
             if (auto self = weakThis.get())
             {
+                // UI_THREAD.md §10a #2: out of the live tree there is nothing to place, so drop the
+                // LayoutUpdated hook (and its recorded placement) until the next Loaded.
+                self->_UpdateBadgeLayoutHook(false);
                 try
                 {
                     if (const auto popup = self->HeaderTagBookmarksPopup(); popup && popup.IsOpen())
@@ -267,6 +264,9 @@ namespace winrt::TerminalApp::implementation
         Loaded([weakThis = get_weak()](auto&&, auto&&) {
             if (auto self = weakThis.get())
             {
+                // UI_THREAD.md §10a #2: back in the live tree — a tagged header needs its LayoutUpdated
+                // hook again to follow reorders (a no-op for an untagged header).
+                self->_UpdateBadgeLayoutHook(true);
                 if (!self->_renderedTagsSpec.empty())
                 {
                     self->_PositionTagBadges();
@@ -632,6 +632,10 @@ namespace winrt::TerminalApp::implementation
             return; // unchanged — the common re-assert costs nothing
         }
         _renderedTagsSpec = spec;
+        // UI_THREAD.md §10a #2: the first tag arms the LayoutUpdated hook (when the header is in the
+        // live tree), and removing the last tag disarms it — before any early return below, so the
+        // hook always follows the spec.
+        _UpdateBadgeLayoutHook(std::nullopt);
         const auto panel = HeaderTagBookmarks();
         if (!panel)
         {
@@ -738,11 +742,29 @@ namespace winrt::TerminalApp::implementation
     // after layout settles: reads are stable there, a mutation starts a fresh pass whose
     // LayoutUpdated merely schedules one more check that no-ops on the unchanged gates — settled,
     // no synchronous feedback, no cycle.
-    void TabHeaderControl::_PositionTagBadges()
+    //
+    // LAYOUT-PASS GATE (UI_THREAD.md §10a #2): the per-pass check used to BE the placement, and the
+    // placement creates up to 4 TransformToVisual transforms; releasing each one is a linear search
+    // over every event-registered object in XAML's event manager (thousands at fleet scale). With 7
+    // tagged tabs that was ~84 ms/s of the release UI thread while sessions were busy. So a trigger
+    // from the LayoutUpdated hook (fromLayoutPass) first compares _BadgePlacementSignature — plain
+    // property reads, no transforms — with the signature of the last COMPLETED placement, and
+    // schedules nothing when they match. Reading inside the LayoutUpdated handler is safe: the pass
+    // has finished, and only a WRITE re-enters layout. If a later pass moves something, it raises
+    // LayoutUpdated again and that pass is compared. Explicit triggers (SizeChanged, ViewChanged,
+    // Loaded, a tag change) skip the gate and always schedule, exactly as before.
+    // fromLayoutPass: true only from the LayoutUpdated hook; false for every other trigger.
+    void TabHeaderControl::_PositionTagBadges(const bool fromLayoutPass)
     {
         if (_badgeReposQueued)
         {
             return; // a check is already scheduled — triggers coalesce
+        }
+        // An empty recorded signature means no completed placement yet, and an empty current one means
+        // a read failed: both read as "changed", so the full placement runs, which is the old behavior.
+        if (fromLayoutPass && !_badgePlacedSignature.empty() && _BadgePlacementSignature() == _badgePlacedSignature)
+        {
+            return; // nothing the placement reads has moved since it last ran
         }
         _badgeReposQueued = true;
         try
@@ -764,6 +786,10 @@ namespace winrt::TerminalApp::implementation
 
     void TabHeaderControl::_PositionTagBadgesNow()
     {
+        // UI_THREAD.md §10a #2: forget the last completed placement until this one completes. Every
+        // early return below (no row, no badges, a thrown read) then leaves it empty, so the next
+        // layout pass schedules a full placement again instead of trusting a stale signature.
+        _badgePlacedSignature.clear();
         const auto popup = HeaderTagBookmarksPopup();
         const auto row = HeaderTagBookmarks();
         if (!popup || !row)
@@ -928,6 +954,9 @@ namespace winrt::TerminalApp::implementation
                 {
                     popup.IsOpen(false);
                 }
+                // UI_THREAD.md §10a #2: this placement completed (the row is hidden); record what it saw
+                // so the layout passes that follow skip it until something moves.
+                _badgePlacedSignature = _BadgePlacementSignature();
                 return;
             }
             if (popup.IsOpen() && parentMoved)
@@ -944,8 +973,147 @@ namespace winrt::TerminalApp::implementation
                     popup.IsOpen(true);
                 }
             }
+            // UI_THREAD.md §10a #2: record the signature AFTER the open above, so the popup's resulting
+            // state is part of it: a popup that something else closes later reads as a change.
+            _badgePlacedSignature = _BadgePlacementSignature();
         }
         CATCH_LOG();
+    }
+
+    // Agentmaster (bookmark tags, UI_THREAD.md §10a #2): arm or disarm the header grid's LayoutUpdated
+    // hook, the trigger that re-places the badges after a tab REORDER moved this header without
+    // resizing it. XAML raises LayoutUpdated on EVERY subscriber of the UI thread after every layout
+    // pass: all windows, and headers outside any visual tree too. So the hook is held only while it can
+    // matter: this header shows badges AND is in the live tree. A strip of 550 tabs with 7 tagged ones
+    // then runs 7 handlers per layout pass instead of ~550.
+    // inLiveTree: true from Loaded and false from Unloaded (the event's own state, not a property read
+    //             that could lag it); std::nullopt reads IsLoaded() now (a tag change; any other caller).
+    // Disarming also clears _badgePlacedSignature: the popup is closed while the header is out of the
+    // tree, and a re-armed hook must start from a full placement, never from a stale "nothing moved".
+    // Never throws (it runs from XAML event handlers, where an escaping exception is a fail-fast): a
+    // failed read or subscribe is logged and leaves the hook off. Explicit triggers still place the
+    // badges then; only a reorder can leave them at a stale spot until the next trigger.
+    void TabHeaderControl::_UpdateBadgeLayoutHook(const std::optional<bool> inLiveTree)
+    {
+        try
+        {
+            const bool loaded = inLiveTree.has_value() ? *inLiveTree : IsLoaded();
+            const bool want = loaded && !_renderedTagsSpec.empty();
+            // The revoker holds the subscription, so its state IS "armed". Acting only on a change keeps
+            // the repeated Loaded / tag re-asserts free and can never stack a second handler.
+            if (want == static_cast<bool>(_badgeLayoutUpdatedRevoker))
+            {
+                return;
+            }
+            if (!want)
+            {
+                _badgeLayoutUpdatedRevoker.revoke();
+                _badgePlacedSignature.clear();
+                return;
+            }
+            _badgeLayoutUpdatedRevoker = HeaderRootGrid().LayoutUpdated(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
+                if (auto self = weakThis.get())
+                {
+                    // Belt: the hook is disarmed the moment the last tag goes, but a raise already in
+                    // progress can still reach a header whose spec has just emptied.
+                    if (!self->_renderedTagsSpec.empty())
+                    {
+                        self->_PositionTagBadges(true);
+                    }
+                }
+            });
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"tab-header badge layout hook");
+        }
+    }
+
+    // Agentmaster (bookmark tags, UI_THREAD.md §10a #2): the fingerprint behind the layout-pass gate in
+    // _PositionTagBadges. It holds every input of _PositionTagBadgesNow's placement, read as plain
+    // properties (the header comment lists them). No TransformToVisual: the transform objects it
+    // creates made the per-pass placement expensive, because each release walks XAML's event-manager
+    // list. Read-only, so it is safe inside a LayoutUpdated handler.
+    // Returns: the fingerprint; empty when a needed element is missing or a read threw (empty reads as
+    //          "changed", so the caller falls back to a full placement).
+    // Never throws: a failed read is logged (AgentLogCaughtException throttles repeats per context).
+    std::vector<double> TabHeaderControl::_BadgePlacementSignature() noexcept
+    {
+        try
+        {
+            const auto popup = HeaderTagBookmarksPopup();
+            const auto row = HeaderTagBookmarks();
+            const auto grid = HeaderRootGrid();
+            if (!popup || !row || !grid)
+            {
+                return {};
+            }
+            std::vector<double> signature;
+            signature.reserve(128);
+            // The x source: the title's first character while the title shows, else the fixed
+            // fallback. _PositionTagBadgesNow reads the title's position under this same condition.
+            const auto title = HeaderTextBlock();
+            const bool titleGivesX = title && title.Visibility() == winrt::Windows::UI::Xaml::Visibility::Visible && title.ActualWidth() > 0;
+            signature.push_back(titleGivesX ? 1.0 : 0.0);
+            // The show/hide inputs: the popup's state, the open gate, and the row width that the strip-
+            // viewport test uses. Then the header height: the top when no TabViewItem is found.
+            signature.push_back(popup.IsOpen() ? 1.0 : 0.0);
+            signature.push_back((grid.IsLoaded() && grid.XamlRoot()) ? 1.0 : 0.0);
+            signature.push_back(row.ActualWidth());
+            signature.push_back(grid.ActualHeight());
+            // The position inputs: the layout offset of every element from the x source up to the root.
+            // A reorder moves the TabViewItem inside its panel, an indicator icon moves the title inside
+            // the header, and a change around the strip moves the ScrollViewer: each changes an offset
+            // here. The first TabViewItem (its height sets the badge top) and the first ScrollViewer
+            // (its scroll offsets, which ActualOffset leaves out, and its width, the visible range) are
+            // the elements _PositionTagBadgesNow finds by the same upward walk from the header grid.
+            constexpr size_t kMaxDepth = 128; // far deeper than a tab header's ancestry (~40 elements)
+            winrt::Windows::UI::Xaml::DependencyObject node{ nullptr };
+            if (titleGivesX)
+            {
+                node = title;
+            }
+            else
+            {
+                node = grid;
+            }
+            bool sawTabViewItem = false;
+            bool sawScrollViewer = false;
+            for (size_t depth = 0; node && depth < kMaxDepth; ++depth)
+            {
+                if (const auto element = node.try_as<winrt::Windows::UI::Xaml::UIElement>())
+                {
+                    const auto offset = element.ActualOffset();
+                    signature.push_back(offset.x);
+                    signature.push_back(offset.y);
+                }
+                if (!sawTabViewItem)
+                {
+                    if (const auto tvi = node.try_as<winrt::Microsoft::UI::Xaml::Controls::TabViewItem>())
+                    {
+                        sawTabViewItem = true;
+                        signature.push_back(tvi.ActualHeight());
+                    }
+                }
+                if (!sawScrollViewer)
+                {
+                    if (const auto scroller = node.try_as<winrt::Windows::UI::Xaml::Controls::ScrollViewer>())
+                    {
+                        sawScrollViewer = true;
+                        signature.push_back(scroller.HorizontalOffset());
+                        signature.push_back(scroller.VerticalOffset());
+                        signature.push_back(scroller.ActualWidth());
+                    }
+                }
+                node = winrt::Windows::UI::Xaml::Media::VisualTreeHelper::GetParent(node);
+            }
+            return signature;
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"tab-header badge placement signature");
+            return {};
+        }
     }
 
     // Method Description:

@@ -133,9 +133,48 @@ namespace winrt::TerminalApp::implementation
         // _badgeReposQueued) — every trigger is layout-driven, and mutating the popup synchronously
         // inside a layout pass is the E_LAYOUTCYCLE fail-fast (the 2026-07-02 13:32/13:50 dumps);
         // _PositionTagBadgesNow does the actual reads + gated mutations on a clean dispatcher tick.
-        void _PositionTagBadges(); // the coalescing scheduler — safe from ANY trigger
+        // UI_THREAD.md §10a #2: a LayoutUpdated trigger (fromLayoutPass) schedules the placement only
+        // when _BadgePlacementSignature differs from the one the last completed placement recorded —
+        // layout passes run for ANY change on the UI thread (every window), and each placement creates
+        // up to 4 TransformToVisual transforms whose release is a linear search in XAML's event manager
+        // (~84 ms/s with 7 tagged tabs on the 550-tab release). Every other trigger always schedules.
+        // Parameters: fromLayoutPass - true only from the LayoutUpdated hook (_UpdateBadgeLayoutHook);
+        //             false (the default) for every explicit trigger, which skips the fingerprint check.
+        // Never throws: a failed schedule is logged and dropped (the next trigger retries).
+        void _PositionTagBadges(bool fromLayoutPass = false); // the coalescing scheduler — safe from ANY trigger
         void _PositionTagBadgesNow(); // the deferred work: resolve geometry, place, show/hide (clean tick only)
         bool _badgeReposQueued{ false }; // a reposition tick is pending — triggers coalesce onto it
+        // UI_THREAD.md §10a #2: arm the header's LayoutUpdated hook only while the header shows badges
+        // AND is in the live tree; disarm it otherwise. XAML calls EVERY LayoutUpdated handler of the
+        // thread after EVERY layout pass, a header outside any tree included, so the old always-on
+        // subscription made each layout pass in any window run ~550 header handlers (UI_THREAD.md §4c).
+        // A loaded, tagged header still needs the hook: a tab REORDER moves the header without
+        // resizing it, which no SizeChanged reports. Idempotent; disarming also drops the recorded
+        // placement signature, so the next arm starts with a full placement.
+        // Parameters: inLiveTree - true from the Loaded handler, false from the Unloaded handler (the
+        //             event's own state); std::nullopt to read IsLoaded() now (every other caller).
+        // Never throws: a failed subscribe is logged and leaves the hook off (explicit triggers still
+        // place the badges; only a reorder can then leave them at a stale spot until the next trigger).
+        void _UpdateBadgeLayoutHook(std::optional<bool> inLiveTree);
+        winrt::Windows::UI::Xaml::FrameworkElement::LayoutUpdated_revoker _badgeLayoutUpdatedRevoker{};
+        // UI_THREAD.md §10a #2: a cheap fingerprint of everything the placement reads, built from plain
+        // property reads only — no TransformToVisual, so no transform whose release walks XAML's
+        // event-manager list. Holds: whether the title gives the x; the popup's open state and the
+        // open gate (IsLoaded + XamlRoot); the badge row's width; the header's height; then the layout
+        // offset (UIElement::ActualOffset, x and y) of every element from the title (or the header grid,
+        // when the title is hidden) up to the root, with the nearest TabViewItem's height and the
+        // nearest ScrollViewer's scroll offsets and width (ActualOffset leaves out the scroll offset)
+        // added where the walk meets them. Equal fingerprints mean the placement would produce the same
+        // result, unless an ancestor's RenderTransform changed alone — nothing in the tab strip does
+        // that; any explicit trigger (SizeChanged, ViewChanged, Loaded, a tag change) re-places anyway.
+        // Safe to call inside a LayoutUpdated handler: it reads, it never writes.
+        // Returns: the fingerprint; empty when a part could not be read (empty == "changed").
+        // Never throws: a failed read is logged (throttled) and returns empty.
+        std::vector<double> _BadgePlacementSignature() noexcept;
+        // The _BadgePlacementSignature of the last COMPLETED placement — written at the end of
+        // _PositionTagBadgesNow (after its popup open/close), cleared when it starts and when the hook is
+        // disarmed. Empty means "no completed placement": the next layout-pass check schedules one.
+        std::vector<double> _badgePlacedSignature;
         winrt::hstring _renderedTagsSpec;
         // The TabViewItem ancestor the badges are pinned to + its SizeChanged hook, and the tab
         // strip's ScrollViewer + its ViewChanged hook (both re-resolved fresh each position pass —

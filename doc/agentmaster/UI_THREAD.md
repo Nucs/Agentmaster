@@ -194,9 +194,10 @@ release after item 1 and sets the order for the rest.
      outside a visual tree has no size, so it cannot initialize anyway. The §4c `Loaded` / `Unloaded`
      handlers are the place.
    - `TabHeaderControl` (TabHeaderControl.cpp:231): subscribe only while the header has tags and is
-     loaded.
+     loaded. Done in code, not built yet (§10a #2: `_UpdateBadgeLayoutHook`).
 4. **Badge placement without transforms per pass** (TabHeaderControl.cpp:765). Gate on cheap reads first
    (tab index, strip scroll offset, `ActualOffset`), and call `TransformToVisual` only on a real change.
+   Done in code, not built yet (§10a #2: `_BadgePlacementSignature`).
 5. **Ambient animations on the Composition API.** Run the pulse and the sparks as composition key-frame
    animations (`ElementCompositionPreview::GetElementVisual`, `IterationBehavior::Forever`) instead of
    XAML storyboards. Composition animations run in the compositor, so XAML's UI-thread loop can stop.
@@ -303,3 +304,29 @@ Notes:
   window for one minute and sample again.
 - Builds: (1) #1 + #2 + the observer part of #4; (2) #3 alone; (3) the rest of #4. #5 needs a decision.
   Do #6 only if the frame walk still shows after #1.
+
+### 10b. #2 in the code (2026-10-04, not built yet)
+
+All in `TabHeaderControl.cpp` / `.h`; no other file changed:
+- **The hook.** The constructor no longer subscribes `HeaderRootGrid().LayoutUpdated`.
+  `_UpdateBadgeLayoutHook` holds that subscription (a revoker) only while the header has tags AND is in
+  the live tree. It runs from `Loaded` (arm), `Unloaded` (disarm) and `_UpdateTagBadges` (the first tag
+  arms, the last one disarms). A strip with 7 tagged tabs now runs 7 header handlers per layout pass,
+  not ~550.
+- **The gate.** `_PositionTagBadges(fromLayoutPass)`: the hook passes true. It then compares
+  `_BadgePlacementSignature()` with `_badgePlacedSignature`, which `_PositionTagBadgesNow` records after
+  each completed placement (after its popup open or close). When they match, nothing is scheduled. The
+  signature holds plain property reads only: whether the title gives the x, the popup's open state, the
+  open gate (IsLoaded + XamlRoot), the badge row's width, the header's height, and the `ActualOffset` of
+  every element from the title (or the header grid) up to the root. Where the walk meets the first
+  `TabViewItem` it adds its height; where it meets the first `ScrollViewer`, its scroll offsets and
+  width. No `TransformToVisual`.
+- **Unchanged.** Every other trigger (`SizeChanged` of the header or its tab, the strip's
+  `ViewChanged`, `Loaded`, a tag change) skips the gate and schedules the full placement, as before.
+  The placement itself is the same code.
+- **The limit.** A change that moves no `ActualOffset`, size or scroll offset (an ancestor's
+  `RenderTransform` alone) is not seen by a layout pass. Nothing in the tab strip does that, and the next
+  explicit trigger re-places the badges.
+- **Check after the build.** Tag a tab, then reorder, scroll and resize the strip, and rename the tab:
+  the ribbons must follow every time. In a stacksnap profile during session churn,
+  `_PositionTagBadgesNow` and `CEventManager::RemoveObject` must be gone or near zero.
