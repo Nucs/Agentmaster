@@ -420,3 +420,51 @@ All in `TermControl.cpp` / `.h` (upstream code, marked Agentmaster), plus the #2
   another window (Reattach); Deactivate, then open the tab again; a window restore with several tabs.
   Every terminal must draw and its claude must start. In a stacksnap profile during session churn,
   `TermControl` frames must be gone from the `LayoutUpdated` raise.
+
+### 10e. Measured again, 10:27–10:33: the fixes are not built yet
+
+No binary has #1–#3 yet: the newest layouts (Debug, Release, Release-B) are from 2026-10-03, before
+the fix commits. The release (pid 222804) runs the same code as in §10. Same tools, read-only:
+`threadcensus` 30 s, `stacksnap sample` 60 s, and a process-tree census (15 s).
+
+| Item | 09:08 (§10) | 10:27 |
+|---|---|---|
+| UI thread | 286–374 ms/s | 263–264 ms/s |
+| XAML frame thread | 65.1 wake-ups/s | 60.9 wake-ups/s |
+| Frame tick, plus walk samples outside it | 70% of busy | 80% of busy (~210 ms/s) |
+| Animation tick | ~9 ms/s | ~2 ms/s |
+| UI work outside the frame loop | — | ~53 ms/s; registry copies are ~15 ms/s of it |
+| `SessionScanner` | 31–44 ms/s | 36 ms/s: `SnapshotLive` 79% (~28 ms/s), of it prompt-queue copies ~14 ms/s; the reconcile itself ~3 ms/s |
+| `ProcessObserver` | 38–41 ms/s | 38 ms/s: `SnapshotProcesses` 58% (~22 ms/s), full `Snapshot()` 12% (~5 ms/s) |
+| Initialized terminals / painted | 18 / 0 in 20 s | 21 / 0 in 30 s |
+| Process tree | — | 121 processes, 45% of one core (Agentmaster 38%, 18 `claude.exe` 6%); private 14.1 GB (Agentmaster 1.0 GB, `claude.exe` 11.9 GB, `pwsh` 0.7 GB) |
+| Machine commit | — | 137 of 159 GB (86%) |
+
+What this adds to §10:
+- An animation tick of ~2 ms/s means one or two indicators ran. They alone kept the loop at 61 frames/s.
+- After #1–#3, the UI thread should keep ~50 ms/s: the work outside the frame loop, plus the frames that
+  still run for real changes.
+- #4 is bigger than §10a says: ~48 ms/s in total (UI ~15, scanner ~28, observer ~5). After #1–#3 it is
+  the largest item on the UI thread and on the engine threads. Its parts:
+  - `_ReconcileClaudeTabsImpl` copies every live session with its prompt queue every ~2.5 s, in each
+    window, and reads only `id`, `tabToken` and `workingDir`.
+  - The liveness sweep calls `Get` per tab and reads only `tabToken`.
+  - The cache-warm and pending-input sweeps also call `Get` per tab.
+  - The scanner's `SnapshotLive` is 79% of its thread; the reconcile it feeds is ~3 ms/s.
+  - The observer's full `Snapshot()` only collects the tab tokens of managed Codex sessions.
+
+### 10f. Can XAML's loop run at 30 Hz? No
+
+- System XAML has no frame-rate setting. Its render thread (`CompositorScheduler::RenderThreadFrame`)
+  wakes the UI thread for at most one frame per display refresh. In the release it waits in
+  `RefreshRateInfo::WaitForRefreshInterval` → `CDXGIOutput::WaitForVBlank` (the `stacksnap top` stack of
+  the XAML frame thread). The WinUI source has the same design: `Scheduler::OnImmediateUIThreadFrame`
+  (`dxaml/xcp/components/graphics/Scheduler.cpp`) and `RefreshRateInfo` (`dxaml/xcp/core/compositor/`),
+  where the interval comes from DirectComposition's frame statistics, that is, from the monitor.
+- A 30 Hz timer of our own would cost more than #1: each XAML frame walks the tree (~2.5 ms), so 30
+  frames/s is ~75 ms/s on the UI thread. With #1, a running pulse costs the UI thread nothing.
+- After #1, the pulses run in the compositor (DWM) at the display rate. An app cannot set DWM's rate
+  either. To reduce DWM's work, have fewer indicators move.
+- The terminals already draw only on change, with vsync (`Present1(1, 0)` in AtlasEngine), and hidden
+  tabs draw nothing (RENDERING.md §4c): 21 terminals drew 0 frames in 30 s.
+- A lower refresh rate for the monitor would halve the loop, but for every app on that display.
