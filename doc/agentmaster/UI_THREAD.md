@@ -178,12 +178,13 @@ copy) for each tab on each tick. The `top` snapshot caught the UI thread inside 
 
 ## 8. Fix directions
 
-Ranked by measured cost addressed. None is done; each needs a build.
+Ranked by measured cost addressed. Item 1 is done; each of the others needs a build. §10 measures the
+release after item 1 and sets the order for the rest.
 
-1. **Ship §4c to the release.** It is built and running on dev. It stops off-screen header pulses,
-   shows still dots for dormant tabs (headers, side panel, board), stops hidden terminals from painting,
-   and releases a hidden terminal's device after 60 s. This removes the device-limit risk (§6) and most
-   running storyboards (§4a).
+1. **Ship §4c to the release.** Done: release 0.6.8.15 (2026-10-03). It stops off-screen header
+   pulses, shows still dots for dormant tabs (headers, side panel, board), stops hidden terminals from
+   painting, and releases a hidden terminal's device after 60 s. It removed the device-limit risk (§6).
+   It did not stop the 60 Hz loop (§10).
 2. **Virtualize the side panel's card list.** Use an `ItemsRepeater` with a `StackLayout`, or a
    `ListView`. Or start a card's pulse only while the card is in the scroll viewport
    (`EffectiveViewportChanged`). Today all 461 cards of the big window are live, and every card with a
@@ -226,3 +227,79 @@ Checks after the fixes:
 - XAML frame thread at ~3 wake-ups/s when nothing visible animates.
 - `CEventManager::RemoveObject` and `TermControl::_InitializeTerminal` absent from the UI profile.
 - NVIDIA threads ÷ 20 ≈ windows + tabs viewed in the last 60 s + 1.
+
+## 10. After §4c: release 0.6.8.15, measured again on 2026-10-04
+
+Release 0.6.8.15 has the RENDERING.md §4c work. It runs from layout slot A as pid 222804, started
+2026-10-03 23:13. Its hooks.log has `[render] hidden tabs (settings.json): pause ON, GPU release after
+60 s hidden`. The fleet has the same size as in §1: 4 windows, 555 tabs (466 + 58 + 28 + 3), 52
+remembered drafts, and the side panel open in 3 windows. Measured 09:08–09:12 with the §2 tools,
+read-only: `threadcensus` 20 s, `stacksnap top` 10 s, and `stacksnap sample` 60 s on the UI, scanner
+and observer threads. The user worked in the release during the sample.
+
+| Item | 0.6.8.14 (§1–§6) | 0.6.8.15 |
+|---|---|---|
+| Threads | 1,303 | 137 |
+| Initialized terminals | 57 (9 painted in 20 s) | 18 (0 painted in 20 s) |
+| D3D11 devices (NVIDIA threads ÷ 20) | 58 | 4 |
+| Process CPU | 43–60% of one core | 42% |
+| UI thread | 211–614 ms/s | 286–374 ms/s |
+| XAML frame thread | 64.6 wake-ups/s | 65.1 wake-ups/s |
+| `ProcessObserver` / `SessionScanner` | 40–63 / 22–44 ms/s | 38–41 / 31–44 ms/s |
+
+§4c removed the device risk. It did not stop the 60 Hz loop, so the UI thread did not get cheaper.
+
+UI thread, 60 s sample (374 ms/s, 605 busy samples of 2,011):
+
+| Share of busy samples | Value |
+|---|---|
+| XAML frame tick (`CXcpBrowserHost::OnTick`) | 49% (~185 ms/s) |
+| – composition submit, the tree walk | 46% (~174 ms/s): ~2.7 ms per frame |
+| – animation tick (`CTimeManager::Tick`) | 2.5% (~9 ms/s) |
+| Walk samples that the sampler could not follow to the frame tick (`UpdateTreeChildren`, `get_Children` → `AllocateItemForPeer`, `VisualIterator`) | 21% (~78 ms/s) more |
+| `LayoutUpdated` raise / `_PositionTagBadgesNow` | 0.2% / 0.5% (no session churn in this window) |
+| Our lanes (`_ReconcileClaudeTabsImpl`, liveness sweep, observer probe, cache-warm scan, pending scan) | ~6% (~23 ms/s); registry copies are ~15 ms/s of it |
+
+What this shows:
+- The frame loop is 50–70% of the UI thread's busy time (~185–260 ms/s).
+- A few storyboards are enough to keep the loop at 60 Hz. The animation tick fell from ~42 to ~9 ms/s,
+  but each frame still walks the composition tree for ~2.7 ms. The cost of the loop depends on the size
+  of the tree, not on the number of animations.
+- §4c leaves these Forever storyboards running:
+  - the draft dots of a STARTED (or external) session: on its header when the strip has realized the
+    header, and on its side-panel card (all cards are loaded, so an off-screen card pulses too);
+  - the spark crown of each realized header within 5 min of its session's last turn.
+- The costs of session churn (the `LayoutUpdated` raise and the badge placement, sections 4c and 4d
+  above) did not show in this window. They stay as found.
+- Tab switches: 1 `[tab-switch-settle]` (905 ms) in 47 tab focuses after startup.
+- Open: a frame costs ~2.7 ms here against ~1.4 ms in 0.6.8.14 (§4b), with the same fleet. The cause is
+  not known. One candidate: 0.6.8.15's side-panel summary lists the whole conversation.
+
+### 10a. The order for the rest: win × ease
+
+| # | Fix (§8 item) | Win | Ease |
+|---|---|---|---|
+| 1 | Pulses and sparks on the Composition API (item 5) | ~185–260 ms/s, while any indicator animates | Medium: the two storyboards in `TabHeaderControl.cpp` and `BuildPendingDots`; the §4c gates stay |
+| 2 | Header `LayoutUpdated` only while the header is tagged and loaded (item 3, second half), and a cheap change check before the badge transforms (item 4) | During session churn: up to ~110 ms/s (the 0.6.8.14 active window in §4) | Easy: Agentmaster code in `TabHeaderControl.cpp` only |
+| 3 | `TermControl` `LayoutUpdated` only while loaded (item 3, first half) | During session churn: up to ~55 ms/s | Small, but upstream code on the terminal-start path |
+| 4 | Lean registry copies (item 6) | ~15 ms/s on the UI thread, ~17 ms/s on the scanner, ~4 ms/s on the observer | Easy for the observer (a managed-Codex token query); medium for a copy without the prompt queue (the scanner keeps only Sent, unechoed prompts for the lost-send verdict) |
+| 5 | A longer survey interval while nothing changes (item 7) | ~10–15 ms/s on the observer thread | Easy code, but a `claude` typed in a `+` tab is found later than the 2 s of today: a product decision |
+| 6 | Virtualize the side panel (item 2) | After #1: only the frames that still run | Hard: an `ItemsRepeater` and an element factory in a 2,200-line file |
+
+Notes:
+- **#1, check it before you build:** switch off Windows "Animation effects" for 5 minutes. The §4c
+  gates then show still dots and a still crown: each header at its next decision, each side-panel card
+  at its next rebuild. Then run `threadcensus`. If the frame thread drops to ~3 wake-ups/s and the UI
+  thread loses ~200 ms/s, #1 will work. If the frame thread stays at ~65/s, something else keeps the
+  loop running, and #1 alone will not help.
+- **#1, two traps:** start a composition animation only on an element that animates. A hand-out visual
+  (`ElementCompositionPreview::GetElementVisual`) gives the element its own composition node, and each
+  frame walks the nodes. Check on dev that a stopped pulse returns to the correct base opacity: set the
+  visual's opacity after `StopAnimation`, and compare the still dots and crown with today's.
+- **#3:** also try the start from the `Loaded` handler. Otherwise a layout pass that ran before `Loaded`
+  leaves the terminal blank until the next pass. Build it alone, so that a blank-tab regression points
+  at it.
+- **#6:** first measure how much of the walk the side panel causes: collapse the side panel of the big
+  window for one minute and sample again.
+- Builds: (1) #1 + #2 + the observer part of #4; (2) #3 alone; (3) the rest of #4. #5 needs a decision.
+  Do #6 only if the frame walk still shows after #1.
