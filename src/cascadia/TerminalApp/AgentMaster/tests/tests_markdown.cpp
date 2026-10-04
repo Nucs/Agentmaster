@@ -113,7 +113,7 @@ void TestMarkdownBlocks()
         {
             CHECK(r.blocks[0].kind == MdBlockKind::Heading && r.blocks[0].headingLevel == 3, "md: ### is a level-3 heading");
             CHECK(BlockText(r.blocks[0]) == L"Turn 1 \x00B7 Jan 02 10:00", "md: heading text");
-            CHECK(MdIsLabelParagraph(r.blocks[1]), "md: **\x276F User** is a label line");
+            CHECK(MdIsLabelParagraph(r.blocks[1]), "md: **U+276F User** is a label line");
             CHECK(r.blocks[1].runs.size() == 1 && (r.blocks[1].runs[0].style & kMdBold) != 0, "md: the label is one bold run");
             CHECK(r.blocks[2].containers.size() == 1 && r.blocks[2].containers[0].kind == MdContainerKind::Quote, "md: the message sits in one quote");
             CHECK(BlockText(r.blocks[2]) == L"list the files\nand run the scan", "md: a soft break stays a line break");

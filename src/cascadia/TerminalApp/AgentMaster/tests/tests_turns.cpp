@@ -657,13 +657,13 @@ void TestConversationUpstream()
         const auto& s1 = upG.segments[1];
         const auto& s2 = upG.segments[2];
         CHECK(s0.sessionId == idP && s1.sessionId == idP && s2.sessionId == idF, "upstream/fork: oldest session first, every segment tagged with its session");
-        CHECK(s0.userMsgs == std::vector<std::wstring>{ L"study the market data", L"backtest the strategy" } && !s0.label.empty() && s0.continuedBy.empty(),
+        CHECK(s0.userMsgs == (std::vector<std::wstring>{ L"study the market data", L"backtest the strategy" }) && !s0.label.empty() && s0.continuedBy.empty(),
               "upstream/fork: P's part before its /compact, closed by the compaction's label");
         CHECK(s1.userMsgs == std::vector<std::wstring>{ L"try a stop loss" } && s1.continuedBy == L"fork",
               "upstream/fork: P's last part, up to where F forked it, carries how F continued it");
         CHECK(s2.userMsgs == std::vector<std::wstring>{ L"fork: try MSFT" } && s2.continuedBy == L"fork",
               "upstream/fork: F's own part, up to where G forked it");
-        CHECK(s0.uuids == std::vector<std::wstring>{ L"p-u1", L"p-u2" } && s1.uuids == std::vector<std::wstring>{ L"p-u3" } &&
+        CHECK(s0.uuids == (std::vector<std::wstring>{ L"p-u1", L"p-u2" }) && s1.uuids == std::vector<std::wstring>{ L"p-u3" } &&
                   s2.uuids == std::vector<std::wstring>{ L"f-u1" },
               "upstream/fork: each prompt's transcript-line uuid, in lockstep");
     }
@@ -682,7 +682,7 @@ void TestConversationUpstream()
     {
         const auto aG = AnalyzeSessionTranscript(pathOf(folder, idG).wstring(), 0);
         CHECK(aG.userMsgs.size() == aG.userMsgUuids.size(), "upstream/analyzer: userMsgUuids runs in lockstep with userMsgs");
-        CHECK(aG.userMsgUuids == std::vector<std::wstring>{ L"p-u3", L"f-u1", L"g-u1" },
+        CHECK(aG.userMsgUuids == (std::vector<std::wstring>{ L"p-u3", L"f-u1", L"g-u1" }),
               "upstream/analyzer: a fork's copied prompts keep their parent's uuids");
         const auto aP = AnalyzeSessionTranscript(pathOf(folder, idP).wstring(), 0);
         std::vector<std::wstring> prevMsgs;
@@ -694,10 +694,10 @@ void TestConversationUpstream()
             prevMsgs.insert(prevMsgs.end(), seg.userMsgs.begin(), seg.userMsgs.end());
             prevUuids.insert(prevUuids.end(), seg.uuids.begin(), seg.uuids.end());
         }
-        CHECK(lockstep && prevMsgs == std::vector<std::wstring>{ L"study the market data", L"backtest the strategy" } &&
-                  prevUuids == std::vector<std::wstring>{ L"p-u1", L"p-u2" },
+        CHECK(lockstep && prevMsgs == (std::vector<std::wstring>{ L"study the market data", L"backtest the strategy" }) &&
+                  prevUuids == (std::vector<std::wstring>{ L"p-u1", L"p-u2" }),
               "upstream/analyzer: the pre-/compact segments carry their prompts' uuids in lockstep");
-        CHECK(aP.userMsgUuids == std::vector<std::wstring>{ L"p-u3", L"p-u4" }, "upstream/analyzer: the current part's uuids");
+        CHECK(aP.userMsgUuids == (std::vector<std::wstring>{ L"p-u3", L"p-u4" }), "upstream/analyzer: the current part's uuids");
 
         // ---- the whole numbered list for G, end to end ----
         const auto titleOf = [&](const std::wstring& sid) { return sid == idP ? std::wstring{ L"Title of P" } : std::wstring{}; };
@@ -736,7 +736,7 @@ void TestConversationUpstream()
               "upstream/recorded: without the record a /clear successor continues nothing (no transcript records the link)");
         const auto upY = CollectConversationUpstream(pathOf(folder, idY), recorded, born);
         CHECK(upY.segments.size() == 1 && upY.segments[0].sessionId == idX &&
-                  upY.segments[0].userMsgs == std::vector<std::wstring>{ L"first X prompt", L"second X prompt" } && upY.segments[0].continuedBy == L"clear",
+                  upY.segments[0].userMsgs == (std::vector<std::wstring>{ L"first X prompt", L"second X prompt" }) && upY.segments[0].continuedBy == L"clear",
               "upstream/recorded: a /clear successor lists the conversation it cleared");
         const auto all = AllUpstreamPrompts(upY);
         CHECK(std::find(all.begin(), all.end(), L"X resumed later") == all.end(),
