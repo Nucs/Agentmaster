@@ -192,7 +192,7 @@ release after item 1 and sets the order for the rest.
 3. **Subscribe to `LayoutUpdated` only where it can matter.**
    - `TermControl` (TermControl.cpp:361): subscribe on `Loaded` and revoke on `Unloaded`. A control
      outside a visual tree has no size, so it cannot initialize anyway. The §4c `Loaded` / `Unloaded`
-     handlers are the place.
+     handlers are the place. Done in code, not built yet (§10a #3: `_UpdateLayoutInitHook`, §10d).
    - `TabHeaderControl` (TabHeaderControl.cpp:231): subscribe only while the header has tags and is
      loaded. Done in code, not built yet (§10a #2: `_UpdateBadgeLayoutHook`).
 4. **Badge placement without transforms per pass** (TabHeaderControl.cpp:765). Gate on cheap reads first
@@ -310,9 +310,14 @@ Notes:
 All in `TabHeaderControl.cpp` / `.h`; no other file changed:
 - **The hook.** The constructor no longer subscribes `HeaderRootGrid().LayoutUpdated`.
   `_UpdateBadgeLayoutHook` holds that subscription (a revoker) only while the header has tags AND is in
-  the live tree. It runs from `Loaded` (arm), `Unloaded` (disarm) and `_UpdateTagBadges` (the first tag
-  arms, the last one disarms). A strip with 7 tagged tabs now runs 7 header handlers per layout pass,
-  not ~550.
+  the live tree. It runs from `Loaded`, `Unloaded` and `_UpdateTagBadges` (the first tag arms, the last
+  one disarms). A strip with 7 tagged tabs now runs 7 header handlers per layout pass, not ~550.
+- **The live tree is `IsLoaded()`, not the event** (corrected with #3, §10d). XAML can raise a STALE
+  `Unloaded` after the next `Loaded` when an element is re-parented within one tick; a tab move removes
+  and re-inserts its `TabViewItem`. The first version trusted the event and could drop the hook of a
+  header that was still on screen. Now the method reads `IsLoaded()` and returns whether the hook is
+  armed. When it is still armed after an `Unloaded`, that `Unloaded` was stale: the handler schedules a
+  full placement at once, which reopens the popup that the handler's close just hid.
 - **The gate.** `_PositionTagBadges(fromLayoutPass)`: the hook passes true. It then compares
   `_BadgePlacementSignature()` with `_badgePlacedSignature`, which `_PositionTagBadgesNow` records after
   each completed placement (after its popup open or close). When they match, nothing is scheduled. The
@@ -383,3 +388,35 @@ XAML's frame loop can stop while a pulse or a crown is on screen.
   - The dots pulse in the header and in the side panel. Still dots and the still crown look as before.
   - The embers follow the tab's color, also after a tab-color change.
   - No `[exc]` line with "pending-dots pulse", "cache-warm crown" or "ember color".
+
+### 10d. #3 in the code (2026-10-04, not built yet)
+
+All in `TermControl.cpp` / `.h` (upstream code, marked Agentmaster), plus the #2 correction in §10b:
+- **The hook.** The constructor no longer subscribes `SwapChainPanel().LayoutUpdated`, the hook that
+  starts a terminal on its first non-zero layout. `_UpdateLayoutInitHook` holds it only while the
+  terminal has not started, the control is in the live tree (`IsLoaded()`), the control is not closing,
+  and the control is not detached. The §4c `Loaded` and `Unloaded` handlers call it, after
+  `_UpdateRenderingSuspension`. A restored tab that nobody opens (~537 on the release) now has no handler
+  at all; before, each one ran on every layout pass, read its size and returned.
+- **The start on `Loaded`.** Whenever the hook is wanted, the method also tries the start at once. The
+  layout pass that sizes the panel can run before XAML raises `Loaded` (the §4c code already notes this
+  order), and a hook armed after that pass would wait for another pass that may not come.
+  `_InitializeTerminal` returns false for a zero size and for a terminal that already started, so the
+  attempt is free when it cannot succeed. The hook is armed BEFORE the attempt, so a start that throws
+  (logged) is retried by the next layout pass.
+- **The reason.** `_layoutInitReason` (Create; Reattach after `_initializeForAttach`) replaces the
+  separate Reattach handler that `_initializeForAttach` used to swap in. A torn-out tab's new control
+  sets Reattach before its first `Loaded`.
+- **Two belts in the handler.** It drops itself on a closing or detached control. `Detach` revokes the
+  `Loaded` / `Unloaded` handlers and nulls `_interactivity`, which the start uses, so a hook left armed
+  across a `Detach` must never start: before, the always-on hook could do that on a never-started
+  control, if a later layout pass gave it a size.
+- **Unchanged.** `InitializeWithSize` (Activate Tab / Activate All) still starts a terminal off screen
+  and revokes the hook. A stale `Unloaded` keeps the hook, because the method reads `IsLoaded()`.
+- **The risk.** This is the path that starts every terminal. A mistake leaves a tab blank, with its
+  claude never started. Build it on its own (§10a).
+- **Check after the build, on dev:** a new tab; the first visit of a restored tab; Activate Tab and
+  Activate All; a split pane; zoom in and out; a tab torn out into a new window and one docked into
+  another window (Reattach); Deactivate, then open the tab again; a window restore with several tabs.
+  Every terminal must draw and its claude must start. In a stacksnap profile during session churn,
+  `TermControl` frames must be gone from the `LayoutUpdated` raise.

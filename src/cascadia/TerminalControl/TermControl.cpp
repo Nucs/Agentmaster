@@ -347,28 +347,29 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             if (const auto control = weakThis.get())
             {
                 control->_UpdateRenderingSuspension();
+                // Agentmaster (UI_THREAD.md §10a #3): in the tree now, so a not-yet-started terminal
+                // needs its layout hook — and may be able to start right here (see the method).
+                control->_UpdateLayoutInitHook();
             }
         });
         _revokers.Unloaded = Unloaded(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
             if (const auto control = weakThis.get())
             {
                 control->_UpdateRenderingSuspension();
+                // Agentmaster (UI_THREAD.md §10a #3): out of the tree a terminal has no size and cannot
+                // start, so its layout hook goes (unless this Unloaded is stale — the method reads
+                // IsLoaded()).
+                control->_UpdateLayoutInitHook();
             }
         });
 
         // Initialize the terminal only once the swapchainpanel is loaded - that
         //      way, we'll be able to query the real pixel size it got on layout
-        _layoutUpdatedRevoker = SwapChainPanel().LayoutUpdated(winrt::auto_revoke, [this](auto /*s*/, auto /*e*/) {
-            // This event fires every time the layout changes, but it is always the last one to fire
-            // in any layout change chain. That gives us great flexibility in finding the right point
-            // at which to initialize our renderer (and our terminal).
-            // Any earlier than the last layout update and we may not know the terminal's starting size.
-            if (_InitializeTerminal(InitializeReason::Create))
-            {
-                // Only let this succeed once.
-                _layoutUpdatedRevoker.revoke();
-            }
-        });
+        // Agentmaster (UI_THREAD.md §10a #3): the SwapChainPanel LayoutUpdated hook that does this is
+        // no longer subscribed here, for the life of a terminal that may never be shown. The Loaded
+        // handler above arms it (_UpdateLayoutInitHook), and the Unloaded handler drops it again. XAML
+        // calls every LayoutUpdated handler of the thread after every layout pass, controls outside
+        // any tree included, so ~537 never-opened restored tabs ran a no-op handler on every pass.
 
         // Get our dispatcher. This will get us the same dispatcher as
         // TermControl::Dispatcher().
@@ -524,17 +525,15 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         // Initialize the terminal only once the swapchainpanel is loaded - that
         //      way, we'll be able to query the real pixel size it got on layout
-        auto r = SwapChainPanel().LayoutUpdated(winrt::auto_revoke, [this](auto /*s*/, auto /*e*/) {
-            // Replace the normal initialize routine with one that will allow up
-            // to complete initialization even though the Core was already
-            // initialized.
-            if (_InitializeTerminal(InitializeReason::Reattach))
-            {
-                // Only let this succeed once.
-                _layoutUpdatedRevoker.revoke();
-            }
-        });
-        _layoutUpdatedRevoker.swap(r);
+        // Replace the normal initialize routine with one that will allow up
+        // to complete initialization even though the Core was already
+        // initialized.
+        // Agentmaster (UI_THREAD.md §10a #3): the layout hook no longer swaps in a Reattach handler here;
+        // it is armed by the Loaded handler (_UpdateLayoutInitHook) and performs _layoutInitReason. Set
+        // the reason BEFORE the call: this control is normally not in a tree yet, so the call only
+        // drops a hook nothing armed, and the Loaded that follows arms the Reattach start.
+        _layoutInitReason = InitializeReason::Reattach;
+        _UpdateLayoutInitHook();
     }
 
     uint64_t TermControl::ContentId() const
@@ -1691,6 +1690,56 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // The core is always in-proc here (as for ReapplySoftwareRendering), so get_self reaches its
         // implementation without widening ControlCore.idl.
         winrt::get_self<ControlCore>(_core)->SetRenderingSuspended(!onScreen);
+    }
+    CATCH_LOG()
+
+    // Agentmaster (UI_THREAD.md §10a #3): see TermControl.h.
+    void TermControl::_UpdateLayoutInitHook() noexcept
+    try
+    {
+        // The hook has one job: start this terminal once its panel has a size. It is wanted only while
+        // the terminal has not started, the control is in the window's visual tree (IsLoaded — the live
+        // answer, not the event that brought us here), the control is not closing, and its core still
+        // belongs to it (Detach hands the core to another window's control, which starts it there).
+        const auto wanted = !_initializedTerminal && !_IsClosing() && !_detached && IsLoaded();
+        if (!wanted)
+        {
+            _layoutUpdatedRevoker.revoke();
+            return;
+        }
+        if (!_layoutUpdatedRevoker)
+        {
+            // [this] is safe: the revoker is a member, so the handler is removed before this control is
+            // destroyed (the upstream subscription captured [this] the same way).
+            _layoutUpdatedRevoker = SwapChainPanel().LayoutUpdated(winrt::auto_revoke, [this](auto /*s*/, auto /*e*/) {
+                // This event fires every time the layout changes, but it is always the last one to fire
+                // in any layout change chain. That gives us great flexibility in finding the right point
+                // at which to initialize our renderer (and our terminal).
+                // Any earlier than the last layout update and we may not know the terminal's starting size.
+                // Agentmaster: a control that is closing, or that handed its core to another window, must
+                // never start: Detach also nulls _interactivity, which the start uses. Detach revokes the
+                // Loaded / Unloaded handlers, so nothing else would drop this hook: drop it here.
+                if (_IsClosing() || _detached)
+                {
+                    _layoutUpdatedRevoker.revoke();
+                    return;
+                }
+                if (_InitializeTerminal(_layoutInitReason))
+                {
+                    // Only let this succeed once.
+                    _layoutUpdatedRevoker.revoke();
+                }
+            });
+        }
+        // The layout pass that sized the panel can run BEFORE XAML raises Loaded, and nothing promises
+        // another pass soon after: try the start now. _InitializeTerminal returns false for a zero size
+        // and for a terminal that already started, so this costs a few property reads when it cannot
+        // succeed, and the hook armed above then waits for the pass that sizes the panel. The hook is
+        // armed FIRST, so a start that throws here is retried by the next layout pass.
+        if (_InitializeTerminal(_layoutInitReason))
+        {
+            _layoutUpdatedRevoker.revoke();
+        }
     }
     CATCH_LOG()
 

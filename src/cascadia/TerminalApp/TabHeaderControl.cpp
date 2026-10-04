@@ -171,9 +171,6 @@ namespace winrt::TerminalApp::implementation
         Unloaded([weakThis = get_weak()](auto&&, auto&&) {
             if (auto self = weakThis.get())
             {
-                // UI_THREAD.md §10a #2: out of the live tree there is nothing to place, so drop the
-                // LayoutUpdated hook (and its recorded placement) until the next Loaded.
-                self->_UpdateBadgeLayoutHook(false);
                 try
                 {
                     if (const auto popup = self->HeaderTagBookmarksPopup(); popup && popup.IsOpen())
@@ -184,6 +181,15 @@ namespace winrt::TerminalApp::implementation
                 catch (...)
                 {
                     ::Agentmaster::AgentLogCaughtException(L"tab-header tag popup close (unload)");
+                }
+                // UI_THREAD.md §10a #2: out of the live tree there is nothing to place, so the LayoutUpdated
+                // hook (and its recorded placement) goes until the next Loaded. The method reads IsLoaded():
+                // if it still reports the header in the tree, this Unloaded is STALE (raised after the next
+                // Loaded — a tab move re-inserts its TabViewItem within one tick), the hook stays, and the
+                // badges the close above just hid are placed again now, not at some later layout pass.
+                if (self->_UpdateBadgeLayoutHook())
+                {
+                    self->_PositionTagBadges();
                 }
                 // RENDERING.md §4c: a header out of the live tree (virtualized away by the strip, its tab
                 // closed or torn out) stops its pulse / embers — each update reads IsLoaded() and is
@@ -200,8 +206,9 @@ namespace winrt::TerminalApp::implementation
             if (auto self = weakThis.get())
             {
                 // UI_THREAD.md §10a #2: back in the live tree — a tagged header needs its LayoutUpdated
-                // hook again to follow reorders (a no-op for an untagged header).
-                self->_UpdateBadgeLayoutHook(true);
+                // hook again to follow reorders (a no-op for an untagged header, and for a stale Loaded
+                // whose header has already left the tree again: the method reads IsLoaded()).
+                self->_UpdateBadgeLayoutHook();
                 if (!self->_renderedTagsSpec.empty())
                 {
                     self->_PositionTagBadges();
@@ -606,7 +613,7 @@ namespace winrt::TerminalApp::implementation
         // UI_THREAD.md §10a #2: the first tag arms the LayoutUpdated hook (when the header is in the
         // live tree), and removing the last tag disarms it — before any early return below, so the
         // hook always follows the spec.
-        _UpdateBadgeLayoutHook(std::nullopt);
+        _UpdateBadgeLayoutHook();
         const auto panel = HeaderTagBookmarks();
         if (!panel)
         {
@@ -957,30 +964,34 @@ namespace winrt::TerminalApp::implementation
     // pass: all windows, and headers outside any visual tree too. So the hook is held only while it can
     // matter: this header shows badges AND is in the live tree. A strip of 550 tabs with 7 tagged ones
     // then runs 7 handlers per layout pass instead of ~550.
-    // inLiveTree: true from Loaded and false from Unloaded (the event's own state, not a property read
-    //             that could lag it); std::nullopt reads IsLoaded() now (a tag change; any other caller).
+    // "In the live tree" is IsLoaded(), the live answer, never the event that brought us here: XAML can
+    // raise a STALE Unloaded after the next Loaded when an element is re-parented within one tick (a tab
+    // move removes and re-inserts its TabViewItem), the case TermControl::_UpdateRenderingSuspension
+    // documents. Trusting that Unloaded would drop the hook of a header that is still on screen.
+    // Returns: true when the hook is armed after the call (the header is tagged and in the live tree).
+    // The Unloaded handler uses it to tell a stale Unloaded and re-place the badges it just hid.
     // Disarming also clears _badgePlacedSignature: the popup is closed while the header is out of the
     // tree, and a re-armed hook must start from a full placement, never from a stale "nothing moved".
     // Never throws (it runs from XAML event handlers, where an escaping exception is a fail-fast): a
-    // failed read or subscribe is logged and leaves the hook off. Explicit triggers still place the
-    // badges then; only a reorder can leave them at a stale spot until the next trigger.
-    void TabHeaderControl::_UpdateBadgeLayoutHook(const std::optional<bool> inLiveTree)
+    // failed read or subscribe is logged and leaves the hook as it was; the return value reports that
+    // state. With the hook off, explicit triggers still place the badges; only a reorder can then leave
+    // them at a stale spot until the next trigger.
+    bool TabHeaderControl::_UpdateBadgeLayoutHook()
     {
         try
         {
-            const bool loaded = inLiveTree.has_value() ? *inLiveTree : IsLoaded();
-            const bool want = loaded && !_renderedTagsSpec.empty();
+            const bool want = IsLoaded() && !_renderedTagsSpec.empty();
             // The revoker holds the subscription, so its state IS "armed". Acting only on a change keeps
             // the repeated Loaded / tag re-asserts free and can never stack a second handler.
             if (want == static_cast<bool>(_badgeLayoutUpdatedRevoker))
             {
-                return;
+                return want;
             }
             if (!want)
             {
                 _badgeLayoutUpdatedRevoker.revoke();
                 _badgePlacedSignature.clear();
-                return;
+                return false;
             }
             _badgeLayoutUpdatedRevoker = HeaderRootGrid().LayoutUpdated(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
                 if (auto self = weakThis.get())
@@ -993,10 +1004,13 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
             });
+            return true;
         }
         catch (...)
         {
             ::Agentmaster::AgentLogCaughtException(L"tab-header badge layout hook");
+            // A failed subscribe throws before the assignment, so the revoker still tells the truth.
+            return static_cast<bool>(_badgeLayoutUpdatedRevoker);
         }
     }
 

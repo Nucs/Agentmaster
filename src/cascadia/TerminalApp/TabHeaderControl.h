@@ -167,12 +167,16 @@ namespace winrt::TerminalApp::implementation
         // subscription made each layout pass in any window run ~550 header handlers (UI_THREAD.md §4c).
         // A loaded, tagged header still needs the hook: a tab REORDER moves the header without
         // resizing it, which no SizeChanged reports. Idempotent; disarming also drops the recorded
-        // placement signature, so the next arm starts with a full placement.
-        // Parameters: inLiveTree - true from the Loaded handler, false from the Unloaded handler (the
-        //             event's own state); std::nullopt to read IsLoaded() now (every other caller).
-        // Never throws: a failed subscribe is logged and leaves the hook off (explicit triggers still
-        // place the badges; only a reorder can then leave them at a stale spot until the next trigger).
-        void _UpdateBadgeLayoutHook(std::optional<bool> inLiveTree);
+        // placement signature, so the next arm starts with a full placement. "In the live tree" is
+        // IsLoaded(), never the event that called: XAML can raise a STALE Unloaded after the next Loaded
+        // when an element is re-parented within one tick (a tab move), and trusting it would drop the
+        // hook of a header that is still on screen.
+        // Returns: true when the hook is armed after the call (tagged + in the live tree); the Unloaded
+        // handler uses it to spot a stale Unloaded and re-place the badges it has just hidden.
+        // Never throws: a failed read or subscribe is logged and leaves the hook as it was (the return
+        // reports that state); explicit triggers still place the badges, only a reorder can then leave
+        // them at a stale spot until the next trigger.
+        bool _UpdateBadgeLayoutHook();
         winrt::Windows::UI::Xaml::FrameworkElement::LayoutUpdated_revoker _badgeLayoutUpdatedRevoker{};
         // UI_THREAD.md §10a #2: a cheap fingerprint of everything the placement reads, built from plain
         // property reads only — no TransformToVisual, so no transform whose release walks XAML's

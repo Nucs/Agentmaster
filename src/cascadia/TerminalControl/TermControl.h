@@ -352,6 +352,9 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         winrt::Windows::UI::Composition::ScalarKeyFrameAnimation _bellDarkAnimation{ nullptr };
         SafeDispatcherTimer _bellLightTimer;
 
+        // Agentmaster (UI_THREAD.md §10a #3): the SwapChainPanel's LayoutUpdated subscription that starts
+        // this terminal on its first non-zero layout. Held ONLY while the control is loaded and not yet
+        // initialized (_UpdateLayoutInitHook) — no longer from construction until the first start.
         winrt::Windows::UI::Xaml::Controls::SwapChainPanel::LayoutUpdated_revoker _layoutUpdatedRevoker;
         winrt::hstring _restorePath;
         bool _showMarksInScrollbar{ false };
@@ -420,6 +423,31 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // InitializeWithSize passes a placeholder size so a never-laid-out background tab can initialize
         // + start its connection in place. Same AV-safe Initialize()->Start() order.
         bool _InitializeTerminalWithSize(const InitializeReason reason, const double panelWidthDip, const double panelHeightDip, const float panelScaleX, const float panelScaleY);
+        // Agentmaster (UI_THREAD.md §10a #3): arm or disarm _layoutUpdatedRevoker, the hook that starts
+        // this terminal on its first non-zero layout. XAML calls EVERY LayoutUpdated handler of the UI
+        // thread after EVERY layout pass, in every window, controls outside any visual tree included. The
+        // constructor used to subscribe unconditionally, so each restored tab never opened (~537 on the
+        // 550-tab release) ran a handler on every pass that read its size and returned (35% of the
+        // LayoutUpdated raise, UI_THREAD.md §4c). A control outside the visual tree has no size, so it
+        // cannot start anyway: the hook is now held only while the control is loaded and not yet
+        // initialized, and dropped while closing or after Detach (the core then belongs to another
+        // window's control). Called from the Loaded / Unloaded handlers and _initializeForAttach; it
+        // reads IsLoaded(), the live answer, because XAML can raise a STALE Unloaded after the next Loaded
+        // when an element is re-parented within one tick (a zoom, a pane move).
+        // Whenever the hook is wanted it also tries the start at once: the layout pass that sized the
+        // panel can run BEFORE XAML raises Loaded, and a hook armed after that pass would otherwise wait
+        // for the next one. _InitializeTerminal refuses a zero size and a second start, so the attempt is
+        // free when it cannot succeed, and the hook stays armed for the pass that sizes the panel.
+        // Never throws (it runs from XAML event handlers): a failed read, subscribe or start is logged.
+        // The hook is armed BEFORE the immediate start, so a start that throws is retried by the next
+        // layout pass, exactly as the hook-only path always did.
+        void _UpdateLayoutInitHook() noexcept;
+        // Agentmaster (UI_THREAD.md §10a #3): the start the layout hook performs. Create for a new
+        // control (build the core, then start its connection); Reattach after _initializeForAttach (the
+        // core came from another window's control and usually only needs a resize). A member, read at
+        // every start attempt, so the reason survives the hook being dropped and re-armed across
+        // Unloaded / Loaded (the upstream code baked it into the one handler it subscribed).
+        InitializeReason _layoutInitReason{ InitializeReason::Create };
         safe_void_coroutine _restoreInBackground();
         void _TappedHandler(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::TappedRoutedEventArgs& e);
         void _KeyDownHandler(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::KeyRoutedEventArgs& e);
