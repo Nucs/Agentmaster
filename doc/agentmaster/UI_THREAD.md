@@ -508,3 +508,74 @@ copies at ~48 ms/s.
   thread and from the scanner, `SessionRegistry::Snapshot` gone from the observer, and the scanner thread
   at a few ms/s while sessions sit idle. The tab reconcile, the liveness sweep (archives a dead claude's
   tab), the spark crown, the inferred tab colors and the managed Codex cards behave as before.
+
+### 10h. What else is in the draw loop (2026-10-04)
+
+Read from the 10:27 profile (§10e) and from the XAML source. The system `Windows.UI.Xaml.dll` of this
+Windows build has the same functions as the WinUI source quoted here (checked in its public symbols:
+`CFrameworkElement::UpdateRequiresCompNodeForRoundedCorners`, `HWCompTreeNodeWinRT::UpdateRoundedCornerClipVisual`,
+`HWCompTreeNodeWinRT::UpdateTreeChildren`).
+
+**One frame** (~2.5–2.7 ms; 61 frames/s on the release):
+
+| Part of the frame | Share |
+|---|---|
+| The composition walk (`SubmitRenderCommandsToCompositor` → `UpdateTree*`) | 93% |
+| DirectManipulation container bookkeeping (`InitializeDirectManipulationContainers`) | 3% |
+| Layout, nearly all of it the `LayoutUpdated` raise | 1.5% |
+| Storyboard tick | 1.3% |
+| Render walk, commit | <1% |
+
+**The walk visits every composition node of every window, on every frame.**
+`HWCompTreeNode::UpdateTreeChildren` (WinUI `dxaml/xcp/core/hw/hwcompnode.cpp`) recurses through all
+children with no dirty check at that level. In the system DLL, each node also walks its composition visual
+collections (`get_Children`, `VisualIterator`, `get_IsVisible`). So the cost of a frame is the number of
+composition nodes. An element gets a node for one of the `CompositionRequirement` reasons. The one that
+our UI triggers in bulk is **rounded corners**: a `FrameworkElement` whose `CornerRadius` is non-zero
+**and that has children** gets a node, so that XAML can clip the children
+(`CFrameworkElement::UpdateRequiresCompNodeForRoundedCorners`, `framework.cpp`). A rounded element with no
+children is drawn with an alpha mask and gets no node.
+
+**Where our nodes come from:**
+
+| Source | Nodes |
+|---|---|
+| Side-panel cards (`_SidePanelMakeCard`): the card `Border` (`CornerRadius(4)`, child: the card body) and the title band (`CornerRadius(3,3,0,0)`, child: the title). All cards are loaded (a `StackPanel`), on screen or not. | 2 per card: ~1,100 for the ~550 cards of the three open side panels |
+| The side-panel summary: a `Button` (the stock template is rounded and has content) for each ▸ jump — one per prompt of the selected session's current part, after its last /compact — and for each earlier-session separator | tens per window |
+| The tab strip: each realized tab's `TabContainer` (rounded top corners and children, WinUI 2.8.4 `TabView.xaml`) and its rounded close button | ~2 per realized tab (the visible ones plus about two viewports on each side) |
+| Popups (the 7 tag-badge rows, a tooltip), per-tab overlay badges, `ScrollViewer`s, terminal `SwapChainPanel`s | a few dozen |
+
+Open: a frame cost ~1.4 ms in 0.6.8.14 and ~2.7 ms in 0.6.8.15, and the cause is not known. The cards
+were the same (their rounded shapes date from 2a0a2e001, 2026-09-16). The whole-conversation summary of
+0.6.8.15 adds rows, but its rows have no node of their own (a plain `Grid`), and its buttons are tens per
+window — too few to double the walk alone. The number of realized tabs and which tabs are selected also
+differ between the two measurements.
+
+**What makes XAML draw a frame at all:**
+
+| Source | Rate | Note |
+|---|---|---|
+| A running storyboard (draft dots, spark crown) | every display frame | fix #1 (c751ed257, not built) |
+| The unread flash ring (`_OnAgentFlashTick`): it toggles the ring's **Visibility** | every 600 ms in each window with an unread tab | A Visibility change is a layout pass too. 2 unread tabs in the big window during §10e. After #1 this is the steadiest frame source. |
+| Side-panel rebuild (`_SidePanelRebuildCards`): Clear, then re-create every card | at most every 500 ms (`kSidePanelRebuildMinGapMs`) while the fleet changes | ~470 cards and ~940 nodes in the big window, rebuilt each time |
+| Side-panel timing refresh | every 30 s | a full `Get` per card, and every card's text is set even when it did not change, so every card is measured again |
+| Registry-driven property changes (status dot, pending dots, crown, overlay badge) | on change | change-gated (`_SetTabAgentDot` / `_SetTabPending` / `_SetTabCacheWarm`) |
+| Pointer hover, tooltips (1 s watchdog while one is open), scrolling | on input | normal |
+| Agent Manager page timers (1 s countdown, 30 s refresh) | only while the page is shown | |
+
+Not in this loop: the terminals draw on their own render threads, only on change and with vsync, and a
+hidden tab draws nothing (RENDERING.md §4c; 21 terminals drew 0 frames in 30 s). Nothing here has a frame
+rate to lower (§10f).
+
+**Fix candidates:**
+
+| Fix | Win | Ease |
+|---|---|---|
+| Flash ring by `Opacity` (or a composition opacity loop) instead of `Visibility` | no layout pass every 600 ms; with a composition loop, no frames either | Easy |
+| Side-panel timing text: set it only when it changed, from a lean read | no re-measure of every card every 30 s | Very easy |
+| Card and title band: move the rounded corners to a childless background element behind the content | ~2 fewer nodes per card, ~1,100 in all: likely the largest share of every frame | Easy to medium (check the look) |
+| Summary ▸ jump and separators: no stock rounded `Button` template (a `CornerRadius` 0 style, or a tap handler on the row) | tens of nodes per window | Easy |
+| Side panel: update cards in place, or virtualize (#6) | small rebuilds; only on-screen cards hold nodes | Hard |
+
+To measure the side panel's share before any build: collapse the big window's side panel for one minute,
+and sample again (`stacksnap sample`, §9). The walk's cost should drop by its share of the nodes.
