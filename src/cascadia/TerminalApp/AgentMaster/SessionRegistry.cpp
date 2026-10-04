@@ -71,9 +71,18 @@ namespace
                (p.status == PromptStatus::Sent && !p.echoed);
     }
 
+    // Agentmaster (UI_THREAD.md §10a #4; SIDE_PANEL.md §2c): WHICH members a lean copy leaves out of a
+    // stored record. Each lean read names the narrowest kind that still holds everything its caller reads.
+    enum class LeanCopyKind : uint8_t
+    {
+        WithoutQueue, // GetWithoutQueue: the prompt queue only
+        Scan, // SnapshotLiveForScan: the queue (refilled with its OPEN prompts) + all four display texts
+        Cards, // SnapshotLiveForCards: the queue + lastAssistantText, recap and pendingPasteRefs; pendingInput KEPT
+    };
+
     // Agentmaster (UI_THREAD.md §10a #4): moves the members a lean copy must not copy OUT of a stored session
     // record, and moves them back when it goes out of scope — also when the copy made in between throws.
-    // Copying a SessionInfo while its queue (and, for the scan copy, its four display texts) is parked here
+    // Copying a SessionInfo while its queue (and, per LeanCopyKind, some of its display texts) is parked here
     // copies every other member exactly as Get does, so a member added to SessionInfo later is carried by the
     // lean reads without anyone listing it. std::vector / std::wstring move construction and move assignment
     // are noexcept with std::allocator, so parking and restoring cannot fail; each parked member is cleared
@@ -82,13 +91,15 @@ namespace
     class ParkedSessionMembers
     {
     public:
-        // Parks `owner.queue`, and also its lastAssistantText, recap, pendingInput and pendingPasteRefs when
-        // `parkTexts` is true.
-        //   owner     — the stored record; the parked members move out now and back in the destructor.
-        //   parkTexts — also park the four display texts (the SessionScanner snapshot).
-        ParkedSessionMembers(Agentmaster::SessionInfo& owner, bool parkTexts) noexcept :
+        // Parks `owner.queue` always; lastAssistantText, recap and pendingPasteRefs for the Scan and Cards
+        // kinds; pendingInput for the Scan kind only (a card shows the unsent-draft dots, so it needs to know
+        // whether a draft exists — the draft is short, unlike the transcript texts).
+        //   owner — the stored record; the parked members move out now and back in the destructor.
+        //   kind  — which members to park (LeanCopyKind).
+        ParkedSessionMembers(Agentmaster::SessionInfo& owner, LeanCopyKind kind) noexcept :
             _owner{ owner },
-            _parkTexts{ parkTexts },
+            _parkTexts{ kind == LeanCopyKind::Scan || kind == LeanCopyKind::Cards },
+            _parkPendingInput{ kind == LeanCopyKind::Scan },
             _queue(std::move(owner.queue))
         {
             owner.queue.clear();
@@ -98,10 +109,13 @@ namespace
                 owner.lastAssistantText.clear();
                 _recap = std::move(owner.recap);
                 owner.recap.clear();
-                _pendingInput = std::move(owner.pendingInput);
-                owner.pendingInput.clear();
                 _pendingPasteRefs = std::move(owner.pendingPasteRefs);
                 owner.pendingPasteRefs.clear();
+            }
+            if (_parkPendingInput)
+            {
+                _pendingInput = std::move(owner.pendingInput);
+                owner.pendingInput.clear();
             }
         }
 
@@ -114,8 +128,11 @@ namespace
             {
                 _owner.lastAssistantText = std::move(_lastAssistantText);
                 _owner.recap = std::move(_recap);
-                _owner.pendingInput = std::move(_pendingInput);
                 _owner.pendingPasteRefs = std::move(_pendingPasteRefs);
+            }
+            if (_parkPendingInput)
+            {
+                _owner.pendingInput = std::move(_pendingInput);
             }
         }
 
@@ -131,7 +148,8 @@ namespace
 
     private:
         Agentmaster::SessionInfo& _owner;
-        bool _parkTexts;
+        bool _parkTexts; // lastAssistantText, recap and pendingPasteRefs are parked
+        bool _parkPendingInput; // pendingInput is parked
         std::vector<Agentmaster::QueuedPrompt> _queue;
         std::wstring _lastAssistantText;
         std::wstring _recap;
@@ -140,22 +158,23 @@ namespace
     };
 
     // Agentmaster (UI_THREAD.md §10a #4): a copy of a stored record that never copies its prompt queue — the
-    // shared body of SessionRegistry::GetWithoutQueue (forScan false) and SnapshotLiveForScan (forScan true:
-    // the four display texts are not copied either, and the copy's queue is refilled with the stored record's
-    // OPEN prompts, IsOpenScanPrompt, in their order).
+    // shared body of SessionRegistry::GetWithoutQueue (WithoutQueue), SnapshotLiveForScan (Scan: the four
+    // display texts are not copied either, and the copy's queue is refilled with the stored record's OPEN
+    // prompts, IsOpenScanPrompt, in their order) and SnapshotLiveForCards (Cards: lastAssistantText, recap and
+    // pendingPasteRefs are not copied, pendingInput is; the queue stays empty).
     // The caller must hold the registry mutex: the stored record is a non-const element of the registry's map,
     // reached through a const accessor, and the const_cast lets the parking guard move its members out and
     // back. Every reader of a stored record takes that same mutex, so no thread can observe the parked state.
     //   stored  — the registry's own record.
-    //   forScan — false: leave out the queue only. true: also leave out the texts, then keep the open prompts.
+    //   kind    — which members to leave out (LeanCopyKind).
     //   returns — the lean copy.
     //   throws  — std::bad_alloc; the guard's destructor restores the stored record first.
-    Agentmaster::SessionInfo CopyLeanSessionLocked(const Agentmaster::SessionInfo& stored, bool forScan)
+    Agentmaster::SessionInfo CopyLeanSessionLocked(const Agentmaster::SessionInfo& stored, LeanCopyKind kind)
     {
         auto& owner = const_cast<Agentmaster::SessionInfo&>(stored);
-        ParkedSessionMembers parked{ owner, forScan };
+        ParkedSessionMembers parked{ owner, kind };
         Agentmaster::SessionInfo copy = owner; // every member except the parked ones, which read empty right now
-        if (forScan)
+        if (kind == LeanCopyKind::Scan)
         {
             for (const auto& p : parked.Queue())
             {
@@ -373,7 +392,7 @@ namespace Agentmaster
         {
             return std::nullopt;
         }
-        return CopyLeanSessionLocked(it->second, false);
+        return CopyLeanSessionLocked(it->second, LeanCopyKind::WithoutQueue);
     }
 
     std::wstring SessionRegistry::GetTabToken(const std::wstring& id) const
@@ -440,7 +459,32 @@ namespace Agentmaster
             const auto it = _sessions.find(id);
             if (it != _sessions.end() && it->second.live)
             {
-                out.push_back(CopyLeanSessionLocked(it->second, true));
+                out.push_back(CopyLeanSessionLocked(it->second, LeanCopyKind::Scan));
+            }
+        }
+        return out;
+    }
+
+    std::vector<SessionInfo> SessionRegistry::SnapshotLiveForCards() const
+    {
+        std::lock_guard guard{ _mtx };
+        std::vector<SessionInfo> out;
+        // Size once, as in SnapshotLive: a reallocation would move every lean record already built.
+        size_t liveCount = 0;
+        for (const auto& entry : _sessions)
+        {
+            if (entry.second.live)
+            {
+                ++liveCount;
+            }
+        }
+        out.reserve(liveCount);
+        for (const auto& id : _order)
+        {
+            const auto it = _sessions.find(id);
+            if (it != _sessions.end() && it->second.live)
+            {
+                out.push_back(CopyLeanSessionLocked(it->second, LeanCopyKind::Cards));
             }
         }
         return out;

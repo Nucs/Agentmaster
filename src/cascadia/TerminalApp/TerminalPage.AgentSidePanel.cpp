@@ -30,11 +30,17 @@
 // ("the last one to resize sets the default for new windows"). Collapse follows the same rule; the
 // dock side (LEFT by default; the header ⇄ flips it) is GLOBAL-only.
 //
-// PERF DISCIPLINE (the Manager-lens rebuild-tax lesson): rebuilds are COALESCED off the page's
-// already-batched registry drain, min-gap throttled, and deferred entirely while collapsed; the
-// ~30s timing refresh rewrites the timing TextBlocks IN PLACE instead of rebuilding; cards carry
-// NO eager flyouts (the context menu is built lazily at right-click); and every per-card resolve
-// (color, dir) goes through the already-cached engine resolvers.
+// PERF DISCIPLINE (the Manager-lens rebuild-tax lesson): list updates are COALESCED off the page's
+// already-batched registry drain, min-gap throttled, and deferred entirely while collapsed; and
+// since SIDE_PANEL.md §2c an update is IN PLACE — every session keeps ONE card for as long as it is
+// listed, an update writes only the values that changed (a card model compared field by field), new
+// cards are built only for sessions new to the list, and the order changes with the fewest
+// removes / inserts / moves (AgentMaster/KeyedListDiff.h; a XAML Move is a plain reorder, no
+// Unloaded/Loaded). The per-update reads are lean: SnapshotLiveForCards (no queues, no transcript
+// texts), ONE dir-colors snapshot for every card's color (LoadDirColorIndex), and the bookmark tags
+// cached per card until SessionTagsEpoch moves. The ~30s timing refresh runs the same update, so
+// only the timing texts that changed are written; cards carry NO eager flyouts (the context menu is
+// built lazily at right-click).
 // ======================================================================================
 //
 // This file implements TerminalPage methods (same class, separate TU — the TabManagement.cpp
@@ -57,19 +63,23 @@
 #include "AgentStatusColors.h" // ParseArgbHexColor — the pending-dots color pair
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / LogNav / ShortId
 #include "AgentMaster/Engine.h" // BroadcastSettingsChanged — the ⌖ scroll-to-tab toggle reaches every OTHER open window live
-#include "AgentMaster/Persistence.h" // Load/SaveAppSettings + EffectiveWorkingDir / ResolveSessionColorHex
+#include "AgentMaster/KeyedListDiff.h" // PlanKeyedListOps / ApplyKeyedListOp — the card list's fewest removes / inserts / moves (SIDE_PANEL.md §2c)
+#include "AgentMaster/Persistence.h" // Load/SaveAppSettings + EffectiveWorkingDir / ResolveSessionColorHex + LoadDirColorIndex (one color snapshot per list update)
 #include "AgentMaster/ProcessInspect.h" // ExternalClaudeRow (the Internal.h MakeSortKey overload's parameter type)
 #include "AgentMaster/ProfileBootstrap.h" // (Internal.h convention — harmless here, keeps the include set board-identical)
-#include "AgentMaster/SessionRegistry.h" // SnapshotLive / Get
+#include "AgentMaster/SessionRegistry.h" // SnapshotLiveForCards / Get
 #include "AgentMaster/SessionSearch.h" // ParseSessionQuery / MatchesQueryText / MatchesPathQuery — the Sessions grammar, reused
-#include "AgentMaster/SessionStore.h" // GetSessionTags / LoadAllTagColors — the cards' bookmark-tag strip (read once per rebuild)
+#include "AgentMaster/SessionStore.h" // GetSessionTags / LoadAllTagColors / SessionTagsEpoch — the cards' bookmark-tag strip (cached per card until a tag changes)
 
 #include <algorithm>
 #include <chrono> // kCardTipDelay (the Internal.h card-tip hold-back) + the tip helpers' delay overrides
 #include <cmath>
 #include <cwctype> // towlower — the fold for the in-process matchers
-#include <map> // the per-rebuild tag-color map (folded tag name -> "#AARRGGBB") the cards' ribbons resolve against
+#include <map> // the cached tag-color map (folded tag name -> "#AARRGGBB") the cards' ribbons resolve against
 #include <shobjidl.h> // IFileOpenDialog — required BY AgentManagerContent.Internal.h's PickClaudeExe helper (per-TU anonymous-namespace copy)
+#include <string_view> // the list update's duplicate-id belt (a set of views into the snapshot's ids)
+#include <unordered_set>
+#include <vector>
 
 using namespace winrt::Windows::Foundation;
 // Using-DECLARATIONS (not a directive) for the color helpers: a `using namespace
@@ -259,6 +269,116 @@ namespace
         ribbon.StrokeThickness(0.75);
         ribbon.VerticalAlignment(VerticalAlignment::Top);
         return ribbon;
+    }
+
+    // --- The in-place card list (SIDE_PANEL.md §2c) ----------------------------------------------
+
+    // Pack a Color as 0xAARRGGBB — the card model's comparable form of a color.
+    //   c       — the color.
+    //   returns — the packed value. Never throws.
+    uint32_t SidePanelPackArgb(const Color& c) noexcept
+    {
+        return (static_cast<uint32_t>(c.A) << 24) | (static_cast<uint32_t>(c.R) << 16) | (static_cast<uint32_t>(c.G) << 8) | static_cast<uint32_t>(c.B);
+    }
+
+    // The inverse of SidePanelPackArgb. A plain struct initialization (Color is a POD of A, R, G, B), not
+    // ColorHelper::FromArgb — that one is a WinRT factory call, and the dots and ribbons unpack per update.
+    //   argb    — 0xAARRGGBB.
+    //   returns — the color. Never throws.
+    Color SidePanelUnpackArgb(uint32_t argb) noexcept
+    {
+        return Color{ static_cast<uint8_t>(argb >> 24), static_cast<uint8_t>(argb >> 16), static_cast<uint8_t>(argb >> 8), static_cast<uint8_t>(argb) };
+    }
+
+    // Remove `child` from `panel` wherever it sits — the optional parts of a card (codex pill, dots,
+    // timing, tag strip) are found by identity, so a part's removal never depends on its siblings' count.
+    //   panel — the parent panel.
+    //   child — the element to remove; a no-op when it is not one of the panel's children.
+    // Throws winrt::hresult_error if XAML refuses the edit (a torn-down tree) — the list update's catch
+    // resets the list.
+    void SidePanelRemoveChild(const winrt::Windows::UI::Xaml::Controls::Panel& panel, const UIElement& child)
+    {
+        uint32_t index = 0;
+        if (panel && child && panel.Children().IndexOf(child, index))
+        {
+            panel.Children().RemoveAt(index);
+        }
+    }
+
+    // Everything ONE card shows, computed from its live session (the lean SnapshotLiveForCards copy) and
+    // this update's shared lookups — a plain record that _SidePanelApplyCardModel compares, value by value,
+    // with the one the card shows now.
+    //   s                 — the session (its queue and transcript texts are empty in the lean copy; nothing
+    //                       here reads them).
+    //   mode              — the GLOBAL tab-color mode (the band color and the effective working dir).
+    //   tags              — the session's bookmark tags in add order (the card's tag cache).
+    //   tagColors         — this tags epoch's LoadAllTagColors() (empty when no rendered card is tagged).
+    //   dirColors         — this update's LoadDirColorIndex() snapshot.
+    //   pendingArgb       — the pending dots' color, 0xAARRGGBB (the configured LIGHT color: card bodies are dark).
+    //   animationsEnabled — Windows' "Animation effects" (AgentAnimationsEnabled), read once per update.
+    //   returns           — the model.
+    //   throws            — std::bad_alloc on allocation failure only.
+    winrt::TerminalApp::implementation::AgentSidePanelCardModel SidePanelCardModelFor(const ::Agentmaster::SessionInfo& s,
+                                                                                      ::Agentmaster::TabColorMode mode,
+                                                                                      const std::vector<std::wstring>& tags,
+                                                                                      const std::map<std::wstring, std::wstring>& tagColors,
+                                                                                      const ::Agentmaster::DirColorIndex& dirColors,
+                                                                                      uint32_t pendingArgb,
+                                                                                      bool animationsEnabled)
+    {
+        winrt::TerminalApp::implementation::AgentSidePanelCardModel m;
+        m.title = s.title.empty() ? s.id : s.title;
+        // The band: the session's resolved color (dir-keyed / individual / inferred per the GLOBAL mode;
+        // empty under Remove-colors) with WCAG-contrast-picked ink — resolved from the update's ONE
+        // dir-colors snapshot, never one file stat + map copy per card.
+        m.bandHex = ::Agentmaster::ResolveSessionColorHex(mode, s, dirColors);
+        if (const auto band = HexToColor(m.bandHex))
+        {
+            m.darkInk = PreferDarkTextOn(*band);
+        }
+        m.state = s.state;
+        m.codex = (s.kind == ::Agentmaster::AgentKind::Codex);
+        m.pending = !s.pendingInput.empty();
+        if (m.pending)
+        {
+            // RENDERING.md §4c: still dots for a session whose tab has not started (a dormant tab's
+            // remembered draft), as on its tab; an external session (no control of ours) keeps the pulse.
+            // Windows' animation switch is folded in HERE (not only inside BuildPendingDots) so that turning
+            // it on or off changes the model, and the dots of every card are rebuilt in the new mode.
+            m.pendingAnimated = (s.started || s.external) && animationsEnabled;
+            m.pendingArgb = pendingArgb;
+        }
+        const int64_t last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
+        m.timing = FormatSessionTiming(s.convCreatedUnixMs, last);
+        // The dir line: "<leaf>[ / <branch>]", dim — the card's place at a glance (the full path rides the tooltip).
+        const std::wstring dir = ::Agentmaster::EffectiveWorkingDir(mode, s);
+        m.dirLine = SidePanelLeafOf(dir);
+        if (!s.branch.empty())
+        {
+            m.dirLine += L" / " + s.branch;
+        }
+        m.tags = tags;
+        m.tagArgb.reserve(tags.size());
+        for (const auto& tag : tags)
+        {
+            // The ONE resolution every tag surface shares (a user-picked color, else the name hash), so a
+            // tag wears the same color on this card as on its tab.
+            m.tagArgb.push_back(SidePanelPackArgb(winrt::TerminalApp::implementation::ResolveTagDisplayColor(tag, tagColors)));
+        }
+        // The tooltip names EVERY tag, in the order they were added — the ribbons are colors only, and a
+        // "+N" corner hides the overflow, so this is where the full set reads as words.
+        std::wstring tagsLine;
+        if (!tags.empty())
+        {
+            tagsLine = L"\ntags: ";
+            for (size_t i = 0; i < tags.size(); ++i)
+            {
+                tagsLine += (i ? L" \x00B7 " : L"") + tags[i];
+            }
+        }
+        m.tipTitle = s.title;
+        m.tipText = dir + (s.branch.empty() ? L"" : (L"\nbranch: " + s.branch)) + tagsLine + L"\n\nClick to select \x00B7 double-click to jump to its tab \x00B7 right-click for actions.";
+        return m;
     }
 }
 
@@ -1245,12 +1365,12 @@ namespace winrt::TerminalApp::implementation
             _sidePanelRevealPendingId.clear(); // switched off (here or by a broadcast) after the request was made
             return;
         }
-        const auto it = _sidePanelCardsById.find(_sidePanelRevealPendingId);
-        if (it == _sidePanelCardsById.end() || !it->second)
+        const auto it = _sidePanelCardViews.find(_sidePanelRevealPendingId);
+        if (it == _sidePanelCardViews.end() || !it->second.card)
         {
             return; // no card for it (yet) — _SidePanelRebuildCards re-queues; a newer tab selection replaces the debt
         }
-        const auto card = it->second; // a strong ref: layout below can't release it under us
+        const auto card = it->second.card; // a strong ref: layout below can't release it under us
         _sidePanelRevealPendingId.clear();
         try
         {
@@ -1379,10 +1499,13 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // The periodic body (UI thread after the hop): (1) replay a rebuild deferred by the throttle,
-    // (2) kick the summary overlay's cheap mtime-gated content re-check (so a quiet session's last
-    // message still lands without a registry notify), (3) every ~30s rewrite the cards' timing
-    // texts IN PLACE — never a full rebuild just to move an "ago" string (the Manager lens lesson).
+    // The periodic body (UI thread after the hop): (1) run a list update deferred by the throttle, or owed
+    // because the hosted set or the tags changed without a registry notify, (2) kick the summary overlay's
+    // cheap mtime-gated content re-check (so a quiet session's last message still lands without a registry
+    // notify), (3) after ~30s without any list update, refresh the cards' timing texts through the same
+    // in-place update — which writes only the texts whose value moved (SIDE_PANEL.md §2c), never a rebuild
+    // just to move an "ago" string (the Manager lens lesson), and reads the lean card snapshot instead of a
+    // full registry copy per card.
     winrt::Windows::Foundation::IAsyncAction TerminalPage::_SidePanelPeriodicTickImpl()
     {
         auto strongThis{ get_strong() };
@@ -1401,40 +1524,29 @@ namespace winrt::TerminalApp::implementation
         {
             _sidePanelDirty = true;
         }
+        // Tags belt: a tag added, removed or recolored in ANOTHER window (or on the Sessions page) fires no
+        // registry notify and no _SidePanelNoteTagsChanged here — but it moves the process-wide tag epoch the
+        // cards' tag cache was read at. One atomic load per tick.
+        if (!_sidePanelDirty && ::Agentmaster::SessionTagsEpoch() != _sidePanelTagsEpoch)
+        {
+            _sidePanelDirty = true;
+        }
         if (_sidePanelDirty)
         {
-            _SidePanelRebuildCards(); // rebuild resets the timing texts too — skip the in-place pass
+            _SidePanelRebuildCards(); // the update refreshes the timing texts too — no separate timing pass
             co_return;
         }
         if (_sidePanelSummaryOverlay)
         {
             _sidePanelSummaryOverlay->RefreshSummaryContent(); // mtime-gated: a quiet transcript costs one stat
         }
-        const uint64_t now = ::GetTickCount64();
-        if (now < _sidePanelNextTimingMs)
+        if (::GetTickCount64() < _sidePanelNextTimingMs)
         {
             co_return;
         }
-        _sidePanelNextTimingMs = now + kSidePanelTimingRefreshMs;
-        if (!_sessionRegistry)
-        {
-            co_return;
-        }
-        for (const auto& [id, tb] : _sidePanelTimingTexts)
-        {
-            if (!tb)
-            {
-                continue;
-            }
-            if (const auto s = _sessionRegistry->Get(id))
-            {
-                const std::wstring t = FormatSessionTiming(s->convCreatedUnixMs, s->convLastActivityUnixMs ? s->convLastActivityUnixMs : s->lastActivityUnixMs);
-                if (!t.empty())
-                {
-                    tb.Text(winrt::hstring{ t });
-                }
-            }
-        }
+        // ~30 quiet seconds: the timing texts age, so run the in-place update — it rewrites only the cards
+        // whose text moved (and re-arms the next deadline itself).
+        _SidePanelRebuildCards();
     }
 
     // The managed sessions hosted in THIS window: every _claudeTabs entry whose weak Tab still
@@ -1457,19 +1569,33 @@ namespace winrt::TerminalApp::implementation
         return ids;
     }
 
-    // Rebuild the card list from the live fleet: SnapshotLive (never the full archived Snapshot —
-    // the Manager-lens tax rule) -> the SCOPE (LOCAL, the default: only sessions hosted in THIS
-    // window per _HostedSessionIds; GLOBAL: every window's) -> the search filter (the Sessions
-    // grammar) -> the SHARED boardSort order (MakeSortKey/SortKeyLess — the board's own comparator)
-    // -> the bookmark tags of exactly the cards that will render (+ the tag colors, only if any is
-    // tagged) -> compact cards. Also refreshes the count line (which names the scope) and re-registers the
-    // selection highlight + timing-text maps + the hosted set the periodic LOCAL belt diffs against.
-    // Tags live in the SessionStore, not the registry, so a tag edit fires none of this list's
-    // rebuild triggers: this window's own edits call _SidePanelNoteTagsChanged, and an edit made in
-    // another window lands on the next rebuild here (the Triage Board's accepted cross-window lag).
+    // Bring the card list up to date with the live fleet — IN PLACE (SIDE_PANEL.md §2c). The rows:
+    // SnapshotLiveForCards (the live sessions without their queues and transcript texts — never the full
+    // archived Snapshot, the Manager-lens tax rule) -> the SCOPE (LOCAL, the default: only sessions hosted
+    // in THIS window per _HostedSessionIds; GLOBAL: every window's) -> the search filter (the Sessions
+    // grammar) -> the SHARED boardSort order (MakeSortKey/SortKeyLess — the board's own comparator, with one
+    // key per session). Then one AgentSidePanelCardModel per row, and the list is EDITED, never rebuilt:
+    //   - a session that keeps its card gets only the values that changed written (_SidePanelApplyCardModel);
+    //   - a session new to the list gets a card (_SidePanelCreateCardView + a fresh apply);
+    //   - the order changes with the fewest removes / inserts / moves (PlanKeyedListOps). A XAML Move is a
+    //     plain reorder of the panel's items (no Unloaded/Loaded), so a card that moves keeps its elements,
+    //     its pulsing dots and its hover state.
+    // In the steady state (one session changed its state) that is one card's dot, label and border. The old
+    // Clear() + rebuild re-created every card — ~466 in the release's biggest window — up to twice a second.
+    // The reads are lean too: each card's tags come from the per-card cache, re-read only when
+    // SessionTagsEpoch moved (a tag write anywhere in this process) or for a card new to the list, and every
+    // card's color resolves against ONE LoadDirColorIndex snapshot. Also refreshes the count line (which names
+    // the scope; written only when its text changed), every card's timing text (so the ~30s timing pass is
+    // due only after 30 quiet seconds), and the hosted set the periodic LOCAL belt diffs against; and pays an
+    // owed ⌖ reveal.
+    // Tags live in the SessionStore, not the registry, so a tag edit fires no registry trigger: this window's
+    // own edits call _SidePanelNoteTagsChanged, and an edit made in another window moves the epoch, which the
+    // periodic tick notices (_SidePanelPeriodicTickImpl).
     // No-op before _InitAgentSidePanel (or without a registry). UI thread only.
-    // Throws winrt::hresult_error if XAML construction fails mid-rebuild (a torn-down or wrong-thread
-    // tree); the list may then be partially rebuilt, and the next rebuild starts from a Clear().
+    // Never throws: a failure midway (a XAML edit refused — a torn-down tree — or an allocation) is logged
+    // (Rule #18), the list is reset to empty (_SidePanelResetCards) and marked dirty, and the next tick
+    // rebuilds it from scratch. The in-place edits rely on the order mirror matching the panel exactly, and
+    // after a partial edit it might not.
     void TerminalPage::_SidePanelRebuildCards()
     {
         if (!_sidePanelBuilt || !_sidePanelCards || !_sessionRegistry)
@@ -1478,280 +1604,351 @@ namespace winrt::TerminalApp::implementation
         }
         _sidePanelLastRebuildMs = ::GetTickCount64();
         _sidePanelDirty = false;
+        // This update writes every card's current timing text, so the periodic timing pass is owed only
+        // after 30 seconds without one.
+        _sidePanelNextTimingMs = _sidePanelLastRebuildMs + kSidePanelTimingRefreshMs;
+        try
+        {
+            const auto mode = _appSettings.tabColorMode;
+            const auto snap = _sessionRegistry->SnapshotLiveForCards();
+            const auto terms = ::Agentmaster::ParseSessionQuery(_sidePanelSearchText);
+            // LOCAL scope (the default): only the sessions whose tab lives in THIS window — the hosted
+            // set, snapshotted ONCE per update and remembered so the periodic tick can detect a hosting
+            // change the registry never announces (a tab docked in / torn out — see _SidePanelPeriodicTickImpl).
+            const bool local = !_sidePanelGlobal;
+            std::unordered_set<std::wstring> hosted;
+            if (local)
+            {
+                hosted = _HostedSessionIds();
+            }
+            _sidePanelRenderedLocalIds = hosted; // empty under GLOBAL — the belt only diffs while LOCAL
 
-        const auto snap = _sessionRegistry->SnapshotLive();
-        const auto terms = ::Agentmaster::ParseSessionQuery(_sidePanelSearchText);
-        // LOCAL scope (the default): only the sessions whose tab lives in THIS window — the hosted
-        // set, snapshotted ONCE per rebuild and remembered so the periodic tick can detect a hosting
-        // change the registry never announces (a tab docked in / torn out — see _SidePanelPeriodicTickImpl).
-        const bool local = !_sidePanelGlobal;
-        std::unordered_set<std::wstring> hosted;
-        if (local)
-        {
-            hosted = _HostedSessionIds();
-        }
-        _sidePanelRenderedLocalIds = hosted; // empty under GLOBAL — the belt only diffs while LOCAL
-        std::vector<const ::Agentmaster::SessionInfo*> rows;
-        rows.reserve(snap.size());
-        size_t liveTotal = 0; // the IN-SCOPE total (what "N of M" counts against — never another window's sessions under LOCAL)
-        for (const auto& s : snap)
-        {
-            if (!s.live)
+            // The rows, each with its sort key built ONCE: a comparator that built both keys per comparison
+            // (a title copy each) cost O(n log n) string copies per update.
+            struct CardRow
             {
-                continue; // belt — SnapshotLive should already be live-only
-            }
-            if (local && hosted.find(s.id) == hosted.end())
+                SortKey key;
+                const ::Agentmaster::SessionInfo* session;
+            };
+            std::vector<CardRow> rows;
+            rows.reserve(snap.size());
+            size_t liveTotal = 0; // the IN-SCOPE total (what "N of M" counts against — never another window's sessions under LOCAL)
+            for (const auto& s : snap)
             {
-                continue; // hosted by another window (or a live session with no tab here) — not "here"
+                if (!s.live)
+                {
+                    continue; // belt — SnapshotLiveForCards is already live-only
+                }
+                if (local && hosted.find(s.id) == hosted.end())
+                {
+                    continue; // hosted by another window (or a live session with no tab here) — not "here"
+                }
+                ++liveTotal;
+                if (SidePanelSessionMatches(s, terms, mode))
+                {
+                    rows.push_back(CardRow{ MakeSortKey(s), &s });
+                }
             }
-            ++liveTotal;
-            if (SidePanelSessionMatches(s, terms, _appSettings.tabColorMode))
-            {
-                rows.push_back(&s);
-            }
-        }
-        std::stable_sort(rows.begin(), rows.end(), [this](const ::Agentmaster::SessionInfo* a, const ::Agentmaster::SessionInfo* b) {
-            return SortKeyLess(_appSettings.boardSort, MakeSortKey(*a), MakeSortKey(*b));
-        });
+            std::stable_sort(rows.begin(), rows.end(), [this](const CardRow& a, const CardRow& b) {
+                return SortKeyLess(_appSettings.boardSort, a.key, b.key);
+            });
 
-        // Bookmark tags for exactly the cards about to render, read ONCE per rebuild — the Triage
-        // Board's recipe (_RebuildBoard), so the two surfaces cost the same per card: GetSessionTags
-        // sits on SessionStore's (size,mtime)-validated record cache, i.e. one file stat per card in the
-        // steady state and a re-parse only when that session's store file actually changed (which is
-        // also how an edit made in ANOTHER window shows up here on this rebuild). The colors file is
-        // read only when a rendered card is tagged at all, so an untagged fleet pays nothing for it.
-        // Rows the filter hid are never read — they get no card.
-        std::unordered_map<std::wstring, std::vector<std::wstring>> tagsById;
-        for (const auto* s : rows)
-        {
-            if (auto tags = ::Agentmaster::GetSessionTags(s->id); !tags.empty())
+            // Bookmark tags, from the per-card cache. The epoch is loaded BEFORE any read (the SessionStore.h
+            // contract): a write landing during the reads below leaves the older epoch stored here, so the next
+            // update re-reads — a cache refreshed once too often, never kept stale. A moved epoch means some tag
+            // or tag color changed in this process since the last read, so everything cached is dropped. A card
+            // new to the list reads its tags once (GetSessionTags: SessionStore's (size,mtime)-validated record
+            // cache — one file stat); a card that stays reads nothing. Rows the filter hid are never read.
+            const uint64_t tagsEpoch = ::Agentmaster::SessionTagsEpoch();
+            if (tagsEpoch != _sidePanelTagsEpoch)
             {
-                tagsById.emplace(s->id, std::move(tags));
+                _sidePanelTagsById.clear();
+                _sidePanelTagColors.clear();
+                _sidePanelTagColorsLoaded = false;
+                _sidePanelTagsEpoch = tagsEpoch;
+            }
+            bool anyTagged = false;
+            for (const auto& row : rows)
+            {
+                auto it = _sidePanelTagsById.find(row.session->id);
+                if (it == _sidePanelTagsById.end())
+                {
+                    it = _sidePanelTagsById.emplace(row.session->id, ::Agentmaster::GetSessionTags(row.session->id)).first;
+                }
+                anyTagged = anyTagged || !it->second.empty();
+            }
+            if (_sidePanelTagsById.size() > rows.size())
+            {
+                // Keep only the rendered cards' entries, so the cache can't grow with every session that ever
+                // passed through the list (a card that comes back re-reads its tags once). Node handles move
+                // each kept entry over without copying its strings.
+                std::unordered_map<std::wstring, std::vector<std::wstring>> kept;
+                kept.reserve(rows.size());
+                for (const auto& row : rows)
+                {
+                    auto node = _sidePanelTagsById.extract(row.session->id);
+                    if (!node.empty())
+                    {
+                        kept.insert(std::move(node));
+                    }
+                }
+                _sidePanelTagsById.swap(kept);
+            }
+            if (anyTagged && !_sidePanelTagColorsLoaded)
+            {
+                // The colors file is read once per epoch, and only when a rendered card is tagged at all — an
+                // untagged fleet never pays for it.
+                _sidePanelTagColors = ::Agentmaster::LoadAllTagColors();
+                _sidePanelTagColorsLoaded = true;
+            }
+
+            // One model per card. The shared inputs are read ONCE per update: the dir-colors snapshot every
+            // card's band color resolves against, the dots' color, and Windows' animation switch.
+            const auto dirColors = ::Agentmaster::LoadDirColorIndex();
+            const uint32_t pendingArgb = SidePanelPackArgb(ParseArgbHexColor(_appSettings.pendingDotsLightColor, Color{ 0xFF, 0xE0, 0xA9, 0x2B }));
+            const bool animationsEnabled = AgentAnimationsEnabled();
+            std::vector<std::wstring> order; // the new card order, as session ids — the planner's target
+            std::vector<AgentSidePanelCardModel> models; // parallel to `order`
+            order.reserve(rows.size());
+            models.reserve(rows.size());
+            // Belt: the planner needs unique ids, and a session listed twice must get ONE card. The registry
+            // never lists an id twice, so this only guards the guarantee (views into `snap`'s ids, no copies).
+            std::unordered_set<std::wstring_view> seen;
+            seen.reserve(rows.size());
+            for (const auto& row : rows)
+            {
+                if (!seen.insert(row.session->id).second)
+                {
+                    continue;
+                }
+                order.push_back(row.session->id);
+                models.push_back(SidePanelCardModelFor(*row.session, mode, _sidePanelTagsById[row.session->id], _sidePanelTagColors, dirColors, pendingArgb, animationsEnabled));
+            }
+
+            // The panel and its mirror must agree before any in-place edit: every index the plan carries is
+            // computed on the mirror. They always do — the list is only ever edited here and by
+            // _SidePanelResetCards — so a mismatch means an earlier edit failed halfway; start from empty.
+            auto children = _sidePanelCards.Children();
+            if (children.Size() != _sidePanelCardOrder.size() || _sidePanelCardViews.size() != _sidePanelCardOrder.size())
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[sidepanel] card list out of step with its mirror (panel " + std::to_wstring(children.Size()) +
+                                                  L", mirror " + std::to_wstring(_sidePanelCardOrder.size()) + L", cards " +
+                                                  std::to_wstring(_sidePanelCardViews.size()) + L") - rebuilt from empty (window " +
+                                                  ::Agentmaster::ShortId(_windowId) + L")\n");
+                _SidePanelResetCards();
+            }
+
+            // The cards that stay: write only what changed. The new ones: build them now (detached until the
+            // plan's Insert puts them in the list).
+            for (size_t i = 0; i < order.size(); ++i)
+            {
+                const auto it = _sidePanelCardViews.find(order[i]);
+                if (it != _sidePanelCardViews.end())
+                {
+                    _SidePanelApplyCardModel(it->second, std::move(models[i]), order[i], /*fresh*/ false);
+                }
+                else
+                {
+                    const auto created = _sidePanelCardViews.emplace(order[i], _SidePanelCreateCardView(order[i])).first;
+                    _SidePanelApplyCardModel(created->second, std::move(models[i]), order[i], /*fresh*/ true);
+                }
+            }
+
+            // The order: the fewest removes / inserts / moves (KeyedListDiff.h), each made on the panel and on
+            // the mirror in step. A removed card's view is erased right after its RemoveAt — its handlers hold
+            // the page only weakly and reach the card through `sender`, so nothing keeps it alive after that.
+            bool mirrorBroken = false;
+            for (const auto& op : ::Agentmaster::PlanKeyedListOps(_sidePanelCardOrder, order))
+            {
+                switch (op.kind)
+                {
+                case ::Agentmaster::KeyedListOpKind::Remove:
+                    children.RemoveAt(op.from);
+                    _sidePanelCardViews.erase(op.key);
+                    break;
+                case ::Agentmaster::KeyedListOpKind::Insert:
+                    children.InsertAt(op.to, _sidePanelCardViews.at(op.key).card);
+                    break;
+                case ::Agentmaster::KeyedListOpKind::Move:
+                    children.Move(op.from, op.to); // a reorder of the panel's item array — no Unloaded/Loaded
+                    break;
+                }
+                if (!::Agentmaster::ApplyKeyedListOp(_sidePanelCardOrder, op))
+                {
+                    mirrorBroken = true; // an index out of range: the mirror no longer describes the panel
+                    break;
+                }
+            }
+            if (mirrorBroken || _sidePanelCardOrder != order || _sidePanelCardViews.size() != order.size() || children.Size() != order.size())
+            {
+                // A planned edit applied in order can't end anywhere else — this would be a planner or mirror
+                // bug, or a panel that kept its old children because the reset above could not Clear() it (the
+                // mirror then planned from empty while the panel was not). Editing on from a wrong mirror would
+                // only compound it, so start over from empty instead.
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[sidepanel] card list edit ended out of step with its plan - rebuilding from empty (window " + ::Agentmaster::ShortId(_windowId) + L")\n");
+                _SidePanelResetCards();
+                _sidePanelDirty = true;
+                return;
+            }
+
+            if (_sidePanelCountText)
+            {
+                const std::wstring shown = std::to_wstring(order.size());
+                const std::wstring total = std::to_wstring(liveTotal);
+                // The count names the scope, so a short list under LOCAL reads as "this window" rather
+                // than "the fleet shrank" — the cue that the toggle exists when a session seems missing.
+                const std::wstring where = local ? L" in this window" : L" across all windows";
+                std::wstring countText = terms.empty() ? (total + L" session" + (liveTotal == 1 ? L"" : L"s") + where) : (shown + L" of " + total + L" sessions" + where);
+                if (countText != _sidePanelCountValue)
+                {
+                    _sidePanelCountText.Text(winrt::hstring{ countText });
+                    _sidePanelCountValue = std::move(countText);
+                }
             }
         }
-        const std::map<std::wstring, std::wstring> tagColors = tagsById.empty() ? std::map<std::wstring, std::wstring>{} : ::Agentmaster::LoadAllTagColors();
-        const std::vector<std::wstring> noTags; // the shared "carries none" list for untagged cards (no per-card allocation)
-
-        _sidePanelCards.Children().Clear();
-        _sidePanelCardsById.clear();
-        _sidePanelTimingTexts.clear();
-        for (const auto* s : rows)
+        catch (...)
         {
-            const auto tagIt = tagsById.find(s->id);
-            _sidePanelCards.Children().Append(_SidePanelMakeCard(*s, tagIt != tagsById.end() ? tagIt->second : noTags, tagColors));
-        }
-        if (_sidePanelCountText)
-        {
-            const std::wstring shown = std::to_wstring(rows.size());
-            const std::wstring total = std::to_wstring(liveTotal);
-            // The count names the scope, so a short list under LOCAL reads as "this window" rather
-            // than "the fleet shrank" — the cue that the toggle exists when a session seems missing.
-            const std::wstring where = local ? L" in this window" : L" across all windows";
-            _sidePanelCountText.Text(winrt::hstring{ terms.empty() ? (total + L" session" + (liveTotal == 1 ? L"" : L"s") + where) : (shown + L" of " + total + L" sessions" + where) });
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelRebuildCards");
+            _SidePanelResetCards();
+            _sidePanelDirty = true; // the next periodic tick rebuilds the list from empty
+            return;
         }
         // ⌖ scroll-to-tab: a reveal owed to a card that did NOT exist yet (a just-launched session's first
         // card, a card the filter hid until now, a tab docked in from another window) can be paid now that
-        // the list is rebuilt. Deliberately ONLY an owed reveal — a rebuild never re-scrolls on its own
-        // (rebuilds follow every fleet change, and would otherwise fight the user's own scrolling).
+        // the list is up to date. Deliberately ONLY an owed reveal — an update never re-scrolls on its own
+        // (updates follow every fleet change, and would otherwise fight the user's own scrolling).
         _SidePanelQueueReveal();
     }
 
-    // Build ONE compact session card — the Triage-Board card's visual language re-hosted for a
-    // narrow vertical list: the title on a band painted the session's RESOLVED color (the same
-    // ResolveSessionColorHex every color surface shares, contrast-picked text) with the session's
-    // bookmark-tag ribbons in the band's TOP-RIGHT corner (_SidePanelMakeTagStrip), then a state row
-    // (dot + label in the shared AgentStatusColors palette, the pending-draft dots, the timing
-    // adornment) and a dim dir/branch line. Interactions: click = select (Linked Lenses),
-    // double-click = activate (jump to the tab, cross-window), right-click = the SHARED lazy
-    // session menu (AgentManagerContent::BuildSessionMenuFor — zero drift from the board's), anchored
-    // on this card so its Tags item opens the tag panel right under it.
-    // `s`: the live session snapshot the card renders (values copied — the card never holds it).
-    // `tags`: the session's bookmark tags in the order they were added (the SessionStore list the
-    //         rebuild read once for every rendered card); empty == untagged, and the band keeps its
-    //         plain title-only layout, byte-identical to a card from before tags existed.
-    // `tagColors`: the rebuild's one LoadAllTagColors() (folded tag name -> "#AARRGGBB"; empty when no
-    //         rendered card is tagged) that every ribbon resolves its color against.
-    // Returns the card Border, also registered in _sidePanelCardsById (selection restyle) and, when it
-    // has a timing line, in _sidePanelTimingTexts (the 30s in-place refresh).
-    // Throws winrt::hresult_error if XAML construction fails (off the UI thread / a torn-down tree) —
-    // _SidePanelRebuildCards calls it on the UI thread.
-    winrt::Windows::UI::Xaml::Controls::Border TerminalPage::_SidePanelMakeCard(const ::Agentmaster::SessionInfo& s,
-                                                                             const std::vector<std::wstring>& tags,
-                                                                             const std::map<std::wstring, std::wstring>& tagColors)
+    // Drop every card: the panel's children, the id -> card map, the order mirror and the remembered count
+    // text. The recovery path of _SidePanelRebuildCards — when the panel and its mirror disagree, or an update
+    // failed halfway — after which the next update rebuilds the list from empty (the planner then fills it
+    // front to back). The bookmark-tag caches are DATA, not UI, and stay.
+    // No parameters; returns nothing. Never throws: a panel that refuses Clear() is logged (Rule #18) and left
+    // non-empty, which the next update sees as out of step with the (now empty) mirror — and calls this again.
+    void TerminalPage::_SidePanelResetCards()
     {
-        const std::wstring id = s.id;
-        const std::wstring dir = ::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, s);
-        const Color stateColor = StateColor(s.state);
-        const bool selected = (id == _sidePanelSelectedId);
+        // The maps first: clearing them cannot fail, so the page's view of the list is consistently "empty"
+        // even when the panel below refuses its Clear.
+        _sidePanelCardViews.clear();
+        _sidePanelCardOrder.clear();
+        _sidePanelCountValue.clear(); // the next update writes the count line again
+        if (!_sidePanelCards)
+        {
+            return;
+        }
+        try
+        {
+            _sidePanelCards.Children().Clear();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelResetCards");
+        }
+    }
 
-        Border card{};
-        card.Background(Fill(0xFF, 0x33, 0x33, 0x33));
-        card.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
-        card.Margin(ThicknessHelper::FromLengths(4, 2, 4, 2));
-        card.BorderThickness(ThicknessHelper::FromUniformLength(1)); // constant width — hover/selection recolor, never reflow
-        SidePanelStyleCardBorder(card, stateColor, selected, /*hover*/ false);
+    // Build ONE card's skeleton — the Triage-Board card's visual language re-hosted for a narrow vertical
+    // list: a title on a band, then a state row (dot + label in the shared AgentStatusColors palette, followed
+    // by whatever optional parts the model adds — the teal `codex` pill, the pending-draft dots, the timing
+    // adornment), then a dim dir/branch line. Every card has these elements; their VALUES — texts, brushes,
+    // the band's tag strip, the optional parts — come from _SidePanelApplyCardModel, so a card is built once
+    // per session and from then on only edited.
+    // Interactions: click = select (Linked Lenses), double-click = activate (jump to the tab, cross-window),
+    // right-click = the SHARED lazy session menu (AgentManagerContent::BuildSessionMenuFor — zero drift from
+    // the board's), anchored on this card so its Tags item opens the tag panel right under it.
+    // `id`: the session the card belongs to, for its whole life (a card is never re-keyed: a session that
+    // leaves the list loses its card, and a later one gets a new card).
+    // Returns the view, built and wired but showing nothing yet: the caller applies the first model with
+    // fresh == true, then inserts view.card into the list.
+    // Throws winrt::hresult_error if XAML construction fails (off the UI thread / a torn-down tree) —
+    // _SidePanelRebuildCards calls it on the UI thread and resets the list on a throw.
+    AgentSidePanelCardView TerminalPage::_SidePanelCreateCardView(const std::wstring& id)
+    {
+        AgentSidePanelCardView v;
+        v.card = Border{};
+        v.card.Background(Fill(0xFF, 0x33, 0x33, 0x33));
+        v.card.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
+        v.card.Margin(ThicknessHelper::FromLengths(4, 2, 4, 2));
+        v.card.BorderThickness(ThicknessHelper::FromUniformLength(1)); // constant width — hover/selection recolor, never reflow
 
-        StackPanel v{};
-        v.Orientation(Orientation::Vertical);
+        StackPanel body{};
+        body.Orientation(Orientation::Vertical);
 
-        // Title band: the session's resolved color (dir-keyed / individual / inferred per the
-        // GLOBAL tab-color mode — empty under Remove-colors) with WCAG-contrast-picked ink, the
-        // same visual as the board card's band, so same-dir cards cluster by color here too.
-        Border band{};
-        const std::wstring colorHex = ::Agentmaster::ResolveSessionColorHex(_appSettings.tabColorMode, s);
-        const auto bandColor = HexToColor(colorHex);
-        band.Background(SolidColorBrush{ bandColor.value_or(ColorHelper::FromArgb(0xFF, 0x3A, 0x3A, 0x3A)) });
-        band.CornerRadius(CornerRadiusHelper::FromRadii(3, 3, 0, 0));
-        band.Padding(ThicknessHelper::FromLengths(6, 2, 6, 2));
-        TextBlock title{};
-        title.Text(winrt::hstring{ s.title.empty() ? id : s.title });
-        title.FontSize(12);
-        title.FontWeight(FontWeights::SemiBold());
-        title.TextWrapping(TextWrapping::NoWrap);
-        title.TextTrimming(TextTrimming::CharacterEllipsis);
-        const bool darkText = bandColor && PreferDarkTextOn(*bandColor);
-        title.Foreground(darkText ? Fill(0xFF, 0x10, 0x10, 0x10) : Fill(0xFF, 0xF0, 0xF0, 0xF0));
-        if (tags.empty())
-        {
-            band.Child(title); // untagged: the band is exactly the title, as it always was
-        }
-        else
-        {
-            // Tagged: [ title * ][ tag strip Auto ]. The strip takes the width its (capped) ribbons
-            // need and the title takes the rest, trimming with its ellipsis — so the ribbons stay in
-            // the band's top-right corner and a long title can never push them off the card.
-            Grid bandGrid{};
-            ColumnDefinition titleCol{};
-            titleCol.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
-            ColumnDefinition tagCol{};
-            tagCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            bandGrid.ColumnDefinitions().Append(titleCol);
-            bandGrid.ColumnDefinitions().Append(tagCol);
-            Grid::SetColumn(title, 0);
-            bandGrid.Children().Append(title);
-            // Hang the strip from the band's TOP EDGE: lift it by exactly the band's top padding, so
-            // the ribbons start where the card's colored bar starts — bookmarks clipped to the top of
-            // the card rather than badges floating mid-bar. Read back from the band (not a literal) so
-            // a later padding change can't silently detach them from the edge.
-            auto strip = _SidePanelMakeTagStrip(tags, tagColors, darkText, band.Padding().Top, card);
-            Grid::SetColumn(strip, 1);
-            bandGrid.Children().Append(strip);
-            band.Child(bandGrid);
-        }
-        v.Children().Append(band);
+        // Title band: its color and the title's ink come from the model (the session's resolved color, the
+        // same visual as the board card's band, so same-dir cards cluster by color here too).
+        v.band = Border{};
+        v.band.CornerRadius(CornerRadiusHelper::FromRadii(3, 3, 0, 0));
+        v.band.Padding(ThicknessHelper::FromLengths(6, 2, 6, 2));
+        v.title = TextBlock{};
+        v.title.FontSize(12);
+        v.title.FontWeight(FontWeights::SemiBold());
+        v.title.TextWrapping(TextWrapping::NoWrap);
+        v.title.TextTrimming(TextTrimming::CharacterEllipsis);
+        v.band.Child(v.title); // the untagged layout; _SidePanelApplyCardTags wraps the title in [ title * ][ strip ] for a tagged session
+        body.Children().Append(v.band);
 
-        // State row: dot + label (the shared palette), a teal `codex` pill for a managed Codex,
-        // the pending-draft "3 dots" (the light half of the contrast pair — card bodies are dark),
-        // and the timing adornment at the end.
-        StackPanel row1{};
-        row1.Orientation(Orientation::Horizontal);
-        row1.Spacing(5);
-        row1.Margin(ThicknessHelper::FromLengths(6, 3, 6, 0));
-        winrt::Windows::UI::Xaml::Shapes::Ellipse dot{};
-        dot.Width(8);
-        dot.Height(8);
-        dot.VerticalAlignment(VerticalAlignment::Center);
-        dot.Fill(SolidColorBrush{ stateColor });
-        row1.Children().Append(dot);
-        {
-            auto stateText = Text(StateLabel(s.state), 10, false, 0.9);
-            stateText.Foreground(SolidColorBrush{ stateColor });
-            row1.Children().Append(stateText);
-        }
-        if (s.kind == ::Agentmaster::AgentKind::Codex)
-        {
-            auto pill = Text(L"codex", 9, true, 0.9);
-            pill.Foreground(Fill(0xFF, 0x2E, 0xB8, 0xA8)); // the External/Codex teal pill color family
-            row1.Children().Append(pill);
-        }
-        if (!s.pendingInput.empty())
-        {
-            // Unsent-draft indicator — the same BuildPendingDots cluster the board card pulses,
-            // in the user's configured LIGHT color (card bodies are always dark here).
-            const auto dotsColor = ParseArgbHexColor(_appSettings.pendingDotsLightColor, ColorHelper::FromArgb(0xFF, 0xE0, 0xA9, 0x2B));
-            // RENDERING.md §4c: still dots for a session whose tab has not started (a dormant tab's
-            // remembered draft), as on its tab; an external session (no control of ours) keeps the pulse.
-            row1.Children().Append(BuildPendingDots(4.0, dotsColor, s.started || s.external));
-        }
-        {
-            const int64_t last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
-            if (auto timing = TimingText(s.convCreatedUnixMs, last))
-            {
-                row1.Children().Append(timing);
-                _sidePanelTimingTexts.emplace_back(id, timing); // the 30s tick rewrites it in place
-            }
-        }
-        v.Children().Append(row1);
+        // State row: the dot and the label; the model inserts the optional parts after them.
+        v.stateRow = StackPanel{};
+        v.stateRow.Orientation(Orientation::Horizontal);
+        v.stateRow.Spacing(5);
+        v.stateRow.Margin(ThicknessHelper::FromLengths(6, 3, 6, 0));
+        v.stateDot = winrt::Windows::UI::Xaml::Shapes::Ellipse{};
+        v.stateDot.Width(8);
+        v.stateDot.Height(8);
+        v.stateDot.VerticalAlignment(VerticalAlignment::Center);
+        v.stateRow.Children().Append(v.stateDot);
+        v.stateText = Text(L"", 10, false, 0.9);
+        v.stateRow.Children().Append(v.stateText);
+        body.Children().Append(v.stateRow);
 
-        // Dir/branch line: "<leaf>[ / <branch>]", dim — the card's place at a glance (the full
-        // path rides the tooltip).
-        {
-            std::wstring line = SidePanelLeafOf(dir);
-            if (!s.branch.empty())
-            {
-                line += L" / " + s.branch;
-            }
-            auto dirText = Text(winrt::hstring{ line }, 10, false, 0.55);
-            dirText.Margin(ThicknessHelper::FromLengths(6, 0, 6, 4));
-            v.Children().Append(dirText);
-        }
+        // Dir/branch line: "<leaf>[ / <branch>]", dim — the card's place at a glance (the full path rides the tooltip).
+        v.dirLine = Text(L"", 10, false, 0.55);
+        v.dirLine.Margin(ThicknessHelper::FromLengths(6, 0, 6, 4));
+        body.Children().Append(v.dirLine);
 
-        card.Child(v);
-        // The card's tip names EVERY tag, in the order they were added — the ribbons are colors only,
-        // and a "+N" corner hides the overflow, so this is where the full set reads as words. (The tip
-        // yields while the pointer is on the strip itself; see _SidePanelMakeTagStrip.)
-        std::wstring tagsLine;
-        if (!tags.empty())
-        {
-            tagsLine = L"\ntags: ";
-            for (size_t i = 0; i < tags.size(); ++i)
-            {
-                tagsLine += (i ? L" \x00B7 " : L"") + tags[i];
-            }
-        }
-        AgentSetTitledTip(card, winrt::hstring{ s.title }, winrt::hstring{ dir + (s.branch.empty() ? L"" : (L"\nbranch: " + s.branch)) + tagsLine + L"\n\nClick to select \x00B7 double-click to jump to its tab \x00B7 right-click for actions." }, kCardTipDelay);
+        v.card.Child(body);
 
         const auto weakThis = get_weak();
-        // Hover ring — guarded by PointerStillWithin so a child-bubbled exit (crossing between the
-        // card's hit-testable labels) can't strobe the ring off while the pointer is still inside.
-        // ⚠ The handlers reach the card ONLY through `sender` — capturing the Border itself in a
-        // handler attached TO it is a self-reference cycle (element -> handler -> element) that
-        // leaks one card per rebuild forever (the board's cards capture weakly for the same reason).
-        card.PointerEntered([weakThis, id](const IInspectable& sender, const PointerRoutedEventArgs&) {
+        // Hover ring — guarded by PointerStillWithin so a child-bubbled exit (crossing between the card's
+        // hit-testable labels) can't strobe the ring off while the pointer is still inside. The ring takes the
+        // color of the state the card SHOWS (its view's model — what its dot shows, with no registry copy per
+        // pointer event), and the view remembers the hover so a state change repaints the ring in the new color.
+        // ⚠ The handlers reach the card ONLY through `sender` — capturing the Border itself in a handler
+        // attached TO it is a self-reference cycle (element -> handler -> element) that would leak every card
+        // ever dropped from the list (the board's cards capture weakly for the same reason). A sender that is
+        // not the card registered for `id` (a card already dropped, or replaced by a reset) is ignored.
+        v.card.PointerEntered([weakThis, id](const IInspectable& sender, const PointerRoutedEventArgs&) {
             const auto self = weakThis.get();
             const auto b = sender.try_as<Border>();
             if (!self || !b)
             {
                 return;
             }
-            Color c = Colors::Gray();
-            if (self->_sessionRegistry)
+            const auto it = self->_sidePanelCardViews.find(id);
+            if (it == self->_sidePanelCardViews.end() || it->second.card != b)
             {
-                if (const auto cur = self->_sessionRegistry->Get(id))
-                {
-                    c = StateColor(cur->state);
-                }
+                return; // not the live card of this session any more — nothing of ours to paint
             }
-            SidePanelStyleCardBorder(b, c, id == self->_sidePanelSelectedId, /*hover*/ true);
+            it->second.hovered = true;
+            SidePanelStyleCardBorder(b, StateColor(it->second.model.state), id == self->_sidePanelSelectedId, /*hover*/ true);
         });
-        card.PointerExited([weakThis, id](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+        v.card.PointerExited([weakThis, id](const IInspectable& sender, const PointerRoutedEventArgs& e) {
             const auto self = weakThis.get();
             const auto b = sender.try_as<Border>();
             if (!self || !b || PointerStillWithin(sender, e))
             {
                 return; // bubbled from a child — the pointer never actually left the card
             }
-            Color c = Colors::Gray();
-            if (self->_sessionRegistry)
+            const auto it = self->_sidePanelCardViews.find(id);
+            if (it == self->_sidePanelCardViews.end() || it->second.card != b)
             {
-                if (const auto cur = self->_sessionRegistry->Get(id))
-                {
-                    c = StateColor(cur->state);
-                }
+                return; // not the live card of this session any more
             }
-            SidePanelStyleCardBorder(b, c, id == self->_sidePanelSelectedId, /*hover*/ false);
+            it->second.hovered = false;
+            SidePanelStyleCardBorder(b, StateColor(it->second.model.state), id == self->_sidePanelSelectedId, /*hover*/ false);
         });
-        card.Tapped([weakThis, id](const IInspectable&, const TappedRoutedEventArgs&) {
+        v.card.Tapped([weakThis, id](const IInspectable&, const TappedRoutedEventArgs&) {
             if (const auto self = weakThis.get())
             {
                 self->_SidePanelSelectSession(id, /*driveManagerLens*/ true);
@@ -1763,14 +1960,14 @@ namespace winrt::TerminalApp::implementation
                 self->_RevealClickedSessionTab(id);
             }
         });
-        card.DoubleTapped([weakThis, id](const IInspectable&, const DoubleTappedRoutedEventArgs& e) {
+        v.card.DoubleTapped([weakThis, id](const IInspectable&, const DoubleTappedRoutedEventArgs& e) {
             e.Handled(true);
             if (const auto self = weakThis.get())
             {
                 self->_ActivateClaudeSession(winrt::hstring{ id }); // jump to the tab — cross-window via the activate sinks
             }
         });
-        card.RightTapped([weakThis, id](const IInspectable& sender, const RightTappedRoutedEventArgs& e) {
+        v.card.RightTapped([weakThis, id](const IInspectable& sender, const RightTappedRoutedEventArgs& e) {
             e.Handled(true);
             const auto self = weakThis.get();
             if (!self)
@@ -1810,9 +2007,175 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AgentLogCaughtException(L"sidepanel card context menu");
             }
         });
+        return v;
+    }
 
-        _sidePanelCardsById[id] = card;
-        return card;
+    // Write `model` into a card IN PLACE: every value that differs from the one the card shows now (its
+    // view.model) is written — a text, a brush, the border — and an optional part (the codex pill, the pending
+    // dots, the timing text, the band's tag strip) is added or dropped only when its presence changes. A value
+    // that did not change is never touched, so an update that changed nothing for this card costs it nothing.
+    // `view`: the card (its elements + the model they show).
+    // `model`: what it must show; moved into view.model at the end.
+    // `id`: the card's session — the selection check of its border.
+    // `fresh`: true for a card _SidePanelCreateCardView just built — write EVERY value (its model is still the
+    //          empty default); false — write only the differences.
+    // Throws winrt::hresult_error if XAML refuses an edit (a torn-down tree) — _SidePanelRebuildCards resets
+    // the list on a throw, so a half-edited card never outlives its update.
+    void TerminalPage::_SidePanelApplyCardModel(AgentSidePanelCardView& view, AgentSidePanelCardModel model, const std::wstring& id, bool fresh)
+    {
+        const AgentSidePanelCardModel& shown = view.model; // the card as it is now (ignored when fresh)
+        if (fresh || model.title != shown.title)
+        {
+            view.title.Text(winrt::hstring{ model.title });
+        }
+        if (fresh || model.bandHex != shown.bandHex)
+        {
+            const auto bandColor = HexToColor(model.bandHex);
+            view.band.Background(SolidColorBrush{ bandColor.value_or(Color{ 0xFF, 0x3A, 0x3A, 0x3A }) });
+        }
+        if (fresh || model.darkInk != shown.darkInk)
+        {
+            view.title.Foreground(model.darkInk ? Fill(0xFF, 0x10, 0x10, 0x10) : Fill(0xFF, 0xF0, 0xF0, 0xF0));
+        }
+        // The tag strip shows the tags, their colors and — in its "+N" count — the title's ink.
+        if (fresh || model.tags != shown.tags || model.tagArgb != shown.tagArgb || (!model.tags.empty() && model.darkInk != shown.darkInk))
+        {
+            _SidePanelApplyCardTags(view, model);
+        }
+        if (fresh || model.state != shown.state)
+        {
+            const Color stateColor = StateColor(model.state);
+            view.stateDot.Fill(SolidColorBrush{ stateColor });
+            view.stateText.Text(StateLabel(model.state));
+            view.stateText.Foreground(SolidColorBrush{ stateColor });
+            SidePanelStyleCardBorder(view.card, stateColor, id == _sidePanelSelectedId, view.hovered);
+        }
+        // The state row's optional parts, always in this order after the dot and the label:
+        // [codex pill][pending dots][timing]. An insert index is derived from the parts in front of it.
+        if (model.codex && !view.codexPill)
+        {
+            view.codexPill = Text(L"codex", 9, true, 0.9);
+            view.codexPill.Foreground(Fill(0xFF, 0x2E, 0xB8, 0xA8)); // the External/Codex teal pill color family
+            view.stateRow.Children().InsertAt(2, view.codexPill); // right after the dot and the label
+        }
+        else if (!model.codex && view.codexPill)
+        {
+            SidePanelRemoveChild(view.stateRow, view.codexPill);
+            view.codexPill = nullptr;
+        }
+        if (fresh || model.pending != shown.pending || model.pendingAnimated != shown.pendingAnimated || model.pendingArgb != shown.pendingArgb)
+        {
+            // Replaced whole — it changes rarely (a draft appears or goes, a dormant tab starts, the dots' color
+            // or Windows' animation switch changes), and a cluster is three ellipses plus its pulse, so a new
+            // one is simpler than retuning the old. The old cluster's Unloaded stops its pulse.
+            if (view.pendingDots)
+            {
+                SidePanelRemoveChild(view.stateRow, view.pendingDots);
+                view.pendingDots = nullptr;
+            }
+            if (model.pending)
+            {
+                // The unsent-draft indicator — the same BuildPendingDots cluster the board card shows, in the
+                // user's configured LIGHT color (card bodies are always dark here).
+                view.pendingDots = BuildPendingDots(4.0, SidePanelUnpackArgb(model.pendingArgb), model.pendingAnimated);
+                const uint32_t dotsIndex = view.codexPill ? 3u : 2u; // after the dot, the label and the pill (when there is one)
+                view.stateRow.Children().InsertAt(dotsIndex, view.pendingDots);
+            }
+        }
+        if (model.timing.empty())
+        {
+            if (view.timing)
+            {
+                SidePanelRemoveChild(view.stateRow, view.timing);
+                view.timing = nullptr;
+            }
+        }
+        else if (!view.timing)
+        {
+            // Built like the board's TimingText (Internal.h) — the same dim 10px text and its explanatory
+            // tip — from the model's already-formatted string.
+            view.timing = Text(winrt::hstring{ model.timing }, 10, false, 0.45);
+            AgentSetTitledTip(view.timing, winrt::hstring{ kTimingTooltipTitle }, winrt::hstring{ kTimingTooltip });
+            view.stateRow.Children().Append(view.timing); // always the row's last part
+        }
+        else if (fresh || model.timing != shown.timing)
+        {
+            view.timing.Text(winrt::hstring{ model.timing }); // the ~30s "ago" refresh lands here, for the cards whose text moved
+        }
+        if (fresh || model.dirLine != shown.dirLine)
+        {
+            view.dirLine.Text(winrt::hstring{ model.dirLine });
+        }
+        if (fresh || model.tipTitle != shown.tipTitle || model.tipText != shown.tipText)
+        {
+            // On an element that already has a tip, AgentSetTitledTip only updates the recorded text (no
+            // second handler set), and a tip open right now shows the new text at once. (The tip yields while
+            // the pointer is on the tag strip itself; see _SidePanelMakeTagStrip.)
+            AgentSetTitledTip(view.card, winrt::hstring{ model.tipTitle }, winrt::hstring{ model.tipText }, kCardTipDelay);
+        }
+        view.model = std::move(model);
+    }
+
+    // Give a card's band the layout its tags need. Untagged: the band is exactly the title, byte-identical to
+    // a card from before tags existed. Tagged: [ title * ][ tag strip Auto ] — the strip takes the width its
+    // (capped) ribbons need and the title takes the rest, trimming with its ellipsis, so the ribbons stay in
+    // the band's top-right corner and a long title can never push them off the card. A changed tag list, tag
+    // color or title ink REPLACES the strip (a few ribbons — simpler than editing them); the title element is
+    // only re-parented between the band and the grid, never rebuilt.
+    // `view`: the card. `model`: the values it must show (tags, their colors, the ink).
+    // Throws winrt::hresult_error if XAML refuses an edit — _SidePanelRebuildCards resets the list on a throw.
+    void TerminalPage::_SidePanelApplyCardTags(AgentSidePanelCardView& view, const AgentSidePanelCardModel& model)
+    {
+        if (model.tags.empty())
+        {
+            if (view.bandGrid)
+            {
+                // Back to the plain band. The title leaves the grid FIRST: a XAML element has one parent, and
+                // handing it to the band while the grid still holds it would throw.
+                SidePanelRemoveChild(view.bandGrid, view.title);
+                view.band.Child(view.title);
+                view.bandGrid = nullptr;
+                view.tagStrip = nullptr;
+            }
+            return;
+        }
+        std::vector<Color> colors;
+        colors.reserve(model.tagArgb.size());
+        for (const uint32_t argb : model.tagArgb)
+        {
+            colors.push_back(SidePanelUnpackArgb(argb));
+        }
+        // Hang the strip from the band's TOP EDGE: lift it by exactly the band's top padding, so the ribbons
+        // start where the card's colored bar starts — bookmarks clipped to the top of the card rather than
+        // badges floating mid-bar. Read back from the band (not a literal) so a later padding change can't
+        // silently detach them from the edge.
+        auto strip = _SidePanelMakeTagStrip(model.tags, colors, model.darkInk, view.band.Padding().Top, view.card);
+        Grid::SetColumn(strip, 1);
+        if (!view.bandGrid)
+        {
+            Grid bandGrid{};
+            ColumnDefinition titleCol{};
+            titleCol.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            ColumnDefinition tagCol{};
+            tagCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            bandGrid.ColumnDefinitions().Append(titleCol);
+            bandGrid.ColumnDefinitions().Append(tagCol);
+            view.band.Child(nullptr); // release the title from the band before the grid takes it (one parent)
+            Grid::SetColumn(view.title, 0);
+            bandGrid.Children().Append(view.title);
+            bandGrid.Children().Append(strip);
+            view.band.Child(bandGrid);
+            view.bandGrid = bandGrid;
+        }
+        else
+        {
+            if (view.tagStrip)
+            {
+                SidePanelRemoveChild(view.bandGrid, view.tagStrip);
+            }
+            view.bandGrid.Children().Append(strip);
+        }
+        view.tagStrip = strip;
     }
 
     // Build a card's bookmark-TAG strip: the ribbons in the title band's TOP-RIGHT corner. It is the
@@ -1834,8 +2197,9 @@ namespace winrt::TerminalApp::implementation
     // the card tip as usual (the tip helper's nested-tip re-arm on the next PointerMoved).
     //
     // `tags`: the session's tags in the order they were added — non-empty (an untagged card builds no strip).
-    // `tagColors`: the rebuild's one LoadAllTagColors() map; every ribbon's color resolves through
-    //              ResolveTagDisplayColor against it (user-picked > name hash), exactly like the tab badges.
+    // `colors`: each tag's RESOLVED display color, parallel to `tags` — the card model's tagArgb, which
+    //           SidePanelCardModelFor resolved through ResolveTagDisplayColor (user-picked > name hash), exactly
+    //           like the tab badges. A missing entry (never, for a model) falls back to the name hash.
     // `darkInk`: true when the band is light enough that the title uses dark ink; the "+N" count follows
     //            the title's ink so it stays readable on any folder color.
     // `hangPx`: the band's top padding — the strip is lifted by exactly this much, so the ribbons hang
@@ -1848,7 +2212,7 @@ namespace winrt::TerminalApp::implementation
     // Throws winrt::hresult_error if XAML construction fails (off the UI thread / a torn-down tree); the
     // pointer handlers themselves never throw out (weak refs that no longer resolve just no-op).
     winrt::Windows::UI::Xaml::Controls::StackPanel TerminalPage::_SidePanelMakeTagStrip(const std::vector<std::wstring>& tags,
-                                                                                    const std::map<std::wstring, std::wstring>& tagColors,
+                                                                                    const std::vector<winrt::Windows::UI::Color>& colors,
                                                                                     bool darkInk,
                                                                                     double hangPx,
                                                                                     const winrt::Windows::UI::Xaml::Controls::Border& card)
@@ -1869,7 +2233,7 @@ namespace winrt::TerminalApp::implementation
         const auto cardWeak = winrt::make_weak(card);
         for (size_t i = 0; i < ribbonCount; ++i)
         {
-            auto ribbon = SidePanelMakeTagRibbon(ResolveTagDisplayColor(tags[i], tagColors));
+            auto ribbon = SidePanelMakeTagRibbon(i < colors.size() ? colors[i] : TagColorFor(tags[i]));
             const winrt::hstring tagName{ tags[i] };
             ribbon.PointerEntered([weakThis, cardWeak, tagName](const IInspectable& sender, const PointerRoutedEventArgs& e) {
                 // Keep the card's own tip off the hover panel: drop a pending open and close an open one
@@ -1959,23 +2323,16 @@ namespace winrt::TerminalApp::implementation
         }
         const std::wstring prev = _sidePanelSelectedId;
         _sidePanelSelectedId = id;
-        // Restyle in place via the card map — the reason the map exists (a selection change must
-        // not pay a list rebuild).
+        // Restyle in place via the card map — a selection change must not pay a list update. The border
+        // takes the color of the state the card SHOWS (its view's model, the same color as its dot) — no
+        // registry copy per selection — and keeps the card's hover ring if the pointer is on it.
         const auto restyle = [this](const std::wstring& sid, bool sel) {
-            const auto it = _sidePanelCardsById.find(sid);
-            if (it == _sidePanelCardsById.end() || !it->second)
+            const auto it = _sidePanelCardViews.find(sid);
+            if (it == _sidePanelCardViews.end() || !it->second.card)
             {
                 return; // filtered out / not rendered — nothing to paint
             }
-            Color c = Colors::Gray();
-            if (_sessionRegistry)
-            {
-                if (const auto cur = _sessionRegistry->Get(sid))
-                {
-                    c = StateColor(cur->state);
-                }
-            }
-            SidePanelStyleCardBorder(it->second, c, sel, /*hover*/ false);
+            SidePanelStyleCardBorder(it->second.card, StateColor(it->second.model.state), sel, it->second.hovered);
         };
         if (!prev.empty())
         {

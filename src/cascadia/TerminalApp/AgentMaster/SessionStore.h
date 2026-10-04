@@ -251,4 +251,25 @@ namespace Agentmaster
     std::map<std::wstring, std::wstring> LoadAllTagColors();
     std::wstring GetTagColor(const std::wstring& tag);
     bool SetTagColor(const std::wstring& tag, const std::wstring& hex);
+
+    // ===== the TAG-CHANGE EPOCH (SIDE_PANEL.md §2c) ===========================================
+    //
+    // A process-wide counter that moves after every write that CHANGED a session's tag list (the
+    // `tags` key, through SetSessionStoreFieldIn / SetSessionStoreFieldsIn — so every Add/Remove/Set
+    // wrapper above) or a tag's color (SetTagColorIn). A reader that caches tags — the side panel,
+    // whose card list keeps each card's tags between updates — compares the epoch with the one it
+    // read at and re-reads only when it moved: an unchanged epoch PROVES no tag or tag color changed
+    // in this process since, so the cache answers with no session-store stat per card (the stat per
+    // card per update the side panel used to pay, ~466 per update on the release's biggest window).
+    // Every window runs in this one process (the WindowEmperor), so another window's tag edit moves
+    // the epoch too and every cached view sees it. NOT covered: a write by ANOTHER process to the same
+    // profile — a configuration the profile mutex already warns about (PROFILES.md), and no other
+    // process writes tags today (the agentmaster CLI only reads).
+    // The bump comes AFTER the write and its record-cache update, and a reader must load the epoch
+    // BEFORE it reads tags: a write landing between the two then leaves the reader holding the older
+    // epoch, so its next comparison sees the move and re-reads — a cache can be refreshed once too
+    // often, never kept stale.
+    //   returns — the current epoch; 0 until the first tag or tag-color change of this process.
+    //   throws  — nothing.
+    uint64_t SessionTagsEpoch() noexcept;
 }

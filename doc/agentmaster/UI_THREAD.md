@@ -497,7 +497,8 @@ copies at ~48 ms/s.
   (`ScanNeedsFreshTail`, the lost-send pre-filter, `ShouldWarnOnBoxNotVisible`), never the four emptied
   texts, and it `Get`s the fresh record before it changes anything, as before.
 - **Not changed:** the Manager lens, the side panel and the pending-input sweep keep `SnapshotLive` / `Get`.
-  They read the queue or the draft, and the profiles in §10 and §10e did not show them.
+  They read the queue or the draft, and the profiles in §10 and §10e did not show them. (The side panel
+  moved to its own lean read, `SnapshotLiveForCards`, in §10j.)
 - **Checked:** `TestRegistryLeanReads` in the m5 harness (each read's content and order, the open-prompt
   filter, the emptied texts, the scanner predicates answer the same on the lean copy, and the stored
   record is intact after repeated reads). The three changed engine files compile cleanly with the app's
@@ -540,7 +541,7 @@ children is drawn with an alpha mask and gets no node.
 
 | Source | Nodes |
 |---|---|
-| Side-panel cards (`_SidePanelMakeCard`): the card `Border` (`CornerRadius(4)`, child: the card body) and the title band (`CornerRadius(3,3,0,0)`, child: the title). All cards are loaded (a `StackPanel`), on screen or not. | 2 per card: ~1,100 for the ~550 cards of the three open side panels |
+| Side-panel cards (`_SidePanelMakeCard`; `_SidePanelCreateCardView` since §10j, the same two shapes): the card `Border` (`CornerRadius(4)`, child: the card body) and the title band (`CornerRadius(3,3,0,0)`, child: the title). All cards are loaded (a `StackPanel`), on screen or not. | 2 per card: ~1,100 for the ~550 cards of the three open side panels |
 | The side-panel summary: a `Button` (the stock template is rounded and has content) for each ▸ jump — one per prompt of the selected session's current part, after its last /compact — and for each earlier-session separator | tens per window |
 | The tab strip: each realized tab's `TabContainer` (rounded top corners and children, WinUI 2.8.4 `TabView.xaml`) and its rounded close button | ~2 per realized tab (the visible ones plus about two viewports on each side) |
 | Popups (the 7 tag-badge rows, a tooltip), per-tab overlay badges, `ScrollViewer`s, terminal `SwapChainPanel`s | a few dozen |
@@ -557,8 +558,8 @@ differ between the two measurements.
 |---|---|---|
 | A running storyboard (draft dots, spark crown) | every display frame | fix #1 (c751ed257, not built) |
 | The unread flash ring (`_OnAgentFlashTick`): it toggles the ring's **Visibility** | every 600 ms in each window with an unread tab | A Visibility change is a layout pass too. 2 unread tabs in the big window during §10e. After #1 this is the steadiest frame source. Fixed in the code (§10i, not built): a composition blink, no XAML change per blink. |
-| Side-panel rebuild (`_SidePanelRebuildCards`): Clear, then re-create every card | at most every 500 ms (`kSidePanelRebuildMinGapMs`) while the fleet changes | ~470 cards and ~940 nodes in the big window, rebuilt each time |
-| Side-panel timing refresh | every 30 s | a full `Get` per card, and every card's text is set even when it did not change, so every card is measured again |
+| Side-panel rebuild (`_SidePanelRebuildCards`): Clear, then re-create every card | at most every 500 ms (`kSidePanelRebuildMinGapMs`) while the fleet changes | ~470 cards and ~940 nodes in the big window, rebuilt each time. Fixed in the code (§10j, not built): the list is edited in place, and an update writes only the values that changed. |
+| Side-panel timing refresh | every 30 s | a full `Get` per card, and every card's text is set even when it did not change, so every card is measured again. Fixed in the code (§10j, not built): the same in-place update, from the lean card snapshot; only the texts that moved are set. |
 | Registry-driven property changes (status dot, pending dots, crown, overlay badge) | on change | change-gated (`_SetTabAgentDot` / `_SetTabPending` / `_SetTabCacheWarm`) |
 | Pointer hover, tooltips (1 s watchdog while one is open), scrolling | on input | normal |
 | Agent Manager page timers (1 s countdown, 30 s refresh) | only while the page is shown | |
@@ -572,10 +573,10 @@ rate to lower (§10f).
 | Fix | Win | Ease |
 |---|---|---|
 | Flash ring by `Opacity` (or a composition opacity loop) instead of `Visibility` | no layout pass every 600 ms; with a composition loop, no frames either | Easy. Done in the code (§10i, not built) |
-| Side-panel timing text: set it only when it changed, from a lean read | no re-measure of every card every 30 s | Very easy |
+| Side-panel timing text: set it only when it changed, from a lean read | no re-measure of every card every 30 s | Very easy. Done in the code (§10j, not built) |
 | Card and title band: move the rounded corners to a childless background element behind the content | ~2 fewer nodes per card, ~1,100 in all: likely the largest share of every frame | Easy to medium (check the look) |
 | Summary ▸ jump and separators: no stock rounded `Button` template (a `CornerRadius` 0 style, or a tap handler on the row) | tens of nodes per window | Easy |
-| Side panel: update cards in place, or virtualize (#6) | small rebuilds; only on-screen cards hold nodes | Hard |
+| Side panel: update cards in place, or virtualize (#6) | small rebuilds; only on-screen cards hold nodes | Hard. In place: done in the code (§10j, not built). Virtualize: open |
 
 To measure the side panel's share before any build: collapse the big window's side panel for one minute,
 and sample again (`stacksnap sample`, §9). The walk's cost should drop by its share of the nodes.
@@ -657,3 +658,83 @@ lockstep across tabs, and a tab that starts flashing mid-cycle takes the current
   - With only rings flashing (no pulse, no crown), XAML's frame thread stays at ~3 wake-ups/s, and a
     stacksnap profile shows no layout pass every 600 ms.
   - No `[exc]` line with "flash-ring blink" or "AgentLockstepBlink".
+
+### 10j. The side-panel card list in place (2026-10-04, the engine part tested, the UI part not built yet)
+
+The side panel edits its card list in place (SIDE_PANEL.md §2c). An update no longer clears the list and
+builds every card again.
+
+- **Before:**
+  - Each update ran `Children().Clear()` and built every card again: at most every 500 ms while sessions
+    changed, and once more every 30 s for the timing texts. In the release's biggest window that was ~466
+    cards and ~940 composition nodes, each card with its elements, handlers, tooltip and tag strip.
+  - The reads of one update:
+    - `SnapshotLive()`: every live record whole, with its queue history and transcript texts.
+    - Per card, `GetSessionTags`: one session-store stat.
+    - Per card, `ResolveSessionColorHex` → `GetDirColor`: the dir-colors lock, one file stat, a copy of
+      the whole color map and a linear scan.
+  - The 30 s timing pass did a full `Get` per card and set every card's text, changed or not.
+  - The hover ring did a full `Get` on each pointer entry and exit, and the selection restyle did one per
+    card.
+- **Now:**
+  - **Only the differences are written.** `_SidePanelRebuildCards` computes one `AgentSidePanelCardModel`
+    per card (`SidePanelCardModelFor`). `_SidePanelApplyCardModel` compares it with the model the card
+    shows and writes only the values that changed. An optional part (the codex pill, the draft dots, the
+    timing text, the band's tag strip) is added or removed only when its presence changes. When one session
+    changes its state, the update writes one dot, one label and one border.
+  - **A card is built once per session** (`_SidePanelCreateCardView`).
+  - **The order changes with the fewest edits** (`PlanKeyedListOps`, `AgentMaster/KeyedListDiff.h`, pure):
+    - Removes run first, from the highest index.
+    - The cards on the longest increasing subsequence of their target positions stay where they are.
+    - Every other card is moved or inserted right before its target successor.
+    - That is the minimum: (cards kept − LIS length) moves. A card that jumps to the top, or sinks to the
+      bottom, is one `UIElementCollection.Move`.
+    - `Move` reorders the panel's item array without taking the card out of the tree, so the card keeps its
+      elements, its pulsing dots and its hover state (to confirm after the build, below).
+  - **The reads are lean and run once per update:**
+    - `SnapshotLiveForCards()` (new): the live records without the queue, lastAssistantText, recap and
+      pendingPasteRefs. It keeps pendingInput, which the dots read. It is the §10g parking with
+      `LeanCopyKind::Cards`.
+    - ONE `LoadDirColorIndex()`: one stat, one copy, a hash map keyed by `NormDirKey`. Every card resolves
+      its color through the 3-argument `ResolveSessionColorHex`, which shares one precedence template with
+      the 2-argument one.
+    - The tags come from a per-card cache. The cache is read again only when `SessionTagsEpoch()` moved: a
+      process-wide counter that SessionStore moves after every changed tag write or tag-color write. All
+      windows run in one process, so another window's edit moves it too, and the periodic tick (~2.5 s)
+      sees it. The tag colors are read once per epoch.
+  - **The timing pass is the same update.** It runs after 30 s without one, and sets only the texts that
+    moved.
+  - **Hover and selection read the card's model** (`AgentSidePanelCardView::model` / `hovered`): no
+    registry read per pointer event.
+  - **Recovery.** When the panel and its order mirror disagree, or an edit throws midway, the list is reset
+    to empty (logged: `[sidepanel] … out of step` or `[exc] _SidePanelRebuildCards`), and the next tick
+    fills it from empty.
+- **Not changed:** the composition nodes. The loaded cards keep their ~940 nodes (two rounded shapes with
+  children per card, §10h), so the walk of every frame costs the same. The next candidates for that walk
+  are in §10h: move the rounding to a childless background element, and virtualize (#6).
+- **Checked:**
+  - `TestKeyedListDiff` (new, `tests/tests_sidepanel.cpp`) replays each plan onto the current order. The
+    result must be the target, and the move count must be the minimum (checked against an O(n²) LIS). It
+    covers the named shapes, all 120 orders of 5 cards, 3,000 random lists over a 9-key universe, and
+    466-card rotations (one move each).
+  - `TestRegistryLeanReads`: `SnapshotLiveForCards` gives the live set and order, no queue, no texts, the
+    draft kept, and the stored record is intact after repeated reads.
+  - `TestSessionTags`: the epoch moves on a changed tag list (add, remove, a batch with the tags key) and
+    on a tag-color change. It does not move on a dedup'd or case-variant write, a title or favorite write,
+    a batch without the tags key, or an unchanged or refused color.
+  - `TestTabColorModes`: the batch resolve gives the same color as the 2-argument resolver in every mode.
+  - The harness: 5,393 checks, 3 failures, the known taskbar-badge baseline. The changed engine files and
+    the planner compile cleanly with the app's warning settings (/W4 /WX, the five always-error warnings,
+    /sdl /permissive-). `TerminalPage.AgentSidePanel.cpp` and `TerminalPage.h` are not built. They pass a
+    syntax-only check: `cl /Zs` with the last build's recorded command line (/W3 /WX + the project's five
+    always-error warnings) against its PCH, for `TerminalPage.AgentSidePanel.cpp`, `TerminalPage.cpp` and
+    `TerminalPage.AgentEngine.cpp`; a negative control (a TU with an undeclared name) fails as it must.
+- **Check after the build:**
+  - A session that changes state repaints only its card. The list does not flicker.
+  - Launch, close, the filter, LOCAL/GLOBAL and the sort order put the cards in the right order.
+  - A hovered card keeps its ring while another card moves. A card's draft dots keep pulsing after it
+    moves.
+  - A tag added in another window shows on this window's card within ~2.5 s.
+  - In a stacksnap profile, no `_SidePanelRebuildCards` share proportional to the card count while one
+    session works, and no `SessionRegistry::SnapshotLive` or `Get` under the side panel.
+  - No `[sidepanel] … out of step` line in hooks.log.

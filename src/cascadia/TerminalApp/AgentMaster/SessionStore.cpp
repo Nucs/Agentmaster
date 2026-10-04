@@ -11,6 +11,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic> // the tag-change epoch (SessionTagsEpoch)
 #include <cwctype>
 #include <mutex>
 #include <string>
@@ -170,6 +171,20 @@ namespace Agentmaster
         std::mutex g_recCacheMtx;
         std::unordered_map<std::wstring, RecCacheEntry> g_recCache; // key: case-folded full path
 
+        // Agentmaster (SIDE_PANEL.md §2c): the TAG-CHANGE EPOCH behind SessionTagsEpoch (SessionStore.h).
+        // Atomic: tags are written from any window's UI thread and read from every other window's.
+        std::atomic<uint64_t> g_tagsEpoch{ 0 };
+
+        // Move the epoch: a session's tag list or a tag's color has just CHANGED on disk. Called only
+        // after the write (and its write-through cache update) succeeded — the ordering the reader
+        // contract in SessionStore.h relies on. Release order publishes the completed write to a reader
+        // that acquires the new value.
+        //   throws — nothing.
+        void NoteTagsChanged() noexcept
+        {
+            g_tagsEpoch.fetch_add(1, std::memory_order_acq_rel);
+        }
+
         std::wstring RecCacheKey(const std::wstring& path)
         {
             std::wstring k = path;
@@ -306,7 +321,14 @@ namespace Agentmaster
             rec[key] = value;
         }
         ::CreateDirectoryW(storeDir.c_str(), nullptr); // idempotent; only when we actually write
-        return WriteRecord(storeDir, sessionId, rec);
+        const bool written = WriteRecord(storeDir, sessionId, rec);
+        // Only a CHANGED tag list moves the epoch (SessionTagsEpoch): the dedup returns above never get
+        // here, and every other key (title / favorite / draft / cmdProgress) leaves the tags as they were.
+        if (written && key == kSessionStoreTagsKey)
+        {
+            NoteTagsChanged();
+        }
+        return written;
     }
 
     bool SetSessionStoreFieldsIn(const std::wstring& storeDir, const std::wstring& sessionId, const SessionStoreRecord& fields)
@@ -317,6 +339,7 @@ namespace Agentmaster
         }
         SessionStoreRecord rec = ParseRecord(storeDir, sessionId); // freshest-disk RMW (as the single-field setter)
         bool changed = false;
+        bool tagsChanged = false; // the batch changed the `tags` key — moves the tag-change epoch once written
         for (const auto& [key, value] : fields)
         {
             if (key.empty())
@@ -331,6 +354,7 @@ namespace Agentmaster
                 {
                     rec.erase(it);
                     changed = true;
+                    tagsChanged = tagsChanged || key == kSessionStoreTagsKey;
                 }
                 continue; // absent already — nothing to remove
             }
@@ -340,13 +364,19 @@ namespace Agentmaster
             }
             rec[key] = value;
             changed = true;
+            tagsChanged = tagsChanged || key == kSessionStoreTagsKey;
         }
         if (!changed)
         {
             return true; // every field already held its value — dedup the write entirely
         }
         ::CreateDirectoryW(storeDir.c_str(), nullptr); // idempotent; only when we actually write
-        return WriteRecord(storeDir, sessionId, rec);
+        const bool written = WriteRecord(storeDir, sessionId, rec);
+        if (written && tagsChanged)
+        {
+            NoteTagsChanged(); // after the write — the SessionTagsEpoch reader contract
+        }
+        return written;
     }
 
     std::unordered_map<std::wstring, std::wstring> LoadAllSessionStoreFieldIn(const std::wstring& storeDir, const std::wstring& key)
@@ -878,7 +908,17 @@ namespace Agentmaster
             o.Set(k, json::Value::MkStr(v));
         }
         ::CreateDirectoryW(stateDir.c_str(), nullptr); // idempotent (tests point at a fresh temp dir)
-        return AtomicWriteUtf8(TagColorsPath(stateDir), json::Dump(o));
+        const bool written = AtomicWriteUtf8(TagColorsPath(stateDir), json::Dump(o));
+        if (written)
+        {
+            NoteTagsChanged(); // a ribbon color changed (the dedup returns above never get here)
+        }
+        return written;
+    }
+
+    uint64_t SessionTagsEpoch() noexcept
+    {
+        return g_tagsEpoch.load(std::memory_order_acquire);
     }
 
     std::map<std::wstring, std::wstring> LoadAllTagColors()

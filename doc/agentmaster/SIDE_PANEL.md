@@ -44,21 +44,24 @@ which also flips the collapse chevron (`«` here — it always points toward the
 
 ## 2. TOP — the session cards (the Triage-Board integration, vertical)
 
-- **Data**: `SessionRegistry::SnapshotLive()` (both kinds), narrowed by the **card scope**:
+- **Data**: `SessionRegistry::SnapshotLiveForCards()` (both kinds — the live sessions without their
+  prompt queues and transcript texts, which no card shows; the unsent draft stays, for the dots),
+  narrowed by the **card scope**:
   **LOCAL by default — only the sessions whose tab is hosted in THIS window**
   (`TerminalPage::_HostedSessionIds()`, the live `_claudeTabs` set — the SAME predicate the
   Explorer Tree's LOCAL scope provider reads, so the two surfaces can never disagree about what
   "here" means); the header's **LOCAL / GLOBAL** toggle (`_SidePanelToggleScope`) widens THIS
   window's list to every window's sessions. It is a SEPARATE state from the Manager's tree/board
   scope (they answer different questions — the fleet lens vs. what sits beside your terminal) and
-  is persisted **per window only** (§4). Rebuilt off the page's already-batched registry drain,
-  min-gap throttled (500ms), fully deferred while collapsed (the Manager-lens rebuild-tax
-  discipline) — plus, while LOCAL, a per-tick **hosted-set diff** (`_SidePanelPeriodicTickImpl`):
-  a tab docked into / torn out of the window changes `_claudeTabs` with NO registry notify (the
-  moved session stays live + unchanged), so the drain trigger alone would leave a LOCAL list
-  stale. The ~30s "ago" refresh rewrites the timing TextBlocks IN PLACE — never a rebuild for a
-  clock tick. The count line names the scope (`N of M sessions in this window` / `… across all
-  windows`), so a short list reads as "this window", not "the fleet shrank".
+  is persisted **per window only** (§4). The list is **edited in place, never rebuilt** (§2c), off
+  the page's already-batched registry drain, min-gap throttled (500ms), fully deferred while
+  collapsed (the Manager-lens rebuild-tax discipline) — plus, while LOCAL, a per-tick **hosted-set
+  diff** (`_SidePanelPeriodicTickImpl`): a tab docked into / torn out of the window changes
+  `_claudeTabs` with NO registry notify (the moved session stays live + unchanged), so the drain
+  trigger alone would leave a LOCAL list stale. After ~30 s with no update, the periodic tick runs
+  the same in-place update for the "ago" texts: only the timing texts whose value moved are written
+  — never a rebuild for a clock tick. The count line names the scope (`N of M sessions in this
+  window` / `… across all windows`), so a short list reads as "this window", not "the fleet shrank".
 - **Search** (the header's second line, full width — slim: FontSize 11 over a ~22px floor, the
   TextBox template's stock 32px lifted for this box alone by overriding `TextControlThemeMinHeight`
   in its own `Resources`, since a `MinHeight` on the control can't lower a template part's floor):
@@ -129,8 +132,8 @@ the card list until that tab's card is on screen**. It is a GLOBAL preference,
   tab). And a terminal touch that ENDS a peek (`_SidePanelFollowFocusedTab` moving the selection back
   to your tab — §3) scrolls back to your tab's card; a terminal touch that changes nothing never
   scrolls, so clicking into the terminal can't snap back a list you scrolled by hand.
-- **What never scrolls it.** A rebuild (they follow every fleet change and would fight your own
-  scrolling), a card click (the card is already where you clicked it), a Manager-side selection (the
+- **What never scrolls it.** A list update (updates follow every fleet change and would fight your
+  own scrolling), a card click (the card is already where you clicked it), a Manager-side selection (the
   lens push), and the Agent Manager page itself (no tab is selected there).
 - **Minimal and one-shot.** The scroll is `UpdateLayout()` + `StartBringIntoView()` on the card — the
   Manager board's own `BringSelectedIntoView` recipe — so a card already fully visible never moves
@@ -138,9 +141,9 @@ the card list until that tab's card is on screen**. It is a GLOBAL preference,
 - **An owed reveal.** `_SidePanelRevealTabCard` records the id (`_sidePanelRevealPendingId`) and
   queues ONE coalesced Low-priority tick (`_SidePanelQueueReveal` → `_SidePanelRevealPendingNow`), so
   rapid Ctrl+Tab cycling folds into one scroll to the LAST tab, and the tick measures the list after
-  whatever rebuild/content swap ran first. The debt is consumed by the first tick that finds the card
+  whatever list update / content swap ran first. The debt is consumed by the first tick that finds the card
   **rendered**, and survives until then: a just-launched session's card (it lands on the NEXT
-  rebuild — `_SidePanelRebuildCards` re-queues), a collapsed panel (the expand re-queues), a card the
+  update — `_SidePanelRebuildCards` re-queues), a collapsed panel (the expand re-queues), a card the
   filter hides (paid when the filter admits it).
 - **Cancelling it.** A card click (the user's own pick outranks a pending scroll — cleared in
   `_SidePanelSelectSession` when `driveManagerLens`), selecting a tab with no card (pwsh / cmd /
@@ -192,15 +195,82 @@ never push the tags off the card. An untagged card's band is exactly the old tit
   its children (each would re-arm the card tip); the `+N` hooks its own tip BEFORE marking its
   entry handled, so its tip opens while the card's cannot. Leaving the strip re-arms the card tip
   normally.
-- **Data + freshness**: `_SidePanelRebuildCards` reads `GetSessionTags` for exactly the cards it
-  renders (SessionStore's (size,mtime)-validated record cache: one file stat per card at rest)
-  and `LoadAllTagColors()` once, only when a rendered card is tagged — the board's per-rebuild
-  recipe. Tags live in the SessionStore, not the registry, so no drain reports a tag edit: the
-  Tags panel's two mutation paths (`_ToggleSessionTag`, `_CommitTagEditorAdd`) call
-  `_SidePanelNoteTagsChanged()` (rebuild NOW past the min-gap; collapsed → just dirty) beside the
-  board's `_RefreshManagerBoardTags`. Another window's side panel catches up on its own next
-  rebuild — the cross-window lag every tag surface shares. Deleting a 0-carrier tag needs no
-  refresh: no card can show a tag nothing carries.
+- **Data + freshness**: the list keeps each rendered card's tags in a per-card cache
+  (`_sidePanelTagsById`). `GetSessionTags` (SessionStore's (size,mtime)-validated record cache: one
+  file stat) runs only for a card new to the list, and for every rendered card once the
+  **tag-change epoch** moved: `SessionTagsEpoch()`, a process-wide counter that SessionStore moves
+  after every write that CHANGED a session's tag list or a tag's color. `LoadAllTagColors()` runs
+  once per epoch, and only when a rendered card is tagged. So an update with no tag change reads no
+  tag file at all; it used to stat one record per rendered card, ~466 per update in the release's
+  biggest window. The epoch is loaded BEFORE any tag read: a write that lands during the reads
+  leaves the older epoch cached, and the next update reads again — a cache refreshed once too often,
+  never kept stale. Tags live in the SessionStore, not the registry, so no drain reports a tag edit:
+  the Tags panel's two mutation paths (`_ToggleSessionTag`, `_CommitTagEditorAdd`) call
+  `_SidePanelNoteTagsChanged()` (update NOW past the min-gap; collapsed → just dirty) beside the
+  board's `_RefreshManagerBoardTags`. An edit made in **another window** or on the Sessions page
+  moves the same epoch (every window runs in one process), and the periodic tick (~2.5 s) compares
+  it, so every side panel follows within one tick. Before, another window's panel caught up only on
+  its next unrelated rebuild. Not seen: a tag write by another PROCESS on the same profile (the
+  profile mutex already warns about two instances on one profile, and the CLI only reads). Deleting
+  a 0-carrier tag needs no refresh: no card can show a tag nothing carries.
+
+### 2c. The card list is edited in place, never rebuilt
+
+Each update brings the list up to date with the fewest XAML edits. The old update cleared the list and
+built every card again: ~466 cards and ~940 composition nodes in the release's biggest window, up to
+twice a second while sessions changed, and once more every 30 s to move the "ago" texts.
+
+- **A model per card.** `SidePanelCardModelFor` computes everything a card shows from its live
+  session — the title, the band color and ink, the state, the codex pill, the draft dots (with their
+  color and whether they pulse), the timing text, the dir line, the tags with their RESOLVED colors,
+  the tooltip — into a plain `AgentSidePanelCardModel` (`TerminalPage.h`). The card keeps the model it
+  shows (`AgentSidePanelCardView::model`).
+- **Only the differences are written.** `_SidePanelApplyCardModel` compares the new model with the one
+  the card shows, value by value, and writes only what changed. An optional part (the codex pill, the
+  draft dots, the timing text, the band's tag strip) is added or removed only when its presence
+  changes. In the steady state (one session changed its state) the update writes one dot, one label
+  and one border; a session that changed nothing costs its card nothing.
+- **A card is built once per session.** `_SidePanelCreateCardView` builds the skeleton (band, title,
+  state row, dir line) and wires the handlers once; the first model is applied with `fresh` (every
+  value written). A card is never re-keyed: a session that leaves the list loses its card, and a session
+  that comes back gets a new one.
+- **The order changes with the fewest removes, inserts and moves.** `PlanKeyedListOps`
+  (`AgentMaster/KeyedListDiff.h`, pure, header-only) diffs the shown order against the new one:
+  removes first (highest index first), then the cards on the longest increasing subsequence of target
+  positions stay where they are, and every other card is moved or inserted right before its target
+  successor. That is the minimum (cards kept − LIS length). A card that jumps to the top, or sinks to
+  the bottom, is ONE move. The plan's indexes are those of XAML's `UIElementCollection`: `Move` is a
+  reorder of the panel's item array, with no `Unloaded`/`Loaded`, so a moved card keeps its elements,
+  its pulsing dots and its hover state.
+- **The mirror.** `_sidePanelCardOrder` (the shown order, as session ids) and `_sidePanelCardViews`
+  (id → card) must match the panel's children exactly; every edit is made on both in step. Before an
+  update edits anything, the panel size, the mirror and the map are compared; after it, the mirror
+  must equal the new order and the panel must hold that many children. A mismatch, or a throw midway
+  (a XAML edit refused, a torn-down tree), resets the list to empty (`_SidePanelResetCards`, logged
+  `[sidepanel] … out of step` / `[exc] _SidePanelRebuildCards`) and marks it dirty; the next tick fills
+  it from empty (front-to-back appends).
+- **Lean inputs, read once per update:** `SnapshotLiveForCards` (no queues, no transcript texts), ONE
+  `LoadDirColorIndex()` snapshot for every card's band color (`ResolveSessionColorHex`'s 3-argument
+  overload — the same precedence as the 2-argument one, through one shared template), the tags from
+  the per-card cache (§2b), the dots' color, and Windows' animation switch.
+- **Hover and selection read the card's model**, not a registry copy: the hover ring takes the state
+  color of the state the card shows, and the card remembers that it is hovered
+  (`AgentSidePanelCardView::hovered`), so a state change repaints the ring in the new color.
+- **The timing texts** ride the same update: the periodic tick runs it after ~30 s without one, and
+  only the texts whose value moved are written.
+- **Tested** (no build needed): `TestKeyedListDiff` (`tests/tests_sidepanel.cpp`) replays every plan
+  and checks it against the target and against the minimum (an O(n²) LIS): the named shapes, all 120
+  orders of five cards, 3000 random lists, and 466-card rotations (one move each). The lean snapshot,
+  the tag epoch and the color index have their own checks (`TestRegistryLeanReads`,
+  `TestSessionTags`, the color-index block of `TestTabColorModes`). The card code itself
+  (`TerminalPage.AgentSidePanel.cpp`) is NOT BUILT yet (2026-10-04); it passes a syntax-only `cl /Zs`
+  check against the last build's PCH, and so do `TerminalPage.cpp` and `TerminalPage.AgentEngine.cpp`,
+  which include the changed `TerminalPage.h`.
+- **Check after the build:** a session that changes state repaints only its card (no flicker of the
+  list); launch, close, filter and sort changes put the cards in the right order; a hovered card keeps
+  its ring while another card moves; a card's draft dots keep pulsing when it moves; a tag added in
+  another window shows on this window's card within ~2.5 s; no `[sidepanel] … out of step` line in
+  hooks.log.
 
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
@@ -309,19 +379,25 @@ GLOBAL-only; the **card scope is per-window ONLY** (no global default — see be
 
 ## 5. Perf + safety rules upheld
 
-- Rebuilds: batched-drain trigger + 500ms min gap + collapsed-defers + in-place timing refresh;
-  no eager flyouts on cards (menus built at right-click); `SnapshotLive` only; the per-card
-  color resolve rides the cached `LoadDirColors`; the per-card tag read rides SessionStore's
-  (size,mtime) record cache (one stat per rendered card), with `tag-colors.json` read once per
-  rebuild and only when a rendered card is tagged (§2b).
+- Updates: batched-drain trigger + 500ms min gap + collapsed-defers; the list is edited in place
+  with the fewest removes / inserts / moves, and a card gets only its changed values written (§2c) —
+  never `Children().Clear()` + rebuild (the reset after a failed edit is the one exception); the
+  timing refresh is the same in-place update; no eager flyouts on cards (menus built at
+  right-click); `SnapshotLiveForCards` only (never `Snapshot`, never a per-card `Get`); ONE
+  `LoadDirColorIndex()` snapshot per update for every card's color; the tags from a per-card cache,
+  re-read only when `SessionTagsEpoch` moved or for a card new to the list, with `tag-colors.json`
+  read once per epoch and only when a rendered card is tagged (§2b); hover and selection restyle from
+  the card's own model, with no registry read per pointer event.
 - The `⌖` reveal is one coalesced Low-priority tick per tab selection (a map lookup + one
-  `UpdateLayout` + `StartBringIntoView` when owed; nothing at all when not), never a per-rebuild
+  `UpdateLayout` + `StartBringIntoView` when owed; nothing at all when not), never a per-update
   re-scroll, and never a focus move — the terminal keeps typing focus.
 - Layout mutations from layout-driven triggers (ContentArea/root SizeChanged) go through
   coalesced dispatcher ticks with change-gated writes (the E_LAYOUTCYCLE lesson); pointer-drag
   applies synchronously (input, not layout).
 - Card hover handlers reach the card only via `sender` — capturing the element in its own
-  handler is a self-cycle that leaks a card per rebuild (the board's weak-capture lesson).
+  handler is a self-cycle that leaks every card ever dropped from the list (the board's
+  weak-capture lesson). A sender that is not the card registered for its session (a card already
+  dropped, or replaced by a reset) is ignored.
 - The periodic tick is a terminate-netted `fire_and_forget` over an awaitable Impl
   (`resume_foreground` first), the `_ScanCacheWarmTabs` idiom.
 - Tooltips via `AgentSetTip`/`AgentSetTitledTip` only (the per-element ToolTip leak rule).
@@ -330,11 +406,16 @@ GLOBAL-only; the **card scope is per-window ONLY** (no global default — see be
 
 - `TerminalPage.AgentSidePanel.cpp` (new TU; includes `AgentManagerContent.Internal.h` for the
   board's shared helpers), `TerminalPage.xaml` (the ContentArea wrapper), `TerminalPage.h`
-  (members + decls), seams in `TerminalPage.cpp` (`_OnFirstLayout`),
+  (members + decls, and the card's `AgentSidePanelCardModel` / `AgentSidePanelCardView` structs —
+  §2c), seams in `TerminalPage.cpp` (`_OnFirstLayout`),
   `TerminalPage.AgentEngine.cpp` (drain / liveness / funnels / sink / broadcast),
   `TerminalPage.AgentObserver.cpp` (toggle loops + the Tags panel's `_SidePanelNoteTagsChanged`
   calls), `TerminalPage.AgentWindowRecord.cpp` (capture), `AgentManagerContent.h` (the two public
   wrappers — `BuildSessionMenuFor` takes the card as its Tags-panel anchor),
   `AgentManagerContent.Settings.cpp` (cog preserve), `AgentTabOverlay.{h,Summary.cpp}`
   (fill-host mode), `AgentMaster/SessionModels.h` + `Persistence.cpp` (fields + JSON),
-  `tests/tests_persistence.cpp` (round-trip / defaults / bands).
+  `tests/tests_persistence.cpp` (round-trip / defaults / bands). The in-place card list (§2c):
+  `AgentMaster/KeyedListDiff.h` (the planner, pure), `AgentMaster/SessionRegistry.{h,cpp}`
+  (`SnapshotLiveForCards`), `AgentMaster/SessionStore.{h,cpp}` (`SessionTagsEpoch`),
+  `AgentMaster/Persistence.{h,cpp}` (`DirColorIndex` / `LoadDirColorIndex` + the 3-argument
+  `ResolveSessionColorHex`), `tests/tests_sidepanel.cpp` (`TestKeyedListDiff`).

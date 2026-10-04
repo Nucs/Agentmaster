@@ -182,6 +182,21 @@ namespace Agentmaster
         //   throws  — std::bad_alloc on allocation failure; the stored records are left intact.
         std::vector<SessionInfo> SnapshotLiveForScan() const;
 
+        // The side panel's card-list snapshot (SIDE_PANEL.md §2c): the LIVE sessions (the SnapshotLive set and
+        // order), each copied WITHOUT the parts a card never shows:
+        //   - `queue` comes back EMPTY (not copied) — a card shows no queue count.
+        //   - lastAssistantText, recap and pendingPasteRefs come back EMPTY — the transcript texts can be
+        //     kilobytes per session, and a card shows none of them.
+        //   - pendingInput IS copied: a card shows the unsent-draft dots when it is non-empty.
+        // The panel builds every card's model from this on each list update (up to twice a second while the
+        // fleet changes, and every ~30 s for the timing texts), where SnapshotLive copied every queued prompt
+        // and transcript text of every live session.
+        // ⚠ Contract: a reader must never read the queue or the three emptied texts from this snapshot — an
+        // empty value there means "not copied". Anything else needs Get.
+        //   returns — the lean live records, insertion order.
+        //   throws  — std::bad_alloc on allocation failure; the stored records are left intact.
+        std::vector<SessionInfo> SnapshotLiveForCards() const;
+
         size_t Count() const;
 
         // The single entry point that applies an authoritative hook event and mutates

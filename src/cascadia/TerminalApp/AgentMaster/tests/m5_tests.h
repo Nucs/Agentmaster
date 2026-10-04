@@ -20,6 +20,7 @@
 //   tests_taskbar.cpp         - NOTIFICATIONS.md section 8: the taskbar unread badge (TaskbarBadge.h's label / size / disc + digit composition / GDI icon, drawn like the shell draws it) + the engine's process-wide unread census
 //   tests_turns.cpp           - the Copy > Transcript levels: TranscriptTurns (the C++ port of the am-agentmaster-cli skill's transcript_turns.py v9) vs the reference's own goldens in turns\expected, byte for byte; + the summary's whole-conversation chain (CollectConversationUpstream / BuildSummaryConversation)
 //   tests_markdown.cpp        - the transcript overlay's Markdown flattener (MarkdownBlocks — cmark -> flat render blocks); compiled only when the vcpkg cmark of a full build is present (AM_HAVE_CMARK), else it reports a skip
+//   tests_sidepanel.cpp       - SIDE_PANEL.md §2c: the side panel's in-place card list — the order planner (KeyedListDiff.h): reaches the target, indexes in range, minimal
 // ======================================================================================
 //
 // Agentmaster - M5 standalone test harness: SHARED declarations.
@@ -136,7 +137,7 @@ void TestWire();
 void TestRegistry();
 void TestRegistryFanout();
 void TestRegistrySnapshotLive();
-void TestRegistryLeanReads(); // UI_THREAD.md §10a #4 — the lean registry reads: GetWithoutQueue (no queue, everything else), GetTabToken, LiveTabBindings (the SnapshotLive set + order, three fields), ManagedCodexTabTokens (live + ours + tokened Codex only), SnapshotLiveForScan (open prompts only, the four display texts empty, the scanner predicates unchanged); every read leaves the stored record byte-for-byte intact
+void TestRegistryLeanReads(); // UI_THREAD.md §10a #4 — the lean registry reads: GetWithoutQueue (no queue, everything else), GetTabToken, LiveTabBindings (the SnapshotLive set + order, three fields), ManagedCodexTabTokens (live + ours + tokened Codex only), SnapshotLiveForScan (open prompts only, the four display texts empty, the scanner predicates unchanged), SnapshotLiveForCards (SIDE_PANEL.md §2c: no queue, lastAssistantText / recap / pendingPasteRefs empty, pendingInput KEPT); every read leaves the stored record byte-for-byte intact
 void TestForkSourceIdEcho();
 void TestSummaryChainLinks(); // the summary's conversation chain: a /clear's SessionStart(source "clear") paired with the conversation whose SessionEnd(clear) arrived on its ConPTY (beats a fresher child record), the ConPTY fallback (live before archived), other sources / no candidate / no token => no link, per-ConPTY + consumed entries, an unknown ended id, first writer wins
 void TestRetiredHostToken(); // RETIRED HOSTS (SessionRegistry::RetireHostToken — the 2026-08-26 deactivate unbind + the restart archives): an observation / any hook from a replaced connection changes NOTHING on the record (token, pid, heartbeat, state, provenance); case-insensitive; per session; the new host still heard; Remove forgets; the per-session bound
@@ -219,6 +220,13 @@ void TestTabDragMath();
 // [0, ScrollableWidth], the even pad split on a narrow strip, wider-than-viewport headers, and
 // degenerate / non-finite inputs that must never reach ChangeView
 void TestTabStripReveal();
+// tests_sidepanel.cpp — SIDE_PANEL.md §2c: the card list's ORDER planner (KeyedListDiff.h) — every planned
+// Remove / Insert / Move applied in order reaches the target exactly, each index in range when it runs (the XAML
+// panel's own preconditions), and the plan is MINIMAL (one remove per vanished card, one insert per new card,
+// |survivors| - LIS moves against an independent O(n^2) LIS) — the named shapes (first build, emptying, a card to
+// the top / bottom, a swap, a reversal, launch / close / filter), all 120 permutations of 5, a seeded random sweep
+// with removals and insertions, and the release's 466-card list
+void TestKeyedListDiff();
 // TabCloseSuccessor.h (FAVORITES.md §4a): the tab focused after the FOCUSED tab closes — upstream's pick
 // kept when it starts nothing; a DORMANT successor replaced by the nearest (in-order) / most recently
 // used (MRU) tab that starts nothing; right-first ties, the Manager fallback, hostile/empty inputs

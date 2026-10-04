@@ -1529,6 +1529,55 @@ void TestTabColorModes()
         CHECK(ResolveSessionColorHex(TabColorMode::NoColor, bare).empty(), "resolve: NoColor -> empty for a bare session too (no dir-keyed fallback)");
     }
 
+    // --- The BATCH resolve (SIDE_PANEL.md 2c): ResolveSessionColorHex(mode, s, LoadDirColorIndex()) answers
+    //     exactly what the per-session form answers, for every mode — one shared precedence ---
+    {
+        SeedDirColors(0xA11CE5EEull);
+        const std::wstring painted = L"K:\\am-index-test\\painted";
+        const std::wstring unpainted = L"K:\\am-index-test\\unpainted";
+        const std::wstring inferred = L"K:\\am-index-test\\inferred";
+        SetDirColor(painted, std::wstring{ L"#123456" });
+        SetDirColor(inferred, std::wstring{ L"#654321" });
+        const auto index = LoadDirColorIndex();
+        CHECK(index.Find(painted) == std::optional<std::wstring>{ L"#123456" }, "dir color index: a persisted folder's color");
+        CHECK(index.Find(L"k:/AM-INDEX-TEST/painted/") == std::optional<std::wstring>{ L"#123456" },
+              "dir color index: a case/slash/trailing variant finds the same entry (NormDirKey, as GetDirColor)");
+        CHECK(!index.Find(unpainted).has_value(), "dir color index: a folder with no persisted color -> nullopt");
+        CHECK(index.Find(painted) == GetDirColor(painted) && index.Find(unpainted) == GetDirColor(unpainted),
+              "dir color index: Find agrees with GetDirColor");
+
+        SessionInfo s;
+        s.id = L"sid-batch";
+        s.workingDir = painted;
+        SessionInfo dealt = s;
+        dealt.tabColorHex = L"#ABCDEF";
+        SessionInfo autoColor = s;
+        autoColor.workingDir = unpainted;
+        SessionInfo inferring = s;
+        inferring.inferredWorkingDir = inferred;
+        bool allAgree = true;
+        for (const auto mode : { TabColorMode::WorkingDirectory, TabColorMode::Individual, TabColorMode::InferredWorkingDirectory, TabColorMode::NoColor })
+        {
+            for (const SessionInfo* session : { &s, &dealt, &autoColor, &inferring })
+            {
+                allAgree = allAgree && ResolveSessionColorHex(mode, *session, index) == ResolveSessionColorHex(mode, *session);
+            }
+        }
+        CHECK(allAgree, "batch resolve: equals the per-session resolve for every mode and session shape");
+        CHECK(ResolveSessionColorHex(TabColorMode::WorkingDirectory, s, index) == L"#123456", "batch resolve: a persisted dir color");
+        CHECK(ResolveSessionColorHex(TabColorMode::WorkingDirectory, autoColor, index) == AutoDirColorHex(unpainted),
+              "batch resolve: no persisted color -> the AutoDirColorHex preview");
+        CHECK(ResolveSessionColorHex(TabColorMode::Individual, dealt, index) == L"#ABCDEF", "batch resolve: Individual -> the session's own color");
+        CHECK(ResolveSessionColorHex(TabColorMode::InferredWorkingDirectory, inferring, index) == L"#654321",
+              "batch resolve: Inferred -> the inferred dir's color");
+        CHECK(ResolveSessionColorHex(TabColorMode::NoColor, dealt, index).empty(), "batch resolve: NoColor -> empty");
+
+        // Clean up the scratch profile's dir-colors.json for the tests after this one.
+        SetDirColor(painted, std::nullopt);
+        SetDirColor(inferred, std::nullopt);
+        CHECK(!LoadDirColorIndex().Find(painted).has_value(), "dir color index: a fresh snapshot sees a removed color gone");
+    }
+
     // --- ChooseSessionAutoColor: the per-SESSION deal (Individual mode) ---
     {
         SeedDirColors(0xA11CE5EEull); // the session deal shares the dir-color seed

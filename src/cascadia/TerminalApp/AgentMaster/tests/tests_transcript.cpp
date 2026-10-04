@@ -4302,6 +4302,58 @@ void TestSessionTags()
         std::filesystem::remove_all(std::filesystem::path{ store }, ec);
     }
 
+    // --- the TAG-CHANGE EPOCH (SIDE_PANEL.md 2c): moves on every CHANGED tag list / tag color, and only then ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring store = std::wstring{ tmp } + L"am_tagepoch_" + std::to_wstring(::GetCurrentProcessId());
+        const std::wstring colorsDir = std::wstring{ tmp } + L"am_tagepoch_colors_" + std::to_wstring(::GetCurrentProcessId());
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path{ store }, ec);
+        std::filesystem::remove_all(std::filesystem::path{ colorsDir }, ec);
+        const std::wstring a = L"cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+        uint64_t e = SessionTagsEpoch();
+        CHECK(AddSessionTagIn(store, a, L"bug"), "tags epoch: fixture add");
+        CHECK(SessionTagsEpoch() > e, "tags epoch: adding a tag moves it");
+        e = SessionTagsEpoch();
+        CHECK(!AddSessionTagIn(store, a, L"BUG"), "tags epoch: fixture no-op add");
+        CHECK(SessionTagsEpoch() == e, "tags epoch: a no-op add (a case-variant duplicate) leaves it");
+        CHECK(SetSessionTagsIn(store, a, { L"bug" }), "tags epoch: fixture unchanged bulk set");
+        CHECK(SessionTagsEpoch() == e, "tags epoch: re-storing the SAME list (a dedup'd write) leaves it");
+        CHECK(SetSessionStoreFieldIn(store, a, L"title", L"T"), "tags epoch: fixture title write");
+        CHECK(SetSessionStoreFieldIn(store, a, kSessionStoreFavoriteKey, L"1"), "tags epoch: fixture favorite write");
+        CHECK(SessionTagsEpoch() == e, "tags epoch: a title or favorite write on the same record leaves it");
+        CHECK(RemoveSessionTagIn(store, a, L"bug"), "tags epoch: fixture remove");
+        CHECK(SessionTagsEpoch() > e, "tags epoch: removing a tag moves it");
+        e = SessionTagsEpoch();
+        // The batched writer moves it only when the batch changes the tags key.
+        SessionStoreRecord titleOnly;
+        titleOnly[L"title"] = L"T2";
+        CHECK(SetSessionStoreFieldsIn(store, a, titleOnly), "tags epoch: fixture batched title write");
+        CHECK(SessionTagsEpoch() == e, "tags epoch: a batch without the tags key leaves it");
+        SessionStoreRecord withTags;
+        withTags[L"title"] = L"T3";
+        withTags[kSessionStoreTagsKey] = EncodeTagList({ L"perf" });
+        CHECK(SetSessionStoreFieldsIn(store, a, withTags), "tags epoch: fixture batched tags write");
+        CHECK(SessionTagsEpoch() > e, "tags epoch: a batch that changes the tags key moves it");
+        CHECK(GetSessionTagsIn(store, a).size() == 1 && GetSessionTagsIn(store, a)[0] == L"perf",
+              "tags epoch: the batched tags write is what a reader then sees (the bump follows the write)");
+        e = SessionTagsEpoch();
+        // Tag colors: a stored color moves it, an unchanged re-set and a refused value do not.
+        CHECK(SetTagColorIn(colorsDir, L"perf", L"#FF112233"), "tags epoch: fixture color write");
+        CHECK(SessionTagsEpoch() > e, "tags epoch: a tag color write moves it (the ribbons change color)");
+        e = SessionTagsEpoch();
+        CHECK(SetTagColorIn(colorsDir, L"PERF", L"#FF112233"), "tags epoch: fixture unchanged color");
+        CHECK(!SetTagColorIn(colorsDir, L"perf", L"red"), "tags epoch: fixture refused color");
+        CHECK(SessionTagsEpoch() == e, "tags epoch: an unchanged or refused color leaves it");
+        CHECK(SetTagColorIn(colorsDir, L"perf", L""), "tags epoch: fixture color removal");
+        CHECK(SessionTagsEpoch() > e, "tags epoch: removing a color (back to the name hash) moves it");
+
+        std::filesystem::remove_all(std::filesystem::path{ store }, ec);
+        std::filesystem::remove_all(std::filesystem::path{ colorsDir }, ec);
+    }
+
     // --- tag COLORS: the profile-level tag-colors.json (the tag editor's color picker) ---
     {
         wchar_t tmp[MAX_PATH]{};

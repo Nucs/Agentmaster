@@ -1948,10 +1948,40 @@ void TestRegistryLeanReads()
     CHECK(leanB && leanB->queue.empty() && !ScanNeedsFreshTail(*leanB),
           "SnapshotLiveForScan: a queue of completed history only scans as empty, and not hot");
 
+    // --- SnapshotLiveForCards (SIDE_PANEL.md 2c): no queue, no transcript texts, the draft KEPT ---
+    const auto cards = reg.SnapshotLiveForCards();
+    bool cardsOrder = cards.size() == liveFull.size();
+    for (size_t i = 0; cardsOrder && i < cards.size(); ++i)
+    {
+        cardsOrder = cards[i].id == liveFull[i].id;
+    }
+    CHECK(cardsOrder, "SnapshotLiveForCards: the SnapshotLive set and order");
+    const SessionInfo* cardA = nullptr;
+    for (const auto& s : cards)
+    {
+        cardA = (s.id == L"live-a") ? &s : cardA;
+    }
+    CHECK(cardA && cardA->queue.empty(), "SnapshotLiveForCards: the queue comes back empty (a card shows no queue)");
+    CHECK(cardA && cardA->lastAssistantText.empty() && cardA->recap.empty() && cardA->pendingPasteRefs.empty(),
+          "SnapshotLiveForCards: lastAssistantText, recap and pendingPasteRefs come back empty");
+    CHECK(cardA && cardA->pendingInput == L"an unsent draft",
+          "SnapshotLiveForCards: pendingInput is KEPT (a card shows the unsent-draft dots)");
+    CHECK(cardA && cardA->title == L"Title A" && cardA->workingDir == L"C:\\a" && cardA->tabToken == L"TOK-A" &&
+              cardA->state == SessionState::WaitingForInput && cardA->started && cardA->pid == 4242 &&
+              cardA->pendingInputUnixMs == 1234 && cardA->presenceStatus == L"idle",
+          "SnapshotLiveForCards: every other field as SnapshotLive copies it");
+    bool cardsHoldArchived = false;
+    for (const auto& s : cards)
+    {
+        cardsHoldArchived = cardsHoldArchived || s.id == L"arch" || s.id == L"codex-archived";
+    }
+    CHECK(!cardsHoldArchived, "SnapshotLiveForCards: archived records are left out");
+
     // --- every lean read leaves the stored record intact ---
     for (int i = 0; i < 3; ++i)
     {
         (void)reg.SnapshotLiveForScan();
+        (void)reg.SnapshotLiveForCards();
         (void)reg.GetWithoutQueue(L"live-a");
     }
     const auto afterA = reg.Get(L"live-a");
@@ -1972,7 +2002,7 @@ void TestRegistryLeanReads()
     // --- an empty registry ---
     SessionRegistry empty;
     CHECK(empty.LiveTabBindings().empty() && empty.ManagedCodexTabTokens().empty() && empty.SnapshotLiveForScan().empty() &&
-              !empty.GetWithoutQueue(L"x").has_value() && empty.GetTabToken(L"x").empty(),
+              empty.SnapshotLiveForCards().empty() && !empty.GetWithoutQueue(L"x").has_value() && empty.GetTabToken(L"x").empty(),
           "empty registry: every lean read is empty");
 }
 

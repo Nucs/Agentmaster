@@ -2448,6 +2448,36 @@ namespace Agentmaster
         return CanonicalWorktreeColorDir(EffectiveWorkingDir(mode, s));
     }
 
+    namespace
+    {
+        // Agentmaster (SIDE_PANEL.md §2c): the ONE color precedence behind BOTH ResolveSessionColorHex
+        // overloads — one copy, so the per-session form and the batch form (a LoadDirColorIndex snapshot)
+        // can never resolve a session differently; they differ only in how a key dir's persisted color is
+        // looked up.
+        //   mode           — the GLOBAL tab-color mode.
+        //   s              — the session.
+        //   lookupDirColor — callable(const std::wstring& keyDir) -> std::optional<std::wstring>: the key
+        //                    dir's persisted dir-colors.json color, or nullopt (GetDirColor, or a
+        //                    DirColorIndex::Find).
+        //   returns        — "#RRGGBB", or "" under NoColor.
+        //   throws         — std::bad_alloc on allocation failure; whatever the lookup throws.
+        template <typename LookupDirColor>
+        std::wstring ResolveSessionColorHexWith(TabColorMode mode, const SessionInfo& s, const LookupDirColor& lookupDirColor)
+        {
+            if (mode == TabColorMode::NoColor)
+            {
+                return {};
+            }
+            if (mode == TabColorMode::Individual && !s.tabColorHex.empty())
+            {
+                return s.tabColorHex;
+            }
+            const std::wstring keyDir = SessionColorKeyDir(mode, s);
+            const auto persisted = lookupDirColor(keyDir);
+            return persisted ? *persisted : AutoDirColorHex(keyDir);
+        }
+    }
+
     std::wstring ResolveSessionColorHex(TabColorMode mode, const SessionInfo& s)
     {
         // The ONE read-side resolution of "what color does this session's tab wear" — shared by the
@@ -2458,18 +2488,22 @@ namespace Agentmaster
         // none dealt yet (or a pre-feature/archived record) falls through to the dir-keyed
         // precedence, matching the tab until its first Individual paint deals one. Dir modes =>
         // persisted dir color, else the deterministic AutoDirColorHex preview (the existing
-        // board/chip precedence).
-        if (mode == TabColorMode::NoColor)
-        {
-            return {};
-        }
-        if (mode == TabColorMode::Individual && !s.tabColorHex.empty())
-        {
-            return s.tabColorHex;
-        }
-        const std::wstring keyDir = SessionColorKeyDir(mode, s);
-        const auto persisted = GetDirColor(keyDir);
-        return persisted ? *persisted : AutoDirColorHex(keyDir);
+        // board/chip precedence). The precedence itself lives in ResolveSessionColorHexWith, shared
+        // with the batch overload below; this form looks the dir color up with GetDirColor (one
+        // dir-colors.json stat + map copy per call — right for one session, not for a whole list).
+        return ResolveSessionColorHexWith(mode, s, [](const std::wstring& keyDir) {
+            return GetDirColor(keyDir);
+        });
+    }
+
+    std::wstring ResolveSessionColorHex(TabColorMode mode, const SessionInfo& s, const DirColorIndex& dirColors)
+    {
+        // The batch form: the same precedence, with the persisted dir color read from the caller's one
+        // snapshot (a hash lookup) — what lets the side panel resolve its whole card list from ONE
+        // dir-colors.json read instead of one stat + one full map copy per card.
+        return ResolveSessionColorHexWith(mode, s, [&dirColors](const std::wstring& keyDir) {
+            return dirColors.Find(keyDir);
+        });
     }
 
     std::vector<std::pair<std::wstring, std::wstring>>
@@ -2678,6 +2712,36 @@ namespace Agentmaster
             }
         }
         return std::nullopt;
+    }
+
+    std::optional<std::wstring> DirColorIndex::Find(const std::wstring& dir) const
+    {
+        // Normalize the QUERY exactly as GetDirColor does; the keys were stored normalized by the
+        // writers (SetDirColor / AssignDirAutoColor key by NormDirKey), so a case/slash variant of a
+        // dir finds the same entry here as there.
+        const auto it = byKey.find(NormDirKey(dir));
+        if (it == byKey.end())
+        {
+            return std::nullopt;
+        }
+        return it->second;
+    }
+
+    DirColorIndex LoadDirColorIndex()
+    {
+        DirColorIndex index;
+        // Under the same lock GetDirColor reads under, so the snapshot never sees half of a
+        // read-modify-write sequence (the writers hold it across their load + save).
+        std::lock_guard guard{ g_dirColorMtx };
+        auto colors = LoadDirColors(); // the (size,mtime)-cached map: one stat, a re-read only when the file moved
+        index.byKey.reserve(colors.size());
+        for (auto& [key, color] : colors)
+        {
+            // emplace keeps the FIRST color of a repeated key — GetDirColor's first-match rule, so the two
+            // lookups agree even on a hand-edited file that lists a folder twice.
+            index.byKey.emplace(std::move(key), std::move(color));
+        }
+        return index;
     }
 
     void SetDirColor(const std::wstring& dir, const std::optional<std::wstring>& colorHex)

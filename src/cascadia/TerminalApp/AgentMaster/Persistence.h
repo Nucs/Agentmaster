@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map> // DirColorIndex (the batch color lookup)
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -172,6 +173,29 @@ namespace Agentmaster
     std::vector<std::pair<std::wstring, std::wstring>> LoadDirColors();
     std::optional<std::wstring> GetDirColor(const std::wstring& dir);
     void SetDirColor(const std::wstring& dir, const std::optional<std::wstring>& colorHex);
+
+    // Agentmaster (SIDE_PANEL.md §2c): ONE dir-colors.json snapshot, indexed for a caller that resolves
+    // MANY sessions' colors in one pass. GetDirColor (and the per-session ResolveSessionColorHex built on
+    // it) stats the file and copies the WHOLE folder->color map on every call — fine for one tab, but
+    // O(cards x folders) allocations for a card list (the side panel resolves every card's color on each
+    // update). Take one index per pass instead and resolve each session with the 3-argument
+    // ResolveSessionColorHex below. A snapshot: a color written after LoadDirColorIndex is not in it, so
+    // build a fresh one per pass rather than keeping one around.
+    struct DirColorIndex
+    {
+        std::unordered_map<std::wstring, std::wstring> byKey; // NormDirKey(dir) -> "#RRGGBB", as dir-colors.json stores it
+
+        // The persisted color of `dir` — the answer GetDirColor would give, from the snapshot.
+        //   dir     — any spelling of the directory (normalized with NormDirKey here).
+        //   returns — "#RRGGBB", or nullopt when the folder has no persisted color.
+        //   throws  — std::bad_alloc on allocation failure only.
+        std::optional<std::wstring> Find(const std::wstring& dir) const;
+    };
+
+    // Read dir-colors.json once (through LoadDirColors' (size,mtime) cache) into a DirColorIndex.
+    //   returns — the index; empty when no folder has a color yet (or the file is missing/unreadable).
+    //   throws  — std::bad_alloc on allocation failure only.
+    DirColorIndex LoadDirColorIndex();
 
     // Per-directory env overrides on disk (dir-env.json) — a NormDirKey -> env-text map (env-text is
     // the multi-line NAME=VALUE block the Settings cog's Per-directory tab edits). Merged OVER the
@@ -346,6 +370,15 @@ namespace Agentmaster
     // deals/persists (the tab PAINT seams do that: AssignDirAutoColor /
     // TerminalPage::_ApplySessionTabColor's Individual deal).
     std::wstring ResolveSessionColorHex(TabColorMode mode, const SessionInfo& s);
+    // The BATCH form (SIDE_PANEL.md §2c): the identical precedence (one shared implementation), with the
+    // key dir's persisted color read from `dirColors` — a LoadDirColorIndex snapshot the caller took once
+    // for the whole pass — instead of one dir-colors.json stat + full map copy per call.
+    //   mode      — the GLOBAL tab-color mode.
+    //   s         — the session.
+    //   dirColors — this pass's LoadDirColorIndex().
+    //   returns   — what the 2-argument form returns for the same session and file contents.
+    //   throws    — std::bad_alloc on allocation failure only.
+    std::wstring ResolveSessionColorHex(TabColorMode mode, const SessionInfo& s, const DirColorIndex& dirColors);
     // One-time dir-colors.json upgrade (v1 -> v2): de-collide the persisted map (every folder keeps its
     // color where possible; duplicate palette colors are reassigned to free ones). Idempotent (version).
     void MigrateDirColorsToV2IfNeeded();

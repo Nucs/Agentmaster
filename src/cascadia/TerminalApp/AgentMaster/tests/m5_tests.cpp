@@ -141,6 +141,7 @@ int wmain()
     TestBridgeRoundTrip();
     TestTabDragMath();
     TestTabStripReveal();
+    TestKeyedListDiff(); // SIDE_PANEL.md §2c — the side panel card list's order planner (tests_sidepanel.cpp)
     TestTabCloseSuccessor();
     TestTaskbarBadge(); // NOTIFICATIONS.md section 8 — the taskbar unread badge's renderer (tests_taskbar.cpp)
     TestUnreadCensus(); // ...and the process-wide unread count behind it
