@@ -451,6 +451,8 @@ namespace winrt::TerminalApp::implementation
         // FULLY OPAQUE, matching the badge (_root) — its see-through-ness is owned SOLELY by
         // _summaryRoot.Opacity (the same GLOBAL "Overlay opacity" setting). A translucent fill here
         // (was 0xE6) would multiply with that Opacity, so "100%" could never be truly opaque.
+        // This fill + border + rounding is the FLOATING look of the per-tab panel over a terminal; the
+        // fill-host block below removes all of it for the side panel, where the panel is not floating.
         _summaryRoot.Background(Fill(0xFF, 0x20, 0x20, 0x20));
         _summaryRoot.BorderBrush(Fill(0x40, 0xFF, 0xFF, 0xFF));
         _summaryRoot.BorderThickness(ThicknessHelper::FromUniformLength(1));
@@ -470,6 +472,19 @@ namespace winrt::TerminalApp::implementation
         // (the tag-badge lesson), while the deferred apply is change-gated so it converges.
         if (_summaryFillHost)
         {
+            // NO FRAME. The look set above (a 1px 25%-white border, 4px rounded corners, its own #202020
+            // fill) marks the per-tab panel as a card FLOATING over a terminal. Here the panel is encased
+            // in the side panel's lower area, so that frame drew a card inside the pane. Remove all three:
+            //  - no border and square corners — the area's own edges are the panel's edges;
+            //  - a TRANSPARENT fill, so the host's background shows through and the summary reads as the
+            //    area's content. Transparent, NOT a null brush: a Border without a background is not
+            //    hit-testable in its empty parts, and the right-click menu wired on _summaryRoot ("Copy
+            //    Summary", "Show Transcript", the view toggles) must still open on the gaps between rows.
+            // Square corners also remove the rounded-corner clip, for which XAML gives a Border with a
+            // child its own composition node — one node fewer in the per-frame walk (UI_THREAD.md §10h).
+            _summaryRoot.Background(Fill(0x00, 0, 0, 0));
+            _summaryRoot.BorderThickness(ThicknessHelper::FromUniformLength(0));
+            _summaryRoot.CornerRadius(CornerRadiusHelper::FromUniformRadius(0));
             _summaryRoot.HorizontalAlignment(HorizontalAlignment::Stretch);
             _summaryRoot.VerticalAlignment(VerticalAlignment::Top);
             _summaryRoot.Margin(ThicknessHelper::FromUniformLength(0));
@@ -877,7 +892,7 @@ namespace winrt::TerminalApp::implementation
         // (a 50%-of-pane cap makes sense floating over a terminal, not filling a dedicated slot).
         // Width: MaxWidth = the host width (the root stretches to it; MaxWidth still bounds a wide
         // unwrappable line). Height: the body viewport's MaxHeight = host height minus the panel's own
-        // CHROME (title + times bar + padding + border), measured as rootActual - scrollActual — valid
+        // CHROME (title + times bar + padding; this mode draws no border), measured as rootActual - scrollActual — valid
         // because the fill root stays TOP-aligned/content-hugging (see _BuildSummaryPanel). Before the
         // first real layout both actuals are 0, so a conservative fallback stands in; the root's
         // deferred SizeChanged re-apply then corrects it. Every write is CHANGE-GATED (>0.5px delta)
@@ -898,7 +913,8 @@ namespace winrt::TerminalApp::implementation
                 const double scrollH = _summaryScroll.ActualHeight();
                 // Chrome = everything of the panel that is NOT the scrolling body. The subtraction is
                 // only meaningful once both are laid out AND sane; else assume ~64px (title 18 + times
-                // 17 + paddings 12 + border 2 + margins) — corrected by the next SizeChanged re-apply.
+                // 17 + paddings 12 + margins, with room to spare; this mode draws no border) — corrected
+                // by the next SizeChanged re-apply.
                 double chrome = (rootH > 0.0 && scrollH > 0.0 && rootH > scrollH && rootH - scrollH < _summaryPaneH) ? (rootH - scrollH) : 64.0;
                 const double maxH = std::max(40.0, _summaryPaneH - chrome);
                 if (std::abs(_summaryScroll.MaxHeight() - maxH) > 0.5)

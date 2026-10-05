@@ -166,8 +166,11 @@ namespace winrt::TerminalApp::implementation
         // its 50% cap), the body ScrollViewer's MaxHeight tracks the pushed pane height minus the
         // panel's own chrome (title + times bar + padding), and the three resize GRIPS are never built
         // — the host owns sizing (its own splitters), so a grip would fight it and its drag-persist
-        // would corrupt the GLOBAL per-tab fractions. ⚠ MUST be called BEFORE Initialize: the grips
-        // and the root's alignment are decided when _BuildSummaryPanel constructs the tree, and there
+        // would corrupt the GLOBAL per-tab fractions. It also draws NO frame — no border, square
+        // corners, a transparent fill (still hit-testable, for the right-click menu) — because it
+        // sits inside the host's area instead of floating over a terminal: the host's own background
+        // shows through. ⚠ MUST be called BEFORE Initialize: the grips, the root's alignment and its
+        // frame are decided when _BuildSummaryPanel constructs the tree, and there
         // is deliberately no dynamic un-build (the mode is fixed for the overlay's lifetime). A
         // fill-hosted overlay still honors every content flag (wrap/truncate/previous, SetSummary*)
         // and still needs OnSummaryPaneSize pushes — the HOST's slot size, not a terminal pane's.

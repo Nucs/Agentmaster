@@ -278,7 +278,7 @@ The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched i
 **fill-host mode** (`SetSummaryFillHost`, called before `Initialize`): the per-tab pencil
 panel's entire pipeline — off-thread `AnalyzeSessionTranscript` + `RenderSummaryBox`/
 `RenderCodexSummary`, the live times bar, the wrap/truncate/whole-conversation toggles, the JUMP
-buttons, the context menus — reused verbatim, with three differences:
+buttons, the context menus — reused verbatim, with four differences:
 
 - it stretches to the HOST slot (fractions + the 50%-of-pane cap ignored; the body viewport's
   MaxHeight tracks the slot height minus the panel's own chrome, change-gated + re-applied on a
@@ -286,7 +286,14 @@ buttons, the context menus — reused verbatim, with three differences:
 - the resize GRIPS are never built (the panel's splitters own sizing; a grip's drag-persist
   would corrupt the per-tab GLOBAL fractions);
 - it is never dimmed (`SetOverlayOpacities(1,1)`) and always enabled — independent of the
-  per-tab pencil global.
+  per-tab pencil global;
+- it draws NO FRAME (2026-10-05): no border, square corners, and a transparent fill, so the
+  bottom area's own `#252525` shows through and the summary reads as the area's content. The
+  per-tab panel keeps its 1 px 25%-white border, 4 px rounded corners and `#202020` fill, which
+  mark a card floating over a terminal. The fill is transparent, not null: a `Border` without a
+  background is not hit-testable in its empty parts, and the right-click menu must still open on
+  the gaps between rows. Square corners also drop the rounded-corner clip, which XAML backs with a
+  composition node (UI_THREAD.md §10h).
 
 It is DELIBERATELY not in `_claudeOverlays` (that map is keyed by session id and may already
 hold the session's own per-tab overlay), so `_ToggleSummaryWrap`/`Truncate`/`History` and the
