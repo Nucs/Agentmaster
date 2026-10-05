@@ -67,6 +67,12 @@ the panel:
   buttons (`⌖`, `⇄`, the collapse chevron, and the collapsed strip's chevron) are 12 px
   (`kSidePanelIconFontSize`, 2026-10-05 — they were 11 px, and a symbol reads smaller than a word at
   the same size).
+- **The two separators are 3 px thick** (`kSidePanelSplitterPx`: the vertical one's ContentArea
+  column and the horizontal one's body row; 2026-10-05 — they were 6 px, the size of the per-tab
+  overlay's resize grips, and read as heavy borders). They stay solid gray, `#3E3E3E` at rest and
+  `#606060` under the pointer or during a drag. Each bar is its own grab area, so the drag target is
+  3 px too; a wider invisible hit area would have to overlap the terminal's edge or the cards and
+  take their pointer input.
 
 ## 2. TOP — the session cards (the Triage-Board integration, vertical)
 

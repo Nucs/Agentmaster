@@ -115,7 +115,13 @@ namespace
 {
     // --- Side panel geometry constants (one place, so the drag clamps, the load-time persistence
     // bands (Persistence.cpp), and the layout math can never disagree) --------------------------
-    constexpr double kSidePanelSplitterPx = 6.0; // both separators' thickness (matches the overlay grips)
+    // The thickness of both drag-to-resize separators: the VERTICAL one (its own ContentArea column, between the panel
+    // and the terminal) and the HORIZONTAL one (its own body row, between the cards and the summary). 3px since
+    // 2026-10-05 — at 6px (the size of the per-tab overlay's resize grips, which stay 6px) the two bars read as heavy
+    // borders. Tradeoff: each bar is its own grab area, so the drag target shrank with it. No wider invisible hit area
+    // was added: it would have to overlap the terminal's edge or the cards and take their pointer input (a text
+    // selection that starts at the terminal's first column, a card click).
+    constexpr double kSidePanelSplitterPx = 3.0;
     constexpr double kSidePanelStripPx = 20.0; // the collapsed expander strip's column width
     constexpr double kSidePanelMinPx = 180.0; // the panel never renders thinner than this (fractions aside) — the header row stays usable
     constexpr double kSidePanelMinWidthFrac = 0.10; // drag clamp — mirrors the Persistence load band
