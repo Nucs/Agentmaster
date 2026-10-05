@@ -1237,9 +1237,11 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Slider _setTabTitleFontSize{ nullptr }; // the tab title font size (default 12; the rename box follows it)
         winrt::Windows::UI::Xaml::Controls::ComboBox _setTabTitleFontWeight{ nullptr }; // the tab title weight — Normal (default) / SemiBold / Bold — items in TabTitleFontWeight order
         winrt::Windows::UI::Xaml::Controls::Slider _setTabMinHeight{ nullptr }; // the shortest a tab may get, px (default 32); never below the tab's own content height
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setTabWidthHint{ nullptr }; // tab title fit: the dim line under the two width sliders that says, for the mode the "Tab width" combo shows NOW, what the minimum / maximum do and whether a long title widens its tab — so Equal width's "every tab the same share, a long title ends in …" is never a surprise (rendered by _UpdateTabWidthHint)
         bool _tabSizeSyncing{ false }; // reentrancy guard: one width slider pushing the other must not bounce back through the other's push
         void _UpdateTabSizeHeaders(); // re-render the four sliders' "<label> — <value>" Headers from their CURRENT values (the build, every ValueChanged, the seed)
-        void _SyncTabMinWidthEnabled(); // enable the min-width slider unless the width combo says Compact (where a minimum would stop unselected tabs shrinking)
+        void _SyncTabMinWidthEnabled(); // the "Tab width" combo's dependents: enable the min-width slider unless the combo says Compact (where a minimum would stop unselected tabs shrinking), then re-render the mode hint (_UpdateTabWidthHint)
+        void _UpdateTabWidthHint(); // re-render _setTabWidthHint for the combo's CURRENT (unsaved) mode; null-safe, so the build can call it before the hint exists
         winrt::Windows::UI::Xaml::Controls::ComboBox _setTitleNaming{ nullptr }; // TABS: HOW an untitled session's tab title derives from its working dir — last word (default) / folder as-is / two folders / capitals (TabTitleNaming); GLOBAL, applies at the next launch/adopt
         winrt::Windows::UI::Xaml::Controls::ComboBox _setTitleCase{ nullptr }; // TABS: the case transform on the derived title — Default / Lowercase / Uppercase (TabTitleCase); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setTitleUnderscores{ nullptr }; // TABS: convert any whitespace in the derived title to '_' (AppSettings::tabTitleSpacesToUnderscores); GLOBAL

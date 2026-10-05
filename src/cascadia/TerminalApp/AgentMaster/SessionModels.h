@@ -3002,6 +3002,31 @@ namespace Agentmaster
         return ClampTabSizeSetting(v, kDefaultTabMinHeight, kTabMinHeightBandMin, kTabMinHeightBandMax);
     }
 
+    // Agentmaster (tab title fit): the floor of RenamingTabWidth below. The rename box is bounded by its
+    // tab (TabHeaderControl.xaml's title row), so a tiny maximum would leave it room for a character or
+    // two: 200 px, minus the tab's chrome (~68 px: the 8 + 4 px padding, a 16 + 4 px icon, the 32 + 4 px
+    // close button) and the 18 px status-dot slot, still leaves ~114 px for the box.
+    inline constexpr uint32_t kRenamingTabFloorWidth = 200;
+
+    // Agentmaster (tab title fit): the width an EQUAL-width strip holds its SELECTED tab at while that
+    // tab's rename box is open (TerminalPage::_ApplyTabSizingToTab sets it as the tab's MinWidth, which
+    // outranks the equal share MUX writes as Width). Equal width gives every tab the same fixed share of
+    // the strip — with many tabs, the minimum — and the box can't grow past its tab any more, so without
+    // this a rename in a crowded strip would show only a few characters of what you type. Holding the
+    // tab at the MAXIMUM tab width gives the title the room the maximum promises; Fit to title and Compact
+    // need no hold, because there the tab already grows with the box up to the maximum.
+    // Use only for the SELECTED tab: widening an unselected one makes MUX scroll the strip to the
+    // SELECTED tab (TabView::OnItemsPresenterSizeChanged -> BringSelectedTabIntoView), which could carry
+    // the tab being renamed out of view.
+    // Parameters: maxWidth - the maximum tab width, stored / typed (0 == unset; clamped like the setting,
+    //             so an already-normalized value passes through unchanged).
+    // Returns: the larger of the clamped maximum and kRenamingTabFloorWidth, in px. Never throws.
+    inline uint32_t RenamingTabWidth(uint32_t maxWidth) noexcept
+    {
+        const auto clamped = ClampTabMaxWidth(maxWidth);
+        return clamped > kRenamingTabFloorWidth ? clamped : kRenamingTabFloorWidth;
+    }
+
 
     // Agentmaster (COMMANDS.md §6a): normalize a user-typed command name into the form everything
     // downstream agrees on — the transcript echo parser lowercases ASCII (ParseCommandEcho), the

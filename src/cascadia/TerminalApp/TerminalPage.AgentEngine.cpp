@@ -2512,12 +2512,14 @@ namespace winrt::TerminalApp::implementation
 
     // See TerminalPage.h.
     // Parameters: tabViewItem - the tab to size; null is tolerated (a tab mid-teardown).
+    // Returns: the width in px this call holds the tab at for an open rename box (Equal width, selected tab —
+    //          RenamingTabWidth), or 0 when no rename hold is in force (the usual case; also after a failure).
     // UI thread. Never throws: one tab's XAML failure is logged (Rule #18) and the loop moves on.
-    void TerminalPage::_ApplyTabSizingToTab(const winrt::MUX::Controls::TabViewItem& tabViewItem)
+    uint32_t TerminalPage::_ApplyTabSizingToTab(const winrt::MUX::Controls::TabViewItem& tabViewItem)
     {
         if (!tabViewItem)
         {
-            return;
+            return 0;
         }
         try
         {
@@ -2530,31 +2532,59 @@ namespace winrt::TerminalApp::implementation
             // HEIGHT — the style's own floor (TabViewItemMinHeight, 32) is the default, so 32 clears ours.
             _SetOrClearLocalDouble(tabViewItem, winrt::WUX::FrameworkElement::MinHeightProperty(), static_cast<double>(minHeight), minHeight == ::Agentmaster::kDefaultTabMinHeight);
 
+            // The header control: the title font below, and whether its rename box is open (the hold below).
+            winrt::com_ptr<implementation::TabHeaderControl> headerImpl{ nullptr };
+            if (const auto header = tabViewItem.Header().try_as<winrt::TerminalApp::TabHeaderControl>())
+            {
+                headerImpl.copy_from(winrt::get_self<implementation::TabHeaderControl>(header));
+            }
+
             // WIDTH — by the mode the strip is ACTUALLY in (read off the TabView, so this stays right while
             // a mode flip is mid-flight): Equal hands widths to MUX entirely (both cleared — the bounds ride
             // the app resources); Compact keeps only the max (the selected tab's title); Fit to title gets both.
             const auto mode = _tabView ? _tabView.TabWidthMode() : winrt::MUX::Controls::TabViewWidthMode::Equal;
             const bool equal = mode == winrt::MUX::Controls::TabViewWidthMode::Equal;
             const bool compact = mode == winrt::MUX::Controls::TabViewWidthMode::Compact;
-            _SetOrClearLocalDouble(tabViewItem, winrt::WUX::FrameworkElement::MinWidthProperty(), static_cast<double>(minWidth), equal || compact);
+
+            // ...except the RENAME HOLD (tab title fit). The rename box is bounded by its tab (the title row's
+            // star column, TabHeaderControl.xaml), and an Equal tab has the same fixed share as every other —
+            // with many tabs, the minimum — so a rename there would show only a few typed characters. While the
+            // box is open the SELECTED tab gets MinWidth = RenamingTabWidth (the maximum tab width, 200 px
+            // floor): a MinWidth larger than the Width MUX writes wins in XAML's min/max resolution, so the tab
+            // widens without fighting MUX's own width pass. MUX then sees its items presenter grow and brings
+            // the SELECTED tab into view (TabView::OnItemsPresenterSizeChanged), which is this very tab — that
+            // is why the hold is limited to the selected tab: on an unselected one the same call would scroll
+            // the strip to the selected tab and could carry the box out of view (the box then just stays
+            // bounded by the narrow tab and its text scrolls). Fit to title and Compact need no hold: there
+            // the tab already grows with the box up to its MaxWidth. The close (InRename() false again) falls
+            // through to the normal Equal branch, which clears the MinWidth.
+            const bool renameHold = equal && headerImpl && headerImpl->InRename() && tabViewItem.IsSelected();
+            const uint32_t heldWidth = renameHold ? ::Agentmaster::RenamingTabWidth(maxWidth) : 0;
+            if (renameHold)
+            {
+                _SetOrClearLocalDouble(tabViewItem, winrt::WUX::FrameworkElement::MinWidthProperty(), static_cast<double>(heldWidth), false);
+            }
+            else
+            {
+                _SetOrClearLocalDouble(tabViewItem, winrt::WUX::FrameworkElement::MinWidthProperty(), static_cast<double>(minWidth), equal || compact);
+            }
             _SetOrClearLocalDouble(tabViewItem, winrt::WUX::FrameworkElement::MaxWidthProperty(), static_cast<double>(maxWidth), equal);
 
             // TITLE FONT — the header control applies it to the title TextBlocks; 0 == inherit (the default).
-            if (const auto header = tabViewItem.Header().try_as<winrt::TerminalApp::TabHeaderControl>())
+            if (headerImpl)
             {
-                if (const auto impl = winrt::get_self<implementation::TabHeaderControl>(header))
-                {
-                    const uint16_t weight = _appSettings.tabTitleFontWeight == ::Agentmaster::TabTitleFontWeight::Bold     ? uint16_t{ 700 } :
-                                            _appSettings.tabTitleFontWeight == ::Agentmaster::TabTitleFontWeight::SemiBold ? uint16_t{ 600 } :
-                                                                                                                          uint16_t{ 0 };
-                    impl->ApplyTitleFont(fontSize == ::Agentmaster::kDefaultTabTitleFontSize ? 0.0 : static_cast<double>(fontSize), weight);
-                }
+                const uint16_t weight = _appSettings.tabTitleFontWeight == ::Agentmaster::TabTitleFontWeight::Bold     ? uint16_t{ 700 } :
+                                        _appSettings.tabTitleFontWeight == ::Agentmaster::TabTitleFontWeight::SemiBold ? uint16_t{ 600 } :
+                                                                                                                      uint16_t{ 0 };
+                headerImpl->ApplyTitleFont(fontSize == ::Agentmaster::kDefaultTabTitleFontSize ? 0.0 : static_cast<double>(fontSize), weight);
             }
+            return heldWidth;
         }
         catch (...)
         {
             ::Agentmaster::AgentLogCaughtException(L"_ApplyTabSizingToTab");
         }
+        return 0;
     }
 
     // See TerminalPage.h.

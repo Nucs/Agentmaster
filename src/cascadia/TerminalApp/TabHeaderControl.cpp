@@ -1276,6 +1276,10 @@ namespace winrt::TerminalApp::implementation
     // space between the box's actual on-screen left and the window's right edge, so the box grows as
     // large as it can ("maximize") while the WHOLE border — and, for RTL/Hebrew text whose start sits at
     // the right edge, the beginning of the text — stays visible.
+    // (Tab title fit: the box also lives in the title row's STAR column now — TabHeaderControl.xaml's
+    // HeaderTitleRow — so the room its TAB gives it bounds it on top of this cap; past that the text
+    // scrolls inside the box. This window cap still matters for a tab at the strip's right end, where the
+    // tab itself can reach past the window's visible edge.)
     //
     // Recomputes AT MOST ONCE per (rename, window width). See the header comment: writing MaxWidth
     // reflows layout and re-fires the SizeChanged that calls this, and recomputing leftX every pass made
@@ -1336,7 +1340,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Never collapse below the usable floor (an emptied box must stay grabbable) even on a window so
-        // narrow the box can't fully fit — visibility of a 120px box beats a 0px one.
+        // narrow the box can't fully fit — visibility of a MinWidth (40px) box beats a 0px one.
         const double floorW = box.MinWidth();
         if (maxW < floorW)
         {

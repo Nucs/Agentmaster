@@ -2746,6 +2746,29 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster (tab title fit): the tab's rename box opened or closed -> re-apply THIS tab's width
+        // bounds. _ApplyTabSizingToTab reads the header's InRename() and, in an Equal-width strip, holds the
+        // SELECTED tab at the maximum tab width while the box is open (RenamingTabWidth), then drops the hold
+        // on close. It catches + logs its own failures (Rule #18), so nothing escapes this XAML-event path.
+        hostingTab.RenamerOpenChanged([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (!page || !tab)
+            {
+                return;
+            }
+            if (const auto heldWidth = page->_ApplyTabSizingToTab(tab->TabViewItem()); heldWidth > 0)
+            {
+                // A hold is a user-visible width jump: one line per rename makes it checkable in hooks.log
+                // (a rename is a deliberate gesture, so this never floods). The close logs nothing: the
+                // hold simply ends, and the commit itself is already in the "[nav] rename" line.
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[tab-size] rename: " + page->_DescribeTabForLog(*tab) +
+                                                  L" held at " + std::to_wstring(heldWidth) +
+                                                  L" px while its rename box is open (Equal width)\n");
+            }
+        });
+
         // Agentmaster (eager-init): context-menu "Activate Tab" -> start this tab's DORMANT session's
         // claude IN PLACE (no focus change). _ActivateDormantSession is a no-op if it already started.
         hostingTab.ActivateSessionRequested([weakTab, weakThis]() {

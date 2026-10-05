@@ -18,7 +18,7 @@
           HorizontalAlignment="Left">
         <!--  Agentmaster (Linked Lenses): the "selected/active" pill — a filled accent background
               drawn BEHIND the header content (first Grid child, so the icon/dot/title render on top).
-              The Grid sizes to the header StackPanel; the NEGATIVE Margin then grows the pill OUTWARD
+              The Grid sizes to the header's title row (HeaderTitleRow); the NEGATIVE Margin then grows the pill OUTWARD
               past the content on all sides (it stays Stretch, so a negative margin makes it larger
               than its cell) for breathing room — a rounded pill, not a tight box hugging the glyphs —
               WITHOUT shifting the content (the icon/dot/title don't move). Shown ONLY while the Agent
@@ -38,6 +38,34 @@
                 CornerRadius="8"
                 Background="{x:Bind TabStatus.AgentSelectionBrush, Mode=OneWay}"
                 Visibility="{x:Bind TabStatus.AgentSelectionVisible, Mode=OneWay}" />
+        <!--  Agentmaster (tab title fit): the title ROW, a 2-column Grid. Column 0 (Auto) holds the status
+              and indicator glyphs (HeaderStackPanel); column 1 (*) holds the title, and the rename box while
+              a rename is open. The STAR column is what keeps the title INSIDE its tab.
+              Why: the tab strip is a ListView on an ItemsStackPanel, and XAML treats every one of its items
+              (a TabViewItem is a ListViewItem) as a NON-CLIPPING subtree — inside one, an element's desired
+              size is never cut down to the space it was offered (WinUI FrameworkElement::MeasureCore:
+              "currently only listviewitems do not want clipping"; ListViewBase::PreProcessContentPreparation
+              turns it on for each container of an ItemsStackPanel). The title used to sit in the horizontal StackPanel, which
+              measures its children with an UNBOUNDED width, so the title asked for its whole length. The tab
+              then arranged its content at that length (ArrangeCore arranges at the larger of the desired size
+              and the tab's Width) and clipped the result at its own width: a long title ran to the tab's edge
+              and seemed to go on UNDER the next tab, while the close button, the right separator and the
+              selected tab's right corner, laid out past that edge, disappeared.
+              A star column measures its child with the room that is really left (the tab's width minus its
+              chrome, the icon, the close button and the glyphs), and TextTrimming then ends a longer title in
+              an ellipsis inside the tab, in every Tab width mode (Fit to title and Compact first grow the tab
+              up to the maximum width, TerminalPage::_ApplyTabSizingToTab). The rename box shares the cell, so
+              it is bounded the same way.
+              The vertical layout is unchanged: the row is as tall as its tallest child (the 22px glyph wrap,
+              a taller title font, or the rename box), and each child is laid out against that height exactly
+              as the one StackPanel laid them out before. The title still starts right after the glyphs, so
+              the tag-badge anchor (the title's first-character x, _PositionTagBadgesNow) is unchanged.  -->
+        <Grid x:Name="HeaderTitleRow"
+              VerticalAlignment="Center">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
         <StackPanel x:Name="HeaderStackPanel"
                 Orientation="Horizontal"
                 VerticalAlignment="Center">
@@ -370,35 +398,51 @@
                          Fill="{x:Bind TabStatus.AgentPendingBrush, Mode=OneWay}" />
             </StackPanel>
         </Grid>
+        </StackPanel>
+        <!--  Agentmaster (tab title fit): the title, in the title row's STAR column (see HeaderTitleRow above
+              for why it must not sit in the horizontal StackPanel any more). TextTrimming ends a title that
+              does not fit in "…" INSIDE the tab instead of letting it run on under the next tab; the tab's
+              tooltip still shows the whole title. A title with line breaks trims each line on its own.
+              VerticalAlignment stays the default Stretch, so the text sits at the top of the row exactly as
+              it did in the StackPanel (the status dot's 1px dip below centre is tuned against that).  -->
         <TextBlock x:Name="HeaderTextBlock"
+                   Grid.Column="1"
                    Text="{x:Bind Title, Mode=OneWay}"
+                   TextTrimming="CharacterEllipsis"
                    Visibility="Visible" />
         <!--  Agentmaster: AcceptsReturn makes this a MULTI-LINE rename box — a non-commit Return inserts
               a newline (titles can hold line breaks). Commit (accept + save, identical to clicking away)
               is by clicking away (LostFocus) ALWAYS, plus optionally Shift+Enter (default) or Enter, per
               the GLOBAL TabRenameCommitMode app-setting — see TabHeaderControl.cpp's PreviewKeyDown/KeyUp,
               which suppress the newline for whichever key is the commit key. Escape cancels.
-              TextWrapping is NoWrap (NOT Wrap): this box lives in the tab header's HORIZONTAL
-              StackPanel, which measures children with INFINITE width. A Wrap TextBox has no finite
-              width to wrap against there, so it degenerates to its MinWidth and never grows with the
-              text — in SizeToContent tab mode (RenamerMaxWidth = infinity) it collapsed to ~0px and
-              whatever you typed scrolled invisibly inside it (the title still committed on focus-loss,
-              you just couldn't see it while typing). NoWrap makes the box auto-size its WIDTH to the
-              content in BOTH tab-width modes, so it stays visible and grows as you type; explicit
-              Return newlines still grow it vertically up to MaxHeight. MinWidth is a usable floor so
-              an emptied box (Ctrl+A, Delete) stays visible instead of vanishing; MinHeight keeps the
-              one-line look; MaxHeight caps the growth for a tall title.
-              Agentmaster: MaxWidth is set in code-behind (_ApplyRenamerMaxWidth), NOT bound here. The
-              box is anchored at the tab's left and grows rightward, so an unbounded (SizeToContent) or
-              far-right (equal mode) box could push its RIGHT border off the window edge — and with RTL
-              (Hebrew) text, whose start sits at the right edge, you'd lose both the border and the start
-              of the title. The code caps MaxWidth to the space from the box's on-screen left to the
-              window's right edge (using RenamerMaxWidth as the settings ceiling), so the box grows as
-              large as it can while staying fully visible.  -->
+              Agentmaster (tab title fit): the box shares the title's STAR column (Grid.Column 1), so it is
+              measured with the room its tab really has and can never grow past the tab's edge (the
+              non-clipping-ListViewItem trap HeaderTitleRow explains: in the old horizontal StackPanel a long
+              title made the box ask for more than the tab, the tab clipped it, and its right border and the
+              typed text vanished under the next tab). Past that room the text scrolls inside the box. In
+              Fit to title and Compact the tab grows with the box up to the maximum tab width; in Equal width
+              every tab has the same fixed share, so while the SELECTED tab is renamed TerminalPage holds it at
+              the maximum tab width instead (_ApplyTabSizingToTab / RenamingTabWidth), which gives the box room.
+              TextWrapping is NoWrap (NOT Wrap): a Wrap TextBox measured with an UNBOUNDED width (Fit to title
+              with no maximum, or the old horizontal StackPanel) has nothing to wrap against, so it degenerates
+              to its MinWidth and never grows with the text — in that layout it once collapsed to ~0px and
+              whatever you typed scrolled invisibly inside it. NoWrap makes the box size its WIDTH to the
+              text, so it stays visible and grows as you type; explicit Return newlines still grow it
+              vertically up to MaxHeight. MinWidth is a usable floor so an emptied box (Ctrl+A, Delete) stays
+              visible instead of vanishing; it is kept SMALL (40, was 120) because the column can be narrow
+              (a 130px Equal-width tab leaves ~50px) and a floor wider than the column would make the box ask
+              for more than the tab again. MinHeight keeps the one-line look; MaxHeight caps the growth for a
+              tall title.
+              Agentmaster: MaxWidth is set in code-behind (_ApplyRenamerMaxWidth), NOT bound here. It caps
+              the box to the space from the box's on-screen left to the window's right edge (using
+              RenamerMaxWidth as the settings ceiling), so a box on a tab near the window's right edge never
+              pushes its RIGHT border off the window — with RTL (Hebrew) text, whose start sits at the right
+              edge, you would lose both the border and the start of the title.  -->
         <TextBox x:Name="HeaderRenamerTextBox"
+                 Grid.Column="1"
                  MinHeight="24"
                  MaxHeight="96"
-                 MinWidth="120"
+                 MinWidth="40"
                  Padding="4,4,4,3"
                  FontSize="12"
                  AcceptsReturn="True"
@@ -411,7 +455,7 @@
                 <mtu:TextMenuFlyout />
             </TextBox.ContextFlyout>
         </TextBox>
-        </StackPanel>
+        </Grid>
         <!--  Agentmaster (consistent multi-line tab-row height): an invisible height "reserver". The tab
               strip's ListView stretches every tab to the tallest REALIZED tab, so a tab whose title has
               embedded newlines (a multi-line rename) grew the WHOLE row only while it was on-screen —

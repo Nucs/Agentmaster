@@ -109,6 +109,12 @@ namespace winrt::TerminalApp::implementation
         _headerControl.RenameEnded([weakThis = get_weak()](auto&&, auto&&) {
             if (auto tab{ weakThis.get() })
             {
+                // Agentmaster (tab title fit): the box is already collapsed (the header raises RenameEnded
+                // after hiding it), so the page now drops the rename-time width hold it put on an
+                // Equal-width tab (TerminalPage::_ApplyTabSizingToTab). Raised BEFORE the focus hand-off:
+                // the width change only invalidates layout, so the order is cosmetic, but the strip then
+                // re-lays out once with both changes.
+                tab->RenamerOpenChanged.raise();
                 tab->RequestFocusActiveControl.raise();
             }
         });
@@ -1515,6 +1521,13 @@ namespace winrt::TerminalApp::implementation
         ASSERT_UI_THREAD();
 
         _headerControl.BeginRename();
+        // Agentmaster (tab title fit): every way into a rename (double-click, the context menu's Rename Tab,
+        // the renameTab action) comes through here, and the box is visible now — so the page can hold this
+        // tab at the maximum tab width while the box is open, when the strip is in Equal width and this is
+        // the selected tab (TerminalPage::_ApplyTabSizingToTab). The rename box is bounded by its tab since
+        // TabHeaderControl.xaml's title row, so without the hold a crowded Equal strip would leave it only a
+        // few characters of room. The header's RenameEnded handler (the constructor) raises the matching close.
+        RenamerOpenChanged.raise();
     }
 
     // Method Description:

@@ -1762,7 +1762,7 @@ namespace winrt::TerminalApp::implementation
         _setTabWidthMode.Items().Append(winrt::box_value(L"Equal width")); // index 1 == TabStripWidthMode::Equal
         _setTabWidthMode.Items().Append(winrt::box_value(L"Fit to title")); // index 2 == TabStripWidthMode::TitleLength
         _setTabWidthMode.Items().Append(winrt::box_value(L"Compact")); // index 3 == TabStripWidthMode::Compact
-        AgentSetTip(_setTabWidthMode, L"How the tab strip sizes its tabs.\n\x2022 Windows Terminal setting (default): whatever Terminal's own \x201CTab width mode\x201D says (its Settings \x2192 Appearance page, or tabWidthMode in Terminal's settings.json) \x2014 Equal width unless you changed it there.\n\x2022 Equal width: every tab the same width. Tabs share the strip, shrinking toward the minimum below as you open more; past that the strip scrolls instead. A strip with only a few tabs stops widening them at the maximum.\n\x2022 Fit to title: each tab as wide as its title, kept between the minimum and the maximum (a longer title is cut off \x2014 hover the tab for all of it).\n\x2022 Compact: the tabs you are not on shrink to just their icon (turn on \x201CShow icons on tabs\x201D, or they show only their color); the selected tab shows its title, up to the maximum.\nApplies to every window when you press Save.");
+        AgentSetTip(_setTabWidthMode, L"How the tab strip sizes its tabs.\n\x2022 Windows Terminal setting (default): whatever Terminal's own \x201CTab width mode\x201D says (its Settings \x2192 Appearance page, or tabWidthMode in Terminal's settings.json) \x2014 Equal width unless you changed it there.\n\x2022 Equal width: every tab the same width. Tabs share the strip, shrinking toward the minimum below as you open more; past that the strip scrolls instead. A strip with only a few tabs stops widening them at the maximum. A long title does not make its tab wider \x2014 it ends in \x201C\x2026\x201D; while you rename the selected tab, it widens to the maximum.\n\x2022 Fit to title: each tab as wide as its title, kept between the minimum and the maximum (a longer title ends in \x201C\x2026\x201D \x2014 hover the tab for all of it). Pick this to let a long title widen its tab.\n\x2022 Compact: the tabs you are not on shrink to just their icon (turn on \x201CShow icons on tabs\x201D, or they show only their color); the selected tab shows its title, up to the maximum.\nApplies to every window when you press Save.");
         // Compact ignores the minimum (it would stop unselected tabs shrinking), so grey that slider out
         // while Compact is picked — the _setInferGitRoot enable-by-mode idiom.
         _setTabWidthMode.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) { _SyncTabMinWidthEnabled(); });
@@ -1781,7 +1781,15 @@ namespace winrt::TerminalApp::implementation
             panel.Children().Append(slot);
         };
         makeTabSizeSlider(_setTabMinWidth, ::Agentmaster::kTabWidthBandMin, ::Agentmaster::kTabWidthBandMax, ::Agentmaster::kDefaultTabMinWidth, L"The narrowest a tab may get. In Equal width, tabs shrink toward this as you open more, then the strip scrolls instead of squeezing them further. In Fit to title, a short title still gets at least this much room. Not used in Compact. Default 130 px.\n\nIt can never pass the maximum \x2014 dragging it past pushes the maximum along.");
-        makeTabSizeSlider(_setTabMaxWidth, ::Agentmaster::kTabWidthBandMin, ::Agentmaster::kTabWidthBandMax, ::Agentmaster::kDefaultTabMaxWidth, L"The widest a tab may get. In Equal width, a strip with only a few tabs stops widening them at this size instead of stretching them across the window. In Fit to title and Compact, a longer title is cut off at this width (hover the tab for the whole title). Default 240 px.\n\nIt can never drop below the minimum \x2014 dragging it under pushes the minimum along.");
+        makeTabSizeSlider(_setTabMaxWidth, ::Agentmaster::kTabWidthBandMin, ::Agentmaster::kTabWidthBandMax, ::Agentmaster::kDefaultTabMaxWidth, L"The widest a tab may get. In Equal width, a strip with only a few tabs stops widening them at this size instead of stretching them across the window, and the selected tab widens to it while you rename it. In Fit to title and Compact, a tab grows with its title up to this width, and a longer title ends in \x201C\x2026\x201D (hover the tab for the whole title). Default 240 px.\n\nIt can never drop below the minimum \x2014 dragging it under pushes the minimum along.");
+        // Tab title fit: one dim line, right under the two width sliders, that says what they do in the mode the
+        // combo shows NOW — Equal width's "every tab the same share; a long title ends in an ellipsis" read as a
+        // bug ("the tab stays at the minimum") when it lived only in the tooltips. Re-rendered by
+        // _UpdateTabWidthHint (via _SyncTabMinWidthEnabled) on every combo change, the seed and the Reset link.
+        _setTabWidthHint = Text(L"", 11, false, 0.7);
+        _setTabWidthHint.TextWrapping(TextWrapping::Wrap);
+        _setTabWidthHint.Margin(Thickness{ 0, -2, 0, 4 });
+        panel.Children().Append(_setTabWidthHint);
         makeTabSizeSlider(_setTabTitleFontSize, ::Agentmaster::kTabTitleFontSizeBandMin, ::Agentmaster::kTabTitleFontSizeBandMax, ::Agentmaster::kDefaultTabTitleFontSize, L"How big the tab titles are, 8 to 28. Default 12. The rename box uses the same size, so what you type reads the way it will look. A bigger title makes the tabs taller; the status dot and the other tab icons keep their size.");
         _setTabTitleFontWeight = ComboBox{};
         _setTabTitleFontWeight.Header(winrt::box_value(L"Title font weight"));
@@ -4543,11 +4551,63 @@ namespace winrt::TerminalApp::implementation
     // idiom. The value is kept (and still saved), so switching back restores it. Under the default
     // "Windows Terminal setting" the slider stays enabled: Terminal's own mode isn't known here, and it is
     // Equal unless the user changed it. UI thread; never throws in practice (two property reads + one write).
+    // Tab title fit: it also re-renders the mode hint under the width sliders (_UpdateTabWidthHint) — every
+    // caller (the combo's SelectionChanged, the build, the _ShowSettings seed, the Reset link) is exactly a
+    // moment the combo's mode may have changed, so the hint can never show another mode's text.
     void AgentManagerContent::_SyncTabMinWidthEnabled()
     {
         if (_setTabMinWidth && _setTabWidthMode)
         {
             _setTabMinWidth.IsEnabled(_setTabWidthMode.SelectedIndex() != 3); // 3 == TabStripWidthMode::Compact
+        }
+        _UpdateTabWidthHint();
+    }
+
+    // Agentmaster (tab title fit): say, under the two width sliders, what they do in the mode the "Tab width"
+    // combo shows NOW (its unsaved selection, so the line answers "what will Save give me?"). The reason it
+    // exists: in Equal width the minimum / maximum only clamp the SHARE every tab gets, so a strip of many tabs
+    // keeps every tab at the minimum however long its title is — which reads as "the tab won't stretch to the
+    // maximum" unless it is said where the sliders are. Fit to title is the mode where the title drives the
+    // width, so the Equal texts name it. Under "Windows Terminal setting" the effective mode isn't known here
+    // (Terminal's own setting), so the text describes Equal width — Terminal's default — and says so.
+    // The texts follow TerminalPage::_ApplyTabSizingToTab: an ellipsis inside the tab in every mode, the
+    // selected tab held at the maximum while it is renamed in Equal width, the box growing with the text
+    // elsewhere. Null-safe (the build calls it before the hint exists). UI thread. Throws only what a XAML
+    // property write throws (winrt::hresult_error) — every caller runs inside the cog's own UI-thread handlers.
+    void AgentManagerContent::_UpdateTabWidthHint()
+    {
+        if (!_setTabWidthHint || !_setTabWidthMode)
+        {
+            return;
+        }
+        // Index order == TabStripWidthMode (the combo's items): 0 Terminal, 1 Equal, 2 Fit to title, 3 Compact.
+        // Each escape sequence is followed by a non-hex character (or a literal split), so none of them
+        // swallows the next letter.
+        const wchar_t* text = nullptr;
+        switch (_setTabWidthMode.SelectedIndex())
+        {
+        case 1:
+            text = L"Equal width: every tab gets the same share of the strip, kept between the minimum and the maximum. "
+                   L"With many tabs, every tab is at the minimum. A long title does not make its tab wider; it ends in \x201C\x2026\x201D. "
+                   L"While you rename the selected tab, it widens to the maximum. To let a long title widen its tab, up to the maximum, select Fit to title.";
+            break;
+        case 2:
+            text = L"Fit to title: each tab is as wide as its title \x2014 never narrower than the minimum, never wider than the maximum. "
+                   L"A longer title ends in \x201C\x2026\x201D. While you rename a tab, it grows with the text, up to the maximum.";
+            break;
+        case 3:
+            text = L"Compact: the tabs you are not on show only their icon, so the minimum does not apply. "
+                   L"The selected tab is as wide as its title, up to the maximum; a longer title ends in \x201C\x2026\x201D.";
+            break;
+        default:
+            text = L"Windows Terminal setting \x2014 Equal width, unless you changed Terminal's own tab width mode: every tab gets the same share "
+                   L"of the strip, kept between the minimum and the maximum. With many tabs, every tab is at the minimum. A long title does not "
+                   L"make its tab wider; it ends in \x201C\x2026\x201D. To let a long title widen its tab, up to the maximum, select Fit to title.";
+            break;
+        }
+        if (_setTabWidthHint.Text() != text)
+        {
+            _setTabWidthHint.Text(winrt::hstring{ text });
         }
     }
 

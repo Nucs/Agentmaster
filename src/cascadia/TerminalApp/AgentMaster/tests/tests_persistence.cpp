@@ -940,6 +940,13 @@ void TestAppSettings()
         CHECK(lo == 500u && hi == 500u, "NormalizeTabWidthRange: an unset max below the min is raised to the min");
         CHECK(ClampTabSizeSetting(0, 7, 1, 9) == 7u && ClampTabSizeSetting(10, 7, 1, 9) == 9u && ClampTabSizeSetting(5, 7, 1, 9) == 5u,
               "ClampTabSizeSetting: 0 -> default, above -> ceiling, in-band -> unchanged");
+
+        // Tab title fit: an Equal-width strip holds its selected tab at the maximum tab width while that
+        // tab is renamed, never narrower than the 200 px floor that keeps the rename box usable.
+        CHECK(RenamingTabWidth(260) == 260u, "RenamingTabWidth: a maximum above the floor is the held width");
+        CHECK(RenamingTabWidth(150) == kRenamingTabFloorWidth && kRenamingTabFloorWidth == 200u, "RenamingTabWidth: a maximum below the floor is raised to 200 px");
+        CHECK(RenamingTabWidth(0) == 240u, "RenamingTabWidth: an unset maximum is the 240 px default");
+        CHECK(RenamingTabWidth(5000) == kTabWidthBandMax, "RenamingTabWidth: an out-of-band maximum is clamped to the band first");
     }
 
     // tabColorMode (tab color modes): each token parses to its mode; an unknown/absent token falls
