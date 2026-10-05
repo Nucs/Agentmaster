@@ -3021,9 +3021,11 @@ namespace Agentmaster
     // this a rename in a crowded strip would show only a few characters of what you type. Holding the
     // tab at the MAXIMUM tab width gives the title the room the maximum promises; Fit to title and Compact
     // need no hold, because there the tab already grows with the box up to the maximum.
-    // Use only for the SELECTED tab: widening an unselected one makes MUX scroll the strip to the
-    // SELECTED tab (TabView::OnItemsPresenterSizeChanged -> BringSelectedTabIntoView), which could carry
-    // the tab being renamed out of view.
+    // Used only for the SELECTED tab, as designed. The original reason — widening an unselected one made MUX
+    // scroll the strip to the SELECTED tab (TabView::OnItemsPresenterSizeChanged -> BringSelectedTabIntoView),
+    // which could carry the tab being renamed out of view — is gone since the strip ignores bring-into-view
+    // requests (TerminalPage::_EnsureTabStripScrollViewer); the page reveals the renaming tab itself
+    // (TerminalPage::_TrackRenamingTabInStrip).
     // Parameters: maxWidth - the maximum tab width, stored / typed (0 == unset; clamped like the setting,
     //             so an already-normalized value passes through unchanged).
     // Returns: the larger of the clamped maximum and kRenamingTabFloorWidth, in px. Never throws.

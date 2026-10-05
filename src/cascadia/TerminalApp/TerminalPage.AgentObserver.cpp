@@ -4424,7 +4424,9 @@ namespace winrt::TerminalApp::implementation
             // Derealized (virtualized out). ListViewBase::ScrollIntoView realizes the container and
             // rough-scrolls it into the viewport (WT inserts the TabViewItems directly into TabItems,
             // so the item IS the TabViewItem). Fall back to StartBringIntoView when the template
-            // isn't resolvable (it can still help a realized-but-unarranged item).
+            // isn't resolvable (it can still help a realized-but-unarranged item). The fallback acts only
+            // while the strip's ScrollViewer is NOT bound: binding it turns the strip's bring-into-view off
+            // (_EnsureTabStripScrollViewer), and the strip then ignores this request like MUX's own.
             ListView tabListView{ nullptr };
             auto node = _tabStripScrollViewer ? VisualTreeHelper::GetParent(_tabStripScrollViewer) : DependencyObject{ nullptr };
             while (node && !tabListView)
@@ -4543,6 +4545,113 @@ namespace winrt::TerminalApp::implementation
                 CATCH_LOG();
             }
         });
+    }
+
+    // Agentmaster (tab-strip reveal — the rename box): see TerminalPage.h. Runs on every
+    // Tab::RenamerOpenChanged, which the tab raises AFTER the box's visibility flipped, so the header's
+    // InRename() already reads the new state. Until the strip stopped honoring bring-into-view requests
+    // (_EnsureTabStripScrollViewer), two side effects kept the box on screen: the box taking focus scrolled
+    // it into view (BringIntoViewOnFocusChange), and MUX scrolled its SELECTED tab into view whenever the
+    // strip's content changed size — the Equal-width rename hold widening the selected tab, a Fit-to-title
+    // tab growing with the typed text. This replaces both, for the renamed tab only. (The second one also
+    // scrolled the strip AWAY when the tab being renamed was not the selected one; that is gone too.)
+    //   tab - the tab whose rename box just opened or closed; null does nothing.
+    // Never throws: a failure is logged (CATCH_LOG -> [wil] in hooks.log), and the box may then sit partly
+    // outside the strip's viewport until the next reveal.
+    void TerminalPage::_TrackRenamingTabInStrip(const winrt::TerminalApp::Tab& tab)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        try
+        {
+            const auto tvi = tab.TabViewItem();
+            if (!tvi)
+            {
+                return;
+            }
+            const auto header = tvi.Header().try_as<winrt::TerminalApp::TabHeaderControl>();
+            if (!header || !header.InRename())
+            {
+                // CLOSED: stop following this tab's size, but only when it is the tab being followed. Opening a
+                // rename on another tab moves the focus there first, and XAML raises the previous box's
+                // LostFocus (which commits and closes it) after that, so this close can arrive AFTER the next
+                // rename's open: revoking blindly would drop the new rename's subscription.
+                if (_renamingTabViewItem.get() == tvi)
+                {
+                    _renamingTabSizeChangedRevoker.revoke();
+                    _renamingTabViewItem = nullptr;
+                }
+                return;
+            }
+            // OPENED: follow this tab's size until its box closes. Its SizeChanged reports every width change
+            // while the box is open — the rename hold's MinWidth (_ApplyTabSizingToTab ran just before this)
+            // landing on the next layout pass, a Fit-to-title or Compact tab growing with the text. Assigning the
+            // revoker drops the previous rename's subscription, if one was still held.
+            _renamingTabViewItem = winrt::make_weak(tvi);
+            _renamingTabSizeChangedRevoker = tvi.SizeChanged(winrt::auto_revoke, [weakThis = get_weak(), weakTab = winrt::make_weak(tab)](auto&&, auto&&) {
+                // Raised inside a layout pass: only QUEUE the reveal here. A ChangeView from inside the pass
+                // would scroll the strip mid-layout (the layout-cycle class this codebase has hit before).
+                if (const auto page = weakThis.get())
+                {
+                    if (const auto t = weakTab.get())
+                    {
+                        page->_QueueRevealRenamingTab(t);
+                    }
+                }
+            });
+            // The box itself: it just became visible, so a tab the user scrolled away from (the renameTab
+            // action) or one cut off at the strip's edge is brought fully into view once it has laid out.
+            _QueueRevealRenamingTab(tab);
+        }
+        CATCH_LOG();
+    }
+
+    // Agentmaster (tab-strip reveal — the rename box): see TerminalPage.h.
+    //   tab - the renaming tab to reveal; null does nothing.
+    // Never throws: a failure is logged ([exc] in hooks.log) and clears _renameRevealQueued, because a flag
+    // left set would make every later call return early and no rename would ever be revealed again.
+    void TerminalPage::_QueueRevealRenamingTab(const winrt::TerminalApp::Tab& tab)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        try
+        {
+            // The newest request names the tab: if a rename opens on another tab while an older reveal is still
+            // queued, the box the user is now typing in is the one to show.
+            _renameRevealTarget = winrt::make_weak(tab);
+            if (_renameRevealQueued)
+            {
+                return; // one reveal per burst — a tab that grows on every keystroke queues one, not one per key
+            }
+            _renameRevealQueued = true;
+            // Low priority runs after the pending layout pass, so the reveal measures the tab at its NEW width.
+            Dispatcher().RunAsync(CoreDispatcherPriority::Low, [weakThis = get_weak()]() {
+                if (const auto page = weakThis.get())
+                {
+                    try
+                    {
+                        // Cleared FIRST: a size change during the reveal's own ChangeView queues the next one.
+                        page->_renameRevealQueued = false;
+                        if (const auto t = page->_renameRevealTarget.get())
+                        {
+                            // Leave-in-place: a renaming tab already wholly on screen never moves, so the box stays
+                            // under the pointer that opened it; a tab cut off at an edge lands inside the pads.
+                            page->_RevealTabInStrip(t, /*leaveFullyVisibleInPlace*/ true);
+                        }
+                    }
+                    CATCH_LOG();
+                }
+            });
+        }
+        catch (...)
+        {
+            _renameRevealQueued = false;
+            ::Agentmaster::AgentLogCaughtException(L"_QueueRevealRenamingTab");
+        }
     }
 
     // Agentmaster (tab-strip reveal): how long _KeepTabHeaderInView waits before its SECOND check. The

@@ -832,6 +832,34 @@ namespace winrt::TerminalApp::implementation
     // _UpdateManagerNavButtons, the strip reveal, the drag gesture) retry until it's there. The strip
     // reveal and the drag gesture's edge auto-scroll are its users now (the Home button no longer tracks
     // the scroll offset — it is always shown). The guard makes repeat calls cheap no-ops.
+    //
+    // Binding also turns the strip's BRING-INTO-VIEW off (BringIntoViewOnFocusChange = false), so that
+    // Agentmaster's own reveal (_RevealTabInStrip) is the only thing that scrolls the strip to a tab.
+    //   Why: MUX scrolls its SELECTED tab into view every time the strip's content changes size
+    //   (TabView::OnItemsPresenterSizeChanged -> BringSelectedTabIntoView), and in a big window that happens
+    //   WHILE THE USER SCROLLS. The strip lays out only the tabs near the view and estimates the width of the
+    //   rest from the width it recorded for each tab it ever laid out (StackingLayoutStrategyImpl::
+    //   RegisterSize / EstimateNonGroupedExtent). A recorded width can be stale (a cog Save that changed the
+    //   tab width; a tab first measured before MUX gave it its equal width), so the first layout of such a
+    //   tab during a scroll moves the estimate, the content changes size, and MUX pulls the strip back to the
+    //   selected tab. That works as long as the selected tab is still laid out — about two strip widths on
+    //   each side of the view — so the strip could never be scrolled away from it. 2026-10-05, release
+    //   0.6.8.16, a 476-tab window, an hour after two tab-width cog Saves: "The scrolling now does not allow
+    //   me to move away from the selected tab's view". UI Automation (read-only) measured that window's
+    //   content at 67,800 px for about 66,650 px of tabs; a 31-tab window, every tab laid out, was exact.
+    //   How: XAML's ScrollViewer::OnBringIntoViewRequested acts on a request from inside it only when the
+    //   request is FORCED or BringIntoViewOnFocusChange is true, and UIElement::StartBringIntoView — what
+    //   MUX's TabViewItem::StartBringTabIntoView calls — never forces. ChangeView (the reveal's precise
+    //   pass, the Home button, the drag auto-scroll, MUX's < / > buttons) and ListView::ScrollIntoView (the
+    //   panel changes the offset itself) are not bring-into-view requests, so they still work.
+    //   What else stops, and who covers it: MUX's reveal on a SELECTION (every selection reveals through
+    //   _UpdatedSelectedTab, the close successor included — _RemoveTab calls it — and _TryMoveTab reveals
+    //   itself); MUX's reveal after a native drag (native drag is off); the scroll to an element that gets
+    //   FOCUS inside the strip — the one that matters, a tab's rename box, is revealed by the page
+    //   (_TrackRenamingTabInStrip), and ListView keyboard navigation scrolls through ScrollIntoView. The
+    //   Shift+Click revert (_OnTabSelectionChanged) now leaves the strip where you clicked instead of
+    //   pulling it to the restored tab.
+    // A failure to set it is logged (Rule #18) and the strip keeps MUX's reveals — the behavior before this.
     void TerminalPage::_EnsureTabStripScrollViewer()
     {
         if (_tabStripScrollViewer || !_tabView)
@@ -846,6 +874,17 @@ namespace winrt::TerminalApp::implementation
         }
 
         _tabStripScrollViewer = sv;
+        try
+        {
+            // A LOCAL value: it outranks whatever the template or its style sets on this ScrollViewer.
+            sv.BringIntoViewOnFocusChange(false);
+            // Once per window (the bind runs once): the line that shows a running build carries this fix.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[strip] bring-into-view off: only _RevealTabInStrip scrolls the tab strip to a tab\n");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_EnsureTabStripScrollViewer BringIntoViewOnFocusChange");
+        }
     }
 
     // Agentmaster: the Manager lens's currently-selected managed session (the highlighted board card /
@@ -2552,13 +2591,16 @@ namespace winrt::TerminalApp::implementation
             // with many tabs, the minimum — so a rename there would show only a few typed characters. While the
             // box is open the SELECTED tab gets MinWidth = RenamingTabWidth (the maximum tab width, 200 px
             // floor): a MinWidth larger than the Width MUX writes wins in XAML's min/max resolution, so the tab
-            // widens without fighting MUX's own width pass. MUX then sees its items presenter grow and brings
-            // the SELECTED tab into view (TabView::OnItemsPresenterSizeChanged), which is this very tab — that
-            // is why the hold is limited to the selected tab: on an unselected one the same call would scroll
-            // the strip to the selected tab and could carry the box out of view (the box then just stays
-            // bounded by the narrow tab and its text scrolls). Fit to title and Compact need no hold: there
-            // the tab already grows with the box up to its MaxWidth. The close (InRename() false again) falls
-            // through to the normal Equal branch, which clears the MinWidth.
+            // widens without fighting MUX's own width pass. The widened tab is kept on screen by the page
+            // (_TrackRenamingTabInStrip, run by the same RenamerOpenChanged right after this): the strip
+            // ignores bring-into-view requests since _EnsureTabStripScrollViewer, so MUX's own reaction to the
+            // grown items presenter (TabView::OnItemsPresenterSizeChanged -> BringSelectedTabIntoView) no
+            // longer scrolls anything. The hold is limited to the selected tab as designed (an unselected tab
+            // renamed from its context menu keeps its narrow tab, the box bounded by it and its text
+            // scrolling). Its original reason, that the same MUX call would scroll the strip to the selected
+            // tab and carry the box out of view, no longer applies. Fit to title and Compact need no hold:
+            // there the tab already grows with the box up to its MaxWidth. The close (InRename() false again)
+            // falls through to the normal Equal branch, which clears the MinWidth.
             const bool renameHold = equal && headerImpl && headerImpl->InRename() && tabViewItem.IsSelected();
             const uint32_t heldWidth = renameHold ? ::Agentmaster::RenamingTabWidth(maxWidth) : 0;
             if (renameHold)
@@ -2817,7 +2859,11 @@ namespace winrt::TerminalApp::implementation
     // request is routed asynchronously, so it lands after everything else this call stack does and nothing
     // here can undo it. So settle with the tab that must end up on screen already SELECTED — _InitializeTab
     // selects a new tab first for exactly this reason (2026-10-03: a tab opened from another tab's context
-    // menu scrolled the strip to the tab the user had been on). It is also a whole-window layout pass:
+    // menu scrolled the strip to the tab the user had been on). Since 2026-10-05 the strip ignores that
+    // request (_EnsureTabStripScrollViewer turns its bring-into-view off — MUX made the same request on every
+    // content resize WHILE the user scrolled a big strip), so the order is now a belt: it still matters before
+    // the strip's ScrollViewer is bound, or if turning that off failed (logged).
+    // The settle is also a whole-window layout pass:
     // content swapped in just before it gets its first layout HERE, synchronously, and a terminal control
     // starts its connection on its first layout — for a brand-new tab that would be before
     // _LaunchClaudeSession has wired the session up, which is why _InitializeTab also settles BEFORE its

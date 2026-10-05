@@ -2750,6 +2750,12 @@ namespace winrt::TerminalApp::implementation
         // bounds. _ApplyTabSizingToTab reads the header's InRename() and, in an Equal-width strip, holds the
         // SELECTED tab at the maximum tab width while the box is open (RenamingTabWidth), then drops the hold
         // on close. It catches + logs its own failures (Rule #18), so nothing escapes this XAML-event path.
+        // Agentmaster (tab-strip reveal): then keep the box on screen. The strip ignores bring-into-view
+        // requests (_EnsureTabStripScrollViewer), so neither the box taking focus nor the hold widening the
+        // tab scrolls it into view any more; _TrackRenamingTabInStrip reveals the tab now and after every size
+        // change while the box stays open, and stops on close. Runs AFTER the sizing on purpose: the hold's
+        // new width is then already set, and its layout pass raises the SizeChanged that is followed.
+        // _TrackRenamingTabInStrip never throws either (CATCH_LOG).
         hostingTab.RenamerOpenChanged([weakTab, weakThis]() {
             auto page{ weakThis.get() };
             auto tab{ weakTab.get() };
@@ -2767,6 +2773,7 @@ namespace winrt::TerminalApp::implementation
                                                   L" held at " + std::to_wstring(heldWidth) +
                                                   L" px while its rename box is open (Equal width)\n");
             }
+            page->_TrackRenamingTabInStrip(*tab);
         });
 
         // Agentmaster (eager-init): context-menu "Activate Tab" -> start this tab's DORMANT session's

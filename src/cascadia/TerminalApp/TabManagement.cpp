@@ -253,7 +253,9 @@ namespace winrt::TerminalApp::implementation
         //      _OnTabSelectionChanged only records the switch;
         //   2. settle: the layout pass. MUX answers the strip's growth by scrolling its SELECTED tab into view,
         //      and that is the new tab now, not the tab the user was on — which, a few tabs away, is where the
-        //      strip used to jump when a tab was opened from another tab's context menu;
+        //      strip used to jump when a tab was opened from another tab's context menu (since 2026-10-05 the
+        //      strip ignores MUX's request — _EnsureTabStripScrollViewer — so this order is a belt for a strip
+        //      whose ScrollViewer is not bound yet);
         //   3. run the held switch: the content swap, focus, and the reveal of a tab the strip has now laid out
         //      (a tab opened on screen, beside the one that was right-clicked, keeps the strip where it is —
         //      the reveal moves it only to pull a tab sitting at the very edge inside its padding).
@@ -286,7 +288,8 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: settle the item->container mapping + pin the new tab CanDrag(false) — native
         // MUX drag is permanently OFF (the drag-AV resolution; see TerminalPage.AgentEngine.cpp). ⚠ This
         // is a whole layout pass, and it must stay AFTER step 1 above: run with the user's previous tab still
-        // selected, it scrolls the strip to THAT tab (see the step list above).
+        // selected, it scrolls the strip to THAT tab wherever the strip still honors MUX's bring-into-view (see
+        // the step list above).
         _ApplyTabDragPolicy(tabViewItem);
 
         if (switchHeld)
