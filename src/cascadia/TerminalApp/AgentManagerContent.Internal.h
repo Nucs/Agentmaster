@@ -29,6 +29,7 @@
 #include "AgentClipboard.h" // RobustCopyTextToClipboard — the retry-looped Win32 writer CopyTextToClipboard routes through
 #include "AgentAmbientAnimation.h" // AgentDotsPulse — the unsent-draft dots' pulse on the Composition API (BuildPendingDots)
 #include "AgentCatchLog.h" // AgentLogCaughtException — Rule #18 forensics for a refused pulse start / stop (BuildPendingDots)
+#include "AgentMaster/SessionTimingText.h" // FormatSessionTimingLine — the cards' and rows' "created 4d1h, active 2m4s ago" (FormatSessionTiming)
 
 namespace
 {
@@ -512,11 +513,18 @@ namespace
 
     // Agentmaster: format a duration (ms) as a consolidated span. Units descend month / day / hour /
     // minute / second; month(=30d) and minute SHARE the letter 'm', disambiguated by position (the
-    // sequence is always largest->smallest), per the requested format: "1m4d6h" (1 month 4 days 6
-    // hours), "2h30m" (2 hours 30 min), "5m30s" (5 min 30 s), "45s". Non-zero units only, from the
-    // largest down to the floor. `allowSeconds` enables the seconds unit — but only when the whole
-    // span is < 1 hour ("seconds if hours not present, otherwise minutes minimum"). Always emits at
-    // least the floor unit (value 0) so a just-started span reads "0m" / "0s", never "".
+    // sequence is always largest->smallest): "1m4d6h" (1 month 4 days 6 hours), "2h30m" (2 hours
+    // 30 min), "5m30s" (5 min 30 s), "45s". Non-zero units only, from the largest down to the floor.
+    // `allowSeconds` enables the seconds unit — but only when the whole span is < 1 hour ("seconds if
+    // hours not present, otherwise minutes minimum"). Always emits at least the floor unit (value 0)
+    // so a just-started span reads "0m" / "0s", never "".
+    // ⚠ The session timing line on the cards and rows no longer uses this: its month/minute 'm' made
+    // "-7h5m/7h6m/2m4s" unreadable (2026-10-05), and FormatSessionTiming now renders "created 4d1h,
+    // active 2m4s ago" through AgentMaster/SessionTimingText.h, which has no month unit. The one caller
+    // left is the board card's remembered-draft tip ("last seen <span> ago").
+    //   ms           - the duration in ms; negative counts as 0.
+    //   allowSeconds - true to show seconds while the span is under an hour.
+    //   returns      - the span, never empty. Throws std::bad_alloc only.
     std::wstring FormatSpan(int64_t ms, bool allowSeconds)
     {
         if (ms < 0)
@@ -557,35 +565,31 @@ namespace
         return out;
     }
 
-    // Agentmaster: the consolidated per-session timing string "-{createdAgo}/{activeFor}/-{lastAgo}",
-    // e.g. "-2m7d/12h/-2h30m" = created 2 months 7 days ago, active for 12 h, last activity 2 h 30 m
-    // ago. The "ago" parts are signed (-); the active span (lastActivity - created) is not. The first
-    // two parts floor at minutes; the last allows seconds (when < 1 h). Empty when we have no
-    // creation time (a never-prompted session — nothing meaningful to show).
+    // Agentmaster: the per-session timing line of every session card and row (the side-panel cards, the
+    // Triage Board's managed + External cards, the Explorer tree's rows): "created 4d1h, active 2m4s ago".
+    // It replaced the unreadable "-7h5m/7h6m/2m4s" (created-ago / active-span / last-activity-ago) on
+    // 2026-10-05. Every rule lives in the pure AgentMaster/SessionTimingText.h (FormatSessionTimingLine,
+    // harness-tested): "created" in years / days / hours ("created recently" under an hour, "created now"
+    // under 5 minutes), "active … ago" in y / d / h / m / s and left out when it is 0. This wrapper only
+    // reads the wall clock, which keeps that function testable.
+    //   createdMs      - when the session was created (unix ms); 0 = unknown.
+    //   lastActivityMs - when it last did something (unix ms); 0 = unknown (no "active" part).
+    //   returns        - the line, or "" when there is no creation time (a never-prompted session —
+    //                    nothing meaningful to show; the callers then show no timing at all).
+    // Throws std::bad_alloc only.
     std::wstring FormatSessionTiming(int64_t createdMs, int64_t lastActivityMs)
     {
-        if (createdMs <= 0)
-        {
-            return {};
-        }
-        const int64_t now = NowMs();
-        if (lastActivityMs < createdMs)
-        {
-            lastActivityMs = createdMs; // no activity recorded / clock skew -> 0 active span
-        }
-        const std::wstring createdAgo = FormatSpan(now - createdMs, false);
-        const std::wstring activeFor = FormatSpan(lastActivityMs - createdMs, false);
-        const std::wstring lastAgo = FormatSpan(now - lastActivityMs, true);
-        return L"-" + createdAgo + L"/" + activeFor + L"/-" + lastAgo;
+        return ::Agentmaster::FormatSessionTimingLine(createdMs, lastActivityMs, NowMs());
     }
 
-    // The human-readable tooltip explaining the cryptic timing string, and its heading for the tip
-    // panel (the timing is a bare TextBlock — there is no label to derive one from).
+    // The tooltip on the timing line, and its heading for the tip panel (the timing is a bare TextBlock —
+    // there is no label to derive one from). The line names its two facts itself now, so the tip only
+    // gives the units and the rules; keep it in step with AgentMaster/SessionTimingText.h.
     constexpr const wchar_t* kTimingTooltipTitle = L"Age and activity";
     constexpr const wchar_t* kTimingTooltip =
-        L"Three spans, in order: how long ago the session was created  /  how long it spanned, from creation to its last activity  /  how long ago it was last active.\n\n"
-        L"So -2m7d/12h/-2h30m reads: started 2 months 7 days ago, spanned 12 hours of work, last did something 2\xBD hours ago.\n\n"
-        L"d=day, h=hour, s=second; m is months before a d/h and minutes after one.";
+        L"created \x2014 how long ago this session was created, in years, days and hours (y, d, h). Under an hour it reads \"created recently\", under 5 minutes \"created now\".\n\n"
+        L"active \x2026 ago \x2014 how long ago it last did something, in y, d, h, m (minutes) and s (seconds, only under an hour). Left out when there is no recorded activity, or when it did something this very second.\n\n"
+        L"Both are read from the session's transcript.";
 
     // Set the window pointer cursor (used by the resize splitters: a ↔/↕ on hover, Arrow on
     // exit). There is no per-element cursor in this XAML projection (ProtectedCursor is only
@@ -927,9 +931,13 @@ namespace
         b.FontWeight(FontWeights::SemiBold());
     }
 
-    // Agentmaster: the dim per-session timing adornment "-created/active/-lastAgo" + an explanatory
-    // tooltip. Returns a null TextBlock (falsy) when there is no creation time to show, so callers
-    // can `if (auto t = TimingText(...)) row.Children().Append(t);`.
+    // Agentmaster: the dim per-session timing line "created 4d1h, active 2m4s ago" (FormatSessionTiming)
+    // + its explanatory tooltip, as a TextBlock for a board card or a tree row.
+    //   createdMs      - when the session was created (unix ms); 0 = unknown.
+    //   lastActivityMs - when it last did something (unix ms); 0 = unknown.
+    //   returns        - the TextBlock, or a null TextBlock (falsy) when there is no creation time to
+    //                    show, so callers can `if (auto t = TimingText(...)) row.Children().Append(t);`.
+    // Throws what XAML construction throws (winrt::hresult_error off the UI thread) and std::bad_alloc.
     TextBlock TimingText(int64_t createdMs, int64_t lastActivityMs)
     {
         const std::wstring s = FormatSessionTiming(createdMs, lastActivityMs);

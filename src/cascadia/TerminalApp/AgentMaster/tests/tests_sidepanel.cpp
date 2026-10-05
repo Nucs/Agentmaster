@@ -1,7 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Agentmaster M5 test harness - the SIDE PANEL's pure helpers (SIDE_PANEL.md section 2c).
+// Agentmaster M5 test harness - the SIDE PANEL's pure helpers (SIDE_PANEL.md section 2c) and the session timing line its
+// cards share with the Triage Board's cards and the Explorer tree's rows.
+//
+// TestSessionTimingText pins that line (AgentMaster/SessionTimingText.h): "created 4d1h, active 2m4s ago" on a fixed
+// clock - the user's two examples, the word thresholds ("created now" under 5 minutes, "created recently" under an
+// hour), the units (y / d / h for created, + m / s for active, seconds only under an hour, no month), the active part
+// left out when it is 0, and the unknown / clock-skew edges; plus a sweep over 3 years of ages.
 //
 // TestKeyedListDiff pins the card list's order planner (AgentMaster/KeyedListDiff.h): for every
 // (current, target) pair it checks that applying the planned operations in order turns current into
@@ -14,6 +20,7 @@
 #include "m5_tests.h"
 
 #include "../KeyedListDiff.h"
+#include "../SessionTimingText.h" // the cards' and rows' "created 4d1h, active 2m4s ago" (TestSessionTimingText)
 
 #include <algorithm>
 #include <cstdint>
@@ -279,5 +286,119 @@ void TestKeyedListDiff()
         std::rotate(sunk.begin(), sunk.begin() + 1, sunk.end());
         const auto d = CheckPlan(current, sunk);
         CHECK(d.reachesTarget && d.indexesValid && d.moves == 1, "list diff: 466 cards, the first one sinks to the bottom - ONE move");
+    }
+}
+
+namespace
+{
+    // One expected timing text: counts a CHECK, and on a mismatch prints what came out next to what was wanted (the
+    // CHECK line alone names only the case).
+    //   got  - the formatted text.
+    //   want - the expected text.
+    //   what - the case's description for the [FAIL] line.
+    // Returns nothing. Throws nothing the harness does not already allow (wprintf).
+    void ExpectTimingText(const std::wstring& got, const wchar_t* want, const char* what)
+    {
+        if (got != want)
+        {
+            std::wprintf(L"    got \"%ls\", want \"%ls\"\n", got.c_str(), want);
+        }
+        CHECK(got == want, what);
+    }
+}
+
+// The session timing line of the side-panel cards, the Triage Board's cards and the Explorer tree's rows
+// (AgentMaster/SessionTimingText.h): "created 4d1h, active 2m4s ago", replacing the unreadable "-7h5m/7h6m/2m4s"
+// (2026-10-05). Pins the user's rules on a fixed clock: "created" in years / days / hours only, "created recently"
+// under an hour, "created now" under 5 minutes; "active ... ago" in y / d / h / m / s (seconds only under an hour) and
+// left out when it is 0; no month unit, so 'm' is minutes only; and the unknown / clock-skew edges.
+void TestSessionTimingText()
+{
+    std::wprintf(L"\n[TestSessionTimingText]\n");
+    constexpr int64_t s = kTimingMsPerSecond;
+    constexpr int64_t m = kTimingMsPerMinute;
+    constexpr int64_t h = kTimingMsPerHour;
+    constexpr int64_t d = kTimingMsPerDay;
+    constexpr int64_t y = kTimingMsPerYear;
+    constexpr int64_t now = 1'800'000'000'000; // a fixed instant (2027-01-15): every case below is relative to it
+
+    // --- the user's own examples ---
+    ExpectTimingText(FormatSessionTimingLine(now - (4 * d + 1 * h + 30 * m + 15 * s), now - (2 * m + 4 * s), now),
+                     L"created 4d1h, active 2m4s ago", "timing: the user's example - created 4d1h (minutes cut), active 2m4s ago");
+    ExpectTimingText(FormatSessionTimingLine(now - (1 * y + 4 * d + 1 * h + 20 * m), now, now),
+                     L"created 1y4d1h", "timing: the user's example - created 1y4d1h, the active part left out when it is 0");
+
+    // --- created: the words under an hour, then years / days / hours ---
+    ExpectTimingText(FormatSessionTimingLine(now, 0, now), L"created now", "timing: created this instant -> \"created now\"");
+    ExpectTimingText(FormatSessionTimingLine(now - (4 * m + 59 * s), 0, now), L"created now", "timing: created 4m59s ago -> still \"now\" (< 5 min)");
+    ExpectTimingText(FormatSessionTimingLine(now - 5 * m, 0, now), L"created recently", "timing: created exactly 5 min ago -> \"recently\" (the boundary)");
+    ExpectTimingText(FormatSessionTimingLine(now - (59 * m + 59 * s), 0, now), L"created recently", "timing: created 59m59s ago -> still \"recently\" (< 1 h)");
+    ExpectTimingText(FormatSessionTimingLine(now - 1 * h, 0, now), L"created 1h", "timing: created exactly 1 h ago -> \"1h\" (the boundary)");
+    ExpectTimingText(FormatSessionTimingLine(now - (1 * h + 59 * m + 59 * s), 0, now), L"created 1h", "timing: created 1h59m59s ago -> \"1h\" (cut, never rounded up)");
+    ExpectTimingText(FormatSessionTimingLine(now - (45 * d + 3 * h), 0, now), L"created 45d3h", "timing: 45 days -> \"45d3h\" (no month unit)");
+    ExpectTimingText(FormatSessionTimingLine(now - (1 * y + 5 * h), 0, now), L"created 1y5h", "timing: a zero day count is left out -> \"1y5h\"");
+    ExpectTimingText(FormatSessionTimingLine(now - (2 * y + 30 * m), 0, now), L"created 2y", "timing: whole years -> \"2y\"");
+    ExpectTimingText(FormatSessionTimingLine(now + 10 * m, 0, now), L"created now", "timing: a creation stamp in the future (clock skew) reads \"now\"");
+
+    // --- active ... ago: seconds under an hour, minutes as the floor above it, left out when 0 ---
+    ExpectTimingText(FormatSessionTimingLine(now - 2 * d, 0, now), L"created 2d", "timing: no recorded activity (0) -> no active part");
+    ExpectTimingText(FormatSessionTimingLine(now - 2 * d, now - 999, now), L"created 2d", "timing: activity under a second ago is the 0 that is left out");
+    ExpectTimingText(FormatSessionTimingLine(now - 2 * d, now + 5 * s, now), L"created 2d", "timing: an activity stamp in the future reads as 0 and is left out");
+    ExpectTimingText(FormatSessionTimingLine(now - 2 * d, now - 1 * s, now), L"created 2d, active 1s ago", "timing: activity 1 s ago");
+    ExpectTimingText(FormatSessionTimingLine(now - 2 * d, now - 45 * s, now), L"created 2d, active 45s ago", "timing: activity 45 s ago");
+    ExpectTimingText(FormatSessionTimingLine(now - 2 * d, now - 1 * m, now), L"created 2d, active 1m ago", "timing: a zero second count is left out -> \"1m\"");
+    ExpectTimingText(FormatSessionTimingLine(now - 2 * d, now - (59 * m + 59 * s), now), L"created 2d, active 59m59s ago", "timing: just under an hour keeps its seconds");
+    ExpectTimingText(FormatSessionTimingLine(now - 2 * d, now - (1 * h + 30 * s), now), L"created 2d, active 1h ago", "timing: from an hour on the seconds go -> \"1h\"");
+    ExpectTimingText(FormatSessionTimingLine(now - 2 * d, now - (2 * h + 30 * m + 59 * s), now), L"created 2d, active 2h30m ago", "timing: hours and minutes");
+    ExpectTimingText(FormatSessionTimingLine(now - 9 * d, now - (3 * d + 2 * h + 15 * m), now), L"created 9d, active 3d2h15m ago", "timing: days, hours and minutes");
+    ExpectTimingText(FormatSessionTimingLine(now - 2 * y, now - 400 * d, now), L"created 2y, active 1y35d ago", "timing: years in the active part too");
+    ExpectTimingText(FormatSessionTimingLine(now - 3 * m, now - 12 * s, now), L"created now, active 12s ago", "timing: \"created now\" with its activity");
+    ExpectTimingText(FormatSessionTimingLine(now - 20 * m, now - (4 * m + 4 * s), now), L"created recently, active 4m4s ago", "timing: \"created recently\" with its activity");
+
+    // --- unknown creation, and an activity stamp older than the creation ---
+    ExpectTimingText(FormatSessionTimingLine(0, now - 10 * s, now), L"", "timing: no creation time -> no line at all (a never-prompted session)");
+    ExpectTimingText(FormatSessionTimingLine(-5, now - 10 * s, now), L"", "timing: a negative creation time is unknown too");
+    ExpectTimingText(FormatSessionTimingLine(now - 3 * h, now - 5 * h, now), L"created 3h, active 3h ago",
+                     "timing: activity before the creation is raised to the creation (the old line's clamp)");
+
+    // --- the units, swept: 'm' only ever means minutes, the created span never shows minutes or seconds, the
+    //     active span never shows seconds from an hour on, and neither span is ever empty where a value is due ---
+    {
+        size_t createdBad = 0;
+        size_t activeBad = 0;
+        size_t lineBad = 0;
+        size_t cases = 0;
+        for (int64_t age = 0; age < 3 * y; age += 7919 * s + 13) // a prime stride: lands on every unit mix
+        {
+            ++cases;
+            const std::wstring created = FormatCreatedSpan(age);
+            if (age >= kCreatedRecentlyMs)
+            {
+                // A number: digits and y / d / h only, never empty.
+                const bool ok = !created.empty() && created.find_first_not_of(L"0123456789ydh") == std::wstring::npos;
+                createdBad += ok ? 0 : 1;
+            }
+            else
+            {
+                createdBad += (created == (age < kCreatedNowMs ? L"now" : L"recently")) ? 0 : 1;
+            }
+            const std::wstring active = FormatActiveAgoSpan(age);
+            if (age < kTimingMsPerSecond)
+            {
+                activeBad += active.empty() ? 0 : 1;
+            }
+            else
+            {
+                const bool allowedChars = active.find_first_not_of(L"0123456789ydhms") == std::wstring::npos;
+                const bool secondsOk = age < kTimingMsPerHour || active.find(L's') == std::wstring::npos;
+                activeBad += (!active.empty() && allowedChars && secondsOk) ? 0 : 1;
+            }
+            const std::wstring line = FormatSessionTimingLine(now - age, now - age / 2, now);
+            lineBad += (line.rfind(L"created ", 0) == 0) ? 0 : 1;
+        }
+        CHECK(cases > 10000, "timing sweep: covered more than 10000 ages across 3 years");
+        CHECK(createdBad == 0, "timing sweep: the created span is \"now\" / \"recently\" under an hour, else only y / d / h - never minutes or seconds");
+        CHECK(activeBad == 0, "timing sweep: the active span is empty under a second, else y / d / h / m (+ s only under an hour), never empty");
+        CHECK(lineBad == 0, "timing sweep: every line with a creation time starts \"created \"");
     }
 }

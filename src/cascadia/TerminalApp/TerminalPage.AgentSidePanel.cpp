@@ -2039,9 +2039,10 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Build ONE card's skeleton — the Triage-Board card's visual language re-hosted for a narrow vertical
-    // list: a title on a band, then a state row (dot + label in the shared AgentStatusColors palette, followed
-    // by whatever optional parts the model adds — the teal `codex` pill, the pending-draft dots, the timing
-    // adornment), then a dim dir/branch line. Every card has these elements; their VALUES — texts, brushes,
+    // list: a title on a band, then a state line (a row with the dot + label in the shared AgentStatusColors
+    // palette, followed by whatever optional parts the model adds — the teal `codex` pill, the pending-draft
+    // dots — and, in the line's star column, the "created 4d1h, active 2m4s ago" timing text), then a dim
+    // dir/branch line. Every card has these elements; their VALUES — texts, brushes,
     // the band's tag strip, the optional parts — come from _SidePanelApplyCardModel, so a card is built once
     // per session and from then on only edited.
     // Interactions: click = select (Linked Lenses), double-click = activate (jump to the tab, cross-window),
@@ -2078,11 +2079,23 @@ namespace winrt::TerminalApp::implementation
         v.band.Child(v.title); // the untagged layout; _SidePanelApplyCardTags wraps the title in [ title * ][ strip ] for a tagged session
         body.Children().Append(v.band);
 
-        // State row: the dot and the label; the model inserts the optional parts after them.
+        // State line: [ state row Auto ][ timing * ]. The row holds the dot and the label, and the model inserts the
+        // codex pill and the draft dots after them; the timing text goes in the star column (added by the model too),
+        // so on a narrow panel it is the part that gives way, ending in "…" (Text's CharacterEllipsis) — in the row's
+        // StackPanel it was offered unlimited width and got cut off mid-letter at the card's edge instead.
+        v.stateLine = Grid{};
+        v.stateLine.Margin(ThicknessHelper::FromLengths(6, 3, 6, 0));
+        {
+            ColumnDefinition rowCol{};
+            rowCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            ColumnDefinition timingCol{};
+            timingCol.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            v.stateLine.ColumnDefinitions().Append(rowCol);
+            v.stateLine.ColumnDefinitions().Append(timingCol);
+        }
         v.stateRow = StackPanel{};
         v.stateRow.Orientation(Orientation::Horizontal);
         v.stateRow.Spacing(5);
-        v.stateRow.Margin(ThicknessHelper::FromLengths(6, 3, 6, 0));
         v.stateDot = winrt::Windows::UI::Xaml::Shapes::Ellipse{};
         v.stateDot.Width(8);
         v.stateDot.Height(8);
@@ -2090,7 +2103,9 @@ namespace winrt::TerminalApp::implementation
         v.stateRow.Children().Append(v.stateDot);
         v.stateText = Text(L"", 10, false, 0.9);
         v.stateRow.Children().Append(v.stateText);
-        body.Children().Append(v.stateRow);
+        Grid::SetColumn(v.stateRow, 0);
+        v.stateLine.Children().Append(v.stateRow);
+        body.Children().Append(v.stateLine);
 
         // Dir/branch line: "<leaf>[ / <branch>]", dim — the card's place at a glance (the full path rides the tooltip).
         v.dirLine = Text(L"", 10, false, 0.55);
@@ -2241,7 +2256,8 @@ namespace winrt::TerminalApp::implementation
             SidePanelStyleCardBorder(view.card, stateColor, id == _sidePanelSelectedId, view.hovered);
         }
         // The state row's optional parts, always in this order after the dot and the label:
-        // [codex pill][pending dots][timing]. An insert index is derived from the parts in front of it.
+        // [codex pill][pending dots]. An insert index is derived from the parts in front of it. The timing text is the
+        // state LINE's star column (after the row), not a row part.
         if (model.codex && !view.codexPill)
         {
             view.codexPill = Text(L"codex", 9, true, 0.9);
@@ -2276,22 +2292,24 @@ namespace winrt::TerminalApp::implementation
         {
             if (view.timing)
             {
-                SidePanelRemoveChild(view.stateRow, view.timing);
+                SidePanelRemoveChild(view.stateLine, view.timing);
                 view.timing = nullptr;
             }
         }
         else if (!view.timing)
         {
             // Built like the board's TimingText (Internal.h) — the same dim 10px text and its explanatory
-            // tip — from the model's already-formatted string. With "Sum" off the card shows ONE tooltip, the
-            // rich session card (a tab header's model), so the explanatory floating tip is not attached here;
-            // _SidePanelApplyCardTipMode adds it when the summary comes back.
+            // tip — from the model's already-formatted string ("created 4d1h, active 2m4s ago"). With "Sum" off
+            // the card shows ONE tooltip, the rich session card (a tab header's model), so the explanatory
+            // floating tip is not attached here; _SidePanelApplyCardTipMode adds it when the summary comes back.
             view.timing = Text(winrt::hstring{ model.timing }, 10, false, 0.45);
+            view.timing.Margin(ThicknessHelper::FromLengths(5, 0, 0, 0)); // the gap the row's own Spacing(5) gives its parts
             if (!_sidePanelSummaryHidden)
             {
                 AgentSetTitledTip(view.timing, winrt::hstring{ kTimingTooltipTitle }, winrt::hstring{ kTimingTooltip });
             }
-            view.stateRow.Children().Append(view.timing); // always the row's last part
+            Grid::SetColumn(view.timing, 1); // the state line's star column: it trims with "…" when the panel is narrow
+            view.stateLine.Children().Append(view.timing);
         }
         else if (fresh || model.timing != shown.timing)
         {

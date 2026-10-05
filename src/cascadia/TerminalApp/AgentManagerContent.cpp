@@ -168,7 +168,7 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster (Waiting-for-you "unread" model): a low-frequency board refresh so TIME-derived
         // adornments stay current without a hook event — the card's ⚡ "still cached" hint (a few-minute
-        // window) and the "-2h30m" timing text. _Refresh() recomputes them from the live snapshot; it is
+        // window) and the "created …, active … ago" timing text. _Refresh() recomputes them from the live snapshot; it is
         // idempotent and already runs on every registry event, so this only covers quiet periods. Weak
         // self so a closed window never leaks a ticking timer.
         // Agentmaster (perf): the tick no longer runs a FULL _Refresh (a whole board+tree+plan teardown
@@ -441,7 +441,7 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (perf — the 30s timing tick): rewrite the "-2h30m" timing text of every live card and
+    // Agentmaster (perf — the 30s timing tick): rewrite the "created …, active … ago" timing text of every live card and
     // row IN PLACE from a fresh live snapshot (the observer refreshes convLastActivityUnixMs SILENTLY —
     // no notify — so the tick is what keeps "ago" honest), and detect whether any card's ⚡ "still
     // server-cached" glyph must appear or vanish since it was rendered; only THAT (rare — a few-minute

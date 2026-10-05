@@ -142,6 +142,7 @@ int wmain()
     TestTabDragMath();
     TestTabStripReveal();
     TestKeyedListDiff(); // SIDE_PANEL.md §2c — the side panel card list's order planner (tests_sidepanel.cpp)
+    TestSessionTimingText(); // the cards' and rows' "created 4d1h, active 2m4s ago" timing line (tests_sidepanel.cpp)
     TestTabCloseSuccessor();
     TestTaskbarBadge(); // NOTIFICATIONS.md section 8 — the taskbar unread badge's renderer (tests_taskbar.cpp)
     TestUnreadCensus(); // ...and the process-wide unread count behind it

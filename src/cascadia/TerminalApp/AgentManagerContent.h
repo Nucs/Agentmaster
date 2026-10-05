@@ -756,7 +756,7 @@ namespace winrt::TerminalApp::implementation
         bool _lensVisible{ true };
         bool _refreshDirty{ false };
 
-        // Agentmaster (perf — the 30s timing tick): the "-2h30m" timing TextBlocks of the live cards +
+        // Agentmaster (perf — the 30s timing tick): the "created …, active … ago" timing TextBlocks of the live cards +
         // rows, bound to their session ids, so the periodic tick REWRITES their text in place (a
         // handful of TextBlock.Text sets) instead of tearing down + recreating the whole board and
         // tree (which is what the tick used to do — a full _Refresh every 30s, ~1-6s of UI-thread

@@ -124,8 +124,24 @@ the panel:
 - **A card**: title on a band painted the session's `ResolveSessionColorHex` color
   (WCAG-contrast text), the session's **bookmark-tag ribbons in the band's top-right corner**
   (§2b), state dot + `StateLabel` in the shared `AgentStatusColors` palette, a
-  teal `codex` pill, the pending-draft `BuildPendingDots` cluster, the `TimingText` adornment,
-  and a dim `leaf / branch` line.
+  teal `codex` pill, the pending-draft `BuildPendingDots` cluster, the timing line, and a dim
+  `leaf / branch` line.
+- **The timing line** (2026-10-05) reads `created 4d1h, active 2m4s ago` — the same text as the
+  Triage Board's cards and the Explorer tree's rows, from one pure formatter
+  (`AgentMaster/SessionTimingText.h`, `FormatSessionTimingLine`, harness-tested):
+  - **created** — how long ago the session was created, in years / days / hours (`y`, `d`, `h`),
+    never minutes or seconds. Under an hour it is a word: `created recently`; under 5 minutes
+    `created now`.
+  - **active … ago** — how long ago it last did something, in `y` / `d` / `h` / `m` (minutes) /
+    `s` (seconds only under an hour). Left out when it is 0: no recorded activity, or activity
+    this very second.
+  - There is no month unit, so `m` is always minutes. It replaced `-7h5m/7h6m/2m4s` (created ago /
+    active span / last activity ago, with `m` meaning months before a `d`/`h` and minutes after
+    one), which the user found unreadable.
+  - It sits in the STAR column of the card's state line (`[ state row Auto ][ timing * ]`,
+    `AgentSidePanelCardView::stateLine`), so on a narrow panel it ends in `…`. In the row's
+    horizontal StackPanel it was offered unlimited width and was cut off mid-letter at the card's
+    edge — and the new text is about twice as long as the old one.
 - **Interactions** (Linked Lenses): click = select (drives `AgentManagerContent::SelectSession`,
   so the board/tree/Auto-Testing follow); double-click = `_ActivateClaudeSession` (jump to the
   tab, cross-window); right-click = **the** session context menu —
@@ -190,11 +206,11 @@ width its ribbons need and the title takes the rest, trimming with its ellipsis,
 never push the tags off the card. An untagged card's band is exactly the old title-only band.
 
 ```
-┌──────────────────────────────┐
-│ Fix the flaky login…   ▮▮▮▮+2│  ← title band (folder color); ribbons hang from its top edge (6 tags: 4 + "+2")
-│ ● Waiting  -2m/12h/-3m       │
-│ Agentmaster / main           │
-└──────────────────────────────┘
+┌──────────────────────────────────────────┐
+│ Fix the flaky login…               ▮▮▮▮+2│  ← title band (folder color); ribbons hang from its top edge (6 tags: 4 + "+2")
+│ ● Waiting  created 4d1h, active 2m4s ago │  ← state line: the timing text trims with "…" when the panel is narrow
+│ Agentmaster / main                       │
+└──────────────────────────────────────────┘
 ```
 
 - **Top-right on the bar, not below it** (the ask). The Triage-Board card hangs its ribbons out of
@@ -578,4 +594,7 @@ below).
   `AgentTipHelpers.h` (`AgentSuppressTip`), `TerminalAppLib.vcxproj` (the new TU),
   `AgentMaster/SessionModels.h` + `Persistence.cpp` (`sidePanelSummaryHidden`, both halves) +
   `tests/tests_persistence.cpp` (round-trip, legacy absent, committed false, non-bool, unset
-  omitted, settings default).
+  omitted, settings default). The timing line (§2): `AgentMaster/SessionTimingText.h` (the pure
+  formatter), `AgentManagerContent.Internal.h` (`FormatSessionTiming` — the wall-clock wrapper every
+  card and row calls — and the `kTimingTooltip` text), `tests/tests_sidepanel.cpp`
+  (`TestSessionTimingText`).

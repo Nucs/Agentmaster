@@ -145,7 +145,7 @@ namespace winrt::TerminalApp::implementation
         bool pending{ false }; // an unsent draft: the 3-dot cluster
         bool pendingAnimated{ false }; // the dots pulse (a started/external session, Windows animations on) rather than stand still
         uint32_t pendingArgb{ 0 }; // the dots' color, 0xAARRGGBB (the light half of the configured pair; 0 without a draft)
-        std::wstring timing; // the "-created/active/-last" adornment ("" = no timing text yet)
+        std::wstring timing; // the "created 4d1h, active 2m4s ago" line (FormatSessionTiming; "" = no timing text yet)
         std::wstring dirLine; // "<leaf>[ / <branch>]"
         std::vector<std::wstring> tags; // the bookmark tags, in the order they were added
         std::vector<uint32_t> tagArgb; // each tag's resolved display color (ResolveTagDisplayColor), 0xAARRGGBB, parallel to `tags`
@@ -164,12 +164,17 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock title{ nullptr }; // the title (the band's child, or the band grid's column 0 while tagged)
         winrt::Windows::UI::Xaml::Controls::Grid bandGrid{ nullptr }; // [ title * ][ tag strip Auto ] while the session is tagged; null untagged
         winrt::Windows::UI::Xaml::Controls::StackPanel tagStrip{ nullptr }; // the ribbons in the band's top-right corner; null untagged
-        winrt::Windows::UI::Xaml::Controls::StackPanel stateRow{ nullptr }; // [dot][label][codex pill?][pending dots?][timing?]
+        // The state line: a 2-column Grid, [ stateRow Auto ][ timing * ]. The timing sits in the STAR column, not in the
+        // row's StackPanel, because a horizontal StackPanel offers its children unlimited width: there the "created 4d1h,
+        // active 2m4s ago" line (twice the length of the old "-7h5m/7h6m/2m4s") was cut off mid-letter at the card's edge on
+        // a narrow panel. In the star column it gets the width that is left and ends in "…" instead.
+        winrt::Windows::UI::Xaml::Controls::Grid stateLine{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::StackPanel stateRow{ nullptr }; // [dot][label][codex pill?][pending dots?] — the state line's Auto column
         winrt::Windows::UI::Xaml::Shapes::Ellipse stateDot{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBlock stateText{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBlock codexPill{ nullptr }; // null unless a Codex session
         winrt::Windows::UI::Xaml::Controls::StackPanel pendingDots{ nullptr }; // null without an unsent draft
-        winrt::Windows::UI::Xaml::Controls::TextBlock timing{ nullptr }; // null until the session has a creation time
+        winrt::Windows::UI::Xaml::Controls::TextBlock timing{ nullptr }; // the state line's star column; null until the session has a creation time
         winrt::Windows::UI::Xaml::Controls::TextBlock dirLine{ nullptr };
         AgentSidePanelCardModel model; // what the elements show now — the left side of every comparison
         bool hovered{ false }; // the pointer is over the card: kept so a state change repaints the hover ring in the new color

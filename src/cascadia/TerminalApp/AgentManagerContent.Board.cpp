@@ -392,7 +392,7 @@ namespace winrt::TerminalApp::implementation
             stack.Children().Append(errText);
         }
 
-        // Per-session timing (created-ago / active-for / last-activity-ago) from the transcript.
+        // Per-session timing line ("created 4d1h, active 2m4s ago" — FormatSessionTiming) from the transcript.
         {
             const int64_t last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
             if (auto t = TimingText(s.convCreatedUnixMs, last))
@@ -1818,7 +1818,7 @@ namespace winrt::TerminalApp::implementation
             stack.Children().Append(meText);
         }
 
-        // timing (created-ago / active-for / last-activity-ago)
+        // timing line ("created 4d1h, active 2m4s ago" — FormatSessionTiming)
         {
             const int64_t created = ex.createdUnixMs ? ex.createdUnixMs : ex.startUnixMs;
             if (auto t = TimingText(created, ex.lastActivityUnixMs))

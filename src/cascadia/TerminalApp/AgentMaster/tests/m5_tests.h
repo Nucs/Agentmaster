@@ -20,7 +20,7 @@
 //   tests_taskbar.cpp         - NOTIFICATIONS.md section 8: the taskbar unread badge (TaskbarBadge.h's label / size / disc + digit composition / GDI icon, drawn like the shell draws it) + the engine's process-wide unread census
 //   tests_turns.cpp           - the Copy > Transcript levels: TranscriptTurns (the C++ port of the am-agentmaster-cli skill's transcript_turns.py v9) vs the reference's own goldens in turns\expected, byte for byte; + the summary's whole-conversation chain (CollectConversationUpstream / BuildSummaryConversation)
 //   tests_markdown.cpp        - the transcript overlay's Markdown flattener (MarkdownBlocks — cmark -> flat render blocks); compiled only when the vcpkg cmark of a full build is present (AM_HAVE_CMARK), else it reports a skip
-//   tests_sidepanel.cpp       - SIDE_PANEL.md §2c: the side panel's in-place card list — the order planner (KeyedListDiff.h): reaches the target, indexes in range, minimal
+//   tests_sidepanel.cpp       - SIDE_PANEL.md §2c: the side panel's in-place card list — the order planner (KeyedListDiff.h): reaches the target, indexes in range, minimal; + the cards' and rows' timing line (SessionTimingText.h)
 // ======================================================================================
 //
 // Agentmaster - M5 standalone test harness: SHARED declarations.
@@ -227,6 +227,11 @@ void TestTabStripReveal();
 // the top / bottom, a swap, a reversal, launch / close / filter), all 120 permutations of 5, a seeded random sweep
 // with removals and insertions, and the release's 466-card list
 void TestKeyedListDiff();
+// SessionTimingText.h (SIDE_PANEL.md §2): the timing line of the side-panel cards, the Triage Board's cards and the
+// Explorer tree's rows — "created 4d1h, active 2m4s ago": the user's examples, "created now" (< 5 min) / "created
+// recently" (< 1 h), y / d / h for created, + m / s for active (seconds only under an hour, no month unit), the active
+// part left out when it is 0, the unknown / clock-skew edges, and a 3-year sweep of the units (tests_sidepanel.cpp)
+void TestSessionTimingText();
 // TabCloseSuccessor.h (FAVORITES.md §4a): the tab focused after the FOCUSED tab closes — upstream's pick
 // kept when it starts nothing; a DORMANT successor replaced by the nearest (in-order) / most recently
 // used (MRU) tab that starts nothing; right-first ties, the Manager fallback, hostile/empty inputs

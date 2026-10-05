@@ -474,7 +474,7 @@ namespace winrt::TerminalApp::implementation
                     AgentSetTitledTip(outside, L"Another window", L"This session's tab lives in a different Agentmaster window \x2014 which is why it only appears here in GLOBAL scope. Double-click the row to bring that window forward and land on the tab.");
                     row.Children().Append(outside);
                 }
-                // Per-session timing (created-ago / active-for / last-activity-ago) from the transcript.
+                // Per-session timing line ("created 4d1h, active 2m4s ago" — FormatSessionTiming) from the transcript.
                 {
                     const int64_t last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
                     if (auto t = TimingText(s.convCreatedUnixMs, last))
@@ -891,7 +891,7 @@ namespace winrt::TerminalApp::implementation
                     row.Children().Append(pidCol);
                 }
 
-                // timing (created-ago / active-for / last-activity-ago) — transcript ctime/mtime,
+                // timing line ("created 4d1h, active 2m4s ago" — FormatSessionTiming) — transcript ctime/mtime,
                 // falling back to the process start time when there is no transcript yet.
                 {
                     const int64_t created = ex.createdUnixMs ? ex.createdUnixMs : ex.startUnixMs;
