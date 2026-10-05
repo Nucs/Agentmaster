@@ -296,6 +296,13 @@ list when `agentcli.cpp` changes, and drop a gap once it is fixed.
   `--model` on the claude command line; the transcript's assistant lines carry the real model.
 - **`live: false` / `linkState: "archived"` only means "no claude runs now".** A restored tab
   that hasn't been focused yet (dormant) reads the same as a closed session.
+- **A session recorded in BOTH profiles shows the OTHER instance's claude as its own** (seen
+  2026-10-05 with `agentmasterdev`). Both profiles' `sessions.json` held `a77419cf`; production
+  ran it. The pid-keyed presence heartbeat (`~/.claude/sessions/<pid>.json`) is shared by every
+  install, so `agentmasterdev sessions` bound production's claude to the dev record and listed it
+  as a live dev session with production's pid. After the dev instance was swapped, that claude
+  was still alive and read like an orphan. Tell the owner by the claude's `--settings` path
+  (`.agentmaster` vs `.agentmaster-dev`) or its parent chain, not by which CLI lists it.
 - **`tabs` lists closed windows too** (every saved `windows/<id>.json`) and doesn't mark them;
   `open-windows.json` says which windows are open.
 - **`tabs --window W` filters only with `--json`.** The human view is the `windows` tree, printed

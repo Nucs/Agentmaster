@@ -889,6 +889,7 @@
 
 ```powershell
 # one-time per machine (or after the manifest changes): register the loose layout
+# (slot A; a dev hot deploy later moves the registration to bin\x64\Debug-B and back — see below)
 Add-AppxPackage -Register "K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug\AppxManifest.xml" -ForceUpdateFromAnyVersion
 ```
 
@@ -925,7 +926,8 @@ bash tools/am-lock.sh release --token "$TOKEN"
 ### Inner loop.
 
 - The loose layout is live (binaries update in place), but you **cannot relink `Agentmaster.exe` while the app is running** — it locks the exe.
-- So: close *our* dev instance (spare the Store WT), rebuild, relaunch.
+- So: close *our* dev instance (spare the Store WT), rebuild, relaunch. The **hot deploy** below avoids the close: it builds while dev runs, and its only downtime is a swap of seconds.
+- ⚠ **Dev can run from either of TWO layout slots** (`…\bin\x64\Debug\` or `…\bin\x64\Debug-B\`), because the hot deploy alternates them. Read `(Get-AppxPackage AgentmasterDev).InstallLocation` first; the recipe below closes and builds THAT folder (`$devDir`). A hard-coded `bin\x64\Debug` is a silent no-op while dev runs from `Debug-B`: the close finds nothing, the build writes the unregistered folder, and the relaunch starts the old binaries.
 - **Building, deploying, and installing require the user's permission — always ask first** (see *Development Rules*; the prior "always auto deploy, run without prompting" standing authorization is **revoked**).
 - Just never touch the Store WT (it's not under our path — see Gotchas).
 - **Hold the `build-launch` mutex around the whole cycle** (acquire at step 0, release at step 4 — see *Concurrency lock*).
@@ -936,23 +938,29 @@ TOKEN=$(bash tools/am-lock.sh acquire --wait 600 --label "deploy $(git rev-parse
 ```
 
 ```powershell
+# 0b. the folder dev is REGISTERED from: bin\x64\Debug or bin\x64\Debug-B (the hot deploy below
+#     alternates them). Every path filter and the build target below use it.
+$devDir = (Get-AppxPackage AgentmasterDev).InstallLocation.TrimEnd('\')
 # 1. close ONLY our dev instance — the GUI PROCESS ONLY (path filter spares the Store WT AND the
-#    release layout under ...\bin\x64\Release — see Gotchas). ⚠ NEVER Stop-Process OpenConsole.exe:
+#    release layout under ...\bin\x64\Release / Release-B — see Gotchas). ⚠ NEVER Stop-Process OpenConsole.exe:
 #    a ConPTY host killed outright skips its CTRL_CLOSE broadcast, so that tab's pwsh + claude.exe
 #    (+ MCP node children) live on forever with a DEAD console (35 such pairs + ~140
 #    children from ONE such kill, alive six days — OBSERVER.md §13a). Killing the GUI alone closes
 #    its pipe handles; every OpenConsole then ends its clients itself and exits.
+#    The trailing '\*' keeps ...\Debug from matching ...\Debug-B.
 Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe'" |
-  ? { $_.ExecutablePath -like 'K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug\*' } | % { Stop-Process -Id $_.ProcessId -Force }
+  ? { $_.ExecutablePath -like "$devDir\*" } | % { Stop-Process -Id $_.ProcessId -Force }
 # (the GUI exe is Agentmaster.exe since the rename; WindowsTerminal.exe stays in the filter for a
 #  STILL-RUNNING pre-rename instance during the transition deploy)
 # 1b. WAIT for the layout's ConPTY hosts to drain before relinking (they lock OpenConsole.exe; each
 #     ends its clients — ≤5 s per stubborn client — then exits; a host still alive after ~30 s is wedged)
 $deadline = (Get-Date).AddSeconds(30)
 do { Start-Sleep -Milliseconds 500; $hosts = Get-CimInstance Win32_Process -Filter "Name='OpenConsole.exe'" |
-  ? { $_.ExecutablePath -like 'K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug\*' } } while ($hosts -and (Get-Date) -lt $deadline)
-# 2. build (full exe link; the wrapper skips the ~156s appxsym by default — see Building FAST)
-pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore      # or: msbuild OpenConsole.slnx /t:Terminal\CascadiaPackage /m /p:Configuration=Debug /p:Platform=x64 /p:AppxSymbolPackageEnabled=false
+  ? { $_.ExecutablePath -like "$devDir\*" } } while ($hosts -and (Get-Date) -lt $deadline)
+# 2. build INTO the registered folder (full exe link; the wrapper skips the ~156s appxsym by default —
+#    see Building FAST). -LayoutDir is what makes a Debug-B registration get the new binaries; for the
+#    stock bin\x64\Debug it names the folder the wapproj defaults to anyway (it only sets OutputPath).
+pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore -LayoutDir $devDir      # or (stock slot only): msbuild OpenConsole.slnx /t:Terminal\CascadiaPackage /m /p:Configuration=Debug /p:Platform=x64 /p:AppxSymbolPackageEnabled=false
 # 3. relaunch
 Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"   # or: agentmasterdev
 ```
@@ -972,6 +980,14 @@ bash tools/am-lock.sh release --token "$TOKEN"
 - The icon files follow the slot too: `CopyAgentmasterImagesToLayout` copies `res\terminal\images-Dev` into `$(TargetDir)Images\`. Until 2026-10-02 it hard-coded `bin\x64\<Config>\`, so slot B never had them. A layout without its `Images\` registers and runs, but its taskbar and Start icons are blank; production ran that way from slot B, and its taskbar button showed only the unread-count disc. The swap now refuses a layout that is missing an icon file its manifest names.
 - The only downtime is the swap, `tools\Swap-AgentmasterLayout.ps1 -LayoutDir <slot>`: it stamps the registered version +1 revision, stops the GUI only (never `OpenConsole.exe`), waits for the ConPTY hosts to drain, re-registers, launches, and reports the measured downtime. The register cannot succeed while any process of the old package lives (`0x80073D02`), and a workspace with many live tabs drains slowly (72 hosts took ~87 s on 2026-10-01), so the script drains for up to 120 s, then retries the register while the old package still reads in use. Only after that does it relaunch the old version. Rolling back is the same script pointed at the previous slot.
 - Still hold the `build-launch` mutex across build + swap, and refresh it while a long build runs. Full runbook: the `build-install` skill §4a.
+
+### Hot deploy of the DEV instance (build while it runs)
+
+- The same mechanism and the same script serve the dev identity. Dev's two slots are `…\bin\x64\Debug\` (A, the stock layout) and `…\bin\x64\Debug-B\` (B).
+- Build the Debug package into the slot dev is NOT registered from (`tools\Build-Agentmaster.ps1 -NoRestore -LayoutDir <slot>`, no `-ReleaseIdentity`), then swap: `tools\Swap-AgentmasterLayout.ps1 -LayoutDir <slot> -PackageName AgentmasterDev`. The swap bumps the revision (0.0.1.1 → 0.0.1.2) and refuses a release-identity layout.
+- Run the swap from a shell OUTSIDE dev (it refuses otherwise): the release instance, Windows Terminal or a plain console.
+- First run (2026-10-05, dev 0.0.1.1 @ `Debug` → 0.0.1.2 @ `Debug-B`, 42 tabs, 16 live claudes, all at rest): a purged build ran for 295 s (`-MaxCpu 4 -ClMpCount 6`) while dev kept serving. The swap's downtime was **8.2 s**: the 16 ConPTY hosts drained by themselves in 5.8 s, and the register took 2.1 s at the first attempt. The window restore then re-homed all 42 tabs.
+- After a swap, dev runs from the other slot. The next deploy targets the old slot (hot), or uses the inner loop above, which follows `$devDir`.
 
 ## Releasing a public version
 

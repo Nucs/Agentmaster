@@ -6,10 +6,11 @@ description: |
   the engine test harness) and both local installs: the DEV instance (AgentmasterDev,
   Debug loose layout, close → build → relaunch) and the PRODUCTION instance (Agentmaster,
   Release loose layout: build -ReleaseIdentity → stamp version → register → launch →
-  profile picker), including production's HOT deploy — build into the layout slot production is
-  NOT registered from (Build-Agentmaster.ps1 -LayoutDir, slots bin\x64\Release / Release-B) while
-  it keeps running, then a few-second swap (tools\Swap-AgentmasterLayout.ps1: GUI-only stop,
-  drain, re-register, launch, rollback). Encodes the machine map (two registered identities side by side, one
+  profile picker), including the HOT deploy of either instance — build into the layout slot it is
+  NOT registered from (Build-Agentmaster.ps1 -LayoutDir; production slots bin\x64\Release /
+  Release-B, dev slots bin\x64\Debug / Debug-B) while it keeps running, then a few-second swap
+  (tools\Swap-AgentmasterLayout.ps1 [-PackageName AgentmasterDev]: GUI-only stop, drain,
+  re-register, launch, rollback). Encodes the machine map (two registered identities side by side, one
   repo tree, the Store WT to never touch) and the battle-tested troubleshooting: the
   self-kill check (is MY shell hosted in the instance I'm about to close?), PRI210
   mapped resources.pri, 0x80070020 same-full-name re-register collisions (orphaned
@@ -26,8 +27,8 @@ description: |
   in one session. Use when asked to build, rebuild, compile-check, deploy/reinstall/relaunch the
   dev or production instance, make the build faster, register the loose layout, or diagnose a
   build/registration/crash-on-launch failure.
-keywords: build, install, deploy, register, relaunch, hot deploy, hot build, minimal downtime, zero downtime, blue green, layout slot, Release-B, LayoutDir, AgentmasterLayoutDir, Swap-AgentmasterLayout, InstallLocation, C1085, not enough space, obj junction, msbuild, TerminalAppLib, ClCompile, loose layout, Add-AppxPackage, Remove-AppxPackage, AgentmasterDev, Agentmaster, profile picker, resources.pri, PRI210, 0x80070020, 0x80073CF6, am-lock, build mutex, run-m5-tests, appxsym, AppxSymbolPackageEnabled, build speed, faster build, slow build, D8040, GenerateAppxSymbolPackage, stale build, incremental build, LNK2019, unresolved external, heap corruption, 0xC0000374, STATUS_HEAP_CORRUPTION, RTC1, stack corruption, ClMpCount, PCH, C3859, C1076, crash on launch, purge Generated Files
-keywords-sparse: build release without closing it, deploy release with minimal downtime, build while production runs, swap to the new build, roll back the release, build the app, install it here, deploy dev, deploy production, reinstall agentmaster, relaunch the instance, compile check, register the layout, the build failed, make the build faster, build is slow, it crashes on launch, unresolved external symbol, heap corruption crash, deploy dev please, build and deploy dev
+keywords: build, install, deploy, register, relaunch, hot deploy, hot build, minimal downtime, zero downtime, blue green, layout slot, Release-B, Debug-B, PackageName, swap, LayoutDir, AgentmasterLayoutDir, Swap-AgentmasterLayout, InstallLocation, C1085, not enough space, obj junction, msbuild, TerminalAppLib, ClCompile, loose layout, Add-AppxPackage, Remove-AppxPackage, AgentmasterDev, Agentmaster, profile picker, resources.pri, PRI210, 0x80070020, 0x80073CF6, am-lock, build mutex, run-m5-tests, appxsym, AppxSymbolPackageEnabled, build speed, faster build, slow build, D8040, GenerateAppxSymbolPackage, stale build, incremental build, LNK2019, unresolved external, heap corruption, 0xC0000374, STATUS_HEAP_CORRUPTION, RTC1, stack corruption, ClMpCount, PCH, C3859, C1076, crash on launch, purge Generated Files
+keywords-sparse: build release without closing it, deploy release with minimal downtime, build while production runs, swap to the new build, roll back the release, deploy dev by swap, hot deploy dev, build dev while it runs, dev swap, build the app, install it here, deploy dev, deploy production, reinstall agentmaster, relaunch the instance, compile check, register the layout, the build failed, make the build faster, build is slow, it crashes on launch, unresolved external symbol, heap corruption crash, deploy dev please, build and deploy dev
 keywords-regex: \bbuild\b|\binstall\b|\bdeploy\b|\bregister\b|\brelaunch\b|\bmsbuild\b|PRI210|0x800704c8|0x80070020|0x80073CF6|resources\.pri|Add-AppxPackage|appxsym|AppxSymbolPackageEnabled|D8040|GenerateAppxSymbolPackage|LNK2019|0xC0000374|STATUS_HEAP_CORRUPTION|ClMpCount|C3859|C1076
 ---
 
@@ -47,15 +48,15 @@ these build recipes but adds the pipeline/draft/publish flow).
 |---|---|---|
 | Package | `AgentmasterDev_56k4f06dsfp9r` | `Agentmaster_56k4f06dsfp9r` |
 | Manifest source | `Package-Dev.appxmanifest` (default) | `Package-Rel.appxmanifest` (`/p:AgentmasterPackageIdentity=Release`) |
-| Registered from | `src\cascadia\CascadiaPackage\bin\x64\Debug\` | **one of two slots** (§4a): `…\bin\x64\Release\` (A) or `…\bin\x64\Release-B\` (B) — always read `(Get-AppxPackage Agentmaster).InstallLocation` |
+| Registered from | **one of two slots** (§4a): `src\cascadia\CascadiaPackage\bin\x64\Debug\` (A) or `…\bin\x64\Debug-B\` (B) — always read `(Get-AppxPackage AgentmasterDev).InstallLocation` | **one of two slots** (§4a): `…\bin\x64\Release\` (A) or `…\bin\x64\Release-B\` (B) — always read `(Get-AppxPackage Agentmaster).InstallLocation` |
 | Launch | alias `agentmasterdev` · Start "Agentmaster Dev" · `shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App` | alias `agentmaster` · Start "Agentmaster" · `shell:appsFolder\Agentmaster_56k4f06dsfp9r!App` |
 | Profile (state) | `~\.agentmaster-dev` | `~\.agentmaster` |
 | Updated by | any full **Debug** package build | any full **Release** package build (incl. release pre-validation!) |
 
 - Both are **loose registrations over build-output trees** — a full package build of that
   configuration relinks the binaries UNDER the running instance, so the close→build→relaunch
-  rule applies to whichever configuration you're building. **Exception — production's HOT
-  deploy (§4a):** building the release layout into the slot production is NOT registered from
+  rule applies to whichever configuration you're building. **Exception — the HOT deploy (§4a),
+  for either identity:** building a layout into the slot that instance is NOT registered from
   (`Build-Agentmaster.ps1 -LayoutDir`) touches nothing it has loaded, so it keeps running for the
   whole build and only the few-second swap is downtime.
 - Build intermediates live on **Q:** through junctions (K: is chronically full — §5.9):
@@ -144,7 +145,16 @@ can't parse `.slnx` — the wrapper restores `dep\nuget\packages.config` itself)
 
 ## 3. Deploy the DEV instance (the inner loop)
 
-Standing-authorized ("always auto deploy") — no prompting. Full cycle:
+**Needs the user's permission** (CLAUDE.md *Development Rules*: build, deploy and install are
+asked for first — the old "always auto deploy" standing authorization is REVOKED, and CLAUDE.md
+wins over this skill). **Prefer the HOT deploy (§4a)**: dev keeps running for the whole build
+and the swap costs seconds (8.2 s measured, 2026-10-05). The close cycle below is the fallback.
+
+⚠ Dev runs from ONE OF TWO slots (`bin\x64\Debug` or `bin\x64\Debug-B` — the hot deploy
+alternates them), so every filter and the build target follow its REGISTERED folder (`$devDir`).
+A hard-coded `bin\x64\Debug` is a silent no-op while dev runs from `Debug-B`: the close finds
+nothing, the build writes the unregistered folder, and the relaunch starts the old binaries.
+Full cycle:
 
 ```bash
 # 0. self-kill check (§1.2)  →  1. mutex (§1.1)
@@ -153,24 +163,34 @@ git diff --stat <last-deployed-commit>..HEAD -- '**/SessionModels.h' '**/Session
 # non-empty output => purge before building (§5.8), don't bother trying incremental first
 ```
 ```powershell
-# 2. close the dev instance (path filter; add '*\bin\x64\Debug\*' to spare production)
-# 3. build - EITHER:
-#    incremental (no header/idl hit above):  pwsh -ExecutionPolicy Bypass -File .\tools\Build-Agentmaster.ps1 -NoRestore
+# 1.5. the folder dev is registered from (Debug or Debug-B):
+$devDir = (Get-AppxPackage AgentmasterDev).InstallLocation.TrimEnd('\')
+# 2. close the dev instance - GUI only, path filter "$devDir\*" (the trailing '\*' keeps Debug from
+#    matching Debug-B; it also spares production), then wait for its OpenConsole hosts to drain
+# 3. build INTO $devDir - EITHER:
+#    incremental (no header/idl hit above):  pwsh -ExecutionPolicy Bypass -File .\tools\Build-Agentmaster.ps1 -NoRestore -LayoutDir $devDir
 #    OR purge+clean (header/idl hit, §5.8):  rm -rf "src/cascadia/TerminalApp/Generated Files" "obj/x64/Debug/TerminalApp" "obj/x64/Debug/TerminalAppLib"
-#                                             pwsh -ExecutionPolicy Bypass -File .\tools\Build-Agentmaster.ps1 -NoRestore -ClMpCount 6
+#                                             pwsh -ExecutionPolicy Bypass -File .\tools\Build-Agentmaster.ps1 -NoRestore -ClMpCount 6 -LayoutDir $devDir
 # 4. relaunch:
 Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"
 # 4.5. verify it didn't crash on startup - wait for the window restore to genuinely finish
-#      (grep hooks.log for the tail-end "drag re-enabled on Loaded" burst / "window-save", not
-#      just "process exists 5s after launch" - a heap-corruption crash can take longer than that)
-#      before calling it stable; a Debug/dev pid disappearing after a Start-Process ~= it crashed.
+#      (grep hooks.log for "[rehome] window <id> resumed=N" and then "[ui-stall] watchdog armed",
+#      not just "process exists 5s after launch" - a heap-corruption crash can take longer than
+#      that) before calling it stable; a Debug/dev pid disappearing after a Start-Process ~= it crashed.
 ```
 ```bash
 # 5. release the mutex
 ```
 
-- **Re-register only when `Package-Dev.appxmanifest` changed**:
-  `Add-AppxPackage -Register "K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug\AppxManifest.xml" -ForceUpdateFromAnyVersion`
+- **Re-register only when `Package-Dev.appxmanifest` changed** — and then through the swap
+  (§4a, into the other slot), which stamps a version above the registered one. A fresh build
+  writes 0.0.1.0 into the layout manifest, and development-mode re-registration refuses a version
+  that is not newer (the `Swap-AgentmasterLayout.ps1` notes), so a bare
+  `Add-AppxPackage -Register "$devDir\AppxManifest.xml" -ForceUpdateFromAnyVersion` works only
+  while dev is still registered at 0.0.1.0, or after you stamp the manifest by hand.
+- The close cycle itself never re-registers, and that is fine: a launch does not re-read the
+  layout manifest. Checked 2026-10-05: dev ran for two days from a folder whose manifest the
+  10-03 build had rewritten to 0.0.1.0 while its registration said 0.0.1.1.
 - Verify: `tail ~/.agentmaster-dev/hooks.log` → `[engine] bridge listening` + observer census
   lines; `Get-AppxPackage -Name AgentmasterDev`.
 
@@ -219,7 +239,9 @@ Start-Process "shell:appsFolder\Agentmaster_56k4f06dsfp9r!App"
   import needs an admin/UAC step) — replaces the loose registration's coupling to the repo
   tree. Same-family replace may need `Remove-AppxPackage` of the loose one first (§5.3 risk).
 
-## 4a. HOT deploy of PRODUCTION — build while it runs, swap in seconds (the default)
+## 4a. HOT deploy of PRODUCTION (and DEV) — build while it runs, swap in seconds (the default)
+
+The same two scripts serve the dev identity; its variant is at the end of this section.
 
 Production is a loose registration over a package LAYOUT folder, and it locks only THAT folder
 (loaded images + the mapped `resources.pri`). Nothing it loads comes from the intermediate
@@ -294,6 +316,49 @@ bash tools/am-lock.sh release --token "$TOKEN"
   prints `HostsLeft`).
 - The version keeps `Major.Minor.Build` and bumps the revision (0.6.8.11 → 0.6.8.12): the in-app
   updater compares the first three against GitHub releases.
+
+### The DEV variant (first run 2026-10-05)
+
+| slot | folder | build it with |
+|---|---|---|
+| A | `src\cascadia\CascadiaPackage\bin\x64\Debug\` | no `-LayoutDir` (stock) |
+| B | `src\cascadia\CascadiaPackage\bin\x64\Debug-B\` | `-LayoutDir .\src\cascadia\CascadiaPackage\bin\x64\Debug-B` |
+
+```bash
+# 0. self-kill check: your shell must NOT be inside DEV (inside production is fine - the dev
+#    swap stops only dev's GUI). 1. mutex, refreshed on every poll, as above.
+TOKEN=$(bash tools/am-lock.sh acquire --wait 600 --label "hot-dev $(git rev-parse --short HEAD)") || exit 1
+# 2. target slot = the one dev is NOT registered from:
+powershell -NoProfile -Command "(Get-AppxPackage AgentmasterDev).InstallLocation"
+# 3. the §5.8 purge check (purge if it hits), and the target slot's resources.pri (§5.1):
+rm -f src/cascadia/CascadiaPackage/bin/x64/<target-slot>/resources.pri
+# 4. build the Debug package (NO -ReleaseIdentity) into the target slot - dev keeps serving:
+pwsh -ExecutionPolicy Bypass -File ./tools/Build-Agentmaster.ps1 -NoRestore -MaxCpu 4 -ClMpCount 6 -LayoutDir 'K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug-B'
+# 5. before the swap: the swap ends each dev claude with CTRL_CLOSE, so check none is mid-turn
+#    (agentmasterdev sessions --json: derivedState / turnInFlight / presence). Then dry-run it:
+pwsh -ExecutionPolicy Bypass -File ./tools/Swap-AgentmasterLayout.ps1 -LayoutDir 'K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug-B' -PackageName AgentmasterDev -WhatIf
+pwsh -ExecutionPolicy Bypass -File ./tools/Swap-AgentmasterLayout.ps1 -LayoutDir 'K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug-B' -PackageName AgentmasterDev
+# 6. verify (~/.agentmaster-dev/hooks.log: the new pid's "bridge listening", "[rehome] ...
+#    resumed=N", "[ui-stall] watchdog armed"; no crash dump; no Application Error) -> release
+bash tools/am-lock.sh release --token "$TOKEN"
+```
+
+- **Measured (2026-10-05, dev 0.0.1.1 @ `Debug` → 0.0.1.2 @ `Debug-B`, 42 tabs, 16 live
+  claudes, all at rest):** a purged build (header + `.idl` changes) took 295 s with
+  `-MaxCpu 4 -ClMpCount 6` and 44 GB of commit free (lowest sampled free 35.9 GB, polled every
+  45 s; no C1002) while dev kept serving. The swap's downtime was **8.2 s**: GUI stop, the 16 hosts drained by themselves in
+  5.8 s (0 left), register 2.1 s at the first attempt, launch. The window restore re-homed all 42
+  tabs, and no claude was orphaned.
+- `-WhatIf` prints ~45 `What if: ... Set Alias` lines first (the Appx module's alias creation under
+  WhatIfPreference) — noise, not a problem.
+- **The dev CLI can show a PRODUCTION claude as a live dev session.** A conversation with a record
+  in both profiles (here `a77419cf`) is bound by claude's shared presence heartbeat, so
+  `agentmasterdev sessions` listed production's claude (pid 16640) under the dev record. After
+  the swap that pid was still alive and read like an orphan. Before calling a leftover claude an
+  orphan, check its `--settings` path (`.agentmaster` = production, `.agentmaster-dev` = dev) and
+  its parent chain (CLI.md §11).
+- Dev, like production, then runs from the other slot. The next dev deploy targets the old one,
+  or uses the §3 close cycle, which follows the registered folder (`$devDir`).
 
 ## 5. Troubleshooting (all field-verified on this machine)
 
