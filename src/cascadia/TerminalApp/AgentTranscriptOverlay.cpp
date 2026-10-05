@@ -15,7 +15,9 @@
 //   * _Pump / _BuildNext  — the UI-thread, time-sliced block -> XAML build, which folds each tool area
 //                           into a summary row + a hidden panel (_BuildFold) or a one-line note;
 //   * _BuildBlockElement  — one MdBlock -> one element: text / code / rule, wrapped in its quote bars
-//                           and list indents.
+//                           and list indents; a Session chain row's "session N" become hyperlinks
+//                           (_AppendSessionLinks), each scrolling session N's heading to the top
+//                           (_JumpToSession / _ScrollToSessionHeading, or a pending jump done by _Pump).
 #include "pch.h"
 #include "AgentTranscriptOverlay.h"
 
@@ -124,6 +126,10 @@ namespace
     // How deep the reading-position anchor descends: the level's content stack -> a chunk -> an open fold
     // panel -> that fold's chunk -> the element (4). A guard, never reached by the overlay's own tree.
     constexpr int kMaxAnchorDepth = 8;
+
+    // A Session chain link scrolls its session's heading to the top of the view, this many DIPs below the
+    // edge — a hair of air, so the heading never reads as cut off.
+    constexpr double kSessionJumpGap = 8.0;
 
     // Point a level's scroll view at a line-wrap mode — the whole mechanism of the ↵ toggle, one property:
     //   wrap ON  -> HorizontalScrollBarVisibility DISABLED: the content is measured at the viewport's width,
@@ -1125,6 +1131,13 @@ namespace winrt::TerminalApp::implementation
 
     void AgentTranscriptOverlay::_SelectLevel(int level, bool focusBody)
     {
+        // A session jump still pending on the level being LEFT (a chain link clicked before its heading was
+        // built) is dropped: only the level on screen builds, so the jump would fire when the reader comes
+        // back to it — scrolling away from wherever they are reading by then.
+        if (level != _current && _current >= 0 && _current < static_cast<int>(_levels.size()))
+        {
+            _levels[_current].pendingSessionJump = 0;
+        }
         _current = level;
         _UpdateTabVisuals();
         _EnsureLevelView(level);
@@ -1312,6 +1325,9 @@ namespace winrt::TerminalApp::implementation
             // The tool-call lists the build folds (here, off the UI thread, with the parse: one linear pass
             // over the blocks, and the UI thread then only follows the indices).
             out.areas = ::Agentmaster::MdFindToolAreas(out.blocks);
+            // The Session chain list and the session headings its links point to (one more linear pass;
+            // an ordinary one-session transcript yields an empty chain).
+            out.chain = ::Agentmaster::MdFindSessionChain(out.blocks);
             if (out.blocks.empty())
             {
                 // A failed parse already logged its exception (ParseMarkdownBlocks, Rule #18) — say so
@@ -1370,6 +1386,9 @@ namespace winrt::TerminalApp::implementation
             view.hasFolds = std::any_of(view.areas.begin(), view.areas.end(), [](const ::Agentmaster::MdToolArea& area) {
                 return ::Agentmaster::MdToolAreaFoldable(area);
             });
+            view.chain = std::move(render.chain);
+            view.sessionHeadings.clear();
+            view.pendingSessionJump = 0;
             view.state = LevelState::Building;
             // The placeholder gives way to content.
             if (view.messageText && view.content)
@@ -1450,6 +1469,14 @@ namespace winrt::TerminalApp::implementation
                     break; // yield: the next slice is queued below
                 }
             }
+            // A chain link clicked before its heading was built: this slice may have built it — jump now
+            // (BEFORE _FinishLevel below, which drops a jump whose heading never came).
+            if (const size_t pending = view.pendingSessionJump;
+                pending > 0 && pending < view.sessionHeadings.size() && view.sessionHeadings[pending])
+            {
+                view.pendingSessionJump = 0;
+                _ScrollToSessionHeading(view, pending);
+            }
             if (view.built >= view.blocks.size())
             {
                 _FinishLevel(view);
@@ -1491,6 +1518,11 @@ namespace winrt::TerminalApp::implementation
         view.areaEnd = 0;
         view.areaChunk = nullptr;
         view.areaChunkFill = 0;
+        // The chain was only needed to build the links and to know which heading to record; the links and
+        // view.sessionHeadings stay. A jump still pending targets a heading the build never reached (cut by
+        // the block cap): drop it rather than keep a target that can never exist.
+        view.chain = ::Agentmaster::MdSessionChain{};
+        view.pendingSessionJump = 0;
         if (view.truncated || view.failed)
         {
             auto note = _MakeTextBlock(kStatusFontSize);
@@ -1570,8 +1602,23 @@ namespace winrt::TerminalApp::implementation
             // Otherwise (Compact's own content: answers, compactions, an agent's messages) the list is
             // built open, exactly as before folding existed.
         }
+        // A row of the Session chain list: its "session N" mentions become links — only those whose session
+        // has a heading in this level (a one-session chain has none, so nothing there links). Only the
+        // list's few blocks pay for the scan.
+        const bool hasChain = view.chain.end > view.chain.first;
+        std::vector<::Agentmaster::MdSessionRef> sessionRefs;
+        if (hasChain && index >= view.chain.first && index < view.chain.end)
+        {
+            for (const auto& ref : ::Agentmaster::MdFindSessionRefs(view.blocks[index]))
+            {
+                if (ref.session < view.chain.headings.size() && view.chain.headings[ref.session] != ::Agentmaster::kMdNoBlock)
+                {
+                    sessionRefs.push_back(ref);
+                }
+            }
+        }
         // The first block inside a fold starts its panel flush: the summary row above took the gap.
-        const auto element = _BuildBlockElement(view, view.blocks[index], firstInFold ? nullptr : above);
+        const auto element = _BuildBlockElement(view, view.blocks[index], firstInFold ? nullptr : above, sessionRefs.empty() ? nullptr : &sessionRefs);
         if (view.areaPanel)
         {
             _AppendToFold(view, element);
@@ -1579,6 +1626,20 @@ namespace winrt::TerminalApp::implementation
         else
         {
             _AppendElement(view, element);
+        }
+        // A session's heading — the very block the chain says its links point to (a session's FIRST
+        // heading): record the element, so a click scrolls to it.
+        if (hasChain)
+        {
+            const size_t session = ::Agentmaster::MdSessionHeadingNumber(view.blocks[index]);
+            if (session > 0 && session < view.chain.headings.size() && view.chain.headings[session] == index)
+            {
+                if (view.sessionHeadings.size() <= session)
+                {
+                    view.sessionHeadings.resize(session + 1, winrt::Windows::UI::Xaml::FrameworkElement{ nullptr });
+                }
+                view.sessionHeadings[session] = element;
+            }
         }
         ++view.built;
     }
@@ -1817,7 +1878,7 @@ namespace winrt::TerminalApp::implementation
         return text;
     }
 
-    FrameworkElement AgentTranscriptOverlay::_BuildBlockContent(LevelView& view, const ::Agentmaster::MdBlock& block)
+    FrameworkElement AgentTranscriptOverlay::_BuildBlockContent(LevelView& view, const ::Agentmaster::MdBlock& block, const std::vector<::Agentmaster::MdSessionRef>* sessionRefs)
     {
         switch (block.kind)
         {
@@ -1895,10 +1956,22 @@ namespace winrt::TerminalApp::implementation
         }
 
         bool inFirstLine = true; // for a label paragraph: still on the label line
-        for (const auto& source : block.runs)
+        for (size_t runIndex = 0; runIndex < block.runs.size(); ++runIndex) // indexed: a session link names its run by index
         {
+            const auto& source = block.runs[runIndex];
             if (source.text.empty())
             {
+                continue;
+            }
+            // A Session chain row: a run holding "session N" goes in as plain pieces around hyperlinks
+            // (_AppendSessionLinks). Such rows are never label paragraphs, so the label tint is not involved;
+            // the first-line flag is kept honest anyway.
+            if (sessionRefs && _AppendSessionLinks(text, source, runIndex, *sessionRefs))
+            {
+                if (source.text.find_first_of(L"\r\n") != std::wstring::npos)
+                {
+                    inFirstLine = false;
+                }
                 continue;
             }
             Run run;
@@ -1969,9 +2042,9 @@ namespace winrt::TerminalApp::implementation
         return text;
     }
 
-    FrameworkElement AgentTranscriptOverlay::_BuildBlockElement(LevelView& view, const ::Agentmaster::MdBlock& block, const ::Agentmaster::MdBlock* prev)
+    FrameworkElement AgentTranscriptOverlay::_BuildBlockElement(LevelView& view, const ::Agentmaster::MdBlock& block, const ::Agentmaster::MdBlock* prev, const std::vector<::Agentmaster::MdSessionRef>* sessionRefs)
     {
-        FrameworkElement element = _BuildBlockContent(view, block);
+        FrameworkElement element = _BuildBlockContent(view, block, sessionRefs);
         const double gap = ::Agentmaster::MdGapAbove(prev, block);
         // The gap goes INSIDE the containers this block shares with the one above it: a quote bar they
         // share then runs unbroken through the gap, while a quote that STARTS here begins below it.
@@ -2060,6 +2133,122 @@ namespace winrt::TerminalApp::implementation
             AddMargin(element, pendingIndent, 0);
         }
         return element;
+    }
+
+    bool AgentTranscriptOverlay::_AppendSessionLinks(const TextBlock& text, const ::Agentmaster::MdRun& source, size_t runIndex, const std::vector<::Agentmaster::MdSessionRef>& refs)
+    {
+        // One plain piece of the run, in the run's own bold / italic style (a mention never sits in a code or
+        // link run — MdFindSessionRefs skips those).
+        const auto makeRun = [&source](std::wstring_view piece) {
+            Run run;
+            run.Text(winrt::hstring{ piece });
+            if (source.style & ::Agentmaster::kMdBold)
+            {
+                run.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+            }
+            if (source.style & ::Agentmaster::kMdItalic)
+            {
+                run.FontStyle(winrt::Windows::UI::Text::FontStyle::Italic);
+            }
+            return run;
+        };
+        const std::wstring_view whole{ source.text };
+        bool any = false;
+        size_t at = 0; // the first unit of the run not appended yet
+        for (const auto& ref : refs)
+        {
+            // Another run's mention — or a range that would overlap / overrun this one (refs come in text
+            // order from this very block, so never; the check keeps a bad range from slicing past the end).
+            if (ref.run != runIndex || ref.offset < at || ref.length > whole.size() || ref.offset > whole.size() - ref.length)
+            {
+                continue;
+            }
+            any = true;
+            if (ref.offset > at)
+            {
+                text.Inlines().Append(makeRun(whole.substr(at, ref.offset - at)));
+            }
+            Hyperlink link;
+            link.Foreground(_linkBrush);
+            link.Inlines().Append(makeRun(whole.substr(ref.offset, ref.length)));
+            winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(link, winrt::hstring{ L"Go to session " + std::to_wstring(ref.session) });
+            // No NavigateUri: Click is the whole behavior. A WEAK reference — the handler lives on the link,
+            // and the overlay must never be kept alive by its own XAML.
+            link.Click([weak = get_weak(), session = ref.session](const Hyperlink&, const HyperlinkClickEventArgs&) {
+                try
+                {
+                    if (const auto self = weak.get())
+                    {
+                        self->_JumpToSession(session);
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay session link"); // the view stays where it was
+                }
+            });
+            text.Inlines().Append(link);
+            at = ref.offset + ref.length;
+        }
+        if (!any)
+        {
+            return false;
+        }
+        if (at < whole.size())
+        {
+            text.Inlines().Append(makeRun(whole.substr(at)));
+        }
+        return true;
+    }
+
+    void AgentTranscriptOverlay::_JumpToSession(size_t session)
+    {
+        auto& view = _levels[_current];
+        if (session < view.sessionHeadings.size() && view.sessionHeadings[session])
+        {
+            view.pendingSessionJump = 0; // a direct jump supersedes any earlier click still waiting
+            _ScrollToSessionHeading(view, session);
+            return;
+        }
+        // The heading is further down than the time-sliced build has reached: jump the moment it is built
+        // (_Pump). A level that is not building can't build it any more (the block cap cut it): nothing to do.
+        if (view.state == LevelState::Building)
+        {
+            view.pendingSessionJump = session;
+        }
+    }
+
+    void AgentTranscriptOverlay::_ScrollToSessionHeading(LevelView& view, size_t session) noexcept
+    {
+        try
+        {
+            if (!view.scroll || !view.content || session >= view.sessionHeadings.size() || !view.sessionHeadings[session])
+            {
+                return;
+            }
+            const auto& heading = view.sessionHeadings[session];
+            // Lay the view out first: a heading built in this very slice has no position yet, and ChangeView
+            // clamps to the current extent (the board's UpdateLayout-then-ChangeView recipe). Legal here — the
+            // callers are a link's Click and a build slice, never a layout pass.
+            view.scroll.UpdateLayout();
+            // The heading's top in the content's coordinates == the scroll offset that puts it at the top edge
+            // (a session heading is a top-level block, never inside a collapsed fold, so it always has a
+            // position). TransformToVisual is right HERE, unlike in FindScrollAnchor: this is the level on
+            // screen, laid out the line above.
+            const auto top = heading.TransformToVisual(view.content).TransformPoint(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
+            view.scroll.ChangeView(nullptr, std::max(0.0, static_cast<double>(top.Y) - kSessionJumpGap), nullptr, true /* disableAnimation: an anchor jump, not a glide */);
+            // Focus to the scroll view: the clicked link, left focused but scrolled away, would be brought back
+            // into view the next time focus returns to it (BringIntoViewOnFocusChange — e.g. on a window
+            // activation).
+            view.scroll.Focus(FocusState::Programmatic);
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the view stays where it was. Contained HERE, not left to the callers: a
+            // pending jump runs inside a build slice (_Pump), whose catch would stop building the level — a
+            // failed scroll must never cost the rest of the transcript.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay session jump");
+        }
     }
 
     void AgentTranscriptOverlay::_UpdateStatus()

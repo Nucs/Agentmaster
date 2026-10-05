@@ -7,9 +7,13 @@
 // the container chain + ids (a quote bar runs through the gap between two paragraphs of ONE quote, never
 // across two quotes), list markers (only on an item's first block; numbered lists keep their numbers and
 // share one marker width), the gaps MdGapAbove picks, raw HTML kept as text, soft breaks kept as line
-// breaks, the caps, a real transcript_turns golden parsed end to end, and the TOOL AREAS the overlay folds
+// breaks, the caps, a real transcript_turns golden parsed end to end, the TOOL AREAS the overlay folds
 // (MdFindToolAreas / MdToolAreaFoldable / MdToolAreaSummary — which lists are areas, the item counts, the
-// "(no tool calls)" note, the summary text) over an inline fixture and five goldens.
+// "(no tool calls)" note, the summary text) over an inline fixture and five goldens, and the SESSION CHAIN
+// LINKS (MdFindSessionChain / MdFindSessionRefs / MdSessionHeadingNumber — which list is the chain, which
+// heading is each session's, which "session N" mentions the overlay links: never inside a word, a code span
+// or a quoted title, never past 4096, only where the session has a heading) over an inline fixture, the
+// edge cases and four chain goldens.
 //
 // cmark is the one dependency the rest of the harness doesn't have: run-m5-tests.bat compiles this test
 // for real only when it finds cmark in the vcpkg tree a full msbuild installs (obj\x64\vcpkg — it defines
@@ -86,6 +90,58 @@ namespace
         for (const auto& area : areas)
         {
             n += MdToolAreaFoldable(area) ? 1 : 0;
+        }
+        return n;
+    }
+
+    // One turns\expected golden, read + parsed, for the session-chain checks. An unreadable golden parses
+    // to no blocks — the caller's checks then fail visibly.
+    // Parameters: leaf — the golden's file name, e.g. L"chain-a4a4a4a4-default.md".
+    std::vector<MdBlock> GoldenBlocks(const wchar_t* leaf)
+    {
+        return ParseMarkdownBlocks(ReadUtf8File(MarkdownHarnessDir() / L"turns" / L"expected" / leaf)).blocks;
+    }
+
+    // The mentions the transcript overlay turns into links in block `index` — AgentTranscriptOverlay::
+    // _BuildNext's rule, kept here in step with it: only a block of the chain list, and only a mention whose
+    // session has a heading to scroll to.
+    // Parameters: blocks / chain — a parsed level and its MdFindSessionChain; index — the block.
+    // Returns the linked mentions in text order; empty outside the chain list.
+    std::vector<MdSessionRef> OverlaySessionLinks(const std::vector<MdBlock>& blocks, const MdSessionChain& chain, size_t index)
+    {
+        std::vector<MdSessionRef> links;
+        if (index < chain.first || index >= chain.end || index >= blocks.size())
+        {
+            return links;
+        }
+        for (const auto& ref : MdFindSessionRefs(blocks[index]))
+        {
+            if (ref.session < chain.headings.size() && chain.headings[ref.session] != kMdNoBlock)
+            {
+                links.push_back(ref);
+            }
+        }
+        return links;
+    }
+
+    // The session numbers of `refs`, in order — the compact form the checks compare.
+    std::vector<size_t> RefSessions(const std::vector<MdSessionRef>& refs)
+    {
+        std::vector<size_t> sessions;
+        for (const auto& ref : refs)
+        {
+            sessions.push_back(ref.session);
+        }
+        return sessions;
+    }
+
+    // Every link the overlay would draw over the whole chain list (OverlaySessionLinks for each row).
+    size_t CountOverlaySessionLinks(const std::vector<MdBlock>& blocks, const MdSessionChain& chain)
+    {
+        size_t n = 0;
+        for (size_t i = chain.first; i < chain.end; ++i)
+        {
+            n += OverlaySessionLinks(blocks, chain, i).size();
         }
         return n;
     }
@@ -351,6 +407,126 @@ void TestMarkdownBlocks()
         }
         const auto chain = GoldenToolAreas(L"chain-b3b3b3b3-default.md");
         CHECK(chain.size() == 1 && chain[0].empty, "md golden areas: chain default - the Session chain list is not an area");
+    }
+
+    // ---- session chain links: the chain list, the session headings, the "session N" mentions ----
+    {
+        // Blocks: 0 the intro · 1 a gone-parent row · 2 session 1's row · 3 session 2's row (its quoted title
+        // says "session 9" and "session 2") · 4 session 1's heading · 5 a turn heading · 6 a "## Session 2 of
+        // 2" the user typed into a quote · 7 session 2's heading. (The title's opening quote ends its literal:
+        // "\x201C" followed by "fix" would read as the hex escape \x201Cf.)
+        const std::wstring doc =
+            L"**Session chain**, oldest first (the last one is this session):\n"
+            L"- `b0b0` \x2014 its transcript is gone; session 1 was restarted from it\n"
+            L"- session 1 \x00B7 `a1a1` \x2014 started Jan 10 08:00\n"
+            L"- session 2 \x00B7 `a2a2` \x00B7 \x201C"
+            L"fix session 9 and session 2\x201D \x2014 forked from session 1 on Jan 10 11:00 \x00B7 this session\n\n"
+            L"## Session 1 of 2 \x00B7 `a1a1` \x00B7 started Jan 10 08:00\n\n"
+            L"### Turn 1\n\n"
+            L"> ## Session 2 of 2\n\n"
+            L"## Session 2 of 2 \x00B7 `a2a2` \x00B7 forked from session 1 on Jan 10 11:00 \x00B7 this session\n";
+        const auto r = ParseMarkdownBlocks(doc);
+        CHECK(!r.failed && r.blocks.size() == 8, "md chain: the fixture parses into 8 blocks");
+        const auto chain = MdFindSessionChain(r.blocks);
+        CHECK(chain.first == 1 && chain.end == 4, "md chain: the list's three rows are blocks 1..3 (the intro is not a row)");
+        CHECK(chain.headings.size() == 3 && chain.headings[0] == kMdNoBlock && chain.headings[1] == 4 && chain.headings[2] == 7,
+              "md chain: session 1's heading is block 4, session 2's block 7 (the quoted copy at 6 does not count)");
+        if (r.blocks.size() == 8)
+        {
+            std::vector<size_t> numbers;
+            for (const auto& block : r.blocks)
+            {
+                numbers.push_back(MdSessionHeadingNumber(block));
+            }
+            CHECK((numbers == std::vector<size_t>{ 0, 0, 0, 0, 1, 0, 0, 2 }),
+                  "md chain: only the two top-level 'Session N of M' headings are session headings (not the intro, a row, a turn heading or a quoted heading)");
+            const auto gone = MdFindSessionRefs(r.blocks[1]);
+            CHECK(gone.size() == 1 && gone[0].session == 1 && gone[0].run == 1,
+                  "md chain: the gone-parent row names session 1 in its text after the id (run 1)");
+            const auto first = MdFindSessionRefs(r.blocks[2]);
+            CHECK(first.size() == 1 && first[0].run == 0 && first[0].offset == 0 && first[0].length == 9 && first[0].session == 1,
+                  "md chain: a row's own label is a mention - run 0, offset 0, 9 units ('session 1')");
+            const auto second = MdFindSessionRefs(r.blocks[3]);
+            CHECK(RefSessions(second) == (std::vector<size_t>{ 2, 1 }) && second.size() == 2 && second[0].run == 0 && second[1].run == 2,
+                  "md chain: a row's label + its 'forked from session 1' - the quoted title's 'session 9' / 'session 2' are skipped, and so is 'this session'");
+            CHECK(RefSessions(OverlaySessionLinks(r.blocks, chain, 1)) == (std::vector<size_t>{ 1 }) &&
+                      RefSessions(OverlaySessionLinks(r.blocks, chain, 2)) == (std::vector<size_t>{ 1 }) &&
+                      RefSessions(OverlaySessionLinks(r.blocks, chain, 3)) == (std::vector<size_t>{ 2, 1 }),
+                  "md chain: the overlay links every row mention whose session has a heading");
+            CHECK(OverlaySessionLinks(r.blocks, chain, 4).empty() && OverlaySessionLinks(r.blocks, chain, 7).empty(),
+                  "md chain: nothing outside the list links (a heading's own 'forked from session 1' stays plain)");
+        }
+
+        // What is NOT a mention: inside a word, session 0, a 5-digit number, the capitalized word, a code span.
+        const auto edge = ParseMarkdownBlocks(L"- subsession 1, session 0, session 12345, Session 1, `session 1` and session 3.\n");
+        CHECK(edge.blocks.size() == 1 && RefSessions(MdFindSessionRefs(edge.blocks[0])) == (std::vector<size_t>{ 3 }),
+              "md chain: of 'subsession 1, session 0, session 12345, Session 1, `session 1`, session 3' only session 3 is a mention");
+        const auto big = ParseMarkdownBlocks(L"- session 4096 and session 4097\n");
+        CHECK(big.blocks.size() == 1 && RefSessions(MdFindSessionRefs(big.blocks[0])) == (std::vector<size_t>{ 4096 }),
+              "md chain: kMdMaxSessionNumber (4096) is the largest session number");
+
+        // What is NOT a session heading.
+        const auto headingNumber = [](const wchar_t* markdown) {
+            const auto parsed = ParseMarkdownBlocks(markdown);
+            return parsed.blocks.size() == 1 ? MdSessionHeadingNumber(parsed.blocks[0]) : static_cast<size_t>(-1);
+        };
+        CHECK(headingNumber(L"## Session 3 of 4\n") == 3, "md chain: '## Session 3 of 4' is session 3's heading");
+        CHECK(headingNumber(L"#### Session 3 of 4 \x00B7 `id`\n") == 3, "md chain: any heading level counts, details after M too");
+        CHECK(headingNumber(L"## Session 3 of\n") == 0, "md chain: '## Session 3 of' (no M) is not a session heading");
+        CHECK(headingNumber(L"## Sessions 3 of 4\n") == 0, "md chain: '## Sessions 3 of 4' is not a session heading");
+        CHECK(headingNumber(L"## Session 12345 of 4\n") == 0, "md chain: a 5-digit N is not a session number");
+        CHECK(headingNumber(L"## `Session 1 of 2`\n") == 0, "md chain: a heading whose text is a code span is not a session heading");
+        CHECK(headingNumber(L"Session 1 of 2\n") == 0, "md chain: a paragraph is not a session heading");
+
+        // What is NOT a chain list.
+        CHECK(MdFindSessionChain(ParseMarkdownBlocks(L"> **Session chain**, oldest first:\n> - session 1 \x00B7 `x`\n").blocks).end == 0,
+              "md chain: a Session chain pasted into a quoted message is not the chain");
+        CHECK(MdFindSessionChain(ParseMarkdownBlocks(L"**Session chain**, oldest first:\n\nsome text\n- session 1\n").blocks).end == 0,
+              "md chain: the intro must be followed directly by the list");
+        CHECK(MdFindSessionChain(ParseMarkdownBlocks(L"Session chain, oldest first:\n- session 1\n").blocks).end == 0,
+              "md chain: the intro's 'Session chain' must be bold");
+        const auto headingsOnly = MdFindSessionChain(ParseMarkdownBlocks(L"## Session 1 of 2\n").blocks);
+        CHECK(headingsOnly.first == 0 && headingsOnly.end == 0 && headingsOnly.headings.size() == 2 && headingsOnly.headings[1] == 0,
+              "md chain: headings without a chain list are still found (the overlay then has no list to link from)");
+        CHECK(MdFindSessionChain({}).end == 0 && MdFindSessionChain({}).headings.empty() && MdFindSessionRefs(MdBlock{}).empty() && MdSessionHeadingNumber(MdBlock{}) == 0,
+              "md chain: nothing in, nothing out");
+    }
+
+    // ---- session chain links over real transcript_turns goldens ----
+    {
+        const auto a4 = GoldenBlocks(L"chain-a4a4a4a4-default.md");
+        const auto a4Chain = MdFindSessionChain(a4);
+        CHECK(a4Chain.first == 1 && a4Chain.end == 4, "md golden chain: a4 default - three rows under the intro");
+        CHECK(a4Chain.headings.size() == 4 && a4Chain.headings[1] == a4Chain.end, "md golden chain: a4 default - session 1's heading directly follows the list");
+        bool headingsRight = a4Chain.headings.size() == 4;
+        for (size_t n = 1; headingsRight && n < a4Chain.headings.size(); ++n)
+        {
+            headingsRight = a4Chain.headings[n] != kMdNoBlock && a4Chain.headings[n] < a4.size() && MdSessionHeadingNumber(a4[a4Chain.headings[n]]) == n &&
+                            (n == 1 || a4Chain.headings[n] > a4Chain.headings[n - 1]);
+        }
+        CHECK(headingsRight, "md golden chain: a4 default - sessions 1..3 each have a 'Session N of 3' heading, in order");
+        const auto a4Row3 = OverlaySessionLinks(a4, a4Chain, 3);
+        CHECK(RefSessions(a4Row3) == (std::vector<size_t>{ 3, 2 }) && a4Row3[0].run == 0 && a4Row3[0].offset == 0 && a4Row3[0].length == 9 && a4Row3[1].run == 2,
+              "md golden chain: a4 default row 3 - its label (session 3) + 'forked from session 2'");
+        CHECK(CountOverlaySessionLinks(a4, a4Chain) == 5, "md golden chain: a4 default - 5 links (3 labels + 2 'forked from')");
+
+        const auto a4Max = GoldenBlocks(L"chain-a4a4a4a4-max.md");
+        const auto a4MaxChain = MdFindSessionChain(a4Max);
+        CHECK(a4MaxChain.end - a4MaxChain.first == 3 && CountOverlaySessionLinks(a4Max, a4MaxChain) == 5, "md golden chain: a4 max - the same 3 rows + 5 links at the longest level");
+
+        const auto b2 = GoldenBlocks(L"chain-b2b2b2b2-default.md");
+        const auto b2Chain = MdFindSessionChain(b2);
+        CHECK(b2Chain.first == 1 && b2Chain.end == 3 && CountOverlaySessionLinks(b2, b2Chain) == 3,
+              "md golden chain: b2 default - a plan restart's 2 rows, 3 links ('restarted from session 1' included)");
+
+        const auto b3 = GoldenBlocks(L"chain-b3b3b3b3-default.md");
+        const auto b3Chain = MdFindSessionChain(b3);
+        CHECK(b3Chain.first == 1 && b3Chain.end == 3 && b3Chain.headings.empty(), "md golden chain: b3 default - a gone parent + session 1, and no session headings");
+        CHECK(b3.size() > 2 && RefSessions(MdFindSessionRefs(b3[1])) == (std::vector<size_t>{ 1 }) && CountOverlaySessionLinks(b3, b3Chain) == 0,
+              "md golden chain: b3 default - 'session 1' is mentioned but links nowhere (a one-session chain has no heading)");
+
+        const auto a1Chain = MdFindSessionChain(GoldenBlocks(L"chain-a1a1a1a1-default.md"));
+        CHECK(a1Chain.end == 0 && a1Chain.headings.empty(), "md golden chain: a1 default - a transcript that continues nothing has no chain");
     }
 
     // ---- a real transcript_turns golden, end to end ----

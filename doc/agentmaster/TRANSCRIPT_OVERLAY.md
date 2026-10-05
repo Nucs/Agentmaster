@@ -3,7 +3,8 @@
 A session's conversation, rendered as Markdown, in a reading view laid over the window. Status:
 **written 2026-10-03, NOT BUILT** (no compile, no deploy — see §9 for the verification checklist). Same day,
 second pass: 85% wide, folded tool calls (§3b), the remembered level (§3a) — also not built; then 90% wide
-(third ask, same day, not built). 2026-10-05: the ↵ line-wrap toggle (§3c, fourth ask) — not built.
+(third ask, same day, not built). 2026-10-05: the ↵ line-wrap toggle (§3c, fourth ask) — not built; then
+the Session chain links (§3d, fifth ask, same day) — not built.
 
 ## 1. The ask (verbatim)
 
@@ -32,6 +33,12 @@ And the fourth (2026-10-05):
 > On top-right add a button for breakline, by default true, but if disabled then text overflowing right
 > border is invisible/hidden
 > Have it's state persist across all windows
+
+And the fifth (2026-10-05), with a screenshot of a five-session chain — the "Session chain" list, then the
+heading "Session 1 of 5 · 26c59294 · started Oct 01 21:25":
+
+> the sessions N in this list should be hyperlinks to viewing the title (session row as in the image appears
+> at the top when session 1 is clicked.
 
 ## 2. Where it opens
 
@@ -64,7 +71,8 @@ Labels, tooltip and glyph (`\xE736` ReadingMode) are shared constants in `AgentC
   while the current level has folded tool calls (§3b).
 - **Body**: one scroll view per level (each keeps its own scroll position; switching back is instant).
 - **Keyboard**: Esc closes; 1–5 pick a tab by position; PageUp / PageDown / Home / End / arrows scroll;
-  Tab cycles inside the card (through the fold rows too — Enter / Space opens one); the app's
+  Tab cycles inside the card (through the fold rows too — Enter / Space opens one — and the Session chain
+  links, §3d); the app's
   tab-switching chords (Ctrl+Tab, …) still work — and close it.
 - Always dark (the Agentmaster surface convention), explicit brushes.
 
@@ -160,14 +168,73 @@ overlay **folds each such list into one summary row** and keeps the reply open:
   still agree.
 - Unlogged, like the folds and Expand all — a pure view toggle (the CLAUDE.md logging convention).
 
+### 3d. Session chain links
+
+A transcript that continues earlier sessions (a fork, a plan restart — `TranscriptTurns`' chain,
+`ChainBlock` / `SessionHeader`) opens with the chain list, and each session's part starts with a heading:
+
+    Session chain, oldest first (the last one is this session):
+    • session 1 · 26c59294-… — started Oct 01 21:25
+    • session 2 · f48cd627-… · “its title” — forked from session 1 on Oct 04 08:09
+    …
+    Session 1 of 5 · 26c59294 · started Oct 01 21:25
+
+- **Every "session N" in the list is a link** (link-colored, like the transcript's other links). A click
+  scrolls the view so session N's heading is at the top, 8 px below the edge (`kSessionJumpGap`), with no
+  animation. The links: each row's own label ("session 2"), "forked from session N", "restarted from
+  session N", and the gone-parent row's "session 1 was restarted from it".
+- **Never a link**: "this session" (no number); anything inside the row's quoted title (“…” — a title may
+  say "fix session 9"); a code span (the ids); text outside the list — the headings' own "forked from
+  session N" included, since the headings are the targets.
+- **Only a session with a heading gets a link.** `TranscriptTurns` heads a session from its first turn, so
+  a session with no turns of its own has no heading: a fork that was forked again at once, or "this
+  session" before its first message (2 of 25 real chains, 2026-10-05). Its row label stays plain text. A
+  one-session chain (a plan restart whose parent transcript is gone) has no headings at all, so nothing in
+  it links.
+- **A click before the heading is built**: the build is time-sliced (§4), and a session's heading can be
+  thousands of blocks down. The click is kept as the level's pending jump and done by the build slice that
+  builds the heading (`_Pump`). A newer click replaces it. A heading past the 25,000-block cap never comes,
+  so the end of the build drops the pending jump. A switch to another level drops it too (`_SelectLevel`):
+  only the level on screen builds, so the jump would otherwise fire when the reader comes back, scrolling
+  away from wherever they are reading by then.
+- **Mechanics**:
+  - `MdFindSessionChain` (`MarkdownBlocks.h`) runs off the UI thread with the parse, once per level. The
+    list is the top-level list right under the top-level paragraph whose first run is the bold "Session
+    chain". Each session's target is its FIRST top-level heading that starts "Session N of M"
+    (`MdSessionHeadingNumber`), so a heading a user typed into a quoted message never counts. N is
+    1..4096 (`kMdMaxSessionNumber`).
+  - `_BuildNext` scans only the list's rows (`MdFindSessionRefs`, the plain runs only), keeps the
+    mentions whose session has a heading, and records each session heading's element as it builds it
+    (`LevelView::sessionHeadings`).
+  - `_AppendSessionLinks` splits a run around its mentions into plain Runs and Hyperlinks. A link has no
+    NavigateUri; its Click calls `_JumpToSession` through a weak reference, and its screen-reader name is
+    "Go to session N". A Hyperlink is a tab stop, so Tab reaches the links.
+  - `_ScrollToSessionHeading`: `UpdateLayout` (a heading built in this very slice has no position yet,
+    and `ChangeView` clamps to the extent) → the heading's top in the content's coordinates
+    (`TransformToVisual`) → `ChangeView`. It then moves keyboard focus to the scroll view: the clicked
+    link, left focused and scrolled out of view, would otherwise be brought back into view (the scroll
+    view's BringIntoViewOnFocusChange) the next time focus returns to it, e.g. on a window activation. It
+    contains its own failures: a pending jump runs inside a build slice, and a failed scroll must never
+    stop the build.
+- Each level has its own links and targets: each level's blocks are scanned on their own, so a link always
+  points into the level it is drawn in. (In the goldens and the real chains above, every level heads the
+  same sessions.)
+- Unlogged, like the folds and Expand all — pure view navigation (the CLAUDE.md logging convention).
+- Checked without a compile (2026-10-05): a Python port (markdown-it) of the flattener's shape, the three
+  helpers and the overlay's link rule passed the inline fixture and the edge cases of `tests_markdown.cpp`,
+  the 15 chain goldens (a4 and b2: every row label + every "from session N"; b3: nothing) and the 40 other
+  goldens (no chain, no link), and 27 renders of 25 real chained transcripts (up to 5 sessions): every row
+  whose session has a heading links its label, and nothing inside a title links.
+
 ## 4. Rendering
 
 1. **Off the UI thread** (`AgentTranscriptOverlay::_LoadLevelAsync`, holding only a weak reference): the
    level's text is exactly what **Copy ▸ Transcript ▸ <level>** copies — `RenderTranscriptTurnsFile` for a
    Claude transcript (local time), and for a Codex rollout `ReadConversationFollowupText` (Minimal /
    Compact) or `ReadConversationText` (Default / Full / Max). Then `ParseMarkdownBlocks`
-   (`AgentMaster/MarkdownBlocks.{h,cpp}`, cmark) flattens it into render blocks, and `MdFindToolAreas`
-   marks the tool-call lists to fold (§3b).
+   (`AgentMaster/MarkdownBlocks.{h,cpp}`, cmark) flattens it into render blocks, `MdFindToolAreas`
+   marks the tool-call lists to fold (§3b), and `MdFindSessionChain` finds the Session chain list and the
+   session headings its links point to (§3d).
 2. **On the UI thread, time-sliced** (`_Pump`): low-priority dispatcher items build blocks into XAML for
    ~12 ms each (at least 16 blocks), then yield. The top of a long transcript shows at once; the window
    keeps answering while the rest lays out. Only the CURRENT level builds; a level left mid-build resumes
@@ -228,10 +295,13 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
 - `[transcript] <sid8> show <Level>: chars=N blocks=M rendered in Xms` (+ `(capped)` /
   `(parse failed part-way)`), or `: nothing to show (<why>) path=…`.
 - A level pick is the `transcript-level` line (the remembered-level write adds no line; a failed write is
-  an `[exc]` line). Opening / closing a fold, Expand all and the ↵ line-wrap toggle are pure view toggles
-  and are deliberately unlogged (the CLAUDE.md logging convention); a failed wrap-state read or write, or a
-  failed re-layout, is an `[exc]` line (`AgentTranscriptOverlay remembered wrap` / `remember wrap` /
-  `sync wrap mode` / `find scroll anchor` / `restore scroll anchor`).
+  an `[exc]` line). Opening / closing a fold, Expand all, the ↵ line-wrap toggle and a Session chain link
+  click are pure view actions and are deliberately unlogged (the CLAUDE.md logging convention); a failed
+  wrap-state read or write, or a failed re-layout, is an `[exc]` line (`AgentTranscriptOverlay remembered
+  wrap` / `remember wrap` / `sync wrap mode` / `find scroll anchor` / `restore scroll anchor`), and so is a
+  failed session jump (`AgentTranscriptOverlay session jump`, the view stays where it was; `AgentTranscriptOverlay
+  session link`, the click handler's belt) or a failed chain scan (`MdFindSessionChain` / `MdFindSessionRefs`
+  — what was found so far still links).
 
 ## 7. Files
 
@@ -251,7 +321,9 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   `AgentMaster/Persistence.cpp` (the `transcriptOverlayLevel` and `transcriptOverlayWrapLines` keys), and
   the two cog-Save preserve blocks (`AgentManagerContent.Settings.cpp`, `TerminalPage.AgentEngine.cpp`).
 - Harness: `tests/tests_markdown.cpp` (`TestMarkdownBlocks`, incl. the tool areas over an inline fixture and
-  five goldens) — compiled by `run-m5-tests.bat` only when `obj\x64\vcpkg\x64-windows-static` holds cmark
+  five goldens, and the Session chain links over an inline fixture, the edge cases and four chain goldens —
+  its `OverlaySessionLinks` mirrors `_BuildNext`'s link rule, so keep the two in step) — compiled by
+  `run-m5-tests.bat` only when `obj\x64\vcpkg\x64-windows-static` holds cmark
   (defines `AM_HAVE_CMARK`); otherwise it reports a skip. `tests/tests_persistence.cpp` pins both settings'
   round trips and their defaults ("default" / true).
 
@@ -274,6 +346,17 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
 - With line wrap OFF, the hidden part of a line is still in its text block: the block's right-click Select
   All + Copy take it, and the header's Copy takes the whole level. Turning wrap back on is the way to READ
   it — the view never scrolls sideways.
+- Session chain links (§3d) are drawn only in the chain list: a heading's "forked from session N" and any
+  "session N" in the conversation stay plain text. A session with no turns of its own has no heading, so its
+  row label stays plain.
+- A session near the END of a level can't reach the top edge: `ChangeView` clamps to the extent, so a jump
+  to a short last part (often "this session") shows its heading lower down, with the end of the level below
+  it.
+- A pending jump (a click before the heading is built) is dropped when the build ends without the heading
+  (cut by the 25,000-block cap) and when the reader switches to another level; the click has to be made
+  again.
+- There is no "back" after a jump; Home (the scroll view has keyboard focus after a jump) returns to the
+  list at the top.
 
 ## 9. Verification checklist (nothing here has been built)
 
@@ -298,3 +381,11 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
    Switch to another level (it catches up, keeping its own place), click again to wrap. Close, reopen in
    another window → the same state; restart → still; a cog Save → still (`transcriptOverlayWrapLines` in
    settings.json). Hover the toggle: the tooltip names the mode.
+10. Session chain links: open a session forked several times (the screenshot's five-session chain). In the
+    "Session chain" list every "session N" and every "from session N" is link-colored; "this session" and
+    the quoted titles are not. Click "session 1" → the "Session 1 of 5" heading sits at the top of the view.
+    Open the Max level of a big chain and at once click the last session's link while the status line still
+    says it is building → the view jumps when that heading is built (not before), unless you switch levels
+    first. A session with no turns of its own (a fork forked again at once) has a plain label. Tab reaches
+    the links; check that Enter follows one. After a jump, switch to another window and back → the view
+    stays on the heading (focus moved to the scroll view).

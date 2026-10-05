@@ -283,4 +283,82 @@ namespace Agentmaster
     // Returns the summary; "" for an area with nothing counted, or on an allocation failure (logged).
     // Never throws.
     std::wstring MdToolAreaSummary(const MdToolArea& area, size_t maxTools = 5) noexcept;
+
+    // ---------------------------------------------------------------------------------------------
+    // SESSION CHAIN LINKS — the "session N" mentions the transcript overlay turns into links.
+    //
+    // A transcript that continues earlier sessions (a fork, a plan restart — TranscriptTurns' chain,
+    // ChainBlock / SessionHeader) opens with the CHAIN LIST, and each session's part starts with a
+    // top-level SESSION HEADING:
+    //     **Session chain**, oldest first (the last one is this session):
+    //     - session 1 · `26c59294-…` — started Oct 01 21:25
+    //     - session 2 · `f48cd627-…` · “its title” — forked from session 1 on Oct 04 08:09 · this session
+    //
+    //     ## Session 1 of 2 · `26c59294` · started Oct 01 21:25
+    //     …
+    //     ## Session 2 of 2 · `f48cd627` · forked from session 1 on Oct 04 08:09 · this session
+    // The overlay makes every "session N" in the list a link that scrolls session N's heading to the top
+    // of the view. These helpers find the list, the headings and the mentions; the overlay owns the XAML.
+    // ---------------------------------------------------------------------------------------------
+
+    // "No block": a MdSessionChain::headings entry for a session that has no heading.
+    inline constexpr size_t kMdNoBlock = static_cast<size_t>(-1);
+
+    // The largest session number the helpers accept. Real chains are a handful of sessions; the cap only
+    // keeps a hostile number in plain text (a Codex rollout is parsed as Markdown too, and its text may say
+    // "## Session 4000000000 of 2") from sizing MdSessionChain::headings.
+    inline constexpr size_t kMdMaxSessionNumber = 4096;
+
+    // Where a chained document's session links point.
+    struct MdSessionChain
+    {
+        // The chain list's blocks [first, end): the top-level list right under the top-level paragraph whose
+        // first run is the bold "Session chain". first == end == 0 when the document has no chain list (only
+        // the first such list counts).
+        size_t first = 0;
+        size_t end = 0;
+        // headings[N] = the index of the block holding session N's heading — the first top-level heading
+        // whose text starts "Session N of M" — or kMdNoBlock when session N has none. Index 0 is unused.
+        // Empty when the document has no session heading: a ONE-session chain (a plan restart whose parent
+        // transcript is gone) has the chain list but no headings, so its "session 1" links nowhere.
+        std::vector<size_t> headings;
+    };
+
+    // One "session N" mention in a block's runs.
+    struct MdSessionRef
+    {
+        // The run that holds it (an index into MdBlock::runs) — always a run with no kMdCode / kMdLink bit.
+        size_t run = 0;
+        // Its first UTF-16 unit in that run's text, and its length ("session 1" == 9, "session 12" == 10).
+        size_t offset = 0;
+        size_t length = 0;
+        // N, 1..kMdMaxSessionNumber.
+        size_t session = 0;
+    };
+
+    // Find the chain list and the session headings in `blocks` (ParseMarkdownBlocks' output for one level).
+    // The chain list is recognized by its intro paragraph (a top-level, non-HTML Paragraph whose first run is
+    // the bold "Session chain") followed directly by a top-level list item; it runs while the blocks stay in
+    // that list. A session heading is what MdSessionHeadingNumber says it is. Linear in the block count.
+    // Parameters: blocks — the parsed level, top to bottom.
+    // Returns the chain (see MdSessionChain); an empty one for an ordinary, one-session transcript.
+    // Never throws: on an allocation failure it returns what was found so far (logged, Rule #18).
+    // Pure: safe on any thread (the overlay calls it on its render thread, right after the parse).
+    MdSessionChain MdFindSessionChain(const std::vector<MdBlock>& blocks) noexcept;
+
+    // Every "session N" mention in `block`'s plain runs: the lowercase word "session" at the start of a word,
+    // one space, then 1-4 digits making 1..kMdMaxSessionNumber (a 5th digit means it is not a session
+    // number). Skipped: code and link runs (an id is never a mention), and anything inside a “curly-quoted”
+    // stretch — the chain list quotes each session's TITLE, which may say anything ("fix session 9"); the
+    // quote state carries across runs, since a title may hold a code span.
+    // Parameters: block — one block of the chain list.
+    // Returns the mentions in text order (run, then offset); empty when there is none.
+    // Never throws: on an allocation failure it returns the mentions found so far (logged, Rule #18).
+    std::vector<MdSessionRef> MdFindSessionRefs(const MdBlock& block) noexcept;
+
+    // N when `block` is a TOP-LEVEL Heading whose first run's text starts "Session N of M" (N and M each
+    // 1..kMdMaxSessionNumber, M followed by the end of the run or a non-digit); else 0. A heading inside a
+    // quoted message — a user who typed "## Session 1 of 2" — sits in a quote container, so it never counts.
+    // Never throws.
+    size_t MdSessionHeadingNumber(const MdBlock& block) noexcept;
 }

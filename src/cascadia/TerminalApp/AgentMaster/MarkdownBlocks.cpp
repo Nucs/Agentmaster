@@ -30,7 +30,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstring>
-#include <cwctype> // iswspace
+#include <cwctype> // iswspace / iswalnum
 #include <memory>
 #include <stdexcept> // std::length_error (ToUtf8's size refusal)
 
@@ -1073,5 +1073,185 @@ namespace Agentmaster
             LogSwallowedException(L"MdToolAreaSummary");
             return {};
         }
+    }
+
+    // ---- session chain links (MarkdownBlocks.h): the "session N" mentions the overlay links ----------
+    namespace
+    {
+        // What TranscriptTurns writes (ChainBlock / SessionHeader): a chain row names a session with the
+        // lowercase word ("- session 2 · …", "… — forked from session 1 on …"), a session heading starts
+        // "Session N of M" ("## Session 2 of 4 · `edd314dd` · …"), and a row puts the session's title between
+        // curly quotes ("· “its title” —").
+        constexpr std::wstring_view kSessionWord{ L"session " };
+        constexpr std::wstring_view kSessionHeadingStart{ L"Session " };
+        constexpr std::wstring_view kSessionHeadingOf{ L" of " };
+        constexpr wchar_t kTitleOpen = L'\x201C';
+        constexpr wchar_t kTitleClose = L'\x201D';
+
+        // `text` holds `literal` at `at` — false when it would run past the end (so the compare below can
+        // never be handed an out-of-range position). Never throws.
+        bool TextHasAt(std::wstring_view text, size_t at, std::wstring_view literal) noexcept
+        {
+            return at <= text.size() && text.size() - at >= literal.size() && text.compare(at, literal.size(), literal) == 0;
+        }
+
+        // Read a session number at `at`: 1-4 digits making 1..kMdMaxSessionNumber. A 5th digit means it is
+        // not a session number at all (never the first four digits of one).
+        // Returns the number and moves `at` past the digits; returns 0 and leaves `at` alone when there is
+        // none. Never throws.
+        size_t ReadSessionNumber(std::wstring_view text, size_t& at) noexcept
+        {
+            size_t value = 0;
+            size_t digits = 0;
+            while (at + digits < text.size() && text[at + digits] >= L'0' && text[at + digits] <= L'9')
+            {
+                if (digits == 4)
+                {
+                    return 0;
+                }
+                value = value * 10 + static_cast<size_t>(text[at + digits] - L'0');
+                ++digits;
+            }
+            if (digits == 0 || value == 0 || value > kMdMaxSessionNumber)
+            {
+                return 0;
+            }
+            at += digits;
+            return value;
+        }
+
+        // The chain list's INTRO paragraph (MdFindSessionChain): top-level, not raw HTML, its first run the
+        // bold "Session chain" — ChainBlock writes "**Session chain**, oldest first (…):". Never throws.
+        bool IsChainIntro(const MdBlock& block) noexcept
+        {
+            return block.kind == MdBlockKind::Paragraph && !block.rawHtml && block.containers.empty() && !block.runs.empty() &&
+                   (block.runs[0].style & kMdBold) != 0 && block.runs[0].text == L"Session chain";
+        }
+    }
+
+    size_t MdSessionHeadingNumber(const MdBlock& block) noexcept
+    {
+        if (block.kind != MdBlockKind::Heading || !block.containers.empty() || block.runs.empty())
+        {
+            return 0;
+        }
+        // "Session N of M" sits wholly in the FIRST run: the short session id after it is a code span — a run
+        // of its own.
+        const std::wstring_view text{ block.runs[0].text };
+        if ((block.runs[0].style & (kMdCode | kMdLink)) != 0 || !TextHasAt(text, 0, kSessionHeadingStart))
+        {
+            return 0;
+        }
+        size_t at = kSessionHeadingStart.size();
+        const size_t session = ReadSessionNumber(text, at);
+        if (session == 0 || !TextHasAt(text, at, kSessionHeadingOf))
+        {
+            return 0;
+        }
+        at += kSessionHeadingOf.size();
+        return ReadSessionNumber(text, at) == 0 ? 0 : session;
+    }
+
+    std::vector<MdSessionRef> MdFindSessionRefs(const MdBlock& block) noexcept
+    {
+        std::vector<MdSessionRef> refs;
+        try
+        {
+            bool inTitle = false; // inside a “…” title — carried across runs, since a title may hold a code span
+            for (size_t r = 0; r < block.runs.size(); ++r)
+            {
+                const MdRun& run = block.runs[r];
+                if ((run.style & (kMdCode | kMdLink)) != 0)
+                {
+                    continue; // a session id or a URL is never a mention
+                }
+                const std::wstring_view text{ run.text };
+                for (size_t i = 0; i < text.size(); ++i)
+                {
+                    const wchar_t ch = text[i];
+                    if (ch == kTitleOpen)
+                    {
+                        inTitle = true;
+                        continue;
+                    }
+                    if (ch == kTitleClose)
+                    {
+                        inTitle = false;
+                        continue;
+                    }
+                    // The cheap rejections first: nearly every unit is not an 's' that starts a word. The
+                    // start of a run counts as a word start (a run boundary is a style change, and a row's
+                    // mentions follow a space, a dash or the row's start).
+                    if (inTitle || ch != L's' || (i > 0 && (iswalnum(text[i - 1]) || text[i - 1] == L'_')))
+                    {
+                        continue;
+                    }
+                    if (!TextHasAt(text, i, kSessionWord))
+                    {
+                        continue;
+                    }
+                    size_t at = i + kSessionWord.size();
+                    const size_t session = ReadSessionNumber(text, at);
+                    if (session == 0)
+                    {
+                        continue; // "this session", "session ids": the word without a number
+                    }
+                    refs.push_back(MdSessionRef{ r, i, at - i, session });
+                    i = at - 1; // resume after the number (the loop's ++i lands on the unit that follows it)
+                }
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery = the mentions found so far: the overlay links those and leaves the rest as
+            // plain text — the row as it read before links existed.
+            LogSwallowedException(L"MdFindSessionRefs");
+        }
+        return refs;
+    }
+
+    MdSessionChain MdFindSessionChain(const std::vector<MdBlock>& blocks) noexcept
+    {
+        MdSessionChain chain;
+        try
+        {
+            for (size_t i = 0; i < blocks.size(); ++i)
+            {
+                if (const size_t session = MdSessionHeadingNumber(blocks[i]); session > 0)
+                {
+                    if (chain.headings.size() <= session)
+                    {
+                        chain.headings.resize(session + 1, kMdNoBlock); // bounded: session <= kMdMaxSessionNumber
+                    }
+                    if (chain.headings[session] == kMdNoBlock)
+                    {
+                        chain.headings[session] = i; // a session's FIRST heading is where its links go
+                    }
+                    continue;
+                }
+                if (chain.end == 0 && i + 1 < blocks.size() && IsChainIntro(blocks[i]) && StartsTopLevelItem(blocks[i + 1]))
+                {
+                    // Every block of the list shares its OUTERMOST container's list id (as MdFindToolAreas reads
+                    // a list): the rows, and anything nested inside a row.
+                    const uint32_t listId = blocks[i + 1].containers[0].listId;
+                    size_t j = i + 1;
+                    while (j < blocks.size() && !blocks[j].containers.empty() && blocks[j].containers[0].kind == MdContainerKind::Item &&
+                           blocks[j].containers[0].listId == listId)
+                    {
+                        ++j;
+                    }
+                    chain.first = i + 1;
+                    chain.end = j;
+                    i = j - 1; // resume after the list (the loop's ++i lands on the block that ended it)
+                }
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery = what was found so far: links to the headings already seen work, a session
+            // whose heading was not reached yet simply gets no link.
+            LogSwallowedException(L"MdFindSessionChain");
+        }
+        return chain;
     }
 }

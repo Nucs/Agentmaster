@@ -34,6 +34,15 @@
 // it). A list with only Compact's own content (answers, compactions, an agent's messages) stays open, and
 // a "(no tool calls)" list becomes a one-line note.
 //
+// SESSION CHAIN LINKS: a transcript that continues earlier sessions (a fork, a plan restart) opens with
+// the "Session chain" list — "session 1 · <id> — started …", "session 2 · <id> — forked from session 1 …"
+// — and each session's part starts with a heading "Session N of M · …". Every "session N" in that list
+// is a hyperlink: a click scrolls session N's heading to the top of the view (_JumpToSession). The build
+// is time-sliced, so a click on a session whose heading is not built yet is remembered and done the
+// moment the heading exists. Only a session with a heading gets a link (a one-session chain has none).
+// The list, the headings and the mentions come from AgentMaster/MarkdownBlocks.h (MdFindSessionChain /
+// MdFindSessionRefs / MdSessionHeadingNumber), found off the UI thread with the parse.
+//
 // How it renders (the expensive part, all of it off the UI thread except the XAML itself):
 //   1. a pool thread renders the level — TranscriptTurns for a Claude transcript (the very text
 //      "Copy ▸ Transcript ▸ <level>" copies), the plain conversation readers for a Codex rollout —
@@ -237,6 +246,21 @@ namespace winrt::TerminalApp::implementation
             // hidden — a switch re-lays out only the level on screen, because a collapsed view can't be laid
             // out to find the reader's place again — and _SelectLevel catches it up when the level is shown.
             bool wrapLines = true;
+            // The level's session chain (MdFindSessionChain, found with the parse): which blocks form the
+            // "Session chain" list (their "session N" mentions become links) and which block holds each
+            // session's heading. Freed once the level is Done — the built links and sessionHeadings carry
+            // everything a click needs after that.
+            ::Agentmaster::MdSessionChain chain;
+            // The BUILT session headings, by session number (index 0 unused; null until built): what a chain
+            // link scrolls to (_JumpToSession). Kept for the view's life, so the links keep working after the
+            // build; released with the view (_ReleaseLevels).
+            std::vector<winrt::Windows::UI::Xaml::FrameworkElement> sessionHeadings;
+            // A chain link clicked before its heading was built (the build is time-sliced, and a session's
+            // heading can be thousands of blocks down): the session to scroll to the moment its heading
+            // exists (_Pump), 0 == none. A newer click replaces it; the end of the build drops it (the heading
+            // lay past the block cap and will never exist), and so does a switch to another level
+            // (_SelectLevel — the jump would otherwise fire when the reader comes back).
+            size_t pendingSessionJump = 0;
         };
 
         // What the background render hands the UI thread for one level.
@@ -251,14 +275,16 @@ namespace winrt::TerminalApp::implementation
             std::wstring message; // why there is nothing to show (blocks empty), or empty
             std::wstring path; // the transcript / rollout read, for the log ("" when none was found)
             std::vector<::Agentmaster::MdToolArea> areas; // the tool areas among `blocks` (MdFindToolAreas)
+            ::Agentmaster::MdSessionChain chain; // the Session chain list + the session headings among `blocks` (MdFindSessionChain)
         };
 
         // Build every piece of the overlay's XAML (Attach). Throws winrt::hresult_error on a XAML failure.
         void _BuildUi();
-        // Make `level` current: tab visuals, view visibility, bring its view up to the current line-wrap
-        // mode (_SyncWrapMode — a view laid out under the other mode re-lays out at once, keeping its
-        // passage), start its render or resume its build, and (focusBody) move keyboard focus into its
-        // scroll view on the next tick.
+        // Make `level` current: drop the left level's pending session jump (it would fire when the reader
+        // comes back), tab visuals, view visibility, bring its view up to the current line-wrap mode
+        // (_SyncWrapMode — a view laid out under the other mode re-lays out at once, keeping its passage),
+        // start its render or resume its build, and (focusBody) move keyboard focus into its scroll view on
+        // the next tick.
         void _SelectLevel(int level, bool focusBody);
         // A tab button / digit key: select the level at TAB POSITION `position` (0 == the first tab,
         // Default), log the switch, and REMEMBER the level for the next open in any window
@@ -299,12 +325,15 @@ namespace winrt::TerminalApp::implementation
         void _ApplyLevelRender(int level, uint64_t generation, LevelRender&& render);
         // Queue one build slice (Low priority), unless one is already queued.
         void _SchedulePump();
-        // One build slice: turn blocks of the CURRENT level into XAML for ~kSliceBudget, then queue the
-        // next slice if blocks remain. Stale (`generation` mismatch) or closed: does nothing.
+        // One build slice: turn blocks of the CURRENT level into XAML for ~kSliceBudget, do the level's
+        // pending session jump once its heading exists (a chain link clicked before the build reached it),
+        // then queue the next slice if blocks remain. Stale (`generation` mismatch) or closed: does nothing.
         void _Pump(uint64_t generation);
         // Build the level's next block (view.built) — or, at the start of a tool area, its fold row first
         // (then the block goes into the fold's panel), or for an empty area its one-line note (skipping
-        // the "(no tool calls)" item) — and advance view.built past what was built.
+        // the "(no tool calls)" item) — and advance view.built past what was built. A block of the Session
+        // chain list gets its "session N" links (only for sessions with a heading in this level), and a
+        // session heading is recorded in view.sessionHeadings for those links.
         void _BuildNext(LevelView& view);
         // Start a folded tool area: append its summary row (a button: chevron + MdToolAreaSummary) and
         // the panel its blocks go into (Collapsed unless the level's expandAll is on) to the level's
@@ -360,7 +389,8 @@ namespace winrt::TerminalApp::implementation
         // the view on screen has already switched.
         // Parameters: wrap — the state just chosen (true == long lines wrap).
         static void _RememberWrapLines(bool wrap) noexcept;
-        // The level ran out of blocks: add the closing notes (cut / failed), free the blocks, mark Done.
+        // The level ran out of blocks: add the closing notes (cut / failed), free the blocks, the areas and
+        // the chain, drop a pending session jump whose heading never came (cut by the block cap), mark Done.
         void _FinishLevel(LevelView& view);
         // Append one built element to the level's current chunk (opening a new chunk when full).
         void _AppendElement(LevelView& view, const winrt::Windows::UI::Xaml::UIElement& element);
@@ -369,9 +399,42 @@ namespace winrt::TerminalApp::implementation
         void _AppendToFold(LevelView& view, const winrt::Windows::UI::Xaml::UIElement& element);
         // Build the XAML for one block, wrapped in its containers (quote bars, list indents + markers),
         // with the gap above it from MdGapAbove placed so shared quote bars run through it.
-        winrt::Windows::UI::Xaml::FrameworkElement _BuildBlockElement(LevelView& view, const ::Agentmaster::MdBlock& block, const ::Agentmaster::MdBlock* prev);
+        // Parameters: view / block / prev — the level, the block, the block drawn above it (nullptr for none);
+        //   sessionRefs — the block's "session N" mentions to draw as links (a Session chain row), or nullptr.
+        winrt::Windows::UI::Xaml::FrameworkElement _BuildBlockElement(LevelView& view, const ::Agentmaster::MdBlock& block, const ::Agentmaster::MdBlock* prev, const std::vector<::Agentmaster::MdSessionRef>* sessionRefs = nullptr);
         // Build the bare content of a block (TextBlock / code panel / rule), without containers.
-        winrt::Windows::UI::Xaml::FrameworkElement _BuildBlockContent(LevelView& view, const ::Agentmaster::MdBlock& block);
+        // Parameters: view / block — the level and the block; sessionRefs — as for _BuildBlockElement.
+        winrt::Windows::UI::Xaml::FrameworkElement _BuildBlockContent(LevelView& view, const ::Agentmaster::MdBlock& block, const std::vector<::Agentmaster::MdSessionRef>* sessionRefs = nullptr);
+        // Append run `source` of a Session chain row to `text` with its "session N" mentions as hyperlinks
+        // (each a Hyperlink whose Click calls _JumpToSession) and the text around them as plain runs in the
+        // run's own bold / italic style. A row is never a speaker label, so no label tint is involved.
+        // Parameters:
+        //   text     — the row's TextBlock.
+        //   source   — the run to append.
+        //   runIndex — its index in the block's runs (MdSessionRef::run).
+        //   refs     — the row's mentions (MdFindSessionRefs, filtered to sessions with a heading).
+        // Returns false, appending nothing, when no mention lies in this run — the caller then builds the
+        // run as usual. Throws winrt::hresult_error / std::bad_alloc (the build's catch contains it).
+        bool _AppendSessionLinks(const winrt::Windows::UI::Xaml::Controls::TextBlock& text, const ::Agentmaster::MdRun& source, size_t runIndex, const std::vector<::Agentmaster::MdSessionRef>& refs);
+        // A Session chain link was clicked: scroll the CURRENT level's heading of `session` to the top
+        // (_ScrollToSessionHeading) — or, when the build hasn't reached that heading yet, remember it as the
+        // level's pending jump, done the moment the heading is built (_Pump). Only the level on screen can be
+        // clicked, so the current level is always the link's level.
+        // Parameters: session — N of the clicked "session N" (1-based).
+        // Throws nothing in practice: the scroll contains its own failures (_ScrollToSessionHeading). Not
+        // marked noexcept only so the link's Click handler keeps its belt catch.
+        void _JumpToSession(size_t session);
+        // Scroll `view` so the built heading of `session` sits a few pixels below the top edge, then move
+        // keyboard focus to the scroll view: the clicked link, left focused and scrolled out of view, would
+        // otherwise be brought back into view — dragging the reader back to the list — the next time focus
+        // returns to it (the scroll view's BringIntoViewOnFocusChange; a window activation restores focus).
+        // The view is laid out first (UpdateLayout): a heading built in this very slice has no position yet,
+        // and ChangeView clamps to the current extent. No-op when the heading is not built.
+        // Parameters: view — the level (the current one); session — N.
+        // Never throws: a XAML failure is logged (Rule #18) and the view stays where it was. Contained here
+        // because a pending jump runs inside a build slice (_Pump), whose own catch would stop the level's
+        // build — a failed scroll must never cost the rest of the transcript.
+        void _ScrollToSessionHeading(LevelView& view, size_t session) noexcept;
         // A selectable, wrapping TextBlock with the shared text context menu — the base of every text
         // element the overlay draws.
         winrt::Windows::UI::Xaml::Controls::TextBlock _MakeTextBlock(double fontSize) const;
