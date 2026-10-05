@@ -370,6 +370,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // handler above arms it (_UpdateLayoutInitHook), and the Unloaded handler drops it again. XAML
         // calls every LayoutUpdated handler of the thread after every layout pass, controls outside
         // any tree included, so ~537 never-opened restored tabs ran a no-op handler on every pass.
+        // Agentmaster (UI_THREAD.md §10k): the start itself now happens in the panel's SizeChanged
+        // (_SwapChainSizeChanged -> _StartTerminalInLayoutPass), in the layout pass that first sizes it —
+        // which can come before Loaded, since XAML lays the tree out before every pointer hit test. The
+        // Loaded hook is the belt behind it.
 
         // Get our dispatcher. This will get us the same dispatcher as
         // TermControl::Dispatcher().
@@ -1736,8 +1740,33 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // and for a terminal that already started, so this costs a few property reads when it cannot
         // succeed, and the hook armed above then waits for the pass that sizes the panel. The hook is
         // armed FIRST, so a start that throws here is retried by the next layout pass.
+        // (Since 2026-10-05 that early pass normally starts the terminal itself, through the panel's
+        // SizeChanged — _StartTerminalInLayoutPass — so `wanted` above is false by now. This attempt and
+        // the hook remain the belt for a start that pass could not make: one that threw, or a panel whose
+        // size did not change, e.g. a control re-entering the tree at the size it last had.)
         if (_InitializeTerminal(_layoutInitReason))
         {
+            _layoutUpdatedRevoker.revoke();
+        }
+    }
+    CATCH_LOG()
+
+    // Agentmaster (the first-sizing start): see TermControl.h.
+    void TermControl::_StartTerminalInLayoutPass() noexcept
+    try
+    {
+        // The layout hook's conditions minus IsLoaded(): this runs in the pass that first sized the panel,
+        // which XAML may run before it raises Loaded — the very case this start exists for. A closing
+        // control must not start, and a detached one handed its core (and its start) to another window's
+        // control; Detach also nulls _interactivity, which the start uses.
+        if (_initializedTerminal || _IsClosing() || _detached)
+        {
+            return;
+        }
+        if (_InitializeTerminal(_layoutInitReason))
+        {
+            // Started. A hook that Loaded already armed has nothing left to do; a Loaded still pending
+            // finds the terminal started and arms none (_UpdateLayoutInitHook's `wanted`).
             _layoutUpdatedRevoker.revoke();
         }
     }
@@ -2789,11 +2818,31 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     // Method Description:
     // - Triggered when the swapchain changes size. We use this to resize the
     //      terminal buffers to match the new visible size.
+    // - Agentmaster (the first-sizing start): it also STARTS a terminal that has not started yet
+    //   (_StartTerminalInLayoutPass). The panel's first size change belongs to the layout pass that
+    //   makes this control hit-testable, and XAML runs such passes OUTSIDE its frame tick (before
+    //   every pointer hit test), where Loaded — and with it the layout hook — has not run yet. Starting
+    //   here means no input event can reach a terminal without a text buffer (the 2026-10-05 crash).
     // Arguments:
+    // - sender: the SwapChainPanel (unused)
     // - e: a SizeChangedEventArgs with the new dimensions of the SwapChainPanel
+    // Return Value:
+    // - <none>
+    // Exceptions:
+    // - whatever _core.SizeChanged or the automation peer throws for a started terminal (upstream,
+    //   unchanged). The start itself never throws: a failure is logged and retried by the layout hook.
     void TermControl::_SwapChainSizeChanged(const winrt::Windows::Foundation::IInspectable& /*sender*/,
                                             const SizeChangedEventArgs& e)
     {
+        // Agentmaster (the first-sizing start): a start reads the panel's new size itself, so a size
+        // change that started the terminal leaves nothing to resize, and one that could not start it
+        // (closing, detached, a failed start) has no core size to change. Either way, stop here.
+        if (!_initializedTerminal)
+        {
+            _StartTerminalInLayoutPass();
+            return;
+        }
+
         if (!_initializedTerminal || _IsClosing())
         {
             return;

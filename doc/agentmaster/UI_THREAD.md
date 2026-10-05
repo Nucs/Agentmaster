@@ -401,6 +401,8 @@ All in `TermControl.cpp` / `.h` (upstream code, marked Agentmaster), plus the #2
 - **The start on `Loaded`.** Whenever the hook is wanted, the method also tries the start at once. The
   layout pass that sizes the panel can run before XAML raises `Loaded` (the §4c code already notes this
   order), and a hook armed after that pass would wait for another pass that may not come.
+  ⚠ Not enough: a mouse move can come between that pass and `Loaded`, and the app then crashed (§10k). The
+  panel's `SizeChanged` now starts the terminal in that pass.
   `_InitializeTerminal` returns false for a zero size and for a terminal that already started, so the
   attempt is free when it cannot succeed. The hook is armed BEFORE the attempt, so a start that throws
   (logged) is retried by the next layout pass.
@@ -738,3 +740,68 @@ builds every card again.
   - In a stacksnap profile, no `_SidePanelRebuildCards` share proportional to the card count while one
     session works, and no `SessionRegistry::SnapshotLive` or `Get` under the side panel.
   - No `[sidepanel] … out of step` line in hooks.log.
+
+### 10k. #3 crashed the app: a mouse move reached a terminal that had not started (2026-10-05)
+
+Dev and release crashed the same way, 9 minutes apart. Both binaries were the first to include #3
+(071031fdf): dev 0.0.1.2 (`Debug-B`, built 16:11) and release 0.6.8.16 (`Release-B`).
+
+- **The crashes.** Both were the same access violation in `Microsoft.Terminal.Control.dll`.
+  - **Dev:** 21:26:03, `0xC0000005` reading `0xFA`, in `TextBuffer::GetSize` (`textBuffer.cpp:798`), then
+    `0xC000041D` at the same offset. Dumps: `%LOCALAPPDATA%\CrashDumps\Agentmaster.exe.60656.dmp` and
+    `Agentmaster.exe(1).60656.dmp`.
+  - **Release:** 21:34:48, reading `0xD8`, in `Terminal::GetHyperlinkIdAtViewportPosition` (`GetSize`
+    inlined). Dumps: `Agentmaster.exe.46304.dmp` and `(1)`.
+  - **The chain, the same in both:** `TermControl::_PointerMovedHandler` → `ControlInteractivity::PointerMoved`
+    → `ControlCore::SetHoveredCell` → `_updateHoveredCell` → `Terminal::GetHyperlinkIdAtViewportPosition` →
+    `_ConvertToBufferCell` → `_activeBuffer().GetSize()`. `_mainBuffer` was null: `Terminal::Create` had not
+    run, because `ControlCore::Initialize` had not run.
+  - **When:** each came less than 0.5 s after a fork. Dev logged `[nav] fork-managed-done new=f0ffd249` at
+    21:26:03.300; release logged `new=a98649d6` at 21:34:48.458.
+- **What the dump shows** (`TermControl` read from the dev dump: `this` from `_PointerMovedHandler`'s spill
+  slot, member offsets from its PDB): `_initializedTerminal = 0`, and `_layoutUpdatedRevoker` empty (no
+  hook armed). So `Loaded` had never run on this control. Yet the control was laid out and hit-testable,
+  since it received the `PointerMoved`.
+- **Why, read off the WinUI 3 source** (the lifted system XAML):
+  - XAML raises `Loaded` only inside its frame tick: `CCoreServices::NWDrawTree` calls
+    `CEventManager::RaiseLoadedEvent` right after the tick's layout pass.
+  - XAML also runs layout passes OUTSIDE the tick: every hit test starts with one
+    (`CUIElement::BoundsTestEntry`: "TODO: HitTest: Consider leaving layout stale and only updating layout
+    during Tick" → `UpdateLayout()`). Our own `UpdateLayout()` calls are more such passes.
+  - So the first mouse move processed between a new tab's content swap and the next tick ran a layout pass
+    that sized the new terminal and made it hit-testable. That pass started nothing, because #3 starts the
+    terminal only after `Loaded`. The same input event then delivered `PointerMoved` to a terminal with no
+    text buffer.
+  - A fork is a slow handler (~0.2 s in the dev log): mouse moves queue up behind it and are processed
+    before the next tick.
+  - Upstream's construction-time `LayoutUpdated` hook was immune: `CLayoutManager::UpdateLayout` raises
+    `SizeChanged` and `LayoutUpdated` in every pass, hit-test passes included, so the terminal started
+    inside the pass that made it hit-testable.
+- **Fix** (`TermControl.cpp` / `.h`, `ControlCore.cpp`):
+  - **The start, at the first size.** `_SwapChainSizeChanged` starts a terminal that has not started
+    (`_StartTerminalInLayoutPass`): the panel's `SizeChanged` fires in the very pass that first sizes it, a
+    hit-test pass included. The conditions are the hook's, without `IsLoaded()`: not started, not closing,
+    not detached. It performs `_layoutInitReason`, like the hook. `SizeChanged` is raised per element, and
+    only for an element whose size changed, so the never-shown restored tabs keep #3's saving: a control
+    outside the tree is never laid out.
+  - **The start runs inside a layout pass**, as upstream's always did. The connection starts there, and
+    `Initialized` is raised there. The renderer starts suspended until `Loaded` reports the control on screen
+    (`_UpdateRenderingSuspension`, §4c).
+  - **The hook stays as the belt.** `_UpdateLayoutInitHook` (`Loaded`) and its `LayoutUpdated` hook retry
+    a start the first pass could not make: one that threw, or a control that re-entered the tree at its old
+    size (no `SizeChanged`).
+  - **A belt at the crash site.** `ControlCore::_updateHoveredCell` does nothing until `Initialize` has built
+    the buffer, like the other `_initializedTerminal`-guarded methods of `ControlCore`. A hover over a
+    terminal whose start failed then does nothing.
+- **Checked without a build:** `TermControl.cpp` and `ControlCore.cpp` pass `cl /Zs` with the last dev
+  build's recorded command lines against its PCH (`Q:\tmp\agentmaster-dev-build\Microsoft.Terminal.Control.Lib`).
+  Negative controls (an undeclared name in each new block) fail with C2065 at exactly those lines.
+- **NOT BUILT.** Check after the build, on dev:
+  - Fork a session from a tab's context menu, and keep moving the mouse over the terminal area while the
+    new tab opens. Do this 10 times. The app must not crash. The fork's terminal must draw, and its claude
+    must start.
+  - Also: Open New Session Here, Ctrl+Shift+D, a plain new tab, and the first visit of a restored tab, each
+    with the mouse moving over the terminal area.
+  - Repeat the §10d check list: Activate Tab, Activate All, a split pane, zoom, tear-out and dock
+    (Reattach), Deactivate and reopen, a window restore.
+  - In a stacksnap profile, `TermControl` frames must still be absent from the `LayoutUpdated` raise.

@@ -1174,8 +1174,30 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         _updateHoveredCell(std::nullopt);
     }
 
+    // Method description:
+    // - The shared body of SetHoveredCell / ClearHoveredCell: records the hovered cell, looks up the
+    //   hyperlink under it, and repaints + raises HoveredHyperlinkChanged when the hovered link changed.
+    // - Agentmaster (UI_THREAD.md §10k): a no-op until Initialize has built the terminal's text buffer.
+    //   The lookup reads the active buffer, and before Initialize there is none — reading it was the
+    //   2026-10-05 crash (TextBuffer::GetSize on a null buffer). A hover over a terminal that has not
+    //   started records nothing, so the first move after the start updates the hover normally.
+    // Arguments:
+    // - terminalPosition: the hovered cell, relative to the viewport; nullopt when the pointer left the
+    //   terminal (ClearHoveredCell).
+    // Return Value:
+    // - <none>
+    // Exceptions:
+    // - whatever the hyperlink lookup, the renderer or a HoveredHyperlinkChanged handler throws
+    //   (upstream behavior, unchanged); none before Initialize.
     void ControlCore::_updateHoveredCell(const std::optional<til::point> terminalPosition)
     {
+        // Agentmaster (UI_THREAD.md §10k): the belt behind TermControl's first-sizing start — a start that
+        // failed leaves a terminal on screen with no buffer, and the pointer reaches it on every move.
+        if (!_initializedTerminal.load(std::memory_order_relaxed))
+        {
+            return;
+        }
+
         if (terminalPosition == _lastHoveredCell)
         {
             return;

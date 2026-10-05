@@ -354,7 +354,9 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         // Agentmaster (UI_THREAD.md §10a #3): the SwapChainPanel's LayoutUpdated subscription that starts
         // this terminal on its first non-zero layout. Held ONLY while the control is loaded and not yet
-        // initialized (_UpdateLayoutInitHook) — no longer from construction until the first start.
+        // initialized (_UpdateLayoutInitHook) — no longer from construction until the first start. Since
+        // 2026-10-05 it is the BELT: the panel's SizeChanged starts the terminal in the pass that first
+        // sizes it, Loaded or not (_StartTerminalInLayoutPass, UI_THREAD.md §10k).
         winrt::Windows::UI::Xaml::Controls::SwapChainPanel::LayoutUpdated_revoker _layoutUpdatedRevoker;
         winrt::hstring _restorePath;
         bool _showMarksInScrollbar{ false };
@@ -441,7 +443,32 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // Never throws (it runs from XAML event handlers): a failed read, subscribe or start is logged.
         // The hook is armed BEFORE the immediate start, so a start that throws is retried by the next
         // layout pass, exactly as the hook-only path always did.
+        // ⚠ Not enough on its own (the 2026-10-05 crash, UI_THREAD.md §10k): XAML raises Loaded only inside
+        // its frame tick, but it also runs layout passes OUTSIDE the tick — one before EVERY pointer hit
+        // test (CUIElement::BoundsTestEntry) — and such a pass makes the control hit-testable while Loaded
+        // is still pending. _StartTerminalInLayoutPass covers that pass; this hook is the belt behind it.
         void _UpdateLayoutInitHook() noexcept;
+        // Agentmaster (the first-sizing start, UI_THREAD.md §10k): start this terminal in the layout pass
+        // that first gives its SwapChainPanel a size — called from the panel's SizeChanged
+        // (_SwapChainSizeChanged), which XAML raises inside EVERY layout pass, its frame tick's and the
+        // ones it runs outside the tick, before every pointer hit test. That outside pass is what made the
+        // 2026-10-05 crash possible: 071031fdf (§10a #3) moved the start to Loaded, which XAML raises only
+        // in the tick, so a mouse move processed between a new tab's content swap and the next tick laid
+        // the new control out, hit it, and delivered PointerMoved to a terminal with no text buffer
+        // (TextBuffer::GetSize on a null buffer, via the hyperlink hover lookup). The construction-time
+        // LayoutUpdated hook of upstream started the terminal inside that same pass; SizeChanged restores
+        // the guarantee per element, so the never-shown restored tabs keep their §10a #3 saving (a
+        // control outside the tree is never laid out, so it gets no SizeChanged).
+        // Conditions: the terminal has not started, the control is not closing, and it is not detached
+        // (the core then belongs to another window's control). Deliberately NOT IsLoaded(): Loaded is
+        // still pending in exactly the pass this covers. It performs _layoutInitReason, like the hook.
+        // The start runs inside a XAML layout pass, as upstream's always did (in LayoutUpdated): the
+        // connection starts and Initialized is raised there, and the renderer starts suspended until
+        // Loaded reports the control on screen (_UpdateRenderingSuspension). A start in a pass that runs
+        // before the panel's final size self-corrects through the next SizeChanged (_core.SizeChanged).
+        // No parameters. Returns nothing. Never throws (it runs from a XAML event handler): a failed start
+        // is logged (CATCH_LOG), and the Loaded attempt and the layout hook retry it.
+        void _StartTerminalInLayoutPass() noexcept;
         // Agentmaster (UI_THREAD.md §10a #3): the start the layout hook performs. Create for a new
         // control (build the core, then start its connection); Reattach after _initializeForAttach (the
         // core came from another window's control and usually only needs a resize). A member, read at
