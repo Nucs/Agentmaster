@@ -793,6 +793,25 @@ Dev and release crashed the same way, 9 minutes apart. Both binaries were the fi
   - **A belt at the crash site.** `ControlCore::_updateHoveredCell` does nothing until `Initialize` has built
     the buffer, like the other `_initializedTerminal`-guarded methods of `ControlCore`. A hover over a
     terminal whose start failed then does nothing.
+  - **The input gate** (`TermControl.cpp`, a later commit the same evening). The hover was not the only path.
+    Every mouse path through `ControlInteractivity` reads the same missing buffer, and a terminal whose start
+    failed stays hit-testable. Examples: a start that threw, or a pane narrower than its padding (the
+    pointer `Grid` has a size, the `SwapChainPanel` has none, so `_InitializeTerminal` refuses).
+    - **Press:** the first step, `GetHyperlink` → `GetHyperlinkAtBufferPosition`, reads `_activeBuffer()`.
+      Every click would crash, not only a Ctrl+click.
+    - **Wheel and scroll bar:** the scroll ends in `Terminal::UserScrollViewport` →
+      `_activeBuffer().TriggerScroll()`. The scroll bar keeps its XAML `Maximum="1"` until the start resets
+      it, so one click on its arrow is enough.
+    - So `_PointerPressedHandler`, `_PointerMovedHandler`, `_PointerReleasedHandler`, `_MouseWheelHandler`,
+      `OnMouseWheel` (AppHost's GH#979 wheel, which bypasses `_MouseWheelHandler`) and
+      `_ScrollbarChangeHandler` forward nothing to `ControlInteractivity` while `_initializedTerminal` is
+      false.
+    - **What still runs:** a press still takes the focus and the pointer capture. The release still releases
+      the capture and stops auto-scroll. The cursor restore and focus-follows-mouse still run.
+    - **Not gated:** keys and characters. `Terminal::SendKeyEvent` reads no buffer, `SendCharEvent` checks
+      `_mainBuffer` for null, and an unstarted `ConptyConnection::WriteInput` drops the input.
+    - Checked like the rest: `cl /Zs` passes, and a negative control (an undeclared name in each of the six
+      gate blocks) fails with C2065 at exactly those six lines.
 - **Checked without a build:** `TermControl.cpp` and `ControlCore.cpp` pass `cl /Zs` with the last dev
   build's recorded command lines against its PCH (`Q:\tmp\agentmaster-dev-build\Microsoft.Terminal.Control.Lib`).
   Negative controls (an undeclared name in each new block) fail with C2065 at exactly those lines.
@@ -805,3 +824,5 @@ Dev and release crashed the same way, 9 minutes apart. Both binaries were the fi
   - Repeat the §10d check list: Activate Tab, Activate All, a split pane, zoom, tear-out and dock
     (Reattach), Deactivate and reopen, a window restore.
   - In a stacksnap profile, `TermControl` frames must still be absent from the `LayoutUpdated` raise.
+  - The input gate, on a started terminal: click, drag a selection, Ctrl+click a link, the wheel, Ctrl+wheel
+    zoom, a scroll-bar drag, and a wheel over an INACTIVE window (the GH#979 path). Each must work as before.

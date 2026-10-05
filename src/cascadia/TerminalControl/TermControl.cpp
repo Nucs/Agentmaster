@@ -2295,9 +2295,21 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
     // Method Description:
     // - handle a mouse click event. Begin selection process.
+    // - Agentmaster (UI_THREAD.md §10k, the input gate): a press on a terminal that has not started still
+    //   takes the pointer capture and the keyboard focus, but it is NOT forwarded to ControlInteractivity.
+    //   Its first step (the Ctrl+click hyperlink lookup, GetHyperlink) reads the text buffer, which does not
+    //   exist before ControlCore::Initialize — the same null-buffer read as the 2026-10-05 hover crash.
+    //   _SwapChainSizeChanged normally starts the terminal in the very hit-test layout pass that delivers
+    //   this press; the gate covers a start that pass could not make (one that threw, a panel with no size
+    //   inside a hit-testable pane, a control that re-entered the tree at its old size).
     // Arguments:
     // - sender: the XAML element responding to the pointer input
     // - args: event data
+    // Return Value:
+    // - <none>
+    // Exceptions:
+    // - whatever the pointer capture, the focus change or ControlInteractivity throws for a started
+    //   terminal (upstream behavior, unchanged); the gate itself adds none.
     void TermControl::_PointerPressedHandler(const Windows::Foundation::IInspectable& sender,
                                              const Input::PointerRoutedEventArgs& args)
     {
@@ -2323,6 +2335,17 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         if (!_focused || (_searchBox && _searchBox->ContainsFocus()))
         {
             Focus(FocusState::Pointer);
+        }
+
+        // Agentmaster (UI_THREAD.md §10k, the input gate): nothing below may run before the terminal has a
+        // text buffer. The focus above is kept on purpose — what the user types after this click goes to
+        // this terminal once it starts. The press is NOT recorded as in-bounds either: no selection drag or
+        // auto-scroll may grow from a press the terminal never saw. The capture taken above is released by
+        // _PointerReleasedHandler, which runs whether or not the terminal has started.
+        if (!_initializedTerminal)
+        {
+            args.Handled(true);
+            return;
         }
 
         // Mark that this pointer event actually started within our bounds.
@@ -2353,9 +2376,20 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
     // Method Description:
     // - handle a mouse moved event. Specifically handling mouse drag to update selection process.
+    // - Agentmaster (UI_THREAD.md §10k, the input gate): on a terminal that has not started, only the
+    //   pointer-cursor and focus-follows-mouse work runs; the move is NOT forwarded to ControlInteractivity.
+    //   This is the path of the 2026-10-05 crash (the hover hyperlink lookup read a null text buffer).
+    //   ControlCore::_updateHoveredCell now refuses that read itself; the gate keeps the whole of
+    //   ControlInteractivity (hover, selection drag, VT mouse, touch scroll) away from a terminal with no
+    //   buffer, the same rule as the press, release, wheel and scroll-bar handlers.
     // Arguments:
     // - sender: not used
     // - args: event data
+    // Return Value:
+    // - <none>
+    // Exceptions:
+    // - whatever ControlInteractivity or the auto-scroll throws for a started terminal (upstream behavior,
+    //   unchanged); the gate itself adds none.
     void TermControl::_PointerMovedHandler(const Windows::Foundation::IInspectable& /*sender*/,
                                            const Input::PointerRoutedEventArgs& args)
     {
@@ -2378,6 +2412,15 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         if (!_focused && _core.Settings().FocusFollowMouse())
         {
             FocusFollowMouseRequested.raise(*this, nullptr);
+        }
+
+        // Agentmaster (UI_THREAD.md §10k, the input gate): everything below reaches the terminal's text
+        // buffer, which does not exist before ControlCore::Initialize. Handled like a forwarded move, so the
+        // move does not bubble to the pane or tab behind the terminal.
+        if (!_initializedTerminal)
+        {
+            args.Handled(true);
+            return;
         }
 
         if (type == Windows::Devices::Input::PointerDeviceType::Mouse ||
@@ -2437,9 +2480,18 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     // Method Description:
     // - Event handler for the PointerReleased event. We use this to de-anchor
     //   touch events, to stop scrolling via touch.
+    // - Agentmaster (UI_THREAD.md §10k, the input gate): on a terminal that has not started, the release
+    //   still clears the in-bounds flag, releases the pointer capture the press took, and stops any
+    //   auto-scroll, but it is NOT forwarded to ControlInteractivity (copy-on-select, VT mouse, touch),
+    //   which works on the text buffer that does not exist before ControlCore::Initialize.
     // Arguments:
     // - sender: the XAML element responding to the pointer input
     // - args: event data
+    // Return Value:
+    // - <none>
+    // Exceptions:
+    // - whatever the capture release or ControlInteractivity throws for a started terminal (upstream
+    //   behavior, unchanged); the gate itself adds none.
     void TermControl::_PointerReleasedHandler(const Windows::Foundation::IInspectable& sender,
                                               const Input::PointerRoutedEventArgs& args)
     {
@@ -2457,6 +2509,17 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         const auto type = ptr.PointerDeviceType();
 
         _ReleasePointerCapture(sender, args);
+
+        // Agentmaster (UI_THREAD.md §10k, the input gate): the capture is released above in every case, so a
+        // press taken while the terminal had not started never leaves the pointer captured. The auto-scroll
+        // stop mirrors the end of this handler (an auto-scroll cannot start before the terminal does, but
+        // the release keeps its one job of always stopping it).
+        if (!_initializedTerminal)
+        {
+            _TryStopAutoScroll(ptr.PointerId());
+            args.Handled(true);
+            return;
+        }
 
         if (type == Windows::Devices::Input::PointerDeviceType::Mouse ||
             type == Windows::Devices::Input::PointerDeviceType::Pen)
@@ -2503,8 +2566,20 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     //   pressed, different actions will take place.
     // - Primarily just takes the data from the PointerRoutedEventArgs and uses
     //   it to call _DoMouseWheel, see _DoMouseWheel for more details.
+    // - Agentmaster (UI_THREAD.md §10k, the input gate): a wheel over a terminal that has not started is
+    //   left unhandled (it may still scroll whatever is behind it). The wheel's scroll ends in
+    //   Terminal::UserScrollViewport -> _activeBuffer().TriggerScroll(), on a text buffer that does not
+    //   exist before ControlCore::Initialize. (Its Ctrl zoom and Ctrl+Shift opacity would survive — both
+    //   check for the render engine — but there is nothing on screen to zoom yet, so the whole wheel waits
+    //   for the start.)
     // Arguments:
+    // - sender: unused
     // - args: the event args containing information about t`he mouse wheel event.
+    // Return Value:
+    // - <none>
+    // Exceptions:
+    // - whatever ControlInteractivity::MouseWheel throws for a started terminal (upstream behavior,
+    //   unchanged); the gate itself adds none.
     void TermControl::_MouseWheelHandler(const Windows::Foundation::IInspectable& /*sender*/,
                                          const Input::PointerRoutedEventArgs& args)
     {
@@ -2514,6 +2589,13 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
 
         RestorePointerCursor.raise(*this, nullptr);
+
+        // Agentmaster (UI_THREAD.md §10k, the input gate): nothing to scroll, zoom or report yet. Not marked
+        // handled, exactly like a wheel ControlInteractivity declined.
+        if (!_initializedTerminal)
+        {
+            return;
+        }
 
         const auto point = args.GetCurrentPoint(*this);
         auto delta = point.Properties().MouseWheelDelta();
@@ -2534,17 +2616,35 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     // - Manually handle a scrolling event. This is used to help support
     //   scrolling on devices where the touchpad doesn't correctly handle
     //   scrolling inactive windows.
+    // - Agentmaster (UI_THREAD.md §10k, the input gate): AppHost::_WindowMouseWheeled calls this directly
+    //   from the window's WM_MOUSEWHEEL (GH#979), for each control under the cursor, so it never passes
+    //   through _MouseWheelHandler and needs that handler's gate on its own: a terminal that has not
+    //   started declines the wheel (returns false), and AppHost offers it to the next element. The
+    //   caller's CATCH_LOG would not help here: a null-buffer read is an access violation, not a C++
+    //   exception.
     // Arguments:
     // - location: the location of the mouse during this event. This location is
     //   relative to the origin of the control
     // - delta: the mouse wheel delta that triggered this event.
-    // - state: the state for each of the mouse buttons individually (pressed/unpressed)
+    // - leftButtonDown / midButtonDown / rightButtonDown: the state for each of the mouse buttons
+    //   individually (pressed/unpressed)
+    // Return Value:
+    // - true when the terminal handled the wheel; false when it declined it, or has not started yet.
+    // Exceptions:
+    // - whatever ControlInteractivity::MouseWheel throws for a started terminal (upstream behavior,
+    //   unchanged); the gate itself adds none.
     bool TermControl::OnMouseWheel(const Windows::Foundation::Point location,
                                    const Core::Point delta,
                                    const bool leftButtonDown,
                                    const bool midButtonDown,
                                    const bool rightButtonDown)
     {
+        // Agentmaster (UI_THREAD.md §10k, the input gate): see the method comment — no text buffer yet.
+        if (!_initializedTerminal)
+        {
+            return false;
+        }
+
         const auto modifiers = _GetPressedModifierKeys();
 
         Control::MouseButtonState state{};
@@ -2591,6 +2691,21 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         _core.AdjustFontSize(fontSizeDelta);
     }
 
+    // Method Description:
+    // - Scrolls the terminal to the scroll bar's new value, when the user moved the scroll bar.
+    // - Agentmaster (UI_THREAD.md §10k, the input gate): ignored on a terminal that has not started. Until
+    //   _InitializeTerminalWithSize resets it, the scroll bar keeps its XAML values (Maximum 1, SmallChange
+    //   1), so a click on its arrow moves it to 1, and the scroll it requests ends in
+    //   Terminal::UserScrollViewport -> _activeBuffer().TriggerScroll() on a buffer that does not exist yet.
+    //   The start itself resets the scroll bar (Maximum, Minimum, Value 0), so nothing is lost.
+    // Arguments:
+    // - sender: unused
+    // - args: the scroll bar's old and new value
+    // Return Value:
+    // - <none>
+    // Exceptions:
+    // - whatever ControlInteractivity::UpdateScrollbar throws for a started terminal (upstream behavior,
+    //   unchanged); the gate itself adds none.
     void TermControl::_ScrollbarChangeHandler(const Windows::Foundation::IInspectable& /*sender*/,
                                               const Controls::Primitives::RangeBaseValueChangedEventArgs& args)
     {
@@ -2599,6 +2714,12 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             // The update comes from ourselves, more specifically from the
             // terminal. So we don't have to update the terminal because it
             // already knows.
+            return;
+        }
+
+        // Agentmaster (UI_THREAD.md §10k, the input gate): see the method comment — no text buffer yet.
+        if (!_initializedTerminal)
+        {
             return;
         }
 
