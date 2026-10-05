@@ -60,6 +60,17 @@ namespace winrt::TerminalApp::implementation
             request.codex = codex;
             request.codexRolloutId = codexRolloutId;
             request.title = title;
+            // Claude only: the fork link, read HERE — every menu (tab, session, badge, side panel) funnels
+            // through this function — so a fork with no messages yet shows the conversation it was forked
+            // from instead of "nothing to show". An external row's id is unknown to the registry (or names
+            // a record with no link), which leaves the field empty.
+            if (!codex && _sessionRegistry)
+            {
+                if (const auto info = _sessionRegistry->GetWithoutQueue(sessionId))
+                {
+                    request.forkParentId = info->forkParentId;
+                }
+            }
             const std::wstring originText{ origin };
             // DEFERRED one tick: every caller is a menu item's Click, and a closing MenuFlyout hands focus
             // back to its target as it goes — that hand-back must land BEFORE the overlay takes focus, or

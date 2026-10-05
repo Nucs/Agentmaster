@@ -1474,6 +1474,50 @@ try {
         return !ResolveClaudeTranscriptPath(sessionId).empty();
     }
 
+    ClaudeDisplayTranscript ResolveClaudeDisplayTranscript(std::wstring_view sessionId, std::wstring_view forkParentId) noexcept
+    {
+        ClaudeDisplayTranscript out;
+        try
+        {
+            out.path = ResolveClaudeTranscriptPath(sessionId);
+            // The session's OWN transcript wins; only a fork without one falls back to its source. The
+            // equality test is a belt: a record whose fork link names itself must not read as a fork.
+            if (out.path.empty() && !sessionId.empty() && !forkParentId.empty() && forkParentId != sessionId)
+            {
+                out.path = ResolveClaudeTranscriptPath(forkParentId);
+                if (!out.path.empty())
+                {
+                    out.forkSourceId = std::wstring{ forkParentId };
+                }
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: an empty result, which every caller shows as "nothing to show yet".
+            // clear() never throws, so the recovery itself cannot fail.
+            LogSwallowedException(L"ResolveClaudeDisplayTranscript");
+            out.path.clear();
+            out.forkSourceId.clear();
+        }
+        return out;
+    }
+
+    std::wstring ForkSourceTranscriptNote(std::wstring_view forkSourceId)
+    {
+        if (forkSourceId.empty())
+        {
+            return {};
+        }
+        // ONE all-italic paragraph, so the transcript overlay dims it like its other notes; no code span,
+        // which would split the italics into a second run style. The blank line ends the paragraph before
+        // the transcript's own first line (a heading or the Session chain intro). The wording names whose
+        // transcript follows and claims no more: a source that kept working after a RUNNING fork started
+        // has turns that fork does not hold (a dormant fork re-forks from the source's current transcript
+        // when it wakes, so for it the view is exact).
+        return L"*No messages in this fork yet. Below is the transcript of session " + ShortId(std::wstring{ forkSourceId }) +
+               L", the session it was forked from.*\n\n";
+    }
+
     std::wstring AgentmasterStateDir()
     {
         // CRITICAL: this path must resolve to the SAME real location for both this app

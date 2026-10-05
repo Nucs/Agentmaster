@@ -155,6 +155,66 @@ void TestSpawnBuilders()
         fs::remove_all(fs::path{ cfg }, ec);
     }
 
+    // ResolveClaudeDisplayTranscript + ForkSourceTranscriptNote (Agentmaster — the 2026-10-05 report: a fork
+    // with no messages yet showed NOTHING in Show Transcript and the summaries). A never-messaged fork has no
+    // transcript of its own, so the DISPLAY surfaces read its fork source's (flagged, so a text view can say
+    // so); the fork's own transcript wins the moment it exists; no link, a self-link, a gone source and an
+    // empty id read nothing. Stages a throwaway CLAUDE_CONFIG_DIR (ClaudeProjectsDir == <cfg>\projects, so the
+    // resolved paths compare exactly).
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const std::wstring cfg = (fs::temp_directory_path(ec) / (L"am-display-transcript-" + NewSessionId())).wstring();
+        wchar_t prevBuf[2048]{};
+        const DWORD prevN = ::GetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevBuf, 2048);
+        const std::wstring prevCfg{ prevBuf, prevN };
+        ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", cfg.c_str());
+        const std::wstring proj = cfg + L"\\projects\\K--work-api";
+        auto touch = [](const std::wstring& p) {
+            std::error_code e2;
+            fs::create_directories(fs::path{ p }.parent_path(), e2);
+            std::ofstream f{ fs::path{ p }, std::ios::binary };
+            f << "{}\n";
+        };
+
+        const std::wstring source = NewSessionId();
+        const std::wstring forkId = NewSessionId();
+        const std::wstring sourcePath = proj + L"\\" + source + L".jsonl";
+        touch(sourcePath); // the SOURCE conversation exists on disk; the fork has written nothing yet
+
+        // (a) a fork with no transcript of its own + a live source -> the source's transcript, flagged.
+        const auto a = ResolveClaudeDisplayTranscript(forkId, source);
+        CHECK(a.path == sourcePath, "display transcript of a never-messaged fork = its fork source's transcript");
+        CHECK(a.forkSourceId == source, "the fork-source fallback is flagged with the source id (a text view names it)");
+
+        // (b)-(e) nothing to fall back to -> an empty result (the views' 'nothing to show yet').
+        const auto b = ResolveClaudeDisplayTranscript(forkId, L"");
+        CHECK(b.path.empty() && b.forkSourceId.empty(), "no fork link -> no display transcript (no guessing)");
+        CHECK(ResolveClaudeDisplayTranscript(forkId, forkId).path.empty(), "a fork link naming the session itself is ignored");
+        CHECK(ResolveClaudeDisplayTranscript(forkId, NewSessionId()).path.empty(), "a fork whose source transcript is gone too -> nothing");
+        CHECK(ResolveClaudeDisplayTranscript(L"", source).path.empty(), "an empty session id -> nothing, even with a fork link");
+
+        // (f) the fork's first message creates its own transcript -> it wins, unflagged.
+        const std::wstring forkPath = proj + L"\\" + forkId + L".jsonl";
+        touch(forkPath);
+        const auto f = ResolveClaudeDisplayTranscript(forkId, source);
+        CHECK(f.path == forkPath && f.forkSourceId.empty(), "the fork's OWN transcript wins over the fork link once it exists");
+
+        // (g) an ordinary session: its own transcript, unflagged.
+        const auto g = ResolveClaudeDisplayTranscript(source, L"");
+        CHECK(g.path == sourcePath && g.forkSourceId.empty(), "an ordinary session's display transcript is its own");
+
+        // The note: ONE all-italic paragraph naming the source's short id, ended by a blank line.
+        const std::wstring note = ForkSourceTranscriptNote(source);
+        CHECK(note.size() > 4 && note.front() == L'*' && note.compare(note.size() - 3, 3, L"*\n\n") == 0, "the fork-source note is one italic paragraph ending in a blank line");
+        CHECK(note.find(L'\n') == note.size() - 2, "the fork-source note is a single line");
+        CHECK(note.find(source.substr(0, 8)) != std::wstring::npos && note.find(source) == std::wstring::npos, "the fork-source note names the source by its SHORT id");
+        CHECK(ForkSourceTranscriptNote(L"").empty(), "no source id -> no note");
+
+        ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevCfg.empty() ? nullptr : prevCfg.c_str());
+        fs::remove_all(fs::path{ cfg }, ec);
+    }
+
     // BuildClaudeSpawn fork id selection (Agentmaster — restoring a never-messaged fork). A GENUINE
     // fork mints a FRESH target id (!= the source); a RESTORE re-fork passes forkIntoSessionId so the
     // fork branches back into its EXISTING id (preserving identity across a restart instead of churning

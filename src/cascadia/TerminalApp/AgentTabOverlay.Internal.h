@@ -327,7 +327,10 @@ namespace
     // `followup` selects the "Transcript Followup" render (ReadConversationFollowupText — the
     // per-turn ❯ user + ● final-reply brief with its legend header, AgentCopyActions.h code 8)
     // instead of the classic whole-transcript "User:/Assistant:" text (code 5).
-    winrt::fire_and_forget CopyConversationAsync(winrt::Windows::System::DispatcherQueue disp, bool codex, std::wstring claudeId, std::wstring codexId, bool followup = false)
+    // `forkParentId` (Claude only; empty otherwise) is the session's fork source: a fork with no
+    // messages of its own yet has no transcript, so its source's is copied — the conversation the fork
+    // holds until its first message (ResolveClaudeDisplayTranscript). Plain text, so no note is added.
+    winrt::fire_and_forget CopyConversationAsync(winrt::Windows::System::DispatcherQueue disp, bool codex, std::wstring claudeId, std::wstring codexId, std::wstring forkParentId, bool followup = false)
     {
         // Agentmaster (contained): an exception escaping this fire_and_forget == winrt::terminate() ==
         // the whole app dies. ReadConversationText self-contains, but the glue (the whole-conversation
@@ -346,7 +349,8 @@ namespace
             }
             else
             {
-                path = ::Agentmaster::ResolveClaudeTranscriptPath(claudeId);
+                // The session's own transcript, else (a fork with no messages yet) its fork source's.
+                path = ::Agentmaster::ResolveClaudeDisplayTranscript(claudeId, forkParentId).path;
             }
             if (path.empty())
             {
@@ -880,7 +884,10 @@ namespace
     // ⏮ toggle governs only the panel — a copy loses nothing), each earlier session closed by a plain
     // "──── <full session id> ────" rule. `registry` feeds the recorded /clear + /handover links and the
     // earlier sessions' titles; null = on-disk links only.
-    winrt::fire_and_forget CopySummaryAsync(winrt::Windows::System::DispatcherQueue disp, bool codex, std::wstring claudeId, std::wstring codexId, std::wstring cwd, std::wstring resumeCmd, std::wstring glyph, std::wstring label, bool wrapNewlines, bool truncate, std::shared_ptr<::Agentmaster::SessionRegistry> registry)
+    // `forkParentId` (Claude only; empty otherwise) is the session's fork source: a fork with no messages
+    // of its own yet has no transcript, so its source's is summarized instead — exactly what the panel
+    // shows for it (_LoadSummaryAsync), so Copy Summary is no longer a silent dead click on a fresh fork.
+    winrt::fire_and_forget CopySummaryAsync(winrt::Windows::System::DispatcherQueue disp, bool codex, std::wstring claudeId, std::wstring codexId, std::wstring forkParentId, std::wstring cwd, std::wstring resumeCmd, std::wstring glyph, std::wstring label, bool wrapNewlines, bool truncate, std::shared_ptr<::Agentmaster::SessionRegistry> registry)
     {
         // Agentmaster (contained): an exception escaping this fire_and_forget == winrt::terminate() ==
         // the whole app dies. The heavy helpers (analyze / upstream walk / plan-file) self-contain now, but
@@ -903,7 +910,9 @@ namespace
         }
         else
         {
-            path = ::Agentmaster::ResolveClaudeTranscriptPath(claudeId);
+            // The session's own transcript, else (a fork with no messages yet) its fork source's — the
+            // panel's rule, so the copy matches what the panel shows.
+            path = ::Agentmaster::ResolveClaudeDisplayTranscript(claudeId, forkParentId).path;
         }
         if (path.empty())
         {

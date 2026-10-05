@@ -2580,7 +2580,9 @@ namespace winrt::TerminalApp::implementation
             {
                 slot.lastCheckMs = now;
                 const bool codex = (s.kind == ::Agentmaster::AgentKind::Codex);
-                _EnsureTabTooltipSummary(winrt::hstring{ sessionId }, codex, winrt::hstring{ s.codexSessionId }, winrt::hstring{ dir });
+                // The fork link (Claude only): a fork with no messages yet summarizes the conversation it was forked from.
+                _EnsureTabTooltipSummary(winrt::hstring{ sessionId }, codex, winrt::hstring{ s.codexSessionId },
+                                         winrt::hstring{ codex ? std::wstring{} : s.forkParentId }, winrt::hstring{ dir });
             }
         }
     }
@@ -2958,10 +2960,14 @@ namespace winrt::TerminalApp::implementation
     //   sessionId — the session to load (the cache + in-flight + waiter key).
     //   codex     — true for a managed Codex session (its rollout is read instead of a Claude transcript).
     //   codexId   — the Codex rollout uuid (SessionInfo::codexSessionId); ignored for Claude.
+    //   forkParentId — Claude only (empty otherwise): the session's fork source. A fork with no messages of
+    //               its own yet has no transcript, so the card summarizes its source's — what the summary
+    //               panel shows for it (ResolveClaudeDisplayTranscript). That path is never cached, so the
+    //               card switches to the fork's own transcript on the first hover after it appears.
     //   cwd       — the session's effective working dir (shown in the box's Dir line on a full render).
     // Never throws (a fire_and_forget must not: an escape is std::terminate) — the inner try contains the
     // background analyze, the outer one the UI-thread hop, and each waiter's re-host has its own catch.
-    winrt::fire_and_forget TerminalPage::_EnsureTabTooltipSummary(winrt::hstring sessionId, bool codex, winrt::hstring codexId, winrt::hstring cwd)
+    winrt::fire_and_forget TerminalPage::_EnsureTabTooltipSummary(winrt::hstring sessionId, bool codex, winrt::hstring codexId, winrt::hstring forkParentId, winrt::hstring cwd)
     {
         const std::wstring id{ sessionId };
         if (id.empty() || _tabTooltipSummaryInFlight.count(id))
@@ -3001,6 +3007,7 @@ namespace winrt::TerminalApp::implementation
             // follows the global toggle; only trimming is pinned ON here.)
             const bool truncate = true;
             const std::wstring codexUuid{ codexId };
+            const std::wstring forkParent{ forkParentId };
             const std::wstring dir{ cwd };
 
             co_await winrt::resume_background();
@@ -3009,12 +3016,22 @@ namespace winrt::TerminalApp::implementation
             int64_t mtime = 0;
             std::wstring body;
             bool rendered = false;
+            bool viaForkSource = false; // `path` is the fork SOURCE's transcript (this fork has none of its own yet)
             try
             {
                 if (path.empty())
                 {
-                    path = codex ? ::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), codexUuid)
-                                 : ::Agentmaster::ResolveClaudeTranscriptPath(id);
+                    if (codex)
+                    {
+                        path = ::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), codexUuid);
+                    }
+                    else
+                    {
+                        // The session's own transcript, else (a fork with no messages yet) its fork source's.
+                        auto display = ::Agentmaster::ResolveClaudeDisplayTranscript(id, forkParent);
+                        path = std::move(display.path);
+                        viaForkSource = !display.forkSourceId.empty();
+                    }
                 }
                 if (!path.empty())
                 {
@@ -3064,7 +3081,10 @@ namespace winrt::TerminalApp::implementation
             if (!path.empty())
             {
                 auto& slot = _tabTooltipSummary[id];
-                slot.path = path;
+                // A fork SOURCE's path is not cached: the next load re-resolves, so the card moves to the
+                // fork's own transcript as soon as its first message creates it. The mtime is still kept, so
+                // a re-resolve that finds the same unchanged source transcript skips the re-render.
+                slot.path = viaForkSource ? std::wstring{} : path;
                 slot.mtime = mtime;
                 if (rendered)
                 {

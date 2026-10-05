@@ -432,6 +432,14 @@ parts under `Previous session N` headers) held a stored `false` in every install
 after the last compaction. The copied `Summary` always carries the whole conversation, each separator as a
 plain `──── <full id> ────` rule.
 
+**A fork with no messages yet.** A `--fork-session` fork writes no transcript until its first message, so
+the panel summarizes its fork source's transcript (`SessionInfo::forkParentId`) — since 88cb5e415, and never
+caching that path, so the fork's own transcript takes over on the first reload after it appears. Since
+2026-10-05 every other summary of such a fork does the same through ONE resolver,
+`ResolveClaudeDisplayTranscript` (`ClaudeSpawn.h`): the copy menu's `Summary` (it used to copy nothing), the
+tab hover card (it showed no body) and the Agent Manager's Summary pane (it said "No messages recorded").
+The transcript views say so in a note; the summaries do not (TRANSCRIPT_OVERLAY.md §3e).
+
 ### 13f. Tab-strip status dot (companion, not the overlay)
 Independently of the in-terminal badge, every classified tab's header reads `[icon] ● <title>`: a
 state-colored `Ellipse` (thin black stroke) in `TabHeaderControl.xaml`'s indicator row — a managed

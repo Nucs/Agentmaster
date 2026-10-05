@@ -466,7 +466,12 @@ namespace winrt::TerminalApp::implementation
         // analyze+render; _RenderSummaryBox splits the box text into mono lines + full-width rules
         // (mirrors the Sessions page's SessAppendSummaryBox).
         void _RefreshSummaryTab();
-        void _LoadSummaryForSession(const std::wstring& id, const std::wstring& dir, int64_t mtime);
+        // `forkParentId` is the session's fork source (SessionInfo::forkParentId; empty for any other
+        // session): a fork with no messages of its own yet has no transcript, so its source's is summarized
+        // instead — what its summary panel shows (ResolveClaudeDisplayTranscript) — rather than "No messages
+        // recorded". The cache key stays (id, mtime): the fork's first message moves its last-activity
+        // stamp, which re-analyzes from the fork's own transcript.
+        void _LoadSummaryForSession(const std::wstring& id, const std::wstring& dir, const std::wstring& forkParentId, int64_t mtime);
         void _RenderSummaryBox(const std::wstring& text);
         void _OnSaveTemplate();
         void _OnApplyTemplate(bool toWholeDirectory);

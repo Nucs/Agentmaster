@@ -4,7 +4,8 @@ A session's conversation, rendered as Markdown, in a reading view laid over the 
 **written 2026-10-03, NOT BUILT** (no compile, no deploy — see §9 for the verification checklist). Same day,
 second pass: 85% wide, folded tool calls (§3b), the remembered level (§3a) — also not built; then 90% wide
 (third ask, same day, not built). 2026-10-05: the ↵ line-wrap toggle (§3c, fourth ask) — not built; then
-the Session chain links (§3d, fifth ask, same day) — not built.
+the Session chain links (§3d, fifth ask, same day) — not built; then a fork with no messages yet shows the
+transcript it was forked from (§3e, a sixth report, same day) — not built.
 
 ## 1. The ask (verbatim)
 
@@ -39,6 +40,12 @@ heading "Session 1 of 5 · 26c59294 · started Oct 01 21:25":
 
 > the sessions N in this list should be hyperlinks to viewing the title (session row as in the image appears
 > at the top when session 1 is clicked.
+
+And a sixth, a report (2026-10-05), about the release tab "sidemenu tooltip (fork) this one!" (session
+`1b114791`, a fork of `e897bda5` that had no message yet):
+
+> If I fork a session and don't send a prompt and try to see a summary (requires session id) or open Show
+> Transcript then nothing shows: "this one!" in the title so you can find the tab
 
 ## 2. Where it opens
 
@@ -226,11 +233,42 @@ A transcript that continues earlier sessions (a fork, a plan restart — `Transc
   goldens (no chain, no link), and 27 renders of 25 real chained transcripts (up to 5 sessions): every row
   whose session has a heading links its label, and nothing inside a title links.
 
+### 3e. A fork with no messages yet
+
+- **What was wrong**: `claude --resume <src> --fork-session --session-id <fork>` writes no `<fork>.jsonl`
+  until the fork's first message (CLAUDE.md Gotchas). The overlay resolved only the fork's own id, so it
+  said "Nothing to show yet — this session has not been prompted". Read-only check on the reported tab: the
+  record has `forkParentId: e897bda5…`, `projects\*\1b114791….jsonl` does not exist, and the source's
+  transcript does.
+- **Now**: the overlay renders the SOURCE's transcript under one dim italic line: *No messages in this fork
+  yet. Below is the transcript of session e897bda5, the session it was forked from.* Until its first
+  message, the fork holds that conversation.
+- **One resolver for every display surface**: `ResolveClaudeDisplayTranscript(id, forkParentId)`
+  (`AgentMaster/ClaudeSpawn.{h,cpp}`) returns the session's own transcript, else its fork source's, flagged
+  with the source id. The note is `ForkSourceTranscriptNote`. The same pair serves:
+  - **Copy ▸ Transcript ▸ <level>** (`CopyTranscriptTurnsAsync`): the same note in front, so Show and Copy
+    stay one text.
+  - **Copy ▸ Summary** (`CopySummaryAsync`), the older copy codes 5 / 8 (`CopyConversationAsync`), the
+    **Agent Manager's Summary pane** (`_LoadSummaryForSession`) and the **tab hover card**
+    (`_EnsureTabTooltipSummary`): no note — they summarize the source silently, as the per-tab / side-panel
+    summary panel has done since 88cb5e415.
+- **The fork link comes from the registry** (`SessionInfo::forkParentId`, kept until the fork's first
+  content-producing hook). The overlay reads it in `_ShowTranscriptOverlay`, the one function every menu
+  goes through; the copy menus and the summaries read it from the record they already hold.
+- **The fork's own transcript wins.** A ↻ Refresh re-resolves, so after the fork's first message it shows the
+  fork's own transcript. The hover card never caches a fallback path (the panel never did), so its next
+  hover switches too.
+- Claude only: a never-prompted Codex fork has no rollout either, but its source rollout id is not kept.
+- Logged on the existing lines: `[transcript] <sid8> show <Level>: … rendered in Xms from the fork source
+  <src8>'s transcript (this fork has no messages yet)`, and `… copy <level>: chars=N rendered in Xms from the
+  fork source <src8>'s transcript`.
+
 ## 4. Rendering
 
 1. **Off the UI thread** (`AgentTranscriptOverlay::_LoadLevelAsync`, holding only a weak reference): the
    level's text is exactly what **Copy ▸ Transcript ▸ <level>** copies — `RenderTranscriptTurnsFile` for a
-   Claude transcript (local time), and for a Codex rollout `ReadConversationFollowupText` (Minimal /
+   Claude transcript (local time; for a fork with no messages yet, its source's transcript under the §3e
+   note), and for a Codex rollout `ReadConversationFollowupText` (Minimal /
    Compact) or `ReadConversationText` (Default / Full / Max). Then `ParseMarkdownBlocks`
    (`AgentMaster/MarkdownBlocks.{h,cpp}`, cmark) flattens it into render blocks, `MdFindToolAreas`
    marks the tool-call lists to fold (§3b), and `MdFindSessionChain` finds the Session chain list and the
@@ -293,7 +331,9 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   `esc`, `click outside`, `close button`, `tab switch`, `agent manager page`, `tab move`, `tab drag`,
   `tab moved to another window`.
 - `[transcript] <sid8> show <Level>: chars=N blocks=M rendered in Xms` (+ `(capped)` /
-  `(parse failed part-way)`), or `: nothing to show (<why>) path=…`.
+  `(parse failed part-way)`, + ` from the fork source <src8>'s transcript (this fork has no messages yet)`
+  for §3e), or `: nothing to show (<why>) path=…`. A Copy ▸ Transcript of such a fork ends its
+  `[transcript] <sid8> copy <level>: chars=N …` line with ` from the fork source <src8>'s transcript`.
 - A level pick is the `transcript-level` line (the remembered-level write adds no line; a failed write is
   an `[exc]` line). Opening / closing a fold, Expand all, the ↵ line-wrap toggle and a Session chain link
   click are pure view actions and are deliberately unlogged (the CLAUDE.md logging convention); a failed
@@ -309,7 +349,14 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   no PCH). cmark comes from the vcpkg manifest's `terminal` feature (UIMarkdown's port) and is auto-linked
   into TerminalApp.dll.
 - `src/cascadia/TerminalApp/AgentTranscriptOverlay.{h,cpp}` — the overlay (`winrt::implements`).
-- `src/cascadia/TerminalApp/TerminalPage.AgentTranscript.cpp` — the page side (build, open, close).
+- `src/cascadia/TerminalApp/TerminalPage.AgentTranscript.cpp` — the page side (build, open, close; reads
+  the fork link for §3e).
+- `src/cascadia/TerminalApp/AgentMaster/ClaudeSpawn.{h,cpp}` — `ResolveClaudeDisplayTranscript` +
+  `ForkSourceTranscriptNote` (§3e), shared with the copy actions (`AgentTabOverlay.Actions.cpp`,
+  `AgentTabOverlay.Internal.h`), the Manager's Summary pane (`AgentManagerContent.AutoTesting.cpp`) and the
+  tab hover card (`TerminalPage.AgentObserver.cpp`). Harness: `tests/tests_spawn_sched.cpp`
+  (`TestSpawnBuilders`: the fallback, the own-transcript win, no link / self link / gone source / empty id,
+  the note's shape).
 - Wiring: `Tab.{h,cpp}` (`ShowTranscriptRequested`, the item + the submenu's Show), `TerminalPage.cpp`
   (the tab event, the Esc / chord routing, the tear-out close), `TabManagement.cpp` (`_TryMoveTab`),
   `TerminalPage.AgentEngine.cpp` (the funnel + drag closes, the Manager handler), `AgentManagerContent.*`
@@ -357,6 +404,15 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   again.
 - There is no "back" after a jump; Home (the scroll view has keyboard focus after a jump) returns to the
   list at the top.
+- A fork with no messages yet (§3e) shows its source's WHOLE transcript. A RUNNING fork holds only the
+  source's lines written before its claude started, so turns the source added after that show although the
+  fork does not have them. A dormant fork (after a restart or a Deactivate) re-forks from the source's current
+  transcript when it wakes, so for it the view is exact. A cut at the fork's process start is possible
+  (`AnalyzeSessionTranscript` takes a byte limit; the turns view would need one) but is not done.
+- The Agent Manager's Summary pane caches the fork's summary by (id, last activity): a source that grows
+  while the fork stays unprompted does not refresh it. The fork's first message does.
+- Codex forks (§3e) are not covered, and neither is alt+↑ / alt+↓ prompt navigation in a fresh fork's
+  terminal (it reads the fork's own transcript, so it finds no prompts until the first message).
 
 ## 9. Verification checklist (nothing here has been built)
 
@@ -389,3 +445,10 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
     first. A session with no turns of its own (a fork forked again at once) has a plain label. Tab reaches
     the links; check that Enter follows one. After a jump, switch to another window and back → the view
     stays on the heading (focus moved to the scroll view).
+11. A fork with no messages yet (§3e): fork a session (tab menu → Fork session) and send nothing. Show
+    Transcript → the dim note "No messages in this fork yet. Below is the transcript of session <src8>…",
+    then the source's turns, at every level. Copy ▸ Transcript ▸ Default → the same text with the note on
+    top. Copy ▸ Summary, the Agent Manager's Summary pane (select the fork), the tab hover card and the
+    summary panel all show the source's messages. Send the fork a message, then ↻ Refresh the overlay → the
+    fork's own transcript (with its Session chain), no note. hooks.log: the `[transcript] … from the fork
+    source …` lines.

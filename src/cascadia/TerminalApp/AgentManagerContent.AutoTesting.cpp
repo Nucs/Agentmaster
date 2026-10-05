@@ -1609,7 +1609,7 @@ namespace winrt::TerminalApp::implementation
         // Subject = the selected MANAGED CLAUDE session. Codex / external / nothing-selected get a
         // placeholder (the Auto Testing tab still serves those). The analyze cache key is the registry's
         // convLastActivityUnixMs — the same "last activity" signal the timing adornment uses.
-        std::wstring id, dir;
+        std::wstring id, dir, forkParent;
         int64_t mtime = 0;
         if (!_selectedId.empty() && _registry)
         {
@@ -1618,6 +1618,7 @@ namespace winrt::TerminalApp::implementation
                 id = _selectedId;
                 dir = s->workingDir;
                 mtime = s->convLastActivityUnixMs;
+                forkParent = s->forkParentId; // a fork with no messages yet is summarized from its source's transcript
             }
         }
         if (id.empty())
@@ -1660,19 +1661,19 @@ namespace winrt::TerminalApp::implementation
         }
         if (_summaryLoadingId != id) // one in-flight analyze per id — a busy session can't stack loads
         {
-            _LoadSummaryForSession(id, dir, mtime);
+            _LoadSummaryForSession(id, dir, forkParent, mtime);
         }
     }
 
     // Off-thread analyze + render of a Claude session's summary box (the Sessions-page recipe), posted
     // back via the dispatcher. Messages are reversed to newest-first before rendering. Cached single-
     // entry by (id, mtime); a stale result (selection moved on, or the Summary tab was left) is dropped.
-    void AgentManagerContent::_LoadSummaryForSession(const std::wstring& id, const std::wstring& dir, int64_t mtime)
+    void AgentManagerContent::_LoadSummaryForSession(const std::wstring& id, const std::wstring& dir, const std::wstring& forkParentId, int64_t mtime)
     {
         _summaryLoadingId = id;
         auto weak = get_weak();
         auto disp = _dispatcher;
-        std::thread([weak, disp, id, dir, mtime]() {
+        std::thread([weak, disp, id, dir, forkParentId, mtime]() {
             // Agentmaster (contained): a throw on this DETACHED thread has no handler => std::terminate
             // kills the whole app silently (the v0.6.x resume crash-loop). The engine helpers self-
             // contain now, but the glue here (string builds, vector reverse, lambda captures) can still
@@ -1681,7 +1682,9 @@ namespace winrt::TerminalApp::implementation
             std::wstring text;
             try
             {
-                const std::wstring path = ::Agentmaster::ResolveClaudeTranscriptPath(id);
+                // The session's own transcript, else (a fork with no messages yet) its fork source's — the
+                // conversation the fork holds until its first message writes its own transcript.
+                const std::wstring path = ::Agentmaster::ResolveClaudeDisplayTranscript(id, forkParentId).path;
                 if (!path.empty())
                 {
                     auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);

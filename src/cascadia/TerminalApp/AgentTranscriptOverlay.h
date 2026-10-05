@@ -43,6 +43,11 @@
 // The list, the headings and the mentions come from AgentMaster/MarkdownBlocks.h (MdFindSessionChain /
 // MdFindSessionRefs / MdSessionHeadingNumber), found off the UI thread with the parse.
 //
+// A FORK WITH NO MESSAGES YET: a fork has no transcript of its own until its first message, and until
+// then its conversation is the one it was forked from. The overlay shows that source's transcript, under
+// a dim one-line note naming the source (ClaudeSpawn.h ResolveClaudeDisplayTranscript /
+// ForkSourceTranscriptNote — the SAME text Copy ▸ Transcript copies for it), instead of "nothing to show".
+//
 // How it renders (the expensive part, all of it off the UI thread except the XAML itself):
 //   1. a pool thread renders the level — TranscriptTurns for a Claude transcript (the very text
 //      "Copy ▸ Transcript ▸ <level>" copies), the plain conversation readers for a Codex rollout —
@@ -104,6 +109,12 @@ namespace winrt::TerminalApp::implementation
         // The display title for the header (SessionInfo::title or the external row's title). May be
         // empty — the header then shows the short id alone.
         std::wstring title;
+        // Claude only: the session's fork source (SessionInfo::forkParentId, read from the registry when
+        // the overlay is opened; empty for any other session, an external row and Codex). A fork that
+        // has no messages of its own has no transcript yet, so the overlay renders this source's
+        // transcript under a note saying so (ResolveClaudeDisplayTranscript / ForkSourceTranscriptNote)
+        // instead of "nothing to show". The session's own transcript, once it exists, always wins.
+        std::wstring forkParentId;
     };
 
     class AgentTranscriptOverlay : public winrt::implements<AgentTranscriptOverlay, winrt::Windows::Foundation::IInspectable>
@@ -274,6 +285,7 @@ namespace winrt::TerminalApp::implementation
             int64_t elapsedMs = 0; // render + parse time
             std::wstring message; // why there is nothing to show (blocks empty), or empty
             std::wstring path; // the transcript / rollout read, for the log ("" when none was found)
+            std::wstring forkSourceId; // set when `path` is the FORK SOURCE's transcript (the session has none of its own yet), for the log
             std::vector<::Agentmaster::MdToolArea> areas; // the tool areas among `blocks` (MdFindToolAreas)
             ::Agentmaster::MdSessionChain chain; // the Session chain list + the session headings among `blocks` (MdFindSessionChain)
         };

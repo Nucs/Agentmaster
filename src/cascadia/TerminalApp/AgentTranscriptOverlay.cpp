@@ -25,7 +25,7 @@
 #include "AgentClipboard.h" // RobustCopyTextToClipboard — the retry-looped Win32 clipboard writer every Agentmaster copy uses
 #include "AgentCopyActions.h" // kTranscriptCopyMenu — the levels (order, labels, descriptions) the tabs mirror
 #include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the islands-safe tooltip host
-#include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / LogNav / ShortId / AppendStateLog
+#include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeDisplayTranscript / ForkSourceTranscriptNote / LogNav / ShortId / AppendStateLog
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings — the remembered level (AppSettings::transcriptOverlayLevel)
 #include "AgentMaster/ProcessInspect.h" // ReadConversationText / ReadConversationFollowupText / the Codex rollout resolve
 #include "AgentMaster/TranscriptTurns.h" // RenderTranscriptTurnsFile / TurnsOptionsForLevel / TurnsLevelName
@@ -1278,7 +1278,11 @@ namespace winrt::TerminalApp::implementation
             }
             else if (!source.sessionId.empty())
             {
-                out.path = ::Agentmaster::ResolveClaudeTranscriptPath(source.sessionId);
+                // The session's own transcript, else — for a fork with no messages yet — the one it was
+                // forked from (the fork holds that conversation until its first message writes its own).
+                auto display = ::Agentmaster::ResolveClaudeDisplayTranscript(source.sessionId, source.forkParentId);
+                out.path = std::move(display.path);
+                out.forkSourceId = std::move(display.forkSourceId);
             }
             if (out.path.empty())
             {
@@ -1304,6 +1308,13 @@ namespace winrt::TerminalApp::implementation
             {
                 out.message = L"Nothing to show \x2014 the transcript could not be read, or it holds no messages at this level.";
                 return;
+            }
+            if (!out.forkSourceId.empty())
+            {
+                // The fork's turns are its SOURCE's: say so above them. Prepended to the text itself (not
+                // drawn beside it) so the header's Copy copies exactly what Copy ▸ Transcript copies for
+                // this fork (CopyTranscriptTurnsAsync prepends the same note).
+                text.insert(0, ::Agentmaster::ForkSourceTranscriptNote(out.forkSourceId));
             }
             out.lines = 1 + static_cast<size_t>(std::count(text.begin(), text.end(), L'\n'));
             std::wstring_view toParse{ text };
@@ -1404,7 +1415,11 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::AppendStateLog(L"hooks.log", head + L"chars=" + std::to_wstring(view.markdown.size()) + L" blocks=" +
                                                             std::to_wstring(view.blocks.size()) + (view.truncated ? L" (capped)" : L"") +
                                                             (view.failed ? L" (parse failed part-way)" : L"") + L" rendered in " +
-                                                            std::to_wstring(view.renderMs) + L"ms\n");
+                                                            std::to_wstring(view.renderMs) + L"ms" +
+                                                            (render.forkSourceId.empty() ? std::wstring{} :
+                                                                                           L" from the fork source " + ::Agentmaster::ShortId(render.forkSourceId) +
+                                                                                               L"'s transcript (this fork has no messages yet)") +
+                                                            L"\n");
             if (level == _current)
             {
                 _SchedulePump();

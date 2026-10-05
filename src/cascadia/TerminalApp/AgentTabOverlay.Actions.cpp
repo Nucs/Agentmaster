@@ -568,6 +568,10 @@ namespace winrt::TerminalApp::implementation
         //   codex      — the session runs Codex (read its rollout, not a Claude transcript).
         //   sessionId  — the managed session id: a Claude session's transcript id; for Codex only the trace's tag.
         //   codexId    — the Codex rollout uuid (empty until its first prompt; unused for Claude).
+        //   forkParentId — Claude only (empty otherwise): the session's fork source. A fork with no messages of
+        //                its own yet has no transcript, so its source's is rendered under the note the transcript
+        //                overlay shows above it (ResolveClaudeDisplayTranscript / ForkSourceTranscriptNote) — the
+        //                overlay's "Show" and this copy stay the same text.
         //   level      — the TurnsLevel value 0-4 (the code minus kCopyFieldTranscriptLevelBase).
         //   generation — the copy generation CopySessionField took: a newer copy (of anything) started while
         //                this one rendered supersedes it, so a slow render never lands on top of a later copy.
@@ -579,6 +583,7 @@ namespace winrt::TerminalApp::implementation
                                                         bool codex,
                                                         std::wstring sessionId,
                                                         std::wstring codexId,
+                                                        std::wstring forkParentId,
                                                         int level,
                                                         uint64_t generation)
         {
@@ -589,6 +594,7 @@ namespace winrt::TerminalApp::implementation
                 co_await winrt::resume_background(); // reads the transcript, its chain and its agents' transcripts: never on the UI thread
                 const auto started = std::chrono::steady_clock::now();
                 std::wstring path;
+                std::wstring forkSourceId; // set when `path` is the fork SOURCE's transcript (this fork has none yet)
                 if (codex)
                 {
                     if (!codexId.empty())
@@ -598,7 +604,9 @@ namespace winrt::TerminalApp::implementation
                 }
                 else
                 {
-                    path = ::Agentmaster::ResolveClaudeTranscriptPath(sessionId);
+                    auto display = ::Agentmaster::ResolveClaudeDisplayTranscript(sessionId, forkParentId);
+                    path = std::move(display.path);
+                    forkSourceId = std::move(display.forkSourceId);
                 }
                 if (path.empty())
                 {
@@ -624,8 +632,17 @@ namespace winrt::TerminalApp::implementation
                     ::Agentmaster::AppendStateLog(L"hooks.log", head + L"nothing copied (the transcript could not be read or rendered) path=" + path + L"\n");
                     co_return;
                 }
+                if (!forkSourceId.empty())
+                {
+                    // The same note the transcript overlay shows above a fork source's turns: the pasted text
+                    // says whose conversation it is, and "Show" and this copy stay one text.
+                    text.insert(0, ::Agentmaster::ForkSourceTranscriptNote(forkSourceId));
+                }
                 const size_t chars = text.size();
-                const bool queued = disp && disp.TryEnqueue([text = std::move(text), head, generation, chars, elapsedMs]() {
+                // The trace names the fork source when the copied turns are its (this fork has no messages yet).
+                const std::wstring sourceNote = forkSourceId.empty() ? std::wstring{} :
+                                                                      L" from the fork source " + ::Agentmaster::ShortId(forkSourceId) + L"'s transcript";
+                const bool queued = disp && disp.TryEnqueue([text = std::move(text), head, generation, chars, elapsedMs, sourceNote]() {
                     // A throw escaping a DispatcherQueue handler is reported against the UI thread; contain it so a
                     // failed trace line can never cost more than this one copy.
                     try
@@ -643,7 +660,7 @@ namespace winrt::TerminalApp::implementation
                         if (RobustCopyTextToClipboard(text))
                         {
                             PlayActionSound(); // the same "copy is done" chime every other copy plays
-                            ::Agentmaster::AppendStateLog(L"hooks.log", head + L"chars=" + std::to_wstring(chars) + L" rendered in " + std::to_wstring(elapsedMs) + L"ms\n");
+                            ::Agentmaster::AppendStateLog(L"hooks.log", head + L"chars=" + std::to_wstring(chars) + L" rendered in " + std::to_wstring(elapsedMs) + L"ms" + sourceNote + L"\n");
                         }
                         else
                         {
@@ -789,10 +806,11 @@ namespace winrt::TerminalApp::implementation
             CopyTextToClipboard(PwshRunnable(BuildLaunchCli(s, /*wantCodex*/ true)));
             break;
         case 5: // Transcript — the whole conversation (user + assistant text only), off-thread
-            CopyConversationAsync(dispatcher, codex, s.id, s.codexSessionId);
+            // The fork link (Claude only): a fork with no messages yet copies the conversation it was forked from.
+            CopyConversationAsync(dispatcher, codex, s.id, s.codexSessionId, codex ? std::wstring{} : s.forkParentId);
             break;
         case 8: // Transcript Followup — the per-turn ❯ user + ● final-reply brief (legend header), off-thread
-            CopyConversationAsync(dispatcher, codex, s.id, s.codexSessionId, /*followup*/ true);
+            CopyConversationAsync(dispatcher, codex, s.id, s.codexSessionId, codex ? std::wstring{} : s.forkParentId, /*followup*/ true);
             break;
         case kCopyFieldTranscriptLevelBase + 0: // Transcript ▸ Minimal
         case kCopyFieldTranscriptLevelBase + 1: // Transcript ▸ Compact
@@ -800,8 +818,10 @@ namespace winrt::TerminalApp::implementation
         case kCopyFieldTranscriptLevelBase + 3: // Transcript ▸ Full
         case kCopyFieldTranscriptLevelBase + 4: // Transcript ▸ Max
             // The conversation as Markdown at that detail level (TranscriptTurns.h), rendered off-thread; this
-            // copy's generation (taken just above) lets a later copy supersede a slow render.
-            CopyTranscriptTurnsAsync(dispatcher, codex, s.id, s.codexSessionId, which - kCopyFieldTranscriptLevelBase, g_promptCopyGeneration.load());
+            // copy's generation (taken just above) lets a later copy supersede a slow render. The fork link
+            // (Claude only): a fork with no messages yet copies the conversation it was forked from, under the
+            // overlay's note.
+            CopyTranscriptTurnsAsync(dispatcher, codex, s.id, s.codexSessionId, codex ? std::wstring{} : s.forkParentId, which - kCopyFieldTranscriptLevelBase, g_promptCopyGeneration.load());
             break;
         case 6: // Summary — the FULL textual session-end.js box (everything; the panel shows a trimmed view)
         {
@@ -809,7 +829,9 @@ namespace winrt::TerminalApp::implementation
             const std::wstring resume = BuildLaunchCli(s, codex); // the same REAL launch CLI as cases 3/4
             // The process-wide registry (by shared_ptr: the copy runs off-thread) carries the /clear and
             // /handover links + titles the copied whole conversation follows (SessionInfo::continuedFromId).
-            CopySummaryAsync(dispatcher, codex, s.id, s.codexSessionId, dir, resume,
+            // The fork link (Claude only): a fork with no messages yet summarizes the conversation it was
+            // forked from — what its summary panel shows.
+            CopySummaryAsync(dispatcher, codex, s.id, s.codexSessionId, codex ? std::wstring{} : s.forkParentId, dir, resume,
                              std::wstring{ StateGlyph(s.state) }, std::wstring{ StateLabel(s.state) }, wrapNewlines, truncate,
                              ::Agentmaster::SharedEngine().registry);
             break;

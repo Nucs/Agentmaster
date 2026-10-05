@@ -481,6 +481,48 @@ namespace Agentmaster
     // `!ResolveClaudeTranscriptPath(id).empty()`.
     std::wstring ResolveClaudeTranscriptPath(std::wstring_view sessionId);
 
+    // The transcript a session's DISPLAY surfaces read — see ResolveClaudeDisplayTranscript.
+    struct ClaudeDisplayTranscript
+    {
+        // The transcript to read: the session's own, else its fork source's. Empty when neither exists
+        // (a session that was never prompted and is no fork, or a fork whose source is gone too).
+        std::wstring path;
+        // Set ONLY when `path` is the fork SOURCE's transcript: that source's conversation id. A surface
+        // that renders text may say so (ForkSourceTranscriptNote); empty when `path` is the session's own.
+        std::wstring forkSourceId;
+    };
+
+    // Which transcript to SHOW for a Claude session: its own, or — for a never-messaged FORK — the one it
+    // was forked from. A `claude --resume <src> --fork-session` fork writes no transcript of its own
+    // until its first message, and then starts it with the source's lines copied verbatim, so until then
+    // its conversation IS the source's; without this fallback every summary and transcript view of a
+    // fresh fork read "nothing" (the 2026-10-05 report: Show Transcript and the summary showed nothing).
+    // The session's own transcript always wins, so a view re-resolving later switches to it the moment
+    // the fork's first message creates it — never CACHE a fallback path across reloads for that reason.
+    // Display only: the mechanics (resume vs re-fork vs fresh, the scanner's tail) keep reading the
+    // session's OWN transcript through ResolveClaudeTranscriptPath.
+    // ⚠ The WHOLE source transcript is returned. A RUNNING fork holds the source's lines written before
+    // its claude started, so turns the source added after that are not in it; a dormant fork re-forks from
+    // the source's current transcript when it wakes, so for it the whole transcript is exact.
+    // Parameters:
+    //   sessionId    — the session's conversation id (SessionInfo::id). Empty yields an empty result.
+    //   forkParentId — its fork source (SessionInfo::forkParentId; the registry keeps it until the fork's
+    //                  first content-producing hook). Empty, or equal to sessionId, disables the fallback.
+    // Returns the path and, for the fallback, the source id (see ClaudeDisplayTranscript).
+    // Never throws: a failure (std::bad_alloc) is logged (Rule #18) and yields an empty result, which the
+    // callers already show as "nothing to show yet".
+    ClaudeDisplayTranscript ResolveClaudeDisplayTranscript(std::wstring_view sessionId, std::wstring_view forkParentId) noexcept;
+
+    // The note a transcript TEXT view puts above a fork source's transcript shown for a fork that has no
+    // messages of its own (ResolveClaudeDisplayTranscript's fallback): one italic Markdown paragraph
+    // naming the source's short id, then a blank line. Show Transcript and Copy ▸ Transcript both prepend
+    // it, so the overlay keeps showing exactly the text the Copy menu copies; a reader of either is told
+    // whose transcript follows (the source's, not the fork's own). Pure.
+    // Parameters: forkSourceId — the source's conversation id (ClaudeDisplayTranscript::forkSourceId).
+    // Returns the note; empty for an empty id.
+    // Throws std::bad_alloc only.
+    std::wstring ForkSourceTranscriptNote(std::wstring_view forkSourceId);
+
     // The Claude transcript root: <claude-config>/projects (config dir == CLAUDE_CONFIG_DIR, else
     // ~/.claude). Empty if neither resolves. The SessionScanner enumerates this to DISCOVER claude
     // sessions launched outside the Manager (a hand-typed `claude` in any tab) — claude always
