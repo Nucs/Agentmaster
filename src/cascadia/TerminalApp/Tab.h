@@ -7,6 +7,7 @@
 #include "ColorPickupFlyout.h"
 #include "Tab.h"
 #include "Tab.g.h"
+#include "AgentSessionToolTip.h" // Agentmaster (tab tooltip): the rich session tooltip's lifecycle — one host per tab (shared with the side-panel cards)
 
 // fwdecl unittest classes
 namespace TerminalAppLocalTests
@@ -98,20 +99,31 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (tab tooltip): a rich, session-aware hover tooltip pushed by TerminalPage — its
         // registry observer (a managed Claude/Codex session) or its activity probe (an unmanaged tab).
         // TerminalPage builds the WHOLE tooltip body as a XAML element (a dark, summary-style card — see
-        // TerminalPage::_UpdateTabAgentToolTip) since it owns the SessionInfo + registry; the Tab just
-        // HOSTS it. While set it REPLACES the default title+keychord tooltip. `signature` is a cheap
-        // content fingerprint: an identical push is a no-op (no re-host), so the per-change + per-tick
-        // callers stay cheap. `swapWhileOpen` is a ONE-SHOT escape from the "Content only while closed"
-        // rule for the async summary-body arrival — the one moment the hovering user WANTS the open card
-        // to update (a single swap; the flicker rule targeted the old per-tick ago-churn, not this).
-        // ClearAgentToolTip reverts to the default tooltip. UI thread only.
+        // TerminalPage::_PushSessionToolTipCard) since it owns the SessionInfo + registry; the Tab just
+        // HOSTS it. While set it REPLACES the default title+keychord tooltip. The lifecycle itself (the ONE
+        // framework-managed ToolTip, closed-only Content swaps, the recycle detach + Loaded re-attach, the
+        // hover/wheel hooks) lives in the shared AgentSessionToolTipHost (AgentSessionToolTip.h) — the side
+        // panel's session cards run the same host — and the members below forward to this tab's instance.
+        //   SetAgentToolTip — host a freshly built card. `signature` is a cheap content fingerprint: an
+        //     identical push is a no-op (no re-host). `swapWhileOpen` is a ONE-SHOT escape from the "Content
+        //     only while closed" rule for the async summary-body arrival — the one moment the hovering user
+        //     WANTS the open card to update. Throws whatever the host's XAML calls throw (callers contain it).
+        //   ClearAgentToolTip — drop the card and revert to the default title+keychord tooltip; a no-op when
+        //     none was set. UI thread only, like every member here.
         void SetAgentToolTip(winrt::Windows::UI::Xaml::UIElement content, winrt::hstring signature, bool swapWhileOpen = false);
         void ClearAgentToolTip();
-        winrt::hstring AgentToolTipSig() const noexcept { return _agentToolTipSig; } // Agentmaster (lazy tooltip): the hosted content's fingerprint — lets a per-tick producer SKIP building a card that would only be sig-discarded
-        bool AgentToolTipAttached() const noexcept { return _agentToolTip != nullptr; } // Agentmaster: is a ToolTip currently ATTACHED to this tab? An owner recycle detaches + nulls it (crash #4), and a tooltip that is not attached cannot open — ToolTipService only starts watching the owner's hover when it is attached (RegisterToolTip)
-        bool AgentToolTipOpen() const noexcept; // Agentmaster: is the rich card CURRENTLY on screen? A safe READ of IsOpen (invariant 2 forbids WRITING it) — the page needs it to keep its wheel-scroll state in lockstep with the card that is actually hosted, and to not yank a reader back to the top when PointerEntered re-fires mid-hover
-        bool AgentToolTipHoverWired() const noexcept { return _agentToolTipHoverWired; } // Agentmaster (lazy tooltip): cheap already-armed probe so per-tick callers skip even the callback construction
-        bool EnsureAgentToolTipHoverHook(std::function<void()> onHoverBuild, std::function<bool(int)> onWheel = nullptr); // Agentmaster (lazy tooltip): wire (once) the owner TabViewItem's PointerEntered -> the page's build-now callback, and its PointerWheelChanged -> the page's card-scroll callback (WHEEL SCROLL — the header is the only real pointer target: the card is hit-test-invisible); returns true only the ONE time it wires (the caller's arm-build cue)
+        winrt::hstring AgentToolTipSig() const noexcept { return _agentToolTipHost ? _agentToolTipHost->Sig() : winrt::hstring{}; } // Agentmaster (lazy tooltip): the hosted content's fingerprint ("" when none) — lets a per-tick producer SKIP building a card that would only be sig-discarded
+        bool AgentToolTipAttached() const noexcept { return _agentToolTipHost && _agentToolTipHost->Attached(); } // Agentmaster: is a ToolTip currently ATTACHED to this tab? An owner recycle detaches + nulls it (crash #4), and a tooltip that is not attached cannot open — ToolTipService only starts watching the owner's hover when it is attached (RegisterToolTip)
+        bool AgentToolTipOpen() const noexcept { return _agentToolTipHost && _agentToolTipHost->Open(); } // Agentmaster: is the rich card CURRENTLY on screen? A safe READ of IsOpen (invariant 2 forbids WRITING it) — the page needs it to keep its wheel-scroll state in lockstep with the card that is actually hosted, and to not yank a reader back to the top when PointerEntered re-fires mid-hover
+        bool AgentToolTipHoverWired() const noexcept { return _agentToolTipHost && _agentToolTipHost->HoverWired(); } // Agentmaster (lazy tooltip): cheap already-armed probe so per-tick callers skip even the callback construction
+        bool EnsureAgentToolTipHoverHook(std::function<void()> onHoverBuild, std::function<bool(int)> onWheel = nullptr); // Agentmaster (lazy tooltip): wire (once) the owner TabViewItem's PointerEntered -> the page's build-now callback (after a closed-only re-anchor to the tab's current bounds), and its PointerWheelChanged -> the page's card-scroll callback (WHEEL SCROLL — the header is the only real pointer target: the card is hit-test-invisible); returns true only the ONE time it wires (the caller's arm-build cue), false when already wired or the TabViewItem is missing
+        // Agentmaster (tab tooltip): this tab's rich-tooltip host, created on first use with the TabViewItem as
+        // its owner ("item" wheel-log label, "Tab" exception context — the historical names). The page's shared
+        // card push (_PushSessionToolTipCard) writes to it directly; it is the SAME object the forwarders above
+        // use, so the two paths can never disagree. Never null after the call. UI thread only.
+        //   returns — the host (shared: a caller may hold it, but must use it on this tab's UI thread only).
+        //   throws  — std::bad_alloc on the first call's allocation; nothing else.
+        const std::shared_ptr<AgentSessionToolTipHost>& AgentToolTipHost();
 
         std::optional<winrt::Windows::UI::Color> GetTabColor();
         std::optional<winrt::Windows::UI::Color> GetRuntimeTabColor() const noexcept { return _runtimeTabColor; } // Agentmaster: the user-chosen override (drives per-dir color sync)
@@ -318,31 +330,14 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster (tab tooltip): the rich, session-aware tooltip pushed by TerminalPage (see
         // SetAgentToolTip). TerminalPage builds the whole body element (a dark, summary-style card); the
-        // Tab only HOSTS it on the reused ToolTip. While _agentToolTipActive, _UpdateToolTip hosts
-        // _agentToolTipContent instead of the default title+keychord; _agentToolTipSig (a content
-        // fingerprint from the page) skips re-hosting identical content each tick.
-        bool _agentToolTipActive{ false };
-        winrt::Windows::UI::Xaml::UIElement _agentToolTipContent{ nullptr };
-        winrt::hstring _agentToolTipSig{};
-        // The ONE reused ToolTip object (swap its Content only while CLOSED; re-creating + re-SetToolTip on
-        // each ~2s refresh would flicker/replace the framework's open tip while hovered). Configured once:
-        // pinned Dark + Placement Bottom + hit-test-invisible, anchored to the TAB via PlacementRect (an
-        // automatic hover tooltip otherwise places itself relative to the POINTER). FRAMEWORK-MANAGED —
-        // ToolTipService owns open/close; we NEVER drive IsOpen (that was the crash source — see
-        // _UpdateAgentToolTip and doc/agentmaster/HANDOVER_tab-tooltip.md). Detached + nulled on an owner
-        // recycle/unload/shutdown.
-        winrt::Windows::UI::Xaml::Controls::ToolTip _agentToolTip{ nullptr };
-        bool _agentToolTipUnloadWired{ false }; // the owner Unloaded -> detach handler is wired once per tab
-        // Agentmaster (LAZY tab tooltip — the CPU fix): the tooltip card is built ON HOVER, not per tick.
-        // The page's build-now callback (weak-captured) runs on the owner TabViewItem's PointerEntered —
-        // which fires well BEFORE ToolTipService's open delay, so the Content swap still happens while the
-        // tip is closed (the safe path). One hook per tab, wired once; the callback resolves the tab's
-        // CURRENT session at hover time, so a /resume re-home never leaves it stale.
-        std::function<void()> _agentToolTipHoverCb{ nullptr };
-        std::function<bool(int)> _agentToolTipWheelCb{ nullptr }; // Agentmaster (WHEEL SCROLL): the page scrolls the OPEN card's body by this many wheel units; returns true when it consumed the notch
-        uint64_t _agentToolTipWheelLogTick{ 0 }; // Agentmaster (WHEEL SCROLL): throttle for the one-line-per-gesture [tooltip-wheel] trace (a spin is many events)
-        bool _agentToolTipHoverWired{ false }; // the PointerEntered hook is wired once per tab
-        bool _agentToolTipSwapOpenOnce{ false }; // one-shot: let the NEXT _UpdateAgentToolTip swap Content while OPEN (the async summary-body arrival)
+        // shared AgentSessionToolTipHost HOSTS it on ONE reused, framework-managed ToolTip attached to this
+        // tab's TabViewItem (Content swapped only while CLOSED; detached + nulled on an owner recycle/unload/
+        // shutdown and re-attached on the next Loaded; the lazy PointerEntered build hook + the wheel hook).
+        // While the host is Active, _UpdateToolTip defers to it instead of the default title+keychord.
+        // Created on first use (AgentToolTipHost); null until then — every forwarder treats null as "no card".
+        // The host's handlers weak-capture the host, and nothing here is torn down in ~Tab: Shutdown (UI
+        // thread) detaches it, because a page teardown can destroy tabs off the UI thread.
+        std::shared_ptr<AgentSessionToolTipHost> _agentToolTipHost;
 
         winrt::Microsoft::Terminal::Settings::Model::ThemeColor _themeColor{ nullptr };
         winrt::Microsoft::Terminal::Settings::Model::ThemeColor _unfocusedThemeColor{ nullptr };
@@ -450,10 +445,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem _AppendCloseMenuItems(winrt::Windows::UI::Xaml::Controls::MenuFlyout flyout);
         void _EnableMenuItems();
         void _UpdateSwitchToTabKeyChord();
-        void _UpdateToolTip();
-        void _UpdateAgentToolTip(); // Agentmaster: host the page-built rich session tooltip card on the reused ToolTip; FRAMEWORK-MANAGED open/close (Content swapped only while closed; we never drive IsOpen)
-        void _WireAgentToolTipUnload(); // Agentmaster: wire (once) the owner TabViewItem Unloaded -> _DetachAgentToolTip, so a MUX recycle can't strand a stale ToolTip ref (the sole handler left after the manual-open path was removed)
-        void _DetachAgentToolTip(); // Agentmaster: detach the framework-managed tooltip from its owner + drop our ref (owner recycle/unload, ClearAgentToolTip, Shutdown); no IsOpen driven — the framework closes any open popup itself
+        void _UpdateToolTip(); // Agentmaster note: while the rich session tooltip host is Active this defers to it (AgentSessionToolTipHost::Update — the moved _UpdateAgentToolTip); otherwise the default title + key-chord tooltip
 
         void _RecalculateAndApplyTabColor();
         void _ApplyTabColorOnUIThread(const winrt::Windows::UI::Color& color);

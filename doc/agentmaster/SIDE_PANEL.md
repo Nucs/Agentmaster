@@ -11,22 +11,43 @@ Shown in the DEFAULT dock (LEFT); the header's `⇄` flips it to the mirror imag
 which also flips the collapse chevron (`«` here — it always points toward the docked edge).
 
 ```
-┌ tab row ─────────────────────────────────────────────────┐
-├──────────────────────┬──┬────────────────────────────────┤
-│[LOCAL][sort][⌖][⇄][«]│ ▌│                                │  ← header line 1 (right-aligned): card SCOPE /
-│                      │ ▌│                                │    order / scroll-to-tab / dock / collapse
-│ [filter sessions…]   │ ▌│                                │  ← header line 2: the filter box, full width
-│ N of M (this window) │ ▌│        terminal content        │  ← count line (names the scope)
-│ ┌──────────────────┐ │ ▌│          (TabContent)          │
-│ │ session CARDS    │ │ ▌│                                │  ← TOP area (own scroll)
-│ └──────────────────┘ │ ▌│                                │
-│ ━━━━━━━━━━━━━━━━━━━━ │ ▌│                                │  ← horizontal splitter
-│ ┌──────────────────┐ │ ▌│                                │
-│ │ selected sess.   │ │ ▌│                                │  ← BOTTOM area (own scroll)
-│ │    SUMMARY       │ │ ▌│                                │
-│ └──────────────────┘ │ ▌│                                │
-└──────────────────────┴──┴────────────────────────────────┘
-                         ↑ vertical splitter (the resizable separator)
+┌ tab row ─────────────────────────────────────────────────────────┐
+├────────────────────────────┬──┬──────────────────────────────────┤
+│[Sum][LOCAL][sort][⌖][⇄][«] │ ▌│                                  │  ← header line 1 (right-aligned): summary area /
+│                            │ ▌│                                  │    card SCOPE / order / scroll-to-tab / dock / collapse
+│ [filter sessions…]         │ ▌│                                  │  ← header line 2: the filter box, full width
+│ N of M (this window)       │ ▌│        terminal content          │  ← count line (names the scope)
+│ ┌────────────────────────┐ │ ▌│          (TabContent)            │
+│ │ session CARDS          │ │ ▌│                                  │  ← TOP area (own scroll)
+│ └────────────────────────┘ │ ▌│                                  │
+│ ━━━━━━━━━━━━━━━━━━━━━━━━━━ │ ▌│                                  │  ← horizontal splitter
+│ ┌────────────────────────┐ │ ▌│                                  │
+│ │ selected sess.         │ │ ▌│                                  │  ← BOTTOM area (own scroll)
+│ │    SUMMARY             │ │ ▌│                                  │
+│ └────────────────────────┘ │ ▌│                                  │
+└────────────────────────────┴──┴──────────────────────────────────┘
+                               ↑ vertical splitter (the resizable separator)
+```
+
+With **Sum** OFF (§2d) the bottom area and the horizontal splitter are gone, the cards fill the
+whole body, and hovering a card opens that session's RICH card — the one a tab header shows — beside
+the panel:
+
+```
+┌ tab row ─────────────────────────────────────────────────────────┐
+├────────────────────────────┬──┬──────────────────────────────────┤
+│[Sum][LOCAL][sort][⌖][⇄][«] │ ▌│                                  │  ← "Sum" OFF (unchecked)
+│ [filter sessions…]         │ ▌│                                  │
+│ N of M (this window)       │ ▌│                                  │
+│ ┌────────────────────────┐ │ ▌│ ┌──────────────────────────────┐ │  ← hover a card: the session's RICH card
+│ │ card                   │ │ ▌│ │ ● title         folder/branch│ │    opens beside the panel (left of it
+│ │ card  (hovered)        │ │ ▌│ │ state · ago · why            │ │    when the panel is docked RIGHT),
+│ │ card                   │ │ ▌│ │ claude · model · effort      │ │    vertically centered on the hovered
+│ │ …                      │ │ ▌│ │ tags                         │ │    card — the card a tab shows on hover
+│ │ (the cards fill        │ │ ▌│ │ ── Summary (wheel-scrolls) ──│ │
+│ │  the whole body)       │ │ ▌│ └──────────────────────────────┘ │
+│ └────────────────────────┘ │ ▌│                                  │
+└────────────────────────────┴──┴──────────────────────────────────┘
 ```
 
 - `TerminalPage.xaml`'s content row became a 3-column `ContentArea` grid; code
@@ -36,11 +57,16 @@ which also flips the collapse chevron (`«` here — it always points toward the
   0 until `_InitAgentSidePanel` runs, so a build without the panel renders the pre-feature layout.
 - The whole panel forces the Agentmaster DARK theme (explicit fills, `RequestedTheme(Dark)`).
 - Collapse (the header chevron / the strip) shrinks the panel to a 20px expander strip; the
-  header also carries a `⇄` dock-side flip, the card list's **LOCAL / GLOBAL** scope toggle (§2),
-  and the `⌖` **scroll-to-selected-tab** icon toggle (§2a).
+  header also carries the **Sum** summary-area toggle (§2d, left of LOCAL / GLOBAL), the card
+  list's **LOCAL / GLOBAL** scope toggle (§2), the `⌖` **scroll-to-selected-tab** icon toggle
+  (§2a), and a `⇄` dock-side flip.
 - The header is **two lines** (one 2-row grid): the buttons, right-aligned in their original order,
   over the filter box, which spans every column. Sharing one line with the buttons, the box was
   squeezed toward its minimum on a narrow panel while the buttons kept their natural widths.
+- **Two font sizes.** The worded buttons (Sum, LOCAL / GLOBAL, the sort label) are 11 px; the ICON
+  buttons (`⌖`, `⇄`, the collapse chevron, and the collapsed strip's chevron) are 12 px
+  (`kSidePanelIconFontSize`, 2026-10-05 — they were 11 px, and a symbol reads smaller than a word at
+  the same size).
 
 ## 2. TOP — the session cards (the Triage-Board integration, vertical)
 
@@ -187,6 +213,8 @@ never push the tags off the card. An untagged card's band is exactly the old tit
   Sessions Tags column open (`_OnTagBadgeHoverBegin/End`): every session carrying the tag (live
   first, then closed), and a click on a live row jumps to its tab, cross-window.
 - **The card's tooltip names every tag** (a `tags: a · b · c` line) — the ribbons are colors only.
+  With **Sum** OFF the card's tooltip is the rich session card (§2d), which shows every tag as a
+  colored chip.
 - **⚠ The strip is a tooltip-free zone for the card.** The card's one `AgentSetTip` tooltip covers
   its whole `Border`, pointer events bubble, and this panel has no LocalTooltip area — so without
   help a ribbon would also arm the card tip, which then floats at the pointer ON TOP of the hover
@@ -195,6 +223,13 @@ never push the tags off the card. An untagged card's band is exactly the old tit
   its children (each would re-arm the card tip); the `+N` hooks its own tip BEFORE marking its
   entry handled, so its tip opens while the card's cannot. Leaving the strip re-arms the card tip
   normally.
+- **With Sum OFF** (§2d) the card's tooltip is a `ToolTip` that `ToolTipService` owns, and nothing
+  may close it by writing `IsOpen`. So a ribbon's or the `+N`'s entry DETACHES it
+  (`_SidePanelSuspendCardToolTip`; the framework then closes an open card and cancels a pending
+  open itself), and the rich card never floats beside the panel while the tag hover panel is up.
+  The next entry into the card's body attaches it again: the card push re-hosts whenever nothing is
+  attached. The `+N` has no floating tip in this mode (the rich card lists every tag), and a mode
+  switch rebuilds the strip so the `+N` always matches the mode.
 - **Data + freshness**: the list keeps each rendered card's tags in a per-card cache
   (`_sidePanelTagsById`). `GetSessionTags` (SessionStore's (size,mtime)-validated record cache: one
   file stat) runs only for a card new to the list, and for every rendered card once the
@@ -263,14 +298,114 @@ twice a second while sessions changed, and once more every 30 s to move the "ago
   orders of five cards, 3000 random lists, and 466-card rotations (one move each). The lean snapshot,
   the tag epoch and the color index have their own checks (`TestRegistryLeanReads`,
   `TestSessionTags`, the color-index block of `TestTabColorModes`). The card code itself
-  (`TerminalPage.AgentSidePanel.cpp`) is NOT BUILT yet (2026-10-04); it passes a syntax-only `cl /Zs`
-  check against the last build's PCH, and so do `TerminalPage.cpp` and `TerminalPage.AgentEngine.cpp`,
-  which include the changed `TerminalPage.h`.
+  (`TerminalPage.AgentSidePanel.cpp`, commit `d99d18d6b`) is built and runs in the local release
+  install 0.6.8.16 (2026-10-04; its `TerminalApp.dll` was linked after that commit). The live checks
+  below are not done yet.
 - **Check after the build:** a session that changes state repaints only its card (no flicker of the
   list); launch, close, filter and sort changes put the cards in the right order; a hovered card keeps
   its ring while another card moves; a card's draft dots keep pulsing when it moves; a tag added in
   another window shows on this window's card within ~2.5 s; no `[sidepanel] … out of step` line in
   hooks.log.
+
+### 2d. The "Sum" toggle — no summary area, a rich card beside the panel instead
+
+The header's **Sum** button (a real `ToggleButton`, left of LOCAL / GLOBAL; checked = the summary
+area is shown, the default) hides the bottom summary area. The session cards then fill the whole
+body, and **hovering a card opens that session's RICH card beside the panel** — the very card a tab
+header shows when you hover it: same content, same lifecycle, same wheel scrolling. It opens to the
+RIGHT of a left-docked panel and to the LEFT of a right-docked one.
+
+- **The click** (`_SidePanelToggleSummary`): flips `_sidePanelSummaryHidden`, logs
+  `[nav] sidepanel summary -> hidden (cards show the rich session tooltip)` / `-> shown`, re-pins the
+  button (`_SidePanelUpdateSumButton` — the member is the truth, not the button's own flip), applies
+  the layout, rebinds the summary, switches every card's tooltip mode, and persists like collapse
+  (§4: this window's record + the last-change default for new windows).
+- **The layout** (`_SidePanelApplyLayout`): hidden → the body rows are `*` / 0 / 0 and the horizontal
+  splitter and the summary host are collapsed; shown → the split fraction as before.
+- **The summary overlay works only while it can be seen**: `_SidePanelBindSummary` releases it while
+  the area is hidden (its registry observer detaches, no more transcript analyses), and showing the
+  area again rebinds the current selection (a peek included).
+
+**One host, extracted from Tab — not a copy.** The tooltip LIFECYCLE that lived inside `Tab` is now
+`AgentSessionToolTipHost` (`AgentSessionToolTip.{h,cpp}`), moved verbatim. `Tab` keeps one host for
+its header (its old public methods forward to it), and each side-panel card keeps one for its
+`Border` (`AgentSidePanelCardView::tipHost`). So both owners run the same code and keep the same
+crash rules (HANDOVER_tab-tooltip.md §9–§10):
+
+- **framework-managed**: `ToolTipService` opens and closes it; nothing writes `IsOpen`;
+- **one reused `ToolTip`**, its `Content` swapped only while closed, with the one-shot open swap for
+  the summary body that lands while you read;
+- **the owner guard**: nothing is created or changed for an owner that is not loaded;
+- **detach on `Unloaded`, re-attach on `Loaded`**, so a tooltip is always attached before a pointer
+  can arrive (an attach during a hover does not open for that hover);
+- **the hover hook**: `PointerEntered` re-anchors a CLOSED tooltip, then runs the page's build;
+- **the wheel hook**: `PointerWheelChanged` read on the OWNER (`handledEventsToo`), acted on only
+  while the card is open; the notch is marked handled only when the card's body has something to
+  scroll (even at an end stop); logged `[tooltip-wheel] card: cb= tip= open=`.
+
+**One content push, shared.** `_PushSessionToolTipCard` (TerminalPage.AgentObserver.cpp) is the old
+body of `_UpdateTabAgentToolTip`, now called by both surfaces: the strings, the change signature,
+the 80%-of-window height budget, the tags, the cached Summary body, the scroll-piece adoption, and
+the summary kick (mtime-gated, at most every 4 s, one load per session). `_UpdateTabAgentToolTip` and
+`_UpdateSidePanelCardToolTip` are thin surfaces over it. The summary loader
+`_EnsureTabTooltipSummary` is now per SESSION, not per tab: on arrival it re-hosts every surface that
+waits for that session (`_tabTooltipSummaryWaiters[session][surface]`, each in its own catch) with
+the open-swap grant and never kicks another analysis (the 2026-08-29 loop rule). The wheel's offset
+math, scrollbar sync and fade are the shared `_ScrollSessionToolTipBody`.
+
+**Surface keys.** The signature and the scroll state are kept per SURFACE: a tab's under its session
+id, a card's under `"\x1F" "sidepanel:" <id>` (`SidePanelToolTipKey`). So the tab and the card of one
+session never share a scroll position or a signature, while they DO share the one Summary cache.
+
+**What differs on purpose:**
+
+1. **Placement** (`_SidePanelCardToolTipPlacement`, the host's placement provider): a
+   `PlacementRect` in the card's own coordinates that spans the whole panel plus its splitter
+   horizontally and the card vertically, with `PlacementMode::Right` (left dock) or `Left` (right
+   dock). WinUI adds its 20 px default mouse offset around the rect, docks the card outside it,
+   centers it vertically on the hovered card, and slides it back inside the window when needed. The
+   provider runs on every closed re-anchor, so a width drag or a dock flip applies at the next hover.
+   A tab keeps the old default: `Bottom` under the tab's own bounds.
+2. **The width budget** (`_SidePanelCardToolTipRoomWidth`): the content area minus the panel, the
+   splitter, the 20 px gap and an 8 px margin, clamped to [320, 660] and carried in the signature on a
+   50 px grain. A tab passes the flat 660. ⚠ Per the WinUI 2.8 source, the `ToolTip` style itself caps
+   every tooltip at **320 px** (`ToolTipMaxWidth`, padding 9,6,9,8), and the host sets no `MaxWidth` —
+   so both the tab's card and this card render at most ~300 px wide today, whatever the budget says
+   (the `kTtCardMaxWidth` note in TerminalPage.AgentObserver.cpp). Not yet measured on screen.
+3. **The wheel** stays with the card list's own `ScrollViewer` while the rich card is closed or its
+   body fits, and it never sets `_tooltipWheelClaimed` (that flag de-dupes the tab ROW's belt
+   handler only); its per-notch line reads `[tooltip-wheel] <sid8> src=card …`.
+4. **The card's floating tips are silenced** in this mode: `AgentSuppressTip` (new in
+   `AgentTipHelpers.h`) on the card and its timing text, and the `+N` gets none. The shared tip host
+   would otherwise REPLACE the card's `ToolTip` on open (it attaches its own tip to the hovered
+   element) and DETACH it on close. `AgentSuppressTip` keeps the element's "already wired" marker, so
+   turning **Sum** back on just gives the texts back (from the card's current model).
+5. **The tag strip suspends it** (§2b): a ribbon or `+N` entry detaches the rich card.
+6. **No default tooltip to fall back to**: a session that is gone or archived at hover time clears
+   the host; the next list update removes the card anyway.
+
+**Cost.** When a card is created in this mode, or the mode turns on, `_SidePanelArmCardToolTip`
+hosts a HEADER-ONLY card (no transcript read): enough for `ToolTipService` to have a tooltip
+attached before the first hover. It is fed from the list update's lean row, or from ONE
+`SnapshotLiveForCards` in the mode switch — never a whole-record copy per card (UI_THREAD.md §10g).
+A hover reads `GetWithoutQueue`, rebuilds the card only when the signature changed or nothing is
+attached, and kicks the Summary analysis, which is shared with the tab's tooltip (one cache entry per
+session). No transcript is read for a card nobody hovers.
+
+**Lifetime.** Before a card leaves the list (an update's Remove, or `_SidePanelResetCards`),
+`_SidePanelDropCardToolTip` shuts its host down (detach + drop both callbacks) and forgets its
+surface state: a `ToolTip` left on a dropped element is the islands leak class (AgentTipHelpers.h),
+and the host's own `Unloaded` detach is deferred, so it can run after the card view is gone. A card
+MOVED inside the list keeps its tooltip (`Move` raises no `Unloaded` / `Loaded`). A Summary load still
+in flight finds the card by id when it lands (or finds none).
+
+**Check after the build:** Sum OFF hides the summary and its splitter, and the cards fill the body;
+hovering a card opens the rich card beside the panel, centered on the card's height, on the right of
+a left-docked panel and on the left after `⇄`; the wheel scrolls its Summary body and, when it can't,
+scrolls the card list; a ribbon's hover panel never has the rich card behind it; a width drag or a
+dock flip is followed at the next hover; Sum ON brings the summary and the small card tips back; a
+reopened window keeps its own choice, and a new window takes the last one; measure the card's real
+width (the 320 px `ToolTip` cap above); no `[exc] Side-panel card …` lines in hooks.log.
 
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
@@ -294,6 +429,9 @@ buttons, the context menus — reused verbatim, with four differences:
   background is not hit-testable in its empty parts, and the right-click menu must still open on
   the gaps between rows. Square corners also drop the rounded-corner clip, which XAML backs with a
   composition node (UI_THREAD.md §10h).
+
+With **Sum** OFF (§2d) this area and its splitter are hidden and the overlay is RELEASED (no
+registry observer, no analyses); turning **Sum** back on rebinds it to the current selection.
 
 It is DELIBERATELY not in `_claudeOverlays` (that map is keyed by session id and may already
 hold the session's own per-tab overlay), so `_ToggleSummaryWrap`/`Truncate`/`History` and the
@@ -340,14 +478,16 @@ these high-frequency events costs nothing at rest.
 ## 4. Persistence — per window, last-one-wins defaults
 
 The user contract: **both separators persist PER WINDOW (not per tab), and the last one to
-resize sets the default for new windows.** Collapse follows the same rule; the dock side is
-GLOBAL-only; the **card scope is per-window ONLY** (no global default — see below).
+resize sets the default for new windows.** Collapse and the **Sum** summary area follow the same
+rule; the dock side is GLOBAL-only; the **card scope is per-window ONLY** (no global default — see
+below).
 
 | state | per-window (windows/<id>.json) | global default (settings.json) |
 |---|---|---|
 | panel width | `WindowRecord::sidePanelWidthFraction` (0 = unset) | `AppSettings::sidePanelWidthFraction` (0.22) |
 | cards/summary split | `WindowRecord::sidePanelSplitFraction` (0 = unset) | `AppSettings::sidePanelSplitFraction` (0.5) |
 | collapsed | `WindowRecord::sidePanelCollapsed` (-1 = unset) | `AppSettings::sidePanelCollapsed` (false) |
+| summary area hidden (**Sum** off, §2d) | `WindowRecord::sidePanelSummaryHidden` (-1 = unset; written only when set; a non-bool value reads unset) | `AppSettings::sidePanelSummaryHidden` (false = **shown, the default** — the pre-toggle layout) |
 | dock side | — | `AppSettings::sidePanelOnLeft` (true = **left, the default**; false = right) |
 | card scope (LOCAL/GLOBAL) | `WindowRecord::sidePanelGlobal` (absent = LOCAL; written only when GLOBAL) | — **none by design**: every new window starts LOCAL |
 | `⌖` scroll to the selected tab (§2a) | — | `AppSettings::sidePanelScrollToSelectedTab` (true = **ON, the default**; absent key = ON) — a GLOBAL preference, broadcast live to every open window |
@@ -359,16 +499,16 @@ GLOBAL-only; the **card scope is per-window ONLY** (no global default — see be
   what guarantees one window's fleet-wide view can never leak into another window's list — the
   bug that motivated the scope ("the upper list shows the tabs of a different window").
 
-- Every drag release / collapse toggle: update the live members → the window-record autosave
-  captures them (`_CaptureWindowRecord`) → a GRANULAR freshest-disk RMW exports ONLY the
+- Every drag release / collapse toggle / **Sum** click: update the live members → the window-record
+  autosave captures them (`_CaptureWindowRecord`) → a GRANULAR freshest-disk RMW exports ONLY the
   adjusted field as the new global default (`_SidePanelPersistDefaults` — a width drag never
-  exports this window's collapse state).
+  exports this window's collapse state, and a **Sum** click exports only `sidePanelSummaryHidden`).
 - A new window (or a pre-feature record's unset field) seeds from the globals at
   `_InitAgentSidePanel`; a window that made its own choice keeps it.
 - Bands everywhere (drag clamps == load-time checks): width (0.10, 0.50], split (0.15, 0.85).
   A record's out-of-band value degrades to UNSET (the global default); a settings out-of-band
   value degrades to the shipped default — a corrupt file can never collapse the terminal.
-- All five AppSettings fields are written OUTSIDE the cog form, so BOTH cog-Save preserve
+- All six AppSettings fields are written OUTSIDE the cog form, so BOTH cog-Save preserve
   blocks (content + page sink) restore them from disk. For the `⌖` toggle the page sink's line is
   load-bearing beyond the cog: the board-sort cycle (the board header's AND this panel's sort
   button) saves through that sink carrying the Manager content's `AppSettings` copy, which never
@@ -407,7 +547,12 @@ GLOBAL-only; the **card scope is per-window ONLY** (no global default — see be
   dropped, or replaced by a reset) is ignored.
 - The periodic tick is a terminate-netted `fire_and_forget` over an awaitable Impl
   (`resume_foreground` first), the `_ScanCacheWarmTabs` idiom.
-- Tooltips via `AgentSetTip`/`AgentSetTitledTip` only (the per-element ToolTip leak rule).
+- Tooltips via `AgentSetTip`/`AgentSetTitledTip` only (the per-element ToolTip leak rule) — with ONE
+  exception: the rich card of the **Sum** OFF mode (§2d), a `ToolTip` attached to the card for its
+  life through `AgentSessionToolTipHost`, the tab tooltip's own crash-hardened lifecycle. It is shut
+  down (detached) before its card leaves the list or the list resets, its floating tips are silenced
+  meanwhile (`AgentSuppressTip`), its arm-build reads no transcript, and every handler it wires holds
+  the page and the host weakly.
 
 ## 6. Files
 
@@ -425,4 +570,12 @@ GLOBAL-only; the **card scope is per-window ONLY** (no global default — see be
   `AgentMaster/KeyedListDiff.h` (the planner, pure), `AgentMaster/SessionRegistry.{h,cpp}`
   (`SnapshotLiveForCards`), `AgentMaster/SessionStore.{h,cpp}` (`SessionTagsEpoch`),
   `AgentMaster/Persistence.{h,cpp}` (`DirColorIndex` / `LoadDirColorIndex` + the 3-argument
-  `ResolveSessionColorHex`), `tests/tests_sidepanel.cpp` (`TestKeyedListDiff`).
+  `ResolveSessionColorHex`), `tests/tests_sidepanel.cpp` (`TestKeyedListDiff`). The **Sum** mode
+  and its rich card (§2d): `AgentSessionToolTip.{h,cpp}` (the tooltip lifecycle host, extracted from
+  `Tab`), `Tab.{h,cpp}` (now forwarders over one host), `TerminalPage.AgentObserver.cpp`
+  (`_PushSessionToolTipCard`, `_ScrollSessionToolTipBody`, the per-session summary waiters, the
+  surface-keyed signature + scroll state, `TtBuildTooltipCard`'s width parameter),
+  `AgentTipHelpers.h` (`AgentSuppressTip`), `TerminalAppLib.vcxproj` (the new TU),
+  `AgentMaster/SessionModels.h` + `Persistence.cpp` (`sidePanelSummaryHidden`, both halves) +
+  `tests/tests_persistence.cpp` (round-trip, legacy absent, committed false, non-bool, unset
+  omitted, settings default).

@@ -17,6 +17,25 @@ the ScrollViewer was removed too (line truncation + a clipping Grid). The histor
 explains WHY the design is what it is and what NOT to reintroduce; the comments in the code remain
 load-bearing.
 
+> **2026-10-05 — the lifecycle is no longer inside `Tab`.** It moved, verbatim, into
+> **`AgentSessionToolTipHost`** (`src/cascadia/TerminalApp/AgentSessionToolTip.{h,cpp}`), so a second
+> owner can run the same code: the **side-panel session card** in the panel's "Sum" OFF mode
+> ([`SIDE_PANEL.md`](SIDE_PANEL.md) §2d). `Tab` owns one host for its header and keeps its old public
+> methods as forwarders, so no caller changed. The content side split the same way: the old body of
+> `_UpdateTabAgentToolTip` is the shared `_PushSessionToolTipCard`, and the tab and the card are thin
+> "surfaces" over it. Old name → current name, for the history sections below:
+>
+> | in this doc (Tab, before) | now (`AgentSessionToolTipHost`) |
+> |---|---|
+> | `_agentToolTipActive` / `_agentToolTipContent` / `_agentToolTipSig` / `_agentToolTip` | `_active` (`Active()`) / `_content` / `_sig` (`Sig()`) / `_toolTip` |
+> | `_agentToolTipUnloadWired` (+ the Loaded half) | `_lifetimeWired` (`_WireOwnerLifetime`) |
+> | `_agentToolTipHoverWired` / `_agentToolTipHoverCb` / `_agentToolTipWheelCb` | `_hoverWired` / `_hoverCb` / `_wheelCb` |
+> | `_UpdateAgentToolTip()` | `Update()` |
+> | `_WireAgentToolTipUnload()` | `_WireOwnerLifetime()` (Unloaded → `Detach`, Loaded → `Update`) |
+> | `_DetachAgentToolTip()` | `Detach()` (its catch now LOGS — it was the last bare `catch (...)` here, Rule #18) |
+> | `SetAgentToolTip` / `ClearAgentToolTip` / `EnsureAgentToolTipHoverHook` (Tab, public) | still on `Tab`, forwarding to `SetContent` / `Clear` / `EnsureHoverHook` |
+> | the `PlacementRect` write inside `_UpdateAgentToolTip` | `_ApplyPlacement` (+ a per-owner placement provider) and `RefreshPlacement` |
+
 ---
 
 ## 0. Scope & what this is NOT
@@ -28,29 +47,35 @@ load-bearing.
   live *inside* the terminal pane). That is `AgentTabOverlay` — see
   [`TAB_OVERLAY.md`](TAB_OVERLAY.md). The two are **separate mechanisms** that happen to show
   overlapping session facts. Don't conflate them.
-- **NOT `AgentTipHelpers.h`** — that's the shared hover-tooltip recipe for the Manager tab's cards
-  and the Sessions/Archive pages (page elements). The tab tooltip is its own code on `Tab` because
-  its owner is a MUX-virtualized `TabViewItem` (which is exactly why it's more fragile — see
-  *Crash history*). `AgentTipHelpers` is a useful reference for the same class of guards, though.
+- **NOT `AgentTipHelpers.h`** — that's the shared hover-tooltip recipe for the Agent Manager page's
+  cards and the Sessions page (page elements). The rich tooltip is its own code,
+  `AgentSessionToolTipHost`, because its first owner is a MUX-virtualized `TabViewItem` (which is
+  exactly why it's more fragile — see *Crash history*). Since 2026-10-05 it has a second owner, the
+  side-panel session card ([`SIDE_PANEL.md`](SIDE_PANEL.md) §2d). The two mechanisms must not share
+  an element: the `AgentTipHelpers` host attaches ITS tip to the hovered element on open and detaches
+  it on close, which would replace and then remove a host's `ToolTip`. So an element that carries a
+  host has its floating tips silenced (`AgentSuppressTip`). `AgentTipHelpers` is a useful reference
+  for the same class of guards, though.
 
 ---
 
 ## 1. The two tab tooltips
 
-Every tab header can carry ONE of two tooltips, mutually exclusive, gated by `Tab::_agentToolTipActive`:
+Every tab header can carry ONE of two tooltips, mutually exclusive, gated by the tab's host
+(`Tab::_agentToolTipHost->Active()`):
 
 | | **Default tooltip** | **Rich agent tooltip** |
 |---|---|---|
-| Shown on | shell/pwsh/cmd tabs, the Manager tab, an agent tab before its first push | a **managed** (bound) Claude/Codex session tab |
-| Content | title + key-chord (`TextBlock`) | dark summary card (state dot, title, folder/branch, state line, model·effort·mode, divider, transcript Summary body) |
-| Built in | `Tab::_UpdateToolTip` (Tab.cpp) | `TerminalPage::_UpdateTabAgentToolTip` builds it, `Tab::SetAgentToolTip` hosts it |
+| Shown on | shell/pwsh/cmd tabs, an agent tab before its first push (the Agent Manager is a page behind the Home button, not a tab, so it has neither) | a **managed** (bound) Claude/Codex session tab |
+| Content | title + key-chord (`TextBlock`) | dark summary card (state dot, title, folder/branch, state line, model·effort·mode, tags, divider, transcript Summary body) |
+| Built in | `Tab::_UpdateToolTip` (Tab.cpp) | `TerminalPage::_UpdateTabAgentToolTip` → the shared `_PushSessionToolTipCard` builds it; the tab's `AgentSessionToolTipHost` hosts it (`SetContent`) |
 | Open/close | **framework-managed** (`ToolTipService` auto opens/closes on hover) | **framework-managed** now too (was manually driven — timers + `IsOpen`; that was the crash source, §9) |
 | Crashes? | **never** (framework owns the lifetime) | the crash history below is the OLD manual path; the current path shares the default's crash-free lifetime model |
 
 There is also a **third, degenerate variant** — the **observe badge tooltip** (`TtBuildObserveCard`):
 a tiny `○ <kind> · unlinked` card shown on a non-managed but observed tab (pwsh / cmd / an
 unprompted claude / external codex). It is pushed via `SetAgentToolTip` too (so it rides the same
-manually-driven lifecycle), by `_SetTabActivityBadge`.
+framework-managed host lifecycle), by `_SetTabActivityBadge`.
 
 **Key insight that drove the rewrite:** the default tooltip is framework-managed and never crashes; the
 rich tooltip WAS manually driven (for fast-open + reliable-close under Islands) and crashed six times. The
@@ -62,125 +87,188 @@ for the default tooltip's crash-free lifetime model (see §4 and §9).
 ## 2. Architecture — who owns what
 
 ```
-TerminalPage (owns SessionInfo + the registry)            Tab (owns the ToolTip XAML lifecycle)
---------------------------------------------------        ---------------------------------------
-_UpdateTabAgentToolTip(tab, sessionId)                    SetAgentToolTip(UIElement content, hstring sig)
-  reads SessionInfo -> formats STRINGS (TtSpan/…)           stores content+sig, _agentToolTipActive=true
-  builds the card element (TtBuildTooltipCard)               -> _UpdateToolTip -> _UpdateAgentToolTip
-  computes a content SIGNATURE (skip if unchanged)         _UpdateAgentToolTip: create + host on the reused ToolTip
-  impl->SetAgentToolTip(card, sig) ----------------------->  _WireAgentToolTipUnload: detach on owner recycle
-  kicks _EnsureTabTooltipSummary (off-thread body)         (ToolTipService owns open/close on hover)
-                                                           ClearAgentToolTip: revert to the default tooltip
+TerminalPage (owns SessionInfo + the registry)          AgentSessionToolTipHost (owns the ToolTip XAML lifecycle)
+------------------------------------------------        ---------------------------------------------------------
+SURFACES (thin):                                        one per OWNER element:
+  _UpdateTabAgentToolTip(tab, sessionId)                  Tab::_agentToolTipHost   (owner = the TabViewItem)
+  _UpdateSidePanelCardToolTip(id)  [Sum OFF]              AgentSidePanelCardView::tipHost (owner = the card Border)
+        |  resolve the session, gone/!live -> Clear
+        v                                                SetContent(UIElement, sig, swapWhileOpen)
+_PushSessionToolTipCard(host, surfaceKey, s, …)            stores content+sig, active=true -> Update()
+  formats STRINGS (TtSpan/…), builds the card             Update(): owner guard; create + SetToolTip once;
+  (TtBuildTooltipCard), computes the SIGNATURE              closed-only placement + Content swap
+  host.SetContent(card, sig, …) ------------------------>  _WireOwnerLifetime: Unloaded -> Detach, Loaded -> Update
+  kicks _EnsureTabTooltipSummary (off-thread body,        EnsureHoverHook: PointerEntered -> re-anchor + build;
+  per SESSION; the arrival re-hosts every waiting           PointerWheelChanged -> the page's body scroll
+  surface)                                                (ToolTipService owns open/close on hover)
+                                                          Clear / Detach / Shutdown
 ```
+
+`Tab` keeps its public tooltip API (`SetAgentToolTip`, `ClearAgentToolTip`, `EnsureAgentToolTipHoverHook`,
+`AgentToolTipSig/Attached/Open/HoverWired`, plus `AgentToolTipHost()`) as one-line forwarders over its host;
+`ClearAgentToolTip` additionally rebuilds the DEFAULT tooltip (`_UpdateToolTip`), which only a tab has.
 
 **Split of responsibility (do not blur this):**
 - **TerminalPage side** (`TerminalPage.AgentObserver.cpp`) owns the *content*: it has the
   `SessionInfo`, formats the strings, builds the XAML card, computes the change signature, and runs
   the off-thread transcript summary load. It knows nothing about *when* the popup opens.
-- **Tab side** (`Tab.cpp`) owns the *lifecycle*: creating + hosting the element on ONE framework-managed
-  `ToolTip`, swapping its `Content` only while closed, and detaching it on an owner recycle. It knows
-  nothing about the session; it just hosts whatever element it's handed. It does NOT own open/close —
-  `ToolTipService` does (post-rewrite; the old manual timers + `IsOpen` are gone, §9).
+- **Host side** (`AgentSessionToolTip.cpp`, formerly `Tab.cpp`) owns the *lifecycle*: creating +
+  hosting the element on ONE framework-managed `ToolTip`, swapping its `Content` only while closed,
+  placing it (a per-owner placement provider, else the tab default), and detaching it on an owner
+  recycle. It knows nothing about the session; it just hosts whatever element it's handed. It does NOT
+  own open/close — `ToolTipService` does (post-rewrite; the old manual timers + `IsOpen` are gone, §9).
 
 This split is why a content change is a cheap "push a new element + signature," and why all the
-crashiness lives on the Tab side (the lifecycle), not the TerminalPage side (the content).
+crashiness lives on the host side (the lifecycle), not the TerminalPage side (the content).
 
 ---
 
 ## 3. File & symbol map
 
-**`src/cascadia/TerminalApp/Tab.cpp` / `Tab.h`** — the lifecycle (all `Agentmaster`-marked; framework-managed
-post-rewrite — the old manual-open members/methods listed in §9's history are DELETED):
-- Members (`Tab.h` ~238–252):
-  - `bool _agentToolTipActive` — is the rich tooltip active (vs the default)?
-  - `winrt::…UIElement _agentToolTipContent` — the card element last handed to us by the page.
-  - `winrt::hstring _agentToolTipSig` — the content fingerprint (skip re-host if unchanged).
-  - `winrt::…Controls::ToolTip _agentToolTip` — the ONE reused ToolTip. Framework-managed (we never
-    drive `IsOpen`); `Content` swapped only while closed; **detached + nulled** on owner recycle /
-    `ClearAgentToolTip` / `Shutdown`. `{ nullptr }` when none.
-  - `bool _agentToolTipUnloadWired` — the owner-`Unloaded`→detach handler is wired ONCE per tab; guards that.
-  - *(DELETED in the rewrite: `_agentToolTipOpenTimer`, `_agentToolTipDismissTimer`, `_agentToolTipHoverWired`,
-    and the file-scope `g_lastAgentToolTipCloseTick` / `kAgentToolTipReopenCooldownMs` cross-tab cooldown.)*
+**`src/cascadia/TerminalApp/AgentSessionToolTip.h` / `.cpp`** — the lifecycle, class
+`AgentSessionToolTipHost` (framework-managed post-rewrite — the old manual-open members/methods listed in §9's
+history are DELETED). One host per OWNER element, held in a `std::shared_ptr` (every handler it wires captures
+a `weak_ptr` to it); the owner itself is held WEAKLY (its real owner — the `Tab`, the side-panel card view —
+keeps it alive). No destructor touches XAML: owners call `Shutdown()` / `Detach()` on the UI thread.
+- Members:
+  - `_owner` (`weak_ref<FrameworkElement>`) — the `TabViewItem`, or a side-panel card `Border`.
+  - `_active` — is the rich tooltip active (vs none / the tab's default)? `Active()`.
+  - `_content` — the card element last handed to us by the page. `_sig` — its fingerprint (`Sig()`).
+  - `_toolTip` — the ONE reused ToolTip. Framework-managed (we never drive `IsOpen`); `Content` swapped only
+    while closed; **detached + nulled** on owner recycle / `Clear` / `Shutdown`. `{ nullptr }` when none
+    (`Attached()`).
+  - `_placementProvider` — optional; where the card opens (§4b). None = the tab default (`Bottom` under the
+    owner's bounds).
+  - `_lifetimeWired` / `_hoverWired` — the owner's Unloaded+Loaded pair and its PointerEntered+wheel pair are
+    each wired ONCE per host. `_hoverCb` / `_wheelCb` — the page's callbacks, dropped by `Shutdown`.
+  - `_swapOpenOnce` — the one-shot open-swap grant (the summary body landing in the open card).
+  - `_wheelLogLabel` (`"item"` for a tab, `"card"` for a side-panel card) + the precomputed `[exc]` context
+    strings, so no catch handler has to allocate.
+  - *(DELETED in the rewrite: `_agentToolTipOpenTimer`, `_agentToolTipDismissTimer`, the first
+    `_agentToolTipHoverWired`, and the file-scope `g_lastAgentToolTipCloseTick` / `kAgentToolTipReopenCooldownMs`
+    cross-tab cooldown.)*
 - Methods:
-  - `_UpdateToolTip()` — the entry that decides default vs rich; builds the default tooltip inline.
-  - `SetAgentToolTip(content, sig)` — public; the page calls this. Stores + `_UpdateToolTip`.
-  - `ClearAgentToolTip()` — public; revert to the default tooltip (session gone/archived); `_DetachAgentToolTip` first.
-  - `_UpdateAgentToolTip()` — owner-guard; create (if null) + `SetToolTip` + `_WireAgentToolTipUnload`;
-    swap `Content` only when `!IsOpen()` (a safe READ; we never SET IsOpen).
-  - `_WireAgentToolTipUnload()` — wire (once) the owner `TabViewItem.Unloaded` → `_DetachAgentToolTip`.
-  - `_DetachAgentToolTip()` — `SetToolTip(tvi, nullptr)` + null the ref (no `IsOpen`, no timers, no cooldown).
-  - `EnsureAgentToolTipHoverHook(onHoverBuild, onWheel)` — public; wire (once per tab) the owner's
-    `PointerEntered` → the page's build-now callback **and** its `PointerWheelChanged` → the page's
-    card-scroll callback (§4b-bis; `_agentToolTipWheelCb`, cleared in `Shutdown` beside the hover one).
-    Returns true only the ONE time it wires (the caller's arm-build cue). The wheel handler READS
-    `IsOpen()` to gate, and marks the notch `Handled` only when the page reports it scrolled.
+  - `Create(owner, wheelLogLabel, logContext)` — the only way to make one (`enable_shared_from_this`).
+  - `SetPlacementProvider(provider)`.
+  - `SetContent(content, sig, swapWhileOpen)` — the page calls this. Early-out only when the signature is
+    unchanged AND a tooltip is attached (§4d-bis); else store, mark active, `Update()`.
+  - `Clear()` — detach + forget the content; returns whether a rich card was active (the tab then rebuilds its
+    default tooltip).
+  - `Update()` — owner guard; create (if null) + `SetToolTip` + `_WireOwnerLifetime`; while CLOSED, apply the
+    placement and swap `Content` (`IsOpen()` is a safe READ; we never SET it).
+  - `RefreshPlacement()` — the closed-only re-anchor, run from the hover hook before the page's build.
+  - `_WireOwnerLifetime()` — wire (once) the owner `Unloaded` → `Detach` and `Loaded` → `Update` (re-attach).
+  - `Detach()` — `SetToolTip(owner, nullptr)` + null the ref (no `IsOpen`, no timers, no cooldown). Its catch
+    LOGS (the old Tab version was bare).
+  - `EnsureHoverHook(onHoverBuild, onWheel)` — wire (once per host) the owner's `PointerEntered` → re-anchor +
+    the page's build-now callback **and** its `PointerWheelChanged` → the page's card-scroll callback
+    (§4b-bis). Returns true only the ONE time it wires (the caller's arm-build cue). The wheel handler READS
+    `IsOpen()` to gate, and marks the notch `Handled` only when the page reports the card took it.
+  - `Shutdown()` — `Detach` + drop both callbacks (a tab's `Shutdown`; a side-panel card leaving the list).
   - *(DELETED: `_WireAgentToolTipHover`, `_SafeSetAgentToolTipOpen`, `_ForceCloseAgentToolTip`, `_ArmAgentToolTipDismiss`.)*
 
+**`src/cascadia/TerminalApp/Tab.cpp` / `Tab.h`** — the first owner: `std::shared_ptr<AgentSessionToolTipHost>
+_agentToolTipHost` (created lazily by `AgentToolTipHost()`, label `"item"`, context `"Tab"`), plus:
+- `_UpdateToolTip()` — the entry that decides default vs rich: an active host → `host->Update()`; else build the
+  default tooltip inline.
+- `SetAgentToolTip(content, sig, swapWhileOpen)` / `EnsureAgentToolTipHoverHook(…)` — forward to the host.
+- `ClearAgentToolTip()` — `host->Clear()`, then `_UpdateToolTip()` to bring the default tooltip back.
+- `AgentToolTipSig()` / `AgentToolTipAttached()` / `AgentToolTipOpen()` / `AgentToolTipHoverWired()` — read-only.
+- `Shutdown()` → `host->Shutdown()`.
+
 **`src/cascadia/TerminalApp/TerminalPage.AgentObserver.cpp`** — the content:
-- TU-local string helpers (anon namespace ~81–195): `TtNowMs`, `TtSpan`, `TtStateLabel`, `TtJoin`,
-  `TtPermIsBypass`.
-- TU-local element builders (~197–411): `TtFill` (brush), `TtBuildSummaryBody` (text → monospace
-  TextBlocks + `\x1F` → full-width `Border` rules), `TtBuildTooltipCard` (the rich card),
+- TU-local string helpers (anon namespace): `TtNowMs`, `TtSpan`, `TtStateLabel`, `TtJoin`, `TtPermIsBypass`.
+- TU-local element builders: `TtFill` (brush), `TtBuildSummaryBody` (text → monospace TextBlocks + `\x1F` →
+  full-width `Border` rules), `TtBuildTooltipCard` (the rich card; takes the card's `maxCardWidth`),
   `TtBuildObserveCard` (the `○ … unlinked` twin).
-- `_UpdateTabAgentToolTip(tab, sessionId)` (~649) — the orchestrator: reads `SessionInfo`, formats,
-  builds, signs, `SetAgentToolTip`s, kicks the off-thread body loader.
-- `_EnsureTabTooltipSummary(...)` (~787) — `fire_and_forget`: off-thread resolve+stat+analyze of the
-  transcript → render the Summary box → cache → re-host.
-- `_SetTabActivityBadge(tab, wt, kind)` (~2295) — pushes the observe-badge tooltip on a non-managed tab.
+- `_UpdateTabAgentToolTip(tab, sessionId, swapWhileOpen, kickSummary)` — the TAB surface: guards, the
+  gone/`!live` → `ClearAgentToolTip` branch, the tags parse (`AgentTagsSpec`), then the shared push.
+- `_PushSessionToolTipCard(host, surfaceKey, s, tagsSpec, tagChips, roomWidth, swapWhileOpen, kickSummary,
+  rehost)` — the shared orchestrator (the old body of `_UpdateTabAgentToolTip`): formats, builds, signs,
+  `host.SetContent`s, adopts the scroll pieces, kicks the off-thread body loader (registering `rehost` as this
+  surface's waiter).
+- `_EnsureTabTooltipSummary(sessionId, codex, codexId, cwd)` — `fire_and_forget`, per SESSION: off-thread
+  resolve+stat+analyze of the transcript → render the Summary box → cache → re-host every waiting surface.
+- `_SetTabActivityBadge(tab, wt, kind)` — pushes the observe-badge tooltip on a non-managed tab.
 - `_ArmTabAgentToolTipHover(tab)` — arms the lazy hover build **and** the wheel hook (one
   `EnsureAgentToolTipHoverHook` call, two callbacks); the hover callback also resets the scroll to the
-  top of the body.
-- **Body scrolling** (§4b-bis): `_ScrollTabAgentToolTip(tab, delta)` (the wheel entry) →
-  `_SyncTabTooltipScrollBar(sid, offset, opacity)` (the render-only apply) +
-  `_ResetTabAgentToolTipScroll(sid)` / `_ArmTabTooltipScrollBarFade(sid)` /
+  top of the body (only for a hover that starts closed).
+- **Body scrolling** (§4b-bis): `_ScrollTabAgentToolTip(tab, delta)` (the tab's wheel entry; sets
+  `_tooltipWheelClaimed`) → the shared `_ScrollSessionToolTipBody(surfaceKey, sessionId, delta, src)` →
+  `_SyncTabTooltipScrollBar(surfaceKey, offset, opacity)` (the render-only apply) +
+  `_ResetTabAgentToolTipScroll(surfaceKey)` / `_ArmTabTooltipScrollBarFade(surfaceKey)` /
   `_OnTabTooltipScrollBarFadeTick()` (the auto-hide). The card's pieces come back from
   `TtBuildTooltipCard`'s `TtCardScrollParts& scrollOut`.
 
-**`src/cascadia/TerminalApp/TerminalPage.h`** — the content cache (~730–744):
+**`src/cascadia/TerminalApp/TerminalPage.AgentSidePanel.cpp`** — the second owner (SIDE_PANEL.md §2d): one host
+per card (`AgentSidePanelCardView::tipHost`, label `"card"`), `_UpdateSidePanelCardToolTip` (the card surface),
+`_SidePanelArmCardToolTip`, `_OnSidePanelCardToolTipHover`, `_ScrollSidePanelCardToolTip`,
+`_SidePanelCardToolTipPlacement` (the placement provider), `_SidePanelCardToolTipRoomWidth`,
+`_SidePanelSuspendCardToolTip`, `_SidePanelDropCardToolTip`, `_SidePanelApplyCardTipMode`.
+
+**`src/cascadia/TerminalApp/TerminalPage.h`** — the content cache:
 - `struct _AgentTooltipSummary { std::wstring path; int64_t mtime; int64_t lastCheckMs; winrt::hstring body; }`
-- `std::unordered_map<std::wstring,_AgentTooltipSummary> _tabTooltipSummary` — per-session Summary cache.
+- `std::unordered_map<std::wstring,_AgentTooltipSummary> _tabTooltipSummary` — per-SESSION Summary cache
+  (shared by every surface of the session).
 - `std::unordered_set<std::wstring> _tabTooltipSummaryInFlight` — one background load per session.
-- `std::unordered_map<std::wstring,std::wstring> _tabTooltipSig` — last signature per session.
+- `_tabTooltipSummaryWaiters` (session → surface key → re-host callback) — who to re-host when it lands.
+- `std::unordered_map<std::wstring,std::wstring> _tabTooltipSig` — last signature per SURFACE key (the session
+  id for a tab; `"\x1F" "sidepanel:" <id>` for a side-panel card).
 - `winrt::fire_and_forget _EnsureTabTooltipSummary(...)`.
 - `struct _AgentTooltipScroll { weak viewport/content/thumb; contentShift; thumbScale; thumbShift; offset; }`
-  + `std::unordered_map<std::wstring,_AgentTooltipScroll> _tabTooltipScroll` — the hovered card's scroll
+  + `std::unordered_map<std::wstring,_AgentTooltipScroll> _tabTooltipScroll` — each surface's card scroll
   state (§4b-bis), re-adopted on every rebuild; **weak** element refs so a superseded card is never pinned.
-- `_tabTooltipScrollFadeTimer` / `_tabTooltipScrollFadeSession` / `_tabTooltipScrollFadeHolding` — the ONE
-  per-window scrollbar auto-hide (hold, then step-down fade).
+- `_tabTooltipScrollFadeTimer` / `_tabTooltipScrollFadeSession` (a surface key) / `_tabTooltipScrollFadeHolding`
+  — the ONE per-window scrollbar auto-hide (hold, then step-down fade).
 
 ---
 
 ## 4. The lifecycle, end to end (CURRENT behavior — framework-managed, post-rewrite)
 
-### 4a. Content push (page → tab)
-1. Something (bind / sweep / activity — see §5) calls `_UpdateTabAgentToolTip(tab, sessionId)`.
-2. It null/registry/impl-guards, then: **if the session is gone or `!live`** → `impl->ClearAgentToolTip()`
-   + drop the cached Summary/sig, return. (This is how an archived tab reverts to the default tooltip.)
-3. Else it formats the header strings from `SessionInfo` (state + "ago" via `TtSpan`; why-needs-you;
-   `⚠ unread`; `claude/codex · model · effort · mode`; folder/branch), pulls the cached Summary body
-   (may be empty on first sight), and computes a `sig` (state+title+folderBranch+meta+bodyMtime).
-4. If `sig` changed since last push → `impl->SetAgentToolTip(TtBuildTooltipCard(...), sig)`.
-5. It then throttle-kicks `_EnsureTabTooltipSummary` (≤ every 4s per session, mtime-gated) to load /
-   refresh the Summary body off-thread; on completion that re-calls `_UpdateTabAgentToolTip` (the body
-   now differs → new sig → re-host).
+### 4a. Content push (page → host)
+1. A SURFACE runs — for a tab, `_UpdateTabAgentToolTip(tab, sessionId, …)` (§5 lists when); for a
+   side-panel card, `_UpdateSidePanelCardToolTip(id, …)`.
+2. It null/registry/impl-guards, then: **if the session is gone or `!live`** → the tab calls
+   `impl->ClearAgentToolTip()` + drops the cached Summary/sig (this is how an archived tab reverts to the
+   default tooltip); the card calls `host->Clear()` and forgets its surface state. Return.
+3. Else it resolves the tags (the tab: its `AgentTagsSpec`; the card: its card model) and calls the shared
+   `_PushSessionToolTipCard(host, surfaceKey, s, …)`, which formats the header strings from `SessionInfo`
+   (state + "ago" via `TtSpan`; why-needs-you; `⚠ unread`; `claude/codex · model · effort · mode`;
+   folder/branch), pulls the cached Summary body (may be empty on first sight), and computes a `sig`
+   (state+title+folderBranch+meta+tags+bodyMtime + the height and width budgets on a 50 px grain).
+4. If `sig` changed since this surface's last push, or nothing is attached, and the card is closed (or this
+   push carries the open-swap grant) → `host.SetContent(TtBuildTooltipCard(...), sig, swapWhileOpen)`.
+5. With `kickSummary`, it then throttle-kicks `_EnsureTabTooltipSummary` (≤ every 4s per session,
+   mtime-gated, one load per session) to load / refresh the Summary body off-thread, after registering this
+   surface's re-host callback as a WAITER; on completion every waiting surface re-hosts (the body now
+   differs → new sig → re-host), with the open-swap grant and `kickSummary=false`.
 
-### 4b. Host (`SetAgentToolTip` → `_UpdateToolTip` → `_UpdateAgentToolTip`)
-- `SetAgentToolTip` returns early if `sig` matches the last one (no XAML churn). Else stores
-  content+sig, sets `_agentToolTipActive=true`, calls `_UpdateToolTip`.
-- `_UpdateToolTip`: `_agentToolTipActive` → `_UpdateAgentToolTip`; else build the default tooltip.
-- `_UpdateAgentToolTip`:
-  1. **Owner guard**: if the `TabViewItem` is null / `!IsLoaded()` / no `XamlRoot()` → return (never
-     build/mutate for a detached owner). The `owner` is captured in the `if`-init and reused below.
-  2. `else if (!_agentToolTip)` → **create** the ONE reused `ToolTip`: `RequestedTheme(Dark)`,
+### 4b. Host (`SetAgentToolTip` → `SetContent` → `Update`)
+- `SetContent` returns early if `sig` matches the last one AND a tooltip is attached (no XAML churn). Else
+  stores content+sig, sets `_active=true`, records the one-shot open-swap grant, calls `Update`. (For a tab,
+  `Tab::_UpdateToolTip` → `host->Update()` when the host is active; else it builds the default tooltip.)
+- `Update`:
+  1. **Owner guard**: if the owner is null / `!IsLoaded()` / no `XamlRoot()` → return (never
+     build/mutate for a detached owner). The one-shot grant is consumed FIRST, even on this early-out.
+  2. `if (!_toolTip)` → **create** the ONE reused `ToolTip`: `RequestedTheme(Dark)`,
      `Placement(Bottom)`, `IsHitTestVisible(false)`, `ToolTipService::SetToolTip(owner, it)`, then
-     `_WireAgentToolTipUnload()` (no-op after the first time). From here **`ToolTipService` owns
+     `_WireOwnerLifetime()` (no-op after the first time). From here **`ToolTipService` owns
      open/close** — hover opens (after the system delay), pointer-exit closes. We wire nothing else.
-  3. If `_agentToolTip.IsOpen()` → return (a safe READ — do NOT swap `Content` while the framework is
-     showing it). Else — closed-only mutations: re-assert **`PlacementRect` = the tab's own bounds**
-     (`{0,0,ActualWidth,ActualHeight}`; a hover-opened AUTOMATIC tooltip otherwise places itself relative
-     to the **pointer**, so `Placement(Bottom)` alone read "below the cursor" — the explicit rect anchors
-     the card centered under the TAB; re-asserted each refresh since tab widths drift), then
-     `_agentToolTip.Content(_agentToolTipContent)`.
+  3. If `_toolTip.IsOpen()` and no open-swap grant → return (a safe READ — do NOT swap `Content` while the
+     framework is showing it). Else — while CLOSED — apply the **placement** (`_ApplyPlacement`): with no
+     provider (a tab), **`PlacementRect` = the owner's own bounds** (`{0,0,ActualWidth,ActualHeight}`; a
+     hover-opened AUTOMATIC tooltip otherwise places itself relative to the **pointer**, so
+     `Placement(Bottom)` alone read "below the cursor" — the explicit rect anchors the card centered under
+     the TAB; re-asserted each refresh since tab widths drift); with a provider (a side-panel card), the
+     provider's mode + rect. Then `_toolTip.Content(_content)`.
+- **The hover re-anchor (new, 2026-10-05):** the `PointerEntered` hook runs `RefreshPlacement()` (the same
+  closed-only placement write) BEFORE the page's build, so a tooltip whose content did not change still
+  opens at the owner's CURRENT geometry (a tab that moved, a side-panel width drag or dock flip). Before the
+  extraction the tab re-anchored only when a content push re-hosted.
+- **Where a Left/Right card lands** (WinUI `ToolTip::PerformNonMousePlacementWithPopup` +
+  `ToolTipPositioning`): the rect is mapped to window coordinates, inflated by the 20 px default mouse
+  offset on each side, the card is docked outside it and CENTERED on it along the other axis, then shifted
+  back inside the window; a side with too little room is skipped for another one.
 
 ### 4b-bis. Input = the WHEEL, read on the TAB HEADER (the body scrolls)
 
@@ -189,20 +277,23 @@ only** (no drag, no keyboard, no touch/manipulation). The card itself takes **no
 stays `IsHitTestVisible(false)` and inert, per invariant 6a — so the wheel is read on the owner
 `TabViewItem`, which is under the cursor for the tooltip's entire life anyway:
 
-1. `Tab::EnsureAgentToolTipHoverHook` wires `PointerWheelChanged` beside the `PointerEntered`
-   build hook (one wiring, once per tab). The handler only ever **reads** `IsOpen()` (invariant 2) and
-   forwards the notch to the page callback.
+1. The host's `EnsureHoverHook` (for a tab: `Tab::EnsureAgentToolTipHoverHook`) wires
+   `PointerWheelChanged` beside the `PointerEntered` build hook (one wiring, once per host). The handler
+   only ever **reads** `IsOpen()` (invariant 2) and forwards the notch to the page callback.
 2. `TerminalPage::_ScrollTabAgentToolTip(tab, delta)` resolves the tab's **current** session (re-home
-   safe, like the hover hook), advances the stored offset by `kTtScrollStepPx` per 120 units, and calls
-   `_SyncTabTooltipScrollBar`.
-3. `TerminalPage::_SyncTabTooltipScrollBar(sid, offset, opacity)` shifts the body's
+   safe, like the hover hook) and hands the notch to the shared `_ScrollSessionToolTipBody(surfaceKey,
+   sessionId, delta, src)`, which advances that surface's stored offset by `kTtScrollStepPx` per 120 units
+   and calls `_SyncTabTooltipScrollBar`. (A side-panel card's wheel callback, `_ScrollSidePanelCardToolTip`,
+   calls the same function with its own surface key and `src=card`.)
+3. `TerminalPage::_SyncTabTooltipScrollBar(surfaceKey, offset, opacity)` shifts the body's
    `TranslateTransform`, re-fits the slim scrollbar (`ScaleTransform` length + `TranslateTransform`
    position), paints it, and returns the max scrollable offset. **Every write is render-only** — never
    `Height`/`Margin` — because this also runs from the viewport's own `SizeChanged` (i.e. from inside a
    layout pass), where a layout write is the popup `E_LAYOUTCYCLE` fail-fast the tag badges had to be
    rewritten around (`TabHeaderControl::_PositionTagBadgesNow`).
-4. The notch is marked `Handled` **only when something actually scrolled**, so a card that fits leaves
-   the wheel to the tab strip's own horizontal scroll.
+4. The notch is marked `Handled` **only when the open card has something to scroll** — even at an end
+   stop, because the card IS the scroller under the pointer — so a card whose whole body fits leaves the
+   wheel to the tab strip's own horizontal scroll (or, for a side-panel card, to the card list).
 5. The bar exists **only while you scroll**: invisible at rest (even on a card that *can* scroll), lit
    on the first notch, then one per-window `DispatcherTimer` holds `kTtScrollBarHoldMs` and steps the
    opacity back to 0 (`_ArmTabTooltipScrollBarFade` / `_OnTabTooltipScrollBarFadeTick`). It is feedback
@@ -220,25 +311,28 @@ register" would otherwise be indistinguishable between *the notch never arrived*
 open*, and *the body had nothing to scroll*. The lines separate exactly those:
 `item: cb=1 tip=1 open=0/1` (the notch reached the tab), `<sid> src=item|row delta=… off=A->B max=M`
 (it scrolled, and by how much), `row: no open card` (it reached the strip but no card was up). **No
-lines at all ⇒ the wheel never reached the tab strip.**
+lines at all ⇒ the wheel never reached the tab strip.** A side-panel card writes the same pair with
+`card: cb=… tip=… open=…` and `src=card`.
 
-The per-card pieces live in `TerminalPage::_tabTooltipScroll[sessionId]` (**weak** element refs + the
-three transforms), re-adopted on every card rebuild. Weak, because the card is rebuilt on every content
+The per-card pieces live in `TerminalPage::_tabTooltipScroll[surfaceKey]` (**weak** element refs + the
+three transforms; the key is the session id for a tab, `"\x1F" "sidepanel:" <id>` for a side-panel card),
+re-adopted on every card rebuild. Weak, because the card is rebuilt on every content
 change — strong refs would pin every superseded tree (the leak class `AgentTipHelpers` exists to avoid).
 
 **Two non-obvious rules keep the state and the screen in lockstep** — both fall out of `PointerEntered`
 being a BUBBLING event, so it re-fires as the pointer crosses the header's own inner elements (icon →
 title → close button), i.e. repeatedly *while the tip is already open*:
 
-- **`_UpdateTabAgentToolTip` does not rebuild while the tip is open** (unless this push is the
-  `swapWhileOpen` grant). `Tab::_UpdateAgentToolTip` would refuse to host it anyway (invariant 3), so
+- **`_PushSessionToolTipCard` does not rebuild while the tip is open** (unless this push is the
+  `swapWhileOpen` grant). The host's `Update` would refuse to host it anyway (invariant 3), so
   the page would end up adopting the scroll pieces of a card that is NOT on screen and the wheel would
   silently drive an unhosted tree. Nothing is lost by skipping: the next `PointerEntered` rebuilds
   fresh, and the staged card's "ago" line would have gone stale by then regardless.
 - **The scroll reset only runs on a hover that starts CLOSED.** Otherwise every mouse nudge inside the
   tab header would snap the reader back to the top of the body.
 
-Both gate on `Tab::AgentToolTipOpen()` — a safe **read** of `IsOpen` (invariant 2 forbids writing it).
+Both gate on the host's `Open()` (`Tab::AgentToolTipOpen()` for a tab) — a safe **read** of `IsOpen`
+(invariant 2 forbids writing it).
 
 ### 4c. Open / close = the FRAMEWORK
 There are no open/dismiss timers, no pointer-loss handlers, no manual `IsOpen`, and no cross-tab
@@ -248,15 +342,17 @@ crashed). We only ever *read* `IsOpen()` (to gate the content swap); we never *s
 removes the entire crash class (§9) — there is no manually-opened popup, and no reused object we drive
 across an open/close cycle.
 
-### 4d. Detach = drop (`_DetachAgentToolTip`)
-Runs from the owner `Unloaded` handler (§4e), `ClearAgentToolTip` (session gone), and `Tab::Shutdown`. It:
-1. Returns early if `!_agentToolTip` (nothing of ours attached — leaves any default tooltip alone).
-2. `ToolTipService::SetToolTip(tvi, nullptr)` (**detach** from the owner; try/catch).
-3. `_agentToolTip = nullptr` (**drop** our strong ref).
+### 4d. Detach = drop (`Detach`, formerly `_DetachAgentToolTip`)
+Runs from the owner `Unloaded` handler (§4e), `Clear` (session gone), `Shutdown` (a tab's `Shutdown`; a
+side-panel card leaving its list), and — side-panel cards only — a tag ribbon's hover
+(`_SidePanelSuspendCardToolTip`, SIDE_PANEL.md §2b). It:
+1. Returns early if `!_toolTip` (nothing of ours attached — leaves any default tooltip alone).
+2. `ToolTipService::SetToolTip(owner, nullptr)` (**detach** from the owner; try/catch that LOGS — Rule #18).
+3. `_toolTip = nullptr` (**drop** our strong ref).
 
-It drives **no `IsOpen`** — the framework closes any open popup itself on exit/recycle — so this path
-can't fail-fast. Dropping the ref means the next `_UpdateAgentToolTip` rebuilds a FRESH tooltip bound to
-the live (reloaded) owner (the crash #4 lesson, kept without the manual machinery).
+It drives **no `IsOpen`** — the framework closes any open popup itself on exit/recycle
+(`UnregisterToolTip`) — so this path can't fail-fast. Dropping the ref means the next `Update` rebuilds a
+FRESH tooltip bound to the live (reloaded) owner (the crash #4 lesson, kept without the manual machinery).
 
 ### 4d-bis. The ATTACH-TIMING root cause (2026-07-27) — why the card "only showed sometimes"
 
@@ -289,54 +385,78 @@ which is why the card *looked* present), while our object was null-or-freshly-cr
 closed. The wheel gate was reporting reality.
 
 **The fix — attach before a pointer can arrive, never during:**
-- `TabViewItem().Loaded → _UpdateAgentToolTip()` when active-but-unattached (the missing other half of
-  the Unloaded detach), so a recycled tab is re-armed the moment it re-enters the tree.
-- `SetAgentToolTip`'s early-out now also requires `_agentToolTip` to exist, so a same-signature push
-  still re-attaches.
-- `_UpdateTabAgentToolTip` pushes when `!AgentToolTipAttached()` even if the signature is unchanged.
+- owner `Loaded → Update()` when active-but-unattached (the missing other half of the Unloaded detach),
+  so a recycled tab is re-armed the moment it re-enters the tree (now `_WireOwnerLifetime`, per host).
+- `SetContent`'s early-out (formerly `SetAgentToolTip`'s) also requires `_toolTip` to exist, so a
+  same-signature push still re-attaches.
+- `_PushSessionToolTipCard` (formerly `_UpdateTabAgentToolTip`) pushes when `!host.Attached()` even if the
+  signature is unchanged. The side-panel card's tag-ribbon detach relies on exactly this: the next hover
+  over the card's body re-attaches it.
 
 **Lesson to keep:** for a service-owned tooltip, *attachment* — not content, not `IsOpen` — is the
 state that determines whether it can ever open. Anything that detaches (recycle, `ClearAgentToolTip`)
 must have a matching re-attach that runs **outside** a dwell.
 
-### 4e. Owner-recycle safety (`_WireAgentToolTipUnload`, wired once per tab)
+### 4e. Owner-recycle safety (`_WireOwnerLifetime`, wired once per host)
 MUX `TabView` virtualizes/recycles its item containers (heavy during a multi-tab window restore), which
 tears down the ToolTip's native peer while our WinRT strong ref keeps resolving non-null — a zombie. If
 the SAME owner later RELOADS, reusing that stale ref to swap `.Content()` would read freed memory (crash
-#4). So the sole surviving handler is `TabViewItem().Unloaded → _DetachAgentToolTip()`: on unload we
-detach + drop, and the next content refresh rebuilds fresh. The `_UpdateAgentToolTip` owner-loaded guard
-is the complementary front door (never build/mutate for a detached owner).
+#4). So the owner's `Unloaded → Detach()`: on unload we detach + drop, and the owner's `Loaded → Update()`
+(§4d-bis) re-attaches a fresh one. The `Update` owner-loaded guard is the complementary front door (never
+build/mutate for a detached owner).
+
+A side-panel card is not recycled by a virtualizing panel, but it does leave the visual tree (a list
+reset, a removal) and is then DROPPED for good. `Unloaded` is a deferred event that may
+run after the card view (and its host) is gone, so the side panel never relies on it alone: it calls
+`Shutdown()` itself before a card leaves the list (`_SidePanelDropCardToolTip`). A `ToolTip` left attached
+to a dropped element is the islands leak class (AgentTipHelpers.h). A card MOVED inside the list keeps its
+tooltip: `UIElementCollection::Move` raises no `Unloaded` / `Loaded`.
 
 ---
 
 ## 5. Who calls what (invocation points)
 
-`_UpdateTabAgentToolTip(tab, sessionId)` is called from (all `TerminalPage.AgentObserver.cpp`):
-1. **The registry/observer refresh** (~645) — the per-change + per-tick path that repaints the tab dot
-   also refreshes the tooltip (and reverts it to default when the session went `!live`).
-2. **`_EnsureTabTooltipSummary` completion** (~883) — after the off-thread Summary body loads, re-host
-   with the fuller card.
-3. **On bind** (`_BindClaudeSessionToTab`, ~2613) — replace any `○ … unlinked` observe tooltip with the
-   rich managed one the instant a session binds.
-4. **The liveness sweep** (`_SweepClaudeLivenessImpl`, ~2673) — the ~2s tick refreshes each hosted
-   tab's tooltip (the "ago" line ticking + reverting dead tabs).
+The tooltip is **LAZY**: a live session's card is built on HOVER, never per tick or per registry
+notify (the CPU fix — with 19+ active sessions the per-notify rebuild was a steady UI-thread burn).
+`_UpdateTabAgentToolTip(tab, sessionId, swapWhileOpen, kickSummary)` is called from (all
+`TerminalPage.AgentObserver.cpp`):
+1. **The hover hook** (`_ArmTabAgentToolTipHover`'s `PointerEntered` callback) — the build with fresh
+   state + a fresh "ago", kicking the mtime-gated Summary load; the scroll resets to the top only for a
+   hover that starts closed.
+2. **The arm-build** — the first time `_ArmTabAgentToolTipHover` wires a tab, a HEADER-ONLY card
+   (`kickSummary=false`) so the first hover finds a tooltip attached.
+3. **The Summary arrival** — `_EnsureTabTooltipSummary` re-hosts every waiting surface; the tab's waiter
+   calls `_UpdateTabAgentToolTip(t, id, swapWhileOpen=true, kickSummary=false)`.
+4. **On bind** (`_BindClaudeSessionToTab`) — replace any `○ … unlinked` observe tooltip with the rich
+   managed HEADER card the instant a session binds (`kickSummary=false`), then arm the hover.
+5. **A tag toggle** — the tag-chip row rides the tab's `AgentTagsSpec` (sig-gated, `kickSummary=false`).
+6. **The `!live` edge** of the registry-observer push (`_UpdateTabAgentDot`) — the gone/archived branch
+   clears to the default tooltip and drops the cached Summary.
 
-`SetAgentToolTip` is called only from `_UpdateTabAgentToolTip` (rich card, ~766) and
-`_SetTabActivityBadge` (observe card, ~2315). `ClearAgentToolTip` from `_UpdateTabAgentToolTip`'s
-gone/`!live` branch (~663) and the liveness sweep's dead-tab branch (~2791).
+The **liveness sweep** (`_SweepClaudeLivenessImpl`, ~2.5 s) no longer builds anything: it only re-arms the
+hover hook for a tab that entered `_claudeTabs` without passing the bind funnel (a window-restored dormant
+tab, a re-home) — one bool probe per tab per tick.
+
+The rich card reaches the tab's host directly: `_PushSessionToolTipCard` calls `SetContent` on the host
+`impl->AgentToolTipHost()` returns. `Tab::SetAgentToolTip` is left with `_SetTabActivityBadge` (the observe
+card). `ClearAgentToolTip` is called from `_UpdateTabAgentToolTip`'s gone/`!live` branch and the liveness
+sweep's dead-tab branch. The side-panel card surface has its own call sites
+(SIDE_PANEL.md §2d): its hover hook, its arm-build, its Summary waiter, and the "Sum" mode switch.
 
 **Threading:** every one of these runs on the window's UI thread. The observer/registry callbacks
 that originate off-thread marshal onto the UI thread (`resume_foreground` / `DispatcherQueue`) BEFORE
-touching the tooltip. `SetAgentToolTip`/`_UpdateAgentToolTip` assert `ASSERT_UI_THREAD()`. Never call
-tooltip code off the UI thread.
+touching the tooltip. The `Tab` forwarders assert `ASSERT_UI_THREAD()`; the host's own entries run from
+them or from XAML events of the owner's thread. Never call tooltip code off the UI thread.
 
 ---
 
 ## 6. The content builders (`Tt*`)
 
-- `TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, bodyText, …, maxCardHeight)` → a
-  dark `Border` (bg `#FF202020`, 1px `#40FFFFFF` border, corner radius 4, padding 10/8,
-  **MaxWidth `kTtCardMaxWidth` = 660**) wrapping a vertical `StackPanel`:
+- `TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, bodyText, …, maxCardHeight,
+  maxCardWidth, scrollOut)` → a dark `Border` (bg `#FF202020`, 1px `#40FFFFFF` border, corner radius 4,
+  padding 10/8, **MaxWidth = `maxCardWidth`**: the flat `kTtCardMaxWidth` = 660 for a tab, the room beside
+  the panel clamped to [`kTtCardMinWidth` 320, 660] for a side-panel card; `<= 0` = 660) wrapping a vertical
+  `StackPanel`:
   - **Header** (a 2-col `Grid`): left = a 9px state-colored `Ellipse` (`accent`, 1px black stroke) +
     the title (Cascadia Mono 13, semibold, ellipsized, NoWrap); right = `folderBranch` (Cascadia Mono
     11, dim `#B0B0B0`, ellipsized).
@@ -370,7 +490,21 @@ budgeted against the window rather than hardcoded — the old flat `MaxHeight(36
 whole card out near half the screen:
 
 - **Width** — `kTtCardMaxWidth` **660** (was 460; +200, and since the card is centered under its tab that
-  spends 100 per side). `kTagLineBudget` (the tag-row greedy packer) is derived from it, so it can't drift.
+  spends 100 per side). `kTagLineBudget` (the tag-row greedy packer) is derived from the card's ACTUAL
+  budget (`maxCardWidth`), so it can't drift. A side-panel card passes the room beside the panel instead
+  (`_SidePanelCardToolTipRoomWidth`, clamped to [320, 660]); the width rides the re-host signature on the
+  same 50px grain as the height.
+- ⚠ **The `ToolTip` caps every card at 320 px.** WinUI 2.8's ToolTip style
+  (`microsoft-ui-xaml` release/2.8, `dev/CommonStyles/ToolTip_rs5_themeresources.xaml`, loaded by the app's
+  `XamlControlsResources ControlsResourcesVersion="Version2"`) sets `MaxWidth = ToolTipMaxWidth = 320` and
+  `Padding = 9,6,9,8` on the `ToolTip` itself, and the template's `ContentPresenter` takes
+  `MaxWidth="{TemplateBinding MaxWidth}"`. Nothing in this app sets a ToolTip `MaxWidth`, so — per that
+  source — the card renders at most ~300 px wide on a tab and on a side-panel card alike, and the
+  460 → 660 change above never showed. Found 2026-10-05 by reading the source; not yet measured on
+  screen. If the wider card is wanted, set the host's `ToolTip.MaxWidth` locally (a local value outranks
+  the style setter) — that is a visible change to every tab's card, so it is a decision, not a fix to
+  slip in. Note that `kTagLineBudget` is sized for the budget, not the cap, so a long tag row can run past
+  the visible width.
 - **Height** — `_UpdateTabAgentToolTip` measures `Root().ActualHeight()` (the XAML island root == the window
   client area; the tooltip renders in the island's popup root, so the window bounds it regardless — and it
   IS the screen when maximized, the normal case) and passes `kTtCardHeightFraction` (**0.80**) of it as
@@ -401,13 +535,21 @@ set as `Content` on two ToolTips would corrupt. Keep builders returning fresh tr
 
 ## 7. The off-thread Summary loader (`_EnsureTabTooltipSummary`)
 
-- `fire_and_forget`, UI → worker → UI. Resolves the transcript path, `GetFileAttributesExW` for the
-  mtime, and — only when the mtime grew (or first sight) — `AnalyzeSessionTranscript` +
-  `RenderSessionSummaryBox` (Claude) / `ReadCodexRolloutInfo` + `RenderCodexSummaryBox` (Codex) on the
-  **worker thread**, then marshals back and stores into `_tabTooltipSummary[id]` and re-calls
-  `_UpdateTabAgentToolTip`.
+- `fire_and_forget`, UI → worker → UI, per SESSION (`_EnsureTabTooltipSummary(sessionId, codex, codexId,
+  cwd)` — it no longer takes a tab). Resolves the transcript path, `GetFileAttributesExW` for the mtime,
+  and — only when the mtime grew (or first sight) — `AnalyzeSessionTranscript` + `RenderSessionSummaryBox`
+  (Claude) / `ReadCodexRolloutInfo` + `RenderCodexSummaryBox` (Codex) on the **worker thread**, then
+  marshals back, stores into `_tabTooltipSummary[id]`, takes the session's entry out of
+  `_tabTooltipSummaryWaiters`, and calls each waiting surface's re-host callback (the tab's re-calls
+  `_UpdateTabAgentToolTip`, a side-panel card's `_UpdateSidePanelCardToolTip`), each inside its own
+  try/catch (one failed surface never costs the others), all with the open-swap grant and
+  `kickSummary=false`.
 - **mtime-gated** (a quiet tab costs one stat) + **in-flight-guarded** (`_tabTooltipSummaryInFlight`,
-  one load per session) + **throttled** by the caller (`lastCheckMs`, ≤ every 4s).
+  one load per session, however many surfaces wait) + **throttled** by the caller (`lastCheckMs`,
+  ≤ every 4s). A surface that asks while a check is DUE (no body yet, or the last check is > 4 s old)
+  registers as a waiter even when a load is already in flight, so hovering the side-panel card while the
+  tab's first load runs (or the reverse) still gets the body. A surface that asks within 4 s of a check
+  that already has a body shows that body; its next hover re-checks.
 - **Exception containment (commit `be1d63b7f`) — do not remove:** an exception escaping a
   `fire_and_forget` calls `std::terminate()`. The body has an INNER try/catch around the background
   analyze/render (contained on the worker thread so the UI cleanup still runs + the in-flight flag is
@@ -524,19 +666,28 @@ escape hatch is the §12 **off-switch**.
    swap) is fine; *setting* it is what caused crashes #1/#5/#6. Do not reintroduce open/dismiss timers,
    pointer-loss close handlers, `_SafeSetAgentToolTipOpen`, or a cross-tab cooldown — that is the retired
    manual-open path (§9).
-3. **Reuse ONE object; swap `Content` only while closed.** Create `_agentToolTip` once and `SetToolTip`
-   once; on refresh, `if (_agentToolTip.IsOpen()) return;` before `.Content(...)` — swapping under the
-   pointer flickers, and re-`SetToolTip`ing every ~2s would replace the framework's open tip.
+3. **Reuse ONE object; swap `Content` only while closed.** Create the host's `_toolTip` once and
+   `SetToolTip` once; on refresh, `if (_toolTip.IsOpen() && !swapOpenOnce) return;` before `.Content(...)` —
+   swapping under the pointer flickers, and re-`SetToolTip`ing every refresh would replace the framework's
+   open tip. Placement is a closed-only write too (`_ApplyPlacement` / `RefreshPlacement`).
 4. **Never build/mutate the tooltip for a detached owner.** Keep the `IsLoaded()`+`XamlRoot()` guard at
-   the top of `_UpdateAgentToolTip`.
+   the top of the host's `Update` (and of `RefreshPlacement`).
 4a. **Every detach needs a re-attach that runs OUTSIDE a dwell.** A tooltip that is not attached cannot
-   open, and one attached mid-hover does not open for that hover (§4d-bis). Keep the
-   `TabViewItem().Loaded → _UpdateAgentToolTip` re-host, and keep `AgentToolTipAttached()` in the push
-   conditions — a signature-only gate will silently leave recycled tabs tooltip-less.
-5. **Detach + drop on owner recycle.** Keep the `TabViewItem().Unloaded → _DetachAgentToolTip` handler
-   (`SetToolTip(tvi, nullptr)` + null the ref). Without it, a recycle→reload reuses a zombie ref on the
-   next `.Content()` swap — exactly crash #4. `_DetachAgentToolTip` drives NO `IsOpen` (the framework
-   closes any open popup itself), so it can't fail-fast.
+   open, and one attached mid-hover does not open for that hover (§4d-bis). Keep the owner
+   `Loaded → Update` re-host (`_WireOwnerLifetime`), and keep `host.Attached()` in the push conditions —
+   a signature-only gate will silently leave recycled tabs (and suspended side-panel cards) tooltip-less.
+5. **Detach + drop on owner recycle.** Keep the owner `Unloaded → Detach` handler
+   (`SetToolTip(owner, nullptr)` + null the ref). Without it, a recycle→reload reuses a zombie ref on the
+   next `.Content()` swap — exactly crash #4. `Detach` drives NO `IsOpen` (the framework closes any open
+   popup itself), so it can't fail-fast.
+5a. **An owner that can be DROPPED shuts its host down first.** `Unloaded` is deferred and may run after
+   the owner's view is gone, and a `ToolTip` attached to a dropped element is the islands leak class — so
+   the side panel calls `Shutdown()` (`_SidePanelDropCardToolTip`) before a card leaves its list or the list
+   resets, and `Tab::Shutdown` does the same for a tab. A new owner must do the same.
+5b. **Never put an `AgentTipHelpers` floating tip on an element that has a host.** That host attaches its
+   own tip to the hovered element on open and detaches it on close — it would REPLACE the host's
+   `ToolTip`, then remove it. Silence the element's floating tips first (`AgentSuppressTip`, which keeps
+   the "already wired" marker so they can be given back), as the side panel's "Sum" OFF mode does.
 6. **Keep it framework-managed — do not "speed it up" back into manual open.** The slower system-hover
    open is the deliberate price of the default tooltip's crash-free lifetime. If it must be faster, that
    is a framework/SDK concern (there is no `InitialShowDelay` here), not a reason to hand-drive `IsOpen`.
@@ -558,9 +709,11 @@ escape hatch is the §12 **off-switch**.
    lanes) must keep their terminate-nets. An escaping exception = `std::terminate`.
 8. **Builders return FRESH element trees.** Never cache/share a XAML element as `Content` across
    ToolTips; the cache holds strings only.
-9. **The signature gate is a correctness feature, not just perf.** `SetAgentToolTip` no-ops on an
-   unchanged `sig`, so the ~2s sweep + per-change observer + bind can all re-assert without XAML churn.
-   Keep the sig covering everything the card renders (state/title/folderBranch/meta/bodyMtime).
+9. **The signature gate is a correctness feature, not just perf.** `SetContent` no-ops on an unchanged
+   `sig` while a tooltip is attached, so every hover, the bind, a tag toggle and the Summary arrival can
+   all re-assert without XAML churn. Keep the sig covering everything the card renders
+   (state/title/folderBranch/meta/tags/bodyMtime + the height and width budgets), and keep it per SURFACE
+   (`_tabTooltipSig[surfaceKey]`) — two surfaces of one session host two different cards.
 10. **One title value.** The tooltip title comes from `SessionInfo.title` (Rule #11 elsewhere); the
     tooltip never renames anything. Read-only.
 
@@ -642,19 +795,22 @@ retired (§9 RESOLUTION).
 
 ## 13. Quick reference
 
-- Rich card built: `TerminalPage::_UpdateTabAgentToolTip` (`TerminalPage.AgentObserver.cpp`) — unchanged by
-  the rewrite (the whole content side is untouched).
-- Hosted + lifecycle (framework-managed): `Tab::SetAgentToolTip` / `_UpdateAgentToolTip` /
-  `_WireAgentToolTipUnload` / `_DetachAgentToolTip` (`Tab.cpp`).
+- Rich card built: the shared `TerminalPage::_PushSessionToolTipCard` (`TerminalPage.AgentObserver.cpp`), called
+  by the tab surface `_UpdateTabAgentToolTip` and the side-panel card surface `_UpdateSidePanelCardToolTip`.
+- Hosted + lifecycle (framework-managed): `AgentSessionToolTipHost` (`AgentSessionToolTip.{h,cpp}`) —
+  `SetContent` / `Update` / `_WireOwnerLifetime` / `Detach` / `EnsureHoverHook` / `Shutdown`; `Tab` forwards
+  (`SetAgentToolTip`, `ClearAgentToolTip`, `EnsureAgentToolTipHoverHook`). Second owner: the side-panel card
+  ([`SIDE_PANEL.md`](SIDE_PANEL.md) §2d).
 - The one rule: `ToolTipService` owns open/close — we never drive `IsOpen`; swap `Content` only while closed.
-- Body scrolling (§4b-bis): wheel-only, read on the tab HEADER (`Tab::EnsureAgentToolTipHoverHook`'s
-  `PointerWheelChanged`) → `TerminalPage::_ScrollTabAgentToolTip` → `_SyncTabTooltipScrollBar`
-  (render-only writes: a `TranslateTransform` on the body, a `ScaleTransform`+`TranslateTransform` on the
-  slim bar, which auto-hides a couple of seconds after the last notch). The card stays inert and
-  hit-test-invisible — still NO ScrollViewer (invariants 6a/6b).
-- Owner-recycle safety: the `TabViewItem().Unloaded → _DetachAgentToolTip` handler + the `_UpdateAgentToolTip`
-  owner-loaded guard.
-- Off-thread body: `_EnsureTabTooltipSummary` + `_tabTooltipSummary`/`_tabTooltipSig`/`_tabTooltipSummaryInFlight`.
+- Body scrolling (§4b-bis): wheel-only, read on the OWNER (the host's `PointerWheelChanged`) →
+  `TerminalPage::_ScrollTabAgentToolTip` / `_ScrollSidePanelCardToolTip` → the shared `_ScrollSessionToolTipBody`
+  → `_SyncTabTooltipScrollBar` (render-only writes: a `TranslateTransform` on the body, a
+  `ScaleTransform`+`TranslateTransform` on the slim bar, which auto-hides a couple of seconds after the last
+  notch). The card stays inert and hit-test-invisible — still NO ScrollViewer (invariants 6a/6b).
+- Owner-recycle safety: the owner `Unloaded → Detach` / `Loaded → Update` pair + the `Update` owner-loaded
+  guard; a droppable owner calls `Shutdown` first (invariant 5a).
+- Off-thread body: `_EnsureTabTooltipSummary` (per session) + `_tabTooltipSummary` / `_tabTooltipSummaryWaiters` /
+  `_tabTooltipSig` (per surface) / `_tabTooltipSummaryInFlight`.
 - Shared palette: `AgentStatusColorFor` (`AgentStatusColors.h`).
 - Commits: `918b720b7`, `44beaea7e`, `be1d63b7f`, `9792161b8` (observer nets), `6601c7532`,
   `1d1edbe18`, `9c026822d` (the six manual-open crashes) → the framework-managed rewrite (this change).

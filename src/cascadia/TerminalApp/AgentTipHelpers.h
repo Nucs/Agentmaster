@@ -519,6 +519,40 @@ namespace winrt::TerminalApp::implementation
         });
     }
 
+    // Silence `el`'s AgentSetTip tooltip WITHOUT unwiring it: the recorded text becomes EMPTY (every handler and
+    // the open tick already treat an empty text as "no tip"), a pending open armed on `el` is cancelled, and an
+    // open tip on `el` is closed. A later AgentSetTip(el, text) turns it back on WITHOUT a second handler set —
+    // the empty string is still a LOCAL value, which is AgentSetTip's "already wired" test (ClearValue would
+    // erase that marker, and the next AgentSetTip would wire the three handlers a second time).
+    // Used by the side panel's cards when the summary area is hidden: a card then shows the RICH session tooltip
+    // — a ToolTip attached to the card for its whole life (AgentSessionToolTipHost) — and this helper's shared
+    // tip must stay off the card, because its open does ToolTipService::SetToolTip(card, sharedTip), REPLACING
+    // the rich one, and its close does SetToolTip(card, nullptr), detaching it.
+    //   el — the element whose tip goes quiet; an element that was never tipped is left untouched (no wiring
+    //        is created just to hold an empty text).
+    //   throws — whatever a property write on a live UI-thread element throws (callers run contained paths).
+    inline void AgentSuppressTip(const winrt::Windows::UI::Xaml::UIElement& el)
+    {
+        namespace atd = agent_tip_details;
+        if (!el || el.ReadLocalValue(atd::TipTextProperty()) == winrt::Windows::UI::Xaml::DependencyProperty::UnsetValue())
+        {
+            return; // never tipped — nothing to silence, and no marker to keep
+        }
+        el.SetValue(atd::TipTextProperty(), winrt::box_value(winrt::hstring{}));
+        auto& h = atd::Host();
+        if (h.armed.get() == el)
+        {
+            // A pending open on THIS element would find the empty text and skip anyway; stopping it here just
+            // keeps the shared one-shot from ticking for nothing.
+            if (h.openTimer)
+            {
+                h.openTimer.Stop();
+            }
+            h.armed = nullptr;
+        }
+        AgentCloseTipOn(el); // an open tip on `el` closes now (and detaches the shared ToolTip from it)
+    }
+
     // Show `tip` on `el` RIGHT NOW — the click-feedback twin of AgentSetTip (e.g. the summary panel's
     // session separator confirming "Copied session id of up to here"). It records the text exactly like
     // AgentSetTip (wiring the hover handlers on first use), then opens the ONE shared tip on `el` with no

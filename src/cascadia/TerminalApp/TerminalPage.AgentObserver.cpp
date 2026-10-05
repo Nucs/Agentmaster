@@ -284,6 +284,18 @@ namespace
     // root, so the window is the true bound regardless. A non-positive budget (root not laid out yet)
     // falls back to the historical fixed size, so an unmeasured build is never worse than before.
     constexpr double kTtCardMaxWidth = 660.0; // 460 + 200 (100 per side)
+    // ⚠ The ToolTip that HOSTS the card is capped narrower than this budget. WinUI 2.8's ToolTip style
+    // (microsoft-ui-xaml release/2.8, dev/CommonStyles/ToolTip_rs5_themeresources.xaml — the one the app's
+    // XamlControlsResources Version2 loads on RS5+) sets MaxWidth = ToolTipMaxWidth = 320 and Padding 9,6,9,8,
+    // and nothing in this app overrides it (AgentSessionToolTipHost sets no MaxWidth on its ToolTip). So, per
+    // that source, the card renders at most ~300 px wide — on a tab and on a side-panel card alike — whatever
+    // this budget says; the budget becomes the real width only if the ToolTip's own MaxWidth is lifted (a local
+    // value outranks the style setter). Read from the source, not yet measured on screen (2026-10-05).
+    // The narrowest card a ROOM-budgeted surface gets (the side-panel card, which opens beside the panel over
+    // the terminal: TerminalPage::_PushSessionToolTipCard clamps the room to [kTtCardMinWidth, kTtCardMaxWidth]).
+    // Below this a numbered prompt line would wrap every few words; a window too narrow even for this lets the
+    // framework slide / clip the popup rather than squeezing the card unreadable. The tab never uses it (flat 660).
+    constexpr double kTtCardMinWidth = 320.0;
     constexpr double kTtCardHeightFraction = 0.80; // "up to 80% of the screen"
     constexpr double kTtCardFallbackHeight = 460.0; // ~= the pre-budget card: the 360px body clip + its chrome
     // Chrome the body does NOT get: header (a title wraps to <=3 lines) + folder/branch + state + meta +
@@ -338,7 +350,10 @@ namespace
     // once the Summary body has loaded -- a divider + the numbered Summary box inside a WHEEL-SCROLLABLE
     // viewport (a clipping Grid + a render-transformed body + a slim auto-hiding bar; `scrollOut` hands
     // the page the pieces it drives). maxCardHeight is the caller's window-derived budget for the WHOLE
-    // card (see the constants above); <= 0 means "not measured" -> the historical fixed size.
+    // card (see the constants above); <= 0 means "not measured" -> the historical fixed size. maxCardWidth
+    // is the card's MaxWidth (the tab passes the flat kTtCardMaxWidth; a side-panel card passes the room
+    // beside the panel, already clamped); <= 0 falls back to kTtCardMaxWidth. The tag-row packer's character
+    // budget follows it, so a narrower card wraps its tag chips instead of overflowing.
     //
     // NO ScrollViewer -- this is a hard rule, learned from a proven fail-fast (2026-07-02, full-dump stowed
     // backtrace): when the ToolTip popup opens, its content tree ENTERs the live tree, and a ScrollViewer's
@@ -363,12 +378,14 @@ namespace
                                                                   double tagsOpacity,
                                                                   const winrt::hstring& bodyText,
                                                                   double maxCardHeight,
+                                                                  double maxCardWidth,
                                                                   TtCardScrollParts& scrollOut)
     {
         using namespace winrt::Windows::UI::Xaml;
         using namespace winrt::Windows::UI::Xaml::Controls;
 
         const double cardHeight = maxCardHeight > 0.0 ? maxCardHeight : kTtCardFallbackHeight;
+        const double cardWidth = maxCardWidth > 0.0 ? maxCardWidth : kTtCardMaxWidth;
         const double bodyMaxHeight = std::max(kTtMinBodyHeight, cardHeight - kTtChromeReserve);
 
         StackPanel col;
@@ -489,10 +506,11 @@ namespace
             tagRows.Opacity(tagsOpacity);
             StackPanel line{ nullptr };
             size_t lineChars = 0;
-            // ~mono-11 chars that fit the card minus its padding. Derived from kTtCardMaxWidth so it can't
-            // drift stale beside it (it was a hand-tuned 52 back when the card was a hardcoded 460 wide --
-            // the ratio, kept here, already allows for the 10px inter-chip gaps).
-            const size_t kTagLineBudget = static_cast<size_t>(52.0 * kTtCardMaxWidth / 460.0);
+            // ~mono-11 chars that fit the card minus its padding. Derived from the card's actual width (the
+            // flat kTtCardMaxWidth on a tab, the room-clamped width on a side-panel card) so it can't drift
+            // stale beside it (it was a hand-tuned 52 back when the card was a hardcoded 460 wide -- the
+            // ratio, kept here, already allows for the 10px inter-chip gaps).
+            const size_t kTagLineBudget = static_cast<size_t>(52.0 * cardWidth / 460.0);
             for (const auto& [tagName, tagColor] : tagChips)
             {
                 if (!line || (lineChars > 0 && lineChars + tagName.size() > kTagLineBudget))
@@ -650,7 +668,7 @@ namespace
         root.BorderThickness(ThicknessHelper::FromUniformLength(1));
         root.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
         root.Padding(ThicknessHelper::FromLengths(10, 8, 10, 8));
-        root.MaxWidth(kTtCardMaxWidth);
+        root.MaxWidth(cardWidth);
         root.Child(col);
         return root;
     }
@@ -2212,7 +2230,96 @@ namespace winrt::TerminalApp::implementation
             _tabTooltipScroll.erase(sessionId); // and the (now dangling) scroll pieces of the card we just dropped
             return;
         }
-        const auto& s = *info;
+
+        // Bookmark TAGS — parsed off the tab's own AgentTagsSpec ("name\t#AARRGGBB" lines; the
+        // colors were already resolved by _SetTabAgentTags), so this per-sweep refresh does no
+        // store I/O. Rendered as name-over-colored-underscore chips in the card.
+        std::wstring tagsSpec;
+        std::vector<std::pair<std::wstring, winrt::Windows::UI::Color>> tagChips;
+        try
+        {
+            if (const auto status = tab.TabStatus())
+            {
+                tagsSpec = std::wstring{ status.AgentTagsSpec() };
+            }
+        }
+        CATCH_LOG();
+        {
+            std::wstring_view rest{ tagsSpec };
+            while (!rest.empty())
+            {
+                const size_t nl = rest.find(L'\n');
+                const std::wstring_view specLine = rest.substr(0, nl);
+                rest = (nl == std::wstring_view::npos) ? std::wstring_view{} : rest.substr(nl + 1);
+                std::wstring_view tagName = specLine;
+                std::wstring_view tagHex{};
+                if (const size_t sep = specLine.find(L'\t'); sep != std::wstring_view::npos)
+                {
+                    tagName = specLine.substr(0, sep);
+                    tagHex = specLine.substr(sep + 1);
+                }
+                if (!tagName.empty())
+                {
+                    tagChips.emplace_back(std::wstring{ tagName }, ParseArgbHexColor(tagHex, TagColorFor(tagName)));
+                }
+            }
+        }
+
+        // Everything else is the SHARED card push (_PushSessionToolTipCard): the side panel's session cards run
+        // the very same strings, signature, budget, host push, scroll adoption and summary kick. The tab surface's
+        // key is the session id itself (the historical _tabTooltipSig / _tabTooltipScroll key, unchanged), its
+        // width is the flat kTtCardMaxWidth (nullopt), and the off-thread summary's arrival re-hosts THIS tab —
+        // weakly held, so a pending load never keeps a closed tab alive (the coroutine used to hold it strongly).
+        auto rehost = [weakThis = get_weak(), weakTab = winrt::make_weak(tab), id = sessionId]() {
+            const auto self = weakThis.get();
+            const auto t = weakTab.get();
+            if (self && t)
+            {
+                // ⚠ kickSummary=false — the arrival's re-host must NEVER schedule another analyze (the 2026-08-29
+                // perpetual-loop rule; see _EnsureTabTooltipSummary). swapWhileOpen: the body lands IN the open tip.
+                self->_UpdateTabAgentToolTip(t, id, /* swapWhileOpen */ true, /* kickSummary */ false);
+            }
+        };
+        _PushSessionToolTipCard(*impl->AgentToolTipHost(), sessionId, *info, tagsSpec, tagChips, std::nullopt, swapWhileOpen, kickSummary, std::move(rehost));
+    }
+
+    // Agentmaster (rich session tooltip): build + host one surface's rich session card — the body of the old
+    // _UpdateTabAgentToolTip from the header strings on, shared by the TAB surface (_UpdateTabAgentToolTip) and the
+    // SIDE-PANEL CARD surface (_UpdateSidePanelCardToolTip, the "Sum" off mode). Everything that decides WHAT the
+    // card says is here, once: the state / why / unread line, the kind·model·effort·permission line, the
+    // folder/branch + dir-detail lines, the cached Summary body, the content signature, the height budget, the
+    // closed-only host push, the wheel-scroll piece adoption and the throttled off-thread summary kick. Each
+    // surface supplies only what differs: its host, its key, its tags (already color-resolved) and its width.
+    //   host          — the surface's AgentSessionToolTipHost (a tab's, a card's).
+    //   surfaceKey    — the key of this surface's signature + scroll state (_tabTooltipSig / _tabTooltipScroll):
+    //                   the session id for a tab (historical), a prefixed key for a side-panel card — two surfaces
+    //                   of ONE session must never share these (each hosts its own card element).
+    //   s             — the LIVE session (the caller already handled gone / archived). Only header fields are read
+    //                   (never the queue or the transcript texts), so a lean copy (GetWithoutQueue, a
+    //                   SnapshotLiveForCards row) is enough.
+    //   tagsSpec      — the tags as a fingerprint string (rides the signature: a tag edit re-hosts the card).
+    //   tagChips      — the tags as (name, resolved color) pairs, in display order.
+    //   roomWidth     — the width available beside the owner (px); nullopt (or <= 0) = the flat kTtCardMaxWidth
+    //                   (the tab). A value is clamped to [kTtCardMinWidth, kTtCardMaxWidth].
+    //   swapWhileOpen — the one-shot open-swap grant (the async summary body landing in the open tip).
+    //   kickSummary   — false = host the header WITHOUT kicking the transcript analyze (the arm/bind pre-hosts — the
+    //                   analyze belongs to a real hover, else arming a restored 60-tab strip or a 400-card list would
+    //                   burst whole-transcript parses onto the pool at the most fragile moment).
+    //   rehost        — re-runs THIS surface's update when the summary arrives (registered as a waiter of the
+    //                   session's load; it must pass kickSummary=false). May be empty (no re-host wanted).
+    //   throws        — whatever the XAML card build / host push throws (UI thread); every caller is contained
+    //                   (the hover hook's catch, the arm paths' own try, the summary arrival's per-waiter catch).
+    void TerminalPage::_PushSessionToolTipCard(AgentSessionToolTipHost& host,
+                                               const std::wstring& surfaceKey,
+                                               const ::Agentmaster::SessionInfo& s,
+                                               const std::wstring& tagsSpec,
+                                               const std::vector<std::pair<std::wstring, winrt::Windows::UI::Color>>& tagChips,
+                                               std::optional<double> roomWidth,
+                                               bool swapWhileOpen,
+                                               bool kickSummary,
+                                               std::function<void()> rehost)
+    {
+        const std::wstring& sessionId = s.id;
         using ::Agentmaster::SessionState;
         const int64_t now = TtNowMs();
         const auto accent = AgentStatusColorFor(s.state);
@@ -2313,41 +2420,9 @@ namespace winrt::TerminalApp::implementation
 
         const std::wstring title = s.title.empty() ? std::wstring{ L"(untitled)" } : s.title;
 
-        // Bookmark TAGS — parsed off the tab's own AgentTagsSpec ("name\t#AARRGGBB" lines; the
-        // colors were already resolved by _SetTabAgentTags), so this per-sweep refresh does no
-        // store I/O. Rendered as name-over-colored-underscore chips in the card.
-        std::wstring tagsSpec;
-        std::vector<std::pair<std::wstring, winrt::Windows::UI::Color>> tagChips;
-        try
-        {
-            if (const auto status = tab.TabStatus())
-            {
-                tagsSpec = std::wstring{ status.AgentTagsSpec() };
-            }
-        }
-        CATCH_LOG();
-        {
-            std::wstring_view rest{ tagsSpec };
-            while (!rest.empty())
-            {
-                const size_t nl = rest.find(L'\n');
-                const std::wstring_view specLine = rest.substr(0, nl);
-                rest = (nl == std::wstring_view::npos) ? std::wstring_view{} : rest.substr(nl + 1);
-                std::wstring_view tagName = specLine;
-                std::wstring_view tagHex{};
-                if (const size_t sep = specLine.find(L'\t'); sep != std::wstring_view::npos)
-                {
-                    tagName = specLine.substr(0, sep);
-                    tagHex = specLine.substr(sep + 1);
-                }
-                if (!tagName.empty())
-                {
-                    tagChips.emplace_back(std::wstring{ tagName }, ParseArgbHexColor(tagHex, TagColorFor(tagName)));
-                }
-            }
-        }
-
-        // The Summary-box body (numbered messages + files), cached + loaded off-thread (see below).
+        // The Summary-box body (numbered messages + files), cached + loaded off-thread (see below). Keyed by
+        // the SESSION, not the surface: a tab and a side-panel card of one session show the same transcript,
+        // so they share one cache and one in-flight load.
         winrt::hstring bodyText;
         int64_t bodyMtime = 0;
         if (const auto it = _tabTooltipSummary.find(sessionId); it != _tabTooltipSummary.end())
@@ -2358,8 +2433,8 @@ namespace winrt::TerminalApp::implementation
 
         // Re-host only on a real content change. The signature folds the header strings + the tags spec +
         // the body's mtime (the body itself changes only when the transcript grows, which bumps the
-        // mtime), so an unchanged idle tab is skipped; the "ago" ticking is what re-hosts an
-        // otherwise-quiet tab each sweep.
+        // mtime), so an unchanged idle card is skipped; the "ago" ticking is what re-hosts an
+        // otherwise-quiet card on the next hover.
         std::wstring sig = stateText;
         sig += L'\x1f';
         sig += title;
@@ -2397,23 +2472,30 @@ namespace winrt::TerminalApp::implementation
         CATCH_LOG();
         sig += L'\x1f';
         sig += std::to_wstring(static_cast<int>(cardMaxHeight / 50.0));
-        // WHEEL SCROLL: a card built while the tip is OPEN cannot be hosted (Tab::_UpdateAgentToolTip
-        // swaps Content only while closed — invariant 3), and adopting its scroll pieces would leave the
-        // wheel driving an off-screen tree while the reader stares at the hosted one. So skip the whole
-        // rebuild in that window; nothing is lost, because the next PointerEntered rebuilds it fresh
-        // anyway (the card is hover-built, and its "ago" line would have gone stale by then regardless).
-        // The one exception is the push that IS allowed to swap while open: the async summary arrival.
-        const auto sit = _tabTooltipSig.find(sessionId);
+        // The card's width budget: the flat kTtCardMaxWidth for a tab (the card is centered under it, so width
+        // spends half to each side); the room beside the side panel for a card (it opens past the panel's edge
+        // over the terminal, so a narrow window must not push it off-screen), clamped to a readable minimum.
+        // Rides the sig on the same 50px grain, so a panel drag or a window resize re-hosts on the next hover.
+        const double cardMaxWidth = (roomWidth && *roomWidth > 0.0) ? std::clamp(*roomWidth, ::kTtCardMinWidth, ::kTtCardMaxWidth) : ::kTtCardMaxWidth;
+        sig += L'\x1f';
+        sig += std::to_wstring(static_cast<int>(cardMaxWidth / 50.0));
+        // WHEEL SCROLL: a card built while the tip is OPEN cannot be hosted (the host's Update swaps Content
+        // only while closed — invariant 3), and adopting its scroll pieces would leave the wheel driving an
+        // off-screen tree while the reader stares at the hosted one. So skip the whole rebuild in that window;
+        // nothing is lost, because the next PointerEntered rebuilds it fresh anyway (the card is hover-built,
+        // and its "ago" line would have gone stale by then regardless). The one exception is the push that IS
+        // allowed to swap while open: the async summary arrival.
+        const auto sit = _tabTooltipSig.find(surfaceKey);
         const bool sigChanged = (sit == _tabTooltipSig.end() || sit->second != sig);
-        // ...or the tab has NO tooltip attached right now (an owner recycle detached it). Attachment is
-        // what lets the framework open the card at all — ToolTipService only starts watching the owner's
-        // hover when the tooltip is attached — so a same-signature tab with nothing attached must still
-        // push, or it stays permanently tooltip-less until some unrelated field changes.
-        if ((sigChanged || !impl->AgentToolTipAttached()) && (!impl->AgentToolTipOpen() || swapWhileOpen))
+        // ...or the surface has NO tooltip attached right now (an owner recycle — or the side panel's tag-ribbon
+        // suspend — detached it). Attachment is what lets the framework open the card at all — ToolTipService
+        // only starts watching the owner's hover when the tooltip is attached — so a same-signature surface with
+        // nothing attached must still push, or it stays permanently tooltip-less until some unrelated field changes.
+        if ((sigChanged || !host.Attached()) && (!host.Open() || swapWhileOpen))
         {
             TtCardScrollParts scrollParts{};
-            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, dirDetailLine, tagChips, tagsOpacity, bodyText, cardMaxHeight, scrollParts), winrt::hstring{ sig }, swapWhileOpen);
-            _tabTooltipSig[sessionId] = sig;
+            host.SetContent(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, dirDetailLine, tagChips, tagsOpacity, bodyText, cardMaxHeight, cardMaxWidth, scrollParts), winrt::hstring{ sig }, swapWhileOpen);
+            _tabTooltipSig[surfaceKey] = sig;
 
             // Agentmaster (tab tooltip -- WHEEL SCROLL): adopt the fresh card's scroll pieces, replacing
             // the previous card's (a rebuild is a whole new tree, so the old refs are dead). WEAK refs to
@@ -2422,7 +2504,7 @@ namespace winrt::TerminalApp::implementation
             // for as long as the session lives (the per-element-handler leak class AgentTipHelpers
             // exists to avoid). A card with no body has no viewport -- the entry then simply reports
             // "nothing to scroll".
-            auto& st = _tabTooltipScroll[sessionId];
+            auto& st = _tabTooltipScroll[surfaceKey];
             st = {};
             if (scrollParts.viewport && scrollParts.content)
             {
@@ -2441,9 +2523,9 @@ namespace winrt::TerminalApp::implementation
                 // therefore where the viewport clips itself and the bar decides whether to show the dim
                 // "there is more" hint. Both writes are render-only (Clip / transforms / Opacity) -- a
                 // layout write from inside a layout pass is the popup layout-cycle fail-fast the tag
-                // badges hit. The handler captures only a WEAK page + the session id, never an element,
+                // badges hit. The handler captures only a WEAK page + the surface key, never an element,
                 // so this per-change-rebuilt tree can't leak through its own handler.
-                scrollParts.viewport.SizeChanged([weak = get_weak(), sid = sessionId](const IInspectable& sender, const auto&) {
+                scrollParts.viewport.SizeChanged([weak = get_weak(), key = surfaceKey](const IInspectable& sender, const auto&) {
                     const auto self = weak.get();
                     if (!self)
                     {
@@ -2468,27 +2550,38 @@ namespace winrt::TerminalApp::implementation
                     // Keep whatever offset the reader is at (a resize mid-read must not yank them back
                     // to the top); a fresh card is at 0 anyway. The bar is sized here but stays INVISIBLE
                     // — it appears only under the wheel.
-                    self->_SyncTabTooltipScrollBar(sid, std::nullopt, ::kTtScrollBarRestOpacity);
+                    self->_SyncTabTooltipScrollBar(key, std::nullopt, ::kTtScrollBarRestOpacity);
                 });
             }
         }
 
         // Keep the Summary body fresh off-thread (throttled + mtime-gated). First sight has no body yet, so
-        // this fills it in, then re-hosts the card (a recursive _UpdateTabAgentToolTip on completion — which
-        // passes kickSummary=false, so the recursion is exactly ONE level deep: a completion never schedules
-        // the next analyze; only a real hover does. See the completion call for the incident that rule fixed).
-        // kickSummary=false (the arm/bind pre-host) skips the kick entirely: those builds exist only so
-        // ToolTipService has a hosted card before the first hover — the analyze belongs to a REAL hover
-        // (else the first sweep after a 60-tab window restore would burst 60 whole-transcript parses onto
-        // the pool at the most fragile startup moment). The first hover's build kicks it, and the body
-        // lands into the open tip via the completion's swapWhileOpen grant.
+        // this fills it in, then re-hosts the card through `rehost` (whose own push passes kickSummary=false, so
+        // the recursion is exactly ONE level deep: an arrival never schedules the next analyze; only a real hover
+        // does. See _EnsureTabTooltipSummary for the incident that rule fixed). kickSummary=false (the arm/bind
+        // pre-host) skips the kick entirely: those builds exist only so ToolTipService has a hosted card before
+        // the first hover — the analyze belongs to a REAL hover (else the first sweep after a 60-tab window
+        // restore would burst 60 whole-transcript parses onto the pool at the most fragile startup moment). The
+        // first hover's build kicks it, and the body lands into the open tip via the arrival's swapWhileOpen grant.
+        // WAITERS: the load is per SESSION, but a session can have two surfaces (its tab + its side-panel card).
+        // Every surface that asks while a check is due registers its re-host under its own key (a repeat ask of
+        // the same surface replaces its entry), and the arrival re-hosts each one — so hovering the card while the
+        // tab's load is still running (or the reverse) still gets the body, instead of the in-flight guard
+        // silently dropping the second ask.
         auto& slot = _tabTooltipSummary[sessionId]; // default-creates an empty slot on first sight
         const bool needCheck = kickSummary && (slot.body.empty() || slot.mtime == 0 || (now - slot.lastCheckMs) > 4000);
-        if (needCheck && !_tabTooltipSummaryInFlight.count(sessionId))
+        if (needCheck)
         {
-            slot.lastCheckMs = now;
-            const bool codex = (s.kind == ::Agentmaster::AgentKind::Codex);
-            _EnsureTabTooltipSummary(tab, winrt::hstring{ sessionId }, codex, winrt::hstring{ s.codexSessionId }, winrt::hstring{ dir });
+            if (rehost)
+            {
+                _tabTooltipSummaryWaiters[sessionId][surfaceKey] = std::move(rehost);
+            }
+            if (!_tabTooltipSummaryInFlight.count(sessionId))
+            {
+                slot.lastCheckMs = now;
+                const bool codex = (s.kind == ::Agentmaster::AgentKind::Codex);
+                _EnsureTabTooltipSummary(winrt::hstring{ sessionId }, codex, winrt::hstring{ s.codexSessionId }, winrt::hstring{ dir });
+            }
         }
     }
 
@@ -2503,9 +2596,15 @@ namespace winrt::TerminalApp::implementation
     // E_LAYOUTCYCLE fail-fast the tag badges had to be rewritten around (TabHeaderControl's
     // _PositionTagBadges coalescing scheduler). Sizing the thumb by ScaleY instead of Height, and moving
     // it by a TranslateTransform instead of Margin, keeps this path structurally incapable of it.
-    double TerminalPage::_SyncTabTooltipScrollBar(const std::wstring& sessionId, std::optional<double> offset, double opacity)
+    //   surfaceKey — whose card: the session id for a tab's card, SidePanelToolTipKey(id) for a side-panel
+    //                card (_PushSessionToolTipCard adopts each surface's pieces under its own key).
+    //   offset     — the new scroll offset (px from the top of the body); nullopt keeps the current one.
+    //   opacity    — the bar's opacity to paint (0 at rest, 1 while the wheel is turning).
+    //   returns    — the maximum scrollable offset (0 = the body fits, or the surface has no card / body).
+    //   throws     — nothing: a XAML failure is logged (Rule #18) and reads as "nothing to scroll".
+    double TerminalPage::_SyncTabTooltipScrollBar(const std::wstring& surfaceKey, std::optional<double> offset, double opacity)
     {
-        const auto it = _tabTooltipScroll.find(sessionId);
+        const auto it = _tabTooltipScroll.find(surfaceKey);
         if (it == _tabTooltipScroll.end())
         {
             return 0.0;
@@ -2569,7 +2668,29 @@ namespace winrt::TerminalApp::implementation
         {
             return false;
         }
-        const auto it = _tabTooltipScroll.find(sessionId);
+        // A tab's card is keyed by the session id itself (the historical _tabTooltipScroll key).
+        return _ScrollSessionToolTipBody(sessionId, sessionId, wheelDelta, fromTabItem ? L"item" : L"row");
+    }
+
+    // Agentmaster (rich session tooltip — WHEEL SCROLL): the shared body of every surface's wheel scroll — the
+    // tab's (_ScrollTabAgentToolTip) and the side-panel card's (_ScrollSidePanelCardToolTip). Moves the OPEN
+    // card's body by one notch's worth, logs the one [tooltip-wheel] line per notch, and (re)arms the bar's
+    // auto-hide when something scrolled.
+    //   surfaceKey — the card's scroll-state key (session id for a tab, SidePanelToolTipKey(id) for a card).
+    //   sessionId  — the session (only for the log line: the key of a card is not a readable id).
+    //   wheelDelta — the notch's wheel units (120 per notch; DOWN is negative); 0 does nothing.
+    //   src        — the log's source word ("item" / "row" for a tab, "card" for a side-panel card).
+    //   returns    — true when the notch belongs to this card (it has something to scroll — even at an end
+    //                stop), false when the body fits or the surface has no card, so the owner's own scroller
+    //                keeps the wheel.
+    //   throws     — std::bad_alloc while formatting the log line only (callers run inside the host's catch).
+    bool TerminalPage::_ScrollSessionToolTipBody(const std::wstring& surfaceKey, const std::wstring& sessionId, int wheelDelta, const wchar_t* src)
+    {
+        if (wheelDelta == 0)
+        {
+            return false;
+        }
+        const auto it = _tabTooltipScroll.find(surfaceKey);
         if (it == _tabTooltipScroll.end())
         {
             return false;
@@ -2577,20 +2698,20 @@ namespace winrt::TerminalApp::implementation
         // A notch is 120 units; wheel DOWN is negative and moves us further down the document.
         const double before = it->second.offset;
         const double next = before - (static_cast<double>(wheelDelta) / 120.0) * ::kTtScrollStepPx;
-        const double maxOff = _SyncTabTooltipScrollBar(sessionId, next, ::kTtScrollBarActiveOpacity);
+        const double maxOff = _SyncTabTooltipScrollBar(surfaceKey, next, ::kTtScrollBarActiveOpacity);
         // One log line per notch, only for a session whose card is actually up: this is the ONE step of
         // the chain that cannot be seen from the outside (the bar's own behavior proves the geometry).
         // A hover+scroll that produces NO line here means the wheel never reached us at all.
         ::Agentmaster::AppendStateLog(L"hooks.log",
-                                      L"[tooltip-wheel] " + ::Agentmaster::ShortId(sessionId) + L" src=" + (fromTabItem ? L"item" : L"row") +
+                                      L"[tooltip-wheel] " + ::Agentmaster::ShortId(sessionId) + L" src=" + src +
                                           L" delta=" + std::to_wstring(wheelDelta) +
                                           L" off=" + std::to_wstring(static_cast<int>(before)) + L"->" + std::to_wstring(static_cast<int>(it->second.offset)) +
                                           L" max=" + std::to_wstring(static_cast<int>(maxOff)) + L"\n"); // newline-terminated (see the item/row traces)
         if (maxOff <= 0.0)
         {
-            return false; // the whole body already fits — don't steal the wheel from the strip
+            return false; // the whole body already fits — don't steal the wheel from the strip / card list
         }
-        _ArmTabTooltipScrollBarFade(sessionId);
+        _ArmTabTooltipScrollBarFade(surfaceKey);
         return true; // consumed even at an end stop: this card IS the scroller under the pointer
     }
 
@@ -2671,10 +2792,12 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster (tab tooltip — WHEEL SCROLL): a fresh hover starts at the top of the body. Called from
     // the PointerEntered build hook, so it covers the case the rebuild does not: an UNCHANGED signature
     // re-hosts nothing, so the very same card element (still shifted where you left it last time) is what
-    // the next hover would show.
-    void TerminalPage::_ResetTabAgentToolTipScroll(const std::wstring& sessionId)
+    // the next hover would show. Shared by every surface: `surfaceKey` is the card's scroll-state key (the
+    // session id for a tab's card, SidePanelToolTipKey(id) for a side-panel card). Never throws beyond the
+    // logged-and-contained _SyncTabTooltipScrollBar.
+    void TerminalPage::_ResetTabAgentToolTipScroll(const std::wstring& surfaceKey)
     {
-        if (_tabTooltipScroll.find(sessionId) == _tabTooltipScroll.end())
+        if (_tabTooltipScroll.find(surfaceKey) == _tabTooltipScroll.end())
         {
             return;
         }
@@ -2683,16 +2806,17 @@ namespace winrt::TerminalApp::implementation
             _tabTooltipScrollFadeTimer.Stop(); // a pending fade would erase the hint we are about to show
         }
         _tabTooltipScrollFadeSession.clear();
-        _SyncTabTooltipScrollBar(sessionId, 0.0, ::kTtScrollBarRestOpacity);
+        _SyncTabTooltipScrollBar(surfaceKey, 0.0, ::kTtScrollBarRestOpacity);
     }
 
     // Agentmaster (tab tooltip — WHEEL SCROLL): (re)start the scrollbar's auto-hide. Every notch restarts
     // the hold, so the bar stays lit while you are scrolling and only fades once you stop — the modern
     // overlay-scrollbar behavior, hand-rolled because the card can host no ScrollViewer to get it for free.
-    // ONE timer per window is enough: exactly one tooltip is ever on screen.
-    void TerminalPage::_ArmTabTooltipScrollBarFade(const std::wstring& sessionId)
+    // ONE timer per window is enough: exactly one tooltip is ever on screen (a tab's OR a side-panel card's —
+    // `surfaceKey` names whose bar the timer holds, the same key _SyncTabTooltipScrollBar takes).
+    void TerminalPage::_ArmTabTooltipScrollBarFade(const std::wstring& surfaceKey)
     {
-        _tabTooltipScrollFadeSession = sessionId;
+        _tabTooltipScrollFadeSession = surfaceKey;
         _tabTooltipScrollFadeHolding = true;
         if (!_tabTooltipScrollFadeTimer)
         {
@@ -2825,12 +2949,19 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster (tab tooltip): resolve + stat + analyze the session's transcript OFF the UI thread, and
     // on a transcript growth render the session-end.js Summary box (full=false: numbered messages + files,
-    // NO header -- the card already shows state/title/dir) into the per-session cache, then re-host the
-    // card. mtime-gated (a quiet tab is one stat) + in-flight-guarded (one load per session at a time);
-    // mirrors the AgentTabOverlay summary panel's off-thread caching. Codex uses its rollout analog.
-    // LAZY: reached only from a hover/bind/tag-toggle build (_UpdateTabAgentToolTip), never per tick —
-    // so the whole-transcript re-analyze runs at human-hover cadence, not 4s x N tabs (the pool burn).
-    winrt::fire_and_forget TerminalPage::_EnsureTabTooltipSummary(winrt::TerminalApp::Tab tab, winrt::hstring sessionId, bool codex, winrt::hstring codexId, winrt::hstring cwd)
+    // NO header -- the card already shows state/title/dir) into the per-session cache, then re-host every
+    // surface waiting for it (its tab card, its side-panel card — _tabTooltipSummaryWaiters). mtime-gated (a
+    // quiet session is one stat) + in-flight-guarded (one load per session at a time); mirrors the
+    // AgentTabOverlay summary panel's off-thread caching. Codex uses its rollout analog. LAZY: reached only
+    // from a hover build (_PushSessionToolTipCard with kickSummary), never per tick — so the whole-transcript
+    // re-analyze runs at human-hover cadence, not 4s x N tabs (the pool burn).
+    //   sessionId — the session to load (the cache + in-flight + waiter key).
+    //   codex     — true for a managed Codex session (its rollout is read instead of a Claude transcript).
+    //   codexId   — the Codex rollout uuid (SessionInfo::codexSessionId); ignored for Claude.
+    //   cwd       — the session's effective working dir (shown in the box's Dir line on a full render).
+    // Never throws (a fire_and_forget must not: an escape is std::terminate) — the inner try contains the
+    // background analyze, the outer one the UI-thread hop, and each waiter's re-host has its own catch.
+    winrt::fire_and_forget TerminalPage::_EnsureTabTooltipSummary(winrt::hstring sessionId, bool codex, winrt::hstring codexId, winrt::hstring cwd)
     {
         const std::wstring id{ sessionId };
         if (id.empty() || _tabTooltipSummaryInFlight.count(id))
@@ -2921,6 +3052,15 @@ namespace winrt::TerminalApp::implementation
 
             co_await wil::resume_foreground(Dispatcher());
             _tabTooltipSummaryInFlight.erase(id);
+            // Take every surface that asked for THIS load (registered by _PushSessionToolTipCard while the
+            // check was due) — taken whether or not a transcript exists yet, so a never-prompted session's
+            // waiters don't linger; the next hover re-registers.
+            std::unordered_map<std::wstring, std::function<void()>> waiters;
+            if (const auto w = _tabTooltipSummaryWaiters.find(id); w != _tabTooltipSummaryWaiters.end())
+            {
+                waiters = std::move(w->second);
+                _tabTooltipSummaryWaiters.erase(w);
+            }
             if (!path.empty())
             {
                 auto& slot = _tabTooltipSummary[id];
@@ -2930,32 +3070,47 @@ namespace winrt::TerminalApp::implementation
                 {
                     slot.body = winrt::hstring{ body };
                 }
-                // Re-host the card with the now-loaded / refreshed body. _UpdateTabAgentToolTip recomputes the
+                // Re-host each waiting card with the now-loaded / refreshed body. The push recomputes the
                 // signature (new mtime) so it re-hosts. swapWhileOpen: the hover that kicked this load is likely
                 // still showing the header-only card — the one-shot open-swap grant lets the body land IN the
                 // open tip (the single moment the "no Content swap while open" rule is wrong — the user is
-                // waiting for it). ⚠ kickSummary=false — this re-host must NEVER schedule another analyze. The
-                // 4s lastCheckMs throttle canNOT contain it here, because at fleet scale the analyze routinely
-                // OUTLIVES 4s (a multi-MB transcript + N in-flight parses contending on the pool), so a default
-                // kick re-armed the next analyze on every completion — a PERPETUAL per-tab [stat → whole-file
-                // parse → card rebuild] loop, contention-locked (more loops ⇒ slower analyzes ⇒ every loop
-                // certainly past the throttle). Live-diagnosed 2026-08-29 on the release instance: 38 active
-                // sessions, the ONE Emperor UI thread at ~80% of a core for 2 days grinding TtBuildTooltipCard
-                // re-measures (sampled stacks all in this completion path), with 22–39s [ui-stall] episodes when
-                // builds stacked. Freshness rides real hovers instead: each PointerEntered re-checks (>4s
-                // apart), so an open tip gets its body landed ONCE and a new hover re-analyzes — human cadence,
-                // never loop cadence.
-                _UpdateTabAgentToolTip(tab, id, /* swapWhileOpen */ true, /* kickSummary */ false);
+                // waiting for it). ⚠ kickSummary=false — every re-host (each waiter's lambda passes it) must
+                // NEVER schedule another analyze. The 4s lastCheckMs throttle canNOT contain it here, because at
+                // fleet scale the analyze routinely OUTLIVES 4s (a multi-MB transcript + N in-flight parses
+                // contending on the pool), so a default kick re-armed the next analyze on every completion — a
+                // PERPETUAL per-tab [stat → whole-file parse → card rebuild] loop, contention-locked (more loops ⇒
+                // slower analyzes ⇒ every loop certainly past the throttle). Live-diagnosed 2026-08-29 on the
+                // release instance: 38 active sessions, the ONE Emperor UI thread at ~80% of a core for 2 days
+                // grinding TtBuildTooltipCard re-measures (sampled stacks all in this completion path), with
+                // 22–39s [ui-stall] episodes when builds stacked. Freshness rides real hovers instead: each
+                // PointerEntered re-checks (>4s apart), so an open tip gets its body landed ONCE and a new hover
+                // re-analyzes — human cadence, never loop cadence.
+                for (auto& [surfaceKey, rehost] : waiters)
+                {
+                    if (!rehost)
+                    {
+                        continue;
+                    }
+                    // Each surface on its own: one card whose XAML build throws must not cost the other its body.
+                    try
+                    {
+                        rehost();
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"_EnsureTabTooltipSummary re-host");
+                    }
+                }
             }
             // path empty => no transcript yet (never prompted): leave the header-only card. The in-flight
             // flag was already cleared above, so a later hover retries.
         }
         catch (...)
         {
-            // Terminate-net for a resume_foreground teardown-race throw or a _UpdateTabAgentToolTip
-            // XAML-build throw. Deliberately does NOT touch the UI-thread maps (we may be off-thread on a
-            // resume failure; on a UI-thread throw the in-flight flag was already erased above). A leaked
-            // flag can only happen on teardown, where the map dies with the page — moot. Never rethrow.
+            // Terminate-net for a resume_foreground teardown-race throw. Deliberately does NOT touch the
+            // UI-thread maps (we may be off-thread on a resume failure; on a UI-thread throw the in-flight flag
+            // was already erased above). A leaked flag can only happen on teardown, where the map dies with the
+            // page — moot. Never rethrow.
             ::Agentmaster::AgentLogCaughtException(L"_EnsureTabTooltipSummary");
         }
     }

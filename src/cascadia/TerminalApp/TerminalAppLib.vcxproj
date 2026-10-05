@@ -170,6 +170,7 @@
     <!-- Agentmaster -->
     <ClInclude Include="AgentManagerContent.h" />
     <ClInclude Include="AgentAmbientAnimation.h" />
+    <ClInclude Include="AgentSessionToolTip.h" />
     <ClInclude Include="AgentClipboard.h" />
     <ClInclude Include="AgentCopyActions.h" />
     <ClInclude Include="AgentLocalTooltip.h" />
@@ -367,6 +368,9 @@
     <!-- Agentmaster (UI_THREAD.md §10a #1): the draft-dots pulse + spark crown on the Composition API — the one
          TU that pays for the full Windows.UI.Composition projection (AgentAmbientAnimation.h stays light). -->
     <ClCompile Include="AgentAmbientAnimation.cpp" />
+    <!-- Agentmaster: the rich session tooltip's lifecycle (one framework-managed ToolTip per owner), shared by the tab
+         header and the side panel's session cards (moved out of Tab.cpp; HANDOVER_tab-tooltip.md, SIDE_PANEL.md §2d). -->
+    <ClCompile Include="AgentSessionToolTip.cpp" />
     <!-- The engine is plain C++ (no WinRT): opt out of the WinRT precompiled header. -->
     <ClCompile Include="AgentMaster\SessionRegistry.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

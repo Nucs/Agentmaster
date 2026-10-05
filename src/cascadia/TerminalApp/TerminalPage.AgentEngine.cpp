@@ -1851,14 +1851,15 @@ namespace winrt::TerminalApp::implementation
                     s.commandHandoverMaterializedName = disk.commandHandoverMaterializedName;
                     s.commandHandoverHereMaterializedName = disk.commandHandoverHereMaterializedName;
                     s.commandHandoverStandbyMaterializedName = disk.commandHandoverStandbyMaterializedName; // the §5b standby member's marker
-                    // Side panel: all four are written OUTSIDE the cog form — the splitters' /
-                    // collapse's / dock flip's own freshest-disk RMWs ("last one to adjust sets the
-                    // new-window default") — so a form Save must never regress an adjustment made
-                    // since the modal was seeded (incl. from another window).
+                    // Side panel: all five are written OUTSIDE the cog form — the splitters' /
+                    // collapse's / "Sum" toggle's / dock flip's own freshest-disk RMWs ("last one to
+                    // adjust sets the new-window default") — so a form Save must never regress an
+                    // adjustment made since the modal was seeded (incl. from another window).
                     s.sidePanelOnLeft = disk.sidePanelOnLeft;
                     s.sidePanelWidthFraction = disk.sidePanelWidthFraction;
                     s.sidePanelSplitFraction = disk.sidePanelSplitFraction;
                     s.sidePanelCollapsed = disk.sidePanelCollapsed;
+                    s.sidePanelSummaryHidden = disk.sidePanelSummaryHidden; // the header "Sum" toggle — written by its own RMW, never by this form
                     // ...and the header's ⌖ scroll-to-tab toggle, written by its own RMW. It matters most
                     // HERE: the board-sort cycle reaches this sink too, carrying the Manager content's
                     // _appSettings, which never learns of THIS window's own flip (the toggle lives on the

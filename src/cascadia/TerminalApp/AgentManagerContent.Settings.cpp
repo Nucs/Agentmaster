@@ -3842,12 +3842,13 @@ namespace winrt::TerminalApp::implementation
             _appSettings.commandHandoverMaterializedName = disk.commandHandoverMaterializedName; // engine-owned reality: which name's definition file the last init wrote (COMMANDS.md §6a) — a Save must never rewrite history
             _appSettings.commandHandoverHereMaterializedName = disk.commandHandoverHereMaterializedName; // ditto for the in-place twin
             _appSettings.commandHandoverStandbyMaterializedName = disk.commandHandoverStandbyMaterializedName; // ditto for the §5b standby member
-            // Side panel: written by the panel's own splitter/collapse/dock RMWs, never this form —
-            // preserve all four so a Save can't regress an adjustment made since the modal opened.
+            // Side panel: written by the panel's own splitter/collapse/"Sum"/dock RMWs, never this form —
+            // preserve every one so a Save can't regress an adjustment made since the modal opened.
             _appSettings.sidePanelOnLeft = disk.sidePanelOnLeft;
             _appSettings.sidePanelWidthFraction = disk.sidePanelWidthFraction;
             _appSettings.sidePanelSplitFraction = disk.sidePanelSplitFraction;
             _appSettings.sidePanelCollapsed = disk.sidePanelCollapsed;
+            _appSettings.sidePanelSummaryHidden = disk.sidePanelSummaryHidden; // the header "Sum" toggle's own RMW — this form never edits it
             _appSettings.sidePanelScrollToSelectedTab = disk.sidePanelScrollToSelectedTab; // the header ⌖ toggle's own RMW — this form never edits it
         }
         if (_settingsSink)

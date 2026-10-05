@@ -2638,10 +2638,16 @@ namespace Agentmaster
         //     stay usable; out-of-band falls back to the 0.5 default.
         //   sidePanelCollapsed: whether the panel starts collapsed to its thin expander strip. A user
         //     who collapses it is saying "not now" — new windows honor that until it is expanded again.
+        //   sidePanelSummaryHidden: the header's "Sum" toggle OFF — the bottom summary area (and its splitter)
+        //     is hidden, the cards fill the panel, and hovering a card shows the RICH session tooltip a tab
+        //     header shows, placed beside the panel (SIDE_PANEL.md §2d). Default false (the summary shown — the
+        //     pre-toggle layout). Same "last one wins" contract as sidePanelCollapsed, and like the four above it
+        //     is written OUTSIDE the cog form, so both cog-Save preserve blocks restore it from disk.
         bool sidePanelOnLeft{ true };
         double sidePanelWidthFraction{ 0.22 };
         double sidePanelSplitFraction{ 0.5 };
         bool sidePanelCollapsed{ false };
+        bool sidePanelSummaryHidden{ false };
         // Agentmaster (SIDE PANEL): the header's ⌖ "scroll to the selected tab" toggle. ON (the DEFAULT)
         // == selecting a tab scrolls the panel's card list until THAT tab's card is on screen (a card that
         // is already fully visible stays put; one scroll per selection, never a re-scroll on every list
@@ -3335,9 +3341,13 @@ namespace Agentmaster
         //   sidePanelCollapsed: 1 == collapsed to the expander strip, 0 == expanded, -1 == unset
         //     (absent in the record — follow the AppSettings default). Kept as an int precisely for
         //     that third state: a plain bool could not tell "expanded" from "never chose".
+        //   sidePanelSummaryHidden: the "Sum" toggle — 1 == the summary area hidden (the cards' rich
+        //     session tooltip mode), 0 == shown, -1 == unset (absent — follow the AppSettings default).
+        //     The same tri-state as sidePanelCollapsed, for the same reason.
         double sidePanelWidthFraction{ 0.0 };
         double sidePanelSplitFraction{ 0.0 };
         int sidePanelCollapsed{ -1 };
+        int sidePanelSummaryHidden{ -1 };
         //   sidePanelGlobal: which sessions the panel's CARD LIST shows — false (the default) == LOCAL,
         //     only the sessions whose tab is hosted in THIS window (the same live hosted-tab set the
         //     Explorer Tree's LOCAL scope reads — TerminalPage::_HostedSessionIds — so a card here always

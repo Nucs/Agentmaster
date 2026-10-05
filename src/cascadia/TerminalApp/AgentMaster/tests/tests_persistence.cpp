@@ -426,6 +426,7 @@ void TestWindowRecord()
     in.sidePanelWidthFraction = 0.3;
     in.sidePanelSplitFraction = 0.6;
     in.sidePanelCollapsed = 1; // collapsed (the tri-state's TRUE)
+    in.sidePanelSummaryHidden = 1; // the "Sum" toggle OFF (the tri-state's TRUE) — set so a dropped key fails the round-trip
     in.sidePanelGlobal = true; // GLOBAL card scope — non-default (LOCAL is the fixed default; an absent key == false) so a dropped key fails the round-trip
 
     const auto out = DeserializeWindowRecord(SerializeWindowRecord(in));
@@ -465,6 +466,7 @@ void TestWindowRecord()
     CHECK(approx(out.sidePanelWidthFraction, 0.3), "sidePanelWidthFraction (per-window separator) round-trip");
     CHECK(approx(out.sidePanelSplitFraction, 0.6), "sidePanelSplitFraction (per-window cards/summary split) round-trip");
     CHECK(out.sidePanelCollapsed == 1, "sidePanelCollapsed committed TRUE round-trips as 1 (not the -1 unset)");
+    CHECK(out.sidePanelSummaryHidden == 1, "sidePanelSummaryHidden (the Sum toggle OFF) committed TRUE round-trips as 1 (not the -1 unset)");
     CHECK(out.sidePanelGlobal == true, "sidePanelGlobal (the per-window card-list scope) round-trips GLOBAL");
 
     // Tolerant of a missing / corrupt document.
@@ -492,16 +494,27 @@ void TestWindowRecord()
         CHECK(sideLegacy.windowId == L"w", "envelope sanity: the legacy side-panel probe actually parsed a record");
         CHECK(sideLegacy.sidePanelWidthFraction == 0.0 && sideLegacy.sidePanelSplitFraction == 0.0, "missing sidePanel fractions -> unset (older record follows the global defaults)");
         CHECK(sideLegacy.sidePanelCollapsed == -1, "missing sidePanelCollapsed -> -1 unset (older record follows the global default)");
+        CHECK(sideLegacy.sidePanelSummaryHidden == -1, "missing sidePanelSummaryHidden -> -1 unset (a record from before the Sum toggle follows the global default)");
         // The card-list scope has NO global default: an absent key is LOCAL, full stop — a
         // pre-feature record must never reopen listing another window's tabs.
         CHECK(sideLegacy.sidePanelGlobal == false, "missing sidePanelGlobal -> LOCAL (a pre-feature record never lists another window's tabs)");
         // An out-of-band stored fraction degrades to UNSET (the global default), never a
         // degenerate layout; a committed FALSE stays 0 (distinct from the -1 unset); a non-bool
         // scope value (hand-edited) reads LOCAL — the safe direction.
-        const auto sideBad = DeserializeWindowRecord(L"{\"version\":1,\"window\":{\"windowId\":\"w\",\"sidePanelWidthFraction\":0.9,\"sidePanelSplitFraction\":0.01,\"sidePanelCollapsed\":false,\"sidePanelGlobal\":\"yes\"}}");
+        const auto sideBad = DeserializeWindowRecord(L"{\"version\":1,\"window\":{\"windowId\":\"w\",\"sidePanelWidthFraction\":0.9,\"sidePanelSplitFraction\":0.01,\"sidePanelCollapsed\":false,\"sidePanelSummaryHidden\":false,\"sidePanelGlobal\":\"yes\"}}");
         CHECK(sideBad.windowId == L"w", "envelope sanity: the out-of-band side-panel probe actually parsed a record");
         CHECK(sideBad.sidePanelWidthFraction == 0.0 && sideBad.sidePanelSplitFraction == 0.0, "out-of-band sidePanel fractions -> unset (degrade to the global defaults)");
         CHECK(sideBad.sidePanelCollapsed == 0, "sidePanelCollapsed committed FALSE reads 0 (a real choice, not the -1 unset)");
+        CHECK(sideBad.sidePanelSummaryHidden == 0, "sidePanelSummaryHidden committed FALSE reads 0 (the Sum toggle ON chosen, not the -1 unset)");
+        // A non-bool "Sum" value (hand-edited) is no choice at all: it stays UNSET and follows the global default.
+        const auto sumBad = DeserializeWindowRecord(L"{\"version\":1,\"window\":{\"windowId\":\"w\",\"sidePanelSummaryHidden\":\"yes\"}}");
+        CHECK(sumBad.windowId == L"w" && sumBad.sidePanelSummaryHidden == -1, "sidePanelSummaryHidden non-bool -> -1 unset (follows the global default)");
+        // An unset value is OMITTED on save (the record keeps meaning "follow the global default").
+        {
+            WindowRecord unsetSum;
+            unsetSum.windowId = L"w";
+            CHECK(SerializeWindowRecord(unsetSum).find(L"sidePanelSummaryHidden") == std::wstring::npos, "sidePanelSummaryHidden -1 unset is not written (absent == follow the global default)");
+        }
         CHECK(sideBad.sidePanelGlobal == false, "sidePanelGlobal non-bool -> LOCAL (never another window's tabs on a corrupt value)");
         // The scope key is written ONLY for a GLOBAL choice: `false` carries no information (no
         // global default exists to override), so a never-flipped window's record stays byte-identical
@@ -626,6 +639,7 @@ void TestAppSettings()
         in.sidePanelWidthFraction = 0.35; // in-band (0.10..0.50); default 0.22
         in.sidePanelSplitFraction = 0.7; // in-band (0.15..0.85); default 0.5
         in.sidePanelCollapsed = true; // non-default (default false = expanded)
+        in.sidePanelSummaryHidden = true; // non-default (default false = the summary area shown) — the "Sum" toggle OFF
         // The side panel header's scroll-to-tab toggle (a GLOBAL preference, not a new-window default):
         // an explicit OFF must survive the round-trip (the default is ON).
         in.sidePanelScrollToSelectedTab = false;
@@ -723,6 +737,7 @@ void TestAppSettings()
         CHECK(out.sidePanelWidthFraction > 0.349 && out.sidePanelWidthFraction < 0.351, "settings sidePanelWidthFraction round-trip");
         CHECK(out.sidePanelSplitFraction > 0.699 && out.sidePanelSplitFraction < 0.701, "settings sidePanelSplitFraction round-trip");
         CHECK(out.sidePanelCollapsed == true, "settings sidePanelCollapsed round-trip (collapsed stored)");
+        CHECK(out.sidePanelSummaryHidden == true, "settings sidePanelSummaryHidden round-trip (the Sum toggle OFF stored)");
         CHECK(out.sidePanelScrollToSelectedTab == false, "settings sidePanelScrollToSelectedTab round-trip (the scroll-to-tab toggle's explicit OFF stored + honored)");
     }
 
@@ -822,6 +837,7 @@ void TestAppSettings()
         CHECK(out.sidePanelWidthFraction > 0.219 && out.sidePanelWidthFraction < 0.221, "settings sidePanelWidthFraction default 0.22 on empty");
         CHECK(out.sidePanelSplitFraction > 0.499 && out.sidePanelSplitFraction < 0.501, "settings sidePanelSplitFraction default 0.5 on empty");
         CHECK(out.sidePanelCollapsed == false, "settings sidePanelCollapsed default false (expanded) on empty");
+        CHECK(out.sidePanelSummaryHidden == false, "settings sidePanelSummaryHidden default false (the summary area shown — the pre-toggle layout) on empty");
         CHECK(out.sidePanelScrollToSelectedTab == true, "settings sidePanelScrollToSelectedTab default true (scroll-to-tab ON) on empty");
         const auto out2 = DeserializeAppSettings(L"not json");
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");

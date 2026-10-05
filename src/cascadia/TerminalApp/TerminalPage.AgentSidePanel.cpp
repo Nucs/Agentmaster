@@ -21,8 +21,13 @@
 //            deferred to a clean tick, never moving a card that is already fully visible.
 //   BOTTOM — the SELECTED session's summary: a REAL AgentTabOverlay in fill-host mode
 //            (SetSummaryFillHost), i.e. the per-tab pencil panel's whole business logic — analyze/
-//            render off-thread, times bar, wrap/truncate/previous toggles, JUMP buttons, context
+//            render off-thread, times bar, wrap/truncate/history toggles, JUMP buttons, context
 //            menus — reused verbatim, just sized by this host instead of anchoring over a terminal.
+//   "Sum" OFF (SIDE_PANEL.md §2d) — the header's first toggle hides the BOTTOM area (and its
+//            splitter): the cards fill the body, and each card shows the RICH SESSION TOOLTIP a tab
+//            header shows — the same AgentSessionToolTipHost lifecycle and the same card push
+//            (TerminalPage::_PushSessionToolTipCard) — placed just past the panel's edge, beside the
+//            hovered card (right of a left-docked panel, left of a right-docked one).
 //
 // PERSISTENCE (the user's contract): both separators — the VERTICAL one (panel width) and the
 // HORIZONTAL one (cards/summary split) — persist PER WINDOW (WindowRecord::sidePanel*, riding the
@@ -57,6 +62,7 @@
 #include "TerminalPage.h"
 
 #include "AgentManagerContent.h" // CycleBoardSort / BuildSessionMenuFor / SelectSession (the Linked-Lenses delegation targets)
+#include "AgentSessionToolTip.h" // the cards' rich session tooltip host ("Sum" off — the tab tooltip's lifecycle, shared)
 #include "AgentTabOverlay.h" // the fill-hosted summary panel (SetSummaryFillHost)
 #include "AgentCatchLog.h" // AgentLogCaughtException — swallowed-exception forensics (Rule #18)
 #include "AgentTipHelpers.h" // AgentSetTip / AgentSetTitledTip — the islands-safe hover tooltips
@@ -125,6 +131,28 @@ namespace
     constexpr double kSidePanelSearchBoxMinHeightPx = 22.0;
     constexpr uint64_t kSidePanelRebuildMinGapMs = 500; // registry-drain rebuild throttle (a storm folds into the periodic catch-up)
     constexpr uint64_t kSidePanelTimingRefreshMs = 30'000; // the in-place "ago" text refresh cadence
+    // The header's ICON buttons (⌖ scroll-to-tab, ⇄ dock flip, «/» collapse) and the collapsed strip's chevron:
+    // one size above the 11px text buttons (Sum / LOCAL / sort), so the single-glyph controls read as clearly as
+    // the worded ones beside them. One place, so the three header icons and the strip can never drift apart.
+    constexpr double kSidePanelIconFontSize = 12.0;
+    // The room the card tooltip ("Sum" off) leaves between itself and the window edge, beyond the framework's own
+    // gap: ToolTip placement inflates the dock rect by DEFAULT_MOUSE_OFFSET (20px, WinUI ToolTip_Partial.h) for a
+    // hover-opened tooltip, so the card starts 20px past the panel's edge; another 8px keeps it off the far edge.
+    constexpr double kSidePanelTipGapPx = 20.0;
+    constexpr double kSidePanelTipEdgeMarginPx = 8.0;
+
+    // The SURFACE KEY of a side-panel card's rich tooltip (the "Sum" off mode): the key its content signature and
+    // wheel-scroll pieces live under in TerminalPage::_tabTooltipSig / _tabTooltipScroll. A tab's card uses the
+    // bare session id there, and both surfaces of ONE session can be armed at once (its tab and its card host
+    // separate card elements), so the card's key must never collide with an id: the U+001F prefix is a control
+    // character no session id (a GUID, or our minted Codex handle) can contain.
+    //   id      — the card's session id.
+    //   returns — the card's surface key.
+    //   throws  — std::bad_alloc on allocation failure only.
+    std::wstring SidePanelToolTipKey(const std::wstring& id)
+    {
+        return std::wstring{ L"\x1F" L"sidepanel:" } + id;
+    }
 
     // The two drag-to-resize separators paint a SOLID gray a touch lighter than the #2E2E2E panel
     // background, so each reads as a visible raised divider at rest instead of a see-through gap: the
@@ -408,6 +436,9 @@ namespace winrt::TerminalApp::implementation
         _sidePanelWidthFraction = (_windowRecord.sidePanelWidthFraction > 0.0) ? _windowRecord.sidePanelWidthFraction : _appSettings.sidePanelWidthFraction;
         _sidePanelSplitFraction = (_windowRecord.sidePanelSplitFraction > 0.0) ? _windowRecord.sidePanelSplitFraction : _appSettings.sidePanelSplitFraction;
         _sidePanelCollapsed = (_windowRecord.sidePanelCollapsed >= 0) ? (_windowRecord.sidePanelCollapsed != 0) : _appSettings.sidePanelCollapsed;
+        // The "Sum" toggle (summary area hidden == the cards' rich tooltip mode) follows the collapse contract:
+        // this window's own choice when its record has one, else the last change anywhere (the global default).
+        _sidePanelSummaryHidden = (_windowRecord.sidePanelSummaryHidden >= 0) ? (_windowRecord.sidePanelSummaryHidden != 0) : _appSettings.sidePanelSummaryHidden;
         // The card-list SCOPE is per-window ONLY: the record's flag (absent == false), never an
         // AppSettings default — the user's contract is that every window starts on ITS OWN tabs
         // (LOCAL), and a fleet-wide (GLOBAL) view is an explicit choice that stays with the window
@@ -535,9 +566,10 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Header: TWO lines.
-        //   line 1 (row 0): [ spacer * ][ scope ][ sort ][ ⌖ ][ ⇄ ][ chevron ] — the buttons keep the
+        //   line 1 (row 0): [ spacer * ][ Sum ][ scope ][ sort ][ ⌖ ][ ⇄ ][ chevron ] — the buttons keep the
         //     right-aligned places they had when the filter box shared this line (column 0, the star, is
-        //     now an empty spacer), the three icons together at the end, the collapse chevron outermost.
+        //     now an empty spacer), "Sum" first (left of LOCAL/GLOBAL — it reshapes the whole panel), the
+        //     three icons together at the end, the collapse chevron outermost.
         //   line 2 (row 1): the filter box across the FULL width. On a line of its own it no longer
         //     competes with the buttons for room — sharing one line, a narrow panel squeezed the box down
         //     to its minimum while the buttons kept their natural widths.
@@ -561,12 +593,15 @@ namespace winrt::TerminalApp::implementation
             c4.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
             ColumnDefinition c5{};
             c5.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            ColumnDefinition c6{}; // the "Sum" toggle's column (column 1) pushed the others one to the right
+            c6.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
             header.ColumnDefinitions().Append(c0);
             header.ColumnDefinitions().Append(c1);
             header.ColumnDefinitions().Append(c2);
             header.ColumnDefinitions().Append(c3);
             header.ColumnDefinitions().Append(c4);
             header.ColumnDefinitions().Append(c5);
+            header.ColumnDefinitions().Append(c6);
             header.Padding(ThicknessHelper::FromLengths(4, 4, 4, 2));
             header.ColumnSpacing(3);
             header.RowSpacing(3); // a little air between the buttons line and the filter line
@@ -611,6 +646,28 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumnSpan(_sidePanelSearchBox, static_cast<int32_t>(header.ColumnDefinitions().Size()));
         header.Children().Append(_sidePanelSearchBox);
 
+        // The "Sum" toggle — the summary area below the cards ON (checked, the default) / OFF. OFF hides the
+        // bottom area and its splitter so the cards fill the body, and each card then shows the RICH session
+        // tooltip beside the panel on hover — the very card a tab header shows (SIDE_PANEL.md §2d). A REAL
+        // ToggleButton (the ⌖ idiom), so its accent fill IS the state; IsChecked is seeded by
+        // _SidePanelUpdateSumButton once the panel is built (a programmatic IsChecked raises no Click, so
+        // seeding can never persist anything). A worded button like LOCAL/sort, so it keeps their 11px size.
+        _sidePanelSumBtn = winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton{};
+        _sidePanelSumBtn.FontSize(11);
+        _sidePanelSumBtn.Padding(ThicknessHelper::FromLengths(8, 1, 8, 1));
+        _sidePanelSumBtn.VerticalAlignment(VerticalAlignment::Center);
+        _sidePanelSumBtn.IsTabStop(false); // like its siblings: a click must never pull keyboard focus out of the terminal
+        _sidePanelSumBtn.Content(winrt::box_value(L"Sum"));
+        AgentSetTitledTip(_sidePanelSumBtn, L"Summary area", winrt::hstring{ L"On: the selected session's summary shows below the cards.\nOff: the cards fill the panel, and hovering a card shows that session's full card beside the panel \x2014 the same card a tab shows when you hover it (scroll it with the mouse wheel).\nThis window remembers its own choice; the last change becomes the default for new windows." });
+        _sidePanelSumBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelToggleSummary();
+            }
+        });
+        Grid::SetColumn(_sidePanelSumBtn, 1);
+        header.Children().Append(_sidePanelSumBtn);
+
         // The card-list SCOPE toggle — LOCAL (this window's tabs; the default, always) / GLOBAL
         // (every window's). The board's own LOCAL/GLOBAL words + accent look, but a SEPARATE state:
         // it re-scopes only this list, never the Manager's tree/board (which answer a different
@@ -629,7 +686,7 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelToggleScope();
             }
         });
-        Grid::SetColumn(_sidePanelScopeBtn, 1);
+        Grid::SetColumn(_sidePanelScopeBtn, 2);
         header.Children().Append(_sidePanelScopeBtn);
 
         _sidePanelSortBtn = Button{};
@@ -658,7 +715,7 @@ namespace winrt::TerminalApp::implementation
             self->_SidePanelUpdateSortButton();
             self->_SidePanelScheduleRebuild(/*force*/ true);
         });
-        Grid::SetColumn(_sidePanelSortBtn, 2);
+        Grid::SetColumn(_sidePanelSortBtn, 3);
         header.Children().Append(_sidePanelSortBtn);
 
         // The ⌖ SCROLL-TO-TAB icon toggle: while ON (the GLOBAL AppSettings::sidePanelScrollToSelectedTab,
@@ -670,7 +727,7 @@ namespace winrt::TerminalApp::implementation
         // read as one group. IsChecked is seeded by _SidePanelUpdateScrollToTabButton once the panel is
         // built — a programmatic IsChecked raises no Click, so seeding can never persist or broadcast.
         _sidePanelScrollToTabBtn = winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton{};
-        _sidePanelScrollToTabBtn.FontSize(11);
+        _sidePanelScrollToTabBtn.FontSize(kSidePanelIconFontSize); // an ICON button: one size above the 11px worded buttons
         _sidePanelScrollToTabBtn.Padding(ThicknessHelper::FromLengths(6, 1, 6, 1));
         _sidePanelScrollToTabBtn.VerticalAlignment(VerticalAlignment::Center);
         _sidePanelScrollToTabBtn.IsTabStop(false); // like its siblings: a click must never pull keyboard focus out of the terminal
@@ -682,11 +739,11 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelToggleScrollToTab();
             }
         });
-        Grid::SetColumn(_sidePanelScrollToTabBtn, 3);
+        Grid::SetColumn(_sidePanelScrollToTabBtn, 4);
         header.Children().Append(_sidePanelScrollToTabBtn);
 
         Button dockBtn{};
-        dockBtn.FontSize(11);
+        dockBtn.FontSize(kSidePanelIconFontSize); // an ICON button: one size above the 11px worded buttons
         dockBtn.Padding(ThicknessHelper::FromLengths(6, 1, 6, 1));
         dockBtn.VerticalAlignment(VerticalAlignment::Center);
         dockBtn.IsTabStop(false);
@@ -698,11 +755,11 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelFlipDock();
             }
         });
-        Grid::SetColumn(dockBtn, 4);
+        Grid::SetColumn(dockBtn, 5);
         header.Children().Append(dockBtn);
 
         _sidePanelCollapseBtn = Button{};
-        _sidePanelCollapseBtn.FontSize(11);
+        _sidePanelCollapseBtn.FontSize(kSidePanelIconFontSize); // an ICON button: one size above the 11px worded buttons
         _sidePanelCollapseBtn.Padding(ThicknessHelper::FromLengths(6, 1, 6, 1));
         _sidePanelCollapseBtn.VerticalAlignment(VerticalAlignment::Center);
         _sidePanelCollapseBtn.IsTabStop(false);
@@ -714,7 +771,7 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelToggleCollapsed();
             }
         });
-        Grid::SetColumn(_sidePanelCollapseBtn, 5);
+        Grid::SetColumn(_sidePanelCollapseBtn, 6);
         header.Children().Append(_sidePanelCollapseBtn);
         Grid::SetRow(header, 0);
         _sidePanelExpandedRoot.Children().Append(header);
@@ -879,7 +936,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelStrip.VerticalAlignment(VerticalAlignment::Center);
         _sidePanelStrip.HorizontalAlignment(HorizontalAlignment::Center);
         _sidePanelStripBtn = Button{};
-        _sidePanelStripBtn.FontSize(11);
+        _sidePanelStripBtn.FontSize(kSidePanelIconFontSize); // the collapsed strip's chevron — the same icon size as the header's collapse chevron it pairs with
         _sidePanelStripBtn.Padding(ThicknessHelper::FromLengths(2, 10, 2, 10));
         _sidePanelStripBtn.IsTabStop(false);
         AgentSetTip(_sidePanelStripBtn, winrt::hstring{ L"Expand the side panel (session cards + the selected session's summary)." });
@@ -942,11 +999,12 @@ namespace winrt::TerminalApp::implementation
         }
 
         _sidePanelBuilt = true;
-        _SidePanelApplyDock(); // assigns the three columns per the global dock side + applies widths/glyphs
+        _SidePanelApplyDock(); // assigns the three columns per the global dock side + applies widths/glyphs (and the summary rows per "Sum")
+        _SidePanelUpdateSumButton(); // "Sum" checked == the summary area shown (no Click => nothing persisted)
         _SidePanelUpdateSortButton();
         _SidePanelUpdateScopeButton(); // LOCAL / GLOBAL per the seeded per-window scope
         _SidePanelUpdateScrollToTabButton(); // ⌖ checked per the GLOBAL setting (no Click => nothing persisted)
-        _SidePanelRebuildCards();
+        _SidePanelRebuildCards(); // with "Sum" off, every new card is armed with its rich tooltip as it is built
         // Re-select the lens's restored session so a reopened window's summary shows immediately
         // (the same restored selection SetManagerState seeded into the Manager lens).
         if (!_windowRecord.manager.selectedId.empty())
@@ -958,6 +1016,7 @@ namespace winrt::TerminalApp::implementation
                                           L") width=" + std::to_wstring(_sidePanelWidthFraction) +
                                           L" split=" + std::to_wstring(_sidePanelSplitFraction) +
                                           (_sidePanelCollapsed ? L" collapsed" : L" expanded") +
+                                          (_sidePanelSummaryHidden ? L" summary=hidden(card-tooltips)" : L" summary=shown") +
                                           (_sidePanelGlobal ? L" scope=global" : L" scope=local") +
                                           (_appSettings.sidePanelScrollToSelectedTab ? L" scroll-to-tab=on" : L" scroll-to-tab=off") +
                                           (_appSettings.sidePanelOnLeft ? L" dock=left\n" : L" dock=right\n"));
@@ -1057,8 +1116,39 @@ namespace winrt::TerminalApp::implementation
                     row.Height(GridLengthHelper::FromValueAndType(v, GridUnitType::Star));
                 }
             };
-            setRowStar(rows.GetAt(0), _sidePanelSplitFraction);
-            setRowStar(rows.GetAt(2), 1.0 - _sidePanelSplitFraction);
+            // The pixel twin of setRowStar (the splitter row is a fixed height, and a hidden area is 0px) —
+            // change-gated for the same reason: a same-value Height write still invalidates layout.
+            const auto setRowPx = [](const RowDefinition& row, double px) {
+                const auto cur = row.Height();
+                if (cur.GridUnitType != GridUnitType::Pixel || std::abs(cur.Value - px) > 0.5)
+                {
+                    row.Height(GridLengthHelper::FromPixels(px));
+                }
+            };
+            if (_sidePanelSummaryHidden)
+            {
+                // "Sum" off: the cards take the whole body; the splitter row and the summary row shrink to
+                // nothing. The split fraction is untouched, so turning the summary back on restores it.
+                setRowStar(rows.GetAt(0), 1.0);
+                setRowPx(rows.GetAt(1), 0.0);
+                setRowPx(rows.GetAt(2), 0.0);
+            }
+            else
+            {
+                setRowStar(rows.GetAt(0), _sidePanelSplitFraction);
+                setRowPx(rows.GetAt(1), kSidePanelSplitterPx);
+                setRowStar(rows.GetAt(2), 1.0 - _sidePanelSplitFraction);
+            }
+        }
+        // The horizontal splitter and the summary host are collapsed with their rows, so a 0px row can never
+        // leave a hit-testable sliver (a drag grip nobody can see) or an empty host taking pointer input.
+        if (_sidePanelHSplitter)
+        {
+            _sidePanelHSplitter.Visibility(_sidePanelSummaryHidden ? Visibility::Collapsed : Visibility::Visible);
+        }
+        if (_sidePanelSummaryHost)
+        {
+            _sidePanelSummaryHost.Visibility(_sidePanelSummaryHidden ? Visibility::Collapsed : Visibility::Visible);
         }
 
         // Expanded content vs the collapsed strip.
@@ -1193,6 +1283,73 @@ namespace winrt::TerminalApp::implementation
         }
         _ScheduleWindowRecordSave();
         _SidePanelPersistDefaults(/*width*/ false, /*split*/ false, /*collapsed*/ true);
+    }
+
+    // The "Sum" header toggle's click: show / hide the bottom summary area (and its splitter). HIDDEN gives the
+    // cards the whole body and moves "what is this session" into the RICH session tooltip each card shows beside
+    // the panel on hover — the card a tab header shows, through the same host + push (SIDE_PANEL.md §2d); SHOWN
+    // restores the classic layout: the selected session's summary below, each card with its small floating tip.
+    // Persists both halves of the collapse contract: this window's record (the autosave reads the live member)
+    // and the new-window default (a granular RMW of that one field). Logged as a [nav] line like collapse.
+    // No parameters; returns nothing. Never throws past its callees' own containment: every card's switch is
+    // contained + logged inside _SidePanelApplyCardTipMode, a failed snapshot is logged (the arm-builds then read
+    // each session alone), and persistence failures are logged at the WriteAllUtf8 chokepoint.
+    void TerminalPage::_SidePanelToggleSummary()
+    {
+        if (!_sidePanelBuilt)
+        {
+            return;
+        }
+        _sidePanelSummaryHidden = !_sidePanelSummaryHidden;
+        ::Agentmaster::LogNav(_sidePanelSummaryHidden ? L"sidepanel summary -> hidden (cards show the rich session tooltip)" : L"sidepanel summary -> shown");
+        _SidePanelUpdateSumButton(); // the ToggleButton flipped itself before Click; re-pin it to the member anyway
+        _SidePanelApplyLayout(); // the body rows + the splitter / summary host visibility
+        // The summary overlay only does work while it can be seen: hidden releases it (its registry observer
+        // detaches, no more off-thread analyses), shown rebinds the CURRENT selection (a peek included) —
+        // _SidePanelBindSummary decides both from _sidePanelSummaryHidden.
+        _SidePanelBindSummary(_sidePanelSelectedId);
+        // Every card switches its tooltip mode. Going to the rich mode arm-builds a header-only card per card, fed
+        // from ONE lean snapshot (no queue, no transcript texts) looked up by id — not a whole-record copy per card
+        // (the UI_THREAD.md §10g tax: a record carries up to 200 queued prompts).
+        std::vector<::Agentmaster::SessionInfo> snap;
+        if (_sidePanelSummaryHidden && _sessionRegistry)
+        {
+            try
+            {
+                snap = _sessionRegistry->SnapshotLiveForCards();
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_SidePanelToggleSummary snapshot"); // each arm-build reads its session alone then
+            }
+        }
+        std::unordered_map<std::wstring_view, const ::Agentmaster::SessionInfo*> byId;
+        byId.reserve(snap.size());
+        for (const auto& s : snap)
+        {
+            byId.emplace(s.id, &s);
+        }
+        for (auto& [id, view] : _sidePanelCardViews)
+        {
+            const auto row = byId.find(id);
+            _SidePanelApplyCardTipMode(view, id, /*rebuildTags*/ true, row != byId.end() ? row->second : nullptr);
+        }
+        _ScheduleWindowRecordSave();
+        _SidePanelPersistDefaults(/*width*/ false, /*split*/ false, /*collapsed*/ false, /*summaryHidden*/ true);
+    }
+
+    // Pin the "Sum" toggle's checked state to the live member — checked == the summary area is SHOWN. Called at
+    // build and after every click (the ToggleButton flips its own IsChecked before Click fires, so the member,
+    // not the button, is the truth). A programmatic IsChecked raises no Click, so re-pinning can't loop or persist.
+    // No parameters; returns nothing; a no-op before the panel is built. Throws only what a property write on a
+    // live UI-thread control can (the sibling label updaters' exposure).
+    void TerminalPage::_SidePanelUpdateSumButton()
+    {
+        if (!_sidePanelSumBtn)
+        {
+            return;
+        }
+        _sidePanelSumBtn.IsChecked(!_sidePanelSummaryHidden);
     }
 
     // Flip the GLOBAL dock side (left <-> right) and re-dock THIS window live. Deliberately a
@@ -1388,10 +1545,11 @@ namespace winrt::TerminalApp::implementation
 
     // The "last one to adjust sets the default" half: RMW ONLY the flagged AppSettings sidePanel*
     // fields from this window's live values (granular on purpose — a width drag must never export
-    // this window's collapse state as the global default), then keep the in-memory copy in step so
-    // a later cog Save's preserve block can't regress it.
-    // `width`/`split`/`collapsed`: which live values to export as the new-window defaults.
-    void TerminalPage::_SidePanelPersistDefaults(bool width, bool split, bool collapsed)
+    // this window's collapse or summary state as the global default), then keep the in-memory copy in
+    // step so a later cog Save's preserve block can't regress it.
+    // `width`/`split`/`collapsed`/`summaryHidden`: which live values to export as the new-window defaults
+    // (`summaryHidden` defaults to false so the three older call sites read unchanged).
+    void TerminalPage::_SidePanelPersistDefaults(bool width, bool split, bool collapsed, bool summaryHidden)
     {
         auto s = ::Agentmaster::LoadAppSettings();
         if (width)
@@ -1406,12 +1564,17 @@ namespace winrt::TerminalApp::implementation
         {
             s.sidePanelCollapsed = _sidePanelCollapsed;
         }
+        if (summaryHidden)
+        {
+            s.sidePanelSummaryHidden = _sidePanelSummaryHidden;
+        }
         ::Agentmaster::SaveAppSettings(s);
-        // Adopt the merged trio (not just the flagged one): the freshest disk may carry another
+        // Adopt the merged set (not just the flagged one): the freshest disk may carry another
         // window's newer defaults, and _appSettings must mirror what is actually stored.
         _appSettings.sidePanelWidthFraction = s.sidePanelWidthFraction;
         _appSettings.sidePanelSplitFraction = s.sidePanelSplitFraction;
         _appSettings.sidePanelCollapsed = s.sidePanelCollapsed;
+        _appSettings.sidePanelSummaryHidden = s.sidePanelSummaryHidden;
     }
 
     // Coalesced rebuild entry. force==true (a user action — typing, sort, settings) rebuilds NOW;
@@ -1709,8 +1872,13 @@ namespace winrt::TerminalApp::implementation
             const bool animationsEnabled = AgentAnimationsEnabled();
             std::vector<std::wstring> order; // the new card order, as session ids — the planner's target
             std::vector<AgentSidePanelCardModel> models; // parallel to `order`
+            // Parallel to `order` too: each card's lean session row (pointers into `snap`, alive for this whole
+            // update) — the "Sum" off mode arm-builds a NEW card's rich tooltip from it instead of a per-card
+            // registry read.
+            std::vector<const ::Agentmaster::SessionInfo*> sessions;
             order.reserve(rows.size());
             models.reserve(rows.size());
+            sessions.reserve(rows.size());
             // Belt: the planner needs unique ids, and a session listed twice must get ONE card. The registry
             // never lists an id twice, so this only guards the guarantee (views into `snap`'s ids, no copies).
             std::unordered_set<std::wstring_view> seen;
@@ -1723,6 +1891,7 @@ namespace winrt::TerminalApp::implementation
                 }
                 order.push_back(row.session->id);
                 models.push_back(SidePanelCardModelFor(*row.session, mode, _sidePanelTagsById[row.session->id], _sidePanelTagColors, dirColors, pendingArgb, animationsEnabled));
+                sessions.push_back(row.session);
             }
 
             // The panel and its mirror must agree before any in-place edit: every index the plan carries is
@@ -1752,6 +1921,14 @@ namespace winrt::TerminalApp::implementation
                 {
                     const auto created = _sidePanelCardViews.emplace(order[i], _SidePanelCreateCardView(order[i])).first;
                     _SidePanelApplyCardModel(created->second, std::move(models[i]), order[i], /*fresh*/ true);
+                    if (_sidePanelSummaryHidden)
+                    {
+                        // "Sum" off: a NEW card gets its rich tooltip now (header-only arm-build; the host attaches
+                        // it on the card's Loaded, before any pointer can reach it). Contained inside — a tooltip
+                        // failure never resets the list. The fresh apply above already built the tag strip in this
+                        // mode, so no strip rebuild.
+                        _SidePanelApplyCardTipMode(created->second, order[i], /*rebuildTags*/ false, sessions[i]);
+                    }
                 }
             }
 
@@ -1765,6 +1942,13 @@ namespace winrt::TerminalApp::implementation
                 {
                 case ::Agentmaster::KeyedListOpKind::Remove:
                     children.RemoveAt(op.from);
+                    if (const auto leaving = _sidePanelCardViews.find(op.key); leaving != _sidePanelCardViews.end())
+                    {
+                        // Detach its rich tooltip BEFORE the view goes: the host's own Unloaded detach can run
+                        // after the host is gone (the event is deferred), and a ToolTip left attached to a dropped
+                        // element is the islands leak class (AgentTipHelpers.h). Never throws.
+                        _SidePanelDropCardToolTip(leaving->second, op.key);
+                    }
                     _sidePanelCardViews.erase(op.key);
                     break;
                 case ::Agentmaster::KeyedListOpKind::Insert:
@@ -1829,6 +2013,12 @@ namespace winrt::TerminalApp::implementation
     // non-empty, which the next update sees as out of step with the (now empty) mirror — and calls this again.
     void TerminalPage::_SidePanelResetCards()
     {
+        // Every card's rich tooltip is detached first (the "Sum" off mode attaches one per card): a ToolTip left
+        // attached to a dropped element is the islands leak class. _SidePanelDropCardToolTip never throws.
+        for (auto& [id, view] : _sidePanelCardViews)
+        {
+            _SidePanelDropCardToolTip(view, id);
+        }
         // The maps first: clearing them cannot fail, so the page's view of the list is consistently "empty"
         // even when the panel below refuses its Clear.
         _sidePanelCardViews.clear();
@@ -2040,7 +2230,7 @@ namespace winrt::TerminalApp::implementation
         // The tag strip shows the tags, their colors and — in its "+N" count — the title's ink.
         if (fresh || model.tags != shown.tags || model.tagArgb != shown.tagArgb || (!model.tags.empty() && model.darkInk != shown.darkInk))
         {
-            _SidePanelApplyCardTags(view, model);
+            _SidePanelApplyCardTags(view, model, id);
         }
         if (fresh || model.state != shown.state)
         {
@@ -2093,9 +2283,14 @@ namespace winrt::TerminalApp::implementation
         else if (!view.timing)
         {
             // Built like the board's TimingText (Internal.h) — the same dim 10px text and its explanatory
-            // tip — from the model's already-formatted string.
+            // tip — from the model's already-formatted string. With "Sum" off the card shows ONE tooltip, the
+            // rich session card (a tab header's model), so the explanatory floating tip is not attached here;
+            // _SidePanelApplyCardTipMode adds it when the summary comes back.
             view.timing = Text(winrt::hstring{ model.timing }, 10, false, 0.45);
-            AgentSetTitledTip(view.timing, winrt::hstring{ kTimingTooltipTitle }, winrt::hstring{ kTimingTooltip });
+            if (!_sidePanelSummaryHidden)
+            {
+                AgentSetTitledTip(view.timing, winrt::hstring{ kTimingTooltipTitle }, winrt::hstring{ kTimingTooltip });
+            }
             view.stateRow.Children().Append(view.timing); // always the row's last part
         }
         else if (fresh || model.timing != shown.timing)
@@ -2106,11 +2301,15 @@ namespace winrt::TerminalApp::implementation
         {
             view.dirLine.Text(winrt::hstring{ model.dirLine });
         }
-        if (fresh || model.tipTitle != shown.tipTitle || model.tipText != shown.tipText)
+        if ((fresh || model.tipTitle != shown.tipTitle || model.tipText != shown.tipText) && !_sidePanelSummaryHidden)
         {
             // On an element that already has a tip, AgentSetTitledTip only updates the recorded text (no
             // second handler set), and a tip open right now shows the new text at once. (The tip yields while
-            // the pointer is on the tag strip itself; see _SidePanelMakeTagStrip.)
+            // the pointer is on the tag strip itself; see _SidePanelMakeTagStrip.) Skipped with "Sum" off: the
+            // card's floating tip must stay silent then — its open would REPLACE the rich session tooltip
+            // attached to the card (both go through ToolTipService) and its close would detach it. The new
+            // text is not lost: it lands in view.model below, which _SidePanelApplyCardTipMode re-applies when
+            // the summary comes back.
             AgentSetTitledTip(view.card, winrt::hstring{ model.tipTitle }, winrt::hstring{ model.tipText }, kCardTipDelay);
         }
         view.model = std::move(model);
@@ -2122,9 +2321,11 @@ namespace winrt::TerminalApp::implementation
     // the band's top-right corner and a long title can never push them off the card. A changed tag list, tag
     // color or title ink REPLACES the strip (a few ribbons — simpler than editing them); the title element is
     // only re-parented between the band and the grid, never rebuilt.
-    // `view`: the card. `model`: the values it must show (tags, their colors, the ink).
-    // Throws winrt::hresult_error if XAML refuses an edit — _SidePanelRebuildCards resets the list on a throw.
-    void TerminalPage::_SidePanelApplyCardTags(AgentSidePanelCardView& view, const AgentSidePanelCardModel& model)
+    // `view`: the card. `model`: the values it must show (tags, their colors, the ink). `id`: the card's session —
+    // handed to the strip so, with "Sum" off, its ribbons can suspend THIS card's rich tooltip while hovered.
+    // Throws winrt::hresult_error if XAML refuses an edit — _SidePanelRebuildCards resets the list on a throw
+    // (the "Sum" mode switch calls it inside _SidePanelApplyCardTipMode's catch).
+    void TerminalPage::_SidePanelApplyCardTags(AgentSidePanelCardView& view, const AgentSidePanelCardModel& model, const std::wstring& id)
     {
         if (model.tags.empty())
         {
@@ -2149,7 +2350,7 @@ namespace winrt::TerminalApp::implementation
         // start where the card's colored bar starts — bookmarks clipped to the top of the card rather than
         // badges floating mid-bar. Read back from the band (not a literal) so a later padding change can't
         // silently detach them from the edge.
-        auto strip = _SidePanelMakeTagStrip(model.tags, colors, model.darkInk, view.band.Padding().Top, view.card);
+        auto strip = _SidePanelMakeTagStrip(model.tags, colors, model.darkInk, view.band.Padding().Top, view.card, id);
         Grid::SetColumn(strip, 1);
         if (!view.bandGrid)
         {
@@ -2196,6 +2397,13 @@ namespace winrt::TerminalApp::implementation
     // so ITS tip still opens while the card's cannot. Leaving the strip for the rest of the card re-arms
     // the card tip as usual (the tip helper's nested-tip re-arm on the next PointerMoved).
     //
+    // With "Sum" OFF (SIDE_PANEL.md §2d) the card's tooltip is the RICH session card instead — a ToolTip attached
+    // to the card for its whole life, opened by ToolTipService, which nothing may close by writing IsOpen. A
+    // ribbon / "+N" entry therefore DETACHES it (_SidePanelSuspendCardToolTip: the framework closes an open one
+    // and cancels a pending open itself), so the session card never floats beside the panel while the tag hover
+    // panel is up; the next hover over the card's body re-attaches it (the card push re-hosts whenever nothing
+    // is attached). The "+N" has NO floating tip in that mode — the rich card lists every tag as a chip.
+    //
     // `tags`: the session's tags in the order they were added — non-empty (an untagged card builds no strip).
     // `colors`: each tag's RESOLVED display color, parallel to `tags` — the card model's tagArgb, which
     //           SidePanelCardModelFor resolved through ResolveTagDisplayColor (user-picked > name hash), exactly
@@ -2207,15 +2415,19 @@ namespace winrt::TerminalApp::implementation
     // `card`: the card Border whose tooltip must yield over the strip. The handlers hold it WEAKLY: the
     //         strip lives inside the card, so a strong capture would be the element -> handler -> element
     //         cycle that leaks one card per rebuild (the board's weak-capture rule).
+    // `id`: the card's session — whose rich tooltip a ribbon / "+N" entry suspends in the "Sum" off mode
+    //       (captured by value; resolved through the card map at hover time, so a dropped card is a no-op).
     // Returns the unparented strip (a horizontal StackPanel), right- and top-aligned for the band's
     // Auto column.
     // Throws winrt::hresult_error if XAML construction fails (off the UI thread / a torn-down tree); the
-    // pointer handlers themselves never throw out (weak refs that no longer resolve just no-op).
+    // pointer handlers themselves never throw out (weak refs that no longer resolve just no-op; the suspend
+    // never throws).
     winrt::Windows::UI::Xaml::Controls::StackPanel TerminalPage::_SidePanelMakeTagStrip(const std::vector<std::wstring>& tags,
                                                                                     const std::vector<winrt::Windows::UI::Color>& colors,
                                                                                     bool darkInk,
                                                                                     double hangPx,
-                                                                                    const winrt::Windows::UI::Xaml::Controls::Border& card)
+                                                                                    const winrt::Windows::UI::Xaml::Controls::Border& card,
+                                                                                    const std::wstring& id)
     {
         StackPanel strip{};
         strip.Orientation(Orientation::Horizontal);
@@ -2235,7 +2447,7 @@ namespace winrt::TerminalApp::implementation
         {
             auto ribbon = SidePanelMakeTagRibbon(i < colors.size() ? colors[i] : TagColorFor(tags[i]));
             const winrt::hstring tagName{ tags[i] };
-            ribbon.PointerEntered([weakThis, cardWeak, tagName](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+            ribbon.PointerEntered([weakThis, cardWeak, tagName, id](const IInspectable& sender, const PointerRoutedEventArgs& e) {
                 // Keep the card's own tip off the hover panel: drop a pending open and close an open one
                 // (AgentCloseTipsIn does both, for the card and anything under it)...
                 if (const auto c = cardWeak.get())
@@ -2248,6 +2460,9 @@ namespace winrt::TerminalApp::implementation
                 const auto el = sender.try_as<UIElement>();
                 if (self && el)
                 {
+                    // "Sum" off: the rich session card must not float beside the panel under the tag hover panel —
+                    // detach it (a no-op in the classic mode). Before the hover begins, so the two never overlap.
+                    self->_SidePanelSuspendCardToolTip(id);
                     self->_OnTagBadgeHoverBegin(tagName, el); // ~160ms open delay; re-targets if another ribbon is mid-delay
                 }
             });
@@ -2272,10 +2487,16 @@ namespace winrt::TerminalApp::implementation
             }
             // ORDER MATTERS: the tip helper's own PointerEntered/Moved handlers must be hooked BEFORE the
             // entry handler below, so they arm the "+N" tip before that handler marks the event handled.
-            AgentSetTitledTip(more,
-                              winrt::hstring{ std::to_wstring(hidden) + L" more tag" + (hidden == 1 ? L"" : L"s") },
-                              winrt::hstring{ hiddenList + L"\n\nRight-click the card \x2192 Tags to see or change them all." });
-            more.PointerEntered([cardWeak](const IInspectable&, const PointerRoutedEventArgs& e) {
+            // Classic mode only: with "Sum" off the card's ONE tooltip is the rich session card, which lists every
+            // tag as a chip — a second floating tip here would only stack on it. (_SidePanelApplyCardTipMode
+            // rebuilds the strip on every mode switch, so the "+N" always matches the mode.)
+            if (!_sidePanelSummaryHidden)
+            {
+                AgentSetTitledTip(more,
+                                  winrt::hstring{ std::to_wstring(hidden) + L" more tag" + (hidden == 1 ? L"" : L"s") },
+                                  winrt::hstring{ hiddenList + L"\n\nRight-click the card \x2192 Tags to see or change them all." });
+            }
+            more.PointerEntered([weakThis, cardWeak, id](const IInspectable&, const PointerRoutedEventArgs& e) {
                 // Close only the CARD's tip if it is up. Not AgentCloseTipsIn: that also cancels the
                 // pending open this element's own tip handler has just armed.
                 if (const auto c = cardWeak.get())
@@ -2283,6 +2504,10 @@ namespace winrt::TerminalApp::implementation
                     AgentCloseTipOn(c);
                 }
                 e.Handled(true); // don't let the card's tip handler re-arm the card over this one
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelSuspendCardToolTip(id); // "Sum" off: the "+N" is part of the tag zone too (a no-op in the classic mode)
+                }
             });
             strip.Children().Append(more);
         }
@@ -2294,6 +2519,346 @@ namespace winrt::TerminalApp::implementation
             e.Handled(true);
         });
         return strip;
+    }
+
+    // --- "Sum" off: the cards' RICH SESSION TOOLTIP (SIDE_PANEL.md §2d) --------------------------------------------
+    // With the summary area hidden, hovering a card shows the card a TAB header shows when hovered: the same
+    // AgentSessionToolTipHost lifecycle (framework-managed ToolTip, closed-only Content swaps, the Loaded re-attach,
+    // the lazy hover build, the wheel scroll read on the owner) and the same content push
+    // (_PushSessionToolTipCard — strings, signature, budgets, summary cache + waiters), placed beside the panel.
+
+    // Switch ONE card to the tooltip mode the summary state asks for.
+    //   RICH ("Sum" off): silence the card's own floating tips — the card's, the timing text's and (by rebuilding the
+    //     strip) the "+N"'s — because the shared tip host's open would REPLACE the rich ToolTip on the card and its
+    //     close would detach it; then arm the rich tooltip host.
+    //   CLASSIC ("Sum" on): clear the rich host (it detaches — the framework closes an open card itself) and forget its
+    //     surface-keyed state, then give the floating tips back from the card's CURRENT model.
+    // `view`: the card. `id`: its session. `rebuildTags`: re-make the tag strip (a mode switch: the "+N" tip follows
+    // the mode); false for a card whose fresh apply just built it in this mode. `lean`: the card's lean session row
+    // for the arm-build (null -> the arm-build reads GetWithoutQueue).
+    // Never throws: any failure is logged (Rule #18) and costs only this card's tooltip — never the list.
+    void TerminalPage::_SidePanelApplyCardTipMode(AgentSidePanelCardView& view, const std::wstring& id, bool rebuildTags, const ::Agentmaster::SessionInfo* lean)
+    {
+        if (!view.card)
+        {
+            return;
+        }
+        try
+        {
+            if (_sidePanelSummaryHidden)
+            {
+                AgentSuppressTip(view.card);
+                if (view.timing)
+                {
+                    AgentSuppressTip(view.timing);
+                }
+                if (rebuildTags && !view.model.tags.empty())
+                {
+                    _SidePanelApplyCardTags(view, view.model, id); // the "+N" comes back without its floating tip
+                }
+                _SidePanelArmCardToolTip(view, id, lean);
+            }
+            else
+            {
+                if (view.tipHost)
+                {
+                    view.tipHost->Clear(); // detach; the hooks stay wired but their callbacks no-op while "Sum" is on
+                }
+                const std::wstring key = SidePanelToolTipKey(id);
+                _tabTooltipSig.erase(key);
+                _tabTooltipScroll.erase(key);
+                // Re-applied from view.model (current: _SidePanelApplyCardModel stores every model even while it
+                // skips the tip write in the rich mode). The first call on a card born in the rich mode wires the
+                // floating tip's handlers; a card that had one just gets its text back (AgentSuppressTip kept the
+                // "already wired" marker).
+                AgentSetTitledTip(view.card, winrt::hstring{ view.model.tipTitle }, winrt::hstring{ view.model.tipText }, kCardTipDelay);
+                if (view.timing)
+                {
+                    AgentSetTitledTip(view.timing, winrt::hstring{ kTimingTooltipTitle }, winrt::hstring{ kTimingTooltip });
+                }
+                if (rebuildTags && !view.model.tags.empty())
+                {
+                    _SidePanelApplyCardTags(view, view.model, id); // the "+N" gets its floating tip back
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelApplyCardTipMode");
+        }
+    }
+
+    // Create the card's rich tooltip host on first use, wire its hooks once, and arm-build it. The host's owner is
+    // the card Border (held weakly — the card view holds it); its placement provider docks the card beside the panel
+    // (_SidePanelCardToolTipPlacement); "card" is its [tooltip-wheel] label and "Side-panel card" its [exc] context.
+    // The arm-build hosts a HEADER-ONLY card (kickSummary=false — the transcript analyze belongs to a real hover,
+    // else arming a 400-card list would burst 400 whole-transcript parses) so ToolTipService has a tooltip attached
+    // before the first hover: a card built before its list insert is not loaded yet, so the host's Loaded handler
+    // does the attach, still before any pointer can reach it. Re-armed after a classic -> rich switch (the Clear left
+    // the host inactive).
+    // `view`: the card. `id`: its session (captured by value in the hooks; resolved through the card map at call
+    // time, so a card that left the list is a no-op). `lean`: the card's lean session row, or null.
+    // Throws what the host / the push throws (std::bad_alloc, a XAML failure) — _SidePanelApplyCardTipMode contains it.
+    void TerminalPage::_SidePanelArmCardToolTip(AgentSidePanelCardView& view, const std::wstring& id, const ::Agentmaster::SessionInfo* lean)
+    {
+        if (!view.card)
+        {
+            return;
+        }
+        if (!view.tipHost)
+        {
+            view.tipHost = AgentSessionToolTipHost::Create(view.card, L"card", L"Side-panel card");
+            view.tipHost->SetPlacementProvider([weakThis = get_weak()](const FrameworkElement& owner) -> std::optional<AgentSessionToolTipPlacement> {
+                const auto self = weakThis.get();
+                return self ? self->_SidePanelCardToolTipPlacement(owner) : std::nullopt;
+            });
+        }
+        view.tipHost->EnsureHoverHook(
+            [weakThis = get_weak(), id]() {
+                if (const auto self = weakThis.get())
+                {
+                    self->_OnSidePanelCardToolTipHover(id);
+                }
+            },
+            [weakThis = get_weak(), id](int delta) -> bool {
+                const auto self = weakThis.get();
+                return self ? self->_ScrollSidePanelCardToolTip(id, delta) : false;
+            });
+        if (!view.tipHost->Active())
+        {
+            _UpdateSidePanelCardToolTip(id, /*swapWhileOpen*/ false, /*kickSummary*/ false, lean);
+        }
+    }
+
+    // The SIDE-PANEL CARD surface of the rich session tooltip — the twin of _UpdateTabAgentToolTip: resolve the
+    // session, clear on gone / archived, else hand everything to the SHARED _PushSessionToolTipCard with this card's
+    // surface key, its tags (the card model already holds them color-resolved through ResolveTagDisplayColor — the
+    // same colors the tab's AgentTagsSpec carries), and the room beside the panel as the width budget.
+    // `id`: the card's session. `swapWhileOpen`: the one-shot open-swap grant (the summary arrival). `kickSummary`:
+    // false = header only, no transcript analyze (the arm-build and the arrival's re-host). `lean`: a lean session row
+    // to use instead of a registry read (the list update / the mode switch have one); null -> GetWithoutQueue (the
+    // card reads no queue field, so the most expensive part of a record copy is skipped).
+    // A no-op unless the panel is built, "Sum" is off, and the card has a host. Throws what the push throws —
+    // callers contain it (the host's hover catch, _SidePanelApplyCardTipMode, the arrival's per-waiter catch).
+    void TerminalPage::_UpdateSidePanelCardToolTip(const std::wstring& id, bool swapWhileOpen, bool kickSummary, const ::Agentmaster::SessionInfo* lean)
+    {
+        if (!_sidePanelBuilt || !_sidePanelSummaryHidden || !_sessionRegistry)
+        {
+            return;
+        }
+        const auto it = _sidePanelCardViews.find(id);
+        if (it == _sidePanelCardViews.end() || !it->second.tipHost)
+        {
+            return; // the card left the list (or never got a host) — nothing to host on
+        }
+        const auto host = it->second.tipHost; // a local strong ref: nothing below may outlive the host it writes to
+        const auto& model = it->second.model;
+        const std::wstring key = SidePanelToolTipKey(id);
+        std::optional<::Agentmaster::SessionInfo> fetched;
+        const ::Agentmaster::SessionInfo* s = lean;
+        if (!s)
+        {
+            fetched = _sessionRegistry->GetWithoutQueue(id);
+            s = fetched ? &*fetched : nullptr;
+        }
+        if (!s || !s->live)
+        {
+            // Gone / archived between the list update and this hover: drop the card (the next update removes the
+            // card itself) and its surface state — the tab path's !live branch, minus a default tooltip to revert to.
+            host->Clear();
+            _tabTooltipSig.erase(key);
+            _tabTooltipScroll.erase(key);
+            return;
+        }
+        // The tags as the push wants them: (name, color) chips in add order, and a fingerprint for the signature (a
+        // tag edit or a recolor moves it, so the card re-hosts on the next hover).
+        std::wstring tagsSpec;
+        std::vector<std::pair<std::wstring, Color>> tagChips;
+        tagChips.reserve(model.tags.size());
+        for (size_t i = 0; i < model.tags.size(); ++i)
+        {
+            const bool resolved = i < model.tagArgb.size();
+            tagChips.emplace_back(model.tags[i], resolved ? SidePanelUnpackArgb(model.tagArgb[i]) : TagColorFor(model.tags[i]));
+            tagsSpec += model.tags[i];
+            tagsSpec += L'\t';
+            tagsSpec += resolved ? std::to_wstring(model.tagArgb[i]) : std::wstring{};
+            tagsSpec += L'\n';
+        }
+        // The summary arrival re-hosts THIS card (looked up again by id then — the card may have left the list).
+        auto rehost = [weakThis = get_weak(), id]() {
+            if (const auto self = weakThis.get())
+            {
+                // ⚠ kickSummary=false — an arrival must NEVER schedule another analyze (the 2026-08-29 loop rule).
+                self->_UpdateSidePanelCardToolTip(id, /*swapWhileOpen*/ true, /*kickSummary*/ false, nullptr);
+            }
+        };
+        _PushSessionToolTipCard(*host, key, *s, tagsSpec, tagChips, _SidePanelCardToolTipRoomWidth(), swapWhileOpen, kickSummary, std::move(rehost));
+    }
+
+    // The card host's PointerEntered callback — the tab hover recipe (_ArmTabAgentToolTipHover's lambda) for a card:
+    // a hover-time build (fresh state + fresh "ago"; kicks the mtime-gated summary load), and — only for a hover that
+    // starts CLOSED — the scroll reset to the top of the body. PointerEntered BUBBLES, so it re-fires as the pointer
+    // crosses the card's own children (band, title, state row) while the tip is already up; resetting then would snap
+    // a reader back to the top every time the mouse moved. (The host re-anchored the CLOSED card before calling here.)
+    // `id`: the card's session. Throws what the build throws — the host's hover catch contains and logs it.
+    void TerminalPage::_OnSidePanelCardToolTipHover(const std::wstring& id)
+    {
+        if (!_sidePanelBuilt || !_sidePanelSummaryHidden)
+        {
+            return; // the classic mode: the hook stays wired on the card, but the floating tip owns the hover
+        }
+        const auto it = _sidePanelCardViews.find(id);
+        if (it == _sidePanelCardViews.end() || !it->second.tipHost)
+        {
+            return;
+        }
+        const bool tipOpen = it->second.tipHost->Open();
+        _UpdateSidePanelCardToolTip(id); // hover-time build: fresh state + fresh "ago", kicks the mtime-gated summary load
+        if (!tipOpen)
+        {
+            _ResetTabAgentToolTipScroll(SidePanelToolTipKey(id)); // WHEEL SCROLL: a fresh hover starts at the top of the body
+        }
+    }
+
+    // The card host's wheel callback: scroll the OPEN card's body one notch (the shared _ScrollSessionToolTipBody,
+    // logged "[tooltip-wheel] <sid8> src=card …"). Returning false leaves the notch to the cards list's own
+    // ScrollViewer (the host marks the event Handled only on true). Deliberately does NOT set _tooltipWheelClaimed:
+    // that flag de-dupes the tab ROW's belt against a tab's own handler, and a stale true from here would make the
+    // belt skip the next notch over the tab strip.
+    // `id`: the card's session. `wheelDelta`: the notch's wheel units. Returns true when the card took the notch.
+    // Throws std::bad_alloc while formatting the log line only — the host's wheel catch contains it.
+    bool TerminalPage::_ScrollSidePanelCardToolTip(const std::wstring& id, int wheelDelta)
+    {
+        if (!_sidePanelBuilt || !_sidePanelSummaryHidden)
+        {
+            return false;
+        }
+        return _ScrollSessionToolTipBody(SidePanelToolTipKey(id), id, wheelDelta, L"card");
+    }
+
+    // The card host's placement provider: dock the rich card OUTSIDE the panel, beside the hovered card. The rect is
+    // in the CARD's coordinate space and spans the whole panel plus its splitter horizontally and the card vertically,
+    // so ToolTip placement (WinUI ToolTip::PerformNonMousePlacementWithPopup: the rect is mapped to window coordinates
+    // at open time, inflated by the 20px mouse offset, then the popup is positioned + slid to fit the window) opens the
+    // card just past the panel's edge — to the RIGHT of a left-docked panel ([panel][splitter][terminal]), to the LEFT
+    // of a right-docked one ([terminal][splitter][panel]) — vertically centered on the hovered card
+    // (ToolTipPositioning::PositionRelativeOnSide centers a Left/Right popup on the rect), slid back inside the window
+    // when it would cross an edge. A popup wider than the room on its side is flipped by the framework to another
+    // side; the width budget (_SidePanelCardToolTipRoomWidth) keeps the card inside that room. Recomputed on every closed
+    // placement (each hover's re-anchor), so a width drag or a dock flip is picked up by the next hover.
+    // `card`: the hovered card (the host's owner). Returns nullopt while the card or the panel has no size (not laid
+    // out yet — the host keeps its current placement). Never throws: a failed transform is logged and reads nullopt.
+    std::optional<AgentSessionToolTipPlacement> TerminalPage::_SidePanelCardToolTipPlacement(const FrameworkElement& card)
+    {
+        try
+        {
+            if (!_sidePanelBuilt || !_sidePanelHost || !card)
+            {
+                return std::nullopt;
+            }
+            const double cardH = card.ActualHeight();
+            const double panelW = _sidePanelHost.ActualWidth();
+            if (cardH <= 0.0 || panelW <= 0.0)
+            {
+                return std::nullopt;
+            }
+            // The card's left edge inside the panel (its margin + the list's own offsets) — so the rect can start at
+            // the panel's left edge, which in the card's own coordinates is at -x.
+            const auto origin = card.TransformToVisual(_sidePanelHost).TransformPoint(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
+            AgentSessionToolTipPlacement p;
+            if (_appSettings.sidePanelOnLeft)
+            {
+                p.mode = winrt::Windows::UI::Xaml::Controls::Primitives::PlacementMode::Right;
+                p.rect = winrt::Windows::Foundation::Rect{ -origin.X, 0.0f, static_cast<float>(panelW + kSidePanelSplitterPx), static_cast<float>(cardH) };
+            }
+            else
+            {
+                p.mode = winrt::Windows::UI::Xaml::Controls::Primitives::PlacementMode::Left;
+                p.rect = winrt::Windows::Foundation::Rect{ -origin.X - static_cast<float>(kSidePanelSplitterPx), 0.0f, static_cast<float>(kSidePanelSplitterPx + panelW), static_cast<float>(cardH) };
+            }
+            return p;
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelCardToolTipPlacement");
+            return std::nullopt;
+        }
+    }
+
+    // The width the terminal side leaves for the rich card beside the panel: the content area minus the panel, its
+    // splitter, the framework's 20px tooltip gap and an 8px margin to the window edge. The push clamps it to
+    // [320, 660] (kTtCardMinWidth / kTtCardMaxWidth in TerminalPage.AgentObserver.cpp): never wider than a tab's card,
+    // never squeezed unreadable — a window too narrow even for 320 lets the framework slide / clip the popup. (The
+    // ToolTip itself is capped at 320 px by WinUI 2.8's ToolTip style — see the kTtCardMaxWidth note — which today
+    // bounds this card exactly like the tab's; the budget is what keeps the card inside the room if that cap is lifted.)
+    // Returns 0 while unmeasured (the push then uses the flat 660). Never throws: a XAML failure is logged, 0.
+    double TerminalPage::_SidePanelCardToolTipRoomWidth()
+    {
+        try
+        {
+            const auto area = ContentArea();
+            if (!area || !_sidePanelHost)
+            {
+                return 0.0;
+            }
+            const double areaW = area.ActualWidth();
+            const double panelW = _sidePanelHost.ActualWidth();
+            if (areaW <= 0.0 || panelW <= 0.0)
+            {
+                return 0.0;
+            }
+            return std::max(0.0, areaW - panelW - kSidePanelSplitterPx - kSidePanelTipGapPx - kSidePanelTipEdgeMarginPx);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelCardToolTipRoomWidth");
+            return 0.0;
+        }
+    }
+
+    // A tag ribbon / "+N" of this card is hovered (the strip's entry handlers): with "Sum" off, DETACH the card's rich
+    // tooltip — the framework closes an open one and cancels a pending open itself (UnregisterToolTip), so nothing writes
+    // IsOpen — so the session card never floats beside the panel while the tag hover panel is up. The hover's next entry
+    // into the card's body re-attaches it: _PushSessionToolTipCard re-hosts whenever nothing is attached.
+    // `id`: the card's session. A no-op in the classic mode or for a card without a host. Never throws (Detach is noexcept).
+    void TerminalPage::_SidePanelSuspendCardToolTip(const std::wstring& id)
+    {
+        if (!_sidePanelBuilt || !_sidePanelSummaryHidden)
+        {
+            return;
+        }
+        const auto it = _sidePanelCardViews.find(id);
+        if (it == _sidePanelCardViews.end() || !it->second.tipHost)
+        {
+            return;
+        }
+        it->second.tipHost->Detach();
+    }
+
+    // Before a card leaves the list (an update's Remove, or a reset): shut its rich tooltip host down — detach the
+    // ToolTip from the card and drop both callbacks — and forget its surface-keyed signature + scroll state. The host's
+    // own Unloaded detach is not enough: the event is deferred and can run after the view (and so the host) is gone,
+    // and a ToolTip left attached to a dropped element is the islands leak class AgentTipHelpers.h describes. A summary
+    // load still in flight for the session keeps its re-host lambda; it resolves the card by id at arrival and finds
+    // none (or the session's NEW card, which is the right one to update).
+    // `view`: the leaving card. `id`: its session. Never throws (Shutdown is noexcept; a failed key build is logged).
+    void TerminalPage::_SidePanelDropCardToolTip(AgentSidePanelCardView& view, const std::wstring& id)
+    {
+        if (view.tipHost)
+        {
+            view.tipHost->Shutdown();
+            view.tipHost = nullptr;
+        }
+        try
+        {
+            const std::wstring key = SidePanelToolTipKey(id);
+            _tabTooltipSig.erase(key);
+            _tabTooltipScroll.erase(key);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelDropCardToolTip");
+        }
     }
 
     // Select a card: restyle the old/new borders in place (no rebuild), bind the summary below,
@@ -2415,7 +2980,9 @@ namespace winrt::TerminalApp::implementation
     // the registry observer) and shows the hint. The overlay is DELIBERATELY not in
     // _claudeOverlays (that map is keyed by session id and may already hold the session's own
     // per-tab overlay) — settings pushes reach it via _SidePanelApplySettings + the extended
-    // _ToggleSummary* loops.
+    // _ToggleSummary* loops. With the summary area HIDDEN ("Sum" off) every bind RELEASES instead: an overlay nobody can
+    // see would still run its registry observer and its off-thread analyses for each selection change; the toggle
+    // rebinds the current selection when the area comes back.
     // `id`: the session to summarize ("" == none).
     void TerminalPage::_SidePanelBindSummary(const std::wstring& id)
     {
@@ -2423,7 +2990,7 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        if (id.empty())
+        if (id.empty() || _sidePanelSummaryHidden)
         {
             _sidePanelSummaryHost.Children().Clear();
             _sidePanelSummaryHost.Children().Append(_sidePanelSummaryHint);

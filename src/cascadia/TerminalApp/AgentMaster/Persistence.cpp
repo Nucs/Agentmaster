@@ -842,6 +842,7 @@ namespace Agentmaster
         o.Set(L"sidePanelWidthFraction", json::Value::MkNum(s.sidePanelWidthFraction));
         o.Set(L"sidePanelSplitFraction", json::Value::MkNum(s.sidePanelSplitFraction));
         o.Set(L"sidePanelCollapsed", json::Value::MkBool(s.sidePanelCollapsed));
+        o.Set(L"sidePanelSummaryHidden", json::Value::MkBool(s.sidePanelSummaryHidden)); // the "Sum" toggle OFF (cards show the rich session tooltip) — a new-window default like the collapse
         // The header ⌖ toggle — a GLOBAL behavior preference (no per-window copy), not a new-window default.
         o.Set(L"sidePanelScrollToSelectedTab", json::Value::MkBool(s.sidePanelScrollToSelectedTab));
         o.Set(L"allowUpdatePrerelease", json::Value::MkBool(s.allowUpdatePrerelease));
@@ -1083,6 +1084,7 @@ namespace Agentmaster
             const double ps = v.NumAt(L"sidePanelSplitFraction", 0.5);
             s.sidePanelSplitFraction = (ps >= 0.15 && ps <= 0.85) ? ps : 0.5;
             s.sidePanelCollapsed = v.BoolAt(L"sidePanelCollapsed", false); // absent => expanded
+            s.sidePanelSummaryHidden = v.BoolAt(L"sidePanelSummaryHidden", false); // absent => the summary area shown (the pre-toggle layout)
             // The ⌖ scroll-to-selected-tab toggle: absent => ON, the SAME value as the struct default, so a
             // settings.json from before the toggle existed behaves exactly like a missing file. A PRESENT
             // false is the user's explicit OFF and wins.
@@ -1374,6 +1376,10 @@ namespace Agentmaster
         {
             o.Set(L"sidePanelCollapsed", json::Value::MkBool(w.sidePanelCollapsed != 0));
         }
+        if (w.sidePanelSummaryHidden >= 0)
+        {
+            o.Set(L"sidePanelSummaryHidden", json::Value::MkBool(w.sidePanelSummaryHidden != 0)); // the "Sum" toggle's per-window choice (absent == follow the global default)
+        }
         // The card-list SCOPE is a plain per-window bool with a FIXED default (LOCAL) and NO global
         // default to fall back to — so only a GLOBAL choice is worth a key: omitting `false` keeps a
         // never-flipped window's record byte-identical to a pre-feature one, and a reader can only
@@ -1420,6 +1426,12 @@ namespace Agentmaster
             if (const auto* c = v.Find(L"sidePanelCollapsed"); c && c->type == json::Value::Type::Bool)
             {
                 w.sidePanelCollapsed = v.BoolAt(L"sidePanelCollapsed", false) ? 1 : 0;
+            }
+            // The "Sum" toggle: the same tri-state rule — only a PRESENT bool is a choice; absent (a record from
+            // before the toggle, or a window that never touched it) stays -1 and follows the global default.
+            if (const auto* h = v.Find(L"sidePanelSummaryHidden"); h && h->type == json::Value::Type::Bool)
+            {
+                w.sidePanelSummaryHidden = v.BoolAt(L"sidePanelSummaryHidden", false) ? 1 : 0;
             }
             // Card-list scope: absent (a pre-feature record / a never-flipped window) or anything but a
             // true bool reads LOCAL — the fixed per-window default; there is no global setting for it
