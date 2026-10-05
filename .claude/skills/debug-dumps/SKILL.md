@@ -32,7 +32,7 @@ fire_and_forget terminates) diagnosed entirely from dumps.
 
 - **VS 2022** with the C++ workload (any edition) — provides `cl.exe`, `dbghelp.lib`, and the **DIA SDK**
   (`<VS>\DIA SDK\include\dia2.h`) + `msdia140.dll`. No cdb/WinDbg needed.
-- Build the tools once: `cmd /c .claude\skills\debug-dumps\scripts\build.bat` → the 6 analysis `.exe` + the
+- Build the tools once: `cmd /c .claude\skills\debug-dumps\scripts\build.bat` → the 7 analysis `.exe` + the
   `makedump` fixture generator land in `scripts\`. `build.bat` auto-detects VS via `vswhere` (falls back to
   Community) and finds the DIA SDK beside it. Re-run any time.
 - **Git Bash note:** when passing Windows paths to these `.exe`, prefix the command with `MSYS_NO_PATHCONV=1`
@@ -130,6 +130,34 @@ stack. Consequences, learned the hard way:
 
 When `dumpourscan` DOES show our frames (e.g. a synchronous AV), the chain is the answer — read top-down.
 
+## 5a. Read the crashed object's FIELDS — `diatype` + `dumpmem`
+
+A chain says WHERE; the object's state says WHY. A full dump holds the object, and the build's PDB holds
+its layout. Three steps (Debug build; verified 2026-10-05 on the terminal-start crash, UI_THREAD.md §10k):
+
+```bash
+# 1. Where the function keeps `this`: loc=3 (register-relative), reg=335 (RSP) / 334 (RBP), off = the
+#    offset from that register AFTER the prologue. Any RVA inside the function works (dumpourscan prints
+#    return addresses as function +offset; RVA = return RVA - offset).
+MSYS_NO_PATHCONV=1 ./scripts/diatype.exe "<bindir>\Microsoft.Terminal.Control.pdb" func 6142E0
+#    -> data this  loc=3 reg=335 off=896 (0x380)
+# 2. The frame's RSP: the stack slot of the return address INTO this function (dumpourscan's "@0x..." of
+#    its callee's return, i.e. the line naming this function) + 8. Read `this` from RSP + off:
+MSYS_NO_PATHCONV=1 ./scripts/dumpmem.exe "<dmp>" <RSP+off hex> 0x8
+# 3. The member offsets, then read them at this + offset:
+MSYS_NO_PATHCONV=1 ./scripts/diatype.exe "<bindir>\Microsoft.Terminal.Control.pdb" udt "winrt::Microsoft::Terminal::Control::implementation::TermControl"
+MSYS_NO_PATHCONV=1 ./scripts/dumpmem.exe "<dmp>" <this+0x480 hex> 0x100
+```
+
+- Check the RSP guess: in a Debug build the parameters are spilled to their home slots, so `this` usually
+  sits 8 bytes above the return address that the CALL of this function pushed (dumpourscan's line that
+  names the CALLER). When both readings give the same address, the frame is right. (2026-10-05:
+  `_PointerMovedHandler +0x444` at `@…B7F8` → RSP `…B800` + `0x380` = `…BB80`; the caller's return at
+  `@…BB78` + 8 = `…BB80`.)
+- An `event_revoker` is a weak ref (8 bytes) + a token (8 bytes): all zero means "never subscribed / revoked".
+- A C++/WinRT projection (`winrt::Foo` member) is one pointer to the ABI object; `nullptr` = empty.
+- Optimized (Release) code keeps `this` in registers more often: read the Debug dump when you have both.
+
 ## 6. Reading the evidence — exception codes & register signatures
 
 Quick reference (full table in `reference/exception-codes.md`):
@@ -180,6 +208,14 @@ Quick reference (full table in `reference/exception-codes.md`):
   `erase(key)` hashes freed memory. Fix: copy the key first.
 - **Eager `connection.Start()` before control init** → AV in `Microsoft.Terminal.Control.dll` on startup.
   (See the project CLAUDE.md "Gotchas".)
+- **Input reaches a terminal that has not started** (2026-10-05, dev + release, UI_THREAD.md §10k). AV
+  reading a small address (`0xFA` / `0xD8`) in `TextBuffer::GetSize` / `Terminal::GetHyperlinkIdAtViewportPosition`,
+  chain `TermControl::_PointerMovedHandler` → `ControlInteractivity::PointerMoved` → `ControlCore::_updateHoveredCell`,
+  right after a new tab opened (a fork). `_mainBuffer` is null because `ControlCore::Initialize` never ran.
+  The XAML fact behind it: **XAML raises `Loaded` only in its frame tick, but it runs `UpdateLayout()` before
+  EVERY hit test** (`CUIElement::BoundsTestEntry`), so input can hit an element that is laid out but not
+  `Loaded` yet. Anything that must be ready before input (a terminal's start) belongs in the element's
+  first `SizeChanged` / layout, never in `Loaded` alone. Fixed in a790584c9.
 
 ## 8. Confidence & honesty
 
@@ -211,6 +247,7 @@ MSYS_NO_PATHCONV=1 ./scripts/dumpourscan.exe "<abs>\test\sample-crash.dmp" "<abs
 - `scripts/dumpmem.cpp` — hexdump arbitrary virtual memory FROM a full dump (`dumpmem <dmp> <hexAddr> <bytes>`; hex + wchar + ascii columns) — the `0xC0000374` heap-forensics companion (read the `HEAP_FAILURE_INFORMATION`, then the corrupt block). Build: `cl /nologo /std:c++20 /EHsc /W3 dumpmem.cpp` in `scripts\` (no DIA needed).
 - `scripts/hangwalk.cpp` — per-thread walk/scan for HANG dumps (no exception stream; procdump `-h`).
 - `scripts/diasym.cpp` — symbolize a single `<pdb> <rva>` (e.g. a WER fault offset).
+- `scripts/diatype.cpp` — a type's member layout (`udt <name>`, base classes included) or a function's `this`/locals locations (`func <rva>`), for reading a crashed object's fields with `dumpmem` (§5a).
 - `scripts/makedump.cpp` — the fixture generator (a safe, tiny crash dump reproducing the UAF signature).
 - `scripts/build.bat` — build them all (VS + DIA auto-detect).
 - `reference/exception-codes.md` — the full code / register-signature reference.

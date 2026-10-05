@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 REM =====================================================================================================
 REM Agentmaster debug-dumps skill — build every dump-analysis tool.
-REM   Tools (DIA):     diasym dumpstack dumpourscan   (symbolize via msdia140.dll + DIA SDK diaguids.lib)
+REM   Tools (DIA):     diasym dumpstack dumpourscan diatype   (symbolize / type layouts via msdia140.dll + DIA SDK diaguids.lib)
 REM   Tools (dbghelp): dumpexc dumpwalk2 hangwalk     (only need dbghelp.lib)
 REM   Fixture gen:     makedump                        (writes a small test dump; dbghelp.lib)
 REM Run from anywhere: it cd's to its own dir. Re-run any time; it overwrites the .exe.
@@ -33,7 +33,7 @@ set FAIL=0
 
 echo(
 echo [debug-dumps] building DIA tools (symbolization)...
-for %%T in (diasym dumpstack dumpourscan) do (
+for %%T in (diasym dumpstack dumpourscan diatype) do (
   if exist "%DIA%\include\dia2.h" (
     cl /nologo /EHsc /O2 /std:c++17 /I"%DIA%\include" %%T.cpp /Fe:%%T.exe ^
        /link "%DIA%\lib\amd64\diaguids.lib" dbghelp.lib ole32.lib oleaut32.lib advapi32.lib 1>%%T_build.log 2>&1
