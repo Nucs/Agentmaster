@@ -10,11 +10,21 @@
 //
 // Shape: a card 90% of the window wide and 80% tall, centered over a dimmed backdrop that covers the
 // page (the terminal, the Agent Manager page, or the Sessions page — "wherever you are"). The card has a
-// header (title · Copy · Refresh · Close), one TAB per transcript detail level in the Copy menu's order
-// (Default · Max · Full · Compact · Minimal), an "Expand all" switch for the level's folded tool calls,
-// and a scrolling body. It opens at the level the user LAST PICKED, in any window: every tab pick is
-// remembered in settings.json (AppSettings::transcriptOverlayLevel, a freshest-disk read-modify-write
+// header (title · Wrap · Copy · Refresh · Close), one TAB per transcript detail level in the Copy menu's
+// order (Default · Max · Full · Compact · Minimal), an "Expand all" switch for the level's folded tool
+// calls, and a scrolling body. It opens at the level the user LAST PICKED, in any window: every tab pick
+// is remembered in settings.json (AppSettings::transcriptOverlayLevel, a freshest-disk read-modify-write
 // done here) and every open reads it back fresh — Default until a first pick.
+//
+// LINE WRAP: the header's ↵ toggle (the first of its buttons, ON by default) decides what a line wider
+// than the body does. ON, it wraps at the body's right edge. OFF, it keeps its length and the part past
+// the right edge is HIDDEN — not a sideways scroll away; real line breaks still break, and Copy still
+// copies every character. The mechanism is one property per level view (ApplyWrapMode in the .cpp): the
+// scroll view either hands its content the viewport's width or measures it at infinite width and clips
+// it. Like the level it is GLOBAL: remembered in settings.json (AppSettings::transcriptOverlayWrapLines,
+// the same freshest-disk read-modify-write) and read back on every open, in any window. A switch keeps the
+// reader on the same passage (_SyncWrapMode), and a level that was hidden at the switch catches up — with
+// its own passage kept — when it is shown again.
 //
 // FOLDED TOOL CALLS: in every turn the list of tool calls and remarks under "**● Claude**" (and under an
 // agent entry's header) — the part Compact leaves out — is folded into ONE summary row ("▸ 4 tool calls:
@@ -223,6 +233,10 @@ namespace winrt::TerminalApp::implementation
             bool hasFolds = false;
             // Every fold built so far, for "Expand all" / "Collapse all".
             std::vector<FoldParts> folds;
+            // The line-wrap mode this level's scroll view is set to. It lags _wrapLines while the level is
+            // hidden — a switch re-lays out only the level on screen, because a collapsed view can't be laid
+            // out to find the reader's place again — and _SelectLevel catches it up when the level is shown.
+            bool wrapLines = true;
         };
 
         // What the background render hands the UI thread for one level.
@@ -241,8 +255,10 @@ namespace winrt::TerminalApp::implementation
 
         // Build every piece of the overlay's XAML (Attach). Throws winrt::hresult_error on a XAML failure.
         void _BuildUi();
-        // Make `level` current: tab visuals, view visibility, start its render or resume its build, and
-        // (focusBody) move keyboard focus into its scroll view on the next tick.
+        // Make `level` current: tab visuals, view visibility, bring its view up to the current line-wrap
+        // mode (_SyncWrapMode — a view laid out under the other mode re-lays out at once, keeping its
+        // passage), start its render or resume its build, and (focusBody) move keyboard focus into its
+        // scroll view on the next tick.
         void _SelectLevel(int level, bool focusBody);
         // A tab button / digit key: select the level at TAB POSITION `position` (0 == the first tab,
         // Default), log the switch, and REMEMBER the level for the next open in any window
@@ -259,7 +275,8 @@ namespace winrt::TerminalApp::implementation
         // remembered level, never the switch the user just made.
         // Parameters: level — the TurnsLevel value picked (0..4).
         static void _RememberLevel(int level) noexcept;
-        // Create `level`'s scroll view + content stack (once) and put it in the body.
+        // Create `level`'s scroll view + content stack (once), set to the current line-wrap mode
+        // (_wrapLines), and put it in the body.
         void _EnsureLevelView(int level);
         // Show `text` in place of `level`'s content (Loading / Empty), creating the placeholder once.
         void _SetLevelMessage(int level, const std::wstring& text);
@@ -311,6 +328,38 @@ namespace winrt::TerminalApp::implementation
         // Show the "Expand all" switch only while the current level has folds, labelled for what a click
         // does next ("Expand all" / "Collapse all").
         void _UpdateExpandAllButton();
+        // The header's ↵ LINE-WRAP toggle: flip _wrapLines, re-lay out the level on screen under the new
+        // mode while keeping the reader on the same passage (_SyncWrapMode; a hidden level catches up when
+        // it is next shown), remember the choice for every window's next open (_RememberWrapLines), then
+        // repaint the toggle. Deliberately unlogged — a pure view toggle (the CLAUDE.md logging convention).
+        // Throws winrt::hresult_error only from the repaint (the toggle's Click handler contains it); the
+        // mode is already applied and remembered by then.
+        void _ToggleWrapLines();
+        // Paint the toggle for _wrapLines: ON = an accent-tinted face with an accent hairline and a bright
+        // glyph; OFF = no face and a dim glyph. The tooltip and the screen-reader name state the mode and
+        // what a click does. No-op before _BuildUi made the toggle.
+        // Throws winrt::hresult_error on a XAML failure (every caller contains it).
+        void _UpdateWrapButton();
+        // Bring `view`'s scroll view to _wrapLines, keeping the reader on the same passage: find the
+        // element at the top of the view in the CURRENT layout (FindScrollAnchor in the .cpp), switch the
+        // mode, lay the view out at once (UpdateLayout — the extent and the anchor's new place must be
+        // real before ChangeView, which clamps to the extent), and scroll the anchor back to the top.
+        // No-op when the view has no scroll view yet or already has the mode. Call it only for the VISIBLE
+        // level: a collapsed view is not laid out, so its anchor's new place can't be read.
+        // Parameters: view — the level to bring up to date (the current one).
+        // Never throws: a failure is logged (Rule #18); view.wrapLines then says which mode the view
+        // really has, so the next select retries a switch that never applied.
+        void _SyncWrapMode(LevelView& view) noexcept;
+        // The line-wrap state last chosen in ANY window (AppSettings::transcriptOverlayWrapLines, read fresh
+        // from settings.json — a small file read on the UI thread, the ColorPickupFlyout idiom).
+        // Returns true (wrap, the default) when long lines should wrap — also when the read fails (logged).
+        static bool _RememberedWrapLines() noexcept;
+        // Store `wrap` as the state every window's next open uses: a FRESHEST-DISK read-modify-write of just
+        // that field (never a stale in-memory copy over a cog Save or another window's change), skipped when
+        // the file already holds it. Best-effort: a failed write (logged) costs only the remembered state —
+        // the view on screen has already switched.
+        // Parameters: wrap — the state just chosen (true == long lines wrap).
+        static void _RememberWrapLines(bool wrap) noexcept;
         // The level ran out of blocks: add the closing notes (cut / failed), free the blocks, mark Done.
         void _FinishLevel(LevelView& view);
         // Append one built element to the level's current chunk (opening a new chunk when full).
@@ -350,8 +399,15 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Grid _host{ nullptr }; // the full-page layer (backdrop + card), Collapsed while closed
         winrt::Windows::UI::Xaml::Controls::Border _backdrop{ nullptr }; // the dim surface outside the card — a press here closes
         winrt::Windows::UI::Xaml::Controls::Border _card{ nullptr }; // the reading card (90% x 80% via the host's star grid)
-        winrt::Windows::UI::Xaml::Controls::Grid _headerRow{ nullptr }; // icon · title · session line · Copy / Refresh / Close
+        winrt::Windows::UI::Xaml::Controls::Grid _headerRow{ nullptr }; // icon · title · session line · Wrap / Copy / Refresh / Close
         winrt::Windows::UI::Xaml::Controls::TextBlock _subtitleText{ nullptr }; // the session line
+        winrt::Windows::UI::Xaml::Controls::Button _wrapButton{ nullptr }; // the header's ↵ line-wrap toggle, first of its buttons (_ToggleWrapLines)
+        // That toggle's FACE, its whole content: tinted with an accent hairline while ON. Inside the content
+        // (not the button's own background) because the button template's hover / press states set that
+        // background through visual-state setters, which outrank a local value — an ON fill drawn there
+        // would vanish under the pointer.
+        winrt::Windows::UI::Xaml::Controls::Border _wrapButtonFace{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::FontIcon _wrapGlyph{ nullptr }; // that toggle's ↵ glyph: bright while ON, dim while OFF
         winrt::Windows::UI::Xaml::Controls::Grid _tabsRow{ nullptr }; // the level tabs + the status line
         std::vector<winrt::Windows::UI::Xaml::Controls::Button> _tabButtons; // one per kTranscriptCopyMenu entry, in its order
         std::vector<winrt::Windows::UI::Xaml::Controls::TextBlock> _tabLabels; // each tab's label (dim / bright)
@@ -381,12 +437,20 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Media::SolidColorBrush _peerBrush{ nullptr }; // "✉" speaker: label text
         winrt::Windows::UI::Xaml::Media::SolidColorBrush _peerBarBrush{ nullptr }; // "✉" speaker: quote bar
         winrt::Windows::UI::Xaml::Media::SolidColorBrush _accentBrush{ nullptr }; // the current tab's underline (system accent)
+        winrt::Windows::UI::Xaml::Media::SolidColorBrush _toggleOnBrush{ nullptr }; // an ON toggle's face: the accent at ~28% — a tint on the dark card, never a solid accent block
+        winrt::Windows::UI::Xaml::Media::SolidColorBrush _toggleOnBorderBrush{ nullptr }; // an ON toggle's hairline: the accent at ~70%, what makes ON read at a glance
         winrt::Windows::UI::Xaml::Media::SolidColorBrush _transparentBrush{ nullptr };
         winrt::Windows::UI::Xaml::Media::FontFamily _monoFont{ nullptr };
 
         std::array<LevelView, 5> _levels{}; // by TurnsLevel value (kTurnsLevelCount)
         TranscriptOverlaySource _source; // what is shown
         int _current = 2; // the current level (TurnsLevel::Default)
+        // Whether long lines WRAP (true, the default) or keep their length and are cut off at the body's
+        // right edge. GLOBAL: Show reads it from settings.json on every open
+        // (AppSettings::transcriptOverlayWrapLines) and the ↵ toggle writes it, so every window opens with
+        // the last choice; an overlay already open in another window keeps its own state until it is opened
+        // again. Each level view follows it through LevelView::wrapLines (_SyncWrapMode).
+        bool _wrapLines = true;
         bool _open = false; // shown
         bool _pumpQueued = false; // a build slice is already queued (one at a time)
         // Bumped by every Show-for-a-new-conversation, Refresh and Close: a background render or a

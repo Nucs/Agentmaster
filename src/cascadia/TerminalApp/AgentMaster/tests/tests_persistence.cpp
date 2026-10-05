@@ -593,6 +593,7 @@ void TestAppSettings()
         in.tabColorPickerCustomOpen = false; // non-default (default true = the tab color picker opens with Custom expanded)
         in.tabColorPickerAdvancedOpen = false; // non-default (default true = ... and its More/Less "advanced" inputs expanded)
         in.transcriptOverlayLevel = L"compact"; // non-default (default "default") — the transcript overlay's last-picked level tab
+        in.transcriptOverlayWrapLines = false; // non-default (default true = long lines wrap) — the transcript overlay's line-wrap toggle
         in.showTabCloseButton = false; // non-default (default true = show the X / theme-driven)
         in.closeTabOnMiddleClick = false; // non-default (default true = middle-click closes a tab)
         in.showTabIcon = true; // non-default (default false = tab icons HIDDEN)
@@ -693,6 +694,7 @@ void TestAppSettings()
         CHECK(out.tabColorPickerCustomOpen == false, "settings tabColorPickerCustomOpen round-trip");
         CHECK(out.tabColorPickerAdvancedOpen == false, "settings tabColorPickerAdvancedOpen round-trip");
         CHECK(out.transcriptOverlayLevel == L"compact", "settings transcriptOverlayLevel round-trip (the remembered level name)");
+        CHECK(out.transcriptOverlayWrapLines == false, "settings transcriptOverlayWrapLines round-trip (the transcript overlay's line-wrap toggle)");
         CHECK(out.showTabCloseButton == false, "settings showTabCloseButton round-trip");
         CHECK(out.closeTabOnMiddleClick == false, "settings closeTabOnMiddleClick round-trip");
         CHECK(out.showTabIcon == true, "settings showTabIcon round-trip");
@@ -781,6 +783,7 @@ void TestAppSettings()
         CHECK(out.summaryPanelTruncate == true, "settings summaryPanelTruncate default true (truncate) on empty");
         CHECK(out.tabColorPickerCustomOpen == true && out.tabColorPickerAdvancedOpen == true, "settings tab color picker opens with Custom + advanced expanded by default on empty");
         CHECK(out.transcriptOverlayLevel == L"default", "settings transcriptOverlayLevel default \"default\" (the overlay opens at Default) on empty");
+        CHECK(out.transcriptOverlayWrapLines == true, "settings transcriptOverlayWrapLines default true (long lines wrap) on empty");
         CHECK(out.showTabCloseButton == true, "settings showTabCloseButton default true (show X) on empty");
         CHECK(out.closeTabOnMiddleClick == true, "settings closeTabOnMiddleClick default true (middle-click closes) on empty");
         CHECK(out.showTabIcon == false, "settings showTabIcon default false (tab icons HIDDEN) on empty");

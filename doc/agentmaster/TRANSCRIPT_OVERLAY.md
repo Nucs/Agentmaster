@@ -3,7 +3,7 @@
 A session's conversation, rendered as Markdown, in a reading view laid over the window. Status:
 **written 2026-10-03, NOT BUILT** (no compile, no deploy — see §9 for the verification checklist). Same day,
 second pass: 85% wide, folded tool calls (§3b), the remembered level (§3a) — also not built; then 90% wide
-(third ask, same day, not built).
+(third ask, same day, not built). 2026-10-05: the ↵ line-wrap toggle (§3c, fourth ask) — not built.
 
 ## 1. The ask (verbatim)
 
@@ -27,6 +27,12 @@ And the third:
 
 > The card is now 85% of the window wide. do 90%.
 
+And the fourth (2026-10-05):
+
+> On top-right add a button for breakline, by default true, but if disabled then text overflowing right
+> border is invisible/hidden
+> Have it's state persist across all windows
+
 ## 2. Where it opens
 
 Every entry opens the overlay over **whatever is on screen** (a terminal tab, the Agent Manager page, the
@@ -49,8 +55,8 @@ Labels, tooltip and glyph (`\xE736` ReadingMode) are shared constants in `AgentC
 - A card **90% of the window wide and 80% tall**, centered, over a 40%-black backdrop that covers the whole
   page (all of Root's rows). The size comes from a 3×3 star grid (1:8:1 rows, 5:90:5 columns) — no size
   code, it follows every resize through layout. (60% wide at first, then 85%, then 90% — the follow-ups.)
-- **Header**: reading-mode icon · "Transcript" · the session line (title · short id · "Codex") · Copy ·
-  Refresh · Close (✕).
+- **Header**: reading-mode icon · "Transcript" · the session line (title · short id · "Codex") · then, at
+  the top-right, **↵ Wrap** (§3c) · Copy · Refresh · Close (✕).
 - **Tabs**, one per level in the Copy menu's order — **Default · Max · Full · Compact · Minimal** — the
   current one bright with an accent underline. Tooltips are the levels' descriptions
   (`kTranscriptCopyMenu`) plus the digit shortcut. A status line to the right shows progress, then
@@ -115,6 +121,45 @@ overlay **folds each such list into one summary row** and keeps the reply open:
   `tests_markdown.cpp`, classified every item of all 55 goldens and of the 12 most recent real sessions at
   Default and Max (zero unknown items), and folded nothing at Compact / Minimal.
 
+### 3c. Line wrap (the ↵ toggle)
+
+- The first of the header's buttons, at the top-right, is **↵** — Segoe Fluent Icons `\xE751` (ReturnKey),
+  the summary panel's wrap symbol drawn from the header's own icon font. That font's 1-em line box keeps the
+  toggle exactly as tall as Copy / Refresh / Close; Segoe UI Symbol's ↵ (the summary panel's) would be
+  ~4.6 px taller at 14 px and grow the header row.
+- **ON (the default)**: a tinted face with an accent hairline and a bright glyph. A line wider than the body
+  continues on the next line — the view as it was before the toggle existed.
+- **OFF**: no face, a dim glyph. Every line keeps its length, and the part past the body's right edge is
+  **hidden** — not a sideways scroll away. Real line breaks still break, and the header's Copy still copies
+  every character. Code panels, quote bars and rules stretch to the content's width, so their right edges
+  are cut off with the text.
+- The tooltip and the screen-reader name (a Button has no toggle state) say which mode is on and what a
+  click does.
+- **Mechanism — one property per level view** (`ApplyWrapMode`): ON sets the scroll view's horizontal
+  scroll bar to `Disabled`, which hands the content the viewport's width, so every TextBlock wraps to it.
+  OFF sets it to `Hidden`, which measures the content at INFINITE width and shows no bar; the scroll
+  presenter clips at its edge. Read off the WinUI source (`ScrollViewer::UpdateCanScroll` sets
+  `CanHorizontallyScroll` from the bar visibility alone; `ScrollContentPresenter::MeasureOverride` then
+  gives the child an infinite width; `UpdateClip` clips it). The horizontal scroll MODE stays `Disabled`
+  (set once in `_EnsureLevelView`): touch, the wheel and the keyboard all reach the view through
+  DirectManipulation, which that mode keeps from panning sideways.
+- **Global**: `AppSettings::transcriptOverlayWrapLines` (default true). Every click writes it with the same
+  freshest-disk read-modify-write as the level (`_RememberWrapLines`); every open reads it back
+  (`_RememberedWrapLines`); both cog-Save preserve blocks restore it. So the choice made in one window is
+  the one every window opens with, and it survives a restart. An overlay that is already open in another
+  window keeps its own state until it is opened again (there is no live broadcast).
+- **The reader stays on the same passage.** `FindScrollAnchor` finds the deepest element crossing the top
+  edge of the view — it sums the earlier siblings' `DesiredSize` down through the chunk and fold stacks; a
+  folded list's `DesiredSize` is 0 — and how far into that element the edge sits. After the switch,
+  `UpdateLayout` lays the view out at once, and `RestoreScrollAnchor` scrolls the same element back to the
+  top at the same fraction (`ChangeView` clamps to the extent, so the layout must come first — the board's
+  recipe).
+- Only the level on screen re-lays out at a click. A hidden level catches up, with its own passage kept,
+  when it is shown again (`_SelectLevel` → `_SyncWrapMode`): a collapsed view is not laid out, so the new
+  place could not be read, but it keeps the layout and offset it had when it was last shown, and those two
+  still agree.
+- Unlogged, like the folds and Expand all — a pure view toggle (the CLAUDE.md logging convention).
+
 ## 4. Rendering
 
 1. **Off the UI thread** (`AgentTranscriptOverlay::_LoadLevelAsync`, holding only a weak reference): the
@@ -145,7 +190,7 @@ renders to 345 KB / 3.7 k lines at Default and 1.5 MB / 22.6 k lines / 619 code 
   line) are dimmed. A paragraph that is entirely italic (notes, stats) is dimmed.
 - **Lists**: a marker column whose width fits the list's widest marker, so wrapped and continuation text
   hangs aligned. Bullets •, ◦, ▪ by depth; **ordered lists keep their numbers**. Tight lists are packed.
-- **Code blocks**: a dark rounded panel, monospace, wrapping, selectable.
+- **Code blocks**: a dark rounded panel, monospace, wrapping while line wrap is ON (§3c), selectable.
 - **Raw HTML is kept as text** (inline: plain; block: monospace dim) — `List<int>` or a quoted
   `<system-reminder>` would otherwise vanish.
 - **Soft line breaks are real line breaks** (a prompt typed on three lines shows as three lines), kept as
@@ -183,8 +228,10 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
 - `[transcript] <sid8> show <Level>: chars=N blocks=M rendered in Xms` (+ `(capped)` /
   `(parse failed part-way)`), or `: nothing to show (<why>) path=…`.
 - A level pick is the `transcript-level` line (the remembered-level write adds no line; a failed write is
-  an `[exc]` line). Opening / closing a fold and Expand all are pure view toggles and are deliberately
-  unlogged (the CLAUDE.md logging convention).
+  an `[exc]` line). Opening / closing a fold, Expand all and the ↵ line-wrap toggle are pure view toggles
+  and are deliberately unlogged (the CLAUDE.md logging convention); a failed wrap-state read or write, or a
+  failed re-layout, is an `[exc]` line (`AgentTranscriptOverlay remembered wrap` / `remember wrap` /
+  `sync wrap mode` / `find scroll anchor` / `restore scroll anchor`).
 
 ## 7. Files
 
@@ -199,13 +246,14 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   (`SetShowTranscriptHandler`, the session + external menus), `AgentTabOverlay.*`
   (`SetShowTranscriptHandler`, the badge submenu + the summary menu), `TerminalPage.AgentObserver.cpp` /
   `TerminalPage.AgentSidePanel.cpp` (the badge / side-panel wiring), `AgentCopyActions.h` (the labels).
-- The remembered level: `AgentMaster/SessionModels.h` (`AppSettings::transcriptOverlayLevel`),
-  `AgentMaster/Persistence.cpp` (the `transcriptOverlayLevel` key), and the two cog-Save preserve blocks
-  (`AgentManagerContent.Settings.cpp`, `TerminalPage.AgentEngine.cpp`).
+- The remembered level and the line-wrap state: `AgentMaster/SessionModels.h`
+  (`AppSettings::transcriptOverlayLevel`, `AppSettings::transcriptOverlayWrapLines`),
+  `AgentMaster/Persistence.cpp` (the `transcriptOverlayLevel` and `transcriptOverlayWrapLines` keys), and
+  the two cog-Save preserve blocks (`AgentManagerContent.Settings.cpp`, `TerminalPage.AgentEngine.cpp`).
 - Harness: `tests/tests_markdown.cpp` (`TestMarkdownBlocks`, incl. the tool areas over an inline fixture and
   five goldens) — compiled by `run-m5-tests.bat` only when `obj\x64\vcpkg\x64-windows-static` holds cmark
-  (defines `AM_HAVE_CMARK`); otherwise it reports a skip. `tests/tests_persistence.cpp` pins the setting's
-  round trip and its "default" default.
+  (defines `AM_HAVE_CMARK`); otherwise it reports a skip. `tests/tests_persistence.cpp` pins both settings'
+  round trips and their defaults ("default" / true).
 
 ## 8. Known limits / follow-ups
 
@@ -219,7 +267,13 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   would make a big Max level faster still, at the cost of an "Expand all" that builds hundreds of blocks
   at once.
 - Which folds are open, and Expand all, are not remembered across opens (every open starts folded); only
-  the level is remembered.
+  the level and the line-wrap state are remembered.
+- A line-wrap click updates the overlay it was made in; an overlay already open in another window keeps
+  its state until it is opened again (no cross-window broadcast — each window has at most one overlay, and
+  the next open there reads the new state).
+- With line wrap OFF, the hidden part of a line is still in its text block: the block's right-click Select
+  All + Copy take it, and the header's Copy takes the whole level. Turning wrap back on is the way to READ
+  it — the view never scrolls sideways.
 
 ## 9. Verification checklist (nothing here has been built)
 
@@ -237,3 +291,10 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
    shows the dim note; the Compact and Minimal tabs fold nothing; an agent entry folds its own list.
 8. Remembered level: pick Compact, close, reopen from another window → Compact; restart the app → still
    Compact; open the cog, Save → still Compact (`transcriptOverlayLevel` in settings.json).
+9. Line wrap: the ↵ toggle is the first button at the top-right, the same size as Copy / Refresh / Close
+   (the header row must not grow), tinted while ON. Scroll halfway down a Max level with long lines, click
+   it: lines stop wrapping, the part past the right edge is hidden (no horizontal bar, no sideways scroll by
+   wheel, touch or arrow keys), code panels run off the edge, and the view still shows the same passage.
+   Switch to another level (it catches up, keeping its own place), click again to wrap. Close, reopen in
+   another window → the same state; restart → still; a cog Save → still (`transcriptOverlayWrapLines` in
+   settings.json). Hover the toggle: the tooltip names the mode.

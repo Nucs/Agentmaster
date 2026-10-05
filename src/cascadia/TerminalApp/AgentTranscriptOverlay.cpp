@@ -3,9 +3,13 @@
 //
 // Agentmaster — the transcript overlay (AgentTranscriptOverlay.h has the design: what it shows, how it
 // renders, what closes it). This file is the whole implementation:
-//   * _BuildUi            — the host layer (backdrop + card), header, level tabs + "Expand all", body;
+//   * _BuildUi            — the host layer (backdrop + card), header (with the ↵ line-wrap toggle), level
+//                           tabs + "Expand all", body;
 //   * Show / Close        — open / retarget / close, the focus hand-offs; the remembered level
 //                           (_RememberedLevel on open, _RememberLevel on every tab pick — settings.json);
+//   * _ToggleWrapLines    — the line-wrap toggle: ApplyWrapMode per level view, the reader's place kept by
+//                           FindScrollAnchor / RestoreScrollAnchor (_SyncWrapMode), the state remembered
+//                           for every window (_RememberedWrapLines on open, _RememberWrapLines per click);
 //   * _LoadLevelAsync     — the pool-thread render (TranscriptTurns / the Codex readers + MarkdownBlocks,
 //                           and the tool areas to fold, MdFindToolAreas);
 //   * _Pump / _BuildNext  — the UI-thread, time-sliced block -> XAML build, which folds each tool area
@@ -98,6 +102,190 @@ namespace
     constexpr double kFoldRowPaddingLeft = 2.0;
     constexpr double kFoldRowPaddingTop = 2.0;
     constexpr double kFoldTextIndent = kFoldRowPaddingLeft + kFoldChevronWidth + kFoldChevronGap;
+
+    // The header's LINE-WRAP toggle. The glyph is Segoe Fluent Icons' ReturnKey (↵) — the same symbol the
+    // summary panel's wrap toggle shows, but from the header's own icon font, whose 1-em line box keeps the
+    // toggle exactly as tall as Copy / Refresh / Close (Segoe UI Symbol's ↵ would be ~4.6 px taller at
+    // 14 px and grow the header row). The tooltips state the mode, what a click does, and that the choice
+    // follows the user into every window.
+    constexpr const wchar_t* kWrapGlyph = L"\xE751";
+    constexpr const wchar_t* kWrapOnTip = L"Wrap long lines: ON. A line wider than the view continues on the next line.\n"
+                                          L"Click to turn it off: long lines then stop at the right edge, and the rest of each line is hidden.\n"
+                                          L"Your choice applies to the transcript in every window.";
+    constexpr const wchar_t* kWrapOffTip = L"Wrap long lines: OFF. A line wider than the view stops at the right edge, and the rest of it is hidden "
+                                           L"(the Copy button still copies every character).\n"
+                                           L"Click to turn it on: long lines then continue on the next line.\n"
+                                           L"Your choice applies to the transcript in every window.";
+    // An ON toggle's face: the accent as a translucent tint (~28%) with a stronger hairline (~70%) — on the
+    // dark card that reads as "pressed / on" without a solid accent block next to the plain icon buttons.
+    constexpr uint8_t kToggleOnFillAlpha = 0x47;
+    constexpr uint8_t kToggleOnBorderAlpha = 0xB3;
+
+    // How deep the reading-position anchor descends: the level's content stack -> a chunk -> an open fold
+    // panel -> that fold's chunk -> the element (4). A guard, never reached by the overlay's own tree.
+    constexpr int kMaxAnchorDepth = 8;
+
+    // Point a level's scroll view at a line-wrap mode — the whole mechanism of the ↵ toggle, one property:
+    //   wrap ON  -> HorizontalScrollBarVisibility DISABLED: the content is measured at the viewport's width,
+    //               so every text block (TextWrapping::Wrap) wraps to it — the view as it always was;
+    //   wrap OFF -> HIDDEN: the content is measured at INFINITE width, so no text block wraps (only real line
+    //               breaks break), no bar shows, and the scroll presenter clips whatever runs past the right
+    //               edge.
+    // HorizontalScrollMode stays Disabled (set once in _EnsureLevelView), so touch and the mouse wheel can't
+    // pan the clipped part into view: OFF means hidden, not a sideways scroll away. Stretched elements (code
+    // panels, quote bars, rules) take the content's width, so with wrap OFF their right edges are cut off
+    // too, exactly like the text.
+    // Parameters: scroll — the level's scroll view; wrap — true for the wrapping view.
+    // Throws winrt::hresult_error on a XAML failure (callers contain it).
+    void ApplyWrapMode(const ScrollViewer& scroll, bool wrap)
+    {
+        scroll.HorizontalScrollBarVisibility(wrap ? ScrollBarVisibility::Disabled : ScrollBarVisibility::Hidden);
+    }
+
+    // The reader's place in a level's scroll view, held as an ELEMENT rather than a pixel offset: the PATH of
+    // child indices from the level's content stack down through its chunk / fold stacks to the deepest
+    // element crossing the top edge of the view, plus how far down that element's layout slot the edge sat
+    // (0..1). A line-wrap switch re-lays every block out at a new height, so the old pixel offset would land
+    // in another passage; the element + fraction lands the reader back on the same text.
+    struct ScrollAnchor
+    {
+        std::vector<uint32_t> path; // empty == no anchor: the view sat at its top, or the walk failed
+        double fraction = 0.0; // 0 == the top edge was at the element's top, 1 == at its bottom
+    };
+
+    // Where a vertical stack's FIRST child starts below the top of the stack's own layout slot: its top
+    // margin + top padding. Each later child then starts where the one before it ends — that child's
+    // DesiredSize, margins included — because the overlay's stacks never set Spacing (a future Spacing
+    // would only shift a restored position by that many pixels per earlier sibling: harmless, not wrong).
+    // Throws winrt::hresult_error on a XAML failure.
+    double StackContentTop(const StackPanel& stack)
+    {
+        return stack.Margin().Top + stack.Padding().Top;
+    }
+
+    // Find the reader's place (ScrollAnchor) in `scroll`, whose content is `content`, from the CURRENT
+    // layout: the extent coordinates of every element are summed from its earlier siblings' DesiredSize
+    // (a vertical stack places each child right below the previous one; a collapsed child's DesiredSize is
+    // 0, so a folded tool list costs nothing and needs no special case). No TransformToVisual: a hidden
+    // level's view keeps the layout it had when it was last shown, and this reads exactly that — consistent
+    // with the VerticalOffset it kept.
+    // Parameters: scroll — the level's scroll view; content — its content stack (scroll.Content()).
+    // Returns the anchor; an empty path when the view sits at its top (the top stays the top in any
+    // layout), when the top edge lies below every element, or when the walk failed.
+    // Never throws (a failure is logged — Rule #18 — and yields no anchor, which keeps the raw offset).
+    ScrollAnchor FindScrollAnchor(const ScrollViewer& scroll, const StackPanel& content) noexcept
+    {
+        ScrollAnchor anchor;
+        try
+        {
+            if (!scroll || !content)
+            {
+                return anchor;
+            }
+            const double top = scroll.VerticalOffset();
+            if (top < 1.0)
+            {
+                return anchor;
+            }
+            StackPanel stack = content;
+            double start = StackContentTop(stack); // where `stack`'s first child starts, in extent coordinates
+            for (int depth = 0; depth < kMaxAnchorDepth; ++depth)
+            {
+                const auto children = stack.Children();
+                const uint32_t count = children.Size();
+                double y = start;
+                uint32_t index = 0;
+                for (; index < count; ++index)
+                {
+                    const double height = children.GetAt(index).DesiredSize().Height;
+                    if (y + height > top)
+                    {
+                        break; // this child crosses (or starts at) the top edge
+                    }
+                    y += height;
+                }
+                if (index >= count)
+                {
+                    break; // the edge is below every child (the stack's bottom padding): nothing to hold on to
+                }
+                anchor.path.push_back(index);
+                const auto child = children.GetAt(index);
+                // A stack crossing the edge (a chunk, an open fold): one of ITS children is a finer anchor.
+                // A stack starting exactly at the edge is anchored as a whole (fraction 0) — same place.
+                const auto inner = child.try_as<StackPanel>();
+                if (inner && inner.Orientation() == Orientation::Vertical && inner.Children().Size() > 0 && y < top)
+                {
+                    stack = inner;
+                    start = y + StackContentTop(inner);
+                    continue;
+                }
+                const double height = child.DesiredSize().Height;
+                anchor.fraction = height > 0.0 ? std::clamp((top - y) / height, 0.0, 1.0) : 0.0;
+                return anchor;
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: no anchor — the view keeps its raw offset (clamped by the new extent).
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay find scroll anchor");
+        }
+        anchor.path.clear(); // an incomplete walk is no anchor
+        return anchor;
+    }
+
+    // Scroll `scroll` so the anchor's element sits at the top edge again, as far into it as before. Call it
+    // only after the view was laid out under its new mode (UpdateLayout): it reads the NEW DesiredSizes,
+    // and ChangeView clamps to the current extent.
+    // Parameters: scroll / content — as for FindScrollAnchor; anchor — what FindScrollAnchor returned.
+    // Returns whether a scroll was requested — false for an empty anchor, or when the tree no longer has the
+    // anchor's path (the view then keeps its clamped raw offset).
+    // Never throws (a failure is logged — Rule #18).
+    bool RestoreScrollAnchor(const ScrollViewer& scroll, const StackPanel& content, const ScrollAnchor& anchor) noexcept
+    {
+        try
+        {
+            if (!scroll || !content || anchor.path.empty())
+            {
+                return false;
+            }
+            StackPanel stack = content;
+            double start = StackContentTop(stack);
+            for (size_t depth = 0; depth < anchor.path.size(); ++depth)
+            {
+                const auto children = stack.Children();
+                const uint32_t index = anchor.path[depth];
+                if (index >= children.Size())
+                {
+                    return false; // the tree changed under the anchor (never between find and restore today)
+                }
+                double y = start;
+                for (uint32_t i = 0; i < index; ++i)
+                {
+                    y += children.GetAt(i).DesiredSize().Height;
+                }
+                const auto child = children.GetAt(index);
+                if (depth + 1 < anchor.path.size())
+                {
+                    const auto inner = child.try_as<StackPanel>();
+                    if (!inner)
+                    {
+                        return false;
+                    }
+                    stack = inner;
+                    start = y + StackContentTop(inner);
+                    continue;
+                }
+                const double offset = y + anchor.fraction * child.DesiredSize().Height;
+                return scroll.ChangeView(nullptr, std::max(offset, 0.0), nullptr, true /* disableAnimation: a jump, not a glide */);
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: none needed — the view keeps its clamped raw offset.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay restore scroll anchor");
+        }
+        return false;
+    }
 
     // The view keeps one LevelView per TurnsLevel value in a fixed array of 5, and settings.json stores
     // the remembered level by NAME (TurnsLevelName) — both assume TranscriptTurns' five levels.
@@ -353,6 +541,8 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay accent lookup"); // the fallback blue stays
         }
         _accentBrush = SolidColorBrush{ accent };
+        _toggleOnBrush = SolidColorBrush{ ColorHelper::FromArgb(kToggleOnFillAlpha, accent.R, accent.G, accent.B) };
+        _toggleOnBorderBrush = SolidColorBrush{ ColorHelper::FromArgb(kToggleOnBorderAlpha, accent.R, accent.G, accent.B) };
         _monoFont = FontFamily{ L"Cascadia Mono, Cascadia Code, Consolas" };
         _textMenu = winrt::Microsoft::Terminal::UI::TextMenuFlyout{};
 
@@ -426,7 +616,7 @@ namespace winrt::TerminalApp::implementation
         }
         _card.Child(layout);
 
-        // --- header: [icon] Transcript  <session line ...>  [Copy] [Refresh] [Close] ---
+        // --- header: [icon] Transcript  <session line ...>  [Wrap] [Copy] [Refresh] [Close] ---
         _headerRow = Grid{};
         for (const auto width : { GridLength{ 0, GridUnitType::Auto }, GridLength{ 0, GridUnitType::Auto }, GridLength{ 1, GridUnitType::Star }, GridLength{ 0, GridUnitType::Auto } })
         {
@@ -488,6 +678,51 @@ namespace winrt::TerminalApp::implementation
                 winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(b, winrt::hstring{ name });
                 return b;
             };
+            // The ↵ LINE-WRAP toggle — first in the group: a view setting, before the actions. ON (the
+            // default): long lines wrap at the body's right edge. OFF: every line keeps its length and the
+            // part past the right edge is hidden. GLOBAL — remembered in settings.json and read back on every
+            // open, in any window (_ToggleWrapLines / Show). Built by hand, not by makeIconButton: its ON
+            // state is a tinted FACE inside the content (see _wrapButtonFace), so the face carries the
+            // padding the button carries elsewhere — 1 px hairline + 8 / 5 padding == the icon buttons'
+            // 9 / 6, so the toggle is exactly their size.
+            _wrapGlyph = FontIcon{};
+            _wrapGlyph.FontFamily(FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            _wrapGlyph.Glyph(kWrapGlyph);
+            _wrapGlyph.FontSize(14);
+            _wrapGlyph.IsHitTestVisible(false); // the button must be the only target (the badge's mkIconBtn lesson)
+            _wrapButtonFace = Border{};
+            _wrapButtonFace.BorderThickness(Thickness{ 1, 1, 1, 1 }); // always 1 px: a flip only recolors it, so nothing moves
+            _wrapButtonFace.CornerRadius(CornerRadius{ 4, 4, 4, 4 }); // the button template's corner radius (ControlCornerRadius)
+            _wrapButtonFace.Padding(Thickness{ 8, 5, 8, 5 });
+            // Click-through too: a TINTED Border is hit-testable and would take the press itself; the
+            // button's transparent background already makes its whole area the target.
+            _wrapButtonFace.IsHitTestVisible(false);
+            _wrapButtonFace.Child(_wrapGlyph);
+            _wrapButton = Button{};
+            _wrapButton.Background(_transparentBrush); // transparent (not null) — still hit-testable, the template still highlights hover
+            _wrapButton.BorderThickness(Thickness{ 0, 0, 0, 0 });
+            _wrapButton.Padding(Thickness{ 0, 0, 0, 0 }); // the face carries the padding (see above)
+            _wrapButton.MinWidth(0);
+            _wrapButton.MinHeight(0);
+            _wrapButton.Content(_wrapButtonFace);
+            _wrapButton.Click([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                try
+                {
+                    if (const auto self = weak.get())
+                    {
+                        self->_ToggleWrapLines();
+                    }
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: none needed — the mode is applied and remembered before the only
+                    // step that can throw here (the toggle's repaint); a stale toggle look fixes itself on
+                    // the next click or open.
+                    ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay wrap toggle");
+                }
+            });
+            buttons.Children().Append(_wrapButton);
+            _UpdateWrapButton(); // the default look (ON) until Show reads the remembered state
             auto copyButton = makeIconButton(L"\xE8C8", L"Copy this level's whole transcript as Markdown \x2014 everything, even past where a very long view stops", L"Copy transcript");
             copyButton.Click([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 try
@@ -743,6 +978,11 @@ namespace winrt::TerminalApp::implementation
             }
             _open = true;
             _UpdateTitle();
+            // The line-wrap state is, like the level, the one last chosen in ANY window — read fresh now, so
+            // a click on the ↵ toggle in another window since this one last opened counts. Read BEFORE
+            // _SelectLevel, which brings an already-built view of this conversation up to it.
+            _wrapLines = _RememberedWrapLines();
+            _UpdateWrapButton();
             _host.Visibility(Visibility::Visible);
             // kRememberedLevel (any negative value): the level last picked in ANY window, read fresh from
             // settings.json now — a pick made in another window since this one last opened counts.
@@ -896,6 +1136,10 @@ namespace winrt::TerminalApp::implementation
             }
         }
         auto& view = _levels[level];
+        // A view last laid out under the other line-wrap mode — it was hidden when the ↵ toggle was clicked,
+        // or another window changed the mode before this open — catches up now that it is visible, keeping
+        // its reading position. A new view already has the mode (_EnsureLevelView): a no-op.
+        _SyncWrapMode(view);
         if (view.state == LevelState::Idle)
         {
             _StartLoad(level);
@@ -921,10 +1165,13 @@ namespace winrt::TerminalApp::implementation
         view.content = StackPanel{};
         view.scroll = ScrollViewer{};
         view.scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
-        // No horizontal scrolling: the content takes the viewport's width, so every text block WRAPS
-        // to it instead of running off to the right.
-        view.scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        // Never a sideways scroll. With line wrap ON the content takes the viewport's width, so every text
+        // block WRAPS to it instead of running off to the right; with it OFF the lines keep their length and
+        // the part past the right edge is cut off — hidden, since this mode keeps touch and the mouse wheel
+        // from panning it into view (ApplyWrapMode has the details).
         view.scroll.HorizontalScrollMode(ScrollMode::Disabled);
+        ApplyWrapMode(view.scroll, _wrapLines);
+        view.wrapLines = _wrapLines;
         view.scroll.ZoomMode(ZoomMode::Disabled);
         view.scroll.IsTabStop(true); // focusable, so PageUp / PageDown / Home / End / arrows scroll it
         view.scroll.Padding(Thickness{ 24, 14, 24, 18 });
@@ -1458,6 +1705,100 @@ namespace winrt::TerminalApp::implementation
         const winrt::hstring label{ view.expandAll ? L"Collapse all" : L"Expand all" };
         _expandAllLabel.Text(label);
         winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(_expandAllButton, label);
+    }
+
+    void AgentTranscriptOverlay::_ToggleWrapLines()
+    {
+        _wrapLines = !_wrapLines;
+        // The level on screen re-lays out now, keeping the reader on the same passage; a hidden level
+        // catches up when it is next shown (_SelectLevel). Neither step throws.
+        _SyncWrapMode(_levels[_current]);
+        // Every window's next open uses it (Show reads it back). Also noexcept.
+        _RememberWrapLines(_wrapLines);
+        // Last: the only step that can throw, so a failed repaint never costs the switch itself.
+        _UpdateWrapButton();
+    }
+
+    void AgentTranscriptOverlay::_UpdateWrapButton()
+    {
+        if (!_wrapButton || !_wrapButtonFace || !_wrapGlyph)
+        {
+            return;
+        }
+        _wrapButtonFace.Background(_wrapLines ? _toggleOnBrush : _transparentBrush);
+        _wrapButtonFace.BorderBrush(_wrapLines ? _toggleOnBorderBrush : _transparentBrush);
+        _wrapGlyph.Foreground(_wrapLines ? _bodyBrush : _dimBrush);
+        // Re-setting a tip only updates its text (and the open tip's content, when this toggle's tip is the
+        // one showing) — AgentSetTip wires its pointer handlers once per element.
+        AgentSetTip(_wrapButton, winrt::hstring{ _wrapLines ? kWrapOnTip : kWrapOffTip });
+        // A Button has no toggle state for a screen reader, so the name carries it.
+        winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(_wrapButton, winrt::hstring{ _wrapLines ? L"Wrap long lines: on" : L"Wrap long lines: off" });
+    }
+
+    void AgentTranscriptOverlay::_SyncWrapMode(LevelView& view) noexcept
+    {
+        try
+        {
+            if (!view.scroll || view.wrapLines == _wrapLines)
+            {
+                return;
+            }
+            // The anchor FIRST: the scroll offset belongs to the layout the view has NOW — for a level that
+            // was hidden, the one it had when it was last shown (a collapsed subtree is not re-measured, so
+            // its DesiredSizes and its offset still agree).
+            const auto anchor = FindScrollAnchor(view.scroll, view.content);
+            ApplyWrapMode(view.scroll, _wrapLines);
+            view.wrapLines = _wrapLines; // after the apply: a throw above leaves the old value, so the next select retries
+            if (!anchor.path.empty())
+            {
+                // Lay the view out NOW under the new width rule, so the anchor's new place — and the extent
+                // ChangeView clamps to — is real (the board's UpdateLayout-then-ChangeView recipe). Legal
+                // here: every caller is an input handler or a menu action, never a layout pass. On a long
+                // Max level this re-measures every block at once — the same work the next frame would do.
+                view.scroll.UpdateLayout();
+                RestoreScrollAnchor(view.scroll, view.content, anchor);
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the view keeps the mode it reached (view.wrapLines says which) and its raw,
+            // clamped scroll offset.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay sync wrap mode");
+        }
+    }
+
+    bool AgentTranscriptOverlay::_RememberedWrapLines() noexcept
+    {
+        try
+        {
+            return ::Agentmaster::LoadAppSettings().transcriptOverlayWrapLines;
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: wrap (the default) — a failed settings read never blocks the overlay.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay remembered wrap");
+        }
+        return true;
+    }
+
+    void AgentTranscriptOverlay::_RememberWrapLines(bool wrap) noexcept
+    {
+        try
+        {
+            // FRESHEST disk, one field (the ColorPickupFlyout idiom, as _RememberLevel): never write a stale
+            // in-memory copy over a cog Save or another window's settings change.
+            auto settings = ::Agentmaster::LoadAppSettings();
+            if (settings.transcriptOverlayWrapLines != wrap)
+            {
+                settings.transcriptOverlayWrapLines = wrap;
+                ::Agentmaster::SaveAppSettings(settings);
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: nothing — the view already switched; only the remembered state is lost.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay remember wrap");
+        }
     }
 
     TextBlock AgentTranscriptOverlay::_MakeTextBlock(double fontSize) const

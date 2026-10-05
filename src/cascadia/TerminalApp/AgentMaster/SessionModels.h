@@ -2577,6 +2577,15 @@ namespace Agentmaster
         // from disk, so a pick in one window decides the next open in every window. The engine stores it
         // opaquely; the overlay maps it, and an unknown or empty name opens at Default. Default "default".
         std::wstring transcriptOverlayLevel{ L"default" };
+        // Agentmaster (TRANSCRIPT_OVERLAY.md §3c): whether the transcript overlay WRAPS long lines — its
+        // header's ↵ toggle. ON (the default): a line wider than the body continues on the next line. OFF:
+        // every line keeps its length and the part past the body's right edge is hidden — not a sideways
+        // scroll away (real line breaks still break, and the header's Copy still copies every character).
+        // GLOBAL + persisted exactly like transcriptOverlayLevel: each flip is a freshest-disk RMW written
+        // by the overlay itself (never the cog form — so both cog-Save preserve blocks restore it), and
+        // every open re-reads it, so a flip in one window decides the next open in every window (an
+        // overlay already open in another window keeps its state until it is opened again). Default true.
+        bool transcriptOverlayWrapLines{ true };
         // Agentmaster: Explorer Tree sort order (the toggle after the scope toggle). GLOBAL — it
         // applies to every window's tree and persists here. Default Newest. See ExplorerSort.
         ExplorerSort treeSort{ ExplorerSort::Newest };
