@@ -13,8 +13,112 @@
 // hooks.log writer (Startup::Note — the EXE links TerminalApp.dll, not the engine lib that owns AppendStateLog).
 #include "../TerminalApp/AgentMaster/TaskbarBadge.h"
 #include "../TerminalApp/AgentMaster/StartupTiming.h"
+// Agentmaster (taskbar preview frame; NOTIFICATIONS.md section 9): the pure sizing / frame / downscale helpers, the
+// worker's job book and the PrintWindow capture, shared with the test harness.
+#include "../TerminalApp/AgentMaster/TaskbarThumbnail.h"
+#include <mutex>
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
+
+namespace
+{
+    namespace TaskbarPreview = ::Agentmaster::TaskbarThumbnail;
+
+    // Agentmaster (taskbar preview frame): the two timers a framed window runs on its own HWND. Upstream sets no
+    // timer on this window, so any distinct non-zero ids work; these spell "AM" + a serial to stay recognizable.
+    constexpr UINT_PTR kTaskbarFrameRefreshTimerId = 0x414D'0001; // the periodic refresh (kRefreshPeriodMs)
+    constexpr UINT_PTR kTaskbarFrameSettleTimerId = 0x414D'0002; // the one-shot debounce after a resize / restore / DPI change
+
+    // Agentmaster (taskbar preview frame): log one "[taskbar-frame] ..." line through the EXE-safe hooks.log writer.
+    // Never throws: building the line can only fail with bad_alloc, and the writer itself swallows its own failures.
+    // Safe from the worker thread (Startup::Note serializes on its own mutex). The profile is resolved long before
+    // any window exists, so the Rule #15 "no line before the profile" contract holds.
+    void LogTaskbarFrame(const std::wstring_view what) noexcept
+    {
+        try
+        {
+            ::Agentmaster::Startup::Note(std::wstring{ L"[taskbar-frame] " } + std::wstring{ what });
+        }
+        catch (...)
+        {
+            // ⚠ DELIBERATELY BARE (Rule #18's logging-path exemption): only bad_alloc can land here, while building the
+            // line for the logger itself. Degradation: this one hooks.log line is lost.
+        }
+    }
+
+    // Agentmaster (taskbar preview frame): "0x<HWND>" for the log lines -- the window's only identity this layer knows.
+    std::wstring HwndText(const HWND hwnd)
+    {
+        wchar_t text[32]{};
+        ::swprintf(text, 32, L"0x%llX", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(hwnd)));
+        return text;
+    }
+
+    // Agentmaster (taskbar preview frame): a 32-bit value as "0x%08X" for the log lines -- an HRESULT, or a frame color
+    // (0xAARRGGBB). Throws std::bad_alloc only if the string cannot be allocated.
+    std::wstring Hex32(const uint32_t value)
+    {
+        wchar_t text[16]{};
+        ::swprintf(text, 16, L"0x%08X", static_cast<unsigned>(value));
+        return text;
+    }
+}
+
+// Agentmaster (taskbar preview frame; NOTIFICATIONS.md section 9): what the window (UI thread) and its capture worker
+// (a thread-pool thread) share. Every field is read and written under `lock` only. The window holds one shared_ptr,
+// each running worker another, so a worker that outlives the window finds `hwnd` null and stops instead of touching a
+// freed object.
+struct IslandWindow::TaskbarFrameState
+{
+    std::mutex lock;
+    // The window, or null once it closed (_TaskbarFrameShutdown): a worker treats null as "stop".
+    HWND hwnd{ nullptr };
+    // True while the frame is on (the iconic attributes are set). A worker that finds it false drops its work, so a
+    // frame turned off mid-pass costs at most that pass's last DWM call -- which DWM ignores on a non-iconic window.
+    bool enabled{ false };
+    // The frame color, 0xAARRGGBB, already through TaskbarThumbnail::FrameColor (alpha floor applied).
+    uint32_t argb{ 0 };
+    // The app icon for the placeholder card. LR_SHARED (GetActiveAppIconHandle), so it is never destroyed and is safe
+    // to draw from the worker.
+    HICON icon{ nullptr };
+    // DWM's maximum preview size, from its last WM_DWMSENDICONICTHUMBNAIL, and the DPI it was learned at. Empty until
+    // DWM asks once; cleared by a DPI change or by a push DWM rejected with E_INVALIDARG.
+    TaskbarPreview::PixelSize learnedBox;
+    uint32_t learnedDpi{ 0 };
+    // True after DWM rejected a push sized by the ESTIMATE: no more guessing; the window waits for DWM to ask.
+    bool estimateRejected{ false };
+    // The last good capture, shrunk to fit kCacheMaxEdge: the preview of a minimized window (which cannot be captured)
+    // and the answer to a request that arrives right after a refresh. Dropped when the frame turns off, so a window
+    // framed again while minimized shows the placeholder card rather than an hour-old picture. Immutable once stored
+    // (a refresh REPLACES the pointer), so a pass reads it outside the lock through its own reference.
+    std::shared_ptr<const std::vector<uint8_t>> cache;
+    TaskbarPreview::PixelSize cacheSize;
+    uint64_t cacheTick{ 0 };
+    // At most one worker in flight; requests made meanwhile fold into its next pass.
+    TaskbarPreview::JobBook book;
+    // Log de-duplication: one line per distinct push failure, per blank capture episode and per placeholder episode,
+    // reset each time the frame turns on.
+    HRESULT lastPushHr{ S_OK };
+    bool loggedBlank{ false };
+    bool loggedCard{ false };
+};
+
+// Agentmaster (taskbar preview frame): one worker pass's inputs, copied out of TaskbarFrameState under its lock so the
+// slow part of the pass (the capture, the downscale, the DWM calls) runs WITHOUT the lock -- the window's UI thread
+// takes the same lock on every request and must never wait for a capture.
+struct IslandWindow::TaskbarFramePassInput
+{
+    HWND hwnd{ nullptr };
+    uint32_t argb{ 0 };
+    HICON icon{ nullptr };
+    TaskbarPreview::PixelSize learnedBox;
+    uint32_t learnedDpi{ 0 };
+    bool estimateRejected{ false };
+    std::shared_ptr<const std::vector<uint8_t>> cache;
+    TaskbarPreview::PixelSize cacheSize;
+    uint64_t cacheTick{ 0 };
+    TaskbarPreview::WorkOrder order;
+};
 
 using namespace winrt::Windows::UI;
 using namespace winrt::Windows::UI::Composition;
@@ -99,6 +203,10 @@ void IslandWindow::Close()
     // message loop, where it'll end up asking XAML something that XAML is no
     // longer able to answer.
     SetWindowLongPtr(_window.get(), GWLP_USERDATA, 0);
+
+    // Agentmaster (taskbar preview frame): a capture worker may still be running for this window; tell it the window
+    // is gone BEFORE anything else is torn down, so it stops instead of capturing a closing window.
+    _TaskbarFrameShutdown();
 
     if (_source)
     {
@@ -520,7 +628,64 @@ void IslandWindow::_OnGetMinMaxInfo(const WPARAM /*wParam*/, const LPARAM lParam
         {
             _ApplyTaskbarBadge();
         }
+        // Agentmaster (taskbar preview frame): DWM's preview box scales with the DPI, so the learned box is stale --
+        // forget it (the estimate takes over until DWM asks again) and refresh once the move settles. A box larger
+        // than DWM's new maximum would be rejected with E_INVALIDARG and leave Alt+Tab without a stored bitmap.
+        if (_taskbarFrameArgb != 0 && _taskbarFrame)
+        {
+            {
+                std::lock_guard<std::mutex> guard{ _taskbarFrame->lock };
+                _taskbarFrame->learnedBox = {};
+                _taskbarFrame->learnedDpi = 0;
+                _taskbarFrame->estimateRejected = false;
+            }
+            _TaskbarFrameArmSettle();
+        }
         return result;
+    }
+    case WM_DWMSENDICONICTHUMBNAIL:
+    {
+        // Agentmaster (taskbar preview frame): DWM wants this window's preview at most HIWORD x LOWORD pixels. Answered
+        // on the capture worker; the UI thread only records the box and queues the job.
+        if (_TaskbarFrameOnThumbnailRequest(lparam))
+        {
+            return 0;
+        }
+        break;
+    }
+    case WM_DWMSENDICONICLIVEPREVIEWBITMAP:
+    {
+        // Agentmaster (taskbar preview frame): the user hovers this window's preview, and DWM wants the full-size
+        // "peek" bitmap. A minimized window falls through to the default handling: DWM then draws its own generic
+        // window placeholder (verified), which beats a blurry blow-up of a 200 px snapshot.
+        if (_TaskbarFrameOnPeekRequest())
+        {
+            return 0;
+        }
+        break;
+    }
+    case WM_TIMER:
+    {
+        // Agentmaster (taskbar preview frame): the periodic refresh and the post-resize debounce. A minimized window
+        // keeps its last picture (it cannot be captured), so the periodic tick skips it.
+        if (wparam == kTaskbarFrameRefreshTimerId)
+        {
+            if (_taskbarFrameArgb != 0 && !::IsIconic(_window.get()))
+            {
+                _TaskbarFrameRequestPush();
+            }
+            return 0;
+        }
+        if (wparam == kTaskbarFrameSettleTimerId)
+        {
+            ::KillTimer(_window.get(), kTaskbarFrameSettleTimerId); // one-shot: SetTimer repeats until killed
+            if (_taskbarFrameArgb != 0 && !::IsIconic(_window.get()))
+            {
+                _TaskbarFrameRequestPush();
+            }
+            return 0;
+        }
+        break;
     }
     case WM_CREATE:
     {
@@ -551,6 +716,13 @@ void IslandWindow::_OnGetMinMaxInfo(const WPARAM /*wParam*/, const LPARAM lParam
         // wparam = 0 indicates the window was deactivated
         const bool activated = LOWORD(wparam) != 0;
         WindowActivated.raise(activated);
+
+        // Agentmaster (taskbar preview frame): the user is leaving a framed window -- the moment its preview is most
+        // likely to be looked at next (Alt+Tab, the taskbar), so refresh it to what they just saw.
+        if (!activated && _taskbarFrameArgb != 0)
+        {
+            _TaskbarFrameRequestPush();
+        }
 
         if (_autoHideWindow && !activated)
         {
@@ -598,6 +770,13 @@ void IslandWindow::_OnGetMinMaxInfo(const WPARAM /*wParam*/, const LPARAM lParam
         {
             WindowVisibilityChanged.raise(true);
             MaximizeChanged.raise(wparam == SIZE_MAXIMIZED);
+            // Agentmaster (taskbar preview frame): a framed window was resized, maximized or restored from the
+            // taskbar: its stored preview has the old shape (or is a minimized-era picture). Debounced, so a
+            // drag-resize costs one capture after it settles.
+            if (_taskbarFrameArgb != 0)
+            {
+                _TaskbarFrameArmSettle();
+            }
         }
 
         if (wparam == SIZE_MINIMIZED)
@@ -1101,6 +1280,673 @@ UINT IslandWindow::_TaskbarButtonCreatedMessage() noexcept
 {
     static const UINT message = ::RegisterWindowMessageW(L"TaskbarButtonCreated");
     return message;
+}
+
+// Method Description:
+// - Agentmaster (taskbar preview frame; NOTIFICATIONS.md section 9): frame this window's taskbar / Alt+Tab preview
+//   while it holds unread tabs, or give the preview back to DWM. Framing replaces DWM's live preview with our own
+//   bitmap (see TaskbarThumbnail.h for why that is the only way, and what was measured).
+// Arguments:
+// - argb: the frame color, 0xAARRGGBB. TerminalPage applies the alpha floor, so an "on" value is never 0; 0 = no frame.
+// Remarks:
+// - UI thread. An unchanged value does nothing; a new color on an already framed window only queues a refresh.
+// - Never throws: a failure is logged ("[taskbar-frame] ... threw") and the window keeps its previous preview mode.
+void IslandWindow::SetTaskbarUnreadFrame(const uint32_t argb)
+{
+    if (argb == _taskbarFrameArgb)
+    {
+        return;
+    }
+    const bool turningOn = _taskbarFrameArgb == 0;
+    _taskbarFrameArgb = argb;
+    try
+    {
+        if (argb == 0)
+        {
+            _TaskbarFrameDisable();
+        }
+        else
+        {
+            _TaskbarFrameEnable(turningOn);
+        }
+    }
+    catch (...)
+    {
+        const HRESULT caught = LOG_CAUGHT_EXCEPTION(); // wil's trace, and the classified HRESULT for the line below
+        try
+        {
+            LogTaskbarFrame(L"setting the frame (" + Hex32(argb) + L") threw " + Hex32(static_cast<uint32_t>(caught)) +
+                            L"; the preview keeps its previous mode until the next change");
+        }
+        catch (...)
+        {
+            // ⚠ DELIBERATELY BARE (Rule #18's logging-path exemption): only bad_alloc can land here, while building the
+            // log line itself. Degradation: no hooks.log line for this failure (wil's trace above still has it).
+        }
+    }
+}
+
+// Method Description:
+// - Agentmaster (taskbar preview frame): turn the frame on, or recolor it. On the first turn-on: set DWM's two iconic
+//   attributes and start the periodic refresh. Either way: store the color and queue a refresh, so the stored preview
+//   is ours before Alt+Tab or the taskbar looks.
+// Arguments:
+// - turningOn: true when the window was not framed before this call.
+// Remarks:
+// - The attributes are set BEFORE the first push is queued: DWM accepts an iconic bitmap only from an iconic window.
+// - Throws std::bad_alloc only from creating the shared state (the caller contains it).
+void IslandWindow::_TaskbarFrameEnable(const bool turningOn)
+{
+    const HWND hwnd = _window.get();
+    if (!hwnd)
+    {
+        return;
+    }
+    if (!_taskbarFrame)
+    {
+        _taskbarFrame = std::make_shared<TaskbarFrameState>();
+    }
+    // The placeholder card's icon: the LR_SHARED big icon the window itself wears (icon.cpp). Fetched here on the UI
+    // thread because its resource choice reads the high-contrast state.
+    const auto icon = static_cast<HICON>(GetActiveAppIconHandle(false));
+    {
+        std::lock_guard<std::mutex> guard{ _taskbarFrame->lock };
+        _taskbarFrame->hwnd = hwnd;
+        _taskbarFrame->enabled = true;
+        _taskbarFrame->argb = TaskbarPreview::FrameColor(_taskbarFrameArgb);
+        _taskbarFrame->icon = icon;
+        if (turningOn)
+        {
+            _taskbarFrame->lastPushHr = S_OK;
+            _taskbarFrame->loggedBlank = false;
+            _taskbarFrame->loggedCard = false;
+        }
+    }
+    if (turningOn)
+    {
+        // FORCE makes DWM show a static bitmap instead of the live window; HAS says the app supplies that bitmap
+        // (FORCE alone would show the app ICON as the preview).
+        const BOOL on = TRUE;
+        const HRESULT forceHr = ::DwmSetWindowAttribute(hwnd, DWMWA_FORCE_ICONIC_REPRESENTATION, &on, sizeof(on));
+        const HRESULT hasHr = ::DwmSetWindowAttribute(hwnd, DWMWA_HAS_ICONIC_BITMAP, &on, sizeof(on));
+        ::SetTimer(hwnd, kTaskbarFrameRefreshTimerId, TaskbarPreview::kRefreshPeriodMs, nullptr);
+        LogTaskbarFrame(L"window " + HwndText(hwnd) + L" framed (color " + Hex32(_taskbarFrameArgb) +
+                        L"; iconic attributes " + Hex32(static_cast<uint32_t>(forceHr)) + L"/" + Hex32(static_cast<uint32_t>(hasHr)) + L")");
+    }
+    _TaskbarFrameRequestPush();
+}
+
+// Method Description:
+// - Agentmaster (taskbar preview frame): turn the frame off. DWM shows the live preview again as soon as the
+//   attributes are cleared; pending work and the remembered capture are dropped, and both timers stop.
+// Remarks:
+// - A worker in the middle of a pass may still call DWM once after this; DWM ignores an iconic bitmap from a window
+//   that is no longer iconic, and the pass's bookkeeping ignores the result (it re-checks `enabled`).
+// - The remembered capture is dropped so a window framed again later while minimized shows the placeholder card, not
+//   a picture from before the user worked in it.
+void IslandWindow::_TaskbarFrameDisable() noexcept
+{
+    const HWND hwnd = _window.get();
+    if (!_taskbarFrame || !hwnd)
+    {
+        return;
+    }
+    try
+    {
+        {
+            std::lock_guard<std::mutex> guard{ _taskbarFrame->lock };
+            _taskbarFrame->enabled = false;
+            _taskbarFrame->book.Clear();
+            _taskbarFrame->cache.reset();
+            _taskbarFrame->cacheSize = {};
+            _taskbarFrame->cacheTick = 0;
+        }
+        ::KillTimer(hwnd, kTaskbarFrameRefreshTimerId);
+        ::KillTimer(hwnd, kTaskbarFrameSettleTimerId);
+        const BOOL off = FALSE;
+        const HRESULT forceHr = ::DwmSetWindowAttribute(hwnd, DWMWA_FORCE_ICONIC_REPRESENTATION, &off, sizeof(off));
+        const HRESULT hasHr = ::DwmSetWindowAttribute(hwnd, DWMWA_HAS_ICONIC_BITMAP, &off, sizeof(off));
+        LogTaskbarFrame(L"window " + HwndText(hwnd) + L" unframed (every tab read, or the switch is off; iconic attributes " +
+                        Hex32(static_cast<uint32_t>(forceHr)) + L"/" + Hex32(static_cast<uint32_t>(hasHr)) + L")");
+    }
+    catch (...)
+    {
+        // Only a failed std::mutex lock (std::system_error) or the log line's allocation can throw here.
+        LOG_CAUGHT_EXCEPTION();
+        LogTaskbarFrame(L"turning the frame off threw; the preview may stay framed until the next change");
+    }
+}
+
+// Method Description:
+// - Agentmaster (taskbar preview frame): the window is closing. Tell any running worker the window is gone (null
+//   `hwnd`), drop pending work, and stop the timers. The worker keeps the shared state alive through its own
+//   reference and simply stops at its next step.
+// Remarks:
+// - Idempotent: Close() runs from both an explicit close and the destructor.
+void IslandWindow::_TaskbarFrameShutdown() noexcept
+{
+    if (!_taskbarFrame)
+    {
+        return;
+    }
+    try
+    {
+        {
+            std::lock_guard<std::mutex> guard{ _taskbarFrame->lock };
+            _taskbarFrame->hwnd = nullptr;
+            _taskbarFrame->enabled = false;
+            _taskbarFrame->book.Clear();
+            _taskbarFrame->cache.reset();
+        }
+        if (const HWND hwnd = _window.get())
+        {
+            ::KillTimer(hwnd, kTaskbarFrameRefreshTimerId);
+            ::KillTimer(hwnd, kTaskbarFrameSettleTimerId);
+        }
+        _taskbarFrameArgb = 0;
+    }
+    catch (...)
+    {
+        // Only a failed std::mutex lock (std::system_error) can throw here. A worker that then still sees the window
+        // as enabled fails its next DWM call on the destroyed HWND, which is harmless.
+        LOG_CAUGHT_EXCEPTION();
+        LogTaskbarFrame(L"stopping the capture worker at window close threw");
+    }
+}
+
+// Method Description:
+// - Agentmaster (taskbar preview frame): queue a refresh -- capture the window, invalidate DWM's stored bitmaps (the
+//   stale peek bitmap goes with them) and store a new framed preview at once. Folded into a pending one if a worker is
+//   already busy; starts a worker otherwise.
+// Remarks:
+// - UI thread. Called at turn-on, on a recolor, on deactivation, on the periodic and the settle timers.
+void IslandWindow::_TaskbarFrameRequestPush() noexcept
+{
+    if (!_taskbarFrame)
+    {
+        return;
+    }
+    try
+    {
+        bool start = false;
+        {
+            std::lock_guard<std::mutex> guard{ _taskbarFrame->lock };
+            if (!_taskbarFrame->enabled || !_taskbarFrame->hwnd)
+            {
+                return;
+            }
+            start = _taskbarFrame->book.RequestPush();
+        }
+        if (start)
+        {
+            _TaskbarFrameStartWorker();
+        }
+    }
+    catch (...)
+    {
+        LOG_CAUGHT_EXCEPTION();
+        LogTaskbarFrame(L"queueing a preview refresh threw; the next trigger retries");
+    }
+}
+
+// Method Description:
+// - Agentmaster (taskbar preview frame): (re)start the one-shot debounce timer. SetTimer with an id that is already
+//   running restarts it, which is what turns a burst of WM_SIZE into one refresh kSettleDelayMs after the last one.
+void IslandWindow::_TaskbarFrameArmSettle() noexcept
+{
+    if (const HWND hwnd = _window.get())
+    {
+        ::SetTimer(hwnd, kTaskbarFrameSettleTimerId, TaskbarPreview::kSettleDelayMs, nullptr);
+    }
+}
+
+// Method Description:
+// - Agentmaster (taskbar preview frame): submit the capture worker to the process thread pool. Called only right
+//   after a JobBook request returned true (this call owns the claim). If the pool refuses, the claim is undone so the
+//   next request starts a worker instead of waiting forever on one that never ran.
+// Remarks:
+// - The worker receives a heap-allocated shared_ptr to the state: one reference that lives exactly as long as the
+//   worker's run, so the window closing meanwhile can never free the state under it.
+void IslandWindow::_TaskbarFrameStartWorker() noexcept
+{
+    std::shared_ptr<TaskbarFrameState>* holder = nullptr;
+    try
+    {
+        holder = new std::shared_ptr<TaskbarFrameState>(_taskbarFrame);
+        if (::TrySubmitThreadpoolCallback(&IslandWindow::_TaskbarFrameWorkCallback, holder, nullptr))
+        {
+            return; // the worker owns the holder from here on and frees it on every exit path
+        }
+        const DWORD error = ::GetLastError();
+        delete holder;
+        holder = nullptr;
+        {
+            std::lock_guard<std::mutex> guard{ _taskbarFrame->lock };
+            _taskbarFrame->book.Abandon();
+        }
+        LogTaskbarFrame(L"the thread pool refused the capture worker (error " + std::to_wstring(error) + L"); the next refresh retries");
+    }
+    catch (...)
+    {
+        // `new` (bad_alloc) or a failed lock: free what exists and release the claim, so a later request can retry.
+        delete holder;
+        LOG_CAUGHT_EXCEPTION();
+        try
+        {
+            std::lock_guard<std::mutex> guard{ _taskbarFrame->lock };
+            _taskbarFrame->book.Abandon();
+        }
+        catch (...)
+        {
+            // A second failed lock: the book stays claimed with no worker behind it, so this window's preview stops
+            // refreshing for the rest of the window's life (Clear keeps a claim; only a worker's empty Take or Abandon
+            // releases it). std::mutex::lock fails only on a deadlock this code cannot produce.
+            LOG_CAUGHT_EXCEPTION();
+        }
+        LogTaskbarFrame(L"starting the capture worker threw; the next refresh retries");
+    }
+}
+
+// Method Description:
+// - Agentmaster (taskbar preview frame): WM_DWMSENDICONICTHUMBNAIL -- DWM is about to show this window's preview and
+//   holds no bitmap for it. Record the size it accepts (the LEARNED box every later push fits into) and queue an
+//   answer on the worker.
+// Arguments:
+// - lparam: HIWORD = the largest preview width DWM accepts, LOWORD = the largest height.
+// Return Value:
+// - true when handled (the window is framed); false sends the message to the default handling.
+bool IslandWindow::_TaskbarFrameOnThumbnailRequest(const LPARAM lparam) noexcept
+{
+    if (_taskbarFrameArgb == 0 || !_taskbarFrame)
+    {
+        return false;
+    }
+    try
+    {
+        const TaskbarPreview::PixelSize box{ static_cast<int>(HIWORD(lparam)), static_cast<int>(LOWORD(lparam)) };
+        if (box.Empty())
+        {
+            return true; // DWM can show nothing at 0 pixels; answering nothing is the correct answer
+        }
+        const uint32_t dpi = ::GetDpiForWindow(_window.get());
+        bool start = false;
+        bool learned = false;
+        {
+            std::lock_guard<std::mutex> guard{ _taskbarFrame->lock };
+            if (!_taskbarFrame->enabled || !_taskbarFrame->hwnd)
+            {
+                return false;
+            }
+            learned = !(_taskbarFrame->learnedBox == box) || _taskbarFrame->learnedDpi != dpi;
+            _taskbarFrame->learnedBox = box;
+            _taskbarFrame->learnedDpi = dpi;
+            _taskbarFrame->estimateRejected = false; // the real box is known now; the estimate no longer matters
+            start = _taskbarFrame->book.RequestAnswer(box);
+        }
+        if (learned)
+        {
+            LogTaskbarFrame(L"window " + HwndText(_window.get()) + L" preview box " + std::to_wstring(box.width) + L"x" +
+                            std::to_wstring(box.height) + L" at " + std::to_wstring(dpi) + L" DPI (asked by the shell)");
+        }
+        if (start)
+        {
+            _TaskbarFrameStartWorker();
+        }
+        return true;
+    }
+    catch (...)
+    {
+        LOG_CAUGHT_EXCEPTION();
+        LogTaskbarFrame(L"handling the shell's preview request threw; it shows no preview this time");
+        return false;
+    }
+}
+
+// Method Description:
+// - Agentmaster (taskbar preview frame): WM_DWMSENDICONICLIVEPREVIEWBITMAP -- the user hovers this window's preview
+//   and DWM wants the full-size "peek" bitmap. Queued on the worker (a full-size capture).
+// Return Value:
+// - true when handled; false (not framed, or minimized) sends the message to the default handling, and DWM then draws
+//   its own generic window placeholder for the peek.
+bool IslandWindow::_TaskbarFrameOnPeekRequest() noexcept
+{
+    if (_taskbarFrameArgb == 0 || !_taskbarFrame || ::IsIconic(_window.get()))
+    {
+        return false;
+    }
+    try
+    {
+        bool start = false;
+        {
+            std::lock_guard<std::mutex> guard{ _taskbarFrame->lock };
+            if (!_taskbarFrame->enabled || !_taskbarFrame->hwnd)
+            {
+                return false;
+            }
+            start = _taskbarFrame->book.RequestPeek();
+        }
+        if (start)
+        {
+            _TaskbarFrameStartWorker();
+        }
+        return true;
+    }
+    catch (...)
+    {
+        LOG_CAUGHT_EXCEPTION();
+        LogTaskbarFrame(L"handling the shell's peek request threw; DWM shows its placeholder instead");
+        return false;
+    }
+}
+
+// Method Description:
+// - Agentmaster (taskbar preview frame): the capture worker, on a thread-pool thread. Drains the JobBook pass by pass
+//   -- every request that arrived while a pass ran is done in the next one -- and returns when a Take finds nothing,
+//   which also marks the book idle.
+// Arguments:
+// - instance: unused (the simple-callback signature).
+// - context: a heap-allocated std::shared_ptr<TaskbarFrameState> from _TaskbarFrameStartWorker; owned and freed here.
+// Remarks:
+// - noexcept: an exception escaping a thread-pool callback ends the process, so every pass is contained and logged.
+// - The lock is held only to copy a pass's inputs and to store its results, never across a capture: the window's UI
+//   thread takes the same lock for every request.
+void CALLBACK IslandWindow::_TaskbarFrameWorkCallback(PTP_CALLBACK_INSTANCE /*instance*/, void* context) noexcept
+{
+    const std::unique_ptr<std::shared_ptr<TaskbarFrameState>> holder{ static_cast<std::shared_ptr<TaskbarFrameState>*>(context) };
+    if (!holder || !*holder)
+    {
+        return;
+    }
+    TaskbarFrameState& state = **holder;
+    for (;;)
+    {
+        TaskbarFramePassInput input;
+        try
+        {
+            std::lock_guard<std::mutex> guard{ state.lock };
+            input.order = state.book.Take();
+            if (!input.order.Any())
+            {
+                return; // Take marked the book idle: the next request starts a new worker
+            }
+            if (!state.enabled || !state.hwnd)
+            {
+                state.book.Clear(); // the frame went off or the window closed: drop it; the next Take ends the run
+                continue;
+            }
+            input.hwnd = state.hwnd;
+            input.argb = state.argb;
+            input.icon = state.icon;
+            input.learnedBox = state.learnedBox;
+            input.learnedDpi = state.learnedDpi;
+            input.estimateRejected = state.estimateRejected;
+            input.cache = state.cache;
+            input.cacheSize = state.cacheSize;
+            input.cacheTick = state.cacheTick;
+        }
+        catch (...)
+        {
+            // A failed lock (std::system_error): nothing can be read or released safely. Leaving keeps the book
+            // claimed with no worker behind it, so this window's preview stops refreshing for the rest of the window's
+            // life. std::mutex::lock fails only on a deadlock this code cannot produce.
+            LOG_CAUGHT_EXCEPTION();
+            LogTaskbarFrame(L"the capture worker could not lock its state and stopped");
+            return;
+        }
+        try
+        {
+            _TaskbarFrameRunPass(state, input);
+        }
+        catch (...)
+        {
+            const HRESULT caught = LOG_CAUGHT_EXCEPTION();
+            try
+            {
+                LogTaskbarFrame(L"a preview pass for window " + HwndText(input.hwnd) + L" threw " + Hex32(static_cast<uint32_t>(caught)) +
+                                L"; the stored preview stays as it was until the next refresh");
+            }
+            catch (...)
+            {
+                // ⚠ DELIBERATELY BARE (Rule #18's logging-path exemption): only bad_alloc can land here, while building
+                // the log line. Degradation: no hooks.log line (wil's trace above still has it).
+            }
+        }
+    }
+}
+
+// Method Description:
+// - Agentmaster (taskbar preview frame): one worker pass. Captures the window at most once (lazily: an answer the fresh
+//   remembered capture can serve never captures), answers a peek with the full-size capture, and stores the framed
+//   preview -- invalidating first on a refresh, so DWM drops its stale peek bitmap, and storing immediately after, so
+//   Alt+Tab never finds the stored preview empty.
+// Arguments:
+// - state: the shared state, for the results (the remembered capture, the box bookkeeping, the log de-dupe).
+// - input: the pass's inputs, copied under the state's lock.
+// Remarks:
+// - The preview's source, in order: a fresh capture; the remembered capture (a minimized window, or a capture that
+//   came back black); the PLACEHOLDER card (the dark card with the app icon) when neither exists.
+// - The box, in order: DWM's own request; the box it asked for last at this DPI; the estimate (until DWM rejected one).
+//   With none of them, a refresh only invalidates, so the next display makes DWM ask -- the one way left to learn it.
+// - Throws std::bad_alloc (the capture and preview buffers) and, in theory, std::system_error from the lock; the
+//   worker contains both.
+void IslandWindow::_TaskbarFrameRunPass(TaskbarFrameState& state, const TaskbarFramePassInput& input)
+{
+    const HWND hwnd = input.hwnd;
+    const bool minimized = ::IsIconic(hwnd) != FALSE;
+    const uint64_t now = ::GetTickCount64();
+
+    std::vector<uint8_t> shot;
+    TaskbarPreview::PixelSize shotSize;
+    bool shotTried = false;
+    bool haveShot = false;
+    const auto capture = [&]() -> bool {
+        if (shotTried)
+        {
+            return haveShot;
+        }
+        shotTried = true;
+        if (minimized || !TaskbarPreview::CaptureClient(hwnd, shot, shotSize))
+        {
+            return false; // a minimized window's client area is 0x0: there is nothing to capture
+        }
+        if (TaskbarPreview::LooksBlank(shot, shotSize))
+        {
+            // DWM rendered nothing for us (an unusual GPU path): never show a black preview. Logged once per framing.
+            bool logIt = false;
+            {
+                std::lock_guard<std::mutex> guard{ state.lock };
+                logIt = !state.loggedBlank;
+                state.loggedBlank = true;
+            }
+            if (logIt)
+            {
+                LogTaskbarFrame(L"window " + HwndText(hwnd) + L" captured black (" + std::to_wstring(shotSize.width) + L"x" +
+                                std::to_wstring(shotSize.height) + L"); using the last good picture or the placeholder card");
+            }
+            shot.clear();
+            shotSize = {};
+            return false;
+        }
+        haveShot = true;
+        // Remember a shrunk copy: the preview while minimized, and the answer to a request right after this refresh.
+        const auto cacheSize = TaskbarPreview::FitInside(shotSize, { TaskbarPreview::kCacheMaxEdge, TaskbarPreview::kCacheMaxEdge });
+        std::shared_ptr<const std::vector<uint8_t>> shrunk = std::make_shared<std::vector<uint8_t>>(TaskbarPreview::DownscaleBgra(shot, shotSize, cacheSize));
+        std::lock_guard<std::mutex> guard{ state.lock };
+        if (state.enabled && state.hwnd == hwnd)
+        {
+            state.cache = std::move(shrunk);
+            state.cacheSize = cacheSize;
+            state.cacheTick = now;
+        }
+        return true;
+    };
+
+    // 1. The peek: the full client area, unframed (the user is looking at the window itself), placed at the client
+    //    area's offset inside the window frame.
+    if (input.order.peek && capture())
+    {
+        if (const HBITMAP dib = TaskbarPreview::CreateTopDownDib(shot, shotSize))
+        {
+            RECT windowRect{};
+            POINT clientOrigin{ 0, 0 };
+            ::GetWindowRect(hwnd, &windowRect);
+            ::ClientToScreen(hwnd, &clientOrigin);
+            POINT offset{ clientOrigin.x - windowRect.left, clientOrigin.y - windowRect.top };
+            const HRESULT hr = ::DwmSetIconicLivePreviewBitmap(hwnd, dib, &offset, 0);
+            ::DeleteObject(dib);
+            if (FAILED(hr))
+            {
+                LogTaskbarFrame(L"window " + HwndText(hwnd) + L" peek bitmap rejected (" + Hex32(static_cast<uint32_t>(hr)) + L")");
+            }
+        }
+    }
+
+    // 2. The preview.
+    if (!input.order.push && !input.order.answer)
+    {
+        return;
+    }
+    enum class BoxSource
+    {
+        None,
+        Request,
+        Learned,
+        Estimate,
+    };
+    BoxSource source = BoxSource::None;
+    TaskbarPreview::PixelSize box;
+    const uint32_t dpi = ::GetDpiForWindow(hwnd);
+    if (input.order.answer)
+    {
+        box = input.order.answerBox;
+        source = BoxSource::Request;
+    }
+    else if (!input.learnedBox.Empty() && input.learnedDpi == dpi)
+    {
+        box = input.learnedBox;
+        source = BoxSource::Learned;
+    }
+    else if (!input.estimateRejected)
+    {
+        box = TaskbarPreview::EstimatedBox(dpi);
+        source = BoxSource::Estimate;
+    }
+    if (box.Empty())
+    {
+        // DWM rejected our estimate and has not asked since: invalidate so it asks the next time it shows the preview.
+        ::DwmInvalidateIconicBitmaps(hwnd);
+        return;
+    }
+
+    std::vector<uint8_t> pixels;
+    TaskbarPreview::PixelSize size;
+    // A request right after a refresh (DWM asks at once when a visible preview was invalidated) reuses that refresh's
+    // capture -- only when the remembered copy is large enough, never blown up.
+    bool fromCache = false;
+    if (input.order.answer && !input.order.push && !input.order.peek && input.cache &&
+        now - input.cacheTick <= TaskbarPreview::kReuseCaptureMs)
+    {
+        const auto fit = TaskbarPreview::FitInside(input.cacheSize, box);
+        fromCache = fit.width <= input.cacheSize.width && fit.height <= input.cacheSize.height;
+    }
+    if (!fromCache && capture())
+    {
+        size = TaskbarPreview::FitInside(shotSize, box);
+        pixels = TaskbarPreview::DownscaleBgra(shot, shotSize, size);
+    }
+    else if (input.cache && !input.cacheSize.Empty())
+    {
+        size = TaskbarPreview::FitInside(input.cacheSize, box);
+        pixels = TaskbarPreview::DownscaleBgra(*input.cache, input.cacheSize, size);
+    }
+    else
+    {
+        // The placeholder card, in the window's RESTORED shape (a minimized window's client area is 0x0).
+        TaskbarPreview::PixelSize shape{ 16, 9 };
+        WINDOWPLACEMENT placement{};
+        placement.length = sizeof(placement);
+        if (::GetWindowPlacement(hwnd, &placement))
+        {
+            const TaskbarPreview::PixelSize normal{ placement.rcNormalPosition.right - placement.rcNormalPosition.left,
+                                                    placement.rcNormalPosition.bottom - placement.rcNormalPosition.top };
+            if (!normal.Empty())
+            {
+                shape = normal;
+            }
+        }
+        size = TaskbarPreview::FitInside(shape, box);
+        pixels = TaskbarPreview::SolidCard(size, TaskbarPreview::kCardFillRgb);
+        const int iconEdge = (std::min)(::GetSystemMetrics(SM_CXICON), (std::min)(size.width, size.height) / 2);
+        TaskbarPreview::DrawIconCentered(pixels, size, input.icon, iconEdge);
+        bool logIt = false;
+        {
+            std::lock_guard<std::mutex> guard{ state.lock };
+            logIt = !state.loggedCard;
+            state.loggedCard = true;
+        }
+        if (logIt)
+        {
+            LogTaskbarFrame(L"window " + HwndText(hwnd) + L" has no picture yet (" + (minimized ? std::wstring{ L"minimized" } : std::wstring{ L"capture failed" }) +
+                            L"); showing the placeholder card until it can be captured");
+        }
+    }
+    if (pixels.empty())
+    {
+        return;
+    }
+    TaskbarPreview::DrawFrame(pixels, size, TaskbarPreview::FrameThickness(size), input.argb);
+    const HBITMAP dib = TaskbarPreview::CreateTopDownDib(pixels, size);
+    if (!dib)
+    {
+        return;
+    }
+    {
+        // Last check before talking to DWM: a frame turned off during this pass's capture must not get a new bitmap.
+        std::lock_guard<std::mutex> guard{ state.lock };
+        if (!state.enabled || state.hwnd != hwnd)
+        {
+            ::DeleteObject(dib);
+            return;
+        }
+    }
+    if (input.order.push)
+    {
+        // Invalidate FIRST, store IMMEDIATELY after (microseconds apart): the invalidation drops DWM's stale peek
+        // bitmap, which it would otherwise keep forever, and the store means Alt+Tab never finds the preview empty
+        // (it shows the window it pre-selects black when it does -- measured).
+        ::DwmInvalidateIconicBitmaps(hwnd);
+    }
+    const HRESULT hr = ::DwmSetIconicThumbnail(hwnd, dib, 0);
+    ::DeleteObject(dib); // DWM keeps its own copy
+    bool logIt = false;
+    {
+        std::lock_guard<std::mutex> guard{ state.lock };
+        if (!state.enabled || state.hwnd != hwnd)
+        {
+            return; // turned off meanwhile: the result means nothing any more
+        }
+        if (hr == E_INVALIDARG)
+        {
+            // Larger than DWM accepts. Stop using the box that produced it; with the push's invalidation above, the
+            // stored preview is now empty, so DWM asks at its next display and teaches the window its real box.
+            if (source == BoxSource::Learned && state.learnedBox == box)
+            {
+                state.learnedBox = {};
+            }
+            else if (source == BoxSource::Estimate)
+            {
+                state.estimateRejected = true;
+            }
+        }
+        logIt = hr != state.lastPushHr;
+        state.lastPushHr = hr;
+    }
+    if (logIt)
+    {
+        LogTaskbarFrame(FAILED(hr) ? L"window " + HwndText(hwnd) + L" preview " + std::to_wstring(size.width) + L"x" +
+                                         std::to_wstring(size.height) + L" rejected (" + Hex32(static_cast<uint32_t>(hr)) + L"); logged once per distinct failure" :
+                                     L"window " + HwndText(hwnd) + L" preview stored again after an earlier failure");
+    }
 }
 
 // From GdiEngine::s_SetWindowLongWHelper

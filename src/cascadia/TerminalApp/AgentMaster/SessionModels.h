@@ -2738,6 +2738,13 @@ namespace Agentmaster
         // OFF clears every window's overlay at once (the Save handler + the cross-window broadcast re-apply live).
         // Windows' own "Show badges on taskbar apps" switch still has the last word. Default ON; a missing key => ON.
         bool taskbarUnreadBadge{ true };
+        // Agentmaster (TASKBAR PREVIEW FRAME; NOTIFICATIONS.md section 9): frame the taskbar / Alt+Tab preview of every
+        // window that holds an unread tab (the same per-tab set the count sums) in the flash-ring color, so hovering the
+        // combined taskbar button shows WHICH window needs you. While framed, a window draws its own preview through
+        // DWM's iconic representation (a capture refreshed on deactivation, resize and every 20 s, on a thread-pool
+        // thread); unframed, DWM's live preview returns. PER WINDOW, unlike the count; independent of the count and of
+        // the toasts. OFF unframes every window at once (Save + the cross-window broadcast). Default ON; missing => ON.
+        bool taskbarUnreadThumbnailFrame{ true };
 
         // --- Slash commands (COMMANDS.md §6a; the cog's "Commands" tab) ---
         // Agentmaster's /handover command family is user-customizable: each command can be RENAMED

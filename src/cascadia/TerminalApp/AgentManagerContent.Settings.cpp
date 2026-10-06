@@ -1475,6 +1475,13 @@ namespace winrt::TerminalApp::implementation
         _setTaskbarUnreadBadge.Header(winrt::box_value(L"Show the unread count on the taskbar icon"));
         AgentSetTip(_setTaskbarUnreadBadge, L"Put a red number on Agentmaster's taskbar button: how many sessions finished while you weren't looking and are still unread \x2014 the tabs whose status dot is flashing, plus any you chose Mark Unread on, across every window. Each newly unread session adds one; visiting its tab (or switching back to the window it finished in) takes it off. Windows' own \x201CShow badges on taskbar apps\x201D (Settings \x203A Personalization \x203A Taskbar \x203A Taskbar behaviors) must be on too, and small taskbar buttons can't show it. Default on.");
         panel.Children().Append(_setTaskbarUnreadBadge);
+        // NOTIFICATIONS.md section 9: the PER-WINDOW twin of the count. The count says how many; the frame says WHICH
+        // window, on the window previews shown when you hover the taskbar button (and in Alt+Tab). Independent of
+        // the count and of the toasts, like the count is of the toasts.
+        _setTaskbarUnreadFrame = ToggleSwitch{};
+        _setTaskbarUnreadFrame.Header(winrt::box_value(L"Frame windows with unread tabs in their taskbar preview"));
+        AgentSetTip(_setTaskbarUnreadFrame, L"When you hover Agentmaster's taskbar button, each window shows a small preview. With this on, the preview of every window that still has an unread tab \x2014 a status dot flashing, or a tab you chose Mark Unread on \x2014 gets a frame in the status flashing color (red by default), so you can see which window needs you. Alt+Tab shows the same frame. The frame goes away when you have visited every unread tab in that window.\n\nWhile a window is framed, Agentmaster draws its preview itself: a picture of the window, refreshed when you leave it, when you resize it and every 20 seconds. A minimized window keeps its last picture. Default on.");
+        panel.Children().Append(_setTaskbarUnreadFrame);
 
         // === COMMANDS tab (COMMANDS.md §6a) ===
         // The /handover slash-command family: rename + enable/disable each command. Everything
@@ -2850,6 +2857,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setTaskbarUnreadBadge.IsOn(_appSettings.taskbarUnreadBadge);
         }
+        if (_setTaskbarUnreadFrame)
+        {
+            _setTaskbarUnreadFrame.IsOn(_appSettings.taskbarUnreadThumbnailFrame);
+        }
         // COMMANDS tab (COMMANDS.md §6a): seed the /handover-family controls, and capture the LIVE
         // names from DISK — the engine-owned materialized-name markers, RMW'd at engine init, are
         // what is actually bound/on-disk THIS RUN ("" == disabled) — so the status lines can stage
@@ -3545,6 +3556,10 @@ namespace winrt::TerminalApp::implementation
         if (_setTaskbarUnreadBadge)
         {
             _appSettings.taskbarUnreadBadge = _setTaskbarUnreadBadge.IsOn();
+        }
+        if (_setTaskbarUnreadFrame)
+        {
+            _appSettings.taskbarUnreadThumbnailFrame = _setTaskbarUnreadFrame.IsOn();
         }
         // COMMANDS tab (COMMANDS.md §6a): store the /handover-family names NORMALIZED +
         // COLLISION-HEALED (the same ResolveCommandNameTriple the Persistence load applies, so the

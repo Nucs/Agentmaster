@@ -124,6 +124,21 @@ void AppHost::_TaskbarUnreadCountChanged(const winrt::Windows::Foundation::IInsp
     }
 }
 
+// Agentmaster (taskbar preview frame; NOTIFICATIONS.md section 9): the page raised TaskbarUnreadFrameChanged — this
+// window gained its first unread tab, lost its last one, or the frame switch / the flash-ring color changed. Re-read
+// the color (the event carries none, the SetTaskbarProgress idiom) and let the IslandWindow frame or unframe the
+// window's taskbar / Alt+Tab preview. The page de-duplicates, so every call is a real change. UI thread; raised
+// synchronously from the page's unread bookkeeping, which is safe because SetTaskbarUnreadFrame only makes Win32 / DWM
+// calls and queues a thread-pool capture — nothing here calls back into the page or XAML.
+void AppHost::_TaskbarUnreadFrameChanged(const winrt::Windows::Foundation::IInspectable& /*sender*/,
+                                         const winrt::Windows::Foundation::IInspectable& /*args*/)
+{
+    if (_windowLogic && _window)
+    {
+        _window->SetTaskbarUnreadFrame(_windowLogic.TaskbarUnreadFrameArgb());
+    }
+}
+
 // Method Description:
 // - Retrieve any commandline args passed on the commandline, and pass them to
 //   the WindowManager, to ask if we should become a window process.
@@ -268,6 +283,7 @@ void AppHost::Initialize()
     _revokers.CloseWindowRequested = _windowLogic.CloseWindowRequested(winrt::auto_revoke, { this, &AppHost::_CloseRequested });
     _revokers.SetTaskbarProgress = _windowLogic.SetTaskbarProgress(winrt::auto_revoke, { this, &AppHost::SetTaskbarProgress });
     _revokers.TaskbarUnreadCountChanged = _windowLogic.TaskbarUnreadCountChanged(winrt::auto_revoke, { this, &AppHost::_TaskbarUnreadCountChanged }); // Agentmaster (taskbar unread badge)
+    _revokers.TaskbarUnreadFrameChanged = _windowLogic.TaskbarUnreadFrameChanged(winrt::auto_revoke, { this, &AppHost::_TaskbarUnreadFrameChanged }); // Agentmaster (taskbar preview frame)
     _revokers.IdentifyWindowsRequested = _windowLogic.IdentifyWindowsRequested(winrt::auto_revoke, { this, &AppHost::_IdentifyWindowsRequested });
     _revokers.WindowSizeChanged = _windowLogic.WindowSizeChanged(winrt::auto_revoke, { this, &AppHost::_WindowSizeChanged });
 

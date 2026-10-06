@@ -714,6 +714,7 @@ void TestAppSettings()
         in.notifySuppressFocused = false;
         in.notifySound = false;
         in.taskbarUnreadBadge = false; // the taskbar-button unread count (NOTIFICATIONS.md section 8)
+        in.taskbarUnreadThumbnailFrame = false; // the per-window taskbar preview frame (NOTIFICATIONS.md section 9)
         in.hiddenSessionIds = { L"11111111-1111-1111-1111-111111111111", L"22222222-2222-2222-2222-222222222222" };
         // Side panel (window chrome) new-window defaults — all four non-default.
         in.sidePanelOnLeft = false; // non-default (default true = dock LEFT) — an explicit RIGHT must survive
@@ -810,6 +811,7 @@ void TestAppSettings()
         CHECK(out.notifySuppressFocused == false, "settings notifySuppressFocused round-trip (stored OFF)");
         CHECK(out.notifySound == false, "settings notifySound round-trip (stored OFF)");
         CHECK(out.taskbarUnreadBadge == false, "settings taskbarUnreadBadge round-trip (stored OFF)");
+        CHECK(out.taskbarUnreadThumbnailFrame == false, "settings taskbarUnreadThumbnailFrame round-trip (stored OFF)");
         CHECK(out.hiddenSessionIds.size() == 2 &&
                   out.hiddenSessionIds[0] == L"11111111-1111-1111-1111-111111111111" &&
                   out.hiddenSessionIds[1] == L"22222222-2222-2222-2222-222222222222",
@@ -911,6 +913,7 @@ void TestAppSettings()
         CHECK(out.notifySuppressFocused == true, "settings notifySuppressFocused default ON on empty");
         CHECK(out.notifySound == true, "settings notifySound default ON on empty");
         CHECK(out.taskbarUnreadBadge == true, "settings taskbarUnreadBadge default ON on empty (a pre-feature settings.json gets the count)");
+        CHECK(out.taskbarUnreadThumbnailFrame == true, "settings taskbarUnreadThumbnailFrame default ON on empty (a pre-feature settings.json gets the frame)");
         CHECK(out.hiddenSessionIds.empty(), "settings hiddenSessionIds empty on empty");
         // Side panel defaults: dock LEFT, 22% wide, 50/50 split, expanded — and unlike the
         // summary-panel fractions there is NO 0 "auto" sentinel (these ARE the new-window values).

@@ -54,6 +54,7 @@
 #include "AgentMaster/SessionScanner.h" // PresenceIsWorking + the toast HOLD gates (ShouldHoldCompletionToast / DecideHeldToast / ShouldSuppressDuplicateToast) — System notifications
 #include "AgentMaster/SessionStore.h" // IsSessionFavorite (the FAVORITE crown on a managed tab's status dot)
 #include "AgentMaster/TabDragMath.h" // DecideTabStripRevealOffset — the tab-strip reveal decision (_AdjustStripToRevealItem)
+#include "AgentMaster/TaskbarThumbnail.h" // FrameColor — the taskbar preview frame's alpha floor (NOTIFICATIONS.md section 9)
 #include "AgentMaster/TranscriptStore.h" // Agentmaster (tab color modes): LoadOrRefreshSessionIndex + InferWorkingDirectory (the inferred-workdir scan)
 #include <winrt/Windows.UI.Xaml.Shapes.h> // Agentmaster (tab tooltip): the header state-dot Ellipse in the summary card
 
@@ -3998,6 +3999,43 @@ namespace winrt::TerminalApp::implementation
         return _taskbarUnreadCount;
     }
 
+    // Agentmaster (taskbar preview frame; NOTIFICATIONS.md section 9): the frame color for THIS window's taskbar /
+    // Alt+Tab preview, cached by _ApplyTaskbarUnreadFrame so the AppHost's re-read on every TaskbarUnreadFrameChanged is
+    // a member load. Returns 0xAARRGGBB, never 0 while the frame is on (the alpha floor), or 0 for "no frame".
+    uint32_t TerminalPage::TaskbarUnreadFrameArgb() const noexcept
+    {
+        return _taskbarUnreadFrameArgb;
+    }
+
+    // Agentmaster (taskbar preview frame; NOTIFICATIONS.md section 9): decide whether THIS window's preview is framed,
+    // and in which color, and tell the AppHost when that changed. Framed = the cog switch
+    // (AppSettings::taskbarUnreadThumbnailFrame) is on AND this window's own published unread set is non-empty -- the
+    // tabs whose status dot flashes, plus Mark Unread: exactly the set the taskbar count sums, so the frame and the
+    // count can never disagree about a window. The color is the flash ring's (the user's "unread" color) with its
+    // alpha raised to at least 50% (TaskbarThumbnail::FrameColor), which also keeps an "on" value non-zero. Called after
+    // every change of the published set (_PublishAgentUnreadSessions) and after a settings change (the cog Save + the
+    // cross-window broadcast carry the switch and the color). The raise reaches the AppHost synchronously, which reads
+    // the color back (TaskbarUnreadFrameArgb, a member load), makes Win32 / DWM calls and queues a thread-pool capture
+    // -- it never re-enters XAML. UI thread.
+    void TerminalPage::_ApplyTaskbarUnreadFrame()
+    {
+        uint32_t argb = 0;
+        if (_appSettings.taskbarUnreadThumbnailFrame && !_publishedUnreadSessions.empty())
+        {
+            const auto color = _FlashRingColorFromSettings();
+            argb = ::Agentmaster::TaskbarThumbnail::FrameColor((static_cast<uint32_t>(color.A) << 24) |
+                                                               (static_cast<uint32_t>(color.R) << 16) |
+                                                               (static_cast<uint32_t>(color.G) << 8) |
+                                                               static_cast<uint32_t>(color.B));
+        }
+        if (argb == _taskbarUnreadFrameArgb)
+        {
+            return;
+        }
+        _taskbarUnreadFrameArgb = argb;
+        TaskbarUnreadFrameChanged.raise(*this, nullptr);
+    }
+
     // Agentmaster (taskbar unread badge): hand this window's unread set to the engine's census. The set is the union
     // of _flashingSessions (the automatic "left Running while you weren't looking" ring) and _manualUnreadSessions
     // (the sticky Mark Unread) — exactly the tabs whose status dot flashes, so the taskbar number and the rings on
@@ -4022,6 +4060,12 @@ namespace winrt::TerminalApp::implementation
         // arrives through the same dispatcher hop as everyone else's (_ApplyTaskbarUnreadCount) — never inline here,
         // where it would re-enter the AppHost from the middle of the flash bookkeeping. Never throws (noexcept).
         ::Agentmaster::PublishWindowUnreadSessions(_windowId, std::move(ids));
+        // The taskbar preview FRAME (NOTIFICATIONS.md section 9) is THIS window's own fact, so it needs no census and
+        // no hop: an empty <-> non-empty flip of the set just published frames or unframes this window's preview. Safe
+        // inline, unlike the count above: the AppHost's handler reads the color back through TaskbarUnreadFrameArgb()
+        // (a member load, already updated before the raise) and then makes only Win32 / DWM calls -- no XAML, nothing
+        // that reaches the flash bookkeeping this call is in the middle of.
+        _ApplyTaskbarUnreadFrame();
     }
 
     // Agentmaster (taskbar unread badge): re-read the census's count, gate it by the cog's switch, and tell the AppHost

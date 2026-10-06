@@ -79,6 +79,10 @@ private:
     // Agentmaster (taskbar unread badge; NOTIFICATIONS.md section 8): the page's unread count changed — re-read it
     // and hand it to the IslandWindow, which paints (or clears) the taskbar overlay. Both args are unused.
     void _TaskbarUnreadCountChanged(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& args);
+    // Agentmaster (taskbar preview frame; NOTIFICATIONS.md section 9): THIS window gained its first unread tab, lost its
+    // last one, or the frame setting / color changed — re-read the frame color and hand it to the IslandWindow, which
+    // frames (or unframes) the window's taskbar / Alt+Tab preview. Both args are unused.
+    void _TaskbarUnreadFrameChanged(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& args);
 
     void _IdentifyWindowsRequested(winrt::Windows::Foundation::IInspectable sender,
                                    winrt::Windows::Foundation::IInspectable args);
@@ -155,6 +159,7 @@ private:
         winrt::TerminalApp::TerminalWindow::CloseWindowRequested_revoker CloseWindowRequested;
         winrt::TerminalApp::TerminalWindow::SetTaskbarProgress_revoker SetTaskbarProgress;
         winrt::TerminalApp::TerminalWindow::TaskbarUnreadCountChanged_revoker TaskbarUnreadCountChanged; // Agentmaster (taskbar unread badge)
+        winrt::TerminalApp::TerminalWindow::TaskbarUnreadFrameChanged_revoker TaskbarUnreadFrameChanged; // Agentmaster (taskbar preview frame)
         winrt::TerminalApp::TerminalWindow::IdentifyWindowsRequested_revoker IdentifyWindowsRequested;
         winrt::TerminalApp::TerminalWindow::IsQuakeWindowChanged_revoker IsQuakeWindowChanged;
         winrt::TerminalApp::TerminalWindow::SummonWindowRequested_revoker SummonWindowRequested;

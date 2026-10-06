@@ -80,6 +80,9 @@ namespace TerminalApp
         // Agentmaster (taskbar unread badge, NOTIFICATIONS.md section 8): the PROCESS-WIDE unread-session count this
         // window paints on its taskbar button; 0 = no badge (also while the Settings switch is off).
         UInt32 TaskbarUnreadCount { get; };
+        // Agentmaster (taskbar preview frame, NOTIFICATIONS.md section 9): THIS window's preview-frame color, 0xAARRGGBB,
+        // while one of its tabs is unread; 0 = no frame (also while the Settings switch is off).
+        UInt32 TaskbarUnreadFrameArgb { get; };
 
         Windows.UI.Xaml.Media.Brush TitlebarBrush { get; };
         void WindowActivated(Boolean activated);
@@ -94,6 +97,7 @@ namespace TerminalApp
         event Windows.Foundation.TypedEventHandler<Object, Object> Initialized;
         event Windows.Foundation.TypedEventHandler<Object, Object> SetTaskbarProgress;
         event Windows.Foundation.TypedEventHandler<Object, Object> TaskbarUnreadCountChanged; // Agentmaster: re-read TaskbarUnreadCount
+        event Windows.Foundation.TypedEventHandler<Object, Object> TaskbarUnreadFrameChanged; // Agentmaster: re-read TaskbarUnreadFrameArgb
         event Windows.Foundation.TypedEventHandler<Object, Object> IdentifyWindowsRequested;
         event Windows.Foundation.TypedEventHandler<Object, RenameWindowRequestedArgs> RenameWindowRequested;
         event Windows.Foundation.TypedEventHandler<Object, Object> SummonWindowRequested;

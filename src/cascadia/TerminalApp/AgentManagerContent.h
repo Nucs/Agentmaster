@@ -1211,6 +1211,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setNotifySuppressFocused{ nullptr }; // skip the toast when the session's tab is focused in the active window (default ON)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setNotifySound{ nullptr }; // play the Windows notification sound (OFF => <audio silent/>; default ON)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setTaskbarUnreadBadge{ nullptr }; // the unread-session count on the taskbar button (AppSettings::taskbarUnreadBadge, NOTIFICATIONS.md section 8; default ON; deliberately NOT greyed by the toast master)
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setTaskbarUnreadFrame{ nullptr }; // the per-window frame on the taskbar / Alt+Tab preview of a window with unread tabs (AppSettings::taskbarUnreadThumbnailFrame, NOTIFICATIONS.md section 9; default ON; independent of the count and the toast master)
         // COMMANDS tab (COMMANDS.md §6a): the /handover slash-command family — each command's
         // Enable toggle + Command-name box + a status line reading the LIVE vs CONFIGURED state
         // ("Active as /x" / "becomes /y after restart" / "disabled after restart"). Rename +

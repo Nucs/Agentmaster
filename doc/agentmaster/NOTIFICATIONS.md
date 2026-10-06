@@ -1,7 +1,11 @@
 # System notifications — Windows toasts when a session leaves Running
 
 > **Also here: the taskbar unread count (§8)** — a red number on Agentmaster's taskbar button counting the
-> unread sessions across every window (an `ITaskbarList3` overlay icon). Written, NOT BUILT yet.
+> unread sessions across every window (an `ITaskbarList3` overlay icon). In release 0.6.8.13 since 2026-09-27.
+>
+> **And the unread FRAME on a window's taskbar preview (§9)** — when you hover Agentmaster's taskbar button, each
+> window that holds an unread tab shows its preview inside a frame in the flash-ring color (red by default); the
+> frame goes away when every tab of that window is read. Also in Alt+Tab. Written 2026-10-06, NOT BUILT yet.
 
 > Status: **complete — the Settings cog "Notifications" tab + the Running → X toast pipe + click-to-surface
 > (bring the hosting window to the FRONT and jump to the session's tab), via a per-identity TOAST COM
@@ -289,10 +293,14 @@ the track leak-proof:
   re-lights Running ~20 s later — the 513d1366 repro); when the background work finally quiets, the true
   settle fires ONE toast (`[notify] … (held Ns)` when it rode a hold); a W→R→W flap inside 20 s logs
   `[notify-dedupe]` for the second entry.
-- ⏳ **Taskbar unread count (§8) — written, NOT BUILT, harness not yet run.** New engine-harness suites
+- ✅ **Taskbar unread count (§8) — in release 0.6.8.13 since 2026-09-27.** Engine-harness suites
   `TestTaskbarBadge` (the renderer, incl. the real GDI glyph pass and the icon drawn with `DrawIconEx` over a
   green canvas) + `TestUnreadCensus` (the census on a local `Engine`), plus the `taskbarUnreadBadge` settings
-  round-trip. Runtime checklist, per §8.6.
+  round-trip. `TestTaskbarBadge` keeps 3 known failures that are test bugs, not renderer bugs (pixel samples
+  and a centroid tolerance). Runtime checklist, per §8.6.
+- ⏳ **Taskbar preview frame (§9) — written 2026-10-06, NOT BUILT.** `TestTaskbarThumbnail` (106 checks) passes;
+  every changed C++ file passes a syntax-only compile with the last build's own flags, except the three projected
+  `TerminalApp` members that only a real build generates (§9.7). Runtime checklist, per §9.7.
 
 ## 8. The taskbar unread count (the number on the taskbar button)
 
@@ -410,6 +418,138 @@ per window (TerminalPage, UI thread): _flashingSessions ∪ _manualUnreadSession
   visiting one → **1**; leave a running session on screen, switch to another app, let it finish → the count rises,
   and clicking back into the window clears it; Mark Unread adds one; the cog switch OFF clears the button in every
   window; restarting explorer.exe brings the badge back; a 125%/150% DPI monitor shows crisp digits.
+
+## 9. The unread frame on a window's taskbar preview
+
+The count (§8) says HOW MANY sessions are unread. It cannot say WHERE: every Agentmaster window shares one taskbar
+button. Hovering that button opens the flyout with one preview per window, and Alt+Tab shows the same previews. A
+window that holds an unread tab now shows its preview inside a **frame** in the flash-ring color (red by default).
+The frame goes away when every tab of that window is read. The request (2026-10-06): "can the window that produced
+the notification be circled in red when I hover on the windows on the Windows taskbar … When we no longer have
+notifications on that window, clear the red (all tabs are read)."
+
+### 9.1 What frames a window
+
+- **The window's OWN unread set** — the same set the count sums (§8.1): the tabs whose status dot carries the flash
+  ring, plus Mark Unread. Non-empty = framed; empty = unframed. So the frame, the rings and the count never disagree.
+- **Per window**, unlike the count: the frame marks which preview to look at.
+- **It clears** by every path that clears the rings: visiting each unread tab, **activating the window** (it clears its
+  focused tab's automatic flash, §8.2), the session going back to Running, Move to Idle/Done, the tab closing or
+  leaving the window.
+- **Color:** `AppSettings::flashRingColor` (the user's "unread" color, default 80% red `#CCFF0000`), with its alpha
+  raised to at least 50% (`TaskbarThumbnail::FrameColor`): a near-transparent pick must not make the frame vanish
+  while the feature still captures. The switch (§9.6) is the way to turn it off.
+
+### 9.2 Why an "iconic" thumbnail (the only per-window mark)
+
+Windows draws each preview itself, as a live copy of the window, and has no API to tint or outline one window's
+preview. Measured on a disposable Windows 11 25H2 (26200) desktop with the probe `tools/taskbar-thumbnail-probe`:
+
+| Cue | Marks ONE window's preview? |
+|---|---|
+| `FlashWindowEx` | no — it flashes the combined taskbar button |
+| `ITaskbarList3` progress state (red / error) | no — the combined button |
+| `SetOverlayIcon` | no — per group (§8.3) |
+| An emoji in the window title / a different `WM_SETICON` | only the caption above the preview; no frame, and it changes the title everywhere |
+| Thumbnail toolbar buttons | shown below every window's preview alike |
+| **DWM iconic bitmap** (`DWMWA_FORCE_ICONIC_REPRESENTATION` + `DWMWA_HAS_ICONIC_BITMAP`) | **yes** — DWM shows OUR bitmap instead of the live preview, in the flyout AND in Alt+Tab |
+
+So a framed window hands DWM a capture of itself with the frame painted on it (`DwmSetIconicThumbnail`), and the
+full-size hover "peek" a capture without the frame (`DwmSetIconicLivePreviewBitmap`). Clearing the two attributes
+gives the live preview back at once.
+
+### 9.3 The pipeline
+
+```
+TerminalPage (UI thread): _PublishAgentUnreadSessions — after every change of THIS window's unread set
+  └─ _ApplyTaskbarUnreadFrame: (switch on && set non-empty) ? FrameColor(flashRingColor) : 0, raised only on a change
+       (also from the cog Save and the settings broadcast: the switch and the color are GLOBAL)
+       └─ TaskbarUnreadFrameChanged → TerminalWindow (forward) → AppHost::_TaskbarUnreadFrameChanged
+            └─ IslandWindow::SetTaskbarUnreadFrame(argb)
+                 on:  both iconic attributes + a 20 s refresh timer, then a refresh
+                 off: clear both attributes (DWM's live preview is back), stop the timers, drop the remembered capture
+```
+
+- **The capture runs on a thread-pool worker.** Every Agentmaster window shares ONE UI thread (UI_THREAD.md), and a
+  capture of a large window takes tens of milliseconds. `PrintWindow(PW_CLIENTONLY | PW_RENDERFULLCONTENT)` makes DWM
+  render the window's composition tree, XAML and swap-chain terminal text included (19–49 ms for a 1113x627 Windows
+  Terminal under WARP). The worker never holds the state lock across a capture or a DWM call; the UI thread only
+  takes the lock to record a request.
+- **At most one worker per window** (`TaskbarThumbnail::JobBook`): requests that arrive while a pass runs (a refresh, a
+  DWM request, a peek) merge into its next pass, so a burst costs one capture, never a queue of stale ones.
+- **A refresh** = capture → fit into the box → box-filter downscale → paint the frame → `DwmInvalidateIconicBitmaps`
+  → `DwmSetIconicThumbnail` **immediately** after (microseconds apart). The invalidation drops DWM's stale peek
+  bitmap; the immediate store keeps Alt+Tab from finding the stored preview empty (§9.4).
+- **Refresh triggers:** turning the frame on or a new color; the window losing activation (the moment its preview is
+  most likely to be looked at next); the 20 s timer (skipped while minimized); a resize, maximize or restore and a
+  DPI change (debounced 400 ms, so a drag-resize costs one capture after it settles).
+- **DWM's requests:** `WM_DWMSENDICONICTHUMBNAIL` carries the largest preview it accepts (lParam: HIWORD = width,
+  LOWORD = height). The window learns that box (per DPI) and answers on the worker, reusing a capture under 1.5 s
+  old when it is large enough. `WM_DWMSENDICONICLIVEPREVIEWBITMAP` gets a fresh full-size capture at the client
+  area's offset; a minimized window leaves it to DWM, which then draws its own generic placeholder.
+- **The box, in order:** DWM's own request; the box it asked for last at this DPI; an ESTIMATE (96% of 200x120 per
+  96 DPI) until DWM rejects one. With none left, a refresh only invalidates, so DWM asks at its next display.
+- **The picture, in order:** a fresh capture; the remembered capture (shrunk to at most 640 px: the picture of a
+  minimized window, or the fallback for a capture that came back black); a PLACEHOLDER card (#202020, the app icon
+  centered, the window's restored shape) when neither exists.
+- **Rendering** (`AgentMaster/TaskbarThumbnail.h`, header-only, plain Win32 — the EXE and the harness both include
+  it): `FitInside` (aspect kept, rounded down: never larger than the box), `DownscaleBgra` (box filter, exact
+  footprints, opaque), `FrameThickness` (about 1/24 of the shorter side: 4 px at 200x108), `DrawFrame` (the color's
+  own alpha blended over the band), `LooksBlank`, `CreateTopDownDib`.
+
+### 9.4 What was measured (the traps)
+
+- **Alt+Tab shows the window it pre-selects BLACK** when DWM holds no stored bitmap at the moment Alt+Tab opens, and
+  it never asks again for that window during that Alt+Tab. An invalidate-and-wait design showed it black every time;
+  hence the immediate store after every invalidation.
+- **A bitmap larger than DWM's maximum is rejected** with `E_INVALIDARG` (`0x80070057`), and DWM tells the window
+  that maximum only in `WM_DWMSENDICONICTHUMBNAIL` (a 704x381 window got 200x108 at 100% scaling: width 200, height
+  from the window's aspect). Hence the learned box, and the estimate kept under it until then.
+- **Without `DwmInvalidateIconicBitmaps`, DWM keeps the FIRST peek bitmap forever.**
+- **Without `PW_RENDERFULLCONTENT`, the capture is black.** With it, a thread-pool thread of the window's own process
+  captures fine.
+- **DWM asks only while something displays the preview**; an unsolicited `DwmSetIconicThumbnail` is accepted,
+  replaces the request, and updates an OPEN flyout live.
+- **A minimized window** keeps the last stored preview; an unanswered peek request makes DWM draw its own placeholder.
+- **Rejected approaches:** a pre-rendered live-preview bitmap and `DWMWA_DISALLOW_PEEK` both made Alt+Tab items black.
+
+### 9.5 Cost
+
+- An unframed window: nothing (no attribute, no timer, no worker).
+- A framed window: one capture per refresh, on a pool thread; about 1.6 MB for the remembered capture.
+- While framed, DWM shows a SNAPSHOT up to 20 s old instead of the live picture. At about 200 px wide, terminal text
+  is unreadable anyway; the hover peek is a fresh full-size capture.
+
+### 9.6 Setting + logs
+
+- `taskbarUnreadThumbnailFrame` — Notifications ▸ TASKBAR ▸ "Frame windows with unread tabs in their taskbar
+  preview", default ON, a missing key ⇒ ON. Applied live: the cog Save re-evaluates this window, the settings
+  broadcast every other one. A flash-ring color change recolors framed windows the same way.
+- `[taskbar-frame]` lines in hooks.log (from the EXE, `Startup::Note`): `window 0x… framed (color …; iconic attributes
+  …/…)`, `… unframed …`, `… preview box WxH at N DPI (asked by the shell)`, `… captured black …` (once per framing),
+  `… has no picture yet … showing the placeholder card` (once per framing), `… preview WxH rejected (0x…)` (once per
+  distinct failure), `… preview stored again after an earlier failure`, and a `… threw …` line for a contained
+  exception.
+
+### 9.7 Limits + verification
+
+- **NOT BUILT; never run against a real Agentmaster window.** Verified so far: the probe on the VM (Windows Terminal,
+  WARP); `TestTaskbarThumbnail` (106 checks: the sizes, the frame, the downscale, the blank check, the job book, and
+  the GDI half on real DCs); a syntax-only compile of every changed C++ file with the last build's own flags. The three
+  projected members `TerminalWindow.TaskbarUnreadFrameArgb` / `TaskbarUnreadFrameChanged` (+ its revoker) exist only
+  after a build regenerates the `TerminalApp` projection, so `AppHost` was checked by review against the unread-count
+  wiring it copies line for line.
+- **Self-capture on a real GPU is not measured yet.** A capture that comes back black is detected and falls back (the
+  remembered picture, else the placeholder card), and it is logged.
+- **A race at the first frame:** between setting the attributes and the first stored bitmap (one capture, tens of
+  milliseconds), an Alt+Tab opened at that instant shows the pre-selected window black.
+- **A window framed while minimized**, never captured before, shows the placeholder card until it is restored.
+- **Runtime checklist** (pends a build/deploy — permission-gated): let a session finish in a tab of window B while you
+  work in window A → hover the taskbar button: B's preview has the frame, A's has not; hooks.log has
+  `[taskbar-frame] window 0x… framed`. Alt+Tab shows the frame too. Visit B's unread tab → the frame is gone at once
+  (`… unframed`). Mark Unread frames the window; minimize a framed window → its preview keeps the framed picture;
+  the cog switch OFF unframes every window; a new flash-ring color recolors the frame; at 150% scaling the log shows
+  a new box; no `rejected` line after the first DWM request.
 
 ## Follow-ups (non-blocking)
 

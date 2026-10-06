@@ -1955,6 +1955,10 @@ namespace winrt::TerminalApp::implementation
                 // Taskbar unread count (NOTIFICATIONS.md section 8): the switch is GLOBAL — turning it off clears this
                 // window's overlay now (on repaints the census's current count); other windows follow via the broadcast.
                 self->_ApplyTaskbarUnreadCount();
+                // Taskbar preview frame (NOTIFICATIONS.md section 9): its switch and its color (the flash-ring color,
+                // re-read just above) are GLOBAL — unframe / reframe / recolor this window's preview now; other windows
+                // follow via the broadcast.
+                self->_ApplyTaskbarUnreadFrame();
                 // Per-tab overlay rest/hover opacities are GLOBAL (TAB_OVERLAY.md) — push the (possibly
                 // changed) pair to every hosted overlay so the badge/summary dim<->bright updates live; other
                 // windows pick it up via the broadcast below.
@@ -2301,6 +2305,9 @@ namespace winrt::TerminalApp::implementation
         // Taskbar unread count (NOTIFICATIONS.md section 8): the switch is GLOBAL — a change made in another window
         // clears (or repaints) THIS window's taskbar overlay too; every combined button must agree.
         _ApplyTaskbarUnreadCount();
+        // Taskbar preview frame (NOTIFICATIONS.md section 9): the switch and the flash-ring color are GLOBAL — a change
+        // made in another window unframes / recolors THIS window's preview too.
+        _ApplyTaskbarUnreadFrame();
         // Per-tab overlay rest/hover opacities are GLOBAL (TAB_OVERLAY.md) — apply a change made in another
         // window to this window's overlays live too.
         _RefreshOverlayOpacities();

@@ -1129,6 +1129,14 @@ namespace winrt::TerminalApp::implementation
         return _root ? _root->TaskbarUnreadCount() : 0u;
     }
 
+    // Agentmaster (taskbar preview frame; NOTIFICATIONS.md section 9): the color the AppHost frames THIS window's
+    // taskbar / Alt+Tab preview in, read on every TaskbarUnreadFrameChanged. 0 (no frame) until the page exists — a new
+    // page holds no unread tab, and it raises the event on its first one, so nothing is missed.
+    uint32_t TerminalWindow::TaskbarUnreadFrameArgb()
+    {
+        return _root ? _root->TaskbarUnreadFrameArgb() : 0u;
+    }
+
     winrt::Windows::UI::Xaml::Media::Brush TerminalWindow::TitlebarBrush()
     {
         return _root ? _root->TitlebarBrush() : nullptr;
