@@ -55,6 +55,13 @@ Agentmaster process block  →  Global (AppSettings.env)  →  Per-dir (dir-env.
   so it can never be clobbered). `AM_SESSION` / `WT_SESSION` are set by the connection; a user value is
   ignored (the lexer warns).
 - One set, **both agents** — Claude and Codex read the same merge (proxies/keys usually apply to both).
+- ⚠ **Claude Code's own settings files win over this whole chain.** At startup claude copies the `env`
+  block of its settings files (`~/.claude/settings.json`, the project and local files, and the
+  `--settings` file) over its process environment (measured 2026-10-06; `~/.claude/CLAUDE.Bash.md`,
+  "OpenRouter Models in Claude Code"). So a variable set here, Global or Per-directory, does not reach
+  claude when one of those files sets the same name — for example `ANTHROPIC_DEFAULT_OPUS_MODEL`,
+  which the user's `~/.claude/settings.json` pins. [`HARNESSES.md`](./HARNESSES.md) (proposal) writes
+  its values into the `--settings` file for this reason.
 
 ## 3. Engine API (pure + unit-tested) — `ClaudeSpawn.{h,cpp}`
 
