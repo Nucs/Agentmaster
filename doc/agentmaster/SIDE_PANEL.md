@@ -73,6 +73,11 @@ the panel:
   `#606060` under the pointer or during a drag. Each bar is its own grab area, so the drag target is
   3 px too; a wider invisible hit area would have to overlap the terminal's edge or the cards and
   take their pointer input.
+- **Their tooltips open only after 7 s of rest** (`kSidePanelSplitterTipDelay`, 2026-10-06; every
+  other Agentmaster tip opens after ~133 ms). A tip that opened while the user aimed at a bar got in
+  the way of the drag. Any move restarts the 7 s, and a drag never shows the tip: the press silences
+  it (`AgentSuppressTip` — an open tip closes, a pending one is cancelled) and the drag's end
+  (`endWidthDrag` / `endSplitDrag`, on release or capture loss) gives the text back.
 
 ## 2. TOP — the session cards (the Triage-Board integration, vertical)
 

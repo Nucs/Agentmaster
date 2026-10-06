@@ -36,7 +36,9 @@
 //
 // Behavior preserved from the old recipe:
 //  - OPEN FAST: ~1/3 of the system tooltip hover time (SPI_GETMOUSEHOVERTIME, default 400 ms
-//    ⇒ ~133 ms), per-call overridable (the dense Triage-Board cards hold back 4 s).
+//    ⇒ ~133 ms), per-call overridable (the dense Triage-Board cards hold back 4 s, the side
+//    panel's two drag separators 7 s — a tip that opens while the user aims at a thin bar to drag
+//    it gets in the way of the drag).
 //  - Open only after the pointer comes to REST: while the tip is still waiting to open, a move
 //    RE-ARMS the one-shot; once OPEN, moves are ignored (the flicker fix — opening a popup fires
 //    a synthetic PointerMoved that would otherwise close+reopen it forever).
@@ -528,6 +530,10 @@ namespace winrt::TerminalApp::implementation
     // — a ToolTip attached to the card for its whole life (AgentSessionToolTipHost) — and this helper's shared
     // tip must stay off the card, because its open does ToolTipService::SetToolTip(card, sharedTip), REPLACING
     // the rich one, and its close does SetToolTip(card, nullptr), detaching it.
+    // Also used by the side panel's two drag separators for the length of a drag (TerminalPage.AgentSidePanel.cpp):
+    // the press calls this so a tip that is open closes and none can open mid-drag, and the drag's end gives the
+    // text back with AgentSetTip. While a tip is open the host ignores moves and only a PointerExited closes it,
+    // and a resize drag keeps the bar under the pointer, so an open tip could otherwise stay up during the drag.
     //   el — the element whose tip goes quiet; an element that was never tipped is left untouched (no wiring
     //        is created just to hold an empty text).
     //   throws — whatever a property write on a live UI-thread element throws (callers run contained paths).

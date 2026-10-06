@@ -170,6 +170,23 @@ namespace
     constexpr uint8_t kSidePanelSplitterIdleGray = 0x3E; // #3E3E3E — resting divider, subtly lighter than the panel
     constexpr uint8_t kSidePanelSplitterHotGray = 0x60; // #606060 — the pointer-over / drag highlight
 
+    // How long the pointer must REST on a drag separator before its tooltip opens: 7 s (2026-10-06), where
+    // every other AgentSetTip tip opens after ~133 ms. Each separator is a thin bar the user aims at to drag
+    // it, and a tip that opened while they aimed got in the way of the drag (the user's report); after 7 s
+    // the tip shows only for someone who stops on the bar on purpose. Any move restarts the wait
+    // (AgentTipHelpers' rest rule). Applies to these two bars only.
+    // Tradeoff: a user who wants the explanation waits 7 s for it. A drag never shows it at all: the press
+    // silences the tip until the drag ends (AgentSuppressTip in each PointerPressed, the text given back by
+    // endWidthDrag / endSplitDrag), so a tip that was already open also closes when the drag starts.
+    constexpr std::chrono::milliseconds kSidePanelSplitterTipDelay{ 7000 };
+
+    // The two separators' tooltip texts, named once: each is set when its bar is built and set again when a
+    // drag on the bar ends (the press emptied it).
+    constexpr const wchar_t* kSidePanelWidthSplitterTip =
+        L"Drag to resize the side panel.\nThis window remembers its own width; the last resize anywhere becomes the default for new windows.";
+    constexpr const wchar_t* kSidePanelSplitSplitterTip =
+        L"Drag to rebalance the cards list and the summary.\nThis window remembers its own split; the last resize anywhere becomes the default for new windows.";
+
     // Case-fold for the in-process matchers (MatchesQueryText expects PRE-FOLDED haystacks; the
     // parser pre-folds the needles into SearchTerm::textLower). Per-character towlower — the same
     // basis the search module uses, so a term that matches on the Sessions page matches here.
@@ -501,6 +518,12 @@ namespace winrt::TerminalApp::implementation
                 if (const auto el = sender.try_as<UIElement>())
                 {
                     el.CapturePointer(e.Pointer());
+                    // Keep the tooltip out of the drag (kSidePanelSplitterTipDelay): a tip already open closes,
+                    // a pending open is cancelled, and the emptied text keeps every move of the drag from arming
+                    // it again. Without this, a tip open at the press could stay up while the bar follows the
+                    // pointer (the tip host ignores moves while a tip is open, and only leaving the bar closes
+                    // it), and a pause in the drag could open one. endWidthDrag gives the text back.
+                    AgentSuppressTip(el);
                 }
                 ApplyCursor(CoreCursorType::SizeWestEast);
                 e.Handled(true);
@@ -532,6 +555,10 @@ namespace winrt::TerminalApp::implementation
                 if (const auto el = sender.try_as<UIElement>())
                 {
                     el.ReleasePointerCapture(e.Pointer());
+                    // The drag is over: the bar gets back the tooltip its press emptied, with the same 7 s wait.
+                    // This lambda serves both PointerReleased and PointerCaptureLost, and only its first call per
+                    // drag gets past the _sidePanelDragWidth gate, so the tip is silent exactly while a drag runs.
+                    AgentSetTip(el, winrt::hstring{ kSidePanelWidthSplitterTip }, kSidePanelSplitterTipDelay);
                 }
                 ApplyCursor(CoreCursorType::Arrow);
                 if (const auto b = sender.try_as<Border>())
@@ -547,7 +574,7 @@ namespace winrt::TerminalApp::implementation
             };
             _sidePanelSplitter.PointerReleased(endWidthDrag);
             _sidePanelSplitter.PointerCaptureLost(endWidthDrag);
-            AgentSetTip(_sidePanelSplitter, winrt::hstring{ L"Drag to resize the side panel.\nThis window remembers its own width; the last resize anywhere becomes the default for new windows." });
+            AgentSetTip(_sidePanelSplitter, winrt::hstring{ kSidePanelWidthSplitterTip }, kSidePanelSplitterTipDelay); // opens after 7 s of rest only
         }
 
         // --- The panel host -----------------------------------------------------------------------
@@ -858,6 +885,9 @@ namespace winrt::TerminalApp::implementation
                 if (const auto el = sender.try_as<UIElement>())
                 {
                     el.CapturePointer(e.Pointer());
+                    // The tooltip stays out of the drag, as on the vertical bar: closed if open, a pending open
+                    // cancelled, silent until endSplitDrag gives the text back.
+                    AgentSuppressTip(el);
                 }
                 ApplyCursor(CoreCursorType::SizeNorthSouth);
                 e.Handled(true);
@@ -888,6 +918,8 @@ namespace winrt::TerminalApp::implementation
                 if (const auto el = sender.try_as<UIElement>())
                 {
                     el.ReleasePointerCapture(e.Pointer());
+                    // The drag is over: give back the tooltip the press emptied (once per drag, as in endWidthDrag).
+                    AgentSetTip(el, winrt::hstring{ kSidePanelSplitSplitterTip }, kSidePanelSplitterTipDelay);
                 }
                 ApplyCursor(CoreCursorType::Arrow);
                 if (const auto b = sender.try_as<Border>())
@@ -902,7 +934,7 @@ namespace winrt::TerminalApp::implementation
             };
             _sidePanelHSplitter.PointerReleased(endSplitDrag);
             _sidePanelHSplitter.PointerCaptureLost(endSplitDrag);
-            AgentSetTip(_sidePanelHSplitter, winrt::hstring{ L"Drag to rebalance the cards list and the summary.\nThis window remembers its own split; the last resize anywhere becomes the default for new windows." });
+            AgentSetTip(_sidePanelHSplitter, winrt::hstring{ kSidePanelSplitSplitterTip }, kSidePanelSplitterTipDelay); // opens after 7 s of rest only
         }
         Grid::SetRow(_sidePanelHSplitter, 1);
         _sidePanelBody.Children().Append(_sidePanelHSplitter);
