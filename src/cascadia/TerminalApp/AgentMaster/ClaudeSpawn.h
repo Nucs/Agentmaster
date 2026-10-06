@@ -32,6 +32,12 @@
 
 namespace Agentmaster
 {
+    // Agentmaster (PRESETS, LaunchPresets.h): what one launch adds to the plain spawn — the settings file's
+    // env block, --model / --effort / --append-system-prompt / extra arguments, and the process env (the
+    // AM_PRESET stamp + the one-hop key variable). Forward-declared so this widely included header does
+    // not pull Json.h; ClaudeSpawn.cpp includes the definition.
+    struct CompiledClaudeLaunch;
+
     struct ClaudeSpawnSpec
     {
         std::wstring sessionId; // lowercase hyphenated UUID (== --session-id == CCMGR_SESSION_ID)
@@ -39,9 +45,14 @@ namespace Agentmaster
         std::wstring workingDir; // the M axis
         std::wstring title; // display title
         std::wstring pipeName; // \\.\pipe\agentmaster.<pid>
-        std::wstring settingsPath; // materialized hooks settings file (backslash form)
+        std::wstring settingsPath; // materialized hooks settings file (backslash form) — a preset's launch settings file when it needs one
         std::wstring forwarderPath; // materialized forwarder script (backslash form)
-        std::vector<std::pair<std::wstring, std::wstring>> env; // child env overrides
+        std::vector<std::pair<std::wstring, std::wstring>> env; // child env overrides (a preset's token variable rides here: never log it)
+        // Agentmaster (PRESETS): the process variable holding a provider key for ONE hop ("" = none).
+        // Pass it to BuildPwshHostedCommandline, which moves it into ANTHROPIC_AUTH_TOKEN for the claude
+        // call only — forgetting it leaves the key out of claude's env, and the launch fails with 401.
+        std::wstring authTokenEnv;
+        std::wstring presetId; // Agentmaster (PRESETS): the preset this launch compiled ("" = none) — for the [spawn] log line
     };
 
     // --- pure helpers (no filesystem / OS state) ---
@@ -178,7 +189,28 @@ namespace Agentmaster
     //   PsDoubleQuote — the managed commandline is invoked by the pwsh host's `&` operator
     //   (BuildPwshHostedCommandline), so PowerShell parsing rules govern the arg. Empty => no arg
     //   (byte-identical to the pre-parameter commandline).
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view modelOverride = {}, std::wstring_view initialPrompt = {});
+    // extraArgs (Agentmaster, PRESETS): pre-rendered claude arguments (RenderLaunchExtraArgs: --effort,
+    //   --append-system-prompt, the preset's own extra arguments), inserted AFTER --model and BEFORE the
+    //   positional initial prompt — claude's parser takes the positional after every flag, so a flag after
+    //   it would become part of the prompt. Empty => byte-identical to the pre-parameter commandline.
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view modelOverride = {}, std::wstring_view initialPrompt = {}, std::wstring_view extraArgs = {});
+
+    // Agentmaster (PRESETS): render a compiled launch's command-line additions — `--effort <level>`, then
+    // `--append-system-prompt "<note>"` (PsDoubleQuote: the managed command line runs under the pwsh host's
+    // `&` operator, so PowerShell parses it), then the preset's extra arguments verbatim. --model is NOT
+    // here: BuildClaudeCommandline's modelOverride carries it, so a preset model and a picked model quote
+    // the same way.
+    //   launch - the compiled launch.
+    // Returns the arguments with no leading space ("" when the launch adds none). Pure.
+    std::wstring RenderLaunchExtraArgs(const CompiledClaudeLaunch& launch);
+
+    // Agentmaster (PRESETS): splice an `"env": {...}` block into a settings document built by
+    // BuildHooksSettingsJson, so a preset's launch settings file carries the hooks AND its env (claude takes
+    // ONE --settings value). Keys and values are JSON-escaped; an empty `env` returns `hooksJson` unchanged.
+    //   hooksJson - BuildHooksSettingsJson's output (a JSON object ending in "}\n").
+    //   env       - the NAME/VALUE pairs, in order.
+    // Returns the combined document. Pure.
+    std::wstring BuildLaunchSettingsJson(std::wstring_view hooksJson, const std::vector<std::pair<std::wstring, std::wstring>>& env);
 
     // Assemble the codex (OpenAI Codex CLI) command line (Agentmaster — Codex managed-session
     // support). Codex CANNOT pin a session id and takes NO --settings (unlike claude), so a FRESH
@@ -216,7 +248,15 @@ namespace Agentmaster
     // correlates exactly like a hand-typed one; our env (CCMGR_* / AM_SESSION) rides pwsh and is
     // inherited by the child; --settings is in the inner command line. `pwshLauncher` is the resolved
     // pwsh/powershell full path (empty => the bare `pwsh.exe` token). Pure + unit-tested.
-    std::wstring BuildPwshHostedCommandline(std::wstring_view pwshLauncher, std::wstring_view innerCommandline);
+    // authTokenEnv (Agentmaster, PRESETS): the name of a process variable holding a provider key for ONE
+    // hop (ClaudeSpawnSpec::authTokenEnv). Non-empty => the script copies it into ANTHROPIC_AUTH_TOKEN,
+    // removes the carrier, runs the inner command, and removes ANTHROPIC_AUTH_TOKEN in a `finally`:
+    //   $env:ANTHROPIC_AUTH_TOKEN = $env:<name>; Remove-Item Env:<name> ...; try { & <inner> } finally { ... }
+    // so the pwsh prompt the tab keeps after claude exits (-NoExit) holds no key — a plain `claude` typed
+    // there would otherwise send the provider's key to Anthropic and fail with 401. A name that is not
+    // [A-Za-z0-9_] is ignored (it is always our own constant; the guard keeps the script injection-free).
+    // Empty => byte-identical to the pre-parameter command line.
+    std::wstring BuildPwshHostedCommandline(std::wstring_view pwshLauncher, std::wstring_view innerCommandline, std::wstring_view authTokenEnv = {});
 
     // Convert backslashes to forward slashes (safe inside double-quoted args + JSON).
     std::wstring ToForwardSlashes(std::wstring_view path);
@@ -676,6 +716,26 @@ namespace Agentmaster
     // nothing meaningful for the caller.
     std::pair<std::wstring, std::wstring> MaterializeSharedHookFiles(const std::wstring& stateDir, const AppSettings& settings, std::wstring_view claudeExePath = {});
 
+    // Agentmaster (PRESETS, doc/agentmaster/HARNESSES.md §6.1): write the settings file a preset launch
+    // passes as --settings — the SAME hooks object as the shared hooks file (BuildHooksSettingsJson, so
+    // the two can never drift), the preset's main model as `model`, and the compiled env block.
+    // CONTENT-ADDRESSED: <stateDir>\launch-settings\<preset>-<hash>.json, written once and never
+    // rewritten. Claude Code WATCHES its settings files, so rewriting a file a running session uses would
+    // change that session; an immutable file per distinct content cannot, and every session of one preset
+    // with one configuration shares one file. A preset edit, a new hook form after a claude upgrade, or a
+    // cog change produces a new name. The file holds no key (the key rides the process env only).
+    // An existing file is reused only when its bytes equal the content (else it is broken and rewritten),
+    // and every write is ATOMIC (temp + rename): a partial file under a content-addressed name would be
+    // reused by every later identical launch.
+    //   stateDir      — the ACTIVE profile dir.
+    //   settings      — the cog settings (co-authored-by, permission mode, the fallback model).
+    //   claudeExePath — the native claude.exe (picks exec-form vs shell-form hooks, like the shared file).
+    //   forwarderPath — the shared forwarder (MaterializeSharedHookFiles' second path).
+    //   launch        — the compiled launch (its model + settingsEnv).
+    // Returns the file's path in backslash form, or "" on I/O failure (the caller then falls back to the
+    // shared hooks file and logs it — the session starts without the preset's env rather than not at all).
+    std::wstring MaterializeLaunchSettingsFile(const std::wstring& stateDir, const AppSettings& settings, std::wstring_view claudeExePath, const std::wstring& forwarderPath, const CompiledClaudeLaunch& launch);
+
     // Resolve the real `claude` launcher on PATH (searched as claude.exe/.cmd/.bat, in that
     // order). MUST be called BEFORE the shim dir is prepended to PATH so it never resolves to
     // our own shim. Returns the full path, or empty if claude is not found on PATH. Used to author
@@ -1055,14 +1115,19 @@ namespace Agentmaster
     // WindowRecord tab ref) across the restart rather than churning a new id every reopen. Collision-free
     // because a transcript-less fork's id is unused on disk. Ignored unless forkFromSessionId is set.
     // `modelOverride` (Agentmaster, launch-model picker): non-empty => the commandline carries
-    // ` --model <id>` — the per-LAUNCH model picked from an "Open New Session Here" submenu (see
-    // BuildClaudeCommandline). Per-launch only, deliberately NOT persisted on the session: a later
-    // resume/restart follows the settings model again (the pick was for THAT launch).
+    // ` --model <id>` (see BuildClaudeCommandline). Ignored when `launch` is given: the compiled launch's
+    // own model applies. The launch seams no longer pass a raw pick here — they compile it into `launch`
+    // (LaunchPresetsOs.h), which is also what makes the pick stick to the session (the launchArgs snapshot).
     // `initialPrompt` (Agentmaster, COMMANDS.md — the /handover successor): non-empty => the
     // commandline carries it as the trailing positional prompt claude submits as the session's
     // FIRST turn (see BuildClaudeCommandline). Per-launch only, never persisted: a restart/resume
     // must not re-submit it (the turn already ran and lives in the transcript).
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view forkIntoSessionId = {}, std::wstring_view modelOverride = {}, std::wstring_view initialPrompt = {});
+    // `launch` (Agentmaster, PRESETS): the compiled preset or model pick (nullptr = the plain spawn,
+    // byte-identical to before). It supplies --model, the command-line additions, the AM_PRESET stamp
+    // and the key variable (spec.env + spec.authTokenEnv), and — when it carries env values — a launch
+    // settings file instead of the shared hooks file (MaterializeLaunchSettingsFile). The caller owns
+    // refusing a launch whose compile failed (CompiledClaudeLaunch::error); this builder does not check.
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view forkIntoSessionId = {}, std::wstring_view modelOverride = {}, std::wstring_view initialPrompt = {}, const CompiledClaudeLaunch* launch = nullptr);
 
     // Build a spec to RELAUNCH an existing managed conversation IN PLACE — the tab's connection died and
     // the user hit "Restart session" (WT's restartConnection). Unlike BuildClaudeSpawn it NEVER mints a
@@ -1079,5 +1144,9 @@ namespace Agentmaster
     // fork (would re-fork a since-grown id). `claudeLauncher` is the resolved full path (BuildClaudeSpawn
     // semantics); `forkParentId` is the session's persisted fork SOURCE (SessionInfo::forkParentId; empty
     // for a non-fork or once the fork produced content).
-    ClaudeSpawnSpec BuildClaudeRestartSpec(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view sessionId, const AppSettings& settings, std::wstring_view claudeLauncher = {}, std::wstring_view forkParentId = {});
+    // `launch` (Agentmaster, PRESETS): the session's compiled launchArgs snapshot (nullptr = none, the
+    // plain relaunch). A restart is "the same session again", so it MUST carry the session's preset or
+    // model — RESTART.md defect 5 ("launch flags are dropped") for a preset session would mean the
+    // conversation silently moves to another provider and model. Same semantics as BuildClaudeSpawn's.
+    ClaudeSpawnSpec BuildClaudeRestartSpec(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view sessionId, const AppSettings& settings, std::wstring_view claudeLauncher = {}, std::wstring_view forkParentId = {}, const CompiledClaudeLaunch* launch = nullptr);
 }

@@ -754,6 +754,18 @@ void TestSpawnBuilders()
         // A bare inner token (codex fresh, or claude's empty-launcher fallback) is still invoked via &.
         const auto hostedCodex = BuildPwshHostedCommandline(L"C:\\bin\\pwsh.exe", L"codex resume 019ec0c7");
         CHECK(b64decodeToWide(hostedCodex.substr(hostedCodex.rfind(L' ') + 1)) == L"& codex resume 019ec0c7", "pwsh host: bare inner token invoked via &");
+        // PRESETS (HARNESSES.md §6.3): a preset's key arrives in a carrier variable and lives in
+        // ANTHROPIC_AUTH_TOKEN for the claude call ONLY — the carrier is removed before claude starts and the
+        // token in `finally`, so the pwsh prompt -NoExit leaves in the tab never holds a key.
+        const auto hostedKey = BuildPwshHostedCommandline(L"C:\\bin\\pwsh.exe", inner, L"AM_PRESET_TOKEN");
+        CHECK(b64decodeToWide(hostedKey.substr(hostedKey.rfind(L' ') + 1)) ==
+                  L"$env:ANTHROPIC_AUTH_TOKEN = $env:AM_PRESET_TOKEN; Remove-Item Env:AM_PRESET_TOKEN -ErrorAction Ignore; try { & " + inner +
+                      L" } finally { Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction Ignore }",
+              "pwsh host: a key carrier becomes ANTHROPIC_AUTH_TOKEN for the claude call only (carrier removed first, token removed in finally)");
+        // The carrier NAME is spliced into the script, so anything outside [A-Za-z0-9_] is refused outright.
+        const auto hostedBadName = BuildPwshHostedCommandline(L"C:\\bin\\pwsh.exe", inner, L"X; Remove-Item C:\\");
+        CHECK(b64decodeToWide(hostedBadName.substr(hostedBadName.rfind(L' ') + 1)) == L"& " + inner,
+              "pwsh host: a carrier name outside [A-Za-z0-9_] is refused (no script injection)");
     }
 }
 

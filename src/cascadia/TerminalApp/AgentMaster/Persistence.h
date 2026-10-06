@@ -202,6 +202,22 @@ namespace Agentmaster
     //         dropped (first spelling kept), capped at kMaxModelListEntries.
     // Throws std::bad_alloc only.
     void ResetModelList(const std::vector<std::wstring>& ids);
+    // Agentmaster (PRESETS, doc/agentmaster/HARNESSES.md): the path of <profile>\launch-presets.json —
+    // the user's preset list, provider overrides and seeded-template record (LaunchPresets.h owns the
+    // format; LaunchPresetsOs.h caches it). Its own file, not an AppSettings field, for the model-list
+    // reason above: settings.json is a read-modify-write document several surfaces contend for.
+    // Returns the full path. Throws std::bad_alloc only.
+    std::wstring LaunchPresetsPath();
+    // The raw text of launch-presets.json ("" when the file is missing or unreadable — the loader then
+    // reads an empty config and seeds the shipped templates). Throws std::bad_alloc only.
+    std::wstring LoadLaunchPresetsText();
+    // Write launch-presets.json atomically (temp + rename; a failure is logged as [persist-fail], like
+    // every other profile file). Only the Settings cog's Save calls it, so it never races a reader's
+    // in-memory seed.
+    //   text    - the whole document (LaunchPresetsConfigToJson).
+    //   returns - true when the file now holds `text`.
+    // Throws std::bad_alloc only.
+    bool SaveLaunchPresetsText(std::wstring_view text);
     void SaveLayout(const ManagerLayout& layout);
     ManagerLayout LoadLayout();
     void SaveAppSettings(const AppSettings& settings);

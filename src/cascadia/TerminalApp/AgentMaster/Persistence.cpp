@@ -1863,6 +1863,20 @@ namespace Agentmaster
         // user chose and the next prompt must still open with the one they last committed.
         SaveModelList(out);
     }
+    std::wstring LaunchPresetsPath()
+    {
+        return AgentmasterStateDir() + L"\\launch-presets.json";
+    }
+    std::wstring LoadLaunchPresetsText()
+    {
+        return ReadAllUtf8(LaunchPresetsPath());
+    }
+    bool SaveLaunchPresetsText(std::wstring_view text)
+    {
+        // WriteAllUtf8 is the atomic temp+rename writer every profile file uses; it logs a failed
+        // write as [persist-fail] itself, so a refused write is visible without a second log here.
+        return WriteAllUtf8(LaunchPresetsPath(), text);
+    }
     void SaveOpenWindows(const std::vector<std::wstring>& windowIds)
     {
         WriteAllUtf8(AgentmasterStateDir() + L"\\open-windows.json", SerializeOpenWindows(windowIds));

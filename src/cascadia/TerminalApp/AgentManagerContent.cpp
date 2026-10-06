@@ -236,6 +236,14 @@ namespace winrt::TerminalApp::implementation
             }
             CATCH_LOG();
         }
+        if (_launchHoverTimer)
+        {
+            try
+            {
+                _launchHoverTimer.Stop(); // PRESETS: the Launch button's hover-intent delay (its Tick holds only a weak ref)
+            }
+            CATCH_LOG(); // a teardown off the UI thread throws RPC_E_WRONG_THREAD here — never let it escape a destructor
+        }
     }
 
     std::wstring AgentManagerContent::_WorkDirOf(const ::Agentmaster::SessionInfo& s) const
@@ -1078,8 +1086,41 @@ namespace winrt::TerminalApp::implementation
 
             _launchBtn = Button{};
             _launchBtn.Content(winrt::box_value(L"Launch Claude"));
-            AgentSetTip(_launchBtn, L"Start the selected agent in the working directory above \x2014 or resume the conversation when a session id is entered.");
-            _launchBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnLaunch(); });
+            AgentSetTip(_launchBtn, L"Start the selected agent in the working directory above \x2014 or resume the conversation when a session id is entered. Hover to pick a model or a preset for the new session.");
+            _launchBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                if (_launchHoverTimer)
+                {
+                    _launchHoverTimer.Stop(); // a click is a decision: the hover menu must not pop after it
+                }
+                _OnLaunch();
+            });
+            // PRESETS (HARNESSES.md §8.2): hovering the button opens the "Open New Session Here" picker
+            // (Default · Specify… · models · presets) after a short intent delay; leaving before it fires
+            // opens nothing. The Tick holds only a weak ref, so a torn-down content is never touched.
+            _launchHoverTimer = DispatcherTimer{};
+            _launchHoverTimer.Interval(std::chrono::milliseconds{ 450 });
+            _launchHoverTimer.Tick([weak = get_weak()](const IInspectable&, const IInspectable&) {
+                if (auto self = weak.get())
+                {
+                    if (self->_launchHoverTimer)
+                    {
+                        self->_launchHoverTimer.Stop(); // one-shot
+                    }
+                    self->_ShowLaunchMenu();
+                }
+            });
+            _launchBtn.PointerEntered([this](const IInspectable&, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
+                if (_launchHoverTimer && !_launchMenu)
+                {
+                    _launchHoverTimer.Start(); // Start() restarts the interval, so a re-entry waits the full delay
+                }
+            });
+            _launchBtn.PointerExited([this](const IInspectable&, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
+                if (_launchHoverTimer)
+                {
+                    _launchHoverTimer.Stop();
+                }
+            });
             _launchBtns.Children().Append(_launchBtn);
 
             // Fork — hidden unless the box holds a FOUND session id; forks that conversation into a

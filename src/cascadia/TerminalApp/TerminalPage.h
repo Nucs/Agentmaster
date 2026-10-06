@@ -43,6 +43,7 @@ namespace winrt::Microsoft::Terminal::Settings
 // TerminalPage can hold them by shared_ptr; SessionModels.h (value types) is included
 // because restore passes a SessionInfo by value.
 #include "AgentMaster/DraftCarry.h" // Agentmaster (PENDING_INPUT.md §11): PasteJournalEntry / DraftFillPaste — the fork carry's by-value pump state
+#include "AgentMaster/LaunchPresets.h" // Agentmaster (PRESETS, HARNESSES.md): LaunchArgs / CompiledClaudeLaunch — the launch seams' by-value snapshot + compile
 #include "AgentMaster/SessionModels.h"
 #include "AgentMaster/SessionStore.h" // Agentmaster (bookmark tags): GlobalTagInfo (by-value member — the Tag panel's cached universe)
 #include "AgentMaster/TranscriptStore.h" // Agentmaster (Sessions page): SessionIndexEntry (by-value member)
@@ -923,6 +924,10 @@ namespace winrt::TerminalApp::implementation
         // (_PromptClaudeMissing) is up, so a burst of not-found gates — e.g. a bulk Restore looping over
         // checked Claude sessions — collapses to a SINGLE dialog instead of stacking one per session.
         bool _claudeMissingPromptShowing{ false };
+        // Agentmaster (PRESETS): true while the "preset can't launch" notice is up (or queued this tick), so a
+        // burst — a window restore of several preset sessions with no key — shows ONE dialog. Re-armed when the
+        // dialog closes, and in its catch, or the notice could never show again for the window's life.
+        bool _presetLaunchErrorShowing{ false };
         // The visible row ids in TABLE (sorted+filtered) order — the Up/Down keyboard
         // navigation list (the archive page's _archiveVisibleOrder pattern). Rebuilt each render.
         std::vector<std::wstring> _sessionsVisibleOrder;
@@ -1162,7 +1167,7 @@ namespace winrt::TerminalApp::implementation
         bool _LeaveManagerPageOntoSelectedTab(const TerminalApp::Tab& tab);
         void _InitAgentmasterEngine(); // Agentmaster: start the SessionRegistry + hooks bridge
         void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition = -1, winrt::hstring model = {}); // Agentmaster (insertPosition: -1 == end/NewTabPosition default; a tab-context-menu spawn passes clickedIndex+1 so the new tab lands next to the clicked tab. model: the launch-model picker's per-LAUNCH `--model <id>` pick from an "Open New Session Here" submenu; "" = Default, the settings model)
-        TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId = {}, uint32_t insertPosition = -1, const std::wstring& modelOverride = {}, const std::wstring& initialPrompt = {}); // Agentmaster (returns the created tab; forkFromId set => fork that conversation into a new id; insertPosition threads tab placement, default -1 == end; modelOverride: launch-model picker — non-empty adds ` --model <id>` to THIS launch's commandline; initialPrompt: COMMANDS.md — non-empty rides the commandline as the positional prompt claude submits as the session's FIRST turn, the /handover successor's kickoff)
+        TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId = {}, uint32_t insertPosition = -1, const std::wstring& modelOverride = {}, const std::wstring& initialPrompt = {}, const std::wstring& inheritLaunchFromId = {}); // Agentmaster (PRESETS): modelOverride is now a LAUNCH TARGET — "" (inherit / Default), a model id, or "@<presetId>" — resolved by _ResolveLaunchForSpawn; an empty target reuses the snapshot of the resumed session, else the fork source, else inheritLaunchFromId (the /handover origin), and the result is stored under the new session id (launchArgs) so every later relaunch keeps it // Agentmaster (returns the created tab; forkFromId set => fork that conversation into a new id; insertPosition threads tab placement, default -1 == end; modelOverride: launch-model picker — non-empty adds ` --model <id>` to THIS launch's commandline; initialPrompt: COMMANDS.md — non-empty rides the commandline as the positional prompt claude submits as the session's FIRST turn, the /handover successor's kickoff)
         void _HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPayload, const std::wstring& commandArgs = {}, bool inPlace = false, bool standby = false); // Agentmaster (COMMANDS.md): a /handover-family await resolved — if THIS window hosts the origin session's tab, FAN OUT one successor PER collected markdown (mdPayload = the '|'-joined path set, SplitWatchPaths): each HANDOVER-*.md starts its OWN "<title> (handover N)" successor whose first user message is THAT file's content, via the per-file delivery tiers (commandline under the escaped budget; full-document bracketed-paste injection above it; NEVER truncated), tabs in write order right of the origin. commandArgs = the typed command's <command-args> verbatim — its LEADING words may name a §6b per-message successor-model hint ("/handover [fable] do x…", PickModelFromArgsHint), overriding the per-command Successor-model combo for THIS handover only. inPlace=false (/handover) spawns every successor as a new tab; inPlace=true (/handover-here) puts the FIRST file's successor INTO the origin tab via _RestartTabIntoFreshSession (additional files beside it), degrading to the new-tab spawn if the in-place swap is unavailable. standby=true (/handover-standby, §5b — mutually exclusive with inPlace) spawns new tabs like /handover but delivers NOTHING at launch: every file (content AND pointer alike) rides the pump's STANDBY lane, which TYPES it into the successor's input box without submitting (BuildPromptFill — one Enter away; the commandline tier is structurally excluded because a positional prompt auto-submits)
         std::wstring _RestartTabIntoFreshSession(const TerminalApp::Tab& originTab, const ::Agentmaster::SessionInfo& origin, const std::wstring& dir, const std::wstring& title, const std::wstring& initialPrompt, const std::wstring& modelOverride = {}); // Agentmaster (COMMANDS.md — /handover-here): REPLACE the origin session's live pane in place with a brand-new FRESH conversation — "Open New Session Here -> Default" spawn semantics (new minted id, the settings model unless the §6b per-command successor modelOverride is set, same dir) delivered through the Restart-session swap (_RestartManagedSession's recipe: HardResetWithoutErase + Connection swap + Start, scrollback kept); _BindClaudeSessionToTab's re-home block then archives the origin (live=false, injector cleared, resumable from Sessions) and re-keys the tab onto the successor. Returns the successor's session id ("" == refused/failed — the caller falls back to the new-tab spawn so the handover is never lost). UI thread only
         // Agentmaster (COMMANDS.md §5 — the over-budget /handover delivery): a successor spawned with a
@@ -1650,6 +1655,33 @@ namespace winrt::TerminalApp::implementation
         bool _CloseClaudeSessionLocal(const std::wstring& sessionId); // Agentmaster (cross-window folder-close): close the session's tab IN THIS WINDOW (skip-confirm), the receiving half of the close-session sink. Returns false when this window doesn't host the session's tab.
         TerminalApp::Tab _RestoreArchivedSession(winrt::hstring sessionId); // Agentmaster: re-launch (claude --resume / codex resume) an archived session — kind-aware; returns the created tab (null on gate/no-op) so the resume nav-END can log the actually-launched id
         void _AdoptExternalClaude(uint32_t pid, winrt::hstring cwd, bool fork); // Agentmaster (Fleet Observer): bring an EXTERNAL claude's conversation under management (fork==true => --fork-session into a NEW transcript [safe on a live external]; else --resume the same; fresh if none)
+        // Agentmaster (PRESETS, HARNESSES.md §6.4): tell the user why a preset session did not start — no key,
+        // no Base URL, or the picked preset was deleted. Buttons-only (XAML-Islands-safe), agentmaster-dark,
+        // deduped by _presetLaunchErrorShowing so a burst of refusals shows one dialog. Never throws (the
+        // body is contained; an escape from a fire_and_forget would terminate the app).
+        //   message - the refusal reason (CompiledClaudeLaunch::error or the LaunchArgsForTarget error).
+        winrt::fire_and_forget _PromptPresetLaunchError(std::wstring message);
+        // Agentmaster (PRESETS): the snapshot a session relaunches with — its own stored launchArgs, else (for a
+        // /clear successor, which runs in the SAME claude process as its predecessor) the predecessor's, walking
+        // continuedFromId up to 8 hops. A /handover link is NOT followed: a successor launched on Default must
+        // resume on Default, not inherit its origin's preset.
+        //   sessionId - the session.
+        // Returns the snapshot, or nullopt (the session launches on Default). UI thread or not: registry reads only.
+        std::optional<::Agentmaster::LaunchArgs> _StoredLaunchArgsFollowingChain(const std::wstring& sessionId);
+        // Agentmaster (PRESETS): the ONE launch-target decision every Claude launch seam makes. A non-empty
+        // `token` (a menu pick: "@<presetId>" or a model id) takes a NEW snapshot; an empty one reuses the
+        // snapshot of `inheritFromId` (the resumed / restarted / forked / handed-over-from session), if any.
+        // Then it compiles for THIS launch (the Windows-tier values and the key are read now).
+        //   token         - the menu pick ("" = none).
+        //   inheritFromId - the session whose snapshot an empty token reuses ("" = none: Default).
+        //   dir           - the launch directory (Per-directory env).
+        //   settings      - the app settings.
+        //   args          - receives the snapshot to store under the new session id (nullopt = Default).
+        //   compiled      - receives the compiled launch (nullopt = the plain spawn).
+        //   error         - receives the user-facing refusal reason.
+        // Returns false when the launch must be REFUSED (the caller logs it, shows the notice, and spawns
+        // nothing — a silent fallback would change the model and the account that pays for it).
+        bool _ResolveLaunchForSpawn(const std::wstring& token, const std::wstring& inheritFromId, const std::wstring& dir, const ::Agentmaster::AppSettings& settings, std::optional<::Agentmaster::LaunchArgs>& args, std::optional<::Agentmaster::CompiledClaudeLaunch>& compiled, std::wstring& error);
         winrt::fire_and_forget _PromptClaudeMissing(); // Agentmaster (native-exe-only policy): the page-level "Claude Code (native) not found" notice — shown by the launch choke points (Restore/Resume/Fork/Adopt/Spawn) when EnsureClaudeAvailable() is false and the Manager tab's rich modal can't render (full-window page / tab / CLI). Idempotent via _claudeMissingPromptShowing (collapses a bulk loop to one dialog); no Re-check by design — the next attempt re-resolves.
         // Agentmaster (Codex managed-session support): launch / restore a codex.exe on a ConPTY as a
         // MANAGED tab, on the same path as Claude. Codex can't pin a session id (no --session-id), so

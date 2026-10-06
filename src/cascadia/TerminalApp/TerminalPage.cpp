@@ -25,6 +25,7 @@
 #include "AgentMaster/Engine.h"
 #include "AgentMaster/HookWire.h"
 #include "AgentMaster/HooksBridge.h"
+#include "AgentMaster/LaunchPresetsOs.h" // PRESETS (HARNESSES.md): LaunchMenuEntries — the model menus list the visible presets after the models
 #include "AgentMaster/Persistence.h"
 #include "AgentMaster/ProcessInspect.h"
 #include "AgentMaster/ProcessObserver.h"
@@ -2952,7 +2953,7 @@ namespace winrt::TerminalApp::implementation
                     // — spawning Claude in its cwd — but keeps the plain "Fork session", which for it
                     // is really WT's duplicate-tab). The Tab change-gates the rebuilds, so an
                     // unchanged list costs only the one parse.
-                    const auto launchModels = ::Agentmaster::ParseLaunchModels(page->_appSettings.launchModels);
+                    const auto launchModels = ::Agentmaster::LaunchMenuEntries(page->_appSettings.launchModels);
                     // The "Specify..." item's opener is the PAGE's prompt (a Tab has no visual root
                     // of its own to host a modal in) — handed over here so the tab menu's submenus
                     // show the very same card the Manager and Sessions surfaces do.

@@ -52,6 +52,7 @@
 #include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
 #include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the shared tooltip-dismissal recipe
 #include "AgentModelMenu.h" // AgentFillModelPickItems / AgentModelEditHint — the shared "Open New Session Here ▸ <model>" picker (launch-model picker)
+#include "AgentMaster/LaunchPresetsOs.h" // PRESETS (HARNESSES.md): LaunchMenuEntries — the model menus list the visible presets after the models
 #include "AgentStatusColors.h" // ResolveTagDisplayColor / TagColorFor — the Tags column's bookmark ribbons
 #include "AgentMaster/ClaudeSpawn.h" // ClaudeProjectsDir / AppendStateLog
 #include "AgentMaster/Engine.h" // EnsureClaudeAvailable (native-exe-only launch gate)
@@ -1992,7 +1993,7 @@ namespace winrt::TerminalApp::implementation
                 MenuFlyoutSubItem forkBtn;
                 forkBtn.Text(L"Fork here");
                 SessSetTip(forkBtn, winrt::hstring{ L"Fork into a NEW BACKGROUND tab (claude --resume --fork-session) \x2014 the original is untouched; the list stays open. Pick the model the fork starts on, or Default. " } + AgentModelEditHint());
-                AgentFillModelPickItems(forkBtn.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), [this, rid, rdir, forkTitle](winrt::hstring model) {
+                AgentFillModelPickItems(forkBtn.Items(), ::Agentmaster::LaunchMenuEntries(_appSettings.launchModels), [this, rid, rdir, forkTitle](winrt::hstring model) {
                     Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid, rdir, forkTitle, model]() {
                         if (auto self = weak.get())
                         {
@@ -2011,7 +2012,7 @@ namespace winrt::TerminalApp::implementation
                 MenuFlyoutSubItem fresh;
                 fresh.Text(L"Open New Session Here");
                 SessSetTip(fresh, winrt::hstring{ L"Start a FRESH BACKGROUND session in this directory \x2014 the list stays open. Pick the model it starts on, or Default. " } + AgentModelEditHint());
-                AgentFillModelPickItems(fresh.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), [this, rdir](winrt::hstring model) {
+                AgentFillModelPickItems(fresh.Items(), ::Agentmaster::LaunchMenuEntries(_appSettings.launchModels), [this, rdir](winrt::hstring model) {
                     Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rdir, model]() {
                         if (auto self = weak.get())
                         {
@@ -2337,7 +2338,7 @@ namespace winrt::TerminalApp::implementation
             });
             {
                 MenuFlyout modelMenu;
-                AgentFillModelPickItems(modelMenu.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), forkHere, _ModelSpecifyOpener());
+                AgentFillModelPickItems(modelMenu.Items(), ::Agentmaster::LaunchMenuEntries(_appSettings.launchModels), forkHere, _ModelSpecifyOpener());
                 forkBtn.Flyout(modelMenu);
             }
             actions.Children().Append(forkBtn);
@@ -2362,7 +2363,7 @@ namespace winrt::TerminalApp::implementation
         });
         {
             MenuFlyout modelMenu;
-            AgentFillModelPickItems(modelMenu.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), spawnFreshHere, _ModelSpecifyOpener());
+            AgentFillModelPickItems(modelMenu.Items(), ::Agentmaster::LaunchMenuEntries(_appSettings.launchModels), spawnFreshHere, _ModelSpecifyOpener());
             fresh.Flyout(modelMenu);
         }
         actions.Children().Append(fresh);

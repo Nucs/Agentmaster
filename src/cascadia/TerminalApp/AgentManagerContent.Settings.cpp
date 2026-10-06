@@ -31,6 +31,7 @@
 // (settings-typed ids are printable), so it can never collide with something a user configured.
 static constexpr std::wstring_view kSpecifyModelSentinel = L"" "specify-model";
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
+#include "AgentMaster/LaunchPresetsOs.h" // PRESETS (HARNESSES.md): the Presets tab (config, keys, placeholders) + the successor combos' preset entries
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/RegexUtil.h" // COMMANDS.md §6b — live validation of the Commands tab's regex boxes
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
@@ -701,7 +702,7 @@ namespace winrt::TerminalApp::implementation
         card.BorderThickness(Thickness{ 1, 1, 1, 1 });
         card.CornerRadius(CornerRadius{ 8, 8, 8, 8 });
         card.Padding(Thickness{ 20, 16, 20, 16 });
-        card.Width(730); // Agentmaster: wider so the eight top-tab buttons (incl. Commands + Notifications) fit on one row
+        card.Width(800); // Agentmaster: wide enough for the nine top-tab buttons (incl. Presets, Commands + Notifications) on one row
         card.HorizontalAlignment(HorizontalAlignment::Center);
         card.VerticalAlignment(VerticalAlignment::Center);
         card.RequestedTheme(ElementTheme::Dark);
@@ -722,6 +723,8 @@ namespace winrt::TerminalApp::implementation
         // The eight group panels (built empty; filled by the sections below, in this label order).
         auto sessionsPanel = StackPanel{};
         sessionsPanel.Spacing(10);
+        auto presetsPanel = StackPanel{}; // PRESETS (HARNESSES.md §8.1): providers + named launch configurations
+        presetsPanel.Spacing(10);
         auto autorunnerPanel = StackPanel{};
         autorunnerPanel.Spacing(10);
         auto behaviorPanel = StackPanel{};
@@ -1072,6 +1075,8 @@ namespace winrt::TerminalApp::implementation
         // ENV_VARS.md: the two-tab "Environment variables" area (Global / Per-directory) replaces the old
         // single ;-delimited box. Built in its own method to keep this builder readable + the diff local.
         _BuildEnvVarsArea(panel);
+        // PRESETS (HARNESSES.md §8.1): its own tab, built here so it sits beside the Sessions code it extends.
+        _BuildPresetsArea(presetsPanel);
 
         // === CLAUDE tab ===
         panel = claudePanel;
@@ -2449,6 +2454,8 @@ namespace winrt::TerminalApp::implementation
         // (title -> tabs -> divider -> content -> Save/Cancel). _SwitchSettingsTab(0) below swaps the
         // Sessions panel into the scroller.
         addSettingsTab(L"Sessions", L"How new Claude sessions launch \x2014 permissions, model, environment variables, and the Launch box's directory history.", sessionsPanel);
+        _presetsTabIndex = static_cast<int>(_settingsTabButtons.size());
+        addSettingsTab(L"Presets", L"Named ways to start a Claude session \x2014 another provider (OpenRouter, Xiaomi MiMo, your own), its models, limits and arguments. Listed at the bottom of every Open New Session Here / Fork session menu.", presetsPanel);
         // Auto Testing is a DEV-OR-DEBUG feature: the Tests Autorunner defaults tab is added under the
         // AgentmasterDev package OR a `--debug` / AGENTMASTER_DEBUG release (IsDevOrDebugPackage; the
         // autorunner never runs otherwise — see Engine.cpp). The panel is still built above so the cog's
@@ -2624,6 +2631,12 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _settingsActiveTab = index;
+        if (index == _presetsTabIndex)
+        {
+            // The Global env editor (Sessions tab) may have changed since the last look: the gray text follows it.
+            _RebuildPresetProviders();
+            _RefreshPresetEditor();
+        }
         if (_settingsTabPanels[index])
         {
             _settingsScroll.Content(_settingsTabPanels[index]); // the ContentPresenter swap
@@ -2683,6 +2696,7 @@ namespace winrt::TerminalApp::implementation
         }
         // ENV_VARS.md: seed both env tabs (global text + the per-directory draft from dir-env.json).
         _LoadEnvVarsArea();
+        _LoadPresetsArea(); // PRESETS: a fresh draft from launch-presets.json (Cancel discards edits)
         if (_setClaudeExePath)
         {
             _setClaudeExePath.Text(winrt::hstring{ _appSettings.claudeExePath });
@@ -2877,7 +2891,8 @@ namespace winrt::TerminalApp::implementation
         // resetting to Default.
         if (_setCmdModelHandover && _setCmdModelHandoverHere && _setCmdModelStandby)
         {
-            const auto models = ::Agentmaster::ParseLaunchModels(_appSettings.launchModels);
+            // PRESETS: the combos list the visible presets too ("@<id>"), so a /handover successor can start on one.
+            const auto models = ::Agentmaster::LaunchMenuEntries(_appSettings.launchModels);
             const auto seedModelCombo = [&models](const winrt::Windows::UI::Xaml::Controls::ComboBox& combo, std::vector<std::wstring>& ids, const std::wstring& stored) {
                 combo.Items().Clear();
                 ids.clear();
@@ -3367,6 +3382,7 @@ namespace winrt::TerminalApp::implementation
         }
         // ENV_VARS.md: global editor -> _appSettings.env; flush the per-directory draft -> dir-env.json.
         _SaveEnvVarsArea();
+        _SavePresetsArea(); // PRESETS: launch-presets.json + typed keys into Windows Credential Manager
         if (_setClaudeExePath)
         {
             std::wstring p{ _setClaudeExePath.Text() };
@@ -4735,6 +4751,796 @@ namespace winrt::TerminalApp::implementation
             }
         }
         ::Agentmaster::SaveDirEnv(clean);
+    }
+
+    // ===== PRESETS tab (doc/agentmaster/HARNESSES.md §8.1) =====================================
+
+    namespace
+    {
+        // The first line of `s`, capped at 140 characters — a placeholder is one gray line, and the identity
+        // note's template text would otherwise fill a single-line box with an unreadable run.
+        //   s - any text.
+        // Returns the line ("…" appended when cut).
+        std::wstring PresetPlaceholderLine(const std::wstring& s)
+        {
+            std::wstring line = s.substr(0, s.find_first_of(L"\r\n"));
+            if (line.size() > 140)
+            {
+                line.resize(140);
+                line += L"\x2026";
+            }
+            return line;
+        }
+    }
+
+    ::Agentmaster::LaunchPreset* AgentManagerContent::_DraftPreset()
+    {
+        for (auto& p : _presetsDraft.presets)
+        {
+            if (p.id == _presetsSelectedId)
+            {
+                return &p;
+            }
+        }
+        return nullptr;
+    }
+
+    ::Agentmaster::LaunchProviderEntry* AgentManagerContent::_DraftProviderEntry(const std::wstring& id, bool create)
+    {
+        for (auto& e : _presetsDraft.providers)
+        {
+            if (e.id == id)
+            {
+                return &e;
+            }
+        }
+        if (!create || id.empty())
+        {
+            return nullptr;
+        }
+        ::Agentmaster::LaunchProviderEntry e;
+        e.id = id;
+        _presetsDraft.providers.push_back(std::move(e));
+        return &_presetsDraft.providers.back();
+    }
+
+    ::Agentmaster::PresetEnvLookup AgentManagerContent::_PresetsAgentmasterEnv()
+    {
+        // The env editor's CURRENT text (it may hold unsaved edits made in this same Settings session), so the
+        // gray text follows what the user is typing over on the Sessions tab. Global only: the cog has no
+        // folder, and a Per-directory value applies at launch on top of this.
+        const std::wstring text = _setEnv ? std::wstring{ _setEnv.Text() } : _appSettings.env;
+        auto vars = ::Agentmaster::MergeSessionEnv(text, L"");
+        return [vars = std::move(vars)](std::wstring_view name) -> std::wstring {
+            std::wstring found;
+            for (const auto& [k, v] : vars)
+            {
+                if (::Agentmaster::detail::PresetEqualsCi(k, name))
+                {
+                    found = v;
+                }
+            }
+            return found;
+        };
+    }
+
+    std::wstring AgentManagerContent::_PresetsKeyFor(const std::wstring& providerId, std::wstring* source)
+    {
+        const auto setSource = [&](const std::wstring& s) {
+            if (source)
+            {
+                *source = s;
+            }
+        };
+        setSource({});
+        if (const auto it = _presetKeyDraft.find(providerId); it != _presetKeyDraft.end() && !::Agentmaster::detail::PresetTrim(it->second).empty())
+        {
+            setSource(L"typed here, saved on Save");
+            return ::Agentmaster::detail::PresetTrim(it->second);
+        }
+        if (_presetKeyDelete.find(providerId) == _presetKeyDelete.end())
+        {
+            if (auto k = ::Agentmaster::ReadPresetProviderKey(providerId); !k.empty())
+            {
+                setSource(L"Windows Credential Manager");
+                return k;
+            }
+        }
+        const auto provider = ::Agentmaster::ResolveLaunchProvider(_presetsDraft, providerId);
+        if (provider.envPrefix.empty())
+        {
+            return {};
+        }
+        const std::wstring name = provider.envPrefix + L"_API_KEY";
+        if (auto k = ::Agentmaster::detail::PresetTrim(_PresetsAgentmasterEnv()(name)); !k.empty())
+        {
+            setSource(name + L" (Agentmaster env)");
+            return k;
+        }
+        if (auto k = ::Agentmaster::detail::PresetTrim(::Agentmaster::ReadWindowsEnvVar(name)); !k.empty())
+        {
+            setSource(name + L" (Windows)");
+            return k;
+        }
+        return {};
+    }
+
+    void AgentManagerContent::_BuildPresetsArea(const StackPanel& panel)
+    {
+        panel.Children().Append(SettingsSeparator(L"PROVIDERS", true));
+        {
+            auto intro = Text(L"Where a preset's requests go. Leave a box empty to use the value shown in gray, and where it comes from. A key you type here is stored in Windows Credential Manager, never in a file.", 11, false, 0.7);
+            intro.TextWrapping(TextWrapping::Wrap);
+            panel.Children().Append(intro);
+        }
+        _presetsProvidersHost = StackPanel{};
+        _presetsProvidersHost.Spacing(12);
+        panel.Children().Append(_presetsProvidersHost);
+        {
+            auto addProvider = Button{};
+            addProvider.Content(winrt::box_value(L"Add a custom provider"));
+            AgentSetTip(addProvider, L"Another Anthropic-compatible endpoint (GLM, Kimi, DeepSeek, a local proxy, ...): its name, the prefix of its env variables (<PREFIX>_API_KEY, <PREFIX>_BASE_URL, ...) and its Base URL.");
+            addProvider.Click([this](const IInspectable&, const RoutedEventArgs&) { _AddCustomProvider(); });
+            panel.Children().Append(addProvider);
+        }
+
+        panel.Children().Append(SettingsSeparator(L"PRESETS"));
+        {
+            auto intro = Text(L"A preset is a named way to start a Claude session: provider, models, limits and arguments. Visible presets are listed at the bottom of every \x201COpen New Session Here\x201D and \x201C" L"Fork session\x201D menu, and in the Launch button's hover menu. A session keeps the values it started with; editing a preset later never changes it.", 11, false, 0.7);
+            intro.TextWrapping(TextWrapping::Wrap);
+            panel.Children().Append(intro);
+        }
+        auto row = StackPanel{};
+        row.Orientation(Orientation::Horizontal);
+        row.Spacing(8);
+        _presetsPicker = ComboBox{};
+        _presetsPicker.MinWidth(300);
+        AgentSetTip(_presetsPicker, L"The preset to edit. (hidden) = not listed in the launch menus.");
+        _presetsPicker.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) {
+            if (_presetsLoading || !_presetsPicker)
+            {
+                return;
+            }
+            const int idx = _presetsPicker.SelectedIndex();
+            if (idx >= 0 && idx < static_cast<int>(_presetsPickerIds.size()))
+            {
+                _SelectPresetForEdit(_presetsPickerIds[static_cast<size_t>(idx)]);
+            }
+        });
+        row.Children().Append(_presetsPicker);
+
+        _presetsNewBtn = Button{};
+        _presetsNewBtn.Content(winrt::box_value(L"New \x25BE"));
+        AgentSetTip(_presetsNewBtn, L"A blank preset (named \x201CPreset N\x201D, on your Claude login until you pick a provider), or one made from a tested template: its empty boxes keep following the template.");
+        {
+            MenuFlyout newMenu;
+            MenuFlyoutItem blank;
+            blank.Text(L"Blank preset");
+            blank.Click([this](const IInspectable&, const RoutedEventArgs&) { _AddPreset({}); });
+            newMenu.Items().Append(blank);
+            newMenu.Items().Append(MenuFlyoutSeparator{});
+            for (const auto& t : ::Agentmaster::LaunchPresetTemplates())
+            {
+                MenuFlyoutItem it;
+                const auto nameIt = t.fields.find(::Agentmaster::kPresetFieldName);
+                const std::wstring name = nameIt == t.fields.end() ? t.id : nameIt->second;
+                it.Text(winrt::hstring{ L"From template: " + name });
+                AgentSetTip(it, winrt::hstring{ t.tested.empty() ? std::wstring{ L"Not tested yet." } : (L"Tested " + t.tested + L".") });
+                it.Click([this, id = t.id](const IInspectable&, const RoutedEventArgs&) { _AddPreset(id); });
+                newMenu.Items().Append(it);
+            }
+            _presetsNewBtn.Flyout(newMenu);
+        }
+        row.Children().Append(_presetsNewBtn);
+        auto dup = Button{};
+        dup.Content(winrt::box_value(L"Duplicate"));
+        AgentSetTip(dup, L"Copy the selected preset, with its template link and every value typed in it.");
+        dup.Click([this](const IInspectable&, const RoutedEventArgs&) { _DuplicatePreset(); });
+        row.Children().Append(dup);
+        auto del = Button{};
+        del.Content(winrt::box_value(L"Delete"));
+        AgentSetTip(del, L"Remove the selected preset (on Save). A deleted template preset does not come back by itself; make it again with New \x25B8 From template. Sessions that already use it keep their values.");
+        del.Click([this](const IInspectable&, const RoutedEventArgs&) { _DeletePreset(); });
+        row.Children().Append(del);
+        panel.Children().Append(row);
+
+        _presetEditor = StackPanel{};
+        _presetEditor.Spacing(8);
+        _presetTestedLine = Text(L"", 11, false, 0.7);
+        _presetTestedLine.TextWrapping(TextWrapping::Wrap);
+        _presetEditor.Children().Append(_presetTestedLine);
+
+        _presetShowInMenus = ToggleSwitch{};
+        _presetShowInMenus.Header(winrt::box_value(L"Show in the launch menus"));
+        AgentSetTip(_presetShowInMenus, L"Off = the preset stays here but is not offered in the menus.");
+        _presetShowInMenus.Toggled([this](const IInspectable&, const RoutedEventArgs&) {
+            if (_presetsLoading)
+            {
+                return;
+            }
+            if (auto* p = _DraftPreset())
+            {
+                p->hidden = !_presetShowInMenus.IsOn();
+                _RebuildPresetPicker(); // the "(hidden)" mark
+            }
+        });
+        _presetEditor.Children().Append(_presetShowInMenus);
+
+        _presetProviderCombo = ComboBox{};
+        _presetProviderCombo.Header(winrt::box_value(L"Provider"));
+        _presetProviderCombo.MinWidth(300);
+        if (const auto* spec = ::Agentmaster::FindPresetFieldSpec(::Agentmaster::kPresetFieldProvider))
+        {
+            AgentSetTip(_presetProviderCombo, winrt::hstring{ spec->tip });
+        }
+        _presetProviderCombo.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) {
+            if (_presetsLoading || !_presetProviderCombo)
+            {
+                return;
+            }
+            auto* p = _DraftPreset();
+            const int idx = _presetProviderCombo.SelectedIndex();
+            if (!p || idx < 0 || idx >= static_cast<int>(_presetProviderIds.size()))
+            {
+                return;
+            }
+            const auto& id = _presetProviderIds[static_cast<size_t>(idx)];
+            if (id.empty())
+            {
+                p->fields.erase(::Agentmaster::kPresetFieldProvider); // "as the template"
+            }
+            else
+            {
+                p->fields[::Agentmaster::kPresetFieldProvider] = id;
+            }
+            _RefreshPresetEditor(); // the env prefix and the visible fields depend on the provider
+        });
+        _presetEditor.Children().Append(_presetProviderCombo);
+
+        // One box per launch field, in the field table's order (the table also drives the snapshot and the
+        // compile, so a field shown here is exactly a field that launches).
+        _presetFieldBoxes.clear();
+        for (const auto& spec : ::Agentmaster::kPresetFieldSpecs)
+        {
+            if (spec.kind == ::Agentmaster::PresetFieldKind::Provider)
+            {
+                continue; // the combo above
+            }
+            auto box = TextBox{};
+            box.Header(winrt::box_value(winrt::hstring{ spec.label }));
+            const bool multi = spec.kind == ::Agentmaster::PresetFieldKind::Json || spec.kind == ::Agentmaster::PresetFieldKind::EnvLines ||
+                               spec.kind == ::Agentmaster::PresetFieldKind::Multiline;
+            if (multi)
+            {
+                box.AcceptsReturn(true);
+                box.TextWrapping(TextWrapping::Wrap);
+                box.MinHeight(56);
+                box.MaxHeight(140);
+                ScrollViewer::SetVerticalScrollBarVisibility(box, ScrollBarVisibility::Auto);
+            }
+            if (spec.kind == ::Agentmaster::PresetFieldKind::Json || spec.kind == ::Agentmaster::PresetFieldKind::EnvLines)
+            {
+                box.FontFamily(FontFamily{ L"Consolas" });
+                box.FontSize(12);
+            }
+            std::wstring tip{ spec.tip };
+            if (spec.envSuffix)
+            {
+                tip += std::wstring{ L"\n\nEmpty = the provider's <PREFIX>_" } + spec.envSuffix + L" variable (Agentmaster's env list first, then Windows), else the template.";
+            }
+            AgentSetTip(box, winrt::hstring{ tip });
+            const std::wstring key{ spec.key };
+            box.TextChanged([this, key](const IInspectable&, const TextChangedEventArgs&) {
+                if (_presetsLoading)
+                {
+                    return;
+                }
+                auto* p = _DraftPreset();
+                const auto it = _presetFieldBoxes.find(key);
+                if (!p || it == _presetFieldBoxes.end())
+                {
+                    return;
+                }
+                const std::wstring value{ it->second.Text() };
+                // Kept as typed (only an all-blank box is "not set"), so what the user sees is what is stored.
+                if (::Agentmaster::detail::PresetTrim(value).empty())
+                {
+                    p->fields.erase(key);
+                }
+                else
+                {
+                    p->fields[key] = value;
+                }
+                if (key == ::Agentmaster::kPresetFieldName)
+                {
+                    _RebuildPresetPicker(); // the picker shows the new name (selection kept, editor untouched)
+                }
+                _RefreshPresetEditor();
+            });
+            _presetFieldBoxes.emplace(key, box);
+            _presetEditor.Children().Append(box);
+        }
+
+        _presetEditor.Children().Append(SettingsSeparator(L"LAUNCH PREVIEW"));
+        _presetPreview = Text(L"", 11, false, 0.8);
+        _presetPreview.TextWrapping(TextWrapping::Wrap);
+        _presetPreview.FontFamily(FontFamily{ L"Consolas" });
+        _presetPreview.IsTextSelectionEnabled(true);
+        AgentSetTip(_presetPreview, L"What a session started with this preset NOW would get: its settings file's env block and the command line's additions. The key is masked. A warning line names a value that would be dropped.");
+        _presetEditor.Children().Append(_presetPreview);
+        panel.Children().Append(_presetEditor);
+    }
+
+    void AgentManagerContent::_RebuildPresetProviders()
+    {
+        if (!_presetsProvidersHost)
+        {
+            return;
+        }
+        _presetsProvidersHost.Children().Clear();
+        const auto amEnv = _PresetsAgentmasterEnv();
+        const auto winEnv = ::Agentmaster::WindowsEnvLookup();
+        std::vector<std::wstring> ids;
+        for (const auto& d : ::Agentmaster::kBuiltInLaunchProviders)
+        {
+            ids.emplace_back(d.id);
+        }
+        for (const auto& e : _presetsDraft.providers)
+        {
+            if (e.custom)
+            {
+                ids.push_back(e.id);
+            }
+        }
+        for (const auto& id : ids)
+        {
+            const auto provider = ::Agentmaster::ResolveLaunchProvider(_presetsDraft, id);
+            if (!provider.found)
+            {
+                continue;
+            }
+            auto block = StackPanel{};
+            block.Spacing(4);
+            block.Children().Append(Text(winrt::hstring{ provider.name + (provider.envPrefix.empty() ? std::wstring{} : (L"   \x00B7   " + provider.envPrefix + L"_*")) }, 13, true, 0.95));
+
+            if (provider.custom)
+            {
+                auto nameBox = TextBox{};
+                nameBox.Header(winrt::box_value(L"Name"));
+                nameBox.Text(winrt::hstring{ provider.name });
+                AgentSetTip(nameBox, L"The provider's display name (the Provider list and the /model display names).");
+                // `sender`, never a captured box: a box captured in its own handler is a reference cycle, and these
+                // blocks are rebuilt on every structural change — each rebuild would leak the old boxes.
+                nameBox.TextChanged([this, id](const IInspectable& sender, const TextChangedEventArgs&) {
+                    if (auto* e = _DraftProviderEntry(id, false))
+                    {
+                        e->name = ::Agentmaster::detail::PresetTrim(std::wstring{ sender.as<TextBox>().Text() });
+                        _RefreshPresetEditor();
+                    }
+                });
+                block.Children().Append(nameBox);
+                auto prefixBox = TextBox{};
+                prefixBox.Header(winrt::box_value(L"Env variable prefix"));
+                prefixBox.Text(winrt::hstring{ provider.envPrefix });
+                AgentSetTip(prefixBox, L"<PREFIX>_API_KEY, <PREFIX>_BASE_URL, <PREFIX>_SMALL_MODEL ... are this provider's variables. Letters, digits and _ only (others become _).");
+                prefixBox.TextChanged([this, id](const IInspectable& sender, const TextChangedEventArgs&) {
+                    if (auto* e = _DraftProviderEntry(id, false))
+                    {
+                        e->envPrefix = ::Agentmaster::SanitizeLaunchEnvPrefix(std::wstring{ sender.as<TextBox>().Text() });
+                        _RefreshPresetEditor();
+                    }
+                });
+                block.Children().Append(prefixBox);
+            }
+
+            auto urlBox = TextBox{};
+            urlBox.Header(winrt::box_value(L"Base URL (Anthropic-compatible)"));
+            urlBox.Text(winrt::hstring{ provider.baseUrlBox });
+            {
+                const auto v = ::Agentmaster::ResolveProviderBaseUrl(provider, amEnv, winEnv, false);
+                urlBox.PlaceholderText(winrt::hstring{ v.value.empty() ? (L"type the endpoint" + (v.envName.empty() ? std::wstring{} : (L", or set " + v.envName))) : (v.value + L"  \x2190 " + ::Agentmaster::PresetValueSourceLabel(v)) });
+            }
+            AgentSetTip(urlBox, winrt::hstring{ L"Claude Code appends /v1/messages to it. Xiaomi's Token Plan uses its own URL (https://token-plan-cn.xiaomimimo.com/anthropic or your region's) with tp- keys. A running session keeps the URL it started with." });
+            urlBox.TextChanged([this, id](const IInspectable& sender, const TextChangedEventArgs&) {
+                if (auto* e = _DraftProviderEntry(id, true))
+                {
+                    e->anthropicBaseUrl = ::Agentmaster::detail::PresetTrim(std::wstring{ sender.as<TextBox>().Text() });
+                    _RefreshPresetEditor();
+                }
+            });
+            block.Children().Append(urlBox);
+
+            auto keyBox = PasswordBox{};
+            keyBox.Header(winrt::box_value(L"API key"));
+            if (const auto it = _presetKeyDraft.find(id); it != _presetKeyDraft.end())
+            {
+                keyBox.Password(winrt::hstring{ it->second });
+            }
+            {
+                std::wstring source;
+                const auto key = _PresetsKeyFor(id, &source);
+                std::wstring placeholder;
+                if (!key.empty() && source != L"typed here, saved on Save")
+                {
+                    placeholder = ::Agentmaster::MaskSecret(key) + L"  \x2190 " + source;
+                }
+                else
+                {
+                    placeholder = L"none: type a key, or set " + provider.envPrefix + L"_API_KEY" + (provider.keyHint.empty() ? std::wstring{} : (L" (" + provider.keyHint + L")"));
+                }
+                keyBox.PlaceholderText(winrt::hstring{ placeholder });
+            }
+            AgentSetTip(keyBox, winrt::hstring{ L"Stored in Windows Credential Manager on Save (target Agentmaster:provider:" + id + L"), shared by every Agentmaster install of this Windows user. Empty = " + provider.envPrefix + L"_API_KEY from Agentmaster's env list, then from Windows. Every launch reads the key again; it is never written into a session's files." });
+            keyBox.PasswordChanged([this, id](const IInspectable& sender, const RoutedEventArgs&) {
+                const std::wstring typed{ sender.as<PasswordBox>().Password() };
+                if (::Agentmaster::detail::PresetTrim(typed).empty())
+                {
+                    _presetKeyDraft.erase(id);
+                }
+                else
+                {
+                    _presetKeyDraft[id] = typed;
+                    _presetKeyDelete.erase(id); // typing a new key supersedes a pending removal
+                }
+                _RefreshPresetEditor();
+            });
+            block.Children().Append(keyBox);
+
+            const bool stored = _presetKeyDelete.find(id) == _presetKeyDelete.end() && ::Agentmaster::HasPresetProviderKey(id);
+            auto keyRow = StackPanel{};
+            keyRow.Orientation(Orientation::Horizontal);
+            keyRow.Spacing(8);
+            keyRow.Children().Append(Text(winrt::hstring{ stored ? std::wstring{ L"A key is stored in Windows Credential Manager." } :
+                                                                   (_presetKeyDelete.count(id) ? std::wstring{ L"The stored key is removed on Save." } : std::wstring{ L"No key is stored." }) },
+                                          11, false, 0.7));
+            if (stored)
+            {
+                auto remove = Button{};
+                remove.Content(winrt::box_value(L"Remove stored key"));
+                remove.FontSize(11);
+                AgentSetTip(remove, L"Delete this provider's key from Windows Credential Manager on Save (Cancel keeps it). The env variable, if set, applies again.");
+                remove.Click([this, id](const IInspectable&, const RoutedEventArgs&) {
+                    _presetKeyDelete.insert(id);
+                    _presetKeyDraft.erase(id);
+                    _RebuildPresetProviders();
+                    _RefreshPresetEditor();
+                });
+                keyRow.Children().Append(remove);
+            }
+            if (provider.custom)
+            {
+                auto drop = Button{};
+                drop.Content(winrt::box_value(L"Delete provider"));
+                drop.FontSize(11);
+                AgentSetTip(drop, L"Remove this custom provider (on Save). A preset still pointing at it refuses to launch until you pick another provider.");
+                drop.Click([this, id](const IInspectable&, const RoutedEventArgs&) {
+                    auto& v = _presetsDraft.providers;
+                    v.erase(std::remove_if(v.begin(), v.end(), [&](const auto& e) { return e.id == id; }), v.end());
+                    _presetKeyDraft.erase(id);
+                    _presetKeyDelete.insert(id); // a deleted provider's stored key goes with it
+                    _RebuildPresetProviders();
+                    _SelectPresetForEdit(_presetsSelectedId); // the Provider list changed
+                });
+                keyRow.Children().Append(drop);
+            }
+            block.Children().Append(keyRow);
+            _presetsProvidersHost.Children().Append(block);
+        }
+    }
+
+    void AgentManagerContent::_RebuildPresetPicker()
+    {
+        if (!_presetsPicker)
+        {
+            return;
+        }
+        _presetsLoading = true;
+        auto done = wil::scope_exit([&] { _presetsLoading = false; });
+        _presetsPicker.Items().Clear();
+        _presetsPickerIds.clear();
+        int sel = -1;
+        for (const auto& p : _presetsDraft.presets)
+        {
+            std::wstring label = ::Agentmaster::PresetDisplayName(p);
+            if (p.hidden)
+            {
+                label += L"   (hidden)";
+            }
+            _presetsPicker.Items().Append(winrt::box_value(winrt::hstring{ label }));
+            _presetsPickerIds.push_back(p.id);
+            if (p.id == _presetsSelectedId)
+            {
+                sel = static_cast<int>(_presetsPickerIds.size()) - 1;
+            }
+        }
+        _presetsPicker.SelectedIndex(sel);
+    }
+
+    void AgentManagerContent::_SelectPresetForEdit(const std::wstring& id)
+    {
+        _presetsSelectedId = id;
+        const auto* p = _DraftPreset();
+        {
+            _presetsLoading = true;
+            auto done = wil::scope_exit([&] { _presetsLoading = false; });
+            if (p)
+            {
+                for (auto& [key, box] : _presetFieldBoxes)
+                {
+                    const auto it = p->fields.find(key);
+                    box.Text(winrt::hstring{ it == p->fields.end() ? std::wstring{} : it->second });
+                }
+                if (_presetShowInMenus)
+                {
+                    _presetShowInMenus.IsOn(!p->hidden);
+                }
+                if (_presetProviderCombo)
+                {
+                    _presetProviderCombo.Items().Clear();
+                    _presetProviderIds.clear();
+                    const auto* t = ::Agentmaster::FindLaunchPresetTemplate(p->templateId);
+                    if (t)
+                    {
+                        const auto tp = t->fields.find(::Agentmaster::kPresetFieldProvider);
+                        const auto tProvider = ::Agentmaster::ResolveLaunchProvider(_presetsDraft, tp == t->fields.end() ? std::wstring{} : tp->second);
+                        _presetProviderCombo.Items().Append(winrt::box_value(winrt::hstring{ L"As the template (" + (tProvider.found ? tProvider.name : std::wstring{ L"Claude login" }) + L")" }));
+                        _presetProviderIds.emplace_back();
+                    }
+                    _presetProviderCombo.Items().Append(winrt::box_value(L"Claude login (your own account)"));
+                    _presetProviderIds.emplace_back(::Agentmaster::kAnthropicProviderId);
+                    for (const auto& d : ::Agentmaster::kBuiltInLaunchProviders)
+                    {
+                        _presetProviderCombo.Items().Append(winrt::box_value(winrt::hstring{ d.name }));
+                        _presetProviderIds.emplace_back(d.id);
+                    }
+                    for (const auto& e : _presetsDraft.providers)
+                    {
+                        if (e.custom)
+                        {
+                            _presetProviderCombo.Items().Append(winrt::box_value(winrt::hstring{ e.name.empty() ? e.id : e.name }));
+                            _presetProviderIds.push_back(e.id);
+                        }
+                    }
+                    const auto boxIt = p->fields.find(::Agentmaster::kPresetFieldProvider);
+                    std::wstring want = boxIt == p->fields.end() ? std::wstring{} : ::Agentmaster::detail::PresetTrim(boxIt->second);
+                    if (want.empty() && !t)
+                    {
+                        want = ::Agentmaster::kAnthropicProviderId; // a blank preset with no box runs on the Claude login
+                    }
+                    int sel = -1;
+                    for (size_t i = 0; i < _presetProviderIds.size(); ++i)
+                    {
+                        if (_presetProviderIds[i] == want)
+                        {
+                            sel = static_cast<int>(i);
+                            break;
+                        }
+                    }
+                    if (sel < 0 && !want.empty())
+                    {
+                        // A provider that no longer exists (a deleted custom one): show it, so the user sees why
+                        // the preset refuses to launch and can pick another.
+                        _presetProviderCombo.Items().Append(winrt::box_value(winrt::hstring{ want + L" (missing)" }));
+                        _presetProviderIds.push_back(want);
+                        sel = static_cast<int>(_presetProviderIds.size()) - 1;
+                    }
+                    _presetProviderCombo.SelectedIndex(sel < 0 ? 0 : sel);
+                }
+            }
+        }
+        _RefreshPresetEditor();
+    }
+
+    void AgentManagerContent::_RefreshPresetEditor()
+    {
+        const auto* p = _DraftPreset();
+        if (_presetEditor)
+        {
+            _presetEditor.Visibility(p ? Visibility::Visible : Visibility::Collapsed);
+        }
+        if (!p)
+        {
+            return;
+        }
+        const auto amEnv = _PresetsAgentmasterEnv();
+        const auto winEnv = ::Agentmaster::WindowsEnvLookup();
+        const auto providerId = ::Agentmaster::PresetProviderId(*p);
+        const auto provider = ::Agentmaster::ResolveLaunchProvider(_presetsDraft, providerId);
+        for (const auto& spec : ::Agentmaster::kPresetFieldSpecs)
+        {
+            const auto it = _presetFieldBoxes.find(spec.key);
+            if (it == _presetFieldBoxes.end())
+            {
+                continue;
+            }
+            const bool inScope = ::Agentmaster::PresetFieldInScope(spec.scope, provider);
+            it->second.Visibility(inScope ? Visibility::Visible : Visibility::Collapsed);
+            if (!inScope)
+            {
+                continue;
+            }
+            const auto v = ::Agentmaster::ResolvePresetField(spec.key, *p, _presetsDraft, amEnv, winEnv, false);
+            std::wstring placeholder;
+            if (v.value.empty())
+            {
+                placeholder = v.envName.empty() ? std::wstring{ L"(not set)" } : (L"(not set \x2014 or set " + v.envName + L")");
+            }
+            else
+            {
+                placeholder = PresetPlaceholderLine(v.value) + L"  \x2190 " + ::Agentmaster::PresetValueSourceLabel(v);
+            }
+            it->second.PlaceholderText(winrt::hstring{ placeholder });
+        }
+        if (_presetTestedLine)
+        {
+            std::wstring line;
+            if (const auto* t = ::Agentmaster::FindLaunchPresetTemplate(p->templateId))
+            {
+                const auto n = t->fields.find(::Agentmaster::kPresetFieldName);
+                line = L"From the template \x201C" + (n == t->fields.end() ? t->id : n->second) + L"\x201D \x2014 " +
+                       (t->tested.empty() ? std::wstring{ L"not tested yet." } : (L"tested " + t->tested + L".")) + L" Empty boxes follow the template.";
+            }
+            else
+            {
+                line = L"Your own preset (no template).";
+            }
+            if (!providerId.empty() && !provider.found)
+            {
+                line += L"  \x26A0 Its provider \x201C" + providerId + L"\x201D no longer exists: it refuses to launch until you pick another.";
+            }
+            _presetTestedLine.Text(winrt::hstring{ line });
+        }
+        if (_presetPreview)
+        {
+            std::wstring preview;
+            if (!providerId.empty() && !provider.found)
+            {
+                preview = L"Cannot launch: the provider \x201C" + providerId + L"\x201D no longer exists.";
+            }
+            else
+            {
+                const auto snap = ::Agentmaster::SnapshotPresetLaunch(*p, _presetsDraft, amEnv);
+                const auto key = provider.found ? _PresetsKeyFor(provider.id, nullptr) : std::wstring{};
+                const auto compiled = ::Agentmaster::CompileClaudeLaunch(snap, ::Agentmaster::EffectiveLaunchValues(snap, winEnv), key);
+                preview = ::Agentmaster::RenderPresetLaunchPreview(compiled, ::Agentmaster::MaskSecret(key));
+                if (preview.empty())
+                {
+                    preview = L"Nothing to add: this preset launches exactly like Default.";
+                }
+            }
+            _presetPreview.Text(winrt::hstring{ preview });
+        }
+    }
+
+    void AgentManagerContent::_AddPreset(const std::wstring& templateId)
+    {
+        ::Agentmaster::LaunchPreset p;
+        p.id = ::Agentmaster::MakeLaunchPresetId(L'p', ::Agentmaster::NewPresetEntropy(), [this](const std::wstring& id) {
+            return ::Agentmaster::FindLaunchPreset(_presetsDraft, id) != nullptr;
+        });
+        p.templateId = templateId;
+        if (templateId.empty())
+        {
+            // "Preset 1", "Preset 2", ... — the first free number, the user's own naming; rename freely.
+            for (int n = 1;; ++n)
+            {
+                const std::wstring name = L"Preset " + std::to_wstring(n);
+                const bool taken = std::any_of(_presetsDraft.presets.begin(), _presetsDraft.presets.end(), [&](const auto& x) {
+                    return ::Agentmaster::PresetDisplayName(x) == name;
+                });
+                if (!taken)
+                {
+                    p.fields[::Agentmaster::kPresetFieldName] = name;
+                    break;
+                }
+            }
+        }
+        _presetsDraft.presets.push_back(p);
+        _presetsSelectedId = p.id;
+        _RebuildPresetPicker();
+        _SelectPresetForEdit(p.id);
+    }
+
+    void AgentManagerContent::_DuplicatePreset()
+    {
+        const auto* src = _DraftPreset();
+        if (!src)
+        {
+            return;
+        }
+        ::Agentmaster::LaunchPreset copy = *src;
+        copy.id = ::Agentmaster::MakeLaunchPresetId(L'p', ::Agentmaster::NewPresetEntropy(), [this](const std::wstring& id) {
+            return ::Agentmaster::FindLaunchPreset(_presetsDraft, id) != nullptr;
+        });
+        copy.fields[::Agentmaster::kPresetFieldName] = ::Agentmaster::PresetDisplayName(*src) + L" (copy)";
+        _presetsDraft.presets.push_back(copy);
+        _presetsSelectedId = copy.id;
+        _RebuildPresetPicker();
+        _SelectPresetForEdit(copy.id);
+    }
+
+    void AgentManagerContent::_DeletePreset()
+    {
+        auto& v = _presetsDraft.presets;
+        const auto it = std::find_if(v.begin(), v.end(), [&](const auto& p) { return p.id == _presetsSelectedId; });
+        if (it == v.end())
+        {
+            return;
+        }
+        // The seeded record already lists a template preset (seeding happened in memory on load), so a deleted
+        // template preset stays deleted after Save.
+        const size_t index = static_cast<size_t>(it - v.begin());
+        v.erase(it);
+        _presetsSelectedId = v.empty() ? std::wstring{} : v[std::min(index, v.size() - 1)].id;
+        _RebuildPresetPicker();
+        _SelectPresetForEdit(_presetsSelectedId);
+    }
+
+    void AgentManagerContent::_AddCustomProvider()
+    {
+        ::Agentmaster::LaunchProviderEntry e;
+        e.id = ::Agentmaster::MakeLaunchPresetId(L'c', ::Agentmaster::NewPresetEntropy(), [this](const std::wstring& id) {
+            return _DraftProviderEntry(id, false) != nullptr;
+        });
+        e.custom = true;
+        e.name = L"Custom provider";
+        e.envPrefix = L"CUSTOM";
+        _presetsDraft.providers.push_back(e);
+        _RebuildPresetProviders();
+        _SelectPresetForEdit(_presetsSelectedId); // the Provider list gains it
+    }
+
+    void AgentManagerContent::_LoadPresetsArea()
+    {
+        _presetsDraft = ::Agentmaster::LoadLaunchPresetsConfig(); // templates seeded in memory: a first open lists them
+        _presetKeyDraft.clear();
+        _presetKeyDelete.clear();
+        if (!::Agentmaster::FindLaunchPreset(_presetsDraft, _presetsSelectedId))
+        {
+            _presetsSelectedId = _presetsDraft.presets.empty() ? std::wstring{} : _presetsDraft.presets.front().id;
+        }
+        _RebuildPresetProviders();
+        _RebuildPresetPicker();
+        _SelectPresetForEdit(_presetsSelectedId);
+    }
+
+    void AgentManagerContent::_SavePresetsArea()
+    {
+        auto& providers = _presetsDraft.providers;
+        // A built-in provider with nothing overridden needs no entry; a custom one is all user data.
+        providers.erase(std::remove_if(providers.begin(), providers.end(), [](const auto& e) {
+                            return !e.custom && ::Agentmaster::detail::PresetTrim(e.anthropicBaseUrl).empty() && ::Agentmaster::detail::PresetTrim(e.openaiBaseUrl).empty();
+                        }),
+                        providers.end());
+        for (auto& e : providers)
+        {
+            if (e.custom)
+            {
+                e.envPrefix = ::Agentmaster::SanitizeLaunchEnvPrefix(e.envPrefix);
+            }
+        }
+        ::Agentmaster::SaveLaunchPresetsConfig(_presetsDraft);
+        size_t removed = 0;
+        size_t stored = 0;
+        for (const auto& id : _presetKeyDelete)
+        {
+            if (::Agentmaster::DeletePresetProviderKey(id))
+            {
+                ++removed;
+            }
+        }
+        for (auto& [id, key] : _presetKeyDraft)
+        {
+            if (!::Agentmaster::detail::PresetTrim(key).empty() && ::Agentmaster::WritePresetProviderKey(id, key))
+            {
+                ++stored;
+            }
+            ::SecureZeroMemory(key.data(), key.size() * sizeof(wchar_t)); // the typed key leaves memory with the draft
+        }
+        _presetKeyDraft.clear();
+        _presetKeyDelete.clear();
+        // Counts only — never a key, never a value.
+        ::Agentmaster::LogNav(L"presets-save presets=" + std::to_wstring(_presetsDraft.presets.size()) + L" keys-stored=" + std::to_wstring(stored) + L" keys-removed=" + std::to_wstring(removed));
     }
 
     void AgentManagerContent::SetQuitForUpdateHandler(std::function<void()> handler)

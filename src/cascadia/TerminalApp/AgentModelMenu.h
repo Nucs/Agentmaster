@@ -11,10 +11,13 @@
 // exactly like to a fresh spawn: the forked session starts on the picked model.)
 //
 // The picker shape is: a "Default" item (act EXACTLY as the plain item always did — the
-// Settings model, or Claude's own default when that is blank) over one item per configured model
-// from AppSettings.launchModels ("Display name | model-id", parsed by ParseLaunchModels). Picking
-// a model starts that ONE session with `--model <id>` (a CLI flag outranks the shared settings
-// file); nothing is persisted — a later resume/restart follows the settings model again.
+// Settings model, or Claude's own default when that is blank; for a fork, the SOURCE's own model or
+// preset) over one item per configured model from AppSettings.launchModels ("Display name |
+// model-id", parsed by ParseLaunchModels), then — after a separator — one item per visible PRESET
+// (doc/agentmaster/HARNESSES.md; the callers pass LaunchMenuEntries, whose preset entries carry the
+// "@<presetId>" token). Picking a model starts that session with `--model <id>`; picking a preset
+// starts it with the preset's whole configuration. Either pick is the session's launch SNAPSHOT
+// (launchArgs): resume, restart, fork and /handover keep it.
 //
 // The models are USER-EDITABLE (the Settings cog → Sessions → "Launch models"), and the user
 // asked the tooltips to say so — AgentModelEditHint() is that pointer, appended to every parent
@@ -36,6 +39,7 @@
 
 #include "AgentTipHelpers.h" // AgentSetTip — the islands-safe hover tooltip (leak-free on rebuilt items)
 #include "AgentMaster/ClaudeSpawn.h" // ParseLaunchModels (so a caller needs only this header)
+#include "AgentMaster/LaunchPresets.h" // IsPresetToken — a preset entry ("@<id>") gets its own group + tooltip
 
 namespace winrt::TerminalApp::implementation
 {
@@ -61,8 +65,16 @@ namespace winrt::TerminalApp::implementation
     //     Specify…           → prompt, then pick(<typed id>)   (only when `specify` is supplied)
     //     ─────────────
     //     <Display name>     → pick(<id>)    (one per configured model, top-to-bottom as typed)
+    //     ─────────────
+    //     <Preset name>      → pick(L"@<presetId>")   (one per visible preset, in list order)
     // With no models configured only Default (+ Specify…) is offered (no separator) — the submenu
     // still works, it just has nothing extra to pick. `pick` is copied into every item's Click.
+    //   items   - the collection to append to (not cleared first).
+    //   models  - LaunchMenuEntries(launchModels): the models, then the "@" preset entries.
+    //   pick    - called with the launch target ("" = Default) on a click.
+    //   specify - the "Specify…" opener (nullptr = no such item).
+    // Throws winrt::hresult_error only if XAML refuses an element (callers build menus lazily on a
+    // flyout's Opening, where an escape is contained by the caller's own guard).
 
     inline void AgentFillModelPickItems(const winrt::Windows::Foundation::Collections::IVector<winrt::Windows::UI::Xaml::Controls::MenuFlyoutItemBase>& items,
                                         const std::vector<std::pair<std::wstring, std::wstring>>& models,
@@ -73,7 +85,7 @@ namespace winrt::TerminalApp::implementation
 
         WUXC::MenuFlyoutItem def;
         def.Text(L"Default");
-        AgentSetTip(def, winrt::hstring{ L"Use the Settings model (blank there = Claude's own default) \x2014 exactly what the plain action always did. " } + AgentModelEditHint());
+        AgentSetTip(def, winrt::hstring{ L"No model or preset pick: a new session uses the Settings model (blank there = Claude's own default), and a fork keeps the model or preset its source runs on \x2014 exactly what the plain action always did. " } + AgentModelEditHint());
         def.Click([pick](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::RoutedEventArgs&) {
             pick(winrt::hstring{});
         });
@@ -99,12 +111,30 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        items.Append(WUXC::MenuFlyoutSeparator{});
+        // One separator before the plain models (when any) and one before the first preset: presets are
+        // a different KIND of pick (a whole configuration, possibly another provider), so they read as
+        // their own group at the bottom, the way the user asked for them.
+        bool lastWasPreset = false;
+        bool first = true;
         for (const auto& [name, id] : models)
         {
+            const bool preset = ::Agentmaster::IsPresetToken(id);
+            if (first || (preset && !lastWasPreset))
+            {
+                items.Append(WUXC::MenuFlyoutSeparator{});
+            }
+            first = false;
+            lastWasPreset = preset;
             WUXC::MenuFlyoutItem it;
             it.Text(winrt::hstring{ name });
-            AgentSetTip(it, winrt::hstring{ L"Start this session on --model " + id + L" (this launch only \x2014 a later resume follows the Settings model again). " } + AgentModelEditHint());
+            if (preset)
+            {
+                AgentSetTip(it, winrt::hstring{ L"Start this session with the \x201C" + name + L"\x201D preset \x2014 its provider, models, limits and arguments. Resume, restart, fork and /handover keep it. Edit presets in the Manager's Settings (\x2699) \x2192 Presets." });
+            }
+            else
+            {
+                AgentSetTip(it, winrt::hstring{ L"Start this session on --model " + id + L". Resume, restart, fork and /handover keep that model. " } + AgentModelEditHint());
+            }
             it.Click([pick, mid = winrt::hstring{ id }](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::RoutedEventArgs&) {
                 pick(mid);
             });

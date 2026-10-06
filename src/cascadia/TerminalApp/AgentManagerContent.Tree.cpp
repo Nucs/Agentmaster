@@ -25,6 +25,7 @@
 #include "AgentCatchLog.h" // AgentLogCaughtException — the lazy menus' Opening handlers (Rule #18: never a bare catch)
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentModelMenu.h" // AgentFillModelPickItems / AgentModelEditHint — the shared "Open New Session Here ▸ <model>" picker (launch-model picker)
+#include "AgentMaster/LaunchPresetsOs.h" // PRESETS (HARNESSES.md): LaunchMenuEntries — the model menus list the visible presets after the models
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
@@ -1112,7 +1113,7 @@ namespace winrt::TerminalApp::implementation
             MenuFlyoutSubItem openHere;
             openHere.Text(L"Open New Session Here");
             AgentSetTip(openHere, winrt::hstring{ L"Launch a managed Claude session in this directory (a new, independent conversation) \x2014 pick the model it starts on, or Default. " } + AgentModelEditHint());
-            AgentFillModelPickItems(openHere.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), [weak, disp, cwd](winrt::hstring model) {
+            AgentFillModelPickItems(openHere.Items(), ::Agentmaster::LaunchMenuEntries(_appSettings.launchModels), [weak, disp, cwd](winrt::hstring model) {
                 // Spawning a managed Claude session needs a native claude.exe (native-exe-only policy) —
                 // gate with the same re-resolve-then-prompt the Adopt action above uses, so this never
                 // silently no-ops at the engine backstop when Claude isn't installed.
@@ -1853,7 +1854,7 @@ namespace winrt::TerminalApp::implementation
             openHere.Text(L"Open New Session Here");
             openHere.Icon(glyphIcon(L"\xE710")); // Add (matches the WT tab menu's "New Session Here")
             AgentSetTip(openHere, winrt::hstring{ L"Launch a managed Claude session in this directory (a new, independent conversation) \x2014 pick the model it starts on, or Default. " } + AgentModelEditHint());
-            AgentFillModelPickItems(openHere.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), [weak, disp, cwd](winrt::hstring model) {
+            AgentFillModelPickItems(openHere.Items(), ::Agentmaster::LaunchMenuEntries(_appSettings.launchModels), [weak, disp, cwd](winrt::hstring model) {
                 auto act = [weak, cwd, model]() {
                     auto self = weak.get();
                     if (!self || !self->_spawnHandler)
@@ -1931,7 +1932,7 @@ namespace winrt::TerminalApp::implementation
             fork.Text(L"Fork session");
             fork.Icon(glyphIcon(L"\xF5ED")); // Duplicate (matches the WT tab menu's "Fork session")
             AgentSetTip(fork, winrt::hstring{ L"Fork this session \x2014 branch its conversation into a new, independent session (named \x201C\x2026 (fork)\x201D); the original is untouched. Pick the model the fork starts on, or Default. " } + AgentModelEditHint());
-            AgentFillModelPickItems(fork.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), [weak, disp, id](winrt::hstring model) {
+            AgentFillModelPickItems(fork.Items(), ::Agentmaster::LaunchMenuEntries(_appSettings.launchModels), [weak, disp, id](winrt::hstring model) {
                 auto act = [weak, id, model]() {
                     if (auto self = weak.get())
                     {

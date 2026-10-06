@@ -26,6 +26,8 @@
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
+#include "AgentMaster/LaunchPresetsOs.h" // PRESETS (HARNESSES.md): LaunchMenuEntries — the Launch button's hover menu
+#include "AgentModelMenu.h" // AgentFillModelPickItems — the hover menu IS the "Open New Session Here" picker
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
 #include "AgentMaster/SessionRegistry.h"
@@ -101,7 +103,57 @@ namespace winrt::TerminalApp::implementation
         _ReflowLaunchBar(); // the toggle width changed (Claude<->Codex) -> re-fit the row
     }
 
-    void AgentManagerContent::_OnLaunch()
+    void AgentManagerContent::_ShowLaunchMenu()
+    {
+        // Offered only while the button starts a NEW Claude session: Codex has no presets yet, a session id
+        // in the box means "Resume" (that session keeps its own snapshot), and a disabled button (a red box)
+        // must not be bypassed through its menu.
+        if (!_launchBtn || !_cwdBox || _launchMenu || _launchCodex || !_launchBtn.IsEnabled())
+        {
+            return;
+        }
+        if (LooksLikeSessionId(std::wstring{ _cwdBox.Text() }))
+        {
+            return;
+        }
+        try
+        {
+            MenuFlyout menu;
+            auto weak = get_weak();
+            AgentFillModelPickItems(
+                menu.Items(),
+                ::Agentmaster::LaunchMenuEntries(_appSettings.launchModels),
+                [weak](winrt::hstring target) {
+                    if (auto self = weak.get())
+                    {
+                        self->_OnLaunch(std::wstring{ target });
+                    }
+                },
+                _ModelSpecifyOpener());
+            // Forget the menu when it closes, so the next hover can open a fresh one (the list may have
+            // changed: a Settings Save adds or renames presets).
+            menu.Closed([weak](const IInspectable&, const IInspectable&) {
+                if (auto self = weak.get())
+                {
+                    self->_launchMenu = nullptr;
+                }
+            });
+            _launchMenu = menu;
+            Primitives::FlyoutShowOptions opts;
+            opts.Placement(Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+            // A hover menu: it does not take focus and closes when the pointer leaves both the button and
+            // the menu, so it never traps a user who only passed by.
+            opts.ShowMode(Primitives::FlyoutShowMode::TransientWithDismissOnPointerMoveAway);
+            menu.ShowAt(_launchBtn, opts);
+        }
+        catch (...)
+        {
+            _launchMenu = nullptr; // a failed open must not block every later hover
+            ::Agentmaster::AgentLogCaughtException(L"_ShowLaunchMenu");
+        }
+    }
+
+    void AgentManagerContent::_OnLaunch(const std::wstring& target)
     {
         if (!_cwdBox)
         {
@@ -165,7 +217,9 @@ namespace winrt::TerminalApp::implementation
             }
             _PushRecentDir(text); // remember it as "recently selected"
             _ClosePathPicker();
-            _spawnHandler(winrt::hstring{ text }, winrt::hstring{}, winrt::hstring{}); // model "" = Default (the launch bar has no model picker — the settings model applies)
+            // `target`: "" = Default (a plain click — the settings model); from the hover menu, a model id or
+            // "@<presetId>" (PRESETS), which the page snapshots into the new session's launchArgs.
+            _spawnHandler(winrt::hstring{ text }, winrt::hstring{}, winrt::hstring{ target });
         }
     }
 

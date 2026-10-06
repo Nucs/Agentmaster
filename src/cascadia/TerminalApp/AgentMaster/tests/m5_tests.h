@@ -21,6 +21,7 @@
 //   tests_turns.cpp           - the Copy > Transcript levels: TranscriptTurns (the C++ port of the am-agentmaster-cli skill's transcript_turns.py v9) vs the reference's own goldens in turns\expected, byte for byte; + the summary's whole-conversation chain (CollectConversationUpstream / BuildSummaryConversation)
 //   tests_markdown.cpp        - the transcript overlay's Markdown flattener (MarkdownBlocks — cmark -> flat render blocks); compiled only when the vcpkg cmark of a full build is present (AM_HAVE_CMARK), else it reports a skip
 //   tests_sidepanel.cpp       - SIDE_PANEL.md §2c: the side panel's in-place card list — the order planner (KeyedListDiff.h): reaches the target, indexes in range, minimal; + the cards' and rows' timing line (SessionTimingText.h)
+//   tests_presets.cpp         - HARNESSES.md: PRESETS (LaunchPresets.h, pure) — template seeding, launch-presets.json, the value tiers, the session snapshot (launchArgs), the compile vs the reference MiMo launcher, refusals, the menus
 // ======================================================================================
 //
 // Agentmaster - M5 standalone test harness: SHARED declarations.
@@ -232,6 +233,14 @@ void TestKeyedListDiff();
 // recently" (< 1 h), y / d / h for created, + m / s for active (seconds only under an hour, no month unit), the active
 // part left out when it is 0, the unknown / clock-skew edges, and a 3-year sweep of the units (tests_sidepanel.cpp)
 void TestSessionTimingText();
+// tests_presets.cpp — HARNESSES.md, PRESETS (LaunchPresets.h, the pure core): the shipped templates seed ONCE (a deleted
+// one stays deleted, an unverified one starts hidden); launch-presets.json round-trips and a malformed file reads as an
+// empty config; the value tiers (box > Agentmaster env > Windows env > template / provider default) for a placeholder
+// AND a snapshot; the snapshot freezes tiers 1-2, records only the NAME of a Windows variable, never stores a key, and
+// round-trips as JSON; the MiMo Pro template compiles to the reference launcher's env block; the refusals (no key / no
+// Base URL / a removed custom provider); reserved env names, forbidden claude flags, the key mask; the menu entries and
+// the /handover hint spec
+void TestLaunchPresets();
 // TabCloseSuccessor.h (FAVORITES.md §4a): the tab focused after the FOCUSED tab closes — upstream's pick
 // kept when it starts nothing; a DORMANT successor replaced by the nearest (in-order) / most recently
 // used (MRU) tab that starts nothing; right-first ties, the Manager fallback, hostile/empty inputs

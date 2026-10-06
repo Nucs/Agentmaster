@@ -14,6 +14,7 @@
 #include "winrt/TerminalApp.h"
 #include "BasicPaneEvents.h"
 #include "AgentMaster/SessionModels.h"
+#include "AgentMaster/LaunchPresets.h" // Agentmaster (PRESETS, HARNESSES.md): LaunchPresetsConfig — the Presets tab's by-value draft
 #include "AgentLocalTooltip.h" // Agentmaster (LocalTooltip): the cog's designated-area tooltip panel (left-outside the card)
 
 #include <winrt/Windows.System.h>
@@ -372,7 +373,17 @@ namespace winrt::TerminalApp::implementation
         void _ApplyLayoutToTracks();
 
         // Action-bar handlers (operate on _selectedId / _selectedPromptId).
-        void _OnLaunch();
+        // The Launch button's action. `target` (PRESETS): the hover menu's pick — "" = Default (a plain click),
+        // a model id, or "@<presetId>" — handed to the spawn handler for a NEW session in the typed folder. A
+        // session id in the box resumes that session on its own snapshot and ignores `target`.
+        //   target - the launch target ("" for a plain click).
+        void _OnLaunch(const std::wstring& target = {});
+        // PRESETS (HARNESSES.md §8.2): the Launch button's hover menu — exactly the "Open New Session Here"
+        // picker (Default, Specify…, the launch models, then the visible presets), opened after a short hover
+        // (_launchHoverTimer) so a pointer merely crossing the toolbar opens nothing. Offered only while the
+        // button launches a NEW Claude session (not in Codex mode, not when the box holds a session id, not
+        // while the button is disabled). A pick launches through _OnLaunch(target).
+        void _ShowLaunchMenu();
         // Agentmaster: "Create & Launch" — ensure the typed working dir exists, creating it (and any
         // missing parents) when it's a not-yet-existing absolute path. Returns false (and warns) if the
         // create failed, so the caller aborts the launch. An existing dir is a no-op pass-through.
@@ -645,6 +656,29 @@ namespace winrt::TerminalApp::implementation
         void _LoadEnvVarsArea(); // seed global text from _appSettings.env + load dir-env.json into the draft
         void _SaveEnvVarsArea(); // global -> _appSettings.env; flush _dirEnvDraft -> SaveDirEnv
         void _SwitchEnvTab(bool perDir); // toggle Global <-> Per-directory panels + restyle the tab buttons
+
+        // Agentmaster (PRESETS, doc/agentmaster/HARNESSES.md §8.1): the cog's "Presets" tab — the providers
+        // (Base URL + key) and the preset list with its editor. Every launch-value box is EMPTY unless the
+        // user typed into it, and an empty box shows, in gray, the value that applies instead and where it
+        // comes from (Agentmaster env, Windows env, template, provider default) — the ONE resolver the launch
+        // uses (ResolvePresetField), so the gray text can never disagree with what launches. Edits go into
+        // an in-memory DRAFT (_presetsDraft + the key drafts), written on Save and dropped on Cancel — the
+        // per-directory env area's form semantics.
+        void _BuildPresetsArea(const winrt::Windows::UI::Xaml::Controls::StackPanel& panel); // build the tab's controls once
+        void _LoadPresetsArea(); // _ShowSettings: draft from launch-presets.json (templates seeded), key drafts cleared, editor on the first preset
+        void _SavePresetsArea(); // _SaveSettings: write launch-presets.json + store / remove typed provider keys in Credential Manager
+        void _RebuildPresetProviders(); // (re)build one block per provider (Base URL box, key box, stored-key line)
+        void _RebuildPresetPicker(); // refill the preset picker from the draft, keeping the selection
+        void _SelectPresetForEdit(const std::wstring& id); // fill the editor from one draft preset (no draft writes while filling)
+        void _RefreshPresetEditor(); // placeholders, field visibility by provider, the tested line, the launch preview
+        void _AddPreset(const std::wstring& templateId); // "New": a blank preset ("" ) or one linked to a template
+        void _DuplicatePreset(); // copy the selected preset (same template link, its typed values, " (copy)")
+        void _DeletePreset(); // drop the selected preset (a template's stays deleted: seededTemplates remembers it)
+        void _AddCustomProvider(); // a new custom Anthropic-compatible provider (name, env prefix, Base URL)
+        ::Agentmaster::LaunchPreset* _DraftPreset(); // the selected preset inside the draft (nullptr = none)
+        ::Agentmaster::LaunchProviderEntry* _DraftProviderEntry(const std::wstring& id, bool create); // a provider's entry in the draft (created on demand)
+        ::Agentmaster::PresetEnvLookup _PresetsAgentmasterEnv(); // Agentmaster's Global env as typed in the (possibly unsaved) env editor
+        std::wstring _PresetsKeyFor(const std::wstring& providerId, std::wstring* source); // the key the preview uses: typed > stored > Agentmaster env > Windows
         void _RebuildEnvDirList(); // (re)populate the per-dir selector from session dirs ∪ dir-env keys, filtered
         void _SelectEnvDir(const std::wstring& normKey, const std::wstring& displayPath); // load a dir's env into the per-dir editor
         // Lex an env editor's text -> recolor its wrapping border + write its status line (the SAME
@@ -986,6 +1020,11 @@ namespace winrt::TerminalApp::implementation
         std::wstring _planAutoScrolledFor; // Agentmaster: the subject key (session id / "x:<extId>") we last auto-scrolled the Auto Testing to bottom for; only a CHANGE re-pins (a same-subject _Refresh keeps the user's scroll)
         winrt::Windows::UI::Xaml::Controls::TextBox _cwdBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _launchBtn{ nullptr }; // Agentmaster: "Launch Claude" (dir) / "Resume session" (a found session id); disabled on a red box
+        // PRESETS: the hover-intent delay before the Launch button's menu opens (started on PointerEntered,
+        // stopped on PointerExited — a pass over the button never opens it) and the menu currently shown
+        // (non-null while open, so a second hover does not stack a second menu).
+        winrt::Windows::UI::Xaml::DispatcherTimer _launchHoverTimer{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _launchMenu{ nullptr };
         // Agentmaster (responsive launch bar): the toolbar's top row + its collapsible pieces, promoted to
         // members so _ReflowLaunchBar can stage-collapse them as the pane narrows. _toolbarCol is the
         // vertical [title row | actions row] stack; _launchBar is the title+launch row; _launchBtns groups
@@ -1311,6 +1350,25 @@ namespace winrt::TerminalApp::implementation
         std::vector<std::pair<std::wstring, std::wstring>> _dirEnvDraft;
         std::wstring _envEditingDirKey; // NormDirKey of the dir currently loaded into _setEnvDir ("" = none)
         bool _envTabIsDir{ false }; // which tab is showing (false = Global)
+        // PRESETS tab state (see _BuildPresetsArea). The draft is the working copy; nothing reaches disk or
+        // Credential Manager before Save.
+        ::Agentmaster::LaunchPresetsConfig _presetsDraft;
+        std::wstring _presetsSelectedId; // the preset the editor shows ("" = none)
+        std::map<std::wstring, std::wstring> _presetKeyDraft; // provider id -> a key typed this session (never logged)
+        std::unordered_set<std::wstring> _presetKeyDelete; // provider ids whose stored key Save removes
+        bool _presetsLoading{ false }; // true while controls are filled from the draft: their change handlers then write nothing
+        int _presetsTabIndex{ -1 }; // the tab's index (its placeholders refresh when it is shown: the env editor may have changed)
+        winrt::Windows::UI::Xaml::Controls::StackPanel _presetsProvidersHost{ nullptr }; // the provider blocks
+        winrt::Windows::UI::Xaml::Controls::ComboBox _presetsPicker{ nullptr }; // which preset the editor shows
+        std::vector<std::wstring> _presetsPickerIds; // parallel to _presetsPicker's items
+        winrt::Windows::UI::Xaml::Controls::Button _presetsNewBtn{ nullptr }; // "New ▾" (blank / from a template)
+        winrt::Windows::UI::Xaml::Controls::StackPanel _presetEditor{ nullptr }; // the editor (collapsed when the list is empty)
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _presetShowInMenus{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ComboBox _presetProviderCombo{ nullptr };
+        std::vector<std::wstring> _presetProviderIds; // parallel to _presetProviderCombo: "" = the template's, else a provider id / kAnthropicProviderId
+        std::map<std::wstring, winrt::Windows::UI::Xaml::Controls::TextBox> _presetFieldBoxes; // field key -> its box
+        winrt::Windows::UI::Xaml::Controls::TextBlock _presetTestedLine{ nullptr }; // "Tested …" / "Not tested yet" / "Your own preset"
+        winrt::Windows::UI::Xaml::Controls::TextBlock _presetPreview{ nullptr }; // the compiled launch, key masked
         winrt::Windows::UI::Xaml::Controls::TextBlock _setClaudeDetected{ nullptr }; // Agentmaster: the AUTO-DETECTED native claude.exe (read-only; "Not detected" when none)
         winrt::Windows::UI::Xaml::Controls::TextBox _setClaudeExePath{ nullptr }; // Agentmaster: explicit claude.exe override (blank = auto-detect; must be an .exe)
         winrt::Windows::UI::Xaml::Controls::Button _setClaudeInstallBtn{ nullptr }; // Agentmaster: one-click install/migrate — shown only when no native claude.exe is detected (label from ClaudeInstallKind())

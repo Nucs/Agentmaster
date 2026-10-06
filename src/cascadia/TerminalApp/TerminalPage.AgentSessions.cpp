@@ -42,6 +42,7 @@
 #include "AgentMaster/CommandWatch.h" // IsSaneWatchPath — the /handover action's path re-assert (COMMANDS.md)
 #include "AgentMaster/Engine.h" // SharedEngine (AM_SESSION stamp; restoreMutex barrier)
 #include "AgentMaster/HooksBridge.h" // PipeName for the spawn spec
+#include "AgentMaster/LaunchPresetsOs.h" // PRESETS (HARNESSES.md): launch-target snapshot (launchArgs) + compile + the key read
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / Save-LoadSessions / LoadAppSettings / dir colors
 #include "AgentMaster/ProcessInspect.h" // ProcessAlive / ProcessStartUnixMs / ResolveSessionId
 #include "AgentMaster/ProcessObserver.h" // External() — an Adopt takes the external's CURRENT (presence-resolved) conversation id
@@ -205,6 +206,106 @@ namespace winrt::TerminalApp::implementation
             }
             ::Agentmaster::AgentLogCaughtException(L"_PromptClaudeMissing");
         }
+    }
+
+    // Agentmaster (PRESETS, HARNESSES.md §6.4): the "this preset can't launch" notice. Modeled on
+    // _PromptClaudeMissing: buttons-only (a text box inside a ContentDialog gets no keypresses under XAML
+    // Islands — and this dialog needs none), agentmaster-dark, deduped across a burst. The refusal already
+    // happened at the launch seam; this only explains it.
+    winrt::fire_and_forget TerminalPage::_PromptPresetLaunchError(std::wstring message)
+    {
+        if (_presetLaunchErrorShowing)
+        {
+            co_return; // one notice at a time: a window restore of N keyless preset sessions shows ONE
+        }
+        const auto presenter{ _dialogPresenter.get() };
+        if (!presenter)
+        {
+            co_return; // nowhere to show it — the [launch-blocked] log line still records the refusal
+        }
+        _presetLaunchErrorShowing = true; // set BEFORE the first co_await so a synchronous burst dedupes
+        const auto weak = get_weak();
+        // Terminate-net: an exception escaping a fire_and_forget is std::terminate (the whole process, every
+        // window). Contain it, and re-arm the dedupe flag in the catch, or the notice is dead for this window.
+        try
+        {
+            ContentDialog dialog;
+            dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
+            dialog.Title(winrt::box_value(L"This preset can't start"));
+            dialog.Content(winrt::box_value(winrt::hstring{ message + L"\n\nNothing was started: a preset session never falls back to your Claude login, because that would run another model on another account." }));
+            dialog.CloseButtonText(L"OK");
+            dialog.DefaultButton(ContentDialogButton::Close);
+            co_await presenter.ShowDialog(dialog);
+            if (const auto strong = weak.get())
+            {
+                strong->_presetLaunchErrorShowing = false;
+            }
+        }
+        catch (...)
+        {
+            if (const auto strong = weak.get())
+            {
+                strong->_presetLaunchErrorShowing = false;
+            }
+            ::Agentmaster::AgentLogCaughtException(L"_PromptPresetLaunchError");
+        }
+    }
+
+    std::optional<::Agentmaster::LaunchArgs> TerminalPage::_StoredLaunchArgsFollowingChain(const std::wstring& sessionId)
+    {
+        std::wstring cur = sessionId;
+        for (int hop = 0; hop < 8 && !cur.empty(); ++hop)
+        {
+            if (auto args = ::Agentmaster::LoadStoredLaunchArgs(cur))
+            {
+                return args;
+            }
+            if (!_sessionRegistry)
+            {
+                break;
+            }
+            // Only a /clear link: the successor runs in the SAME claude process, so it IS on the predecessor's
+            // preset. A /handover successor stored its own snapshot at birth (or deliberately has none).
+            const auto info = _sessionRegistry->GetWithoutQueue(cur);
+            if (!info || info->continuedVia != L"clear" || info->continuedFromId.empty() || info->continuedFromId == cur)
+            {
+                break;
+            }
+            cur = info->continuedFromId;
+        }
+        return std::nullopt;
+    }
+
+    bool TerminalPage::_ResolveLaunchForSpawn(const std::wstring& token, const std::wstring& inheritFromId, const std::wstring& dir, const ::Agentmaster::AppSettings& settings, std::optional<::Agentmaster::LaunchArgs>& args, std::optional<::Agentmaster::CompiledClaudeLaunch>& compiled, std::wstring& error)
+    {
+        args.reset();
+        compiled.reset();
+        error.clear();
+        if (!token.empty())
+        {
+            // A menu pick: a NEW snapshot (tiers 1-2 frozen now). A deleted preset refuses rather than
+            // silently launching on Default.
+            args = ::Agentmaster::LaunchArgsForTarget(token, settings, dir, error);
+            if (!args)
+            {
+                return error.empty(); // "" token text (all blanks) = no pick; a failed preset pick = refuse
+            }
+        }
+        else if (!inheritFromId.empty())
+        {
+            args = _StoredLaunchArgsFollowingChain(inheritFromId); // the session's own preset/model, again
+        }
+        if (!args)
+        {
+            return true; // Default: the plain spawn, byte-identical to before presets existed
+        }
+        ::Agentmaster::CompiledClaudeLaunch c;
+        if (!::Agentmaster::CompileLaunchForSpawn(*args, settings, dir, c, error))
+        {
+            return false;
+        }
+        compiled = std::move(c);
+        return true;
     }
 
     // Agentmaster: launch a fresh Claude session (the Manager's "Launch Claude"). insertPosition
@@ -378,7 +479,8 @@ namespace winrt::TerminalApp::implementation
         // naming (the per-file uniqueness bump below still applies, so a fan-out's later files
         // walk "<title> (handover)" / "(handover 2)" …). No hit changes nothing, and the hint
         // text itself stays in the origin's context verbatim (nothing is stripped anywhere).
-        const auto argsHints = ::Agentmaster::ParseHandoverArgsHints(commandArgs, _appSettings.launchModels);
+        // PRESETS: the spec gains the visible presets ("Name | @id"), so "/handover [mimo] ..." can pick one.
+        const auto argsHints = ::Agentmaster::ParseHandoverArgsHints(commandArgs, ::Agentmaster::LaunchMenuSpec(_appSettings.launchModels));
         if (!argsHints.modelId.empty())
         {
             successorModel = argsHints.modelId;
@@ -463,7 +565,9 @@ namespace winrt::TerminalApp::implementation
             }
             if (newId.empty())
             {
-                const auto successorTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ successorTitle }, std::nullopt, {}, nextInsert, successorModel, launchPrompt);
+                // PRESETS: with no successor model picked (the combo's Default, no message hint), the successor
+                // inherits the ORIGIN's launch snapshot — a MiMo session hands over to MiMo, not to Opus.
+                const auto successorTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ successorTitle }, std::nullopt, {}, nextInsert, successorModel, launchPrompt, sessionId);
                 newId = successorTab ? _ClaudeSessionForTab(successorTab) : std::wstring{};
                 if (!newId.empty() && nextInsert != static_cast<uint32_t>(-1))
                 {
@@ -670,12 +774,27 @@ namespace winrt::TerminalApp::implementation
         // document on the successor's queue). The model is Default (the settings model) unless
         // the §6b per-command successor model overrides THIS launch.
         const auto appSettings = ::Agentmaster::LoadAppSettings();
+        // PRESETS: a picked successor model/preset takes a new snapshot; none (Default) inherits the ORIGIN's
+        // snapshot — the in-place successor continues the same work on the same model. A refusal returns ""
+        // (the caller then tries the new-tab path, which refuses the same way and shows the notice once).
+        std::optional<::Agentmaster::LaunchArgs> launchArgs;
+        std::optional<::Agentmaster::CompiledClaudeLaunch> compiledLaunch;
+        std::wstring launchError;
+        if (!_ResolveLaunchForSpawn(modelOverride, origin.id, dir, appSettings, launchArgs, compiledLaunch, launchError))
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[handover-here] " + ::Agentmaster::ShortId(origin.id) + L" launch refused: " + launchError + L"\n");
+            return {};
+        }
         // Seed workspace trust HERE, at the launch seam — the spec builders are pure and never
         // touch ~/.claude.json (ClaudeSpawn.h). Must precede the spawn so claude's startup
         // trust modal can't park the swapped-in successor.
         ::Agentmaster::PrepareManagedClaudeWorkspace(dir, appSettings);
-        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, title, _hooksBridge->PipeName(), {}, appSettings, {}, ::Agentmaster::SharedEngine().claudeExePath, {}, modelOverride, initialPrompt);
-        const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline);
+        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, title, _hooksBridge->PipeName(), {}, appSettings, {}, ::Agentmaster::SharedEngine().claudeExePath, {}, {}, initialPrompt, compiledLaunch ? &*compiledLaunch : nullptr);
+        if (launchArgs)
+        {
+            ::Agentmaster::StoreLaunchArgs(spec.sessionId, *launchArgs);
+        }
+        const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline, spec.authTokenEnv);
         auto newConn = _BuildAgentConnection(hostedCmd, dir, title, spec.env, /*inheritCursor*/ true);
         if (!newConn)
         {
@@ -743,7 +862,7 @@ namespace winrt::TerminalApp::implementation
     // restores its Auto Testing + autorunner from persistence (DESIGN §13) — so closing and
     // reopening the app brings the session back exactly as it was. `Sent` prompts are kept
     // Sent (never replayed, Correctness Rule #4).
-    TerminalApp::Tab TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId, uint32_t insertPosition, const std::wstring& modelOverride, const std::wstring& initialPrompt)
+    TerminalApp::Tab TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId, uint32_t insertPosition, const std::wstring& modelOverride, const std::wstring& initialPrompt, const std::wstring& inheritLaunchFromId)
     {
         if (!_sessionRegistry || !_hooksBridge)
         {
@@ -841,11 +960,33 @@ namespace winrt::TerminalApp::implementation
         // path passes one; the guard makes that structural rather than conventional.
         const std::wstring launchPrompt = (restored || !resumeId.empty()) ? std::wstring{} : initialPrompt;
         const auto appSettings = ::Agentmaster::LoadAppSettings();
+        // PRESETS (HARNESSES.md §7): what this launch runs. A menu pick (modelOverride: "@<presetId>" or a
+        // model id) takes a NEW snapshot; no pick reuses the snapshot of the session this launch continues —
+        // the resumed / restored session itself first (a re-forked fork included), else the fork source, else
+        // the /handover origin. A refusal (no key, no Base URL, a deleted preset) spawns NOTHING: falling back
+        // to the user's Claude login would silently change both the model and the account that pays.
+        const std::wstring launchInheritFrom = !resumeTargetId.empty() ? resumeTargetId : (!effectiveForkFrom.empty() ? effectiveForkFrom : inheritLaunchFromId);
+        std::optional<::Agentmaster::LaunchArgs> launchArgs;
+        std::optional<::Agentmaster::CompiledClaudeLaunch> compiledLaunch;
+        std::wstring launchError;
+        if (!_ResolveLaunchForSpawn(modelOverride, launchInheritFrom, dir, appSettings, launchArgs, compiledLaunch, launchError))
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[launch-blocked] " + (modelOverride.empty() ? (L"inherited from " + ::Agentmaster::ShortId(launchInheritFrom)) : (L"target " + modelOverride)) + L": " + launchError + L" (\"" + ttl + L"\" cwd=" + dir + L")\n");
+            _PromptPresetLaunchError(launchError);
+            return nullptr;
+        }
         // Seed workspace trust HERE, at the launch seam — the spec builders are pure and never
         // touch ~/.claude.json (ClaudeSpawn.h). This is the shared seam for fresh launch / resume /
         // fork / restore / handover, so all of them get the seed exactly as before.
         ::Agentmaster::PrepareManagedClaudeWorkspace(dir, appSettings);
-        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, appSettings, effectiveForkFrom, ::Agentmaster::SharedEngine().claudeExePath, forkIntoId, modelOverride, launchPrompt);
+        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, appSettings, effectiveForkFrom, ::Agentmaster::SharedEngine().claudeExePath, forkIntoId, {}, launchPrompt, compiledLaunch ? &*compiledLaunch : nullptr);
+        if (launchArgs)
+        {
+            // The session keeps its snapshot for life (resume / restart / fork / handover all reuse it). A
+            // resume re-stores the identical value — a deduplicated no-op in the session store; a restore-
+            // fresh or a fork stores it under its NEW id, which is how the new id inherits it.
+            ::Agentmaster::StoreLaunchArgs(spec.sessionId, *launchArgs);
+        }
 
         // Build the ConPTY connection (commandline = claude + our hooks settings; child env = spec.env
         // [CCMGR_SESSION_ID + CCMGR_HOOK_PIPE + the cog's global env] plus this window's AM_SESSION
@@ -860,8 +1001,9 @@ namespace winrt::TerminalApp::implementation
         // still binds it (FindDescendantByImage is descendant-OR-self, so claude.exe as a CHILD of pwsh
         // correlates like a hand-typed one); spec.env (CCMGR_* / AM_SESSION) rides pwsh and is inherited by
         // claude; --settings is inside spec.commandline. (BuildPwshHostedCommandline; pwsh resolved once at
-        // engine init.)
-        const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline);
+        // engine init.) spec.authTokenEnv (PRESETS): the host script moves a preset's key into
+        // ANTHROPIC_AUTH_TOKEN for the claude call only.
+        const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline, spec.authTokenEnv);
         auto connection = _BuildAgentConnection(hostedCmd, dir, ttl, spec.env);
 
         Microsoft::Terminal::Settings::Model::NewTerminalArgs newTerminalArgs{};
@@ -1116,8 +1258,14 @@ namespace winrt::TerminalApp::implementation
         // id (forkIntoId set); [fork] = a genuine new fork; else resume/restore-fresh/spawn. The suffix
         // names the source for both fork kinds (effectiveForkFrom).
         const std::wstring tag = !forkIntoId.empty() ? L"[refork] " : (!forkFromId.empty() ? L"[fork] " : (wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] ")));
+        // PRESETS: name what the session runs on (never the key) — a preset id, or a plain model pick.
+        std::wstring launchNote;
+        if (compiledLaunch)
+        {
+            launchNote = compiledLaunch->presetId.empty() ? (L" model=" + compiledLaunch->model) : (L" preset=" + compiledLaunch->presetId + (compiledLaunch->model.empty() ? std::wstring{} : (L" model=" + compiledLaunch->model)));
+        }
         ::Agentmaster::AppendStateLog(L"hooks.log",
-                                      tag + spec.sessionId + (effectiveForkFrom.empty() ? L"" : (L" (forked from " + effectiveForkFrom + L")")) + L" \"" + ttl + L"\" cwd=" + dir + L"\n");
+                                      tag + spec.sessionId + (effectiveForkFrom.empty() ? L"" : (L" (forked from " + effectiveForkFrom + L")")) + L" \"" + ttl + L"\" cwd=" + dir + launchNote + L"\n");
         return tab;
     }
 
@@ -2587,13 +2735,25 @@ namespace winrt::TerminalApp::implementation
             // SAME id (the [restore->refork] recipe) instead of replacing the forked branch with an empty
             // fresh conversation — the reported "restart a fork -> loads a new claude session" loss.
             const auto appSettings = ::Agentmaster::LoadAppSettings();
+            // PRESETS: a restart is the same session again, so it relaunches on the session's OWN snapshot
+            // (preset or model pick). Refused — not downgraded — when it can no longer compile (the key is
+            // gone): the old connection stays as it is and the user is told why.
+            std::optional<::Agentmaster::LaunchArgs> launchArgs;
+            std::optional<::Agentmaster::CompiledClaudeLaunch> compiledLaunch;
+            std::wstring launchError;
+            if (!_ResolveLaunchForSpawn({}, managedId, dir, appSettings, launchArgs, compiledLaunch, launchError))
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart-blocked] " + managedId + L": " + launchError + L"\n");
+                _PromptPresetLaunchError(launchError);
+                return true; // handled (refused) — don't fall through to the buggy replay
+            }
             // Seed workspace trust HERE, at the launch seam — the spec builders are pure and never
             // touch ~/.claude.json (ClaudeSpawn.h).
             ::Agentmaster::PrepareManagedClaudeWorkspace(dir, appSettings);
-            const auto spec = ::Agentmaster::BuildClaudeRestartSpec(dir, title, _hooksBridge->PipeName(), managedId, appSettings, ::Agentmaster::SharedEngine().claudeExePath, info->forkParentId);
+            const auto spec = ::Agentmaster::BuildClaudeRestartSpec(dir, title, _hooksBridge->PipeName(), managedId, appSettings, ::Agentmaster::SharedEngine().claudeExePath, info->forkParentId, compiledLaunch ? &*compiledLaunch : nullptr);
             // Re-host in pwsh (as the launch path does) so the relaunched session keeps the same
             // quit-to-pwsh-prompt behavior rather than dying into a dead pane.
-            const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline);
+            const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline, spec.authTokenEnv);
             newConn = _BuildAgentConnection(hostedCmd, dir, title, spec.env, /*inheritCursor*/ true);
             // Log the mode straight off the built artifact (no second transcript stat / no race).
             reforked = spec.commandline.find(L"--fork-session") != std::wstring::npos;
@@ -2894,12 +3054,23 @@ namespace winrt::TerminalApp::implementation
                 return false;
             }
             const auto appSettings = ::Agentmaster::LoadAppSettings();
+            // PRESETS: the parked resume connection carries the session's own snapshot. A snapshot that no
+            // longer compiles (no key) keeps the session RUNNING rather than parking it onto a connection that
+            // would start on another model — silent, like the claude-missing backstop above (log only).
+            std::optional<::Agentmaster::LaunchArgs> launchArgs;
+            std::optional<::Agentmaster::CompiledClaudeLaunch> compiledLaunch;
+            std::wstring launchError;
+            if (!_ResolveLaunchForSpawn({}, sid, dir, appSettings, launchArgs, compiledLaunch, launchError))
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[deactivate] " + sid8 + L" blocked - its preset can't launch: " + launchError + L"\n");
+                return false;
+            }
             // Seed workspace trust NOW, at this launch seam (the spec builders stay pure and never
             // touch ~/.claude.json): the wake may be hours or days away, but the trust flag is
             // durable, so the woken claude can never park on the startup trust modal.
             ::Agentmaster::PrepareManagedClaudeWorkspace(dir, appSettings);
-            const auto spec = ::Agentmaster::BuildClaudeRestartSpec(dir, title, _hooksBridge->PipeName(), sid, appSettings, ::Agentmaster::SharedEngine().claudeExePath, info->forkParentId);
-            const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline);
+            const auto spec = ::Agentmaster::BuildClaudeRestartSpec(dir, title, _hooksBridge->PipeName(), sid, appSettings, ::Agentmaster::SharedEngine().claudeExePath, info->forkParentId, compiledLaunch ? &*compiledLaunch : nullptr);
+            const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline, spec.authTokenEnv);
             newConn = _BuildAgentConnection(hostedCmd, dir, title, spec.env, /*inheritCursor*/ false);
             reforked = spec.commandline.find(L"--fork-session") != std::wstring::npos;
             // The same reading _RestartManagedSession logs, straight off the built commandline.

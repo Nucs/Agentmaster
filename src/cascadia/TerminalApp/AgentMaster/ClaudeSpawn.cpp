@@ -14,6 +14,7 @@
 // TU — TerminalApp.dll, the m5 test harness, agentmaster-cli — would otherwise need its own link edit.
 #pragma comment(lib, "version.lib")
 
+#include <algorithm> // std::all_of — BuildPwshHostedCommandline's token-variable name guard
 #include <atomic> // Agentmaster (perf): AgentmasterStateDir's rate-limited directory re-assert
 #include <cstdio>
 #include <filesystem>
@@ -24,6 +25,7 @@
 #include <vector>
 
 #include "Json.h" // the workspace-trust splice validates ~/.claude.json through this (never reprints it)
+#include "LaunchPresets.h" // PRESETS — CompiledClaudeLaunch (the launch settings file + command-line additions)
 #include "PendingPaste.h" // PENDING_INPUT.md §2b — the pure paste-cache marker resolver (adapter below)
 #include "Persistence.h" // GetDirEnv (the per-directory env overrides; ResolveSessionEnv reads it)
 #include "ProcessInspect.h" // SnapshotProcesses / FindDescendantByImage / ReadProcessCwd (moved here)
@@ -611,7 +613,7 @@ try {
         return json;
     }
 
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view modelOverride, std::wstring_view initialPrompt)
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view modelOverride, std::wstring_view initialPrompt, std::wstring_view extraArgs)
     {
         // When skipPermissions is ON (the cog default), spawn with --dangerously-skip-permissions:
         // the app drives claude programmatically (Autorunner + injected prompts) and gates risky
@@ -688,6 +690,15 @@ try {
             const bool needsQuotes = modelOverride.find_first_of(L" \t") != std::wstring_view::npos;
             cmd += needsQuotes ? (L" --model \"" + std::wstring{ modelOverride } + L"\"") :
                                  (L" --model " + std::wstring{ modelOverride });
+        }
+
+        // Preset additions (Agentmaster, PRESETS): --effort / --append-system-prompt / the preset's extra
+        // arguments, already rendered and quoted by RenderLaunchExtraArgs. Here — after every built-in flag
+        // and BEFORE the positional prompt below — because claude's parser reads the positional only after
+        // the flags; a flag placed after it would be swallowed into the first message.
+        if (!extraArgs.empty())
+        {
+            cmd += L" " + std::wstring{ extraArgs };
         }
 
         // Initial prompt (Agentmaster, COMMANDS.md — the /handover successor): the trailing
@@ -1924,6 +1935,117 @@ try {
             return { std::wstring{}, std::wstring{} };
         }
         return { settingsPath, forwarderPath };
+    }
+
+    std::wstring RenderLaunchExtraArgs(const CompiledClaudeLaunch& launch)
+    {
+        std::wstring out;
+        const auto add = [&](const std::wstring& piece) {
+            if (piece.empty())
+            {
+                return;
+            }
+            if (!out.empty())
+            {
+                out += L' ';
+            }
+            out += piece;
+        };
+        if (!launch.effort.empty())
+        {
+            // The compile step only lets low/medium/high/xhigh/max through, so the value needs no quoting.
+            add(L"--effort " + launch.effort);
+        }
+        if (!launch.appendSystemPrompt.empty())
+        {
+            // PsDoubleQuote: the managed command line is parsed by PowerShell (the pwsh host's `&`), so a
+            // note carrying $, ` or " must be escaped or it would expand / end the argument early.
+            add(L"--append-system-prompt " + PsDoubleQuote(launch.appendSystemPrompt));
+        }
+        add(launch.extraArgs); // the user's own arguments, verbatim (the compile step refused Agentmaster's flags)
+        return out;
+    }
+
+    std::wstring BuildLaunchSettingsJson(std::wstring_view hooksJson, const std::vector<std::pair<std::wstring, std::wstring>>& env)
+    {
+        std::wstring out{ hooksJson };
+        if (env.empty())
+        {
+            return out;
+        }
+        // BuildHooksSettingsJson always ends with "\n}\n"; splice the env block in before the final brace
+        // (found from the end, so the hooks object's own braces are never touched).
+        const size_t close = out.find_last_of(L'}');
+        if (close == std::wstring::npos)
+        {
+            return out; // not a document we built — leave it rather than produce invalid JSON
+        }
+        std::wstring block = L",\n  \"env\": {";
+        for (size_t i = 0; i < env.size(); ++i)
+        {
+            block += (i ? L",\n    \"" : L"\n    \"") + JsonEscape(env[i].first) + L"\": \"" + JsonEscape(env[i].second) + L"\"";
+        }
+        block += L"\n  }\n";
+        // Trim the newline(s) that precede the closing brace so the block joins the last member cleanly.
+        size_t cut = close;
+        while (cut > 0 && (out[cut - 1] == L'\n' || out[cut - 1] == L'\r'))
+        {
+            --cut;
+        }
+        out = out.substr(0, cut) + block + out.substr(close);
+        return out;
+    }
+
+    std::wstring MaterializeLaunchSettingsFile(const std::wstring& stateDir, const AppSettings& settings, std::wstring_view claudeExePath, const std::wstring& forwarderPath, const CompiledClaudeLaunch& launch)
+    {
+        if (forwarderPath.empty())
+        {
+            return {};
+        }
+        const std::wstring execHost = SelectHookExecHost(claudeExePath);
+        // The preset's model is the file's `model` (it must beat ~/.claude/settings.json's pinned model);
+        // without one, the cog's model keeps applying exactly as in the shared hooks file.
+        const std::wstring model = launch.model.empty() ? settings.model : launch.model;
+        const std::wstring content = BuildLaunchSettingsJson(
+            BuildHooksSettingsJson(ToForwardSlashes(forwarderPath), model, settings.includeCoAuthoredBy, settings.skipPermissions, execHost),
+            launch.settingsEnv);
+        // Content-addressed name: <preset>-<16 hex>. The preset part only makes the folder readable; the hash
+        // is what guarantees a running session's (watched) file is never rewritten under it.
+        std::wstring stem;
+        for (const wchar_t c : (launch.presetId.empty() ? std::wstring{ L"model" } : launch.presetId))
+        {
+            const bool ok = (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') || c == L'-' || c == L'_' || c == L'.';
+            stem.push_back(ok ? c : L'_');
+        }
+        if (stem.size() > 48)
+        {
+            stem.resize(48);
+        }
+        const std::wstring dir = stateDir + L"\\launch-settings";
+        const std::wstring path = dir + L"\\" + stem + L"-" + detail::PresetHex(detail::PresetFnv1a(content), 16) + L".json";
+        if (::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+        {
+            // Same name = same content, so the file is normally reused as is: immutable, shared by every
+            // identical launch. Its bytes are still compared (a ~3 KB read per launch), because a file that
+            // does NOT match its name is broken — something truncated or edited it — and reusing it would
+            // start claude on an invalid settings file: no hooks, no provider env, while the provider key
+            // still rides ANTHROPIC_AUTH_TOKEN. Such a file is rewritten below.
+            if (ReadFileUtf8(path) == content)
+            {
+                return path;
+            }
+            AppendStateLog(L"hooks.log", L"[preset] the launch settings file " + path + L" did not match its content hash; rewriting it\n");
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path{ dir }, ec);
+        // ATOMIC (temp + rename): a write that dies half-way (disk full, a crash) must never leave a partial
+        // file under the content-addressed name — every later identical launch would reuse it.
+        if (!WriteFileUtf8Atomic(path, content))
+        {
+            AppendStateLog(L"hooks.log", L"[preset] could not write the launch settings file " + path + L"\n");
+            return {};
+        }
+        return path;
     }
 
     // ---- the /handover command DEFINITION (COMMANDS.md §6) ----
@@ -3523,12 +3645,28 @@ send - nothing is submitted until the user presses Enter in that tab.
         return host;
     }
 
-    std::wstring BuildPwshHostedCommandline(std::wstring_view pwshLauncher, std::wstring_view innerCommandline)
+    std::wstring BuildPwshHostedCommandline(std::wstring_view pwshLauncher, std::wstring_view innerCommandline, std::wstring_view authTokenEnv)
     {
         // The pwsh script: invoke the inner command line via the call operator (&) so a QUOTED exe
         // path is EXECUTED (a bare quoted string would just be echoed). The inner keeps its own double
         // quotes — they are literal inside the -EncodedCommand payload (no nested-shell parsing).
-        const std::wstring script = L"& " + std::wstring{ innerCommandline };
+        std::wstring script = L"& " + std::wstring{ innerCommandline };
+        // PRESETS: a provider key arrives in a carrier variable and lives in ANTHROPIC_AUTH_TOKEN only for
+        // the claude call. The carrier is removed before claude starts, the token after it exits (finally:
+        // also on Ctrl+C), so the `PS <cwd>>` prompt -NoExit leaves in the tab holds no key — a plain
+        // `claude` typed there must reach the user's own login, not Anthropic with an OpenRouter key.
+        // The variable NAME is spliced into the script, so only [A-Za-z0-9_] is accepted (it is always our
+        // own constant; anything else is a bug, and refusing it keeps the script injection-free).
+        const bool safeName = !authTokenEnv.empty() &&
+                              std::all_of(authTokenEnv.begin(), authTokenEnv.end(), [](wchar_t c) {
+                                  return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9') || c == L'_';
+                              });
+        if (safeName)
+        {
+            const std::wstring name{ authTokenEnv };
+            script = L"$env:ANTHROPIC_AUTH_TOKEN = $env:" + name + L"; Remove-Item Env:" + name +
+                     L" -ErrorAction Ignore; try { " + script + L" } finally { Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction Ignore }";
+        }
         // -EncodedCommand wants base64 of the command's UTF-16LE bytes. On Windows wchar_t IS UTF-16LE,
         // so the wstring's raw bytes are exactly that (no BOM).
         const std::string b64 = Base64Encode(reinterpret_cast<const unsigned char*>(script.data()), script.size() * sizeof(wchar_t));
@@ -4436,7 +4574,40 @@ send - nothing is submitted until the user presses Enter in that tab.
         }
     }
 
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view forkIntoSessionId, std::wstring_view modelOverride, std::wstring_view initialPrompt)
+    // Agentmaster (PRESETS): apply a compiled launch to a spec whose plain parts are already built — the
+    // launch settings file (when the launch carries env values), the process env additions and the
+    // key-carrier name. Shared by BuildClaudeSpawn and BuildClaudeRestartSpec so a restart applies a preset
+    // exactly like the first launch did.
+    //   spec     - the spec (settingsPath / forwarderPath set; env not yet extended).
+    //   stateDir - the ACTIVE profile dir.
+    //   settings - the cog settings.
+    //   launcher - the resolved claude.exe (hook form).
+    //   launch   - the compiled launch.
+    static void ApplyCompiledLaunch(ClaudeSpawnSpec& spec, const std::wstring& stateDir, const AppSettings& settings, std::wstring_view launcher, const CompiledClaudeLaunch& launch)
+    {
+        spec.presetId = launch.presetId;
+        if (launch.sessionSettings)
+        {
+            const auto path = MaterializeLaunchSettingsFile(stateDir, settings, launcher, spec.forwarderPath, launch);
+            if (!path.empty())
+            {
+                spec.settingsPath = path;
+            }
+            else
+            {
+                // The session still starts (on the shared hooks file) — losing the preset's env is better than
+                // losing the launch, and the line says exactly what happened.
+                AppendStateLog(L"hooks.log", L"[preset] " + ShortId(spec.sessionId) + L" launch settings file missing; started with the shared hooks file (the preset's env is NOT applied)\n");
+            }
+        }
+        for (const auto& kv : launch.processEnv)
+        {
+            spec.env.push_back(kv); // after CCMGR_* and the user's env: AM_PRESET + the key carrier
+        }
+        spec.authTokenEnv = launch.authTokenEnv;
+    }
+
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view forkIntoSessionId, std::wstring_view modelOverride, std::wstring_view initialPrompt, const CompiledClaudeLaunch* launch)
     {
         ClaudeSpawnSpec spec;
         spec.workingDir = std::wstring{ workingDir };
@@ -4462,17 +4633,23 @@ send - nothing is submitted until the user presses Enter in that tab.
         spec.settingsPath = settingsPath;
         spec.forwarderPath = forwarderPath;
 
-        const auto settingsFwd = ToForwardSlashes(settingsPath);
-        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFromSessionId, claudeLauncher, modelOverride, initialPrompt);
-
         // NOTE: no workspace-trust seed here — building a spec must stay PURE (no writes to
         // ~/.claude.json). The launch seam calls PrepareManagedClaudeWorkspace before spawning.
         // The cog's global env + the hook-correlation vars, applied to every session (CCMGR_* always win).
         AppendManagedClaudeEnv(spec, settings);
+        if (launch)
+        {
+            ApplyCompiledLaunch(spec, stateDir, settings, claudeLauncher, *launch); // may swap settingsPath for the launch file
+        }
+
+        const auto settingsFwd = ToForwardSlashes(spec.settingsPath);
+        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFromSessionId, claudeLauncher,
+                                                  launch ? std::wstring_view{ launch->model } : modelOverride, initialPrompt,
+                                                  launch ? RenderLaunchExtraArgs(*launch) : std::wstring{});
         return spec;
     }
 
-    ClaudeSpawnSpec BuildClaudeRestartSpec(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view sessionId, const AppSettings& settings, std::wstring_view claudeLauncher, std::wstring_view forkParentId)
+    ClaudeSpawnSpec BuildClaudeRestartSpec(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view sessionId, const AppSettings& settings, std::wstring_view claudeLauncher, std::wstring_view forkParentId, const CompiledClaudeLaunch* launch)
     {
         // Relaunch an EXISTING managed conversation IN PLACE (the tab's connection died and the user hit
         // "Restart session"). Unlike BuildClaudeSpawn this NEVER mints a new id. The relaunch form is
@@ -4513,12 +4690,17 @@ send - nothing is submitted until the user presses Enter in that tab.
         {
             forkFrom = std::wstring{ forkParentId };
         }
-        const auto settingsFwd = ToForwardSlashes(settingsPath);
-        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFrom, claudeLauncher);
-
         // NOTE: no workspace-trust seed here — see BuildClaudeSpawn. The restart seam calls
         // PrepareManagedClaudeWorkspace before rebuilding the connection.
         AppendManagedClaudeEnv(spec, settings);
+        if (launch)
+        {
+            ApplyCompiledLaunch(spec, stateDir, settings, claudeLauncher, *launch); // the session's own preset/model, again
+        }
+        const auto settingsFwd = ToForwardSlashes(spec.settingsPath);
+        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFrom, claudeLauncher,
+                                                  launch ? std::wstring_view{ launch->model } : std::wstring_view{}, {},
+                                                  launch ? RenderLaunchExtraArgs(*launch) : std::wstring{});
         return spec;
     }
 }
