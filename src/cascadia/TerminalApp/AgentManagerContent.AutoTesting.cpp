@@ -14,7 +14,7 @@
 //   AgentManagerContent.Tree.cpp        - the Explorer Tree: managed/external trees, context menus, scope/sort toggles, rename, confirm dialogs
 //   AgentManagerContent.Settings.cpp    - keep-awake/reopen/activate buttons + the Settings cog overlay (tabs, save, env editor, UPDATES, claude-missing)
 // ★ AgentManagerContent.AutoTesting.cpp  - the Auto Testing: plan + selection sync, prompt compose/history, Autorunner, the Summary tab, templates
-//   AgentManagerContent.Launch.cpp      - the Launch bar: cwd validation, the Claude/Codex toggle, launch/create/fork, the path-picker drop-down
+//   AgentManagerContent.Launch.cpp      - the Launch bar's HOST half: _MakeLaunchBarHost, the forwarders, LaunchBoxText / SetLaunchBoxText (the bar itself: AgentLaunchBar.{h,cpp})
 // ======================================================================================
 //
 // Agentmaster Manager tab: the FLIGHT PLAN -- plan rebuild + selection sync (managed + external read-only), prompt compose/history, the Autorunner toggle, the Summary tab, and plan templates. Partial TU of AgentManagerContent.cpp.
@@ -714,9 +714,13 @@ namespace winrt::TerminalApp::implementation
 
     // ---- action handlers ----------------------------------------------------
 
-    // Agentmaster (Codex-launch): repaint the launch-bar agent toggle from _launchCodex. Codex wears the
-    // SAME teal (0xFF4EC9B0) as every other codex surface (the EXTERNAL pill, the managed Board/tree pill),
-    // so the agent reads one color everywhere; Claude is a neutral blue accent (the default, unchanged).
+    // Agentmaster: the compose row's envelope ("Add to the queue") — append the compose box's text, verbatim, as a
+    // new Pending prompt at the END of the selected session's Auto-Testing queue (a 56-char single-line label for the
+    // list), then clear the box and keep focus in it so the next prompt can be typed at once. A no-op with no managed
+    // selection (an EXTERNAL's read-only plan has no queue) or an empty box. Nothing is sent here: the Tests
+    // Autorunner (or Send now) delivers the row later, so the queue's order is the delivery order.
+    // (The comment that stood above this function belonged to the launch bar's agent-toggle repaint, which moved
+    // with it into AgentLaunchBar::_UpdateLaunchAgentButton.)
     void AgentManagerContent::_OnAddPrompt()
     {
         if (_selectedId.empty() || !_registry || !_addPromptBox)

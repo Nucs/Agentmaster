@@ -573,7 +573,7 @@ has been run against this implementation yet.**
 | `TerminalPage.AgentSessions.cpp` (+ `.h`) | `_ResolveLaunchForSpawn` (the ONE launch-target decision), `_StoredLaunchArgsFollowingChain`, `_PromptPresetLaunchError`, and the seams: `_LaunchClaudeSession` (+ `inheritLaunchFromId`), the /handover successors, `_RestartTabIntoFreshSession`, `_RestartManagedSession`, Deactivate. |
 | `AgentModelMenu.h` | The preset group (separator + tooltips) in `AgentFillModelPickItems`. |
 | `AgentManagerContent.Settings.cpp` (+ `.h`, `.cpp`) | The Presets tab (§8.1). |
-| `AgentManagerContent.Launch.cpp` (+ `.cpp`) | The Launch button's hover menu and `_OnLaunch(target)`. |
+| `AgentLaunchBar.cpp` (+ `.h`) | The Launch button's hover menu and `_OnLaunch(target)` — moved here from `AgentManagerContent.Launch.cpp` on 2026-10-06 (the shared launch bar the Agent Manager page and the side panel's `+` launcher both run; SIDE_PANEL.md §2e). |
 | `AgentManagerContent.Tree.cpp`, `TerminalPage.AgentSessionsPage.cpp`, `TerminalPage.cpp` | The menu sites switched from `ParseLaunchModels` to `LaunchMenuEntries`. |
 | `AgentMaster/tests/tests_presets.cpp` | `TestLaunchPresets`: seeding, the JSON, the tiers, the snapshot, the compile vs the reference block, the refusals, the reserved names / forbidden flags, the mask, the menus, and the launch settings file on disk (valid JSON, no key, reuse, the rewrite of a broken file, no temp left). |
 | `AgentMaster/tests/tests_spawn_sched.cpp` | The pwsh host script's token scoping (carrier → `ANTHROPIC_AUTH_TOKEN` → removed in `finally`) and the refusal of an unsafe carrier name. |

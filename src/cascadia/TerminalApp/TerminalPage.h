@@ -67,6 +67,7 @@ namespace winrt::TerminalApp::implementation
     class AgentManagerContent; // Agentmaster: the Agent Manager PAGE's content (an IPaneContent, hosted directly in _tabContent — never in a tab); complete only in the TUs that include AgentManagerContent.h, which are the only ones that dereference _managerPage
     class AgentTabOverlay; // Agentmaster: the per-tab "link badge" overlay (TAB_OVERLAY.md)
     class AgentTranscriptOverlay; // Agentmaster: the window-level transcript reading view ("Show Transcript"); complete in the TUs that include AgentTranscriptOverlay.h (the ctor / dtor TUs + TerminalPage.AgentTranscript.cpp)
+    class AgentLaunchBar; // Agentmaster: the shared LAUNCH BAR (the Agent Manager's launch row) the side panel's "+" launcher card hosts; complete in the TUs that include AgentLaunchBar.h (TerminalPage.AgentSidePanel.cpp builds it, TerminalPage.AgentEngine.cpp's destructor shuts it down)
 
     inline constexpr uint32_t DefaultRowsToScroll{ 3 };
     inline constexpr std::wstring_view TabletInputServiceKey{ L"TabletInputService" };
@@ -549,7 +550,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Grid _sidePanelBody{ nullptr }; // rows: cards area (star*split) / horizontal splitter / summary area (star*(1-split)); hidden while collapsed
         winrt::Windows::UI::Xaml::Controls::Border _sidePanelHSplitter{ nullptr }; // the draggable HORIZONTAL separator between the cards list and the summary area
         winrt::Windows::UI::Xaml::Controls::TextBox _sidePanelSearchBox{ nullptr }; // the header's SECOND line: the full-width filter box (ParseSessionQuery grammar over title/dir/branch/id) — slim (FontSize 11, a ~22px floor via a per-box TextControlThemeMinHeight override) so it sits cleanly under the buttons
-        // top-row "Sum" toggle (the FIRST of the right-aligned buttons, left of LOCAL/GLOBAL): checked == the
+        // top-row "Sum" toggle (the second of the right-aligned buttons — after the "+" launcher, left of LOCAL/GLOBAL): checked == the
         // selected session's summary area is SHOWN below the cards (the default); unchecked == hidden, the cards
         // fill the panel and each card shows the rich session tooltip beside the panel on hover (SIDE_PANEL.md
         // §2d). A REAL ToggleButton (the ⌖ idiom) so the accent fill IS the state — kept pinned to
@@ -634,6 +635,48 @@ namespace winrt::TerminalApp::implementation
         bool _sidePanelRevealQueued{ false }; // a coalesced reveal tick is queued (_SidePanelQueueReveal) — rapid Ctrl+Tab cycling folds into ONE scroll, to the LAST tab
         uint64_t _sidePanelLastRebuildMs{ 0 }; // GetTickCount64 of the last card rebuild (the min-gap throttle anchor)
         uint64_t _sidePanelNextTimingMs{ 0 }; // next GetTickCount64 at/after which the in-place timing-text refresh runs (~30s cadence)
+        // --- The header's "+" LAUNCHER (SIDE_PANEL.md §2e) ---
+        // A click on "+" opens a CARD at the click point holding the Agent Manager's own launch row — the shared
+        // AgentLaunchBar, Claude only: [● Claude] [ box ] [Launch Claude] [Fork] — so a session starts from the side
+        // panel without leaving the tab. The card is built on the FIRST click (_SidePanelEnsureLaunchCard) and kept for
+        // the window's life; a window that never opens it pays nothing. Closed by a press outside it, Esc, "+" again,
+        // a launch, a tab switch, a collapse and a dock flip. UI-thread-only, like every side panel member.
+        // The "+" header button (line 1, column 1: the first of the right-aligned buttons, left of "Sum").
+        winrt::Windows::UI::Xaml::Controls::Button _sidePanelLaunchBtn{ nullptr };
+        // The card's Popup, parented into Root() across its three rows (the tag editor's recipe), so its offsets are
+        // Root-relative and it can sit anywhere in the window; null until the first click.
+        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _sidePanelLaunchPopup{ nullptr };
+        // The card itself (dark, the tag editor's look): the outside-press boundary, the key handlers' owner, the
+        // placement's measured size, and the focus-restore test ("was focus inside the card when it closed?").
+        winrt::Windows::UI::Xaml::Controls::Border _sidePanelLaunchCard{ nullptr };
+        // The card's launch bar: the Agent Manager's launch code verbatim (AgentLaunchBar.h), a Claude-only host whose
+        // drop-down lives in Root(). Shut down in ~TerminalPage (its hover timer is UI-affine).
+        std::shared_ptr<AgentLaunchBar> _sidePanelLaunchBar;
+        // Where the card's corner sits, in Root() coordinates: the "+" press point (the tooltip-like placement the user
+        // asked for), else the "+" button's bottom center. Kept while open, so a re-placement after a size change
+        // stays anchored to the same point.
+        winrt::Windows::Foundation::Point _sidePanelLaunchAnchor{ 0.0f, 0.0f };
+        // _sidePanelLaunchAnchor holds a press on "+" that its Click has not consumed yet. Cleared by the Click and by
+        // the button's PointerCaptureLost (a press that ended off the button, without a click), so a Click without a
+        // press of its own (UI Automation) never reuses a stale point.
+        bool _sidePanelLaunchAnchorFromPress{ false };
+        bool _sidePanelLaunchPlaceQueued{ false }; // a coalesced fit + placement tick is queued (_SidePanelQueueLaunchCardPlacement) — the card's / Root's SizeChanged burst folds into it
+        bool _sidePanelLaunchHooked{ false }; // the card's two Root() hooks (the outside-press close, the resize re-placement) are registered — once per page, even when a failed build is retried
+        bool _sidePanelLaunchCardDockLeft{ true }; // the dock side when the card opened: a settings broadcast that moved the dock closes the card (its "+" moved away)
+        double _sidePanelLaunchBoxWidth{ 0.0 }; // the card box's width as last fitted (_SidePanelFitLaunchBox) — written again only when it changes
+        // The key the card's PreviewKeyDown armed (Enter / Escape; None = nothing armed) and what its key-up does. The
+        // card acts on the KEY-UP (the AgentModelPrompt.h rule): closing on the key-down would hand the rest of the
+        // keystroke — the CR / ESC character — to the terminal that takes focus next (a submitted draft, an
+        // interrupted turn).
+        winrt::Windows::System::VirtualKey _sidePanelLaunchArmedKey{ winrt::Windows::System::VirtualKey::None };
+        enum class SidePanelLaunchKeyAction : uint8_t
+        {
+            None, // nothing armed
+            Close, // Escape with the drop-down closed: close the card
+            Launch, // Enter on the focused Launch button: what its click does
+            Fork, // Enter on the focused Fork button: what its click does
+        };
+        SidePanelLaunchKeyAction _sidePanelLaunchArmedAction{ SidePanelLaunchKeyAction::None };
         // Splitter drag state (one drag at a time; pointer captured on the splitter Border).
         bool _sidePanelDragWidth{ false }; // a vertical-separator drag is in flight
         bool _sidePanelDragSplit{ false }; // a horizontal-separator drag is in flight
@@ -1979,6 +2022,53 @@ namespace winrt::TerminalApp::implementation
         void _SidePanelDropCardToolTip(AgentSidePanelCardView& view, const std::wstring& id); // before a card leaves the list (remove / reset): shut its tooltip host down (detach + drop callbacks — a ToolTip left attached to a dropped element is the islands leak class) and forget its surface-keyed signature + scroll state. Never throws
         void _SidePanelToggleCollapsed(); // collapse to the thin expander strip / expand back; persists per window (record autosave) AND as the global default (RMW)
         void _SidePanelFlipDock(); // flip left<->right: RMW the GLOBAL sidePanelOnLeft, re-dock THIS window live (other windows re-dock via the settings broadcast)
+        // --- The header's "+" LAUNCHER (SIDE_PANEL.md §2e) ---
+        // The "+" Click: close the open card, else open it at the press point (or the button, for a Click without a
+        // press). Consumes the recorded press. Never throws (the open and the close contain their own failures).
+        void _SidePanelToggleLaunchCard();
+        // Build the card ONCE (the dark card, its six Button brushes, the Claude-only launch bar with its host, the key
+        // handlers, the Root()-parented Popup) and register the two Root() hooks it needs (the outside-press close and
+        // the window-resize re-placement). Returns true when the card exists (built now or before), false when the
+        // build failed — logged (Rule #18); the next "+" click tries again from scratch.
+        bool _SidePanelEnsureLaunchCard();
+        // Open the card: build it if needed, anchor it (`fromPress` = at the recorded press point, else under the "+"
+        // button), copy the Agent Manager's box text into it, fit the box to the window, place the card toward the
+        // window's center (PointerCardPlacement.h) and focus its box programmatically — the caret in the box, the
+        // drop-down still closed until a click or a keystroke (the user's choice). Logs [nav] sidepanel launcher open.
+        // Never throws (a failure is logged and the card stays closed).
+        //   fromPress - true when _sidePanelLaunchAnchor holds the press that led to this open.
+        void _SidePanelOpenLaunchCard(bool fromPress);
+        // Close the open card: drop an armed key, dismiss the bar (its drop-down closed, the box normalized), mirror the
+        // box's final text into the Agent Manager's box, close the Popup and log [nav] sidepanel launcher close
+        // (<reason>). When the card held keyboard focus, focus goes back to the current tab on a later tick
+        // (_FocusCurrentTab) — a press on a focusable element (the terminal, a text box) keeps the focus it took. A
+        // no-op when the card is closed. Never throws.
+        //   reason - why it closed, for the log ("outside press", "esc", "+ again", "launch", "tab switch", ...).
+        void _SidePanelCloseLaunchCard(std::wstring_view reason);
+        // Coalesce a fit + placement of the OPEN card onto one later dispatcher tick: the only legal path from a
+        // layout-driven trigger (the card's / Root's SizeChanged, the bar's layout callback) — moving a parented
+        // Popup inside a layout pass is the E_LAYOUTCYCLE fail-fast. Never throws (a failed enqueue re-arms the latch).
+        void _SidePanelQueueLaunchCardPlacement();
+        // Place the card at _sidePanelLaunchAnchor with PlacePointerCard (corner at the anchor, extending toward the
+        // window's center, clamped 8 DIP inside Root()), reading the card's live size (its DesiredSize before the first
+        // arrange). Writes the Popup offsets only when they change. Never throws (logged; the card keeps its offsets).
+        void _SidePanelPlaceLaunchCard();
+        // Size the card's box for the window: from 160 to 504 DIPs (the Agent Manager's comfortable width), whatever
+        // the window leaves beside the agent chip, Launch and Fork. A fixed width (Min = Max), so the card does not
+        // change size while you type. Written only when it changes. Never throws (logged).
+        void _SidePanelFitLaunchBox();
+        // Mirror the card's box text into the Agent Manager's box (AgentManagerContent::SetLaunchBoxText) — the two
+        // boxes show the same text (the user's "keep the last, same one we have in agent manager tab"). A no-op without
+        // a card or a Manager. Never throws (logged).
+        void _SidePanelSyncLaunchTextToManager();
+        // True when a press whose source is `source` is INSIDE the launcher: the card, the bar's drop-down, the "+"
+        // button (its Click toggles), or the content of another open popup (the "Specify a model" prompt the Launch
+        // hover menu opens). Everything else is an outside press. Never throws (a failed walk answers false: close).
+        //   source  - the press's OriginalSource.
+        //   returns - true = keep the card open.
+        bool _SidePanelLaunchPressIsInside(const winrt::Windows::UI::Xaml::DependencyObject& source);
+        // True while the card's Popup is open. Never throws (a failed read answers false).
+        bool _SidePanelLaunchCardOpen() const noexcept;
         void _SidePanelUpdateSortButton(); // reflect the current AppSettings::boardSort on the order button's label (the board's own label mapping)
         void _SidePanelToggleScope(); // flip the card list LOCAL <-> GLOBAL for THIS window: relabel, force a rebuild, persist via the window-record autosave ONLY — never _SidePanelPersistDefaults (the scope has no global default by design: every new window starts LOCAL) and never the Manager's own tree/board scope
         void _SidePanelUpdateScopeButton(); // reflect _sidePanelGlobal on the scope toggle's label (LOCAL / GLOBAL — the board's own words)

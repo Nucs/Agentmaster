@@ -44,6 +44,13 @@ namespace Agentmaster::Updater
 
 namespace winrt::TerminalApp::implementation
 {
+    // Agentmaster (the shared LAUNCH BAR — AgentLaunchBar.h, included by the .cpp TUs that build or call it): the toolbar's
+    // launch row is an AgentLaunchBar the content hosts. Forward-declared so this widely-included header does not pull the
+    // bar's header into every TU; shared_ptr members + by-value declarations need no complete type here.
+    class AgentLaunchBar;
+    struct AgentLaunchBarHost;
+    struct AgentLaunchRecentDirs;
+
     class AgentManagerContent : public winrt::implements<AgentManagerContent, IPaneContent>, public BasicPaneEvents
     {
     public:
@@ -236,6 +243,25 @@ namespace winrt::TerminalApp::implementation
         {
             return _MakeLazySessionMenu(id, cwd, anchor);
         }
+        // Agentmaster (SIDE PANEL "+" launcher, SIDE_PANEL.md §2e): the launch box's current text — what the side panel's
+        // launcher card shows when it opens, so the two boxes read the same (the user's "keep the last, the same one the
+        // Agent Manager has"). The text follows everything that writes this box: typing here, the selection pre-aim
+        // (_SelectSession / _SelectExternal), the defaultLaunchDir seed, and the card's own edits (SetLaunchBoxText).
+        //   returns — the untrimmed text; "" before the bar is built.
+        //   throws  — what reading a XAML property throws on the UI thread (never in practice). UI thread only.
+        std::wstring LaunchBoxText() const;
+        // Agentmaster (SIDE PANEL "+" launcher): write the side panel card's box text into THIS launch box — the card
+        // mirrors every edit and its close here — and re-validate it explicitly: the Agent Manager page is usually hidden
+        // then, and TextChanged is unreliable off the live tree. The box is unfocused, so its drop-down never opens from
+        // this. A no-op for identical text. UI thread only.
+        //   text   — the card's box text (a folder or a session id).
+        //   throws — what a XAML property write throws on the UI thread (the page's callers are contained).
+        void SetLaunchBoxText(const std::wstring& text);
+        // Agentmaster (SIDE PANEL "+" launcher): this window's recent-folders list — the ONE list the Manager's launch bar
+        // reads and pushes to. The side panel's bar is built with the same pointer, so a folder launched from either is
+        // at the top of both drop-downs and neither save can drop the other's push. Never null after construction.
+        //   returns — the shared list (AgentLaunchBar.h has the type).
+        std::shared_ptr<AgentLaunchRecentDirs> LaunchRecentDirs() const noexcept { return _launchRecentDirs; }
 
         // Agentmaster (Fleet Observer O6; OBSERVER.md §11c): the External (WindowsTerminal) claude
         // census — observe-only sessions the observer detected in a real Windows Terminal (NOT our
@@ -373,21 +399,8 @@ namespace winrt::TerminalApp::implementation
         void _ApplyLayoutToTracks();
 
         // Action-bar handlers (operate on _selectedId / _selectedPromptId).
-        // The Launch button's action. `target` (PRESETS): the hover menu's pick — "" = Default (a plain click),
-        // a model id, or "@<presetId>" — handed to the spawn handler for a NEW session in the typed folder. A
-        // session id in the box resumes that session on its own snapshot and ignores `target`.
-        //   target - the launch target ("" for a plain click).
-        void _OnLaunch(const std::wstring& target = {});
-        // PRESETS (HARNESSES.md §8.2): the Launch button's hover menu — exactly the "Open New Session Here"
-        // picker (Default, Specify…, the launch models, then the visible presets), opened after a short hover
-        // (_launchHoverTimer) so a pointer merely crossing the toolbar opens nothing. Offered only while the
-        // button launches a NEW Claude session (not in Codex mode, not when the box holds a session id, not
-        // while the button is disabled). A pick launches through _OnLaunch(target).
-        void _ShowLaunchMenu();
-        // Agentmaster: "Create & Launch" — ensure the typed working dir exists, creating it (and any
-        // missing parents) when it's a not-yet-existing absolute path. Returns false (and warns) if the
-        // create failed, so the caller aborts the launch. An existing dir is a no-op pass-through.
-        bool _EnsureLaunchDirExists(const std::wstring& dir);
+        // (The Launch button's action, its PRESETS hover menu and "Create & Launch" moved into the shared AgentLaunchBar —
+        // _OnLaunch / _ShowLaunchMenu / _EnsureLaunchDirExists there; the content reaches them through _launch.)
         void _OnAddPrompt();
         void _OnSendNow(); // the "!" icon — confirms, then _DoSendNow
         void _DoSendNow(); // actual inject, after the Send-now confirm
@@ -488,76 +501,43 @@ namespace winrt::TerminalApp::implementation
         void _OnApplyTemplate(bool toWholeDirectory);
         void _RefreshTemplateCombo();
 
-        // Launch path-picker drop-down (a Popup anchored under the cwd box). Opens on user
-        // focus of the box; shows the recent dirs (excluding the current one) over the
-        // subfolders of the current path; clicking a row drives the box and re-lists. When the
-        // box holds a bare token with NO root path (e.g. "agent"), the recent section instead
-        // becomes case-insensitive fuzzy MATCHES ranked by Levenshtein closeness (closest first).
-        // Its size tracks the WINDOW (_LayoutPathPicker): out to 90% of the pane width, and as tall
-        // as its rows need up to 90% of the window's height.
-        void _OpenPathPicker();
+        // Agentmaster (the shared LAUNCH BAR, AgentLaunchBar.h): the toolbar's launch row — the Claude<->Codex toggle,
+        // the cwd box with its validation underline and its path-picker drop-down (recent dirs / fuzzy RECENT MATCHES /
+        // git worktrees / subfolders, sized against the WINDOW), Launch with its PRESETS hover menu, and Fork — is ONE
+        // AgentLaunchBar (_launch), the same code the side panel's "+" launcher card runs (SIDE_PANEL.md §2e). The
+        // content keeps only its HOST half: the callbacks the bar calls (_MakeLaunchBarHost), the staged toolbar
+        // reflow (_ReflowLaunchBar, below), and three forwarders its other TUs call.
+        // Build the bar's host for THIS content: the Claude<->Codex toggle, the drop-down parented into _root (row 0),
+        // the "Couldn't create folder" dialog on _root, the shared recent list (_launchRecentDirs), and callbacks that
+        // forward to the page-wired handlers (_spawnHandler / _resumeSessionHandler / _forkSessionHandler /
+        // _codexLaunchHandler), the Manager's own modal (_ShowClaudeMissing), the "Specify…" prompt
+        // (_ModelSpecifyOpener) and _ReflowLaunchBar. Every callback holds the content WEAKLY and reads its member at
+        // call time — the page wires the handlers AFTER the bar is built, and a handler still unset makes its action a
+        // no-op. Returns the host by value (complete in AgentLaunchBar.h). Throws std::bad_alloc only.
+        AgentLaunchBarHost _MakeLaunchBarHost();
+        // Close the bar's drop-down (a forwarder: SetActivateAllBusy closes it before greying the box out). No-op
+        // before the bar is built.
         void _ClosePathPicker();
-        // Agentmaster: anchor the drop-down under the cwd box and size it against the CURRENT window —
-        // the width rule (from the box's left edge out to 90% of the pane width, 560-DIP floor) plus the
-        // HEIGHT CAP: the list grows with its rows up to 90% of the window's height, but never past the
-        // window's bottom edge (less an 8-DIP gap). Why both height limits: the list starts below the tab
-        // row + toolbar, so on a short window a full 90% would run off the bottom, and an overflowing
-        // popup is CLIPPED — its last rows AND the lower end of its scrollbar land outside the window,
-        // where they can't be scrolled into view at all. So the bottom-edge clamp wins on a short window;
-        // a 120-DIP floor (~Browse… + a header + two rows) only overrides it on a window too short to fit
-        // even that. "Window" = the XAML island (XamlRoot().Size() — it fills the client area, tab row
-        // included, which _root's own height is not), measured in the island coordinates
-        // TransformToVisual(nullptr) yields. No parameters, no return value. Never throws: the anchor,
-        // width and height steps are guarded one by one and log via AgentLogCaughtException (Rule #18),
-        // each keeping its previous value, so one failed read can neither skip the other steps nor escape
-        // into the GotFocus / dispatcher caller. ⚠ It reads LIVE layout: never call it synchronously from
-        // a SizeChanged / LayoutUpdated handler (mid-pass geometry is stale, and mutating a parented
-        // Popup inside a layout pass is the E_LAYOUTCYCLE fail-fast the tab-strip tag badges hit) — go
-        // through _QueuePathPickerRelayout instead.
-        void _LayoutPathPicker();
-        // Agentmaster: re-fit the OPEN drop-down to a resized window on the next dispatcher tick (via
-        // _LayoutPathPicker). A no-op while the list is closed (every open re-fits anyway) or while a
-        // re-fit is already queued, so a drag-resize's burst of SizeChanged events costs at most one
-        // re-fit per tick. Deferred on purpose — see _LayoutPathPicker's ⚠. No parameters, no return
-        // value. Never throws: a failed enqueue (the dispatcher shutting down with the window) is logged
-        // and RE-ARMS the queued latch — a latch left stuck would silently stop the open list from ever
-        // following the window size again.
+        // Re-fit the bar's OPEN drop-down to a resized window on the next dispatcher tick (a forwarder: _root's
+        // SizeChanged queues it — a layout pass, which is exactly why the re-fit itself is deferred; the bar's
+        // _QueuePathPickerRelayout has the rule). Never throws.
         void _QueuePathPickerRelayout();
-        void _RebuildPathPicker();
-        void _PickPath(const std::wstring& dir);
-        void _NormalizeCwdBox(); // platform-sensitive NormPath of the cwd box (on commit / blur / pick / launch)
         // Agentmaster: validate the Launch box's content as a working dir OR a session id, painting the
         // underline (green = a FOUND session id; red = an unknown id or a missing dir) and enabling the
-        // launch button (disabled on red) + the Fork button (shown only for a found session id).
+        // launch button (disabled on red) + the Fork button (shown only for a found session id). A forwarder to
+        // the bar: call it after every programmatic _cwdBox.Text write (the selection pre-aim, the defaultLaunchDir
+        // seed, the claude.exe recovery) — TextChanged does not fire reliably while the page is off the live tree.
         void _ValidateLaunchBox();
-        // Agentmaster (Codex-launch): the launch bar's Claude<->Codex agent toggle. _UpdateLaunchAgentButton
-        // repaints it from _launchCodex; clicking flips _launchCodex and re-validates (the Launch button text
-        // + the session-id resume/fork affordances are Claude-only — Codex launches a directory only).
-        void _UpdateLaunchAgentButton();
         // Agentmaster (responsive launch bar): stage-collapse the toolbar's top row as the pane narrows —
         // (A) full label -> (B) drop "launch a"/"session in" -> (C) shrink the cwd box to its floor -> (D)
         // wrap the launch buttons (_launchBtns) onto their own line. Measures each piece's DesiredSize
         // against the live pane width and picks the least-collapsed stage that fits. Called from _root's
-        // SizeChanged AND whenever a button's content/visibility changes (_ValidateLaunchBox /
-        // _UpdateReopenButton / _UpdateActivateAllButton / _UpdateLaunchAgentButton). No layout loop —
-        // every change is inside _root, whose size the pane (not its content) owns.
+        // SizeChanged AND whenever a button's content/visibility changes (the bar's layoutChanged callback —
+        // its validation and its agent toggle — plus _UpdateReopenButton / _UpdateActivateAllButton). No
+        // layout loop — every change is inside _root, whose size the pane (not its content) owns.
         void _ReflowLaunchBar();
-        void _OnForkFromBox(); // the Fork button (visible for a found session id) -> _forkSessionHandler
-        bool _ResolveSessionDirTitle(const std::wstring& id, std::wstring& dir, std::wstring& title); // registry first, transcript cwd fallback
-        void _PushRecentDir(const std::wstring& dir);
-        // Recent/known working dirs for the path-picker. `current` is the box text (excluded from
-        // the result). A non-empty `query` (a bare token typed with no root path) switches the
-        // result from plain MRU order to case-insensitive fuzzy matches ranked by Levenshtein
-        // closeness (closest first); an empty query keeps the historical MRU order.
-        std::vector<std::wstring> _CollectRecentDirs(const std::wstring& current, const std::wstring& query) const;
-        winrt::Windows::UI::Xaml::Controls::Button _MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText, const std::wstring& branch = {}); // `branch` (RECENT rows) appends "— <branch>"
-        // Agentmaster: a "GIT WORKTREES" row — "<name> — <path> — <branch>". Mirrors _MakePathRow
-        // (transparent + focus-neutral); a click drills the launch box into the worktree.
-        winrt::Windows::UI::Xaml::Controls::Button _MakeWorktreeRow(const std::wstring& fullPath, const std::wstring& name, const std::wstring& branch, bool isCurrent);
-        // Agentmaster: the "Browse…" row pinned to the TOP of the path-picker (the first option) — a
-        // native folder dialog whose pick both fills the box AND joins the recents (_BrowseForLaunchDir).
-        winrt::Windows::UI::Xaml::Controls::Button _MakeBrowseRow();
-        void _BrowseForLaunchDir();
+        // (Fork, the session-id resolve, the recent-folders push + collect, the drop-down rows and Browse… moved into
+        // the shared AgentLaunchBar with the rest of the launch row.)
 
         // Build one session card for the Triage Board.
         winrt::Windows::UI::Xaml::Controls::Button _MakeCard(const ::Agentmaster::SessionInfo& s);
@@ -1018,13 +998,19 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::StackPanel _planListHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ScrollViewer _planScroll{ nullptr }; // Agentmaster: hosts _planListHost — pinned to the bottom on first view of a subject (see _PinPlanToBottomOnSubjectChange)
         std::wstring _planAutoScrolledFor; // Agentmaster: the subject key (session id / "x:<extId>") we last auto-scrolled the Auto Testing to bottom for; only a CHANGE re-pins (a same-subject _Refresh keeps the user's scroll)
+        // Agentmaster (the shared LAUNCH BAR, AgentLaunchBar.h): the toolbar's launch row — built in _BuildLayout from
+        // _MakeLaunchBarHost and owned for the content's whole life; its parts sit in _launchBar / _launchBtns and its
+        // drop-down Popup in _root. Its Launch button, Fork button, underline, drop-down, hover menu and Codex flag live
+        // inside it now (they were members here). Shut down in the destructor (its hover timer is UI-affine).
+        std::shared_ptr<AgentLaunchBar> _launch;
+        // This window's recent-folders list (recent-dirs.json): loaded in the constructor before _BuildLayout builds the
+        // bar, read and pushed by _launch, and handed to the side panel's "+" launcher (LaunchRecentDirs) so both bars of
+        // the window share ONE list.
+        std::shared_ptr<AgentLaunchRecentDirs> _launchRecentDirs;
+        // The bar's working-dir box (_launch->CwdBox()), kept under its historical name: _ReflowLaunchBar sizes it, the
+        // selection pre-aims it (_SelectSession / _SelectExternal), SetSettings seeds it, SetActivateAllBusy greys it out.
+        // After a direct Text write call _ValidateLaunchBox (TextChanged is unreliable while the page is hidden).
         winrt::Windows::UI::Xaml::Controls::TextBox _cwdBox{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::Button _launchBtn{ nullptr }; // Agentmaster: "Launch Claude" (dir) / "Resume session" (a found session id); disabled on a red box
-        // PRESETS: the hover-intent delay before the Launch button's menu opens (started on PointerEntered,
-        // stopped on PointerExited — a pass over the button never opens it) and the menu currently shown
-        // (non-null while open, so a second hover does not stack a second menu).
-        winrt::Windows::UI::Xaml::DispatcherTimer _launchHoverTimer{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::MenuFlyout _launchMenu{ nullptr };
         // Agentmaster (responsive launch bar): the toolbar's top row + its collapsible pieces, promoted to
         // members so _ReflowLaunchBar can stage-collapse them as the pane narrows. _toolbarCol is the
         // vertical [title row | actions row] stack; _launchBar is the title+launch row; _launchBtns groups
@@ -1041,26 +1027,9 @@ namespace winrt::TerminalApp::implementation
         double _lastRootWidth{ 0.0 }; // last _root width seen in SizeChanged (drives reflow off the hot path)
         double _measLaunchA{ 56.0 }; // cached DesiredSize of "launch a" (read 0 once collapsed; kept from when visible)
         double _measSessionIn{ 62.0 }; // cached DesiredSize of "session in"
-        winrt::Windows::UI::Xaml::Controls::Button _launchAgentBtn{ nullptr }; // Agentmaster (Codex-launch): the Claude<->Codex agent toggle before the box
-        bool _launchCodex{ false }; // Agentmaster (Codex-launch): false = launch a Claude (default, unchanged); true = launch a managed Codex in the typed dir
-        winrt::Windows::UI::Xaml::Controls::Button _forkBtn{ nullptr }; // Agentmaster: "Fork" — visible only when the box holds a FOUND session id
-        winrt::Windows::UI::Xaml::Controls::Border _cwdUnderline{ nullptr }; // Agentmaster: validation underline (green=found session id, red=missing dir / unknown id, hidden=neutral)
-        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _pathPopup{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::Border _pathPanelBorder{ nullptr };
-        // Agentmaster: the drop-down list's scroller. Its MaxHeight IS the list's height cap (the Border
-        // around it adds only fixed padding + a 1-DIP edge): seeded 380 at build, then re-capped by
-        // _LayoutPathPicker at every open and window resize (up to 90% of the window height). Write the cap
-        // ONLY there — a fixed value set anywhere else would quietly win until the next open.
-        winrt::Windows::UI::Xaml::Controls::ScrollViewer _pathScroll{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::StackPanel _pathListHost{ nullptr };
-        std::vector<std::wstring> _recentDirs; // MRU of launched working dirs (persisted)
-        bool _pathPickerUserDismissed{ false }; // Esc/Enter/blur dismiss the picker; (re)focusing/tapping the box clears it
-        // Agentmaster: true while a deferred window-resize re-fit of the open drop-down is queued
-        // (_QueuePathPickerRelayout) — coalesces a drag-resize's SizeChanged burst to one re-fit per tick.
-        // Cleared by the queued tick BEFORE it re-fits (so a resize landing after its reads still queues
-        // another) and on a failed enqueue; if it ever stuck true, the open list would stop following the
-        // window size.
-        bool _pathPickerRelayoutQueued{ false };
+        // Agentmaster (Codex-launch): the bar's Claude<->Codex agent toggle before the box (_launch->AgentToggleButton()),
+        // kept so _ReflowLaunchBar can measure it as part of the row.
+        winrt::Windows::UI::Xaml::Controls::Button _launchAgentBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _addPromptBox{ nullptr };
         // Agentmaster (prompt history): navigation state for the compose box's Up/Down recall.
         // _promptHistoryIndex == -1 means "not navigating" (the live draft); 0 == the newest sent

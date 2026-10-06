@@ -28,6 +28,11 @@
 //            header shows — the same AgentSessionToolTipHost lifecycle and the same card push
 //            (TerminalPage::_PushSessionToolTipCard) — placed just past the panel's edge, beside the
 //            hovered card (right of a left-docked panel, left of a right-docked one).
+//   "+"   (SIDE_PANEL.md §2e) — the header's first button opens a LAUNCHER CARD at the click point,
+//            extending toward the window's center: the Agent Manager's own launch row (the shared
+//            AgentLaunchBar — the same box, drop-down, validation, hover menu, launch / resume / fork /
+//            "Create & Launch"), Claude only, its box mirroring the Manager's box. Closed by a press
+//            outside it, Esc, "+" again, a launch, a tab switch, a collapse or a dock flip.
 //
 // PERSISTENCE (the user's contract): both separators — the VERTICAL one (panel width) and the
 // HORIZONTAL one (cards/summary split) — persist PER WINDOW (WindowRecord::sidePanel*, riding the
@@ -61,7 +66,8 @@
 #include "pch.h"
 #include "TerminalPage.h"
 
-#include "AgentManagerContent.h" // CycleBoardSort / BuildSessionMenuFor / SelectSession (the Linked-Lenses delegation targets)
+#include "AgentManagerContent.h" // CycleBoardSort / BuildSessionMenuFor / SelectSession (the Linked-Lenses delegation targets) + LaunchBoxText / SetLaunchBoxText / LaunchRecentDirs (the "+" launcher mirrors its box)
+#include "AgentLaunchBar.h" // the "+" launcher card's launch row — the Agent Manager's own launch bar, Claude only (SIDE_PANEL.md §2e)
 #include "AgentSessionToolTip.h" // the cards' rich session tooltip host ("Sum" off — the tab tooltip's lifecycle, shared)
 #include "AgentTabOverlay.h" // the fill-hosted summary panel (SetSummaryFillHost)
 #include "AgentCatchLog.h" // AgentLogCaughtException — swallowed-exception forensics (Rule #18)
@@ -70,6 +76,7 @@
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / LogNav / ShortId
 #include "AgentMaster/Engine.h" // BroadcastSettingsChanged — the ⌖ scroll-to-tab toggle reaches every OTHER open window live
 #include "AgentMaster/KeyedListDiff.h" // PlanKeyedListOps / ApplyKeyedListOp — the card list's fewest removes / inserts / moves (SIDE_PANEL.md §2c)
+#include "AgentMaster/PointerCardPlacement.h" // PlacePointerCard — the "+" launcher card opens at the click, toward the window's center (SIDE_PANEL.md §2e)
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings + EffectiveWorkingDir / ResolveSessionColorHex + LoadDirColorIndex (one color snapshot per list update)
 #include "AgentMaster/ProcessInspect.h" // ExternalClaudeRow (the Internal.h MakeSortKey overload's parameter type)
 #include "AgentMaster/ProfileBootstrap.h" // (Internal.h convention — harmless here, keeps the include set board-identical)
@@ -431,6 +438,60 @@ namespace
         m.tipText = dir + (s.branch.empty() ? L"" : (L"\nbranch: " + s.branch)) + tagsLine + L"\n\nClick to select \x00B7 double-click to jump to its tab \x00B7 right-click for actions.";
         return m;
     }
+
+    // --- The header's "+" LAUNCHER card (SIDE_PANEL.md §2e) ------------------------------------------------------
+    // The gap between the card row's parts: the Agent Manager's launch bar spacing, so the row reads the same.
+    constexpr double kSidePanelLaunchRowSpacingPx = 8.0;
+    // The card box's width band: 504 DIPs is the Agent Manager's comfortable width (its widest stage), 160 its
+    // narrowest. The box is pinned inside the band to what the window leaves beside the chip, Launch and Fork.
+    constexpr double kSidePanelLaunchBoxMinPx = 160.0;
+    constexpr double kSidePanelLaunchBoxMaxPx = 504.0;
+    // How far the card's popup offsets must move before they are written again (DIPs): a re-placement that would land
+    // within a quarter DIP of the current place writes nothing (no layout invalidation for a no-op).
+    constexpr double kSidePanelLaunchPlaceEpsilonPx = 0.25;
+    // A measure bound large enough to read an element's natural (content) size — the _ReflowLaunchBar idiom: NoWrap
+    // text and buttons treat it like infinity.
+    constexpr float kSidePanelLaunchMeasureBound = 100000.0f;
+
+    // The COM identity of `o` (its IUnknown pointer), or null for a null object: two references to one element compare
+    // equal by it whatever interface they hold. Read once per element, so a walk that compares an ancestor chain with
+    // many elements costs one QueryInterface per element instead of two per comparison.
+    //   o       - the object (any projected type).
+    //   returns - the identity pointer, valid only for comparison (no reference is kept).
+    //   throws  - winrt::hresult_error when the object refuses IUnknown (never for a XAML element).
+    void* SidePanelLaunchIdentity(const winrt::Windows::Foundation::IInspectable& o)
+    {
+        return o ? winrt::get_abi(o.as<winrt::Windows::Foundation::IUnknown>()) : nullptr;
+    }
+
+    // True when `element` is `ancestor` or lies under it in the visual tree. A TextElement (a Run, a Hyperlink) is not a
+    // visual, so the walk starts from the control that hosts its text (AgentTranscriptOverlay::_IsUnder's rule).
+    // Bounded at 1024 steps, so a broken chain can never hang the UI thread.
+    //   element  - where the walk starts (the focused element).
+    //   ancestor - the element to find.
+    //   returns  - true when found.
+    //   throws   - what VisualTreeHelper / the TextElement read throws (callers contain it).
+    bool SidePanelLaunchIsUnder(winrt::Windows::UI::Xaml::DependencyObject element, const winrt::Windows::UI::Xaml::DependencyObject& ancestor)
+    {
+        if (!element || !ancestor)
+        {
+            return false;
+        }
+        if (const auto textElement = element.try_as<winrt::Windows::UI::Xaml::Documents::TextElement>())
+        {
+            element = textElement.ElementStart().VisualParent();
+        }
+        const void* const target = SidePanelLaunchIdentity(ancestor);
+        for (int guard = 0; element && guard < 1024; ++guard)
+        {
+            if (SidePanelLaunchIdentity(element) == target)
+            {
+                return true;
+            }
+            element = winrt::Windows::UI::Xaml::Media::VisualTreeHelper::GetParent(element);
+        }
+        return false;
+    }
 }
 
 namespace winrt::TerminalApp::implementation
@@ -599,10 +660,11 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Header: TWO lines.
-        //   line 1 (row 0): [ spacer * ][ Sum ][ scope ][ sort ][ ⌖ ][ ⇄ ][ chevron ] — the buttons keep the
+        //   line 1 (row 0): [ spacer * ][ + ][ Sum ][ scope ][ sort ][ ⌖ ][ ⇄ ][ chevron ] — the buttons keep the
         //     right-aligned places they had when the filter box shared this line (column 0, the star, is
-        //     now an empty spacer), "Sum" first (left of LOCAL/GLOBAL — it reshapes the whole panel), the
-        //     three icons together at the end, the collapse chevron outermost.
+        //     now an empty spacer), "+" first (the launcher card — SIDE_PANEL.md §2e; the user's "leftmost,
+        //     to Sum"), then "Sum" (left of LOCAL/GLOBAL — it reshapes the whole panel), the three icons
+        //     together at the end, the collapse chevron outermost.
         //   line 2 (row 1): the filter box across the FULL width. On a line of its own it no longer
         //     competes with the buttons for room — sharing one line, a narrow panel squeezed the box down
         //     to its minimum while the buttons kept their natural widths.
@@ -628,6 +690,8 @@ namespace winrt::TerminalApp::implementation
             c5.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
             ColumnDefinition c6{}; // the "Sum" toggle's column (column 1) pushed the others one to the right
             c6.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            ColumnDefinition c7{}; // the "+" launcher's column (column 1, SIDE_PANEL.md §2e) pushed them one more
+            c7.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
             header.ColumnDefinitions().Append(c0);
             header.ColumnDefinitions().Append(c1);
             header.ColumnDefinitions().Append(c2);
@@ -635,6 +699,7 @@ namespace winrt::TerminalApp::implementation
             header.ColumnDefinitions().Append(c4);
             header.ColumnDefinitions().Append(c5);
             header.ColumnDefinitions().Append(c6);
+            header.ColumnDefinitions().Append(c7);
             header.Padding(ThicknessHelper::FromLengths(4, 4, 4, 2));
             header.ColumnSpacing(3);
             header.RowSpacing(3); // a little air between the buttons line and the filter line
@@ -679,6 +744,69 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumnSpan(_sidePanelSearchBox, static_cast<int32_t>(header.ColumnDefinitions().Size()));
         header.Children().Append(_sidePanelSearchBox);
 
+        // The "+" LAUNCHER (SIDE_PANEL.md §2e) — the first of the right-aligned buttons, left of "Sum" (the user's
+        // "leftmost, to Sum"): a click opens a card AT the click point holding the Agent Manager's own launch row
+        // ([● Claude] [ box ] [Launch Claude] [Fork] — the shared AgentLaunchBar, Claude only), so a session starts
+        // from the side panel without leaving the tab. Built on the first click (_SidePanelEnsureLaunchCard): a window
+        // that never opens it pays nothing. An ICON button (the ⌖ / ⇄ size and padding). IsTabStop false like its
+        // siblings: a click must never pull keyboard focus out of the terminal by itself (the card focuses its own
+        // box when it opens, and hands focus back when it closes).
+        _sidePanelLaunchBtn = Button{};
+        _sidePanelLaunchBtn.FontSize(kSidePanelIconFontSize);
+        _sidePanelLaunchBtn.Padding(ThicknessHelper::FromLengths(6, 1, 6, 1));
+        _sidePanelLaunchBtn.VerticalAlignment(VerticalAlignment::Center);
+        _sidePanelLaunchBtn.IsTabStop(false);
+        _sidePanelLaunchBtn.Content(winrt::box_value(L"+"));
+        // A screen reader would otherwise announce the glyph ("plus"): name the button for what it does.
+        winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(_sidePanelLaunchBtn, winrt::hstring{ L"Launch a session" });
+        AgentSetTitledTip(_sidePanelLaunchBtn, L"Launch a session", winrt::hstring{ L"Open the launcher at the click: the Agent Manager's own launch box \x2014 a working directory (recent and matching folders as you type, Browse\x2026) or a session id to resume or fork \x2014 and Launch Claude (hover it for a model or a preset).\nIt shows the same text as the Agent Manager's box. Click outside it, press Esc, or click + again to close it." });
+        // The PRESS point, in Root() coordinates: the card's corner sits where the user clicked. Read on the press, not
+        // in Click: a Click carries no position, and the Button raises it from its own release handling, before an
+        // instance PointerReleased handler would run. handledEventsToo, because the Button marks its presses handled.
+        _sidePanelLaunchBtn.AddHandler(
+            UIElement::PointerPressedEvent(),
+            winrt::box_value(PointerEventHandler{ [weakThis](const IInspectable&, const PointerRoutedEventArgs& e) {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                try
+                {
+                    self->_sidePanelLaunchAnchor = e.GetCurrentPoint(self->Root()).Position();
+                    self->_sidePanelLaunchAnchorFromPress = true;
+                }
+                catch (...)
+                {
+                    // The open then anchors under the button instead (the no-press fallback); recorded (Rule #18).
+                    self->_sidePanelLaunchAnchorFromPress = false;
+                    ::Agentmaster::AgentLogCaughtException(L"side panel launcher: + press point");
+                }
+            } }),
+            true /* handledEventsToo — the Button handles its own presses */);
+        // A press that ends without a click (released off the button) must not leave its point for a later Click that
+        // has no press of its own (UI Automation, Narrator). A real click normally consumes the point first (ButtonBase
+        // raises Click from its release handling, then releases the capture). Should an order ever be the other way
+        // round, the Click finds no point and anchors under the button instead — a few DIPs from the click, never a
+        // wrong place.
+        _sidePanelLaunchBtn.AddHandler(
+            UIElement::PointerCaptureLostEvent(),
+            winrt::box_value(PointerEventHandler{ [weakThis](const IInspectable&, const PointerRoutedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_sidePanelLaunchAnchorFromPress = false;
+                }
+            } }),
+            true /* handledEventsToo */);
+        _sidePanelLaunchBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelToggleLaunchCard();
+            }
+        });
+        Grid::SetColumn(_sidePanelLaunchBtn, 1);
+        header.Children().Append(_sidePanelLaunchBtn);
+
         // The "Sum" toggle — the summary area below the cards ON (checked, the default) / OFF. OFF hides the
         // bottom area and its splitter so the cards fill the body, and each card then shows the RICH session
         // tooltip beside the panel on hover — the very card a tab header shows (SIDE_PANEL.md §2d). A REAL
@@ -698,7 +826,7 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelToggleSummary();
             }
         });
-        Grid::SetColumn(_sidePanelSumBtn, 1);
+        Grid::SetColumn(_sidePanelSumBtn, 2);
         header.Children().Append(_sidePanelSumBtn);
 
         // The card-list SCOPE toggle — LOCAL (this window's tabs; the default, always) / GLOBAL
@@ -719,7 +847,7 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelToggleScope();
             }
         });
-        Grid::SetColumn(_sidePanelScopeBtn, 2);
+        Grid::SetColumn(_sidePanelScopeBtn, 3);
         header.Children().Append(_sidePanelScopeBtn);
 
         _sidePanelSortBtn = Button{};
@@ -748,7 +876,7 @@ namespace winrt::TerminalApp::implementation
             self->_SidePanelUpdateSortButton();
             self->_SidePanelScheduleRebuild(/*force*/ true);
         });
-        Grid::SetColumn(_sidePanelSortBtn, 3);
+        Grid::SetColumn(_sidePanelSortBtn, 4);
         header.Children().Append(_sidePanelSortBtn);
 
         // The ⌖ SCROLL-TO-TAB icon toggle: while ON (the GLOBAL AppSettings::sidePanelScrollToSelectedTab,
@@ -772,7 +900,7 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelToggleScrollToTab();
             }
         });
-        Grid::SetColumn(_sidePanelScrollToTabBtn, 4);
+        Grid::SetColumn(_sidePanelScrollToTabBtn, 5);
         header.Children().Append(_sidePanelScrollToTabBtn);
 
         Button dockBtn{};
@@ -788,7 +916,7 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelFlipDock();
             }
         });
-        Grid::SetColumn(dockBtn, 5);
+        Grid::SetColumn(dockBtn, 6);
         header.Children().Append(dockBtn);
 
         _sidePanelCollapseBtn = Button{};
@@ -804,7 +932,7 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelToggleCollapsed();
             }
         });
-        Grid::SetColumn(_sidePanelCollapseBtn, 6);
+        Grid::SetColumn(_sidePanelCollapseBtn, 7);
         header.Children().Append(_sidePanelCollapseBtn);
         Grid::SetRow(header, 0);
         _sidePanelExpandedRoot.Children().Append(header);
@@ -1307,6 +1435,12 @@ namespace winrt::TerminalApp::implementation
         }
         _sidePanelCollapsed = !_sidePanelCollapsed;
         ::Agentmaster::LogNav(_sidePanelCollapsed ? L"sidepanel collapse" : L"sidepanel expand");
+        if (_sidePanelCollapsed)
+        {
+            // The "+" launcher card belongs to the header that is going away (SIDE_PANEL.md §2e). The chevron's own
+            // press already closed it as an outside press; this is the belt for a collapse with no press.
+            _SidePanelCloseLaunchCard(L"panel collapsed");
+        }
         _SidePanelApplyLayout();
         if (!_sidePanelCollapsed && _sidePanelDirty)
         {
@@ -1406,6 +1540,9 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::SaveAppSettings(s);
         _appSettings.sidePanelOnLeft = next;
         ::Agentmaster::LogNav(next ? L"sidepanel dock -> left" : L"sidepanel dock -> right");
+        // The "+" launcher card was opened from the header that is moving to the other side (SIDE_PANEL.md §2e). The
+        // ⇄ press already closed it as an outside press; this is the belt for a flip with no press.
+        _SidePanelCloseLaunchCard(L"dock flip");
         _SidePanelApplyDock();
     }
 
@@ -3164,6 +3301,13 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _SidePanelUpdateSortButton();
+        // The "+" launcher card (SIDE_PANEL.md §2e) stays open across a settings broadcast — the user may be typing in
+        // it while another window saves — unless the broadcast MOVED the dock: its "+" button then sits on the other
+        // side of the window, away from the card it opened.
+        if (_SidePanelLaunchCardOpen() && _sidePanelLaunchCardDockLeft != _appSettings.sidePanelOnLeft)
+        {
+            _SidePanelCloseLaunchCard(L"dock moved by a settings change");
+        }
         _SidePanelApplyDock(); // no-op when the dock side didn't change (idempotent assignments)
         // ⌖ scroll-to-tab is GLOBAL: re-pin this window's toggle to the adopted value (another window's
         // click broadcast it here), and if it just turned OFF, drop a reveal still owed so nothing scrolls
@@ -3182,5 +3326,781 @@ namespace winrt::TerminalApp::implementation
             _sidePanelSummaryOverlay->SetModelFamilies(_appSettings.modelFamilies);
         }
         _SidePanelScheduleRebuild(/*force*/ true);
+    }
+
+    // ======================================================================================
+    // The header's "+" LAUNCHER (SIDE_PANEL.md §2e)
+    // ======================================================================================
+    // WHAT: a click on "+" opens a CARD at the click point — its corner at the cursor, extending toward the window's
+    // center (AgentMaster/PointerCardPlacement.h), the user's tooltip-like rule — holding the Agent Manager's own
+    // launch row: [● Claude] [ box ] [Launch Claude] [Fork]. The row IS the Manager's code (the shared AgentLaunchBar,
+    // moved out of AgentManagerContent.Launch.cpp verbatim): the same box, validation underline, path-picker drop-down
+    // (Browse…, RECENT, GIT WORKTREES, MATCHES / SUBFOLDERS), Launch hover menu (models, Specify…, presets) and the
+    // same launch / resume / fork / "Create & Launch" — reaching the very page seams the Manager's handlers call. Two
+    // differences, both the user's: no "launch a" / "session in" words, and Claude only (a fixed "● Claude" chip;
+    // Codex launches from here are planned).
+    // THE BOX IS THE MANAGER'S: the card opens on the Manager box's text, mirrors every edit into it live, and writes
+    // its last text back when it closes — so the two boxes always read the same ("keep the last, same one we have in
+    // agent manager tab"). Both bars push into ONE recent-folders list (AgentManagerContent::LaunchRecentDirs).
+    // LIFETIME: built on the first "+" click and kept for the window's life (a window that never opens it pays
+    // nothing); closed by a press outside it, Esc, "+" again, a launch, a tab switch, a collapse and a dock flip.
+    // Interactive like a tooltip that can be entered: nothing closes on pointer-leave.
+
+    bool TerminalPage::_SidePanelLaunchCardOpen() const noexcept
+    {
+        try
+        {
+            return _sidePanelLaunchPopup && _sidePanelLaunchPopup.IsOpen();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel launcher: IsOpen read"); // a torn-down popup reads as closed
+            return false;
+        }
+    }
+
+    void TerminalPage::_SidePanelToggleLaunchCard()
+    {
+        // Consume the press FIRST, whatever happens next: one press belongs to one Click, so a later Click without a
+        // press of its own (UI Automation) anchors under the button, never at an old point.
+        const bool fromPress = _sidePanelLaunchAnchorFromPress;
+        _sidePanelLaunchAnchorFromPress = false;
+        if (_SidePanelLaunchCardOpen())
+        {
+            // The "+" press itself is exempt from the outside-press close (_SidePanelLaunchPressIsInside), so a click on
+            // "+" with the card open lands here: a toggle, like a second click on any button that opened a pane.
+            _SidePanelCloseLaunchCard(L"+ again");
+            return;
+        }
+        _SidePanelOpenLaunchCard(fromPress);
+    }
+
+    bool TerminalPage::_SidePanelEnsureLaunchCard()
+    {
+        if (_sidePanelLaunchPopup && _sidePanelLaunchCard && _sidePanelLaunchBar)
+        {
+            return true;
+        }
+        try
+        {
+            const auto root = Root();
+            if (!root)
+            {
+                return false; // no page root to parent into (never after the first layout)
+            }
+            const auto weakThis = get_weak();
+
+            // The card: the tag editor's dark look (every Agentmaster surface is dark, whatever the app theme).
+            Border card{};
+            card.RequestedTheme(ElementTheme::Dark);
+            card.Background(Fill(0xFF, 0x26, 0x26, 0x26));
+            card.BorderBrush(Fill(0xFF, 0x3A, 0x3A, 0x3A));
+            card.BorderThickness(ThicknessHelper::FromUniformLength(1));
+            card.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
+            card.Padding(ThicknessHelper::FromLengths(10, 8, 10, 8));
+            // Tab cycles INSIDE the card (box -> Launch -> Fork -> box) instead of walking out into the page behind it.
+            card.TabFocusNavigation(KeyboardNavigationMode::Cycle);
+            // The Agent Manager's six Button state brushes, on the card: under the forced-Dark theme the default
+            // ButtonBackground* brushes resolve to null, and Launch / Fork would be hit-testable only on their text.
+            AgentLaunchBar::SeedButtonStateBrushes(card.Resources());
+
+            // The launch bar: the Agent Manager's launch code, hosted Claude-only.
+            AgentLaunchBarHost host;
+            host.codexToggle = false; // Claude only (the user's call): the "● Claude" chip, no Codex mode, no spawnCodex
+            // ONE recent-folders list per window — the Manager's — so a folder launched from either bar tops both
+            // drop-downs. Without a Manager (the page builds it at first layout, before the side panel, so this is a
+            // belt), a private list read from disk keeps the drop-down's RECENT section useful.
+            if (const auto ipc = _agentManagerContent.get())
+            {
+                if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+                {
+                    host.recentDirs = mgr->LaunchRecentDirs();
+                }
+            }
+            if (!host.recentDirs)
+            {
+                host.recentDirs = std::make_shared<AgentLaunchRecentDirs>();
+                host.recentDirs->dirs = ::Agentmaster::LoadRecentDirs();
+            }
+            // The drop-down lives in Root() beside the card's own Popup, across Root's three rows (tab row, infobars,
+            // content — the tag editor's recipe), so its offsets are Root-relative like the card's.
+            host.popupHost = root;
+            host.popupRowSpan = 3;
+            host.dialogAnchor = card; // a "Couldn't create folder" dialog takes the forced-Dark card's island and theme
+            host.dispatcher = winrt::Windows::System::DispatcherQueue::GetForCurrentThread();
+            // Read at call time, like the Manager's host: a cog Save or a settings broadcast replaces _appSettings.
+            host.registry = [weakThis]() -> std::shared_ptr<::Agentmaster::SessionRegistry> {
+                if (const auto self = weakThis.get())
+                {
+                    return self->_sessionRegistry;
+                }
+                return nullptr; // the page is gone: a session id resolves through its transcript only
+            };
+            host.recentDirsLimit = [weakThis]() -> uint32_t {
+                if (const auto self = weakThis.get())
+                {
+                    return self->_appSettings.recentDirsLimit;
+                }
+                return 0u; // the bar maps 0 to the shipped 10
+            };
+            host.launchModels = [weakThis]() -> std::wstring {
+                if (const auto self = weakThis.get())
+                {
+                    return self->_appSettings.launchModels;
+                }
+                return {};
+            };
+            // The three launches close the card FIRST (its final text mirrored into the Manager's box, the drop-down
+            // shut), then run the page's own seams — the ones the Agent Manager's handlers call
+            // (_WireAgentManagerContent), so a launch from the card IS a launch from the Manager: the same transcript
+            // gates, the same [nav] lines, the same new tab. Closing first keeps the card from sitting over the new
+            // tab while the launch selects and focuses it.
+            host.spawnClaude = [weakThis](const std::wstring& dir, const std::wstring& target) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelCloseLaunchCard(L"launch");
+                    // An empty title lets the page derive one from the dir; `target` is "" (Default), a model id or
+                    // "@<presetId>" from the Launch hover menu.
+                    self->_SpawnClaudeSession(winrt::hstring{ dir }, winrt::hstring{}, static_cast<uint32_t>(-1), winrt::hstring{ target });
+                }
+            };
+            host.resumeSession = [weakThis](const std::wstring& id, const std::wstring& dir, const std::wstring& title) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelCloseLaunchCard(L"resume");
+                    self->_ResumeSessionFromDisk(id, dir, title);
+                }
+            };
+            host.forkSession = [weakThis](const std::wstring& id, const std::wstring& dir, const std::wstring& title) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelCloseLaunchCard(L"fork");
+                    self->_ForkSessionFromDisk(id, dir, title);
+                }
+            };
+            host.claudeMissing = [weakThis]() {
+                if (const auto self = weakThis.get())
+                {
+                    self->_PromptClaudeMissing(); // the page-level "Claude Code (native) not found" notice
+                }
+            };
+            // The page's "Specify a model" opener (a Root() popup — _SidePanelLaunchPressIsInside keeps the card open
+            // while it is up, so its pick can still finish this card's launch).
+            host.specifyModel = _ModelSpecifyOpener();
+            host.layoutChanged = [weakThis]() {
+                if (const auto self = weakThis.get())
+                {
+                    // Launch's label or Fork's visibility changed the row's width: re-fit the box and re-place the card,
+                    // on a later tick (this can run inside a TextChanged; the card's SizeChanged follows anyway).
+                    self->_SidePanelQueueLaunchCardPlacement();
+                }
+            };
+            host.launched = [weakThis]() {
+                if (const auto self = weakThis.get())
+                {
+                    // The bar's follow-up after the hand-off (a resumed / forked id cleared from the box) ran with the
+                    // card already closed — off the live tree, where TextChanged is unreliable — so mirror once more:
+                    // the Manager's box then ends empty too, exactly as a resume from the Manager leaves it.
+                    self->_SidePanelSyncLaunchTextToManager();
+                    self->_SidePanelCloseLaunchCard(L"launch"); // the belt: the launch callbacks above closed it already
+                }
+            };
+            host.textEdited = [weakThis](const std::wstring& text) {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                // Live: the Manager's box reads the same text while you type here. Its own TextChanged re-validates it
+                // and stays quiet otherwise (no textEdited on the Manager's host, so the mirror can never echo back).
+                if (const auto ipc = self->_agentManagerContent.get())
+                {
+                    if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+                    {
+                        mgr->SetLaunchBoxText(text);
+                    }
+                }
+            };
+            auto bar = AgentLaunchBar::Create(std::move(host));
+
+            // [● Claude] [ box / underline ] [Launch Claude] [Fork] — the Manager's row minus its words.
+            StackPanel row{};
+            row.Orientation(Orientation::Horizontal);
+            row.Spacing(kSidePanelLaunchRowSpacingPx);
+            row.VerticalAlignment(VerticalAlignment::Center);
+            row.Children().Append(bar->AgentElement());
+            row.Children().Append(bar->CwdColumn());
+            row.Children().Append(bar->LaunchButton());
+            row.Children().Append(bar->ForkButton());
+            card.Child(row);
+
+            // Enter / Escape, acted on at the KEY-UP — the AgentModelPrompt.h rule. Closing the card (or launching,
+            // which closes it) moves focus to a terminal, and Windows still delivers the rest of the keystroke — the
+            // character message, a CR for Enter, an ESC for Escape — to whatever holds focus next: the CR would submit
+            // that claude's unsent draft, the ESC would interrupt its running turn. By the key-up the character has gone
+            // to the card's own focused element, which ignores it. PreviewKeyDown TUNNELS, so it runs before the box and
+            // the buttons, and marking the key handled there keeps them from acting on it:
+            //   - Escape with the drop-down CLOSED closes the card. With the drop-down open the box takes its own
+            //     Escape (it closes the list, as on the Agent Manager page) and the card stays.
+            //   - Enter on the focused Launch / Fork button runs what its click runs. Enter in the BOX stays the box's own
+            //     commit (close the drop-down, normalize the path — the Agent Manager page's Enter), never a launch.
+            //   - Never for a Ctrl / Alt chord (Alt+Enter is Terminal's full-screen toggle).
+            card.PreviewKeyDown([weakThis](const IInspectable&, const KeyRoutedEventArgs& e) {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                try
+                {
+                    // Any key-down disarms first: the next key-up must belong to the key pressed last.
+                    self->_sidePanelLaunchArmedKey = VirtualKey::None;
+                    self->_sidePanelLaunchArmedAction = SidePanelLaunchKeyAction::None;
+                    const auto key = e.Key();
+                    if (key != VirtualKey::Enter && key != VirtualKey::Escape)
+                    {
+                        return;
+                    }
+                    if ((GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000))
+                    {
+                        return; // an app chord: not ours
+                    }
+                    const auto bar = self->_sidePanelLaunchBar;
+                    if (!bar)
+                    {
+                        return;
+                    }
+                    auto action = SidePanelLaunchKeyAction::None;
+                    if (key == VirtualKey::Escape)
+                    {
+                        if (bar->PathPickerOpen())
+                        {
+                            return; // the box's own Escape closes the drop-down first (the Agent Manager page's key)
+                        }
+                        action = SidePanelLaunchKeyAction::Close;
+                    }
+                    else
+                    {
+                        const void* const source = SidePanelLaunchIdentity(e.OriginalSource());
+                        if (source && source == SidePanelLaunchIdentity(bar->LaunchButton()))
+                        {
+                            action = SidePanelLaunchKeyAction::Launch;
+                        }
+                        else if (source && source == SidePanelLaunchIdentity(bar->ForkButton()))
+                        {
+                            action = SidePanelLaunchKeyAction::Fork;
+                        }
+                        else
+                        {
+                            return; // Enter in the box: its own commit, as on the Agent Manager page
+                        }
+                    }
+                    self->_sidePanelLaunchArmedKey = key;
+                    self->_sidePanelLaunchArmedAction = action;
+                    e.Handled(true); // the Button must not click on this key-down, the box must not see this Escape
+                }
+                catch (...)
+                {
+                    // Nothing may escape a XAML event handler (it can fail the whole app); the key then just does what
+                    // the focused control does with it. Recorded (Rule #18).
+                    ::Agentmaster::AgentLogCaughtException(L"side panel launcher: key-down");
+                }
+            });
+            card.PreviewKeyUp([weakThis](const IInspectable&, const KeyRoutedEventArgs& e) {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                const auto key = e.Key();
+                if (self->_sidePanelLaunchArmedKey == VirtualKey::None || key != self->_sidePanelLaunchArmedKey)
+                {
+                    return; // its key-down was not armed here (another key, or a key-down that happened elsewhere)
+                }
+                const auto action = self->_sidePanelLaunchArmedAction;
+                self->_sidePanelLaunchArmedKey = VirtualKey::None;
+                self->_sidePanelLaunchArmedAction = SidePanelLaunchKeyAction::None;
+                e.Handled(true); // set BEFORE acting: a close or a launch removes the card synchronously
+                try
+                {
+                    const auto bar = self->_sidePanelLaunchBar;
+                    switch (action)
+                    {
+                    case SidePanelLaunchKeyAction::Close:
+                        self->_SidePanelCloseLaunchCard(L"esc");
+                        break;
+                    case SidePanelLaunchKeyAction::Launch:
+                        if (bar)
+                        {
+                            bar->ClickLaunch(); // exactly a click: the hover menu's timer stopped, then the Default launch
+                        }
+                        break;
+                    case SidePanelLaunchKeyAction::Fork:
+                        if (bar)
+                        {
+                            bar->ClickFork();
+                        }
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                catch (...)
+                {
+                    // The launch / close failed past its own containment; the card stays as the failure left it, and
+                    // the throw is recorded (Rule #18) instead of escaping into XAML.
+                    ::Agentmaster::AgentLogCaughtException(L"side panel launcher: key-up");
+                }
+            });
+            // The card's size changed (the box re-fitted, Fork shown / hidden, Launch relabeled): re-place it so its
+            // corner stays at the click. SizeChanged is a layout pass, and moving a parented Popup inside one is the
+            // E_LAYOUTCYCLE fail-fast — so only queue here.
+            card.SizeChanged([weakThis](const IInspectable&, const SizeChangedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelQueueLaunchCardPlacement();
+                }
+            });
+
+            // The Popup: Root()-parented across its three rows, top/left aligned, so HorizontalOffset / VerticalOffset
+            // are Root-relative and the card can sit anywhere in the window (the tag editor's recipe). Not
+            // light-dismiss: the outside-press hook below decides what closes it.
+            winrt::Windows::UI::Xaml::Controls::Primitives::Popup popup{};
+            popup.Child(card);
+            popup.HorizontalAlignment(HorizontalAlignment::Left);
+            popup.VerticalAlignment(VerticalAlignment::Top);
+            Grid::SetRow(popup, 0);
+            Grid::SetRowSpan(popup, 3);
+            root.Children().Append(popup);
+
+            if (!_sidePanelLaunchHooked)
+            {
+                _sidePanelLaunchHooked = true;
+                // Outside-press close: ONE handledEventsToo hook on Root() (registered once, inert while the card is
+                // closed). handledEventsToo, because the terminal, the tabs and the buttons mark their presses handled.
+                // A press inside the card, its drop-down, on "+" or in another open popup is kept (see
+                // _SidePanelLaunchPressIsInside); anything else closes the card. Popup open / close is not a tree
+                // mutation, so closing inside a pointer handler is safe (the tag editor's note).
+                root.AddHandler(
+                    UIElement::PointerPressedEvent(),
+                    winrt::box_value(PointerEventHandler{ [weakThis](const IInspectable&, const PointerRoutedEventArgs& e) {
+                        const auto self = weakThis.get();
+                        if (!self || !self->_SidePanelLaunchCardOpen())
+                        {
+                            return;
+                        }
+                        try
+                        {
+                            if (!self->_SidePanelLaunchPressIsInside(e.OriginalSource().try_as<DependencyObject>()))
+                            {
+                                self->_SidePanelCloseLaunchCard(L"outside press");
+                            }
+                        }
+                        catch (...)
+                        {
+                            // The press goes on to its own target either way; only the close was lost (logged).
+                            ::Agentmaster::AgentLogCaughtException(L"side panel launcher: outside press");
+                        }
+                    } }),
+                    true /* handledEventsToo */);
+                // A window resize: re-fit the box and re-place the card (queued — SizeChanged is a layout pass), and
+                // re-fit an open drop-down (the bar's own coalesced re-fit, the Agent Manager root's SizeChanged twin).
+                root.SizeChanged([weakThis](const IInspectable&, const SizeChangedEventArgs&) {
+                    const auto self = weakThis.get();
+                    if (!self || !self->_SidePanelLaunchCardOpen())
+                    {
+                        return; // a closed card costs nothing: every open fits and places afresh
+                    }
+                    self->_SidePanelQueueLaunchCardPlacement();
+                    if (self->_sidePanelLaunchBar)
+                    {
+                        self->_sidePanelLaunchBar->QueuePathPickerRelayout(); // never throws
+                    }
+                });
+            }
+
+            _sidePanelLaunchPopup = popup;
+            _sidePanelLaunchCard = card;
+            _sidePanelLaunchBar = std::move(bar);
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[sidepanel] launcher card built (window " + ::Agentmaster::ShortId(_windowId) + L")\n");
+            return true;
+        }
+        catch (...)
+        {
+            // Nothing was kept (the members are set only at the end), so the next "+" click builds from scratch.
+            ::Agentmaster::AgentLogCaughtException(L"side panel launcher: build");
+            return false;
+        }
+    }
+
+    void TerminalPage::_SidePanelOpenLaunchCard(bool fromPress)
+    {
+        if (!_sidePanelBuilt || _SidePanelLaunchCardOpen())
+        {
+            return;
+        }
+        if (!_SidePanelEnsureLaunchCard())
+        {
+            return; // the build failed (logged); the next "+" click tries again
+        }
+        try
+        {
+            // The anchor: the "+" press point; without a press (a Click from UI Automation), the button's bottom
+            // center — the card then opens just below the "+", toward the window's center like any click.
+            if (!fromPress && _sidePanelLaunchBtn)
+            {
+                const auto bottomCenter = winrt::Windows::Foundation::Point{ static_cast<float>(_sidePanelLaunchBtn.ActualWidth() / 2.0), static_cast<float>(_sidePanelLaunchBtn.ActualHeight()) };
+                _sidePanelLaunchAnchor = _sidePanelLaunchBtn.TransformToVisual(Root()).TransformPoint(bottomCenter);
+            }
+            _sidePanelLaunchCardDockLeft = _appSettings.sidePanelOnLeft; // a broadcast that moves the dock closes the card
+            _sidePanelLaunchArmedKey = VirtualKey::None;
+            _sidePanelLaunchArmedAction = SidePanelLaunchKeyAction::None;
+            // The box opens on the Agent Manager box's text — the user's "keep the last, same one we have in agent
+            // manager tab". SetBoxText re-validates explicitly either way: the folder may be gone since, an id may have a
+            // transcript now, and the closed card was off the live tree where TextChanged is unreliable.
+            bool copied = false;
+            if (const auto ipc = _agentManagerContent.get())
+            {
+                if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+                {
+                    _sidePanelLaunchBar->SetBoxText(mgr->LaunchBoxText());
+                    copied = true;
+                }
+            }
+            if (!copied)
+            {
+                _sidePanelLaunchBar->ValidateLaunchBox(); // no Manager: keep the card's own text, re-judged now
+            }
+            _SidePanelFitLaunchBox();
+            _sidePanelLaunchPopup.IsOpen(true);
+            // Place it NOW, in this tick, at its real size (_SidePanelPlaceLaunchCard measures the card): a card placed
+            // a tick later would show for a frame at the previous spot first.
+            _SidePanelPlaceLaunchCard();
+            ::Agentmaster::LogNav(fromPress ? L"sidepanel launcher open (at the click)" : L"sidepanel launcher open (under the + button)");
+            // Focus the box one tick later: on the FIRST open the card was only just realized, and a same-tick Focus on
+            // a TextBox that has not been laid out can do nothing (the tag editor's lesson). PROGRAMMATIC focus: the
+            // box's GotFocus opens the drop-down only for a pointer / keyboard focus, so the caret waits in the box and
+            // the list opens on the first click or keystroke (the user's choice for a card that pops up).
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis = get_weak()]() {
+                const auto self = weakThis.get();
+                if (!self || !self->_SidePanelLaunchCardOpen() || !self->_sidePanelLaunchBar)
+                {
+                    return; // closed again before the tick ran
+                }
+                try
+                {
+                    if (const auto box = self->_sidePanelLaunchBar->CwdBox())
+                    {
+                        box.Focus(FocusState::Programmatic);
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"side panel launcher: focus the box"); // a click in the box still focuses it
+                }
+            });
+        }
+        catch (...)
+        {
+            // A half-opened card must not stay on screen with no placement or focus: close it again (best effort).
+            ::Agentmaster::AgentLogCaughtException(L"side panel launcher: open");
+            try
+            {
+                if (_sidePanelLaunchPopup)
+                {
+                    _sidePanelLaunchPopup.IsOpen(false);
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"side panel launcher: open rollback");
+            }
+        }
+    }
+
+    void TerminalPage::_SidePanelCloseLaunchCard(std::wstring_view reason)
+    {
+        if (!_SidePanelLaunchCardOpen())
+        {
+            return;
+        }
+        _sidePanelLaunchArmedKey = VirtualKey::None; // a key held across the close must not act on its release elsewhere
+        _sidePanelLaunchArmedAction = SidePanelLaunchKeyAction::None;
+        // Did the card hold keyboard focus? A press on a focusable element (the terminal, a text box) moved focus there
+        // before this hook ran — that focus stays. A press on a surface that takes no focus (a side-panel card, the
+        // header), Esc, "+" again, or a launch leaves focus in the card, which is about to leave the tree: then focus
+        // goes back to the current tab (the terminal the user was in before "+").
+        bool hadFocus = false;
+        try
+        {
+            if (const auto xr = Root().XamlRoot())
+            {
+                if (const auto focused = FocusManager::GetFocusedElement(xr).try_as<DependencyObject>())
+                {
+                    hadFocus = SidePanelLaunchIsUnder(focused, _sidePanelLaunchCard);
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel launcher: focus read at close"); // no restore: focus stays where XAML puts it
+        }
+        if (_sidePanelLaunchBar)
+        {
+            // The box's blur work, done now: the drop-down closed, the dismissal latched, the text normalized — so the
+            // text mirrored below is the normalized one (the bar's own LostFocus tick would run after this).
+            _sidePanelLaunchBar->DismissForHide(); // noexcept
+        }
+        _SidePanelSyncLaunchTextToManager(); // the Manager's box ends on the card's last text
+        try
+        {
+            _sidePanelLaunchPopup.IsOpen(false);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel launcher: close");
+        }
+        ::Agentmaster::LogNav(L"sidepanel launcher close (" + std::wstring{ reason } + L")");
+        if (hadFocus)
+        {
+            try
+            {
+                // Low priority, after the close settles: a launch has selected and focused its new tab by then, so the
+                // "current tab" is the right one either way.
+                Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [weakThis = get_weak()]() {
+                    const auto self = weakThis.get();
+                    if (!self || self->_SidePanelLaunchCardOpen())
+                    {
+                        return; // reopened meanwhile: its box takes focus again
+                    }
+                    try
+                    {
+                        self->_FocusCurrentTab(true);
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"side panel launcher: focus back to the tab"); // a click in the terminal focuses it
+                    }
+                });
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"side panel launcher: queue the focus restore"); // the window is closing
+            }
+        }
+    }
+
+    void TerminalPage::_SidePanelQueueLaunchCardPlacement()
+    {
+        if (_sidePanelLaunchPlaceQueued)
+        {
+            return; // a tick is already queued: this change folds into it
+        }
+        _sidePanelLaunchPlaceQueued = true;
+        try
+        {
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis = get_weak()]() {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                self->_sidePanelLaunchPlaceQueued = false; // BEFORE the work: a size change during it queues another tick
+                if (!self->_SidePanelLaunchCardOpen())
+                {
+                    return; // closed meanwhile: the next open fits and places afresh
+                }
+                self->_SidePanelFitLaunchBox(); // never throws
+                self->_SidePanelPlaceLaunchCard(); // never throws
+            });
+        }
+        catch (...)
+        {
+            // The dispatcher is going away with the window: re-arm, never latch shut (a stuck latch would freeze the
+            // card's place for the rest of the window's life).
+            _sidePanelLaunchPlaceQueued = false;
+            ::Agentmaster::AgentLogCaughtException(L"side panel launcher: queue placement");
+        }
+    }
+
+    void TerminalPage::_SidePanelPlaceLaunchCard()
+    {
+        if (!_sidePanelLaunchPopup || !_sidePanelLaunchCard)
+        {
+            return;
+        }
+        try
+        {
+            const auto root = Root();
+            // The card's size from a fresh measure — what the Popup arranges it at (a Popup measures its child with no
+            // limit) — rather than ActualWidth, which still holds the previous arrange right after the text, the box
+            // width or Fork changed. Measuring outside a layout pass is legal; the next pass re-measures if needed.
+            _sidePanelLaunchCard.Measure(winrt::Windows::Foundation::Size{ kSidePanelLaunchMeasureBound, kSidePanelLaunchMeasureBound });
+            const auto size = _sidePanelLaunchCard.DesiredSize();
+            const auto placed = ::Agentmaster::PlacePointerCard(static_cast<double>(_sidePanelLaunchAnchor.X),
+                                                                static_cast<double>(_sidePanelLaunchAnchor.Y),
+                                                                static_cast<double>(size.Width),
+                                                                static_cast<double>(size.Height),
+                                                                root ? root.ActualWidth() : 0.0,
+                                                                root ? root.ActualHeight() : 0.0);
+            // Written only on a real move, so a re-placement that changes nothing invalidates nothing.
+            if (std::abs(_sidePanelLaunchPopup.HorizontalOffset() - placed.left) > kSidePanelLaunchPlaceEpsilonPx)
+            {
+                _sidePanelLaunchPopup.HorizontalOffset(placed.left);
+            }
+            if (std::abs(_sidePanelLaunchPopup.VerticalOffset() - placed.top) > kSidePanelLaunchPlaceEpsilonPx)
+            {
+                _sidePanelLaunchPopup.VerticalOffset(placed.top);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel launcher: place"); // the card keeps its previous offsets
+        }
+    }
+
+    void TerminalPage::_SidePanelFitLaunchBox()
+    {
+        if (!_sidePanelLaunchBar || !_sidePanelLaunchCard)
+        {
+            return;
+        }
+        try
+        {
+            const auto box = _sidePanelLaunchBar->CwdBox();
+            if (!box)
+            {
+                return;
+            }
+            const auto root = Root();
+            const double rootW = root ? root.ActualWidth() : 0.0;
+            double width = kSidePanelLaunchBoxMaxPx; // an unmeasured window: the comfortable width, re-fitted on its first SizeChanged
+            if (rootW > 0.0)
+            {
+                // The natural width of each other part of the row (0 when collapsed — Fork usually is), the
+                // _ReflowLaunchBar measure.
+                const auto natural = [](const FrameworkElement& el) -> double {
+                    if (!el || el.Visibility() == Visibility::Collapsed)
+                    {
+                        return 0.0;
+                    }
+                    el.Measure(winrt::Windows::Foundation::Size{ kSidePanelLaunchMeasureBound, kSidePanelLaunchMeasureBound });
+                    return static_cast<double>(el.DesiredSize().Width);
+                };
+                const FrameworkElement others[] = { _sidePanelLaunchBar->AgentElement(), _sidePanelLaunchBar->LaunchButton(), _sidePanelLaunchBar->ForkButton() };
+                double othersW = 0.0;
+                double gaps = 0.0; // one row gap per visible part beside the box
+                for (const auto& el : others)
+                {
+                    const double w = natural(el);
+                    if (w > 0.0)
+                    {
+                        othersW += w;
+                        gaps += kSidePanelLaunchRowSpacingPx;
+                    }
+                }
+                const auto pad = _sidePanelLaunchCard.Padding();
+                const auto edge = _sidePanelLaunchCard.BorderThickness();
+                const double chrome = pad.Left + pad.Right + edge.Left + edge.Right;
+                // The room the window leaves the box: its width less the placement's two edge margins, the card's own
+                // chrome, the row's gaps and the other parts.
+                const double room = rootW - 2.0 * ::Agentmaster::kPointerCardMarginDips - chrome - gaps - othersW;
+                width = std::clamp(room, kSidePanelLaunchBoxMinPx, kSidePanelLaunchBoxMaxPx);
+            }
+            if (std::abs(width - _sidePanelLaunchBoxWidth) < 0.5)
+            {
+                return; // unchanged: no layout invalidation
+            }
+            _sidePanelLaunchBoxWidth = width;
+            // A FIXED width (Min = Max): the card does not grow or shrink while you type — its corner stays at the click.
+            box.MinWidth(width);
+            box.MaxWidth(width);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel launcher: fit the box"); // the box keeps its previous width
+        }
+    }
+
+    void TerminalPage::_SidePanelSyncLaunchTextToManager()
+    {
+        if (!_sidePanelLaunchBar)
+        {
+            return;
+        }
+        try
+        {
+            if (const auto ipc = _agentManagerContent.get())
+            {
+                if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+                {
+                    mgr->SetLaunchBoxText(_sidePanelLaunchBar->BoxText()); // writes only on a change; re-validates the Manager's box
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel launcher: mirror the text"); // the next edit or close mirrors again
+        }
+    }
+
+    bool TerminalPage::_SidePanelLaunchPressIsInside(const DependencyObject& source)
+    {
+        if (!source)
+        {
+            return false;
+        }
+        try
+        {
+            // The identities a press may land under and still count as INSIDE: the card, the bar's drop-down panel (a
+            // separate Root() popup, below the box), and the "+" button (its Click toggles the card closed — closing on
+            // its press would let that Click reopen it at once).
+            std::vector<void*> inside;
+            inside.reserve(8);
+            inside.push_back(SidePanelLaunchIdentity(_sidePanelLaunchCard));
+            inside.push_back(SidePanelLaunchIdentity(_sidePanelLaunchBtn));
+            if (_sidePanelLaunchBar)
+            {
+                inside.push_back(SidePanelLaunchIdentity(_sidePanelLaunchBar->PathPanel()));
+            }
+            // ...plus the content of every OTHER open popup: the "Specify a model" prompt that the Launch hover menu
+            // opens is a Root() popup too (presses in a Root()-parented popup bubble to Root() like any element's), and a
+            // click in it must not close the card whose launch it is about to finish. A flyout or a dialog renders in
+            // the popup layer outside Root() and never reaches this hook at all.
+            if (const auto xr = Root().XamlRoot())
+            {
+                const void* const own = SidePanelLaunchIdentity(_sidePanelLaunchPopup);
+                for (const auto& popup : VisualTreeHelper::GetOpenPopupsForXamlRoot(xr))
+                {
+                    if (SidePanelLaunchIdentity(popup) != own)
+                    {
+                        if (const auto child = popup.Child())
+                        {
+                            inside.push_back(SidePanelLaunchIdentity(child));
+                        }
+                    }
+                }
+            }
+            // Walk up from the press source. A TextElement (a Run in a TextBlock) is not a visual: start from its host.
+            DependencyObject current = source;
+            if (const auto textElement = current.try_as<winrt::Windows::UI::Xaml::Documents::TextElement>())
+            {
+                current = textElement.ElementStart().VisualParent();
+            }
+            for (int guard = 0; current && guard < 1024; ++guard)
+            {
+                const void* const id = SidePanelLaunchIdentity(current);
+                if (id && std::find(inside.begin(), inside.end(), id) != inside.end())
+                {
+                    return true;
+                }
+                current = VisualTreeHelper::GetParent(current);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel launcher: press walk"); // an unreadable press counts as outside: the card closes
+        }
+        return false;
     }
 }

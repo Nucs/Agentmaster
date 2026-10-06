@@ -16,13 +16,21 @@
 // new key, and |survivors| - LIS moves (checked against an independent O(n^2) longest-increasing-
 // subsequence count, so a bug in the planner's patience-sorting LIS can't hide behind itself).
 // Exhaustive over every permutation of 5 keys plus a seeded random sweep with removals and insertions.
+//
+// TestPointerCardPlacement pins where the header's "+" launcher card opens (AgentMaster/PointerCardPlacement.h,
+// SIDE_PANEL.md section 2e): its corner at the click point, extending toward the window's center (each axis decided by
+// the click's half, the exact middle counting as the left / top half), clamped inside the window with a margin, a card
+// larger than the window pinned to the near margin, an unmeasured window never clamped, and every NaN / infinity /
+// negative input neutralized; plus a seeded sweep of the invariants over random clicks, cards and windows.
 
 #include "m5_tests.h"
 
 #include "../KeyedListDiff.h"
+#include "../PointerCardPlacement.h" // the "+" launcher card's tooltip-like placement (TestPointerCardPlacement)
 #include "../SessionTimingText.h" // the cards' and rows' "created 4d1h, active 2m4s ago" (TestSessionTimingText)
 
 #include <algorithm>
+#include <cmath> // std::fabs / std::nan / HUGE_VAL - TestPointerCardPlacement
 #include <cstdint>
 #include <string>
 #include <unordered_set>
@@ -400,5 +408,160 @@ void TestSessionTimingText()
         CHECK(createdBad == 0, "timing sweep: the created span is \"now\" / \"recently\" under an hour, else only y / d / h - never minutes or seconds");
         CHECK(activeBad == 0, "timing sweep: the active span is empty under a second, else y / d / h / m (+ s only under an hour), never empty");
         CHECK(lineBad == 0, "timing sweep: every line with a creation time starts \"created \"");
+    }
+}
+
+namespace
+{
+    // One placement case: checks all four results and prints what came back when any of them differs, so a failing
+    // case names its numbers instead of only its label.
+    //   got   - the placement under test.
+    //   left  - the expected left edge.
+    //   top   - the expected top edge.
+    //   right - the expected towardRight.
+    //   down  - the expected towardDown.
+    //   what  - the case's label (the CHECK message).
+    void ExpectCardPlacement(const PointerCardPlacement& got, double left, double top, bool right, bool down, const char* what)
+    {
+        const bool ok = std::fabs(got.left - left) < 1e-9 && std::fabs(got.top - top) < 1e-9 && got.towardRight == right && got.towardDown == down;
+        if (!ok)
+        {
+            std::wprintf(L"    got left=%g top=%g right=%d down=%d, want left=%g top=%g right=%d down=%d\n",
+                         got.left,
+                         got.top,
+                         got.towardRight ? 1 : 0,
+                         got.towardDown ? 1 : 0,
+                         left,
+                         top,
+                         right ? 1 : 0,
+                         down ? 1 : 0);
+        }
+        CHECK(ok, what);
+    }
+
+    // One axis of the sweep's invariants: a card that fits lands inside [margin, area - margin - size] and, when its
+    // unclamped position is inside that band too, sits exactly `gap` away from the click; a card that doesn't fit is
+    // pinned to the near margin.
+    //   start      - the placed edge (left / top).
+    //   size       - the card's extent on the axis.
+    //   area       - the window's extent on the axis (measured, > 0).
+    //   click      - the click coordinate.
+    //   forward    - the direction the placement took (right / down).
+    //   outside    - incremented for a placement outside the band (or not pinned when too large).
+    //   notAtClick - incremented for an unclamped placement that is not gap away from the click.
+    void CheckCardAxis(double start, double size, double area, double click, bool forward, size_t& outside, size_t& notAtClick)
+    {
+        const double lo = kPointerCardMarginDips;
+        const double hi = area - kPointerCardMarginDips - size;
+        if (hi < lo)
+        {
+            outside += std::fabs(start - lo) < 1e-9 ? 0 : 1; // too large: pinned to the near margin
+            return;
+        }
+        outside += (start >= lo - 1e-9 && start <= hi + 1e-9) ? 0 : 1;
+        const double unclamped = forward ? (click + kPointerCardGapDips) : (click - kPointerCardGapDips - size);
+        if (unclamped >= lo && unclamped <= hi)
+        {
+            notAtClick += std::fabs(start - unclamped) < 1e-9 ? 0 : 1; // inside the window: exactly at the click
+        }
+    }
+}
+
+// Where the side panel's "+" launcher card opens (AgentMaster/PointerCardPlacement.h): "cornered to the cursor" and
+// extending toward the window's center, the user's tooltip-like rule (2026-10-06), kept inside the window.
+void TestPointerCardPlacement()
+{
+    std::wprintf(L"\n[TestPointerCardPlacement]\n");
+    const double nan = std::nan("");
+    const double inf = HUGE_VAL;
+
+    // --- the four quadrants of a 1600 x 900 window, a 600 x 60 card (default gap 2, margin 8) ---
+    ExpectCardPlacement(PlacePointerCard(40, 60, 600, 60, 1600, 900), 42, 62, true, true,
+                        "card placement: a click near the top-left corner opens down-right, the corner just past the click");
+    ExpectCardPlacement(PlacePointerCard(1560, 60, 600, 60, 1600, 900), 958, 62, false, true,
+                        "card placement: near the top-right corner it opens down-left (the card's RIGHT edge at the click)");
+    ExpectCardPlacement(PlacePointerCard(40, 880, 600, 60, 1600, 900), 42, 818, true, false,
+                        "card placement: near the bottom-left corner it opens up-right (the card's BOTTOM edge at the click)");
+    ExpectCardPlacement(PlacePointerCard(1560, 880, 600, 60, 1600, 900), 958, 818, false, false,
+                        "card placement: near the bottom-right corner it opens up-left");
+
+    // --- the middle line counts as the left / top half ---
+    ExpectCardPlacement(PlacePointerCard(800, 450, 600, 60, 1600, 900), 802, 452, true, true,
+                        "card placement: a click exactly on the center lines extends right and down");
+    ExpectCardPlacement(PlacePointerCard(800.5, 450.5, 600, 60, 1600, 900), 198.5, 388.5, false, false,
+                        "card placement: half a DIP past the center lines flips both axes");
+
+    // --- the clamp: an edge the card would cross stops at the margin ---
+    ExpectCardPlacement(PlacePointerCard(300, 40, 800, 60, 1000, 900), 192, 42, true, true,
+                        "card placement: a rightward card that would cross the right edge stops 8 DIP inside it");
+    ExpectCardPlacement(PlacePointerCard(700, 40, 800, 60, 1000, 900), 8, 42, false, true,
+                        "card placement: a leftward card that would cross the left edge stops 8 DIP inside it");
+    ExpectCardPlacement(PlacePointerCard(40, 500, 300, 700, 1600, 800), 42, 8, true, false,
+                        "card placement: an upward card taller than the room above stops at the top margin");
+    ExpectCardPlacement(PlacePointerCard(40, 300, 300, 700, 1600, 800), 42, 92, true, true,
+                        "card placement: a downward card that would cross the bottom edge stops 8 DIP above it");
+
+    // --- a card larger than the window is pinned to the near (left / top) margin, whatever the click ---
+    ExpectCardPlacement(PlacePointerCard(100, 50, 1200, 60, 1000, 900), 8, 52, true, true,
+                        "card placement: a card wider than the window starts at the left margin (clicked on the left)");
+    ExpectCardPlacement(PlacePointerCard(900, 50, 1200, 60, 1000, 900), 8, 52, false, true,
+                        "card placement: ... and when clicked on the right (its start stays visible)");
+    ExpectCardPlacement(PlacePointerCard(100, 50, 984, 60, 1000, 900), 8, 52, true, true,
+                        "card placement: a card exactly as wide as the window minus both margins sits at the margin");
+
+    // --- an unmeasured window: no clamp, and no middle to flip on (forward = right / down) ---
+    ExpectCardPlacement(PlacePointerCard(300, 40, 600, 60, 0, 0), 302, 42, true, true,
+                        "card placement: an unmeasured window (0 x 0) is not clamped");
+    ExpectCardPlacement(PlacePointerCard(5000, 4000, 600, 60, 0, 0), 5002, 4002, true, true,
+                        "card placement: ... even far outside, and it extends right / down (no middle to compare with)");
+    ExpectCardPlacement(PlacePointerCard(2000, 60, 600, 60, nan, -1), 2002, 62, true, true,
+                        "card placement: a NaN or negative window size reads as unmeasured");
+
+    // --- non-finite and negative inputs are neutralized (no NaN can reach a XAML offset) ---
+    ExpectCardPlacement(PlacePointerCard(nan, nan, 600, 60, 1600, 900), 8, 8, true, true,
+                        "card placement: a NaN click reads as (0, 0): right / down, clamped to the margins");
+    ExpectCardPlacement(PlacePointerCard(inf, -inf, 600, 60, 1600, 900), 8, 8, true, true,
+                        "card placement: an infinite click reads as (0, 0) too");
+    ExpectCardPlacement(PlacePointerCard(40, 60, -50, nan, 1600, 900), 42, 62, true, true,
+                        "card placement: a negative or NaN card size reads as 0");
+    ExpectCardPlacement(PlacePointerCard(40, 60, 600, 60, 1600, 900, -5, -5), 40, 60, true, true,
+                        "card placement: a negative gap and margin read as 0 (the corner exactly on the click)");
+    ExpectCardPlacement(PlacePointerCard(1590, 10, 600, 60, 1600, 900, 10, 20), 980, 20, false, true,
+                        "card placement: a custom gap (10) and margin (20) both apply");
+
+    // --- a seeded sweep of the invariants ---
+    {
+        uint64_t seed = 0x9E3779B97F4A7C15ull;
+        // splitmix64 -> [0, span): deterministic, so a failure reproduces exactly.
+        const auto next = [&seed](double span) {
+            seed += 0x9E3779B97F4A7C15ull;
+            uint64_t z = seed;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+            z ^= z >> 31;
+            return span * static_cast<double>(z >> 11) / 9007199254740992.0;
+        };
+        size_t outside = 0; // a fitting card placed outside [margin, area - margin - size], or a too-large one not pinned
+        size_t notAtClick = 0; // an unclamped card whose corner is not gap away from the click
+        size_t wrongDirection = 0; // a direction that disagrees with the click's half
+        size_t cases = 0;
+        for (int i = 0; i < 20000; ++i)
+        {
+            const double aw = 200.0 + next(3000.0);
+            const double ah = 150.0 + next(2000.0);
+            const double cw = next(1500.0);
+            const double ch = next(400.0);
+            const double x = next(aw);
+            const double y = next(ah);
+            const auto p = PlacePointerCard(x, y, cw, ch, aw, ah);
+            ++cases;
+            wrongDirection += (p.towardRight == (x <= aw / 2.0) && p.towardDown == (y <= ah / 2.0)) ? 0 : 1;
+            CheckCardAxis(p.left, cw, aw, x, p.towardRight, outside, notAtClick);
+            CheckCardAxis(p.top, ch, ah, y, p.towardDown, outside, notAtClick);
+        }
+        CHECK(cases == 20000, "card placement sweep: 20000 random clicks, cards and windows");
+        CHECK(wrongDirection == 0, "card placement sweep: every direction follows the click's half of the window");
+        CHECK(outside == 0, "card placement sweep: a card that fits always lands inside the margins; one that doesn't is pinned to the near margin");
+        CHECK(notAtClick == 0, "card placement sweep: an unclamped card always has its corner exactly gap away from the click");
     }
 }

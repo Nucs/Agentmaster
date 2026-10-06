@@ -14,7 +14,7 @@
 //   AgentManagerContent.Tree.cpp        - the Explorer Tree: managed/external trees, context menus, scope/sort toggles, rename, confirm dialogs
 //   AgentManagerContent.Settings.cpp    - keep-awake/reopen/activate buttons + the Settings cog overlay (tabs, save, env editor, UPDATES, claude-missing)
 //   AgentManagerContent.AutoTesting.cpp  - the Auto Testing: plan + selection sync, prompt compose/history, Autorunner, the Summary tab, templates
-//   AgentManagerContent.Launch.cpp      - the Launch bar: cwd validation, the Claude/Codex toggle, launch/create/fork, the path-picker drop-down
+//   AgentManagerContent.Launch.cpp      - the Launch bar's HOST half: _MakeLaunchBarHost, the forwarders, LaunchBoxText / SetLaunchBoxText (the bar itself: AgentLaunchBar.{h,cpp})
 // ======================================================================================
 //
 // Agentmaster Manager tab: the TRIAGE BOARD -- session/external cards, the state columns, the draggable splitters, and _RebuildBoard. Partial TU of AgentManagerContent.cpp.

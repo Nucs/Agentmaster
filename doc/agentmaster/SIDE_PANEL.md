@@ -11,22 +11,22 @@ Shown in the DEFAULT dock (LEFT); the header's `⇄` flips it to the mirror imag
 which also flips the collapse chevron (`«` here — it always points toward the docked edge).
 
 ```
-┌ tab row ─────────────────────────────────────────────────────────┐
-├────────────────────────────┬──┬──────────────────────────────────┤
-│[Sum][LOCAL][sort][⌖][⇄][«] │ ▌│                                  │  ← header line 1 (right-aligned): summary area /
-│                            │ ▌│                                  │    card SCOPE / order / scroll-to-tab / dock / collapse
-│ [filter sessions…]         │ ▌│                                  │  ← header line 2: the filter box, full width
-│ N of M (this window)       │ ▌│        terminal content          │  ← count line (names the scope)
-│ ┌────────────────────────┐ │ ▌│          (TabContent)            │
-│ │ session CARDS          │ │ ▌│                                  │  ← TOP area (own scroll)
-│ └────────────────────────┘ │ ▌│                                  │
-│ ━━━━━━━━━━━━━━━━━━━━━━━━━━ │ ▌│                                  │  ← horizontal splitter
-│ ┌────────────────────────┐ │ ▌│                                  │
-│ │ selected sess.         │ │ ▌│                                  │  ← BOTTOM area (own scroll)
-│ │    SUMMARY             │ │ ▌│                                  │
-│ └────────────────────────┘ │ ▌│                                  │
-└────────────────────────────┴──┴──────────────────────────────────┘
-                               ↑ vertical splitter (the resizable separator)
+┌ tab row ────────────────────────────────────────────────────────────┐
+├───────────────────────────────┬──┬──────────────────────────────────┤
+│[+][Sum][LOCAL][sort][⌖][⇄][«] │ ▌│                                  │  ← header line 1 (right-aligned): + launcher (§2e) /
+│                               │ ▌│                                  │    summary area / card SCOPE / order / scroll-to-tab / dock / collapse
+│ [filter sessions…]            │ ▌│                                  │  ← header line 2: the filter box, full width
+│ N of M (this window)          │ ▌│        terminal content          │  ← count line (names the scope)
+│ ┌───────────────────────────┐ │ ▌│          (TabContent)            │
+│ │ session CARDS             │ │ ▌│                                  │  ← TOP area (own scroll)
+│ └───────────────────────────┘ │ ▌│                                  │
+│ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ │ ▌│                                  │  ← horizontal splitter
+│ ┌───────────────────────────┐ │ ▌│                                  │
+│ │ selected sess.            │ │ ▌│                                  │  ← BOTTOM area (own scroll)
+│ │    SUMMARY                │ │ ▌│                                  │
+│ └───────────────────────────┘ │ ▌│                                  │
+└───────────────────────────────┴──┴──────────────────────────────────┘
+                                  ↑ vertical splitter (the resizable separator)
 ```
 
 With **Sum** OFF (§2d) the bottom area and the horizontal splitter are gone, the cards fill the
@@ -34,20 +34,20 @@ whole body, and hovering a card opens that session's RICH card — the one a tab
 the panel:
 
 ```
-┌ tab row ─────────────────────────────────────────────────────────┐
-├────────────────────────────┬──┬──────────────────────────────────┤
-│[Sum][LOCAL][sort][⌖][⇄][«] │ ▌│                                  │  ← "Sum" OFF (unchecked)
-│ [filter sessions…]         │ ▌│                                  │
-│ N of M (this window)       │ ▌│                                  │
-│ ┌────────────────────────┐ │ ▌│ ┌──────────────────────────────┐ │  ← hover a card: the session's RICH card
-│ │ card                   │ │ ▌│ │ ● title         folder/branch│ │    opens beside the panel (left of it
-│ │ card  (hovered)        │ │ ▌│ │ state · ago · why            │ │    when the panel is docked RIGHT),
-│ │ card                   │ │ ▌│ │ claude · model · effort      │ │    vertically centered on the hovered
-│ │ …                      │ │ ▌│ │ tags                         │ │    card — the card a tab shows on hover
-│ │ (the cards fill        │ │ ▌│ │ ── Summary (wheel-scrolls) ──│ │
-│ │  the whole body)       │ │ ▌│ └──────────────────────────────┘ │
-│ └────────────────────────┘ │ ▌│                                  │
-└────────────────────────────┴──┴──────────────────────────────────┘
+┌ tab row ────────────────────────────────────────────────────────────┐
+├───────────────────────────────┬──┬──────────────────────────────────┤
+│[+][Sum][LOCAL][sort][⌖][⇄][«] │ ▌│                                  │  ← "Sum" OFF (unchecked)
+│ [filter sessions…]            │ ▌│                                  │
+│ N of M (this window)          │ ▌│                                  │
+│ ┌───────────────────────────┐ │ ▌│ ┌──────────────────────────────┐ │  ← hover a card: the session's RICH card
+│ │ card                      │ │ ▌│ │ ● title         folder/branch│ │    opens beside the panel (left of it
+│ │ card  (hovered)           │ │ ▌│ │ state · ago · why            │ │    when the panel is docked RIGHT),
+│ │ card                      │ │ ▌│ │ claude · model · effort      │ │    vertically centered on the hovered
+│ │ …                         │ │ ▌│ │ tags                         │ │    card — the card a tab shows on hover
+│ │ (the cards fill           │ │ ▌│ │ ── Summary (wheel-scrolls) ──│ │
+│ │  the whole body)          │ │ ▌│ └──────────────────────────────┘ │
+│ └───────────────────────────┘ │ ▌│                                  │
+└───────────────────────────────┴──┴──────────────────────────────────┘
 ```
 
 - `TerminalPage.xaml`'s content row became a 3-column `ContentArea` grid; code
@@ -57,14 +57,15 @@ the panel:
   0 until `_InitAgentSidePanel` runs, so a build without the panel renders the pre-feature layout.
 - The whole panel forces the Agentmaster DARK theme (explicit fills, `RequestedTheme(Dark)`).
 - Collapse (the header chevron / the strip) shrinks the panel to a 20px expander strip; the
-  header also carries the **Sum** summary-area toggle (§2d, left of LOCAL / GLOBAL), the card
+  header also carries the **+** launcher (§2e, the first button, left of Sum), the **Sum**
+  summary-area toggle (§2d, left of LOCAL / GLOBAL), the card
   list's **LOCAL / GLOBAL** scope toggle (§2), the `⌖` **scroll-to-selected-tab** icon toggle
   (§2a), and a `⇄` dock-side flip.
 - The header is **two lines** (one 2-row grid): the buttons, right-aligned in their original order,
   over the filter box, which spans every column. Sharing one line with the buttons, the box was
   squeezed toward its minimum on a narrow panel while the buttons kept their natural widths.
 - **Two font sizes.** The worded buttons (Sum, LOCAL / GLOBAL, the sort label) are 11 px; the ICON
-  buttons (`⌖`, `⇄`, the collapse chevron, and the collapsed strip's chevron) are 12 px
+  buttons (`+`, `⌖`, `⇄`, the collapse chevron, and the collapsed strip's chevron) are 12 px
   (`kSidePanelIconFontSize`, 2026-10-05 — they were 11 px, and a symbol reads smaller than a word at
   the same size).
 - **The two separators are 3 px thick** (`kSidePanelSplitterPx`: the vertical one's ContentArea
@@ -434,6 +435,114 @@ dock flip is followed at the next hover; Sum ON brings the summary and the small
 reopened window keeps its own choice, and a new window takes the last one; measure the card's real
 width (the 320 px `ToolTip` cap above); no `[exc] Side-panel card …` lines in hooks.log.
 
+### 2e. The "+" launcher — the Agent Manager's launch box, at the click
+
+NOT BUILT yet (2026-10-06). The header's **+** button (the first of the right-aligned buttons, left
+of **Sum** — the user's "leftmost, to Sum") opens a small card AT THE CLICK that holds the Agent
+Manager's own launch row, so a session starts from the side panel without leaving the tab:
+
+```
+  [+]  ← the click
+     ┌───────────────────────────────────────────────────────────────────┐
+     │ ● Claude   [ K:\source\Agentmaster           ]   [Launch Claude]  │
+     │            ═════════ validation underline ════                    │
+     └───────────────────────────────────────────────────────────────────┘
+     ↑ the card's corner sits at the click; the card extends toward the window's center
+       (Fork appears beside Launch only while the box holds a session id found on disk)
+```
+
+**The user's eight answers** (2026-10-06), and how each is met:
+
+1. **Where:** `+` in header column 1, left of **Sum**; Sum, LOCAL / GLOBAL, the sort, `⌖`, `⇄` and
+   the chevron each moved one column right (column 7 is new). An ICON button: 12 px like `⌖` / `⇄`,
+   `IsTabStop` false like its siblings, an automation name ("Launch a session").
+2. **Placement — tooltip-like, but interactive.** The card's corner sits at the click point and the
+   card extends toward the window's center: a click in the left half opens it rightward (its left
+   edge at the click), in the right half leftward (its right edge at the click), and the same with
+   top / bottom (`AgentMaster/PointerCardPlacement.h` `PlacePointerCard`, pure; the exact middle
+   counts as left / top; a 2-DIP gap off the click pixel). It is clamped 8 DIP inside the window, a
+   card larger than the window is pinned to the near margin, and an unmeasured window is not
+   clamped. Nothing closes on pointer-leave: the pointer can move onto the card and work in it.
+   - The point is read on the `+` button's **press** (`PointerPressed`, `handledEventsToo`): a
+     `Click` carries no position. `PointerCaptureLost` drops a press that ended without a click, so a
+     `Click` with no press of its own (UI Automation) anchors under the button instead.
+   - Placed in the open's own tick at the card's measured size (no frame at a wrong spot), and again
+     on the next tick after every size change of the card or the window
+     (`_SidePanelQueueLaunchCardPlacement` — never inside `SizeChanged`, the `E_LAYOUTCYCLE` rule);
+     the offsets are written only on a real move.
+3. **What it shows:** `[● Claude] [ box ] [Launch Claude] [Fork]` — the Manager's row without its
+   "launch a" / "session in" words.
+4. **The text — "keep the last, same one we have in agent manager tab":** the card opens on the
+   Agent Manager box's text (`AgentManagerContent::LaunchBoxText`), mirrors every edit into it live
+   (the bar's `textEdited` → `SetLaunchBoxText`), and writes its last, normalized text back when it
+   closes. So the two boxes always read the same; a tab switch then pre-aims the Manager's box as
+   always (the card closes first, in `_ApplyAgentTabSelection`, before `_SyncManagerSelectionToTab`).
+5. **Focus:** the box gets PROGRAMMATIC focus one tick after the open — the caret waits in the box,
+   and the drop-down stays closed until a click in the box or a keystroke (the box's own rule: it
+   opens only on a pointer / keyboard focus, a tap or typing).
+6. **Claude only.** The agent element is a fixed `● Claude` chip (the toggle's content, no button
+   chrome, no click); its tooltip says Codex launches from here are planned. The bar never enters
+   Codex mode.
+7. **Closing:** a press OUTSIDE the card (a `Root()` `handledEventsToo` hook — the tag editor's
+   recipe), Esc (with the drop-down closed), `+` again, a launch / resume / fork, a tab switch, a
+   collapse, a dock flip (`⇄` here, or a settings broadcast that moved the dock). INSIDE counts the
+   card, its drop-down (a separate `Root()` popup), the `+` button (its click toggles), and the
+   content of any other open popup — the **Specify a model** prompt the Launch hover menu opens is a
+   `Root()` popup too, and a click in it must not close the card whose launch it is about to finish.
+   Logged `[nav] sidepanel launcher open (at the click | under the + button)` /
+   `[nav] sidepanel launcher close (<reason>)`.
+8. **"Same functionalities exactly like in agent manager tab":** the row IS the Manager's code — the
+   launch bar was moved VERBATIM out of `AgentManagerContent.Launch.cpp` (and the toolbar / drop-down
+   blocks of `_BuildLayout`) into one shared class, **`AgentLaunchBar`** (`AgentLaunchBar.{h,cpp}`),
+   which the Agent Manager now hosts too. The same validation underline (green = a found session id,
+   amber = a folder Launch will create, red = Launch disabled), the same drop-down (Browse…, RECENT /
+   RECENT MATCHES, GIT WORKTREES, MATCHES / SUBFOLDERS, sized against the window), the same keys in
+   the box (Esc closes the drop-down, Enter commits without launching), the same Launch hover menu
+   (Default · Specify… · models · presets), the same launch / resume / fork / "Create & Launch".
+   The card's host calls the very page seams the Manager's handlers call (`_SpawnClaudeSession`,
+   `_ResumeSessionFromDisk`, `_ForkSessionFromDisk`), with the page's own "Claude not detected"
+   notice (`_PromptClaudeMissing`). Both bars push into ONE recent-folders list
+   (`AgentManagerContent::LaunchRecentDirs`).
+
+**Keys act on the KEY-UP** (the `AgentModelPrompt.h` rule): the card's `PreviewKeyDown` arms
+Escape (drop-down closed) or Enter on the focused Launch / Fork button and marks it handled; its
+`PreviewKeyUp` acts. Closing the card moves focus to a terminal, and Windows still delivers the rest
+of a keystroke — the CR of an Enter, the ESC of an Escape — to whatever holds focus next: a claude
+would submit its unsent draft or interrupt its running turn. Ctrl / Alt chords are never ours.
+Enter in the BOX stays the box's own commit (never a launch), as on the Agent Manager page. Tab
+cycles inside the card.
+
+**Focus back.** When the card held keyboard focus at its close (Esc, `+`, a launch, a press on a
+surface that takes no focus), focus returns to the current tab on a Low-priority tick
+(`_FocusCurrentTab`); a press on a focusable element (the terminal, a text box) keeps the focus it
+took.
+
+**The box width** is fixed while the card is open (Min = Max — the card does not grow while you
+type): 504 DIP (the Manager's comfortable width), less when the window leaves less beside the chip,
+Launch and Fork, never under 160 (`_SidePanelFitLaunchBox`).
+
+**The look:** the tag editor's dark card (`#262626`, a `#3A3A3A` edge, 6 px corners), plus the
+Agent Manager's six Button state brushes (`AgentLaunchBar::SeedButtonStateBrushes`): under the
+forced-Dark theme the default `ButtonBackground*` brushes resolve to null, and a button would take a
+click only on its text. The bar seeds its own drop-down panel with them too — that is what the
+Manager's drop-down rows found on the Manager root before; in `Root()` there is none.
+
+**Cost.** Built on the FIRST `+` click and kept for the window's life (`_SidePanelEnsureLaunchCard`);
+a window that never opens it pays nothing. The two `Root()` hooks are inert while it is closed. A
+press while it is open reads the open popups once and walks the press's ancestor chain once
+(identities compared as raw `IUnknown` pointers).
+
+**Check after the build:** `+` sits left of Sum and toggles the card; a click near the top-left
+opens it down-right with its corner at the click, and after `⇄` (dock right) down-left; the card
+shows the Manager box's text and the same underline; typing opens the drop-down and mirrors into the
+Manager's box (open the Agent Manager page beside it to watch); Browse… / a RECENT row / a GIT
+WORKTREES row work; hovering Launch opens the model / preset menu, and Specify… keeps the card open
+until its pick launches; Launch, a typed session id's Resume and Fork each start the session and
+close the card; Esc closes the drop-down first, then the card, and no ESC reaches the terminal (a
+running claude keeps running); Enter on a focused Launch launches on the key-up and no CR reaches
+the new tab; a click on the terminal, a tab, the side panel or `+` closes it; a window resize keeps
+it inside the window; no `[exc] side panel launcher …` lines in hooks.log.
+
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new
@@ -580,6 +689,11 @@ below).
   down (detached) before its card leaves the list or the list resets, its floating tips are silenced
   meanwhile (`AgentSuppressTip`), its arm-build reads no transcript, and every handler it wires holds
   the page and the host weakly.
+- The `+` launcher card (§2e) is built on the first click and never rebuilt; its placement runs on a
+  coalesced dispatcher tick (never inside `SizeChanged`), writes the popup offsets only on a real
+  move, and its keys act on the KEY-UP, so no CR / ESC of a key that closes the card can reach a
+  terminal. Every handler it wires holds the page weakly; the launch bar's own handlers hold the bar
+  weakly; `~TerminalPage` runs the bar's noexcept `Shutdown` (its hover timer is UI-affine).
 
 ## 6. Files
 
@@ -608,4 +722,12 @@ below).
   omitted, settings default). The timing line (§2): `AgentMaster/SessionTimingText.h` (the pure
   formatter), `AgentManagerContent.Internal.h` (`FormatSessionTiming` — the wall-clock wrapper every
   card and row calls — and the `kTimingTooltip` text), `tests/tests_sidepanel.cpp`
-  (`TestSessionTimingText`).
+  (`TestSessionTimingText`). The `+` launcher (§2e): `AgentLaunchBar.{h,cpp}` (the shared launch
+  bar — the Agent Manager's launch row, moved out of `AgentManagerContent.Launch.cpp` and
+  `_BuildLayout`), `AgentManagerContent.Launch.cpp` (now the Manager's HOST half: `_MakeLaunchBarHost`,
+  the forwarders, `LaunchBoxText` / `SetLaunchBoxText`), `AgentManagerContent.{h,cpp}` (the bar
+  member, the shared `LaunchRecentDirs`), `AgentMaster/PointerCardPlacement.h` (the placement, pure),
+  `TerminalPage.AgentSidePanel.cpp` (the button, the card, its keys, hooks, fit and placement),
+  `TerminalPage.AgentEngine.cpp` (the tab-switch close, the destructor's `Shutdown`),
+  `TerminalPage.h` (members + decls), `TerminalAppLib.vcxproj` (the new TU + headers),
+  `tests/tests_sidepanel.cpp` (`TestPointerCardPlacement`).

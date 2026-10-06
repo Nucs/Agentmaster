@@ -14,13 +14,14 @@
 //   AgentManagerContent.Tree.cpp        - the Explorer Tree: managed/external trees, context menus, scope/sort toggles, rename, confirm dialogs
 //   AgentManagerContent.Settings.cpp    - keep-awake/reopen/activate buttons + the Settings cog overlay (tabs, save, env editor, UPDATES, claude-missing)
 //   AgentManagerContent.AutoTesting.cpp  - the Auto Testing: plan + selection sync, prompt compose/history, Autorunner, the Summary tab, templates
-//   AgentManagerContent.Launch.cpp      - the Launch bar: cwd validation, the Claude/Codex toggle, launch/create/fork, the path-picker drop-down
+//   AgentManagerContent.Launch.cpp      - the Launch bar's HOST half: _MakeLaunchBarHost, the forwarders, LaunchBoxText / SetLaunchBoxText (the bar itself: AgentLaunchBar.{h,cpp})
 // ======================================================================================
 //
 // Agentmaster Manager tab content (C1 "Linked Lenses"). CORE: ctor/dtor, the Set* wiring, IPaneContent, the per-window lens, _BuildLayout, _Refresh. The board/tree/auto-testing/settings/launch live in sibling AgentManagerContent.*.cpp TUs (the TerminalPage.Agent*.cpp pattern).
 #include "pch.h"
 #include "AgentManagerContent.h"
 
+#include "AgentLaunchBar.h" // the shared LAUNCH BAR — the toolbar's launch row (built in _BuildLayout, shut down in the destructor)
 #include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
@@ -96,7 +97,11 @@ namespace winrt::TerminalApp::implementation
         _root.RequestedTheme(ElementTheme::Dark);
         _dispatcher = DispatcherQueue::GetForCurrentThread();
         _templates = ::Agentmaster::LoadTemplates(); // persisted plan templates (M8)
-        _recentDirs = ::Agentmaster::LoadRecentDirs(); // MRU for the Launch path-picker
+        // MRU for the Launch path-picker — loaded BEFORE _BuildLayout builds the launch bar (it reads the list on its
+        // first open), and shared with the side panel's "+" launcher card (LaunchRecentDirs), so the window's two
+        // launch bars push into ONE list.
+        _launchRecentDirs = std::make_shared<AgentLaunchRecentDirs>();
+        _launchRecentDirs->dirs = ::Agentmaster::LoadRecentDirs();
         _layout = ::Agentmaster::LoadLayout(); // persisted splitter geometry (pane sizes)
 
         // Agentmaster: paint the Manager pane an OPAQUE background. This is LOAD-BEARING for input,
@@ -236,13 +241,13 @@ namespace winrt::TerminalApp::implementation
             }
             CATCH_LOG();
         }
-        if (_launchHoverTimer)
+        if (_launch)
         {
-            try
-            {
-                _launchHoverTimer.Stop(); // PRESETS: the Launch button's hover-intent delay (its Tick holds only a weak ref)
-            }
-            CATCH_LOG(); // a teardown off the UI thread throws RPC_E_WRONG_THREAD here — never let it escape a destructor
+            // The launch bar's Shutdown stops its PRESETS hover-intent timer and closes an open drop-down — each step
+            // guarded inside (noexcept): a teardown off the UI thread throws RPC_E_WRONG_THREAD there, and nothing may
+            // escape a destructor. Called here, not left to the bar's own destructor, so it runs at this point of the
+            // teardown whatever else still holds the bar.
+            _launch->Shutdown();
         }
     }
 
@@ -894,169 +899,29 @@ namespace winrt::TerminalApp::implementation
             _launchAText = Text(L"launch a", 13, false, 0.6); // collapsible
             bar.Children().Append(_launchAText);
 
-            // Agentmaster (Codex-launch): the agent toggle — Claude (default) <-> Codex. Click cycles it
-            // (the scope/sort/autorunner toggle idiom). It retargets the SAME cwd box + Launch button, so a
-            // managed Codex launches exactly the way a Claude does ("do what we do for Claude"). A Codex
-            // launch is directory-only — Codex has no typed-id resume/fork here (Codex resume is reached via
-            // the Archive page / window-restore / EXTERNAL Adopt), so _ValidateLaunchBox suppresses those.
-            _launchAgentBtn = Button{};
-            _launchAgentBtn.FontSize(11);
-            _launchAgentBtn.Padding(Thickness{ 8, 1, 8, 1 });
-            AgentSetTitledTip(_launchAgentBtn, L"Agent to launch", L"Click to toggle between Claude and Codex. The box and the Launch button beside it retarget to match \x2014 a Codex launch is directory-only (no session id to resume or fork).");
-            _launchAgentBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
-                _launchCodex = !_launchCodex;
-                _UpdateLaunchAgentButton();
-                _ValidateLaunchBox(); // repaint the Launch button text + resume/fork affordances for the new agent
-            });
-            bar.Children().Append(_launchAgentBtn);
-            _UpdateLaunchAgentButton();
+            // Agentmaster (the shared LAUNCH BAR — AgentLaunchBar.h): the Claude <-> Codex agent toggle, the cwd box
+            // with its validation underline and its path-picker drop-down, Launch (with its PRESETS hover menu) and Fork
+            // are ONE AgentLaunchBar — the same code the side panel's "+" launcher card runs (SIDE_PANEL.md §2e). Their
+            // build and every handler moved there verbatim; this block keeps only the toolbar layout around the bar's
+            // parts (the brand, "launch a" / "session in", the wrappable _launchBtns group) and the host callbacks
+            // (_MakeLaunchBarHost). The bar appends its drop-down Popup to _root itself (top-left aligned in row 0, as
+            // the drop-down block further down used to): a Popup renders in the popup layer whatever its place among
+            // _root's children, and its offsets are measured from _root's top-left either way.
+            // Built here, between "launch a" and "session in", so the toggle lands where it always stood. While the
+            // bar builds, its layout callback reaches _ReflowLaunchBar with _cwdBox / _launchBtns still null — the
+            // reflow's early-out, exactly the old build order's (the toggle used to be built before the box).
+            _launch = AgentLaunchBar::Create(_MakeLaunchBarHost());
+            _launchAgentBtn = _launch->AgentToggleButton(); // kept: _ReflowLaunchBar measures the toggle as part of the row
+            bar.Children().Append(_launch->AgentElement());
 
             _sessionInText = Text(L"session in", 13, false, 0.6); // collapsible (with "launch a")
             bar.Children().Append(_sessionInText);
 
-            _cwdBox = TextBox{};
-            // Agentmaster: 504 (the old fixed width) is the COMFORTABLE width; the box grows with its typed
-            // content — a NoWrap TextBox in the horizontal launch bar measures to its text — between the
-            // live MinWidth/MaxWidth that _ReflowLaunchBar sets per stage (504 floor when there's room; a
-            // 240/160 floor once the pane narrows enough to shrink / wrap), so a long path never pushes the
-            // Launch button off-screen. Left alignment keeps it content-sized rather than stretched-to-fill.
-            _cwdBox.MinWidth(504);
-            _cwdBox.MaxWidth(504); // seed; _ReflowLaunchBar (re)computes Min/Max per stage on first layout
-            _cwdBox.HorizontalAlignment(HorizontalAlignment::Left);
-            _cwdBox.PlaceholderText(L"working directory (the M axis)");
-            // Agentmaster: the box accepts EITHER a working dir (new session) OR a session id (Resume / Fork).
-            // The underline + the Launch button's label track what you type — the tip names all three states.
-            AgentSetTitledTip(_cwdBox, L"Where to launch", L"A working directory for a new session, or a Claude session id to resume or fork. Start typing to pick from recent and matching folders.\n\nThe underline reads back what you typed: green = a session id found on disk (Launch becomes Resume, with a Fork twin) \x00B7 amber = a folder that doesn't exist yet (Launch creates it) \x00B7 red = an id with no conversation on disk, or a path that can't be created (Launch is disabled).");
-            {
-                wchar_t up[MAX_PATH];
-                const DWORD n = ::GetEnvironmentVariableW(L"USERPROFILE", up, MAX_PATH);
-                if (n > 0 && n < MAX_PATH)
-                {
-                    _cwdBox.Text(winrt::hstring{ up, n });
-                }
-            }
-            // Path-picker drop-down. Open it only on *user* focus (Pointer/Keyboard) so the
-            // dropdown doesn't pop every time the tab is programmatically activated.
-            _cwdBox.GotFocus([this](const IInspectable&, const RoutedEventArgs&) {
-                if (!_cwdBox)
-                {
-                    return;
-                }
-                // (Re)focusing the box clears any prior Esc/Enter/blur dismissal, so the next
-                // keystroke brings the list back; when the focus itself came from the user
-                // (pointer/keyboard) open it right away.
-                _pathPickerUserDismissed = false;
-                const auto fs = _cwdBox.FocusState();
-                if (fs == FocusState::Pointer || fs == FocusState::Keyboard)
-                {
-                    _OpenPathPicker();
-                }
-            });
-            // Clicking back into an ALREADY-focused box fires no GotFocus, so a tap also re-shows
-            // a previously dismissed picker (open only if needed; a tap is not a drag, so it
-            // won't fight text selection).
-            _cwdBox.Tapped([this](const IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs&) {
-                if (!_cwdBox)
-                {
-                    return;
-                }
-                _pathPickerUserDismissed = false;
-                if (!_pathPopup || !_pathPopup.IsOpen())
-                {
-                    _OpenPathPicker();
-                }
-            });
-            _cwdBox.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) {
-                if (!_cwdBox)
-                {
-                    return;
-                }
-                // Agentmaster: paint the validation underline + enable/disable launch on every edit
-                // (a working dir OR a session id). Runs before the picker logic's focus early-out so
-                // it always reflects the current text.
-                _ValidateLaunchBox();
-                // Typing should ALWAYS surface the list. The prior version only refreshed an
-                // already-open popup, so whenever the box held focus while the popup was closed
-                // (focus arrived programmatically, a stray LostFocus closed it, etc.) typing
-                // showed nothing — exactly the reported "list doesn't show" symptom. Now we
-                // reopen when closed and refresh when open. The lone exception is an explicit
-                // Esc/Enter dismissal, which sticks until the box is refocused or tapped.
-                if (_cwdBox.FocusState() == FocusState::Unfocused || _pathPickerUserDismissed)
-                {
-                    return;
-                }
-                if (_pathPopup && _pathPopup.IsOpen())
-                {
-                    _RebuildPathPicker();
-                }
-                else
-                {
-                    _OpenPathPicker();
-                }
-            });
-            // Close only when focus truly left (not when a row button briefly takes it):
-            // defer the check a tick, and bail if the box has refocused itself (after a pick).
-            {
-                auto weak = get_weak();
-                auto disp = _dispatcher;
-                _cwdBox.LostFocus([weak, disp](const IInspectable&, const RoutedEventArgs&) {
-                    if (!disp)
-                    {
-                        return;
-                    }
-                    disp.TryEnqueue([weak]() {
-                        auto self = weak.get();
-                        if (!self || !self->_cwdBox)
-                        {
-                            return;
-                        }
-                        if (self->_cwdBox.FocusState() != FocusState::Unfocused)
-                        {
-                            return; // regained focus (e.g. after clicking a row) — leave it alone
-                        }
-                        // Focus truly left the box: close the picker (if open) and normalize
-                        // what's there. Mark it dismissed so the normalize's TextChanged won't
-                        // reopen the (now-closed) picker; refocusing/tapping the box clears it.
-                        self->_pathPickerUserDismissed = true;
-                        self->_ClosePathPicker();
-                        self->_NormalizeCwdBox();
-                    });
-                });
-            }
-            _cwdBox.KeyDown([this](const IInspectable&, const KeyRoutedEventArgs& e) {
-                if (e.Key() == VirtualKey::Escape)
-                {
-                    if (_pathPopup && _pathPopup.IsOpen())
-                    {
-                        _pathPickerUserDismissed = true; // stays dismissed until refocus/tap
-                        _ClosePathPicker();
-                        e.Handled(true);
-                    }
-                }
-                else if (e.Key() == VirtualKey::Enter)
-                {
-                    _pathPickerUserDismissed = true; // committing dismisses; keep normalize from reopening it
-                    _ClosePathPicker();
-                    _NormalizeCwdBox(); // commit: normalize what the user typed
-                }
-            });
-            // Agentmaster: the box + a validation underline beneath it, in a vertical column so the
-            // underline tracks the box width. The path-picker Popup anchors via _cwdBox.TransformToVisual
-            // (robust to this wrapping), so the dropdown placement is unaffected.
-            auto cwdCol = StackPanel{};
-            cwdCol.Orientation(Orientation::Vertical);
-            cwdCol.Spacing(2);
-            cwdCol.VerticalAlignment(VerticalAlignment::Center);
-            cwdCol.Children().Append(_cwdBox);
-            _cwdUnderline = Border{};
-            _cwdUnderline.Height(2);
-            // Stretch (no fixed width) so the underline always spans the box's CURRENT width: the box now
-            // grows with content and cwdCol's width tracks it, so a stretched underline stays matched.
-            _cwdUnderline.HorizontalAlignment(HorizontalAlignment::Stretch);
-            _cwdUnderline.CornerRadius(CornerRadius{ 1, 1, 1, 1 });
-            _cwdUnderline.Background(Fill(0x00, 0x00, 0x00, 0x00)); // transparent = neutral; kept present so painting it never reflows the bar
-            cwdCol.Children().Append(_cwdUnderline);
-            bar.Children().Append(cwdCol);
+            // The bar's working-dir box, under its historical member name (_ReflowLaunchBar sizes it, the selection
+            // pre-aims it, SetSettings seeds it, SetActivateAllBusy greys it out), placed with its underline column
+            // (the [box / 2-px underline] stack the drop-down anchors under).
+            _cwdBox = _launch->CwdBox();
+            bar.Children().Append(_launch->CwdColumn());
 
             // Agentmaster (responsive launch bar): the cwd box's width + the whole top row reflow as the
             // pane narrows — _ReflowLaunchBar stages it (full label -> collapse "launch a"/"session in" ->
@@ -1071,7 +936,7 @@ namespace winrt::TerminalApp::implementation
                     _ReflowLaunchBar();
                     // An OPEN path-picker re-fits to the new window size (its width rule + the 90%-of-height
                     // cap) — queued to the next tick, never done synchronously here: this is a layout pass
-                    // (see _LayoutPathPicker's ⚠). A closed picker costs nothing (every open re-fits anyway).
+                    // (see AgentLaunchBar::_LayoutPathPicker's ⚠). A closed picker costs nothing (every open re-fits anyway).
                     _QueuePathPickerRelayout();
                 });
             }
@@ -1084,55 +949,13 @@ namespace winrt::TerminalApp::implementation
             _launchBtns.Spacing(8);
             _launchBtns.VerticalAlignment(VerticalAlignment::Center);
 
-            _launchBtn = Button{};
-            _launchBtn.Content(winrt::box_value(L"Launch Claude"));
-            AgentSetTip(_launchBtn, L"Start the selected agent in the working directory above \x2014 or resume the conversation when a session id is entered. Hover to pick a model or a preset for the new session.");
-            _launchBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
-                if (_launchHoverTimer)
-                {
-                    _launchHoverTimer.Stop(); // a click is a decision: the hover menu must not pop after it
-                }
-                _OnLaunch();
-            });
-            // PRESETS (HARNESSES.md §8.2): hovering the button opens the "Open New Session Here" picker
-            // (Default · Specify… · models · presets) after a short intent delay; leaving before it fires
-            // opens nothing. The Tick holds only a weak ref, so a torn-down content is never touched.
-            _launchHoverTimer = DispatcherTimer{};
-            _launchHoverTimer.Interval(std::chrono::milliseconds{ 450 });
-            _launchHoverTimer.Tick([weak = get_weak()](const IInspectable&, const IInspectable&) {
-                if (auto self = weak.get())
-                {
-                    if (self->_launchHoverTimer)
-                    {
-                        self->_launchHoverTimer.Stop(); // one-shot
-                    }
-                    self->_ShowLaunchMenu();
-                }
-            });
-            _launchBtn.PointerEntered([this](const IInspectable&, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
-                if (_launchHoverTimer && !_launchMenu)
-                {
-                    _launchHoverTimer.Start(); // Start() restarts the interval, so a re-entry waits the full delay
-                }
-            });
-            _launchBtn.PointerExited([this](const IInspectable&, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
-                if (_launchHoverTimer)
-                {
-                    _launchHoverTimer.Stop();
-                }
-            });
-            _launchBtns.Children().Append(_launchBtn);
+            // The bar's Launch button (its PRESETS hover menu rides it: hover -> the "Open New Session Here" picker
+            // after a short intent delay) and its Fork twin (shown only while the box holds a FOUND session id),
+            // first in the wrappable group, as before.
+            _launchBtns.Children().Append(_launch->LaunchButton());
+            _launchBtns.Children().Append(_launch->ForkButton());
 
-            // Fork — hidden unless the box holds a FOUND session id; forks that conversation into a
-            // NEW one (the original transcript is untouched), mirroring the Sessions page's "Fork here".
-            _forkBtn = Button{};
-            _forkBtn.Content(winrt::box_value(L"Fork"));
-            _forkBtn.Visibility(Visibility::Collapsed);
-            AgentSetTip(_forkBtn, L"Fork the entered session into a NEW, independent conversation \x2014 the original transcript is left untouched.");
-            _forkBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnForkFromBox(); });
-            _launchBtns.Children().Append(_forkBtn);
-
-            _ValidateLaunchBox(); // initial state for the seeded cwd (USERPROFILE -> neutral, enabled)
+            _ValidateLaunchBox(); // initial state for the seeded cwd (USERPROFILE -> neutral, enabled); now with _launchBtns + _cwdBox set, so the reflow runs too
 
             // Agentmaster (M10 Increment 3; PERSISTENCE.md §13.5): the "Reopen Windows (N)" recover
             // button — the "if I answered No" path. It reopens saved windows that are NOT currently
@@ -2003,39 +1826,9 @@ namespace winrt::TerminalApp::implementation
         _managerLocalTip.AnchorTopRightInside(_root, boardSection, 8.0);
 
         // ---- Launch path-picker drop-down (a Popup anchored under the cwd box) ----
-        // Parented into _root (top-left aligned) so its offset is _root-relative; it renders
-        // in the overlay above the board. A fixed dark theme keeps the list readable over
-        // whatever the app theme is.
-        {
-            _pathListHost = StackPanel{};
-            _pathListHost.Spacing(0);
-
-            auto sv = ScrollViewer{};
-            sv.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
-            sv.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
-            sv.MaxHeight(380); // seed only: _LayoutPathPicker re-caps it at every open + window resize (up to 90% of the window height)
-            sv.AllowFocusOnInteraction(false); // scrollbar drags mustn't steal focus from the box either
-            sv.IsTabStop(false); // ...and the scroll viewer must never become the focused element itself
-            sv.Content(_pathListHost);
-            _pathScroll = sv; // kept so _LayoutPathPicker can re-cap the list's height against the window
-
-            _pathPanelBorder = Border{};
-            _pathPanelBorder.Background(Fill(0xFF, 0x20, 0x20, 0x20));
-            _pathPanelBorder.BorderBrush(Fill(0x90, 0x80, 0x80, 0x80));
-            _pathPanelBorder.BorderThickness(Thickness{ 1, 1, 1, 1 });
-            _pathPanelBorder.CornerRadius(CornerRadius{ 6, 6, 6, 6 });
-            _pathPanelBorder.Padding(Thickness{ 4, 4, 4, 6 });
-            _pathPanelBorder.Width(380);
-            _pathPanelBorder.RequestedTheme(ElementTheme::Dark);
-            _pathPanelBorder.Child(sv);
-
-            _pathPopup = winrt::Windows::UI::Xaml::Controls::Primitives::Popup{};
-            _pathPopup.HorizontalAlignment(HorizontalAlignment::Left);
-            _pathPopup.VerticalAlignment(VerticalAlignment::Top);
-            _pathPopup.Child(_pathPanelBorder);
-            Grid::SetRow(_pathPopup, 0);
-            _root.Children().Append(_pathPopup);
-        }
+        // Built by the shared launch bar (AgentLaunchBar::_Build — the same build that stood here, moved verbatim)
+        // when the toolbar block above created it: parented into _root (top-left aligned, row 0) so its offset is
+        // _root-relative, rendered in the overlay above the board, fixed dark.
 
         // Agentmaster (FAVORITES.md): both the in-content archive overlay AND the full-window Archive
         // page are GONE — the Sessions browser is the sole history view (closed sessions stay there,

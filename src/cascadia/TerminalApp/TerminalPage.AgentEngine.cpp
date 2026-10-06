@@ -37,6 +37,7 @@
 #include "AgentManagerContent.h" // the Agent Manager page's content (C1 UI) — created, wired and shown here
 #include "AgentTabOverlay.h" // ~TerminalPage destroys the com_ptr<AgentTabOverlay> maps — needs the complete type
 #include "AgentTranscriptOverlay.h" // ~TerminalPage destroys the com_ptr<AgentTranscriptOverlay> — needs the complete type
+#include "AgentLaunchBar.h" // ~TerminalPage shuts the side panel "+" launcher's bar down (AgentLaunchBar::Shutdown) — needs the complete type
 #include "AgentCatchLog.h" // exception forensics: InstallAgentExceptionTrace (VEH throw-stack ring + wil failure logger, engine init below)
 #include "AgentToastActivator.h" // System notifications: the toast COM activator (registered once, process-wide, from the engine init below)
 #include "TabHeaderControl.h" // Agentmaster: SetTabRenameCommitMode (push the GLOBAL rename-commit mode to tab headers)
@@ -522,6 +523,13 @@ namespace winrt::TerminalApp::implementation
                 _activateAllTimer.Stop();
             }
             CATCH_LOG();
+        }
+        // Agentmaster (side panel "+" launcher, SIDE_PANEL.md §2e): stop its launch bar's PRESETS hover timer and close
+        // an open drop-down. Shutdown is noexcept and guards each UI-affine call itself (a pool-thread teardown throws
+        // RPC_E_WRONG_THREAD there — caught and logged inside), so it needs no guard here.
+        if (_sidePanelLaunchBar)
+        {
+            _sidePanelLaunchBar->Shutdown();
         }
         // Agentmaster (cross-window activate): drop this window's activate sink from the shared
         // engine — a stray fan-out after teardown is already a safe no-op (the sink captures
@@ -2210,6 +2218,12 @@ namespace winrt::TerminalApp::implementation
         // likewise (its badge anchor belongs to the strip layout that is about to change).
         _CloseTagEditorPopup();
         _CloseTagHoverPopup();
+        // Agentmaster (side panel "+" launcher, SIDE_PANEL.md §2e): a tab switch closes the launcher card too — the user
+        // moved away from it (a tab, a close successor, the Agent Manager page). It runs BEFORE _SyncManagerSelectionToTab
+        // below: the card's last text goes into the Agent Manager's box first, and the selection pre-aim then sets that
+        // box to the newly selected session's folder — exactly what a tab switch does when no card is open. A no-op
+        // while the card is closed (a launch from the card already closed it before its new tab was selected).
+        _SidePanelCloseLaunchCard(L"tab switch");
         // Agentmaster (transcript overlay): "moving a tab closes the overlay" — any change of what is on
         // screen (a tab switch, a close successor, the Agent Manager page shown / left) closes it. A no-op
         // when it isn't open. It also hands focus back to the tab now on screen: the overlay's focus guard

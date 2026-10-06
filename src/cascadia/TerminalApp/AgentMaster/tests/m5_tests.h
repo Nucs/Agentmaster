@@ -233,6 +233,12 @@ void TestKeyedListDiff();
 // recently" (< 1 h), y / d / h for created, + m / s for active (seconds only under an hour, no month unit), the active
 // part left out when it is 0, the unknown / clock-skew edges, and a 3-year sweep of the units (tests_sidepanel.cpp)
 void TestSessionTimingText();
+// PointerCardPlacement.h (SIDE_PANEL.md §2e): where the side panel's "+" launcher card opens — its corner at the click,
+// extending toward the window's center (each axis by the click's half; the exact middle counts as left / top), clamped
+// 8 DIP inside the window, a card larger than the window pinned to the near margin, an unmeasured window never
+// clamped, NaN / infinite / negative inputs neutralized, and a seeded 20000-case sweep of the invariants
+// (tests_sidepanel.cpp)
+void TestPointerCardPlacement();
 // tests_presets.cpp — HARNESSES.md, PRESETS (LaunchPresets.h, the pure core): the shipped templates seed ONCE (a deleted
 // one stays deleted, an unverified one starts hidden); launch-presets.json round-trips and a malformed file reads as an
 // empty config; the value tiers (box > Agentmaster env > Windows env > template / provider default) for a placeholder
