@@ -99,9 +99,37 @@ namespace Agentmaster
     // Its own file (model-list.json), NOT an AppSettings field: it is written from any window on
     // any pick, and settings.json is a read-modify-write document several surfaces already contend
     // for (the updater's RMW, the cog's Save) — an append must never risk clobbering it.
+    //
+    // The same file also holds the LAST SPECIFIED MODEL (its "last" key): the id the user last
+    // COMMITTED in the prompt, which every prompt then opens pre-filled with — in every window, and
+    // after a restart. It is its own value, not "the list's first entry", because a Fetch rebuilds the
+    // list: right after one, the front is a catalog id the user never typed. So a Fetch KEEPS it, and
+    // only the next commit replaces it. Same file, so one commit updates both in a single atomic
+    // write and the two can never disagree. One profile = one value: the dev and release installs
+    // keep their own.
     inline constexpr size_t kMaxModelListEntries = 100; // a fetched catalog is tens of ids; this bounds a runaway file, not normal use
-    std::wstring SerializeModelList(const std::vector<std::wstring>& models);
+    // The model-list.json document: {"version":1,"models":[...],"last":"<id>"}. The "last" key is
+    // left out when `lastSpecified` is empty, so a file with no remembered model reads exactly as it
+    // did before the key existed (and an older build that rewrites the file just drops it).
+    //   models        - the saved ids, in drop-down order; written exactly as given (callers trim
+    //                   and dedupe through PushModelListEntry / ResetModelList).
+    //   lastSpecified - the id the prompt opens with; "" leaves the key out.
+    //   returns       - the JSON text.
+    // Throws std::bad_alloc only.
+    std::wstring SerializeModelList(const std::vector<std::wstring>& models, std::wstring_view lastSpecified = {});
+    // The saved ids out of model-list.json text, in stored order. Never throws on content: a missing,
+    // corrupt or wrong-shaped document reads as no ids (the prompt then offers only the configured
+    // Launch models), and blank / non-string entries are skipped.
+    //   text    - the file's text ("" for a missing file).
+    //   returns - the ids.
+    // Throws std::bad_alloc only.
     std::vector<std::wstring> DeserializeModelList(std::wstring_view text);
+    // The LAST SPECIFIED MODEL out of model-list.json text (its "last" key) — what the prompt's box
+    // opens with. Trimmed, so a hand-edited "  " reads as none rather than as a blank pre-fill.
+    //   text    - the file's text ("" for a missing file).
+    //   returns - the id, or "" when the key is absent, not a string, blank, or the text is not JSON.
+    // Throws std::bad_alloc only.
+    std::wstring DeserializeLastSpecifiedModel(std::wstring_view text);
     // Push `id` to the FRONT of the list (pure; the caller persists the result). Trims; an empty /
     // whitespace-only id is a no-op; an id already present is MOVED to the front rather than
     // duplicated (matched case-INsensitively — "Opus" and "opus" are one model — while the NEW
@@ -138,15 +166,41 @@ namespace Agentmaster
     std::vector<PlanTemplate> LoadTemplates();
     void SaveRecentDirs(const std::vector<std::wstring>& dirs);
     std::vector<std::wstring> LoadRecentDirs();
+    // Replace the saved LIST in model-list.json and KEEP its last specified model: the "last" key is
+    // re-read from the freshest file and written back unchanged, so no list rewrite (a Fetch reset,
+    // or any future caller) can wipe what the prompt opens with. Best-effort like every state write:
+    // a failed write is logged ([persist-fail] in hooks.log) and the old file stays whole.
+    //   models - the ids to store, in drop-down order, written exactly as given.
+    // Throws std::bad_alloc only.
     void SaveModelList(const std::vector<std::wstring>& models);
+    // The saved list, read from disk on every call (another window may have just changed it).
+    //   returns - the ids in stored order (newest specified first); empty when the file is missing
+    //             or unreadable.
+    // Throws std::bad_alloc only.
     std::vector<std::wstring> LoadModelList();
-    // Load -> PushModelListEntry -> Save, the one call every "Specify..." commit makes (each window
-    // re-reads the freshest file first, so two windows adding models can't lose each other's).
+    // The model the user last COMMITTED in the "Specify a model..." prompt — what the prompt pre-fills
+    // its box with (AgentBuildSpecifyModelCard). Read from disk on every call, so a commit in one
+    // window shows in the next prompt that ANY window opens, and survives a restart.
+    //   returns - the trimmed id, or "" when none was ever committed in this profile (or the file is
+    //             missing / corrupt); the prompt then opens with an empty box, as it did before.
+    // Throws std::bad_alloc only.
+    std::wstring LoadLastSpecifiedModel();
+    // The one call every "Specify..." commit makes: push `id` to the front of the saved list AND make
+    // it the last specified model, in ONE read and ONE write of model-list.json. The freshest file is
+    // read first, so two windows committing models can't lose each other's entries. A blank id
+    // changes nothing and writes nothing (Default is not a model).
+    //   id - the committed model id; trimmed here (' ', '\t', '\r', '\n'), like PushModelListEntry.
+    // Throws std::bad_alloc only.
     void RememberSpecifiedModel(std::wstring_view id);
     // The "Fetch models" RESET: replace the whole list with `ids` (order kept, deduped, capped).
     // Destructive by design — Fetch is how a user says "rebuild this from the published lists", so
     // ids they specified earlier are cleared along with a previous fetch's. The configured launch
-    // models are unaffected (they live in settings and are merged in at display time).
+    // models are unaffected (they live in settings and are merged in at display time). The last
+    // specified model is KEPT (SaveModelList preserves it): a fetch is not a model the user chose, so
+    // the next prompt still opens with the id they last committed, even when the new list lacks it.
+    //   ids - the fetched ids, Anthropic's before Codex's; blanks dropped, case-insensitive repeats
+    //         dropped (first spelling kept), capped at kMaxModelListEntries.
+    // Throws std::bad_alloc only.
     void ResetModelList(const std::vector<std::wstring>& ids);
     void SaveLayout(const ManagerLayout& layout);
     ManagerLayout LoadLayout();

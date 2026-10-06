@@ -679,6 +679,13 @@ namespace winrt::TerminalApp::implementation
         // `onPicked` fires ONLY on commit, with the trimmed id; cancel/backdrop/Escape launch nothing.
         // Opened by every "Open New Session Here"/"Fork session" submenu here and by the Settings
         // tab's successor-model combos.
+        //   onPicked - receives the committed, trimmed model id (never ""), on the UI thread.
+        //   seed     - the id the box opens with; "" (every caller today) = the model last committed in
+        //              this prompt in ANY window (model-list.json's "last" key), or an empty box if none.
+        // Returns at once; the prompt opens on a later dispatcher tick, where a failure to build or show
+        // it is logged ([exc] in hooks.log) and nothing opens. A content with no root or dispatcher yet
+        // opens nothing.
+        // Throws std::bad_alloc only (TryEnqueue reports a refusal by its result, not by throwing).
         void _PromptForModel(std::function<void(winrt::hstring)> onPicked, const std::wstring& seed = {});
         void _HideSpecifyModel();
         // The opener every model submenu on this surface passes to AgentFillModelPickItems — ONE

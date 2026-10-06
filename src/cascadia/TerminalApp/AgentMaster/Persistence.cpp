@@ -1543,7 +1543,38 @@ namespace Agentmaster
         return out;
     }
 
-    std::wstring SerializeModelList(const std::vector<std::wstring>& models)
+    namespace
+    {
+        // Trim a model id the way PushModelListEntry does (' ', '\t', '\r', '\n' at both ends), so
+        // the "last" key always stores exactly the spelling the list's front entry got.
+        //   id      - the raw id (typed, pasted, or read back from a hand-edited file).
+        //   returns - the trimmed id; "" for an empty or blank one.
+        // Throws std::bad_alloc only.
+        std::wstring TrimModelId(std::wstring_view id)
+        {
+            const auto blank = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
+            size_t b = 0, e = id.size();
+            while (b < e && blank(id[b]))
+            {
+                ++b;
+            }
+            while (e > b && blank(id[e - 1]))
+            {
+                --e;
+            }
+            return std::wstring{ id.substr(b, e - b) };
+        }
+
+        // Where the model list lives: model-list.json in the ACTIVE profile (one per install).
+        //   returns - the absolute path.
+        // Throws std::bad_alloc only.
+        std::wstring ModelListPath()
+        {
+            return AgentmasterStateDir() + L"\\model-list.json";
+        }
+    }
+
+    std::wstring SerializeModelList(const std::vector<std::wstring>& models, std::wstring_view lastSpecified)
     {
         auto root = json::Value::MkObj();
         root.Set(L"version", json::Value::MkNum(1));
@@ -1553,7 +1584,23 @@ namespace Agentmaster
             arr.Push(json::Value::MkStr(m));
         }
         root.Set(L"models", std::move(arr));
+        // Optional, so a profile that never committed a model keeps the exact pre-"last" document.
+        if (!lastSpecified.empty())
+        {
+            root.Set(L"last", json::Value::MkStr(std::wstring{ lastSpecified }));
+        }
         return json::Dump(root);
+    }
+
+    std::wstring DeserializeLastSpecifiedModel(std::wstring_view text)
+    {
+        const auto parsed = json::Parse(text);
+        if (!parsed)
+        {
+            return {};
+        }
+        // StrAt yields "" for a missing or non-string key; the trim turns a blank one into "" too.
+        return TrimModelId(parsed->StrAt(L"last"));
     }
 
     std::vector<std::wstring> DeserializeModelList(std::wstring_view text)
@@ -1774,17 +1821,33 @@ namespace Agentmaster
 
     void SaveModelList(const std::vector<std::wstring>& models)
     {
-        WriteAllUtf8(AgentmasterStateDir() + L"\\model-list.json", SerializeModelList(models));
+        // Carry the remembered model across the rewrite: this call replaces the LIST only, and the
+        // freshest file is the only place the "last" key lives.
+        const std::wstring path = ModelListPath();
+        WriteAllUtf8(path, SerializeModelList(models, DeserializeLastSpecifiedModel(ReadAllUtf8(path))));
     }
     std::vector<std::wstring> LoadModelList()
     {
-        return DeserializeModelList(ReadAllUtf8(AgentmasterStateDir() + L"\\model-list.json"));
+        return DeserializeModelList(ReadAllUtf8(ModelListPath()));
+    }
+    std::wstring LoadLastSpecifiedModel()
+    {
+        return DeserializeLastSpecifiedModel(ReadAllUtf8(ModelListPath()));
     }
     void RememberSpecifiedModel(std::wstring_view id)
     {
+        // A blank id is "Default", not a model: it must neither reach the list nor clear the
+        // remembered model, so stop before touching the file at all.
+        const std::wstring trimmed = TrimModelId(id);
+        if (trimmed.empty())
+        {
+            return;
+        }
         // Re-read the FRESHEST file rather than trusting an in-memory copy: any window can add a
-        // model at any time, and this list is small enough that the read is free.
-        SaveModelList(PushModelListEntry(LoadModelList(), id));
+        // model at any time, and this list is small enough that the read is free. The list entry and
+        // the "last" key are written together, so they always name the same id in the same spelling.
+        const std::wstring path = ModelListPath();
+        WriteAllUtf8(path, SerializeModelList(PushModelListEntry(DeserializeModelList(ReadAllUtf8(path)), trimmed), trimmed));
     }
     void ResetModelList(const std::vector<std::wstring>& ids)
     {
@@ -1796,6 +1859,8 @@ namespace Agentmaster
         {
             out = PushModelListEntry(std::move(out), *it);
         }
+        // SaveModelList, not a raw write: it keeps the "last" key, because a fetch is not a model the
+        // user chose and the next prompt must still open with the one they last committed.
         SaveModelList(out);
     }
     void SaveOpenWindows(const std::vector<std::wstring>& windowIds)

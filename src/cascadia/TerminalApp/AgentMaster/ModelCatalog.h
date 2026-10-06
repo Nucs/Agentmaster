@@ -28,9 +28,11 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef> // std::ptrdiff_t - PlaceSeedAheadOfLongerIds' iterator offsets
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <utility> // std::move
 #include <vector>
 
 #include "Json.h"
@@ -197,6 +199,97 @@ namespace Agentmaster
             }
         }
         return out;
+    }
+
+    namespace detail
+    {
+        // ASCII-only case fold, the same rule MergeModelIdGroups applies: model ids are ASCII, and a
+        // locale-aware fold could make two ids equal here that the drop-down's dedupe keeps apart.
+        //   text    - the id to fold.
+        //   returns - `text` with A-Z lowered; every other character unchanged.
+        // Throws std::bad_alloc only.
+        inline std::wstring FoldModelIdCase(std::wstring_view text)
+        {
+            std::wstring folded;
+            folded.reserve(text.size());
+            for (const wchar_t c : text)
+            {
+                folded.push_back(c >= L'A' && c <= L'Z' ? static_cast<wchar_t>(c - L'A' + L'a') : c);
+            }
+            return folded;
+        }
+    }
+
+    // Keep the "Specify a model" box's PRE-FILLED id from being rewritten the moment the box takes
+    // focus. Call it on the drop-down list before it fills the ComboBox, with the id the box opens with.
+    //
+    // Why the list order can change the box: when an editable ComboBox gets focus from a mouse or the
+    // keyboard, it selects its text and runs its type-ahead search once. The search walks the items from
+    // the TOP for the first one that STARTS WITH the text (case ignored) and, unless that item EQUALS the
+    // text (case ignored), REPLACES the text with the item (WinUI ComboBox_Partial.cpp: OnGotFocus ->
+    // ProcessSearch -> SearchItemSourceIndex -> UpdateEditableTextBox). So a box pre-filled with
+    // "claude-opus-4-1" would open showing "claude-opus-4-1-20250805" whenever that longer id is listed
+    // above it, and the user would launch a model they never chose. It happens most after a Fetch: the
+    // fetched catalog's dated ids extend the aliases people type, and the Fetch removed the typed id from
+    // the saved list.
+    //
+    // The fix makes the seed the FIRST listed id that starts with it: an entry equal to the seed (case
+    // ignored) is MOVED, or the seed itself is INSERTED, just in front of the first id that starts with
+    // it. Nothing moves in the usual case: a specified id is at the front of the saved list, so it is
+    // already first among its matches. Nothing moves either when no id starts with the seed, because then
+    // nothing can capture it. So the designed order (MergeModelIdGroups) holds everywhere else, and the
+    // configured Launch models stay on top unless the seed is a strict prefix of one of them.
+    //
+    // Limit: the match folds ASCII case only. The ComboBox also ignores width, kana and diacritics, so a
+    // non-ASCII seed could still be captured. Model ids are ASCII in practice.
+    //   ids     - the drop-down list, in display order (MergeModelIdGroups' output).
+    //   seed    - the id the box opens with (trimmed by the caller); "" changes nothing.
+    //   returns - `ids` with the seed placed as described; an entry that is moved keeps the list's own
+    //             spelling (the ComboBox compares case-insensitively, so a case-only difference is fine).
+    // Throws std::bad_alloc only.
+    inline std::vector<std::wstring> PlaceSeedAheadOfLongerIds(std::vector<std::wstring> ids, std::wstring_view seed)
+    {
+        if (seed.empty())
+        {
+            return ids;
+        }
+        const std::wstring foldedSeed = detail::FoldModelIdCase(seed);
+        constexpr size_t none = static_cast<size_t>(-1);
+        size_t firstMatch = none; // the first id that STARTS WITH the seed: where the type-ahead stops
+        size_t sameId = none; // the first id EQUAL to the seed (case ignored), if the list has one
+        for (size_t i = 0; i < ids.size(); ++i)
+        {
+            const std::wstring folded = detail::FoldModelIdCase(ids[i]);
+            if (folded.size() < foldedSeed.size() || folded.compare(0, foldedSeed.size(), foldedSeed) != 0)
+            {
+                continue;
+            }
+            if (firstMatch == none)
+            {
+                firstMatch = i;
+            }
+            if (folded.size() == foldedSeed.size())
+            {
+                sameId = i;
+                break; // an equal id also starts with the seed, so firstMatch is already set at or before it
+            }
+        }
+        if (firstMatch == none || firstMatch == sameId)
+        {
+            return ids; // nothing can capture the seed, or the seed itself is what the search finds first
+        }
+        if (sameId != none)
+        {
+            // Move the existing entry up, so the list never shows the same model twice.
+            std::wstring entry = std::move(ids[sameId]);
+            ids.erase(ids.begin() + static_cast<std::ptrdiff_t>(sameId));
+            ids.insert(ids.begin() + static_cast<std::ptrdiff_t>(firstMatch), std::move(entry));
+        }
+        else
+        {
+            ids.insert(ids.begin() + static_cast<std::ptrdiff_t>(firstMatch), std::wstring{ seed });
+        }
+        return ids;
     }
 
     // ---- the endpoints (constants here so the fetch site and the docs link can never disagree) ----

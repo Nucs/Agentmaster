@@ -56,6 +56,19 @@ void TestPersistence()
         const auto back = DeserializeModelList(text);
         CHECK(back.size() == 2 && back[0] == L"opus" && back[1] == L"claude-fable-5", "model list: JSON round-trip preserves order");
         CHECK(DeserializeModelList(L"").empty() && DeserializeModelList(L"{ not json").empty(), "model list: a missing/corrupt file reads as none (the prompt still works)");
+
+        // The LAST SPECIFIED model rides the same document (its "last" key): what the prompt opens
+        // with. Absent when there is none, so a pre-"last" file and a never-committed profile read the
+        // same, and every malformed value reads as "no pre-fill" rather than a wrong one.
+        const auto withLast = SerializeModelList({ L"opus" }, L"claude-fable-5");
+        CHECK(DeserializeLastSpecifiedModel(withLast) == L"claude-fable-5" && DeserializeModelList(withLast) == std::vector<std::wstring>({ L"opus" }),
+              "last model: JSON round-trip, the list beside it untouched");
+        CHECK(SerializeModelList({ L"opus" }).find(L"\"last\"") == std::wstring::npos && DeserializeLastSpecifiedModel(SerializeModelList({ L"opus" })).empty(),
+              "last model: none remembered -> no key in the file");
+        CHECK(DeserializeLastSpecifiedModel(L"").empty() && DeserializeLastSpecifiedModel(L"{ not json").empty(), "last model: a missing/corrupt file reads as none");
+        CHECK(DeserializeLastSpecifiedModel(LR"j({"version":1,"models":[],"last":42})j").empty() && DeserializeLastSpecifiedModel(LR"j({"version":1,"models":[],"last":"  "})j").empty(),
+              "last model: a non-string or blank value reads as none");
+        CHECK(DeserializeLastSpecifiedModel(LR"j({"version":1,"models":[],"last":" opus "})j") == L"opus", "last model: a hand-edited value is trimmed");
     }
 
     // The "Fetch models" RESET semantics, on disk: the list is REPLACED by what came back (order
@@ -74,18 +87,31 @@ void TestPersistence()
         ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", dir.c_str());
 
         CHECK(LoadModelList().empty(), "model list: a fresh profile starts with no saved models");
+        CHECK(LoadLastSpecifiedModel().empty(), "last model: a fresh profile remembers none (the prompt opens with an empty box)");
         RememberSpecifiedModel(L"my-custom-model");
         RememberSpecifiedModel(L"another-one");
         CHECK(LoadModelList() == std::vector<std::wstring>({ L"another-one", L"my-custom-model" }), "model list: a SPECIFIED model is saved, newest first");
+        // The remembered model is the newest COMMIT; every window reads it from this one file.
+        CHECK(LoadLastSpecifiedModel() == L"another-one", "last model: the newest commit is remembered");
         // ...and it persists: a second read (a reopened prompt / another window) sees it.
         CHECK(LoadModelList().size() == 2, "model list: the saved list persists across reads");
         // Fetch RESETS: the specified ids are gone, replaced by the catalog in the given order.
         ResetModelList({ L"claude-opus-4-8", L"claude-sonnet-5", L"gpt-5.6-sol" });
         CHECK(LoadModelList() == std::vector<std::wstring>({ L"claude-opus-4-8", L"claude-sonnet-5", L"gpt-5.6-sol" }),
               "model list: Fetch REPLACES the list (order preserved), dropping earlier entries");
+        // ...but a fetch is not a model the user chose: the prompt still opens with their last commit.
+        CHECK(LoadLastSpecifiedModel() == L"another-one", "last model: a Fetch reset KEEPS it, though the rebuilt list no longer holds it");
         // Specifying after a reset prepends to the fetched list rather than starting over.
         RememberSpecifiedModel(L"typed-after-fetch");
         CHECK(LoadModelList().size() == 4 && LoadModelList()[0] == L"typed-after-fetch", "model list: a model specified after a Fetch joins the rebuilt list");
+        CHECK(LoadLastSpecifiedModel() == L"typed-after-fetch", "last model: a commit after a Fetch replaces it");
+        // A blank commit is "Default", not a model: it must neither reach the list nor clear the memory.
+        RememberSpecifiedModel(L"  \t ");
+        CHECK(LoadModelList().size() == 4 && LoadLastSpecifiedModel() == L"typed-after-fetch", "last model: a blank commit changes neither the list nor the remembered model");
+        // Trimmed, and spelled exactly like the list's front entry (a re-used id keeps the NEW spelling).
+        RememberSpecifiedModel(L"  Claude-Opus-4-8  ");
+        CHECK(LoadModelList().size() == 4 && LoadModelList()[0] == L"Claude-Opus-4-8" && LoadLastSpecifiedModel() == L"Claude-Opus-4-8",
+              "last model: trimmed, same spelling as the list's front entry");
         // A reset that dedupes / drops blanks still lands a clean list.
         ResetModelList({ L"a", L"", L"A", L"b" });
         CHECK(LoadModelList() == std::vector<std::wstring>({ L"a", L"b" }), "model list: reset dedupes case-insensitively (first spelling) and drops blanks");
@@ -93,6 +119,7 @@ void TestPersistence()
         // merged in from settings at display time).
         ResetModelList({});
         CHECK(LoadModelList().empty(), "model list: an empty reset clears the saved list");
+        CHECK(LoadLastSpecifiedModel() == L"Claude-Opus-4-8", "last model: even an empty reset keeps it");
 
         ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", prevEnv.empty() ? nullptr : prevEnv.c_str());
         std::error_code ec;
@@ -164,6 +191,60 @@ void TestPersistence()
         const auto cased = MergeModelIdGroups({ { L"Opus" }, { L"opus", L"OPUS" } });
         CHECK(cased == std::vector<std::wstring>({ L"Opus" }), "merge: one model, one entry (case-insensitive, first spelling kept)");
         CHECK(MergeModelIdGroups({}).empty() && MergeModelIdGroups({ { L"", L"x", L"" } }) == std::vector<std::wstring>({ L"x" }), "merge: no groups / blank ids -> dropped");
+    }
+
+    // Agentmaster: where the drop-down lists the PRE-FILLED id (PlaceSeedAheadOfLongerIds). On focus the
+    // editable ComboBox replaces its text with the FIRST listed id that starts with it (unless that id
+    // equals the text), so the pre-filled model must come first among those ids, or the prompt would
+    // open showing a model the user never chose.
+    {
+        // The ComboBox's rule, checked on every result: the first listed id that starts with the seed
+        // (ASCII case folded) IS the seed, so the focus-time type-ahead finds the text itself.
+        const auto typeAheadKeepsSeed = [](const std::vector<std::wstring>& ids, const std::wstring& seed) {
+            const auto lowerAscii = [](const std::wstring& s) {
+                std::wstring f = s;
+                for (auto& c : f)
+                {
+                    if (c >= L'A' && c <= L'Z')
+                    {
+                        c = static_cast<wchar_t>(c - L'A' + L'a');
+                    }
+                }
+                return f;
+            };
+            const std::wstring want = lowerAscii(seed);
+            for (const auto& id : ids)
+            {
+                const std::wstring have = lowerAscii(id);
+                if (have.size() >= want.size() && have.compare(0, want.size(), want) == 0)
+                {
+                    return have == want;
+                }
+            }
+            return true; // no listed id starts with the seed: nothing can rewrite it
+        };
+        const std::vector<std::wstring> base{ L"fable", L"opus", L"sonnet", L"claude-opus-4-8" };
+        // The usual case: a specified model heads the saved list, so the designed order stands.
+        CHECK(PlaceSeedAheadOfLongerIds(base, L"claude-opus-4-8") == base, "seed: already first among the ids it prefixes -> list unchanged");
+        CHECK(PlaceSeedAheadOfLongerIds(base, L"") == base, "seed: no seed -> list unchanged");
+        CHECK(PlaceSeedAheadOfLongerIds(base, L"my-custom-model") == base, "seed: no listed id starts with it -> unchanged (nothing can capture it)");
+        CHECK(PlaceSeedAheadOfLongerIds(base, L"OPUS") == base, "seed: a case variant of a listed id IS that id -> unchanged");
+        // After a Fetch: a dated catalog id extends the alias the user typed, and the alias left the list.
+        const std::vector<std::wstring> fetched{ L"fable", L"opus", L"sonnet", L"claude-opus-4-1-20250805", L"gpt-5.6-sol" };
+        const auto inserted = PlaceSeedAheadOfLongerIds(fetched, L"claude-opus-4-1");
+        CHECK(inserted == std::vector<std::wstring>({ L"fable", L"opus", L"sonnet", L"claude-opus-4-1", L"claude-opus-4-1-20250805", L"gpt-5.6-sol" }),
+              "seed: absent and a longer id starts with it -> inserted just before that id");
+        // Listed, but after a longer id that starts with it -> moved up, keeping the list's spelling.
+        const auto moved = PlaceSeedAheadOfLongerIds({ L"gpt-5.6-sol", L"opus", L"GPT-5" }, L"gpt-5");
+        CHECK(moved == std::vector<std::wstring>({ L"GPT-5", L"gpt-5.6-sol", L"opus" }), "seed: listed after a longer match -> moved in front of it, list spelling kept, no duplicate");
+        // A configured id is no exception: a remembered "son" would otherwise open as "sonnet".
+        const auto beforeConfigured = PlaceSeedAheadOfLongerIds(base, L"son");
+        CHECK(beforeConfigured == std::vector<std::wstring>({ L"fable", L"opus", L"son", L"sonnet", L"claude-opus-4-8" }), "seed: a configured id it prefixes is handled the same way");
+        CHECK(typeAheadKeepsSeed(inserted, L"claude-opus-4-1") && typeAheadKeepsSeed(moved, L"gpt-5") && typeAheadKeepsSeed(beforeConfigured, L"son") &&
+                  typeAheadKeepsSeed(PlaceSeedAheadOfLongerIds(base, L"OPUS"), L"OPUS") && typeAheadKeepsSeed(PlaceSeedAheadOfLongerIds(base, L"claude-opus-4-8"), L"claude-opus-4-8"),
+              "seed: on every result the first id that starts with the seed is the seed itself");
+        // Without the placement the trap is real: the unplaced Fetch list fails the ComboBox's rule.
+        CHECK(!typeAheadKeepsSeed(fetched, L"claude-opus-4-1"), "seed: (control) the raw Fetch list WOULD rewrite the pre-filled id");
     }
 
     // JSON round-trip of a small document.

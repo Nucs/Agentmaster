@@ -1545,6 +1545,13 @@ namespace winrt::TerminalApp::implementation
         // the same control. Serves the Sessions page's row menu + detail SplitButtons AND the WT tab
         // menu's "New Session Here"/"Fork session" submenus (Tab raises nothing — the page hands Tab
         // the opener at flyout-open). `onPicked` fires ONLY on commit; cancel launches nothing.
+        //   onPicked - receives the committed, trimmed model id (never ""), on the UI thread.
+        //   seed     - the id the box opens with; "" (every caller today) = the model last committed in
+        //              this prompt in ANY window (model-list.json's "last" key), or an empty box if none.
+        // Returns at once; the prompt opens on a later dispatcher tick, where a failure to build or show
+        // it is logged ([exc] in hooks.log) and nothing opens.
+        // Throws winrt::hresult_error when the window's dispatcher refuses the work (a closing window),
+        // and std::bad_alloc.
         void _PromptForModel(std::function<void(winrt::hstring)> onPicked, const std::wstring& seed = {});
         void _HideSpecifyModel();
         std::function<void(std::function<void(winrt::hstring)>)> _ModelSpecifyOpener(); // ONE opener, shared by every model submenu this page builds or feeds
