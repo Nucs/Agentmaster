@@ -1,12 +1,15 @@
 # Presets — Claude Code sessions on other models and providers
 
-> **Status: IMPLEMENTED v1 (2026-10-06), NOT BUILT.** Every `TerminalAppLib` file (89) passes a `/Zs`
-> syntax check with the last build's recorded flags (`/W3 /WX` + the `/we` list), and every
-> `agentmaster-cli` file (16) with its own (`/W4 /WX`), negative controls included. The engine harness
-> passes `TestLaunchPresets` (248 checks) and the host-script checks in `tests_spawn_sched.cpp`. No live
-> session has run on this code yet: the P0 checks (§10) and the UI checks (§12) are open. The file keeps
-> its proposal-time name (`HARNESSES.md`), because code comments cite its sections. The proposal it
-> replaces called the feature "harnesses"; the user renamed it **Presets** on 2026-10-06 (§11).
+> **Status: IMPLEMENTED v1 (2026-10-06, commit 82cd65d2a), in release 0.6.8.18 since 2026-10-06 18:36.**
+> The later commits are NOT BUILT: e667b103b (no template identity note) and 00945aa56 (the Kimi K3, Qwen3.8
+> and GLM-5.3 templates, effort as `CLAUDE_CODE_EFFORT_LEVEL`, `top_k` / `require_parameters`, and the
+> /handover hint rule of §8.2). For them, every `TerminalAppLib` file (89) passes a `/Zs` syntax check with
+> the last build's recorded flags (`/W3 /WX` + the `/we` list), and every `agentmaster-cli` file (16) with
+> its own (`/W4 /WX`), negative controls included; the engine harness passes `TestLaunchPresets` (248
+> checks) and the host-script checks in `tests_spawn_sched.cpp`. No live check has run yet: the two preset
+> sessions started in 0.6.8.18 (18:38) got no prompt, so the P0 checks (§10) and the UI checks (§12) are
+> open. The file keeps its proposal-time name (`HARNESSES.md`), because code comments cite its sections. The
+> proposal it replaces called the feature "harnesses"; the user renamed it **Presets** on 2026-10-06 (§11).
 >
 > The reference configuration is the user's OpenRouter launcher (`mimo`, `mimo-flash`, `kimi`, `qwen`,
 > `glm`: `~/.claude/scripts/openrouter.ps1` + `openrouter-profiles.json`, verified 2026-10-06 on Claude
@@ -540,8 +543,10 @@ Preset 1
   `/handover [mimo] …` picks "MiMo Pro · OpenRouter" (the first visible match), `[mimo flash]` the
   Flash one, `[kimi]`, `[qwen]` and `[glm 5.3]` the others. A bare word never picks a preset, and a
   bracket that only occurs inside a name (`[router]`, `[flash]`) is a successor title. Why: a preset
-  moves the successor to another provider and bill, and under the models' substring rule (before
-  2026-10-06) `/handover open the PR`, `out of memory` or `pro tips` matched every "… · OpenRouter" name.
+  moves the successor to another provider and bill, and under the models' substring rule (82cd65d2a)
+  `/handover open the PR`, `out of memory` or `pro tips` matched every "… · OpenRouter" name. ⚠ That
+  older rule runs in release 0.6.8.18 until the next deploy (no hint has picked a preset there so far:
+  hooks.log has no `successor model from the message hint: @…` line).
 - **The Launch button's hover menu**: hovering "Launch Claude" for 450 ms opens the same menu under the
   button (`_ShowLaunchMenu`, `TransientWithDismissOnPointerMoveAway`: it takes no focus and closes when
   the pointer leaves). A pick launches a NEW session in the typed folder with that target; a plain
