@@ -1,26 +1,27 @@
 # Presets — Claude Code sessions on other models and providers
 
-> **Status: IMPLEMENTED v1 (2026-10-06), NOT BUILT.** Every `TerminalAppLib` file (88) passes a `/Zs`
+> **Status: IMPLEMENTED v1 (2026-10-06), NOT BUILT.** Every `TerminalAppLib` file (89) passes a `/Zs`
 > syntax check with the last build's recorded flags (`/W3 /WX` + the `/we` list), and every
 > `agentmaster-cli` file (16) with its own (`/W4 /WX`), negative controls included. The engine harness
-> passes `TestLaunchPresets` (176 checks) and the host-script checks in `tests_spawn_sched.cpp`. No live
-> session has run on this code yet: the P0 checks (§10) and the UI checks (§12) are open. The file keeps its proposal-time name (`HARNESSES.md`), because code comments
-> cite its sections. The proposal it replaces called the feature "harnesses"; the user renamed it
-> **Presets** on 2026-10-06 (§11).
+> passes `TestLaunchPresets` (248 checks) and the host-script checks in `tests_spawn_sched.cpp`. No live
+> session has run on this code yet: the P0 checks (§10) and the UI checks (§12) are open. The file keeps
+> its proposal-time name (`HARNESSES.md`), because code comments cite its sections. The proposal it
+> replaces called the feature "harnesses"; the user renamed it **Presets** on 2026-10-06 (§11).
 >
-> The reference configuration is the user's `mimo` / `mimo-flash` launcher
-> (`~/.claude/scripts/openrouter.ps1` + `openrouter-profiles.json`, verified 2026-10-06 on Claude Code
-> 2.1.282). Companions: [`ENV_VARS.md`](./ENV_VARS.md) (the env chain, tier 2) · [`HOOKS.md`](./HOOKS.md)
-> (the hooks file) · [`RESTART.md`](./RESTART.md) (relaunch options) · [`PROFILES.md`](./PROFILES.md)
-> (the state profile).
+> The reference configuration is the user's OpenRouter launcher (`mimo`, `mimo-flash`, `kimi`, `qwen`,
+> `glm`: `~/.claude/scripts/openrouter.ps1` + `openrouter-profiles.json`, verified 2026-10-06 on Claude
+> Code 2.1.282, `mimo-flash` re-checked on 2.1.291). Companions: [`ENV_VARS.md`](./ENV_VARS.md) (the env
+> chain, tier 2) · [`HOOKS.md`](./HOOKS.md) (the hooks file) · [`RESTART.md`](./RESTART.md) (relaunch
+> options) · [`PROFILES.md`](./PROFILES.md) (the state profile).
 
 ## 1. Goal
 
 Before presets, Agentmaster started every managed session on the models and the login of the user's own
-Claude setup, with at most a `--model` pick. A **preset** starts a session on another model type (first
-Xiaomi MiMo-V2.6 Pro and Flash) through a provider the user picks (OpenRouter, Xiaomi's own API, or any
-other Anthropic-compatible endpoint), and keeps the full Claude Code harness: hooks, skills, MCP
-servers, CLAUDE.md files, and every Agentmaster feature.
+Claude setup, with at most a `--model` pick. A **preset** starts a session on another model type (Xiaomi
+MiMo-V2.6 Pro and Flash first, then Moonshot Kimi K3, Qwen3.8-2.4T-A95B and Z.ai GLM-5.3) through a
+provider the user picks (OpenRouter, Xiaomi's own API, or any other Anthropic-compatible endpoint), and
+keeps the full Claude Code harness: hooks, skills, MCP servers, CLAUDE.md files, and every Agentmaster
+feature.
 
 | # | Requirement (the user, 2026-10-06) | Where |
 |---|---|---|
@@ -82,8 +83,18 @@ The generated block (`OPENROUTER_DRY_RUN=1`, profile `mimo`, 2026-10-06):
 The "MiMo Pro · OpenRouter" template compiles to this block. The harness pins it key by key
 (`TestLaunchPresets`); the only differences are the `*_NAME` display names (the launcher fetches
 OpenRouter's names, Agentmaster derives `mimo-v2.6-pro (OpenRouter)` offline) and the number text
-(`1` for `1.0`, the same JSON value). Unlike step 5, Agentmaster appends no identity note (§5.2). Claude Code caps the output of an unrecognized model at 128,000
-tokens, so 131,072 sends 128,000.
+(`1` for `1.0`, the same JSON value). Unlike step 5, Agentmaster appends no identity note (§5.2). Claude
+Code caps the output of an unrecognized model at 128,000 tokens, so 131,072 sends 128,000.
+
+The same launcher runs `mimo-flash`, `kimi`, `qwen` and `glm`; only the profile changes. The harness
+compiles every OpenRouter template and compares its `CLAUDE_CODE_EXTRA_BODY` with the profile's
+`extraBody` as ordered JSON, plus its models and its limits (§4).
+
+**Effort.** The launcher sets no effort. Every test ran with `CLAUDE_CODE_EFFORT_LEVEL=max` from the
+user's own `~/.claude/settings.json`, and the evaluation lists it as a requirement for all five models
+("Effort max in your settings"). The templates therefore carry `max` themselves (F9, F10), so a machine
+without that variable runs the tested configuration too. Agentmaster's file adds one key the launcher's
+does not: `"CLAUDE_CODE_EFFORT_LEVEL": "max"`.
 
 ### 2.1 Facts that shape the design
 
@@ -97,6 +108,8 @@ tokens, so 131,072 sends 128,000.
 | F6 | Claude Code tells an unknown model that it is "Claude Fable 5". | CLAUDE.Bash.md | Cosmetic only: no template corrects it (the user, 2026-10-06). A preset can add an identity note (`--append-system-prompt`, §5.2). |
 | F7 | An unknown model gets no ToolSearch (every tool, every turn: a ~35K-token prefix). `/cost` overstates 17–33×. The claude.ai connectors are off. | CLAUDE.Bash.md | Nothing to build. |
 | F8 | MiMo is slow: ~50 tokens/s. One turn thought for 22 minutes before its first tool call. | CLAUDE.Bash.md | The pull reconcilers must keep such a silent turn Running (R5). |
+| F9 | `CLAUDE_CODE_EFFORT_LEVEL` overrides `--effort` and `/effort` for the whole session (`/effort` answers "CLAUDE_CODE_EFFORT_LEVEL=… overrides this session"). `unset` and `auto` turn the override off; an invalid value is ignored. | `claude.exe` 2.1.291 code (`Nz()`, the `/effort` command) | A preset's effort goes into the `--settings` file's env, which outranks the user's `settings.json` (F1), and also onto the command line as `--effort`. With `--effort` alone (v1 until 2026-10-06), the reference machine's `CLAUDE_CODE_EFFORT_LEVEL=max` silently overrode any level a preset's Effort box set. In such a session `/effort` cannot change the level. |
+| F10 | OpenRouter maps Claude Code's effort `max` to each model's top reasoning level: `xhigh` for Qwen3.8. | `openrouter-profiles.json` comment; the 2026-10-06 tests | One level, `max`, serves all five templates. |
 
 ## 3. Rejected: run `mimo.cmd` as the session command
 
@@ -139,17 +152,58 @@ Agentmaster reuses the launcher's knowledge instead: the same profiles (as templ
   reuses on every later launch (§7). A preset edit, a preset deletion or a template update never
   changes a session that exists.
 
-The shipped templates (from `openrouter-profiles.json`, 2026-10-06):
+The shipped templates (from `openrouter-profiles.json`, 2026-10-06), in menu order:
 
-| Id | Provider | Main and background model | `/model` switch | Context | Request body | Seeded |
+| Id | Name | Main and background model | `/model` switch | Context | Request body | Seeded |
 |---|---|---|---|---|---|---|
-| `mimo-pro.openrouter` | OpenRouter | `xiaomi/mimo-v2.6-pro` | `xiaomi/mimo-v2.6-flash` | 1,048,576 | `provider.order` gmicloud, novita, deepinfra; `quantizations` bf16, fp8; `temperature` 1.0; `top_p` 0.95 | visible (tested 2026-10-06, Claude Code 2.1.282) |
-| `mimo-flash.openrouter` | OpenRouter | `xiaomi/mimo-v2.6-flash` | `xiaomi/mimo-v2.6-pro` | 1,048,320 | the same, order + io-net | visible (tested) |
-| `mimo-pro.xiaomi` | Xiaomi MiMo | `mimo-v2.6-pro` | `mimo-v2.6-flash` | 1,048,576 | `temperature` 1.0; `top_p` 0.95; no `provider` block | **hidden** (not tested: R3) |
-| `mimo-flash.xiaomi` | Xiaomi MiMo | `mimo-v2.6-flash` | `mimo-v2.6-pro` | 1,048,576 | the same | **hidden** (not tested) |
+| `mimo-pro.openrouter` | MiMo Pro · OpenRouter | `xiaomi/mimo-v2.6-pro` | `xiaomi/mimo-v2.6-flash` | 1,048,576 | `provider.order` gmicloud, novita, deepinfra; `quantizations` bf16, fp8; `temperature` 1.0; `top_p` 0.95 | visible (tested 2026-10-06, Claude Code 2.1.282) |
+| `mimo-flash.openrouter` | MiMo Flash · OpenRouter | `xiaomi/mimo-v2.6-flash` | `xiaomi/mimo-v2.6-pro` | 1,048,320 | the same, order + io-net | visible (tested; re-checked on 2.1.291) |
+| `kimi.openrouter` | Kimi K3 · OpenRouter | `moonshotai/kimi-k3` | — | 1,048,576 | `provider.order` decart, modal, deepinfra; `quantizations` mxfp4; `temperature` 1.0; `top_p` 1.0 | visible (tested) |
+| `qwen.openrouter` | Qwen3.8 2.4T · OpenRouter | `qwen/qwen3.8-2.4t-a95b` | — | 1,000,000 | `provider.order` siliconflow, novita; `require_parameters` true; `allow_fallbacks` false; `temperature` 1.0; `top_p` 0.95; `top_k` 20 | visible (tested) |
+| `glm.openrouter` | GLM-5.3 · OpenRouter | `z-ai/glm-5.3` | — | 1,048,576 | `provider.order` z-ai, sail-research, siliconflow, akashml; `quantizations` fp8, bf16; `temperature` 1.0; `top_p` 1.0 | visible (tested) |
+| `mimo-pro.xiaomi` | MiMo Pro · Xiaomi | `mimo-v2.6-pro` | `mimo-v2.6-flash` | 1,048,576 | `temperature` 1.0; `top_p` 0.95; no `provider` block | **hidden** (not tested: R3) |
+| `mimo-flash.xiaomi` | MiMo Flash · Xiaomi | `mimo-v2.6-flash` | `mimo-v2.6-pro` | 1,048,576 | the same | **hidden** (not tested) |
 
-All four set Max output 131,072. None sets an identity note (§5.2). An untested template is seeded hidden,
-so it never appears in a menu by surprise; the user turns on "Show in the launch menus" to offer it.
+All seven set Max output 131,072. The five OpenRouter templates set Effort `max`, the level their tests
+ran with (§2, F9, F10); the untested Xiaomi pair sets none. None sets an identity note (§5.2). An untested
+template is seeded hidden, so it never appears in a menu by surprise; the user turns on "Show in the
+launch menus" to offer it. A release that adds a template seeds only that one: an existing preset list
+gains it at the end, and a template the user deleted stays deleted.
+
+### 4.1 Why these values (the evaluation of 2026-10-06)
+
+The values come from the sessions that built the launcher profiles: each vendor's model card, OpenRouter's
+endpoint list, and measured runs through Claude Code. Speed = time to the first token, then output tokens
+per second, 3 samples per endpoint. Prices per million tokens on the first endpoint, as of 2026-10-06.
+
+| Template | Precision served | First endpoint | Input / cache read / output | Balance per request |
+|---|---|---|---|---|
+| MiMo Pro | GMICloud bf16 (an expanded copy of Xiaomi's FP8 release); fp8 fallbacks | GMICloud: 13.0 s, then 17 tok/s | $0.435 / $0.004 / $0.87 | $0.11 |
+| MiMo Flash | the same | GMICloud: 14.8 s, then 43 tok/s | $0.14 / $0.003 / $0.28 | $0.04 |
+| Kimi K3 | MXFP4, the precision Moonshot trains Kimi K3 in | Decart: 1.0 s, then 201 tok/s | $2.01 / $0.201 / $10.05 | $1.29 ($1.92 on Modal) |
+| Qwen3.8 2.4T | SiliconFlow fp8 (Qwen's own FP8 release); Novita states none | SiliconFlow: 2.8 s, then 43 tok/s | $2.00 / $0.25 / $6.00 | $0.77 |
+| GLM-5.3 | fp8 (Z.ai's release) or bf16; Z.ai's own endpoint first | Z.AI: 2.7 s, then 83 tok/s | $1.40 / $0.26 / $4.40 | $0.56 |
+
+- **Balance per request**: OpenRouter refuses a request when the balance cannot pay for all 128,000
+  output tokens that Claude Code asks for ("This request requires more credits, or fewer max_tokens").
+- **Sampling**: each vendor's benchmark settings. Kimi K3: Moonshot's (temperature 1.0, top_p 1.0).
+  Qwen3.8: Qwen's recommendation (temperature 1.0, top_p 0.95, top_k 20). GLM-5.3: Z.ai's own Claude Code
+  benchmark settings (temperature 1.0, top_p 1.0). MiMo: Xiaomi's (temperature 1.0, top_p 0.95).
+- **Qwen's routing**: `require_parameters` skips a host that ignores `top_k` (Modal). `allow_fallbacks:
+  false` keeps the request on SiliconFlow and Novita: without it, a forced failure went to Venice, which
+  does not state its precision. No `quantizations` filter, because Novita states none and a filter would
+  drop it. Left out: Together (it rejects 128,000 output tokens) and DeepInfra (fp4). No endpoint serves
+  the BF16 original.
+- **Effort**: MiMo ignores the level (200 requests changed nothing). For Kimi and GLM, 3 samples per level
+  showed no clear difference between low and max, and for Qwen low used as much thinking as max. `max`
+  stays because Moonshot and Z.ai benchmark at max and xhigh is Qwen's top level (F10).
+- **Not applied**, as in the launcher: DeepInfra first for MiMo Pro would be about twice as fast at the
+  same price, and SiliconFlow first for GLM-5.3 would halve the cost and give faster output. A preset's
+  Provider order box takes either order.
+- **How much the tests prove**: prices, precision and the delivery of earlier reasoning are strong; speed
+  and cache are moderate (3 samples per endpoint); quality comparisons rest on the vendors' own scores and
+  one math problem. Only MiMo Pro ran the graded Claude Code tasks. Not tested: long sessions near
+  auto-compact, the `/model` switch, and whether Kimi, Qwen and GLM use the earlier reasoning.
 
 "Codex in mind": a snapshot carries `agent: "claude"`, a provider entry stores an `openaiBaseUrl` beside
 its Anthropic one, and a Codex snapshot is refused by this build instead of misread. Codex presets
@@ -171,8 +225,8 @@ Every preset field resolves through these tiers. The first tier that is set wins
 Rules:
 
 - **"Set"** means not empty after trimming. The value `none` turns an optional value off (the `/model`
-  switch entry, the identity note), because Windows cannot hold an empty variable. The launcher uses
-  the same rule.
+  switch entry, the effort, the identity note), because Windows cannot hold an empty variable and an
+  empty box inherits the template's value. The launcher uses the same rule.
 - **One resolver.** `ResolvePresetField` (and `ResolveProviderBaseUrl` for the provider's URL) returns
   `{value, source, envName}`. The gray placeholder, the snapshot and the launch preview call it, so
   they cannot disagree (the `PickCurrentPromptText` idiom).
@@ -201,14 +255,16 @@ Claude login has its own models and limits); **routing** = only OpenRouter.
 | `model` | Main model | — | all | `--model`; the settings file's `model`; with a provider also `env.ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{FABLE,OPUS,SONNET}_MODEL` (+ `_NAME`), `CLAUDE_CODE_SUBAGENT_MODEL` |
 | `smallModel` | Background model | `<P>_SMALL_MODEL` | provider | `env.ANTHROPIC_DEFAULT_HAIKU_MODEL` (+ `_NAME`); empty = the main model |
 | `switchModel` | /model switch entry | `<P>_SWITCH_MODEL` | provider | `env.ANTHROPIC_CUSTOM_MODEL_OPTION` (+ `_NAME`, `_DESCRIPTION`); `none` = no entry |
-| `effort` | Effort | — | all | `--effort low|medium|high|xhigh|max` |
+| `effort` | Effort | — | all | `env.CLAUDE_CODE_EFFORT_LEVEL` AND `--effort`, `low|medium|high|xhigh|max`; `none` = neither |
 | `context` | Context window (tokens) | `<P>_CONTEXT` | provider | `env.CLAUDE_CODE_MAX_CONTEXT_TOKENS` (digits only) |
 | `maxOutput` | Max output tokens | `<P>_MAX_OUTPUT` | all | `env.CLAUDE_CODE_MAX_OUTPUT_TOKENS` (digits only) |
 | `providerOrder` | Provider order | `OPENROUTER_PROVIDER` | routing | `CLAUDE_CODE_EXTRA_BODY.provider.order` |
 | `quantizations` | Quantizations | — | routing | `….provider.quantizations` |
+| `requireParameters` | Require parameter support | — | routing | `….provider.require_parameters` (`true` / `false`) |
 | `allowFallbacks` | Allow fallbacks | — | routing | `….provider.allow_fallbacks` (`true` / `false`) |
 | `temperature` | Temperature | — | provider | `….temperature` |
 | `topP` | top_p | — | provider | `….top_p` |
+| `topK` | top_k | — | provider | `….top_k` (digits only) |
 | `extraBody` | Extra request body (JSON) | `<P>_EXTRA_BODY` | provider | deep-merged into `env.CLAUDE_CODE_EXTRA_BODY` |
 | `extraEnv` | Extra env vars | — | all | `NAME=VALUE` lines, the LAST keys of the settings file's `env` (they win over the generated ones); `CCMGR_*`, `AM_*` and `WT_SESSION` are refused |
 | `identityNote` | Identity note | — | provider | optional, empty in every template: `--append-system-prompt "<text>"`; `{model}`, `{provider}`, `{switchModel}` and `{switch}` are filled in; `none` = no note |
@@ -216,6 +272,14 @@ Claude login has its own models and limits); **routing** = only OpenRouter.
 
 The provider's **Base URL** (`<P>_BASE_URL`, tier 4 = the provider's default) is not a preset field:
 it lives on the provider, and the snapshot carries it under the key `baseUrl`.
+
+**Effort is written twice** (F9): as `CLAUDE_CODE_EFFORT_LEVEL` in the settings file's env, which Claude
+Code obeys first, and as `--effort` on the command line, which the observer's `model · effort` adornment
+reads. A Claude-login preset with an effort therefore gets a settings file too (§6.1). The variable is
+generated before the extra env, so a `CLAUDE_CODE_EFFORT_LEVEL` line in Extra env vars still wins; the
+preview then shows a ⚠ line, because the Effort box no longer decides. While a level is set, `/effort`
+in the session cannot change it ("CLAUDE_CODE_EFFORT_LEVEL=max overrides this session"); type `none` in
+the box to leave the effort to Claude Code's own settings.
 
 **No template ships an identity note** (the user, 2026-10-06: "not necessary"), so a preset launch adds no
 `--append-system-prompt` unless the preset's Identity note box holds text. Without a note, a non-Claude
@@ -226,9 +290,10 @@ this prompt that calls you Claude describes the harness, not you. When asked whi
 that model."* — where `{switch}` becomes ", unless the user switched to {switchModel} with /model" when a
 switch model exists.
 
-A value the compile step cannot use (a non-number limit, an unknown effort level, an invalid JSON
-body, a forbidden argument, a malformed env line) is DROPPED, not guessed. The launch preview shows a
-⚠ line for it, and each launch logs it as `[preset] <id>: <reason>`.
+A value the compile step cannot use (a non-number limit, a fractional `top_k`, a switch that is not
+`true` or `false`, an unknown effort level, an invalid JSON body, a forbidden argument, a malformed env
+line) is DROPPED, not guessed. The launch preview shows a ⚠ line for it, and each launch logs it as
+`[preset] <id>: <reason>`.
 
 ### 5.3 Placeholders
 
@@ -268,8 +333,8 @@ launch did).
 
 ### 6.1 The settings file
 
-When a launch carries env values (every provider preset, and a Claude-login preset with Max output or
-Extra env), it gets its own `--settings` file instead of the shared `hooks-settings.json`:
+When a launch carries env values (every provider preset, and a Claude-login preset with an Effort, Max
+output or Extra env), it gets its own `--settings` file instead of the shared `hooks-settings.json`:
 
 ```
 <profile>\launch-settings\<presetId>-<16 hex>.json
@@ -309,7 +374,8 @@ the pre-preset launch.
 the positional only after the flags):
 
 - `--model <main model>` (also for a provider preset: the file's `model` and the flag agree);
-- `--effort <level>`;
+- `--effort <level>` (the settings file carries the same level as `CLAUDE_CODE_EFFORT_LEVEL`, which
+  Claude Code obeys first — F9, §5.2);
 - `--append-system-prompt "<note>"`, only when the preset's Identity note box holds text (no template sets
   one), PowerShell-quoted (`PsDoubleQuote`: the command runs under the pwsh host's `&`);
 - the preset's extra arguments, verbatim (`RenderLaunchExtraArgs`).
@@ -459,15 +525,23 @@ Fable / Opus / Sonnet          (the launch models, Settings → Sessions)
 ─────────────
 MiMo Pro · OpenRouter          (the VISIBLE presets, in list order)
 MiMo Flash · OpenRouter
+Kimi K3 · OpenRouter
+Qwen3.8 2.4T · OpenRouter
+GLM-5.3 · OpenRouter
 Preset 1
 ```
 
 - A preset is visible unless its "Show in the launch menus" switch is off. A visible preset whose key
   is missing is still listed; picking it shows the refusal notice (§6.4).
 - Default: a new session uses the cog's model; a fork keeps its SOURCE's model or preset (§7).
-- The /handover per-message hint matches presets too: `LaunchMenuSpec` appends the visible presets to
-  the launch-models spec as `Name | @id` lines, so `/handover [mimo] …` picks "MiMo Pro · OpenRouter"
-  (the first visible match) and `/handover [mimo flash] …` the Flash one.
+- The /handover per-message hint matches presets too, more strictly than the launch models:
+  `LaunchMenuSpec` appends the visible presets to the launch-models spec as `Name | @id` lines, and a
+  preset is picked only by the BRACKETED form with a PREFIX of its name (`ParseHandoverArgsHints`).
+  `/handover [mimo] …` picks "MiMo Pro · OpenRouter" (the first visible match), `[mimo flash]` the
+  Flash one, `[kimi]`, `[qwen]` and `[glm 5.3]` the others. A bare word never picks a preset, and a
+  bracket that only occurs inside a name (`[router]`, `[flash]`) is a successor title. Why: a preset
+  moves the successor to another provider and bill, and under the models' substring rule (before
+  2026-10-06) `/handover open the PR`, `out of memory` or `pro tips` matched every "… · OpenRouter" name.
 - **The Launch button's hover menu**: hovering "Launch Claude" for 450 ms opens the same menu under the
   button (`_ShowLaunchMenu`, `TransientWithDismissOnPointerMoveAway`: it takes no focus and closes when
   the pointer leaves). A pick launches a NEW session in the typed folder with that target; a plain
@@ -519,7 +593,7 @@ has been run against this implementation yet.**
 
 | # | Risk | Check |
 |---|---|---|
-| R1 | Cross-provider history: MiMo's empty thinking signatures sent to Anthropic, or Anthropic's signed (or redacted) thinking sent to MiMo. | Fork a two-turn MiMo session onto Default and send a prompt; then the reverse. Record success or the API error. The result decides whether a cross-provider Fork stays offered, gets a warning, or is blocked. |
+| R1 | Cross-provider history: MiMo's empty thinking signatures sent to Anthropic, or Anthropic's signed (or redacted) thinking sent to MiMo. Kimi K3, Qwen3.8 and GLM-5.3 are untested in either direction, and so is a fork between two of the five models. | Fork a two-turn MiMo session onto Default and send a prompt; then the reverse; then once per other model. Record success or the API error. The result decides whether a cross-provider Fork stays offered, gets a warning, or is blocked. |
 | R2 | A startup modal parks the tab (F4). | Launch each provider on a PTY with the generated file and env. The screen must show the input box. |
 | R3 | Xiaomi's auth header. | One `-p` call per header style against the pay-as-you-go URL. A pass un-hides the Xiaomi templates (a template edit + its `tested` line). |
 | R4 | A typed identity note after `--resume` and `--fork-session` (no template sets one). | Ask "which model are you?" after a resume. |
@@ -541,6 +615,9 @@ has been run against this implementation yet.**
 | D8 | Settings file | **content-addressed and immutable**, shared by identical launches (the proposal's per-session file would have been rewritten under a running session on the next relaunch) |
 | D9 | Default target | not built: a plain Launch click and every "Default" item keep the cog's model |
 | D10 | Templates | seeded ONCE, LINKED (empty fields follow the template), a deletion sticks |
+| D11 | Template set (2026-10-06) | the launcher's five profiles as visible templates — MiMo Pro, MiMo Flash, Kimi K3, Qwen3.8 2.4T, GLM-5.3, all through OpenRouter — with their values unchanged (the evaluation's faster or cheaper orders not applied, §4.1) and Effort `max` added, the level every test ran with |
+| D12 | Effort | written as `CLAUDE_CODE_EFFORT_LEVEL` in the settings file AND as `--effort` (F9); `none` = neither |
+| D13 | /handover hint for presets | the bracketed form with a prefix of the preset's name only; a bare word never picks a preset (§8.2) |
 
 ## 12. Follow-ups and known gaps
 
@@ -550,7 +627,8 @@ has been run against this implementation yet.**
 - **Display** (§8.3): the pill, the vendor-prefix-less model name, a per-provider ⚡ cache rule (the
   current rule is Anthropic's 5 minutes), the Sessions chip, the CLI field.
 - **Test key** and **Fetch limits** (OpenRouter's endpoints data as a tier between the env and the
-  template, cached in `model-limits.json`).
+  template, cached in `model-limits.json`). A key test could also read the balance: OpenRouter refuses
+  a request the balance cannot pay in full (§4.1), $0.04–1.92 per request for the shipped templates.
 - **`launch-settings` cleanup**: delete the files no live or resumable session references.
 - **Copy ▸ Launch CLI** of a DORMANT preset session builds the plain command (`AgentTabOverlay`'s
   fallback); a live session's copy reads the real command line from its process.
@@ -568,12 +646,12 @@ has been run against this implementation yet.**
 |---|---|
 | `AgentMaster/LaunchPresets.h` | The PURE core (header-only): field keys + the field table, providers, templates + seeding, `launch-presets.json` (de)serialization, the tiers (`ResolvePresetField`, `ResolveProviderBaseUrl`), the snapshot (`LaunchArgs`, `SnapshotPresetLaunch`, `SnapshotModelLaunch`, `EffectiveLaunchValues`, JSON), the refusal (`PresetLaunchRefusal`), the compile (`CompileClaudeLaunch`, `ComposePresetExtraBody`), the preview, `MaskSecret`, the menu entries + the /handover hint spec. |
 | `AgentMaster/LaunchPresetsOs.h` | The OS half (TerminalApp only): the two env lookups (Agentmaster's list; Windows = process env, then the registry), Credential Manager (`Read/Write/DeletePresetProviderKey`), the stamp-cached config loader, `LaunchMenuEntries` / `LaunchMenuSpec`, `LaunchArgsForTarget`, `Load/StoreLaunchArgs`, `ResolveLaunchKey`, `CompileLaunchForSpawn`. |
-| `AgentMaster/ClaudeSpawn.{h,cpp}` | `ClaudeSpawnSpec::authTokenEnv` / `presetId`; `BuildClaudeCommandline`'s `extraArgs`; `RenderLaunchExtraArgs`; `BuildLaunchSettingsJson`; `MaterializeLaunchSettingsFile`; `ApplyCompiledLaunch`; the `launch` parameter of `BuildClaudeSpawn` / `BuildClaudeRestartSpec`; `BuildPwshHostedCommandline`'s token scoping. |
+| `AgentMaster/ClaudeSpawn.{h,cpp}` | `ClaudeSpawnSpec::authTokenEnv` / `presetId`; `BuildClaudeCommandline`'s `extraArgs`; `RenderLaunchExtraArgs`; `BuildLaunchSettingsJson`; `MaterializeLaunchSettingsFile`; `ApplyCompiledLaunch`; the `launch` parameter of `BuildClaudeSpawn` / `BuildClaudeRestartSpec`; `BuildPwshHostedCommandline`'s token scoping; `ParseHandoverArgsHints`' preset rule (D13). |
 | `AgentMaster/Persistence.{h,cpp}` | `LaunchPresetsPath` / `LoadLaunchPresetsText` / `SaveLaunchPresetsText` (atomic). |
 | `TerminalPage.AgentSessions.cpp` (+ `.h`) | `_ResolveLaunchForSpawn` (the ONE launch-target decision), `_StoredLaunchArgsFollowingChain`, `_PromptPresetLaunchError`, and the seams: `_LaunchClaudeSession` (+ `inheritLaunchFromId`), the /handover successors, `_RestartTabIntoFreshSession`, `_RestartManagedSession`, Deactivate. |
 | `AgentModelMenu.h` | The preset group (separator + tooltips) in `AgentFillModelPickItems`. |
 | `AgentManagerContent.Settings.cpp` (+ `.h`, `.cpp`) | The Presets tab (§8.1). |
 | `AgentLaunchBar.cpp` (+ `.h`) | The Launch button's hover menu and `_OnLaunch(target)` — moved here from `AgentManagerContent.Launch.cpp` on 2026-10-06 (the shared launch bar the Agent Manager page and the side panel's `+` launcher both run; SIDE_PANEL.md §2e). |
 | `AgentManagerContent.Tree.cpp`, `TerminalPage.AgentSessionsPage.cpp`, `TerminalPage.cpp` | The menu sites switched from `ParseLaunchModels` to `LaunchMenuEntries`. |
-| `AgentMaster/tests/tests_presets.cpp` | `TestLaunchPresets`: seeding, the JSON, the tiers, the snapshot, the compile vs the reference block, the refusals, the reserved names / forbidden flags, the mask, the menus, and the launch settings file on disk (valid JSON, no key, reuse, the rewrite of a broken file, no temp left). |
+| `AgentMaster/tests/tests_presets.cpp` | `TestLaunchPresets`: seeding (and an upgrade that adds templates), the JSON, the tiers, the snapshot, the compile vs the reference block, every OpenRouter template vs its launcher profile (ordered JSON body, models, limits, effort), effort (`none`, the extra-env override), `top_k` / `require_parameters`, the refusals, the reserved names / forbidden flags, the mask, the menus, the /handover hint's preset rule, and the launch settings file on disk (valid JSON, no key, reuse, the rewrite of a broken file, no temp left). |
 | `AgentMaster/tests/tests_spawn_sched.cpp` | The pwsh host script's token scoping (carrier → `ANTHROPIC_AUTH_TOKEN` → removed in `finally`) and the refusal of an unsafe carrier name. |

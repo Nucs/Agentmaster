@@ -5,11 +5,12 @@
 // (doc/agentmaster/HARNESSES.md).
 //
 // A preset says HOW one Claude session runs: which provider serves it (OpenRouter, Xiaomi MiMo, a custom
-// Anthropic-compatible endpoint, or the user's own Claude login), which model each tier uses, the limits,
-// extra request-body fields, an optional identity note for a non-Claude model, extra env vars and extra
-// claude arguments. Every "Open New Session Here" / "Fork session" menu and the Launch button's hover menu list
-// the visible presets after a separator. A pick travels through the existing model-pick plumbing as the
-// string "@<presetId>" (IsPresetToken), so no menu callback changes shape.
+// Anthropic-compatible endpoint, or the user's own Claude login), which model each tier uses, its effort, the
+// limits, the request-body fields (OpenRouter routing, sampling, extra JSON), an optional identity note for a
+// non-Claude model, extra env vars and extra claude arguments. Every "Open New Session Here" / "Fork session"
+// menu and the Launch button's hover menu list the visible presets after a separator. A pick travels through
+// the existing model-pick plumbing as the string "@<presetId>" (IsPresetToken), so no menu callback changes
+// shape.
 //
 // Three layers of data:
 //   * TEMPLATES (LaunchPresetTemplates) — tested configurations shipped with the app. Each one is seeded
@@ -78,14 +79,16 @@ namespace Agentmaster
     inline constexpr const wchar_t* kPresetFieldModel = L"model"; // the main model (and every tier that is not overridden)
     inline constexpr const wchar_t* kPresetFieldSmallModel = L"smallModel"; // the haiku tier / background work
     inline constexpr const wchar_t* kPresetFieldSwitchModel = L"switchModel"; // an extra /model picker entry; "none" = no entry
-    inline constexpr const wchar_t* kPresetFieldEffort = L"effort"; // --effort <level>
+    inline constexpr const wchar_t* kPresetFieldEffort = L"effort"; // CLAUDE_CODE_EFFORT_LEVEL + --effort <level>; "none" = neither
     inline constexpr const wchar_t* kPresetFieldContext = L"context"; // CLAUDE_CODE_MAX_CONTEXT_TOKENS
     inline constexpr const wchar_t* kPresetFieldMaxOutput = L"maxOutput"; // CLAUDE_CODE_MAX_OUTPUT_TOKENS
     inline constexpr const wchar_t* kPresetFieldProviderOrder = L"providerOrder"; // OpenRouter provider.order
     inline constexpr const wchar_t* kPresetFieldQuantizations = L"quantizations"; // OpenRouter provider.quantizations
+    inline constexpr const wchar_t* kPresetFieldRequireParameters = L"requireParameters"; // OpenRouter provider.require_parameters
     inline constexpr const wchar_t* kPresetFieldAllowFallbacks = L"allowFallbacks"; // OpenRouter provider.allow_fallbacks
     inline constexpr const wchar_t* kPresetFieldTemperature = L"temperature"; // request body temperature
     inline constexpr const wchar_t* kPresetFieldTopP = L"topP"; // request body top_p
+    inline constexpr const wchar_t* kPresetFieldTopK = L"topK"; // request body top_k (a whole number)
     inline constexpr const wchar_t* kPresetFieldExtraBody = L"extraBody"; // a JSON object merged into the request body
     inline constexpr const wchar_t* kPresetFieldExtraEnv = L"extraEnv"; // NAME=VALUE lines for the settings env block
     inline constexpr const wchar_t* kPresetFieldIdentityNote = L"identityNote"; // --append-system-prompt text; "none" = no note
@@ -555,7 +558,9 @@ namespace Agentmaster
         return detail::PresetTrim(out);
     }
 
-    // True for an --effort level claude 2.1.291 accepts (`claude --help`: low, medium, high, xhigh, max).
+    // True for an effort level claude 2.1.291 accepts both as --effort (`claude --help`: low, medium, high, xhigh,
+    // max) and as CLAUDE_CODE_EFFORT_LEVEL (its level list Kc). The preset value "none" is not a level: the compile
+    // step reads it as "set no effort" before it asks this.
     //   level - the value (case-insensitive).
     // Never throws.
     inline bool IsValidPresetEffort(std::wstring_view level) noexcept
@@ -683,11 +688,21 @@ namespace Agentmaster
         std::vector<std::wstring> seededTemplates; // template ids already seeded once (a deleted one stays deleted)
     };
 
-    // The templates this release ships, in menu order. The OpenRouter pair is the reference launcher's
-    // "peak" profile, verified end to end on 2026-10-06 with Claude Code 2.1.282 (GMICloud bf16 served every
-    // request; temperature 1 and top_p 0.95 sent; thinking blocks sent back; prompt cache hit). The Xiaomi
-    // pair uses the documented endpoint and ids but has NOT been run yet (HARNESSES.md check R3: does
-    // Xiaomi accept a Bearer token?), so it is seeded hidden.
+    // The templates this release ships, in menu order. The five OpenRouter templates are the reference
+    // launcher's profiles (~/.claude/scripts/openrouter-profiles.json: mimo, mimo-flash, kimi, qwen, glm), each
+    // run end to end through that launcher on 2026-10-06 with Claude Code 2.1.282: the endpoints in each order
+    // returned thinking tokens and received the earlier reasoning, and every request carried the template's
+    // sampling values. MiMo Flash was re-checked on 2.1.291 the same day. HARNESSES.md §4 has the measurements
+    // behind each choice (speed, price, precision).
+    //
+    // Effort is "max" in all five: the tests ran with CLAUDE_CODE_EFFORT_LEVEL=max in the user's own
+    // ~/.claude/settings.json (the launcher sets no effort; OpenRouter maps "max" to each model's top reasoning
+    // level, which is xhigh for Qwen). A template carries it so a machine without that variable runs the tested
+    // configuration too. MiMo ignores the level (200 requests changed nothing), and setting it keeps the template
+    // equal to what was tested.
+    //
+    // The Xiaomi pair uses the documented endpoint and ids but has NOT been run yet (HARNESSES.md check R3:
+    // does Xiaomi accept a Bearer token?), so it is seeded hidden and sets no effort.
     // Returns the immutable list (built once, thread-safe).
     inline const std::vector<LaunchPresetTemplate>& LaunchPresetTemplates()
     {
@@ -700,6 +715,7 @@ namespace Agentmaster
                 { kPresetFieldModel, L"xiaomi/mimo-v2.6-pro" },
                 { kPresetFieldSmallModel, L"xiaomi/mimo-v2.6-pro" },
                 { kPresetFieldSwitchModel, L"xiaomi/mimo-v2.6-flash" },
+                { kPresetFieldEffort, L"max" },
                 { kPresetFieldContext, L"1048576" },
                 { kPresetFieldMaxOutput, L"131072" },
                 { kPresetFieldProviderOrder, L"gmicloud, novita, deepinfra" },
@@ -707,18 +723,68 @@ namespace Agentmaster
                 { kPresetFieldTemperature, L"1.0" },
                 { kPresetFieldTopP, L"0.95" },
             } });
-            t.push_back({ L"mimo-flash.openrouter", tested, false, {
+            t.push_back({ L"mimo-flash.openrouter", L"2026-10-06 \x00B7 Claude Code 2.1.282 and 2.1.291", false, {
                 { kPresetFieldName, L"MiMo Flash \x00B7 OpenRouter" },
                 { kPresetFieldProvider, L"openrouter" },
                 { kPresetFieldModel, L"xiaomi/mimo-v2.6-flash" },
                 { kPresetFieldSmallModel, L"xiaomi/mimo-v2.6-flash" },
                 { kPresetFieldSwitchModel, L"xiaomi/mimo-v2.6-pro" },
+                { kPresetFieldEffort, L"max" },
                 { kPresetFieldContext, L"1048320" },
                 { kPresetFieldMaxOutput, L"131072" },
                 { kPresetFieldProviderOrder, L"gmicloud, novita, deepinfra, io-net" },
                 { kPresetFieldQuantizations, L"bf16, fp8" },
                 { kPresetFieldTemperature, L"1.0" },
                 { kPresetFieldTopP, L"0.95" },
+            } });
+            // Kimi K3: Moonshot's benchmark settings. Moonshot trains Kimi K3 in MXFP4, so "mxfp4 only" is the
+            // official precision, not a quantized copy (the generic fp4 hosts stay out). Decart first: ~200 tokens/s.
+            t.push_back({ L"kimi.openrouter", tested, false, {
+                { kPresetFieldName, L"Kimi K3 \x00B7 OpenRouter" },
+                { kPresetFieldProvider, L"openrouter" },
+                { kPresetFieldModel, L"moonshotai/kimi-k3" },
+                { kPresetFieldSmallModel, L"moonshotai/kimi-k3" },
+                { kPresetFieldEffort, L"max" },
+                { kPresetFieldContext, L"1048576" },
+                { kPresetFieldMaxOutput, L"131072" },
+                { kPresetFieldProviderOrder, L"decart, modal, deepinfra" },
+                { kPresetFieldQuantizations, L"mxfp4" },
+                { kPresetFieldTemperature, L"1.0" },
+                { kPresetFieldTopP, L"1.0" },
+            } });
+            // Qwen3.8-2.4T-A95B (the open-weight Qwen3.8 Max): Qwen's recommended sampling. require_parameters
+            // skips a host that would ignore top_k (Modal); allow_fallbacks false keeps the request on the two
+            // listed hosts — without it a forced failure went to Venice, whose precision is not stated. No
+            // quantizations filter: Novita states no precision, so a filter would drop it.
+            t.push_back({ L"qwen.openrouter", tested, false, {
+                { kPresetFieldName, L"Qwen3.8 2.4T \x00B7 OpenRouter" },
+                { kPresetFieldProvider, L"openrouter" },
+                { kPresetFieldModel, L"qwen/qwen3.8-2.4t-a95b" },
+                { kPresetFieldSmallModel, L"qwen/qwen3.8-2.4t-a95b" },
+                { kPresetFieldEffort, L"max" },
+                { kPresetFieldContext, L"1000000" },
+                { kPresetFieldMaxOutput, L"131072" },
+                { kPresetFieldProviderOrder, L"siliconflow, novita" },
+                { kPresetFieldRequireParameters, L"true" },
+                { kPresetFieldAllowFallbacks, L"false" },
+                { kPresetFieldTemperature, L"1.0" },
+                { kPresetFieldTopP, L"0.95" },
+                { kPresetFieldTopK, L"20" },
+            } });
+            // GLM-5.3: Z.ai's own Claude Code benchmark settings. Z.ai releases FP8 weights, and its own endpoint
+            // (z-ai) is first; fallbacks stay on fp8/bf16.
+            t.push_back({ L"glm.openrouter", tested, false, {
+                { kPresetFieldName, L"GLM-5.3 \x00B7 OpenRouter" },
+                { kPresetFieldProvider, L"openrouter" },
+                { kPresetFieldModel, L"z-ai/glm-5.3" },
+                { kPresetFieldSmallModel, L"z-ai/glm-5.3" },
+                { kPresetFieldEffort, L"max" },
+                { kPresetFieldContext, L"1048576" },
+                { kPresetFieldMaxOutput, L"131072" },
+                { kPresetFieldProviderOrder, L"z-ai, sail-research, siliconflow, akashml" },
+                { kPresetFieldQuantizations, L"fp8, bf16" },
+                { kPresetFieldTemperature, L"1.0" },
+                { kPresetFieldTopP, L"1.0" },
             } });
             t.push_back({ L"mimo-pro.xiaomi", L"", true, {
                 { kPresetFieldName, L"MiMo Pro \x00B7 Xiaomi" },
@@ -965,7 +1031,7 @@ namespace Agentmaster
         { kPresetFieldSwitchModel, L"/model switch entry", L"SWITCH_MODEL", PresetFieldKind::Text, PresetFieldScope::ProviderOnly,
           L"An extra entry in Claude Code's /model picker, so you can move the session to another model mid-way. Type none for no entry." },
         { kPresetFieldEffort, L"Effort", nullptr, PresetFieldKind::Effort, PresetFieldScope::Always,
-          L"--effort for the session: low, medium, high, xhigh or max. Empty = Claude Code's own setting." },
+          L"The session's reasoning effort: low, medium, high, xhigh or max. Written as CLAUDE_CODE_EFFORT_LEVEL into the session's settings file (Claude Code obeys that variable over --effort and over the same variable in ~/.claude/settings.json) and passed as --effort. While it is set, /effort in the session cannot change the level. Type none for no effort setting; empty = the template's, else Claude Code's own setting." },
         { kPresetFieldContext, L"Context window (tokens)", L"CONTEXT", PresetFieldKind::Integer, PresetFieldScope::ProviderOnly,
           L"CLAUDE_CODE_MAX_CONTEXT_TOKENS: the window Claude Code plans compaction around. Use the SMALLEST window among the providers that may serve the model." },
         { kPresetFieldMaxOutput, L"Max output tokens", L"MAX_OUTPUT", PresetFieldKind::Integer, PresetFieldScope::Always,
@@ -973,13 +1039,17 @@ namespace Agentmaster
         { kPresetFieldProviderOrder, L"Provider order", L"PROVIDER", PresetFieldKind::List, PresetFieldScope::RoutingOnly,
           L"OpenRouter's provider.order: the hosts to try, first to last (comma separated)." },
         { kPresetFieldQuantizations, L"Quantizations", nullptr, PresetFieldKind::List, PresetFieldScope::RoutingOnly,
-          L"OpenRouter's provider.quantizations: only hosts serving these weights may answer (bf16, fp8, ...). A fallback can never reach a more heavily quantized host." },
+          L"OpenRouter's provider.quantizations: only hosts serving these weights may answer (bf16, fp8, mxfp4, ...). A fallback can never reach a more heavily quantized host. A host that does not state its precision is dropped too." },
+        { kPresetFieldRequireParameters, L"Require parameter support", nullptr, PresetFieldKind::Boolean, PresetFieldScope::RoutingOnly,
+          L"OpenRouter's provider.require_parameters: true = only hosts that support every parameter of the request may answer, so a host that would silently ignore one (top_k, for example) is skipped. Empty = OpenRouter's default (false)." },
         { kPresetFieldAllowFallbacks, L"Allow fallbacks", nullptr, PresetFieldKind::Boolean, PresetFieldScope::RoutingOnly,
           L"OpenRouter's provider.allow_fallbacks: false = only the hosts in the order above, or an error. Empty = OpenRouter's default (true)." },
         { kPresetFieldTemperature, L"Temperature", nullptr, PresetFieldKind::Decimal, PresetFieldScope::ProviderOnly,
-          L"Sent in every request body. Xiaomi recommends 1.0 for MiMo; without an explicit value a third-party host applies its own default." },
+          L"Sent in every request body. Use the model vendor's recommended value (1.0 for MiMo, Kimi K3, Qwen3.8 and GLM-5.3); without an explicit value a third-party host applies its own default." },
         { kPresetFieldTopP, L"top_p", nullptr, PresetFieldKind::Decimal, PresetFieldScope::ProviderOnly,
-          L"Sent in every request body. Xiaomi recommends 0.95 for MiMo." },
+          L"Sent in every request body. Vendors' values: 0.95 for MiMo and Qwen3.8, 1.0 for Kimi K3 and GLM-5.3." },
+        { kPresetFieldTopK, L"top_k", nullptr, PresetFieldKind::Integer, PresetFieldScope::ProviderOnly,
+          L"Sent in every request body, as a whole number (Qwen recommends 20 for Qwen3.8). Empty = not sent. Not every host honors it: on OpenRouter, set Require parameter support to true so such a host is skipped." },
         { kPresetFieldExtraBody, L"Extra request body (JSON)", L"EXTRA_BODY", PresetFieldKind::Json, PresetFieldScope::ProviderOnly,
           L"A JSON object merged over the fields above into every request (CLAUDE_CODE_EXTRA_BODY). Objects merge; any other value replaces." },
         { kPresetFieldExtraEnv, L"Extra env vars", nullptr, PresetFieldKind::EnvLines, PresetFieldScope::Always,
@@ -1505,7 +1575,7 @@ namespace Agentmaster
         std::wstring providerId; // "" = the Claude login
         std::wstring providerName;
         std::wstring model; // --model, and the settings file's "model" ("" = leave both alone)
-        std::wstring effort; // --effort ("" = none)
+        std::wstring effort; // --effort ("" = none); settingsEnv carries the same level as CLAUDE_CODE_EFFORT_LEVEL
         std::wstring appendSystemPrompt; // --append-system-prompt ("" = none)
         std::wstring extraArgs; // raw claude arguments, appended before any positional prompt
         std::vector<std::pair<std::wstring, std::wstring>> settingsEnv; // the settings file's env block, in order
@@ -1517,7 +1587,9 @@ namespace Agentmaster
     };
 
     // Compose the request-body extras for a provider: OpenRouter's routing block, the sampling fields, then
-    // the extra-body JSON deep-merged over them.
+    // the extra-body JSON deep-merged over them. The key order (provider: order, quantizations,
+    // require_parameters, allow_fallbacks; then temperature, top_p, top_k) is the reference profiles' own, so a
+    // template's body reads like the launcher's; JSON readers do not depend on it.
     //   values   - the effective values (EffectiveLaunchValues).
     //   routing  - the provider takes OpenRouter's routing block.
     //   warnings - receives a note per value dropped as invalid.
@@ -1545,19 +1617,27 @@ namespace Agentmaster
                 }
                 prov.Set(jsonKey, std::move(arr));
             };
-            putList(kPresetFieldProviderOrder, L"order");
-            putList(kPresetFieldQuantizations, L"quantizations");
-            if (const auto fb = get(kPresetFieldAllowFallbacks); !fb.empty())
-            {
-                if (detail::PresetEqualsCi(fb, L"true") || detail::PresetEqualsCi(fb, L"false"))
+            // A true/false routing switch. Anything else is dropped with a warning rather than guessed: a
+            // misread "allow_fallbacks" would let a request reach a host the preset excludes.
+            const auto putBool = [&](const wchar_t* field, const wchar_t* jsonKey, const wchar_t* label) {
+                const auto text = get(field);
+                if (text.empty())
                 {
-                    prov.Set(L"allow_fallbacks", json::Value::MkBool(detail::PresetEqualsCi(fb, L"true")));
+                    return;
+                }
+                if (detail::PresetEqualsCi(text, L"true") || detail::PresetEqualsCi(text, L"false"))
+                {
+                    prov.Set(jsonKey, json::Value::MkBool(detail::PresetEqualsCi(text, L"true")));
                 }
                 else
                 {
-                    warnings.push_back(L"Allow fallbacks: \"" + fb + L"\" is not true or false (not sent)");
+                    warnings.push_back(std::wstring{ label } + L": \"" + text + L"\" is not true or false (not sent)");
                 }
-            }
+            };
+            putList(kPresetFieldProviderOrder, L"order");
+            putList(kPresetFieldQuantizations, L"quantizations");
+            putBool(kPresetFieldRequireParameters, L"require_parameters", L"Require parameter support");
+            putBool(kPresetFieldAllowFallbacks, L"allow_fallbacks", L"Allow fallbacks");
             if (!prov.members.empty())
             {
                 body.Set(L"provider", std::move(prov));
@@ -1580,6 +1660,19 @@ namespace Agentmaster
         };
         putNumber(kPresetFieldTemperature, L"temperature", L"Temperature");
         putNumber(kPresetFieldTopP, L"top_p", L"top_p");
+        // top_k is an integer in every API that takes it: a fractional or signed value is dropped, not rounded.
+        // PresetIsAllDigits caps it at 12 digits, so the double below holds it exactly (< 2^53).
+        if (const auto topK = get(kPresetFieldTopK); !topK.empty())
+        {
+            if (detail::PresetIsAllDigits(topK))
+            {
+                body.Set(L"top_k", json::Value::MkNum(static_cast<double>(std::wcstoull(topK.c_str(), nullptr, 10))));
+            }
+            else
+            {
+                warnings.push_back(L"top_k: \"" + topK + L"\" is not a whole number (not sent)");
+            }
+        }
         if (const auto extra = get(kPresetFieldExtraBody); !extra.empty())
         {
             const auto parsed = json::Parse(extra);
@@ -1709,14 +1802,15 @@ namespace Agentmaster
                 c.warnings.push_back(L"Max output tokens: \"" + maxOut + L"\" is not a whole number (not set)");
             }
         }
-        if (const auto extraEnv = get(kPresetFieldExtraEnv); !extraEnv.empty())
-        {
-            for (const auto& [name, value] : detail::PresetParseEnvLines(extraEnv, &c.warnings))
-            {
-                putEnv(name, value);
-            }
-        }
-        if (const auto effort = get(kPresetFieldEffort); !effort.empty())
+        // Effort rides the settings file as CLAUDE_CODE_EFFORT_LEVEL, not only as --effort: Claude Code obeys that
+        // variable over --effort and /effort for the whole session (claude.exe 2.1.291, Nz()), and a user's own
+        // ~/.claude/settings.json may set it (the reference machine sets max), which would silently override a
+        // --effort-only preset. The --settings file outranks the user's file (HARNESSES.md F1, F9), so the
+        // preset's level wins. The flag is passed too, so the command line names the level the observer's
+        // `model · effort` adornment shows. "none" = neither: the session then follows Claude Code's own setting
+        // (it unsets a template's level). Generated BEFORE the extra env, so a CLAUDE_CODE_EFFORT_LEVEL typed there
+        // still wins (the extra-env rule).
+        if (const auto effort = get(kPresetFieldEffort); !effort.empty() && !detail::PresetEqualsCi(effort, L"none"))
         {
             if (IsValidPresetEffort(effort))
             {
@@ -1725,11 +1819,36 @@ namespace Agentmaster
                 {
                     lower.push_back(detail::PresetLowerAscii(ch));
                 }
+                putEnv(L"CLAUDE_CODE_EFFORT_LEVEL", lower);
                 c.effort = std::move(lower);
             }
             else
             {
-                c.warnings.push_back(L"Effort: \"" + effort + L"\" is not low, medium, high, xhigh or max (not set)");
+                c.warnings.push_back(L"Effort: \"" + effort + L"\" is not low, medium, high, xhigh, max or none (not set)");
+            }
+        }
+        if (const auto extraEnv = get(kPresetFieldExtraEnv); !extraEnv.empty())
+        {
+            for (const auto& [name, value] : detail::PresetParseEnvLines(extraEnv, &c.warnings))
+            {
+                putEnv(name, value);
+            }
+        }
+        // An extra-env line replaced the generated CLAUDE_CODE_EFFORT_LEVEL. Claude Code follows the variable, not
+        // --effort, so the Effort box no longer decides the level: say so in the preview and the [preset] log line.
+        if (!c.effort.empty())
+        {
+            for (const auto& [name, value] : c.settingsEnv)
+            {
+                if (detail::PresetEqualsCi(name, L"CLAUDE_CODE_EFFORT_LEVEL"))
+                {
+                    if (!detail::PresetEqualsCi(detail::PresetTrim(value), c.effort))
+                    {
+                        c.warnings.push_back(L"Effort: Extra env vars sets CLAUDE_CODE_EFFORT_LEVEL=" + value +
+                                             L", which Claude Code follows instead of the Effort box (" + c.effort + L")");
+                    }
+                    break;
+                }
             }
         }
         if (const auto args = get(kPresetFieldExtraArgs); !args.empty())

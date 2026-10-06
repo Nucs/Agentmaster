@@ -3108,13 +3108,31 @@ send - nothing is submitted until the user presses Enter in that tab.
         // same rule the launch-model submenus render by). Returns the model ID to launch with.
         // An EMPTY launchModels list simply never matches — the TITLE slot must still parse
         // (with no models configured, every leading bracket is a title).
-        const auto matchHint = [&](const std::wstring& hint) -> const std::wstring* {
+        // A PRESET entry ("Name | @<id>", appended by LaunchMenuSpecFrom — HARNESSES.md §8.2) is
+        // stricter, because picking one moves the successor to ANOTHER provider, account and bill:
+        // only the BRACKETED form (`bracketed`) can pick it, and only when the hint is a PREFIX of
+        // the preset's folded NAME ("[mimo]", "[mimo flash]", "[kimi]", "[glm 5.3]"). Under the
+        // substring rule every "... · OpenRouter" name matched a bare "open the PR", "out of memory"
+        // or "pro tips", and a "[router]" title bracket was taken as a pick. A preset's id side is
+        // not consulted: a user preset's id ("p-1a2b3c4d") is internal and would match stray short
+        // brackets like "[p1]".
+        //   hint      - the folded hint (a bracket body, or the bare leading words).
+        //   bracketed - true for the "[hint]" form; false for the bare form, which never picks a preset.
+        const auto matchHint = [&](const std::wstring& hint, bool bracketed) -> const std::wstring* {
             if (hint.empty())
             {
                 return nullptr;
             }
             for (const auto& [display, id] : models)
             {
+                if (IsPresetToken(id))
+                {
+                    if (bracketed && fold(display).rfind(hint, 0) == 0)
+                    {
+                        return &id;
+                    }
+                    continue;
+                }
                 if (fold(display).find(hint) != std::wstring::npos || fold(id).find(hint) != std::wstring::npos)
                 {
                     return &id;
@@ -3192,7 +3210,7 @@ send - nothing is submitted until the user presses Enter in that tab.
             // never even tried as a model; like a no-match it falls THROUGH to the title slot.
             if (close <= 65)
             {
-                if (const auto* id = matchHint(fold(line.substr(1, close - 1))))
+                if (const auto* id = matchHint(fold(line.substr(1, close - 1)), /*bracketed*/ true))
                 {
                     hints.modelId = *id;
                     hints.title = titleBracketAfter(close + 1);
@@ -3231,7 +3249,7 @@ send - nothing is submitted until the user presses Enter in that tab.
             {
                 return hints; // too short to be a deliberate bare hint ("a", "do", "5")
             }
-            if (const auto* id = matchHint(concat))
+            if (const auto* id = matchHint(concat, /*bracketed*/ false))
             {
                 best = *id;
                 bestEnd = at;

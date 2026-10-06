@@ -1065,7 +1065,11 @@ namespace Agentmaster
     // (spaces/dots/hyphens/brackets dropped), and the hint matches an entry when it is a SUBSTRING
     // of either folded side — "fable" hits the shipped "Fable"/"fable" and equally a user's pinned
     // "Fable 5"/"claude-fable-5"; "sonnet" hits "claude-sonnet-5". First matching entry in list
-    // order wins. Only the args' FIRST LINE's
+    // order wins. PRESET entries (the "Name | @<id>" lines LaunchMenuSpecFrom appends, HARNESSES.md
+    // §8.2) are stricter, because a preset moves the successor to another provider and bill: only
+    // the BRACKETED form picks one, and only when the hint is a PREFIX of the preset's folded name
+    // ("[mimo flash]", "[glm 5.3]") — a bare "open the PR" can never land on "... · OpenRouter".
+    // Only the args' FIRST LINE's
     // LEADING portion is consulted:
     //   * `[hint]` — the explicit bracketed form: the bracket body is the hint (any non-empty fold;
     //     an absurdly long bracket or a no-match is not a model — it FALLS BACK to the TITLE slot
