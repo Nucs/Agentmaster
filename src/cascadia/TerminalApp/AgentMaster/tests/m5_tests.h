@@ -21,7 +21,7 @@
 //   tests_turns.cpp           - the Copy > Transcript levels: TranscriptTurns (the C++ port of the am-agentmaster-cli skill's transcript_turns.py v9) vs the reference's own goldens in turns\expected, byte for byte; + the summary's whole-conversation chain (CollectConversationUpstream / BuildSummaryConversation)
 //   tests_markdown.cpp        - the transcript overlay's Markdown flattener (MarkdownBlocks — cmark -> flat render blocks); compiled only when the vcpkg cmark of a full build is present (AM_HAVE_CMARK), else it reports a skip
 //   tests_sidepanel.cpp       - SIDE_PANEL.md §2c: the side panel's in-place card list — the order planner (KeyedListDiff.h): reaches the target, indexes in range, minimal; + the cards' and rows' timing line (SessionTimingText.h)
-//   tests_presets.cpp         - HARNESSES.md: PRESETS (LaunchPresets.h, pure) — template seeding, launch-presets.json, the value tiers, the session snapshot (launchArgs), every OpenRouter template's compile vs its launcher profile (MiMo, Kimi, Qwen, GLM), effort, top_k / require_parameters, refusals, the menus, the /handover hint's preset rule
+//   tests_presets.cpp         - HARNESSES.md: PRESETS (LaunchPresets.h, pure) — the empty initial list + "Add presets…", the one-click template adds, the 0.6.8.18 cleanup, launch-presets.json, the value tiers, the session snapshot (launchArgs), every OpenRouter template's compile vs its launcher profile (MiMo, Kimi, Qwen, GLM), effort, top_k / require_parameters, refusals, the menus, the /handover hint's preset rule
 // ======================================================================================
 //
 // Agentmaster - M5 standalone test harness: SHARED declarations.
@@ -239,9 +239,11 @@ void TestSessionTimingText();
 // clamped, NaN / infinite / negative inputs neutralized, and a seeded 20000-case sweep of the invariants
 // (tests_sidepanel.cpp)
 void TestPointerCardPlacement();
-// tests_presets.cpp — HARNESSES.md, PRESETS (LaunchPresets.h, the pure core): the shipped templates seed ONCE (a deleted
-// one stays deleted, an unverified one starts hidden); launch-presets.json round-trips and a malformed file reads as an
-// empty config; the value tiers (box > Agentmaster env > Windows env > template / provider default) for a placeholder
+// tests_presets.cpp — HARNESSES.md, PRESETS (LaunchPresets.h, the pure core): the list starts EMPTY (no template is added
+// by itself) and an empty list offers "Add presets…" with help text naming the way to the Presets tab (a list of hidden
+// presets does not); one click adds a template as a linked, visible "p-" preset and "Add all tested" adds the five tested
+// ones in order; a 0.6.8.18 file loses exactly the untouched presets that build added by itself; launch-presets.json
+// round-trips and a malformed file reads as an empty config; the value tiers (box > Agentmaster env > Windows env > template / provider default) for a placeholder
 // AND a snapshot; the snapshot freezes tiers 1-2, records only the NAME of a Windows variable, never stores a key, and
 // round-trips as JSON; the MiMo Pro template compiles to the reference launcher's env block, and every OpenRouter
 // template (MiMo Pro / Flash, Kimi K3, Qwen3.8, GLM-5.3) to its launcher profile's request body, limits and tested

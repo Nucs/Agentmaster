@@ -694,6 +694,14 @@ namespace winrt::TerminalApp::implementation
         {
             MenuFlyout menu;
             const auto weak = weak_from_this();
+            // PRESETS: the "Add presets…" item takes the presets' place while the user has none — the same shared
+            // question every other model menu's host asks (ShouldOfferAddPresets), asked again at each open because a
+            // Settings Save between two hovers can change the answer.
+            AgentAddPresetsOpener addPresets;
+            if (_host.addPresets && ::Agentmaster::ShouldOfferAddPresets())
+            {
+                addPresets = _host.addPresets;
+            }
             AgentFillModelPickItems(
                 menu.Items(),
                 ::Agentmaster::LaunchMenuEntries(_LaunchModelsSetting()),
@@ -703,7 +711,8 @@ namespace winrt::TerminalApp::implementation
                         self->_OnLaunch(std::wstring{ target });
                     }
                 },
-                _host.specifyModel);
+                _host.specifyModel,
+                addPresets);
             // Forget the menu when it closes, so the next hover can open a fresh one (the list may have
             // changed: a Settings Save adds or renames presets).
             menu.Closed([weak](const IInspectable&, const IInspectable&) {

@@ -4,8 +4,11 @@
 // Agentmaster M5 test harness - PRESETS (doc/agentmaster/HARNESSES.md; AgentMaster/LaunchPresets.h).
 //
 // TestLaunchPresets pins the pure half of the feature:
-//   * the shipped templates seed ONCE (a deleted one stays deleted; an unverified one is seeded hidden),
-//     and an upgrade that ships new templates appends only those;
+//   * the list starts EMPTY - no template is added by itself (the user's rule, 2026-10-06) - and an empty list
+//     offers "Add presets..." (a list of hidden presets does not), with help text that names the way to the
+//     Presets tab; one click adds a template as a LINKED, visible "p-" preset, and "Add all tested" adds the five
+//     tested ones in order; a file written by release 0.6.8.18 (which added the templates by itself) loses
+//     exactly the presets it added that nobody touched, and is never pruned again once re-saved;
 //   * launch-presets.json round-trips, and a malformed file reads as an empty config;
 //   * the value tiers - box > Agentmaster env > Windows env > template - for a placeholder AND a snapshot;
 //   * the snapshot freezes tiers 1-2, records only the NAME of a Windows variable (re-read at every
@@ -71,11 +74,22 @@ namespace
         return L"<absent>";
     }
 
-    // A config with the templates seeded, as the OS loader produces on a first run.
-    LaunchPresetsConfig SeededConfig()
+    // A config holding one preset per shipped template, LINKED to it, with the TEMPLATE's id as its own id and the
+    // untested ones hidden: the list release 0.6.8.18 added by itself, and still a valid list (a user keeps those
+    // presets once they touch them). The tier, compile, menu and hint checks below run against every template
+    // through it, and its ids keep the launch-file name check readable (<preset>-<hash>.json).
+    // Returns the config (never throws except std::bad_alloc).
+    LaunchPresetsConfig AllTemplatesConfig()
     {
         LaunchPresetsConfig cfg;
-        SeedLaunchPresetTemplates(cfg);
+        for (const auto& t : LaunchPresetTemplates())
+        {
+            LaunchPreset p;
+            p.id = t.id;
+            p.templateId = t.id;
+            p.hidden = t.tested.empty();
+            cfg.presets.push_back(std::move(p));
+        }
         return cfg;
     }
 
@@ -169,57 +183,133 @@ void TestLaunchPresets()
     std::wprintf(L"\n[TestLaunchPresets]\n");
     const int checksBefore = g_checks;
 
-    // --- seeding: once, deletion sticks, unverified templates start hidden ---
+    // --- the initial list is EMPTY: no template is added by itself (the user's rule, 2026-10-06), and the launch
+    // menus then offer "Add presets..." in the presets' place (the item itself is AgentModelMenu.h's) ---
     {
-        LaunchPresetsConfig cfg;
-        CHECK(SeedLaunchPresetTemplates(cfg), "presets: a first seed adds the templates");
-        CHECK(cfg.presets.size() == LaunchPresetTemplates().size() && cfg.presets.size() == 7, "presets: one preset per template (5 OpenRouter + 2 Xiaomi)");
-        CHECK(cfg.presets.front().id == L"mimo-pro.openrouter" && cfg.presets.front().templateId == L"mimo-pro.openrouter", "presets: a seeded preset keeps the template id and links to it");
-        bool hiddenIffUntested = true;
-        for (const auto& t : LaunchPresetTemplates())
-        {
-            const auto* p = FindLaunchPreset(cfg, t.id);
-            hiddenIffUntested &= p && p->templateId == t.id && p->hidden == t.tested.empty() && p->hidden == t.hiddenByDefault;
-        }
-        CHECK(hiddenIffUntested, "presets: every template is seeded linked, visible when tested and hidden when not");
-        const std::vector<std::wstring> menuOrder{ L"mimo-pro.openrouter", L"mimo-flash.openrouter", L"kimi.openrouter", L"qwen.openrouter", L"glm.openrouter" };
-        bool visibleInOrder = true;
-        size_t visible = 0;
-        for (const auto& p : cfg.presets)
-        {
-            if (!p.hidden)
-            {
-                visibleInOrder &= visible < menuOrder.size() && p.id == menuOrder[visible];
-                ++visible;
-            }
-        }
-        CHECK(visibleInOrder && visible == menuOrder.size(), "presets: the five tested OpenRouter templates are visible, in the launcher's order (mimo, mimo-flash, kimi, qwen, glm)");
-        CHECK(FindLaunchPreset(cfg, L"mimo-pro.xiaomi")->hidden && FindLaunchPreset(cfg, L"mimo-flash.xiaomi")->hidden, "presets: the unverified Xiaomi templates start hidden");
-        CHECK(!SeedLaunchPresetTemplates(cfg), "presets: a second seed changes nothing");
-        cfg.presets.erase(cfg.presets.begin()); // the user deletes MiMo Pro
-        CHECK(!SeedLaunchPresetTemplates(cfg) && !FindLaunchPreset(cfg, L"mimo-pro.openrouter"), "presets: a deleted template preset is never re-seeded");
+        const auto none = LaunchPresetsConfigFromJson(L"");
+        CHECK(none.presets.empty() && none.providers.empty(), "initial: no file = an empty list (no template is added by itself)");
+        CHECK(ShouldOfferAddPresets(none), "initial: an empty list offers Add presets...");
+        const auto entries = LaunchMenuEntriesFrom({ { L"Opus", L"opus" } }, none);
+        CHECK(entries.size() == 1 && entries[0].second == L"opus", "initial: the menu entries are just the launch models");
+        CHECK(LaunchMenuSpecFrom(L"Opus | opus", none) == L"Opus | opus", "initial: the /handover hint spec gains nothing");
+        LaunchPresetsConfig hiddenOnly;
+        LaunchPreset hidden;
+        hidden.id = L"p-0000beef";
+        hidden.hidden = true;
+        hiddenOnly.presets.push_back(hidden);
+        CHECK(!ShouldOfferAddPresets(hiddenOnly) && LaunchMenuEntriesFrom({}, hiddenOnly).empty(),
+              "initial: a list whose presets are all hidden lists none AND offers no Add presets... (the user has presets)");
+        const auto help = AddPresetsHelpText(false);
+        CHECK(help.find(L"1. Open the Agent Manager") != std::wstring::npos && help.find(L"2. Click \x2699 (Settings)") != std::wstring::npos &&
+                  help.find(L"Presets tab") != std::wstring::npos && help.find(L"TEMPLATES") != std::wstring::npos && help.find(L"4. Click Save.") != std::wstring::npos,
+              "help: outside the Agent Manager - open it, Settings, the Presets tab, TEMPLATES, Save (4 steps)");
+        const auto helpIn = AddPresetsHelpText(true);
+        CHECK(helpIn.find(L"Open the Agent Manager") == std::wstring::npos && helpIn.find(L"1. Click \x2699 (Settings)") != std::wstring::npos &&
+                  helpIn.find(L"3. Click Save.") != std::wstring::npos,
+              "help: over the Agent Manager the open step is left out and the steps renumber");
     }
 
-    // --- an upgrade: a config saved before Kimi / Qwen / GLM shipped gains ONLY the new templates, after the
-    // user's own presets, and a template the user deleted stays deleted ---
+    // --- the shipped templates: seven, in the launcher's order; the five OpenRouter ones tested, the Xiaomi pair not ---
     {
-        LaunchPresetsConfig old;
-        old.seededTemplates = { L"mimo-pro.openrouter", L"mimo-flash.openrouter", L"mimo-pro.xiaomi", L"mimo-flash.xiaomi" };
+        const auto& all = LaunchPresetTemplates();
+        const std::vector<std::wstring> order{ L"mimo-pro.openrouter", L"mimo-flash.openrouter", L"kimi.openrouter", L"qwen.openrouter",
+                                               L"glm.openrouter",      L"mimo-pro.xiaomi",       L"mimo-flash.xiaomi" };
+        bool inOrder = all.size() == order.size();
+        for (size_t i = 0; inOrder && i < all.size(); ++i)
+        {
+            inOrder = all[i].id == order[i] && (i < 5) == !all[i].tested.empty();
+        }
+        CHECK(inOrder, "templates: seven, in the launcher's order; the five OpenRouter ones tested, the Xiaomi pair not (R3)");
+        const LaunchPresetsConfig empty{};
+        CHECK(LaunchPresetTemplatesNotInList(empty, true) == std::vector<std::wstring>(order.begin(), order.begin() + 5), "templates: Add all tested = the five tested ones, in order");
+        CHECK(LaunchPresetTemplatesNotInList(empty, false) == order, "templates: an empty list offers every template");
+    }
+
+    // --- one click adds a template: a LINKED preset at the end, visible, with a "p-" id and nothing typed; the list
+    // then knows it (its row reads Added) and "Add all tested" skips it ---
+    {
+        LaunchPresetsConfig cfg;
         LaunchPreset mine;
         mine.id = L"p-0000aaaa";
         mine.fields[kPresetFieldName] = L"Mine";
-        old.presets.push_back(mine); // every MiMo preset was deleted; the user's own preset remains
-        CHECK(SeedLaunchPresetTemplates(old), "upgrade: the new templates are seeded");
-        CHECK(old.presets.size() == 4 && old.presets[0].id == L"p-0000aaaa" && old.presets[1].id == L"kimi.openrouter" &&
-                  old.presets[2].id == L"qwen.openrouter" && old.presets[3].id == L"glm.openrouter",
-              "upgrade: only the NEW templates are appended, after the user's presets; the deleted MiMo ones stay deleted");
-        CHECK(!old.presets[1].hidden && !old.presets[2].hidden && !old.presets[3].hidden && old.seededTemplates.size() == LaunchPresetTemplates().size(),
-              "upgrade: the new tested templates are visible, and every template is now recorded as seeded");
+        cfg.presets.push_back(mine);
+        const auto added = AddLaunchPresetsFromTemplates(cfg, { L"kimi.openrouter" }, 42);
+        CHECK(added.size() == 1 && cfg.presets.size() == 2 && cfg.presets[1].id == added[0], "add: one preset, appended after the user's own");
+        const LaunchPreset kimi = cfg.presets[1]; // a copy: the adds below grow the vector
+        CHECK(kimi.id.size() == 10 && kimi.id.rfind(L"p-", 0) == 0 && kimi.templateId == L"kimi.openrouter" && !kimi.hidden && kimi.fields.empty(),
+              "add: a p- id, linked to the template, visible, nothing typed");
+        CHECK(PresetDisplayName(kimi) == L"Kimi K3 \x00B7 OpenRouter", "add: its name follows the template");
+        CHECK(LaunchPresetListHasTemplate(cfg, L"kimi.openrouter") && !LaunchPresetListHasTemplate(cfg, L"qwen.openrouter") && !LaunchPresetListHasTemplate(cfg, L""),
+              "add: the list knows the template is in it");
+        CHECK(!ShouldOfferAddPresets(cfg), "add: a list with presets offers no Add presets...");
+        const auto rest = LaunchPresetTemplatesNotInList(cfg, true);
+        CHECK(rest == std::vector<std::wstring>({ L"mimo-pro.openrouter", L"mimo-flash.openrouter", L"qwen.openrouter", L"glm.openrouter" }),
+              "add: Add all tested now skips Kimi");
+        const auto more = AddLaunchPresetsFromTemplates(cfg, rest, 42); // the same entropy as before: the ids must still differ
+        bool unique = more.size() == 4 && cfg.presets.size() == 6;
+        for (size_t i = 0; unique && i < cfg.presets.size(); ++i)
+        {
+            for (size_t j = i + 1; unique && j < cfg.presets.size(); ++j)
+            {
+                unique = cfg.presets[i].id != cfg.presets[j].id;
+            }
+        }
+        CHECK(unique && cfg.presets[2].templateId == L"mimo-pro.openrouter" && cfg.presets[5].templateId == L"glm.openrouter",
+              "add all: the four others appended in order, every id unique even from one entropy value");
+        CHECK(LaunchPresetTemplatesNotInList(cfg, true).empty() && LaunchPresetTemplatesNotInList(cfg, false).size() == 2,
+              "add all: no tested template is left; the untested Xiaomi pair is still offered, by its own rows");
+        const auto entries = LaunchMenuEntriesFrom({ { L"Opus", L"opus" } }, cfg);
+        CHECK(entries.size() == 7 && entries[1].first == L"Mine" && entries[2].second == PresetToken(kimi.id) && entries[2].first == L"Kimi K3 \x00B7 OpenRouter",
+              "add: the menus list the added presets in list order, under the template's name");
+        CHECK(AddLaunchPresetsFromTemplates(cfg, { L"no-such.template" }, 7).empty() && cfg.presets.size() == 6, "add: an unknown template id adds nothing");
+        CHECK(AddLaunchPresetsFromTemplates(cfg, { L"glm.openrouter" }, 7).size() == 1 && cfg.presets.size() == 7,
+              "add: a template already in the list is added AGAIN when asked (Settings offers Add only when it is not)");
+        const auto back = LaunchPresetsConfigFromJson(LaunchPresetsConfigToJson(cfg));
+        CHECK(back.presets.size() == 7 && back.presets[1].templateId == L"kimi.openrouter" && back.presets[1].fields.empty(),
+              "add: the added presets survive the JSON round trip, still linked and untyped");
+    }
+
+    // --- the one-time cleanup of a file written by release 0.6.8.18, the build that added the templates by itself:
+    // a preset that is still EXACTLY what that build added is left out; anything the user touched stays ---
+    {
+        const std::wstring old =
+            L"{\"version\":1,\"seededTemplates\":[\"mimo-pro.openrouter\",\"mimo-flash.openrouter\",\"mimo-pro.xiaomi\",\"mimo-flash.xiaomi\"],\"providers\":[],"
+            L"\"presets\":["
+            L"{\"id\":\"mimo-pro.openrouter\",\"templateId\":\"mimo-pro.openrouter\"}," // untouched -> left out
+            L"{\"id\":\"mimo-flash.openrouter\",\"templateId\":\"mimo-flash.openrouter\",\"fields\":{\"name\":\"Flash\"}}," // renamed -> kept
+            L"{\"id\":\"mimo-pro.xiaomi\",\"templateId\":\"mimo-pro.xiaomi\",\"hidden\":true}," // untouched (hidden, as added) -> left out
+            L"{\"id\":\"mimo-flash.xiaomi\",\"templateId\":\"mimo-flash.xiaomi\"}," // shown by the user -> kept
+            L"{\"id\":\"mimo-pro-2\",\"templateId\":\"mimo-pro.openrouter\"}," // a linked copy with another id -> kept
+            L"{\"id\":\"p-0000aaaa\",\"fields\":{\"name\":\"Mine\"}}" // the user's own -> kept
+            L"]}";
+        std::vector<std::wstring> dropped;
+        const auto cfg = LaunchPresetsConfigFromJson(old, &dropped);
+        CHECK(dropped == std::vector<std::wstring>({ L"mimo-pro.openrouter", L"mimo-pro.xiaomi" }), "cleanup: exactly the untouched auto-added presets are left out");
+        CHECK(cfg.presets.size() == 4 && cfg.presets[0].id == L"mimo-flash.openrouter" && cfg.presets[1].id == L"mimo-flash.xiaomi" &&
+                  cfg.presets[2].id == L"mimo-pro-2" && cfg.presets[3].id == L"p-0000aaaa",
+              "cleanup: a renamed one, an unhidden one, a linked copy and the user's own stay, in order");
+        const auto text = LaunchPresetsConfigToJson(cfg);
+        CHECK(text.find(L"seededTemplates") == std::wstring::npos, "cleanup: a Save writes no seededTemplates list");
+        std::vector<std::wstring> again{ L"stale" };
+        const auto reread = LaunchPresetsConfigFromJson(text, &again);
+        CHECK(again.empty() && reread.presets.size() == 4, "cleanup: a file this build wrote is never pruned (and the out list is cleared)");
+        // The same presets WITHOUT the list (a file no build filled by itself): nothing is left out.
+        std::wstring noList = old;
+        const auto from = noList.find(L"\"seededTemplates\"");
+        noList.erase(from, noList.find(L"\"providers\"") - from);
+        CHECK(LaunchPresetsConfigFromJson(noList).presets.size() == 6, "cleanup: runs only on a file that records seededTemplates");
+        // The file release 0.6.8.18 wrote on the reference machine (2026-10-06 23:05, a Settings Save), verbatim: its
+        // four presets are exactly what that build added, so the list reads EMPTY and the menus offer "Add presets...".
+        const auto reference = LaunchPresetsConfigFromJson(
+            L"{\"version\":1,\"seededTemplates\":[\"mimo-pro.openrouter\",\"mimo-flash.openrouter\",\"mimo-pro.xiaomi\",\"mimo-flash.xiaomi\"],\"providers\":[],"
+            L"\"presets\":[{\"id\":\"mimo-pro.openrouter\",\"templateId\":\"mimo-pro.openrouter\"},{\"id\":\"mimo-flash.openrouter\",\"templateId\":\"mimo-flash.openrouter\"},"
+            L"{\"id\":\"mimo-pro.xiaomi\",\"templateId\":\"mimo-pro.xiaomi\",\"hidden\":true},{\"id\":\"mimo-flash.xiaomi\",\"templateId\":\"mimo-flash.xiaomi\",\"hidden\":true}]}");
+        CHECK(reference.presets.empty() && ShouldOfferAddPresets(reference), "cleanup: the reference machine's 0.6.8.18 file reads as an empty list");
     }
 
     // --- launch-presets.json round trip + tolerance ---
     {
-        auto cfg = SeededConfig();
+        auto cfg = AllTemplatesConfig();
         cfg.presets[1].hidden = true;
         cfg.presets[0].fields[kPresetFieldName] = L"Pro on OR";
         cfg.presets[0].fields[kPresetFieldSmallModel] = L"xiaomi/mimo-v2.6-flash";
@@ -238,7 +328,8 @@ void TestLaunchPresets()
         CHECK(back.presets.size() == cfg.presets.size(), "presets json: preset count survives");
         CHECK(back.presets[0].fields.at(kPresetFieldName) == L"Pro on OR" && back.presets[0].fields.at(kPresetFieldSmallModel) == L"xiaomi/mimo-v2.6-flash", "presets json: sparse fields survive");
         CHECK(back.presets[1].hidden && !back.presets[0].hidden, "presets json: the hidden flag survives");
-        CHECK(back.seededTemplates == cfg.seededTemplates, "presets json: the seeded record survives");
+        CHECK(LaunchPresetsConfigToJson(cfg).find(L"seededTemplates") == std::wstring::npos && back.presets[0].id == L"mimo-pro.openrouter",
+              "presets json: no seededTemplates list is written, so a re-read keeps every preset (nothing is pruned)");
         CHECK(back.providers.size() == 2 && back.providers[0].custom && back.providers[0].envPrefix == L"GLM", "presets json: a custom provider survives");
         CHECK(back.providers[1].anthropicBaseUrl == L"http://127.0.0.1:9999", "presets json: a built-in override survives");
         CHECK(LaunchPresetsConfigFromJson(L"not json").presets.empty(), "presets json: malformed text reads as an empty config");
@@ -248,7 +339,7 @@ void TestLaunchPresets()
 
     // --- tiers: box > Agentmaster env > Windows env > template ---
     {
-        const auto cfg = SeededConfig();
+        const auto cfg = AllTemplatesConfig();
         LaunchPreset p = *FindLaunchPreset(cfg, L"mimo-pro.openrouter");
         const auto none = MapEnv({});
         auto v = ResolvePresetField(kPresetFieldSmallModel, p, cfg, none, none, true);
@@ -301,7 +392,7 @@ void TestLaunchPresets()
     // --- the snapshot: tiers 1-2 frozen, Windows names recorded, never a key ---
     LaunchArgs snap;
     {
-        auto cfg = SeededConfig();
+        auto cfg = AllTemplatesConfig();
         LaunchPreset p = *FindLaunchPreset(cfg, L"mimo-pro.openrouter");
         p.fields[kPresetFieldTopP] = L"0.9";
         snap = SnapshotPresetLaunch(p, cfg, MapEnv({ { L"OPENROUTER_CONTEXT", L"500000" }, { L"OPENROUTER_API_KEY", L"sk-or-v1-secret-value-1234" } }));
@@ -333,7 +424,7 @@ void TestLaunchPresets()
 
     // --- compile: the MiMo Pro template == the reference launcher's env block ---
     {
-        const auto cfg = SeededConfig();
+        const auto cfg = AllTemplatesConfig();
         const auto a = SnapshotPresetLaunch(*FindLaunchPreset(cfg, L"mimo-pro.openrouter"), cfg, MapEnv({}));
         const auto c = CompileClaudeLaunch(a, EffectiveLaunchValues(a, MapEnv({})), L"sk-or-v1-abcdefabcdef9876");
         CHECK(c.error.empty() && c.sessionSettings, "compile: a provider preset writes a settings file");
@@ -415,7 +506,7 @@ void TestLaunchPresets()
             { L"glm.openrouter", L"z-ai/glm-5.3", nullptr, L"1048576",
               L"{\"provider\":{\"order\":[\"z-ai\",\"sail-research\",\"siliconflow\",\"akashml\"],\"quantizations\":[\"fp8\",\"bf16\"]},\"temperature\":1.0,\"top_p\":1.0}" },
         };
-        const auto cfg = SeededConfig();
+        const auto cfg = AllTemplatesConfig();
         for (const auto& ref : kProfiles)
         {
             const auto* t = FindLaunchPresetTemplate(ref.templateId);
@@ -455,7 +546,7 @@ void TestLaunchPresets()
 
     // --- effort: CLAUDE_CODE_EFFORT_LEVEL + --effort; "none" sets neither; an Extra env line still wins ---
     {
-        const auto cfg = SeededConfig();
+        const auto cfg = AllTemplatesConfig();
         auto p = *FindLaunchPreset(cfg, L"kimi.openrouter");
         const auto compile = [&](const LaunchPreset& preset) {
             const auto a = SnapshotPresetLaunch(preset, cfg, MapEnv({}));
@@ -481,7 +572,7 @@ void TestLaunchPresets()
 
     // --- top_k + require_parameters: validation, scope, and the extra-body merge ---
     {
-        const auto cfg = SeededConfig();
+        const auto cfg = AllTemplatesConfig();
         const auto compile = [&](const LaunchPreset& preset, std::wstring_view key) {
             const auto a = SnapshotPresetLaunch(preset, cfg, MapEnv({}));
             return CompileClaudeLaunch(a, EffectiveLaunchValues(a, MapEnv({})), key);
@@ -515,7 +606,7 @@ void TestLaunchPresets()
 
     // --- Xiaomi: no routing block; Claude login: flags only ---
     {
-        const auto cfg = SeededConfig();
+        const auto cfg = AllTemplatesConfig();
         const auto a = SnapshotPresetLaunch(*FindLaunchPreset(cfg, L"mimo-pro.xiaomi"), cfg, MapEnv({}));
         CHECK(!a.routing && a.keyEnv == L"MIMO_API_KEY", "xiaomi: no routing, MIMO_API_KEY");
         const auto c = CompileClaudeLaunch(a, EffectiveLaunchValues(a, MapEnv({})), L"tp-xxxxxxxxxxxxxxxx");
@@ -544,7 +635,7 @@ void TestLaunchPresets()
 
     // --- validation: extra env, extra args, numbers ---
     {
-        const auto cfg = SeededConfig();
+        const auto cfg = AllTemplatesConfig();
         LaunchPreset p = *FindLaunchPreset(cfg, L"mimo-pro.openrouter");
         p.fields[kPresetFieldExtraEnv] = L"API_TIMEOUT_MS=900000\nCCMGR_SESSION_ID=x\nAM_SESSION=y\nnot an assignment\nANTHROPIC_BASE_URL=http://override";
         p.fields[kPresetFieldExtraArgs] = L"--autocompact 600000";
@@ -567,7 +658,7 @@ void TestLaunchPresets()
 
     // --- menus, tokens, small helpers ---
     {
-        auto cfg = SeededConfig();
+        auto cfg = AllTemplatesConfig();
         const auto entries = LaunchMenuEntriesFrom({ { L"Opus", L"opus" } }, cfg);
         CHECK(entries.size() == 6 && entries[0].second == L"opus", "menus: launch models first");
         CHECK(entries[1].second == L"@mimo-pro.openrouter" && entries[2].second == L"@mimo-flash.openrouter" && entries[3].second == L"@kimi.openrouter" &&
@@ -599,7 +690,7 @@ void TestLaunchPresets()
     // in "OpenRouter", and under the substring rule "open the PR" or "out of memory" switched the successor to a
     // paid provider ---
     {
-        const auto cfg = SeededConfig();
+        const auto cfg = AllTemplatesConfig();
         const auto spec = LaunchMenuSpecFrom(L"Fable | fable\nOpus | opus\nSonnet | sonnet", cfg);
         const auto model = [&](std::wstring_view args) { return ParseHandoverArgsHints(args, spec).modelId; };
         CHECK(model(L"[mimo] fix x") == L"@mimo-pro.openrouter" && model(L"[MiMo Flash] fix x") == L"@mimo-flash.openrouter", "hint: [mimo] picks the first MiMo preset, [mimo flash] the Flash one");
@@ -627,7 +718,7 @@ void TestLaunchPresets()
         const fs::path dir = fs::temp_directory_path(ec) / (L"am-presets-test-" + std::to_wstring(::GetCurrentProcessId()));
         fs::remove_all(dir, ec);
         fs::create_directories(dir, ec);
-        const auto cfg = SeededConfig();
+        const auto cfg = AllTemplatesConfig();
         const auto a = SnapshotPresetLaunch(*FindLaunchPreset(cfg, L"mimo-pro.openrouter"), cfg, MapEnv({}));
         const auto c = CompileClaudeLaunch(a, EffectiveLaunchValues(a, MapEnv({})), L"sk-or-v1-abcdefabcdef9876");
         const AppSettings settings{};

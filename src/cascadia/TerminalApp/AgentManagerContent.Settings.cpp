@@ -4882,7 +4882,63 @@ namespace winrt::TerminalApp::implementation
 
     void AgentManagerContent::_BuildPresetsArea(const StackPanel& panel)
     {
-        panel.Children().Append(SettingsSeparator(L"PROVIDERS", true));
+        // TEMPLATES first: the one-click way to the tested configurations. The preset list starts EMPTY (the user's
+        // rule, 2026-10-06: no template is added by itself), and the "Add presets…" item of every launch menu sends
+        // the user to this tab, so the adds sit at its top, before anything scrolls.
+        panel.Children().Append(SettingsSeparator(L"TEMPLATES", true));
+        {
+            auto intro = Text(L"Tested configurations that ship with Agentmaster. Add one to your presets with one click: its empty boxes keep following the template, so a release that retunes it reaches your preset too. Click Save to keep what you add.", 11, false, 0.7);
+            intro.TextWrapping(TextWrapping::Wrap);
+            panel.Children().Append(intro);
+        }
+        _presetsAddAllBtn = Button{};
+        _presetsAddAllBtn.Content(winrt::box_value(L"Add all tested templates"));
+        AgentSetTip(_presetsAddAllBtn, L"Add every tested template that is not in your presets yet, in the order listed below. An untested template is added only by its own Add.");
+        _presetsAddAllBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+            _AddPresetsFromTemplates(::Agentmaster::LaunchPresetTemplatesNotInList(_presetsDraft, true));
+        });
+        panel.Children().Append(_presetsAddAllBtn);
+        _presetTemplateRows.clear();
+        for (const auto& t : ::Agentmaster::LaunchPresetTemplates())
+        {
+            // [Add]  Name
+            //        model id · tested … (· in your presets)
+            auto row = Grid{};
+            ColumnDefinition cButton;
+            cButton.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            ColumnDefinition cText;
+            cText.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            row.ColumnDefinitions().Append(cButton);
+            row.ColumnDefinitions().Append(cText);
+
+            const auto nameIt = t.fields.find(::Agentmaster::kPresetFieldName);
+            const std::wstring name = nameIt == t.fields.end() ? t.id : nameIt->second;
+            auto add = Button{};
+            add.Content(winrt::box_value(L"Add"));
+            add.MinWidth(76);
+            add.VerticalAlignment(VerticalAlignment::Center);
+            add.Margin(Thickness{ 0, 0, 10, 0 });
+            AgentSetTip(add, winrt::hstring{ L"Add \x201C" + name + L"\x201D to your presets, linked to this template. " +
+                                             (t.tested.empty() ? std::wstring{ L"Not tested yet: it may not start." } : (L"Tested " + t.tested + L".")) });
+            // The id is captured, never the button: a control captured in its own handler is a reference cycle.
+            add.Click([this, id = t.id](const IInspectable&, const RoutedEventArgs&) { _AddPresetsFromTemplates({ id }); });
+            Grid::SetColumn(add, 0);
+            row.Children().Append(add);
+
+            auto text = StackPanel{};
+            text.Spacing(1);
+            text.VerticalAlignment(VerticalAlignment::Center);
+            text.Children().Append(Text(winrt::hstring{ name }, 12, true, 0.95));
+            auto detail = Text(L"", 11, false, 0.7); // filled by _RefreshPresetTemplateRows (it follows the draft)
+            detail.TextWrapping(TextWrapping::Wrap);
+            text.Children().Append(detail);
+            Grid::SetColumn(text, 1);
+            row.Children().Append(text);
+            panel.Children().Append(row);
+            _presetTemplateRows.push_back({ t.id, add, detail });
+        }
+
+        panel.Children().Append(SettingsSeparator(L"PROVIDERS"));
         {
             auto intro = Text(L"Where a preset's requests go. Leave a box empty to use the value shown in gray, and where it comes from. A key you type here is stored in Windows Credential Manager, never in a file.", 11, false, 0.7);
             intro.TextWrapping(TextWrapping::Wrap);
@@ -4954,10 +5010,15 @@ namespace winrt::TerminalApp::implementation
         row.Children().Append(dup);
         auto del = Button{};
         del.Content(winrt::box_value(L"Delete"));
-        AgentSetTip(del, L"Remove the selected preset (on Save). A deleted template preset does not come back by itself; make it again with New \x25B8 From template. Sessions that already use it keep their values.");
+        AgentSetTip(del, L"Remove the selected preset (on Save). Nothing comes back by itself: a template's preset can be added again under TEMPLATES above. Sessions that already use it keep their values.");
         del.Click([this](const IInspectable&, const RoutedEventArgs&) { _DeletePreset(); });
         row.Children().Append(del);
         panel.Children().Append(row);
+        // The empty state (the initial one): the picker is blank and the editor hidden, so say what to do.
+        _presetsEmptyLine = Text(L"No presets yet. Add a template under TEMPLATES above, or start one with New \x25B8 Blank preset.", 11, false, 0.7);
+        _presetsEmptyLine.TextWrapping(TextWrapping::Wrap);
+        _presetsEmptyLine.Visibility(Visibility::Collapsed); // _RefreshPresetTemplateRows shows it while the list is empty
+        panel.Children().Append(_presetsEmptyLine);
 
         _presetEditor = StackPanel{};
         _presetEditor.Spacing(8);
@@ -5269,6 +5330,59 @@ namespace winrt::TerminalApp::implementation
             }
         }
         _presetsPicker.SelectedIndex(sel);
+        // Every list change (add, duplicate, delete, load, a rename) passes here, so the TEMPLATES rows and the
+        // empty-list line follow the draft from this one place.
+        _RefreshPresetTemplateRows();
+    }
+
+    void AgentManagerContent::_RefreshPresetTemplateRows()
+    {
+        for (auto& row : _presetTemplateRows)
+        {
+            const auto* t = ::Agentmaster::FindLaunchPresetTemplate(row.templateId);
+            if (!t || !row.add || !row.detail)
+            {
+                continue;
+            }
+            // "Added" while ANY preset links to the template (one the user added, or one release 0.6.8.18 added by
+            // itself and the user changed): a second copy is one Duplicate away, and a disabled Add can't make one
+            // by accident. Deleting that preset brings the Add back.
+            const bool inList = ::Agentmaster::LaunchPresetListHasTemplate(_presetsDraft, row.templateId);
+            row.add.IsEnabled(!inList);
+            row.add.Content(winrt::box_value(winrt::hstring{ inList ? L"Added" : L"Add" }));
+            const auto model = t->fields.find(::Agentmaster::kPresetFieldModel);
+            std::wstring line = model == t->fields.end() ? std::wstring{} : (model->second + L"  \x00B7  ");
+            line += t->tested.empty() ? std::wstring{ L"not tested yet" } : (L"tested " + t->tested);
+            if (inList)
+            {
+                line += L"  \x00B7  in your presets";
+            }
+            row.detail.Text(winrt::hstring{ line });
+        }
+        if (_presetsAddAllBtn)
+        {
+            const auto missing = ::Agentmaster::LaunchPresetTemplatesNotInList(_presetsDraft, true);
+            _presetsAddAllBtn.IsEnabled(!missing.empty());
+            _presetsAddAllBtn.Content(winrt::box_value(winrt::hstring{ missing.empty() ? std::wstring{ L"All tested templates are in your presets" } :
+                                                                                         (L"Add all tested templates (" + std::to_wstring(missing.size()) + L")") }));
+        }
+        if (_presetsEmptyLine)
+        {
+            _presetsEmptyLine.Visibility(_presetsDraft.presets.empty() ? Visibility::Visible : Visibility::Collapsed);
+        }
+    }
+
+    void AgentManagerContent::_AddPresetsFromTemplates(const std::vector<std::wstring>& templateIds)
+    {
+        const auto added = ::Agentmaster::AddLaunchPresetsFromTemplates(_presetsDraft, templateIds, ::Agentmaster::NewPresetEntropy());
+        if (added.empty())
+        {
+            return; // nothing to add (every template asked for is unknown): leave the editor where it is
+        }
+        // Show the first new preset, so the user sees its values (and its provider's key line) at once.
+        _presetsSelectedId = added.front();
+        _RebuildPresetPicker();
+        _SelectPresetForEdit(_presetsSelectedId);
     }
 
     void AgentManagerContent::_SelectPresetForEdit(const std::wstring& id)
@@ -5482,8 +5596,8 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        // The seeded record already lists a template preset (seeding happened in memory on load), so a deleted
-        // template preset stays deleted after Save.
+        // Nothing adds a template preset back by itself (the list starts empty and only the user adds), so a deleted
+        // one stays deleted after Save; its TEMPLATES row offers Add again (_RebuildPresetPicker refreshes the rows).
         const size_t index = static_cast<size_t>(it - v.begin());
         v.erase(it);
         _presetsSelectedId = v.empty() ? std::wstring{} : v[std::min(index, v.size() - 1)].id;
@@ -5507,7 +5621,7 @@ namespace winrt::TerminalApp::implementation
 
     void AgentManagerContent::_LoadPresetsArea()
     {
-        _presetsDraft = ::Agentmaster::LoadLaunchPresetsConfig(); // templates seeded in memory: a first open lists them
+        _presetsDraft = ::Agentmaster::LoadLaunchPresetsConfig(); // as the file holds it: nothing is added by itself, so a first open shows an empty list and the TEMPLATES adds
         _presetKeyDraft.clear();
         _presetKeyDelete.clear();
         if (!::Agentmaster::FindLaunchPreset(_presetsDraft, _presetsSelectedId))
@@ -6144,6 +6258,60 @@ namespace winrt::TerminalApp::implementation
                 self->_PromptForModel(pick);
             }
         };
+    }
+
+    std::function<void()> AgentManagerContent::_AddPresetsOpener()
+    {
+        // The one shared question (the cached config): with any preset in the list — even hidden ones — the menus
+        // offer no "Add presets…" item.
+        if (!::Agentmaster::ShouldOfferAddPresets())
+        {
+            return {};
+        }
+        auto weak = get_weak();
+        return [weak]() {
+            if (auto self = weak.get())
+            {
+                self->_ShowAddPresetsHelp();
+            }
+        };
+    }
+
+    void AgentManagerContent::_ShowAddPresetsHelp()
+    {
+        if (!_dispatcher)
+        {
+            return; // a content with no dispatcher yet has no window to show a dialog in
+        }
+        // Defer off the invoking flyout's click (the _PromptForModel discipline): the MenuFlyout closes asynchronously,
+        // and the dialog should open after it is gone.
+        auto weak = get_weak();
+        _dispatcher.TryEnqueue([weak]() {
+            const auto self = weak.get();
+            if (!self || !self->_root)
+            {
+                return;
+            }
+            try
+            {
+                // Buttons-only (a ContentDialog's text box would take no keypresses under XAML Islands — this one has
+                // none), one OK, as the user asked: the text says where presets are added.
+                ContentDialog dialog;
+                dialog.Title(winrt::box_value(winrt::hstring{ ::Agentmaster::kAddPresetsHelpTitle }));
+                dialog.Content(winrt::box_value(winrt::hstring{ ::Agentmaster::AddPresetsHelpText(/*inAgentManager*/ true) }));
+                dialog.CloseButtonText(L"OK");
+                dialog.DefaultButton(ContentDialogButton::Close);
+                dialog.XamlRoot(self->_root.XamlRoot());
+                dialog.RequestedTheme(ElementTheme::Dark); // the Agent Manager UI is always dark (Conventions)
+                // Not awaited: there is nothing to do after OK. A refusal (another ContentDialog is already open) either
+                // throws here, into the catch, or fails the operation nobody observes; either way nothing else happens.
+                dialog.ShowAsync();
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"AgentManagerContent::_ShowAddPresetsHelp");
+            }
+        });
     }
 
     void AgentManagerContent::_BrowseForClaudeExe(bool fromSettings)

@@ -251,6 +251,50 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (PRESETS, HARNESSES.md §8.2): the "Add presets" help, shown by the "Add presets…" item every model
+    // menu this page serves carries while the user has no preset at all. Modeled on _PromptPresetLaunchError:
+    // buttons-only, agentmaster-dark, one OK (the user's request: a dialog that says where presets are added).
+    winrt::fire_and_forget TerminalPage::_PromptAddPresets()
+    {
+        if (_addPresetsHelpShowing)
+        {
+            co_return; // already up: one dialog, however many clicks
+        }
+        const auto presenter{ _dialogPresenter.get() };
+        if (!presenter)
+        {
+            co_return; // nowhere to show it (a window still starting): the click does nothing, and launches nothing
+        }
+        _addPresetsHelpShowing = true; // set BEFORE the first co_await so a second click in the same tick dedupes
+        const auto weak = get_weak();
+        // Terminate-net: an exception escaping a fire_and_forget is std::terminate (the whole process, every window).
+        // Contain it, and re-arm the dedupe flag in the catch, or the help could never show again for this window.
+        try
+        {
+            ContentDialog dialog;
+            dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
+            dialog.Title(winrt::box_value(winrt::hstring{ ::Agentmaster::kAddPresetsHelpTitle }));
+            // Every surface this page serves (the tab menu, the Sessions page, the side panel's launcher) is outside the
+            // Agent Manager, so the text starts with how to open it.
+            dialog.Content(winrt::box_value(winrt::hstring{ ::Agentmaster::AddPresetsHelpText(/*inAgentManager*/ false) }));
+            dialog.CloseButtonText(L"OK");
+            dialog.DefaultButton(ContentDialogButton::Close);
+            co_await presenter.ShowDialog(dialog);
+            if (const auto strong = weak.get())
+            {
+                strong->_addPresetsHelpShowing = false;
+            }
+        }
+        catch (...)
+        {
+            if (const auto strong = weak.get())
+            {
+                strong->_addPresetsHelpShowing = false;
+            }
+            ::Agentmaster::AgentLogCaughtException(L"_PromptAddPresets");
+        }
+    }
+
     std::optional<::Agentmaster::LaunchArgs> TerminalPage::_StoredLaunchArgsFollowingChain(const std::wstring& sessionId)
     {
         std::wstring cur = sessionId;
@@ -4181,6 +4225,24 @@ namespace winrt::TerminalApp::implementation
             if (const auto page = weak.get())
             {
                 page->_PromptForModel(pick);
+            }
+        };
+    }
+
+    // The "Add presets…" twin of _ModelSpecifyOpener: ONE decision for every model submenu this page builds or feeds.
+    std::function<void()> TerminalPage::_AddPresetsOpener()
+    {
+        // The one shared question (the cached config): with any preset in the list — even hidden ones — the menus
+        // offer no "Add presets…" item.
+        if (!::Agentmaster::ShouldOfferAddPresets())
+        {
+            return {};
+        }
+        auto weak = get_weak();
+        return [weak]() {
+            if (const auto page = weak.get())
+            {
+                page->_PromptAddPresets();
             }
         };
     }

@@ -1,14 +1,19 @@
 # Presets — Claude Code sessions on other models and providers
 
 > **Status: IMPLEMENTED v1 (2026-10-06, commit 82cd65d2a), in release 0.6.8.18 since 2026-10-06 18:36.**
-> The later commits are NOT BUILT: e667b103b (no template identity note) and 00945aa56 (the Kimi K3, Qwen3.8
+> The later commits are NOT BUILT: e667b103b (no template identity note), 00945aa56 (the Kimi K3, Qwen3.8
 > and GLM-5.3 templates, effort as `CLAUDE_CODE_EFFORT_LEVEL`, `top_k` / `require_parameters`, and the
-> /handover hint rule of §8.2). For them, every `TerminalAppLib` file (89) passes a `/Zs` syntax check with
-> the last build's recorded flags (`/W3 /WX` + the `/we` list), and every `agentmaster-cli` file (16) with
-> its own (`/W4 /WX`), negative controls included; the engine harness passes `TestLaunchPresets` (248
-> checks) and the host-script checks in `tests_spawn_sched.cpp`. No live check has run yet: the two preset
-> sessions started in 0.6.8.18 (18:38) got no prompt, so the P0 checks (§10) and the UI checks (§12) are
-> open. The file keeps its proposal-time name (`HARNESSES.md`), because code comments cite its sections. The
+> /handover hint rule of §8.2), and the change that made the list start EMPTY (D14, the same day: no template
+> is added by itself, "Add presets…" in every launch menu with its OK dialog, the TEMPLATES adds in Settings,
+> the 0.6.8.18 cleanup). For the last of them, every `TerminalAppLib` file (89) passes a `/Zs` syntax check
+> with the last build's recorded flags (`/W3 /WX` + the `/we` list), and every `agentmaster-cli` file (16)
+> with its own (`/W4 /WX`); four negative controls (a probe on the new header in four consumers) fail as they
+> must; the engine harness passes `TestLaunchPresets` (265 checks) and the host-script checks in
+> `tests_spawn_sched.cpp`. ⚠ Release 0.6.8.18 still adds the templates by itself: on the reference machine it
+> wrote its four MiMo presets into `~/.agentmaster/launch-presets.json` at a Settings Save (2026-10-06 23:05).
+> The cleanup (§4) leaves all four out once this change is deployed (pinned by a test on that file). No live
+> check has run yet: the two preset sessions started in 0.6.8.18 (18:38) got no prompt, so the P0 checks
+> (§10) and the UI checks (§12) are open. The file keeps its proposal-time name (`HARNESSES.md`), because code comments cite its sections. The
 > proposal it replaces called the feature "harnesses"; the user renamed it **Presets** on 2026-10-06 (§11).
 >
 > The reference configuration is the user's OpenRouter launcher (`mimo`, `mimo-flash`, `kimi`, `qwen`,
@@ -35,9 +40,10 @@ feature.
 | Q5 | Presets are listed at the bottom of every "Fork" and "New Session Here" menu, after a separator, and can be renamed. | §8.2 |
 | Q6 | The Launch button opens the same menu on hover: Default, the models, the presets. | §8.2 |
 | Q7 | Add, rename, delete; tested templates shipped ahead of time; "Claude, with Codex in mind". | §4, §8.1 |
-| Q8 | Templates show in the menus unless the user hides them. | §4 |
+| Q8 | Templates show in the menus unless the user hides them. **Replaced by Q11** (later the same day). | §4 |
 | Q9 | The session keeps the configuration it started with, FLATTENED to values (no template link). Env values are read again from the environment; values from Settings are persisted. Stored in Agentmaster's own session store, as `launchArgs`. | §7 |
 | Q10 | `~/.claude/settings.json` outranking Agentmaster's env vars is the intended order. | [`ENV_VARS.md`](./ENV_VARS.md) §2 |
+| Q11 | No template is included by default: the initial preset list is empty, and the user adds presets by hand. While no preset is defined, the menus show an "Add presets…" item where the presets would be; it opens an OK dialog that says where presets are in Settings. There, a button adds the templates. | §4, §8.1, §8.2 |
 
 ## 2. The reference: what `mimo` does
 
@@ -141,11 +147,13 @@ Agentmaster reuses the launcher's knowledge instead: the same profiles (as templ
   limits, sampling, routing, an optional identity note, extra env, extra arguments (§5.2). Its fields are
   SPARSE: only what the user typed is stored, and an empty field resolves through the tiers (§5.1).
   The user adds, renames, duplicates, hides and deletes presets.
-- **Template** — a tested configuration shipped with the app (`LaunchPresetTemplates`). Each one is
-  seeded ONCE into the user's preset list and stays LINKED to it: an empty field takes the template's
-  CURRENT value, so a release that retunes a template reaches every preset whose field the user never
-  typed. A deleted template preset is never seeded again (`seededTemplates` records it), and New ▸
-  From template makes a new linked copy.
+- **Template** — a tested configuration shipped with the app (`LaunchPresetTemplates`). No template is
+  in the user's list by default (Q11): the list starts EMPTY, and Settings → Presets → TEMPLATES adds
+  one with one click, or every tested one with "Add all tested templates" (`AddLaunchPresetsFromTemplates`,
+  §8.1). An added preset gets a fresh `p-<8 hex>` id and stays LINKED to its template: an empty field
+  takes the template's CURRENT value, so a release that retunes a template reaches every preset whose
+  field the user never typed. Nothing is ever added back by itself: a deleted template preset stays
+  deleted, and its TEMPLATES row offers Add again. New ▸ From template makes a further linked copy.
 - **Launch target** — what one launch runs: `""` (Default), a model id (the old `--model` pick), or
   `@<presetId>`. It is one string, so it travels through the existing `modelOverride` plumbing
   unchanged (the menu callbacks, `_LaunchClaudeSession`, `_ForkManagedSessionById`,
@@ -155,23 +163,35 @@ Agentmaster reuses the launcher's knowledge instead: the same profiles (as templ
   reuses on every later launch (§7). A preset edit, a preset deletion or a template update never
   changes a session that exists.
 
-The shipped templates (from `openrouter-profiles.json`, 2026-10-06), in menu order:
+The shipped templates (from `openrouter-profiles.json`, 2026-10-06), in the order of Settings → Presets →
+TEMPLATES (and of "Add all tested templates"):
 
-| Id | Name | Main and background model | `/model` switch | Context | Request body | Seeded |
+| Id | Name | Main and background model | `/model` switch | Context | Request body | Tested |
 |---|---|---|---|---|---|---|
-| `mimo-pro.openrouter` | MiMo Pro · OpenRouter | `xiaomi/mimo-v2.6-pro` | `xiaomi/mimo-v2.6-flash` | 1,048,576 | `provider.order` gmicloud, novita, deepinfra; `quantizations` bf16, fp8; `temperature` 1.0; `top_p` 0.95 | visible (tested 2026-10-06, Claude Code 2.1.282) |
-| `mimo-flash.openrouter` | MiMo Flash · OpenRouter | `xiaomi/mimo-v2.6-flash` | `xiaomi/mimo-v2.6-pro` | 1,048,320 | the same, order + io-net | visible (tested; re-checked on 2.1.291) |
-| `kimi.openrouter` | Kimi K3 · OpenRouter | `moonshotai/kimi-k3` | — | 1,048,576 | `provider.order` decart, modal, deepinfra; `quantizations` mxfp4; `temperature` 1.0; `top_p` 1.0 | visible (tested) |
-| `qwen.openrouter` | Qwen3.8 2.4T · OpenRouter | `qwen/qwen3.8-2.4t-a95b` | — | 1,000,000 | `provider.order` siliconflow, novita; `require_parameters` true; `allow_fallbacks` false; `temperature` 1.0; `top_p` 0.95; `top_k` 20 | visible (tested) |
-| `glm.openrouter` | GLM-5.3 · OpenRouter | `z-ai/glm-5.3` | — | 1,048,576 | `provider.order` z-ai, sail-research, siliconflow, akashml; `quantizations` fp8, bf16; `temperature` 1.0; `top_p` 1.0 | visible (tested) |
-| `mimo-pro.xiaomi` | MiMo Pro · Xiaomi | `mimo-v2.6-pro` | `mimo-v2.6-flash` | 1,048,576 | `temperature` 1.0; `top_p` 0.95; no `provider` block | **hidden** (not tested: R3) |
-| `mimo-flash.xiaomi` | MiMo Flash · Xiaomi | `mimo-v2.6-flash` | `mimo-v2.6-pro` | 1,048,576 | the same | **hidden** (not tested) |
+| `mimo-pro.openrouter` | MiMo Pro · OpenRouter | `xiaomi/mimo-v2.6-pro` | `xiaomi/mimo-v2.6-flash` | 1,048,576 | `provider.order` gmicloud, novita, deepinfra; `quantizations` bf16, fp8; `temperature` 1.0; `top_p` 0.95 | 2026-10-06, Claude Code 2.1.282 ("Add all tested" adds it) |
+| `mimo-flash.openrouter` | MiMo Flash · OpenRouter | `xiaomi/mimo-v2.6-flash` | `xiaomi/mimo-v2.6-pro` | 1,048,320 | the same, order + io-net | 2026-10-06; re-checked on 2.1.291 |
+| `kimi.openrouter` | Kimi K3 · OpenRouter | `moonshotai/kimi-k3` | — | 1,048,576 | `provider.order` decart, modal, deepinfra; `quantizations` mxfp4; `temperature` 1.0; `top_p` 1.0 | 2026-10-06, Claude Code 2.1.282 |
+| `qwen.openrouter` | Qwen3.8 2.4T · OpenRouter | `qwen/qwen3.8-2.4t-a95b` | — | 1,000,000 | `provider.order` siliconflow, novita; `require_parameters` true; `allow_fallbacks` false; `temperature` 1.0; `top_p` 0.95; `top_k` 20 | 2026-10-06, Claude Code 2.1.282 |
+| `glm.openrouter` | GLM-5.3 · OpenRouter | `z-ai/glm-5.3` | — | 1,048,576 | `provider.order` z-ai, sail-research, siliconflow, akashml; `quantizations` fp8, bf16; `temperature` 1.0; `top_p` 1.0 | 2026-10-06, Claude Code 2.1.282 |
+| `mimo-pro.xiaomi` | MiMo Pro · Xiaomi | `mimo-v2.6-pro` | `mimo-v2.6-flash` | 1,048,576 | `temperature` 1.0; `top_p` 0.95; no `provider` block | **not tested** (R3): added only by its own Add |
+| `mimo-flash.xiaomi` | MiMo Flash · Xiaomi | `mimo-v2.6-flash` | `mimo-v2.6-pro` | 1,048,576 | the same | **not tested**: added only by its own Add |
 
 All seven set Max output 131,072. The five OpenRouter templates set Effort `max`, the level their tests
-ran with (§2, F9, F10); the untested Xiaomi pair sets none. None sets an identity note (§5.2). An untested
-template is seeded hidden, so it never appears in a menu by surprise; the user turns on "Show in the
-launch menus" to offer it. A release that adds a template seeds only that one: an existing preset list
-gains it at the end, and a template the user deleted stays deleted.
+ran with (§2, F9, F10); the untested Xiaomi pair sets none. None sets an identity note (§5.2). None is in
+the preset list until the user adds it (Q11). An untested template is added only by its own Add, never by
+"Add all tested templates", and its row says "not tested yet"; once added it is visible like any preset. A
+release that ships a new template adds nothing to anyone's list: the template only appears in TEMPLATES.
+
+**The 0.6.8.18 cleanup.** Release 0.6.8.18 (82cd65d2a) did add the templates by itself ("seeding"): its
+loader put every template into the list in memory, and any Settings Save then wrote them into
+`launch-presets.json`, with their ids under `seededTemplates`. When this build reads such a file, it leaves
+out each preset that is still exactly what that build added (`DropUntouchedAutoAddedPresets`): the id is
+the template's own id (an added preset gets a `p-` id), the id is listed in `seededTemplates`, no field was
+typed, and the "Show in the launch menus" switch is where seeding left it (off exactly for an untested
+template). A preset the user changed stays. The loader logs one `[preset] launch-presets.json: left out N
+template preset(s) …` line in hooks.log; the next Settings Save writes the file without those presets and
+without `seededTemplates`, so the cleanup runs once. Sessions that started on such a preset keep their own
+snapshot (§7).
 
 ### 4.1 Why these values (the evaluation of 2026-10-06)
 
@@ -469,6 +489,17 @@ The cog's card grew to 800 DIP for the ninth tab. Edits go into a DRAFT, written
 Cancel (the Per-directory env area's form semantics).
 
 ```
+TEMPLATES
+ Tested configurations that ship with Agentmaster. Add one to your presets with one click: …
+ [Add all tested templates (5)]
+ [Add]    MiMo Pro · OpenRouter
+          xiaomi/mimo-v2.6-pro  ·  tested 2026-10-06 · Claude Code 2.1.282
+ [Added]  Kimi K3 · OpenRouter                          (disabled: a preset links to it)
+          moonshotai/kimi-k3  ·  tested 2026-10-06 · Claude Code 2.1.282  ·  in your presets
+ …one row per template, in the table's order (§4)…
+ [Add]    MiMo Flash · Xiaomi
+          mimo-v2.6-flash  ·  not tested yet
+
 PROVIDERS
  Where a preset's requests go. Leave a box empty to use the value shown in gray, …
  OpenRouter   ·   OPENROUTER_*
@@ -486,6 +517,8 @@ PROVIDERS
 PRESETS
  A preset is a named way to start a Claude session: …
  [ MiMo Pro · OpenRouter            ▾]  [New ▾] [Duplicate] [Delete]
+ (an EMPTY list instead shows: "No presets yet. Add a template under TEMPLATES above, or start one with
+  New ▸ Blank preset." and no editor)
    From the template "MiMo Pro · OpenRouter" — tested 2026-10-06 · Claude Code 2.1.282. Empty boxes follow the template.
    Show in the launch menus  [on]
    Provider [ As the template (OpenRouter) ▾ ]   (Claude login (your own account) · OpenRouter · Xiaomi MiMo · custom …)
@@ -501,11 +534,20 @@ PRESETS
    ANTHROPIC_AUTH_TOKEN=sk-or-v1-…a1b2 (only for the claude call)
 ```
 
+- **TEMPLATES** (Q11) sits at the TOP of the tab, so the "Add presets…" dialog (§8.2) points at
+  something visible without scrolling. One row per template (§4): **Add** appends a LINKED preset with a
+  fresh `p-` id, visible, nothing typed, and selects it in the editor (`_AddPresetsFromTemplates` →
+  `AddLaunchPresetsFromTemplates`). While any preset links to the template the button reads **Added** and
+  is disabled (a second copy is Duplicate or New ▸ From template); deleting that preset brings Add back.
+  **Add all tested templates (N)** adds every tested template not in the list yet, in the table's order,
+  and selects the first; it is disabled once N is 0. The untested Xiaomi pair is added only by its own
+  Add. Nothing is written before Save.
 - **New ▾**: "Blank preset" (named "Preset N", the first free number; on the Claude login until a
-  provider is picked) or "From template: <name>" (a linked copy).
+  provider is picked) or "From template: <name>" (a linked copy, also when the template is already in
+  the list).
 - **Duplicate** copies the template link and every typed value, named "<name> (copy)".
-- **Delete** removes the preset on Save. A deleted template preset stays deleted; sessions that use it
-  keep their snapshot.
+- **Delete** removes the preset on Save. Nothing comes back by itself (a template preset's TEMPLATES row
+  offers Add again); sessions that use it keep their snapshot.
 - **Provider**: "As the template (…)" (a linked preset only) · "Claude login (your own account)" · the
   built-in providers · the custom providers. A provider that no longer exists is listed as
   "<id> (missing)", the tested line warns, and the preview reads "Cannot launch".
@@ -533,6 +575,33 @@ Qwen3.8 2.4T · OpenRouter
 GLM-5.3 · OpenRouter
 Preset 1
 ```
+
+With NO preset at all, the initial state (Q11), one item takes the presets' place:
+
+```
+Default
+Specify…
+─────────────
+Fable / Opus / Sonnet
+─────────────
+Add presets…                   (only while the preset list is empty)
+```
+
+- **Add presets…** opens an OK dialog, "Add presets" (`kAddPresetsHelpTitle` + `AddPresetsHelpText`):
+  what a preset is, then the steps — open the Agent Manager (the Home button at the left end of the tab
+  strip; left out when the dialog opens over the Agent Manager), ⚙ Settings → the Presets tab,
+  TEMPLATES → Add or "Add all tested templates", Save — and the OpenRouter key note. The item launches
+  nothing.
+- Every host asks ONE question when it builds a menu, `ShouldOfferAddPresets()` (the list is empty):
+  `_AddPresetsOpener` on the Agent Manager and on the page (it returns no opener while presets exist),
+  and the Launch button's hover menu at each open (`AgentLaunchBar`). A list whose presets are all
+  HIDDEN offers no item: the user has presets and keeps them out of the menus.
+- The Agent Manager self-hosts the ContentDialog (`_ShowAddPresetsHelp`, one tick after the menu
+  closes); the page shows it through its dialog presenter, tagged `agentmaster-dark` and deduped
+  (`_PromptAddPresets`: the tab menu, the Sessions page, the side panel's launcher).
+- The WT tab menu keeps its plain "New Session Here" item when the launch-model list is empty, so it
+  offers no "Add presets…" then (every other surface does). The Commands tab's successor-model combos
+  never list it: they hold values, not actions.
 
 - A preset is visible unless its "Show in the launch menus" switch is off. A visible preset whose key
   is missing is still listed; picking it shows the refusal notice (§6.4).
@@ -583,7 +652,8 @@ a Sessions-page chip and the CLI's `preset:` line are follow-ups (§12). The obs
   temperature 1.0 and top_p 0.95 in thinking mode, so sending them is harmless.
 - Auth header: community configurations use `ANTHROPIC_AUTH_TOKEN` (Bearer). Xiaomi's curl example
   sends an `api-key` header and its SDK example `x-api-key`. **Unverified (R3)** — the reason the two
-  Xiaomi templates are seeded hidden. If only `x-api-key` works, F4 applies: pre-approve the key in
+  Xiaomi templates say "not tested yet" and are left out of "Add all tested templates". If only
+  `x-api-key` works, F4 applies: pre-approve the key in
   `~/.claude.json` `customApiKeyResponses.approved` at the launch seam (the workspace-trust idiom), or
   use `apiKeyHelper`.
 
@@ -600,7 +670,7 @@ has been run against this implementation yet.**
 |---|---|---|
 | R1 | Cross-provider history: MiMo's empty thinking signatures sent to Anthropic, or Anthropic's signed (or redacted) thinking sent to MiMo. Kimi K3, Qwen3.8 and GLM-5.3 are untested in either direction, and so is a fork between two of the five models. | Fork a two-turn MiMo session onto Default and send a prompt; then the reverse; then once per other model. Record success or the API error. The result decides whether a cross-provider Fork stays offered, gets a warning, or is blocked. |
 | R2 | A startup modal parks the tab (F4). | Launch each provider on a PTY with the generated file and env. The screen must show the input box. |
-| R3 | Xiaomi's auth header. | One `-p` call per header style against the pay-as-you-go URL. A pass un-hides the Xiaomi templates (a template edit + its `tested` line). |
+| R3 | Xiaomi's auth header. | One `-p` call per header style against the pay-as-you-go URL. A pass gives the Xiaomi templates a `tested` line (a template edit), so "Add all tested templates" includes them. |
 | R4 | A typed identity note after `--resume` and `--fork-session` (no template sets one). | Ask "which model are you?" after a resume. |
 | R5 | A long silent MiMo turn (F8) demoted from Running. | One long turn on a dev build: no `[recon-stop]` before the real Stop. |
 | R6 | The pwsh prompt after claude exits keeps the key. | At that prompt, `$env:ANTHROPIC_AUTH_TOKEN` and `$env:AM_PRESET_TOKEN` are empty. |
@@ -615,20 +685,24 @@ has been run against this implementation yet.**
 | D3 | Precedence | box > Agentmaster env > Windows env > template / provider default (§5.1); no "fetched" tier yet |
 | D4 | Typed keys | **Windows Credential Manager**, one target per provider, shared by the installs |
 | D5 | Persistence | **every pick** (preset AND plain model) as a flattened `launchArgs` snapshot in the session store — not a `SessionInfo` field, so `sessions.json` is unchanged |
-| D6 | Menu visibility | the preset's own switch (untested templates start hidden); a missing key refuses at launch with a notice instead of hiding the preset |
+| D6 | Menu visibility | the preset's own switch (an added preset starts visible, an untested template's too: the user added it on purpose); a missing key refuses at launch with a notice instead of hiding the preset |
 | D7 | Missing preset, provider, key or URL at a launch | **refuse** and keep the session resumable — never fall back to the Claude login |
 | D8 | Settings file | **content-addressed and immutable**, shared by identical launches (the proposal's per-session file would have been rewritten under a running session on the next relaunch) |
 | D9 | Default target | not built: a plain Launch click and every "Default" item keep the cog's model |
-| D10 | Templates | seeded ONCE, LINKED (empty fields follow the template), a deletion sticks |
-| D11 | Template set (2026-10-06) | the launcher's five profiles as visible templates — MiMo Pro, MiMo Flash, Kimi K3, Qwen3.8 2.4T, GLM-5.3, all through OpenRouter — with their values unchanged (the evaluation's faster or cheaper orders not applied, §4.1) and Effort `max` added, the level every test ran with |
+| D10 | Templates | added only by the user (D14), LINKED (empty fields follow the template); nothing is added back by itself. Until D14 (82cd65d2a … 00945aa56): seeded ONCE into the list, a deletion sticking |
+| D11 | Template set (2026-10-06) | the launcher's five profiles as tested templates — MiMo Pro, MiMo Flash, Kimi K3, Qwen3.8 2.4T, GLM-5.3, all through OpenRouter — with their values unchanged (the evaluation's faster or cheaper orders not applied, §4.1) and Effort `max` added, the level every test ran with |
 | D12 | Effort | written as `CLAUDE_CODE_EFFORT_LEVEL` in the settings file AND as `--effort` (F9); `none` = neither |
 | D13 | /handover hint for presets | the bracketed form with a prefix of the preset's name only; a bare word never picks a preset (§8.2) |
+| D14 | Initial list (2026-10-06, Q11) | EMPTY: no template is added by itself. While the list is empty every launch menu shows "Add presets…", which opens an OK dialog naming the way to Settings → Presets → TEMPLATES (§8.2); there, one Add per template and "Add all tested templates" (§8.1). A 0.6.8.18 file loses the presets that build added and nobody changed (§4) |
 
 ## 12. Follow-ups and known gaps
 
 - **Live checks**: §10 (R1–R7), and the UI — the Launch button's hover menu (open delay, dismissal, a
-  click while it is open), the Presets tab (placeholders, Save / Cancel, Remove stored key), a refusal
-  notice.
+  click while it is open), the Presets tab (placeholders, Save / Cancel, Remove stored key, the TEMPLATES
+  rows' Add / Added and "Add all tested templates"), the "Add presets…" item on every surface and its
+  dialog (the Agent Manager's own and the page's), a refusal notice.
+- The "Add presets" dialog could also open Settings → Presets directly (a "Take me there" button). Not
+  built: the user asked for an OK dialog that says where presets are.
 - **Display** (§8.3): the pill, the vendor-prefix-less model name, a per-provider ⚡ cache rule (the
   current rule is Anthropic's 5 minutes), the Sessions chip, the CLI field.
 - **Test key** and **Fetch limits** (OpenRouter's endpoints data as a tier between the env and the
@@ -649,14 +723,14 @@ has been run against this implementation yet.**
 
 | File | What |
 |---|---|
-| `AgentMaster/LaunchPresets.h` | The PURE core (header-only): field keys + the field table, providers, templates + seeding, `launch-presets.json` (de)serialization, the tiers (`ResolvePresetField`, `ResolveProviderBaseUrl`), the snapshot (`LaunchArgs`, `SnapshotPresetLaunch`, `SnapshotModelLaunch`, `EffectiveLaunchValues`, JSON), the refusal (`PresetLaunchRefusal`), the compile (`CompileClaudeLaunch`, `ComposePresetExtraBody`), the preview, `MaskSecret`, the menu entries + the /handover hint spec. |
-| `AgentMaster/LaunchPresetsOs.h` | The OS half (TerminalApp only): the two env lookups (Agentmaster's list; Windows = process env, then the registry), Credential Manager (`Read/Write/DeletePresetProviderKey`), the stamp-cached config loader, `LaunchMenuEntries` / `LaunchMenuSpec`, `LaunchArgsForTarget`, `Load/StoreLaunchArgs`, `ResolveLaunchKey`, `CompileLaunchForSpawn`. |
+| `AgentMaster/LaunchPresets.h` | The PURE core (header-only): field keys + the field table, providers, templates + the one-click adds (`AddLaunchPresetsFromTemplates`, `LaunchPresetTemplatesNotInList`, `LaunchPresetListHasTemplate`), the 0.6.8.18 cleanup (`DropUntouchedAutoAddedPresets`), the "Add presets…" rule and text (`ShouldOfferAddPresets`, `kAddPresetsMenuText` / `…Tip`, `kAddPresetsHelpTitle`, `AddPresetsHelpText`), `launch-presets.json` (de)serialization, the tiers (`ResolvePresetField`, `ResolveProviderBaseUrl`), the snapshot (`LaunchArgs`, `SnapshotPresetLaunch`, `SnapshotModelLaunch`, `EffectiveLaunchValues`, JSON), the refusal (`PresetLaunchRefusal`), the compile (`CompileClaudeLaunch`, `ComposePresetExtraBody`), the preview, `MaskSecret`, the menu entries + the /handover hint spec. |
+| `AgentMaster/LaunchPresetsOs.h` | The OS half (TerminalApp only): the two env lookups (Agentmaster's list; Windows = process env, then the registry), Credential Manager (`Read/Write/DeletePresetProviderKey`), the stamp-cached config loader (it adds nothing by itself; it logs the 0.6.8.18 cleanup once per file stamp), `LaunchMenuEntries` / `LaunchMenuSpec`, `ShouldOfferAddPresets()` (the one question every host asks before it offers "Add presets…"), `LaunchArgsForTarget`, `Load/StoreLaunchArgs`, `ResolveLaunchKey`, `CompileLaunchForSpawn`. |
 | `AgentMaster/ClaudeSpawn.{h,cpp}` | `ClaudeSpawnSpec::authTokenEnv` / `presetId`; `BuildClaudeCommandline`'s `extraArgs`; `RenderLaunchExtraArgs`; `BuildLaunchSettingsJson`; `MaterializeLaunchSettingsFile`; `ApplyCompiledLaunch`; the `launch` parameter of `BuildClaudeSpawn` / `BuildClaudeRestartSpec`; `BuildPwshHostedCommandline`'s token scoping; `ParseHandoverArgsHints`' preset rule (D13). |
 | `AgentMaster/Persistence.{h,cpp}` | `LaunchPresetsPath` / `LoadLaunchPresetsText` / `SaveLaunchPresetsText` (atomic). |
-| `TerminalPage.AgentSessions.cpp` (+ `.h`) | `_ResolveLaunchForSpawn` (the ONE launch-target decision), `_StoredLaunchArgsFollowingChain`, `_PromptPresetLaunchError`, and the seams: `_LaunchClaudeSession` (+ `inheritLaunchFromId`), the /handover successors, `_RestartTabIntoFreshSession`, `_RestartManagedSession`, Deactivate. |
-| `AgentModelMenu.h` | The preset group (separator + tooltips) in `AgentFillModelPickItems`. |
-| `AgentManagerContent.Settings.cpp` (+ `.h`, `.cpp`) | The Presets tab (§8.1). |
-| `AgentLaunchBar.cpp` (+ `.h`) | The Launch button's hover menu and `_OnLaunch(target)` — moved here from `AgentManagerContent.Launch.cpp` on 2026-10-06 (the shared launch bar the Agent Manager page and the side panel's `+` launcher both run; SIDE_PANEL.md §2e). |
-| `AgentManagerContent.Tree.cpp`, `TerminalPage.AgentSessionsPage.cpp`, `TerminalPage.cpp` | The menu sites switched from `ParseLaunchModels` to `LaunchMenuEntries`. |
-| `AgentMaster/tests/tests_presets.cpp` | `TestLaunchPresets`: seeding (and an upgrade that adds templates), the JSON, the tiers, the snapshot, the compile vs the reference block, every OpenRouter template vs its launcher profile (ordered JSON body, models, limits, effort), effort (`none`, the extra-env override), `top_k` / `require_parameters`, the refusals, the reserved names / forbidden flags, the mask, the menus, the /handover hint's preset rule, and the launch settings file on disk (valid JSON, no key, reuse, the rewrite of a broken file, no temp left). |
+| `TerminalPage.AgentSessions.cpp` (+ `.h`) | `_ResolveLaunchForSpawn` (the ONE launch-target decision), `_StoredLaunchArgsFollowingChain`, `_PromptPresetLaunchError`, `_AddPresetsOpener` + `_PromptAddPresets` (the page's "Add presets…" item and its OK dialog, §8.2), and the seams: `_LaunchClaudeSession` (+ `inheritLaunchFromId`), the /handover successors, `_RestartTabIntoFreshSession`, `_RestartManagedSession`, Deactivate. |
+| `AgentModelMenu.h` | The preset group (separator + tooltips) in `AgentFillModelPickItems`, and the "Add presets…" item in its place while the list is empty (`AgentAddPresetsOpener`). |
+| `AgentManagerContent.Settings.cpp` (+ `.h`, `.cpp`) | The Presets tab (§8.1): TEMPLATES (`_RefreshPresetTemplateRows`, `_AddPresetsFromTemplates`), the empty-list line, the editor; and the Agent Manager's "Add presets…" opener + dialog (`_AddPresetsOpener`, `_ShowAddPresetsHelp`). |
+| `AgentLaunchBar.cpp` (+ `.h`) | The Launch button's hover menu (it offers "Add presets…" through the host's `addPresets` while the list is empty) and `_OnLaunch(target)` — moved here from `AgentManagerContent.Launch.cpp` on 2026-10-06 (the shared launch bar the Agent Manager page and the side panel's `+` launcher both run; SIDE_PANEL.md §2e). |
+| `AgentManagerContent.Tree.cpp`, `TerminalPage.AgentSessionsPage.cpp`, `TerminalPage.cpp` | The menu sites switched from `ParseLaunchModels` to `LaunchMenuEntries`, and pass the host's `_AddPresetsOpener()`; `Tab.cpp`'s two model submenus take it from the page at flyout-open (its presence is part of their rebuild key). |
+| `AgentMaster/tests/tests_presets.cpp` | `TestLaunchPresets`: the empty initial list + `ShouldOfferAddPresets` (a list of hidden presets offers nothing) + the dialog text, the template order and tested flags, the one-click adds (linked, visible, `p-` ids, "Add all tested" skips what is in the list), the 0.6.8.18 cleanup (exactly the untouched auto-added presets; never on a file this build wrote), the JSON, the tiers, the snapshot, the compile vs the reference block, every OpenRouter template vs its launcher profile (ordered JSON body, models, limits, effort), effort (`none`, the extra-env override), `top_k` / `require_parameters`, the refusals, the reserved names / forbidden flags, the mask, the menus, the /handover hint's preset rule, and the launch settings file on disk (valid JSON, no key, reuse, the rewrite of a broken file, no temp left). |
 | `AgentMaster/tests/tests_spawn_sched.cpp` | The pwsh host script's token scoping (carrier → `ANTHROPIC_AUTH_TOKEN` → removed in `finally`) and the refusal of an unsafe carrier name. |

@@ -2776,8 +2776,11 @@ namespace winrt::TerminalApp::implementation
     // list keeps the PLAIN item; otherwise the submenu shows: Default + one item per model, every
     // click raising NewSessionHereRequested with its model id ("" for Default) — the page spawns.
     // The rebuild is change-gated on the joined list (_newSessionModelsKey) so the usual flyout-open
-    // with an unchanged settings list touches nothing.
-    void Tab::SetNewSessionModels(const std::vector<std::pair<std::wstring, std::wstring>>& models, bool isCodex, std::function<void(std::function<void(winrt::hstring)>)> specify)
+    // with an unchanged settings list touches nothing. PRESETS: `addPresets` is the page's "Add
+    // presets…" opener, passed only while the user has no preset at all; the submenu then ends with
+    // that item. An EMPTY list keeps the plain item even then (a user who cleared the launch models
+    // asked for the one-click Default; the other surfaces still offer "Add presets…").
+    void Tab::SetNewSessionModels(const std::vector<std::pair<std::wstring, std::wstring>>& models, bool isCodex, std::function<void(std::function<void(winrt::hstring)>)> specify, std::function<void()> addPresets)
     {
         ASSERT_UI_THREAD();
 
@@ -2796,6 +2799,9 @@ namespace winrt::TerminalApp::implementation
             key += id;
             key += L'\x1E';
         }
+        // The "Add presets…" item comes and goes with the opener (the user adds or deletes the last preset), and a
+        // HIDDEN preset leaves `models` unchanged while taking the item away — so its presence is part of the key.
+        key += addPresets ? L"\x1D+add-presets" : L"\x1D";
         if (key == _newSessionModelsKey && _newSessionHereSubMenu.Items().Size() > 0)
         {
             return; // unchanged list — skip the item churn
@@ -2810,7 +2816,8 @@ namespace winrt::TerminalApp::implementation
                     tab->NewSessionHereRequested.raise(model);
                 }
             },
-            specify);
+            specify,
+            addPresets);
     }
 
     // Agentmaster (launch-model picker): the "Fork session" twin of SetNewSessionModels — swap the
@@ -2821,8 +2828,9 @@ namespace winrt::TerminalApp::implementation
     // duplicate — both keep the plain item. Submenu picks raise ForkSessionRequested (the page
     // routes to _ForkManagedSessionById with the clicked tab's placement); the plain item keeps its
     // action dispatch, which reaches the same fork seam with model = Default. Change-gated like
-    // SetNewSessionModels so an unchanged settings list costs nothing at flyout-open.
-    void Tab::SetForkSessionModels(const std::vector<std::pair<std::wstring, std::wstring>>& models, bool isManagedClaude, std::function<void(std::function<void(winrt::hstring)>)> specify)
+    // SetNewSessionModels so an unchanged settings list costs nothing at flyout-open; `addPresets`
+    // works as there (the "Add presets…" item while the user has no preset; part of the key).
+    void Tab::SetForkSessionModels(const std::vector<std::pair<std::wstring, std::wstring>>& models, bool isManagedClaude, std::function<void(std::function<void(winrt::hstring)>)> specify, std::function<void()> addPresets)
     {
         ASSERT_UI_THREAD();
 
@@ -2841,6 +2849,7 @@ namespace winrt::TerminalApp::implementation
             key += id;
             key += L'\x1E';
         }
+        key += addPresets ? L"\x1D+add-presets" : L"\x1D"; // the "Add presets…" item's presence (see SetNewSessionModels)
         if (key == _forkModelsKey && _forkSessionSubMenu.Items().Size() > 0)
         {
             return; // unchanged list — skip the item churn
@@ -2855,7 +2864,8 @@ namespace winrt::TerminalApp::implementation
                     tab->ForkSessionRequested.raise(model);
                 }
             },
-            specify);
+            specify,
+            addPresets);
     }
 
     // Agentmaster (FAVORITES.md): show/hide the "★ Favorite & close all tabs" close-submenu item. Unlike

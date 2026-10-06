@@ -117,6 +117,14 @@ namespace winrt::TerminalApp::implementation
         // The "Specify…" opener for the hover menu. Taken once: it is itself a weak-capturing lambda that reaches the
         // content per call (_ModelSpecifyOpener), so it is the same opener the old per-hover call produced.
         host.specifyModel = _ModelSpecifyOpener();
+        // PRESETS: the hover menu's "Add presets…" item opens the Manager's own help dialog. The bar decides when the
+        // item shows (only while the user has no preset at all), so this is just the dialog.
+        host.addPresets = [weak]() {
+            if (const auto self = weak.get())
+            {
+                self->_ShowAddPresetsHelp();
+            }
+        };
         host.layoutChanged = [weak]() {
             if (const auto self = weak.get())
             {

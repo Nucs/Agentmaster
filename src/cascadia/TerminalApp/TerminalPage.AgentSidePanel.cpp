@@ -3487,6 +3487,14 @@ namespace winrt::TerminalApp::implementation
             // The page's "Specify a model" opener (a Root() popup — _SidePanelLaunchPressIsInside keeps the card open
             // while it is up, so its pick can still finish this card's launch).
             host.specifyModel = _ModelSpecifyOpener();
+            // PRESETS: the hover menu's "Add presets…" item opens the page's help dialog. The bar decides when the item
+            // shows (only while the user has no preset at all), so this is just the dialog.
+            host.addPresets = [weakThis]() {
+                if (const auto self = weakThis.get())
+                {
+                    self->_PromptAddPresets();
+                }
+            };
             host.layoutChanged = [weakThis]() {
                 if (const auto self = weakThis.get())
                 {

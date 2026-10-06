@@ -1132,7 +1132,7 @@ namespace winrt::TerminalApp::implementation
                 };
                 if (disp) { disp.TryEnqueue(act); } else { act(); }
             },
-                                    _ModelSpecifyOpener());
+                                    _ModelSpecifyOpener(), _AddPresetsOpener());
             menu.Items().Append(openHere);
 
             // Copy Session Id — the resolved conversation id. Empty for a never-prompted external
@@ -1873,7 +1873,7 @@ namespace winrt::TerminalApp::implementation
                 };
                 if (disp) { disp.TryEnqueue(act); } else { act(); }
             },
-                                    _ModelSpecifyOpener());
+                                    _ModelSpecifyOpener(), _AddPresetsOpener());
             menu.Items().Append(openHere);
         }
 
@@ -1944,7 +1944,7 @@ namespace winrt::TerminalApp::implementation
                 };
                 if (disp) { disp.TryEnqueue(act); } else { act(); }
             },
-                                    _ModelSpecifyOpener());
+                                    _ModelSpecifyOpener(), _AddPresetsOpener());
             menu.Items().Append(fork);
         }
 

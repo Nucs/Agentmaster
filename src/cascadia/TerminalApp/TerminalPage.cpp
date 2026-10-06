@@ -2956,9 +2956,12 @@ namespace winrt::TerminalApp::implementation
                     const auto launchModels = ::Agentmaster::LaunchMenuEntries(page->_appSettings.launchModels);
                     // The "Specify..." item's opener is the PAGE's prompt (a Tab has no visual root
                     // of its own to host a modal in) — handed over here so the tab menu's submenus
-                    // show the very same card the Manager and Sessions surfaces do.
-                    tab->SetNewSessionModels(launchModels, isCodex, page->_ModelSpecifyOpener());
-                    tab->SetForkSessionModels(launchModels, isSession && !isCodex, page->_ModelSpecifyOpener());
+                    // show the very same card the Manager and Sessions surfaces do. Same for the
+                    // PRESETS "Add presets…" item: the page's opener, decided here at flyout-open
+                    // (empty while the user has any preset, so the item is left out).
+                    const auto addPresets = page->_AddPresetsOpener();
+                    tab->SetNewSessionModels(launchModels, isCodex, page->_ModelSpecifyOpener(), addPresets);
+                    tab->SetForkSessionModels(launchModels, isSession && !isCodex, page->_ModelSpecifyOpener(), addPresets);
                     tab->SetAgentMarkUnreadVisible(isSession); // Agentmaster: "Mark Unread" is session-only too
                     tab->SetAgentOpenInExplorerVisible(isSession); // Agentmaster: "Open In Explorer" is session-only too (opens the session's EFFECTIVE work dir — inferred → cwd — like the overlay Open Path)
                     tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star

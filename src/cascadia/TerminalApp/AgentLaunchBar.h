@@ -116,6 +116,10 @@ namespace winrt::TerminalApp::implementation
         // The "Specify…" opener the Launch hover menu hands to AgentFillModelPickItems (AgentModelMenu.h). Empty =
         // the menu has no "Specify…" item.
         std::function<void(std::function<void(winrt::hstring)>)> specifyModel;
+        // PRESETS: show the host's "Add presets" dialog (where presets are added). The bar hands it to the hover menu
+        // only while the user has no preset at all — it asks ::Agentmaster::ShouldOfferAddPresets() each time the menu
+        // opens — so the "Add presets…" item takes the presets' place exactly then. Empty = never such an item.
+        std::function<void()> addPresets;
         // The bar's own width just changed (the agent toggle's label, the Launch label, Fork shown or hidden). The
         // Agent Manager re-runs its staged toolbar reflow here; the side panel does not need it (its card re-places
         // itself on its own SizeChanged).

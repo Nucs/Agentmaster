@@ -977,6 +977,7 @@ namespace winrt::TerminalApp::implementation
         // burst — a window restore of several preset sessions with no key — shows ONE dialog. Re-armed when the
         // dialog closes, and in its catch, or the notice could never show again for the window's life.
         bool _presetLaunchErrorShowing{ false };
+        bool _addPresetsHelpShowing{ false }; // Agentmaster (PRESETS): the "Add presets" dialog is up — a second click while it shows opens nothing (_PromptAddPresets)
         // The visible row ids in TABLE (sorted+filtered) order — the Up/Down keyboard
         // navigation list (the archive page's _archiveVisibleOrder pattern). Rebuilt each render.
         std::vector<std::wstring> _sessionsVisibleOrder;
@@ -1610,6 +1611,20 @@ namespace winrt::TerminalApp::implementation
         void _PromptForModel(std::function<void(winrt::hstring)> onPicked, const std::wstring& seed = {});
         void _HideSpecifyModel();
         std::function<void(std::function<void(winrt::hstring)>)> _ModelSpecifyOpener(); // ONE opener, shared by every model submenu this page builds or feeds
+        // Agentmaster (PRESETS, HARNESSES.md §8.2): the "Add presets…" opener every model submenu this page builds or
+        // feeds passes to AgentFillModelPickItems (the Sessions page's row menu + detail split buttons, the WT tab
+        // menu's submenus). Asked when the menu is built: it returns the opener ONLY while the user has no preset at all
+        // (::Agentmaster::ShouldOfferAddPresets — the one shared question), else an empty function, so the item is left
+        // out. The side panel's Launch hover menu asks the same question itself (AgentLaunchBar) and calls
+        // _PromptAddPresets through its host.
+        // Returns the opener (it reaches this page weakly), or an empty function. Throws std::bad_alloc only.
+        std::function<void()> _AddPresetsOpener();
+        // Show where presets are added: a buttons-only dialog through the window's dialog presenter, tagged
+        // agentmaster-dark, with one OK button (the user's request) and the text AddPresetsHelpText(false) — which
+        // starts with "open the Agent Manager (Home)", because every surface this page serves is outside it. Deduped by
+        // _addPresetsHelpShowing (re-armed when the dialog closes, and in the catch). Never throws: the body is
+        // contained, since an escape from a fire_and_forget would terminate the app.
+        winrt::fire_and_forget _PromptAddPresets();
         void _RebuildTagEditorList(); // re-list the GLOBAL tag universe (CollectGlobalTags over sessions ∪ the tags.json registry — max session activity desc, 0-carrier known tags last) with this session's on/off state per row, a right-aligned ✕ delete on 0-carrier rows, + the "K of N tags" footer
         void _CommitTagEditorAdd(); // the "+" button / Enter: normalize the typed name; an existing tag just applies to this session, a NEW name is cap-gated (AppSettings::maxTags) + takes the picker's color (an explicit pick also recolors an existing tag); re-randomizes the pick after a successful add
         void _UpdateTagEditorAddState(); // TextChanged: show the "+" only when the box holds a usable name; disable + hint when a NEW name would exceed the cap

@@ -13,11 +13,13 @@
 // shape.
 //
 // Three layers of data:
-//   * TEMPLATES (LaunchPresetTemplates) — tested configurations shipped with the app. Each one is seeded
-//     ONCE into the user's preset list (SeedLaunchPresetTemplates; "deletion sticks", the ApplyEnvDefaults
-//     rule), so it shows in the menus until the user hides or deletes it. A seeded preset stays LINKED to
-//     its template: an empty field inherits the template's CURRENT value, so a release that retunes a
-//     template reaches every preset whose field the user never typed.
+//   * TEMPLATES (LaunchPresetTemplates) — tested configurations shipped with the app. NONE is in the user's
+//     list by default (the user's rule, 2026-10-06: "the initial presets are none"): Settings ▸ Presets ▸
+//     TEMPLATES adds one, or every tested one, with one click (AddLaunchPresetsFromTemplates), and while the
+//     list is empty every launch menu offers "Add presets…" where the presets would be (ShouldOfferAddPresets),
+//     which tells where that list is. An added preset stays LINKED to its template: an empty field inherits
+//     the template's CURRENT value, so a release that retunes a template reaches every preset whose field
+//     the user never typed.
 //   * PRESETS (LaunchPresetsConfig, <profile>\launch-presets.json) — the user's list: add, rename, hide,
 //     delete. Fields are SPARSE: only what the user typed is stored; the rest resolves through the tiers.
 //   * LAUNCH ARGS (LaunchArgs, <profile>\session-store\<sid>.json key "launchArgs") — the FLATTENED
@@ -671,24 +673,24 @@ namespace Agentmaster
         std::map<std::wstring, std::wstring> fields; // field key -> the value the user typed
     };
 
-    // A shipped, tested configuration. Seeded into the preset list once (SeedLaunchPresetTemplates).
+    // A shipped, tested configuration. It is never in the user's list by itself: Settings ▸ Presets ▸ TEMPLATES
+    // adds it on a click (AddLaunchPresetsFromTemplates), as a preset LINKED to it.
     struct LaunchPresetTemplate
     {
-        std::wstring id; // also the id of the preset it seeds
-        std::wstring tested; // when + with which Claude Code it was verified; "" = not verified yet
-        bool hiddenByDefault{ false }; // an unverified template is seeded hidden, so it never shows by surprise
+        std::wstring id; // stable: the link a preset keeps (LaunchPreset::templateId); never reused for other values
+        std::wstring tested; // when + with which Claude Code it was verified; "" = not verified yet ("Add all tested" skips it)
         std::map<std::wstring, std::wstring> fields; // every value the template sets
     };
 
-    // The whole <profile>\launch-presets.json document.
+    // The whole <profile>\launch-presets.json document. An empty `presets` is the INITIAL state: no preset until
+    // the user adds one (a template or a blank preset in Settings).
     struct LaunchPresetsConfig
     {
         std::vector<LaunchProviderEntry> providers; // overrides of built-ins + custom providers
         std::vector<LaunchPreset> presets; // menu order
-        std::vector<std::wstring> seededTemplates; // template ids already seeded once (a deleted one stays deleted)
     };
 
-    // The templates this release ships, in menu order. The five OpenRouter templates are the reference
+    // The templates this release ships, in the order Settings lists them. The five OpenRouter templates are the reference
     // launcher's profiles (~/.claude/scripts/openrouter-profiles.json: mimo, mimo-flash, kimi, qwen, glm), each
     // run end to end through that launcher on 2026-10-06 with Claude Code 2.1.282: the endpoints in each order
     // returned thinking tokens and received the earlier reasoning, and every request carried the template's
@@ -702,14 +704,17 @@ namespace Agentmaster
     // equal to what was tested.
     //
     // The Xiaomi pair uses the documented endpoint and ids but has NOT been run yet (HARNESSES.md check R3:
-    // does Xiaomi accept a Bearer token?), so it is seeded hidden and sets no effort.
+    // does Xiaomi accept a Bearer token?), so its `tested` is empty: Settings marks it "not tested yet", "Add all
+    // tested" skips it, and it sets no effort.
+    //
+    // The list order is the order of Settings ▸ Presets ▸ TEMPLATES and of "Add all tested" (the launcher's order).
     // Returns the immutable list (built once, thread-safe).
     inline const std::vector<LaunchPresetTemplate>& LaunchPresetTemplates()
     {
         static const std::vector<LaunchPresetTemplate> templates = [] {
             std::vector<LaunchPresetTemplate> t;
             const std::wstring tested = L"2026-10-06 \x00B7 Claude Code 2.1.282";
-            t.push_back({ L"mimo-pro.openrouter", tested, false, {
+            t.push_back({ L"mimo-pro.openrouter", tested, {
                 { kPresetFieldName, L"MiMo Pro \x00B7 OpenRouter" },
                 { kPresetFieldProvider, L"openrouter" },
                 { kPresetFieldModel, L"xiaomi/mimo-v2.6-pro" },
@@ -723,7 +728,7 @@ namespace Agentmaster
                 { kPresetFieldTemperature, L"1.0" },
                 { kPresetFieldTopP, L"0.95" },
             } });
-            t.push_back({ L"mimo-flash.openrouter", L"2026-10-06 \x00B7 Claude Code 2.1.282 and 2.1.291", false, {
+            t.push_back({ L"mimo-flash.openrouter", L"2026-10-06 \x00B7 Claude Code 2.1.282 and 2.1.291", {
                 { kPresetFieldName, L"MiMo Flash \x00B7 OpenRouter" },
                 { kPresetFieldProvider, L"openrouter" },
                 { kPresetFieldModel, L"xiaomi/mimo-v2.6-flash" },
@@ -739,7 +744,7 @@ namespace Agentmaster
             } });
             // Kimi K3: Moonshot's benchmark settings. Moonshot trains Kimi K3 in MXFP4, so "mxfp4 only" is the
             // official precision, not a quantized copy (the generic fp4 hosts stay out). Decart first: ~200 tokens/s.
-            t.push_back({ L"kimi.openrouter", tested, false, {
+            t.push_back({ L"kimi.openrouter", tested, {
                 { kPresetFieldName, L"Kimi K3 \x00B7 OpenRouter" },
                 { kPresetFieldProvider, L"openrouter" },
                 { kPresetFieldModel, L"moonshotai/kimi-k3" },
@@ -756,7 +761,7 @@ namespace Agentmaster
             // skips a host that would ignore top_k (Modal); allow_fallbacks false keeps the request on the two
             // listed hosts — without it a forced failure went to Venice, whose precision is not stated. No
             // quantizations filter: Novita states no precision, so a filter would drop it.
-            t.push_back({ L"qwen.openrouter", tested, false, {
+            t.push_back({ L"qwen.openrouter", tested, {
                 { kPresetFieldName, L"Qwen3.8 2.4T \x00B7 OpenRouter" },
                 { kPresetFieldProvider, L"openrouter" },
                 { kPresetFieldModel, L"qwen/qwen3.8-2.4t-a95b" },
@@ -773,7 +778,7 @@ namespace Agentmaster
             } });
             // GLM-5.3: Z.ai's own Claude Code benchmark settings. Z.ai releases FP8 weights, and its own endpoint
             // (z-ai) is first; fallbacks stay on fp8/bf16.
-            t.push_back({ L"glm.openrouter", tested, false, {
+            t.push_back({ L"glm.openrouter", tested, {
                 { kPresetFieldName, L"GLM-5.3 \x00B7 OpenRouter" },
                 { kPresetFieldProvider, L"openrouter" },
                 { kPresetFieldModel, L"z-ai/glm-5.3" },
@@ -786,7 +791,7 @@ namespace Agentmaster
                 { kPresetFieldTemperature, L"1.0" },
                 { kPresetFieldTopP, L"1.0" },
             } });
-            t.push_back({ L"mimo-pro.xiaomi", L"", true, {
+            t.push_back({ L"mimo-pro.xiaomi", L"", {
                 { kPresetFieldName, L"MiMo Pro \x00B7 Xiaomi" },
                 { kPresetFieldProvider, L"xiaomi" },
                 { kPresetFieldModel, L"mimo-v2.6-pro" },
@@ -797,7 +802,7 @@ namespace Agentmaster
                 { kPresetFieldTemperature, L"1.0" },
                 { kPresetFieldTopP, L"0.95" },
             } });
-            t.push_back({ L"mimo-flash.xiaomi", L"", true, {
+            t.push_back({ L"mimo-flash.xiaomi", L"", {
                 { kPresetFieldName, L"MiMo Flash \x00B7 Xiaomi" },
                 { kPresetFieldProvider, L"xiaomi" },
                 { kPresetFieldModel, L"mimo-v2.6-flash" },
@@ -848,36 +853,6 @@ namespace Agentmaster
         return nullptr;
     }
 
-    // Seed every template that was never seeded into `cfg`: append it as a preset (id = the template id,
-    // linked to it, hidden when the template is unverified) and record it in seededTemplates. A template
-    // already recorded is skipped even when its preset is gone — the user deleted it, and a deletion sticks.
-    // The OS loader seeds in memory on every load and the next Save persists the record, so a read never
-    // writes the file.
-    //   cfg - the config (modified).
-    // Returns true when anything was added.
-    inline bool SeedLaunchPresetTemplates(LaunchPresetsConfig& cfg)
-    {
-        bool changed = false;
-        for (const auto& t : LaunchPresetTemplates())
-        {
-            if (std::find(cfg.seededTemplates.begin(), cfg.seededTemplates.end(), t.id) != cfg.seededTemplates.end())
-            {
-                continue;
-            }
-            cfg.seededTemplates.push_back(t.id);
-            if (!FindLaunchPreset(cfg, t.id))
-            {
-                LaunchPreset p;
-                p.id = t.id;
-                p.templateId = t.id;
-                p.hidden = t.hiddenByDefault;
-                cfg.presets.push_back(std::move(p));
-            }
-            changed = true;
-        }
-        return changed;
-    }
-
     // A fresh id for a user preset ('p') or a custom provider ('c'): "<prefix>-<8 hex>". The caller supplies
     // the entropy (the OS half passes a GUID hash), and the id is re-drawn while it collides with one in use.
     //   prefix  - 'p' or 'c'.
@@ -899,6 +874,118 @@ namespace Agentmaster
             }
         }
         return id;
+    }
+
+    // ===== templates in the user's list ======================================================
+
+    // True when `cfg` holds a preset made from the template: one LINKED to it (LaunchPreset::templateId), whatever
+    // its id — a preset added in Settings ("p-<8 hex>") or one release 0.6.8.18 added by itself (its id the
+    // template's). Settings ▸ Presets ▸ TEMPLATES shows such a template as "Added".
+    //   cfg        - the presets config.
+    //   templateId - the template id ("" never matches).
+    // Never throws.
+    inline bool LaunchPresetListHasTemplate(const LaunchPresetsConfig& cfg, std::wstring_view templateId) noexcept
+    {
+        if (templateId.empty())
+        {
+            return false;
+        }
+        for (const auto& p : cfg.presets)
+        {
+            if (p.templateId == templateId)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The shipped templates that are NOT in the user's list yet (LaunchPresetListHasTemplate), in the shipped order:
+    // what "Add all tested templates" adds, and what decides whether that button is enabled.
+    //   cfg        - the presets config.
+    //   testedOnly - true = only the templates with a `tested` line (an untested one is still added by its own row).
+    // Returns template ids (empty when every template asked for is in the list).
+    inline std::vector<std::wstring> LaunchPresetTemplatesNotInList(const LaunchPresetsConfig& cfg, bool testedOnly)
+    {
+        std::vector<std::wstring> out;
+        for (const auto& t : LaunchPresetTemplates())
+        {
+            if ((testedOnly && t.tested.empty()) || LaunchPresetListHasTemplate(cfg, t.id))
+            {
+                continue;
+            }
+            out.push_back(t.id);
+        }
+        return out;
+    }
+
+    // Add one preset per template at the END of the list (menu order). Each new preset is LINKED to its template
+    // and has no typed field, so every value follows the template (its name too); it is visible in the launch
+    // menus, an untested template's preset included (the user added it on purpose, and Settings says "not tested
+    // yet" beside it); and it gets a fresh "p-<8 hex>" id (MakeLaunchPresetId). A template that is already in the
+    // list is added AGAIN, as a second linked preset: the caller decides (Settings offers Add only for a template
+    // that is not in the list). An unknown template id is skipped.
+    //   cfg         - the presets config (modified).
+    //   templateIds - the template ids, in the order to add them.
+    //   entropy     - seeds the new ids (the OS half passes NewPresetEntropy()).
+    // Returns the ids of the added presets, in order (empty when nothing was added).
+    inline std::vector<std::wstring> AddLaunchPresetsFromTemplates(LaunchPresetsConfig& cfg, const std::vector<std::wstring>& templateIds, uint64_t entropy)
+    {
+        std::vector<std::wstring> added;
+        for (const auto& templateId : templateIds)
+        {
+            if (!FindLaunchPresetTemplate(templateId))
+            {
+                continue;
+            }
+            LaunchPreset p;
+            // One entropy value serves the whole batch: each new id is in the list before the next one is drawn,
+            // so the collision check re-draws (the next salt) instead of handing out the same id twice.
+            p.id = MakeLaunchPresetId(L'p', entropy, [&cfg](const std::wstring& id) { return FindLaunchPreset(cfg, id) != nullptr; });
+            p.templateId = templateId;
+            added.push_back(p.id);
+            cfg.presets.push_back(std::move(p));
+        }
+        return added;
+    }
+
+    // The one-time cleanup of a launch-presets.json written by release 0.6.8.18 (82cd65d2a): the one build that put
+    // the shipped templates into the list BY ITSELF ("seeding") and recorded their ids under "seededTemplates".
+    // Since 2026-10-06 the list starts empty and only the user adds templates (the user's rule), so a preset that is
+    // still EXACTLY what that build added is left out. All of these must hold: its id IS its template's id (the
+    // seeding mark — a preset added in Settings gets a "p-" id), the file lists that id under seededTemplates, it
+    // links to a shipped template, no field was typed into it, and its menu switch is where seeding left it (hidden
+    // exactly when the template is untested — that build's rule). A preset the user touched in any of these ways
+    // stays. Sessions that started on a dropped preset keep their own snapshot (launchArgs), so nothing that exists
+    // changes, and the next Settings Save writes the file without the dropped presets (and without the list).
+    //   cfg          - the parsed config (modified).
+    //   autoAddedIds - the file's "seededTemplates" list (empty = a file this build wrote: nothing is dropped).
+    // Returns the ids of the dropped presets, in list order.
+    inline std::vector<std::wstring> DropUntouchedAutoAddedPresets(LaunchPresetsConfig& cfg, const std::vector<std::wstring>& autoAddedIds)
+    {
+        std::vector<std::wstring> dropped;
+        if (autoAddedIds.empty())
+        {
+            return dropped;
+        }
+        std::vector<LaunchPreset> kept;
+        kept.reserve(cfg.presets.size());
+        for (auto& p : cfg.presets)
+        {
+            const auto* t = FindLaunchPresetTemplate(p.templateId);
+            const bool untouched = t && p.id == p.templateId && p.fields.empty() && p.hidden == t->tested.empty() &&
+                                   std::find(autoAddedIds.begin(), autoAddedIds.end(), p.id) != autoAddedIds.end();
+            if (untouched)
+            {
+                dropped.push_back(p.id);
+            }
+            else
+            {
+                kept.push_back(std::move(p));
+            }
+        }
+        cfg.presets = std::move(kept);
+        return dropped;
     }
 
     // A provider id resolved against the built-ins and the user's entries.
@@ -1951,7 +2038,9 @@ namespace Agentmaster
     }
 
     // The model menus' entries: the launch models first, then every VISIBLE preset as {name, "@id"} in list
-    // order. AgentFillModelPickItems puts a separator before the first preset entry.
+    // order. AgentFillModelPickItems puts a separator before the first preset entry. With NO preset at all
+    // (ShouldOfferAddPresets) the entries are just the models, and the menu shows "Add presets…" in the presets'
+    // place instead (the host passes its opener).
     //   models - ParseLaunchModels(AppSettings::launchModels).
     //   cfg    - the presets config.
     // Returns {display name, launch target} pairs.
@@ -1995,21 +2084,58 @@ namespace Agentmaster
         return out;
     }
 
+    // True while the list holds NO preset at all: the initial state (the user's rule, 2026-10-06 — no template is
+    // added by itself). Every launch menu then shows "Add presets…" where the presets would be, and its dialog says
+    // where the list is (AddPresetsHelpText). A list whose presets are ALL hidden offers nothing: the user has
+    // presets and chose to keep them out of the menus.
+    //   cfg - the presets config.
+    // Never throws.
+    inline bool ShouldOfferAddPresets(const LaunchPresetsConfig& cfg) noexcept
+    {
+        return cfg.presets.empty();
+    }
+
+    // The "Add presets…" menu item (AgentFillModelPickItems): its label and its tooltip.
+    inline constexpr const wchar_t* kAddPresetsMenuText = L"Add presets\x2026";
+    inline constexpr const wchar_t* kAddPresetsMenuTip = L"You have no presets yet. Shows where to add one: Settings (\x2699) \x2192 Presets \x2192 TEMPLATES.";
+    // The title of the dialog the item opens (each host shows it in its own dialog layer).
+    inline constexpr const wchar_t* kAddPresetsHelpTitle = L"Add presets";
+
+    // The body of the "Add presets" dialog: what a preset is, the numbered steps to add one (ending with Save, because
+    // the Settings card applies nothing before it), and the key an OpenRouter preset needs.
+    //   inAgentManager - true when the dialog opens over the Agent Manager page, whose toolbar holds the Settings
+    //                    button: the "open the Agent Manager" step is then left out and the steps renumber.
+    // Returns the text ('\n'-separated lines).
+    inline std::wstring AddPresetsHelpText(bool inAgentManager)
+    {
+        std::vector<std::wstring> steps;
+        if (!inAgentManager)
+        {
+            steps.emplace_back(L"Open the Agent Manager: the Home button at the left end of the tab strip.");
+        }
+        steps.emplace_back(L"Click \x2699 (Settings) in its toolbar, then the Presets tab.");
+        // Two literals: a hex escape would swallow the "Add" that follows it.
+        steps.emplace_back(L"Under TEMPLATES, click Add next to a tested configuration, or \x201C" L"Add all tested templates\x201D.");
+        steps.emplace_back(L"Click Save.");
+        std::wstring out = L"You have no presets yet. A preset starts a Claude session with another provider or model setup, for example Kimi K3, Qwen3.8 or GLM-5.3 through OpenRouter.\n\nTo add one:\n";
+        for (size_t i = 0; i < steps.size(); ++i)
+        {
+            out += std::to_wstring(i + 1) + L". " + steps[i] + L"\n";
+        }
+        out += L"\nYour presets are then listed at the bottom of this menu. An OpenRouter preset also needs your OpenRouter API key: type it in the OpenRouter block under PROVIDERS on the same tab, or set OPENROUTER_API_KEY.";
+        return out;
+    }
+
     // ===== launch-presets.json ===============================================================
 
-    // Serialize the config (compact JSON). Empty sparse maps and default flags are left out.
+    // Serialize the config (compact JSON). Empty sparse maps and default flags are left out. The "seededTemplates"
+    // list of release 0.6.8.18 is never written: a file without it is never pruned (DropUntouchedAutoAddedPresets).
     //   cfg - the config.
     // Returns the file text.
     inline std::wstring LaunchPresetsConfigToJson(const LaunchPresetsConfig& cfg)
     {
         json::Value root = json::Value::MkObj();
         root.Set(L"version", json::Value::MkNum(1));
-        json::Value seeded = json::Value::MkArr();
-        for (const auto& id : cfg.seededTemplates)
-        {
-            seeded.Push(json::Value::MkStr(id));
-        }
-        root.Set(L"seededTemplates", std::move(seeded));
         json::Value providers = json::Value::MkArr();
         for (const auto& e : cfg.providers)
         {
@@ -2063,25 +2189,36 @@ namespace Agentmaster
         return json::Dump(root);
     }
 
-    // Parse the config. Tolerant by design: a missing or unreadable file reads as an EMPTY config (the
-    // loader then seeds the templates), a malformed entry is skipped, and duplicate ids keep the first.
-    //   text - the file text.
+    // Parse the config. Tolerant by design: a missing or unreadable file reads as an EMPTY config (no preset: the
+    // menus then offer "Add presets…"), a malformed entry is skipped, and duplicate ids keep the first. A file
+    // written by release 0.6.8.18 also loses the template presets that build added by itself and the user never
+    // changed (DropUntouchedAutoAddedPresets, run on its "seededTemplates" list).
+    //   text            - the file text.
+    //   droppedAutoAdded - when not null, receives the ids of the presets that cleanup left out (the OS loader logs
+    //                      them once per file stamp); cleared first.
     // Returns the config (never throws on bad input).
-    inline LaunchPresetsConfig LaunchPresetsConfigFromJson(std::wstring_view text)
+    inline LaunchPresetsConfig LaunchPresetsConfigFromJson(std::wstring_view text, std::vector<std::wstring>* droppedAutoAdded = nullptr)
     {
+        if (droppedAutoAdded)
+        {
+            droppedAutoAdded->clear();
+        }
         LaunchPresetsConfig cfg;
         const auto parsed = json::Parse(text);
         if (!parsed || parsed->type != json::Value::Type::Obj)
         {
             return cfg;
         }
+        // Release 0.6.8.18's record of the templates it added by itself. Read only for the cleanup below: this build
+        // adds nothing by itself, and its Save no longer writes the list.
+        std::vector<std::wstring> autoAddedIds;
         if (const auto* seeded = parsed->Find(L"seededTemplates"); seeded && seeded->type == json::Value::Type::Arr)
         {
             for (const auto& v : seeded->arr)
             {
                 if (v.type == json::Value::Type::Str && !v.str.empty())
                 {
-                    cfg.seededTemplates.push_back(v.str);
+                    autoAddedIds.push_back(v.str);
                 }
             }
         }
@@ -2134,6 +2271,11 @@ namespace Agentmaster
                     cfg.presets.push_back(std::move(p));
                 }
             }
+        }
+        auto dropped = DropUntouchedAutoAddedPresets(cfg, autoAddedIds);
+        if (droppedAutoAdded)
+        {
+            *droppedAutoAdded = std::move(dropped);
         }
         return cfg;
     }

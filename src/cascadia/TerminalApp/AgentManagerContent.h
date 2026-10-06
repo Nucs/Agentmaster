@@ -645,7 +645,7 @@ namespace winrt::TerminalApp::implementation
         // an in-memory DRAFT (_presetsDraft + the key drafts), written on Save and dropped on Cancel — the
         // per-directory env area's form semantics.
         void _BuildPresetsArea(const winrt::Windows::UI::Xaml::Controls::StackPanel& panel); // build the tab's controls once
-        void _LoadPresetsArea(); // _ShowSettings: draft from launch-presets.json (templates seeded), key drafts cleared, editor on the first preset
+        void _LoadPresetsArea(); // _ShowSettings: draft from launch-presets.json (nothing added by itself: no file = an empty list), key drafts cleared, editor on the first preset
         void _SavePresetsArea(); // _SaveSettings: write launch-presets.json + store / remove typed provider keys in Credential Manager
         void _RebuildPresetProviders(); // (re)build one block per provider (Base URL box, key box, stored-key line)
         void _RebuildPresetPicker(); // refill the preset picker from the draft, keeping the selection
@@ -653,7 +653,13 @@ namespace winrt::TerminalApp::implementation
         void _RefreshPresetEditor(); // placeholders, field visibility by provider, the tested line, the launch preview
         void _AddPreset(const std::wstring& templateId); // "New": a blank preset ("" ) or one linked to a template
         void _DuplicatePreset(); // copy the selected preset (same template link, its typed values, " (copy)")
-        void _DeletePreset(); // drop the selected preset (a template's stays deleted: seededTemplates remembers it)
+        void _DeletePreset(); // drop the selected preset (a template's preset can be added again from TEMPLATES; nothing comes back by itself)
+        void _RefreshPresetTemplateRows(); // TEMPLATES: each row's Add / disabled "Added" + its detail line, the "Add all tested" button, and the empty-list line — after every list change (_RebuildPresetPicker calls it)
+        // TEMPLATES' Add and "Add all tested templates": append one LINKED preset per template id to the draft
+        // (AddLaunchPresetsFromTemplates — no typed field, visible, a fresh "p-" id), select the first one, and rebuild
+        // the picker + editor once. Nothing is written before Save. An empty or all-unknown list does nothing.
+        //   templateIds - the template ids to add, in order.
+        void _AddPresetsFromTemplates(const std::vector<std::wstring>& templateIds);
         void _AddCustomProvider(); // a new custom Anthropic-compatible provider (name, env prefix, Base URL)
         ::Agentmaster::LaunchPreset* _DraftPreset(); // the selected preset inside the draft (nullptr = none)
         ::Agentmaster::LaunchProviderEntry* _DraftProviderEntry(const std::wstring& id, bool create); // a provider's entry in the draft (created on demand)
@@ -707,6 +713,21 @@ namespace winrt::TerminalApp::implementation
         // out rather than using AgentModelMenu.h's AgentSpecifyModelOpener alias because that header
         // (and the prompt's) must not fan out through this one — see the UpdateInfo note above.
         std::function<void(std::function<void(winrt::hstring)>)> _ModelSpecifyOpener();
+        // Agentmaster (PRESETS, HARNESSES.md §8.2): the "Add presets…" opener every model menu on this surface passes
+        // to AgentFillModelPickItems (the board / tree / External menus). Asked when the menu is built: it returns the
+        // opener ONLY while the user has no preset at all (::Agentmaster::ShouldOfferAddPresets — the one shared
+        // question), and an empty function otherwise, so the item is left out. Spelled out for the same reason as
+        // _ModelSpecifyOpener. The Launch button's hover menu asks the same question itself (AgentLaunchBar) and calls
+        // _ShowAddPresetsHelp through its host.
+        // Returns the opener (it reaches this content weakly: a click after teardown does nothing), or an empty
+        // function. Reads the cached presets config; throws std::bad_alloc only.
+        std::function<void()> _AddPresetsOpener();
+        // Show where presets are added: a buttons-only ContentDialog over the Agent Manager with one OK button (the
+        // user's request), its text AddPresetsHelpText(true) — without the "open the Agent Manager" step, because the
+        // Settings button is on screen. Deferred one dispatcher tick past the invoking menu's close. Never throws: a
+        // dialog that cannot show (another ContentDialog is open, no XamlRoot yet) is logged ([exc] in hooks.log),
+        // and nothing else happens.
+        void _ShowAddPresetsHelp();
         // COMMANDS.md §6b: give a successor-model combo its "Specify..." behavior (the row itself is
         // seeded by seedModelCombo). Wired ONCE at build time — reseeding only refills Items().
         void _WireSuccessorModelCombo(const winrt::Windows::UI::Xaml::Controls::ComboBox& combo, std::vector<std::wstring>* ids);
@@ -1332,6 +1353,17 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ComboBox _presetsPicker{ nullptr }; // which preset the editor shows
         std::vector<std::wstring> _presetsPickerIds; // parallel to _presetsPicker's items
         winrt::Windows::UI::Xaml::Controls::Button _presetsNewBtn{ nullptr }; // "New ▾" (blank / from a template)
+        // TEMPLATES, the one-click adds at the top of the tab: one row per shipped template, built once in
+        // _BuildPresetsArea; their states follow the draft (_RefreshPresetTemplateRows).
+        struct PresetTemplateRow
+        {
+            std::wstring templateId; // the template the row's button adds
+            winrt::Windows::UI::Xaml::Controls::Button add{ nullptr }; // "Add", or a disabled "Added" while a preset links to the template
+            winrt::Windows::UI::Xaml::Controls::TextBlock detail{ nullptr }; // model id · tested line (· in your presets)
+        };
+        std::vector<PresetTemplateRow> _presetTemplateRows;
+        winrt::Windows::UI::Xaml::Controls::Button _presetsAddAllBtn{ nullptr }; // "Add all tested templates (N)"; disabled once every tested template is in the list
+        winrt::Windows::UI::Xaml::Controls::TextBlock _presetsEmptyLine{ nullptr }; // "No presets yet…" under the picker row, shown only while the list is empty
         winrt::Windows::UI::Xaml::Controls::StackPanel _presetEditor{ nullptr }; // the editor (collapsed when the list is empty)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _presetShowInMenus{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _presetProviderCombo{ nullptr };

@@ -7,8 +7,8 @@
 //     directory) and the Windows environment (the process env, then the registry for a name set after
 //     Agentmaster started);
 //   * provider keys in Windows Credential Manager (a typed key never goes into a profile file);
-//   * the launch-presets.json loader, cached by file stamp and seeded with the shipped templates in
-//     memory (a read never writes the file);
+//   * the launch-presets.json loader, cached by file stamp (a read never writes the file, and adds nothing: no
+//     file means no preset, and the menus then offer "Add presets…" — ShouldOfferAddPresets);
 //   * the session's snapshot in the session store (`launchArgs`), and the launch-time compile that reads
 //     the key again.
 //
@@ -221,7 +221,7 @@ namespace Agentmaster
 
     namespace detail
     {
-        // The process-wide cache of the parsed (and seeded) config, keyed by the file's existence, size
+        // The process-wide cache of the parsed config, keyed by the file's existence, size
         // and last-write time. Every menu open asks for the config; parsing on each would re-read the file
         // for a list that changes only on a Settings Save.
         struct LaunchPresetsCache
@@ -243,9 +243,11 @@ namespace Agentmaster
         }
     }
 
-    // The preset config, with the shipped templates seeded in memory (SeedLaunchPresetTemplates). Cached by
-    // file stamp; a missing or unreadable file reads as an empty config, then seeded — so a first run lists
-    // the templates without writing anything.
+    // The preset config, exactly as the file holds it: no template is added by itself (the user's rule,
+    // 2026-10-06), so a missing or unreadable file reads as an EMPTY list and every launch menu offers "Add
+    // presets…". A file written by release 0.6.8.18 loses, in memory, the template presets that build added by
+    // itself and the user never changed (DropUntouchedAutoAddedPresets; logged once per file stamp as a [preset]
+    // line); the next Settings Save writes the file without them. Cached by file stamp.
     // Returns a copy (callers may edit it freely; SaveLaunchPresetsConfig persists an edited copy).
     inline LaunchPresetsConfig LoadLaunchPresetsConfig()
     {
@@ -260,8 +262,20 @@ namespace Agentmaster
         {
             return cache.cfg;
         }
-        LaunchPresetsConfig cfg = exists ? LaunchPresetsConfigFromJson(LoadLaunchPresetsText()) : LaunchPresetsConfig{};
-        SeedLaunchPresetTemplates(cfg);
+        std::vector<std::wstring> dropped;
+        LaunchPresetsConfig cfg = exists ? LaunchPresetsConfigFromJson(LoadLaunchPresetsText(), &dropped) : LaunchPresetsConfig{};
+        if (!dropped.empty())
+        {
+            // Once per parse (the cache keeps the result until the file changes), so a menu open never repeats it.
+            std::wstring ids;
+            for (const auto& id : dropped)
+            {
+                ids += (ids.empty() ? L"" : L", ") + id;
+            }
+            AppendStateLog(L"hooks.log", L"[preset] launch-presets.json: left out " + std::to_wstring(dropped.size()) +
+                                             L" template preset(s) release 0.6.8.18 added by itself and nobody changed (" + ids +
+                                             L"); presets start empty now, and the next Settings Save removes them from the file\n");
+        }
         cache.loaded = true;
         cache.exists = exists;
         cache.size = size;
@@ -307,6 +321,14 @@ namespace Agentmaster
     inline std::wstring LaunchMenuSpec(std::wstring_view launchModelsSpec)
     {
         return LaunchMenuSpecFrom(launchModelsSpec, LoadLaunchPresetsConfig());
+    }
+
+    // True while the user has no preset at all (ShouldOfferAddPresets over the cached config): the ONE question every
+    // host asks before it hands a menu its "Add presets…" opener (AgentManagerContent / TerminalPage
+    // _AddPresetsOpener, the Launch button's hover menu), so the menus can never disagree about it.
+    inline bool ShouldOfferAddPresets()
+    {
+        return ShouldOfferAddPresets(LoadLaunchPresetsConfig());
     }
 
     // ===== the session snapshot ===============================================================

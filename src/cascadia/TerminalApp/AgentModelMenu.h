@@ -17,7 +17,10 @@
 // (doc/agentmaster/HARNESSES.md; the callers pass LaunchMenuEntries, whose preset entries carry the
 // "@<presetId>" token). Picking a model starts that session with `--model <id>`; picking a preset
 // starts it with the preset's whole configuration. Either pick is the session's launch SNAPSHOT
-// (launchArgs): resume, restart, fork and /handover keep it.
+// (launchArgs): resume, restart, fork and /handover keep it. While the user has NO preset at all (the
+// initial state since 2026-10-06 — no template is added by itself), the presets' place holds one
+// "Add presets…" item instead, which opens the host's dialog saying where presets are added
+// (Settings ▸ Presets ▸ TEMPLATES).
 //
 // The models are USER-EDITABLE (the Settings cog → Sessions → "Launch models"), and the user
 // asked the tooltips to say so — AgentModelEditHint() is that pointer, appended to every parent
@@ -59,6 +62,14 @@ namespace winrt::TerminalApp::implementation
     // omits the item entirely, so an un-wired caller still compiles and behaves as before.
     using AgentSpecifyModelOpener = std::function<void(std::function<void(winrt::hstring)>)>;
 
+    // How a surface answers the "Add presets…" item: it shows, in ITS own dialog layer, where presets
+    // are added (kAddPresetsHelpTitle + AddPresetsHelpText — the Agent Manager self-hosts a
+    // ContentDialog, the page uses its dialog presenter). A host hands one over ONLY while the user
+    // has no preset at all (::Agentmaster::ShouldOfferAddPresets(), asked when the menu is built) and
+    // nullptr otherwise, so the item never shows beside real presets. It carries no pick: the item
+    // launches nothing.
+    using AgentAddPresetsOpener = std::function<void()>;
+
     // Fill `items` — a MenuFlyoutSubItem's Items() or a MenuFlyout's Items(), same collection
     // type — with the picker:
     //     Default            → pick(L"")     (the plain "Open New Session Here" behavior)
@@ -67,19 +78,22 @@ namespace winrt::TerminalApp::implementation
     //     <Display name>     → pick(<id>)    (one per configured model, top-to-bottom as typed)
     //     ─────────────
     //     <Preset name>      → pick(L"@<presetId>")   (one per visible preset, in list order)
-    // With no models configured only Default (+ Specify…) is offered (no separator) — the submenu
-    // still works, it just has nothing extra to pick. `pick` is copied into every item's Click.
-    //   items   - the collection to append to (not cleared first).
-    //   models  - LaunchMenuEntries(launchModels): the models, then the "@" preset entries.
-    //   pick    - called with the launch target ("" = Default) on a click.
-    //   specify - the "Specify…" opener (nullptr = no such item).
+    //     Add presets…       → addPresets()  (instead of the presets: only when `addPresets` is supplied)
+    // With no models configured only Default (+ Specify…) is offered before that last group — the
+    // submenu still works, it just has nothing extra to pick. `pick` is copied into every item's Click.
+    //   items      - the collection to append to (not cleared first).
+    //   models     - LaunchMenuEntries(launchModels): the models, then the "@" preset entries.
+    //   pick       - called with the launch target ("" = Default) on a click.
+    //   specify    - the "Specify…" opener (nullptr = no such item).
+    //   addPresets - the "Add presets…" opener (nullptr = no such item; see AgentAddPresetsOpener).
     // Throws winrt::hresult_error only if XAML refuses an element (callers build menus lazily on a
     // flyout's Opening, where an escape is contained by the caller's own guard).
 
     inline void AgentFillModelPickItems(const winrt::Windows::Foundation::Collections::IVector<winrt::Windows::UI::Xaml::Controls::MenuFlyoutItemBase>& items,
                                         const std::vector<std::pair<std::wstring, std::wstring>>& models,
                                         std::function<void(winrt::hstring)> pick,
-                                        AgentSpecifyModelOpener specify = nullptr)
+                                        AgentSpecifyModelOpener specify = nullptr,
+                                        AgentAddPresetsOpener addPresets = nullptr)
     {
         namespace WUXC = winrt::Windows::UI::Xaml::Controls;
 
@@ -107,18 +121,17 @@ namespace winrt::TerminalApp::implementation
             items.Append(spec);
         }
 
-        if (models.empty())
-        {
-            return;
-        }
         // One separator before the plain models (when any) and one before the first preset: presets are
         // a different KIND of pick (a whole configuration, possibly another provider), so they read as
-        // their own group at the bottom, the way the user asked for them.
+        // their own group at the bottom, the way the user asked for them. (No models: the loop adds
+        // nothing, and only the "Add presets…" group below can follow Default + Specify….)
         bool lastWasPreset = false;
         bool first = true;
+        bool anyPreset = false;
         for (const auto& [name, id] : models)
         {
             const bool preset = ::Agentmaster::IsPresetToken(id);
+            anyPreset = anyPreset || preset;
             if (first || (preset && !lastWasPreset))
             {
                 items.Append(WUXC::MenuFlyoutSeparator{});
@@ -139,6 +152,24 @@ namespace winrt::TerminalApp::implementation
                 pick(mid);
             });
             items.Append(it);
+        }
+
+        // "Add presets…" takes the presets' place while the user has none (the host passes the opener only
+        // then), behind the same separator a first preset gets. A preset entry in `models` wins: the two are
+        // read from the same cached config, but a Settings Save between the two reads must never show this item
+        // beside real presets.
+        if (addPresets && !anyPreset)
+        {
+            items.Append(WUXC::MenuFlyoutSeparator{});
+            WUXC::MenuFlyoutItem add;
+            add.Text(winrt::hstring{ ::Agentmaster::kAddPresetsMenuText });
+            AgentSetTip(add, winrt::hstring{ ::Agentmaster::kAddPresetsMenuTip });
+            add.Click([addPresets](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::RoutedEventArgs&) {
+                // The opener defers or dedupes as its host needs (each host's dialog layer has its own rules);
+                // nothing launches from here.
+                addPresets();
+            });
+            items.Append(add);
         }
     }
 }
