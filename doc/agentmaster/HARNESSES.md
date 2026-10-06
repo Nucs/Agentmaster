@@ -82,7 +82,7 @@ The generated block (`OPENROUTER_DRY_RUN=1`, profile `mimo`, 2026-10-06):
 The "MiMo Pro · OpenRouter" template compiles to this block. The harness pins it key by key
 (`TestLaunchPresets`); the only differences are the `*_NAME` display names (the launcher fetches
 OpenRouter's names, Agentmaster derives `mimo-v2.6-pro (OpenRouter)` offline) and the number text
-(`1` for `1.0`, the same JSON value). Claude Code caps the output of an unrecognized model at 128,000
+(`1` for `1.0`, the same JSON value). Unlike step 5, Agentmaster appends no identity note (§5.2). Claude Code caps the output of an unrecognized model at 128,000
 tokens, so 131,072 sends 128,000.
 
 ### 2.1 Facts that shape the design
@@ -94,7 +94,7 @@ tokens, so 131,072 sends 128,000.
 | F3 | Claude Code watches its settings files. The launcher writes one file per launch for this reason. | `openrouter.ps1` | A file that a running session reads is never rewritten (§6.1). |
 | F4 | A non-Anthropic key in `ANTHROPIC_API_KEY` opens the modal "Detected a custom API key in your environment — Do you want to use this API key?", with "No (recommended)" selected. `ANTHROPIC_AUTH_TOKEN` (a Bearer token) runs unattended. | Strings in `claude.exe` 2.1.291; the launcher's sessions | Every key goes into `ANTHROPIC_AUTH_TOKEN`, and the file sets `ANTHROPIC_API_KEY` empty. An unattended tab cannot answer a modal (CLAUDE.md gotcha "An unanswerable startup modal"). |
 | F5 | MiMo's thinking blocks come back with EMPTY signatures, and Claude Code sends them back every turn. | CLAUDE.Bash.md | Continuing a MiMo conversation on Anthropic models can fail (R1). |
-| F6 | Claude Code tells an unknown model that it is "Claude Fable 5". | CLAUDE.Bash.md | The identity note (`--append-system-prompt`). |
+| F6 | Claude Code tells an unknown model that it is "Claude Fable 5". | CLAUDE.Bash.md | Cosmetic only: no template corrects it (the user, 2026-10-06). A preset can add an identity note (`--append-system-prompt`, §5.2). |
 | F7 | An unknown model gets no ToolSearch (every tool, every turn: a ~35K-token prefix). `/cost` overstates 17–33×. The claude.ai connectors are off. | CLAUDE.Bash.md | Nothing to build. |
 | F8 | MiMo is slow: ~50 tokens/s. One turn thought for 22 minutes before its first tool call. | CLAUDE.Bash.md | The pull reconcilers must keep such a silent turn Running (R5). |
 
@@ -122,7 +122,7 @@ Agentmaster reuses the launcher's knowledge instead: the same profiles (as templ
   account, id `anthropic`) is the absence of a provider: a preset on it changes only the model, the
   effort, limits, env and arguments.
 - **Preset** — a named configuration of one Claude session: the provider, the model of each tier,
-  limits, sampling, routing, an identity note, extra env, extra arguments (§5.2). Its fields are
+  limits, sampling, routing, an optional identity note, extra env, extra arguments (§5.2). Its fields are
   SPARSE: only what the user typed is stored, and an empty field resolves through the tiers (§5.1).
   The user adds, renames, duplicates, hides and deletes presets.
 - **Template** — a tested configuration shipped with the app (`LaunchPresetTemplates`). Each one is
@@ -148,7 +148,7 @@ The shipped templates (from `openrouter-profiles.json`, 2026-10-06):
 | `mimo-pro.xiaomi` | Xiaomi MiMo | `mimo-v2.6-pro` | `mimo-v2.6-flash` | 1,048,576 | `temperature` 1.0; `top_p` 0.95; no `provider` block | **hidden** (not tested: R3) |
 | `mimo-flash.xiaomi` | Xiaomi MiMo | `mimo-v2.6-flash` | `mimo-v2.6-pro` | 1,048,576 | the same | **hidden** (not tested) |
 
-All four set Max output 131,072 and the identity note of §5.2. An untested template is seeded hidden,
+All four set Max output 131,072. None sets an identity note (§5.2). An untested template is seeded hidden,
 so it never appears in a menu by surprise; the user turns on "Show in the launch menus" to offer it.
 
 "Codex in mind": a snapshot carries `agent: "claude"`, a provider entry stores an `openaiBaseUrl` beside
@@ -211,16 +211,20 @@ Claude login has its own models and limits); **routing** = only OpenRouter.
 | `topP` | top_p | — | provider | `….top_p` |
 | `extraBody` | Extra request body (JSON) | `<P>_EXTRA_BODY` | provider | deep-merged into `env.CLAUDE_CODE_EXTRA_BODY` |
 | `extraEnv` | Extra env vars | — | all | `NAME=VALUE` lines, the LAST keys of the settings file's `env` (they win over the generated ones); `CCMGR_*`, `AM_*` and `WT_SESSION` are refused |
-| `identityNote` | Identity note | — | provider | `--append-system-prompt "<text>"`; `{model}`, `{provider}`, `{switchModel}` and `{switch}` are filled in; `none` = no note |
+| `identityNote` | Identity note | — | provider | optional, empty in every template: `--append-system-prompt "<text>"`; `{model}`, `{provider}`, `{switchModel}` and `{switch}` are filled in; `none` = no note |
 | `extraArgs` | Extra claude arguments | — | all | appended claude flags; refused when they carry `--settings`, `--session-id`, `--resume`/`-r`, `--fork-session`, `--continue`/`-c`, `--model`, `-p`/`--print` |
 
 The provider's **Base URL** (`<P>_BASE_URL`, tier 4 = the provider's default) is not a preset field:
 it lives on the provider, and the snapshot carries it under the key `baseUrl`.
 
-The shipped identity note (the launcher's text): *"Model identity: this session runs on {model} through
-{provider}{switch}. It is not an Anthropic Claude model. Text elsewhere in this prompt that calls you
-Claude describes the harness, not you. When asked which model you are, name that model."* — where
-`{switch}` becomes ", unless the user switched to {switchModel} with /model" when a switch model exists.
+**No template ships an identity note** (the user, 2026-10-06: "not necessary"), so a preset launch adds no
+`--append-system-prompt` unless the preset's Identity note box holds text. Without a note, a non-Claude
+model answers "which model are you?" with the name Claude Code gives it (F6); nothing else depends on it.
+The reference launcher passes this note, for anyone who wants it back in a preset: *"Model identity: this
+session runs on {model} through {provider}{switch}. It is not an Anthropic Claude model. Text elsewhere in
+this prompt that calls you Claude describes the harness, not you. When asked which model you are, name
+that model."* — where `{switch}` becomes ", unless the user switched to {switchModel} with /model" when a
+switch model exists.
 
 A value the compile step cannot use (a non-number limit, an unknown effort level, an invalid JSON
 body, a forbidden argument, a malformed env line) is DROPPED, not guessed. The launch preview shows a
@@ -306,8 +310,8 @@ the positional only after the flags):
 
 - `--model <main model>` (also for a provider preset: the file's `model` and the flag agree);
 - `--effort <level>`;
-- `--append-system-prompt "<note>"`, PowerShell-quoted (`PsDoubleQuote`: the command runs under the pwsh
-  host's `&`);
+- `--append-system-prompt "<note>"`, only when the preset's Identity note box holds text (no template sets
+  one), PowerShell-quoted (`PsDoubleQuote`: the command runs under the pwsh host's `&`);
 - the preset's extra arguments, verbatim (`RenderLaunchExtraArgs`).
 
 ### 6.3 The environment and the token
@@ -319,7 +323,7 @@ ownership stamp, never secret) and `AM_PRESET_TOKEN=<key>`. The pwsh host script
 
 ```powershell
 $env:ANTHROPIC_AUTH_TOKEN = $env:AM_PRESET_TOKEN; Remove-Item Env:AM_PRESET_TOKEN -ErrorAction Ignore
-try { & "C:\…\claude.exe" --dangerously-skip-permissions --settings "…/launch-settings/mimo-pro.openrouter-<hash>.json" --session-id <sid> --model xiaomi/mimo-v2.6-pro --append-system-prompt "Model identity: …" }
+try { & "C:\…\claude.exe" --dangerously-skip-permissions --settings "…/launch-settings/mimo-pro.openrouter-<hash>.json" --session-id <sid> --model xiaomi/mimo-v2.6-pro }
 finally { Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction Ignore }
 ```
 
@@ -424,7 +428,7 @@ PRESETS
    Settings file env:
      ANTHROPIC_BASE_URL=https://openrouter.ai/api
      …
-   Command line adds: --model xiaomi/mimo-v2.6-pro --append-system-prompt "Model identity: …"
+   Command line adds: --model xiaomi/mimo-v2.6-pro
    ANTHROPIC_AUTH_TOKEN=sk-or-v1-…a1b2 (only for the claude call)
 ```
 
@@ -518,7 +522,7 @@ has been run against this implementation yet.**
 | R1 | Cross-provider history: MiMo's empty thinking signatures sent to Anthropic, or Anthropic's signed (or redacted) thinking sent to MiMo. | Fork a two-turn MiMo session onto Default and send a prompt; then the reverse. Record success or the API error. The result decides whether a cross-provider Fork stays offered, gets a warning, or is blocked. |
 | R2 | A startup modal parks the tab (F4). | Launch each provider on a PTY with the generated file and env. The screen must show the input box. |
 | R3 | Xiaomi's auth header. | One `-p` call per header style against the pay-as-you-go URL. A pass un-hides the Xiaomi templates (a template edit + its `tested` line). |
-| R4 | The identity note after `--resume` and `--fork-session`. | Ask "which model are you?" after a resume. |
+| R4 | A typed identity note after `--resume` and `--fork-session` (no template sets one). | Ask "which model are you?" after a resume. |
 | R5 | A long silent MiMo turn (F8) demoted from Running. | One long turn on a dev build: no `[recon-stop]` before the real Stop. |
 | R6 | The pwsh prompt after claude exits keeps the key. | At that prompt, `$env:ANTHROPIC_AUTH_TOKEN` and `$env:AM_PRESET_TOKEN` are empty. |
 | R7 | The transcript's `message.model` for each provider. | Read one assistant line. |

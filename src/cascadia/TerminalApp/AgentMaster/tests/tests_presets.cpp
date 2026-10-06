@@ -11,7 +11,8 @@
 //     launch), never stores a key, and survives a JSON round trip;
 //   * the MiMo Pro template compiles to EXACTLY the env block the reference launcher generates
 //     (~/.claude/scripts/openrouter.ps1, OPENROUTER_DRY_RUN=1, 2026-10-06), apart from the /model display
-//     names (the launcher fetches OpenRouter's names; Agentmaster derives them offline);
+//     names (the launcher fetches OpenRouter's names; Agentmaster derives them offline), and with no identity
+//     note (the launcher passes one; the user dropped it 2026-10-06), while a typed note still compiles;
 //   * a Xiaomi preset gets no OpenRouter routing block; the Claude-login preset compiles to flags only;
 //   * refusals (no key / no Base URL / a removed custom provider), reserved env names, forbidden claude
 //     flags, the key mask;
@@ -241,8 +242,8 @@ void TestLaunchPresets()
         CHECK(EnvOf(c, L"ANTHROPIC_CUSTOM_MODEL_OPTION") == L"xiaomi/mimo-v2.6-flash", "compile: the /model switch entry");
         CHECK(EnvOf(c, L"CLAUDE_CODE_EXTRA_BODY") == L"{\"provider\":{\"order\":[\"gmicloud\",\"novita\",\"deepinfra\"],\"quantizations\":[\"bf16\",\"fp8\"]},\"temperature\":1,\"top_p\":0.95}",
               "compile: the request body is the launcher's (provider routing + sampling)");
-        CHECK(c.appendSystemPrompt == L"Model identity: this session runs on xiaomi/mimo-v2.6-pro through OpenRouter, unless the user switched to xiaomi/mimo-v2.6-flash with /model. It is not an Anthropic Claude model. Text elsewhere in this prompt that calls you Claude describes the harness, not you. When asked which model you are, name that model.",
-              "compile: the identity note");
+        // No template ships an identity note (the user, 2026-10-06: "not necessary"), unlike the reference launcher.
+        CHECK(c.appendSystemPrompt.empty(), "compile: the templates append no identity note");
         CHECK(c.model == L"xiaomi/mimo-v2.6-pro", "compile: --model carries the main model");
         CHECK(c.authTokenEnv == kPresetTokenEnvName, "compile: the key rides the scoped token variable");
         bool tokenInProcess = false, presetStamp = false;
@@ -264,6 +265,19 @@ void TestLaunchPresets()
         auto noUrl = a;
         noUrl.base.erase(kPresetFieldBaseUrl);
         CHECK(!CompileClaudeLaunch(noUrl, EffectiveLaunchValues(noUrl, MapEnv({})), L"k").error.empty(), "compile: no Base URL = refuse");
+
+        // The Identity note box stays optional: a note the user TYPES is appended with its placeholders filled,
+        // and "none" still means no note.
+        auto noted = *FindLaunchPreset(cfg, L"mimo-pro.openrouter");
+        noted.fields[kPresetFieldIdentityNote] = L"Runs on {model} via {provider}{switch}.";
+        const auto na = SnapshotPresetLaunch(noted, cfg, MapEnv({}));
+        CHECK(CompileClaudeLaunch(na, EffectiveLaunchValues(na, MapEnv({})), L"k-0123456789abcdef").appendSystemPrompt ==
+                  L"Runs on xiaomi/mimo-v2.6-pro via OpenRouter, unless the user switched to xiaomi/mimo-v2.6-flash with /model.",
+              "compile: a typed identity note is appended, its placeholders filled");
+        noted.fields[kPresetFieldIdentityNote] = L"None";
+        const auto xa = SnapshotPresetLaunch(noted, cfg, MapEnv({}));
+        CHECK(CompileClaudeLaunch(xa, EffectiveLaunchValues(xa, MapEnv({})), L"k-0123456789abcdef").appendSystemPrompt.empty(),
+              "compile: a typed \"none\" appends no note");
     }
 
     // --- Xiaomi: no routing block; Claude login: flags only ---

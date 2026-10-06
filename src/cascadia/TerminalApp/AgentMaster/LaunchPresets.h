@@ -6,8 +6,8 @@
 //
 // A preset says HOW one Claude session runs: which provider serves it (OpenRouter, Xiaomi MiMo, a custom
 // Anthropic-compatible endpoint, or the user's own Claude login), which model each tier uses, the limits,
-// extra request-body fields, an identity note for a non-Claude model, extra env vars and extra claude
-// arguments. Every "Open New Session Here" / "Fork session" menu and the Launch button's hover menu list
+// extra request-body fields, an optional identity note for a non-Claude model, extra env vars and extra
+// claude arguments. Every "Open New Session Here" / "Fork session" menu and the Launch button's hover menu list
 // the visible presets after a separator. A pick travels through the existing model-pick plumbing as the
 // string "@<presetId>" (IsPresetToken), so no menu callback changes shape.
 //
@@ -112,13 +112,10 @@ namespace Agentmaster
     // OpenRouter or Xiaomi model id starts with '@', so a token can never be mistaken for a model.
     inline constexpr wchar_t kPresetTokenPrefix = L'@';
 
-    // The identity note the templates ship. {model} / {provider} / {switchModel} are substituted, and
-    // {switch} becomes ", unless the user switched to <switchModel> with /model" when a switch model
-    // exists (else nothing). Same text as the reference launcher (~/.claude/scripts/openrouter.ps1).
-    inline constexpr const wchar_t* kDefaultPresetIdentityNote =
-        L"Model identity: this session runs on {model} through {provider}{switch}. It is not an Anthropic Claude model. "
-        L"Text elsewhere in this prompt that calls you Claude describes the harness, not you. "
-        L"When asked which model you are, name that model.";
+    // No template ships an identity note (the user, 2026-10-06: "not necessary"). The reference launcher
+    // (~/.claude/scripts/openrouter.ps1) passes one so a non-Claude model does not call itself Claude; here the
+    // Identity note box is optional and empty by default, so a preset launch appends no system prompt unless
+    // the user typed one (RenderPresetIdentityNote fills its placeholders).
 
     // ===== small pure helpers ===============================================================
 
@@ -533,7 +530,7 @@ namespace Agentmaster
         return out;
     }
 
-    // Fill an identity-note template (kDefaultPresetIdentityNote's placeholders).
+    // Fill the placeholders of an identity note the user typed into a preset.
     //   text         - the note with {model} / {provider} / {switchModel} / {switch} placeholders.
     //   model        - the main model id.
     //   providerName - the provider's display name.
@@ -709,7 +706,6 @@ namespace Agentmaster
                 { kPresetFieldQuantizations, L"bf16, fp8" },
                 { kPresetFieldTemperature, L"1.0" },
                 { kPresetFieldTopP, L"0.95" },
-                { kPresetFieldIdentityNote, kDefaultPresetIdentityNote },
             } });
             t.push_back({ L"mimo-flash.openrouter", tested, false, {
                 { kPresetFieldName, L"MiMo Flash \x00B7 OpenRouter" },
@@ -723,7 +719,6 @@ namespace Agentmaster
                 { kPresetFieldQuantizations, L"bf16, fp8" },
                 { kPresetFieldTemperature, L"1.0" },
                 { kPresetFieldTopP, L"0.95" },
-                { kPresetFieldIdentityNote, kDefaultPresetIdentityNote },
             } });
             t.push_back({ L"mimo-pro.xiaomi", L"", true, {
                 { kPresetFieldName, L"MiMo Pro \x00B7 Xiaomi" },
@@ -735,7 +730,6 @@ namespace Agentmaster
                 { kPresetFieldMaxOutput, L"131072" },
                 { kPresetFieldTemperature, L"1.0" },
                 { kPresetFieldTopP, L"0.95" },
-                { kPresetFieldIdentityNote, kDefaultPresetIdentityNote },
             } });
             t.push_back({ L"mimo-flash.xiaomi", L"", true, {
                 { kPresetFieldName, L"MiMo Flash \x00B7 Xiaomi" },
@@ -747,7 +741,6 @@ namespace Agentmaster
                 { kPresetFieldMaxOutput, L"131072" },
                 { kPresetFieldTemperature, L"1.0" },
                 { kPresetFieldTopP, L"0.95" },
-                { kPresetFieldIdentityNote, kDefaultPresetIdentityNote },
             } });
             return t;
         }();
@@ -992,7 +985,7 @@ namespace Agentmaster
         { kPresetFieldExtraEnv, L"Extra env vars", nullptr, PresetFieldKind::EnvLines, PresetFieldScope::Always,
           L"NAME=VALUE per line, written into the session's settings file, so they win over ~/.claude/settings.json for this session. CCMGR_*, AM_* and WT_SESSION are reserved." },
         { kPresetFieldIdentityNote, L"Identity note", nullptr, PresetFieldKind::Multiline, PresetFieldScope::ProviderOnly,
-          L"Appended to the system prompt (--append-system-prompt). Claude Code tells an unknown model that it is Claude; this corrects it. {model}, {provider}, {switchModel} and {switch} are filled in. Type none for no note." },
+          L"Optional; empty = nothing is appended. Text appended to the system prompt (--append-system-prompt). Claude Code tells an unknown model that it is Claude; a note such as \"This session runs on {model} through {provider}.\" corrects that. {model}, {provider}, {switchModel} and {switch} are filled in." },
         { kPresetFieldExtraArgs, L"Extra claude arguments", nullptr, PresetFieldKind::Arguments, PresetFieldScope::Always,
           L"Appended to the claude command line, for example --autocompact 600000 or --permission-mode plan. Agentmaster owns --settings, --session-id, --resume, --fork-session, --model and print mode." },
     };
