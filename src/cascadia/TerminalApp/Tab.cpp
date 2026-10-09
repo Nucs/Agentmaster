@@ -1850,6 +1850,14 @@ namespace winrt::TerminalApp::implementation
     // the moment the tab is focused or activated. Built COLLAPSED — the page shows it at flyout-open
     // only for a managed, NON-adopted session tab (SetAgentDeactivateState); each item raises
     // DeactivateTabsRequested with its scope and the page does the work (_DeactivateTabsFromMenu).
+    // The items mirror the "Close ▸" submenu's scopes one for one, in the same order: this tab · tabs to
+    // the left · tabs to the right · other tabs · of same folder · other of same folder · all tabs. The
+    // scope codes are Tab.h's kDeactivateScope* constants — the menu <-> page contract.
+    //   flyout — the tab's context menu; the submenu is appended at its current end, so the caller's
+    //            call order decides where it sits (directly above "Close ▸").
+    // Returns nothing. Throws the WinRT errors of the XAML calls (winrt::hresult_error); it is called once
+    // per tab, while the context menu is built. Each click handler holds the tab weakly, so a menu item
+    // that outlives its tab does nothing.
     void Tab::_AppendDeactivateMenuItems(winrt::Windows::UI::Xaml::Controls::MenuFlyout flyout)
     {
         auto weakThis{ get_weak() };
@@ -1860,22 +1868,70 @@ namespace winrt::TerminalApp::implementation
         _deactivateTabMenuItem.Click([weakThis](auto&&, auto&&) {
             if (auto tab{ weakThis.get() })
             {
-                tab->DeactivateTabsRequested.raise(0);
+                tab->DeactivateTabsRequested.raise(kDeactivateScopeThisTab);
             }
         });
         _deactivateTabMenuItem.Text(L"Deactivate Tab");
         WUX::Controls::ToolTipService::SetToolTip(_deactivateTabMenuItem, box_value(winrt::hstring{ L"Shut this session's agent down but KEEP the tab exactly where it is \x2014 blank and waiting, like a freshly reopened window's tab. Focusing or activating the tab resumes the conversation. Nothing is closed or deleted." }));
+
+        // Tabs to the Left — every managed session tab LEFT of this one in this window (this tab and
+        // the tabs to its right keep running): the deactivate twin of "Close tabs to the left". Grayed on
+        // the left-most tab (_EnableMenuItems), where there is no tab to park.
+        _deactivateTabsBeforeMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->DeactivateTabsRequested.raise(kDeactivateScopeTabsBefore);
+            }
+        });
+        _deactivateTabsBeforeMenuItem.Text(L"Tabs to the Left");
+        WUX::Controls::ToolTipService::SetToolTip(_deactivateTabsBeforeMenuItem, box_value(winrt::hstring{ L"Deactivate every managed session tab to the LEFT of this one in this window \x2014 this tab and the tabs to its right keep running. Each parked tab resumes its conversation when you focus or activate it." }));
+
+        // Tabs to the Right — the mirror of the item above: every managed session tab RIGHT of this one
+        // in this window (the twin of "Close tabs to the right"). Grayed on the right-most tab.
+        _deactivateTabsAfterMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->DeactivateTabsRequested.raise(kDeactivateScopeTabsAfter);
+            }
+        });
+        _deactivateTabsAfterMenuItem.Text(L"Tabs to the Right");
+        WUX::Controls::ToolTipService::SetToolTip(_deactivateTabsAfterMenuItem, box_value(winrt::hstring{ L"Deactivate every managed session tab to the RIGHT of this one in this window \x2014 this tab and the tabs to its left keep running. Each parked tab resumes its conversation when you focus or activate it." }));
 
         // Other Tabs — every OTHER managed session tab in this window (this one keeps running): the
         // deactivate twin of "Close other tabs", for quiescing the background fleet in one gesture.
         _deactivateOtherTabsMenuItem.Click([weakThis](auto&&, auto&&) {
             if (auto tab{ weakThis.get() })
             {
-                tab->DeactivateTabsRequested.raise(1);
+                tab->DeactivateTabsRequested.raise(kDeactivateScopeOtherTabs);
             }
         });
         _deactivateOtherTabsMenuItem.Text(L"Other Tabs");
         WUX::Controls::ToolTipService::SetToolTip(_deactivateOtherTabsMenuItem, box_value(winrt::hstring{ L"Deactivate every OTHER managed session tab in this window \x2014 this one keeps running. Each parked tab resumes its conversation when you focus or activate it." }));
+
+        // Of Same Folder / Other of Same Folder — the folder-scoped twins of "Other Tabs", keyed on the
+        // SESSION's effective work dir (inferred -> cwd) and CROSS-WINDOW, exactly like "Close ▸ Of Same
+        // Folder": they park every live managed session sharing this tab's session's folder (incl. / excl.
+        // this one), wherever its tab lives. Unlike their Close twins they ask NOTHING first — no Deactivate
+        // scope confirms, because a park ends no conversation — so the tooltip is the only warning that
+        // other windows are reached. No Visibility flip of their own: the whole submenu is already shown
+        // only for a managed session tab, the one place a folder exists to match.
+        _deactivateSessionsOfSameFolderMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->DeactivateTabsRequested.raise(kDeactivateScopeSameFolder);
+            }
+        });
+        _deactivateSessionsOfSameFolderMenuItem.Text(L"Of Same Folder");
+        WUX::Controls::ToolTipService::SetToolTip(_deactivateSessionsOfSameFolderMenuItem, box_value(winrt::hstring{ L"Deactivate every open session whose working directory is the same as this one, this one included \x2014 in EVERY window, without asking first. Nothing is closed or deleted: each parked tab resumes its conversation when you focus or activate it." }));
+
+        _deactivateOtherSessionsOfSameFolderMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->DeactivateTabsRequested.raise(kDeactivateScopeOtherSameFolder);
+            }
+        });
+        _deactivateOtherSessionsOfSameFolderMenuItem.Text(L"Other of Same Folder");
+        WUX::Controls::ToolTipService::SetToolTip(_deactivateOtherSessionsOfSameFolderMenuItem, box_value(winrt::hstring{ L"Deactivate every OTHER open session whose working directory is the same as this one \x2014 in EVERY window, without asking first. This session keeps running. Each parked tab resumes its conversation when you focus or activate it." }));
 
         // All Tabs — every managed session tab in this window, this one included: the strip then
         // reads exactly as if the app had just opened (every session dormant, waiting for a
@@ -1883,7 +1939,7 @@ namespace winrt::TerminalApp::implementation
         _deactivateAllTabsMenuItem.Click([weakThis](auto&&, auto&&) {
             if (auto tab{ weakThis.get() })
             {
-                tab->DeactivateTabsRequested.raise(2);
+                tab->DeactivateTabsRequested.raise(kDeactivateScopeAllTabs);
             }
         });
         _deactivateAllTabsMenuItem.Text(L"All Tabs");
@@ -1899,8 +1955,14 @@ namespace winrt::TerminalApp::implementation
         _deactivateSubMenu.Icon(deactivateSymbol);
         _deactivateSubMenu.Visibility(WUX::Visibility::Collapsed); // shown only for a managed, non-adopted session tab (page-driven)
         WUX::Controls::ToolTipService::SetToolTip(_deactivateSubMenu, box_value(winrt::hstring{ L"Park session tabs in the dormant waiting-for-focus state a freshly reopened window's tabs sit in \x2014 the agent process shuts down, the tab stays where it is, and focusing or activating it resumes the conversation" }));
+        // The "Close ▸" submenu's order, so the two submenus read alike: this tab first, then left,
+        // right, other, the two folder scopes, and the whole window last.
         _deactivateSubMenu.Items().Append(_deactivateTabMenuItem);
+        _deactivateSubMenu.Items().Append(_deactivateTabsBeforeMenuItem);
+        _deactivateSubMenu.Items().Append(_deactivateTabsAfterMenuItem);
         _deactivateSubMenu.Items().Append(_deactivateOtherTabsMenuItem);
+        _deactivateSubMenu.Items().Append(_deactivateSessionsOfSameFolderMenuItem); // folder-scoped, cross-window
+        _deactivateSubMenu.Items().Append(_deactivateOtherSessionsOfSameFolderMenuItem); // the same folder batch minus this session
         _deactivateSubMenu.Items().Append(_deactivateAllTabsMenuItem);
         flyout.Items().Append(_deactivateSubMenu);
     }
@@ -2604,6 +2666,17 @@ namespace winrt::TerminalApp::implementation
         // enabled if there are other tabs on the right
         _closeTabsAfterMenuItem.IsEnabled(tabIndex < numOfTabs - 1);
 
+        // Agentmaster (deactivate): the strip-position scopes of "Deactivate ▸" follow the SAME index
+        // gates as their Close twins above, so an item that could reach no tab is grayed instead of
+        // being a silent no-op: "Other Tabs" needs another tab, "Tabs to the Left" a tab on the left,
+        // "Tabs to the Right" a tab on the right. These gates know only tab POSITIONS: an enabled item
+        // can still park nothing (every tab in its range is a shell, adopted, or already dormant), and
+        // the page then logs parked=0. "Deactivate Tab" is gated by the session's own state instead
+        // (SetAgentDeactivateState), and the folder + "All Tabs" items always have a candidate (this tab).
+        _deactivateOtherTabsMenuItem.IsEnabled(numOfTabs > _reservedLeadingTabs + 1);
+        _deactivateTabsBeforeMenuItem.IsEnabled(tabIndex > _reservedLeadingTabs);
+        _deactivateTabsAfterMenuItem.IsEnabled(tabIndex < numOfTabs - 1);
+
         // enabled if not left-most tab
         _moveLeftMenuItem.IsEnabled(tabIndex > 0);
 
@@ -2756,11 +2829,15 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster (deactivate): show/hide the "Deactivate ▸" submenu + gray its "Deactivate Tab" item
     // while THIS session is already dormant (nothing running to stop — "Activate Tab" is the offered
-    // verb then; the batch items stay enabled since OTHER tabs may be running). Page-driven at
+    // verb then; the batch items do not follow this flag since OTHER tabs may be running — the three
+    // strip-position ones are gated by tab index in _EnableMenuItems instead). Page-driven at
     // flyout-open beside SetAgentActivateVisible — the two are complementary halves of one toggle: a
     // dormant session offers Activate, a running one offers Deactivate. Hidden for a plain shell
     // tab AND for an ADOPTED session (its ConPTY hosts the user's own shell — not
     // ours to swap a dormant connection into).
+    //   visible        — show the whole submenu (true only for a managed, non-adopted session tab).
+    //   thisTabDormant — this tab's session has not started; grays "Deactivate Tab" alone.
+    // Returns nothing. Throws the WinRT errors of the two property writes; UI thread only (asserted).
     void Tab::SetAgentDeactivateState(bool visible, bool thisTabDormant)
     {
         ASSERT_UI_THREAD();

@@ -2796,7 +2796,9 @@ namespace winrt::TerminalApp::implementation
         // managed tab / EVERY managed tab in this window back in the DORMANT waiting-for-focus state a
         // freshly reopened window's tabs sit in — claude shut down, the tab kept exactly where it is,
         // the conversation resuming the moment the tab is focused or activated. scope: 0 == this tab ·
-        // 1 == other tabs · 2 == all tabs.
+        // 1 == other tabs · 2 == all tabs · 3 == tabs to the left · 4 == tabs to the right · 5 == of
+        // same folder · 6 == other of same folder (Tab.h's kDeactivateScope* codes — the "Close ▸"
+        // submenu's scopes; the two folder ones reach every window, see _DeactivateTabsFromMenu).
         hostingTab.DeactivateTabsRequested([weakTab, weakThis](int32_t scope) {
             auto page{ weakThis.get() };
             auto tab{ weakTab.get() };

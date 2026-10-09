@@ -3299,13 +3299,25 @@ namespace winrt::TerminalApp::implementation
         return true;
     }
 
-    // Agentmaster (deactivate): the tab context menu's "Deactivate ▸" dispatcher. scope: 0 == this tab
+    // Agentmaster (deactivate): the tab context menu's "Deactivate ▸" dispatcher. scope (Tab.h's
+    // kDeactivateScope* codes): 0 == this tab
     // · 1 == every OTHER managed tab in this window · 2 == EVERY managed tab in this window — the
     // literal "as if the app had just opened" (every session parked dormant, each resuming on
-    // focus/activate). Batches silently pass over non-session tabs and count/log only meaningful
+    // focus/activate) · 3 == every managed tab LEFT of this one · 4 == every managed tab RIGHT of this
+    // one (both: this window; this tab keeps running) · 5 == every live managed session sharing this
+    // tab's session's EFFECTIVE work dir, this one included · 6 == the same folder batch minus this
+    // session. The scopes mirror the "Close ▸" submenu one for one. The two FOLDER scopes use the key
+    // "Close ▸ Of Same Folder" uses (NormDirKey of EffectiveWorkingDir — the inferred dir while the
+    // session infers, else the launch cwd) and its reach, EVERY window: the tabs this window hosts are
+    // parked here, and each session hosted elsewhere is handed to its own window
+    // (DeactivateSessionInOtherWindows -> _DeactivateSessionLocal there), because a park swaps a
+    // terminal control and only the hosting window's UI thread may do that.
+    // Batches silently pass over non-session tabs and count/log only meaningful
     // skips (adopted / already dormant / mid-delivery — logged by _DeactivateManagedTab). NO confirm
     // dialog by design: deactivate is non-destructive — the conversation stays on disk and a single
     // click resumes it — exactly like "Restart session", which also kills the process unconfirmed.
+    // ⚠ That holds for the folder scopes too, although their Close twins confirm first: a folder scope
+    // also stops sessions in windows the user is not looking at, mid-turn ones included.
     // The FOCUSED tab is the one special case. A parked tab holds a never-initialized control whose first
     // layout STARTS it (that is how entering the tab wakes it), so the focused tab — the one on screen —
     // must leave the screen BEFORE its control is replaced, or the replacement would be laid out within a
@@ -3314,13 +3326,56 @@ namespace winrt::TerminalApp::implementation
     // ordinary selection that lays it out and starts it. And the strip stays where it was: the right-clicked
     // tab, if it was wholly on screen, is checked again after the work (twice, see _KeepTabHeaderInView) and
     // revealed in place if a re-layout moved it out of view. UI thread only.
+    //   anchorTab — the right-clicked tab, the reference point of every scope; null is a no-op.
+    //   scope     — a kDeactivateScope* code; an unknown one parks nothing and is logged.
+    // Returns nothing: the outcome is the [nav] deactivate-begin / deactivate-done pair in hooks.log
+    // (parked / skipped counts; for a folder scope also how many sessions were handed to other windows).
+    // Throws what the tab-vector and registry calls throw (WinRT errors, std::bad_alloc), and what a
+    // park's bookkeeping throws AFTER its swap (the registry update, the overlay attach): those steps are
+    // not guarded, so such an exception ends the batch with the remaining tabs untouched. The strip
+    // snapshot, each target resolve, each pane build and each swap are guarded inside.
     void TerminalPage::_DeactivateTabsFromMenu(const winrt::TerminalApp::Tab& anchorTab, int32_t scope)
     {
         if (!anchorTab)
         {
             return;
         }
-        const std::wstring scopeName = (scope == 0) ? L"this" : ((scope == 1) ? L"others" : L"all");
+        // The scope's name in the log. The first three keep the words they always had ("this" / "others" /
+        // "all"), so an old grep over hooks.log still finds them. A code this dispatcher does not know is
+        // REFUSED: guessing a scope could park tabs the user never chose, and a refusal costs one retry.
+        const wchar_t* scopeLabel = nullptr;
+        switch (scope)
+        {
+        case implementation::Tab::kDeactivateScopeThisTab:
+            scopeLabel = L"this";
+            break;
+        case implementation::Tab::kDeactivateScopeOtherTabs:
+            scopeLabel = L"others";
+            break;
+        case implementation::Tab::kDeactivateScopeAllTabs:
+            scopeLabel = L"all";
+            break;
+        case implementation::Tab::kDeactivateScopeTabsBefore:
+            scopeLabel = L"left";
+            break;
+        case implementation::Tab::kDeactivateScopeTabsAfter:
+            scopeLabel = L"right";
+            break;
+        case implementation::Tab::kDeactivateScopeSameFolder:
+            scopeLabel = L"folder";
+            break;
+        case implementation::Tab::kDeactivateScopeOtherSameFolder:
+            scopeLabel = L"folder-others";
+            break;
+        default:
+            break;
+        }
+        if (!scopeLabel)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[deactivate] refused - unknown scope code " + std::to_wstring(scope) + L" (nothing parked)\n");
+            return;
+        }
+        const std::wstring scopeName{ scopeLabel };
         ::Agentmaster::LogNav(L"deactivate-begin scope=" + scopeName + L" anchor=" + _DescribeTabForLog(anchorTab));
         // Keep the tab you right-clicked in view. Parking a tab must leave the strip where it was, but on
         // 2026-10-01 a Deactivate of the focused tab in a 416-tab window left the strip on an unrelated
@@ -3348,17 +3403,95 @@ namespace winrt::TerminalApp::implementation
         uint32_t parked = 0;
         uint32_t skipped = 0;
         std::vector<winrt::TerminalApp::Tab> targets;
-        if (scope == 0)
+        // Folder scopes only: the matching sessions whose tabs are NOT in this window. They are handed to
+        // their hosting windows after the local parks below (a park needs the hosting window's own UI
+        // objects), and `folderForLog` names the matched folder in the done line.
+        std::vector<std::wstring> remoteSessionIds;
+        std::wstring folderForLog;
+        const bool folderScope = (scope == implementation::Tab::kDeactivateScopeSameFolder || scope == implementation::Tab::kDeactivateScopeOtherSameFolder);
+        if (scope == implementation::Tab::kDeactivateScopeThisTab)
         {
             targets.push_back(anchorTab);
         }
+        else if (folderScope)
+        {
+            // The folder is the ANCHOR session's effective work dir, compared by its canonical key — exactly
+            // what "Close ▸ Of Same Folder" matches on (_CloseClaudeSessionsInFolder), so the two verbs can
+            // never disagree about which sessions "the same folder" names.
+            const std::wstring anchorSessionId = _ClaudeSessionForTab(anchorTab);
+            // Without the prompt queue: the folder comes from the directory fields alone.
+            const auto anchorInfo = (!anchorSessionId.empty() && _sessionRegistry) ? _sessionRegistry->GetWithoutQueue(anchorSessionId) : std::optional<::Agentmaster::SessionInfo>{};
+            if (anchorInfo)
+            {
+                folderForLog = ::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, *anchorInfo);
+            }
+            const std::wstring folderKey = ::Agentmaster::NormDirKey(folderForLog);
+            if (folderKey.empty())
+            {
+                // No session on this tab any more (it was archived between the click and this handler), or a
+                // record with no directory: there is no folder to match. The menu shows these items only on
+                // a session tab; this is the belt. An empty key must park NOTHING — matching it would select
+                // every session that has no directory.
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[deactivate] folder scope skipped - the right-clicked tab has no session folder to match (nothing parked)\n");
+            }
+            else
+            {
+                const bool keepAnchorRunning = (scope == implementation::Tab::kDeactivateScopeOtherSameFolder);
+                // From a SNAPSHOT of the live sessions: a park mutates the registry, so it is never walked
+                // live. The whole fleet is read (not just _claudeTabs) because the scope spans every window.
+                for (const auto& s : _sessionRegistry->SnapshotLive())
+                {
+                    if (keepAnchorRunning && s.id == anchorSessionId)
+                    {
+                        continue; // "Other of Same Folder": the right-clicked session keeps running
+                    }
+                    if (::Agentmaster::NormDirKey(::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, s)) != folderKey)
+                    {
+                        continue; // another folder
+                    }
+                    const auto hostedIt = _claudeTabs.find(s.id);
+                    if (const auto hostedTab = (hostedIt != _claudeTabs.end()) ? hostedIt->second.get() : nullptr)
+                    {
+                        // Hosted in this window: the loop below parks it. Listed once even if two session
+                        // ids ever named one tab (a second park of the same tab would only read "already dormant").
+                        if (std::find(targets.begin(), targets.end(), hostedTab) == targets.end())
+                        {
+                            targets.push_back(hostedTab);
+                        }
+                    }
+                    else
+                    {
+                        // Not hosted here: its tab is in another window, or it has no tab anywhere (a session
+                        // still binding, an observe-only external). The fan-out below finds out which — the
+                        // one hosting window parks it, and with no host every window's sink misses.
+                        remoteSessionIds.push_back(s.id);
+                    }
+                }
+            }
+        }
         else
         {
+            // The strip scopes (other / all / left / right). "Left" and "right" are positions relative to the
+            // anchor, so they need its strip index. A tab that left this window between the click and this
+            // handler has no index here; nothing is then to its left or right, and those two scopes park
+            // nothing (the done line reads parked=0).
+            uint32_t anchorIndex = 0;
+            const bool anchorInStrip = _tabs.IndexOf(anchorTab, anchorIndex);
+            uint32_t nextIndex = 0;
             for (const auto& t : _tabs)
             {
-                if (scope == 1 && t == anchorTab)
+                const uint32_t tabIndex = nextIndex++;
+                if (scope == implementation::Tab::kDeactivateScopeOtherTabs && t == anchorTab)
                 {
                     continue; // "Other Tabs": this one keeps running
+                }
+                if (scope == implementation::Tab::kDeactivateScopeTabsBefore && !(anchorInStrip && tabIndex < anchorIndex))
+                {
+                    continue; // "Tabs to the Left": lower strip indices only — the anchor and everything right of it keep running
+                }
+                if (scope == implementation::Tab::kDeactivateScopeTabsAfter && !(anchorInStrip && tabIndex > anchorIndex))
+                {
+                    continue; // "Tabs to the Right": higher strip indices only — the anchor and everything left of it keep running
                 }
                 targets.push_back(t);
             }
@@ -3408,13 +3541,54 @@ namespace winrt::TerminalApp::implementation
                 ++skipped;
             }
         }
-        ::Agentmaster::LogNav(L"deactivate-done scope=" + scopeName + L" parked=" + std::to_wstring(parked) + L" skipped=" + std::to_wstring(skipped));
+        // Folder scopes: hand every matching session that this window does not host to the other windows.
+        // Each window's sink queues ONE dispatcher item per session and parks it there if it hosts the
+        // tab, so this loop only posts work — it waits for nothing, and `parked` / `skipped` above count
+        // this window's tabs alone (the hosting windows log their own begin/done pairs).
+        for (const auto& remoteSessionId : remoteSessionIds)
+        {
+            ::Agentmaster::DeactivateSessionInOtherWindows(remoteSessionId, _windowId);
+        }
+        // "elsewhere" = sessions handed to other windows, NOT sessions parked there: a session with no tab
+        // anywhere is counted too, and its fan-out simply finds no host.
+        const std::wstring folderSuffix = folderScope ? (L" elsewhere=" + std::to_wstring(remoteSessionIds.size()) + L" dir=" + folderForLog) : std::wstring{};
+        ::Agentmaster::LogNav(L"deactivate-done scope=" + scopeName + L" parked=" + std::to_wstring(parked) + L" skipped=" + std::to_wstring(skipped) + folderSuffix);
         // Only a tab that was wholly on screen is kept there: one already half off the edge was where the
         // user had scrolled the strip, and pulling it in would move the strip for no reason.
         if (keepAnchorInView)
         {
             _KeepTabHeaderInView(winrt::make_weak(anchorTab), stripOffsetBefore, stripScrollableBefore, L"deactivate");
         }
+    }
+
+    // Agentmaster (cross-window folder-deactivate): park `sessionId`'s tab IN THIS WINDOW — the receiving
+    // half of the park-session sink (Engine.h RegisterWindowDeactivateSessionHandler). Another window's
+    // "Deactivate ▸ Of Same Folder" / "Other of Same Folder" matched a session whose tab lives here, and
+    // only this window can park it (the park swaps this pane's terminal control). It runs the ordinary
+    // single-tab path — _DeactivateTabsFromMenu with the this-tab scope — rather than calling
+    // _DeactivateManagedTab directly, because that path carries the one rule a bare park would break: a
+    // session that is the FOCUSED tab here must leave the screen first (this window goes to its Agent
+    // Manager page), or the fresh control would be laid out and restart the agent at once. It also keeps
+    // every other park rule in one place: an adopted, already-dormant or mid-delivery session is skipped
+    // and logged there, and the tab's header stays in view.
+    // ⚠ No confirmation here, by the same design as every other Deactivate scope; a turn in progress is
+    // cut off. The log tells the two origins apart: a [nav] deactivate-remote line precedes this window's
+    // own deactivate-begin / deactivate-done pair.
+    //   sessionId — the session to park; an id this window does not host is a miss.
+    // Returns true when this window hosts the session's tab (whether or not the park then went through —
+    // the done line carries parked / skipped); false on a miss, where nothing was touched.
+    // Throws what _DeactivateTabsFromMenu throws; the sink that calls this contains it. UI thread only.
+    bool TerminalPage::_DeactivateSessionLocal(const std::wstring& sessionId)
+    {
+        const auto it = _claudeTabs.find(sessionId);
+        const auto tab = (it != _claudeTabs.end()) ? it->second.get() : nullptr;
+        if (!tab)
+        {
+            return false; // not hosted here (another window's tab, or no tab anywhere) — the fan-out simply misses
+        }
+        ::Agentmaster::LogNav(L"deactivate-remote " + ::Agentmaster::ShortId(sessionId) + L" (a folder deactivate started in another window)");
+        _DeactivateTabsFromMenu(tab, implementation::Tab::kDeactivateScopeThisTab);
+        return true;
     }
 
     // Agentmaster: fork a MANAGED session by id — the kind-aware fork shared by the WT tab's "Fork

@@ -336,6 +336,27 @@ namespace Agentmaster
         uint32_t unreadCount{ 0 };
         std::vector<UnreadCountSink> unreadCountSinks;
         uint64_t nextUnreadCountToken{ 1 };
+
+        // Agentmaster (cross-window "Deactivate ▸ Of Same Folder"): per-window "park this session's tab"
+        // sinks — same shape + lifetime as closeSessionSinks. The tab menu's "Deactivate ▸ Of Same Folder"
+        // / "Other of Same Folder" parks EVERY live managed session sharing the clicked tab's effective
+        // work dir, but each session's tab lives in exactly ONE window, and a park swaps that window's
+        // terminal control — so it must run there. The initiating window parks the tabs it hosts and fans
+        // the rest out here. Each TerminalPage registers a sink at engine init ("park this session if YOU
+        // host its tab; no-op on a miss") and detaches it at teardown (Rule #10). Snapshot-under-lock /
+        // invoke-outside-it, like closeSessionSinks (each sink marshals into its own window's dispatcher).
+        // ⚠ A sink that stays registered after its window is gone is harmless only because every sink
+        // captures a weak page reference; the detach is what keeps this list bounded. Placed LAST in the
+        // struct (layout-safe incremental rebuilds, like unreadCountSinks).
+        struct WindowDeactivateSessionSink
+        {
+            uint64_t token{ 0 }; // the handle RegisterWindowDeactivateSessionHandler returned; 0 is never issued
+            std::wstring windowId; // the registering window, so a fan-out can skip its own source window
+            std::function<void(const std::wstring& sessionId)> fn; // parks sessionId's tab if this window hosts it; must not throw across the engine
+        };
+        std::mutex deactivateSessionMutex; // guards deactivateSessionSinks + nextDeactivateSessionToken; never held while a sink runs
+        std::vector<WindowDeactivateSessionSink> deactivateSessionSinks; // registration order; at most one entry per open window
+        uint64_t nextDeactivateSessionToken{ 1 }; // monotonic, never reused, so a stale token can never detach a younger sink
     };
 
     // The one process-wide engine. The FIRST call constructs it (creates the registry, wires
@@ -566,6 +587,38 @@ namespace Agentmaster
     uint64_t RegisterWindowCloseSessionHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler);
     void UnregisterWindowCloseSessionHandler(uint64_t token);
     void CloseSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId);
+
+    // Agentmaster (cross-window "Deactivate ▸ Of Same Folder"): register THIS window's park-session sink.
+    // Each window registers one at engine init, so a folder-scoped Deactivate started in another window
+    // can reach the session tabs this window hosts. The registry-token pattern: keep the returned token
+    // and pass it to UnregisterWindowDeactivateSessionHandler at teardown (Rule #10).
+    //   windowId — the registering window's id; DeactivateSessionInOtherWindows skips the sink whose
+    //              windowId equals its sourceWindowId.
+    //   handler  — called with a session id from ANY thread; it must marshal to its own UI thread, park
+    //              the session's tab when this window hosts it, and do nothing on a miss. It must not throw.
+    //   returns  — a non-zero token, or 0 when `handler` is empty (nothing was registered).
+    //   throws   — std::bad_alloc on allocation failure; std::system_error if the mutex cannot be locked.
+    uint64_t RegisterWindowDeactivateSessionHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler);
+
+    // Agentmaster (cross-window "Deactivate ▸ Of Same Folder"): detach the sink a
+    // RegisterWindowDeactivateSessionHandler call returned. Call it from the window's teardown; a sink left
+    // behind keeps receiving fan-outs for a window that no longer exists.
+    //   token  — the token to remove. 0 and a token that was already removed are no-ops.
+    //   throws — std::system_error if the mutex cannot be locked.
+    void UnregisterWindowDeactivateSessionHandler(uint64_t token);
+
+    // Agentmaster (cross-window "Deactivate ▸ Of Same Folder"): ask every OTHER window to park
+    // `sessionId`'s tab. Exactly one window hosts a session's tab, so at most one sink acts; with no host
+    // anywhere (an archived session, a session still binding, an external one) every sink misses and the
+    // call does nothing. Fire-and-forget: it returns before any window has parked anything, and it reports
+    // no result — the hosting window logs its own [nav] deactivate-begin / deactivate-done pair.
+    // ⚠ No confirmation happens on the receiving side, and a turn in progress there is cut off, exactly as
+    // for a park in the initiating window.
+    //   sessionId      — the session to park; an empty id is a no-op.
+    //   sourceWindowId — the calling window, whose own sink is skipped (it already handled its own tabs).
+    //   throws         — std::bad_alloc on allocation failure; std::system_error if the mutex cannot be
+    //                    locked; anything a sink throws (a sink must not throw).
+    void DeactivateSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId);
 
     // Agentmaster (cross-window tab DOCKING): register THIS window as a dock TARGET — its top-level
     // HWND + a probe ("is this screen point over MY tab-strip row, and at which insertion slot?";

@@ -1588,6 +1588,81 @@ namespace Agentmaster
         }
     }
 
+    // Agentmaster (cross-window "Deactivate ▸ Of Same Folder"): see Engine.h. Registers one window's
+    // park-session sink and hands back the token that detaches it.
+    //   windowId — the registering window's id (the fan-out's "skip my own window" key).
+    //   handler  — the sink; an empty one is refused, because a null sink would crash the fan-out.
+    //   returns  — a non-zero token, or 0 when `handler` is empty.
+    //   throws   — std::bad_alloc on allocation failure; std::system_error if the mutex cannot be locked.
+    uint64_t RegisterWindowDeactivateSessionHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler)
+    {
+        if (!handler)
+        {
+            return 0;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.deactivateSessionMutex);
+        const auto token = e.nextDeactivateSessionToken++;
+        e.deactivateSessionSinks.push_back({ token, windowId, std::move(handler) });
+        return token;
+    }
+
+    // Agentmaster (cross-window "Deactivate ▸ Of Same Folder"): see Engine.h. Detaches one sink by token.
+    //   token  — the token to remove; 0 (never issued) and an already-removed token are no-ops, so a
+    //            double teardown is safe.
+    //   throws — std::system_error if the mutex cannot be locked.
+    void UnregisterWindowDeactivateSessionHandler(uint64_t token)
+    {
+        if (token == 0)
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.deactivateSessionMutex);
+        for (auto it = e.deactivateSessionSinks.begin(); it != e.deactivateSessionSinks.end(); ++it)
+        {
+            if (it->token == token)
+            {
+                e.deactivateSessionSinks.erase(it);
+                return;
+            }
+        }
+    }
+
+    // Agentmaster (cross-window "Deactivate ▸ Of Same Folder"): see Engine.h. Fans `sessionId` out to
+    // every registered sink except the source window's.
+    //   sessionId      — the session to park; empty is a no-op.
+    //   sourceWindowId — the calling window; its own sink is skipped.
+    //   throws         — std::bad_alloc on allocation failure; std::system_error if the mutex cannot be
+    //                    locked; anything a sink throws (a sink must not throw).
+    void DeactivateSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        // Snapshot under the lock, invoke outside it (the CloseSessionInOtherWindows pattern): each sink
+        // hops into its own window's dispatcher, and a sink that registered or detached another sink while
+        // this lock was held would deadlock on it.
+        std::vector<std::function<void(const std::wstring&)>> sinks;
+        {
+            std::lock_guard<std::mutex> lk(e.deactivateSessionMutex);
+            sinks.reserve(e.deactivateSessionSinks.size());
+            for (const auto& s : e.deactivateSessionSinks)
+            {
+                if (s.fn && s.windowId != sourceWindowId)
+                {
+                    sinks.push_back(s.fn);
+                }
+            }
+        }
+        for (const auto& fn : sinks)
+        {
+            fn(sessionId); // fire-and-forget; the (single) hosting window parks the session's tab, the rest miss
+        }
+    }
+
     uint64_t RegisterWindowDockTarget(const std::wstring& windowId, void* topLevelHwnd, std::function<DockProbeResult(long, long, DockProbeMode)> probe)
     {
         if (!probe || !topLevelHwnd)

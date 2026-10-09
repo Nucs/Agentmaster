@@ -553,6 +553,13 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::UnregisterWindowCloseSessionHandler(_windowCloseSessionToken);
         }
+        // Agentmaster (cross-window "Deactivate ▸ Of Same Folder"): drop this window's park-session sink too
+        // (Rule #10). Bare on purpose, like its neighbors: the detach is thread-safe engine work, and it must
+        // never be skipped by a guarded throw (the destructor-cascade rule in Gotchas).
+        if (_windowDeactivateSessionToken)
+        {
+            ::Agentmaster::UnregisterWindowDeactivateSessionHandler(_windowDeactivateSessionToken);
+        }
         // Agentmaster (cross-window tab DOCKING): drop this window's dock-target sink too (Rule #10) —
         // a torn-down window must never be offered as a drop target.
         if (_windowDockTargetToken)
@@ -1225,6 +1232,39 @@ namespace winrt::TerminalApp::implementation
                     if (auto self = weakThis.get())
                     {
                         self->_CloseClaudeSessionLocal(id);
+                    }
+                });
+            });
+        }
+
+        // Cross-window park-session sink ("Deactivate ▸ Of Same Folder"): the tab menu's folder scopes park
+        // every live managed session sharing a folder; the initiating window parks the tabs it hosts and
+        // fans the rest out here. When ANOTHER window's folder-deactivate names a session hosted HERE, this
+        // sink hops to this window's UI thread and parks its tab — a park swaps the pane's terminal control,
+        // which only the hosting window's UI thread may touch. No confirmation (no Deactivate scope asks),
+        // and this window's own focused-tab rule applies: a session that is on screen here sends this window
+        // to its Agent Manager page first. A miss is a no-op. Each session arrives as its own dispatcher
+        // item, so a batch never holds this window's UI thread for more than one park at a time. Detached
+        // in ~TerminalPage (Rule #10).
+        {
+            const auto weakThis = get_weak();
+            const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
+            _windowDeactivateSessionToken = ::Agentmaster::RegisterWindowDeactivateSessionHandler(_windowId, [weakThis, dispatcher](const std::wstring& id) {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, id]() {
+                    // The page may be gone by the time the item runs (the window closed meanwhile): a dead
+                    // weak reference simply ends it.
+                    if (auto self = weakThis.get())
+                    {
+                        // An exception escaping a dispatcher item is fatal to the process, and a park
+                        // touches XAML and WinRT throughout — contain it (Rule #18) and leave the tab running.
+                        try
+                        {
+                            self->_DeactivateSessionLocal(id);
+                        }
+                        catch (...)
+                        {
+                            ::Agentmaster::AgentLogCaughtException(L"park-session sink (_DeactivateSessionLocal)");
+                        }
                     }
                 });
             });

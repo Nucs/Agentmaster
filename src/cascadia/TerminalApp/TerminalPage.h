@@ -490,6 +490,13 @@ namespace winrt::TerminalApp::implementation
         // this sink, which hops to this window's UI thread and closes its tab (skip-confirm — the
         // initiating window's one dialog already covered the batch). Detached in ~TerminalPage (Rule #10).
         uint64_t _windowCloseSessionToken{ 0 };
+        // Agentmaster (cross-window "Deactivate ▸ Of Same Folder"): this window's park-session sink on the
+        // shared engine — a folder-scoped Deactivate started in ANOTHER window fans a session hosted HERE
+        // out to this sink, which hops to this window's UI thread and parks its tab (_DeactivateSessionLocal).
+        // 0 until engine init registered it. Detached in ~TerminalPage (Rule #10): without that the engine
+        // would keep calling a sink whose window is gone (harmless — it holds a weak page reference — but
+        // the sink list would grow with every closed window).
+        uint64_t _windowDeactivateSessionToken{ 0 };
         // Agentmaster (eager-init / "Activate All Tabs"): this window's "wake all dormant tabs" sink on
         // the shared engine — the Manager's fleet-wide "Activate All" in ANOTHER window fans out here, and
         // this window eager-inits its own dormant controls. Detached in ~TerminalPage (Rule #10).
@@ -1694,7 +1701,8 @@ namespace winrt::TerminalApp::implementation
         // out, and its one-shot first-layout init starts the resume — the same wake every restored tab
         // gets; "Activate Tab" / "Activate All Tabs (N)" initialize it in place (InitializeWithSize).
         // All UI thread.
-        void _DeactivateTabsFromMenu(const winrt::TerminalApp::Tab& anchorTab, int32_t scope); // scope: 0 == this tab · 1 == other tabs · 2 == all tabs (this window). When the FOCUSED tab is among them, the Agent Manager page is shown FIRST, so the fresh control is never laid out on screen (laying it out would start it at once). The right-clicked tab stays in view (_KeepTabHeaderInView) — the 2026-10-01 strip jump
+        void _DeactivateTabsFromMenu(const winrt::TerminalApp::Tab& anchorTab, int32_t scope); // scope: one of Tab's kDeactivateScope* codes — this tab · other tabs · all tabs · tabs to the left · tabs to the right (all five: this window) · of same folder · other of same folder (both: EVERY window — the tabs this window hosts are parked here, the rest are fanned out to their hosting window, DeactivateSessionInOtherWindows). An unknown code parks nothing and is logged. When the FOCUSED tab is among them, the Agent Manager page is shown FIRST, so the fresh control is never laid out on screen (laying it out would start it at once). The right-clicked tab stays in view (_KeepTabHeaderInView) — the 2026-10-01 strip jump
+        bool _DeactivateSessionLocal(const std::wstring& sessionId); // Agentmaster (cross-window folder-deactivate): park the session's tab IN THIS WINDOW, the receiving half of the park-session sink. Runs the whole single-tab path (_DeactivateTabsFromMenu, this-tab scope), so THIS window's focused-tab rule applies: a session on screen here sends this window to its Agent Manager page first. Returns false when this window doesn't host the session's tab (the fan-out simply misses here). No confirmation, and a turn in progress is cut off
         bool _DeactivateManagedTab(const winrt::TerminalApp::Tab& tab); // ONE tab -> dormant; false == skipped (not a managed session / adopted-external / already dormant / mid-delivery / no claude.exe / connection or pane build failed / the swap refused), each meaningful skip logged
         // Agentmaster (deactivate): resolve what parking `tab` would act on, WITHOUT acting or logging. On
         // true, `sessionId` / `info` / `pane` / `control` describe the session, its own leaf pane (the
