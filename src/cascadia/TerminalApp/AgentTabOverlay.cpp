@@ -242,7 +242,7 @@ namespace winrt::TerminalApp::implementation
         _row1.Children().Append(tb);
     }
 
-    void AgentTabOverlay::_Refresh()
+    void AgentTabOverlay::_Refresh(bool updateSummary)
     {
         if (_pending)
         {
@@ -386,19 +386,53 @@ namespace winrt::TerminalApp::implementation
             t.VerticalAlignment(VerticalAlignment::Center);
             t.Foreground(modeBrush);
             // "Paused -> Auto" for an interrupt hold (both words from the one display-name table).
-            t.Text(interruptHeld ? winrt::hstring{ std::wstring{ ModeLabel(AutorunnerMode::Off) } + L" \x2192 " + ModeLabel(s.autorunner.interruptHeldMode) } :
-                                   winrt::hstring{ ModeLabel(mode) });
+            const winrt::hstring currentModeText = interruptHeld ? winrt::hstring{ std::wstring{ ModeLabel(AutorunnerMode::Off) } + L" \x2192 " + ModeLabel(s.autorunner.interruptHeldMode) } :
+                                                                   winrt::hstring{ ModeLabel(mode) };
+            if (!_globalPauseShown)
+            {
+                t.Text(currentModeText); // the plain badge: built exactly as it was before the global-pause suffix existed
+            }
+            else
+            {
+                // Agentmaster (the GLOBAL PAUSE on the badge — DELIVERY.md §17.3): "<current> (Off globally)".
+                // The Agent Manager toolbar's Pause holds EVERY session's automatic send, whatever the
+                // session's own mode says, and until 2026-10-09 the badge could not show it: a tab read
+                // a green "Auto" while nothing would ever go out. The session's own mode stays the first
+                // word, in its own color — it is kept during the pause, the click below still switches
+                // it, and it is what applies again after a resume — and the reason follows in the Paused
+                // gray, so the pair reads "this is set to Auto, but the runner is off for everyone".
+                // Two Runs (the status block's idiom above) and not Text + one appended Run: the suffix
+                // needs its own color, and mixing the Text property with the Inlines collection would
+                // lean on how the two interact, which nothing else in this file relies on.
+                Run current{};
+                current.Text(currentModeText);
+                t.Inlines().Append(current); // no Foreground of its own: it takes the TextBlock's mode color
+                Run offGlobally{};
+                offGlobally.Text(winrt::hstring{ kOffGloballySuffix });
+                offGlobally.Foreground(Fill(0xFF, 0xB0, 0xB0, 0xB0)); // the Paused gray: the runner is off, whatever color the mode word wears
+                t.Inlines().Append(offGlobally);
+            }
             // CLICK-THROUGH the label so a click on the text (not just the button background) still cycles
             // the mode: the on-top TextBlock would otherwise catch the glyph-area pointer without driving
             // the ButtonBase click. The button keeps hover + tooltip (AgentSetTip is on `b`).
             t.IsHitTestVisible(false);
             b.Content(t);
-            AgentSetTip(b, winrt::hstring{
-                L"Prompt Queue Runner \x2014 click to switch between Paused and Auto.\n"
-                L"Paused: nothing is sent on its own; the queue waits for you.\n"
-                L"Auto: the next queued prompt goes out by itself once the session is ready.\n"
-                L"Interrupting a turn (Esc) pauses it until your next message, then it returns\n"
-                L"to Auto by itself (\"Paused \x2192 Auto\"); setting the mode yourself cancels that." });
+            // The tooltip LEADS with the global pause while it is on: it is the reason nothing goes out,
+            // and the lines about this session's own mode stay true underneath it.
+            std::wstring modeTip;
+            if (_globalPauseShown)
+            {
+                modeTip = L"Off globally \x2014 the Prompt Queue Runner is paused for EVERY session (the Agent Manager\n"
+                          L"toolbar; its button now reads \"Resume Prompt Queue Runner\"). Nothing is sent on its\n"
+                          L"own until it is resumed there. Send now (Agent Manager) still works. This session's\n"
+                          L"own mode is kept, and you can still switch it here.\n\n";
+            }
+            modeTip += L"Prompt Queue Runner \x2014 click to switch between Paused and Auto.\n"
+                       L"Paused: nothing is sent on its own; the queue waits for you.\n"
+                       L"Auto: the next queued prompt goes out by itself once the session is ready.\n"
+                       L"Interrupting a turn (Esc) pauses it until your next message, then it returns\n"
+                       L"to Auto by itself (\"Paused \x2192 Auto\"); setting the mode yourself cancels that.";
+            AgentSetTip(b, winrt::hstring{ modeTip });
             const auto weak = get_weak();
             b.Click([weak](const IInspectable&, const RoutedEventArgs&) {
                 if (auto self = weak.get())
@@ -529,10 +563,13 @@ namespace winrt::TerminalApp::implementation
                 // build gate since 2026-10-09: the scheduler now runs in every build, so the hold this
                 // cue describes exists wherever the row is shown (the cue was dev-or-debug before,
                 // because an ordinary release never started the scheduler).
-                // ⚠ The cue cannot see the GLOBAL pause (it lives in the scheduler, not on the session):
-                // while the toolbar's Pause holds every send, a session can still read "settling" here.
+                // The GLOBAL pause hides the cue (_globalPauseShown — the page mirrors it in, because it
+                // lives in the scheduler and not on the session): DecideAdvance answers "global pause"
+                // before it ever looks at the settle window, so nothing is waiting on the clock, and
+                // row 1 already says why ("<current> (Off globally)"). Until 2026-10-09 the cue could not
+                // see the pause, and a session read "settling" while the toolbar's Pause held every send.
                 int64_t settleLeftMs = 0;
-                if (!heldByQuestion && s.live && (s.started || s.external) && s.autorunner.mode != ::Agentmaster::AutorunnerMode::Off &&
+                if (!heldByQuestion && !_globalPauseShown && s.live && (s.started || s.external) && s.autorunner.mode != ::Agentmaster::AutorunnerMode::Off &&
                     (s.state == ::Agentmaster::SessionState::Idle || s.state == ::Agentmaster::SessionState::WaitingForInput))
                 {
                     const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -575,6 +612,14 @@ namespace winrt::TerminalApp::implementation
                                                            L"Release: answer in the terminal, Send now, or switch the Prompt Queue Runner to Paused and back to Auto (an explicit re-arm clears the hold).\n\n"
                                                            L"Next queued prompt:\n" } +
                                                  full :
+                                         // The global pause comes second: a question hold stays the more
+                                         // specific reason (it still holds this queue after a resume), and
+                                         // the default text below would promise a send that cannot happen.
+                                         _globalPauseShown ?
+                                             std::wstring{ L"Queue OFF GLOBALLY \x2014 the Prompt Queue Runner is paused for every session (the Agent Manager toolbar), so this prompt is not sent on its own.\n"
+                                                           L"Resume it there (this session then follows its own mode again), or use Send now.\n\n"
+                                                           L"Next queued prompt:\n" } +
+                                                 full :
                                          settling ?
                                              std::wstring{ L"Queue SETTLING \x2014 the Prompt Queue Runner types the next prompt only after this session has held a sendable status (Idle / Waiting-for-you) for " } +
                                                  settleSeconds +
@@ -592,7 +637,14 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Summary panel (2nd slot): show/hide per the persisted toggle + (re)load when the transcript grew.
-        _UpdateSummary(s);
+        // Skipped for a repaint whose cause cannot change anything the panel shows (updateSummary false —
+        // the global pause): while the panel is on, each _UpdateSummary starts an off-thread growth check
+        // (a transcript path lookup, which walks the project folders for a session that has no transcript
+        // yet, and a stat), and a pause click repaints every badge of the window in one go.
+        if (updateSummary)
+        {
+            _UpdateSummary(s);
+        }
     }
 
     // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): see the header. The timer is one-shot by
@@ -755,6 +807,28 @@ namespace winrt::TerminalApp::implementation
         if (!_pending && !_sessionId.empty() && _registry)
         {
             _Refresh(); // repaint row 1's model part under the new list
+        }
+    }
+
+    // Agentmaster (the GLOBAL PAUSE on the badge — DELIVERY.md §17.3): adopt the scheduler's process-wide
+    // pause state (seeded on attach, then pushed by the window's global-pause listener through
+    // TerminalPage::_ApplyGlobalPauseShown). The header has the contract. The flag is a plain mirror:
+    // _Refresh reads it for row 1's "<current> (Off globally)" label and for row 3's hold cue.
+    //   paused — true while the Agent Manager toolbar's "Pause Prompt Queue Runner" is in force.
+    void AgentTabOverlay::SetGlobalPauseShown(bool paused)
+    {
+        if (_globalPauseShown == paused)
+        {
+            return; // the seed of an unpaused badge, and a repeated broadcast, cost nothing
+        }
+        _globalPauseShown = paused;
+        // Only a LINKED badge has a mode button and a row 3. An observe badge (_pending) and a badge
+        // that Initialize has not bound yet keep the value for their first _Refresh, if one ever comes.
+        if (!_pending && !_sessionId.empty() && _registry)
+        {
+            // Rows only (updateSummary false): the pause changes nothing that the summary panel shows, and
+            // this call reaches every badge of the window at once — see _Refresh.
+            _Refresh(false); // repaint row 1's mode button and row 3's hold cue under the new state
         }
     }
 

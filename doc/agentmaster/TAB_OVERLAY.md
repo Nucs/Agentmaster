@@ -81,9 +81,24 @@ the CLI keep `Off` / `Full`. A third mode, `SemiAuto` (chip `Semi`: "Agentmaster
 prompt; you confirm"), was removed on 2026-10-09 (DELIVERY.md §17.4). A stored `SemiAuto` loads as
 `Off`. The chip is shown in every build since the same day (before: dev-or-debug only).
 
+**The global pause** (2026-10-09, NOT BUILT yet; DELIVERY.md §17.3). While the Agent Manager toolbar's
+"Pause Prompt Queue Runner" is on, the chip reads `<current> (Off globally)`:
+
+| Session's own mode | Chip while the pause is on |
+| --- | --- |
+| Auto | `Auto (Off globally)` |
+| Paused | `Paused (Off globally)` |
+| Paused by an interrupt hold | `Paused → Auto (Off globally)` |
+
+- The mode word keeps its color. ` (Off globally)` follows in gray (`kOffGloballySuffix`).
+- The session's own mode is kept. A click on the chip still switches it.
+- The chip's tooltip starts with the pause and names where to end it (the Manager toolbar).
+- The wording is the user's. It says "Off", because "Paused" is the word for a session's own mode.
+
 Plus the transient annotations that explain *why nothing is moving right now*:
 `held: question`
-(`lastMessageWasQuestion` + the question-guard), `⏸ paused` (scheduler global pause), and the
+(`lastMessageWasQuestion` + the question-guard), the global pause (the ` (Off globally)` suffix above;
+the design seed called it `⏸ paused`), and the
 backstop `n/maxAutoSends`. An `error` state (Crimson) already signals a `stopOnError` halt.
 
 ### 3c. Status — *what* is the session doing?
@@ -197,7 +212,7 @@ seams):
 | ~~**Confirm / Skip**~~ | removed on 2026-10-09 with the SemiAuto mode (it was a page callback → `Scheduler::Confirm(id, bool)`) | — |
 | **Jump to Manager** | page callback: focus `_managerTab` + `AgentManagerContent::SelectSession(id)` (new public entry) | the inverse of `_ActivateClaudeSession` |
 | link state | `SessionRegistry::HasInjector(id)` (new) | — |
-| global pause | provider `() -> _scheduler->GlobalPaused()` | — |
+| global pause | pushed in, not pulled: `AgentTabOverlay::SetGlobalPauseShown(bool)`. `_AttachClaudeOverlay` seeds it from `_scheduler->GlobalPaused()`, and the window's global-pause listener re-applies it to every badge (`TerminalPage::_ApplyGlobalPauseShown`). The design seed planned a provider `() -> _scheduler->GlobalPaused()`. | the listener behind the Manager's Pause button (DELIVERY.md §17.3) |
 
 > Switching the Prompt Queue Runner to `Full` (Auto) while the session sits `Idle`/`WaitingForInput`
 > naturally kicks the plan: the registry `Update` fires observers → the scheduler's `OnObserved`
@@ -211,9 +226,14 @@ Mirror the Manager's proven pattern (`AgentManagerContent.cpp:390-416`) but **id
 
 - On `SetRegistry`, `AddObserver([weak, disp, myId](const SessionInfo& s, HookEvent){ if (s.id==myId) disp.TryEnqueue(refresh); })`. Keep the returned `ObserverToken`; **`RemoveObserver` on teardown** (the overlay's `Close`/dtor) — same discipline as the Manager lens (Rule #10), so a closed tab's badge never pins a dead `DispatcherQueue`.
 - N sessions ⇒ N observers, each doing an O(1) id check per change — fine at this scale.
-- **Global pause** is scheduler state, not a registry event: read it via the provider on each
-  `refresh`, and have the page **nudge every open overlay** when Pause-all toggles (iterate
-  `_claudeTabs`) so the `⏸ paused` mark updates immediately rather than on the next session event.
+- **Global pause** is scheduler state, not a registry event, so no session notify carries it. Since
+  2026-10-09 (written that day, NOT BUILT yet) the page **tells every linked overlay** when the pause
+  changes. The scheduler calls each window's global-pause listener, the listener hops to the window's
+  UI thread, and `TerminalPage::_ApplyGlobalPauseShown` re-reads `GlobalPaused()` and calls
+  `SetGlobalPauseShown` on each overlay in `_claudeOverlays`. The overlay stores the value and
+  re-renders, so the ` (Off globally)` suffix appears at once, not on the next session event. A new
+  overlay is seeded in `_AttachClaudeOverlay`. (The design seed planned a provider that each refresh
+  would read, and a `⏸ paused` mark.)
 - Refresh is **snapshot-driven** (rebuild the line from `registry->Get(id)`), like the Manager —
   no incremental diffing.
 
@@ -492,8 +512,12 @@ reads as stuck:
     autorunner on, Idle / Waiting-for-you, and no question held.
   - The end of a settle window notifies nothing, so a one-shot timer (`_ArmSettleRefresh`) redraws
     the row just past it, and the cue clears without waiting for the send.
+  - It is hidden while the global pause is on (2026-10-09, NOT BUILT yet): the scheduler answers
+    `global pause` before it looks at the settle window, so no send is waited for. Row 1 then says
+    why (`<current> (Off globally)`, §3b).
 
-The tooltip explains the active hold and how to release it.
+The tooltip explains the active hold and how to release it. While the global pause is on and no
+question holds the queue, it says that the queue is off globally and where to resume it.
 
 ### 13j. The MAIL button — move the unsent draft to the queue (row 1, between folder and copy)
 A **mail** button (`\xE715`, the SAME Segoe Fluent glyph the Manager compose row's "Add to queue" envelope

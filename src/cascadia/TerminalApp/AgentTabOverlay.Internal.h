@@ -173,6 +173,15 @@ namespace
         return ::Agentmaster::AutorunnerModeDisplayName(m);
     }
 
+    // What row 1's mode button appends to the session's own mode word while the Prompt Queue Runner is
+    // paused for EVERY session (the Agent Manager toolbar's "Pause Prompt Queue Runner" button —
+    // Scheduler::GlobalPaused): "Auto (Off globally)", "Paused (Off globally)",
+    // "Paused -> Auto (Off globally)". The wording is the user's own (2026-10-09). It says "Off", not
+    // "Paused", on purpose: "Paused" is already the word for the session's OWN mode, and
+    // "Paused (Paused globally)" would not tell the two apart. The leading space belongs to the
+    // constant, so the button's text is always <mode word> + this, with no separator to forget.
+    constexpr const wchar_t* kOffGloballySuffix = L" (Off globally)";
+
     // Agentmaster (TAB_OVERLAY row 3): a one-line preview of a queued prompt — its FIRST line, capped
     // at `maxChars` characters, a trailing "..." whenever there is more than what's shown. The rule
     // itself now lives in the engine as ::Agentmaster::PromptPreviewLine (SessionModels.h, PURE +

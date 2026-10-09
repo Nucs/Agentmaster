@@ -50,6 +50,7 @@
 #include "AgentMaster/ProcessInspect.h" // ResolveClaudeTranscriptPath + AnalyzeSessionTranscript (prompt-nav)
 #include "AgentMaster/ProcessObserver.h" // roster publish + Correlation/Activity/External tables
 #include "AgentMaster/ProfileBootstrap.h" // Profiles:: profile-aware state paths (engine)
+#include "AgentMaster/Scheduler.h" // GlobalPaused — seed a new tab badge with the process-wide pause state (_AttachClaudeOverlay, DELIVERY.md §17.3)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/SessionScanner.h" // PresenceIsWorking + the toast HOLD gates (ShouldHoldCompletionToast / DecideHeldToast / ShouldSuppressDuplicateToast) — System notifications
 #include "AgentMaster/SessionStore.h" // IsSessionFavorite (the FAVORITE crown on a managed tab's status dot)
@@ -5021,6 +5022,14 @@ namespace winrt::TerminalApp::implementation
         // seed this overlay's row-1 model shortener; a cog Save re-applies it live via the same
         // _ReapplyManagedTabColors broadcast that pushes the tab-color mode.
         overlay->SetModelFamilies(_appSettings.modelFamilies);
+        // The GLOBAL PAUSE (DELIVERY.md §17.3): process-wide SCHEDULER state, not a setting and not a
+        // fact of the session — seed this badge, so a tab that is opened, bound or re-attached while the
+        // Prompt Queue Runner is paused reads "<current> (Off globally)" from its first frame. Every later
+        // change reaches it through this window's global-pause listener (_ApplyGlobalPauseShown), which
+        // walks _claudeOverlays. A change that lands between this read and the map insert below cannot be
+        // lost: its hop is queued on THIS thread and runs after this function, when the badge is in the map.
+        // No scheduler (engine init did not run) reads as "not paused" — the plain badge.
+        overlay->SetGlobalPauseShown(_scheduler && _scheduler->GlobalPaused());
         {
             auto weakThis = get_weak();
             overlay->SetSummaryToggleHandler([weakThis]() {

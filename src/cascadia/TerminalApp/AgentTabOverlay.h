@@ -127,6 +127,31 @@ namespace winrt::TerminalApp::implementation
         // change re-renders a linked badge. Call on the UI thread.
         void SetModelFamilies(const std::wstring& familiesCsv);
 
+        // Agentmaster (the GLOBAL PAUSE on the badge — DELIVERY.md §17.3, TAB_OVERLAY.md §3b): tell this
+        // badge whether the Prompt Queue Runner is paused for EVERY session (the Agent Manager toolbar's
+        // "Pause Prompt Queue Runner" button — Scheduler::GlobalPaused). The pause is a fact of the
+        // process-wide scheduler, NOT of the session, so no registry notify ever carries it and the
+        // badge cannot read it by itself: the page mirrors it in — on attach (the seed in
+        // _AttachClaudeOverlay) and from the window's global-pause listener on every change
+        // (TerminalPage::_ApplyGlobalPauseShown). While it is on:
+        //   - row 1's mode button reads "<current> (Off globally)" — the session's own mode
+        //     ("Auto", "Paused", "Paused -> Auto"), which is kept and still switchable, followed by
+        //     the reason nothing goes out by itself;
+        //   - row 3 shows no "settling" cue (no automatic send is being waited for), and its tooltip
+        //     names the global pause instead of promising a send on the next turn-complete — unless
+        //     a question hold is the reason on screen, which stays (it outlives a resume).
+        // ⚠ A DISPLAY mirror only: this neither pauses nor resumes anything (the scheduler owns the
+        // state), and a badge that is never told keeps showing the plain mode — so every code path
+        // that creates a linked badge must seed it.
+        // Change-gated (a repeated value costs nothing); a real change re-renders a LINKED badge. An
+        // observe badge has no mode button, so it only stores the value.
+        //   paused — true while the global pause is in force.
+        //   returns — nothing.
+        //   throws  — what a badge re-render can throw: winrt::hresult_error from a failing XAML call,
+        //             std::bad_alloc. The page's caller contains it per badge (_ApplyGlobalPauseShown).
+        // Call on the UI thread.
+        void SetGlobalPauseShown(bool paused);
+
         // Agentmaster (TAB_OVERLAY.md summary panel): whether the panel preserves a message's real
         // newlines (true) or collapses each message to one line with a literal "\n" (false, the default
         // session-end.js look). A GLOBAL setting (AppSettings::summaryPanelWrapNewlines), mirrored in here
@@ -261,7 +286,19 @@ namespace winrt::TerminalApp::implementation
         void RefreshSummaryContent();
 
     private:
-        void _Refresh(); // rebuild the line from the registry snapshot (UI thread)
+        // Rebuild the LINKED badge from the registry snapshot of this session: row 1 (model, status,
+        // actions, the Prompt Queue Runner button, queued count, link state), row 2 (folder / branch) and
+        // row 3 (the next queued prompt with its hold cue). A no-op for an observe badge and before
+        // Initialize; an id the registry no longer knows collapses the badge. UI thread only.
+        //   updateSummary — true (the default: every registry-driven refresh) also runs _UpdateSummary,
+        //                   which shows / hides the summary panel and, while the panel is on, asks for an
+        //                   off-thread transcript growth check (a path lookup and a stat for each call).
+        //                   Pass false ONLY when the cause of the repaint cannot change anything the
+        //                   panel shows — today the global pause (SetGlobalPauseShown), which reaches
+        //                   every badge of a window at once and would start one check per badge.
+        //   returns — nothing.
+        //   throws  — winrt::hresult_error from a failing XAML call; std::bad_alloc.
+        void _Refresh(bool updateSummary = true);
         void _Detach(); // drop the registry observer
         void _WireHover(); // attach the pointer-over brighten handlers (idempotent; weak-captured)
         void _BuildActionsRow(); // lazily build the action buttons (folder + mail/queue + copy menu + pencil); placed in row 1 right after the status block by _Refresh, for a LINKED session
@@ -322,6 +359,7 @@ namespace winrt::TerminalApp::implementation
         double _hoverOpacity{ 1.0 }; // GLOBAL AppSettings::tabOverlayHoverOpacity mirror (bright, on hover / copy-menu-open) — page-driven
         int _tabColorMode{ 0 }; // GLOBAL AppSettings::tabColorMode mirror as int (0 == WorkingDirectory) — page-driven; keys the EFFECTIVE work dir the subline/Open Path/Copy Path show (SetTabColorMode)
         std::wstring _modelFamiliesCsv; // GLOBAL AppSettings::modelFamilies mirror (raw csv; parsed per refresh) — page-driven; the family words row 1's model shortener recognizes for a bare --model alias (SetModelFamilies)
+        bool _globalPauseShown{ false }; // Scheduler::GlobalPaused() mirror (the Manager toolbar's "Pause Prompt Queue Runner") — page-driven: seeded on attach, then set by the window's global-pause listener. true => row 1's mode button reads "<current> (Off globally)" and row 3 drops its "settling" cue. Display only; false until the page says otherwise (SetGlobalPauseShown)
         std::wstring _lastActivitySig; // last kind rendered by ShowActivity (skip redundant re-renders)
         std::shared_ptr<::Agentmaster::SessionRegistry> _registry;
         uint64_t _observerToken{ 0 }; // ::Agentmaster::ObserverToken (uint64_t; avoid the header here)

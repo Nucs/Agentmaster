@@ -1067,8 +1067,37 @@ queued dispatcher hop).
 **Not changed:** the pause is not persisted (a restart starts resumed), per-session modes are not
 touched, and Send now works while paused.
 
-**Known gap:** the per-tab badge's `settling` cue does not know the global pause, because the pause is
-not a fact of the session. A paused session can still read `settling` there.
+**The per-tab badge shows the pause** (2026-10-09, a later change of the same day, NOT BUILT yet). The
+pause is not a fact of the session, so no registry notify carries it, and the badge could not show it:
+a tab read a green `Auto`, or `settling`, while nothing would go out. The user asked for the text:
+*"Have the per-tab badge say "<current> (Off globally)" when global switch is used"*.
+
+| Session's own mode | Badge text while the pause is on |
+|---|---|
+| Auto | `Auto (Off globally)` |
+| Paused | `Paused (Off globally)` |
+| Paused by an interrupt hold (§14) | `Paused → Auto (Off globally)` |
+
+- The first words are the session's own mode, in its usual color. The mode is kept during the pause,
+  a click on the button still switches it, and it applies again after a resume.
+- ` (Off globally)` follows in gray. It says "Off" and not "Paused", because "Paused" is the word for
+  the session's own mode.
+- The button's tooltip starts with the global pause and where to end it. Row 3 shows no `settling` cue
+  during the pause, because no send is waited for, and its tooltip says that the queue is off globally.
+  A question hold (`❓ held …`) stays: it still holds the queue after a resume.
+- **How the badge learns it:** `AgentTabOverlay::SetGlobalPauseShown(bool)` is a display mirror, like
+  the Manager button's. The window's global-pause listener calls it for every badge of the window
+  (`TerminalPage::_ApplyGlobalPauseShown` walks `_claudeOverlays` after it repaints the button), and
+  `_AttachClaudeOverlay` seeds a badge that is created during a pause. Each badge is contained on its
+  own, so one failing re-render does not stop the others.
+- **Cost:** one badge re-render for each linked tab of the window, once for each real pause change.
+  Every badge is told at once: nothing else repaints the badge of a quiet session. The re-render
+  rebuilds the badge's three rows only (`_Refresh(false)`). It skips the summary panel's update,
+  which would start one off-thread transcript check for each badge (a path lookup and a stat) for a
+  change that the panel does not show.
+- **Not changed:** the Manager pane's own mode toggle and the board card's ⚙ tooltip still show only
+  the session's own mode. On the Manager page the toolbar button itself shows the pause
+  ("Resume Prompt Queue Runner").
 
 ### 17.4 Two modes — Paused and Auto
 
@@ -1124,6 +1153,8 @@ engine through it, and it is the place where a kill switch would go.
   - hooks.log has the `[engine] prompt queue runner started …` line in a release without Debug Mode;
   - a Pause in one window relabels the button in every window, and `autorunner.log` has the
     `[pause-all]` pair;
+  - during the pause every tab badge, in every window, reads `<mode> (Off globally)`, a tab that is
+    opened or entered then reads it too, no badge shows `settling`, and a Resume removes the suffix;
   - a queued prompt on a Deactivated tab stays `Pending`, with one
     `[advance-skip] … (tab dormant …)` line, and is sent after the tab is entered;
   - Send now on a Deactivated tab types nothing: the row returns to the upcoming list, and hooks.log

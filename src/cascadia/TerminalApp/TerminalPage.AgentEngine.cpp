@@ -1414,12 +1414,14 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Global-pause listener (DELIVERY.md §17): the "Pause Prompt Queue Runner" state is ONE
-        // process-wide value owned by the shared scheduler, but every window draws its own button. The
+        // process-wide value owned by the shared scheduler, but every window draws its own button and
+        // its own per-tab badges ("<current> (Off globally)"). The
         // scheduler calls this listener on each real change — whichever window's click made it, this one
         // included — on the CLICKING thread, so the listener only hops to this window's UI thread; the
         // hop carries no value on purpose (_ApplyGlobalPauseShown re-reads the scheduler, so hops that
         // land out of order cannot leave a stale label). No seed here: the Manager page is not built yet
-        // at engine init, and _WireAgentManagerContent seeds its button when it is. Detached in
+        // at engine init, and _WireAgentManagerContent seeds its button when it is; no tab badge exists
+        // yet either, and each one seeds itself when it is attached (_AttachClaudeOverlay). Detached in
         // ~TerminalPage (Rule #10).
         if (_scheduler)
         {
@@ -2365,26 +2367,63 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (the GLOBAL PAUSE — DELIVERY.md §17): repaint THIS window's "Pause / Resume Prompt Queue
-    // Runner" toolbar button from the shared scheduler's current pause state. Called on this window's UI
-    // thread by the global-pause listener's hop (engine init), for a change made in ANY window.
+    // Agentmaster (the GLOBAL PAUSE — DELIVERY.md §17): repaint everything THIS window shows of the shared
+    // scheduler's current pause state: its "Pause / Resume Prompt Queue Runner" toolbar button, and the
+    // mode button of every per-tab badge, which reads "<current> (Off globally)" while the pause is on
+    // (AgentTabOverlay::SetGlobalPauseShown). Called on this window's UI thread by the global-pause
+    // listener's hop (engine init), for a change made in ANY window.
     // The state is RE-READ here, never passed in: the listener runs on the clicking thread and its hops
-    // can reach this thread in any order, so a carried value could leave the button on the older state.
-    // A window without a Manager page (not built yet, or already released at teardown) or without a
-    // scheduler does nothing — the page seeds its own button when it is wired.
+    // can reach this thread in any order, so a carried value could leave the button and the badges on
+    // the older state.
+    // A window without a scheduler does nothing. A window without a Manager page (not built yet, or
+    // already released at teardown) skips only the button — the page seeds it when it is wired — and
+    // still repaints its badges. A badge that is attached later seeds itself (_AttachClaudeOverlay).
+    // Each target is contained on its own: a badge whose re-render throws must not cost the other
+    // badges, or the button, their repaint.
+    // Cost: one re-render per linked badge of this window (a registry read and a rebuild of the badge's
+    // rows), once per real pause change — a user's click, never a timer. Every badge is told at once and
+    // not when its tab is next entered, because nothing else would repaint a badge of a quiet session.
     //   returns — nothing.
     //   throws  — nothing: this runs as a dispatcher item, where an escaping exception ends the
     //             process, and it sets XAML content (which can throw). A failure is logged (Rule #18)
-    //             and the button keeps its previous label until the next change repaints it.
+    //             and that one button or badge keeps its previous text until the next change repaints it.
     void TerminalPage::_ApplyGlobalPauseShown() noexcept
     {
         try
         {
-            if (!_managerPage || !_scheduler)
+            if (!_scheduler)
             {
                 return;
             }
-            _managerPage->SetGlobalPauseShown(_scheduler->GlobalPaused());
+            const bool paused = _scheduler->GlobalPaused();
+            if (_managerPage)
+            {
+                try
+                {
+                    _managerPage->SetGlobalPauseShown(paused);
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"_ApplyGlobalPauseShown (Manager button)");
+                }
+            }
+            // The linked badges only: an observe badge (_pendingOverlays) has no mode button, and the side
+            // panel's fill-hosted overlay shows its summary panel alone, never the badge rows.
+            for (const auto& [id, overlay] : _claudeOverlays)
+            {
+                if (!overlay)
+                {
+                    continue;
+                }
+                try
+                {
+                    overlay->SetGlobalPauseShown(paused); // change-gated: a badge already on this state does nothing
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"_ApplyGlobalPauseShown (tab badge)");
+                }
+            }
         }
         catch (...)
         {
