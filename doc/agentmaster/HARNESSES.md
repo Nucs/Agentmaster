@@ -25,7 +25,9 @@
 > 43 new; a negative control fails exactly its two altered checks), all 89 `TerminalAppLib` files and all 16
 > `agentmaster-cli` files under `/Zs` with the last build's flags (through a precompiled header built from the
 > copy), and probes that fail every consumer of the changed files. No request has gone to NanoGPT or RunPod
-> (R8, R9).
+> (R8, R9). A same-day review against the vendors' benchmark settings and release precisions (§4.2) changed
+> only the RunPod template: Context 917,504 + Max output 131,072 for the server's 1M window (it had 262,144 +
+> 32,000, which a vLLM server with a 262,144 window could refuse), and Xiaomi's own server command in §9.
 >
 > The reference configuration is the user's OpenRouter launcher (`mimo`, `mimo-flash`, `kimi`, `qwen`,
 > `glm`: `~/.claude/scripts/openrouter.ps1` + `openrouter-profiles.json`, verified 2026-10-06 on Claude
@@ -192,9 +194,9 @@ TEMPLATES (and of "Add all tested templates"):
 | `mimo-flash.xiaomi` | MiMo Flash · Xiaomi | `mimo-v2.6-flash` | `mimo-v2.6-pro` | 1,048,576 | the same | **not tested**: added only by its own Add |
 | `mimo-flash.nanogpt` | MiMo Flash · NanoGPT | `xiaomi/mimo-v2.6-flash` | `xiaomi/mimo-v2.6-pro` | 1,000,000 | `temperature` 1.0; `top_p` 0.95; no `provider` block; Effort `high` | **not tested** (R8, §4.2) |
 | `glm-flash.nanogpt` | GLM-5.3 Flash · NanoGPT | `z-ai/glm-5.3-flash` | `z-ai/glm-5.3` | 1,000,000 | `temperature` 1.0; `top_p` 1.0; no `provider` block; Effort `max` | **not tested** (R8, §4.2) |
-| `mimo-flash.runpod` | MiMo Flash · RunPod | `XiaomiMiMo/MiMo-V2.6-Flash-MOPD` (a Hugging Face id) | — | 262,144 | `temperature` 1.0; `top_p` 0.95; Max output **32,000**; no effort | **not tested** (R9, §4.2) |
+| `mimo-flash.runpod` | MiMo Flash · RunPod | `XiaomiMiMo/MiMo-V2.6-Flash-MOPD` (a Hugging Face id) | — | 917,504 (the server's 1,048,576 window minus Max output) | `temperature` 1.0; `top_p` 0.95; no effort | **not tested** (R9, §4.2) |
 
-All ten set Max output 131,072, except the RunPod one (32,000, §4.2). The five OpenRouter templates set
+All ten set Max output 131,072 (Claude Code asks for at most 128,000 for a model it does not know). The five OpenRouter templates set
 Effort `max`, the level their tests ran with (§2, F9, F10); the untested Xiaomi pair sets none; the NanoGPT
 pair sets the top level each model lists (§4.2); the RunPod one sets none. None sets an identity note
 (§5.2). None is in the preset list until the user adds it (Q11). An untested template is added only by its
@@ -274,9 +276,22 @@ The templates use the NORMAL release of each. The values come from NanoGPT's pub
 - **No host pinned**: NanoGPT routes automatically, tries to keep a session on one host that caches prompts
   (its cache-affinity routing), and a NanoGPT subscription covers both models. A pinned host (§9) is billed
   pay-as-you-go plus 5%.
-- **Sampling**: Xiaomi's for MiMo (temperature 1.0, top_p 0.95); for GLM 5.3 Flash, Z.ai's GLM-5.3 Claude
-  Code values (1.0, 1.0), taken over from the same family: Z.ai's values for the Flash model itself were
-  not found.
+- **Sampling = the vendors' benchmark settings** (model cards, read 2026-10-09): Xiaomi recommends
+  temperature 1.0, top_p 0.95 for MiMo V2.6. Z.ai runs GLM-5.3 Flash's Claude Code benchmark (Terminal-Bench
+  2.1, Claude Code 2.1.207) at temperature 1.0, top_p 1 and 65,536 output tokens; `max` is the model's
+  default effort. The templates' 131,072 output limit is at or above every benchmark's (Z.ai: 64K–128K).
+- **Precision** (the release files, read 2026-10-09):
+  - MiMo V2.6 Flash: Xiaomi's own release keeps its MoE experts in MXFP4 (packed 4-bit, one scale per 32
+    values; `mxfp4_block_size` in `config.json`) and attention in FP8 e4m3: 172.9 GB for 309B parameters.
+    MiMo V2.6 Pro has the same layout (566 GB). No higher-precision release exists, so a "bf16" or "fp8" host
+    serves an up-conversion of the same 4-bit experts: no MiMo host is stronger than Xiaomi's release.
+  - GLM-5.3 Flash: Z.ai releases FP8 (`zai-org/GLM-5.3-Flash`) and the BF16 original
+    (`zai-org/GLM-5.3-Flash-BF16`). Of its 36 NanoGPT hosts, 11 serve FP4 / NVFP4, 1 BF16 (uomi), and Z.ai's
+    own host FP8. NanoGPT's precision filter (`provider.min_quantization` / `quantizations`) and its host pin
+    (`X-Provider`) are documented only for `/v1/chat/completions`, `/v1/completions` and talk-to-gpt; the
+    Messages API that Claude Code uses lists neither. So the template cannot exclude the 4-bit hosts today
+    (check R8: a request naming an unknown host in either control must fail if NanoGPT honors it). A filter
+    or a pin makes every request pay-as-you-go plus 5%, outside a subscription.
 - The bigger siblings are the `/model` switch entries: `xiaomi/mimo-v2.6-pro` ($0.435 / $0.87) and
   `z-ai/glm-5.3` ($1.00 / $3.20).
 
@@ -286,20 +301,29 @@ Main model must be the server's served model name (the Hugging Face repository i
 names Xiaomi's official MiMo V2.6 Flash in its MOPD checkpoint (`XiaomiMiMo/MiMo-V2.6-Flash-MOPD`,
 published 2026-09-27; Xiaomi's note: an on-policy distillation upgrade with a fix for repeated tool calls,
 which in Claude Code lowered MiMo Pro's repetition rate from 0.04–0.16% to about 0.01%). Read from the
-Hugging Face API on 2026-10-09: 177.7 GB of safetensors, MIT license, not gated. `XiaomiMiMo/MiMo-V2.6-Flash-RL`
-is the earlier release with the same layout.
+Hugging Face API on 2026-10-09: 172.9 GB of safetensors in Xiaomi's release precision (MXFP4 experts, FP8
+attention: see Precision above), MIT license, not gated. `XiaomiMiMo/MiMo-V2.6-Flash-RL` is the earlier release
+with the same layout. The values are the benchmark-like ones (changed 2026-10-09 from 262,144 / 32,000, which
+also broke the rule below):
 
-- **Hardware**: two H200 GPUs, tensor parallel 2 — the fit the user's research recorded (2026-10-07) for a
-  MiMo V2.6 Flash copy with the same 178 GB layout, at about 119 tokens per second.
-- **Context 262,144** = the `--max-model-len` of the command in §9. Change both together: vLLM refuses a
-  request whose input plus `max_tokens` passes its `--max-model-len`.
-- **Max output 32,000**: a load-balancing Serverless endpoint ends any request after 5.5 minutes (RunPod's
-  limits table); 32,000 tokens at about 119 tokens per second take about 4.5 minutes. A Pod's HTTP proxy
-  has another limit: it runs through Cloudflare, which ends a request with a 524 error when the server does
-  not respond within 100 seconds (RunPod's page calls it "a maximum connection time of 100 seconds").
-  Whether a long streamed answer, or the prefill of a large context before the first token, trips it was
-  not checked. A Pod's TCP port with a public IP avoids Cloudflare, but has no TLS.
-- **No effort**: what vLLM does with Claude Code's effort level was not checked.
+- **The server**: Xiaomi's own vLLM command (§9) with `--max-model-len 1048576`, the model's full window.
+  Xiaomi's command uses tensor parallel 4; 4 x H200 hold the weights and a 1M-token window either way.
+  The KV cache is small for this model (39 of its 48 layers are sliding-window attention with a 128-token
+  window), but whether vLLM sizes it that way was not checked, so 4 x H100 may not fit 1M.
+- **Max output 131,072**: Claude Code asks for at most 128,000 for a model it does not know — the 128K
+  maximum output Z.ai's own Claude Code benchmarks use.
+- **Context 917,504** = 1,048,576 − 131,072. vLLM REFUSES a request whose input plus `max_tokens` passes
+  its `--max-model-len`, so the window Claude Code plans compaction around must leave room for a full
+  answer: Context = the server's `--max-model-len` minus Max output. Change them together.
+- **Thinking**: MiMo's chat template thinks unless a request passes `enable_thinking: false`, so a vLLM
+  server reasons by default. No effort is set: what vLLM does with Claude Code's effort level was not
+  checked.
+- **A Serverless endpoint** ends any request after 5.5 minutes (RunPod's limits table): there, set Max
+  output to 32,000 (about 4.5 minutes at ~119 tokens per second) and Context to the window minus 32,000. A
+  Pod has no such limit. A Pod's HTTP proxy runs through Cloudflare, which ends a request with a 524 error
+  when the server does not respond within 100 seconds (RunPod's page calls it "a maximum connection time of
+  100 seconds"); whether a long streamed answer, or the prefill of a large context before the first token,
+  trips it was not checked. A Pod's TCP port with a public IP avoids Cloudflare, but has no TLS.
 - **Refusals**: a RunPod preset is refused at the pick when it names no model (`PresetLaunchRefusal`), and
   at the launch while no Base URL resolves — the notice then shows both URL shapes and `RUNPOD_BASE_URL`.
 
@@ -781,27 +805,37 @@ a Sessions-page chip and the CLI's `preset:` line are follow-ups (§12). The obs
   served model name: the repository id given to `vllm serve`, or `--served-model-name` when the weights are
   loaded from a local path (a network volume). The preset's Main model must be that name exactly
   (`modelRequired`).
-- **A server command for the template** (NOT RUN; the image and the parser flags are those the user's
-  research found on the model cards of MiMo V2.6 Flash copies with the same layout):
+- **A server command for the template** (NOT RUN): Xiaomi's own vLLM command from the MiMo V2.6 Flash MOPD
+  model card, with the window made explicit so the template's Context can match it (Xiaomi's card says
+  `--max-model-len auto`):
 
   ```
-  image:   vllm/vllm-openai:mimo-v26-cu129   (entrypoint: vllm serve)
-  args:    XiaomiMiMo/MiMo-V2.6-Flash-MOPD --tensor-parallel-size 2 --max-model-len 262144
-           --reasoning-parser mimo --tool-call-parser mimo --enable-auto-tool-choice --port <port>
-  GPUs:    2 x H200 (the 177.7 GB of weights; about 119 tok/s per the research)
-  env:     VLLM_USE_DEEP_GEMM=0 on the first boot of a fresh Hopper machine (the research's note)
+  image:   vllm/vllm-openai:mimov25-cu129   (the card's pre-built image; entrypoint: vllm serve)
+  args:    XiaomiMiMo/MiMo-V2.6-Flash-MOPD --tensor-parallel-size 4 --trust-remote-code
+           --gpu-memory-utilization 0.95 --max-model-len 1048576
+           --reasoning-parser mimo --tool-call-parser mimo --enable-auto-tool-choice
+           --generation-config vllm --port <port>
+  GPUs:    4 x H200 (172.9 GB of weights + the 1M-token window)
+  env:     VLLM_USE_DEEP_GEMM=0 on the first boot of a fresh Hopper machine (the user's research)
   ```
 
+  - `--generation-config vllm` makes vLLM ignore the model's own defaults, so the preset's temperature 1.0
+    and top_p 0.95 (Xiaomi's recommended sampling) are what the server uses.
+  - A smaller server: `--tensor-parallel-size 2` on 2 x H200 with `--max-model-len 262144`; then set the
+    preset's Max output to 65,536 and Context to 196,608 (the window minus Max output).
+  - Xiaomi names SGLang (`lmsysorg/sglang:latest`, with its multi-token-prediction speculative decoding) as
+    the best-performing runtime; its card command uses 8 GPUs. SGLang also serves `/v1/messages`.
   - Serverless: endpoint type **Load balancer**, `--port 80` (or set `PORT` to the port), `HEALTH_CHECK_PATH=/health`
     (vLLM's health route; RunPod polls `/ping` by default), no `--api-key` (RunPod's load balancer checks the
-    key). Keep one worker active while sessions run: a cold worker must download and load 178 GB, longer than
-    the 2-minute wait for a worker. A network volume or RunPod's model caching avoids the download.
+    key), and the preset's Max output 32,000 (the 5.5-minute request limit, §4.2). Keep one worker active while
+    sessions run: a cold worker must download and load 173 GB, longer than the 2-minute wait for a worker. A
+    network volume or RunPod's model caching avoids the download.
   - Pod: expose HTTP port 8000 (`--port 8000`) and add `--api-key`. The research's clone-first pattern
     (a network volume filled by a CPU pod, then the GPU pod) avoids paying GPU time for the download; with
     the weights on the volume, add `--served-model-name XiaomiMiMo/MiMo-V2.6-Flash-MOPD`.
   - Cost noted by the research: 2 x H200 at $7.18/h (community cloud) or $9.18/h (secure cloud, which a
-    network volume needs). Its first attempt (2026-10-06) ran 81 minutes for about $9.75 and never served,
-    because the 178 GB download did not finish.
+    network volume needs), so about twice that for the 4 x H200 of the command above. Its first attempt
+    (2026-10-06) ran 81 minutes for about $9.75 and never served, because the 178 GB download did not finish.
 - Agentmaster creates, starts and stops no RunPod resource (§12): it only points the session at the URL.
 
 **Custom** — a name, an env prefix (sanitized to `[A-Z0-9_]`, no leading digit), a Base URL and a key.
@@ -822,8 +856,8 @@ RunPod endpoint. **None has been run against this implementation yet.** Each sen
 | R5 | A long silent MiMo turn (F8) demoted from Running. | One long turn on a dev build: no `[recon-stop]` before the real Stop. |
 | R6 | The pwsh prompt after claude exits keeps the key. | At that prompt, `$env:ANTHROPIC_AUTH_TOKEN` and `$env:AM_PRESET_TOKEN` are empty. |
 | R7 | The transcript's `message.model` for each provider. | Read one assistant line. |
-| R8 | NanoGPT through Claude Code (2026-10-09 templates): the Bearer token, the effort levels (`high` for MiMo, `max` for GLM), reasoning returned, tool calls, the Context of 1,000,000. | One `-p` call per NanoGPT template with its generated settings file (a fraction of a cent each). A pass gives the templates a `tested` line. |
-| R9 | RunPod: a vLLM endpoint serving `XiaomiMiMo/MiMo-V2.6-Flash-MOPD` answers Claude Code (`/v1/messages`, the tool-call and reasoning parsers, the served name), and a turn stays inside the Serverless 5.5-minute limit. | Needs a running endpoint (§9: 2 x H200, about $7–9 per hour). |
+| R8 | NanoGPT through Claude Code (2026-10-09 templates): the Bearer token, the effort levels (`high` for MiMo, `max` for GLM), reasoning returned, tool calls, the Context of 1,000,000; and whether NanoGPT's Messages API honors the `X-Provider` header (Extra env `ANTHROPIC_CUSTOM_HEADERS`) and a body `provider` object (`min_quantization`), the only ways to keep GLM-5.3 Flash off its FP4 / NVFP4 hosts (§4.2). | One `-p` call per NanoGPT template with its generated settings file (a fraction of a cent each). For the controls: a request that names an UNKNOWN host (`X-Provider: no-such-host`, or `provider.only: ["no-such-host"]`) fails with `provider_unknown_provider` when the control is honored, before any generation. A pass gives the templates a `tested` line. |
+| R9 | RunPod: a vLLM endpoint serving `XiaomiMiMo/MiMo-V2.6-Flash-MOPD` answers Claude Code (`/v1/messages`, the tool-call and reasoning parsers, the served name), the 1M window with Context 917,504 + Max output 131,072, and (Serverless) a turn inside the 5.5-minute limit at Max output 32,000. | Needs a running endpoint (§9: 4 x H200, about $14–18 per hour; 2 x H200 with the smaller window about $7–9). |
 
 ## 11. Decisions (as taken)
 
@@ -844,7 +878,7 @@ RunPod endpoint. **None has been run against this implementation yet.** Each sen
 | D13 | /handover hint for presets | the bracketed form with a prefix of the preset's name only; a bare word never picks a preset (§8.2) |
 | D14 | Initial list (2026-10-06, Q11) | EMPTY: no template is added by itself. While the list is empty every launch menu shows "Add presets…", which opens an OK dialog naming the way to Settings → Presets → TEMPLATES (§8.2); there, one Add per template and "Add all tested templates" (§8.1). A 0.6.8.18 file loses the presets that build added and nobody changed (§4) |
 | D15 | NanoGPT (2026-10-09, Q12) | a built-in provider on the direct API host, with no routing block (NanoGPT's Messages API takes no `provider` object); two untested templates on the NORMAL models, no host pinned (the automatic route, covered by a subscription), effort = the top level each model lists (§4.2) |
-| D16 | RunPod (2026-10-09, Q13) | a built-in provider with NO default URL and `modelRequired` (one model per vLLM endpoint); the key is `RUNPOD_API_KEY` for a Serverless endpoint, or a vLLM key typed in the box for a Pod; one untested template on Xiaomi's official MOPD checkpoint, Max output 32,000 for the 5.5-minute limit; Agentmaster manages no RunPod resource (§12) |
+| D16 | RunPod (2026-10-09, Q13) | a built-in provider with NO default URL and `modelRequired` (one model per vLLM endpoint); the key is `RUNPOD_API_KEY` for a Serverless endpoint, or a vLLM key typed in the box for a Pod; one untested template on Xiaomi's official MOPD checkpoint with the benchmark-like limits (Max output 131,072, Context 917,504 = the 1M window minus that output; 32,000 on a Serverless endpoint, by hand); Agentmaster manages no RunPod resource (§12) |
 | D17 | A `/model` display name with a NanoGPT suffix (2026-10-09) | the vendor prefix ends at a slash BEFORE the first `:` (`xiaomi/mimo-v2.6-flash:reasoning-effort/none` → `mimo-v2.6-flash:reasoning-effort/none`) |
 
 ## 12. Follow-ups and known gaps

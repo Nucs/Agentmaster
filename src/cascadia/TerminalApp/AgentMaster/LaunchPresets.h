@@ -763,21 +763,34 @@ namespace Agentmaster
     // 2026-10-09; HARNESSES.md §4.2): the ids; the effort levels each model lists (MiMo: none and high, so high;
     // GLM: low, high and max, so max); Max output 131,072 (the catalog's); Context 1,000,000, the smallest window
     // of MiMo's hosts (Venice) and of GLM's hosts but one (Runware and Nube; Engy's 262,144 is smaller, and Engy
-    // states no precision, while NanoGPT labels its automatic route "FP8+"). Sampling is the vendors' (Xiaomi's
-    // for MiMo; Z.ai's GLM-5.3 values for GLM 5.3 Flash, the same family). No host is pinned: NanoGPT then routes
-    // automatically, tries to keep a session on one host that caches prompts, and a NanoGPT subscription
-    // covers both models, while a pinned host is billed pay-as-you-go plus 5%. Not run through Claude Code yet, so
-    // `tested` is empty.
+    // states no precision, while NanoGPT labels its automatic route "FP8+"). Sampling and effort are the vendors'
+    // benchmark settings (the model cards, read 2026-10-09): Xiaomi recommends temperature 1.0, top_p 0.95 for
+    // MiMo, whose top NanoGPT effort level is high; Z.ai runs GLM-5.3 Flash's Claude Code benchmark (Terminal-Bench
+    // 2.1, Claude Code 2.1.207) at temperature 1.0, top_p 1 and 65,536 output tokens, and max is the model's
+    // default effort. No host is pinned: NanoGPT then routes automatically, tries to keep a session on one host
+    // that caches prompts, and a NanoGPT subscription covers both models, while a pinned host is billed
+    // pay-as-you-go plus 5%. Precision: Xiaomi's own MiMo V2.6 release already holds its experts in MXFP4, so no
+    // host serves MiMo above Xiaomi's precision; GLM-5.3 Flash is released in FP8 and BF16, and 11 of its 36
+    // NanoGPT hosts serve FP4 / NVFP4, but NanoGPT documents its precision filter (`provider.min_quantization`)
+    // and its host pin (`X-Provider`) only for chat completions, not for the Messages API Claude Code uses
+    // (HARNESSES.md §4.2, check R8). Not run through Claude Code yet, so `tested` is empty.
     //
     // The RunPod template serves a Hugging Face model the user deploys: Xiaomi's official MiMo V2.6 Flash, the
     // MOPD checkpoint (XiaomiMiMo/MiMo-V2.6-Flash-MOPD, published 2026-09-27; Xiaomi's note: a fix for repeated
-    // tool calls, which matters most in Claude Code). Its weights take 177.7 GB, which the user's research fitted on
-    // two H200 GPUs (tensor parallel 2). The model id must be vLLM's served model name, the repository id by
-    // default. Context 262,144 assumes `--max-model-len 262144` (HARNESSES.md §9 has the server command); Max
-    // output 32,000 keeps one answer inside a Serverless endpoint's 5.5-minute request limit at about 119 tokens
-    // per second (the speed that research recorded for MiMo V2.6 Flash on two H200s). Sampling is Xiaomi's. No
-    // effort: what a vLLM server does with Claude Code's effort level is not checked. Not run yet, so `tested` is
-    // empty.
+    // tool calls, which matters most in Claude Code). The model id must be vLLM's served model name, the
+    // repository id by default. The values are the benchmark-like ones (HARNESSES.md §4.2, §9):
+    //   * the server runs Xiaomi's own vLLM command with `--max-model-len 1048576`, the model's full window. The
+    //     weights take 172.9 GB (MXFP4 experts + FP8 attention: Xiaomi's release precision; no higher-precision
+    //     release exists), and Xiaomi's command uses tensor parallel 4 (4 x H200 fits the 1M window either way).
+    //   * Max output 131,072: Claude Code asks for at most 128,000 tokens for a model it does not know, the
+    //     128K output Z.ai's own Claude Code benchmarks use.
+    //   * Context 917,504 = 1,048,576 - 131,072. vLLM REFUSES a request whose input plus max_tokens passes its
+    //     --max-model-len, so the window Claude Code plans compaction around leaves room for a full answer.
+    //   * Sampling: Xiaomi's recommended temperature 1.0, top_p 0.95. No effort: MiMo's chat template thinks
+    //     unless a request passes enable_thinking=false, and what vLLM does with Claude Code's effort level is not
+    //     checked.
+    // A load-balancing Serverless endpoint ends any request after 5.5 minutes: there, Max output 32,000 and
+    // Context = the server's window - 32,000 (HARNESSES.md §9). Not run yet, so `tested` is empty.
     //
     // The list order is the order of Settings ▸ Presets ▸ TEMPLATES and of "Add all tested" (the launcher's order).
     // Returns the immutable list (built once, thread-safe).
@@ -918,8 +931,8 @@ namespace Agentmaster
                 { kPresetFieldProvider, L"runpod" },
                 { kPresetFieldModel, L"XiaomiMiMo/MiMo-V2.6-Flash-MOPD" },
                 { kPresetFieldSmallModel, L"XiaomiMiMo/MiMo-V2.6-Flash-MOPD" },
-                { kPresetFieldContext, L"262144" },
-                { kPresetFieldMaxOutput, L"32000" },
+                { kPresetFieldContext, L"917504" }, // the server's 1,048,576 window minus Max output (vLLM refuses a request that passes it)
+                { kPresetFieldMaxOutput, L"131072" },
                 { kPresetFieldTemperature, L"1.0" },
                 { kPresetFieldTopP, L"0.95" },
             } });
@@ -1232,7 +1245,7 @@ namespace Agentmaster
         { kPresetFieldEffort, L"Effort", nullptr, PresetFieldKind::Effort, PresetFieldScope::Always,
           L"The session's reasoning effort: low, medium, high, xhigh or max. Written as CLAUDE_CODE_EFFORT_LEVEL into the session's settings file (Claude Code obeys that variable over --effort and over the same variable in ~/.claude/settings.json) and passed as --effort. While it is set, /effort in the session cannot change the level. Type none for no effort setting; empty = the template's, else Claude Code's own setting." },
         { kPresetFieldContext, L"Context window (tokens)", L"CONTEXT", PresetFieldKind::Integer, PresetFieldScope::ProviderOnly,
-          L"CLAUDE_CODE_MAX_CONTEXT_TOKENS: the window Claude Code plans compaction around. Use the SMALLEST window among the providers that may serve the model. On your own vLLM server (RunPod), use its --max-model-len." },
+          L"CLAUDE_CODE_MAX_CONTEXT_TOKENS: the window Claude Code plans compaction around. Use the SMALLEST window among the providers that may serve the model. On your own vLLM server (RunPod), use its --max-model-len MINUS Max output tokens: vLLM refuses a request whose input plus max_tokens passes its window." },
         { kPresetFieldMaxOutput, L"Max output tokens", L"MAX_OUTPUT", PresetFieldKind::Integer, PresetFieldScope::Always,
           L"CLAUDE_CODE_MAX_OUTPUT_TOKENS. Claude Code caps an unrecognized model at 128,000 whatever this says. A RunPod Serverless endpoint ends any request after 5.5 minutes, so keep one answer short enough to finish in that time." },
         { kPresetFieldProviderOrder, L"Provider order", L"PROVIDER", PresetFieldKind::List, PresetFieldScope::RoutingOnly,

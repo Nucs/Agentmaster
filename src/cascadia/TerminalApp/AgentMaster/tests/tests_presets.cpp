@@ -748,8 +748,13 @@ void TestLaunchPresets()
             CHECK(tiers, "runpod: every tier asks for the one Hugging Face model the server runs");
             CHECK(EnvOf(c, L"ANTHROPIC_CUSTOM_MODEL_OPTION") == L"<absent>" && EnvOf(c, L"CLAUDE_CODE_EFFORT_LEVEL") == L"<absent>" && c.effort.empty(),
                   "runpod: no /model switch entry (the server has no other model) and no effort");
-            CHECK(EnvOf(c, L"CLAUDE_CODE_MAX_CONTEXT_TOKENS") == L"262144" && EnvOf(c, L"CLAUDE_CODE_MAX_OUTPUT_TOKENS") == L"32000",
-                  "runpod: --max-model-len 262144, and an answer that ends inside Serverless's 5.5 minutes");
+            CHECK(EnvOf(c, L"CLAUDE_CODE_MAX_CONTEXT_TOKENS") == L"917504" && EnvOf(c, L"CLAUDE_CODE_MAX_OUTPUT_TOKENS") == L"131072",
+                  "runpod: the benchmark-like limits - 128K output (Claude Code's cap) and the 1M window minus that output");
+            // vLLM refuses a request whose input plus max_tokens passes --max-model-len (1,048,576 in the documented
+            // server command), so the window Claude Code plans compaction around must leave room for a full answer.
+            const auto ctx = std::wcstoull(EnvOf(c, L"CLAUDE_CODE_MAX_CONTEXT_TOKENS").c_str(), nullptr, 10);
+            const auto out = std::wcstoull(EnvOf(c, L"CLAUDE_CODE_MAX_OUTPUT_TOKENS").c_str(), nullptr, 10);
+            CHECK(ctx > 0 && out > 0 && ctx + out <= 1048576ull, "runpod: context + max output fit the server's --max-model-len 1048576");
             CHECK(EnvOf(c, L"CLAUDE_CODE_EXTRA_BODY") == L"{\"temperature\":1,\"top_p\":0.95}" && EnvOf(c, L"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME") == L"MiMo-V2.6-Flash-MOPD (RunPod)",
                   "runpod: Xiaomi's sampling; the /model display name drops the Hugging Face owner");
 
