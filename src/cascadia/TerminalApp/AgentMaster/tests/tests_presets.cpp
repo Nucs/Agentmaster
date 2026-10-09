@@ -7,7 +7,8 @@
 //   * the list starts EMPTY - no template is added by itself (the user's rule, 2026-10-06) - and an empty list
 //     offers "Add presets..." (a list of hidden presets does not), with help text that names the way to the
 //     Presets tab; one click adds a template as a LINKED, visible "p-" preset, and "Add all tested" adds the five
-//     tested ones in order; a file written by release 0.6.8.18 (which added the templates by itself) loses
+//     tested ones in order (the ten templates' order is pinned); a file written by release 0.6.8.18 (which added
+//     the templates by itself) loses
 //     exactly the presets it added that nobody touched, and is never pruned again once re-saved;
 //   * launch-presets.json round-trips, and a malformed file reads as an empty config;
 //   * the value tiers - box > Agentmaster env > Windows env > template - for a placeholder AND a snapshot;
@@ -24,8 +25,12 @@
 //     the flag; "none" unsets a template's level; an Extra env line still wins, with a warning;
 //   * top_k and require_parameters: validation, scope (no routing block on Xiaomi), the extra-body merge;
 //   * a Xiaomi preset gets no OpenRouter routing block; the Claude-login preset compiles to flags only;
-//   * refusals (no key / no Base URL / a removed custom provider), reserved env names, forbidden claude
-//     flags, the key mask;
+//   * the built-in provider table (OpenRouter, Xiaomi MiMo, NanoGPT, RunPod); NanoGPT's two templates compile to
+//     the NORMAL models with the values of NanoGPT's catalog (2026-10-09) on its direct API host; RunPod has no
+//     default URL (the refusal shows the endpoint shapes and RUNPOD_BASE_URL), takes RUNPOD_API_KEY, and refuses a
+//     preset that names no model, because a vLLM endpoint serves exactly one;
+//   * refusals (no key / no Base URL / a removed custom provider / no model on RunPod), reserved env names,
+//     forbidden claude flags, the key mask;
 //   * the menu entries and the /handover hint spec list visible presets after the launch models, and the
 //     hint picks a preset only through a bracketed name prefix - never by a bare word.
 
@@ -209,17 +214,19 @@ void TestLaunchPresets()
               "help: over the Agent Manager the open step is left out and the steps renumber");
     }
 
-    // --- the shipped templates: seven, in the launcher's order; the five OpenRouter ones tested, the Xiaomi pair not ---
+    // --- the shipped templates: ten, in order; the five OpenRouter ones tested, the Xiaomi pair, the NanoGPT pair and
+    // the RunPod one not ---
     {
         const auto& all = LaunchPresetTemplates();
-        const std::vector<std::wstring> order{ L"mimo-pro.openrouter", L"mimo-flash.openrouter", L"kimi.openrouter", L"qwen.openrouter",
-                                               L"glm.openrouter",      L"mimo-pro.xiaomi",       L"mimo-flash.xiaomi" };
+        const std::vector<std::wstring> order{ L"mimo-pro.openrouter", L"mimo-flash.openrouter", L"kimi.openrouter",    L"qwen.openrouter",
+                                               L"glm.openrouter",      L"mimo-pro.xiaomi",       L"mimo-flash.xiaomi",  L"mimo-flash.nanogpt",
+                                               L"glm-flash.nanogpt",   L"mimo-flash.runpod" };
         bool inOrder = all.size() == order.size();
         for (size_t i = 0; inOrder && i < all.size(); ++i)
         {
             inOrder = all[i].id == order[i] && (i < 5) == !all[i].tested.empty();
         }
-        CHECK(inOrder, "templates: seven, in the launcher's order; the five OpenRouter ones tested, the Xiaomi pair not (R3)");
+        CHECK(inOrder, "templates: ten, in order; the five OpenRouter ones tested, the Xiaomi (R3), NanoGPT and RunPod ones not");
         const LaunchPresetsConfig empty{};
         CHECK(LaunchPresetTemplatesNotInList(empty, true) == std::vector<std::wstring>(order.begin(), order.begin() + 5), "templates: Add all tested = the five tested ones, in order");
         CHECK(LaunchPresetTemplatesNotInList(empty, false) == order, "templates: an empty list offers every template");
@@ -256,8 +263,9 @@ void TestLaunchPresets()
         }
         CHECK(unique && cfg.presets[2].templateId == L"mimo-pro.openrouter" && cfg.presets[5].templateId == L"glm.openrouter",
               "add all: the four others appended in order, every id unique even from one entropy value");
-        CHECK(LaunchPresetTemplatesNotInList(cfg, true).empty() && LaunchPresetTemplatesNotInList(cfg, false).size() == 2,
-              "add all: no tested template is left; the untested Xiaomi pair is still offered, by its own rows");
+        CHECK(LaunchPresetTemplatesNotInList(cfg, true).empty() &&
+                  LaunchPresetTemplatesNotInList(cfg, false) == std::vector<std::wstring>({ L"mimo-pro.xiaomi", L"mimo-flash.xiaomi", L"mimo-flash.nanogpt", L"glm-flash.nanogpt", L"mimo-flash.runpod" }),
+              "add all: no tested template is left; the five untested ones are still offered, by their own rows");
         const auto entries = LaunchMenuEntriesFrom({ { L"Opus", L"opus" } }, cfg);
         CHECK(entries.size() == 7 && entries[1].first == L"Mine" && entries[2].second == PresetToken(kimi.id) && entries[2].first == L"Kimi K3 \x00B7 OpenRouter",
               "add: the menus list the added presets in list order, under the template's name");
@@ -631,6 +639,152 @@ void TestLaunchPresets()
         login.fields[kPresetFieldMaxOutput] = L"64000";
         const auto la3 = SnapshotPresetLaunch(login, cfg, MapEnv({}));
         CHECK(CompileClaudeLaunch(la3, EffectiveLaunchValues(la3, MapEnv({})), L"").sessionSettings, "login: an env value needs the settings file");
+    }
+
+    // --- the built-in provider table: four providers, in Settings order, each found by id ---
+    {
+        const std::vector<std::wstring> ids{ L"openrouter", L"xiaomi", L"nanogpt", L"runpod" };
+        bool table = std::size(kBuiltInLaunchProviders) == ids.size();
+        for (size_t i = 0; table && i < ids.size(); ++i)
+        {
+            table = kBuiltInLaunchProviders[i].id == ids[i] && FindBuiltInLaunchProvider(ids[i]) == &kBuiltInLaunchProviders[i] &&
+                    kBuiltInLaunchProviders[i].name && *kBuiltInLaunchProviders[i].name && SanitizeLaunchEnvPrefix(kBuiltInLaunchProviders[i].envPrefix) == kBuiltInLaunchProviders[i].envPrefix;
+        }
+        CHECK(table, "providers: OpenRouter, Xiaomi MiMo, NanoGPT, RunPod - in order, found by id, each with a name and a clean env prefix");
+        CHECK(!FindBuiltInLaunchProvider(L"") && !FindBuiltInLaunchProvider(kAnthropicProviderId) && !FindBuiltInLaunchProvider(L"c-12345678") && !FindBuiltInLaunchProvider(L"NanoGPT"),
+              "providers: the Claude login, a custom id and a display name are no built-in id (ids are exact)");
+    }
+
+    // --- NanoGPT: the direct API host, NANOGPT_API_KEY, no routing block; both templates are the NORMAL models (not the
+    // refusal-removed copies the user's evaluation ran) with the values of NanoGPT's catalog ---
+    {
+        const auto cfg = AllTemplatesConfig();
+        const auto prov = ResolveLaunchProvider(cfg, L"nanogpt");
+        CHECK(prov.found && !prov.routing && !prov.custom && !prov.modelRequired && prov.name == L"NanoGPT" && prov.envPrefix == L"NANOGPT" && prov.baseUrlExample.empty(),
+              "nanogpt: a built-in provider without routing, prefix NANOGPT, any model allowed");
+        const auto url = ResolveProviderBaseUrl(prov, nullptr, nullptr, true);
+        CHECK(url.value == L"https://api.nano-gpt.com/api" && url.source == PresetValueSource::ProviderDefault && url.envName == L"NANOGPT_BASE_URL",
+              "nanogpt: the default Base URL is the direct API host's Anthropic root (claude appends /v1/messages)");
+        struct NanoRef
+        {
+            const wchar_t* templateId;
+            const wchar_t* model;
+            const wchar_t* switchModel;
+            const wchar_t* effort;
+            const wchar_t* body;
+        };
+        static constexpr NanoRef kNano[] = {
+            { L"mimo-flash.nanogpt", L"xiaomi/mimo-v2.6-flash", L"xiaomi/mimo-v2.6-pro", L"high", L"{\"temperature\":1,\"top_p\":0.95}" },
+            { L"glm-flash.nanogpt", L"z-ai/glm-5.3-flash", L"z-ai/glm-5.3", L"max", L"{\"temperature\":1,\"top_p\":1}" },
+        };
+        for (const auto& ref : kNano)
+        {
+            const auto* p = FindLaunchPreset(cfg, ref.templateId);
+            CHECK(p != nullptr, "nanogpt: the template exists");
+            if (!p)
+            {
+                continue;
+            }
+            CHECK(PresetLaunchRefusal(*p, cfg).empty(), "nanogpt: the template launches");
+            const auto a = SnapshotPresetLaunch(*p, cfg, MapEnv({}));
+            CHECK(a.providerId == L"nanogpt" && !a.routing && a.keyCredential == L"nanogpt" && a.keyEnv == L"NANOGPT_API_KEY", "nanogpt: the key is NANOGPT_API_KEY (the variable NanoGPT's own examples use)");
+            const auto c = CompileClaudeLaunch(a, EffectiveLaunchValues(a, MapEnv({})), L"nano-0123456789abcdef");
+            CHECK(c.error.empty() && c.warnings.empty() && c.sessionSettings, "nanogpt: the template compiles with nothing dropped");
+            CHECK(EnvOf(c, L"ANTHROPIC_BASE_URL") == L"https://api.nano-gpt.com/api", "nanogpt: the session goes to the direct API host");
+            bool tiers = c.model == ref.model;
+            for (const auto* k : { L"ANTHROPIC_MODEL", L"ANTHROPIC_DEFAULT_FABLE_MODEL", L"ANTHROPIC_DEFAULT_OPUS_MODEL", L"ANTHROPIC_DEFAULT_SONNET_MODEL", L"ANTHROPIC_DEFAULT_HAIKU_MODEL", L"CLAUDE_CODE_SUBAGENT_MODEL" })
+            {
+                tiers &= EnvOf(c, k) == ref.model;
+            }
+            const std::wstring model{ ref.model };
+            CHECK(tiers && model.find(L"abliterated") == std::wstring::npos && model.find(L"uncensored") == std::wstring::npos,
+                  "nanogpt: every tier runs the NORMAL model (no abliterated / uncensored id)");
+            CHECK(EnvOf(c, L"ANTHROPIC_CUSTOM_MODEL_OPTION") == ref.switchModel, "nanogpt: /model switches to the full model of the family");
+            CHECK(EnvOf(c, L"CLAUDE_CODE_MAX_CONTEXT_TOKENS") == L"1000000" && EnvOf(c, L"CLAUDE_CODE_MAX_OUTPUT_TOKENS") == L"131072",
+                  "nanogpt: context 1,000,000 (the smallest host window but Engy's) and the catalog's 131,072 output");
+            CHECK(EnvOf(c, L"CLAUDE_CODE_EFFORT_LEVEL") == ref.effort && c.effort == ref.effort, "nanogpt: the top effort level the model lists (MiMo: high; GLM: max)");
+            CHECK(EnvOf(c, L"CLAUDE_CODE_EXTRA_BODY") == ref.body, "nanogpt: the body carries the vendor's sampling and no provider block");
+        }
+        CHECK(PresetModelDisplayName(L"xiaomi/mimo-v2.6-flash:reasoning-effort/none", L"NanoGPT") == L"mimo-v2.6-flash:reasoning-effort/none (NanoGPT)",
+              "display name: a slash inside a NanoGPT suffix is not the vendor prefix");
+        CHECK(PresetModelDisplayName(L"deepseek/deepseek-r1:free", L"OpenRouter") == L"deepseek-r1:free (OpenRouter)" &&
+                  PresetModelDisplayName(L"us.anthropic.claude-x:0", L"") == L"us.anthropic.claude-x:0",
+              "display name: ids with a ':' and no slash after it read as before");
+    }
+
+    // --- RunPod: the user's own vLLM endpoint - no default Base URL (a refusal that shows the URL shapes and the
+    // variable), RUNPOD_API_KEY, exactly one model (a preset without one is refused when picked) ---
+    {
+        const auto cfg = AllTemplatesConfig();
+        const auto prov = ResolveLaunchProvider(cfg, L"runpod");
+        CHECK(prov.found && !prov.routing && prov.modelRequired && prov.baseUrlDefault.empty() && prov.envPrefix == L"RUNPOD" &&
+                  prov.baseUrlExample.find(L".api.runpod.ai") != std::wstring::npos && prov.baseUrlExample.find(L".proxy.runpod.net") != std::wstring::npos,
+              "runpod: no default URL, an example of both endpoint shapes, one model per endpoint");
+        const auto none = ResolveProviderBaseUrl(prov, nullptr, nullptr, false);
+        CHECK(none.value.empty() && none.source == PresetValueSource::None && none.envName == L"RUNPOD_BASE_URL", "runpod: nothing resolves until the user names the endpoint");
+
+        const auto* p = FindLaunchPreset(cfg, L"mimo-flash.runpod");
+        CHECK(p != nullptr, "runpod: the template exists");
+        if (p)
+        {
+            CHECK(PresetLaunchRefusal(*p, cfg).empty(), "runpod: the template names its model, so it is not refused when picked");
+            const auto a = SnapshotPresetLaunch(*p, cfg, MapEnv({}));
+            CHECK(a.keyEnv == L"RUNPOD_API_KEY" && a.env.at(kPresetFieldBaseUrl) == L"RUNPOD_BASE_URL" && a.base.find(kPresetFieldBaseUrl) == a.base.end(),
+                  "runpod: the key is RUNPOD_API_KEY; the Base URL is only the variable's NAME (no default to fall back to)");
+            const auto refused = CompileClaudeLaunch(a, EffectiveLaunchValues(a, MapEnv({})), L"rpa_0123456789abcdef");
+            CHECK(refused.error.find(L"No Base URL for RunPod") == 0 && refused.error.find(L"https://<ENDPOINT_ID>.api.runpod.ai") != std::wstring::npos &&
+                      refused.error.find(L"or set RUNPOD_BASE_URL.") != std::wstring::npos,
+                  "runpod: no URL = refused, with the endpoint shapes and the variable in the message");
+
+            // RUNPOD_BASE_URL set in Windows: re-read at this launch (tier 3), and the session runs on the endpoint.
+            const auto windows = MapEnv({ { L"RUNPOD_BASE_URL", L"https://abc123xyz.api.runpod.ai" } });
+            const auto c = CompileClaudeLaunch(a, EffectiveLaunchValues(a, windows), L"rpa_0123456789abcdef");
+            CHECK(c.error.empty() && c.warnings.empty() && EnvOf(c, L"ANTHROPIC_BASE_URL") == L"https://abc123xyz.api.runpod.ai", "runpod: the Windows variable names the endpoint");
+            bool tiers = c.model == L"XiaomiMiMo/MiMo-V2.6-Flash-MOPD";
+            for (const auto* k : { L"ANTHROPIC_MODEL", L"ANTHROPIC_DEFAULT_FABLE_MODEL", L"ANTHROPIC_DEFAULT_OPUS_MODEL", L"ANTHROPIC_DEFAULT_SONNET_MODEL", L"ANTHROPIC_DEFAULT_HAIKU_MODEL", L"CLAUDE_CODE_SUBAGENT_MODEL" })
+            {
+                tiers &= EnvOf(c, k) == L"XiaomiMiMo/MiMo-V2.6-Flash-MOPD";
+            }
+            CHECK(tiers, "runpod: every tier asks for the one Hugging Face model the server runs");
+            CHECK(EnvOf(c, L"ANTHROPIC_CUSTOM_MODEL_OPTION") == L"<absent>" && EnvOf(c, L"CLAUDE_CODE_EFFORT_LEVEL") == L"<absent>" && c.effort.empty(),
+                  "runpod: no /model switch entry (the server has no other model) and no effort");
+            CHECK(EnvOf(c, L"CLAUDE_CODE_MAX_CONTEXT_TOKENS") == L"262144" && EnvOf(c, L"CLAUDE_CODE_MAX_OUTPUT_TOKENS") == L"32000",
+                  "runpod: --max-model-len 262144, and an answer that ends inside Serverless's 5.5 minutes");
+            CHECK(EnvOf(c, L"CLAUDE_CODE_EXTRA_BODY") == L"{\"temperature\":1,\"top_p\":0.95}" && EnvOf(c, L"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME") == L"MiMo-V2.6-Flash-MOPD (RunPod)",
+                  "runpod: Xiaomi's sampling; the /model display name drops the Hugging Face owner");
+
+            // The URL typed into the provider's box is frozen into the session (tier 1).
+            auto typed = cfg;
+            LaunchProviderEntry entry;
+            entry.id = L"runpod";
+            entry.anthropicBaseUrl = L"  https://pod77-8000.proxy.runpod.net  ";
+            typed.providers.push_back(entry);
+            const auto ta = SnapshotPresetLaunch(*FindLaunchPreset(typed, L"mimo-flash.runpod"), typed, MapEnv({}));
+            CHECK(ta.set.at(kPresetFieldBaseUrl) == L"https://pod77-8000.proxy.runpod.net" &&
+                      EnvOf(CompileClaudeLaunch(ta, EffectiveLaunchValues(ta, windows), L"vllm-key-0123456789"), L"ANTHROPIC_BASE_URL") == L"https://pod77-8000.proxy.runpod.net",
+                  "runpod: a typed Pod URL is frozen into the session and beats the Windows variable");
+        }
+
+        // A RunPod preset that names no model is refused when picked; the template's model, or a typed one, launches.
+        LaunchPreset blank;
+        blank.id = L"p-0000cafe";
+        blank.fields[kPresetFieldName] = L"My pod";
+        blank.fields[kPresetFieldProvider] = L"runpod";
+        const auto refusal = PresetLaunchRefusal(blank, cfg);
+        CHECK(refusal.find(L"\"My pod\"") != std::wstring::npos && refusal.find(L"RunPod") != std::wstring::npos && refusal.find(L"Main model") != std::wstring::npos,
+              "runpod: a preset with no model is refused, naming the preset, the provider and the box to fill");
+        blank.fields[kPresetFieldModel] = L"   ";
+        CHECK(!PresetLaunchRefusal(blank, cfg).empty(), "runpod: a model box of blanks is no model");
+        blank.fields[kPresetFieldModel] = L"Qwen/Qwen3-Coder-30B-A3B-Instruct";
+        CHECK(PresetLaunchRefusal(blank, cfg).empty(), "runpod: a typed Hugging Face id launches");
+        LaunchPreset linked;
+        linked.id = L"p-0000d00d";
+        linked.templateId = L"mimo-flash.runpod";
+        CHECK(PresetLaunchRefusal(linked, cfg).empty(), "runpod: a preset linked to the template takes the template's model");
+        LaunchPreset other;
+        other.id = L"p-0000f00d";
+        other.fields[kPresetFieldProvider] = L"nanogpt";
+        CHECK(PresetLaunchRefusal(other, cfg).empty(), "runpod rule: a provider that serves many models launches without one (Claude Code's own ids)");
     }
 
     // --- validation: extra env, extra args, numbers ---

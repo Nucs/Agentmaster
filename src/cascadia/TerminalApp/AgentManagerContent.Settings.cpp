@@ -2471,7 +2471,7 @@ namespace winrt::TerminalApp::implementation
         // Sessions panel into the scroller.
         addSettingsTab(L"Sessions", L"How new Claude sessions launch \x2014 permissions, model, environment variables, and the Launch box's directory history.", sessionsPanel);
         _presetsTabIndex = static_cast<int>(_settingsTabButtons.size());
-        addSettingsTab(L"Presets", L"Named ways to start a Claude session \x2014 another provider (OpenRouter, Xiaomi MiMo, your own), its models, limits and arguments. Listed at the bottom of every Open New Session Here / Fork session menu.", presetsPanel);
+        addSettingsTab(L"Presets", L"Named ways to start a Claude session \x2014 another provider (OpenRouter, NanoGPT, Xiaomi MiMo, RunPod, your own), its models, limits and arguments. Listed at the bottom of every Open New Session Here / Fork session menu.", presetsPanel);
         // The Prompt Queue Runner defaults tab ("Tests Autorunner" until 2026-10-09) — in EVERY build now.
         // While the runner was a dev-or-debug feature the tab was added only under the AgentmasterDev
         // package or Debug Mode, which also hid the four send-safety toggles that live on it and that
@@ -5221,9 +5221,14 @@ namespace winrt::TerminalApp::implementation
             urlBox.Text(winrt::hstring{ provider.baseUrlBox });
             {
                 const auto v = ::Agentmaster::ResolveProviderBaseUrl(provider, amEnv, winEnv, false);
-                urlBox.PlaceholderText(winrt::hstring{ v.value.empty() ? (L"type the endpoint" + (v.envName.empty() ? std::wstring{} : (L", or set " + v.envName))) : (v.value + L"  \x2190 " + ::Agentmaster::PresetValueSourceLabel(v)) });
+                // With nothing set, a provider that has no default URL (RunPod) shows the SHAPE of the user's own
+                // endpoint instead of a bare "type the endpoint": nobody can guess RunPod's two URL forms.
+                const std::wstring empty = provider.baseUrlExample.empty() ? std::wstring{ L"type the endpoint" } : (L"e.g. " + provider.baseUrlExample);
+                urlBox.PlaceholderText(winrt::hstring{ v.value.empty() ? (empty + (v.envName.empty() ? std::wstring{} : (L", or set " + v.envName))) : (v.value + L"  \x2190 " + ::Agentmaster::PresetValueSourceLabel(v)) });
             }
-            AgentSetTip(urlBox, winrt::hstring{ L"Claude Code appends /v1/messages to it. Xiaomi's Token Plan uses its own URL (https://token-plan-cn.xiaomimimo.com/anthropic or your region's) with tp- keys. A running session keeps the URL it started with." });
+            AgentSetTip(urlBox, winrt::hstring{ L"Claude Code appends /v1/messages to it. Xiaomi's Token Plan uses its own URL (https://token-plan-cn.xiaomimimo.com/anthropic or your region's) with tp- keys. "
+                                                L"RunPod: https://<ENDPOINT_ID>.api.runpod.ai for a load-balancing Serverless endpoint (key: your RunPod API key), or https://<POD_ID>-8000.proxy.runpod.net for a Pod (key: the --api-key its vLLM runs with); "
+                                                L"the server must serve Claude's /v1/messages (vLLM or SGLang), and a queue-based endpoint cannot. A running session keeps the URL it started with." });
             urlBox.TextChanged([this, id](const IInspectable& sender, const TextChangedEventArgs&) {
                 if (auto* e = _DraftProviderEntry(id, true))
                 {

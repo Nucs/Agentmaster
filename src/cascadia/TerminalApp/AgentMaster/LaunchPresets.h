@@ -4,8 +4,9 @@
 // Agentmaster — PRESETS: named, user-editable configurations of a Claude session
 // (doc/agentmaster/HARNESSES.md).
 //
-// A preset says HOW one Claude session runs: which provider serves it (OpenRouter, Xiaomi MiMo, a custom
-// Anthropic-compatible endpoint, or the user's own Claude login), which model each tier uses, its effort, the
+// A preset says HOW one Claude session runs: which provider serves it (OpenRouter, NanoGPT, Xiaomi MiMo, a RunPod
+// endpoint that serves a Hugging Face model through vLLM, a custom Anthropic-compatible endpoint, or the user's own
+// Claude login), which model each tier uses, its effort, the
 // limits, the request-body fields (OpenRouter routing, sampling, extra JSON), an optional identity note for a
 // non-Claude model, extra env vars and extra claude arguments. Every "Open New Session Here" / "Fork session"
 // menu and the Launch button's hover menu list the visible presets after a separator. A pick travels through
@@ -114,7 +115,8 @@ namespace Agentmaster
     inline constexpr const wchar_t* kSessionStoreLaunchArgsKey = L"launchArgs";
 
     // A preset pick's prefix in the model-pick plumbing: "@<presetId>". No Anthropic, Bedrock, Vertex,
-    // OpenRouter or Xiaomi model id starts with '@', so a token can never be mistaken for a model.
+    // OpenRouter, NanoGPT, Xiaomi or Hugging Face model id starts with '@', so a token can never be mistaken
+    // for a model.
     inline constexpr wchar_t kPresetTokenPrefix = L'@';
 
     // No template ships an identity note (the user, 2026-10-06: "not necessary"). The reference launcher
@@ -517,6 +519,9 @@ namespace Agentmaster
 
     // The display name of a model in Claude Code's /model picker: the id without a vendor prefix, then the
     // provider in parentheses ("xiaomi/mimo-v2.6-pro" through OpenRouter -> "mimo-v2.6-pro (OpenRouter)").
+    // Only a '/' BEFORE the first ':' ends the vendor prefix: NanoGPT's model suffixes can hold a slash of their
+    // own ("xiaomi/mimo-v2.6-flash:reasoning-effort/none" turns MiMo's reasoning off), and the last slash would
+    // shorten that id to "none".
     //   id           - the model id.
     //   providerName - the provider's display name ("" = no suffix).
     // Returns the display text ("" for an empty id).
@@ -526,7 +531,8 @@ namespace Agentmaster
         {
             return {};
         }
-        const size_t slash = id.find_last_of(L'/');
+        // npos when there is no ':' (substr then keeps the whole id); a slash after the first ':' is the suffix's.
+        const size_t slash = id.substr(0, id.find(L':')).find_last_of(L'/');
         std::wstring out{ slash == std::wstring_view::npos ? id : id.substr(slash + 1) };
         if (!providerName.empty())
         {
@@ -616,25 +622,66 @@ namespace Agentmaster
     // ===== providers =========================================================================
 
     // A provider Agentmaster knows without any setup. The defaults are the values the reference launcher
-    // and Xiaomi's documentation use (doc/agentmaster/HARNESSES.md §9); the user can override the Base URL.
+    // and the providers' documentation use (doc/agentmaster/HARNESSES.md §9); the user can override the Base URL.
     struct LaunchProviderDef
     {
         const wchar_t* id; // stable id: what presets and snapshots store
         const wchar_t* name; // display name ("OpenRouter")
         const wchar_t* envPrefix; // <PREFIX>_API_KEY, <PREFIX>_BASE_URL, <PREFIX>_SMALL_MODEL, ...
-        const wchar_t* anthropicBaseUrl; // the Anthropic-compatible endpoint (claude appends /v1/messages)
+        const wchar_t* anthropicBaseUrl; // the Anthropic-compatible endpoint (claude appends /v1/messages); "" = the user's own
         const wchar_t* openaiBaseUrl; // the OpenAI-compatible endpoint — for Codex presets later; unused today
         const wchar_t* keyHint; // what a key looks like, for the key box's placeholder
         bool routing; // true = OpenRouter's `provider` routing block exists (order / quantizations / fallbacks)
+        // The shape of the user's own endpoint, for a provider with no default URL ("" = none): the Base URL box's
+        // placeholder while nothing resolves, and the "No Base URL" refusal's example.
+        const wchar_t* baseUrlExample;
+        // True = the endpoint serves exactly ONE model, the one its server runs (vLLM's served model name), so a
+        // preset without a model is refused when it is picked (PresetLaunchRefusal): Claude Code would otherwise
+        // ask for its own Claude model ids, which such a server answers with "model does not exist".
+        bool modelRequired;
     };
 
-    // The built-in providers. Xiaomi's Token Plan uses another URL (https://token-plan-cn.xiaomimimo.com/
-    // anthropic, or the region URL on the plan page) and tp-/ttp- keys: the user types that URL into the
-    // provider's Base URL box.
+    // The built-in providers, in the order Settings lists them.
+    //   * Xiaomi's Token Plan uses another URL (https://token-plan-cn.xiaomimimo.com/anthropic, or the region URL on
+    //     the plan page) and tp-/ttp- keys: the user types that URL into the provider's Base URL box.
+    //   * NanoGPT: the direct API host, which NanoGPT recommends for long requests (a higher request size limit and
+    //     a longer request runtime than nano-gpt.com; its API Hosts page, read 2026-10-09). Claude Code appends
+    //     /v1/messages: https://api.nano-gpt.com/api/v1/messages answered 401 without a key on 2026-10-09, an
+    //     unknown path 404. NanoGPT's own examples name the key variable NANOGPT_API_KEY, which the prefix gives.
+    //     No routing block: NanoGPT documents its `provider` object for /v1/chat/completions, not /v1/messages.
+    //     A host is picked by appending ":<provider id>" to the model id instead (billed pay-as-you-go, +5%).
+    //   * RunPod: the user's own endpoint, so there is no default URL. A load-balancing Serverless endpoint
+    //     (https://<ENDPOINT_ID>.api.runpod.ai) takes the RunPod API key as its Bearer token and passes the
+    //     request to the worker's server; a Pod's HTTP proxy (https://<POD_ID>-<port>.proxy.runpod.net) reaches
+    //     the server directly, and vLLM then checks the --api-key it was started with. The server must speak
+    //     Claude's /v1/messages (vLLM and SGLang do) and serves exactly one model, hence modelRequired. A
+    //     queue-based Serverless endpoint speaks only OpenAI's API and cannot serve Claude Code.
     inline constexpr LaunchProviderDef kBuiltInLaunchProviders[] = {
-        { L"openrouter", L"OpenRouter", L"OPENROUTER", L"https://openrouter.ai/api", L"https://openrouter.ai/api/v1", L"sk-or-v1-\x2026", true },
-        { L"xiaomi", L"Xiaomi MiMo", L"MIMO", L"https://api.xiaomimimo.com/anthropic", L"https://api.xiaomimimo.com/v1", L"sk-\x2026 (pay-as-you-go) or tp-\x2026 (Token Plan)", false },
+        { L"openrouter", L"OpenRouter", L"OPENROUTER", L"https://openrouter.ai/api", L"https://openrouter.ai/api/v1", L"sk-or-v1-\x2026", true, L"", false },
+        { L"xiaomi", L"Xiaomi MiMo", L"MIMO", L"https://api.xiaomimimo.com/anthropic", L"https://api.xiaomimimo.com/v1", L"sk-\x2026 (pay-as-you-go) or tp-\x2026 (Token Plan)", false, L"", false },
+        { L"nanogpt", L"NanoGPT", L"NANOGPT", L"https://api.nano-gpt.com/api", L"https://api.nano-gpt.com/api/v1", L"the key from nano-gpt.com/api", false, L"", false },
+        { L"runpod", L"RunPod", L"RUNPOD", L"", L"", L"rpa_\x2026 for a Serverless endpoint; for a Pod, its vLLM --api-key", false,
+          L"https://<ENDPOINT_ID>.api.runpod.ai, or https://<POD_ID>-8000.proxy.runpod.net", true },
     };
+
+    // The built-in provider with `id`.
+    //   id - a provider id ("" never matches).
+    // Returns a pointer into kBuiltInLaunchProviders, or nullptr for a custom or unknown id. Never throws.
+    inline const LaunchProviderDef* FindBuiltInLaunchProvider(std::wstring_view id) noexcept
+    {
+        if (id.empty())
+        {
+            return nullptr;
+        }
+        for (const auto& d : kBuiltInLaunchProviders)
+        {
+            if (id == d.id)
+            {
+                return &d;
+            }
+        }
+        return nullptr;
+    }
 
     // The user's stored data for one provider: an override of a built-in one (only the URLs are used), or
     // a custom provider (`custom` = true; every field is the user's).
@@ -659,7 +706,9 @@ namespace Agentmaster
         std::wstring envPrefix;
         std::wstring keyHint;
         std::wstring baseUrlBox; // the user's Base URL box (may be empty)
-        std::wstring baseUrlDefault; // the built-in default ("" for a custom provider)
+        std::wstring baseUrlDefault; // the built-in default ("" for a custom provider, and for RunPod)
+        std::wstring baseUrlExample; // the built-in's LaunchProviderDef::baseUrlExample ("" for a custom provider)
+        bool modelRequired{ false }; // the built-in's LaunchProviderDef::modelRequired (false for a custom provider)
     };
 
     // ===== presets, templates, config ========================================================
@@ -706,6 +755,29 @@ namespace Agentmaster
     // The Xiaomi pair uses the documented endpoint and ids but has NOT been run yet (HARNESSES.md check R3:
     // does Xiaomi accept a Bearer token?), so its `tested` is empty: Settings marks it "not tested yet", "Add all
     // tested" skips it, and it sets no effort.
+    //
+    // The NanoGPT pair (the user's request, 2026-10-09: NanoGPT "templated to normal models (not abliterated)") is
+    // the NORMAL release of the two models the user's evaluation ran as refusal-removed copies on NanoGPT
+    // (xiaomi/mimo-v2.6-flash-abliterated, z-ai/glm-5.3-flash-uncensored). Every value comes from NanoGPT's public
+    // catalog and provider lists (GET /api/v1/models?detailed=true and /api/models/<id>/providers, read
+    // 2026-10-09; HARNESSES.md §4.2): the ids; the effort levels each model lists (MiMo: none and high, so high;
+    // GLM: low, high and max, so max); Max output 131,072 (the catalog's); Context 1,000,000, the smallest window
+    // of MiMo's hosts (Venice) and of GLM's hosts but one (Runware and Nube; Engy's 262,144 is smaller, and Engy
+    // states no precision, while NanoGPT labels its automatic route "FP8+"). Sampling is the vendors' (Xiaomi's
+    // for MiMo; Z.ai's GLM-5.3 values for GLM 5.3 Flash, the same family). No host is pinned: NanoGPT then routes
+    // automatically, tries to keep a session on one host that caches prompts, and a NanoGPT subscription
+    // covers both models, while a pinned host is billed pay-as-you-go plus 5%. Not run through Claude Code yet, so
+    // `tested` is empty.
+    //
+    // The RunPod template serves a Hugging Face model the user deploys: Xiaomi's official MiMo V2.6 Flash, the
+    // MOPD checkpoint (XiaomiMiMo/MiMo-V2.6-Flash-MOPD, published 2026-09-27; Xiaomi's note: a fix for repeated
+    // tool calls, which matters most in Claude Code). Its weights take 177.7 GB, which the user's research fitted on
+    // two H200 GPUs (tensor parallel 2). The model id must be vLLM's served model name, the repository id by
+    // default. Context 262,144 assumes `--max-model-len 262144` (HARNESSES.md §9 has the server command); Max
+    // output 32,000 keeps one answer inside a Serverless endpoint's 5.5-minute request limit at about 119 tokens
+    // per second (the speed that research recorded for MiMo V2.6 Flash on two H200s). Sampling is Xiaomi's. No
+    // effort: what a vLLM server does with Claude Code's effort level is not checked. Not run yet, so `tested` is
+    // empty.
     //
     // The list order is the order of Settings ▸ Presets ▸ TEMPLATES and of "Add all tested" (the launcher's order).
     // Returns the immutable list (built once, thread-safe).
@@ -810,6 +882,44 @@ namespace Agentmaster
                 { kPresetFieldSwitchModel, L"mimo-v2.6-pro" },
                 { kPresetFieldContext, L"1048576" },
                 { kPresetFieldMaxOutput, L"131072" },
+                { kPresetFieldTemperature, L"1.0" },
+                { kPresetFieldTopP, L"0.95" },
+            } });
+            // NanoGPT, the normal releases (see the comment above). The /model switch entry moves a session to the
+            // full model of the same family, as the OpenRouter MiMo Flash template does.
+            t.push_back({ L"mimo-flash.nanogpt", L"", {
+                { kPresetFieldName, L"MiMo Flash \x00B7 NanoGPT" },
+                { kPresetFieldProvider, L"nanogpt" },
+                { kPresetFieldModel, L"xiaomi/mimo-v2.6-flash" },
+                { kPresetFieldSmallModel, L"xiaomi/mimo-v2.6-flash" },
+                { kPresetFieldSwitchModel, L"xiaomi/mimo-v2.6-pro" },
+                { kPresetFieldEffort, L"high" },
+                { kPresetFieldContext, L"1000000" },
+                { kPresetFieldMaxOutput, L"131072" },
+                { kPresetFieldTemperature, L"1.0" },
+                { kPresetFieldTopP, L"0.95" },
+            } });
+            t.push_back({ L"glm-flash.nanogpt", L"", {
+                { kPresetFieldName, L"GLM-5.3 Flash \x00B7 NanoGPT" },
+                { kPresetFieldProvider, L"nanogpt" },
+                { kPresetFieldModel, L"z-ai/glm-5.3-flash" },
+                { kPresetFieldSmallModel, L"z-ai/glm-5.3-flash" },
+                { kPresetFieldSwitchModel, L"z-ai/glm-5.3" },
+                { kPresetFieldEffort, L"max" },
+                { kPresetFieldContext, L"1000000" },
+                { kPresetFieldMaxOutput, L"131072" },
+                { kPresetFieldTemperature, L"1.0" },
+                { kPresetFieldTopP, L"1.0" },
+            } });
+            // RunPod: one Hugging Face model on the user's own vLLM endpoint (see the comment above). No /model
+            // switch entry: the endpoint serves no other model.
+            t.push_back({ L"mimo-flash.runpod", L"", {
+                { kPresetFieldName, L"MiMo Flash \x00B7 RunPod" },
+                { kPresetFieldProvider, L"runpod" },
+                { kPresetFieldModel, L"XiaomiMiMo/MiMo-V2.6-Flash-MOPD" },
+                { kPresetFieldSmallModel, L"XiaomiMiMo/MiMo-V2.6-Flash-MOPD" },
+                { kPresetFieldContext, L"262144" },
+                { kPresetFieldMaxOutput, L"32000" },
                 { kPresetFieldTemperature, L"1.0" },
                 { kPresetFieldTopP, L"0.95" },
             } });
@@ -1020,6 +1130,8 @@ namespace Agentmaster
                 r.keyHint = d.keyHint;
                 r.baseUrlDefault = d.anthropicBaseUrl;
                 r.baseUrlBox = entry ? detail::PresetTrim(entry->anthropicBaseUrl) : std::wstring{};
+                r.baseUrlExample = d.baseUrlExample;
+                r.modelRequired = d.modelRequired;
                 return r;
             }
         }
@@ -1110,9 +1222,9 @@ namespace Agentmaster
         { kPresetFieldName, L"Name", nullptr, PresetFieldKind::Text, PresetFieldScope::Always,
           L"The name the launch menus show for this preset. Renaming it never breaks a session that already uses the preset." },
         { kPresetFieldProvider, L"Provider", nullptr, PresetFieldKind::Provider, PresetFieldScope::Always,
-          L"Where the session's requests go. \"Claude login\" keeps your own Claude account; OpenRouter, Xiaomi MiMo or a custom provider replace it for this session only." },
+          L"Where the session's requests go. \"Claude login\" keeps your own Claude account; OpenRouter, NanoGPT, Xiaomi MiMo, RunPod or a custom provider replace it for this session only." },
         { kPresetFieldModel, L"Main model", nullptr, PresetFieldKind::Text, PresetFieldScope::Always,
-          L"The model the session runs on. With a provider, every tier (Fable, Opus, Sonnet and subagents) uses it unless a field below says otherwise. With your Claude login it is passed as --model." },
+          L"The model the session runs on. With a provider, every tier (Fable, Opus, Sonnet and subagents) uses it unless a field below says otherwise. With your Claude login it is passed as --model. On RunPod, type the Hugging Face id your server serves (vLLM's served model name): a RunPod preset without a model does not launch." },
         { kPresetFieldSmallModel, L"Background model", L"SMALL_MODEL", PresetFieldKind::Text, PresetFieldScope::ProviderOnly,
           L"The model for the haiku tier and background work (titles, WebFetch summaries). Empty = the main model." },
         { kPresetFieldSwitchModel, L"/model switch entry", L"SWITCH_MODEL", PresetFieldKind::Text, PresetFieldScope::ProviderOnly,
@@ -1120,9 +1232,9 @@ namespace Agentmaster
         { kPresetFieldEffort, L"Effort", nullptr, PresetFieldKind::Effort, PresetFieldScope::Always,
           L"The session's reasoning effort: low, medium, high, xhigh or max. Written as CLAUDE_CODE_EFFORT_LEVEL into the session's settings file (Claude Code obeys that variable over --effort and over the same variable in ~/.claude/settings.json) and passed as --effort. While it is set, /effort in the session cannot change the level. Type none for no effort setting; empty = the template's, else Claude Code's own setting." },
         { kPresetFieldContext, L"Context window (tokens)", L"CONTEXT", PresetFieldKind::Integer, PresetFieldScope::ProviderOnly,
-          L"CLAUDE_CODE_MAX_CONTEXT_TOKENS: the window Claude Code plans compaction around. Use the SMALLEST window among the providers that may serve the model." },
+          L"CLAUDE_CODE_MAX_CONTEXT_TOKENS: the window Claude Code plans compaction around. Use the SMALLEST window among the providers that may serve the model. On your own vLLM server (RunPod), use its --max-model-len." },
         { kPresetFieldMaxOutput, L"Max output tokens", L"MAX_OUTPUT", PresetFieldKind::Integer, PresetFieldScope::Always,
-          L"CLAUDE_CODE_MAX_OUTPUT_TOKENS. Claude Code caps an unrecognized model at 128,000 whatever this says." },
+          L"CLAUDE_CODE_MAX_OUTPUT_TOKENS. Claude Code caps an unrecognized model at 128,000 whatever this says. A RunPod Serverless endpoint ends any request after 5.5 minutes, so keep one answer short enough to finish in that time." },
         { kPresetFieldProviderOrder, L"Provider order", L"PROVIDER", PresetFieldKind::List, PresetFieldScope::RoutingOnly,
           L"OpenRouter's provider.order: the hosts to try, first to last (comma separated)." },
         { kPresetFieldQuantizations, L"Quantizations", nullptr, PresetFieldKind::List, PresetFieldScope::RoutingOnly,
@@ -1498,24 +1610,39 @@ namespace Agentmaster
         return a;
     }
 
-    // Why a preset cannot launch at all. Checked when the preset is PICKED, before any snapshot: its
-    // provider no longer exists (a custom provider removed in Settings). SnapshotPresetLaunch would then
-    // record no provider, and the session would start on the user's own Claude login with the preset's
-    // model - a silent switch to another account and another bill. A session that already holds a
-    // snapshot is not affected: its provider, Base URL and key reference are frozen in the snapshot.
+    // Why a preset cannot launch at all. Checked when the preset is PICKED, before any snapshot:
+    //   * its provider no longer exists (a custom provider removed in Settings). SnapshotPresetLaunch would then
+    //     record no provider, and the session would start on the user's own Claude login with the preset's
+    //     model - a silent switch to another account and another bill;
+    //   * its provider serves one model only (LaunchProviderDef::modelRequired: RunPod) and the preset names
+    //     none. Claude Code would then ask the server for its own Claude model ids, and every request would
+    //     fail with "model does not exist". The Main model has no env tier, so the box and the template decide.
+    // A session that already holds a snapshot is not affected: its provider, Base URL, key reference and model
+    // are frozen in the snapshot.
     //   preset - the preset.
     //   cfg    - the config (its providers).
     // Returns the user-facing reason, or "" when the preset can launch (the Claude login, a built-in
-    // provider, or a custom provider that still exists).
+    // provider, or a custom provider that still exists, with a model where its provider needs one).
     inline std::wstring PresetLaunchRefusal(const LaunchPreset& preset, const LaunchPresetsConfig& cfg)
     {
         const auto providerId = PresetProviderId(preset);
-        if (providerId.empty() || ResolveLaunchProvider(cfg, providerId).found)
+        if (providerId.empty())
         {
             return {};
         }
-        return L"The preset \"" + PresetDisplayName(preset) + L"\" uses the provider \"" + providerId +
-               L"\", which no longer exists. Pick another provider for it in Settings \x25B8 Presets.";
+        const auto provider = ResolveLaunchProvider(cfg, providerId);
+        if (!provider.found)
+        {
+            return L"The preset \"" + PresetDisplayName(preset) + L"\" uses the provider \"" + providerId +
+                   L"\", which no longer exists. Pick another provider for it in Settings \x25B8 Presets.";
+        }
+        // No env lookups: the Main model has no env tier (its spec's envSuffix is nullptr).
+        if (provider.modelRequired && ResolvePresetField(kPresetFieldModel, preset, cfg, nullptr, nullptr, true).value.empty())
+        {
+            return L"The preset \"" + PresetDisplayName(preset) + L"\" names no model, and " + provider.name +
+                   L" serves only the model its server runs. Type that model's Hugging Face id (vLLM's served model name) into the preset's Main model box in Settings \x25B8 Presets.";
+        }
+        return {};
     }
 
     // The values a session launches with NOW: `set`, else the Windows variable named in `env` when it is
@@ -1819,7 +1946,19 @@ namespace Agentmaster
             const auto baseUrl = get(kPresetFieldBaseUrl);
             if (baseUrl.empty())
             {
-                c.error = L"No Base URL for " + (a.providerName.empty() ? a.providerId : a.providerName) + L". Set it in Settings \x25B8 Presets.";
+                c.error = L"No Base URL for " + (a.providerName.empty() ? a.providerId : a.providerName) + L". Set it in Settings \x25B8 Presets";
+                // A built-in with no default URL (RunPod) names the shape of the user's own endpoint, and its
+                // variable: the user cannot be expected to know either.
+                const auto* def = FindBuiltInLaunchProvider(a.providerId);
+                if (def && def->baseUrlExample && *def->baseUrlExample)
+                {
+                    c.error += L" (" + std::wstring{ def->baseUrlExample } + L")";
+                }
+                if (const auto it = a.env.find(kPresetFieldBaseUrl); it != a.env.end() && !it->second.empty())
+                {
+                    c.error += L", or set " + it->second;
+                }
+                c.error += L".";
                 return c;
             }
             putEnv(L"ANTHROPIC_BASE_URL", baseUrl);

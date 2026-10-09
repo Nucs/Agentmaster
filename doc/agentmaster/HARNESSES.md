@@ -16,6 +16,17 @@
 > (§10) and the UI checks (§12) are open. The file keeps its proposal-time name (`HARNESSES.md`), because code comments cite its sections. The
 > proposal it replaces called the feature "harnesses"; the user renamed it **Presets** on 2026-10-06 (§11).
 >
+> **2026-10-09, NOT BUILT: NanoGPT and RunPod** (Q12, Q13; D15–D17). Two built-in providers more: **NanoGPT**
+> (`NANOGPT_*`, its direct API host) and **RunPod** (`RUNPOD_*`, the user's own vLLM endpoint serving one
+> Hugging Face model: no default URL, and a preset without a model is refused). Three templates more, all
+> "not tested yet": MiMo Flash and GLM-5.3 Flash on NanoGPT (the NORMAL models, not the refusal-removed copies
+> the user's evaluation ran), and MiMo Flash on RunPod (`XiaomiMiMo/MiMo-V2.6-Flash-MOPD`). Checked without a
+> build, on an isolated copy of HEAD's `src` + this change: the engine harness (`TestLaunchPresets` 308 checks,
+> 43 new; a negative control fails exactly its two altered checks), all 89 `TerminalAppLib` files and all 16
+> `agentmaster-cli` files under `/Zs` with the last build's flags (through a precompiled header built from the
+> copy), and probes that fail every consumer of the changed files. No request has gone to NanoGPT or RunPod
+> (R8, R9).
+>
 > The reference configuration is the user's OpenRouter launcher (`mimo`, `mimo-flash`, `kimi`, `qwen`,
 > `glm`: `~/.claude/scripts/openrouter.ps1` + `openrouter-profiles.json`, verified 2026-10-06 on Claude
 > Code 2.1.282, `mimo-flash` re-checked on 2.1.291). Companions: [`ENV_VARS.md`](./ENV_VARS.md) (the env
@@ -27,7 +38,8 @@
 Before presets, Agentmaster started every managed session on the models and the login of the user's own
 Claude setup, with at most a `--model` pick. A **preset** starts a session on another model type (Xiaomi
 MiMo-V2.6 Pro and Flash first, then Moonshot Kimi K3, Qwen3.8-2.4T-A95B and Z.ai GLM-5.3) through a
-provider the user picks (OpenRouter, Xiaomi's own API, or any other Anthropic-compatible endpoint), and
+provider the user picks (OpenRouter, NanoGPT, Xiaomi's own API, a RunPod endpoint that serves a Hugging Face
+model, or any other Anthropic-compatible endpoint), and
 keeps the full Claude Code harness: hooks, skills, MCP servers, CLAUDE.md files, and every Agentmaster
 feature.
 
@@ -44,6 +56,8 @@ feature.
 | Q9 | The session keeps the configuration it started with, FLATTENED to values (no template link). Env values are read again from the environment; values from Settings are persisted. Stored in Agentmaster's own session store, as `launchArgs`. | §7 |
 | Q10 | `~/.claude/settings.json` outranking Agentmaster's env vars is the intended order. | [`ENV_VARS.md`](./ENV_VARS.md) §2 |
 | Q11 | No template is included by default: the initial preset list is empty, and the user adds presets by hand. While no preset is defined, the menus show an "Add presets…" item where the presets would be; it opens an OK dialog that says where presets are in Settings. There, a button adds the templates. | §4, §8.1, §8.2 |
+| Q12 | (2026-10-09) NanoGPT support, its templates on the NORMAL models, not the abliterated copies the user's evaluation compared (`xiaomi/mimo-v2.6-flash-abliterated`, `z-ai/glm-5.3-flash-uncensored`). The key is the saved `NANOGPT_API_KEY`. | §4, §4.2, §9 |
+| Q13 | (2026-10-09) Routing through RunPod with a Hugging Face model; the key is in the env var `RUNPOD_API_KEY`. | §4, §4.2, §9 |
 
 ## 2. The reference: what `mimo` does
 
@@ -139,8 +153,9 @@ Agentmaster reuses the launcher's knowledge instead: the same profiles (as templ
 ## 4. Concepts
 
 - **Provider** — an Anthropic-compatible endpoint and its key. Built in: **OpenRouter** (env prefix
-  `OPENROUTER`) and **Xiaomi MiMo** (prefix `MIMO`). Custom: any other endpoint (GLM, Kimi, DeepSeek, a
-  local proxy), with its own name, env prefix and Base URL. The **Claude login** (the user's own
+  `OPENROUTER`), **Xiaomi MiMo** (prefix `MIMO`), **NanoGPT** (prefix `NANOGPT`) and **RunPod** (prefix
+  `RUNPOD`: the user's own vLLM endpoint, so no default URL, and exactly one model — §9). Custom: any other
+  endpoint (GLM, Kimi, DeepSeek, a local proxy), with its own name, env prefix and Base URL. The **Claude login** (the user's own
   account, id `anthropic`) is the absence of a provider: a preset on it changes only the model, the
   effort, limits, env and arguments.
 - **Preset** — a named configuration of one Claude session: the provider, the model of each tier,
@@ -175,12 +190,17 @@ TEMPLATES (and of "Add all tested templates"):
 | `glm.openrouter` | GLM-5.3 · OpenRouter | `z-ai/glm-5.3` | — | 1,048,576 | `provider.order` z-ai, sail-research, siliconflow, akashml; `quantizations` fp8, bf16; `temperature` 1.0; `top_p` 1.0 | 2026-10-06, Claude Code 2.1.282 |
 | `mimo-pro.xiaomi` | MiMo Pro · Xiaomi | `mimo-v2.6-pro` | `mimo-v2.6-flash` | 1,048,576 | `temperature` 1.0; `top_p` 0.95; no `provider` block | **not tested** (R3): added only by its own Add |
 | `mimo-flash.xiaomi` | MiMo Flash · Xiaomi | `mimo-v2.6-flash` | `mimo-v2.6-pro` | 1,048,576 | the same | **not tested**: added only by its own Add |
+| `mimo-flash.nanogpt` | MiMo Flash · NanoGPT | `xiaomi/mimo-v2.6-flash` | `xiaomi/mimo-v2.6-pro` | 1,000,000 | `temperature` 1.0; `top_p` 0.95; no `provider` block; Effort `high` | **not tested** (R8, §4.2) |
+| `glm-flash.nanogpt` | GLM-5.3 Flash · NanoGPT | `z-ai/glm-5.3-flash` | `z-ai/glm-5.3` | 1,000,000 | `temperature` 1.0; `top_p` 1.0; no `provider` block; Effort `max` | **not tested** (R8, §4.2) |
+| `mimo-flash.runpod` | MiMo Flash · RunPod | `XiaomiMiMo/MiMo-V2.6-Flash-MOPD` (a Hugging Face id) | — | 262,144 | `temperature` 1.0; `top_p` 0.95; Max output **32,000**; no effort | **not tested** (R9, §4.2) |
 
-All seven set Max output 131,072. The five OpenRouter templates set Effort `max`, the level their tests
-ran with (§2, F9, F10); the untested Xiaomi pair sets none. None sets an identity note (§5.2). None is in
-the preset list until the user adds it (Q11). An untested template is added only by its own Add, never by
-"Add all tested templates", and its row says "not tested yet"; once added it is visible like any preset. A
-release that ships a new template adds nothing to anyone's list: the template only appears in TEMPLATES.
+All ten set Max output 131,072, except the RunPod one (32,000, §4.2). The five OpenRouter templates set
+Effort `max`, the level their tests ran with (§2, F9, F10); the untested Xiaomi pair sets none; the NanoGPT
+pair sets the top level each model lists (§4.2); the RunPod one sets none. None sets an identity note
+(§5.2). None is in the preset list until the user adds it (Q11). An untested template is added only by its
+own Add, never by "Add all tested templates", and its row says "not tested yet"; once added it is visible
+like any preset. A release that ships a new template adds nothing to anyone's list: the template only
+appears in TEMPLATES.
 
 **The 0.6.8.18 cleanup.** Release 0.6.8.18 (82cd65d2a) did add the templates by itself ("seeding"): its
 loader put every template into the list in memory, and any Settings Save then wrote them into
@@ -227,6 +247,61 @@ per second, 3 samples per endpoint. Prices per million tokens on the first endpo
   and cache are moderate (3 samples per endpoint); quality comparisons rest on the vendors' own scores and
   one math problem. Only MiMo Pro ran the graded Claude Code tasks. Not tested: long sessions near
   auto-compact, the `/model` switch, and whether Kimi, Qwen and GLM use the earlier reasoning.
+
+### 4.2 NanoGPT and RunPod values (2026-10-09)
+
+**NanoGPT (Q12).** The user's evaluation (pasted 2026-10-09) compared two refusal-removed copies on NanoGPT:
+`xiaomi/mimo-v2.6-flash-abliterated` (Heabsy, NVFP4, $0.50 / $1.50 per M, thinking none or high, the
+faster in its small tests) and `z-ai/glm-5.3-flash-uncensored` (Arnict, NVFP4, cheaper, thinking always on).
+The templates use the NORMAL release of each. The values come from NanoGPT's public catalog
+(`GET https://api.nano-gpt.com/api/v1/models?detailed=true`, 632 entries) and provider lists
+(`GET https://api.nano-gpt.com/api/models/<id with %2F>/providers`), both read without a key on 2026-10-09:
+
+| Template | Model | Input / cache read / output per M | Window / max output | Effort levels listed | NanoGPT's automatic route |
+|---|---|---|---|---|---|
+| MiMo Flash · NanoGPT | `xiaomi/mimo-v2.6-flash` (309B MoE, 15B active) | $0.14 / $0.0028 / $0.28 | 1,048,576 / 131,072 | none, high | "FP8+", 38 tok/s, first token 3.6 s; 10 hosts (Xiaomi's own among them) |
+| GLM-5.3 Flash · NanoGPT | `z-ai/glm-5.3-flash` (320B MoE, 18B active) | $0.10 / $0.025 / $0.30 | 1,048,576 / 131,072 | low, high, max | "FP8+", 177 tok/s, first token 4.5 s; 36 hosts (Z.ai's own among them) |
+
+- **Effort**: the top level each model lists — `high` for MiMo (a `max` may be refused: "other effort
+  levels remain model/provider-specific"), `max` for GLM. To turn MiMo's reasoning off, append NanoGPT's
+  suffix to the model id: `xiaomi/mimo-v2.6-flash:reasoning-effort/none` (NanoGPT then sends
+  `thinking: {type: "disabled"}`). The `/model` display name keeps the suffix (`PresetModelDisplayName`
+  ends the vendor prefix at a slash BEFORE the first `:` only).
+- **Context 1,000,000**: the smallest window of MiMo's hosts (Venice) and of GLM's hosts but one (Runware
+  and Nube); Engy's 262,144 is smaller, and Engy states no precision while NanoGPT labels its automatic
+  route "FP8+". Not verified: that the automatic route never sends a larger request to a host whose
+  window is too small.
+- **No host pinned**: NanoGPT routes automatically, tries to keep a session on one host that caches prompts
+  (its cache-affinity routing), and a NanoGPT subscription covers both models. A pinned host (§9) is billed
+  pay-as-you-go plus 5%.
+- **Sampling**: Xiaomi's for MiMo (temperature 1.0, top_p 0.95); for GLM 5.3 Flash, Z.ai's GLM-5.3 Claude
+  Code values (1.0, 1.0), taken over from the same family: Z.ai's values for the Flash model itself were
+  not found.
+- The bigger siblings are the `/model` switch entries: `xiaomi/mimo-v2.6-pro` ($0.435 / $0.87) and
+  `z-ai/glm-5.3` ($1.00 / $3.20).
+
+**RunPod (Q13).** RunPod hosts the server; Agentmaster only points Claude Code at it. The server must
+speak Claude's `/v1/messages` (vLLM since PR #22627, or SGLang) and serves exactly ONE model, so the preset's
+Main model must be the server's served model name (the Hugging Face repository id by default). The template
+names Xiaomi's official MiMo V2.6 Flash in its MOPD checkpoint (`XiaomiMiMo/MiMo-V2.6-Flash-MOPD`,
+published 2026-09-27; Xiaomi's note: an on-policy distillation upgrade with a fix for repeated tool calls,
+which in Claude Code lowered MiMo Pro's repetition rate from 0.04–0.16% to about 0.01%). Read from the
+Hugging Face API on 2026-10-09: 177.7 GB of safetensors, MIT license, not gated. `XiaomiMiMo/MiMo-V2.6-Flash-RL`
+is the earlier release with the same layout.
+
+- **Hardware**: two H200 GPUs, tensor parallel 2 — the fit the user's research recorded (2026-10-07) for a
+  MiMo V2.6 Flash copy with the same 178 GB layout, at about 119 tokens per second.
+- **Context 262,144** = the `--max-model-len` of the command in §9. Change both together: vLLM refuses a
+  request whose input plus `max_tokens` passes its `--max-model-len`.
+- **Max output 32,000**: a load-balancing Serverless endpoint ends any request after 5.5 minutes (RunPod's
+  limits table); 32,000 tokens at about 119 tokens per second take about 4.5 minutes. A Pod's HTTP proxy
+  has another limit: it runs through Cloudflare, which ends a request with a 524 error when the server does
+  not respond within 100 seconds (RunPod's page calls it "a maximum connection time of 100 seconds").
+  Whether a long streamed answer, or the prefill of a large context before the first token, trips it was
+  not checked. A Pod's TCP port with a public IP avoids Cloudflare, but has no TLS.
+- **No effort**: what vLLM does with Claude Code's effort level was not checked.
+- **Refusals**: a RunPod preset is refused at the pick when it names no model (`PresetLaunchRefusal`), and
+  at the launch while no Base URL resolves — the notice then shows both URL shapes and `RUNPOD_BASE_URL`.
 
 "Codex in mind": a snapshot carries `agent: "claude"`, a provider entry stores an `openaiBaseUrl` beside
 its Anthropic one, and a Codex snapshot is refused by this build instead of misread. Codex presets
@@ -275,7 +350,7 @@ Claude login has its own models and limits); **routing** = only OpenRouter.
 |---|---|---|---|---|
 | `name` | Name | — | all | the menu label (not a launch value) |
 | `provider` | Provider | — | all | a provider id; `anthropic` = the Claude login; empty = the template's |
-| `model` | Main model | — | all | `--model`; the settings file's `model`; with a provider also `env.ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{FABLE,OPUS,SONNET}_MODEL` (+ `_NAME`), `CLAUDE_CODE_SUBAGENT_MODEL` |
+| `model` | Main model | — | all | `--model`; the settings file's `model`; with a provider also `env.ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{FABLE,OPUS,SONNET}_MODEL` (+ `_NAME`), `CLAUDE_CODE_SUBAGENT_MODEL`. REQUIRED on a provider that serves one model (RunPod, `LaunchProviderDef::modelRequired`): a preset without one is refused (§6.4) |
 | `smallModel` | Background model | `<P>_SMALL_MODEL` | provider | `env.ANTHROPIC_DEFAULT_HAIKU_MODEL` (+ `_NAME`); empty = the main model |
 | `switchModel` | /model switch entry | `<P>_SWITCH_MODEL` | provider | `env.ANTHROPIC_CUSTOM_MODEL_OPTION` (+ `_NAME`, `_DESCRIPTION`); `none` = no entry |
 | `effort` | Effort | — | all | `env.CLAUDE_CODE_EFFORT_LEVEL` AND `--effort`, `low|medium|high|xhigh|max`; `none` = neither |
@@ -428,8 +503,12 @@ A preset launch is REFUSED — nothing starts — when:
 
 - the picked preset no longer exists;
 - its provider no longer exists (a custom provider deleted in Settings; `PresetLaunchRefusal`);
+- its provider serves one model only (RunPod) and the preset names none, in its box or its template
+  (`PresetLaunchRefusal`: Claude Code would otherwise ask the server for its own Claude ids, and every
+  request would fail with "model does not exist");
 - no key resolves for its provider (§5.1);
-- no Base URL resolves (a custom provider with an empty URL box and no `<PREFIX>_BASE_URL`).
+- no Base URL resolves (a custom provider with an empty URL box and no `<PREFIX>_BASE_URL`, or RunPod before
+  the user names an endpoint: its notice shows both URL shapes and `RUNPOD_BASE_URL`).
 
 A silent fallback to the user's Claude login would run another model on another account (D7). Per seam:
 
@@ -510,6 +589,12 @@ PROVIDERS
    Base URL (Anthropic-compatible)  [ https://api.xiaomimimo.com/anthropic  ← provider default ]
    API key                          [ none: type a key, or set MIMO_API_KEY (sk-… or tp-…)  ]
    A key is stored in Windows Credential Manager.  [Remove stored key]
+ NanoGPT   ·   NANOGPT_*
+   Base URL (Anthropic-compatible)  [ https://api.nano-gpt.com/api  ← provider default      ]
+   API key                          [ …wxyz  ← NANOGPT_API_KEY (Windows)                   ]
+ RunPod   ·   RUNPOD_*                               (no default URL: the box shows the two shapes)
+   Base URL (Anthropic-compatible)  [ e.g. https://<ENDPOINT_ID>.api.runpod.ai, or https://<POD_ID>-8000.proxy.runpod.net, or set RUNPOD_BASE_URL ]
+   API key                          [ …wxyz  ← RUNPOD_API_KEY (Windows)                    ]
  GLM   ·   GLM_*                                     (a custom provider: + Name, Env variable prefix)
    …                                                 [Delete provider]
  [Add a custom provider]
@@ -521,7 +606,7 @@ PRESETS
   New ▸ Blank preset." and no editor)
    From the template "MiMo Pro · OpenRouter" — tested 2026-10-06 · Claude Code 2.1.282. Empty boxes follow the template.
    Show in the launch menus  [on]
-   Provider [ As the template (OpenRouter) ▾ ]   (Claude login (your own account) · OpenRouter · Xiaomi MiMo · custom …)
+   Provider [ As the template (OpenRouter) ▾ ]   (Claude login (your own account) · OpenRouter · Xiaomi MiMo · NanoGPT · RunPod · custom …)
    Name                       [ MiMo Pro · OpenRouter  ← template                      ]
    Main model                 [ xiaomi/mimo-v2.6-pro  ← template                       ]
    Background model           [ xiaomi/mimo-v2.6-pro  ← template                       ]
@@ -540,8 +625,8 @@ PRESETS
   `AddLaunchPresetsFromTemplates`). While any preset links to the template the button reads **Added** and
   is disabled (a second copy is Duplicate or New ▸ From template); deleting that preset brings Add back.
   **Add all tested templates (N)** adds every tested template not in the list yet, in the table's order,
-  and selects the first; it is disabled once N is 0. The untested Xiaomi pair is added only by its own
-  Add. Nothing is written before Save.
+  and selects the first; it is disabled once N is 0. The untested templates (the Xiaomi pair, the NanoGPT
+  pair, the RunPod one) are added only by their own Add. Nothing is written before Save.
 - **New ▾**: "Blank preset" (named "Preset N", the first free number; on the Claude login until a
   provider is picked) or "From template: <name>" (a linked copy, also when the template is already in
   the list).
@@ -657,14 +742,76 @@ a Sessions-page chip and the CLI's `preset:` line are follow-ups (§12). The obs
   `~/.claude.json` `customApiKeyResponses.approved` at the launch seam (the workspace-trust idiom), or
   use `apiKeyHelper`.
 
+**NanoGPT** (2026-10-09; read from docs.nano-gpt.com and probed without a key)
+
+- Base URL `https://api.nano-gpt.com/api`, the direct API host, which NanoGPT recommends for long requests (a
+  higher request size limit and a longer runtime than `nano-gpt.com`); claude appends `/v1/messages`, which
+  answered 401 without a key (an unknown path: 404). NanoGPT's own Claude Code page uses
+  `https://nano-gpt.com/api/v1`, which makes claude call `…/api/v1/v1/messages`; on the direct host that path
+  answered a 307 redirect.
+- Prefix `NANOGPT`: `NANOGPT_API_KEY` is the name NanoGPT's own examples use (on the reference machine it is a
+  User variable). Bearer is accepted (`Authorization: Bearer` or `x-api-key`), so `ANTHROPIC_AUTH_TOKEN`
+  works as for OpenRouter. Key format: not documented.
+- Model ids are `vendor/model` from the catalog (`GET /api/v1/models?detailed=true`, public). Suffixes are
+  part of the id: `:reasoning-effort/<none|low|medium|high|xhigh|max>`, `:<provider id>` (a host from
+  `GET /api/models/<id with %2F>/providers`), the routing preferences `:speed`, `:throughput`, `:latency`,
+  `:price` (`:fast`, `:cheap`), and `:caching`. A pinned host or a routing preference is billed pay-as-you-go
+  plus about 5% and bypasses a subscription.
+- No `provider` routing block: NanoGPT documents its `provider` object for `/v1/chat/completions`,
+  `/v1/completions` and `/api/talk-to-gpt`, not for Messages. A host can also be pinned with the `X-Provider`
+  header: Extra env vars `ANTHROPIC_CUSTOM_HEADERS=X-Provider: <id>` (not tested).
+- NanoGPT's installer adds `API_TIMEOUT_MS=600000`; put it into Extra env vars if a long answer times out.
+
+**RunPod** (2026-10-09; RunPod's documentation, and the user's own research of 2026-10-06/07 in
+`~/.claude/CLAUDE.Bash.md`)
+
+- **No default Base URL**: each endpoint has its own. Two shapes work with Claude Code:
+  - a **load-balancing Serverless endpoint**: `https://<ENDPOINT_ID>.api.runpod.ai`. RunPod's load balancer
+    takes the RunPod API key as the Bearer token (`RUNPOD_API_KEY`, the prefix's variable) and sends the
+    request to the worker's own HTTP server. Limits: 2 minutes of waiting for a free worker, 5.5 minutes
+    per request, 30 MB per request and response.
+  - a **Pod's HTTP proxy**: `https://<POD_ID>-<port>.proxy.runpod.net`. It reaches the server directly, through
+    Cloudflare (a 524 error when the server does not respond within 100 seconds). The proxy URL is public,
+    so start vLLM with `--api-key <a key of your own>` and type that key into the RunPod key box (Credential
+    Manager outranks `RUNPOD_API_KEY`). Never use the RunPod account key as vLLM's `--api-key`: it would
+    sit in the Pod's command line.
+  A **queue-based** Serverless endpoint (RunPod's `worker-vllm`, `https://api.runpod.ai/v2/<id>/openai/v1`)
+  speaks only OpenAI's API and cannot serve Claude Code.
+- The server must speak Claude's `/v1/messages`: vLLM (PR #22627) and SGLang do. It serves ONE model, the
+  served model name: the repository id given to `vllm serve`, or `--served-model-name` when the weights are
+  loaded from a local path (a network volume). The preset's Main model must be that name exactly
+  (`modelRequired`).
+- **A server command for the template** (NOT RUN; the image and the parser flags are those the user's
+  research found on the model cards of MiMo V2.6 Flash copies with the same layout):
+
+  ```
+  image:   vllm/vllm-openai:mimo-v26-cu129   (entrypoint: vllm serve)
+  args:    XiaomiMiMo/MiMo-V2.6-Flash-MOPD --tensor-parallel-size 2 --max-model-len 262144
+           --reasoning-parser mimo --tool-call-parser mimo --enable-auto-tool-choice --port <port>
+  GPUs:    2 x H200 (the 177.7 GB of weights; about 119 tok/s per the research)
+  env:     VLLM_USE_DEEP_GEMM=0 on the first boot of a fresh Hopper machine (the research's note)
+  ```
+
+  - Serverless: endpoint type **Load balancer**, `--port 80` (or set `PORT` to the port), `HEALTH_CHECK_PATH=/health`
+    (vLLM's health route; RunPod polls `/ping` by default), no `--api-key` (RunPod's load balancer checks the
+    key). Keep one worker active while sessions run: a cold worker must download and load 178 GB, longer than
+    the 2-minute wait for a worker. A network volume or RunPod's model caching avoids the download.
+  - Pod: expose HTTP port 8000 (`--port 8000`) and add `--api-key`. The research's clone-first pattern
+    (a network volume filled by a CPU pod, then the GPU pod) avoids paying GPU time for the download; with
+    the weights on the volume, add `--served-model-name XiaomiMiMo/MiMo-V2.6-Flash-MOPD`.
+  - Cost noted by the research: 2 x H200 at $7.18/h (community cloud) or $9.18/h (secure cloud, which a
+    network volume needs). Its first attempt (2026-10-06) ran 81 minutes for about $9.75 and never served,
+    because the 178 GB download did not finish.
+- Agentmaster creates, starts and stops no RunPod resource (§12): it only points the session at the URL.
+
 **Custom** — a name, an env prefix (sanitized to `[A-Z0-9_]`, no leading digit), a Base URL and a key.
 No routing block. Id `c-<8 hex>`.
 
 ## 10. Risks and checks (P0)
 
-R1–R4, R6 and R7 run without an Agentmaster build: the `claude-wrap-ConPTY` skill's driver, a throwaway
-folder, a hand-made settings file, and for R6 the host script run by hand. R5 needs a dev build. **None
-has been run against this implementation yet.**
+R1–R4, R6, R7 and R8 run without an Agentmaster build: the `claude-wrap-ConPTY` skill's driver, a throwaway
+folder, a hand-made settings file, and for R6 the host script run by hand. R5 needs a dev build, R9 a running
+RunPod endpoint. **None has been run against this implementation yet.** Each sends paid requests: ask first.
 
 | # | Risk | Check |
 |---|---|---|
@@ -675,6 +822,8 @@ has been run against this implementation yet.**
 | R5 | A long silent MiMo turn (F8) demoted from Running. | One long turn on a dev build: no `[recon-stop]` before the real Stop. |
 | R6 | The pwsh prompt after claude exits keeps the key. | At that prompt, `$env:ANTHROPIC_AUTH_TOKEN` and `$env:AM_PRESET_TOKEN` are empty. |
 | R7 | The transcript's `message.model` for each provider. | Read one assistant line. |
+| R8 | NanoGPT through Claude Code (2026-10-09 templates): the Bearer token, the effort levels (`high` for MiMo, `max` for GLM), reasoning returned, tool calls, the Context of 1,000,000. | One `-p` call per NanoGPT template with its generated settings file (a fraction of a cent each). A pass gives the templates a `tested` line. |
+| R9 | RunPod: a vLLM endpoint serving `XiaomiMiMo/MiMo-V2.6-Flash-MOPD` answers Claude Code (`/v1/messages`, the tool-call and reasoning parsers, the served name), and a turn stays inside the Serverless 5.5-minute limit. | Needs a running endpoint (§9: 2 x H200, about $7–9 per hour). |
 
 ## 11. Decisions (as taken)
 
@@ -694,6 +843,9 @@ has been run against this implementation yet.**
 | D12 | Effort | written as `CLAUDE_CODE_EFFORT_LEVEL` in the settings file AND as `--effort` (F9); `none` = neither |
 | D13 | /handover hint for presets | the bracketed form with a prefix of the preset's name only; a bare word never picks a preset (§8.2) |
 | D14 | Initial list (2026-10-06, Q11) | EMPTY: no template is added by itself. While the list is empty every launch menu shows "Add presets…", which opens an OK dialog naming the way to Settings → Presets → TEMPLATES (§8.2); there, one Add per template and "Add all tested templates" (§8.1). A 0.6.8.18 file loses the presets that build added and nobody changed (§4) |
+| D15 | NanoGPT (2026-10-09, Q12) | a built-in provider on the direct API host, with no routing block (NanoGPT's Messages API takes no `provider` object); two untested templates on the NORMAL models, no host pinned (the automatic route, covered by a subscription), effort = the top level each model lists (§4.2) |
+| D16 | RunPod (2026-10-09, Q13) | a built-in provider with NO default URL and `modelRequired` (one model per vLLM endpoint); the key is `RUNPOD_API_KEY` for a Serverless endpoint, or a vLLM key typed in the box for a Pod; one untested template on Xiaomi's official MOPD checkpoint, Max output 32,000 for the 5.5-minute limit; Agentmaster manages no RunPod resource (§12) |
+| D17 | A `/model` display name with a NanoGPT suffix (2026-10-09) | the vendor prefix ends at a slash BEFORE the first `:` (`xiaomi/mimo-v2.6-flash:reasoning-effort/none` → `mimo-v2.6-flash:reasoning-effort/none`) |
 
 ## 12. Follow-ups and known gaps
 
@@ -718,19 +870,25 @@ has been run against this implementation yet.**
   model.
 - An ad-hoc `@openrouter:<model>` target, and an import of `openrouter-profiles.json`.
 - `defaultLaunchTarget` (D9).
+- **RunPod resources from Agentmaster**: create, start and stop an endpoint or a Pod through RunPod's REST API
+  (`rest.runpod.io/v1`), or wake a Serverless worker (a `/health` probe) before a launch, since a cold worker
+  takes longer than the load balancer's 2-minute wait. Not built: each of these spends money.
+- A **NanoGPT host pin** as a preset field (the `X-Provider` header through `ANTHROPIC_CUSTOM_HEADERS`), and a
+  NanoGPT catalog fetch as a tier (its public model list carries each model's window, output limit and effort
+  levels).
 
 ## 13. Code map
 
 | File | What |
 |---|---|
-| `AgentMaster/LaunchPresets.h` | The PURE core (header-only): field keys + the field table, providers, templates + the one-click adds (`AddLaunchPresetsFromTemplates`, `LaunchPresetTemplatesNotInList`, `LaunchPresetListHasTemplate`), the 0.6.8.18 cleanup (`DropUntouchedAutoAddedPresets`), the "Add presets…" rule and text (`ShouldOfferAddPresets`, `kAddPresetsMenuText` / `…Tip`, `kAddPresetsHelpTitle`, `AddPresetsHelpText`), `launch-presets.json` (de)serialization, the tiers (`ResolvePresetField`, `ResolveProviderBaseUrl`), the snapshot (`LaunchArgs`, `SnapshotPresetLaunch`, `SnapshotModelLaunch`, `EffectiveLaunchValues`, JSON), the refusal (`PresetLaunchRefusal`), the compile (`CompileClaudeLaunch`, `ComposePresetExtraBody`), the preview, `MaskSecret`, the menu entries + the /handover hint spec. |
+| `AgentMaster/LaunchPresets.h` | The PURE core (header-only): field keys + the field table, providers (`kBuiltInLaunchProviders` — OpenRouter, Xiaomi MiMo, NanoGPT, RunPod — with `baseUrlExample` and `modelRequired`; `FindBuiltInLaunchProvider`; `ResolveLaunchProvider`), templates + the one-click adds (`AddLaunchPresetsFromTemplates`, `LaunchPresetTemplatesNotInList`, `LaunchPresetListHasTemplate`), the 0.6.8.18 cleanup (`DropUntouchedAutoAddedPresets`), the "Add presets…" rule and text (`ShouldOfferAddPresets`, `kAddPresetsMenuText` / `…Tip`, `kAddPresetsHelpTitle`, `AddPresetsHelpText`), `launch-presets.json` (de)serialization, the tiers (`ResolvePresetField`, `ResolveProviderBaseUrl`), the snapshot (`LaunchArgs`, `SnapshotPresetLaunch`, `SnapshotModelLaunch`, `EffectiveLaunchValues`, JSON), the refusal (`PresetLaunchRefusal`), the compile (`CompileClaudeLaunch`, `ComposePresetExtraBody`), the preview, `MaskSecret`, the menu entries + the /handover hint spec. |
 | `AgentMaster/LaunchPresetsOs.h` | The OS half (TerminalApp only): the two env lookups (Agentmaster's list; Windows = process env, then the registry), Credential Manager (`Read/Write/DeletePresetProviderKey`), the stamp-cached config loader (it adds nothing by itself; it logs the 0.6.8.18 cleanup once per file stamp), `LaunchMenuEntries` / `LaunchMenuSpec`, `ShouldOfferAddPresets()` (the one question every host asks before it offers "Add presets…"), `LaunchArgsForTarget`, `Load/StoreLaunchArgs`, `ResolveLaunchKey`, `CompileLaunchForSpawn`. |
 | `AgentMaster/ClaudeSpawn.{h,cpp}` | `ClaudeSpawnSpec::authTokenEnv` / `presetId`; `BuildClaudeCommandline`'s `extraArgs`; `RenderLaunchExtraArgs`; `BuildLaunchSettingsJson`; `MaterializeLaunchSettingsFile`; `ApplyCompiledLaunch`; the `launch` parameter of `BuildClaudeSpawn` / `BuildClaudeRestartSpec`; `BuildPwshHostedCommandline`'s token scoping; `ParseHandoverArgsHints`' preset rule (D13). |
 | `AgentMaster/Persistence.{h,cpp}` | `LaunchPresetsPath` / `LoadLaunchPresetsText` / `SaveLaunchPresetsText` (atomic). |
 | `TerminalPage.AgentSessions.cpp` (+ `.h`) | `_ResolveLaunchForSpawn` (the ONE launch-target decision), `_StoredLaunchArgsFollowingChain`, `_PromptPresetLaunchError`, `_AddPresetsOpener` + `_PromptAddPresets` (the page's "Add presets…" item and its OK dialog, §8.2), and the seams: `_LaunchClaudeSession` (+ `inheritLaunchFromId`), the /handover successors, `_RestartTabIntoFreshSession`, `_RestartManagedSession`, Deactivate. |
 | `AgentModelMenu.h` | The preset group (separator + tooltips) in `AgentFillModelPickItems`, and the "Add presets…" item in its place while the list is empty (`AgentAddPresetsOpener`). |
-| `AgentManagerContent.Settings.cpp` (+ `.h`, `.cpp`) | The Presets tab (§8.1): TEMPLATES (`_RefreshPresetTemplateRows`, `_AddPresetsFromTemplates`), the empty-list line, the editor; and the Agent Manager's "Add presets…" opener + dialog (`_AddPresetsOpener`, `_ShowAddPresetsHelp`). |
+| `AgentManagerContent.Settings.cpp` (+ `.h`, `.cpp`) | The Presets tab (§8.1): TEMPLATES (`_RefreshPresetTemplateRows`, `_AddPresetsFromTemplates`), the empty-list line, the editor, the provider blocks (`_RebuildPresetProviders`: a Base URL box that shows a provider's `baseUrlExample` while nothing resolves, and a tip with the RunPod URL shapes); and the Agent Manager's "Add presets…" opener + dialog (`_AddPresetsOpener`, `_ShowAddPresetsHelp`). |
 | `AgentLaunchBar.cpp` (+ `.h`) | The Launch button's hover menu (it offers "Add presets…" through the host's `addPresets` while the list is empty) and `_OnLaunch(target)` — moved here from `AgentManagerContent.Launch.cpp` on 2026-10-06 (the shared launch bar the Agent Manager page and the side panel's `+` launcher both run; SIDE_PANEL.md §2e). |
 | `AgentManagerContent.Tree.cpp`, `TerminalPage.AgentSessionsPage.cpp`, `TerminalPage.cpp` | The menu sites switched from `ParseLaunchModels` to `LaunchMenuEntries`, and pass the host's `_AddPresetsOpener()`; `Tab.cpp`'s two model submenus take it from the page at flyout-open (its presence is part of their rebuild key). |
-| `AgentMaster/tests/tests_presets.cpp` | `TestLaunchPresets`: the empty initial list + `ShouldOfferAddPresets` (a list of hidden presets offers nothing) + the dialog text, the template order and tested flags, the one-click adds (linked, visible, `p-` ids, "Add all tested" skips what is in the list), the 0.6.8.18 cleanup (exactly the untouched auto-added presets; never on a file this build wrote), the JSON, the tiers, the snapshot, the compile vs the reference block, every OpenRouter template vs its launcher profile (ordered JSON body, models, limits, effort), effort (`none`, the extra-env override), `top_k` / `require_parameters`, the refusals, the reserved names / forbidden flags, the mask, the menus, the /handover hint's preset rule, and the launch settings file on disk (valid JSON, no key, reuse, the rewrite of a broken file, no temp left). |
+| `AgentMaster/tests/tests_presets.cpp` | `TestLaunchPresets`: the empty initial list + `ShouldOfferAddPresets` (a list of hidden presets offers nothing) + the dialog text, the template order and tested flags, the provider table, NanoGPT (direct host, `NANOGPT_API_KEY`, no routing block, both templates on the normal models with the catalog's values, the suffix-aware display name), RunPod (no default URL and the refusal's URL shapes, `RUNPOD_API_KEY`, the Windows variable and a typed Pod URL, the one-model refusal), the one-click adds (linked, visible, `p-` ids, "Add all tested" skips what is in the list), the 0.6.8.18 cleanup (exactly the untouched auto-added presets; never on a file this build wrote), the JSON, the tiers, the snapshot, the compile vs the reference block, every OpenRouter template vs its launcher profile (ordered JSON body, models, limits, effort), effort (`none`, the extra-env override), `top_k` / `require_parameters`, the refusals, the reserved names / forbidden flags, the mask, the menus, the /handover hint's preset rule, and the launch settings file on disk (valid JSON, no key, reuse, the rewrite of a broken file, no temp left). |
 | `AgentMaster/tests/tests_spawn_sched.cpp` | The pwsh host script's token scoping (carrier → `ANTHROPIC_AUTH_TOKEN` → removed in `finally`) and the refusal of an unsafe carrier name. |
