@@ -1024,6 +1024,21 @@ mode check:
 - `OnObserved` keeps its own test through the shared `Scheduler::_wantsIdleStart`, so it requests no
   advance that `DecideAdvance` would refuse at once.
 
+**The manual half — Send now.** Send now does not pass through `DecideAdvance`. The hosting window's
+submitter (`TerminalPage::_SubmitPromptWithDraftSwapImpl`) treated a control whose connection is not
+started as "no box to protect" and sent plainly: the write was dropped, `[delivered]` was logged for
+bytes that went nowhere, and the lost-send verdict failed the prompt. The same branch also caught an
+automatic send whose tab was parked between the decision and the delivery (the 500 ms throttle, a
+queued dispatcher hop).
+- Now the submitter types nothing into a hosted control that is `NotConnected`. It puts the prompt back
+  to `Pending` (`RollbackPromptToPending`) and logs
+  `[send-verify] <sid8> prompt <id8> NOT sent: the tab is dormant (its claude is not started) - back to Pending; it goes out after the tab is entered or activated`.
+- The prompt is not lost. In the Auto mode the runner sends it after the tab starts and settles. In the
+  Paused mode it waits in the queue.
+- No `external` carve-out is necessary there: an adopted session's control is the user's own shell,
+  which runs, so it is never `NotConnected`.
+- A control that is gone (`!control`) keeps the plain send, as before.
+
 ### 17.3 The GLOBAL PAUSE — one state for the process, and a resume that restarts the held queues
 
 **Two defects.**
@@ -1110,4 +1125,6 @@ engine through it, and it is the place where a kill switch would go.
   - a Pause in one window relabels the button in every window, and `autorunner.log` has the
     `[pause-all]` pair;
   - a queued prompt on a Deactivated tab stays `Pending`, with one
-    `[advance-skip] … (tab dormant …)` line, and is sent after the tab is entered.
+    `[advance-skip] … (tab dormant …)` line, and is sent after the tab is entered;
+  - Send now on a Deactivated tab types nothing: the row returns to the upcoming list, and hooks.log
+    has the `[send-verify] … NOT sent: the tab is dormant …` line.

@@ -6091,10 +6091,32 @@ namespace winrt::TerminalApp::implementation
         const auto info = _sessionRegistry->Get(id);
         const auto control = _ControlForSession(id);
         const bool verifyOn = _appSettings.verifySendBeforeSubmit;
-        if (!info || !control ||
+        // Agentmaster (the DORMANT-TAB gate, the manual half — DELIVERY.md §17.2): this window hosts the
+        // tab, but its connection is NOT STARTED — a window-restored background tab that nobody entered,
+        // or a Deactivated ("parked") tab. Its claude does not run, and a write into that connection is
+        // dropped without an error. The plain send below would therefore log [delivered] for bytes that
+        // went nowhere, leave the prompt Sent, and let the lost-send verdict mark it Failed 15 s later
+        // and pause the session's runner. DecideAdvance keeps every AUTOMATIC send away from such a tab;
+        // this is the send that does not pass through it: the Manager's Send now.
+        // So type nothing and put the prompt back to Pending. It is not lost: in the Auto mode the
+        // runner sends it by itself after the tab is entered or activated (and has settled); in the
+        // Paused mode it waits in the queue. NotConnected says exactly "the ConPTY child is not
+        // launched", whoever owns the tab: an adopted session's control is the user's own running
+        // shell, never NotConnected, so no `external` carve-out is needed here.
+        // (A control that is GONE — `!control` — keeps the historical injection below: there the
+        // injector may still reach a live connection.)
+        if (info && control &&
             control.ConnectionState() == TerminalConnection::ConnectionState::NotConnected)
         {
-            // Session gone, or no readable buffer (dormant / not hosted here) — there is no box to
+            _sessionRegistry->RollbackPromptToPending(id, submission.promptId, submission.refundAutoSend);
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[send-verify] " + sid8 + L" prompt " + ::Agentmaster::ShortId(submission.promptId) +
+                                              L" NOT sent: the tab is dormant (its claude is not started) - back to Pending; it goes out after the tab is entered or activated\n");
+            co_return; // the gateCloser releases the delivery gate; nothing was typed
+        }
+        if (!info || !control)
+        {
+            // Session gone, or its control is gone (not hosted here any more) — there is no box to
             // protect OR to verify against, so this is the historical injection verbatim.
             if (!plainSend())
             {
