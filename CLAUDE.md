@@ -792,7 +792,7 @@
 - small touches in `TerminalPage.{h,cpp}` (~20 integration seams left in the `.cpp`: `_OnFirstLayout` startup, `_MakePane`'s `agentManager` branch, close/quit record-flush + teardown-archive, tab-move detach, title/color sync hooks, `_restartPaneConnection` injector re-point), `Tab.{h,cpp}` (a `TabColorChanged` event + `GetRuntimeTabColor`), `TabManagement.cpp` (incl. the generic `_DismissAgentPageOverlays` tab-switch seam), `TabHeaderControl.xaml` + `TerminalTabStatus.{h,idl}` (the tab-strip status dot: an `AgentStatusVisible`/ `AgentStatusBrush`-bound Ellipse in the indicator row, plus the **FAVORITE marker** `Path`s — the `AgentFavoriteVisible`-bound gold **crown** at the dot's NW *or* the `AgentFavoriteStarVisible`-bound white, golden-tipped **star** behind the dot, mutually exclusive, chosen by the cog's `AppSettings::favoriteIcon` — FAVORITES.md §5a; **and the bookmark-TAG badges** — an always-open parented `HeaderTagBookmarksPopup` (the below-tab 30/70 overhang) whose ribbons are (re)built by `_UpdateTagBadges` from `TerminalTabStatus::AgentTagsSpec` and placed by the coalescing `_PositionTagBadges` → `_PositionTagBadgesNow` scheduler; hover raises `TagBadgeHoverBegin/End`); registrations in `TerminalAppLib.vcxproj`.
 - `src/cascadia/wt/shim.cpp` + `wt.vcxproj` (the `agentmaster <verb>` overload, CLI.md §2): the alias-target launcher shim is now **console-subsystem + dual-mode** (`SubSystem=Console`) — it execs `agentmaster-cli.exe` for a CLI verb / leading CLI-flag and forwards everything else to `Agentmaster.exe` byte-for-byte; the `agentmaster-cli.vcxproj` reference + the `wt`-mirrored entry in `OpenConsole.slnx` + `CascadiaPackage.wapproj` ship the CLI in the package.
 - `src/cascadia/WindowsTerminalShim/` (`shim.cpp` + `WindowsTerminalShim.rc` + `resource.h` + `WindowsTerminalShim.vcxproj`, GUID `{34770444-…}`) — the **`WindowsTerminal.exe` BACKWARDS-COMPAT shim**. The GUI binary is now `Agentmaster.exe`; this tiny **GUI-subsystem** forwarder (project `WindowsTerminalShim`, **`TargetName=WindowsTerminal`** so the output leaf is the old name) keeps a by-name launch of `WindowsTerminal.exe` working — it `CreateProcessW`s the neighbor `Agentmaster.exe` with the **verbatim commandline tail** and exits, so old shortcuts / scripts / muscle-memory land in the ONE real app. Deliberately a shim, **not a copy of the binary**: WindowEmperor derives its single-instance identity from the process IMAGE path (unpackaged), so a second exe named `WindowsTerminal.exe` would hash to a DIFFERENT identity and spin up a SECOND instance on the same profile (the profile mutex would warn) — forwarding keeps exactly one identity, the real one. Its `.rc` embeds the SAME branding-conditional terminal icon block as `WindowsTerminal.rc` (`WT_BRANDING_DEV` ⇒ `images-Dev\terminal.ico`), verified byte-identical to `Agentmaster.exe`'s icon, so it LOOKS identical too. NOT referenced by either manifest (defterm/COM + AUMID activation target `Agentmaster.exe` directly — only a raw by-name launch hits the shim); it flattens into the package root as `WindowsTerminal.exe` and rides the portable zip automatically (the wapproj flatten + `New-UnpackagedTerminalDistribution.ps1`'s keep-list). Wired via the `wt`-mirrored `OpenConsole.slnx` entry + a `CascadiaPackage.wapproj` `ProjectReference`.
-- `Package-Rel.appxmanifest` + `Package-Dev.appxmanifest` (the two identities; selection in `CascadiaPackage.wapproj` via `AgentmasterPackageIdentity`; each also declares its OWN **toast-activator CLSID** — `<desktop:ToastNotificationActivation>` + a `<com:Class>` under an `Agentmaster.exe` ExeServer with `Arguments="-ToastActivated"` — see `AgentToastActivator.h` / NOTIFICATIONS.md §4a; a change here needs a **re-register**), a comctl32-v6 dependency in `WindowsTerminal.manifest` (the profile picker's TaskDialog), the `AGENTMASTER_PROFILE` redirect in `TerminalSettingsModel/FileUtils.cpp` (Terminal's own settings → `<profile>\terminal\`), the profile bootstrap call in `WindowEmperor.cpp`, `doc/agentmaster/`, `tools/Build-Agentmaster.ps1` (incl. `-ReleaseIdentity`), `tools/am-lock.sh` (the global build/launch mutex — see Deploy & run → *Concurrency lock*), `tools/warpbench.cpp` + `tools/_build_warpbench.bat` (the GPU-vs-WARP terminal frame + RAM benchmark behind RENDERING.md; standalone).
+- `Package-Rel.appxmanifest` + `Package-Dev.appxmanifest` (the two identities; selection in `CascadiaPackage.wapproj` via `AgentmasterPackageIdentity`; each also declares its OWN **toast-activator CLSID** — `<desktop:ToastNotificationActivation>` + a `<com:Class>` under an `Agentmaster.exe` ExeServer with `Arguments="-ToastActivated"` — see `AgentToastActivator.h` / NOTIFICATIONS.md §4a; a change here needs a **re-register**), a comctl32-v6 dependency in `WindowsTerminal.manifest` (the profile picker's TaskDialog), the `AGENTMASTER_PROFILE` redirect in `TerminalSettingsModel/FileUtils.cpp` (Terminal's own settings → `<profile>\terminal\`), the profile bootstrap call in `WindowEmperor.cpp`, `doc/agentmaster/`, `tools/Build-Agentmaster.ps1` (incl. `-ReleaseIdentity` and `-LayoutDir`), `tools/Swap-AgentmasterLayout.ps1` (the hot-deploy swap of either installed identity — see Deploy & run → *The swap script*), `tools/am-lock.sh` (the global build/launch mutex — see Deploy & run → *Concurrency lock*), `tools/warpbench.cpp` + `tools/_build_warpbench.bat` (the GPU-vs-WARP terminal frame + RAM benchmark behind RENDERING.md; standalone).
 - `.github/workflows/ci.yml` + `.github/workflows/release.yml` — the GitHub Actions build gate + public-release pipeline (see *Releasing a public version*). The **only** CI in the repo; Windows Terminal's upstream Azure-Pipelines / OneBranch under `build/pipelines/` is Microsoft-internal and never runs for this fork.
 
 ### Runtime state dir = the ACTIVE PROFILE
@@ -991,7 +991,7 @@ bash tools/am-lock.sh release --token "$TOKEN"
 - A running instance locks only its own layout (loaded images + the mapped `resources.pri`), never the intermediate `bin\x64\<Config>\<Project>\` / `obj\` trees. Building the package layout into the slot it is NOT registered from (`tools\Build-Agentmaster.ps1 … -LayoutDir <slot>` → `/p:AgentmasterLayoutDir`, which `CascadiaPackage.wapproj` turns into DesktopBridge's `OutputPath` before its props import) therefore needs no close.
 - The icon files follow the slot too: `CopyAgentmasterImagesToLayout` copies `res\terminal\images-Dev` into `$(TargetDir)Images\`. Until 2026-10-02 it hard-coded `bin\x64\<Config>\`, so slot B never had them. A layout without its `Images\` registers and runs, but its taskbar and Start icons are blank; production ran that way from slot B, and its taskbar button showed only the unread-count disc. The swap now refuses a layout that is missing an icon file its manifest names.
 - The only downtime is the swap, `tools\Swap-AgentmasterLayout.ps1 -LayoutDir <slot>`: it stamps the registered version +1 revision, stops the GUI only (never `OpenConsole.exe`), waits for the ConPTY hosts to drain, re-registers, launches, and reports the measured downtime. The register cannot succeed while any process of the old package lives (`0x80073D02`), and a workspace with many live tabs drains slowly (72 hosts took ~87 s on 2026-10-01), so the script drains for up to 120 s, then retries the register while the old package still reads in use. Only after that does it relaunch the old version. Rolling back is the same script pointed at the previous slot.
-- Still hold the `build-launch` mutex across build + swap, and refresh it while a long build runs. Full runbook: the `build-install` skill §4a.
+- Still hold the `build-launch` mutex across build + swap, and refresh it while a long build runs. Full runbook: the `build-install` skill §4a. Every switch, refusal and output of the swap script: *The swap script* below.
 
 ### Hot deploy of the DEV instance (build while it runs)
 
@@ -1000,6 +1000,85 @@ bash tools/am-lock.sh release --token "$TOKEN"
 - Run the swap from a shell OUTSIDE dev (it refuses otherwise): the release instance, Windows Terminal or a plain console.
 - First run (2026-10-05, dev 0.0.1.1 @ `Debug` → 0.0.1.2 @ `Debug-B`, 42 tabs, 16 live claudes, all at rest): a purged build ran for 295 s (`-MaxCpu 4 -ClMpCount 6`) while dev kept serving. The swap's downtime was **8.2 s**: the 16 ConPTY hosts drained by themselves in 5.8 s, and the register took 2.1 s at the first attempt. The window restore then re-homed all 42 tabs.
 - After a swap, dev runs from the other slot. The next deploy targets the old slot (hot), or uses the inner loop above, which follows `$devDir`.
+
+### The swap script — `tools\Swap-AgentmasterLayout.ps1`
+
+- **What it does:** it moves an installed loose registration (`Agentmaster` or `AgentmasterDev`) to a freshly built layout folder, with seconds of downtime. It is the swap half of a hot deploy. The build half is `tools\Build-Agentmaster.ps1 -LayoutDir <slot>`.
+- **What it does not do:** it builds nothing, and it takes no lock. Hold the `build-launch` mutex around the build AND the swap yourself.
+- **Run it with PowerShell 7** (`pwsh`; the script has `#Requires -Version 7`), from a shell OUTSIDE the instance that it swaps.
+- **The reference** is the script's comment-based help. `Get-Help` does not show that help (cause not found), so read the script header.
+
+#### The six steps
+
+Nothing stops before step 3, so a refusal in step 1 costs nothing.
+
+1. **Validate.** The script refuses (it throws; exit code 1 when run as a script) when:
+   - `-LayoutDir` has no `AppxManifest.xml`, or the manifest does not parse.
+   - The manifest's Identity Name is not `-PackageName`. So a dev layout never replaces the release family, and the reverse.
+   - An image that the manifest names (`Images\X.png`) is missing, both as that file and as every MakePri variant (`X.*.png`). Such a layout registers, but its taskbar and Start icons are blank.
+   - `-LayoutDir` is the folder that the package already runs from.
+   - The version is not newer than the registered one, or the revision would pass 65535.
+   - The calling shell descends from a GUI process that the swap stops (the self-hosting guard). The stop would kill the script after step 3 and leave the package stopped and unregistered. The guard runs under `-WhatIf` too.
+2. **Stamp.** It writes the new version into the layout's manifest. A build always writes `0.0.1.0`, and development-mode re-registration accepts only a newer version.
+3. **Stop.** It stops only the GUI processes under the old folder. It reads their image names from the OLD layout's manifest (fallback: `Agentmaster.exe`, `WindowsTerminal.exe`). It never stops `OpenConsole.exe`.
+4. **Drain.** It waits for the old folder's ConPTY hosts to exit by themselves. Each host first ends its tab's shell and claude with `CTRL_CLOSE`. The register cannot succeed while one of these hosts lives.
+5. **Register.** `Add-AppxPackage -Register <manifest> -ForceUpdateFromAnyVersion` moves the InstallLocation to the new folder. On `0x80073D02` (the old package is still in use) it tries again every 3 s.
+6. **Launch.** It starts `shell:appsFolder\<PFN>!<AppId>` and waits for the new GUI process under the new folder.
+
+#### Parameters
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `-LayoutDir <folder>` | (required) | The built layout folder to switch to. A relative path resolves against the PowerShell location. |
+| `-PackageName` | `Agentmaster` | `Agentmaster` (release) or `AgentmasterDev` (dev). It must be the layout manifest's Identity Name. |
+| `-Version <a.b.c.d>` | the registered version, revision + 1 | The version to stamp and register. It must be newer than the registered version. Keep `Major.Minor.Build`: the in-app updater compares those three parts with the GitHub releases. |
+| `-DrainTimeoutSec` | 120 (0–600) | How long to wait for the old hosts. The hosts are never killed: a killed host skips its `CTRL_CLOSE`, and its tab's pwsh + claude stay alive on a dead console (OBSERVER.md §13a). When the time runs out, the register's retries cover the remaining hosts. |
+| `-RegisterRetrySec` | 120 (0–600) | How long to retry the register on `0x80073D02`, counted from the first attempt. `0` disables the retry. Any other register error rolls back at once. |
+| `-LaunchTimeoutSec` | 60 (1–600) | How long to wait for the new GUI process. This affects only the report: the app starts either way. |
+| `-NoLaunch` | off | Register, but do not start the app. The downtime lasts until someone starts it. |
+| `-WhatIf` | off | Dry run: resolve, validate (the icons and the self-hosting guard included) and print the plan. It stamps, stops and registers nothing. |
+
+#### Output, failure and undo
+
+- **Progress:** one `[HH:mm:ss.fff]` line per step: `package`, `target`, `running`, `stopped`, `drained`, `register attempt N … retrying`, `registered`, `launched pid N - downtime Xs`. On a failure: `REGISTER FAILED: …` and `rollback: relaunching …`.
+- **Result object** (printed last): `Package`, `OldVersion`, `OldLocation`, `NewVersion`, `NewLocation`, `StoppedPids`, `DrainSeconds`, `HostsLeft` (old hosts still alive when the drain ended), `RegisterSeconds` (the retries included), `RegisterAttempts`, `NewPid` (0 = not started, or not seen within `-LaunchTimeoutSec`), `DowntimeSeconds` (from the GUI stop to the new GUI's kernel start time; empty when unknown).
+- **Rollback:** the script never changes the old folder. When the register fails with another error, or still reads "in use" after `-RegisterRetrySec`, the script starts the still-registered OLD version (unless `-NoLaunch`), then throws. So a failed swap costs one restart, not an outage.
+- **Undo** a successful swap: run the script again with `-LayoutDir` set to the previous slot. That folder gets the next version number, like any swap.
+
+#### What a swap ends, and who can run it
+
+- **The stop ends every claude of that instance:** each host sends `CTRL_CLOSE` to its tab. The window restore then re-homes the tabs, and each Claude tab resumes its conversation (dormant until focused). A turn in flight is cut off. Before a swap, make sure that the sessions are at rest: `agentmaster sessions` (production) or `agentmaster sessions --instance dev`.
+- **Walk your shell's ancestry before a swap.** A session that runs inside production cannot run the release swap, and a session inside dev cannot run the dev swap: the self-hosting guard refuses. Run the other instance's swap yourself, and give the user the command for the swap of your own host. The user runs it from Windows Terminal, from the other instance, or from a plain console.
+
+#### Traps
+
+- **Never register a fresh build by hand.** Its manifest says `0.0.1.0`. Swap it.
+- **`-WhatIf` noise:** it prints a `What if: Performing the operation "Set Alias"` line for each alias. Filter these lines out.
+- **The new instance can stop on the "Reopen your N previous Agentmaster windows?" dialog.** The measured downtime ends when the new GUI starts, not when someone answers. Someone must click it.
+- **After a swap, the instance runs from the OTHER slot.** The next build targets the slot that it left.
+
+#### Measured runs
+
+| Date | Instance | Versions | Live hosts | Drain | Register | Downtime |
+|---|---|---|---|---|---|---|
+| 2026-09-26 | release | 0.6.8.11 → 0.6.8.12 | not recorded (3 windows) | 11.7 s | 2.5 s | 14.5 s |
+| 2026-10-01 | release | 0.6.8.13 → 0.6.8.14 | 72 | ~87 s | refused, rolled back (the drain cap was 30 s then); the second swap took 1.5 s | ~2 min |
+| 2026-10-05 | dev | 0.0.1.1 → 0.0.1.2 | 16 | 5.8 s | 2.1 s | 8.2 s |
+| 2026-10-06 | dev | 0.0.1.2 → 0.0.1.3 (dev was already down) | 0 | 0.5 s | 1.2 s | 1.9 s |
+
+#### The build half, and both instances in one deploy
+
+- **`Build-Agentmaster.ps1 -LayoutDir <folder>`** writes ONLY the package layout to that folder (`/p:AgentmasterLayoutDir`). Every other project keeps its usual `bin\` and `obj\`. It registers nothing. The switches that matter for a swap build:
+  - `-NoRestore` (the packages exist already);
+  - `-Configuration Release -ReleaseIdentity` for production. Without `-ReleaseIdentity` the layout is `AgentmasterDev`, and the swap refuses it for `Agentmaster`;
+  - `-MaxCpu N` / `-ClMpCount N` to cap the parallel work under memory pressure (`4` / `6` with ~80 live claudes);
+  - `-WithSymbolPackage` only when a Store symbol bundle is necessary (the `.appxsym` costs ~156 s, and it is off by default).
+- **To deploy both instances** ("build release and debug for swap"):
+  1. Walk your shell's ancestry, and acquire the mutex.
+  2. Read both InstallLocations. Each build targets the slot that its instance does NOT run from.
+  3. Apply the purge rule (the `build-install` skill §5.8) to each configuration. Its baseline is the time of `bin\x64\<Config>\TerminalApp\TerminalApp.dll`, the last build of that configuration.
+  4. Build Release (`-Configuration Release -ReleaseIdentity -LayoutDir <release slot>`), THEN Debug (`-LayoutDir <dev slot>`). Never run the two builds at the same time: both write the same `src\cascadia\TerminalApp\Generated Files` folder (one flat folder for both configurations), and two builds double the memory load.
+  5. Swap each instance from a shell outside it (`-PackageName AgentmasterDev` for dev), then release the mutex.
 
 ## Releasing a public version
 
