@@ -215,9 +215,12 @@ by a precedence ladder (highest first) — **so in normal use you never pass a f
    even from a release-hosted shell.)
 3. **Inherited `AGENTMASTER_PROFILE` env (UNPACKAGED)** — an unpackaged build run *inside* an
    Agentmaster tab inherits the app's exported profile, so it auto-targets that instance.
-4. **Compile-time brand (UNPACKAGED)** — `-DAGENTMASTER_DEV` so the unpackaged dev CLI defaults to
-   `~/.agentmaster-dev` when run outside any app (release omits it → `~/.agentmaster`). The literal
-   "the binary targets its build type" knob. (Verified: `env -u AGENTMASTER_PROFILE` → dev.)
+4. **Compile-time brand (UNPACKAGED)** — `-DAGENTMASTER_DEV`: an unpackaged CLI that inherits no
+   `AGENTMASTER_PROFILE` defaults to `~/.agentmaster-dev`. (Verified: `env -u AGENTMASTER_PROFILE`
+   → dev.) ⚠ The brand was meant for the dev build only ("the binary targets its build type"), but
+   `agentmaster-cli.vcxproj` defines it for EVERY configuration and no build file turns it off, so
+   the RELEASE binary carries it too. That only matters without package identity, which is how a
+   portable copy runs: see §11.
 5. **Per-identity default** (`ResolveProfileDir` fallback — `~/.agentmaster`).
 
 All resolution is **headless-safe** (never shows UI). So: shipped → automatic by the **alias's
@@ -253,6 +256,10 @@ token), so `agentmaster --instance dev show …` dispatches too. Anything else (
   **Live on both aliases**, each auto-targeting its own profile by package identity — verified
   2026-10-01: `agentmaster --json --version` (the release install, 0.6.8.13, from its Release layout)
   and `agentmasterdev --json --version` (the dev install) both answer `agentmaster-cli schema 2`.
+  ⚠ That check proves less than it seems: `--version` and `--help` return before the CLI reads any
+  file. On 2026-10-09 the DEV alias failed on every real verb, because the Debug build of the CLI
+  ends with `0xC0000409` while the process exits (§11; first seen 2026-10-06). The release alias
+  passes every verb.
   (History: it first went live on the dev alias through an in-place binary swap, before any full
   build had run.) The JSON envelope is `schemaVersion` **2** since the Auto Testing rename
   (2026-06-30: `autopilot` → `autorunner`, `autopilotDetail` → `autorunnerDetail`, `flightPlan` →
@@ -310,12 +317,118 @@ list when `agentcli.cpp` changes, and drop a gap once it is fixed.
 - **A title ref is a plain substring over every session, closed ones included** (`show cli` also
   matches "bad click"), and an exact title that several sessions share stays ambiguous (exit 1).
 - **Designed in §5 but not emitted:** the pending question's text (`pendingInteractiveTool` is
-  only the tool's name), the last turn's tool calls (`lastTurnTools`, collected and never
-  written), and hook provenance (`hookWired`). The conversation tail counts text blocks, not
-  turns.
+  only the tool's name), the last turn's tool calls (`lastTurnTools` is never written, and it
+  only ever holds interactive tool names, because `ParseTranscriptDelta` reports no other tool),
+  and hook provenance (`hookWired`). The conversation tail counts text blocks, not turns.
 - **Codex is mostly invisible** (read from the code; no Codex tab was open to test). A managed
   Codex tab reads `kind: "shell"` with no id, and `external` lists claudes only.
 - **Not in the CLI at all:** unsent drafts, tags, favorites, API errors (an errored session reads
   Idle or WaitingForInput), and a background shell job (heartbeat `shell` → Idle).
 - **`--help` / `--version` as the first token go to the GUI** (§5): the running app shows a
   message box. Put a verb or a CLI-only flag first.
+
+### Found 2026-10-09 (release 0.6.8.18, dev 0.0.1.4, schema 2)
+
+A study of the whole CLI (design, source, launcher, build files, the skill) with read-only runs
+on both installs. Each item says how it is known: **measured** (run on the live installs), or
+**read** (from the code, and not run, because a run would act on the user's running app).
+
+- **The dev alias fails on every real verb. The cause is the Debug build of the CLI.** (measured)
+  - **What you see:** `agentmasterdev sessions`, `windows`, `tabs`, `external`, `list` and `show`
+    exit with `0xC0000409` (Git Bash prints exit 127). When stdout is a pipe or a file, the
+    output is cut at the last full stdio buffer, or it is empty. `--version` and `--help` work.
+    The same binary fails when it is run by path, with either profile. Both Debug builds on disk
+    fail (2026-10-06 and 2026-10-09). The Release binary reads the same dev profile correctly.
+  - **Where it ends:** after `wmain` returns, inside `exit()`. The C++ library destroys its
+    lazily created locale facets there (`std::_Fac_tidy_reg_t::~_Fac_tidy_reg_t` →
+    `std::_Fac_node::~_Fac_node`: `delete _Facptr->_Decref()`), and one of them is a
+    `std::codecvt<char,char,_Mbstatet>`. That facet exists because `ReadAllUtf8`
+    (`Persistence.cpp`) reads files through `std::ifstream`, so every verb that loads state
+    creates it. `--version` and `--help` return before any file is read.
+  - **Why it ends:** Control Flow Guard refuses the call (`__fastfail` subcode 10,
+    `FAST_FAIL_GUARD_ICALL_CHECK_FAILURE`). The facet and its vtable are intact. In the
+    2026-10-09 build, slot 0 of the vtable holds the incremental-link jump thunk at RVA `0xFED0`,
+    which jumps to the facet's scalar deleting destructor (RVA `0x17D410`). The image's Guard CF
+    function table (658 entries, `dumpbin /loadconfig`) does not list that thunk. It lists a
+    second thunk to the same function (RVA `0x16AD0`, `??_E?$codecvt@DDU_Mbstatet@@…`, the
+    vector deleting destructor), which the vtable does not use. For `codecvt<wchar_t,char>` and
+    `codecvt<unsigned short,char>` the table lists two rows each. The Debug link runs with
+    `/INCREMENTAL /guard:cf`; the Release link has no thunks, and its table lists the function
+    itself.
+  - **Not known:** why the linker lists only one of the two thunks; whether a clean,
+    non-incremental Debug link has the same fault; when it began; and whether another Debug
+    binary that deletes this facet has it. Windows logs no Application Error event for these
+    runs, and the reason was not established. With a real console the whole output probably
+    shows before the process ends, because the CRT does not hold back a console stream (not
+    tested).
+  - **How it was found:** `procdump -e -ma -x <dir> <exe> windows`, then the debug-dumps skill's
+    `dumpexc`, `dumpourscan`, `dumpmem` and `diasym`.
+  - **Until it is fixed:** `agentmaster <verb> --instance dev` (the release CLI on the dev
+    profile). The skill's `am_inspect.py --dev` fails for the same reason (`tabs --json exited
+    3221226505`); run it as `AGENTMASTER_PROFILE=<dev profile> am_inspect.py --cli <a release
+    agentmaster-cli.exe>`.
+- **A release CLI without package identity reads the DEV profile.** (measured)
+  `agentmaster-cli.vcxproj` defines `AGENTMASTER_DEV` for every configuration (§7, step 4). So an
+  unpackaged release binary that inherits no `AGENTMASTER_PROFILE` sets that variable to
+  `~/.agentmaster-dev` itself, and the profile resolver reads the variable before a portable
+  copy's `profile.path` and `<exedir>\profile`. Measured with the 0.6.8.18 binary: run by path
+  with the variable removed, it answers from `~/.agentmaster-dev`; in a folder with a `.portable`
+  marker and a `profile.path`, it still answers from `~/.agentmaster-dev`, and it answers from
+  the pointed profile only when the variable is inherited. So in a portable copy, or in a
+  portable install (its folder is on the user PATH, PROFILES.md §2b), `agentmaster-cli.exe` from
+  a shell outside the app reads the wrong profile, and creates `~/.agentmaster-dev` when it is
+  missing. The packaged aliases are not affected. Workaround: `--instance release`, or
+  `--profile <dir>` after the verb.
+- **The CLI creates the profile folder that it resolves.** (measured) `ResolveProfileDir` and
+  `AgentmasterStateDir` create the folder when it is missing. `agentmaster sessions --profile
+  <a folder that does not exist>` exits 0 with an empty list and leaves that folder behind. It
+  is the one thing the CLI writes.
+- **Only a verb or one of seven flags may come first.** (read) The launcher sends a command line
+  to the CLI when its first token is a verb or one of `--json --self --offline --tail --instance
+  --state --dir`. Every other first token goes to the running app, and its Windows Terminal
+  parser treats an unknown word as the command line of a NEW TAB. So `--profile <dir>` first (a
+  new-tab option there), `--window <w>` first (the parser's window target), `--archived` first,
+  a mistyped verb and a verb in capitals (the match is exact) all act on the user's running app
+  and print nothing. Put the verb first, always.
+- **`show` reads only the last 512 KiB for the conversation.** (measured) `conversation`,
+  `lastUserPrompt` and `lastAssistantReply` come from the text blocks inside that window. A long
+  turn made of tool calls leaves none there: the studying session's own `show --self` had 0
+  blocks and no `lastUserPrompt`, with its only prompt 2.75 MB before the end of the transcript.
+  The `autoTesting` rows with origin `Typed` are the prompts that the registry recorded, and
+  they do not depend on the window.
+- **A message typed while claude worked is not in `show`.** (measured, session `f62a102b`)
+  Claude Code stores it as a `queued_command` attachment, which `ParseTranscriptDelta` does not
+  read. It is missing from `conversation` and `lastUserPrompt`, and `activity.userPrompts` does
+  not count it (2, against 3 `Typed` rows).
+- **`managed` is always `true`.** (measured) `show` on a live claude that the profile does not
+  manage prints `managed: true` next to `external: true` and `linkState: "external"`. Read
+  `external` and `linkState`.
+- **Ids match by exact case.** (measured) An id prefix in capitals matches nothing (exit 1). A
+  FULL id in capitals of a live session misses the saved record and takes the live-claude path,
+  so a managed session comes back as the synthesized view: `external: true`, autorunner `Off`,
+  an empty queue.
+- **`host` is relative to the shell that asks.** (measured) `agentmaster-self` means "launched by
+  the Agentmaster that hosts the calling shell" (the shell's own `AM_SESSION`), not "by the
+  install whose profile is queried". From a release tab, `external --instance dev` labels the
+  release sessions `agentmaster-self`. From a shell outside Agentmaster, every stamped claude
+  reads `agentmaster-other`.
+- **Filter values are not checked.** (measured) `--instance <anything but dev>` means release.
+  `--state <unknown>` gives an empty list with exit 0. `--tail 0`, a negative number or a
+  non-number gives every text block in the window.
+- **The whole-fleet verbs grow with the profile.** (measured, 1,592 saved sessions)
+  `sessions --archived --json` took 69 s, `sessions --archived` 28 s and `list --json` 20 s.
+  Every other verb took about 0.4 s, `list` without `--json` included (it prints open sessions
+  only). Each saved session costs a search of every Claude project folder for its transcript
+  (`ResolveClaudeTranscriptPath`) and a 128 KiB tail read. One `sessions --json` call took 38 s
+  instead of 0.5 s and three repeats did not; the cause is unknown. The CLI has no timeout.
+- **Old names in the human view.** `show` heads the queue `FLIGHT PLAN` (measured; the feature is
+  Auto Testing, and the JSON key is `autoTesting`) and the tail `CONVERSATION (last N turns)`
+  (read; N counts text blocks).
+- **Two comments in the source are wrong.** (read) The precedence comment above the profile
+  block in `agentcli.cpp` `wmain` puts the inherited variable before the package identity; the
+  code under it, and §7, do the reverse for a packaged build. The comment in
+  `agentmaster-cli.vcxproj` says that the release package build turns the dev brand off; no
+  build file does.
+- **No test covers `agentcli.cpp`.** (read) The m5 harness covers the engine units that it
+  links. Its own code (argument parsing, ref resolution, `DeriveState`, the JSON builders) has
+  no test.
