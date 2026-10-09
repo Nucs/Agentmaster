@@ -1047,7 +1047,7 @@ Nothing stops before step 3, so a refusal in step 1 costs nothing.
 
 #### What a swap ends, and who can run it
 
-- **The stop ends every claude of that instance:** each host sends `CTRL_CLOSE` to its tab. The window restore then re-homes the tabs, and each Claude tab resumes its conversation (dormant until focused). A turn in flight is cut off. Before a swap, make sure that the sessions are at rest: `agentmaster sessions` (production) or `agentmaster sessions --instance dev`.
+- **The stop ends every claude of that instance:** each host sends `CTRL_CLOSE` to its tab. The window restore then re-homes the tabs, and each Claude tab resumes its conversation (dormant until focused). A turn in flight is cut off. Before a swap, make sure that no session is Running: `agentmaster sessions` (production) or `agentmaster sessions --instance dev`. Read the state (`derivedState` in `--json`), not `turnInFlight`: that flag reads only the transcript tail (`agentcli.cpp`: the last stop reason is not terminal and no interrupt follows), so it is true on some sessions whose own heartbeat reads idle (11 of the 66 at-rest sessions on 2026-10-09).
 - **Walk your shell's ancestry before a swap.** A session that runs inside production cannot run the release swap, and a session inside dev cannot run the dev swap: the self-hosting guard refuses. Run the other instance's swap yourself, and give the user the command for the swap of your own host. The user runs it from Windows Terminal, from the other instance, or from a plain console.
 
 #### Traps
