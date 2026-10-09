@@ -190,8 +190,6 @@ namespace Agentmaster
     {
         switch (m)
         {
-        case AutorunnerMode::SemiAuto:
-            return L"SemiAuto";
         case AutorunnerMode::Full:
             return L"Full";
         case AutorunnerMode::Off:
@@ -201,10 +199,11 @@ namespace Agentmaster
     }
     AutorunnerMode AutorunnerModeFromString(std::wstring_view s)
     {
-        if (s == L"SemiAuto")
-            return AutorunnerMode::SemiAuto;
         if (s == L"Full")
             return AutorunnerMode::Full;
+        // "Off", anything unknown — and "SemiAuto", the mode removed on 2026-10-09 (see AutorunnerMode).
+        // An older build's session record or cog default that asked for a confirm before each send must
+        // not start sending by itself after an update, so it lands on Off (paused), never on Full.
         return AutorunnerMode::Off;
     }
 

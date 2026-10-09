@@ -1576,9 +1576,10 @@ void TestObserveClaude()
     //    driven like any launched session instead of silently defaulting Off ("queued prompts stuck
     //    Pending, never sent"). CREATION-only: an existing record's mode is never touched.
     {
-        // Un-wired (the harness / CLI / a plain release): both create paths still mint Off.
+        // Un-wired (the harness / the CLI — and, until 2026-10-09, a plain release, whose engine did
+        // not call SetDefaultAutorunnerMode): both create paths still mint Off.
         CHECK(reg.Get(L"obs-1") && reg.Get(L"obs-1")->autorunner.mode == AutorunnerMode::Off,
-              "default-mode: un-wired registry minted Off (release/harness behavior unchanged)");
+              "default-mode: un-wired registry minted Off (harness / CLI behavior unchanged)");
 
         reg.SetDefaultAutorunnerMode(AutorunnerMode::Full);
 

@@ -15,6 +15,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <functional> // GlobalPauseObserver
 #include <memory>
 #include <mutex>
 #include <string>
@@ -90,11 +91,9 @@ namespace Agentmaster
     // lands). Measured from the registry's OWN clock (never a wire ts — the kMinSendSpacingMs lesson).
     // TIMED: DecideAdvance returns the remaining time as AdvancePlan::retryAfterMs, so a held plan
     // re-decides on its own when the window ends (no other notify needed) and simply re-schedules if a
-    // change moved the anchor meanwhile. Applies to the automatic path only — Send-now and a SemiAuto
-    // Confirm click are the human's explicit sends and bypass DecideAdvance — but it DOES gate the
-    // SemiAuto ARMING, exactly like the send spacing (an armed suggestion races status just like an
-    // auto-send). The Scheduler's configured value (Scheduler::SetStateSettleMs) is what DecideAdvance
-    // is handed; this constant is its default.
+    // change moved the anchor meanwhile. Applies to the automatic path only — Send-now is the human's
+    // explicit send and bypasses DecideAdvance. The Scheduler's configured value
+    // (Scheduler::SetStateSettleMs) is what DecideAdvance is handed; this constant is its default.
     inline constexpr int64_t kStateSettleMs = 40000;
 
     // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): how much longer the settle hold keeps
@@ -161,15 +160,17 @@ namespace Agentmaster
     // indistinguishable from a success until a human diffed the transcript.
     inline constexpr int64_t kLostSendSettleMs = 15000;
 
+    // What DecideAdvance tells the scheduler to do for one session. (A fourth action, AwaitConfirm —
+    // "arm the next prompt for a one-click confirm" — went away with the SemiAuto mode on 2026-10-09:
+    // a session is now either paused or automatic, see AutorunnerMode.)
     enum class AdvanceAction
     {
         None, // nothing to do (see reason)
-        Send, // auto-send queue[promptIndex] (Full)
+        Send, // auto-send queue[promptIndex] (the Auto mode — AutorunnerMode::Full)
         Hold, // LEGACY — no longer produced. A pending question / "needs you" state now leaves the
               // prompt Pending (treated like a Running mid-turn: stay queued, wait for a status
               // change), NOT parked in a separate Held status. Kept only so _process can still
               // rehabilitate Held prompts persisted by older builds. See the question-guard below.
-        AwaitConfirm, // SemiAuto: arm queue[promptIndex] for one-click confirm
         PlanDone, // no Pending prompts remain
     };
 
@@ -178,27 +179,37 @@ namespace Agentmaster
         AdvanceAction action{ AdvanceAction::None };
         size_t promptIndex{ 0 };
         std::wstring reason;
-        // Non-zero ONLY when action==None is a TIMED hold (today: the minimum send spacing) — how
-        // long until the hold self-releases. The scheduler schedules a deferred re-advance for it:
-        // unlike every other None reason, a spacing hold has NO external re-trigger of its own (a
-        // quiet session may see no registry notify for minutes — OnObserved fires on changes only).
+        // Non-zero ONLY when action==None is a TIMED hold (the STATE SETTLE window or the minimum send
+        // spacing) — how long until the hold self-releases. The scheduler schedules a deferred
+        // re-advance for it: unlike every other None reason, a timed hold has NO external re-trigger of
+        // its own (a quiet session may see no registry notify for minutes — OnObserved fires on changes
+        // only).
         int64_t retryAfterMs{ 0 };
     };
 
-    // PURE decision (DESIGN §10 "the loop" + the three-states table). Inputs are explicit so
-    // tests pass deterministic values:
-    //   nowUnixMs            — current time
-    //   lastHumanInputUnixMs — when the human last typed into this session (0 if never)
-    //   globalPause          — the scheduler's global Pause-all backstop
+    // PURE decision (DESIGN §10 "the loop" + the three-states table): may the Tests Autorunner type the
+    // next queued prompt into this session RIGHT NOW? This is the ONE rule every advance trigger goes
+    // through — the Stop seam, an observed change (Scheduler::OnObserved) and a timed re-check — so a
+    // gate that lives only in a trigger is a hole (the dormant-tab send below was exactly that).
+    // Inputs are explicit so tests pass deterministic values:
+    //   s                    — the session snapshot the decision is made from (never mutated).
+    //   nowUnixMs            — current time (system-clock ms).
+    //   lastHumanInputUnixMs — when the human last typed into this session (0 if never; no code
+    //                          feeds it today, so the pause-on-human-input gate never fires).
+    //   globalPause          — the scheduler's global Pause-all backstop.
     //   stateSettleMs        — the STATE SETTLE window (kStateSettleMs by default — the Scheduler
-    //                          passes its configured value; <= 0 disables the hold)
-    // Encodes, in order: global pause; mode Off; not-ready (only Idle or WaitingForInput are
+    //                          passes its configured value; <= 0 disables the hold).
+    //   returns              — the plan: Send (with promptIndex), PlanDone, or None with the reason
+    //                          the queue did not move (a FIXED literal, so the [advance-skip]
+    //                          change-dedup can compare it); retryAfterMs is set for a timed hold.
+    //   throws               — std::bad_alloc only (the reason strings are literals).
+    // Encodes, in order: global pause; mode Off (the session is paused); the session is not open, or
+    // its tab is DORMANT (its claude never started); not-ready (only Idle or WaitingForInput are
     // ready — see below); pause-on-human-input; maxAutoSends; the delivery gate; the box state;
     // awaiting-injection-pickup guard; (no Pending => PlanDone); Manual-gate skip; question-guard
     // (None — the prompt stays queued and waits, exactly like a Running mid-turn); the STATE
     // SETTLE hold (kStateSettleMs — a TIMED hold, retryAfterMs set); minimum SEND SPACING
-    // (kMinSendSpacingMs — a TIMED hold, retryAfterMs set); SemiAuto => AwaitConfirm; Full => Send.
-    // Never throws in practice (the reason strings are literals; only an allocation failure could).
+    // (kMinSendSpacingMs — a TIMED hold, retryAfterMs set); otherwise Send.
     inline AdvancePlan DecideAdvance(const SessionInfo& s,
                                      int64_t nowUnixMs,
                                      int64_t lastHumanInputUnixMs,
@@ -218,6 +229,29 @@ namespace Agentmaster
             plan.reason = InterruptHoldActive(s.autorunner) ?
                               L"autorunner off (interrupt hold - resumes on your next message)" :
                               L"autorunner off";
+            return plan;
+        }
+        // Agentmaster (the DORMANT-TAB gate — DELIVERY.md §17): the session must be OPEN and its claude
+        // must have STARTED. A window-restored background tab and a Deactivated ("parked") tab are live
+        // and injector-bound, but their ConPTY child is not launched: a write into that connection is
+        // silently dropped, so a send there loses the prompt (it then reads `Sent`, the lost-send
+        // verdict fails it 15 s later and pauses the session's autorunner — recorded live on
+        // 2026-10-09, dev 11:04:58). Scheduler::OnObserved always had this test for its idle-start
+        // trigger, but a TIMED re-check scheduled before the park (a settle or spacing hold's
+        // deferred re-advance) reached this decision without it and sent about 40 s after the park.
+        // The rule therefore lives HERE, where no trigger can skip it. `started` is meaningless for
+        // an adopted (`external`) session — the app tracks no control state for it and its claude IS
+        // running — hence the carve-out (the same one DecideEnterRetry and OnObserved use).
+        // Nothing re-polls this hold: SessionRegistry::SetStarted notifies the moment the tab's
+        // control starts, and OnObserved then requests the advance again.
+        if (!s.live)
+        {
+            plan.reason = L"session closed (no open tab)";
+            return plan;
+        }
+        if (!s.started && !s.external)
+        {
+            plan.reason = L"tab dormant (its claude is not started - the queue resumes when the tab is entered or activated)";
             return plan;
         }
         // Ready for a prompt = turn-complete (a clean Stop -> WaitingForInput) OR sitting Idle
@@ -365,9 +399,9 @@ namespace Agentmaster
         // moves the anchor and the re-decide simply holds again — the hold postpones itself until the
         // status is stable. Sits AFTER the question-guard (a question-parked plan schedules no timed
         // re-checks) and BEFORE the send spacing (the spacing is the narrower, send-anchored belt; when
-        // both apply, this one answers first and the spacing re-checks at its expiry). Gates the
-        // SemiAuto arming too. The two anchors get distinct FIXED literals (the [advance-skip]
-        // change-dedup compares reasons exactly), so the log says which clock is holding the queue.
+        // both apply, this one answers first and the spacing re-checks at its expiry). The two
+        // anchors get distinct FIXED literals (the [advance-skip] change-dedup compares reasons
+        // exactly), so the log says which clock is holding the queue.
         if (const int64_t settleLeftMs = StateSettleRemainingMs(s, item, nowUnixMs, stateSettleMs); settleLeftMs > 0)
         {
             plan.reason = item.queuedAtUnixMs > s.stateChangedAtUnixMs ?
@@ -392,10 +426,8 @@ namespace Agentmaster
         // spacing it would just slow the legitimate retry). A negative gap (clock skew / a future
         // stamp) reads as expired, the pickup guard's idiom — never a permanent hold. Sits AFTER the
         // question-guard so a question-parked plan doesn't schedule pointless timed re-checks, and
-        // AFTER the Pending scan so a drained plan still answers PlanDone immediately; it gates the
-        // SemiAuto arming too (the armed suggestion races status exactly like an auto-send would).
-        // The human's explicit paths (Send-now, a SemiAuto Confirm click) bypass DecideAdvance
-        // entirely and are deliberately NOT spaced.
+        // AFTER the Pending scan so a drained plan still answers PlanDone immediately. The human's
+        // explicit path (Send-now) bypasses DecideAdvance entirely and is deliberately NOT spaced.
         int64_t lastSendMs = 0;
         for (const auto& q : s.queue)
         {
@@ -424,13 +456,8 @@ namespace Agentmaster
             }
         }
 
-        if (s.autorunner.mode == AutorunnerMode::SemiAuto)
-        {
-            plan.action = AdvanceAction::AwaitConfirm;
-            plan.reason = L"semi-auto: awaiting confirm";
-            return plan;
-        }
-
+        // Every gate passed and the mode is not Off, so it is the Auto mode (AutorunnerMode::Full — the
+        // only other mode since SemiAuto and its one-click confirm were removed): send.
         plan.action = AdvanceAction::Send;
         plan.reason = L"full: auto-send";
         return plan;
@@ -730,32 +757,108 @@ namespace Agentmaster
         return false;
     }
 
+    // Agentmaster (the GLOBAL PAUSE — DELIVERY.md §17): a listener for the process-wide "Pause Prompt
+    // Queue Runner" state (Scheduler::AddGlobalPauseObserver). Called with the NEW state each time it
+    // really changes, on the thread that called SetGlobalPause and outside the scheduler's lock — so a
+    // window's listener must hop to its own UI thread before it touches a control.
+    //   paused — true == every session's automatic send is held; false == resumed.
+    using GlobalPauseObserver = std::function<void(bool paused)>;
+
+    // The engine half of the PROMPT QUEUE RUNNER (its UI name since 2026-10-09; "Tests Autorunner"
+    // before, and still "autorunner" in every identifier, persisted key and log line) — ONE per process
+    // (Engine.cpp), shared by every window. It has two jobs that are deliberately separable:
+    //   1. the PICKUP WATCH — re-press a lone Enter for a just-sent prompt whose submit Enter the TUI
+    //      ate (DecideEnterRetry). It serves EVERY send path (the auto-send, the Manager's Send-now and
+    //      the /handover paste pump);
+    //   2. the AUTO-ADVANCE — type the next queued prompt when a session is ready (DecideAdvance).
+    //      SetAutoAdvanceEnabled(false) turns only this job off.
+    // Both jobs run in EVERY build since 2026-10-09. Until then the runner was a dev-or-debug feature
+    // and an ordinary release ran job 1 only (and, before DELIVERY.md §17, neither).
     class Scheduler
     {
     public:
+        // Bind the scheduler to the registry it drives. Starts nothing — call Start().
+        //   registry — the process-wide session registry; held for the scheduler's life (never null).
         explicit Scheduler(std::shared_ptr<SessionRegistry> registry);
+        // Stops and joins the worker thread (Stop). Never throws.
         ~Scheduler();
 
         Scheduler(const Scheduler&) = delete;
         Scheduler& operator=(const Scheduler&) = delete;
 
+        // Start the worker thread that runs the advances and the pickup watch. Idempotent (a second call
+        // is a no-op). Until it runs, a requested advance only queues and no Enter is ever re-pressed.
+        //   throws — std::system_error when the thread cannot be created (the scheduler stays stopped).
         void Start();
+        // Stop the worker and join it. Idempotent; safe to call from the destructor. Queued advances and
+        // watched sends are dropped (the prompts keep their status in the registry).
         void Stop() noexcept;
 
-        // Enqueue a turn-complete advance (wired to SessionRegistry::SetAdvanceHandler).
-        // Returns immediately; the work runs on the scheduler thread.
+        // Enqueue an advance for one session (wired to SessionRegistry::SetAdvanceHandler for the Stop
+        // seam; also the idle-start trigger and a timed hold's self-release). Returns immediately; the
+        // decision and any send run on the worker thread. Deduplicated: one pending advance per session.
+        // A NO-OP while the auto-advance is disabled (SetAutoAdvanceEnabled(false)).
+        //   sessionId — the session to decide for (an unknown id is dropped when the worker reads it).
+        //   throws    — std::bad_alloc when the queue cannot grow (nothing is queued then).
         void RequestAdvance(const std::wstring& sessionId);
 
-        // Backstop observer (wired via SessionRegistry::AddObserver): pauses a session's plan
-        // when its turn ends in Error and stopOnError is set.
+        // Registry observer (wired via SessionRegistry::AddObserver; called on whichever thread
+        // notified). It always arms the pickup watch for a session with a send awaiting pickup, in every
+        // build and every mode. Only while the auto-advance is enabled it also applies the stopOnError
+        // backstop (a turn that ended in Error pauses the session's plan) and requests an idle-start
+        // advance for a ready session with queued work.
+        //   s      — the post-change snapshot of the session.
+        //   throws — std::bad_alloc on allocation failure; a throw here reaches the registry's notify
+        //            loop, which the caller owns.
         void OnObserved(const SessionInfo& s);
 
-        // SemiAuto one-click confirm (from the UI): send the armed prompt (confirm=true) or
-        // skip it (confirm=false), then clear the pending-confirm flag.
-        void Confirm(const std::wstring& sessionId, bool confirm);
+        // Agentmaster (the GLOBAL PAUSE — DELIVERY.md §17): pause or resume the automatic send of EVERY
+        // session at once (the Manager toolbar's "Pause Prompt Queue Runner"). Per-session modes are not
+        // touched, and Send-now keeps working. CHANGE-GATED: setting the state it already has does
+        // nothing. A real change (a) logs `[pause-all]` to autorunner.log, (b) calls every
+        // GlobalPauseObserver, so each window's button shows the one process-wide state, and (c) on a
+        // RESUME re-requests an advance for every ready session with queued work. Without (c) a plan
+        // held by the pause on a quiet session stayed held until some unrelated registry change
+        // happened along (DecideAdvance answered "global pause" with no timed re-check).
+        // Not persisted: a restart starts resumed. Thread-safe; the caller's thread runs the observers
+        // and the re-request scan (one lean copy of the live sessions).
+        //   paused — true == hold every automatic send; false == resume.
+        //   throws — std::bad_alloc on allocation failure. An observer that throws is logged
+        //            (LogSwallowedException) and the remaining observers still run.
+        void SetGlobalPause(bool paused);
+        // The current process-wide pause state (see SetGlobalPause). Thread-safe; never throws.
+        //   returns — true while every automatic send is held.
+        bool GlobalPaused() const noexcept { return _globalPause.load(); }
+        // Register a listener for global-pause CHANGES (see GlobalPauseObserver). The scheduler is shared
+        // by every window, so each window registers one and MUST remove it on teardown (Rule #10) — an
+        // observer that outlives its window would be called with a dead capture.
+        //   observer — the listener; an empty function is ignored (the token returned is 0).
+        //   returns  — a token for RemoveGlobalPauseObserver (never reused), or 0 when nothing was added.
+        //   throws   — std::bad_alloc when the list cannot grow (nothing is registered then).
+        uint64_t AddGlobalPauseObserver(GlobalPauseObserver observer);
+        // Detach a listener added by AddGlobalPauseObserver. Thread-safe; an unknown or zero token is a
+        // quiet no-op, so a double remove is harmless. An observer call already in flight on another
+        // thread may still complete after this returns (the list is copied before it is called).
+        //   token  — the value AddGlobalPauseObserver returned.
+        //   throws — nothing beyond std::mutex::lock's std::system_error.
+        void RemoveGlobalPauseObserver(uint64_t token);
 
-        void SetGlobalPause(bool paused) { _globalPause.store(paused); }
-        bool GlobalPaused() const { return _globalPause.load(); }
+        // Agentmaster (DELIVERY.md §17): enable or disable the AUTO-ADVANCE job — and only that one. The
+        // pickup watch keeps running either way, because a /handover paste and a Send-now need the
+        // eaten-Enter rescue even where nothing is auto-sent. The default is ENABLED, and since
+        // 2026-10-09 NO build disables it: Engine.cpp sets it to true for every package (until then it
+        // passed false for an ordinary release, while the runner was a dev-or-debug feature). The
+        // switch is kept because the harness tests the watch-only engine through it, and because it is
+        // the one place a kill switch for the auto-advance would go. While disabled: RequestAdvance is
+        // a no-op, OnObserved neither applies stopOnError nor requests an idle-start, and a session's
+        // queue never moves by itself.
+        // Thread-safe (atomic); call it before Start() so no advance can slip through.
+        //   enabled — false == the scheduler runs its pickup watch only.
+        void SetAutoAdvanceEnabled(bool enabled) noexcept { _autoAdvance.store(enabled); }
+        // Whether the auto-advance job is enabled (see SetAutoAdvanceEnabled). Thread-safe.
+        //   returns — true in the app's engine (every build); false only where a caller disabled it
+        //             (today: the harness's watch-only test engine).
+        bool AutoAdvanceEnabled() const noexcept { return _autoAdvance.load(); }
 
         // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): the settle window this scheduler hands
         // DecideAdvance (kStateSettleMs unless changed). Thread-safe (atomic); takes effect at the next
@@ -776,13 +879,33 @@ namespace Agentmaster
         // (DecideEnterRetry). Runs on the worker thread each poll tick; drains _pending as sessions
         // start their turn / give up. Does its registry I/O OUTSIDE _mtx.
         void _sweepPendingPickups();
+        // Agentmaster (DELIVERY.md §17): is this session one whose plan an observed change should START
+        // — open, launched (or adopted), not paused, at rest, driven by a bound stdin injector, and
+        // holding queued work? The ONE idle-start rule, shared by OnObserved (a session's own change)
+        // and _requestHeldAdvances (the global pause was lifted), so the two triggers cannot disagree.
+        // It is only a cheap pre-filter: DecideAdvance still makes the real decision on the worker.
+        // Reads state / live / started / external / the mode and the queue's OPEN prompts — nothing a
+        // SessionRegistry::SnapshotLiveForScan copy leaves out. Takes the registry lock (HasInjector),
+        // so never call it under _mtx.
+        //   s       — a session snapshot (a lean scan snapshot is enough).
+        //   returns — true when an advance should be requested for it.
+        //   throws  — nothing beyond std::mutex::lock's std::system_error.
+        bool _wantsIdleStart(const SessionInfo& s) const;
+        // Agentmaster (the GLOBAL PAUSE — DELIVERY.md §17): request an advance for every live session
+        // that _wantsIdleStart, and return how many were requested. Called when the global pause is
+        // lifted: every plan the pause held answered "global pause" with nothing scheduled to ask again.
+        // Runs on the caller's thread over ONE lean copy of the live sessions (SnapshotLiveForScan — the
+        // queue's open prompts only, no transcript texts), then only queues ids; the worker decides.
+        //   returns — the number of sessions an advance was requested for.
+        //   throws  — std::bad_alloc on allocation failure (the remaining sessions are not requested).
+        size_t _requestHeldAdvances();
         // Agentmaster (no-silent-stall): a DecideAdvance that answers None used to leave NO trace, so
         // a queue held by the question-guard / global pause / maxAutoSends / a manual gate was
         // indistinguishable in autorunner.log from a dead scheduler (the "stuck in Pending, log shows
         // nothing" report). _noteAdvanceSkip logs `[advance-skip] <id> (<reason>)` change-deduped per
         // session (the reasons are fixed literals, so equality is exact); _clearAdvanceSkip forgets
-        // the session's last reason whenever its plan makes progress (a send / an armed confirm /
-        // plan-done), so the NEXT stall logs again instead of being swallowed by the dedup.
+        // the session's last reason whenever its plan makes progress (a send / plan-done), so the NEXT
+        // stall logs again instead of being swallowed by the dedup.
         void _noteAdvanceSkip(const std::wstring& id, const std::wstring& reason);
         void _clearAdvanceSkip(const std::wstring& id);
         // Agentmaster (send spacing): re-run a session's advance once a TIMED hold expires
@@ -809,7 +932,17 @@ namespace Agentmaster
         // worker promotes it into _queue, so it is bounded by the sessions currently spacing-held.
         std::unordered_map<std::wstring, int64_t> _deferred;
         std::atomic<bool> _running{ false };
+        // The process-wide Pause-all state (SetGlobalPause). Atomic: DecideAdvance's input is read on the
+        // worker while a window's UI thread writes it.
         std::atomic<bool> _globalPause{ false };
+        // The listeners SetGlobalPause calls on a real change, with their tokens (AddGlobalPauseObserver).
+        // Guarded by _mtx; copied under the lock and called OUTSIDE it, so a listener may call back in.
+        std::vector<std::pair<uint64_t, GlobalPauseObserver>> _pauseObservers;
+        // The next GlobalPauseObserver token (monotonic, never reused, 0 is "none"). Guarded by _mtx.
+        uint64_t _nextPauseObserverId{ 1 };
+        // Whether the AUTO-ADVANCE job runs (SetAutoAdvanceEnabled). Enabled by default, and no build
+        // disables it since 2026-10-09 (an ordinary release did until then, keeping only the pickup watch).
+        std::atomic<bool> _autoAdvance{ true };
         // The STATE SETTLE window handed to DecideAdvance (SetStateSettleMs; DELIVERY.md §16).
         std::atomic<int64_t> _stateSettleMs{ kStateSettleMs };
     };

@@ -43,7 +43,7 @@ Has completed after 2h30m and is waiting for you
   finished. Lines 1+2 say *which session* and *what outcome*, but never what it was **doing** — and a
   title names a folder, not a task, which is the missing half when three sessions finish while you are
   elsewhere. Sourced from the registry queue's **newest `Sent` entry**
-  (`LastDeliveredPrompt`, SessionModels.h) — the same record the Auto Testing's SENT summary renders, so
+  (`LastDeliveredPrompt`, SessionModels.h) — the same record the Prompt Queue's SENT summary renders, so
   it covers a prompt **typed straight into the ConPTY** as well as one the autorunner injected. **Both
   origins count**: an `Autorun` prompt is no less the user's message than a `Typed` one (they queued
   it), and filtering by origin would blank the line for exactly the autorunner-driven sessions whose
@@ -261,8 +261,9 @@ the track leak-proof:
   notifies — deliberate: you are not looking at it.
 - **Uniform wording.** `Has completed … and is error` reads slightly off for Error — the template is
   kept uniform by design (the requested shape); the state label carries the meaning.
-- **Not dev-gated.** Unlike the Tests Autorunner, notifications are a user feature — release installs
-  get the tab and the toasts.
+- **Not dev-gated.** Notifications are a user feature — release installs get the tab and the toasts.
+  (This note set them apart from the Prompt Queue Runner, which was dev-or-debug only until
+  2026-10-09 and is in every build since.)
 
 ## 7. Verification
 

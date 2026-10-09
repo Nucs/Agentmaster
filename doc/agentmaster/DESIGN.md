@@ -22,7 +22,7 @@ Run **N Claude Code sessions across M working directories** from one native Wind
 - **Fully interact** with any session — it's a real `claude.exe` in a real terminal (colors, mouse, scrollback, the genuine Ink TUI), not a proxy or scrape.
 - Give the app **100% programmatic control** — inject prompts, read output, observe state, and drive sessions on a schedule.
 - **See and triage the whole fleet** — when N×M is large, surface what needs you and hide the calm.
-- **Automate sequences** — queue a plan of prompts per session and let a **Tests Autorunner** advance it as each turn completes. *(Dev-only — see §9.4.)*
+- **Automate sequences** — queue a plan of prompts per session and let a **Prompt Queue Runner** advance it as each turn completes. *(In every build since 2026-10-09 — see §9.4.)*
 
 The headline differentiator: **full human interaction and full machine control coexist on the same session**, because both write to the same ConPTY stdin.
 
@@ -68,7 +68,7 @@ The "brain" (orchestration, scheduling, state) lives **in-process in C++/WinRT**
 │                  │ observes / commands                └──────────────────────┘ │
 │        ┌─────────▼──────────┐   ┌──────────────┐   ┌────────────────────────┐  │
 │        │ SessionRegistry    │──▶│ Scheduler /  │   │ Hooks bridge           │  │
-│        │ (SessionInfo × N)  │   │ Tests Autorunner    │   │ (named-pipe listener)  │  │
+│        │ (SessionInfo × N)  │   │ Queue Runner │   │ (named-pipe listener)  │  │
 │        └─────────▲──────────┘   └──────┬───────┘   └───────────▲────────────┘  │
 │                  │ state updates       │ WriteInput            │ hook events    │
 └──────────────────┼─────────────────────┼───────────────────────┼───────────────┘
@@ -81,7 +81,7 @@ Layers:
 - **SessionRegistry** — the single source of truth: one `SessionInfo` per session, across M dirs.
 - **ClaudeConnection** — a session's `ITerminalConnection` (ConPTY + `claude.exe`); the read/write channel.
 - **Hooks bridge** — receives authoritative state events from Claude Code hooks over a local pipe.
-- **Scheduler / Tests Autorunner** — drives Auto Testing queues by injecting prompts on the right signal.
+- **Scheduler / Prompt Queue Runner** — drives prompt queues by injecting prompts on the right signal.
 
 ## 5. The session substrate (ConPTY)
 
@@ -102,7 +102,7 @@ SessionInfo { id, title, workingDir (the M axis), branch, state,
 SessionState  = Idle | Running | WaitingForInput | NeedsApproval | Error | Done
 QueuedPrompt  { id, label, text, status(Pending|Sent|Held|Skipped|Failed),
                 gate(OnTurnComplete|AfterDelay|Manual), guardPattern, dependsOn, attempts }
-AutorunnerState{ mode(Off|SemiAuto|Full), throttleMs, stopOnError, pauseOnHumanInput,
+AutorunnerState{ mode(Off|Full), throttleMs, stopOnError, pauseOnHumanInput,
                 maxAutoSends, approval: ApprovalPolicy }
 ApprovalPolicy{ pauseForHuman, autoApproveTools[] }
 ```
@@ -126,7 +126,7 @@ detected and bound; `CCMGR_SESSION_ID` / hooks remain the low-latency push.
    Idle ───────────────────────────────▶ Running
      ▲                                      │ Stop hook
      │ (next turn)                          ▼
-     └──────────────────────────── WaitingForInput ──▶ (Tests Autorunner advance — DecideAdvance)
+     └──────────────────────────── WaitingForInput ──▶ (Prompt Queue Runner advance — DecideAdvance)
                                           │
    Notification(permission) ──▶ NeedsApproval ──▶ the queue holds; you answer in the terminal
    turn ends in error ───────▶ Error      SessionEnd ──▶ Done
@@ -139,7 +139,7 @@ The crucial subtlety: **"the agent is waiting" is three different states**, and 
 Authoritative state with no screen-scraping. Full contract in [`HOOKS.md`](./HOOKS.md); summary:
 
 - On spawn, set `CCMGR_SESSION_ID=<guid>` on the child and write a hooks config whose commands post `{sessionId, cwd, event, …}` to a **local named pipe** (`\\.\pipe\agentmaster.<pid>`), read on a dedicated thread. (Fallback: the forwarder discovers the pipe via a `bridge.json` file when it didn't inherit the env; the always-on floor beneath the lossy push is the Fleet Observer — §8a.)
-- Event → effect: `SessionStart`→register/Idle; `UserPromptSubmit`→Running (also confirms our injected prompt landed → idempotency); `PreToolUse/PostToolUse`→activity; `Notification(permission)`→NeedsApproval (the queue holds until you answer; nothing auto-approves — `ApprovalPolicy` is a persisted placeholder); `Stop`→WaitingForInput + the Tests Autorunner advance (a real, non-stale turn-complete only — HOOKS.md *State machine*); `SubagentStop`→info; `SessionEnd`→Done.
+- Event → effect: `SessionStart`→register/Idle; `UserPromptSubmit`→Running (also confirms our injected prompt landed → idempotency); `PreToolUse/PostToolUse`→activity; `Notification(permission)`→NeedsApproval (the queue holds until you answer; nothing auto-approves — `ApprovalPolicy` is a persisted placeholder); `Stop`→WaitingForInput + the Prompt Queue Runner advance (a real, non-stale turn-complete only — HOOKS.md *State machine*); `SubagentStop`→info; `SessionEnd`→Done.
 - The hook payload carries a best-effort `lastMessageIsQuestion` flag that feeds the question-guard.
 
 ### 8a. Fleet Observer — the PULL correlation/state floor (shipped)
@@ -166,7 +166,7 @@ AGENT MANAGER page (opened by the tab strip's Home button — not a tab)
 │ Running      │ Waiting-for-you │ Needs-approval │ Error          │
 │ api-test ⚙2/6│ api-fix ⚙4/10 ◄ │      —         │  ui-test        │
 ├──────────────────────── drag divider ──────────────────────────┤
-│ EXPLORER TREE              │ AUTO TESTING — api-fix  Tests Autorunner[▶] │
+│ EXPLORER TREE              │ PROMPT QUEUE — api-fix     Runner[▶] │
 │ ▾ K:/api  3 ·1◐ ◄scoped    │ next: turn-complete · 3/10 sent      │
 │   ● api-fix  waiting ◄hl   │ ✓ add unit tests                     │
 │   ● api-test running ⚙     │ ⏳ add docs to API     [turn-done]    │
@@ -191,26 +191,29 @@ AGENT MANAGER page (opened by the tab strip's Home button — not a tab)
   GLOBAL setting (`AppSettings.treeSort`); a **↻ refresh** re-pulls + `Wake()`s the observer. Activate
   is **cross-window** (fans out through the engine's activate sinks to the hosting window).
 
-### 9.4 Auto Testing (bottom-right) — *plan & automate*
-- **⚠ DEV-ONLY.** Auto Testing / Tests Autorunner ships only in the **AgentmasterDev** package
-  (`Profiles::IsDevPackage()`). In a **release** install this whole pane is the read-only **Summary**
-  view only — no `[Summary | Auto Testing]` toggle, no Tests Autorunner / queue / compose — and the
-  autorunner scheduler is **never started** (`Engine.cpp`), so nothing auto-sends. Everything below
-  describes the dev experience.
-- The selected session's **prompt queue** + **Tests Autorunner** + the compose row. Add/edit/reorder/delete prompts; per-item **gate** badge (turn-done / delay / manual) and **guard**; `Send now`, `Test Templates`, import/apply-to-many. Detailed mechanics in §10.
-- **Shipped — the as-built UI.** **Tests Autorunner is a colored toggle in the Auto-Testing header**
-  (gray ○ Off / amber ◐ Semi / green ● Full, cycling on click), not a combo. The **compose row** is
+### 9.4 Prompt Queue (bottom-right) — *plan & automate*
+- **In every build since 2026-10-09 (NOT BUILT yet; DELIVERY.md §17.1).** Until then the Prompt Queue
+  and the Prompt Queue Runner (named "Auto Testing" and "Tests Autorunner") were a dev-or-debug
+  feature (`Profiles::IsDevOrDebugPackage()`): an ordinary release showed this pane as the read-only
+  **Summary** view only and did not run the auto-advance. Debug Mode is kept, but no feature reads it
+  today.
+- **Two modes:** Paused and Auto (stored as `Off` / `Full`). The SemiAuto mode and its one-click
+  confirm were removed on 2026-10-09 (DELIVERY.md §17.4). Where the rest of this document shows a
+  Semi mode, a confirm banner or a mode cycle of three, that part no longer exists.
+- The selected session's **prompt queue** + **Prompt Queue Runner** + the compose row. Add/edit/reorder/delete prompts; per-item **gate** badge (turn-done / delay / manual) and **guard**; `Send now`, `Test Templates`, import/apply-to-many. Detailed mechanics in §10.
+- **Shipped — the as-built UI.** **The Prompt Queue Runner is a colored toggle at the top right of
+  the Prompt Queue tab** (gray ○ Paused / green ● Auto, flipping on click), not a combo. The **compose row** is
   three icon buttons (**eye** = Focus/jump to the tab · **!** = Send now, confirms first · **envelope**
   = Add to queue) beside a growing multiline textarea; **Templates** collapse behind a paper icon.
   Per-message actions (Move up/down/Delete; Archive session) live on a **right-click menu over the
   messages**. The plan reflects **every** message a session received — a chronological **SENT**
   summary (rows tagged **flight** = we injected vs **typed** = the human typed it) over the
   **UPCOMING** queue. Selecting an **external** shows its conversation **read-only** (no
-  queue/Tests Autorunner — we host no ConPTY for it).
+  queue/Prompt Queue Runner — we host no ConPTY for it).
 
 ### 9.5 Selection sync (the "Linked Lenses" core)
 One shared selection over the registry:
-- Select a **card** → tree expands/scrolls/highlights that session + loads its Auto Testing.
+- Select a **card** → tree expands/scrolls/highlights that session + loads its prompt queue.
 - Select a **directory** in the tree → the board filters to that dir's lanes.
 - Everything stays consistent because there is one model, three views.
 
@@ -218,7 +221,7 @@ One shared selection over the registry:
 (single-click selects, **double-click Activates** the live tab cross-window, right-click = same menu)
 — the board/tree → tab half. **The reverse holds too:** switching to a session's tab selects it in
 the Manager (`_OnTabSelectionChanged` → `_SyncManagerSelectionToTab` → `SelectSession`), lighting up
-the card + tree row + Auto Testing. The selection is part of the per-window lens, so it persists across
+the card + tree row + Prompt Queue. The selection is part of the per-window lens, so it persists across
 restart via the `WindowRecord` autosave.
 
 ### 9.6 Other manager paradigms (deferred, optional toggle-views)
@@ -227,11 +230,11 @@ A2 Mission-Control Wall (live tiles + semantic zoom), A4 Command-Palette switche
 ### 9.7 Per-tab link badge (the overlay) — *the here-and-now lens*
 The Agent Manager page is the *fleet* view; each Claude session tab also carries a small **link badge**
 pinned to the **top-right of its terminal**, so the tab ⇄ Agentmaster relationship is legible
-while you work *inside* a session: hook-driven status, whether/how Tests Autorunner is driving it
-(`Manual` / `Semi` / `Full`), link state (surfaced only when *not* linked), queued count, and — on
-hover/click — controls (Tests Autorunner cycle, Send-now, queue peek, Jump-to-Manager) + a contextual
-SemiAuto confirm. Dim until hover; off-switchable. It only *reflects* registry/scheduler state
-and *requests* the same actions the Auto Testing does — never a second source of truth. Full
+while you work *inside* a session: hook-driven status, whether/how Prompt Queue Runner is driving it
+(`Paused` / `Auto`), link state (surfaced only when *not* linked), queued count, and — on
+hover/click — controls (the Prompt Queue Runner toggle, Send-now, queue peek, Jump-to-Manager).
+Dim until hover; off-switchable. It only *reflects* registry/scheduler state
+and *requests* the same actions the Prompt Queue does — never a second source of truth. Full
 spec: [`TAB_OVERLAY.md`](./TAB_OVERLAY.md).
 
 **Shipped — the as-built badge (richer than the sketch).** Built as `AgentTabOverlay`. Beyond the
@@ -241,7 +244,7 @@ as activity changes — a `pwsh` tab → `claude` the moment you run it → the 
 first prompt. The linked badge's **row 1** reads `status · actions · autorunner · queue` (**link state
 shows only when *not* linked**) over a dim **second row** `<workdir folder>/<live branch>`; its
 **always-shown row-1 action cluster** is a folder button (Open Path), a **mail** button (queue the
-tab's unsent draft into its Auto-Testing queue + clear it from the input box, a move; Shift+Click keeps
+tab's unsent draft into its prompt queue + clear it from the input box, a move; Shift+Click keeps
 it — dev-or-debug + Claude only), a **copy
 menu** (Session Id · dir · branch · the **REAL** Claude/Codex launch CLI · Summary · Transcript), and
 a **pencil** toggling a **SUMMARY PANEL** (a second overlay ≤20% pane width rendering the
@@ -249,20 +252,20 @@ a **pencil** toggling a **SUMMARY PANEL** (a second overlay ≤20% pane width re
 toggle `AppSettings.summaryPanelWrapNewlines`). The **tab strip** itself also carries a state-colored
 dot (`[icon] ● <title>`).
 
-## 10. Auto Testing & Tests Autorunner (the scheduler)
+## 10. Prompt Queue & Prompt Queue Runner (the scheduler)
 
-**Auto Testing** = a per-session ordered list of prompts. **Tests Autorunner** advances it.
+**Prompt Queue** = a per-session ordered list of prompts. **Prompt Queue Runner** advances it.
 
 ### The loop (the original sketch — the shipped gate order is in HOOKS.md *Scheduler trigger*)
 ```
 Stop hook ─▶ WaitingForInput ─▶ tryAdvance(session)
 tryAdvance(s):
-  if s.autorunner.mode == Off: return
+  if s.autorunner.mode == Off: return                     # Paused
+  if !s.live || (!s.started && !s.external): return       # closed, or a dormant tab (DELIVERY.md §17.2)
   if s.state != WaitingForInput && s.state != Idle: return  # Idle: a launched/resumed plan must START
   if humanTypedWithin(s, ~1500ms): return                 # pauseOnHumanInput
   item = s.queue.firstPending(); if none: notifyPlanDone; return
   if !passesGuard(s, item): item=Held; flag card; return  # e.g. not-a-question
-  if s.autorunner.mode == SemiAuto: askConfirm; return
   sleep(throttleMs)
   s.connection.WriteInput(item.text + "\r")               # inject + submit (terminated)
   item=Sent; item.sentAt=now; persist(s)
@@ -270,7 +273,7 @@ tryAdvance(s):
 ```
 
 ### The one correctness call: "waiting" is three states
-| Sub-state | Signal | Tests Autorunner |
+| Sub-state | Signal | Prompt Queue Runner |
 |---|---|---|
 | Turn complete, ready for next msg | `Stop` | ✅ dequeue + send next |
 | Needs tool approval ("y/n") | `Notification(permission)` | ❌ NOT the queue — it holds until you answer in the terminal |
@@ -279,8 +282,9 @@ tryAdvance(s):
 ### Policy & guards
 - **Default mode:** the cog's `defaultAutorunnerMode` — shipped as **`Full`** — is stamped onto every
   new, adopted and reopened session (the bare `AutorunnerState` default is `Off`; a managed Codex stays
-  `Off`). `SemiAuto` gives a one-click confirm per send; `Full` is hands-off. The scheduler itself runs
-  only in a dev build or with debug mode on (`IsDevOrDebugPackage`).
+  `Off`). `Full` (shown "Auto") is hands-off; `Off` (shown "Paused") sends nothing by itself. A third
+  mode, `SemiAuto` with a one-click confirm per send, was removed on 2026-10-09. The scheduler runs in
+  every build since the same day (before: only in a dev build or with debug mode on).
 - **Question-guard ON** by default; per-item override `answers-a-question:ok` (set as the prompt's `guardPattern`).
 - **Approvals** are separate: `NeedsApproval` holds the queue until you answer in the terminal. An
   `ApprovalPolicy` (`pauseForHuman` + an `autoApproveTools` allowlist) is in the data model and
@@ -321,10 +325,10 @@ in [`DELIVERY.md`](./DELIVERY.md):
 
 ## 11. Input & control model
 
-- **Shared stdin:** user keystrokes and injected prompts both reach `claude.exe`; they interleave. `pauseOnHumanInput` suspends Tests Autorunner while you type.
+- **Shared stdin:** user keystrokes and injected prompts both reach `claude.exe`; they interleave. `pauseOnHumanInput` suspends Prompt Queue Runner while you type.
 - **Gating:** read-only toggle blocks user input for moments of exclusive control.
 - **Reading:** the serialized terminal buffer feeds previews and the optional output-parse; hooks feed state.
-- **Activate vs send:** navigating the Manager never sends to an agent. Sending is explicit: Enter→tab→type, Auto Testing `Send now`, or queue+Tests Autorunner.
+- **Activate vs send:** navigating the Manager never sends to an agent. Sending is explicit: Enter→tab→type, Prompt Queue `Send now`, or queue+Prompt Queue Runner.
 
 ## 12. Windows Terminal integration
 
@@ -346,7 +350,7 @@ in [`DELIVERY.md`](./DELIVERY.md):
 
 - Per session: queue + autorunner state + metadata (title, dir, branch) saved as JSON under the app's state dir; reloaded **without replaying** sent prompts.
 - **Lifecycle = Open ⇄ Archived** (transient `SessionInfo::live`, never persisted). *Open* = a live tab/`claude.exe` this run (shown on the Board/Tree); *Archived* = shut down but kept restorable (listed behind the Manager's **Archived** button).
-- **Closing a session's tab archives it** (the X, tree `Del`, Manager Archive, Auto-Testing Archive — one seam, one consequence confirm): the record is **kept** (`live=false`), so it survives + lists under Archived. There is **no discard** — archive is terminal, and the Claude transcript on disk is never deleted.
+- **Closing a session's tab archives it** (the X, tree `Del`, Manager Archive, Prompt Queue Archive — one seam, one consequence confirm): the record is **kept** (`live=false`), so it survives + lists under Archived. There is **no discard** — archive is terminal, and the Claude transcript on disk is never deleted.
 - **Startup ARCHIVES, never auto-launches** (reversal of the earlier "close == reopen"): persisted sessions load as Archived; no session tab is re-opened at startup. The user re-opens what they want via **Restore** → `claude --resume <id>` (transcript-gated; a missing transcript ⇒ a fresh id, and the stale archived record is dropped). Restore is **agent-aware** — a Codex record re-launches via `codex resume <uuid>`, transcript-gated on its rollout. Quitting therefore archives the open fleet for next launch.
 - Plan **templates** saved separately and reusable across sessions/machines.
 
@@ -415,7 +419,7 @@ Claude session (not just managed ones) with two-phase search and Jump / Resume /
   (the Observer's PULL model run one-shot from a separate process), so it **works app-up or
   app-down**. Control verbs (`restore`/`archive`, `watch`, `enqueue`/`send-now`) are designed +
   deferred (CLI P2/P3).
-- **Branching plans:** conditional Auto Testing steps (on output match → jump/skip/stop).
+- **Branching plans:** conditional Prompt Queue steps (on output match → jump/skip/stop).
 - **Metrics:** per-session cost/tokens/throughput, an attention/cost dashboard.
 
 ## 18. Open decisions
@@ -427,8 +431,9 @@ Claude session (not just managed ones) with two-phase search and Jump / Resume /
 - Prevent splitting the Manager tab (mirror the `_settingsTab` split guard) — likely yes. **Resolved:** moot —
   the Manager is a page behind the Home button, not a pane, and an `agentManager` pane request is refused.
 - Whether sessions are always git-worktree-isolated or optional per session.
-- Where Tests Autorunner confirmation UI lives (inline card vs toast). **Resolved:** a contextual confirm
-  on the per-tab overlay + the SemiAuto one-click confirm in the Auto Testing (§9.4/§9.7).
+- Where Prompt Queue Runner confirmation UI lives (inline card vs toast). **Resolved, then removed:** a
+  contextual confirm on the per-tab overlay + the SemiAuto one-click confirm in the Prompt Queue
+  (§9.4/§9.7) shipped, and both went away with the SemiAuto mode on 2026-10-09 (DELIVERY.md §17.4).
 - Package identity: keep publisher for signing simplicity vs. fully self-branded cert. **Resolved:**
   a **fully self-branded `CN=Agentmaster`** self-signed identity (the Publisher derives the shared
   PFN hash), with two side-by-side identities (release/dev) — see [`PROFILES.md`](./PROFILES.md).
@@ -437,7 +442,7 @@ Claude session (not just managed ones) with two-phase search and Jump / Resume /
 
 Build sequence and current status live in [`IMPLEMENTATION.md`](./IMPLEMENTATION.md):
 **M0–M4.1 done** (fork, scaffold, builds, content wired, pinned Manager tab — since 2026-09-25 a page behind the Home button, own identity, deployed) →
-**M5** SessionRegistry + ConPTY `claude.exe` + hooks bridge → **M6** C1 UI → **M7** Tests Autorunner → **M8** persistence/templates/apply-to-many.
+**M5** SessionRegistry + ConPTY `claude.exe` + hooks bridge → **M6** C1 UI → **M7** Prompt Queue Runner → **M8** persistence/templates/apply-to-many.
 
 **Status: M0–M8 are all shipped + live-verified.** The original M9–M14 persistence ladder is
 **superseded** by `PERSISTENCE.md`'s Increments 1–4 — the per-window workspace layer (singleton

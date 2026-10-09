@@ -535,6 +535,14 @@ namespace winrt::TerminalApp::implementation
         // window repaints its own taskbar button with the same number (the taskbar combines our windows into one
         // button whose overlay is "the last one received", so they must all agree). Detached in ~TerminalPage (Rule #10).
         uint64_t _unreadCountToken{ 0 };
+        // Agentmaster (the GLOBAL PAUSE — DELIVERY.md §17): this window's listener on the shared scheduler's
+        // process-wide "pause every automatic send" state (Scheduler::AddGlobalPauseObserver). ANY window's
+        // Pause / Resume click reaches it; it hops to this window's UI thread and repaints this window's
+        // button (_ApplyGlobalPauseShown), so every window shows the ONE state that the scheduler owns —
+        // a per-window flag is what once let two windows disagree. Detached in ~TerminalPage (Rule #10):
+        // a listener that outlived its page would be called with a dead dispatcher. 0 == not registered
+        // (engine init has not run, or the engine has no scheduler).
+        uint64_t _globalPauseObserverToken{ 0 };
         ::Agentmaster::AppSettings _appSettings{}; // Agentmaster: global settings (the cog); loaded at engine init
         // Agentmaster (tab sizing): the Equal-mode width bounds THIS window's strip was last sized with (0 ==
         // not yet applied). The bounds themselves live in process-wide app resources, so only this per-window
@@ -1576,6 +1584,16 @@ namespace winrt::TerminalApp::implementation
         void _PublishAgentUnreadSessions(); // Agentmaster (taskbar unread badge): hand this window's unread set (the union of _flashingSessions and _manualUnreadSessions) to the engine's census when it changed; called after every mutation of either set; UI thread
         void _ApplyTaskbarUnreadCount(); // Agentmaster (taskbar unread badge): re-read the census count, gate it by AppSettings::taskbarUnreadBadge, and raise TaskbarUnreadCountChanged if this window's number changed (the sink hop, engine init, the cog Save, the settings broadcast); UI thread
         void _ApplyTaskbarUnreadFrame(); // Agentmaster (taskbar preview frame, NOTIFICATIONS.md section 9): recompute THIS window's frame color from its own published unread set + AppSettings::taskbarUnreadThumbnailFrame + flashRingColor, and raise TaskbarUnreadFrameChanged if it changed (after every unread-set change, the cog Save, the settings broadcast); UI thread
+        // Agentmaster (the GLOBAL PAUSE — DELIVERY.md §17): repaint THIS window's "Pause / Resume Prompt
+        // Queue Runner" toolbar button from the shared scheduler's CURRENT process-wide pause state. The
+        // state is read fresh on every call instead of being carried by the caller, so two changes that
+        // reach this window's UI thread out of order still end on the true state. Callers: the
+        // global-pause observer's hop (engine init registers it) — a click in ANY window, this one
+        // included, comes back through it. A no-op while the window has no Manager page yet or the
+        // engine has no scheduler (the page seeds itself when it is wired, _WireAgentManagerContent).
+        // UI thread only (it touches a XAML control). Never throws: a failure is logged through
+        // AgentLogCaughtException and the button keeps its previous label.
+        void _ApplyGlobalPauseShown() noexcept;
         void _OnAgentWindowActivated(bool activated); // Agentmaster (taskbar unread badge): the window came to the foreground — its focused tab is now being LOOKED AT, so stamp it read and drop its automatic flash (the flash ring's "current tab of the ACTIVE window is visited" rule; a manual Mark Unread stays sticky); from TerminalPage::WindowActivated; UI thread
         void _MoveSessionTriageState(const std::wstring& sessionId); // Agentmaster (Waiting-for-you + Error triage): the tab context-menu's status-adaptive move — demote a WaitingForInput session to Idle ("Move to Idle/Done"), DISMISS an Error one the same way (records the errorDismissed ack so the scanner's level-derived Error can't bounce it back), or plainly promote an Idle/Done one to WaitingForInput ("Move to Waiting-for-you"); direction re-derived from the live registry state. EXPLICITLY separate from _MarkSessionUnread (no sticky manualUnread, no ring flash)
         void _EvaluateAgentNotification(const std::wstring& sessionId, const TerminalApp::Tab& tab, ::Agentmaster::SessionState newState, bool live); // Agentmaster (System notifications): detect the Running -> X edge per registry update on a HOSTED tab and raise the Windows toast per the Notifications settings (per-state switches, focused-tab skip); tracks the Running-entry time for the "after <duration>" clause; HOLDS an Idle/Waiting toast while the external-work signal is live (spurious-completion suppression — SessionScanner's ShouldHoldCompletionToast) and DROPS the hold on a Running re-entry; forgets state on !live like _EvaluateAgentFlash; UI thread

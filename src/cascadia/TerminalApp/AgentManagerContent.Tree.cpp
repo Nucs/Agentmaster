@@ -461,7 +461,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     auto cp = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
                     cp.Opacity(0.9);
-                    AgentSetTitledTip(cp, L"Codex agent", L"This managed session runs the OpenAI Codex CLI instead of Claude. Agentmaster launches, resumes and tracks it like any session, but cannot drive its prompts \x2014 there is no queue or Tests Autorunner for Codex, and it reports only Running / Waiting / Idle.");
+                    AgentSetTitledTip(cp, L"Codex agent", L"This managed session runs the OpenAI Codex CLI instead of Claude. Agentmaster launches, resumes and tracks it like any session, but cannot drive its prompts \x2014 there is no Prompt Queue or Prompt Queue Runner for Codex, and it reports only Running / Waiting / Idle.");
                     row.Children().Append(cp);
                 }
                 row.Children().Append(Text(StateLabel(s.state), 11, false, 0.5));

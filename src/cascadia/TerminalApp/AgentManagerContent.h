@@ -143,8 +143,21 @@ namespace winrt::TerminalApp::implementation
         // on every ~2s observer/registry tick. The page wires this to GetForegroundWindow()==hwnd; when
         // backgrounded the user isn't keyboard-navigating this board, so the focus-restore is skipped.
         void SetWindowForegroundProvider(std::function<bool()> provider);
-        void SetPauseHandler(std::function<void(bool)> handler); // global Autorunner Pause-all
-        void SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler); // SemiAuto confirm/skip
+        // Agentmaster (the GLOBAL PAUSE — DELIVERY.md §17): the "Pause Prompt Queue Runner" button's action.
+        // The button only ASKS: the handler (the hosting page) sets the process-wide state on the ONE
+        // scheduler, and the button's label then follows SetGlobalPauseShown. This content never decides
+        // the state itself — a per-window flag here is what let two windows disagree.
+        //   handler — called on the UI thread with the state the click asks for (true == pause all).
+        void SetPauseHandler(std::function<void(bool)> handler);
+        // Agentmaster (the GLOBAL PAUSE — DELIVERY.md §17): show the process-wide pause state on this
+        // window's "Pause / Resume Prompt Queue Runner" button. The scheduler owns the state; the page
+        // calls this when it seeds the content and whenever ANY window changes the pause, so every
+        // window's button reads the same and the next click always asks for the opposite of the TRUE
+        // state. UI thread only (it touches a XAML control). A no-op for the label while the button is
+        // not built yet; the state is remembered either way.
+        //   paused — true == every session's automatic send is held (the button reads "Resume Prompt Queue Runner").
+        //   throws — winrt::hresult_error if the XAML control rejects the content (not expected).
+        void SetGlobalPauseShown(bool paused);
         void SetSettings(const ::Agentmaster::AppSettings& settings); // seed the cog dialog's current values
         void SetSettingsHandler(std::function<void(::Agentmaster::AppSettings)> handler); // persist on Save
         // Agentmaster (cross-window settings broadcast): adopt GLOBAL settings that were changed in
@@ -467,13 +480,20 @@ namespace winrt::TerminalApp::implementation
         // extension). The find+capture+erase run in ONE registry Update (TakeLastPendingPrompt) so a
         // racing scheduler send can't be un-recorded.
         bool _PopLastQueuedPromptIntoBox();
-        void _OnAutorunnerChanged(int index);
-        // Agentmaster: the FLIGHT-PLAN-header Autorunner toggle. _CycleAutorunner advances the
-        // selected session's mode (Off -> Semi-auto -> Full -> Off); _UpdateAutorunnerButton paints
+        // Set the SELECTED session's Tests Autorunner mode — the user's explicit choice, so it cancels a
+        // pending interrupt resume (DELIVERY.md §14) whichever mode is picked. Switching to Auto also
+        // resets the per-run send counter, releases the question-guard hold (the user is attending) and
+        // re-stamps a blocked box-state clock. Writes the shared registry, so the scheduler sees it at
+        // once; a no-op with nothing selected and for a managed Codex (it can never be driven).
+        //   mode   — AutorunnerMode::Full ("Auto") or AutorunnerMode::Off ("Paused").
+        //   throws — std::bad_alloc on allocation failure only.
+        void _OnAutorunnerChanged(::Agentmaster::AutorunnerMode mode);
+        // Agentmaster: the Auto-Testing header's Tests Autorunner toggle. _CycleAutorunner flips the
+        // selected session between its two modes (Paused <-> Auto); _UpdateAutorunnerButton paints
         // the button's colored state dot + label (dim/disabled when no live session is selected).
         void _CycleAutorunner();
         // Takes the whole AutorunnerState: an INTERRUPT-HELD Off (DELIVERY.md §14) paints differently
-        // from a user's Off — "Off -> Full on your next message".
+        // from a user's Off — "Paused -> Auto on your next message".
         void _UpdateAutorunnerButton(const ::Agentmaster::AutorunnerState& autorunner, bool enabled);
         // Agentmaster: the Auto-Testing pane's two-state [Summary | Auto Testing] tab toggle (its top
         // line). _SelectPlanPaneTab(summary) sets the GLOBAL choice (AppSettings::autoTestingShowsSummary),
@@ -896,8 +916,7 @@ namespace winrt::TerminalApp::implementation
         std::function<std::unordered_set<std::wstring>()> _localScopeProvider; // Agentmaster: this window's hosted session ids (for the Explorer Tree LOCAL scope)
         std::function<std::wstring(const std::wstring&)> _liveDraftProvider; // Agentmaster (PENDING_INPUT.md §8): read a session's unsent input-box draft from its LIVE buffer for "Copy Current Prompt" ("" when the tab isn't hosted/readable here — the remembered draft then wins)
         std::function<bool()> _windowForegroundProvider; // Agentmaster (focus-steal fix): is this Manager's window the OS foreground window? Gates _Refresh's focus-restore so a background rebuild can't steal foreground.
-        std::function<void(bool)> _pauseHandler;
-        std::function<void(winrt::hstring, bool)> _confirmHandler;
+        std::function<void(bool)> _pauseHandler; // Agentmaster (DELIVERY.md §17): asks the page to set the process-wide pause (SetPauseHandler)
         std::function<void(::Agentmaster::AppSettings)> _settingsSink;
         std::function<void()> _reopenWindowsHandler; // Agentmaster (M10): the "Reopen Windows" recover-button action
         std::function<void()> _openSessionsHandler; // Agentmaster (Sessions page): open the full-window global Sessions browser (TerminalPage-hosted)
@@ -906,6 +925,9 @@ namespace winrt::TerminalApp::implementation
         std::function<void()> _refreshHandler; // Agentmaster: Explorer Tree refresh -> page re-surveys the Fleet Observer (reload the current scope's data)
         std::function<void(::Agentmaster::ManagerState)> _lensChangedHandler; // Agentmaster (M10): push lens changes to the hosting window
         ::Agentmaster::AppSettings _appSettings{}; // current settings (seeded by SetSettings; edited via the cog)
+        // Agentmaster (the GLOBAL PAUSE — DELIVERY.md §17): the process-wide pause state as this window
+        // last heard it — a DISPLAY mirror, written only by SetGlobalPauseShown. The scheduler is the
+        // owner; the button's click reads this to ask for the opposite and never flips it itself.
         bool _globalPaused{ false };
 
         std::wstring _selectedId;
@@ -1388,7 +1410,7 @@ namespace winrt::TerminalApp::implementation
         std::wstring _lastUpdateChangelogUrl; // the available update's release page (drives _setUpdateChangelog's click)
         winrt::Windows::UI::Xaml::Controls::Button _setUninstallBtn{ nullptr }; // Agentmaster (updater): "Uninstall Agentmaster…" -> remove THIS install (per-user; profile data kept), then quit. Shown only for packaged installs.
         // ---- DEVELOPER (Agentmaster debug escape hatch; ProfileBootstrap.h IsDebugPackage) ----
-        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setDebugMode{ nullptr }; // About-tab "Enable Debug Mode" — the durable --debug twin (unlocks the Auto Testing / Tests Autorunner tools in a Release build; applies after restart). FORM-owned (AppSettings.debugMode); forced ON+disabled on a Dev build.
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setDebugMode{ nullptr }; // About-tab "Enable Debug Mode" — the durable --debug twin (makes a Release build answer Profiles::IsDevOrDebugPackage() true, the gate for debug-only features; NO feature reads it since 2026-10-09, when the Prompt Queue Runner left it — kept for later ones; applies after restart). FORM-owned (AppSettings.debugMode); forced ON+disabled on a Dev build.
         winrt::Windows::UI::Xaml::Controls::TextBlock _setDebugModeNote{ nullptr }; // caption under the toggle — "Applies after restart." / dev-build / active-now state
         winrt::Windows::UI::Xaml::Controls::TextBox _templateNameBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _templateCombo{ nullptr };

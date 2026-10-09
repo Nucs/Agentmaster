@@ -176,7 +176,7 @@ The command is chosen in phase G, from the FINAL disk state:
 | `turns` | reset | The old turn and its type-ahead are void. |
 | `state` | `RestoredSessionState(state)` | Rule #16. |
 | `lastMessageWasQuestion` | `RestoredQuestionFlag` | Rule #16. |
-| `pendingConfirmPromptId` | clear | A SemiAuto confirm of the old process. |
+| ~~`pendingConfirmPromptId`~~ | — | The field was removed with the SemiAuto mode on 2026-10-09 (DELIVERY.md §17.4). Nothing to reset. |
 | `pendingInput`, `pendingInputUnixMs`, `pendingPasteRefs` | **keep** (D3) | The draft is typed back after the start (§3.13). The durable store keeps it too (no `_PersistSessionDraft(id, {})`). |
 | paste journal (registry side map, not a field) | keep | It resolves the draft's placeholders now, and the new box's placeholders later. |
 | `pendingBoxState`, `pendingBoxStateUnixMs` | `NoBox`, now | The old input box is gone. `DecideAdvance` holds ("input box not visible") until the scan reads the NEW box. While the draft re-fill is armed, the scan does not record the box state, so the hold lasts until the draft is back (§3.13). |
@@ -311,8 +311,8 @@ differs from the Fork lane in six points:
   (`NotePastedText` de-dupes only the newest entry, so a re-note would duplicate them).
 - A non-empty `pendingInput` on the record is expected. (The Fork lane drops its copy when the record holds a
   draft.) Only the live box decides whether the user typed first.
-- The setting is `restoreDraftOnResume` (default ON; its cog switch is on the dev-or-debug Tests Autorunner
-  tab).
+- The setting is `restoreDraftOnResume` (default ON; its cog switch is on the Prompt Queue Runner
+  tab, which is in every build since 2026-10-09 and was dev-or-debug only before).
 - The resolve policy is STRICT, with steps 2–3. The fork's LIVE policy types an unresolved mid-line
   placeholder as text, which would lose a drag-dropped paste silently.
 - The hands-off baseline (`armedUnixMs`) is the first pump tick that sees the session started, not the arm

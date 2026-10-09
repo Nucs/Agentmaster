@@ -385,10 +385,13 @@ namespace Agentmaster
         // on a re-homed tab) then never auto-sent its queued prompts, contradicting the documented
         // "the MODE seeds every OPENED session — new, adopted, AND restored" (AppSettings,
         // SessionModels.h) and reading as "queued prompts stuck Pending, never sent". Wired at engine
-        // init (gated on IsDevOrDebugPackage like the Scheduler itself, so a plain release keeps
-        // minting Off records to match its never-started autorunner) and re-pushed live by the cog
-        // Save. CREATION-only: an existing record's mode is the user's per-session choice (or the
-        // launch/restore stamp) and is never touched here.
+        // init in EVERY build since 2026-10-09 (until then it was gated on IsDevOrDebugPackage like the
+        // scheduler's auto-advance, so a plain release kept minting Off records) and re-pushed live by
+        // the cog Save. Un-wired (the test harness, the CLI) the registry still mints Off. CREATION-only:
+        // an existing record's mode is the user's per-session choice (or the launch/restore stamp) and
+        // is never touched here.
+        //   mode   — the mode to stamp on records created from now on (Off == Paused, Full == Auto).
+        //   throws — nothing beyond std::mutex::lock's std::system_error.
         void SetDefaultAutorunnerMode(AutorunnerMode mode);
         // Multiple adoption handlers may register — one per window (M9). When a hook arrives for
         // a session we didn't Launch, ALL are invoked (outside the lock); whichever window hosts
@@ -428,7 +431,7 @@ namespace Agentmaster
         bool PressEnterVerified(const std::wstring& id, const std::wstring& promptId, const std::wstring& promptText);
 
         // SEND a queued prompt — the ONE seam every submit path goes through (the autorunner's
-        // auto-send, its SemiAuto confirm, the Manager's Send-now, the /handover paste pump), so
+        // auto-send, the Manager's Send-now, the /handover paste pump), so
         // the draft swap can never apply to some of them and not others. With a submitter bound
         // the hosting window owns the delivery (and any later rollback); otherwise this is exactly
         // the historical Inject(BuildPromptSubmission(text)). Returns "accepted for delivery";

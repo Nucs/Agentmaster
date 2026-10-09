@@ -1117,7 +1117,6 @@ namespace winrt::TerminalApp::implementation
         info.lastMessageWasQuestion = restored ? ::Agentmaster::RestoredQuestionFlag(info.state, info.lastMessageWasQuestion) : false;
         info.external = false; // we own this tab's ConPTY -> managed, not an adopted session
         info.live = true; // OPEN: has a live tab/claude now -> shows on the Triage Board (not Archived)
-        info.pendingConfirmPromptId.clear();
         // Agentmaster: stamp the hosting ConPTY's WT_SESSION (== the wire tabToken hooks will report)
         // EAGERLY, not lazily on the first hook — GuidToPlainString here is byte-identical to the
         // connection's WT_SESSION env (same fn, same guid), so the first real hook's tabToken write is
@@ -1195,8 +1194,8 @@ namespace winrt::TerminalApp::implementation
             // intentionally OVERRIDES the session's saved per-session mode (a deliberate carve-out
             // from the old "a restored session keeps its mode"); it stays changeable afterward via
             // the Auto Testing toggle. Re-arming zeroes the per-run send counter so a reopened plan
-            // isn't instantly capped by a lingering in-memory autoSendsThisRun (pendingConfirmPromptId
-            // was already cleared above). Codex restores keep their own Off (see _LaunchCodexSession).
+            // isn't instantly capped by a lingering in-memory autoSendsThisRun. Codex restores keep
+            // their own Off (see _LaunchCodexSession).
             info.autorunner.mode = _appSettings.defaultAutorunnerMode;
             info.autorunner.autoSendsThisRun = 0;
             // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): the re-stamp above voids any hold a
@@ -1386,7 +1385,6 @@ namespace winrt::TerminalApp::implementation
                     // stays held across the crash and can't auto-answer it), drop it when the state
                     // normalized to Idle (a stale flag from an interrupted Running turn must not hold).
                     s.lastMessageWasQuestion = ::Agentmaster::RestoredQuestionFlag(s.state, s.lastMessageWasQuestion);
-                    s.pendingConfirmPromptId.clear();
                     _sessionRegistry->Upsert(std::move(s));
                 }
                 eng.restored = true; // publish ONLY after the registry is fully populated (still under the lock)
@@ -1565,7 +1563,6 @@ namespace winrt::TerminalApp::implementation
             }
             _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
                 s.live = false;
-                s.pendingConfirmPromptId.clear();
             });
             _sessionRegistry->SetInjector(id, nullptr);
             _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
@@ -1739,7 +1736,6 @@ namespace winrt::TerminalApp::implementation
             }
             _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
                 s.live = false;
-                s.pendingConfirmPromptId.clear();
             });
             _sessionRegistry->SetInjector(id, nullptr);
             _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
@@ -1949,7 +1945,6 @@ namespace winrt::TerminalApp::implementation
         {
             _sessionRegistry->Update(sessionId, [](::Agentmaster::SessionInfo& s) {
                 s.live = false;
-                s.pendingConfirmPromptId.clear();
             });
             _sessionRegistry->SetInjector(sessionId, nullptr);
             _sessionRegistry->SetPromptSubmitter(sessionId, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
@@ -2012,7 +2007,6 @@ namespace winrt::TerminalApp::implementation
             }
             _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
                 s.live = false;
-                s.pendingConfirmPromptId.clear();
             });
             _sessionRegistry->SetInjector(id, nullptr);
             _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
@@ -2342,7 +2336,6 @@ namespace winrt::TerminalApp::implementation
         info.external = false; // we own this tab's ConPTY
         info.live = true;
         info.autorunner.mode = ::Agentmaster::AutorunnerMode::Off; // no driving in this phase
-        info.pendingConfirmPromptId.clear();
         if (!restored)
         {
             // Agentmaster (new-session sort placement — the _LaunchClaudeSession twin): a NEW Codex (a fresh
@@ -2867,7 +2860,6 @@ namespace winrt::TerminalApp::implementation
             s.midTurnAtRestore = ::Agentmaster::RestoredMidTurnFlag(s.state, s.midTurnAtRestore);
             s.state = ::Agentmaster::RestoredSessionState(s.state);
             s.lastMessageWasQuestion = ::Agentmaster::RestoredQuestionFlag(s.state, s.lastMessageWasQuestion);
-            s.pendingConfirmPromptId.clear();
             s.pendingInput.clear(); // the old screen (and any unsent draft on it) is gone — the user
             s.pendingInputUnixMs = 0; // watched this tab restart, so an eager clear beats a 2-tick
             s.pendingPasteRefs.clear(); // revalidation flash of dots for a box that no longer exists
@@ -3273,7 +3265,6 @@ namespace winrt::TerminalApp::implementation
             s.midTurnAtRestore = ::Agentmaster::RestoredMidTurnFlag(s.state, s.midTurnAtRestore);
             s.state = ::Agentmaster::RestoredSessionState(s.state);
             s.lastMessageWasQuestion = ::Agentmaster::RestoredQuestionFlag(s.state, s.lastMessageWasQuestion);
-            s.pendingConfirmPromptId.clear();
             s.presenceStatus.clear();
             s.presenceWaitingFor.clear();
             if (reforked)

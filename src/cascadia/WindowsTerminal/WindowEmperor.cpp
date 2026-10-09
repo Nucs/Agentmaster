@@ -684,11 +684,11 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     // Agentmaster (Enable Debug Mode; ProfileBootstrap.h): with the profile resolved — and BEFORE engine
     // init or any UI reads IsDebugPackage() — apply the persisted "Enable Debug Mode" setting (the
     // Settings cog's About toggle). It is the durable twin of the --debug / AGENTMASTER_DEBUG launch flag:
-    // when settings.json turns it on, this forces the same escape hatch that unlocks the DEV-only Auto
-    // Testing / Tests Autorunner surfaces in a Release install. A no-op when off / on first launch (no
+    // when settings.json turns it on, this forces the escape hatch that DEBUG-ONLY features read (none
+    // today: the Prompt Queue Runner needed it until 2026-10-09). A no-op when off / on first launch (no
     // settings.json yet). The latch is MODULE-local (one copy per linked binary — an inline header
     // function's static never crosses the DLL boundary), so this call alone once enabled debug in the EXE
-    // ONLY while TerminalApp.dll — the Engine scheduler gate + every Auto Testing UI gate — still read
+    // ONLY while TerminalApp.dll — then the home of the scheduler gate and of every UI gate — still read
     // false ("did not get enabled across the entire app"): the apply therefore ALSO exports
     // AGENTMASTER_DEBUG=1 into the process env block (the AGENTMASTER_PROFILE propagation idiom), which
     // every other module's IsDebugPackage() first-use scan reads; Engine.cpp re-applies as a belt. The
@@ -1267,8 +1267,8 @@ void WindowEmperor::_dispatchCommandline(winrt::TerminalApp::CommandlineArgs arg
 
 void WindowEmperor::_dispatchCommandlineCommon(winrt::array_view<const winrt::hstring> args, wil::zwstring_view currentDirectory, wil::zwstring_view envString, uint32_t showWindowCommand)
 {
-    // Agentmaster (Auto Testing debug escape hatch; ProfileBootstrap.h IsDebugPackage): `--debug`
-    // (or `-debug`) unlocks the DEV-only Tests Autorunner surfaces in a RELEASE build. It is NOT a
+    // Agentmaster (the Debug Mode escape hatch; ProfileBootstrap.h IsDebugPackage): `--debug`
+    // (or `-debug`) turns on Debug Mode, the gate for debug-only features, in any build. It is NOT a
     // Windows Terminal commandline option, so strip it here — the ONE choke every dispatch path funnels
     // through (fresh launch, the reopen loop, AND the single-instance WM_COPYDATA handoff) — before the
     // args reach the WT parser, which would otherwise reject the unknown option. The enablement itself

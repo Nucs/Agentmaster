@@ -2341,10 +2341,8 @@ namespace winrt::TerminalApp::implementation
         {
             why = L"answer needed";
         }
-        else if (!s.pendingConfirmPromptId.empty())
-        {
-            why = L"awaiting your confirm";
-        }
+        // (A third reason, "awaiting your confirm", described a SemiAuto session whose next prompt was
+        // armed. It went away with that mode on 2026-10-09.)
         if (!why.empty())
         {
             stateText += L"  \x00B7  " + why;
@@ -7804,7 +7802,6 @@ namespace winrt::TerminalApp::implementation
                 _sessionRegistry->SetEnterPresser(superseded, nullptr); // DELIVERY_PLAN.md R8
                 _sessionRegistry->Update(superseded, [](::Agentmaster::SessionInfo& s) {
                     s.live = false;
-                    s.pendingConfirmPromptId.clear();
                 });
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + superseded + L" -> " + id + L" (same tab, new conversation id)\n");
                 // Nav audit: a TAB SWAPPED its bound session id (claude switched conversation in place
@@ -8127,7 +8124,6 @@ namespace winrt::TerminalApp::implementation
             }
             _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
                 s.live = false;
-                s.pendingConfirmPromptId.clear();
                 // PENDING_INPUT.md §5: the draft is deliberately KEPT. The dead claude's input box is
                 // gone, so this record is the ONLY copy of an unsent message — archiving must not be
                 // the erasure ("persist and load on startup the message"; Rule #16's never-lose

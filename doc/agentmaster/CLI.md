@@ -130,13 +130,13 @@ a message box.
   a live claude managed by the *other* instance also matches by id/prefix — see below); ambiguity prints
   the candidates and exits non-zero. (`w<N>:t<M>` tab-refs and `--pid <n>` are designed but not yet parsed.)
 - **`--self`** introspects the tab the agent is *calling from* (reads its own `WT_SESSION` and
-  correlates) — "what's my queue, is the Tests Autorunner driving me, what window am I in".
+  correlates) — "what's my queue, is the Prompt Queue Runner driving me, what window am I in".
 - **`--profile` / `--instance`** retarget another install's state (release vs dev, or an explicit
   folder); default is the active profile resolved exactly as the engine resolves it.
 
 ### The `show` payload (the "understand the tab fully" contract)
 
-A faithful render of the per-tab overlay + Auto Testing + Triage card combined:
+A faithful render of the per-tab overlay + Prompt Queue + Triage card combined:
 
 - **Identity / placement** — id, title, workingDir (+ live PEB cwd), branch, model, effort,
   permissionMode; window (id + index), tab index, focused?, color, **link state** (linked /
@@ -158,7 +158,7 @@ A faithful render of the per-tab overlay + Auto Testing + Triage card combined:
   `--minimal` (each turn's message and final reply) through the default steps view (every tool call
   on one line) to `--max` (verbatim Bash, first output lines, written files, a stats line per turn).
   It is the baseline that any future CLI or in-app turns view is compared against.
-- **Auto Testing** — the full queue, each prompt `{label, text, status, origin (flight/typed), gate,
+- **Prompt Queue** — the full queue, each prompt `{label, text, status, origin (flight/typed), gate,
   sentAt}`, plus the sent history and the autorunner backstops
   (maxAutoSends / autoSendsThisRun / stopOnError / pauseOnHumanInput).
 
@@ -421,9 +421,10 @@ on both installs. Each item says how it is known: **measured** (run on the live 
   only). Each saved session costs a search of every Claude project folder for its transcript
   (`ResolveClaudeTranscriptPath`) and a 128 KiB tail read. One `sessions --json` call took 38 s
   instead of 0.5 s and three repeats did not; the cause is unknown. The CLI has no timeout.
-- **Old names in the human view.** `show` heads the queue `FLIGHT PLAN` (measured; the feature is
-  Auto Testing, and the JSON key is `autoTesting`) and the tail `CONVERSATION (last N turns)`
-  (read; N counts text blocks).
+- **Old names in the human view.** `show` heads the queue `FLIGHT PLAN` (measured; the app calls the
+  pane Prompt Queue since 2026-10-09 and called it Auto Testing before, and the JSON key is
+  `autoTesting`) and the tail `CONVERSATION (last N turns)` (read; N counts text blocks). The CLI also
+  prints the mode as `Off` / `Full`, the stored words; the app shows Paused / Auto.
 - **Two comments in the source are wrong.** (read) The precedence comment above the profile
   block in `agentcli.cpp` `wmain` puts the inherited variable before the package identity; the
   code under it, and §7, do the reverse for a packaged build. The comment in
@@ -432,7 +433,7 @@ on both installs. Each item says how it is known: **measured** (run on the live 
 - **No test covers `agentcli.cpp`.** (read) The m5 harness covers the engine units that it
   links. Its own code (argument parsing, ref resolution, `DeriveState`, the JSON builders) has
   no test.
-- **The Tests Autorunner is visible, not drivable.** The CLI prints each session's mode and
+- **The Prompt Queue Runner is visible, not drivable.** The CLI prints each session's mode and
   queue counts and, in `show`, the limits and every queue row. It has no verb that queues or
   sends a prompt, sets a mode or pauses (§9, P3), and the app has no command channel that such a
   verb could use: the app loads `sessions.json` once at its start and writes it again on every
@@ -441,9 +442,10 @@ on both installs. Each item says how it is known: **measured** (run on the live 
     `Persistence.cpp` neither writes nor reads the counter, and the CLI reads the saved file.
   - `queueCounts` has no failed or skipped count. (measured) The release profile held 49
     `Failed` rows; only `show` lists them, one session at a time.
-  - It prints no scheduler state (read): whether the scheduler runs in this install (the
-    dev-or-debug gate; `debugMode` in `settings.json`), Pause all and the interrupt hold (both
-    in memory only), and why a prompt waits (`[advance-skip]` in `autorunner.log`).
+  - It prints no scheduler state (read): Pause all and the interrupt hold (both in memory only),
+    and why a prompt waits (`[advance-skip]` in `autorunner.log`). (Whether the scheduler runs in
+    an install is no longer a question: since 2026-10-09 it runs in every build. Before, that
+    depended on the dev-or-debug gate, `debugMode` in `settings.json`.)
   - Saved and not printed (read): a row's `guardPattern`, `delayMs`, `dependsOn` and `attempts`,
     the session's `lastMessageWasQuestion`, and `templates.json`.
 - **Engine code that the CLI links and no verb uses.** (read) `SessionSearch.cpp` (the Sessions

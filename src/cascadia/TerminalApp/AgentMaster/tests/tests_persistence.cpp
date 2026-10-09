@@ -268,7 +268,19 @@ void TestPersistence()
 
     // enum round-trips.
     CHECK(SessionStateFromString(ToString(SessionState::NeedsApproval)) == SessionState::NeedsApproval, "state enum round-trip");
-    CHECK(AutorunnerModeFromString(ToString(AutorunnerMode::SemiAuto)) == AutorunnerMode::SemiAuto, "mode enum round-trip");
+    CHECK(AutorunnerModeFromString(ToString(AutorunnerMode::Full)) == AutorunnerMode::Full && AutorunnerModeFromString(ToString(AutorunnerMode::Off)) == AutorunnerMode::Off, "mode enum round-trip (both modes)");
+    // The stored words are the machine vocabulary and must never change: every sessions.json / settings.json
+    // on disk carries them (the UI's "Paused" / "Auto" wording is AutorunnerModeDisplayName, a separate thing).
+    CHECK(ToString(AutorunnerMode::Full) == L"Full" && ToString(AutorunnerMode::Off) == L"Off", "mode enum: the persisted words stay Off / Full");
+    // The SemiAuto mode was removed (2026-10-09). A value an older build stored must load as Off (paused) —
+    // never as Full: a session whose user asked to confirm each send must not start sending by itself.
+    CHECK(AutorunnerModeFromString(L"SemiAuto") == AutorunnerMode::Off, "mode enum: a stored SemiAuto (removed mode) loads as Off, the safe direction");
+    CHECK(AutorunnerModeFromString(L"anything else") == AutorunnerMode::Off && AutorunnerModeFromString(L"") == AutorunnerMode::Off, "mode enum: an unknown or empty word loads as Off");
+    {
+        // ...end to end through the two places a mode is stored: the cog's default and a session record.
+        const auto legacySettings = DeserializeAppSettings(L"{\"settings\":{\"defaultAutorunnerMode\":\"SemiAuto\"}}");
+        CHECK(legacySettings.defaultAutorunnerMode == AutorunnerMode::Off, "settings: a stored SemiAuto default loads as Off");
+    }
     CHECK(PromptStatusFromString(ToString(PromptStatus::Held)) == PromptStatus::Held, "status enum round-trip");
     CHECK(PromptGateFromString(ToString(PromptGate::Manual)) == PromptGate::Manual, "gate enum round-trip");
 
@@ -339,6 +351,22 @@ void TestPersistence()
             CHECK(r.queue.size() == 2 && r.queue[1].gate == PromptGate::Manual && r.queue[1].guardPattern == L"answers-a-question:ok", "prompt gate+guard preserved");
             CHECK(r.autorunner.mode == AutorunnerMode::Full && r.autorunner.throttleMs == 750 && !r.autorunner.stopOnError && r.autorunner.maxAutoSends == 7, "autorunner preserved");
             CHECK(!r.autorunner.approval.pauseForHuman && r.autorunner.approval.autoApproveTools.size() == 2, "approval policy preserved");
+        }
+
+        // A sessions.json written by a build that still had the SemiAuto mode: the same record with its
+        // stored mode word replaced. It must load as Off (paused) and keep everything else — the queue
+        // above all (the removed mode must not cost a session its queued prompts).
+        {
+            std::wstring legacy = text;
+            const auto modeAt = legacy.find(L"\"Full\"");
+            CHECK(modeAt != std::wstring::npos, "legacy SemiAuto: the serialized record carries its mode word");
+            if (modeAt != std::wstring::npos)
+            {
+                legacy.replace(modeAt, 6, L"\"SemiAuto\"");
+                const auto old = DeserializeSessions(legacy);
+                CHECK(old.size() == 1 && old[0].autorunner.mode == AutorunnerMode::Off, "legacy SemiAuto: a stored SemiAuto session mode loads as Off");
+                CHECK(old.size() == 1 && old[0].queue.size() == 2 && old[0].autorunner.maxAutoSends == 7, "legacy SemiAuto: the queue and the other autorunner fields are kept");
+            }
         }
     }
 

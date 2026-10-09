@@ -5,7 +5,7 @@
 > ALTERNATE screen buffer. A 2026-09-18 guard (`132e19b5d`) answered "no box" for any alt-buffer screen
 > without reading it. Release 0.6.8.12 was the first release build to carry that guard, and in it the
 > monitor went dark for every Claude tab: the mail button (§8d) never enabled, Copy Current Prompt came
-> back empty, the §10 re-fill gave up, and the Tests Autorunner held every advance on "input box not
+> back empty, the §10 re-fill gave up, and the Prompt Queue Runner held every advance on "input box not
 > visible". `ControlCore::ReadPendingInputDraft` now reads the active buffer, main or alt, and tells a
 > child full-screen app (the Ctrl+G editor) apart by content. Real-capture fixtures in
 > `TestPendingInput` cases 28–29 pin both sides. Rides the next deploy.
@@ -37,7 +37,7 @@
 > `restoreDraftOnResume` (default ON) — so an unsent message survives a restart as a real box draft, one
 > Enter away, instead of a display-only memory. **The CONTINUATION CHECK + the conditional pull button
 > (§8b) and the durable per-session draft CACHE (§8c, 2026-07-27) complete the compose-box half:** the
-> Manager's Auto-Testing box now compares what you composed here against the session's live draft
+> Manager's Prompt Queue box now compares what you composed here against the session's live draft
 > (`EvaluateDraftPull` — fill an empty box, EXTEND a strict prefix, never overwrite a box that is ahead)
 > and offers a **pull button** for a genuinely different draft only when taking it wouldn't destroy your
 > text (contained in it, or >=80% similar over 50 chars); and every draft change is mirrored into the
@@ -625,9 +625,9 @@ happen?" is answerable straight from hooks.log rather than being a silent dead c
 paste-cache off-thread through the shared `CopyPromptTextExpandingPastes`, all-or-refuse — a placeholder
 that can't be proven is copied **as rendered**, never guessed. (v1 copied every placeholder as rendered.)
 
-### 8a. Pull it into the Auto-Testing compose box (built)
+### 8a. Pull it into the Prompt Queue compose box (built)
 
-The Manager's **Auto Testing** compose box (the textarea you queue the next prompt in) takes the same
+The Manager's **Prompt Queue** compose box (the textarea you queue the next prompt in) takes the same
 draft **on click**. The case it serves: you typed a prompt into a Claude tab's input box, never sent it
 (its "3 dots" are pulsing), and came to the Manager to **queue** it instead — retyping it would be absurd.
 
@@ -828,7 +828,7 @@ the `agentmaster` CLI — which is where they should be wired next.
 
 The third consumer of the same draft, and the one that needs no Manager visit at all: the per-tab
 badge's **mail** button (`AgentTabOverlay::_QueueCurrentPrompt`, row 1 between the folder and copy
-buttons — TAB_OVERLAY.md §13j) **queues the unsent draft into this session's own Auto-Testing queue**
+buttons — TAB_OVERLAY.md §13j) **queues the unsent draft into this session's own prompt queue**
 in one click, and **clears it out of the input box** — the draft is *moved* to the queue. §8a answers
 "I want to queue this, but in the Manager"; this answers "I want to queue this, from right here."
 
@@ -841,10 +841,10 @@ normally answers here: the overlay sits inside the session's own pane, so its wi
 (`Pending` / `OnTurnComplete`, the 56-char flattened label) onto `s.queue`, byte-for-byte what
 `AgentManagerContent::_OnAddPrompt` builds, so the scheduler cannot tell them apart.
 
-**Shown only where the queue means something:** `Profiles::IsDevOrDebugPackage()` (the Tests Autorunner
-subsystem is dev-or-debug; in a release the `Scheduler` never starts, so the button would append prompts
-nothing would ever send) **and Claude only** (no `❯` box on Codex ⇒ never a draft), with a kind backstop
-in the handler.
+**Shown for Claude only** (no `❯` box on Codex ⇒ never a draft), with a kind backstop in the handler —
+**in every build since 2026-10-09**. Before, it was also gated on `Profiles::IsDevOrDebugPackage()`:
+the Prompt Queue Runner was a dev-or-debug feature, and in an ordinary release the button would have
+appended prompts that nothing would ever send (DELIVERY.md §17.1).
 
 **Enabled only while a draft exists** (`AgentTabOverlay::_RefreshQueueButtonEnabled`, from `_Refresh`): the
 button is greyed **disabled** on an empty box and clickable exactly while the session holds an unsent draft,
@@ -908,13 +908,13 @@ live|remembered chars=N`.
 > nothing backs is now kept as written (a quote), claude's bare `[Pasted text #N]` is recognized, and the
 > span-based substitution no longer refuses a placeholder that shares its line with typed words.
 
-**The report.** In the Manager's Auto Testing, right-click → **Copy** on a queued prompt that held a large
+**The report.** In the Manager's Prompt Queue, right-click → **Copy** on a queued prompt that held a large
 paste put the literal `[Pasted text #1 +31 lines]` on the clipboard — a label that means nothing outside
 the one input box that rendered it.
 
 **Why a queued prompt holds a label at all.** Claude Code shows a large paste in its box as a one-line
 placeholder (§2b), and both draft consumers queue the box's text *as rendered*: the overlay's MAIL button
-(§8d) verbatim, and the compose box (§8a) through whatever was pulled into it. So the Auto-Testing row
+(§8d) verbatim, and the compose box (§8a) through whatever was pulled into it. So the Prompt Queue row
 stores `[Pasted text #N +M lines]`, not the paste — measured in the release fleet: five mail-queued rows
 consisting of nothing but a placeholder (`[Pasted text #1 +11 lines]`, `[Pasted text #2 +6 lines]`, …).
 
@@ -924,8 +924,8 @@ surfaces, so they can never disagree about what a prompt holds:
 
 | surface | text | expanded? |
 |---|---|---|
-| Auto Testing row menu → **Copy** (`_MakePromptMenu`), row origin **Autorun** (we queued it) | `QueuedPrompt::text` | yes |
-| Auto Testing row menu → **Copy**, row origin **Typed** | `QueuedPrompt::text` | **no — verbatim** |
+| Prompt Queue row menu → **Copy** (`_MakePromptMenu`), row origin **Autorun** (we queued it) | `QueuedPrompt::text` | yes |
+| Prompt Queue row menu → **Copy**, row origin **Typed** | `QueuedPrompt::text` | **no — verbatim** |
 | every **Copy Current Prompt** (overlay / Manager `Copy ▸` / WT tab `Copy ▸`, `CopySessionField` code 7) | the §8 live-else-remembered draft | yes |
 
 - **No placeholder** (the common case): one cheap pure `FindPasteMarkers` scan, then the historical
@@ -954,7 +954,7 @@ surfaces, so they can never disagree about what a prompt holds:
 **The decision the old follow-up left open — may a copy differ from the screen?** Yes. The placeholder is
 Claude's DISPLAY compression of one input box; outside it the label is inert — pasting it back into claude
 does not re-bind the content, it submits the literal label (the §9/§10 rule). So a copy yields what the
-prompt MEANS. Nothing on screen changes: the Auto-Testing row and the tab still show the label.
+prompt MEANS. Nothing on screen changes: the Prompt Queue row and the tab still show the label.
 
 **Limits (known, accepted for a copy).** The collapsed tier is only as strong as "exactly one cached paste
 has that many lines": a placeholder merely QUOTED alone on its own line whose count happens to match a
@@ -963,7 +963,7 @@ label with typed words on its own line refuses (the resolver replaces whole line
 text) — which is also what keeps a handover brief that quotes a placeholder mid-sentence intact; every
 real draft observed puts the typed text on the NEXT line, which expands.
 
-**Observability.** `[nav] copy auto-testing-prompt <sid8> (auto|typed)` (the Auto-Testing Copy intent; Copy
+**Observability.** `[nav] copy auto-testing-prompt <sid8> (auto|typed)` (the Prompt Queue Copy intent; Copy
 Current Prompt keeps its `[nav] copy current-prompt <sid8>`), then, only when a placeholder was present,
 one `[pending] <sid8> copy <what>: …` mechanism line naming the outcome — `expanded N paste
 placeholder(s) from the paste-cache chars=A->B` · `paste placeholder(s) NOT expanded (no proven paste-cache
@@ -971,7 +971,7 @@ match) - copied as rendered` · `paste expansion threw (see the [exc] line) - co
 `superseded by a newer copy …` · `the window closed before the paste expansion finished (nothing copied)`.
 
 **Not fixed here — the SEND side of the same label** (see Follow-ups): a queued placeholder is also what
-the Tests Autorunner DELIVERS. In the release log all five placeholder-only mail-queued prompts were
+the Prompt Queue Runner DELIVERS. In the release log all five placeholder-only mail-queued prompts were
 delivered as the bare 25–26-char label (`[delivered] … verified=exact`), with two outcomes, both wrong:
 - **four** — claude expanded the label through its still-bound paste (the MOVE-clear's discard leaves the
   binding), so the `[ups]` echo carried the full text (437 / 650 / 1073 / 1622 chars) and was recorded as a
@@ -1042,10 +1042,10 @@ re-typing `[Pasted text #1 +50 lines]` would put that label in the box as litera
 the content behind it. In that case the box is left empty and the draft kept in memory, loudly logged —
 worse than a perfect restore, much better than a corrupted one.
 
-**One seam, four callers.** The swap lives behind `SessionRegistry::SubmitPrompt`, and **every** path
-that sends a queued prompt goes through it, so they can never disagree: the autorunner's auto-send
-(`Scheduler::_process`), its SemiAuto `Confirm`, the Manager's **Send-now**, and the /handover paste
-pump. The hosting window registers a `PromptSubmitter` next to its injector (only that window can read
+**One seam, three callers.** The swap lives behind `SessionRegistry::SubmitPrompt`, and **every** path
+that sends a queued prompt goes through it, so they can never disagree: the runner's auto-send
+(`Scheduler::_process`), the Manager's **Send-now**, and the /handover paste pump. (A fourth caller,
+the SemiAuto `Confirm`, went away with that mode on 2026-10-09.) The hosting window registers a `PromptSubmitter` next to its injector (only that window can read
 the control's box or block its keyboard); with none bound `SubmitPrompt` *is* the historical
 `Inject(BuildPromptSubmission(...))`, so a host that never registers one behaves exactly as before.
 `_AcceptPromptSubmission` returns "accepted" synchronously — the swap is asynchronous, and an accepted
@@ -1058,7 +1058,7 @@ mid-swap the box is deliberately empty, and letting the clear debounce see that 
 draft the swap is carrying (and drop the dots for a second). The swap re-records the draft when it
 finishes.
 
-**Off-switches.** `AppSettings::preserveDraftOnSend` (cog → **Tests Autorunner** → *"Preserve my unsent
+**Off-switches.** `AppSettings::preserveDraftOnSend` (cog → **Prompt Queue Runner** → *"Preserve my unsent
 draft when a prompt is sent"*), **default ON**, and beneath it `AppSettings::draftSwapUseCtrlS`
 (*"Use Ctrl+S to stash my draft aside while it sends"*), **also default ON**, which picks the stash rung
 over the kill-ring fallback. Off restores the historical merge behavior verbatim. A
@@ -1087,7 +1087,7 @@ re-fork; every path funnels through `_LaunchClaudeSession` — Agentmaster types
 back into the fresh claude's box itself, through the machinery /handover-standby already proved:
 **`Inject(BuildPromptFill(text))`** (the bracketed paste with **NO submit CR** — nothing runs until
 the user presses Enter) followed by a **read-back verify** (`ReadPendingInputDraft`; no echo ever
-confirms a fill). Gated by the cog's **`restoreDraftOnResume`** (TESTS AUTORUNNER, beside the §9
+confirms a fill). Gated by the cog's **`restoreDraftOnResume`** (PROMPT QUEUE RUNNER, beside the §9
 draft-swap toggles; **default ON** — OFF restores the display-only memory verbatim).
 
 **The pipeline** (`TerminalPage.AgentObserver.cpp`):
@@ -1200,8 +1200,9 @@ the copy lands keeps the fork's box yours (pre-fill check, in-delivery re-check,
 check); a prompt sent from the fork hands the lane off.
 
 **Setting.** `AppSettings::carryDraftOnFork` (default ON), cog **SESSIONS ▸ "Copy my unsent prompt into a
-forked session"** — deliberately not on the TESTS AUTORUNNER tab beside §10's toggle: that tab is
-dev-or-debug only, and forks are a release feature.
+forked session"** — deliberately not on the PROMPT QUEUE RUNNER tab beside §10's toggle: when the
+switch was placed, that tab was dev-or-debug only, and forks are a release feature. The tab is in
+every build since 2026-10-09; the switch stays on SESSIONS, because a fork is a session action.
 
 **Known limits.** Inherited from the detector (§2): a SOFT-wrapped line reads with a `\n` where the box
 wrapped it (Ink wraps the input itself, so the buffer can't tell a wrap from a newline) — the fork gets a
@@ -1239,16 +1240,16 @@ delivery + pump are WinRT (verified live on the next deploy).
 - **The out-of-band probe** (`tests/pending_probe.cpp` + `tests/_run-pending-probe.bat`): the
   AttachConsole ground-truth oracle used for the live verification + the fleet capture sweeps — run it
   against any live claude pid to see exactly what the shipped detector would extract, without the app.
-- **Tests Autorunner tie-in**: largely **superseded by §9** — a send no longer eats a draft, so the
+- **Prompt Queue Runner tie-in**: largely **superseded by §9** — a send no longer eats a draft, so the
   original motivation is gone. What remains optional is the *politeness* half: `pauseOnHumanInput` could
   still consult "has a pending draft" to **defer** an auto-send while the user is visibly mid-compose,
   rather than swapping around them. (It would also finally give that dead toggle a feeder — its
   `lastHumanInputUnixMs` gate has none.)
-- ~~**Expand pastes on copy**~~ — **built as §8e** (`CopyPromptTextExpandingPastes`: the Auto-Testing row
+- ~~**Expand pastes on copy**~~ — **built as §8e** (`CopyPromptTextExpandingPastes`: the Prompt Queue row
   Copy + every Copy Current Prompt; off-thread, all-or-refuse, as rendered on refusal).
 - **Expand pastes at QUEUE time — the SEND side of §8e.** The overlay MAIL button (§8d) and the compose
   envelope (§8a → `_OnAddPrompt`) still store the RENDERED draft, so a queued `[Pasted text #N +M lines]`
-  is what the Tests Autorunner delivers — measured: 4/5 such sends ended `Failed` + the autorunner PAUSED
+  is what the Prompt Queue Runner delivers — measured: 4/5 such sends ended `Failed` + the autorunner PAUSED
   (claude expanded the label via a still-bound paste, so the echo never matched), and 1/5 reached the model
   as the literal label (content lost) — §8e *Not fixed here*. The shape: queue as today (the click, the
   label and the MOVE-clear ordering stay synchronous), then expand off-thread with the same
@@ -1283,7 +1284,7 @@ effects:
 - **The mail button (§8d)** stayed disabled, and **Copy Current Prompt (§8)** found nothing.
 - **The §10 restore re-fill** logged `gave up 10 min after start (box never readable)`. The §11 fork
   carry was the only reader still working (see below).
-- **The Tests Autorunner delivered nothing.** Every advance logged
+- **The Prompt Queue Runner delivered nothing.** Every advance logged
   `[advance-skip] <sid> (input box not visible)`. The last `[delivered]` line predates the deploy.
 
 ### Why

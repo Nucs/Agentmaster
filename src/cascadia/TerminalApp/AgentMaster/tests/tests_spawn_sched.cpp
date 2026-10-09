@@ -1174,12 +1174,17 @@ void TestProfileBootstrap()
     // AGENTMASTER_DEBUG=1, the same cross-module channel AGENTMASTER_PROFILE uses — which every
     // module's IsDebugPackage() first-use scan reads. settings.json + the ambient env var are
     // saved/restored (the AGENTMASTER_PROFILE idiom above).
+    // The propagation is still tested although NO feature reads the gate since 2026-10-09 (the
+    // Tests Autorunner — now the Prompt Queue Runner — left it and runs in every build): Debug Mode
+    // is kept for later debug-only features, and the one thing such a feature needs from it is
+    // exactly this — the same verdict in every module.
     //
     // ⚠ ORDERING: the ON-case apply LATCHES this module's DebugForced() for the REST OF THE
     // PROCESS (one-way by design — there is no un-force), so this block must stay the LAST in
     // this function, and no later check in the harness RUN may assume IsDevOrDebugPackage() is
-    // false (nothing does today: the only engine consumer is SharedEngine()'s wiring, which the
-    // harness never calls — tests_persistence.cpp works on local Engine instances for that reason).
+    // false (nothing does today: no engine code reads the gate any more — SharedEngine() only
+    // re-applies the persisted toggle, and the harness never calls it; tests_persistence.cpp works
+    // on local Engine instances for that reason).
     {
         namespace fs = std::filesystem;
         const std::wstring dir = P::ResolveProfileDir();
@@ -1225,7 +1230,7 @@ void TestProfileBootstrap()
         CHECK(P::detail::DebugForced().load(), "debug apply: ON setting latches this module");
         CHECK(envIsOne(), "debug apply: ON setting exports AGENTMASTER_DEBUG=1 (cross-module channel)");
         CHECK(P::IsDebugPackage(), "debug apply: gate reads true via the live latch (pre-cache callers heal on next call)");
-        CHECK(P::IsDevOrDebugPackage(), "debug apply: the Auto Testing feature-gate predicate is unlocked");
+        CHECK(P::IsDevOrDebugPackage(), "debug apply: the debug-only feature gate (IsDevOrDebugPackage) is unlocked");
 
         // Restore ambient state (the latch itself is one-way — see the block comment above).
         ::SetEnvironmentVariableW(L"AGENTMASTER_DEBUG", hadEnv ? prevEnv.c_str() : nullptr);
@@ -1354,6 +1359,8 @@ void TestScheduler()
         SessionInfo s;
         s.id = L"a";
         s.state = st;
+        s.live = true; // an OPEN session whose claude has STARTED: DecideAdvance holds for anything else
+        s.started = true; // (the DORMANT-TAB gate, DELIVERY.md section 17 - its own checks are below)
         s.autorunner.mode = m;
         QueuedPrompt p;
         p.id = L"p1";
@@ -1408,13 +1415,49 @@ void TestScheduler()
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "manual gate -> none");
     }
     {
-        auto s = mk(AutorunnerMode::SemiAuto, SessionState::WaitingForInput);
-        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::AwaitConfirm, "semi-auto -> await confirm");
-    }
-    {
         auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput);
         s.queue[0].status = PromptStatus::Sent;
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::PlanDone, "no pending -> plan done");
+    }
+
+    // --- The DORMANT-TAB gate (DELIVERY.md section 17): the decision itself refuses a session that is
+    //     not open, or whose claude never started - a restored background tab, or a Deactivated
+    //     ("parked") one. The gate used to live only in Scheduler::OnObserved, so a TIMED re-check
+    //     scheduled before a park reached DecideAdvance without it and sent ~40 s later into a
+    //     connection that drops the bytes (dev 2026-10-09 11:04:58: prompt Failed, autorunner paused). ---
+    {
+        auto s = mk(AutorunnerMode::Full, SessionState::Idle);
+        s.started = false; // parked / restored-dormant: live, at rest, Auto, queued work - and no claude
+        const auto p = DecideAdvance(s, now, 0, false);
+        CHECK(p.action == AdvanceAction::None, "dormant tab (not started) -> none, even with a ready state + queued work");
+        CHECK(p.reason.find(L"tab dormant") == 0, "dormant tab: the reason names the dormancy (the [advance-skip] line)");
+        CHECK(p.retryAfterMs == 0, "dormant tab: NOT a timed hold - the tab's start (SetStarted) re-triggers, nothing polls");
+        CHECK(s.queue[0].status == PromptStatus::Pending, "dormant tab: the prompt stays Pending");
+    }
+    {
+        auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput);
+        s.started = false;
+        s.external = true; // adopted: the app tracks no control for it, its claude IS running
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::Send, "adopted (external) session: `started` is meaningless -> still sends");
+    }
+    {
+        auto s = mk(AutorunnerMode::Full, SessionState::Idle);
+        s.live = false; // archived (closed): no tab to type into
+        const auto p = DecideAdvance(s, now, 0, false);
+        CHECK(p.action == AdvanceAction::None && p.reason.find(L"session closed") == 0, "closed session (not live) -> none, reason names it");
+        CHECK(p.retryAfterMs == 0, "closed session: no timed re-check");
+    }
+    {
+        // Order: the mode and the global pause answer first (their reasons are the more useful ones),
+        // and the dormancy answers before the drained-queue PlanDone (no [plan-done] line for a parked tab).
+        auto s = mk(AutorunnerMode::Off, SessionState::Idle);
+        s.started = false;
+        CHECK(DecideAdvance(s, now, 0, false).reason == L"autorunner off", "dormant + paused session: the mode answers first");
+        s.autorunner.mode = AutorunnerMode::Full;
+        CHECK(DecideAdvance(s, now, 0, true).reason == L"global pause", "dormant + global pause: the pause answers first");
+        s.queue[0].status = PromptStatus::Sent;
+        const auto p = DecideAdvance(s, now, 0, false);
+        CHECK(p.action == AdvanceAction::None && p.reason.find(L"tab dormant") == 0, "dormant + drained queue: dormant answers before PlanDone");
     }
     {
         auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput);
@@ -1431,10 +1474,6 @@ void TestScheduler()
         auto s = mk(AutorunnerMode::Full, SessionState::Idle);
         const auto p = DecideAdvance(s, now, 0, false);
         CHECK(p.action == AdvanceAction::Send && p.promptIndex == 0, "full + idle -> send (bootstrap)");
-    }
-    {
-        auto s = mk(AutorunnerMode::SemiAuto, SessionState::Idle);
-        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::AwaitConfirm, "semi-auto + idle -> await confirm");
     }
     {
         auto s = mk(AutorunnerMode::Off, SessionState::Idle);
@@ -1552,14 +1591,6 @@ void TestScheduler()
         auto s = withLead(PromptStatus::Sent, true, now - 500, SessionState::WaitingForInput);
         s.queue[1].status = PromptStatus::Skipped;
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::PlanDone, "drained + recent send -> plan done (not spacing)");
-    }
-    {
-        // SemiAuto arming is spaced like an auto-send (the armed suggestion races status the same
-        // way); the human's Confirm click itself bypasses DecideAdvance and is never spaced.
-        auto s = withLead(PromptStatus::Sent, true, now - 500, SessionState::WaitingForInput);
-        s.autorunner.mode = AutorunnerMode::SemiAuto;
-        const auto p = DecideAdvance(s, now, 0, false);
-        CHECK(p.action == AdvanceAction::None && p.retryAfterMs > 0, "semi-auto within spacing -> timed hold (arming deferred)");
     }
 }
 
@@ -1798,6 +1829,7 @@ void TestDeliveryGate()
     {
         SessionInfo s = MakeSession(L"a", SessionState::WaitingForInput);
         s.live = true;
+        s.started = true; // its claude is running (DecideAdvance holds for a dormant tab — DELIVERY.md §17)
         s.autorunner.mode = AutorunnerMode::Full;
         QueuedPrompt p;
         p.id = L"q1";
@@ -1818,6 +1850,7 @@ void TestDeliveryGate()
         const int64_t T = 1000000;
         SessionInfo s = MakeSession(L"pg", SessionState::WaitingForInput);
         s.live = true;
+        s.started = true; // its claude is running (DecideAdvance holds for a dormant tab — DELIVERY.md §17)
         s.autorunner.mode = AutorunnerMode::Full;
         QueuedPrompt sent; // the just-delivered prompt, still unacknowledged
         sent.id = L"p1";
@@ -2392,7 +2425,6 @@ void TestSchedulerIntegration()
         reg->Update(id, [](SessionInfo& s) {
             s.autorunner.mode = AutorunnerMode::Full;
             s.autorunner.autoSendsThisRun = 0;
-            s.pendingConfirmPromptId.clear();
         });
 
         // Poll up to ~2s for the worker to pick up + inject (deterministic outcome, bounded wait).
@@ -2539,79 +2571,237 @@ void TestSchedulerIntegration()
         sched.Stop();
     }
 
-    // --- The SemiAuto arm must SETTLE, not spin (the 2026-07-25 release freeze). Arming the
-    //     one-click confirm writes pendingConfirmPromptId; SessionRegistry::Update _notify's
-    //     unconditionally, OnObserved re-requests an advance for a SemiAuto session whose prompt is
-    //     (by design) still Pending, and _process re-reached the arm — so the old unconditional
-    //     re-write of the SAME armed id closed a notify -> OnObserved -> RequestAdvance -> re-arm
-    //     cycle at ~3ms/turn, forever (137k+ [await-confirm] lines live; the per-notify observer
-    //     fan-out starved the UI dispatcher into a half-frozen app). With the change-gate the cycle
-    //     ends on its settle pass: the confirm arms once, the prompt stays Pending, and the notify
-    //     stream goes QUIET. This drives the real worker + the Engine.cpp wiring and counts
-    //     notifies — pre-fix this measured hundreds in the settle window. ---
+    // (The "SemiAuto arm must SETTLE, not spin" case lived here. It went away with the SemiAuto mode on
+    // 2026-10-09; the notify-loop lesson it pinned is still covered by the pickup-window case below.)
+
+    // --- DELIVERY.md §17 — a TIMED re-check must NOT send into a PARKED tab. The live defect (dev
+    //     2026-10-09 11:04:58): a settle hold had scheduled its deferred re-advance, the user then
+    //     Deactivated the tab (its claude gone, started=false), and the re-check — which never passes
+    //     through OnObserved's started-gate — sent the queued prompt into the not-started connection
+    //     ~40 s later (lost; the prompt went Failed and the autorunner paused). The gate now lives in
+    //     DecideAdvance, so the re-check answers "tab dormant" and schedules nothing; the queue resumes
+    //     by itself when the tab's claude starts (SetStarted notifies). Real worker, a short window. ---
     {
         auto reg = std::make_shared<SessionRegistry>();
         Scheduler sched{ reg };
-        // These cases pin OTHER gates on short polls; the 40 s STATE SETTLE hold (DELIVERY.md §16) would
-        // hold every one of them (the Upsert below starts the settle clock), so it is disabled here and
-        // exercised on its own in TestStateSettle.
-        sched.SetStateSettleMs(0);
+        sched.SetStateSettleMs(300); // short, but REAL: this hold is what schedules the timed re-check
         sched.Start();
         reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
         const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
-        std::atomic<int> notifies{ 0 };
-        const auto cntTok = reg->AddObserver([&notifies](const SessionInfo&, HookEvent) { notifies.fetch_add(1); });
 
-        const std::wstring id = L"semi-sess";
+        const std::wstring id = L"parked-sess";
+        std::atomic<int> injected{ 0 };
         {
             SessionInfo s;
             s.id = id;
             s.workingDir = L"K:\\tmp";
-            s.state = SessionState::WaitingForInput; // at rest — exactly the state the spin lived in
+            s.state = SessionState::Idle;
             s.live = true;
-            s.started = true;
-            s.autorunner.mode = AutorunnerMode::Off; // the stop-on-error backstop just paused it
+            s.started = true; // running when the prompt is queued
+            s.autorunner.mode = AutorunnerMode::Full;
             s.autorunner.throttleMs = 0;
             QueuedPrompt p;
             p.id = L"p1";
-            p.text = L"the pending prompt";
+            p.text = L"queued before the park";
             p.status = PromptStatus::Pending;
             p.origin = PromptOrigin::Autorun;
             s.queue.push_back(p);
             reg->Upsert(std::move(s));
         }
-        reg->SetInjector(id, [](const std::wstring&) {});
-
-        // The per-tab overlay's cycle click, Off -> Semi (AgentTabOverlay::_CycleAutorunner's write).
-        reg->Update(id, [](SessionInfo& s) {
-            s.autorunner.mode = AutorunnerMode::SemiAuto;
-            s.autorunner.autoSendsThisRun = 0;
-            s.pendingConfirmPromptId.clear();
-        });
-
-        // Wait for the confirm to arm...
-        bool armed = false;
-        for (int i = 0; i < 200 && !armed; ++i)
+        reg->SetInjector(id, [&injected](const std::wstring&) { injected.fetch_add(1); });
+        reg->Update(id, [](SessionInfo&) {}); // an observed change: the advance runs, holds on the settle window, schedules its re-check
+        std::this_thread::sleep_for(std::chrono::milliseconds(80)); // let the worker reach that hold
+        reg->SetStarted(id, false); // PARK: what Deactivate does to the record (it also restarts the settle clock)
+        // Two full windows and more: pre-fix the re-check re-armed on the restarted clock and SENT at the
+        // second expiry (~600 ms after the park).
+        std::this_thread::sleep_for(std::chrono::milliseconds(1100));
         {
             const auto snap = reg->Get(id);
-            armed = snap && snap->pendingConfirmPromptId == L"p1";
-            if (!armed)
+            CHECK(snap && snap->queue[0].status == PromptStatus::Pending, "parked tab: the timed re-check sends NOTHING (the prompt stays Pending)");
+            CHECK(injected.load() == 0, "parked tab: no bytes reach the not-started connection");
+        }
+        // WAKE: entering / activating the tab starts its claude. The queue must resume with no other push.
+        reg->SetStarted(id, true);
+        bool sentAfterWake = false;
+        for (int i = 0; i < 300 && !sentAfterWake; ++i)
+        {
+            const auto snap = reg->Get(id);
+            sentAfterWake = snap && snap->queue[0].status == PromptStatus::Sent;
+            if (!sentAfterWake)
             {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         }
-        CHECK(armed, "semi-auto arm: pendingConfirmPromptId set for the first Pending prompt");
-        // ...then the stream must go QUIET: no further Update/notify while the confirm awaits the
-        // user. Pre-fix the re-arm cycle produced ~2 notifies every ~3ms (hundreds in this window).
-        const int atArm = notifies.load();
-        std::this_thread::sleep_for(std::chrono::milliseconds(600));
-        const int drift = notifies.load() - atArm;
-        CHECK(drift <= 2, "semi-auto arm SETTLES: no notify feedback spin while awaiting the confirm");
+        CHECK(sentAfterWake && injected.load() > 0, "woken tab: the queue resumes by itself one settle window after the start");
+        reg->RemoveObserver(obsTok);
+        sched.Stop();
+    }
+
+    // --- DELIVERY.md §17 — the GLOBAL PAUSE is one process-wide fact, and RESUME re-requests the held
+    //     advances. Pre-fix SetGlobalPause only stored a flag: a plan the pause held answered "global
+    //     pause" with no timed re-check, so on a quiet session nothing asked again after Resume — the
+    //     prompt sat Pending until some unrelated registry change. Every window's button now follows the
+    //     scheduler through an observer (the per-window bool it replaced could show "Pause" while the
+    //     scheduler WAS paused). ---
+    {
+        auto reg = std::make_shared<SessionRegistry>();
+        Scheduler sched{ reg };
+        sched.SetStateSettleMs(0); // this case pins the pause, not the settle hold
+        sched.Start();
+        reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
+        const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
+
+        std::vector<bool> seenA; // window A's "button" — what its observer was told, in order
+        std::atomic<int> seenBCount{ 0 }; // window B's observer (a second window on the same scheduler)
+        const uint64_t tokA = sched.AddGlobalPauseObserver([&seenA](bool paused) { seenA.push_back(paused); });
+        const uint64_t tokB = sched.AddGlobalPauseObserver([&seenBCount](bool) { seenBCount.fetch_add(1); });
+        CHECK(tokA != 0 && tokB != 0 && tokA != tokB, "pause: each observer gets its own non-zero token");
+        CHECK(sched.AddGlobalPauseObserver(GlobalPauseObserver{}) == 0, "pause: an empty observer is ignored (token 0)");
+
+        CHECK(!sched.GlobalPaused(), "pause: a new scheduler starts resumed");
+        sched.SetGlobalPause(false); // already resumed
+        CHECK(seenA.empty() && seenBCount.load() == 0, "pause: setting the state it already has notifies nobody (change-gated)");
+        sched.SetGlobalPause(true);
+        CHECK(sched.GlobalPaused(), "pause: the scheduler reads paused");
+        CHECK(seenA.size() == 1 && seenA[0] && seenBCount.load() == 1, "pause: EVERY window's observer is told once (the button is global)");
+        sched.SetGlobalPause(true); // a second window clicking Pause on an already-paused scheduler
+        CHECK(seenA.size() == 1 && seenBCount.load() == 1, "pause: a repeated Pause is quiet (no double notify)");
+
+        const std::wstring id = L"paused-sess";
+        std::atomic<int> injected{ 0 };
+        {
+            SessionInfo s;
+            s.id = id;
+            s.workingDir = L"K:\\tmp";
+            s.state = SessionState::WaitingForInput;
+            s.live = true;
+            s.started = true;
+            s.autorunner.mode = AutorunnerMode::Full;
+            s.autorunner.throttleMs = 0;
+            QueuedPrompt p;
+            p.id = L"p1";
+            p.text = L"held by the global pause";
+            p.status = PromptStatus::Pending;
+            p.origin = PromptOrigin::Autorun;
+            s.queue.push_back(p);
+            reg->Upsert(std::move(s));
+        }
+        reg->SetInjector(id, [&injected](const std::wstring&) { injected.fetch_add(1); });
+        reg->Update(id, [](SessionInfo&) {}); // an observed change while paused: the advance runs and holds
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
         {
             const auto snap = reg->Get(id);
-            CHECK(snap && snap->queue[0].status == PromptStatus::Pending, "semi-auto: the armed prompt stays Pending (nothing auto-sent)");
+            CHECK(snap && snap->queue[0].status == PromptStatus::Pending && injected.load() == 0, "pause: nothing is sent while paused");
         }
-        reg->RemoveObserver(cntTok);
+        // RESUME on a QUIET session — nothing touches the registry from here on.
+        sched.SetGlobalPause(false);
+        CHECK(seenA.size() == 2 && !seenA[1] && seenBCount.load() == 2, "resume: every observer is told the new state");
+        bool sentAfterResume = false;
+        for (int i = 0; i < 200 && !sentAfterResume; ++i)
+        {
+            const auto snap = reg->Get(id);
+            sentAfterResume = snap && snap->queue[0].status == PromptStatus::Sent;
+            if (!sentAfterResume)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+        CHECK(sentAfterResume && injected.load() > 0, "resume: the held prompt is sent with NO further registry change (the advance is re-requested)");
+
+        // A window that closed must stop being called (Rule #10): remove B, toggle again.
+        sched.RemoveGlobalPauseObserver(tokB);
+        sched.RemoveGlobalPauseObserver(tokB); // a double remove is a quiet no-op
+        sched.RemoveGlobalPauseObserver(0); // ...and so is the "no token" value
+        sched.SetGlobalPause(true);
+        CHECK(seenA.size() == 3 && seenBCount.load() == 2, "pause: a removed observer is no longer called; the others still are");
+        sched.SetGlobalPause(false);
+        sched.RemoveGlobalPauseObserver(tokA);
+        reg->RemoveObserver(obsTok);
+        sched.Stop();
+    }
+
+    // --- DELIVERY.md §17 — a WATCH-ONLY engine: the auto-advance is OFF, the pickup watch is ON.
+    //     The two jobs of the scheduler are separable, and this pins the separation: with
+    //     SetAutoAdvanceEnabled(false) a queue never moves by itself (even on the Stop seam),
+    //     stop-on-error leaves the mode alone, yet a Sent prompt whose turn never starts still gets
+    //     its lone Enter re-pressed.
+    //     History: this was the ORDINARY RELEASE's engine until 2026-10-09 — Engine.cpp first did not
+    //     start the scheduler there at all (so the one send a release made, a /handover briefing
+    //     pasted through SubmitPrompt, had no eaten-Enter rescue), then started it watch-only. Since
+    //     the Prompt Queue Runner left the dev-or-debug gate, Engine.cpp enables both jobs in every
+    //     build and no production engine is watch-only; the switch stays (a kill switch's place), and
+    //     so does this test of it. ---
+    {
+        auto reg = std::make_shared<SessionRegistry>();
+        Scheduler sched{ reg };
+        sched.SetStateSettleMs(0);
+        sched.SetAutoAdvanceEnabled(false); // the watch-only switch (no build of the app sets it since 2026-10-09)
+        CHECK(!sched.AutoAdvanceEnabled(), "watch-only engine: the auto-advance reads disabled");
+        sched.Start();
+        // (No SetAdvanceHandler: a watch-only engine leaves the Stop seam unwired, as the release's did.)
+        const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
+
+        const std::wstring id = L"release-sess";
+        std::atomic<int> pastes{ 0 }; // injections that carry text (a prompt)
+        std::atomic<int> loneEnters{ 0 }; // injections that are exactly one CR (the watchdog's press)
+        {
+            SessionInfo s;
+            s.id = id;
+            s.workingDir = L"K:\\tmp";
+            s.state = SessionState::WaitingForInput;
+            s.live = true;
+            s.started = true;
+            s.autorunner.mode = AutorunnerMode::Full; // the launch seam stamps the cog default in every build
+            s.autorunner.throttleMs = 0;
+            QueuedPrompt p;
+            p.id = L"p1";
+            p.text = L"a queue left by a debug run";
+            p.status = PromptStatus::Pending;
+            p.origin = PromptOrigin::Autorun;
+            s.queue.push_back(p);
+            reg->Upsert(std::move(s));
+        }
+        reg->SetInjector(id, [&pastes, &loneEnters](const std::wstring& text) {
+            (text == L"\r" ? loneEnters : pastes).fetch_add(1);
+        });
+        reg->Update(id, [](SessionInfo&) {}); // an observed change on a ready session with queued work
+        sched.RequestAdvance(id); // ...and an explicit request (what a wired Stop seam would do)
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        {
+            const auto snap = reg->Get(id);
+            CHECK(snap && snap->queue[0].status == PromptStatus::Pending && pastes.load() == 0, "watch-only engine: the queue never moves by itself (no auto-send)");
+        }
+        // stop-on-error is part of the queue-driving half: with it off, an Error leaves the mode alone.
+        reg->Update(id, [](SessionInfo& s) { s.state = SessionState::Error; });
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        {
+            const auto snap = reg->Get(id);
+            CHECK(snap && snap->autorunner.mode == AutorunnerMode::Full, "watch-only engine: stop-on-error does not touch a session's mode");
+        }
+        // The /handover paste pump's shape: mark the prompt Sent, submit it through the ONE seam. The
+        // paste lands (no submitter bound -> the direct inject), the echo never comes — the eaten Enter.
+        reg->Update(id, [](SessionInfo& s) {
+            s.state = SessionState::WaitingForInput;
+            s.queue[0].status = PromptStatus::Sent;
+            s.queue[0].sentAtUnixMs = NowMsTest();
+            s.queue[0].echoed = false;
+            s.queue[0].enterRetries = 0;
+            s.queue[0].injectedAtUnixMs = 0;
+        });
+        CHECK(reg->SubmitPrompt({ id, L"p1", L"a queue left by a debug run", false }), "watch-only engine: the paste itself is delivered");
+        CHECK(pastes.load() == 1, "watch-only engine: exactly one paste reached the session");
+        // The first re-press is due kEnterRetryFirstMs (3 s) after the send; the worker polls each second.
+        bool rescued = false;
+        for (int i = 0; i < 600 && !rescued; ++i)
+        {
+            rescued = loneEnters.load() > 0;
+            if (!rescued)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+        CHECK(rescued, "watch-only engine: the pickup watch still re-presses the lone Enter for an unsubmitted paste");
+        CHECK(pastes.load() == 1, "watch-only engine: the rescue never re-types the prompt (a lone Enter only)");
         reg->RemoveObserver(obsTok);
         sched.Stop();
     }
@@ -2698,8 +2888,8 @@ void TestSchedulerIntegration()
 // sendable status for the settle window, counted from the LATER of its last status change and the
 // prompt's queue time, and every further status change restarts the wait. Covers the pure
 // StateSettleRemainingMs arithmetic (both anchors, disabled, fail-open on a future anchor), where
-// DecideAdvance applies it (reasons, the timed re-check, SemiAuto arming, the gates that answer
-// first, the hand-off to the send spacing), the registry stamping at every seam (creation, keep on a
+// DecideAdvance applies it (reasons, the timed re-check, the gates that answer first — the dormant-tab
+// gate included — and the hand-off to the send spacing), the registry stamping at every seam (creation, keep on a
 // no-op Update / a stale re-upsert, live and started flips, a real vs a stale Stop, ObserveClaude
 // create + revive, queue insertion, rollback keeps the queue stamp), and the REAL scheduler worker
 // end to end on short windows: the hold, a mid-window status change postponing the send, the timed
@@ -2739,6 +2929,8 @@ void TestStateSettle()
         SessionInfo s;
         s.id = L"settle";
         s.state = st;
+        s.live = true; // open + started: the settle hold is only reached for a session DecideAdvance may
+        s.started = true; // type into at all (the dormant-tab gate answers before it — DELIVERY.md §17)
         s.autorunner.mode = mode;
         s.stateChangedAtUnixMs = now - changedAgoMs;
         QueuedPrompt p;
@@ -2771,13 +2963,15 @@ void TestStateSettle()
         CHECK(plan.action == AdvanceAction::Send, "advance: a 0 window (Scheduler::SetStateSettleMs(0)) disables the hold");
     }
     {
-        const auto held = DecideAdvance(mk(AutorunnerMode::SemiAuto, SessionState::WaitingForInput, 1000), now, 0, false);
-        CHECK(held.action == AdvanceAction::None && held.retryAfterMs > 0, "advance: the SemiAuto ARMING waits out the settle too");
-        const auto armed = DecideAdvance(mk(AutorunnerMode::SemiAuto, SessionState::WaitingForInput, kStateSettleMs + 1), now, 0, false);
-        CHECK(armed.action == AdvanceAction::AwaitConfirm, "advance: ...and arms once the status held");
-    }
-    {
         // Gates that answer BEFORE the settle hold — none of them schedules a timed re-check.
+        // The dormant-tab gate first (DELIVERY.md §17): a tab parked 1 s ago has a fresh settle anchor (the
+        // `started` flip restarts the clock), yet the decision must NOT become a timed hold — a timer on a
+        // parked tab is exactly how the pre-fix scheduler came back 40 s later and sent into it.
+        auto dormant = mk(AutorunnerMode::Full, SessionState::Idle, 1000);
+        dormant.started = false;
+        const auto parked = DecideAdvance(dormant, now, 0, false);
+        CHECK(parked.action == AdvanceAction::None && parked.retryAfterMs == 0 && parked.reason.find(L"tab dormant") == 0,
+              "advance: a dormant (parked) tab answers before the settle hold and schedules NO timed re-check");
         const auto running = DecideAdvance(mk(AutorunnerMode::Full, SessionState::Running, 1000), now, 0, false);
         CHECK(running.action == AdvanceAction::None && running.retryAfterMs == 0 && running.reason.find(L"not ready") != std::wstring::npos,
               "advance: a Running session reads not-ready, not settling (no timed re-check)");
@@ -3889,6 +4083,7 @@ void TestVerifiedPlacement()
         auto mk = [&](InputBoxState st) {
             SessionInfo s = MakeSession(L"adv", SessionState::WaitingForInput);
             s.live = true;
+            s.started = true; // its claude is running (DecideAdvance holds for a dormant tab — DELIVERY.md §17)
             s.autorunner.mode = AutorunnerMode::Full;
             s.autorunner.maxAutoSends = 10;
             s.pendingBoxState = st;
@@ -3935,7 +4130,7 @@ void TestVerifiedPlacement()
     // The apply side no longer flips the autorunner mode — DecideAdvance's hold + the
     // blocked->unblocked notify already park + self-resume the plan; the predicate now gates a
     // once-per-episode [send-verify] warning (the scanner dedups on pendingBoxStateUnixMs).
-    // A manual Off->Semi/Full re-arm RE-STAMPS pendingBoxStateUnixMs (both arming surfaces), so
+    // A manual Paused->Auto (Off->Full) re-arm RE-STAMPS pendingBoxStateUnixMs (both arming surfaces), so
     // the 60s window can never be measured from before the human's explicit GO — the live
     // incident: the clock ran from before the re-arm and the old escalation overrode a manual
     // Full 48s after it was set.
@@ -4319,11 +4514,11 @@ void TestInterruptHold()
         CHECK(!TakeInterruptHold(off, now) && !InterruptHoldActive(off) && off.mode == AutorunnerMode::Off,
               "pure: an Off autorunner takes no hold (the user drives manually)");
 
-        AutorunnerState semi;
-        semi.mode = AutorunnerMode::SemiAuto;
-        CHECK(TakeInterruptHold(semi, now) && semi.interruptHeldMode == AutorunnerMode::SemiAuto, "pure: SemiAuto parks with SemiAuto remembered");
-        CHECK(ResumeInterruptHold(semi, 0) == AutorunnerMode::SemiAuto && semi.mode == AutorunnerMode::SemiAuto,
-              "pure: an unstamped (0) message trusts the caller; SemiAuto resumes SemiAuto");
+        AutorunnerState unstamped;
+        unstamped.mode = AutorunnerMode::Full;
+        CHECK(TakeInterruptHold(unstamped, now) && unstamped.interruptHeldMode == AutorunnerMode::Full, "pure: an Auto (Full) autorunner parks with Full remembered");
+        CHECK(ResumeInterruptHold(unstamped, 0) == AutorunnerMode::Full && unstamped.mode == AutorunnerMode::Full,
+              "pure: an unstamped (0) message trusts the caller and resumes the held mode");
 
         AutorunnerState cleared;
         cleared.mode = AutorunnerMode::Full;
@@ -4335,7 +4530,7 @@ void TestInterruptHold()
         // A stale remembered mode under a re-stamped non-Off mode is inert (a resume only moves Off -> held).
         AutorunnerState restamped;
         restamped.mode = AutorunnerMode::Full;
-        restamped.interruptHeldMode = AutorunnerMode::SemiAuto;
+        restamped.interruptHeldMode = AutorunnerMode::Full;
         CHECK(!InterruptHoldActive(restamped) && ResumeInterruptHold(restamped, now) == AutorunnerMode::Off && restamped.mode == AutorunnerMode::Full,
               "pure: a remembered mode under a non-Off mode is inert");
 
@@ -4344,8 +4539,10 @@ void TestInterruptHold()
         CHECK(!InterruptMarkerIsFresh(now - kInterruptHoldFreshMs - 1, now), "pure: freshness - past the window is stale (history replay)");
         CHECK(!InterruptMarkerIsFresh(0, now), "pure: freshness - an unstamped marker is never fresh");
         CHECK(InterruptMarkerIsFresh(now + 5000, now), "pure: freshness - a small future skew is tolerated");
-        CHECK(std::wstring{ AutorunnerModeLabel(AutorunnerMode::Full) } == L"Full" && std::wstring{ AutorunnerModeLabel(AutorunnerMode::SemiAuto) } == L"Semi" && std::wstring{ AutorunnerModeLabel(AutorunnerMode::Off) } == L"Off",
-              "pure: the mode labels");
+        CHECK(std::wstring{ AutorunnerModeLabel(AutorunnerMode::Full) } == L"Full" && std::wstring{ AutorunnerModeLabel(AutorunnerMode::Off) } == L"Off",
+              "pure: the mode LOG words stay the machine vocabulary (Off / Full - what the persisted files and the CLI carry)");
+        CHECK(std::wstring{ AutorunnerModeDisplayName(AutorunnerMode::Full) } == L"Auto" && std::wstring{ AutorunnerModeDisplayName(AutorunnerMode::Off) } == L"Paused",
+              "pure: the mode DISPLAY names are what every UI surface shows (Paused / Auto)");
     }
 
     // ---- the registry: NoteInterrupt parks; the interrupt's synthesized Stop can't auto-send; the
@@ -4459,18 +4656,18 @@ void TestInterruptHold()
         reg.RemoveObserver(tok);
     }
 
-    // ---- SemiAuto resumes SemiAuto; the echo of a user Send-now is the user's message too ----
+    // ---- the echo of a user Send-now is the user's message too: it resumes the held mode ----
     {
         SessionRegistry reg;
         {
             auto s = MakeSession(L"h2", SessionState::Running);
             s.live = true;
-            s.autorunner.mode = AutorunnerMode::SemiAuto;
+            s.autorunner.mode = AutorunnerMode::Full;
             reg.Upsert(s);
         }
         reg.NoteInterrupt(L"h2", now - 200);
         auto s = reg.Get(L"h2");
-        CHECK(s && s->autorunner.mode == AutorunnerMode::Off && s->autorunner.interruptHeldMode == AutorunnerMode::SemiAuto, "registry: SemiAuto parks with SemiAuto remembered");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Off && s->autorunner.interruptHeldMode == AutorunnerMode::Full, "registry: the interrupt parks Off with Full remembered");
         // While held, mode is Off — the ONLY sends that can produce an echo are the user's own (a Send-now).
         reg.Update(L"h2", [&](SessionInfo& ss) {
             QueuedPrompt p;
@@ -4488,8 +4685,8 @@ void TestInterruptHold()
             reg.OnHookEvent(ups);
         }
         s = reg.Get(L"h2");
-        CHECK(s && s->autorunner.mode == AutorunnerMode::SemiAuto && !InterruptHoldActive(s->autorunner),
-              "registry: the echo of a user Send-now resumes SemiAuto (any real message while held is the user's)");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Full && !InterruptHoldActive(s->autorunner),
+              "registry: the echo of a user Send-now resumes the held mode (any real message while held is the user's)");
         bool echoed = false;
         for (const auto& p : s->queue)
         {
@@ -4566,13 +4763,13 @@ void TestInterruptHold()
         reg.NoteInterrupt(L"h4", now + 2000);
         s = reg.Get(L"h4");
         CHECK(s && !InterruptHoldActive(s->autorunner) && s->autorunner.mode == AutorunnerMode::Off, "user-set: an interrupt on a user's-Off session takes no hold");
-        // ...and a user re-arm (the toggle to Semi) clears too, so a LATER manual Off stays Off.
+        // ...and a user re-arm (the toggle back to Auto) clears too, so a LATER manual Off stays Off.
         reg.Update(L"h4", [](SessionInfo& ss) {
             ss.autorunner.mode = AutorunnerMode::Full;
         });
         reg.NoteInterrupt(L"h4", now + 2500);
         reg.Update(L"h4", [](SessionInfo& ss) {
-            ss.autorunner.mode = AutorunnerMode::SemiAuto;
+            ss.autorunner.mode = AutorunnerMode::Full;
             ClearInterruptHold(ss.autorunner);
         });
         reg.Update(L"h4", [](SessionInfo& ss) {

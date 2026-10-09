@@ -55,6 +55,15 @@ namespace Agentmaster
 
     void Scheduler::RequestAdvance(const std::wstring& sessionId)
     {
+        // DELIVERY.md §17: an engine whose auto-advance is off runs the pickup watch only. Dropping the
+        // request HERE keeps the queue, the worker's wake-ups and the [advance-skip] trail empty there,
+        // instead of deciding and logging for a job that is switched off. (No build switches it off
+        // since 2026-10-09 — until then an ordinary release did; the switch stays for the test harness
+        // and as the place a kill switch would go.)
+        if (!_autoAdvance.load())
+        {
+            return;
+        }
         {
             std::lock_guard lk{ _mtx };
             // Dedup: one pending advance per session is enough — _process always re-reads the
@@ -119,7 +128,18 @@ namespace Agentmaster
                 {
                     if (_pending.empty() && nextDueMs == 0)
                     {
-                        _cv.wait(lk, ready);
+                        // IDLE: nothing queued, nothing watched, nothing deferred. Sleep until there is
+                        // work of ANY of the three kinds — not only a queued advance (DELIVERY.md §17).
+                        // OnObserved arms the pickup watch from whichever thread notified (a window's
+                        // UI thread for a Send-now or the /handover pump) and signals this condition
+                        // variable; with the advance-only predicate `ready` that signal was re-checked,
+                        // found false and slept through, so the Enter-retry sweep did not start until
+                        // some later advance request (another session's turn-complete) happened to wake
+                        // the worker — and in an engine whose auto-advance is off, where no advance is
+                        // ever requested (an ordinary release until 2026-10-09), it would never have
+                        // started at all. The timed wait below keeps `ready`: once
+                        // a watch exists it must sleep its whole poll interval, not spin.
+                        _cv.wait(lk, [this] { return !_running.load() || !_queue.empty() || !_pending.empty() || !_deferred.empty(); });
                     }
                     else
                     {
@@ -345,6 +365,12 @@ namespace Agentmaster
 
     void Scheduler::_process(const std::wstring& id)
     {
+        // The belt behind RequestAdvance's gate (DELIVERY.md §17): an advance queued just before the
+        // auto-advance was disabled, or a deferred re-check promoted by the worker, must not send.
+        if (!_autoAdvance.load())
+        {
+            return;
+        }
         auto s = _registry->Get(id);
         if (!s)
         {
@@ -439,7 +465,6 @@ namespace Agentmaster
                             p.enterRetries = 0; // fresh send -> reset the Enter-retry watch (Scheduler.h)
                             p.injectedAtUnixMs = 0; // fresh send -> injection evidence pending (DELIVERY.md §12)
                             ss.autorunner.autoSendsThisRun += 1;
-                            ss.pendingConfirmPromptId.clear();
                             break;
                         }
                     }
@@ -496,9 +521,9 @@ namespace Agentmaster
                 }
                 return;
             }
-            // fall through to handle the re-decided plan — and carry ITS snapshot with it, so the
-            // AwaitConfirm change-gate below compares against the state the plan was decided from.
-            s = std::move(s2);
+            // Fall through to handle the re-decided plan: the state changed during the throttle sleep
+            // (a status change re-armed the settle hold, the session was paused, the tab was parked),
+            // so the switch below records why the send did not happen and schedules a timed re-check.
             plan = plan2;
         }
 
@@ -517,34 +542,11 @@ namespace Agentmaster
             });
             AppendStateLog(L"autorunner.log", L"[hold] " + id + L" (" + plan.reason + L")\n");
             break;
-        case AdvanceAction::AwaitConfirm:
-        {
-            // Arm the SemiAuto one-click confirm — ONLY when it actually changes the armed id.
-            //
-            // ⚠ The notify-loop guard (the 2026-07-25 release freeze). Update _notify's
-            // unconditionally, OnObserved re-requests an advance for a SemiAuto session whose prompt
-            // is (by design) still Pending, and this arm is reached on every such pass — so the old
-            // unconditional re-write of the SAME pendingConfirmPromptId closed a self-sustaining
-            // notify -> OnObserved -> RequestAdvance -> re-arm cycle at ~3ms/turn (observed live:
-            // 137k+ [await-confirm] lines in 5 minutes; the per-notify observer fan-out starved the
-            // UI dispatcher into the "half-frozen app"). A no-change pass now touches nothing — no
-            // Update, no notify, no log — so the cycle terminates on its settle pass, while a REAL
-            // re-aim (the armed prompt was deleted / re-ordered / skipped) still writes + notifies.
-            const std::wstring armId =
-                (plan.promptIndex < s->queue.size()) ? s->queue[plan.promptIndex].id : std::wstring{};
-            if (!armId.empty() && s->pendingConfirmPromptId != armId)
-            {
-                _registry->Update(id, [&](SessionInfo& ss) {
-                    if (plan.promptIndex < ss.queue.size())
-                    {
-                        ss.pendingConfirmPromptId = ss.queue[plan.promptIndex].id;
-                    }
-                });
-                AppendStateLog(L"autorunner.log", L"[await-confirm] " + id + L"\n");
-            }
-            _clearAdvanceSkip(id); // progress: the next prompt is armed for confirm
-            break;
-        }
+        // (The AwaitConfirm case — arm a SemiAuto one-click confirm — went away with that mode. Its
+        // lesson stays valid for every case here: SessionRegistry::Update notifies UNCONDITIONALLY and
+        // OnObserved answers a notify with another advance request, so a case that writes the registry
+        // on a pass that changes nothing closes a notify -> advance -> write loop. That loop was the
+        // 2026-07-25 release freeze: 137k+ [await-confirm] lines in 5 minutes.)
         case AdvanceAction::PlanDone:
             AppendStateLog(L"autorunner.log", L"[plan-done] " + id + L"\n");
             _clearAdvanceSkip(id); // progress: the queue drained
@@ -562,7 +564,9 @@ namespace Agentmaster
             // Agentmaster (send spacing / state settle): a TIMED hold (retryAfterMs — the minimum send
             // spacing, and the STATE SETTLE window, DELIVERY.md §16) self-releases: schedule the
             // re-decide for its expiry. Every OTHER None reason has an external re-trigger (a hook, a
-            // notify, the gate's close, the box-state release); a timed window on a quiet session has
+            // notify, the gate's close, the box-state release, a dormant tab's start — SetStarted
+            // notifies — and the global pause's resume, which re-requests every held plan itself:
+            // SetGlobalPause, DELIVERY.md §17); a timed window on a quiet session has
             // none — without this the plan would stall until some unrelated registry mutation happened
             // along. A status change during a settle window needs nothing special here: the re-decide at
             // the old expiry reads the moved anchor and schedules the new one (the deferred map keeps the
@@ -581,11 +585,13 @@ namespace Agentmaster
     void Scheduler::OnObserved(const SessionInfo& s)
     {
         // Enter-retry watch (DecideEnterRetry): arm the watch whenever a session has a Flight send
-        // awaiting pickup. EVERY send path — the auto-send + SemiAuto confirm below AND the Manager's
-        // manual Send-now — marks the prompt Sent through the registry, which notifies this observer,
-        // so no send path needs to know about the retry mechanism. Independent of autorunner mode (a
-        // manual Send-now with autorunner Off must still submit reliably) and of the early returns
-        // below, so it sits first. The worker sweep drains the watch as turns start / give up.
+        // awaiting pickup. EVERY send path — the auto-send below, the Manager's manual Send-now AND
+        // the /handover paste pump — marks the prompt Sent through the registry, which notifies this
+        // observer, so no send path needs to know about the retry mechanism. Independent of autorunner
+        // mode (a manual Send-now with autorunner Off must still submit reliably), of the auto-advance
+        // switch (an engine with the auto-advance off still sends: a /handover paste and a Send-now
+        // need the rescue just the same — DELIVERY.md §17) and of the early returns below, so it sits
+        // first. The worker sweep drains the watch as turns start / give up.
         {
             const auto rp = DecideEnterRetry(s, NowMs(), _registry->HasInjector(s.id));
             if (rp.action == EnterRetryAction::Waiting || rp.action == EnterRetryAction::Retry)
@@ -600,6 +606,15 @@ namespace Agentmaster
                     _cv.notify_one(); // wake the worker to begin polling this send for pickup
                 }
             }
+        }
+
+        // DELIVERY.md §17: everything below DRIVES a session's queue — the Prompt Queue Runner's
+        // auto-advance. An engine whose auto-advance is off stops here: it must neither change a
+        // session's mode (stopOnError) nor request an advance, since nothing there ever auto-sends.
+        // (The app's engine always has it on since 2026-10-09; see SetAutoAdvanceEnabled.)
+        if (!_autoAdvance.load())
+        {
+            return;
         }
 
         // stopOnError backstop: a turn that ended in Error pauses the plan. An INTERRUPT-HELD session
@@ -622,8 +637,16 @@ namespace Agentmaster
         // or you just enabled autorunner / added a prompt) should START consuming. Without this
         // a resumed-Idle session would wait forever — it never emits a Stop to trigger an
         // advance. DecideAdvance + the pickup guard keep it to one prompt per turn, and
-        // RequestAdvance dedups the burst.
-        //
+        // RequestAdvance dedups the burst. The rule itself is _wantsIdleStart (shared with the
+        // global-pause resume, which needs exactly the same test for every live session at once).
+        if (_wantsIdleStart(s))
+        {
+            RequestAdvance(s.id);
+        }
+    }
+
+    bool Scheduler::_wantsIdleStart(const SessionInfo& s) const
+    {
         // The gate is CONTROLLABILITY (HasInjector — do we hold this session's stdin?), NOT
         // provenance (s.external — did we launch it?). The two diverge for an ADOPTED session:
         // a claude typed into a `+` tab is external=true yet, once adopted, is bound an injector
@@ -646,105 +669,113 @@ namespace Agentmaster
         // exactly then with nothing lost. `started` is MEANINGLESS for an external session (we track no
         // control for it — left false though the adopted claude IS running), so the `|| s.external`
         // carve-out keeps adopted sessions drivable (mirrors the `!started && !external` "dormant"
-        // definition the tab-strip status dot uses).
-        if (s.live && (s.started || s.external) && s.autorunner.mode != AutorunnerMode::Off &&
-            (s.state == SessionState::Idle || s.state == SessionState::WaitingForInput) &&
-            _registry->HasInjector(s.id))
+        // definition the tab-strip status dot uses). DecideAdvance repeats the open + started test
+        // (DELIVERY.md §17), because a timed re-check reaches it without passing through here.
+        if (!(s.live && (s.started || s.external) && s.autorunner.mode != AutorunnerMode::Off &&
+              (s.state == SessionState::Idle || s.state == SessionState::WaitingForInput) &&
+              _registry->HasInjector(s.id)))
         {
-            bool hasWork = false;
-            for (const auto& p : s.queue)
+            return false;
+        }
+        for (const auto& p : s.queue)
+        {
+            // Pending = ready to (re)consider. Held = a question-guard hold persisted by an
+            // older build (current builds never park a prompt in Held — the guard keeps it
+            // Pending instead): include it so _process's un-hold recovery is reachable and a
+            // stranded Held prompt rehabilitates to Pending once the question clears, rather
+            // than sitting dead forever (OnObserved is the only re-trigger for an idle session).
+            if (p.status == PromptStatus::Pending || p.status == PromptStatus::Held)
             {
-                // Pending = ready to (re)consider. Held = a question-guard hold persisted by an
-                // older build (current builds never park a prompt in Held — the guard keeps it
-                // Pending instead): include it so _process's un-hold recovery is reachable and a
-                // stranded Held prompt rehabilitates to Pending once the question clears, rather
-                // than sitting dead forever (OnObserved is the only re-trigger for an idle session).
-                if (p.status == PromptStatus::Pending || p.status == PromptStatus::Held)
-                {
-                    hasWork = true;
-                    break;
-                }
-            }
-            if (hasWork)
-            {
-                RequestAdvance(s.id);
+                return true;
             }
         }
+        return false;
     }
 
-    void Scheduler::Confirm(const std::wstring& sessionId, bool confirm)
+    size_t Scheduler::_requestHeldAdvances()
     {
-        std::wstring text;
-        std::wstring confirmedId;
-        _registry->Update(sessionId, [&](SessionInfo& ss) {
-            if (ss.pendingConfirmPromptId.empty())
-            {
-                return;
-            }
-            for (auto& p : ss.queue)
-            {
-                if (p.id == ss.pendingConfirmPromptId)
-                {
-                    if (confirm && p.status == PromptStatus::Pending)
-                    {
-                        text = p.text;
-                        confirmedId = p.id; // remember it so a failed inject can roll it back (Rule #4)
-                        p.status = PromptStatus::Sent;
-                        p.sentAtUnixMs = NowMs();
-                        p.attempts += 1;
-                        p.echoed = false; // await this injection's UserPromptSubmit echo
-                        p.enterRetries = 0; // fresh send -> reset the Enter-retry watch (Scheduler.h)
-                        p.injectedAtUnixMs = 0; // fresh send -> injection evidence pending (DELIVERY.md §12)
-                        ss.autorunner.autoSendsThisRun += 1;
-                    }
-                    else if (!confirm)
-                    {
-                        p.status = PromptStatus::Skipped;
-                    }
-                    break;
-                }
-            }
-            ss.pendingConfirmPromptId.clear();
-        });
-        if (confirm && !text.empty())
+        // ONE lean copy of the live sessions (the queue's open prompts, no transcript texts) is all
+        // _wantsIdleStart reads; the worker re-reads each requested session in full before it decides.
+        size_t requested = 0;
+        for (const auto& s : _registry->SnapshotLiveForScan())
         {
-            // Agentmaster: check the inject result and roll back on failure — the SemiAuto
-            // confirm path was the mirror-image of the auto-send path in _process above but was MISSING
-            // its rollback: it marked the prompt Sent then injected and ignored the bool. If no injector
-            // is bound yet (confirming during a restore before the ConPTY is wired), the prompt was
-            // stranded as a phantom Sent that was never delivered AND never re-fires (the re-fire keys
-            // on Pending), violating Correctness Rule #4. Mirror _process: revert to Pending; the next
-            // advance re-decides AwaitConfirm and re-arms the confirm once the injector binds.
-            // Agentmaster (PENDING_INPUT.md §9): the shared send seam — the draft swap applies to a
-            // confirmed SemiAuto send exactly as it does to an auto-send.
-            const bool delivered = _registry->SubmitPrompt({ sessionId, confirmedId, text, true });
-            if (delivered)
+            if (_wantsIdleStart(s))
             {
-                AppendStateLog(L"autorunner.log", L"[confirm-send] " + sessionId + L"\n");
+                RequestAdvance(s.id);
+                ++requested;
             }
-            else
+        }
+        return requested;
+    }
+
+    void Scheduler::SetGlobalPause(bool paused)
+    {
+        // Change-gated on the atomic itself: two windows clicking at once produce exactly one real
+        // change each way, and a repeated "pause" neither logs nor notifies.
+        if (_globalPause.exchange(paused) == paused)
+        {
+            return;
+        }
+        // The observers first, so every window's button repaints before the advances start to move.
+        // Copied under the lock and called outside it: a listener may add or remove observers.
+        std::vector<GlobalPauseObserver> observers;
+        {
+            std::lock_guard lk{ _mtx };
+            observers.reserve(_pauseObservers.size());
+            for (const auto& o : _pauseObservers)
             {
-                _registry->Update(sessionId, [&](SessionInfo& ss) {
-                    for (auto& p : ss.queue)
-                    {
-                        if (p.id == confirmedId && p.status == PromptStatus::Sent)
-                        {
-                            p.status = PromptStatus::Pending;
-                            p.echoed = false;
-                            p.injectedAtUnixMs = 0; // DELIVERY.md §12
-                            if (p.attempts > 0)
-                            {
-                                p.attempts -= 1;
-                            }
-                            if (ss.autorunner.autoSendsThisRun > 0)
-                            {
-                                ss.autorunner.autoSendsThisRun -= 1;
-                            }
-                            break;
-                        }
-                    }
-                });
-                AppendStateLog(L"autorunner.log", L"[confirm-deferred] " + sessionId + L" (not delivered: no injector, or the box is owned - rolled back to Pending)\n");
+                observers.push_back(o.second);
+            }
+        }
+        for (const auto& observer : observers)
+        {
+            try
+            {
+                observer(paused);
+            }
+            catch (...)
+            {
+                // Rule #18: one window's failing listener (a dispatcher that is going away) must not
+                // cost the other windows their repaint, nor the resume its re-request below.
+                LogSwallowedException(L"Scheduler::SetGlobalPause observer");
+            }
+        }
+        if (paused)
+        {
+            AppendStateLog(L"autorunner.log", L"[pause-all] on (every session's automatic send is held; per-session modes are unchanged)\n");
+            return;
+        }
+        // RESUME: a plan the pause held answered "global pause" with no timed re-check, so nothing
+        // would ask again on a quiet session. Ask now for every session that is ready with queued work.
+        const size_t requested = _requestHeldAdvances();
+        AppendStateLog(L"autorunner.log", L"[pause-all] off (re-requested an advance for " + std::to_wstring(requested) + L" session(s) with queued work)\n");
+    }
+
+    uint64_t Scheduler::AddGlobalPauseObserver(GlobalPauseObserver observer)
+    {
+        if (!observer)
+        {
+            return 0; // nothing to call — and 0 is the "no token" value RemoveGlobalPauseObserver ignores
+        }
+        std::lock_guard lk{ _mtx };
+        const uint64_t token = _nextPauseObserverId++;
+        _pauseObservers.emplace_back(token, std::move(observer));
+        return token;
+    }
+
+    void Scheduler::RemoveGlobalPauseObserver(uint64_t token)
+    {
+        if (token == 0)
+        {
+            return;
+        }
+        std::lock_guard lk{ _mtx };
+        for (auto it = _pauseObservers.begin(); it != _pauseObservers.end(); ++it)
+        {
+            if (it->first == token)
+            {
+                _pauseObservers.erase(it);
+                return;
             }
         }
     }

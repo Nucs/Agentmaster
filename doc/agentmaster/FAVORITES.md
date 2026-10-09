@@ -27,7 +27,7 @@
 
 `_ResumeSessionFromDisk` (the Sessions page's "Resume here") already routes a **known** closed
 record through `_RestoreArchivedSession` → `_LaunchClaudeSession(..., *info)`, which **rehydrates
-its Auto Testing queue + autorunner**. So the Sessions page's Resume *already subsumes* the Archive
+its prompt queue + autorunner**. So the Sessions page's Resume *already subsumes* the Archive
 page's "Restore here" — removing the Archive page loses **no** resume/restore capability. The
 Archive page is genuinely redundant once Sessions is the sole browser.
 
@@ -37,7 +37,7 @@ Archive page is genuinely redundant once Sessions is the sole browser.
 
 | Concept | Today | After |
 |---|---|---|
-| A managed tab's lifecycle verbs | 3-way close confirm: **Delete / Archive / Cancel** | **Close & Favorite.** **Close** replaces Archive — it *always archives* (keep the record, `live=false`, keep Auto Testing + autorunner); it never deletes. **Favorite** marks the session as a keeper. |
+| A managed tab's lifecycle verbs | 3-way close confirm: **Delete / Archive / Cancel** | **Close & Favorite.** **Close** replaces Archive — it *always archives* (keep the record, `live=false`, keep Prompt Queue + autorunner); it never deletes. **Favorite** marks the session as a keeper. |
 | "Archived" sessions | A separate view behind the **Archived (N)** toolbar button (`TerminalPage.AgentArchivePage.cpp`) | **No separate view.** They appear in the **Sessions page** like any on-disk session (they have transcripts → already enumerated). |
 | "I care about this" marker | implicit (you archived it) | explicit **Favorite ★** (persisted, filterable) |
 | Delete-permanently | board / tree / tab / Archive-page actions | **Removed** (we always archive; nothing is destroyed) |
@@ -295,7 +295,7 @@ instant, other windows on the next broadcast/bind).
   `SetOpenArchiveHandler`/`_openArchiveHandler`, the retired `_BuildArchiveOverlay` /
   `_BuildArchivedList` block (~5282–5640), and `SetReopenWindowHandler(int)` (per-window reopen —
   only the Archive page used it). Toolbar becomes **Launch · Fork · Reopen Windows(N) · ⚙ · Pause
-  Tests Autorunner · Sessions**.
+  Prompt Queue Runner · Sessions**.
 - **Delete `TerminalPage.AgentArchivePage.cpp`** + its `TerminalAppLib.vcxproj` registration + all
   `_archive*` members/declarations in `TerminalPage.h` (`_BuildArchivePageShell`,
   `_ShowArchivePage`, `_GatherArchiveRows`, `_RenderArchiveTable`, `_ArchiveRow`, the

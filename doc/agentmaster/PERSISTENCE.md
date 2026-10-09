@@ -211,7 +211,7 @@ flow is superseded by an explicit restore, so a relaunch never avalanches into N
    gated), an `Other` ref via WT action replay (`_RestoreWindowTabs`). The Manager's **Archived**
    page also restores any session **per-tab** into the current window anytime.
 4. As each restored Claude `SessionStart` arrives, the engine re-attaches that `convId`'s
-   Auto Testing + autorunner from the record (correlate by id — window-scoped). A managed Codex
+   Prompt Queue + autorunner from the record (correlate by id — window-scoped). A managed Codex
    has no hooks; its state comes from the C2 rollout tail (`_ReconcileManagedCodex`).
 
 **Close window.** Tear down the window's tabs → each ConPTY closes → its `claude.exe` job
@@ -223,7 +223,7 @@ records remain → full restore next launch.
 
 **Session teardown — *as built*, `Kill` became `Archive` (non-destructive).** The agreed
 design above kept a destructive per-session `Kill`; **what shipped has no `Kill`** — closing a
-tab (the X, tree `Del`, the Manager's Archive, the Auto-Testing Archive button) all route through
+tab (the X, tree `Del`, the Manager's Archive, the Prompt Queue Archive button) all route through
 ONE seam (`_HandleCloseTabRequested` → `_ArchiveAndCloseClaudeTab`) that flips `live=false`,
 clears the injector, persists, and closes the tab while **keeping the record** (restorable from
 the Archived page). Archive is terminal and the Claude transcript on disk is never deleted —

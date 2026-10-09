@@ -4,6 +4,11 @@
 > `AgentMaster/tests/`; rides the next deploy cycle.
 > **Companions:** `PENDING_INPUT.md` §9 (the draft swap — the delivery mechanism this serializes),
 > `DESIGN.md` §10 / `HOOKS.md` (the Tests Autorunner the gate paces), `CLAUDE.md` *Tests Autorunner (M7)*.
+> **Read §17 first (2026-10-09).** The feature is now the **Prompt Queue Runner** in the UI (the pane
+> is the **Prompt Queue**), it runs in every build, and it has two modes: Paused and Auto. Sections
+> 1–16 are kept as they were written. Where they say "Tests Autorunner" or "Auto Testing", read the
+> new names. Where they describe the SemiAuto mode, its arming or its Confirm click, or a
+> dev-or-debug gate, that part no longer exists.
 
 ## 1. The problem — four actors, no shared fact
 
@@ -855,10 +860,10 @@ change restarts the window**, so the hold postpones itself until the status stab
   is holding the queue: `status settle (...)` and `queue settle (...)`.
 - **Fail-open edges:** an unstamped anchor holds nothing. A FUTURE anchor (a backward clock step)
   reads as settled, never a hold the size of the step.
-- **Not held:** Send-now and a SemiAuto Confirm click (the human's explicit sends bypass
-  `DecideAdvance`), and the /handover paste pump (its own ~1.5 s settle and Send-now recipe).
-- **Held:** the SemiAuto ARMING waits out the window too, like the spacing — an armed confirm races
-  status exactly like an auto-send.
+- **Not held:** Send-now (the human's explicit send bypasses `DecideAdvance`), and the /handover paste
+  pump (its own ~1.5 s settle and Send-now recipe).
+- **(Removed 2026-10-09, §17.4)** the SemiAuto mode. While it existed, its Confirm click was not held
+  and its ARMING was (an armed confirm raced the status exactly like an auto-send).
 
 **Consequences (intended).**
 - Every automatic prompt now goes out at least 40 s after the turn before it ended. Once that turn's
@@ -886,7 +891,8 @@ cog setting yet.
   - the pure arithmetic: both anchors, the full-window boundary, a future anchor, a 0 / negative /
     custom window;
   - `DecideAdvance`: the hold, both reasons and exact `retryAfterMs`, release at the full window,
-    window 0, SemiAuto arming, the gates that answer first, and the hand-off to the send spacing;
+    window 0, the gates that answer first (the dormant-tab gate of §17.2 among them), and the hand-off
+    to the send spacing;
   - registry stamping at every seam: creation, keep on a no-op Update or a stale re-upsert, the
     live and started flips, a real vs a stale Stop, queue insertion, rollback keeping the queue
     stamp, ObserveClaude create and revive, hook adoption;
@@ -918,3 +924,190 @@ running, now reads `Error` (HOOKS.md "Cut-off turns"):
 
 `TestCutOffTurn` pins both halves on one record: as `Error` the plan is `None`; as the `Idle` the old code
 left, the same record gets `Send`.
+
+## 17. The Prompt Queue Runner — every build, two modes, one global pause, no send into a parked tab (2026-10-09, NOT BUILT yet)
+
+This section records one day's changes to the scheduler. A read-only study of the Tests Autorunner
+found the four defects of §17.2–§17.5. The user then asked for two more things: *"Lets make it enabled
+by default and not debug only"* and *"Lets rename it on ui Prompt Queue Runner"* (§17.1).
+
+### 17.1 The name, and the end of the debug gate
+
+**The name.** The feature is the **Prompt Queue Runner** in the UI, and the Manager pane that lists a
+session's prompts is the **Prompt Queue**. Before 2026-10-09 they were "Tests Autorunner" and "Auto
+Testing".
+
+| What you see | Old text | New text |
+|---|---|---|
+| The pane tab beside Summary | Auto Testing | Prompt Queue |
+| The pane's mode toggle | Tests Autorunner: Paused / Auto | Prompt Queue Runner: Paused / Auto |
+| The Manager toolbar button | Pause / Resume Tests Autorunning | Pause / Resume Prompt Queue Runner |
+| The Settings tab and its section | Tests Autorunner | Prompt Queue Runner |
+| The board card's ⚙ badge tip | Auto Testing queue | Prompt Queue |
+| The templates row | Test templates, Save as test template | Queue templates, Save as queue template |
+
+Only visible text changed. These keep the old words on purpose:
+- every identifier (`AutorunnerMode`, `AutorunnerState`, `_autoTestBody`, `autoTestingShowsSummary`);
+- every persisted key (`autorunner`, `defaultAutorunnerMode`, `autoTestingShowsSummary`), so no stored
+  file changes meaning;
+- `autorunner.log`, every log tag, and the `[nav] autorunner …` lines;
+- the `agentmaster` CLI output (`autorunner:`).
+
+Most code comments and the earlier sections of this document also keep the old words. Read
+"autorunner" and "Tests Autorunner" as the runner, and "Auto Testing" as the Prompt Queue.
+
+**Every build.** Until 2026-10-09 the feature was gated on `Profiles::IsDevOrDebugPackage()`: the dev
+package, or a release with Debug Mode (the About toggle, `--debug`, `AGENTMASTER_DEBUG`). An ordinary
+release did not run the auto-advance and showed none of the UI. The gate is gone at all eleven call
+sites (the third row holds two of them):
+
+| Place | Before, in an ordinary release | Now |
+|---|---|---|
+| `Engine.cpp` | auto-advance off, `SetAdvanceHandler` and `SetDefaultAutorunnerMode` not called | both jobs on, both calls made |
+| `TerminalPage.AgentEngine.cpp` (cog Save) | the default mode was not pushed to the registry | pushed |
+| `AgentManagerContent.cpp` (`SetSettings`, `ApplyExternalSettings`) | the pane was forced to the Summary tab | the stored tab is used |
+| `AgentManagerContent.cpp` (toolbar) | no Pause button | shown |
+| `AgentManagerContent.cpp` (pane) | no `[Summary \| Auto Testing]` toggle | `[Summary \| Prompt Queue]` shown |
+| `AgentManagerContent.AutoTesting.cpp` (`_SelectPlanPaneTab`) | refused | works |
+| `AgentManagerContent.Board.cpp` | no ⚙ sent/total badge | shown when the queue is not empty |
+| `AgentManagerContent.Settings.cpp` | no runner tab | "Prompt Queue Runner" tab shown |
+| `AgentTabOverlay.cpp` | no mode button, no ⏳N count, no `settling` cue | shown |
+| `AgentTabOverlay.Actions.cpp` | no mail button | shown (Claude only) |
+
+The engine logs one line per start, in every build:
+`[engine] prompt queue runner started (auto-advance + pickup watch, every build); default mode for new sessions: Full`.
+It replaced `[engine] release build (no --debug): … disabled`.
+
+**The Settings tab was hidden with the gate, and four of its switches are not about the queue.** The
+draft swap, the Ctrl+S stash, the verified placement and the restore re-fill govern every send path
+(PENDING_INPUT.md §9, §10). An ordinary release ran them at their defaults and had no way to change
+them. Now it has.
+
+**Debug Mode stays.** The About toggle, `--debug`, `AGENTMASTER_DEBUG`, the `debugMode` key,
+`IsDebugPackage`, `IsDevOrDebugPackage` and `ApplyPersistedDebugMode` are all kept (the user's
+decision): a later feature that must stay developer-only gates on `IsDevOrDebugPackage()`. No code
+reads that gate today, so the toggle changes nothing that you can see. Its tooltip says so.
+
+**What changes for an install that ran without Debug Mode:**
+- Every session launched there already carries the cog's default mode, which is Auto unless the user
+  changed it: the launch seam stamped it in every build. So the runner is on for those sessions at once.
+- A queue is normally empty there. The exception is a prompt that stayed `Pending`: a /handover
+  briefing that was parked for the paste tier and never delivered, or a queue left by a Debug Mode run.
+  The runner sends such a prompt after the session is open, started, and has held a sendable status for
+  the settle window (§16).
+- A session that the registry created by itself (an adopted hand-typed claude, the new conversation of
+  a `/clear`) was minted Paused there and stays Paused. New ones get the cog's default.
+
+### 17.2 The DORMANT-TAB gate — never send into a tab whose claude is not started
+
+**The defect.** A window-restored background tab and a Deactivated ("parked") tab are open and have a
+stdin injector, but their claude is not launched. A write into that connection is dropped without an
+error. `Scheduler::OnObserved` tested for this before it requested an idle-start advance. `DecideAdvance`
+did not. A timed re-check (the deferred re-advance of a settle hold or a spacing hold) reaches
+`DecideAdvance` directly, so a hold that was scheduled before a park sent about 40 s after it.
+
+**Recorded live** (dev, 2026-10-09 11:04:58): a prompt was "sent" into a tab parked 40 s earlier. It
+read `Sent`, the lost-send verdict failed it 15 s later, and the session's runner was paused.
+
+**The fix.** The rule is in `DecideAdvance`, where no trigger can skip it. It answers right after the
+mode check:
+
+| Condition | Reason in `[advance-skip]` |
+|---|---|
+| `!s.live` | `session closed (no open tab)` |
+| `!s.started && !s.external` | `tab dormant (its claude is not started - the queue resumes when the tab is entered or activated)` |
+
+- An adopted session (`external`) is exempt. The app tracks no control for it, so `started` stays false
+  although its claude runs. `DecideEnterRetry` and `OnObserved` use the same carve-out.
+- The hold has no timed re-check and needs none: `SessionRegistry::SetStarted` notifies when the tab's
+  control starts, and `OnObserved` then requests the advance.
+- `OnObserved` keeps its own test through the shared `Scheduler::_wantsIdleStart`, so it requests no
+  advance that `DecideAdvance` would refuse at once.
+
+### 17.3 The GLOBAL PAUSE — one state for the process, and a resume that restarts the held queues
+
+**Two defects.**
+1. The toolbar button kept its own flag in each window. A pause set in window A left window B on
+   "Pause". B's first click then asked for a pause that was already in force, and nothing happened.
+2. `DecideAdvance` answers `global pause` with no timed re-check. After a resume, a held plan on a
+   quiet session stayed held until some unrelated registry change occurred.
+
+**The fix.** The scheduler owns the state.
+- `Scheduler::SetGlobalPause(bool)` is change-gated: a repeated value does nothing. A real change logs
+  to `autorunner.log`, calls every listener, and on a resume asks again for every held plan.
+- `Scheduler::AddGlobalPauseObserver` / `RemoveGlobalPauseObserver` register one listener per window
+  (`TerminalPage::_globalPauseObserverToken`, detached in `~TerminalPage`, Rule #10). The listener hops
+  to its window's UI thread and calls `_ApplyGlobalPauseShown`, which reads `GlobalPaused()` again. So
+  hops that arrive out of order cannot leave an old label.
+- The button only asks: its click passes `!_globalPaused` to the page, and the label changes when the
+  listener comes back (`AgentManagerContent::SetGlobalPauseShown`). A new window seeds its button from
+  the scheduler.
+- On a resume, `_requestHeldAdvances` takes one lean copy of the live sessions
+  (`SnapshotLiveForScan`) and requests an advance for each one that `_wantsIdleStart` accepts.
+
+**Logs** (`autorunner.log`):
+- `[pause-all] on (every session's automatic send is held; per-session modes are unchanged)`
+- `[pause-all] off (re-requested an advance for N session(s) with queued work)`
+
+**Not changed:** the pause is not persisted (a restart starts resumed), per-session modes are not
+touched, and Send now works while paused.
+
+**Known gap:** the per-tab badge's `settling` cue does not know the global pause, because the pause is
+not a fact of the session. A paused session can still read `settling` there.
+
+### 17.4 Two modes — Paused and Auto
+
+The SemiAuto mode ("arm the next prompt, wait for a one-click confirm") is removed. Its confirm showed
+only in the Manager's queue pane, so a Semi session waited on a click that the user could not see from
+the tab.
+
+- `AutorunnerMode` is `Off` or `Full`. The stored words stay `Off` / `Full`, and the logs and the CLI
+  use them (`AutorunnerModeLabel`). The UI shows `Paused` / `Auto` (`AutorunnerModeDisplayName`).
+- A stored `SemiAuto` (a session record, or the cog's default mode) loads as `Off`. This is the safe
+  direction: a session whose user asked to confirm each send never starts to send by itself. The queue
+  and the other fields of the record are kept.
+- Removed with it: `AdvanceAction::AwaitConfirm`, `AutorunnerState::pendingConfirmPromptId`,
+  `Scheduler::Confirm`, the Send / Skip banner, `SetConfirmHandler`, and the log tags `[await-confirm]`,
+  `[confirm-send]`, `[confirm-deferred]`.
+- `PromptStatus::Skipped` is LEGACY: only the removed Skip button set it. It still loads and still
+  counts as completed history.
+- The toggles flip Paused ↔ Auto. An interrupt hold still reads `Paused → Auto` (§14).
+
+**Not done, on purpose:** a button that takes a queued prompt back out of the queue. The user asked for
+it as a later step. Today a queued prompt leaves the queue through the row menu's Delete, or through
+Ctrl+Shift+Up in an empty compose box (it pops the last queued prompt back into the box).
+
+### 17.5 The pickup watch runs wherever a prompt is sent
+
+The scheduler has two jobs:
+1. **the pickup watch** — re-press a lone Enter when the TUI ate a send's submit Enter
+   (`DecideEnterRetry`). Every send path needs it: the auto-send, Send now, the /handover paste pump;
+2. **the auto-advance** — type the next queued prompt (`DecideAdvance`).
+
+**The defect.** An ordinary release did not start the scheduler at all. It still sent prompts (the
+/handover paste tier, through `SessionRegistry::SubmitPrompt`), and that send had no eaten-Enter rescue:
+the briefing sat typed but not submitted, and 15 s later the lost-send verdict marked it `Failed`.
+
+**The fix.** The two jobs are separable. `Scheduler::SetAutoAdvanceEnabled(false)` turns off job 2 only:
+`RequestAdvance` is a no-op, and `OnObserved` neither applies stop-on-error nor requests an idle-start.
+The worker's idle wait also wakes for a watched send and for a deferred re-advance. Before, it woke only
+for a queued advance, so a watch armed from a window's UI thread did not start its poll until some
+later advance request happened to wake the worker.
+
+Since §17.1 no build of the app turns job 2 off. The switch stays: the harness tests the watch-only
+engine through it, and it is the place where a kill switch would go.
+
+### 17.6 Tests and live checks
+
+- `TestSchedulerIntegration` (three §17 cases): a timed re-check does not send into a parked tab; the
+  global pause is one state, a removed listener is not called, and a resume sends a held prompt with no
+  further registry change; a watch-only engine never moves a queue but still re-presses the Enter.
+- `TestStateSettle`: the dormant-tab gate answers before the settle hold.
+- `tests_persistence.cpp`: the stored words stay `Off` / `Full`; a stored `SemiAuto` loads as `Off`, in
+  the settings and in a session record, and keeps the queue.
+- **Live checks owed after the first build:**
+  - hooks.log has the `[engine] prompt queue runner started …` line in a release without Debug Mode;
+  - a Pause in one window relabels the button in every window, and `autorunner.log` has the
+    `[pause-all]` pair;
+  - a queued prompt on a Deactivated tab stays `Pending`, with one
+    `[advance-skip] … (tab dormant …)` line, and is sent after the tab is entered.

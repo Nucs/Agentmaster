@@ -12,7 +12,7 @@
 #include "HooksBridge.h"
 #include "Persistence.h"
 #include "ProcessObserver.h"
-#include "ProfileBootstrap.h" // Profiles::IsDevPackage — Auto Testing / Tests Autorunner is a DEV-OR-DEBUG feature (IsDevOrDebugPackage)
+#include "ProfileBootstrap.h" // Profiles::ApplyPersistedDebugMode — the Debug Mode belt for this module (no feature reads the gate today: the Prompt Queue Runner left it on 2026-10-09)
 #include "RegexUtil.h" // COMMANDS.md §6b — validate the configured file-match pattern once at bind time
 #include "Scheduler.h"
 #include "SessionRegistry.h"
@@ -237,40 +237,64 @@ namespace Agentmaster
                 AppendStateLog(L"hooks.log", line);
             });
 
-            // Autorunner scheduler (M7): owns its own worker thread and drives Auto Testing
-            // queues. A clean turn-complete (Stop -> WaitingForInput) lands on the advance seam
-            // and is forwarded to the scheduler; a separate observer feeds the stopOnError
-            // backstop.
+            // Prompt Queue Runner scheduler (M7; the code and the logs still say "autorunner", its name
+            // until 2026-10-09): owns its own worker thread and drives every session's prompt queue. A
+            // clean turn-complete (Stop -> WaitingForInput) lands on the advance seam and is forwarded
+            // to the scheduler; a separate observer feeds the stopOnError backstop.
             //
-            // Agentmaster (Auto Testing is a DEV-OR-DEBUG feature): the autorunner that auto-sends
-            // queued prompts runs under the AgentmasterDev package OR when a RELEASE build is launched
-            // with `--debug` / AGENTMASTER_DEBUG (IsDevOrDebugPackage — the QA escape hatch, see
-            // ProfileBootstrap.h). Otherwise we still create the Scheduler object (so callers never
-            // null-deref) but DO NOT start its worker and DO NOT wire the advance seam — so no session
-            // ever auto-sends. The Auto Testing UI (the Manager pane tab, the autorunner toggles, the
-            // queue/compose, the board badge, the overlay queue rows, the cog tab, the Pause button)
-            // is hidden to match, so there is no way to queue a prompt either. Send-now is a direct
-            // registry->Inject (it does not go through the scheduler), gated the same way in the UI.
-            // Agentmaster (Enable Debug Mode — the cross-module BELT): re-apply the persisted About-tab
-            // toggle IN THIS MODULE before the gate below reads it. The EXE prelude already applied it
-            // (WindowEmperor::HandleCommandlineArgs), but the DebugForced latch is MODULE-local — one
-            // private copy per linked binary (ProfileBootstrap.h) — so the EXE's apply reaches this DLL
-            // only via its AGENTMASTER_DEBUG env export. This belt makes the DLL derive the verdict from
-            // settings.json ITSELF, covering any host/ordering that skipped the EXE prelude. One-way +
-            // idempotent (double application is harmless); inert in the engine test harness, which never
-            // calls SharedEngine().
+            // Agentmaster (IN EVERY BUILD since 2026-10-09): the runner used to be a DEV-OR-DEBUG
+            // feature. An ordinary release switched the scheduler's auto-advance off
+            // (SetAutoAdvanceEnabled(false)), left the advance seam unwired and hid the whole UI, so no
+            // session there could queue or auto-send anything. It is an ordinary feature now: the
+            // release package, the dev package and an unpackaged build all start the scheduler with
+            // BOTH of its jobs — the auto-advance (DecideAdvance) and the pickup watch that re-presses
+            // a lone Enter when the TUI ate a send's submit Enter (DecideEnterRetry, DELIVERY.md §17).
+            // ⚠ What that changes for an EXISTING release install, on its first start with this code:
+            // a session whose queue still holds a Pending prompt (a /handover paste that was never
+            // delivered, a queue left by a Debug Mode run) AND whose stored mode is Auto gets that
+            // prompt sent, once its tab is open, its claude is started and it has held a sendable
+            // status for the settle window (kStateSettleMs). A stored mode is never rewritten here: a
+            // record minted Paused stays Paused until the user changes it.
+            //
+            // Agentmaster (Enable Debug Mode — the cross-module BELT): Debug Mode itself is KEPT — the
+            // About-tab toggle, `--debug` and AGENTMASTER_DEBUG still drive Profiles::IsDevOrDebugPackage,
+            // which is reserved for FUTURE debug-only features and which NOTHING below reads. The call
+            // re-applies the persisted toggle IN THIS MODULE, so that such a feature gets the right
+            // verdict here. The EXE prelude already applied it (WindowEmperor::HandleCommandlineArgs),
+            // but the DebugForced latch is MODULE-local — one private copy per linked binary
+            // (ProfileBootstrap.h) — so the EXE's apply reaches this DLL only via its AGENTMASTER_DEBUG
+            // env export. This belt makes the DLL derive the verdict from settings.json ITSELF, covering
+            // any host/ordering that skipped the EXE prelude. One-way + idempotent (double application
+            // is harmless); inert in the engine test harness, which never calls SharedEngine().
             ::Agentmaster::Profiles::ApplyPersistedDebugMode();
 
             e->scheduler = std::make_shared<Scheduler>(e->registry);
-            if (::Agentmaster::Profiles::IsDevOrDebugPackage())
+            // Both jobs run. The auto-advance is on by default (Scheduler::_autoAdvance) and no build
+            // turns it off any more — SetAutoAdvanceEnabled stays for the test harness and as the place
+            // a future kill switch would go. It is still set explicitly, BEFORE the worker starts and
+            // before the observer is registered, so the engine's intent is stated here and no advance
+            // could be requested (or run) in a gap if that default ever changed.
+            e->scheduler->SetAutoAdvanceEnabled(true);
+            e->scheduler->Start();
             {
-                e->scheduler->Start();
+                // The observer arms the pickup watch for any send that awaits pickup, applies the
+                // stopOnError backstop, and requests the idle-start advance for a ready session with
+                // queued work (Scheduler::OnObserved).
+                auto sched = e->scheduler;
+                e->registry->AddObserver([sched](const SessionInfo& s, HookEvent) {
+                    sched->OnObserved(s);
+                });
+            }
+            // The mode stamped on a session the registry mints by itself (see below). Read once from the
+            // persisted settings; also named in the start line, so hooks.log shows what a new session gets.
+            const AutorunnerMode defaultRunnerMode = LoadAppSettings().defaultAutorunnerMode;
+            {
+                // The Stop seam: a clean turn-complete asks the scheduler to decide that session's next
+                // queued prompt. Wired in every build; without it a turn that completes with queued work
+                // only leaves the registry's [advance-dropped] breadcrumb.
                 auto sched = e->scheduler;
                 e->registry->SetAdvanceHandler([sched](const std::wstring& id) {
                     sched->RequestAdvance(id);
-                });
-                e->registry->AddObserver([sched](const SessionInfo& s, HookEvent) {
-                    sched->OnObserved(s);
                 });
                 // Adopt/re-home autorunner default (SetDefaultAutorunnerMode): the MODE the registry
                 // stamps onto records it mints ITSELF — the hook SessionStart adopt create + the Fleet
@@ -279,14 +303,13 @@ namespace Agentmaster
                 // stamp the cog default in TerminalPage, but these two creations happen inside the
                 // engine and used to default Off — silently exempting exactly those sessions from the
                 // autorunner ("queued prompts stuck Pending"). Seeded here from the persisted settings;
-                // the cog Save re-pushes it live. Deliberately INSIDE this dev-or-debug gate: a plain
-                // release (scheduler never started) keeps minting Off records that match reality.
-                e->registry->SetDefaultAutorunnerMode(LoadAppSettings().defaultAutorunnerMode);
+                // the cog Save re-pushes it live (TerminalPage's settings handler), in every build.
+                e->registry->SetDefaultAutorunnerMode(defaultRunnerMode);
             }
-            else
-            {
-                AppendStateLog(L"hooks.log", L"[engine] release build (no --debug): Auto Testing autorunner disabled (scheduler not started)\n");
-            }
+            // One line per process start: proof in hooks.log that this build runs the runner, and with
+            // which default (the machine words Off / Full — AutorunnerModeLabel — so the line can be
+            // matched against sessions.json). It replaced the old "release build (no --debug): … disabled".
+            AppendStateLog(L"hooks.log", std::wstring{ L"[engine] prompt queue runner started (auto-advance + pickup watch, every build); default mode for new sessions: " } + AutorunnerModeLabel(defaultRunnerMode) + L"\n");
 
             // Persistence (M8): autosave the registry (queue + autorunner + metadata) to
             // sessions.json on change, so an in-progress plan survives a crash. Restore never

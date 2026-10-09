@@ -1188,7 +1188,6 @@ namespace winrt::TerminalApp::implementation
             {
                 _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
                     s.live = false;
-                    s.pendingConfirmPromptId.clear();
                 });
                 _sessionRegistry->SetInjector(id, nullptr);
                 _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector

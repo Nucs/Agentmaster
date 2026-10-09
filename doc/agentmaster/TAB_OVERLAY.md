@@ -2,7 +2,7 @@
 
 > A small, glanceable HUD pinned to the **top-right of every Claude session tab's terminal**,
 > showing the **connection between that tab and Agentmaster**: its hook-driven status, whether
-> (and how) Tests Autorunner is driving it, and what's queued — with on-demand controls. This is the
+> (and how) Prompt Queue Runner is driving it, and what's queued — with on-demand controls. This is the
 > per-tab counterpart to the Agent Manager page's Triage Board: the Board is the *fleet* view; this is
 > the *here-and-now* view, visible while you actually work inside a session.
 > Companions: [`DESIGN.md`](./DESIGN.md) · [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) ·
@@ -42,7 +42,7 @@ This document finalizes both, plus a small Phase 3 of deferred ideas.
 | --- | --- | --- |
 | **Resting content** | **1 compact line** | `◐ waiting · Full · ⏳3` — state + autorunner mode + Pending count (link state shows **only when *not* linked**; §13h). |
 | **Interaction** | **Dim, expand on hover/click** | Resting badge is dim + compact; hover (or click) expands a panel with buttons + a queue peek. |
-| **Phase-2 buttons** | Tests Autorunner cycle · Send next now (!) · Show/hide queued · Jump to Manager | Confirm / Skip appears **contextually** in SemiAuto (not an opt-in). |
+| **Phase-2 buttons** | Prompt Queue Runner toggle · Send next now (!) · Show/hide queued · Jump to Manager | The toggle flips Paused ↔ Auto. (A Confirm / Skip pair appeared **contextually** in the SemiAuto mode; it went away with that mode on 2026-10-09.) |
 | **Default visibility** | **On, dim until hover** | ~55 % opacity at rest, 1.0 on pointer-over; a Settings-cog toggle (`showTabOverlay`) turns it off. |
 
 Everything below is the implementation of these four choices.
@@ -66,18 +66,23 @@ exists at `_injectors`). The overlay reads it on each refresh. *Don't* key this 
 `SessionInfo::external` alone — an adopted session is `external==true` yet fully controllable
 once bound.
 
-### 3b. Tests Autorunner relationship — *how* is it driving?
+### 3b. Prompt Queue Runner relationship — *how* is it driving?
 From `SessionInfo::autorunner.mode`. The expanded panel spells out the relationship in words so
 "how is it handling this" is unambiguous:
 
-| Mode | Chip | Expanded sub-text |
+| Mode (stored word) | Chip | Meaning |
 | --- | --- | --- |
-| `Off` | `Manual` | "You drive — Agentmaster only watches." |
-| `SemiAuto` | `Semi` | "Agentmaster proposes the next prompt; you confirm." |
-| `Full` | `Full` | "Agentmaster auto-sends on each turn-complete." |
+| `Off` | `Paused` (gray) | Nothing is sent by itself. The queue waits for Send now, or for a switch to Auto. |
+| `Full` | `Auto` (green) | The next queued prompt goes out by itself when the session is ready. |
+| `Off` with an interrupt hold | `Paused → Auto` (green) | The user pressed Esc. The runner returns to Auto on the user's next message (DELIVERY.md §14). |
+
+The chip words come from the one table `AutorunnerModeDisplayName`; the stored words, the logs and
+the CLI keep `Off` / `Full`. A third mode, `SemiAuto` (chip `Semi`: "Agentmaster proposes the next
+prompt; you confirm"), was removed on 2026-10-09 (DELIVERY.md §17.4). A stored `SemiAuto` loads as
+`Off`. The chip is shown in every build since the same day (before: dev-or-debug only).
 
 Plus the transient annotations that explain *why nothing is moving right now*:
-`confirm?` (SemiAuto armed — `pendingConfirmPromptId` non-empty), `held: question`
+`held: question`
 (`lastMessageWasQuestion` + the question-guard), `⏸ paused` (scheduler global pause), and the
 backstop `n/maxAutoSends`. An `error` state (Crimson) already signals a `stopOnError` halt.
 
@@ -187,14 +192,14 @@ seams):
 | --- | --- | --- |
 | `sessionId` | set at construction | — |
 | read state/queue/mode | shared `SessionRegistry` (`SetRegistry`) | same `shared_ptr` as the Manager |
-| **Tests Autorunner cycle** | registry `Update` of `autorunner.mode` (Off→Semi→Full) | logic of `AgentManagerContent::_CycleAutorunner` |
+| **Prompt Queue Runner toggle** | registry `Update` of `autorunner.mode` (`Off` ⇄ `Full`, shown Paused ⇄ Auto) | logic of `AgentManagerContent::_CycleAutorunner` |
 | **Send next now (!)** | page callback `sendNextNow(id)` | the Manager's `_DoSendNow` inject path (atomic mark-Sent — Rule #4) |
-| **Confirm / Skip** | page callback → `Scheduler::Confirm(id, bool)` | same as the Auto Testing confirm |
+| ~~**Confirm / Skip**~~ | removed on 2026-10-09 with the SemiAuto mode (it was a page callback → `Scheduler::Confirm(id, bool)`) | — |
 | **Jump to Manager** | page callback: focus `_managerTab` + `AgentManagerContent::SelectSession(id)` (new public entry) | the inverse of `_ActivateClaudeSession` |
 | link state | `SessionRegistry::HasInjector(id)` (new) | — |
 | global pause | provider `() -> _scheduler->GlobalPaused()` | — |
 
-> Cycling Tests Autorunner to `Full`/`SemiAuto` while the session sits `Idle`/`WaitingForInput`
+> Switching the Prompt Queue Runner to `Full` (Auto) while the session sits `Idle`/`WaitingForInput`
 > naturally kicks the plan: the registry `Update` fires observers → the scheduler's `OnObserved`
 > requests an advance (the same change-driven start that lets idle plans begin — Correctness
 > Rule #1). No special-casing needed in the overlay.
@@ -248,7 +253,7 @@ Wiring (all existing seams):
   state + mode + Pending count + link mark) + §7 live updates + §8 scope + §9 off-switch +
   dim-until-hover. Delivers ask #1.
 - **Phase 2 — expand + controls.** Hover/click expand → next-prompt preview + the four buttons
-  (Tests Autorunner cycle, Send now, Queue peek, Jump to Manager) + contextual Confirm / Skip. Delivers
+  (Prompt Queue Runner cycle, Send now, Queue peek, Jump to Manager) + contextual Confirm / Skip. Delivers
   ask #2.
 - **Phase 3 — deferred.** Approve / Deny on `NeedsApproval` (today approvals go through the
   in-terminal y/n; surfacing them on the badge means building a separate approval path — no Approval
@@ -258,7 +263,7 @@ Wiring (all existing seams):
 
 ## 11. Correctness rules to respect (do not regress)
 
-- **#1** Tests Autorunner readiness / question-guard / approval routing — the overlay only *reflects*
+- **#1** Prompt Queue Runner readiness / question-guard / approval routing — the overlay only *reflects*
   scheduler state and *requests* the same actions the Manager does; it never invents a new send
   path. Approve/Deny stays out of the prompt queue.
 - **#2** A badge button **never** writes a stray CR. "Send now" goes through the inject path that
@@ -455,7 +460,7 @@ preserving them freshest-from-disk.
 
 ### 13h. Final row-1 layout + the link-state rule
 Row 1, left → right: **status** (the Triage-Board-colored dot + label) · the **action cluster** (folder
-· mail · copy · pencil — §13d/§13j, a linked session only) · the **Tests Autorunner** button (§3b) · the **queue** count
+· mail · copy · pencil — §13d/§13j, a linked session only) · the **Prompt Queue Runner** button (§3b) · the **queue** count
 (when Pending > 0) · **link state**. Link state is surfaced **only when NOT linked** — `observe` for an
 external claude, `unlinked` otherwise; a **linked** badge shows *nothing* there, because the badge's mere
 presence on a managed tab already implies the link. `model · effort` is **not** on this strip — it lives
@@ -466,8 +471,8 @@ label alone (§13c). (Supersedes the §2 / §3a / §4 design-seed sketches, whic
 A **third** badge line previews **what the queue will send next**, complementing row 1's `⏳N` count
 (which says *how many* are queued): `⏳ <first line of the next prompt, ≤300 chars>`. The "next prompt" is
 the **first `Pending` prompt** in `SessionInfo.queue` — the same item `Scheduler::DecideAdvance` would fire
-next (Full auto-send / Semi confirm / Send-now) — so the preview is mode-agnostic: it shows whenever
-something is queued, regardless of Tests Autorunner mode. The text is the prompt **body's first line** (leading
+next (the Auto mode's auto-send / Send-now) — so the preview is mode-agnostic: it shows whenever
+something is queued, regardless of Prompt Queue Runner mode. The text is the prompt **body's first line** (leading
 blank lines skipped, trailing spaces trimmed); a `...` is appended when the first line exceeds **300
 chars** *or* there's more content (further lines) behind it, so `...` always means "there's more than
 shown". Built (`AgentTabOverlay::_promptLine` + the anon-namespace `FirstLinePreview`) only via `_Refresh`
@@ -476,7 +481,7 @@ full ≤300-char first line can show) but is `MaxWidth`-capped + right-anchored 
 balloon the HUD. The hourglass run is goldenrod (matching the row-1 `⏳N`); a hover tooltip names the row
 and reveals the **full** prompt behind the preview.
 
-Two **hold cues** can prefix the row, so a queue the Tests Autorunner is deliberately not sending never
+Two **hold cues** can prefix the row, so a queue the Prompt Queue Runner is deliberately not sending never
 reads as stuck:
 - **`❓ held — answer the question`** (dark orange) — the question-guard holds the queue (DELIVERY.md §8).
 - **`settling`** (steel blue) — the STATE SETTLE hold (DELIVERY.md §16): the next prompt is typed in
@@ -493,12 +498,12 @@ The tooltip explains the active hold and how to release it.
 ### 13j. The MAIL button — move the unsent draft to the queue (row 1, between folder and copy)
 A **mail** button (`\xE715`, the SAME Segoe Fluent glyph the Manager compose row's "Add to queue" envelope
 uses) takes this session's **UNSENT input-box draft**, **queues it** into that session's own
-Auto-Testing queue, and **clears it out of the input box** — so a prompt you typed in the terminal and
-never sent reaches the Tests Autorunner without being retyped in the Manager, and you are not left with a
+prompt queue, and **clears it out of the input box** — so a prompt you typed in the terminal and
+never sent reaches the Prompt Queue Runner without being retyped in the Manager, and you are not left with a
 duplicate to delete by hand. It is the badge's twin of that envelope, appending through the SAME
 registry seam as `AgentManagerContent::_OnAddPrompt` (one `Update` → a default `QueuedPrompt` — `Pending` /
 `OnTurnComplete`, label = the first 56 chars with newlines flattened — pushed onto `s.queue`), so the
-scheduler cannot tell the two apart and the entry shows in Auto Testing, row 1's `⏳N` and row 3's
+scheduler cannot tell the two apart and the entry shows in Prompt Queue, row 1's `⏳N` and row 3's
 next-prompt preview like any other.
 
 **The draft is resolved by the SAME rule as `Copy Current Prompt`** — the pure `PickCurrentPromptText`
@@ -507,10 +512,11 @@ observer's `SessionInfo::pendingInput` — so the button, the copy menu and §8a
 disagree about what "the current prompt" is. Here the **live** read is normally the one that answers: this
 overlay sits INSIDE the session's own pane, so its window always hosts the tab.
 
-**Shown only when it can do something:** gated on `Profiles::IsDevOrDebugPackage()` exactly like row 1's
-Autorunner button + `⏳N` count (in an ordinary release the Scheduler never starts and every autorunner
-surface is hidden — a queue button there would append prompts nothing would ever send), and **Claude only**
-(Codex renders no `❯` box, so it has no draft — and a managed codex has neither injector nor autorunner).
+**Shown for Claude only** (Codex renders no `❯` box, so it has no draft — and a managed codex has
+neither injector nor runner), **in every build since 2026-10-09**. Before, it was gated on
+`Profiles::IsDevOrDebugPackage()` exactly like row 1's runner button + `⏳N` count: an ordinary release
+did not run the scheduler's auto-advance, so a queue button there would have appended prompts that
+nothing would ever send.
 `_QueueCurrentPrompt` keeps a kind backstop regardless.
 
 **Enabled only while a draft exists** (`_RefreshQueueButtonEnabled`, called from `_Refresh`): the button is

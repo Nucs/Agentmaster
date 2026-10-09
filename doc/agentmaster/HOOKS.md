@@ -91,7 +91,7 @@ event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \t pro
 | 5 | `permission` | `1`/`0` — a `Notification` requesting tool permission (vs. an idle notice) |
 | 6 | `tool` | associated tool name, when applicable |
 | 7 | `tabToken` | the hosting `WT_SESSION` GUID (for adopting a hand-typed `claude`) |
-| 8 | `prompt` | **escaped**; set ONLY on `UserPromptSubmit` (so the Auto Testing records *every* message a session got) |
+| 8 | `prompt` | **escaped**; set ONLY on `UserPromptSubmit` (so the Prompt Queue records *every* message a session got) |
 | 9 | `ts` | the hook's **fire time** (unix ms, UTC) — the event-ORDERING key (see *State machine*) |
 | 10 | `source` | the payload's own **discriminator**: `SessionStart` `source` (`startup`/`resume`/`clear`/`compact`/`fork`), `Pre/PostCompact` `trigger` (`manual`/`auto`), `SessionEnd` `reason` (`clear`/`resume`/`logout`/`prompt_input_exit`/`other`); empty otherwise. Validated to a `[A-Za-z0-9_-]{0,32}` token (else empty — `SanitizeWireSource`, mirrored in the forwarder) because the state machine compares it LITERALLY (see *Compaction*) |
 
@@ -278,9 +278,9 @@ The materialized `hooks-settings.json` (`BuildHooksSettingsJson`) registers the 
 | `SessionStart` | session began (or resumed / cleared / compacted — the wire `source`) | create/confirm `SessionInfo`, state → `Idle` (an at-rest Waiting/NeedsApproval is kept; `source=compact` keeps a `Running` turn `Running` and leaves the turn accounting alone) |
 | `PreCompact` | a compaction is starting (`trigger` manual/auto) | state → `Running`; opens the **compaction window** (`SessionInfo::compactingSinceUnixMs`) — see *Compaction* |
 | `PostCompact` | the compaction's summary is in | closes the window; `manual` → `WaitingForInput` (no `turnComplete`); `auto` → unchanged (the turn continues). A prompt typed DURING a manual compaction is queued by claude and fires its `UserPromptSubmit` only after this hook, so the session reads Waiting for a moment before going Running (see *Compaction*) |
-| `UserPromptSubmit` | a prompt was submitted (by user or by us) | state → `Running`; record the prompt in the Auto Testing; recognize + suppress the echo of a prompt **we** injected (idempotency) |
+| `UserPromptSubmit` | a prompt was submitted (by user or by us) | state → `Running`; record the prompt in the Prompt Queue; recognize + suppress the echo of a prompt **we** injected (idempotency) |
 | `Notification` (permission) | tool-permission prompt | state → `NeedsApproval`: the queue holds (never an auto-send into a permission prompt) until you answer in the terminal. Nothing auto-approves — `ApprovalPolicy` is a persisted placeholder no code evaluates. A plain idle notice leaves state unchanged |
-| `Stop` | main agent finished the turn | a real, non-stale turn-complete → `WaitingForInput` + the Tests Autorunner advance (`RequestAdvance` → `DecideAdvance`); a stale, too-fast or type-ahead `Stop` keeps the state (see *State machine*); carries `isQuestion` (the last assistant text ends with `?`) for the question-guard |
+| `Stop` | main agent finished the turn | a real, non-stale turn-complete → `WaitingForInput` + the Prompt Queue Runner advance (`RequestAdvance` → `DecideAdvance`); a stale, too-fast or type-ahead `Stop` keeps the state (see *State machine*); carries `isQuestion` (the last assistant text ends with `?`) for the question-guard |
 | `SubagentStop` | a subagent finished | informational only (state unchanged) |
 | `SessionEnd` | session ended | state → `Done` (never ready, so nothing is auto-sent; an unrecovered API-error tail still turns it into `Error`) |
 
@@ -320,13 +320,13 @@ showing `WaitingForInput`/`Idle` for an ENTIRE turn (the "second turn never show
   first, so turn N's `Stop` can arrive after turn N+1's `UserPromptSubmit` and would flip the
   Running turn back to `WaitingForInput`. A non-quiescent `Stop` whose wire `ts` predates the
   newest `UserPromptSubmit` (`turns.lastPromptUnixMs`) is **stale**: state is kept, and its
-  question bit + Tests Autorunner advance are suppressed (it described an older turn).
+  question bit + Prompt Queue Runner advance are suppressed (it described an older turn).
 - **Type-ahead** — Claude Code fires `UserPromptSubmit` at **Enter-time** for a prompt typed while
   a turn is still running (measured live: 21 `UserPromptSubmit` vs 4 `Stop` on one heavy session),
   queues it, then consumes the queued batch as the next turn with **no further hook**. A
   `UserPromptSubmit` landing while `Running`/`NeedsApproval` increments `turns.queuedPrompts`; the
   next non-quiescent `Stop` **consumes** the batch (`queuedPrompts -> 0`) and stays `Running` —
-  no `turnComplete`, so Tests Autorunner does not inject into the already-starting turn (Rule #1's one
+  no `turnComplete`, so Prompt Queue Runner does not inject into the already-starting turn (Rule #1's one
   prompt per turn).
 - **Too-fast `Stop`** (`kMinRealTurnSpanMs`, 2 s — DELIVERY.md §9) — a non-quiescent `Stop` whose
   `ts` is less than 2 s past the newest prompt's `ts` is treated as stale too: state kept, no
@@ -764,7 +764,7 @@ Two fields are computed in the forwarder, not just relayed:
   `?`. The text comes from the payload's `last_assistant_message` (Claude Code ≥ 2.1.47 — see *Hook
   invocation*); only when that field is absent does the forwarder tail the transcript
   (`$j.transcript_path`, last ~60 lines) for the last `assistant` text message. This feeds the
-  **question-guard**: Tests Autorunner **Holds** the next queued prompt rather than auto-answering
+  **question-guard**: Prompt Queue Runner **Holds** the next queued prompt rather than auto-answering
   a clarifying question.
 - **`permission`** (on `Notification`): set `1` when the notification `message` matches
   `(?i)permission|approve|allow|grant` — distinguishing a blocking tool-permission prompt from an
@@ -814,7 +814,7 @@ summarizes the middle (`messagesSummarized`, `userContext`). And a legacy resume
 - **`SessionStart(source="compact")` keeps a `Running` turn `Running`** and leaves the turn accounting
   intact. It used to reset to `Idle` — proven live on NumSharp `a3d777bf`: 10 overnight auto-compactions,
   each logging `[SessionStart] … state=0` then `[recon-subagent] Idle -> Running` — and `Idle` is READY to
-  the Tests Autorunner, so a queued prompt could be delivered into the continuing turn.
+  the Prompt Queue Runner, so a queued prompt could be delivered into the continuing turn.
 - **`PostCompact(manual)` → `WaitingForInput`** without a `turnComplete` (no question-guard, no Stop-seam
   advance); the flash ring / toast then tell a user who switched away that the compaction finished.
   **A prompt typed DURING the compaction** is not counted as type-ahead, contrary to what this doc
@@ -904,7 +904,7 @@ working directory it doesn't: it blocks on a modal —
 session submits no prompt ⇒ fires no `UserPromptSubmit` ⇒ writes no transcript ⇒ has **no
 conversation id**. The Fleet Observer can therefore only classify it as a
 [§11d](OBSERVER.md) *correlated-but-no-transcript* claude — the dim `○ claude · unlinked` observe
-badge. No Triage card, no state dot, no Tests Autorunner, and a `/handover` content injection is
+badge. No Triage card, no state dot, no Prompt Queue Runner, and a `/handover` content injection is
 typed straight into the menu. It reads like "tabs don't auto-activate; every one needs a manual
 click", which is why it looks like an Agentmaster bug and is not one.
 
@@ -1040,6 +1040,7 @@ onHook(sid, ev):
 
 DecideAdvance(s)                                     // Scheduler.h — pure; first match wins
   global pause / mode Off (incl. the interrupt hold)       -> hold
+  session not open, or its tab dormant (claude not started) -> hold         // the DORMANT-TAB gate — DELIVERY.md §17.2
   state not in {Idle, WaitingForInput}                     -> hold          // Rule #1: Idle is also "ready"
   human typed < 1.5 s ago                                  -> hold          // pauseOnHumanInput — no feeder yet, inert
   maxAutoSends / delivery gate open / box NoBox or menu    -> hold
@@ -1048,8 +1049,7 @@ DecideAdvance(s)                                     // Scheduler.h — pure; fi
   manual gate / last message was a question                -> hold          // stays Pending, never parked in Held
   status or queue changed < 40 s ago (the later of both)   -> timed hold    // STATE SETTLE — DELIVERY.md §16
   < 20 s since our previous automatic send                 -> timed hold    // send spacing — DELIVERY.md §13
-  SemiAuto                                                 -> arm a one-click confirm
-  Full                                                     -> mark Sent atomically (Rule #4), then
+  Full (shown "Auto"; the only sending mode since 2026-10-09) -> mark Sent atomically (Rule #4), then
                                                               SubmitPrompt: delivery gate + verified paste (DELIVERY.md)
 ```
 

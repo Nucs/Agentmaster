@@ -407,6 +407,16 @@ namespace winrt::TerminalApp::implementation
     {
         _pauseHandler = std::move(handler);
     }
+    void AgentManagerContent::SetGlobalPauseShown(bool paused)
+    {
+        // The mirror first, so a click that lands before the button exists still asks for the right state.
+        _globalPaused = paused;
+        if (_pauseBtn)
+        {
+            // The label names the ACTION the next click performs, so it is the opposite of the state.
+            _pauseBtn.Content(winrt::box_value(paused ? L"Resume Prompt Queue Runner" : L"Pause Prompt Queue Runner"));
+        }
+    }
     void AgentManagerContent::SetReopenWindowsHandler(std::function<void()> handler)
     {
         _reopenWindowsHandler = std::move(handler);
@@ -599,22 +609,13 @@ namespace winrt::TerminalApp::implementation
             }
         });
     }
-    void AgentManagerContent::SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler)
-    {
-        _confirmHandler = std::move(handler);
-    }
     void AgentManagerContent::SetSettings(const ::Agentmaster::AppSettings& settings)
     {
         _appSettings = settings;
-        // Auto Testing is a DEV-OR-DEBUG feature: in an ordinary RELEASE install (no --debug) the
-        // bottom-right pane is the read-only Summary view only (no [Summary | Auto Testing] toggle).
-        // Force the Summary tab selected so every reader (the pane visibility, _RefreshSummaryTab,
-        // _LoadSummaryForSession) shows it regardless of what settings.json carries. In memory only —
-        // never re-persisted.
-        if (!::Agentmaster::Profiles::IsDevOrDebugPackage())
-        {
-            _appSettings.autoTestingShowsSummary = true;
-        }
+        // The bottom-right pane shows the tab that settings.json carries (autoTestingShowsSummary), in
+        // EVERY build since 2026-10-09. Until then an ordinary release forced the Summary tab here, in
+        // memory, because the Prompt Queue (then "Auto Testing") was a dev-or-debug feature and its
+        // [Summary | Auto Testing] toggle was not shown.
         // Seed the Launch cwd box with the configured default (wiring runs after _BuildLayout,
         // which had defaulted the box to %USERPROFILE%). Only override when a default is set.
         if (_cwdBox && !settings.defaultLaunchDir.empty())
@@ -647,14 +648,10 @@ namespace winrt::TerminalApp::implementation
     // toggles, then _Refresh so the board + tree re-sort with the new (global) order immediately.
     void AgentManagerContent::ApplyExternalSettings(const ::Agentmaster::AppSettings& settings)
     {
-        _appSettings = settings;
-        if (!::Agentmaster::Profiles::IsDevOrDebugPackage())
-        {
-            _appSettings.autoTestingShowsSummary = true; // ordinary release (no --debug): Summary-only pane
-        }
+        _appSettings = settings; // incl. autoTestingShowsSummary as stored: no build forces the Summary tab any more (2026-10-09)
         _UpdateTreeSortButton();
         _UpdateBoardSortButton();
-        _UpdatePlanPaneTab(); // adopt another window's Auto-Testing pane tab choice (GLOBAL setting)
+        _UpdatePlanPaneTab(); // adopt another window's Prompt Queue pane tab choice (GLOBAL setting)
         _Refresh();
     }
 
@@ -996,7 +993,7 @@ namespace winrt::TerminalApp::implementation
                 cog.FontSize(13);
                 _settingsBtn.Content(cog);
             }
-            AgentSetTitledTip(_settingsBtn, L"Settings", L"Model and launch options, tab titles and colors, notifications, Tests Autorunner defaults, the Claude binary, the active profile, and app behavior.");
+            AgentSetTitledTip(_settingsBtn, L"Settings", L"Model and launch options, tab titles and colors, notifications, Prompt Queue Runner defaults, the Claude binary, the active profile, and app behavior.");
             _settingsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowSettings(); });
             actionsRow.Children().Append(_settingsBtn);
 
@@ -1005,20 +1002,21 @@ namespace winrt::TerminalApp::implementation
             _pauseBtn = Button{};
             _pauseBtn.FontSize(11);
             _pauseBtn.Padding(Thickness{ 8, 1, 8, 1 });
-            _pauseBtn.Content(winrt::box_value(L"Pause Tests Autorunning"));
+            _pauseBtn.Content(winrt::box_value(L"Pause Prompt Queue Runner")); // SetGlobalPauseShown owns this label from then on (the same two texts)
             // (Content is the label, so the tip panel derives its heading from the button itself —
             // which is what you want here: it tracks the Pause/Resume state.)
-            AgentSetTip(_pauseBtn, L"The global backstop: stop auto-sending across ALL sessions at once, whatever each one's Tests Autorunner is set to. Click again to resume; per-session modes are untouched either way.");
+            AgentSetTip(_pauseBtn, L"The global backstop: stop auto-sending across ALL sessions at once, whatever each one's Prompt Queue Runner is set to. It is one switch for the whole app, so every window shows the same state. Click again to resume \x2014 sessions that were held with queued prompts then continue on their own; per-session modes are untouched either way.");
             _pauseBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
-                _globalPaused = !_globalPaused;
-                ::Agentmaster::LogNav(_globalPaused ? L"pause-all on (global Autorunner backstop)" : L"pause-all off (global Autorunner resumed)");
+                // DELIVERY.md §17: the pause is ONE process-wide fact owned by the scheduler. This window
+                // only ASKS for the opposite of the state it last heard (_globalPaused); the page sets it
+                // on the scheduler, which tells every window — this one included — through
+                // SetGlobalPauseShown. Flipping a per-window bool here (the old code) let a second window
+                // show "Pause" while the scheduler WAS paused, and its first click then did nothing.
+                const bool target = !_globalPaused;
+                ::Agentmaster::LogNav(target ? L"pause-all on (global Autorunner backstop)" : L"pause-all off (global Autorunner resumed)");
                 if (_pauseHandler)
                 {
-                    _pauseHandler(_globalPaused);
-                }
-                if (_pauseBtn)
-                {
-                    _pauseBtn.Content(winrt::box_value(_globalPaused ? L"Resume Tests Autorunning" : L"Pause Tests Autorunning"));
+                    _pauseHandler(target);
                 }
             });
             // (appended LAST — see below, after Keep Awake)
@@ -1049,16 +1047,12 @@ namespace winrt::TerminalApp::implementation
             actionsRow.Children().Append(_keepAwakeBtn);
             _UpdateKeepAwakeButton();
 
-            // Pause/Resume Tests Autorunning — the rightmost button in the actions row (built far
-            // above). Auto Testing / Tests Autorunner is a DEV-OR-DEBUG feature: without --debug the
-            // autorunner never runs (the scheduler isn't started — see Engine.cpp), so this global
-            // pause/resume backstop is hidden. Built unconditionally above but only ATTACHED under the
-            // AgentmasterDev package OR a `--debug` / AGENTMASTER_DEBUG release, so an ordinary release's
-            // actions row never carries a no-op control.
-            if (::Agentmaster::Profiles::IsDevOrDebugPackage())
-            {
-                actionsRow.Children().Append(_pauseBtn);
-            }
+            // Pause / Resume Prompt Queue Runner — the rightmost button in the actions row (built far
+            // above). Attached in EVERY build since 2026-10-09: the runner now runs everywhere
+            // (Engine.cpp), so its global pause/resume backstop must be reachable everywhere too. (It
+            // was attached only under the AgentmasterDev package or Debug Mode while the runner was a
+            // dev-or-debug feature — an ordinary release's row would have carried a no-op control.)
+            actionsRow.Children().Append(_pauseBtn);
 
             // Stack the compact actions row directly below the top (title + launch) row.
             toolbarCol.Children().Append(bar);
@@ -1126,7 +1120,7 @@ namespace winrt::TerminalApp::implementation
             _boardRefreshBtn.FontSize(11);
             _boardRefreshBtn.Padding(Thickness{ 8, 1, 8, 1 });
             _boardRefreshBtn.Content(winrt::box_value(L"\x21BB")); // ↻ refresh glyph
-            AgentSetTitledTip(_boardRefreshBtn, L"Refresh now", L"Redraw the board, the tree and the Auto Testing pane from current data, and make the observer re-survey right away instead of waiting for its next tick \x2014 so new and external sessions show up now.");
+            AgentSetTitledTip(_boardRefreshBtn, L"Refresh now", L"Redraw the board, the tree and the Prompt Queue pane from current data, and make the observer re-survey right away instead of waiting for its next tick \x2014 so new and external sessions show up now.");
             _boardRefreshBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 _Refresh(); // immediate redraw from current data (board + tree + auto testing; recomputes the "ago" timing)
                 if (_refreshHandler)
@@ -1391,9 +1385,9 @@ namespace winrt::TerminalApp::implementation
                     }
                 }));
                 // Exclamation point = Send now (a literal bold "!"; confirmed before it fires).
-                iconCol.Children().Append(mkIconBtn(L"Send now", L"Type the composed prompt straight into the session, ahead of anything queued, whatever its Tests Autorunner mode is. Asks you to confirm first.", textIconGlyph(L"!"), [this]() { _OnSendNow(); }));
+                iconCol.Children().Append(mkIconBtn(L"Send now", L"Type the composed prompt straight into the session, ahead of anything queued, whatever its Prompt Queue Runner mode is. Asks you to confirm first.", textIconGlyph(L"!"), [this]() { _OnSendNow(); }));
                 // Envelope = Add the composed prompt to the queue.
-                iconCol.Children().Append(mkIconBtn(L"Add to queue", L"Append the composed prompt to the end of the selected session's queue. It is sent when the Tests Autorunner reaches it \x2014 or by Send now.", fluentGlyph(L"\xE715"), [this]() { _OnAddPrompt(); }));
+                iconCol.Children().Append(mkIconBtn(L"Add to queue", L"Append the composed prompt to the end of the selected session's queue. It is sent when the Prompt Queue Runner reaches it \x2014 or by Send now.", fluentGlyph(L"\xE715"), [this]() { _OnAddPrompt(); }));
                 Grid::SetColumn(iconCol, 0);
                 composeRow.Children().Append(iconCol);
 
@@ -1593,7 +1587,7 @@ namespace winrt::TerminalApp::implementation
                 // Templates row open/closed (Agentmaster). Kept inline (not a Flyout) so its
                 // TextBox keeps receiving keypresses — a text box in a popup/ContentDialog gets
                 // none in XAML Islands (see Gotchas).
-                auto paperBtn = mkIconBtn(L"Test templates", L"Show or hide the templates row: save this session's queue as a reusable plan, or apply a saved one to this session (or to every session in its directory).", fluentGlyph(L"\xE8A5"), [this]() {
+                auto paperBtn = mkIconBtn(L"Queue templates", L"Show or hide the templates row: save this session's queue as a reusable plan, or apply a saved one to this session (or to every session in its directory).", fluentGlyph(L"\xE8A5"), [this]() {
                     if (_templatesRow)
                     {
                         _templatesRow.Visibility(_templatesRow.Visibility() == Visibility::Visible ? Visibility::Collapsed : Visibility::Visible);
@@ -1647,11 +1641,11 @@ namespace winrt::TerminalApp::implementation
                 _templatesRow.Visibility(Visibility::Collapsed);
                 _templateNameBox = TextBox{};
                 _templateNameBox.Width(150);
-                _templateNameBox.PlaceholderText(L"test template name");
+                _templateNameBox.PlaceholderText(L"queue template name");
                 AgentSetTitledTip(_templateNameBox, L"Template name", L"The name to save the current queue under. Leave it empty to name the template after the session (\x201C<session>-plan\x201D). Saving always adds a new template \x2014 reusing a name gives you two with that name, it does not replace the old one.");
                 _templatesRow.Children().Append(_templateNameBox);
                 // (mkBtn's content IS the label, so the tip panel derives these headings from the buttons.)
-                _templatesRow.Children().Append(mkBtn(L"Save as test template", L"Save the selected session's current queue as a reusable plan, under the name on the left.", [this]() { _OnSaveTemplate(); }));
+                _templatesRow.Children().Append(mkBtn(L"Save as queue template", L"Save the selected session's current queue as a reusable plan, under the name on the left.", [this]() { _OnSaveTemplate(); }));
                 _templateCombo = ComboBox{};
                 _templateCombo.MinWidth(140);
                 AgentSetTitledTip(_templateCombo, L"Saved templates", L"The template that Apply / Apply to dir will use.");
@@ -1664,24 +1658,26 @@ namespace winrt::TerminalApp::implementation
                 Grid::SetRow(actions, 2);
                 outer.Children().Append(actions);
 
-                // Top line (Agentmaster): a two-state [Summary | Auto Testing] segmented toggle that
+                // Top line (Agentmaster): a two-state [Summary | Prompt Queue] segmented toggle that
                 // REPLACES the old "FLIGHT PLAN" label — a COMPACT pill split in two, only one half
-                // "checked" at a time. Both halves share ONE width (symmetric), sized to fit the LONGER
-                // label ("Auto Testing", measured in its bold/selected form so it never clips), and the
+                // "checked" at a time. (The second half read "Auto Testing" until 2026-10-09; the code
+                // still names it so — _autoTestTabBtn, _autoTestBody, autoTestingShowsSummary.) Both
+                // halves share ONE width (symmetric), sized to fit the LONGER
+                // label ("Prompt Queue", measured in its bold/selected form so it never clips), and the
                 // pill is LEFT-aligned rather than stretched across the pane. The selected half is accent-
                 // filled (holds through hover/press via PaintHoldButton — the scope-toggle accent) + bold;
                 // the other reads as the inactive segment. Summary is the default and the choice is GLOBAL
                 // (AppSettings::autoTestingShowsSummary), so it persists + syncs across every window (see
                 // _SelectPlanPaneTab / _UpdatePlanPaneTab). Summary renders the session-summary box off the
-                // transcript (_RefreshSummaryTab, Claude-only); Auto Testing holds the Autorunner + queue +
+                // transcript (_RefreshSummaryTab, Claude-only); Prompt Queue holds the runner toggle + queue +
                 // compose box.
                 auto tabBar = Grid{};
                 tabBar.HorizontalAlignment(HorizontalAlignment::Left); // compact — size to the two segments, don't stretch the pane width
                 tabBar.ColumnDefinitions().Append(autoCol()); // Summary segment (fixed symmetric width)
-                tabBar.ColumnDefinitions().Append(autoCol()); // Auto Testing segment
+                tabBar.ColumnDefinitions().Append(autoCol()); // Prompt Queue segment
                 // Symmetric segment width = the wider label's measured width (measure the SemiBold form —
                 // the selected state — so a bold label never clips) + horizontal padding + a little slack.
-                // Both segments take this one width, so "Summary" is simply padded out to match "Auto Testing".
+                // Both segments take this one width, so "Summary" is simply padded out to match "Prompt Queue".
                 const double tabFont = 11.0;
                 const double tabHPad = 10.0;
                 const auto measureLabel = [tabFont](const winrt::hstring& s) -> double {
@@ -1693,7 +1689,7 @@ namespace winrt::TerminalApp::implementation
                     return static_cast<double>(t.DesiredSize().Width);
                 };
                 const double wSummary = measureLabel(L"Summary");
-                const double wFlight = measureLabel(L"Auto Testing");
+                const double wFlight = measureLabel(L"Prompt Queue"); // must be the SAME text as _autoTestTabBtn's label below
                 const double tabLabelW = wFlight > wSummary ? wFlight : wSummary;
                 const double tabSegW = (tabLabelW > 1.0 ? tabLabelW : 80.0) + tabHPad * 2 + 8.0; // + padding + slack (fallback if Measure runs pre-tree)
                 auto mkTabBtn = [&](const winrt::hstring& label, const winrt::hstring& tip, const CornerRadius& cr, bool summary) {
@@ -1710,20 +1706,20 @@ namespace winrt::TerminalApp::implementation
                 };
                 // (mkTabBtn's content IS the label, so the tip panel derives these headings from the buttons.)
                 _summaryTabBtn = mkTabBtn(L"Summary", L"A read-only overview of the selected session, read from its transcript: its messages, the files it read and edited, its tasks and plan. Claude sessions only.", CornerRadius{ 6, 0, 0, 6 }, true);
-                _autoTestTabBtn = mkTabBtn(L"Auto Testing", L"The selected session's prompt queue, its Tests Autorunner mode, and the box to compose the next prompt.", CornerRadius{ 0, 6, 6, 0 }, false);
+                _autoTestTabBtn = mkTabBtn(L"Prompt Queue", L"The selected session's prompt queue, its Prompt Queue Runner mode, and the box to compose the next prompt.", CornerRadius{ 0, 6, 6, 0 }, false);
                 Grid::SetColumn(_summaryTabBtn, 0);
                 tabBar.Children().Append(_summaryTabBtn);
                 Grid::SetColumn(_autoTestTabBtn, 1);
                 tabBar.Children().Append(_autoTestTabBtn);
 
-                // Auto Testing TAB body: a thin strip carrying the Autorunner toggle (relocated from the
+                // Prompt Queue TAB body: a thin strip carrying the runner toggle (relocated from the
                 // old header — mirrors the EXPLORER TREE toggle but acts on the SELECTED session; a colored
-                // state dot cycles Off -> Semi-auto -> Full, dim/disabled with no live session) over the
+                // state dot flips Paused <-> Auto, dim/disabled with no live session) over the
                 // existing prompt list / compose box (`outer`).
                 _autorunnerBtn = Button{};
                 _autorunnerBtn.FontSize(11);
                 _autorunnerBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                AgentSetTitledTip(_autorunnerBtn, L"Tests Autorunner", L"How the selected session's queue is sent. Click to cycle: Off (nothing auto-sends \x2014 queue and use Send now) \xB7 Semi-auto (each send waits for you to confirm) \xB7 Full (the next prompt goes out on its own as soon as a turn completes). One prompt per turn either way, and a turn ending in a question holds the queue. Interrupting a turn (Esc) parks it at Off until your next message, then it resumes on its own \x2014 setting the mode yourself cancels that resume.");
+                AgentSetTitledTip(_autorunnerBtn, L"Prompt Queue Runner", L"How the selected session's queue is sent. Click to switch: Paused (nothing is sent on its own \x2014 queue prompts and use Send now) \xB7 Auto (the next prompt goes out by itself once the session has been ready for a short while). One prompt per turn, and a turn ending in a question holds the queue. Interrupting a turn (Esc) pauses it until your next message, then it returns to Auto by itself \x2014 setting the mode yourself cancels that.");
                 _autorunnerBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleAutorunner(); });
                 _UpdateAutorunnerButton(::Agentmaster::AutorunnerState{}, false); // a default state: Off, no interrupt hold
                 auto apStrip = StackPanel{};
@@ -1764,19 +1760,15 @@ namespace winrt::TerminalApp::implementation
                 contentArea.Children().Append(_autoTestBody);
 
                 auto wrap = Grid{};
-                wrap.RowDefinitions().Append(autoRow()); // 0: the [Summary | Auto Testing] toggle (dev only)
+                wrap.RowDefinitions().Append(autoRow()); // 0: the [Summary | Prompt Queue] toggle
                 wrap.RowDefinitions().Append(starRow(1)); // 1: the selected tab's body
-                // Auto Testing is a DEV-OR-DEBUG feature: the [Summary | Auto Testing] toggle is shown
-                // under the AgentmasterDev package OR a `--debug` / AGENTMASTER_DEBUG release. In an
-                // ordinary release this pane is the read-only Summary view only —
-                // SetSettings/ApplyExternalSettings force autoTestingShowsSummary=true, so
-                // _UpdatePlanPaneTab keeps the Summary body visible and collapses _autoTestBody (which
-                // is still built so all members stay non-null and the methods are no-ops).
-                if (::Agentmaster::Profiles::IsDevOrDebugPackage())
-                {
-                    Grid::SetRow(tabBar, 0);
-                    wrap.Children().Append(tabBar);
-                }
+                // The [Summary | Prompt Queue] toggle is shown in EVERY build since 2026-10-09. (While the
+                // Prompt Queue was a dev-or-debug feature, an ordinary release did not get the toggle and
+                // SetSettings / ApplyExternalSettings forced autoTestingShowsSummary=true, which left this
+                // pane on the read-only Summary view.) The Summary tab stays the default for an install
+                // that never chose (AppSettings::autoTestingShowsSummary defaults to true).
+                Grid::SetRow(tabBar, 0);
+                wrap.Children().Append(tabBar);
                 Grid::SetRow(contentArea, 1);
                 wrap.Children().Append(contentArea);
 

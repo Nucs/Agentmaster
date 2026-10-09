@@ -45,8 +45,7 @@
 #include "AgentMaster/Engine.h" // SharedEngine / ClaimWindowRecord / Register-UnregisterLiveWindow
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings
 #include "AgentMaster/ProcessObserver.h" // UnpublishWindow (teardown; Rule #10)
-#include "AgentMaster/ProfileBootstrap.h" // IsDevOrDebugPackage — gate the registry's adopt-default autorunner mode push like the scheduler
-#include "AgentMaster/Scheduler.h" // SetGlobalPause / Confirm (Manager callbacks)
+#include "AgentMaster/Scheduler.h" // SetGlobalPause / GlobalPaused + the global-pause observer (the Manager's Pause button, DELIVERY.md §17)
 #include "AgentMaster/SessionRegistry.h" // adoption-handler + registry-observer tokens
 #include "AgentMaster/SessionScanner.h" // liveness-probe token
 #include "AgentMaster/TabDragMath.h" // the pointer-owned tab reorder gesture's pure decision math (bands / slots / release / auto-scroll)
@@ -588,6 +587,17 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::UnregisterUnreadCountHandler(_unreadCountToken);
             _unreadCountToken = 0;
             ::Agentmaster::PublishWindowUnreadSessions(_windowId, {});
+        }
+        // Agentmaster (the GLOBAL PAUSE — DELIVERY.md §17): drop this window's listener from the shared
+        // scheduler (Rule #10). The scheduler outlives every window, and its listener list would otherwise
+        // grow by one dead entry per closed window (each entry holds only a weak page reference and the
+        // agile dispatcher, so a late call is harmless — the list growth is the cost). The remove takes the
+        // scheduler's own mutex and touches no XAML, so it is safe on the pool thread this destructor can
+        // run on, and it stays BARE like the other engine detaches so a guarded throw can never skip it.
+        if (_scheduler && _globalPauseObserverToken)
+        {
+            _scheduler->RemoveGlobalPauseObserver(_globalPauseObserverToken);
+            _globalPauseObserverToken = 0;
         }
         // Agentmaster (ui-stall escalation): drop this window's rescuer from the engine watchdog
         // (Rule #10 — a thread-safe engine detach, stays BARE so it can never be skipped), then
@@ -1403,6 +1413,30 @@ namespace winrt::TerminalApp::implementation
             _ApplyTaskbarUnreadCount();
         }
 
+        // Global-pause listener (DELIVERY.md §17): the "Pause Prompt Queue Runner" state is ONE
+        // process-wide value owned by the shared scheduler, but every window draws its own button. The
+        // scheduler calls this listener on each real change — whichever window's click made it, this one
+        // included — on the CLICKING thread, so the listener only hops to this window's UI thread; the
+        // hop carries no value on purpose (_ApplyGlobalPauseShown re-reads the scheduler, so hops that
+        // land out of order cannot leave a stale label). No seed here: the Manager page is not built yet
+        // at engine init, and _WireAgentManagerContent seeds its button when it is. Detached in
+        // ~TerminalPage (Rule #10).
+        if (_scheduler)
+        {
+            const auto weakThis = get_weak();
+            const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
+            _globalPauseObserverToken = _scheduler->AddGlobalPauseObserver([weakThis, dispatcher](bool /*paused*/) {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis]() {
+                    // The page may be gone by the time the item runs (the window closed meanwhile): a dead
+                    // weak reference simply ends it.
+                    if (auto self = weakThis.get())
+                    {
+                        self->_ApplyGlobalPauseShown();
+                    }
+                });
+            });
+        }
+
         // Debounced autosave of the window record (750ms trailing): structural/lens churn (drag a
         // splitter, reorder tabs, resize the window) collapses to one write; never per keystroke.
         _saveWindowRecordThrottled = std::make_shared<ThrottledFunc<>>(
@@ -1876,24 +1910,33 @@ namespace winrt::TerminalApp::implementation
             auto self = weakThis.get();
             return self && self->_hostingHwnd && ::GetForegroundWindow() == *self->_hostingHwnd;
         });
+        // The toolbar's "Pause / Resume Prompt Queue Runner" button (the GLOBAL PAUSE — DELIVERY.md §17).
+        // The click only REQUESTS the new state: the shared scheduler owns it, and the button of every
+        // window — this one too — is repainted by the global-pause listener that engine init registered
+        // (_ApplyGlobalPauseShown), never by the click itself. That is what keeps two windows from showing
+        // different states. `paused` is the state the user asked for (true == hold every automatic send).
+        // The lambda runs inside a XAML Click handler, where an escaping exception is fatal to the process,
+        // and SetGlobalPause can throw (std::bad_alloc while it copies the live sessions on a resume), so
+        // the call is contained (Rule #18): the pause state then simply stays what it was.
         content->SetPauseHandler([weakThis](bool paused) {
             if (auto self = weakThis.get())
             {
                 if (self->_scheduler)
                 {
-                    self->_scheduler->SetGlobalPause(paused);
+                    try
+                    {
+                        self->_scheduler->SetGlobalPause(paused);
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"pause handler (Scheduler::SetGlobalPause)");
+                    }
                 }
             }
         });
-        content->SetConfirmHandler([weakThis](winrt::hstring id, bool confirm) {
-            if (auto self = weakThis.get())
-            {
-                if (self->_scheduler)
-                {
-                    self->_scheduler->Confirm(std::wstring{ id }, confirm);
-                }
-            }
-        });
+        // Seed the button from the scheduler: a window opened while the runner is already paused (the
+        // pause was set from another window) must not read "Pause". The listener covers every later change.
+        content->SetGlobalPauseShown(_scheduler && _scheduler->GlobalPaused());
         // Settings cog: seed the dialog with the loaded settings, and persist + apply on Save.
         content->SetSettings(_appSettings);
         content->SetSettingsHandler([weakThis](::Agentmaster::AppSettings s) {
@@ -1972,9 +2015,10 @@ namespace winrt::TerminalApp::implementation
                 // creates ITSELF (the hook-adopt + observer first-sight creates — the two open-seams
                 // outside TerminalPage's launch/restore stamping). Engine init seeds it from disk;
                 // keep it live with the cog here. ONE shared engine per process, so no broadcast leg
-                // is needed. Gated like the scheduler wiring (dev-or-debug): a plain release keeps
-                // minting Off records to match its never-started autorunner.
-                if (::Agentmaster::Profiles::IsDevOrDebugPackage() && self->_sessionRegistry)
+                // is needed. In EVERY build since 2026-10-09: the Prompt Queue Runner left the
+                // dev-or-debug gate, so an ordinary release mints its records with the cog's default
+                // mode too (until then it kept minting Off records for a scheduler that never ran).
+                if (self->_sessionRegistry)
                 {
                     self->_sessionRegistry->SetDefaultAutorunnerMode(s.defaultAutorunnerMode);
                 }
@@ -2318,6 +2362,33 @@ namespace winrt::TerminalApp::implementation
         if (laps)
         {
             laps->afterManagerReveal = std::chrono::steady_clock::now(); // lap 4: selection highlight + bring-into-view
+        }
+    }
+
+    // Agentmaster (the GLOBAL PAUSE — DELIVERY.md §17): repaint THIS window's "Pause / Resume Prompt Queue
+    // Runner" toolbar button from the shared scheduler's current pause state. Called on this window's UI
+    // thread by the global-pause listener's hop (engine init), for a change made in ANY window.
+    // The state is RE-READ here, never passed in: the listener runs on the clicking thread and its hops
+    // can reach this thread in any order, so a carried value could leave the button on the older state.
+    // A window without a Manager page (not built yet, or already released at teardown) or without a
+    // scheduler does nothing — the page seeds its own button when it is wired.
+    //   returns — nothing.
+    //   throws  — nothing: this runs as a dispatcher item, where an escaping exception ends the
+    //             process, and it sets XAML content (which can throw). A failure is logged (Rule #18)
+    //             and the button keeps its previous label until the next change repaints it.
+    void TerminalPage::_ApplyGlobalPauseShown() noexcept
+    {
+        try
+        {
+            if (!_managerPage || !_scheduler)
+            {
+                return;
+            }
+            _managerPage->SetGlobalPauseShown(_scheduler->GlobalPaused());
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ApplyGlobalPauseShown");
         }
     }
 

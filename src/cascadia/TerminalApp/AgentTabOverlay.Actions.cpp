@@ -30,7 +30,6 @@
 #include "AgentMaster/ProcessInspect.h" // ReadProcessCommandLine / ReadConversationText / Codex rollout resolve (row 3)
 #include "AgentMaster/Persistence.h" // LoadAppSettings (skipPermissions, for the would-use CLI builder)
 #include "AgentMaster/TranscriptTurns.h" // RenderTranscriptTurnsFile — the Copy ▸ Transcript levels (codes 9-13)
-#include "AgentMaster/ProfileBootstrap.h" // Profiles::IsDevOrDebugPackage — the queue (mail) button is dev-or-debug, like the row-1 Autorunner control
 #include "AgentMaster/Engine.h" // SharedEngine (claudeExePath / codexExePath, for the real launch CLI)
 
 #include <winrt/Windows.UI.h> // Color / ColorHelper / Colors
@@ -171,23 +170,21 @@ namespace winrt::TerminalApp::implementation
         });
 
         // Agentmaster (PENDING_INPUT.md §8): MAIL — queue this session's UNSENT input-box draft straight
-        // into its Auto-Testing queue. The badge's twin of the Manager compose row's "Add to queue"
+        // into its prompt queue. The badge's twin of the Manager compose row's "Add to queue"
         // envelope, down to the SAME \xE715 glyph and the same registry append (_OnAddPrompt), so the
-        // prompt you typed in the terminal but never sent can be handed to the Tests Autorunner without
-        // being retyped in the Manager.
+        // prompt you typed in the terminal but never sent can be handed to the Prompt Queue Runner
+        // without being retyped in the Manager.
         //
-        // Gated exactly like row 1's Autorunner button + its ⏳N count: the whole Tests Autorunner
-        // subsystem is DEV-OR-DEBUG (in an ordinary release Engine.cpp never starts the Scheduler and
-        // every autorunner surface is hidden), so a queue button there would append prompts that nothing
-        // would ever send. Claude only, too — Codex renders no ❯ rule-wrapped input box, so it never has a
-        // draft to queue (and a managed codex has neither injector nor autorunner). Placed between the
-        // folder and copy buttons.
-        static const bool kDevAutoTesting = ::Agentmaster::Profiles::IsDevOrDebugPackage();
+        // Shown in EVERY build since 2026-10-09, like row 1's runner button + its ⏳N count (the runner
+        // was dev-or-debug until then: an ordinary release never started the Scheduler's auto-advance,
+        // so a queue button there would have appended prompts that nothing would ever send). Claude
+        // only — Codex renders no ❯ rule-wrapped input box, so it never has a draft to queue (and a
+        // managed codex has neither injector nor runner). Placed between the folder and copy buttons.
         Button queueBtn{ nullptr };
-        if (kDevAutoTesting && !isCodexSession)
+        if (!isCodexSession)
         {
             queueBtn = mkIconBtn(L"\xE715", // Mail — the same glyph the Manager's "Add to queue" envelope uses
-                                 L"Queue this session's unsent prompt into the Tests Autorunner queue and CLEAR it from the input box (a move).\n"
+                                 L"Queue this session's unsent prompt into its Prompt Queue and CLEAR it from the input box (a move).\n"
                                  L"Shift+Click to queue but KEEP it in the box (a copy).\n"
                                  L"Enabled only while the box holds an unsent draft (the pulsing 3 dots).");
             // Enabled ONLY while a draft actually exists, so a prominent toolbar button never fires a

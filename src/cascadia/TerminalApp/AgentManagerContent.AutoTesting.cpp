@@ -156,56 +156,9 @@ namespace winrt::TerminalApp::implementation
         // would leave queued prompts silently Pending forever.
         _UpdateAutorunnerButton(sel->autorunner, sel->kind == ::Agentmaster::AgentKind::Claude);
 
-        // SemiAuto one-click confirm banner (the scheduler armed the next prompt).
-        if (!sel->pendingConfirmPromptId.empty())
-        {
-            winrt::hstring label;
-            for (const auto& p : sel->queue)
-            {
-                if (p.id == sel->pendingConfirmPromptId)
-                {
-                    label = p.label.empty() ? winrt::hstring{ p.text } : winrt::hstring{ p.label };
-                    break;
-                }
-            }
-            auto banner = StackPanel{};
-            banner.Orientation(Orientation::Horizontal);
-            banner.Spacing(8);
-            banner.VerticalAlignment(VerticalAlignment::Center);
-            banner.Children().Append(Text(L"\x2699 Tests Autorunner ready:", 12, true, 1.0));
-            auto lbl = Text(label, 12, false, 0.9);
-            lbl.MaxWidth(220);
-            banner.Children().Append(lbl);
-            auto sendBtn = Button{};
-            sendBtn.Content(winrt::box_value(L"Send"));
-            // (Both buttons' content IS their label, so the tip panel derives these headings from them.)
-            AgentSetTip(sendBtn, L"Send the prompt the Tests Autorunner has armed. It asks because this session is on Semi-auto \x2014 switch it to Full and prompts go out without this step.");
-            sendBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
-                if (_confirmHandler && !_selectedId.empty())
-                {
-                    _confirmHandler(winrt::hstring{ _selectedId }, true);
-                }
-            });
-            auto skipBtn = Button{};
-            skipBtn.Content(winrt::box_value(L"Skip"));
-            AgentSetTip(skipBtn, L"Pass on the armed prompt: it is marked Skipped \x2014 kept in the list but never sent \x2014 and the queue moves on to the next one.");
-            skipBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
-                if (_confirmHandler && !_selectedId.empty())
-                {
-                    _confirmHandler(winrt::hstring{ _selectedId }, false);
-                }
-            });
-            banner.Children().Append(sendBtn);
-            banner.Children().Append(skipBtn);
-
-            auto bannerBorder = Border{};
-            bannerBorder.Background(Fill(0x40, 0xDA, 0xA5, 0x20));
-            bannerBorder.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
-            bannerBorder.Padding(Thickness{ 8, 4, 8, 4 });
-            bannerBorder.Margin(Thickness{ 0, 6, 0, 0 });
-            bannerBorder.Child(banner);
-            _planHeaderHost.Children().Append(bannerBorder);
-        }
+        // (The SemiAuto one-click confirm banner — "Tests Autorunner ready: … [Send] [Skip]" — was built
+        // here. It went away with the SemiAuto mode on 2026-10-09: a session is Paused or Auto, and a
+        // paused session's next prompt goes out through Send now.)
 
         // The Auto Testing reflects EVERY message this session received — not only ones queued
         // here. Split the queue into a chronological "sent" summary (each tagged by origin:
@@ -260,7 +213,7 @@ namespace winrt::TerminalApp::implementation
                                   typed ? L"Typed" : L"Auto",
                                   typed ?
                                       winrt::hstring{ L"You typed this prompt straight into the terminal. It is listed because Agentmaster records every message a session gets, not only the ones it sent itself." } :
-                                      winrt::hstring{ L"Agentmaster queued this prompt and sent it for you \x2014 either the Tests Autorunner reached it, or you used Send now." });
+                                      winrt::hstring{ L"Agentmaster queued this prompt and sent it for you \x2014 either the Prompt Queue Runner reached it, or you used Send now." });
                 row.Children().Append(originPill);
             }
             else
@@ -294,7 +247,7 @@ namespace winrt::TerminalApp::implementation
                               showOrigin ? L"Sent message" : L"Queued prompt",
                               showOrigin ?
                                   winrt::hstring{ L"A message this session has already received, oldest first \x2014 whether Agentmaster sent it or you typed it. The row trims long text; right-click to copy the whole prompt." } :
-                                  winrt::hstring{ L"A prompt waiting its turn. Click to select it; right-click to copy it, move it up or down the order, or drop it from the queue. The next one still pending is what the Tests Autorunner sends." });
+                                  winrt::hstring{ L"A prompt waiting its turn. Click to select it; right-click to copy it, move it up or down the order, or drop it from the queue. The next one still pending is what the Prompt Queue Runner sends." });
             _planListHost.Children().Append(rowBtn);
         };
 
@@ -745,7 +698,7 @@ namespace winrt::TerminalApp::implementation
             s.queue.push_back(std::move(p));
         });
         // Nav audit: the user QUEUED a prompt to this session (the envelope). The first line is the
-        // identifying context; Autorunner/Send-now later consumes it (scheduler [send]/[confirm-send]).
+        // identifying context; Autorunner/Send-now later consumes it (the scheduler's [send] line).
         ::Agentmaster::LogNav(L"queue " + ::Agentmaster::ShortId(id) + L" \"" + label + L"\"");
         _addPromptBox.Text(L"");
         _Refresh();
@@ -1405,7 +1358,7 @@ namespace winrt::TerminalApp::implementation
         _Refresh();
     }
 
-    void AgentManagerContent::_OnAutorunnerChanged(int index)
+    void AgentManagerContent::_OnAutorunnerChanged(::Agentmaster::AutorunnerMode mode)
     {
         if (_suppressAutorunnerEvent || _selectedId.empty() || !_registry)
         {
@@ -1419,29 +1372,29 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        const AutorunnerMode mode = index == 2 ? AutorunnerMode::Full : index == 1 ? AutorunnerMode::SemiAuto :
-                                                                                   AutorunnerMode::Off;
         // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): a mode the USER sets cancels a pending
         // interrupt resume — whatever they pick, Off included: the human's explicit choice wins over the
         // "resume on your next message" automation, until the next interrupt arms it again.
         const bool cancelsInterruptHold = cur && ::Agentmaster::InterruptHoldActive(cur->autorunner);
         // Nav audit: the user changed this session's Autorunner mode (the Auto-Testing header toggle).
-        ::Agentmaster::LogNav(L"autorunner " + ::Agentmaster::ShortId(_selectedId) + L" -> " + (mode == AutorunnerMode::Full ? L"Full" : mode == AutorunnerMode::SemiAuto ? L"Semi" : L"Off") +
+        // The log keeps the machine words (Off / Full — AutorunnerModeLabel), the ones sessions.json
+        // and the CLI use; only the UI says Paused / Auto.
+        ::Agentmaster::LogNav(L"autorunner " + ::Agentmaster::ShortId(_selectedId) + L" -> " + ::Agentmaster::AutorunnerModeLabel(mode) +
                               (cancelsInterruptHold ? L" (cancels the interrupt hold)" : L""));
         _registry->Update(_selectedId, [&](SessionInfo& s) {
             s.autorunner.mode = mode;
             ::Agentmaster::ClearInterruptHold(s.autorunner); // §14: the user's pick outranks the pending resume
             if (mode != AutorunnerMode::Off)
             {
-                // Arming resets the per-run backstop counter and clears any stale confirm.
+                // Arming resets the per-run backstop counter.
                 s.autorunner.autoSendsThisRun = 0;
-                s.pendingConfirmPromptId.clear();
                 // Agentmaster (DELIVERY.md §8): an EXPLICIT re-arm also releases the question-guard
                 // latch. The guard exists so an UNATTENDED plan can't blindly answer a clarifying
-                // question — but a human clicking the toggle to Semi/Full IS attending, and this
+                // question — but a human clicking the toggle to Auto IS attending, and this
                 // gesture is exactly what a user stuck on the guard tries ("switching from Off,
-                // Semi and back to Full didn't help" — the live report: 3 Pending prompts parked by
-                // lastMessageWasQuestion with nothing on screen saying why). The next Stop that ends
+                // Semi and back to Full didn't help" — the live report, from when a Semi mode still
+                // existed: 3 Pending prompts parked by lastMessageWasQuestion with nothing on screen
+                // saying why). The next Stop that ends
                 // on a question re-latches it, so the protection is undiminished for later turns.
                 s.lastMessageWasQuestion = false;
                 // Agentmaster (DELIVERY.md §12): the re-arm also RE-STAMPS a blocked box-state clock
@@ -1460,8 +1413,10 @@ namespace winrt::TerminalApp::implementation
         });
     }
 
-    // Agentmaster: the FLIGHT-PLAN-header Autorunner toggle — advance the selected session's mode
-    // (Off -> Semi-auto -> Full -> Off), reusing _OnAutorunnerChanged's apply logic.
+    // Agentmaster: the Prompt Queue pane's runner toggle (UI name "Prompt Queue Runner"; "Tests
+    // Autorunner" until 2026-10-09) — flip the selected session between its two modes
+    // (Paused <-> Auto), reusing _OnAutorunnerChanged's apply logic. (It cycled
+    // Off -> Semi-auto -> Full until the SemiAuto mode was removed on 2026-10-09.)
     void AgentManagerContent::_CycleAutorunner()
     {
         if (_selectedId.empty() || !_registry)
@@ -1477,18 +1432,18 @@ namespace winrt::TerminalApp::implementation
         {
             return; // a managed Codex has no injector/hooks — never armable (the button is disabled too)
         }
-        // Off(0) -> Semi-auto(1) -> Full(2) -> Off — same index order the old combo used.
-        const int next = s->autorunner.mode == AutorunnerMode::Off ? 1 :
-                                                                    (s->autorunner.mode == AutorunnerMode::SemiAuto ? 2 : 0);
+        // Paused -> Auto, Auto -> Paused. An interrupt-held Off counts as Paused here: a click on
+        // "Paused -> Auto on your next message" switches to Auto at once (and cancels the hold).
+        const AutorunnerMode next = s->autorunner.mode == AutorunnerMode::Off ? AutorunnerMode::Full : AutorunnerMode::Off;
         _OnAutorunnerChanged(next); // writes the registry + clears the per-run backstops
         _Refresh(); // repaint the header toggle now (the registry observer also refreshes)
     }
 
-    // Paint the Autorunner toggle: a colored state dot (gray circle = Off, amber half = Semi, green
-    // disc = Full) + a label. Dim + disabled when no live session is selected. An INTERRUPT-HELD Off
+    // Paint the Autorunner toggle: a colored state dot (gray circle = Paused, green disc = Auto) + a
+    // label. Dim + disabled when no live session is selected. An INTERRUPT-HELD Off
     // (DELIVERY.md §14 — the user pressed Esc, the autorunner parked itself, it resumes on their next
-    // message) keeps the hollow Off circle but paints it in the HELD mode's color and says so in the
-    // label, so an Off the user did not choose never reads as "someone switched my autorunner off".
+    // message) keeps the hollow circle but paints it in the HELD mode's color and says so in the
+    // label, so a pause the user did not choose never reads as "someone paused my autorunner".
     void AgentManagerContent::_UpdateAutorunnerButton(const ::Agentmaster::AutorunnerState& autorunner, bool enabled)
     {
         if (!_autorunnerBtn)
@@ -1503,25 +1458,20 @@ namespace winrt::TerminalApp::implementation
         {
         case AutorunnerMode::Full:
             glyph = L"\x25CF"; // ●
-            label = L"Tests Autorunner: Full";
+            label = L"Prompt Queue Runner: Auto";
             dot = Colors::MediumSeaGreen();
-            break;
-        case AutorunnerMode::SemiAuto:
-            glyph = L"\x25D0"; // ◐
-            label = L"Tests Autorunner: Semi";
-            dot = Colors::Goldenrod();
             break;
         case AutorunnerMode::Off:
         default:
             glyph = L"\x25CB"; // ○
-            label = L"Tests Autorunner: Off";
+            label = L"Prompt Queue Runner: Paused";
             dot = Colors::Gray();
             if (::Agentmaster::InterruptHoldActive(autorunner))
             {
-                const bool heldFull = autorunner.interruptHeldMode == AutorunnerMode::Full;
-                label = heldFull ? L"Tests Autorunner: Off \x2192 Full on your next message" :
-                                   L"Tests Autorunner: Off \x2192 Semi on your next message";
-                dot = heldFull ? Colors::MediumSeaGreen() : Colors::Goldenrod();
+                // The held mode is always Auto (the only mode an interrupt can park), so the circle
+                // takes Auto's green: hollow = "not sending now", green = "it comes back by itself".
+                label = L"Prompt Queue Runner: Paused \x2192 Auto on your next message";
+                dot = Colors::MediumSeaGreen();
             }
             break;
         }
@@ -1536,21 +1486,18 @@ namespace winrt::TerminalApp::implementation
         _autorunnerBtn.IsEnabled(enabled);
     }
 
-    // Agentmaster: select the Auto-Testing pane's [Summary | Auto Testing] tab. The choice is a GLOBAL app
+    // Agentmaster: select the bottom-right pane's [Summary | Prompt Queue] tab. The choice is a GLOBAL app
     // setting (AppSettings::autoTestingShowsSummary), so — exactly like the Explorer-Tree / Triage-Board
     // sort toggles — mutate _appSettings, re-paint, then push it through the settings sink (the page
     // persists settings.json + broadcasts it to every OTHER window, which adopt it in ApplyExternalSettings).
     // A no-op when unchanged, so re-clicking the active tab doesn't churn persistence/broadcast.
+    // Works in EVERY build since 2026-10-09 (it refused outside the dev package / Debug Mode while the
+    // Prompt Queue was a dev-or-debug feature and an ordinary release's pane was Summary-only).
+    //   summary — true == show the Summary tab; false == show the Prompt Queue tab.
+    //   throws  — whatever the settings sink throws (it persists settings.json and broadcasts); the
+    //             in-memory choice and the repaint are already done by then.
     void AgentManagerContent::_SelectPlanPaneTab(bool summary)
     {
-        // Auto Testing is a DEV-OR-DEBUG feature: in an ordinary release the pane is Summary-only and the
-        // toggle is hidden, so this can only ever be invoked under the AgentmasterDev package OR a
-        // `--debug` / AGENTMASTER_DEBUG release. Defensive no-op otherwise (a future caller / keybinding
-        // can't switch the Summary-only pane off Summary).
-        if (!::Agentmaster::Profiles::IsDevOrDebugPackage())
-        {
-            return;
-        }
         if (_appSettings.autoTestingShowsSummary == summary)
         {
             return; // already on this tab

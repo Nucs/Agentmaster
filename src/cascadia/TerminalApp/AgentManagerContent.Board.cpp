@@ -333,7 +333,7 @@ namespace winrt::TerminalApp::implementation
             auto cp = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
             cp.Opacity(0.9);
             cp.HorizontalAlignment(HorizontalAlignment::Left);
-            AgentSetTitledTip(cp, L"Codex agent", L"This managed session runs the OpenAI Codex CLI instead of Claude. Agentmaster launches, resumes and tracks it like any session, but cannot drive its prompts \x2014 there is no queue or Tests Autorunner for Codex, and it reports only Running / Waiting / Idle.", kCardTipDelay);
+            AgentSetTitledTip(cp, L"Codex agent", L"This managed session runs the OpenAI Codex CLI instead of Claude. Agentmaster launches, resumes and tracks it like any session, but cannot drive its prompts \x2014 there is no Prompt Queue or Prompt Queue Runner for Codex, and it reports only Running / Waiting / Idle.", kCardTipDelay);
             stack.Children().Append(cp);
         }
         {
@@ -453,11 +453,11 @@ namespace winrt::TerminalApp::implementation
             metaRow.Orientation(Orientation::Horizontal);
             metaRow.Spacing(8);
 
-            // DEV OR --debug: the ⚙ sent/total badge is the Auto Testing prompt queue, gated to the
-            // AgentmasterDev package OR a `--debug` / AGENTMASTER_DEBUG release (IsDevOrDebugPackage; an
-            // ordinary release never queues prompts — the autorunner is off). The ⚡ server-cache
-            // indicator below is unrelated and stays in every build.
-            if (::Agentmaster::Profiles::IsDevOrDebugPackage() && !s.queue.empty())
+            // The ⚙ sent/total badge is this session's prompt queue. Shown in EVERY build since
+            // 2026-10-09, whenever the queue holds anything (it was gated to the AgentmasterDev package
+            // or Debug Mode while the Prompt Queue Runner was a dev-or-debug feature). The ⚡
+            // server-cache indicator below is unrelated.
+            if (!s.queue.empty())
             {
                 int sent = 0;
                 for (const auto& p : s.queue)
@@ -476,14 +476,15 @@ namespace winrt::TerminalApp::implementation
                 // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): a gray badge on a session whose
                 // autorunner parked ITSELF (the user pressed Esc) says so — and names the mode that
                 // comes back on their next message — instead of reading like a plain "waits for you".
-                std::wstring queueTip = L"Prompts already sent / total queued for this session. Blue means its Tests Autorunner is on, so the rest will go out on their own as turns complete; gray means they wait for you.";
+                std::wstring queueTip = L"Prompts already sent / total queued for this session. Blue means its Prompt Queue Runner is on Auto, so the rest will go out on their own as turns complete; gray means it is Paused and they wait for you.";
                 if (::Agentmaster::InterruptHoldActive(s.autorunner))
                 {
-                    queueTip += std::wstring{ L" Right now the autorunner is parked by your interrupt (Esc) and resumes to " } +
-                                ::Agentmaster::AutorunnerModeLabel(s.autorunner.interruptHeldMode) +
+                    // The UI word for the held mode (AutorunnerModeDisplayName — "Auto"), not the log word.
+                    queueTip += std::wstring{ L" Right now the runner is paused by your interrupt (Esc) and returns to " } +
+                                ::Agentmaster::AutorunnerModeDisplayName(s.autorunner.interruptHeldMode) +
                                 L" on your next message; setting the mode yourself cancels that.";
                 }
-                AgentSetTitledTip(bt, L"Auto Testing queue", winrt::hstring{ queueTip }, kCardTipDelay);
+                AgentSetTitledTip(bt, L"Prompt Queue", winrt::hstring{ queueTip }, kCardTipDelay);
                 metaRow.Children().Append(bt);
             }
 
@@ -1204,7 +1205,7 @@ namespace winrt::TerminalApp::implementation
                                                              L"Idle / Done";
             const wchar_t* colTip =
                 col.state == SessionState::Running         ? L"The agent is working on a turn right now. Work that outlives the turn \x2014 a background shell, a subagent, a teammate \x2014 keeps a session here too, rather than letting it read as finished while it is still going." :
-                col.state == SessionState::WaitingForInput ? L"The turn is finished and the agent is waiting for your next prompt. With Tests Autorunner on, the next queued prompt goes out on its own. A card you haven't looked at yet stays here \x2014 it only drops to Idle / Done once you have read it and the unread timeout has passed." :
+                col.state == SessionState::WaitingForInput ? L"The turn is finished and the agent is waiting for your next prompt. With the Prompt Queue Runner on Auto, the next queued prompt goes out on its own. A card you haven't looked at yet stays here \x2014 it only drops to Idle / Done once you have read it and the unread timeout has passed." :
                 col.state == SessionState::NeedsApproval   ? L"The agent stopped part-way through a turn on a tool-permission prompt or a question, and cannot continue until you answer. Nothing is auto-sent into it \x2014 the queue is held so a queued prompt can never answer the question for you." :
                 col.state == SessionState::Error           ? L"The agent's last turn did not finish. Either it died \x2014 a rate or usage limit, a prompt too long for the context, an auth failure, a dropped connection \x2014 or its session was shut down while the turn ran: the app closed or crashed, or the tab was restarted or deactivated. The card carries the reason. Nothing is auto-sent into an errored session. A session leaves Error on its next turn; right-click \x2192 Move to Idle / Done dismisses it now." :
                                                              L"No turn in progress \x2014 freshly launched, just resumed, or done. A queued prompt still starts from here: a session that has never run emits no turn to wait for.";

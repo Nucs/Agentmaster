@@ -1066,8 +1066,10 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(_setIncludeCoAuthored, L"When off, commits Claude makes omit the \x201C" L"Co-authored-by\x201D trailer. Applies to new sessions.");
         panel.Children().Append(_setIncludeCoAuthored);
         // Agentmaster (PENDING_INPUT.md §11 — the FORK CARRY). Lives here, not beside the §10 re-fill on the
-        // Tests Autorunner tab: that tab is dev-or-debug only, and forking (with its draft) is a release
-        // feature. Read live by the fork seams + the fill pump (_appSettings), so a Save applies to the next fork.
+        // Prompt Queue Runner tab: when it was placed, that tab (then "Tests Autorunner") was dev-or-debug
+        // only, and forking (with its draft) is a release feature. The tab is in every build since
+        // 2026-10-09, but the toggle stays here: forking is a session action, not a queue one.
+        // Read live by the fork seams + the fill pump (_appSettings), so a Save applies to the next fork.
         _setCarryDraftOnFork = ToggleSwitch{};
         _setCarryDraftOnFork.Header(winrt::box_value(L"Copy my unsent prompt into a forked session"));
         AgentSetTip(_setCarryDraftOnFork, L"When you fork a session \x2014 a tab's \x201C" L"Fork session\x201D (or Ctrl+Shift+D), the Manager's Fork, or the Sessions page's Fork here \x2014 the message sitting UNSENT in the source's input box is typed into the new fork's box as well, WITHOUT pressing Enter, so the fork starts one Enter away from the same prompt. The source keeps its copy.\n\nPasted blocks come across as the real pasted text: each [Pasted text #N +M lines] is rebuilt from what you actually pasted (Agentmaster records every paste it passes to Claude), so the fork's box shows the same placeholder backed by the same content \x2014 never the bare label, which Claude would send as literal text. A draft whose pasted block can't be matched for certain (or that holds an image) is not copied at all.\n\nNever fights you: if you start typing into the fork before it lands, your text wins. Off: forks start with an empty input box.");
@@ -1132,24 +1134,27 @@ namespace winrt::TerminalApp::implementation
         });
         panel.Children().Append(_setClaudeInstallBtn);
 
-        // === TESTS AUTORUNNER tab ===
+        // === PROMPT QUEUE RUNNER tab === (named "Tests Autorunner" until 2026-10-09; the panel variable and
+        // the settings keys keep the old "autorunner" word)
         panel = autorunnerPanel;
-        panel.Children().Append(SettingsSeparator(L"TESTS AUTORUNNER (defaults for new sessions)", true)); // leading section
+        panel.Children().Append(SettingsSeparator(L"PROMPT QUEUE RUNNER (defaults for new sessions)", true)); // leading section
+        // Two modes only (the SemiAuto "confirm each send" mode was removed on 2026-10-09). The item
+        // ORDER is the contract the load + save code below read: index 0 == Off, index 1 == Full. The
+        // labels are the UI words (AutorunnerModeDisplayName); settings.json keeps "Off" / "Full".
         _setDefaultMode = ComboBox{};
         _setDefaultMode.Header(winrt::box_value(L"New-session mode"));
-        _setDefaultMode.Items().Append(winrt::box_value(L"Off"));
-        _setDefaultMode.Items().Append(winrt::box_value(L"SemiAuto"));
-        _setDefaultMode.Items().Append(winrt::box_value(L"Full"));
-        AgentSetTip(_setDefaultMode, L"Tests Autorunner mode each new session starts in \x2014 Off (manual) \xB7 SemiAuto (you confirm each send) \xB7 Full (auto-send the queue on turn-complete). Per-session, changeable from the Auto Testing pane.");
+        _setDefaultMode.Items().Append(winrt::box_value(winrt::hstring{ ::Agentmaster::AutorunnerModeDisplayName(AutorunnerMode::Off) })); // 0: "Paused"
+        _setDefaultMode.Items().Append(winrt::box_value(winrt::hstring{ ::Agentmaster::AutorunnerModeDisplayName(AutorunnerMode::Full) })); // 1: "Auto"
+        AgentSetTip(_setDefaultMode, L"Prompt Queue Runner mode each new or reopened session starts in \x2014 Paused (nothing is sent on its own; you use Send now) \xB7 Auto (the next queued prompt goes out by itself once the session has been ready for a short while). Per-session, changeable from the Prompt Queue pane or the tab's badge.");
         panel.Children().Append(_setDefaultMode);
         _setMaxAutoSends = TextBox{};
         _setMaxAutoSends.Header(winrt::box_value(L"Max auto-sends per run"));
         _setMaxAutoSends.PlaceholderText(L"100");
-        AgentSetTip(_setMaxAutoSends, L"Backstop cap on how many prompts Tests Autorunner may auto-send in one run before stopping. Blank or 0 resets to 100.");
+        AgentSetTip(_setMaxAutoSends, L"Backstop cap on how many prompts the Prompt Queue Runner may auto-send in one run before stopping. Blank or 0 resets to 100.");
         panel.Children().Append(_setMaxAutoSends);
         _setStopOnError = ToggleSwitch{};
         _setStopOnError.Header(winrt::box_value(L"Stop on error"));
-        AgentSetTip(_setStopOnError, L"When on, Tests Autorunner halts a session's queue as soon as it enters the Error state instead of sending the next prompt.");
+        AgentSetTip(_setStopOnError, L"When on, the Prompt Queue Runner halts a session's queue as soon as it enters the Error state instead of sending the next prompt.");
         panel.Children().Append(_setStopOnError);
         _setPauseOnHuman = ToggleSwitch{};
         _setPauseOnHuman.Header(winrt::box_value(L"Pause on human input (not wired up yet)"));
@@ -1159,10 +1164,10 @@ namespace winrt::TerminalApp::implementation
         // the "feed pauseOnHumanInput from a TermControl input tap" follow-up (CLAUDE.md; PENDING_INPUT.md
         // §4/§6) — the setting round-trips and the scheduler is ready, only the keystroke tap is missing.
         // Say so rather than describe a behavior that doesn't happen; drop this caveat when it lands.
-        AgentSetTip(_setPauseOnHuman, L"Meant to hold a session's queue while you are typing into its terminal yourself, so an auto-send can't land mid-sentence.\n\nNot wired up yet: nothing reports your keystrokes to the Tests Autorunner, so this toggle has no effect today. Your choice is saved and takes effect once it is connected.\n\nA prompt you actually SEND does stop the queue \x2014 the session goes Running, and nothing is ever auto-sent mid-turn.");
+        AgentSetTip(_setPauseOnHuman, L"Meant to hold a session's queue while you are typing into its terminal yourself, so an auto-send can't land mid-sentence.\n\nNot wired up yet: nothing reports your keystrokes to the Prompt Queue Runner, so this toggle has no effect today. Your choice is saved and takes effect once it is connected.\n\nA prompt you actually SEND does stop the queue \x2014 the session goes Running, and nothing is ever auto-sent mid-turn.");
         panel.Children().Append(_setPauseOnHuman);
         // Agentmaster (PENDING_INPUT.md §9 — the DRAFT SWAP). Unlike the toggle above, this one is
-        // live: it governs every prompt-submit path at once (auto-send, SemiAuto confirm, Send-now,
+        // live: it governs every prompt-submit path at once (auto-send, Send-now,
         // the /handover paste pump), which all share SessionRegistry::SubmitPrompt.
         _setPreserveDraft = ToggleSwitch{};
         _setPreserveDraft.Header(winrt::box_value(L"Preserve my unsent draft when a prompt is sent"));
@@ -1180,7 +1185,7 @@ namespace winrt::TerminalApp::implementation
         // input box, so a remembered unsent draft is typed back by us when the session reopens.
         _setRestoreDraft = ToggleSwitch{};
         _setRestoreDraft.Header(winrt::box_value(L"Re-type a remembered unsent draft when a session reopens"));
-        AgentSetTip(_setRestoreDraft, L"A message you typed into a session's input box but never sent (its \"3 dots\" are pulsing) is remembered across an app restart or a close. When that session is resumed, this types the remembered draft back into the fresh input box \x2014 pasted WITHOUT pressing Enter, so it sits there exactly as you left it, one Enter away \x2014 and verifies it actually landed by reading the box back. Claude itself never restores its input box, so without this the memory only shows on the dots until the empty box clears it a few seconds after the tab starts.\n\nNever fights you: a session you (or the Tests Autorunner) already sent a prompt to is left alone, a box you started typing into keeps YOUR text, and a draft whose [Pasted text #N] placeholder cannot be matched to its cached content is not re-typed at all (a literal label would silently lose the pasted content when sent).");
+        AgentSetTip(_setRestoreDraft, L"A message you typed into a session's input box but never sent (its \"3 dots\" are pulsing) is remembered across an app restart or a close. When that session is resumed, this types the remembered draft back into the fresh input box \x2014 pasted WITHOUT pressing Enter, so it sits there exactly as you left it, one Enter away \x2014 and verifies it actually landed by reading the box back. Claude itself never restores its input box, so without this the memory only shows on the dots until the empty box clears it a few seconds after the tab starts.\n\nNever fights you: a session you (or the Prompt Queue Runner) already sent a prompt to is left alone, a box you started typing into keeps YOUR text, and a draft whose [Pasted text #N] placeholder cannot be matched to its cached content is not re-typed at all (a literal label would silently lose the pasted content when sent).");
         panel.Children().Append(_setRestoreDraft);
 
         // === BEHAVIOR tab ===
@@ -2392,17 +2397,21 @@ namespace winrt::TerminalApp::implementation
         panel.Children().Append(changeProfile);
 
         // DEVELOPER — the debug escape hatch (ProfileBootstrap.h IsDebugPackage). "Enable Debug Mode" is the
-        // durable, in-UI twin of the --debug / AGENTMASTER_DEBUG launch flag: it unlocks the DEV-only Auto
-        // Testing / Tests Autorunner subsystem (queue prompts + auto-send on turn-complete, the pane toggle,
-        // the board queue badge, the cog's Tests Autorunner tab, the per-tab autorunner control) in THIS
-        // Release install. The gates + the scheduler are wired ONCE at startup (Engine.cpp /
-        // Profiles::ApplyPersistedDebugMode), so a change applies on the NEXT start — matching the flag's own
-        // "relaunch to persist" behaviour. On a Dev build these tools are always on: _ShowSettings shows the
-        // toggle ON + disabled with a note, and OnSave skips writing it (so the forced display can't persist).
+        // durable, in-UI twin of the --debug / AGENTMASTER_DEBUG launch flag: it makes a RELEASE install
+        // answer Profiles::IsDevOrDebugPackage() true, the gate for DEBUG-ONLY features.
+        // ⚠ NO feature reads that gate today. Until 2026-10-09 it unlocked the whole Auto Testing / Tests
+        // Autorunner subsystem (now the Prompt Queue + Prompt Queue Runner, shown and running in every
+        // build). The toggle, the flag and the persisted `debugMode` key are KEPT on purpose (the user's
+        // decision): a future feature that must stay developer-only gates on IsDevOrDebugPackage() and is
+        // switched on from here with no new plumbing. The verdict is latched ONCE at startup
+        // (Profiles::ApplyPersistedDebugMode, run by the EXE prelude and again by Engine.cpp), so a
+        // change applies on the NEXT start — matching the flag's own "relaunch to persist" behaviour. On a
+        // Dev build the gate is always true: _ShowSettings shows the toggle ON + disabled with a note, and
+        // OnSave skips writing it (so the forced display can't persist).
         panel.Children().Append(SettingsSeparator(L"DEVELOPER"));
         _setDebugMode = ToggleSwitch{};
         _setDebugMode.Header(winrt::box_value(L"Enable Debug Mode"));
-        AgentSetTip(_setDebugMode, L"Unlock the developer Auto Testing / Tests Autorunner tools \x2014 queue prompts, auto-send them on turn-complete, the per-tab autorunner control, and the cog's Tests Autorunner tab \x2014 in this build. The durable equivalent of launching with --debug (or setting the AGENTMASTER_DEBUG environment variable). Applies after you restart Agentmaster.");
+        AgentSetTip(_setDebugMode, L"Turn on features that are for developers only. No feature needs it at the moment \x2014 the Prompt Queue and the Prompt Queue Runner, which it used to unlock, are now always available \x2014 so today this switch changes nothing you can see. It is kept for developer-only features of later versions. The durable equivalent of launching with --debug (or setting the AGENTMASTER_DEBUG environment variable). Applies after you restart Agentmaster.");
         panel.Children().Append(_setDebugMode);
         _setDebugModeNote = Text(L"Applies after restart.", 11, false, 0.6);
         _setDebugModeNote.TextWrapping(TextWrapping::Wrap);
@@ -2463,14 +2472,12 @@ namespace winrt::TerminalApp::implementation
         addSettingsTab(L"Sessions", L"How new Claude sessions launch \x2014 permissions, model, environment variables, and the Launch box's directory history.", sessionsPanel);
         _presetsTabIndex = static_cast<int>(_settingsTabButtons.size());
         addSettingsTab(L"Presets", L"Named ways to start a Claude session \x2014 another provider (OpenRouter, Xiaomi MiMo, your own), its models, limits and arguments. Listed at the bottom of every Open New Session Here / Fork session menu.", presetsPanel);
-        // Auto Testing is a DEV-OR-DEBUG feature: the Tests Autorunner defaults tab is added under the
-        // AgentmasterDev package OR a `--debug` / AGENTMASTER_DEBUG release (IsDevOrDebugPackage; the
-        // autorunner never runs otherwise — see Engine.cpp). The panel is still built above so the cog's
-        // load/save code paths stay uniform; it's just not shown.
-        if (::Agentmaster::Profiles::IsDevOrDebugPackage())
-        {
-            addSettingsTab(L"Tests Autorunner", L"Tests Autorunner defaults stamped onto every new session \x2014 the starting mode and its backstops.", autorunnerPanel);
-        }
+        // The Prompt Queue Runner defaults tab ("Tests Autorunner" until 2026-10-09) — in EVERY build now.
+        // While the runner was a dev-or-debug feature the tab was added only under the AgentmasterDev
+        // package or Debug Mode, which also hid the four send-safety toggles that live on it and that
+        // govern EVERY send path (draft swap, Ctrl+S stash, verified placement, restore re-fill): an
+        // ordinary release ran them at their defaults with no way to change them.
+        addSettingsTab(L"Prompt Queue Runner", L"Prompt Queue Runner defaults stamped onto every new session \x2014 the starting mode and its backstops \x2014 and how a sent prompt treats a draft that is already in the input box.", autorunnerPanel);
         addSettingsTab(L"Behavior", L"Interaction + session-state behavior \x2014 close confirms, cleaning up orphaned sessions, the Waiting-for-you \x201Cunread\x201D timeout, and GPU or CPU rendering.", behaviorPanel);
         // COMMANDS is the first tab to offer a per-tab RESET: put every control back to the
         // SHIPPED DEFAULTS, read from a default-constructed AppSettings so there is ONE source of
@@ -2739,9 +2746,8 @@ namespace winrt::TerminalApp::implementation
         }
         if (_setDefaultMode)
         {
-            _setDefaultMode.SelectedIndex(_appSettings.defaultAutorunnerMode == AutorunnerMode::Full ? 2 :
-                                          _appSettings.defaultAutorunnerMode == AutorunnerMode::SemiAuto ? 1 :
-                                                                                                         0);
+            // Index contract (see where the combo is built): 0 == Off ("Paused"), 1 == Full ("Auto").
+            _setDefaultMode.SelectedIndex(_appSettings.defaultAutorunnerMode == AutorunnerMode::Full ? 1 : 0);
         }
         if (_setMaxAutoSends)
         {
@@ -3259,18 +3265,19 @@ namespace winrt::TerminalApp::implementation
         }
         if (_setDebugMode)
         {
-            // DEVELOPER (debug escape hatch): reflect the persisted setting, EXCEPT on a Dev build where the
-            // developer tools are always on (IsDevPackage) and can't be turned off — show ON + disabled with a
+            // DEVELOPER (debug escape hatch): reflect the persisted setting, EXCEPT on a Dev build where
+            // Debug Mode is always on (IsDevPackage) and can't be turned off — show ON + disabled with a
             // note. Otherwise it is user-controllable, and the caption reflects whether debug is ALREADY active
             // this session (persisted-on + applied at startup, or --debug / AGENTMASTER_DEBUG) so a live vs
-            // pending change reads unambiguously.
+            // pending change reads unambiguously. (The note says "Debug Mode", not "developer tools": no
+            // tool hangs on the gate since the Prompt Queue Runner left it on 2026-10-09.)
             if (::Agentmaster::Profiles::IsDevPackage())
             {
                 _setDebugMode.IsOn(true);
                 _setDebugMode.IsEnabled(false);
                 if (_setDebugModeNote)
                 {
-                    _setDebugModeNote.Text(L"Dev build \x2014 developer tools are always on.");
+                    _setDebugModeNote.Text(L"Dev build \x2014 Debug Mode is always on.");
                 }
             }
             else
@@ -3443,9 +3450,9 @@ namespace winrt::TerminalApp::implementation
         }
         if (_setDefaultMode)
         {
-            const int idx = _setDefaultMode.SelectedIndex();
-            _appSettings.defaultAutorunnerMode = idx == 2 ? AutorunnerMode::Full : idx == 1 ? AutorunnerMode::SemiAuto :
-                                                                                            AutorunnerMode::Off;
+            // Index contract (see where the combo is built): 1 == Full ("Auto"); 0 — and a combo with
+            // nothing selected (-1) — reads Off ("Paused"), the direction in which nothing is sent.
+            _appSettings.defaultAutorunnerMode = _setDefaultMode.SelectedIndex() == 1 ? AutorunnerMode::Full : AutorunnerMode::Off;
         }
         if (_setMaxAutoSends)
         {
@@ -3890,7 +3897,7 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::LogNav(std::wstring{ L"settings-save skipPerms=" } + (_appSettings.skipPermissions ? L"1" : L"0") +
                                   L" trustWorkspace=" + (_appSettings.trustWorkspaceOnLaunch ? L"1" : L"0") +
                                   L" model=" + (_appSettings.model.empty() ? std::wstring{ L"(default)" } : _appSettings.model) +
-                                  L" autorunner=" + (_appSettings.defaultAutorunnerMode == AutorunnerMode::Full ? L"Full" : _appSettings.defaultAutorunnerMode == AutorunnerMode::SemiAuto ? L"Semi" : L"Off") +
+                                  L" autorunner=" + ::Agentmaster::AutorunnerModeLabel(_appSettings.defaultAutorunnerMode) + /* the machine word: Off / Full */
                                   L" claudeExe=" + (_appSettings.claudeExePath.empty() ? std::wstring{ L"(auto)" } : _appSettings.claudeExePath) +
                                   L" softwareRendering=" + (_appSettings.softwareRendering ? L"1" : L"0") + /* RENDERING.md — the whole fleet's renderer */
                                   L" pauseHidden=" + (_appSettings.pauseHiddenTerminals ? L"1" : L"0") + /* RENDERING.md §4c */

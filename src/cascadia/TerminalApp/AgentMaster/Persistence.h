@@ -26,7 +26,18 @@ namespace Agentmaster
     // ---- enum <-> string ----
     std::wstring ToString(SessionState s);
     SessionState SessionStateFromString(std::wstring_view s);
+    // The PERSISTED word of a Tests Autorunner mode — what sessions.json, settings.json
+    // (defaultAutorunnerMode) and the `agentmaster` CLI's JSON carry. Never the UI wording
+    // (AutorunnerModeDisplayName): renaming these would orphan every stored value.
+    //   m       — the mode.
+    //   returns — L"Full" or L"Off".
+    //   throws  — std::bad_alloc on allocation failure only.
     std::wstring ToString(AutorunnerMode m);
+    // Parse a persisted mode word. TOTAL: only "Full" reads as Full; "Off", an unknown word and the
+    // retired "SemiAuto" (removed 2026-10-09) all read as Off, so a value written by an older build can
+    // never make a session start sending by itself.
+    //   s       — the stored word (case-sensitive).
+    //   returns — AutorunnerMode::Full or AutorunnerMode::Off.
     AutorunnerMode AutorunnerModeFromString(std::wstring_view s);
     std::wstring ToString(PromptStatus s);
     PromptStatus PromptStatusFromString(std::wstring_view s);

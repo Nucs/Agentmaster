@@ -256,7 +256,7 @@ them).
        - **fits** → that successor's launch commandline positional prompt (the zero-race channel);
        - **over budget** → that file rides the **ConPTY stdin instead — a streamed pipe with NO
          CreateProcessW ceiling**: parked as a Pending prompt at the FRONT of ITS successor's
-         queue (the durable, visible carrier — Auto Testing lists it, Send-now can deliver it
+         queue (the durable, visible carrier — Prompt Queue lists it, Send-now can deliver it
          manually, a restart keeps it) and paste-injected by `_PumpHandoverInjections` (below)
          the moment that session actually starts;
        - **unreadable / whitespace-only / beyond-cap** (a rewrite-in-flight race past the §7

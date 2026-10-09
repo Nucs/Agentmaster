@@ -162,18 +162,15 @@ namespace
         }
     }
 
+    // The badge's word for a Tests Autorunner mode: "Paused" (Off) or "Auto" (Full). It is the engine's
+    // ONE display-name table (AutorunnerModeDisplayName, SessionModels.h), so the badge, the Manager's
+    // header toggle, the board tooltip and the cog can never show different words for one mode. (It
+    // returned Off / Semi / Full until the SemiAuto mode was removed on 2026-10-09.)
+    //   m       — the mode.
+    //   returns — a static string, never null.
     const wchar_t* ModeLabel(AutorunnerMode m)
     {
-        switch (m)
-        {
-        case AutorunnerMode::SemiAuto:
-            return L"Semi";
-        case AutorunnerMode::Full:
-            return L"Full";
-        case AutorunnerMode::Off:
-        default:
-            return L"Off";
-        }
+        return ::Agentmaster::AutorunnerModeDisplayName(m);
     }
 
     // Agentmaster (TAB_OVERLAY row 3): a one-line preview of a queued prompt — its FIRST line, capped

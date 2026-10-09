@@ -155,7 +155,7 @@ the panel:
     horizontal StackPanel it was offered unlimited width and was cut off mid-letter at the card's
     edge — and the new text is about twice as long as the old one.
 - **Interactions** (Linked Lenses): click = select (drives `AgentManagerContent::SelectSession`,
-  so the board/tree/Auto-Testing follow); double-click = `_ActivateClaudeSession` (jump to the
+  so the board/tree/Prompt Queue follow); double-click = `_ActivateClaudeSession` (jump to the
   tab, cross-window); right-click = **the** session context menu —
   `AgentManagerContent::BuildSessionMenuFor` (a public wrapper over `_MakeLazySessionMenu`), the
   exact lazily-filled flyout the board card shows, **anchored on the card** (its optional `anchor`
@@ -607,7 +607,7 @@ when you deliberately peek another.** Two inputs drive the one selection (`_side
 restore-seeded selection) and on the focused tab being a managed session (the Agent Manager page — no tab at all / a
 `pwsh`·`cmd`·external shell resolve empty → the current peek is kept, nothing to summarize). It
 passes `driveManagerLens=false`, so a terminal click moves ONLY the side panel — the Manager
-board/tree/Auto-Testing keeps its own deliberate selection. The same-id early-out in
+board/tree/Prompt Queue keeps its own deliberate selection. The same-id early-out in
 `_SidePanelSelectSession` makes the steady state (already on the focused tab) free, so hooking
 these high-frequency events costs nothing at rest.
 

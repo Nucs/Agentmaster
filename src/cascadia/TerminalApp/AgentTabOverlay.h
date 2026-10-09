@@ -5,14 +5,14 @@
 // compact HUD pinned to the top-right of a Claude session's terminal, summarizing the tab <->
 // Agentmaster link at a glance. Row 1 is a strip of DISCRETE, individually-tooltipped parts, in order:
 // hook-driven status (color-matched to the Triage Board; LEFTMOST), the action buttons (folder / copy
-// menu / pencil — ALWAYS shown for a LINKED session), Autorunner mode (Off/Semi/Full — a CLICKABLE button
-// that cycles the mode), queued (Pending) count, and link state (surfaced ONLY when NOT linked —
+// menu / pencil — ALWAYS shown for a LINKED session), Autorunner mode (Paused/Auto — a CLICKABLE button
+// that flips the mode), queued (Pending) count, and link state (surfaced ONLY when NOT linked —
 // "observe" / "unlinked"; a linked session shows nothing for link state).
 // Row 2: "<root workdir folder>/<branch>" (dim; e.g. myworkdir/feature/issue123) so the session's place +
 // branch read at a glance; the label is hidden when there's no dir/branch (and on observe badges). The
 // row-1 action buttons (a LINKED session only) are: a folder
 // button (Open Path — the working dir via explorer.exe) + a MAIL button (queue this session's UNSENT
-// input-box draft into its Auto-Testing queue — dev-or-debug + Claude only, the Manager envelope's twin)
+// input-box draft into its prompt queue — Claude only, in every build since 2026-10-09; the Manager envelope's twin)
 // + a copy button whose menu copies the Session Id
 // / Copy Path (working dir) / Copy Branch Name / Claude Launch CLI / Codex Launch CLI (each the REAL full
 // command — the live process commandline with hooks, or the builder Agentmaster would use) / Summary (the
@@ -266,7 +266,7 @@ namespace winrt::TerminalApp::implementation
         void _WireHover(); // attach the pointer-over brighten handlers (idempotent; weak-captured)
         void _BuildActionsRow(); // lazily build the action buttons (folder + mail/queue + copy menu + pencil); placed in row 1 right after the status block by _Refresh, for a LINKED session
         void _SetExpanded(bool on); // dim<->bright the whole badge (driven by hover OR the copy-menu pinned state)
-        void _CycleAutorunner(); // row-1 Autorunner button: cycle this session's mode Off -> Semi -> Full -> Off (mutates the shared registry; Rule #1)
+        void _CycleAutorunner(); // row-1 Autorunner button: flip this session's mode Paused <-> Auto (AutorunnerMode Off <-> Full); the user's explicit choice, so it cancels a pending interrupt resume, and a switch to Auto also resets the per-run send counter + releases the question-guard hold (mutates the shared registry; Rule #1). No-op with no live session. Throws std::bad_alloc only
         void _OpenFolder(); // row 3 folder button: open the session's working dir in Explorer (off-thread)
         void _QueueCurrentPrompt(bool clearBox); // row-1 MAIL button (between folder and copy): queue this session's UNSENT input-box draft into its Auto-Testing queue — the badge twin of the Manager compose row's envelope. Dev-or-debug + Claude only. clearBox (a PLAIN click) also REMOVES the draft from the input box after queueing (a move — PENDING_INPUT.md §8d); Shift+Click passes false to KEEP it (the historical copy, Rule #13)
         void _RefreshQueueButtonEnabled(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: enable the MAIL button only while a draft actually exists (mirrors the "3 dots" / pendingInput), so a prominent toolbar button never silently no-ops on an empty box (the "dead button" trap)

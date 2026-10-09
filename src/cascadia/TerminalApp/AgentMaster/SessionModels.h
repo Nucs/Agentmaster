@@ -152,11 +152,32 @@ namespace Agentmaster
         return true;
     }
 
+    // Agentmaster: the mode of ONE session's PROMPT QUEUE RUNNER — a session's queue is either PAUSED or
+    // AUTOMATIC, nothing in between.
+    // NAMING: "Prompt Queue Runner" is what the UI calls the feature since 2026-10-09 (before: "Tests
+    // Autorunner"), and "Prompt Queue" what it calls the Manager pane that lists a session's prompts
+    // (before: "Auto Testing"). Only the visible texts changed. Every identifier (AutorunnerMode,
+    // AutorunnerState, autoTestingShowsSummary, …), every persisted key ("autorunner",
+    // "defaultAutorunnerMode"), autorunner.log and the log tags keep the old words, and so do most
+    // comments in this code base — read "autorunner" / "Tests Autorunner" as the runner and "Auto
+    // Testing" as the Prompt Queue. The same day the runner stopped being a dev-or-debug feature: it
+    // runs, and its UI is shown, in every build (Engine.cpp).
+    // The enumerator NAMES are the stable machine vocabulary: they are
+    // what sessions.json / settings.json store ("Off" / "Full" — Persistence.cpp ToString), what the
+    // `agentmaster` CLI prints and what the logs say, so they did not change when the UI wording did.
+    // The UI shows the two as "Paused" and "Auto" (AutorunnerModeDisplayName below).
+    //
+    // A third mode, SemiAuto ("arm the next prompt and wait for a one-click confirm"), was REMOVED on
+    // 2026-10-09 together with its arming step, its Send / Skip banner and Scheduler::Confirm: the
+    // confirm lived only in the Agent Manager's Auto Testing pane, so a Semi session silently waited
+    // on a click the user could not see from the tab. A stored "SemiAuto" (a session record or the
+    // cog's default mode written by an older build) reads back as Off — the safe direction: nothing is
+    // ever sent on its own for a session the user had asked to confirm each send of
+    // (AutorunnerModeFromString). The numeric values are not persisted anywhere.
     enum class AutorunnerMode
     {
-        Off,
-        SemiAuto, // confirm each auto-send (recommended for the first N sends)
-        Full // auto-send with no confirmation
+        Off, // PAUSED: nothing is sent automatically; the queue waits for Send now (or a switch to Auto)
+        Full // AUTO: the next queued prompt is sent by itself whenever the session is ready (DecideAdvance)
     };
 
     // Agentmaster: session ordering — the basis for BOTH sort toggles. (1) The Explorer Tree's sort
@@ -394,7 +415,9 @@ namespace Agentmaster
         Held, // LEGACY — no longer produced. A pending question / "needs you" state now keeps the
               // prompt Pending (it stays queued and waits, like a Running mid-turn) instead of being
               // parked here. Still parsed (for older sessions.json) + rehabilitated to Pending.
-        Skipped,
+        Skipped, // LEGACY — no longer produced. Only the removed SemiAuto mode's "Skip" button set it
+                 // (a prompt the user declined at the confirm). Still parsed, kept as completed
+                 // history (never sent, never rehabilitated) and shown with its own glyph.
         Failed
     };
 
@@ -1069,7 +1092,7 @@ namespace Agentmaster
 
     // Agentmaster (PENDING_INPUT.md §9): ONE prompt submission, as handed to the hosting window's
     // submitter (SessionRegistry::SetPromptSubmitter). Every path that SENDS a queued prompt —
-    // the autorunner's auto-send, its SemiAuto confirm, the Manager's Send-now, and the /handover
+    // the autorunner's auto-send, the Manager's Send-now, and the /handover
     // paste pump — goes through that one seam, so the draft swap can never apply to some of them
     // and not others. `promptId` is what an aborted swap rolls back; `refundAutoSend` is set only
     // by the autorunner paths, which incremented autoSendsThisRun before injecting (a Send-now
@@ -1168,17 +1191,39 @@ namespace Agentmaster
     // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): the PURE rules over AutorunnerState, shared by
     // the registry seams (NoteInterrupt / the UserPromptSubmit record / NoteExternalPrompt), the pause
     // backstops, the UI cues, and the tests — so no two consumers can disagree on what "held" means.
+    //
+    // The mode's LOG word — the machine vocabulary ("Off" / "Full"), the same words the persisted
+    // files and the CLI use, so a log line can be matched against them. For text the USER reads (a
+    // button, a tooltip) use AutorunnerModeDisplayName instead.
+    //   m       — the mode.
+    //   returns — a static string, never null: L"Full" or L"Off".
     inline const wchar_t* AutorunnerModeLabel(AutorunnerMode m) noexcept
     {
         switch (m)
         {
         case AutorunnerMode::Full:
             return L"Full";
-        case AutorunnerMode::SemiAuto:
-            return L"Semi";
         case AutorunnerMode::Off:
         default:
             return L"Off";
+        }
+    }
+
+    // The mode's DISPLAY name — what every UI surface shows for it (the Prompt Queue pane's runner toggle,
+    // the per-tab badge, the board card's queue tooltip, the cog's default-mode list): "Paused" for Off and
+    // "Auto" for Full. ONE definition so the surfaces cannot drift apart; kept separate from
+    // AutorunnerModeLabel on purpose, because the logs and the persisted files keep the machine words.
+    //   m       — the mode.
+    //   returns — a static string, never null: L"Auto" or L"Paused".
+    inline const wchar_t* AutorunnerModeDisplayName(AutorunnerMode m) noexcept
+    {
+        switch (m)
+        {
+        case AutorunnerMode::Full:
+            return L"Auto";
+        case AutorunnerMode::Off:
+        default:
+            return L"Paused";
         }
     }
 
@@ -1197,7 +1242,7 @@ namespace Agentmaster
         a.interruptHeldUnixMs = 0;
     }
 
-    // PARK: an interrupt on a Semi/Full autorunner -> Off, the mode remembered, the marker stamp kept as
+    // PARK: an interrupt on a non-Off (Auto) autorunner -> Off, the mode remembered, the marker stamp kept as
     // the resume anchor. Returns true iff a hold was TAKEN. An already-Off autorunner is untouched —
     // the user's own Off (they drive manually) or an existing hold (a second Esc while held keeps the
     // ORIGINAL mode + anchor; idempotent).
@@ -1584,9 +1629,6 @@ namespace Agentmaster
         // card's hover tooltip; the summary panel / Sessions detail / copy derive their own from
         // AnalyzeSessionTranscript (SessionSummary.awaySummary), the same data by a different path.
         std::wstring recap;
-        // Transient (not persisted): in SemiAuto, the scheduler arms the next prompt here
-        // and the Auto Testing shows a one-click confirm. Empty when nothing awaits confirm.
-        std::wstring pendingConfirmPromptId;
         // Agentmaster (PENDING_INPUT.md): the session's UNSENT input-box DRAFT — text the user typed
         // into Claude's input box but has NOT yet submitted. Read out-of-band from the rendered terminal
         // buffer by the UI lane (TerminalPage::_ScanPendingInput -> ControlCore::ReadPendingInputDraft;
@@ -2136,14 +2178,15 @@ namespace Agentmaster
         L"Fable 5 | claude-fable-5\nOpus 4.8 | claude-opus-4-8\nSonnet 5 | claude-sonnet-5",
     };
 
-    // Global app settings — the Manager toolbar's Settings cog (next to "Pause Autorunner").
+    // Global app settings — the Manager toolbar's Settings cog (next to "Pause Prompt Queue Runner").
     // Every default reproduces the prior hardcoded behavior EXCEPT defaultAutorunnerMode (now
     // Full, the product default — "all new or opened sessions run on Autorunner"), so a missing
     // settings.json mostly changes nothing. Persisted to ~/.agentmaster/settings.json, loaded at
     // startup, and applied at two seams: the spawn recipe (Claude fields) and session OPEN — the
     // autorunner MODE is stamped onto EVERY opened session (new / adopted / restored); the other
     // autorunner backstops are stamped onto NEW sessions only. These are GLOBAL defaults/backstops;
-    // per-session autorunner mode still lives in the Auto Testing (changeable after open).
+    // per-session autorunner mode still lives in the Prompt Queue pane (changeable after open).
+    // All of it applies in EVERY build since 2026-10-09 (the runner left the dev-or-debug gate).
     // Agentmaster (COMMANDS.md §6a — customizable slash commands): the shipped defaults of the
     // /handover family's command names. ONE definition each — AppSettings' struct defaults, the
     // Persistence absent-key fallbacks, the reconcile's "what a pre-feature install has on disk",
@@ -2274,9 +2317,11 @@ namespace Agentmaster
         // --- Autorunner defaults ---
         // The MODE seeds every OPENED session — new, adopted, AND restored/window-restored (a
         // reopened session is re-armed on this default, OVERRIDING its saved per-session mode),
-        // and stays changeable afterward (the Auto Testing toggle / this cog). Default Full ==
+        // and stays changeable afterward (the Prompt Queue pane's runner toggle / the tab badge). Default Full ==
         // "all new or opened sessions run on Autorunner". The backstops below are stamped onto
         // NEW sessions only; a restored one keeps its persisted maxAutoSends/stopOnError/pauseOnHumanInput.
+        // Two values only — Off (shown "Paused") or Full (shown "Auto"); a stored "SemiAuto" from an
+        // older build loads as Off (see AutorunnerMode).
         AutorunnerMode defaultAutorunnerMode{ AutorunnerMode::Full };
         uint32_t maxAutoSends{ 100 }; // runaway backstop
         bool stopOnError{ true }; // pause a plan when a turn ends in error
@@ -2285,9 +2330,9 @@ namespace Agentmaster
         // session whose input box already holds the user's UNSENT draft, take the draft out of the
         // way first and put it straight back afterwards, instead of pasting the prompt ON TOP of it
         // (which submitted draft + prompt as one message the user never wrote — the merge bug).
-        // GLOBAL, and it governs EVERY submit path at once (the autorunner's auto-send, its SemiAuto
-        // confirm, the Manager's Send-now, and the /handover paste pump all share one seam —
-        // SessionRegistry::SubmitPrompt), so the four can never disagree about it. A session with no
+        // GLOBAL, and it governs EVERY submit path at once (the autorunner's auto-send, the
+        // Manager's Send-now, and the /handover paste pump all share one seam —
+        // SessionRegistry::SubmitPrompt), so the three can never disagree about it. A session with no
         // draft is unaffected either way: the swap is skipped and the injection is byte-identical to
         // before. OFF restores the historical merge behavior verbatim.
         bool preserveDraftOnSend{ true };
@@ -2647,13 +2692,16 @@ namespace Agentmaster
         // cycles MostActive/Newest/Oldest/Alpha — the tree's set minus ByPid (pid grouping is meaningless
         // once cards are split across state columns).
         ExplorerSort boardSort{ ExplorerSort::MostActive };
-        // Agentmaster: which tab the Manager's FLIGHT-PLAN pane shows. Its top line is a two-state
-        // [Summary | Auto Testing] segmented toggle; true == the (currently empty) Summary tab is
-        // selected, false == the Auto Testing tab (the prompt queue / Autorunner / compose box). GLOBAL
-        // across windows like treeSort/boardSort: a click in any window persists it here + broadcasts,
-        // so every window's pane shows the same tab and the choice survives restart. Default true
-        // (Summary). NOTE: distinct from showSummaryPanel — that is the per-tab OVERLAY's pencil-toggled
-        // summary panel (TAB_OVERLAY.md); this is the Manager Auto-Testing pane's tab selection.
+        // Agentmaster: which tab the Manager's bottom-right pane shows. Its top line is a two-state
+        // [Summary | Prompt Queue] segmented toggle ("Auto Testing" until 2026-10-09 — hence this
+        // field's name, which is also its settings.json key and therefore stays); true == the Summary
+        // tab is selected, false == the Prompt Queue tab (the prompt queue / runner toggle / compose
+        // box). GLOBAL across windows like treeSort/boardSort: a click in any window persists it here +
+        // broadcasts, so every window's pane shows the same tab and the choice survives restart.
+        // Default true (Summary). Honored as stored in EVERY build since 2026-10-09 (an ordinary
+        // release forced it to true in memory while the Prompt Queue was a dev-or-debug feature).
+        // NOTE: distinct from showSummaryPanel — that is the per-tab OVERLAY's pencil-toggled
+        // summary panel (TAB_OVERLAY.md); this is the Manager pane's tab selection.
         bool autoTestingShowsSummary{ true };
         // Agentmaster: the Archive page's table|detail splitter position — the TABLE's share of
         // the two columns, kept within (0.05, 0.95). Applied as STAR ratios, so the split scales
@@ -2734,13 +2782,15 @@ namespace Agentmaster
         int64_t updatePostponedUntilUnixMs{ 0 };
         // Agentmaster (debug escape hatch; ProfileBootstrap.h IsDebugPackage): the Settings cog's
         // About-tab "Enable Debug Mode" toggle. The DURABLE, in-UI twin of the --debug /
-        // AGENTMASTER_DEBUG launch flag — when ON it unlocks the DEV-only Auto Testing / Tests
-        // Autorunner subsystem (the autorunner, the pane toggle, the board queue badge, the cog's
-        // Tests Autorunner tab, the per-tab autorunner control) in a RELEASE install. Read ONCE at
-        // startup (WindowEmperor -> Profiles::ApplyPersistedDebugMode -> a process-local one-way
-        // override that IsDebugPackage() consults), so it takes effect on the NEXT start — exactly
-        // like handing --debug to a fresh launch. Default OFF; a missing key => the normal
-        // release behaviour (Auto Testing hidden + inert). The FORM owns this field.
+        // AGENTMASTER_DEBUG launch flag — when ON, a RELEASE install answers
+        // Profiles::IsDevOrDebugPackage() true, the gate for DEBUG-ONLY features.
+        // ⚠ No feature reads that gate today: until 2026-10-09 it unlocked the Auto Testing / Tests
+        // Autorunner subsystem, which is now the Prompt Queue + Prompt Queue Runner of every build.
+        // The field, the toggle and the flag are KEPT on purpose, for developer-only features that
+        // come later. Read ONCE at startup (WindowEmperor -> Profiles::ApplyPersistedDebugMode -> a
+        // process-local one-way override that IsDebugPackage() consults), so it takes effect on the
+        // NEXT start — exactly like handing --debug to a fresh launch. Default OFF; a missing key =>
+        // Debug Mode off. The FORM owns this field.
         bool debugMode{ false };
         // Agentmaster (Sessions page; SESSIONS.md): the session ids the user chose to HIDE from the
         // global Sessions browser ("Hide from list" on a row's right-click menu). Persisted here so

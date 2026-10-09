@@ -25,10 +25,10 @@ directories — with full user interaction *and* full programmatic control.
   - **Triage Board** (top) — sessions as cards in state columns
     (Running · Waiting-for-you · Needs-approval · Error · Idle/Done), plus an *External* column.
   - **Explorer Tree** (bottom-left) — `M` working directories → their `N` sessions.
-  - **Auto Testing** (bottom-right) — per-session prompt queue + Tests Autorunner.
+  - **Prompt Queue** (bottom-right) — per-session prompt queue + Prompt Queue Runner.
   - Selection is bidirectional **and tab-synced both ways** (card ⇄ tree node ⇄ terminal tab; pick a
     dir ⇒ filter the board); Activate/Rename reach a session in **any** window.
-- **Auto Testing / Tests Autorunner.** A per-session queue of prompts. On **turn-complete**
+- **Prompt Queue / Prompt Queue Runner.** A per-session queue of prompts. On **turn-complete**
   the scheduler auto-sends the next prompt. See "Correctness rules".
 
 ## Integration points (grounded in the 1.24 codebase)
@@ -70,7 +70,7 @@ Fleet Observer for dropped / out-of-order events), never screen-scraping. See
 [`HOOKS.md`](./HOOKS.md). Each `claude.exe` is spawned with `CCMGR_SESSION_ID`; hooks are flattened
 to a 9-field TAB-separated wire line (event · sessionId · cwd · isQuestion · permission · tool ·
 tabToken · prompt · ts, **payload-first** session id) over a local named pipe; the registry maps
-events to sessions and drives the Triage Board + Tests Autorunner.
+events to sessions and drives the Triage Board + Prompt Queue Runner.
 
 ## Correctness rules (do not regress)
 
@@ -106,17 +106,20 @@ events to sessions and drives the Triage Board + Tests Autorunner.
   and the Manager UI (Launch button). 67/67 standalone checks pass incl. a live pipe
   round-trip (`AgentMaster/tests/`).
 - **M6** ✅ C1 "Linked Lenses" UI (`AgentManagerContent`): Triage Board + Explorer Tree +
-  Auto Testing, built imperatively, snapshot-driven from the registry (cross-thread refresh
+  Prompt Queue, built imperatively, snapshot-driven from the registry (cross-thread refresh
   via DispatcherQueue), bidirectional selection + directory scope; Explorer `Enter`=Activate
-  / `Del`=**Archive** (never injects — Rule #2); Auto Testing queue editing (add/reorder/delete/Send
-  now) + per-session Tests Autorunner mode selector. Shipped + live-verified.
-- **M7** ✅ Tests Autorunner scheduler (`AgentMaster/Scheduler`): a pure `DecideAdvance()`
+  / `Del`=**Archive** (never injects — Rule #2); prompt queue editing (add/reorder/delete/Send
+  now) + per-session Prompt Queue Runner mode selector. Shipped + live-verified.
+- **M7** ✅ Prompt Queue Runner scheduler (`AgentMaster/Scheduler`): a pure `DecideAdvance()`
   (every branch unit-tested) + a worker thread on the registry's advance seam. On a clean
   turn-complete it sends the next Pending prompt in Full mode, arms a one-click confirm in
   SemiAuto, Holds behind the question-guard (transient — auto-resumes), honors Manual gate,
   pause-on-human-input, maxAutoSends, stopOnError, and a global Pause-all backstop; sends
   are idempotent (atomic mark-Sent before inject). UI: per-session mode selector, confirm
-  banner, Pause-Tests Autorunner toggle. 79/79 checks pass; runtime check pending deploy.
+  banner, Pause-Prompt Queue Runner toggle. 79/79 checks pass; runtime check pending deploy.
+  *(2026-10-09: the SemiAuto mode, its one-click confirm and the confirm banner are removed — two
+  modes remain, Paused and Auto; the feature is named Prompt Queue Runner and runs in every build;
+  DELIVERY.md §17.)*
   *(As of 2026-10-01 — this entry records M7 as shipped; since then:*
   - *the question-guard keeps prompts **Pending** instead of `Held`;*
   - *pause-on-human-input never got its keystroke feeder and is inert;*
@@ -163,7 +166,7 @@ events to sessions and drives the Triage Board + Tests Autorunner.
   that fires zero hooks.
 - **Codex** (the OpenAI Codex CLI) — a first-class **managed** agent: observe + rollout-tail state +
   the full launch / restore / window-restore / adopt lifecycle (a two-id model — our durable handle
-  + the rollout uuid). Driving its TUI (injector + Tests Autorunner) is the one part still deferred.
+  + the rollout uuid). Driving its TUI (injector + Prompt Queue Runner) is the one part still deferred.
 - **`agentmaster` CLI** ([`CLI.md`](./CLI.md)) — read-only fleet introspection from any shell, app
   up or down (`show`/`list`/`sessions`/`tabs`/`windows`/`external`, `--self`, `--json`).
 - **Sessions browser** ([`SESSIONS.md`](./SESSIONS.md)) — a full-window page over every on-disk

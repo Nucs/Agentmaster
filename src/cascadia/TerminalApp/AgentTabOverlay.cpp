@@ -27,7 +27,6 @@
 #include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / BuildClaude|CodexCommandline (row 3 CLI + transcript)
 #include "AgentMaster/ProcessInspect.h" // ReadProcessCommandLine / ReadConversationText / Codex rollout resolve (row 3)
 #include "AgentMaster/Persistence.h" // LoadAppSettings (skipPermissions, for the would-use CLI builder)
-#include "AgentMaster/ProfileBootstrap.h" // Profiles::IsDevPackage — the Tests Autorunner badge is dev-or-debug (IsDevOrDebugPackage)
 #include "AgentMaster/Engine.h" // SharedEngine (claudeExePath / codexExePath, for the real launch CLI)
 
 #include <winrt/Windows.UI.h> // Color / ColorHelper / Colors
@@ -358,25 +357,21 @@ namespace winrt::TerminalApp::implementation
             _RefreshQueueButtonEnabled(s);
         }
 
-        // Autorunner mode — DEV OR --debug: Auto Testing / Tests Autorunner is gated to the AgentmasterDev
-        // package OR a `--debug` / AGENTMASTER_DEBUG release (IsDevOrDebugPackage — the autorunner never runs
-        // otherwise, see Engine.cpp), so an ordinary release tab's badge carries no autorunner control. A
-        // CLICKABLE button that cycles Off -> Semi -> Full -> Off, colored by mode (gray Off / amber Semi /
-        // green Full) to match the Triage Board's language.
-        static const bool kDevAutoTesting = ::Agentmaster::Profiles::IsDevOrDebugPackage();
-        if (kDevAutoTesting)
-        {
+        // Prompt Queue Runner mode — in EVERY build since 2026-10-09 (until then the runner, under its old
+        // name Tests Autorunner, was gated to the AgentmasterDev package or Debug Mode, and an ordinary
+        // release tab's badge carried no runner control; see Engine.cpp). A CLICKABLE button that flips
+        // Paused <-> Auto, colored by mode (gray Paused / green Auto) to match the Triage Board's
+        // language.
         appendSep();
         {
             const auto mode = s.autorunner.mode;
             // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): an Off the autorunner parked ITSELF
-            // into (the user pressed Esc; it resumes on their next message) reads "Off -> Full" in the
-            // held mode's color, so the badge never suggests someone switched the autorunner off.
+            // into (the user pressed Esc; it resumes on their next message) reads "Paused -> Auto" in the
+            // held mode's color, so the badge never suggests someone paused the autorunner.
             const bool interruptHeld = ::Agentmaster::InterruptHoldActive(s.autorunner);
             const auto colorMode = interruptHeld ? s.autorunner.interruptHeldMode : mode;
-            const auto modeBrush = (colorMode == AutorunnerMode::Full)     ? Fill(0xFF, 0x3C, 0xB3, 0x71) :  // MediumSeaGreen
-                                   (colorMode == AutorunnerMode::SemiAuto) ? Fill(0xFF, 0xDA, 0xA5, 0x20) :  // Goldenrod
-                                                                            Fill(0xFF, 0xB0, 0xB0, 0xB0);   // gray (Off)
+            const auto modeBrush = (colorMode == AutorunnerMode::Full) ? Fill(0xFF, 0x3C, 0xB3, 0x71) : // MediumSeaGreen (Auto)
+                                                                        Fill(0xFF, 0xB0, 0xB0, 0xB0); // gray (Paused)
             Button b{};
             b.Background(Fill(0x00, 0, 0, 0)); // transparent — still hit-testable; the template gives a hover highlight ("appears clickable")
             b.BorderThickness(ThicknessHelper::FromUniformLength(0));
@@ -390,7 +385,8 @@ namespace winrt::TerminalApp::implementation
             t.FontSize(12);
             t.VerticalAlignment(VerticalAlignment::Center);
             t.Foreground(modeBrush);
-            t.Text(interruptHeld ? winrt::hstring{ std::wstring{ L"Off \x2192 " } + ModeLabel(s.autorunner.interruptHeldMode) } :
+            // "Paused -> Auto" for an interrupt hold (both words from the one display-name table).
+            t.Text(interruptHeld ? winrt::hstring{ std::wstring{ ModeLabel(AutorunnerMode::Off) } + L" \x2192 " + ModeLabel(s.autorunner.interruptHeldMode) } :
                                    winrt::hstring{ ModeLabel(mode) });
             // CLICK-THROUGH the label so a click on the text (not just the button background) still cycles
             // the mode: the on-top TextBlock would otherwise catch the glyph-area pointer without driving
@@ -398,11 +394,11 @@ namespace winrt::TerminalApp::implementation
             t.IsHitTestVisible(false);
             b.Content(t);
             AgentSetTip(b, winrt::hstring{
-                L"Tests Autorunner \x2014 click to cycle Off \x2192 Semi \x2192 Full.\n"
-                L"Off: you drive. Semi: it proposes the next queued prompt, you confirm.\n"
-                L"Full: it auto-sends the queue on each turn-complete.\n"
-                L"Interrupting a turn (Esc) parks it at Off until your next message, then it\n"
-                L"resumes on its own (\"Off \x2192 Full\"); setting the mode yourself cancels that." });
+                L"Prompt Queue Runner \x2014 click to switch between Paused and Auto.\n"
+                L"Paused: nothing is sent on its own; the queue waits for you.\n"
+                L"Auto: the next queued prompt goes out by itself once the session is ready.\n"
+                L"Interrupting a turn (Esc) pauses it until your next message, then it returns\n"
+                L"to Auto by itself (\"Paused \x2192 Auto\"); setting the mode yourself cancels that." });
             const auto weak = get_weak();
             b.Click([weak](const IInspectable&, const RoutedEventArgs&) {
                 if (auto self = weak.get())
@@ -417,10 +413,9 @@ namespace winrt::TerminalApp::implementation
             b.PointerExited([](const IInspectable&, const PointerRoutedEventArgs&) { ApplyCursor(CoreCursorType::Arrow); });
             _row1.Children().Append(b);
         }
-        } // if (kDevAutoTesting) — the Tests Autorunner button is dev-or-debug
 
-        // queued (Pending) count — ⏳N. Dev-or-debug too (an ordinary release never queues, so pending is always 0).
-        if (kDevAutoTesting && pending > 0)
+        // queued (Pending) count — ⏳N. Shown in every build, whenever something is queued.
+        if (pending > 0)
         {
             appendSep();
             appendText(std::wstring{ kHourglass } + std::to_wstring(pending),
@@ -524,19 +519,20 @@ namespace winrt::TerminalApp::implementation
                 const bool heldByQuestion = s.lastMessageWasQuestion &&
                                             nextPrompt->guardPattern != ::Agentmaster::kAnswersQuestionOk;
                 // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): the same visibility for the settle
-                // hold — the Tests Autorunner is deliberately waiting for this session's status to hold
+                // hold — the Prompt Queue Runner is deliberately waiting for this session's status to hold
                 // steady (40 s from the later of its last status change and this prompt's queue time),
-                // and a 40-second pause per prompt with nothing on screen reads as "the autorunner is
+                // and a 40-second pause per prompt with nothing on screen reads as "the runner is
                 // stuck" (the §8 lesson again). Computed by the SAME pure helper DecideAdvance uses, and
                 // only where the scheduler would otherwise be ready to drive the session (open, launched
-                // or adopted, autorunner on, Idle / Waiting-for-you) and the question-guard isn't the hold
-                // already shown — so the cue never claims a wait the scheduler isn't actually in. Gated on
-                // kDevAutoTesting (row 1's cached IsDevOrDebugPackage) because row 3 itself is NOT: a plain
-                // release never starts the scheduler, yet can briefly show a Pending prompt (the /handover
-                // park) on a session whose stamped mode reads Full — a "settling" claim there would describe
-                // a hold that does not exist.
+                // or adopted, runner on Auto, Idle / Waiting-for-you) and the question-guard isn't the hold
+                // already shown — so the cue never claims a wait the scheduler isn't actually in. No
+                // build gate since 2026-10-09: the scheduler now runs in every build, so the hold this
+                // cue describes exists wherever the row is shown (the cue was dev-or-debug before,
+                // because an ordinary release never started the scheduler).
+                // ⚠ The cue cannot see the GLOBAL pause (it lives in the scheduler, not on the session):
+                // while the toolbar's Pause holds every send, a session can still read "settling" here.
                 int64_t settleLeftMs = 0;
-                if (kDevAutoTesting && !heldByQuestion && s.live && (s.started || s.external) && s.autorunner.mode != ::Agentmaster::AutorunnerMode::Off &&
+                if (!heldByQuestion && s.live && (s.started || s.external) && s.autorunner.mode != ::Agentmaster::AutorunnerMode::Off &&
                     (s.state == ::Agentmaster::SessionState::Idle || s.state == ::Agentmaster::SessionState::WaitingForInput))
                 {
                     const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -576,11 +572,11 @@ namespace winrt::TerminalApp::implementation
                 const std::wstring settleSeconds = std::to_wstring(::Agentmaster::kStateSettleMs / 1000);
                 const std::wstring tip = heldByQuestion ?
                                              std::wstring{ L"Queue HELD \x2014 the agent's last message ended with a QUESTION, so auto-send waits (a planned prompt must not answer it blindly).\n"
-                                                           L"Release: answer in the terminal, Send now, or cycle the Tests Autorunner toggle to Semi/Full (an explicit re-arm clears the hold).\n\n"
+                                                           L"Release: answer in the terminal, Send now, or switch the Prompt Queue Runner to Paused and back to Auto (an explicit re-arm clears the hold).\n\n"
                                                            L"Next queued prompt:\n" } +
                                                  full :
                                          settling ?
-                                             std::wstring{ L"Queue SETTLING \x2014 Tests Autorunner types the next prompt only after this session has held a sendable status (Idle / Waiting-for-you) for " } +
+                                             std::wstring{ L"Queue SETTLING \x2014 the Prompt Queue Runner types the next prompt only after this session has held a sendable status (Idle / Waiting-for-you) for " } +
                                                  settleSeconds +
                                                  L" s, counted from the later of its last status change and when this prompt was queued. Any status change restarts the wait, so a status that is only passing through never gets a prompt typed into it.\n"
                                                  L"Send now skips the wait.\n\n"
@@ -762,12 +758,13 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // The row-1 Autorunner button: cycle THIS session's mode Off -> Semi-auto -> Full -> Off, mirroring
+    // The row-1 Autorunner button: flip THIS session's mode Paused <-> Auto (Off <-> Full), mirroring
     // AgentManagerContent::_CycleAutorunner / _OnAutorunnerChanged. The overlay already holds the SHARED
     // registry, so we mutate it directly: SessionRegistry::Update fires observers, which (a) marshals our
-    // own _Refresh to repaint the button and (b) wakes the scheduler's OnObserved — cycling to Semi/Full
+    // own _Refresh to repaint the button and (b) wakes the scheduler's OnObserved — switching to Auto
     // while the session sits Idle/WaitingForInput naturally kicks a queued plan (Correctness Rule #1). No
     // new send path is invented (Rule #2); we only set the mode + reset the per-run backstops on arming.
+    // (It cycled Off -> Semi-auto -> Full until the SemiAuto mode was removed on 2026-10-09.)
     void AgentTabOverlay::_CycleAutorunner()
     {
         if (!_registry || _sessionId.empty())
@@ -779,29 +776,28 @@ namespace winrt::TerminalApp::implementation
         {
             return; // nothing live to drive (same guard as the Manager's header toggle)
         }
-        const auto cur = info->autorunner.mode;
-        const AutorunnerMode next = (cur == AutorunnerMode::Off)      ? AutorunnerMode::SemiAuto :
-                                   (cur == AutorunnerMode::SemiAuto) ? AutorunnerMode::Full :
-                                                                      AutorunnerMode::Off;
+        // An interrupt-held Off counts as Paused: a click on "Paused -> Auto" switches to Auto now.
+        const AutorunnerMode next = (info->autorunner.mode == AutorunnerMode::Off) ? AutorunnerMode::Full : AutorunnerMode::Off;
         // Nav audit (the Manager's _OnAutorunnerChanged line, tagged with THIS surface): the overlay
         // cycle used to be the ONE mode-change path that logged nothing — the 2026-07-25 freeze
         // forensics had to infer the click from the [await-confirm] flood's start time.
+        // The log keeps the machine words (Off / Full — AutorunnerModeLabel); only the UI says
+        // Paused / Auto.
         // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): a mode the USER sets cancels a pending
         // interrupt resume, whatever they pick (== _OnAutorunnerChanged — the two paths stay in step).
         const bool cancelsInterruptHold = ::Agentmaster::InterruptHoldActive(info->autorunner);
         ::Agentmaster::LogNav(L"autorunner " + ::Agentmaster::ShortId(_sessionId) + L" -> " +
-                              (next == AutorunnerMode::Full ? L"Full" : next == AutorunnerMode::SemiAuto ? L"Semi" : L"Off") +
+                              ::Agentmaster::AutorunnerModeLabel(next) +
                               L" (overlay)" + (cancelsInterruptHold ? L" (cancels the interrupt hold)" : L""));
         _registry->Update(_sessionId, [&](SessionInfo& s) {
             s.autorunner.mode = next;
             ::Agentmaster::ClearInterruptHold(s.autorunner); // §14: the user's pick outranks the pending resume
             if (next != AutorunnerMode::Off)
             {
-                // Arming resets the per-run backstop counter + clears any stale confirm (== _OnAutorunnerChanged).
+                // Arming resets the per-run backstop counter (== _OnAutorunnerChanged).
                 s.autorunner.autoSendsThisRun = 0;
-                s.pendingConfirmPromptId.clear();
                 // Agentmaster (DELIVERY.md §8): an explicit re-arm also releases the question-guard
-                // latch — the human clicking Semi/Full IS attending, so the "don't blindly answer a
+                // latch — the human clicking Auto IS attending, so the "don't blindly answer a
                 // question" hold no longer applies; the next question-ending Stop re-latches it.
                 // (== _OnAutorunnerChanged — the two arming paths must stay in step.)
                 s.lastMessageWasQuestion = false;
