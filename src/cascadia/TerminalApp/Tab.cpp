@@ -2780,7 +2780,7 @@ namespace winrt::TerminalApp::implementation
             icon.Glyph(L"\xE73E"); // CheckMark — "I've handled this; stop waiting on me / stop flagging this error" (matches the board card)
             if (fromError)
             {
-                WUX::Controls::ToolTipService::SetToolTip(_triageMoveMenuItem, box_value(winrt::hstring{ L"Dismiss this errored session to Idle / Done \x2014 acknowledges the API error (it returns to Error if a new one lands)" }));
+                WUX::Controls::ToolTipService::SetToolTip(_triageMoveMenuItem, box_value(winrt::hstring{ L"Dismiss this errored session to Idle / Done \x2014 acknowledges the error: an API failure, or a turn that a shutdown cut off (it returns to Error if a new one lands)" }));
             }
             else
             {

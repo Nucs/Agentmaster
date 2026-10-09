@@ -1530,7 +1530,7 @@ namespace winrt::TerminalApp::implementation
             moveIdle.Icon(glyphIcon(L"\xE73E")); // CheckMark — "I've handled this; stop waiting on me / stop flagging this error"
             if (state == SessionState::Error)
             {
-                AgentSetTip(moveIdle, L"Dismiss this errored card to the Idle / Done column \x2014 acknowledges the API error. It returns to Error if a new API error lands.");
+                AgentSetTip(moveIdle, L"Dismiss this errored card to the Idle / Done column \x2014 acknowledges the error (an API failure, or a turn that a shutdown cut off). It returns to Error if a new error lands.");
             }
             else
             {

@@ -819,15 +819,18 @@ namespace Agentmaster
                 s.compactingSinceUnixMs = (msg.ts != 0) ? msg.ts : NowMs();
             }
             else if (msg.event == HookEvent::PostCompact || msg.event == HookEvent::SessionStart ||
-                     msg.event == HookEvent::SessionEnd || msg.event == HookEvent::Stop || msg.apiError)
+                     msg.event == HookEvent::SessionEnd || msg.event == HookEvent::Stop || msg.apiError ||
+                     msg.turnCutOff) // a cut-off turn: whatever compaction was in flight died with its process
             {
                 s.compactingSinceUnixMs = 0;
             }
             // Agentmaster (API-error triage): preserve the failure reason WHILE in Error so the
             // Triage-Board Error card can show what died (the scanner's recon-error synth carries it on
             // the apiError message); clear it the instant the session leaves Error (recovery), so a
-            // recovered/normal card never shows a stale error. Only the apiError synth sets these.
-            if (msg.apiError)
+            // recovered/normal card never shows a stale error. Only the apiError synth sets these —
+            // and, since 2026-10-09, the CUT-OFF synth (msg.turnCutOff, HOOKS.md "Cut-off turns"), whose
+            // message says that the last turn did not finish and whose status is 0 (no HTTP code).
+            if (msg.apiError || msg.turnCutOff)
             {
                 s.errorMessage = msg.errorMessage;
                 s.errorStatus = msg.errorStatus;
@@ -841,6 +844,17 @@ namespace Agentmaster
             {
                 s.errorMessage.clear();
                 s.errorStatus = 0;
+            }
+            // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): a session that is Running has a
+            // turn in a live process (a real prompt, the scanner's recon-run off fresh transcript lines,
+            // or claude's own working heartbeat). Whatever turn was in flight when the record was last
+            // restored is behind it, so the restore-time hint is spent. Cleared on EVERY path into
+            // Running, on purpose: left standing, it would turn the NEXT at-rest moment of the new turn
+            // (a permission prompt, a bare prompt after an Esc) into a false "cut off".
+            // Not cleared by SessionStart / SessionEnd / a Stop: none of them proves that a turn ran.
+            if (s.state == SessionState::Running)
+            {
+                s.midTurnAtRestore = false;
             }
             if (msg.ts > s.lastActivityUnixMs)
             {

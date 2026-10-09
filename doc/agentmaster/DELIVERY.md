@@ -896,3 +896,25 @@ cog setting yet.
     anchor end to end.
 - The five pre-existing scheduler integration cases set the window to 0 — they pin other gates on
   short polls.
+
+### What the settle hold cannot do — a turn that a shutdown cut off (2026-10-09, NOT BUILT yet)
+
+The hold waits for a status to stay the same. It cannot tell that the status is **wrong**.
+
+**The incident** (release 0.6.8.18, session `c47e90a2`). The app died while the session was mid-turn. On
+reopen the record read `Idle`, and it stayed `Idle` when the tab was opened 17 minutes later: the resumed
+claude wrote a placeholder line, `No response requested.`, whose terminal stop reason reads as a finished
+turn. So the status held steady for 40 s, and the autorunner sent the next queued prompt
+(`[send] … #1` at 17:59:32, `verified=exact`) into a session whose previous turn had never finished.
+
+**The fix is in the state, not in the scheduler.** A turn that never finished, and that no process can be
+running, now reads `Error` (HOOKS.md "Cut-off turns"):
+- `DecideAdvance` already answers "not ready" for `Error`, so nothing is sent.
+- `stopOnError` (default ON) pauses that session's autorunner, as it does after an API error. The user
+  re-arms it. With `stopOnError` OFF the queue goes on after the cut-off turn has run and finished.
+- The session returns to `Running` on the user's next message, on the first line of a continued turn, or
+  on claude's working heartbeat (with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` a resumed claude continues
+  the turn by itself).
+
+`TestCutOffTurn` pins both halves on one record: as `Error` the plan is `None`; as the `Idle` the old code
+left, the same record gets `Send`.

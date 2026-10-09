@@ -91,6 +91,36 @@ namespace Agentmaster
         return restoredState == SessionState::Idle ? false : persistedFlag;
     }
 
+    // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns", the third companion of RestoredSessionState):
+    // does the state a record holds RIGHT BEFORE it is normalized for a (re)host say that a turn was in
+    // flight? RestoredSessionState throws that fact away (Running -> Idle), and the 2026-10-09 incident
+    // (session c47e90a2) is what that cost: the app died mid-turn, the reopened record read Idle, and the
+    // autorunner sent the next queued prompt into a session whose turn had never finished.
+    // Call it at EVERY seam that applies RestoredSessionState to a record — the sessions.json load, the
+    // restored launch, "Restart session", "Deactivate" — BEFORE the normalization, and store the result
+    // in SessionInfo::midTurnAtRestore.
+    //   stateBeforeNormalize — the record's state as persisted / as it stood when the host ended:
+    //       Running        the turn was running;
+    //       NeedsApproval  the turn was blocked on a permission prompt or a question — it died with the
+    //                      process that asked (RestoredSessionState keeps this state for display, so a
+    //                      later load reads it again and the flag stays durable);
+    //       Error          the turn had already failed or been cut off. Counting it is what makes a
+    //                      cut-off Error survive a SECOND restart: sessions.json persists "Error", the
+    //                      load normalizes it to Idle, and this flag lets the scanner derive it again.
+    //   alreadySet — the record's current flag. A set flag is never cleared here (only a turn that
+    //       really starts clears it — SessionRegistry::OnHookEvent), so a restart after a restore keeps it.
+    // Returns the new flag value. PURE + total; never throws.
+    // ⚠ The flag alone decides nothing. The SessionScanner combines it with the transcript tail
+    // (ClassifyCutOffTurn): a record that read Running while its transcript shows a FINISHED turn (the
+    // last Stop was just not saved) is not cut off.
+    inline bool RestoredMidTurnFlag(SessionState stateBeforeNormalize, bool alreadySet) noexcept
+    {
+        return alreadySet ||
+               stateBeforeNormalize == SessionState::Running ||
+               stateBeforeNormalize == SessionState::NeedsApproval ||
+               stateBeforeNormalize == SessionState::Error;
+    }
+
     // Agentmaster: case-insensitive equality for a WT_SESSION / tabToken GUID string. The hook wire
     // carries the token as-is from the WT_SESSION env, while the Fleet Observer reads the same value
     // out of the PEB and the app formats it from a connection's SessionId() — the producers can differ
@@ -1525,6 +1555,26 @@ namespace Agentmaster
         // the tail (the RestoredSessionState philosophy), like the rest of the unread-model family
         // (readUnixMs / manualUnread).
         bool errorDismissed{ false };
+        // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"; Transient, NOT persisted —
+        // Persistence.cpp must not write it): this record said a turn was IN FLIGHT (Running,
+        // NeedsApproval or Error — RestoredMidTurnFlag) the last time it was normalized for a (re)host,
+        // and no turn has started since. It is the one fact RestoredSessionState throws away, and the
+        // SessionScanner needs it to judge a tail the transcript alone cannot settle:
+        //   * a BARE PROMPT at the tail. It means either "the user pressed Esc before any reply"
+        //     (at rest, nothing was lost) or "the host died seconds after the submit" (cut off). Only
+        //     this flag tells the two apart.
+        //   * a started tab the scanner never saw dormant (a "Restart session" swaps the process in
+        //     place), whose resumed claude wrote no placeholder line.
+        // Set ONLY at the four seams that apply RestoredSessionState to a Claude record
+        // (TerminalPage.AgentSessions.cpp: the sessions.json load, the restored launch, the restart
+        // seam, the deactivate seam). Not persisted, and it does not need to be: the next load derives
+        // it again from the persisted state (a cut-off session persists as Error, which sets it).
+        // Cleared by SessionRegistry::OnHookEvent the moment the session enters Running — a turn is
+        // running in a live process, so whatever was cut off is behind it. Read through
+        // ClassifyCutOffTurn (SessionScanner.h); it never decides anything by itself.
+        // ⚠ Do not clear it on a mere SessionStart or SessionEnd: a resume proves no turn, and that
+        // would lose the cut-off the moment its tab is opened.
+        bool midTurnAtRestore{ false };
         // Transient (NOT persisted; Persistence.cpp must not write it): the Claude Code idle RECAP —
         // the latest {"type":"system","subtype":"away_summary"} body the SessionScanner tailed from this
         // session's transcript, normalized (NormalizeRecapText: the "(disable recaps in /config)" hint

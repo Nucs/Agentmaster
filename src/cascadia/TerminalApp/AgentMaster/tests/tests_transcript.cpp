@@ -3684,7 +3684,12 @@ void TestScannerDormantHold()
     const bool parkedLit = becameRunningWithin(3500); // > kScanLiveIdleMs: at least one pass consumes the residue even without a wake
     CHECK(!parkedLit, "dormant hold: a PARKED session's residue (a fresh mid-turn line + a fresh subagent file) does NOT promote it to Running (was: recon-run / recon-subagent re-lit the parked tab until it was entered)");
     const auto atRest = reg->Get(id);
-    CHECK(atRest && atRest->state == SessionState::Idle, "dormant hold: the parked session keeps the state the park normalized it to");
+    // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns", 2026-10-09): the residue is a mid-turn
+    // tool_use, so the parked tab's transcript now ENDS on a turn that never finished, in a tab that has
+    // no process. Until the cut-off rule this read Idle (the state the park normalized to) — which is
+    // READY for the autorunner. It now reads Error: the park cut the turn off. It is still never
+    // Running, which is what this test is about; TestCutOffTurn pins the cut-off rule itself.
+    CHECK(atRest && atRest->state == SessionState::Error, "dormant hold: a session parked MID-TURN reads Error (its turn was cut off), not a ready Idle - and never Running");
 
     // --- WAKE: the tab is entered, its claude really works — the same shape now lights Running ---
     reg->SetStarted(id, true);
@@ -3694,6 +3699,509 @@ void TestScannerDormantHold()
     CHECK(becameRunningWithin(5000), "dormant hold: once the tab is started, the same fresh activity lights Running (the hold is the gate, not the fixture)");
 
     scanner.Stop();
+    ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevCfg.empty() ? nullptr : prevCfg.c_str());
+    std::error_code ecCleanup;
+    std::filesystem::remove_all(std::filesystem::path{ cfg }, ecCleanup);
+}
+
+// Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"; the 2026-10-09 incident, release 0.6.8.18,
+// session c47e90a2). The app died while the session was mid-turn. On reopen the record read Idle, the
+// resumed claude appended its "No response requested." placeholder (a terminal stop_reason), and the
+// autorunner sent the next queued prompt into a session whose turn had never finished. A cut-off turn must
+// read Error, and it must come back to Running when the turn really goes on.
+//   Part 1 — the state machine: the engine-internal turnCutOff flag, a resume keeping Error, and the
+//            "still cached" stamp staying untouched.
+//   Part 2 — RestoredMidTurnFlag (what the restore seams remember before they normalize the state).
+//   Part 3 — the parser: the resume placeholder and claude's interruptedByShutdown flag.
+//   Part 4 — the pure rules: ClassifyCutOffTurn, ShouldSynthesizeCutOff, ShouldReleaseStaleError, and
+//            the cut-off arm of ShouldSynthesizeRunningFromExternalWork.
+//   Part 5 — the registry: what a cut-off synth stores, and when the restore-time hint is spent.
+//   Part 6 — END TO END on a REAL SessionScanner thread over staged transcripts, thirteen sessions in one
+//            fleet: the incident itself and its three ways back to Running, plus every shape that must
+//            NOT read as a cut-off (a live turn, a bare prompt, a fork, a user interrupt).
+// Stages a throwaway CLAUDE_CONFIG_DIR like TestScannerCatchUp and restores it after. [Agentmaster]
+void TestCutOffTurn()
+{
+    std::wprintf(L"Cut-off turns (a turn that a shutdown cut off reads Error, and Running again when it resumes):\n");
+
+    // ---------------- Part 1: the state machine ----------------
+    {
+        HookMessage cut = Msg(L"a", HookEvent::Notification);
+        cut.turnCutOff = true;
+        for (const SessionState from : { SessionState::Idle, SessionState::WaitingForInput, SessionState::NeedsApproval, SessionState::Done, SessionState::Running, SessionState::Error })
+        {
+            CHECK(NextSessionState(from, cut) == SessionState::Error, "machine: a turnCutOff synth lands Error from every state (the scanner's gate decides WHEN to send it)");
+        }
+        TurnAccounting turns;
+        turns.queuedPrompts = 2;
+        const auto ordered = NextSessionStateOrdered(SessionState::Idle, cut, turns);
+        CHECK(ordered.state == SessionState::Error && !ordered.turnComplete && !ordered.staleStop && turns.queuedPrompts == 0,
+              "machine: a cut-off settles the type-ahead count and is NOT a turn-complete (no advance, no question-guard)");
+        CHECK(!IsApiTurnEvidence(cut), "machine: a cut-off synth is NOT API-turn evidence (it must never light the still-cached hint)");
+        CHECK(IsApiTurnEvidence(Msg(L"a", HookEvent::Notification)), "machine: a plain Notification still counts as API-turn evidence (control)");
+
+        HookMessage resume = Msg(L"a", HookEvent::SessionStart);
+        resume.source = std::wstring{ kHookSourceResume };
+        CHECK(NextSessionState(SessionState::Error, resume) == SessionState::Error, "machine: SessionStart(resume) KEEPS Error (a resume recovers nothing - was: reset to a ready Idle)");
+        CHECK(NextSessionState(SessionState::Running, resume) == SessionState::Idle, "machine: SessionStart(resume) from Running -> Idle (unchanged)");
+        CHECK(NextSessionState(SessionState::Done, resume) == SessionState::Idle, "machine: SessionStart(resume) from Done -> Idle (unchanged)");
+        CHECK(NextSessionState(SessionState::WaitingForInput, resume) == SessionState::WaitingForInput, "machine: SessionStart(resume) keeps WaitingForInput (unchanged)");
+        for (const wchar_t* other : { L"", L"startup", L"clear", L"fork" })
+        {
+            HookMessage start = Msg(L"a", HookEvent::SessionStart);
+            start.source = other;
+            CHECK(NextSessionState(SessionState::Error, start) == SessionState::Idle, "machine: only a RESUME keeps Error - a fresh start, a /clear and an old forwarder reset it as before");
+        }
+    }
+
+    // ---------------- Part 2: what the restore seams remember ----------------
+    {
+        CHECK(RestoredMidTurnFlag(SessionState::Running, false), "restore hint: Running at the seam -> a turn was in flight");
+        CHECK(RestoredMidTurnFlag(SessionState::NeedsApproval, false), "restore hint: NeedsApproval at the seam -> the turn was blocked on the user, and that prompt died with the process");
+        CHECK(RestoredMidTurnFlag(SessionState::Error, false), "restore hint: Error at the seam -> counts, so a cut-off Error survives a second restart");
+        CHECK(!RestoredMidTurnFlag(SessionState::Idle, false), "restore hint: Idle -> no turn was in flight");
+        CHECK(!RestoredMidTurnFlag(SessionState::WaitingForInput, false), "restore hint: WaitingForInput -> the turn had finished");
+        CHECK(!RestoredMidTurnFlag(SessionState::Done, false), "restore hint: Done -> no turn was in flight");
+        CHECK(RestoredMidTurnFlag(SessionState::Idle, true), "restore hint: a flag that is already set is never cleared by a seam (only a turn that starts clears it)");
+        // The normalization itself is unchanged: the hint is the ONLY thing that keeps the fact.
+        CHECK(RestoredSessionState(SessionState::Running) == SessionState::Idle, "restore hint: RestoredSessionState still normalizes Running to Idle (the fact survives only in the flag)");
+    }
+
+    // ---------------- fixture lines (the shapes ParseTranscriptDelta folds) ----------------
+    const std::string prompt =
+        R"j({"type":"user","uuid":"p1","message":{"role":"user","content":"Manual QA the system with mocks"},"timestamp":"2026-10-01T14:29:25.000Z"})j" "\n";
+    // A mid-turn assistant step: a NON-interactive Bash tool_use.
+    const std::string toolUse =
+        R"j({"type":"assistant","uuid":"a1","parentUuid":"p1","message":{"role":"assistant","model":"claude-test","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"echo"}}]},"timestamp":"2026-10-01T14:34:50.000Z"})j" "\n";
+    // Its result — the LAST line session c47e90a2 wrote before the app died.
+    const std::string toolResult =
+        R"j({"type":"user","uuid":"r1","parentUuid":"a1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"ok"}]},"timestamp":"2026-10-01T14:34:55.763Z"})j" "\n";
+    // What the resumed claude appended 24 minutes later (c47e90a2, line 183): its placeholder.
+    const std::string placeholder =
+        R"j({"type":"assistant","uuid":"n1","parentUuid":"r1","isApiErrorMessage":false,"message":{"role":"assistant","model":"<synthetic>","stop_reason":"stop_sequence","content":[{"type":"text","text":"No response requested."}]},"timestamp":"2026-10-01T14:58:53.775Z"})j" "\n";
+    // The meta line a resuming claude writes when it continues the turn by itself (isMeta: skipped by the parser).
+    const std::string metaContinue =
+        R"j({"type":"user","uuid":"m1","parentUuid":"r1","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"Continue from where you left off."}]},"timestamp":"2026-10-01T15:37:36.602Z"})j" "\n";
+    // The first REAL line of a continued turn.
+    const std::string toolUseAfterResume =
+        R"j({"type":"assistant","uuid":"a2","parentUuid":"m1","message":{"role":"assistant","model":"claude-test","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu2","name":"Bash","input":{"command":"echo"}}]},"timestamp":"2026-10-01T15:37:53.266Z"})j" "\n";
+    const std::string endTurn =
+        R"j({"type":"assistant","uuid":"e1","parentUuid":"p1","message":{"role":"assistant","model":"claude-test","stop_reason":"end_turn","content":[{"type":"text","text":"All done."}]},"timestamp":"2026-10-01T14:30:00.000Z"})j" "\n";
+    // An UNANSWERED question: the turn is blocked on the user.
+    const std::string askQuestion =
+        R"j({"type":"assistant","uuid":"q1","parentUuid":"p1","message":{"role":"assistant","model":"claude-test","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tq1","name":"AskUserQuestion","input":{"questions":[]}}]},"timestamp":"2026-10-01T14:30:00.000Z"})j" "\n";
+    const std::string userInterrupt =
+        R"j({"type":"user","uuid":"i1","parentUuid":"r1","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"timestamp":"2026-10-01T15:00:55.200Z"})j" "\n";
+    // The same marker carrying claude's own "a shutdown did this" flag.
+    const std::string shutdownInterrupt =
+        R"j({"type":"user","uuid":"i2","parentUuid":"r1","interruptedByShutdown":true,"message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"timestamp":"2026-10-01T15:00:55.200Z"})j" "\n";
+    const std::string shutdownToolResult =
+        R"j({"type":"user","uuid":"r2","parentUuid":"a1","interruptedByShutdown":true,"toolDenialKind":"interrupted","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","is_error":true,"content":"aborted"}]},"timestamp":"2026-10-01T14:34:56.000Z"})j" "\n";
+    // A REAL model reply that happens to be the placeholder's sentence (models do write it).
+    const std::string realSameText =
+        R"j({"type":"assistant","uuid":"x1","message":{"role":"assistant","model":"claude-test","stop_reason":"end_turn","content":[{"type":"text","text":"No response requested."}]},"timestamp":"2026-10-01T14:30:00.000Z"})j" "\n";
+    const std::string apiErrorLine =
+        R"j({"type":"assistant","uuid":"x2","isApiErrorMessage":true,"apiErrorStatus":529,"message":{"role":"assistant","model":"<synthetic>","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: Overloaded"}]},"timestamp":"2026-10-01T14:30:00.000Z"})j" "\n";
+
+    const auto widen = [](const std::string& s) { return std::wstring{ s.begin(), s.end() }; }; // the fixtures are pure ASCII
+
+    // ---------------- Part 3: the parser ----------------
+    {
+        const auto p = ParseTranscriptDelta(widen(toolResult + placeholder + realSameText + apiErrorLine + shutdownToolResult + shutdownInterrupt + userInterrupt + metaContinue));
+        CHECK(p.events.size() == 7, "parser: seven events (the isMeta 'Continue from where you left off.' line is skipped)");
+        if (p.events.size() == 7)
+        {
+            CHECK(p.events[0].kind == TranscriptEvent::Kind::ToolResult && !p.events[0].shutdownInterrupt, "parser: an ordinary tool result carries no shutdown flag");
+            CHECK(p.events[1].kind == TranscriptEvent::Kind::Assistant && p.events[1].resumePlaceholder && p.events[1].stopReason == L"stop_sequence",
+                  "parser: the synthetic 'No response requested.' line is flagged as the resume placeholder (and stays an Assistant event with its stop_reason)");
+            CHECK(p.events[2].kind == TranscriptEvent::Kind::Assistant && !p.events[2].resumePlaceholder, "parser: a REAL model reply with the same sentence is NOT the placeholder (the model is not <synthetic>)");
+            CHECK(p.events[3].kind == TranscriptEvent::Kind::Assistant && p.events[3].apiError && !p.events[3].resumePlaceholder, "parser: the synthetic API-error line is NOT the placeholder");
+            CHECK(p.events[4].kind == TranscriptEvent::Kind::ToolResult && p.events[4].shutdownInterrupt, "parser: a tool result with interruptedByShutdown carries the flag");
+            CHECK(p.events[5].kind == TranscriptEvent::Kind::UserPrompt && IsUserInterruptMarker(p.events[5].text) && p.events[5].shutdownInterrupt,
+                  "parser: the interrupt marker with interruptedByShutdown carries the flag");
+            CHECK(p.events[6].kind == TranscriptEvent::Kind::UserPrompt && IsUserInterruptMarker(p.events[6].text) && !p.events[6].shutdownInterrupt,
+                  "parser: the user's own interrupt marker carries no flag");
+        }
+        CHECK(IsResumePlaceholder(L"<synthetic>", false, L"No response requested."), "placeholder: synthetic + not an API error + the exact text");
+        CHECK(!IsResumePlaceholder(L"<synthetic>", true, L"No response requested."), "placeholder: an API-error line never counts");
+        CHECK(!IsResumePlaceholder(L"claude-opus-5-5", false, L"No response requested."), "placeholder: a real model never counts");
+        CHECK(!IsResumePlaceholder(L"<synthetic>", false, L"No response requested"), "placeholder: the text must match exactly");
+    }
+
+    // ---------------- Part 4: the pure rules ----------------
+    {
+        const auto ev = [](OpenTurnKind kind) {
+            CutOffEvidence e;
+            e.openTurn = kind;
+            return e;
+        };
+        // A started tab with an open turn and no evidence against it: the turn is RUNNING.
+        CHECK(ClassifyCutOffTurn(ev(OpenTurnKind::ToolResult)) == CutOffReason::None, "classify: an open turn in a started tab with no evidence -> not cut off (it is running)");
+        CHECK(ClassifyCutOffTurn(ev(OpenTurnKind::Assistant)) == CutOffReason::None, "classify: the same for an unfinished assistant step");
+        CHECK(ClassifyCutOffTurn(ev(OpenTurnKind::None)) == CutOffReason::None, "classify: a closed tail -> not cut off");
+        for (const OpenTurnKind kind : { OpenTurnKind::ToolResult, OpenTurnKind::Assistant })
+        {
+            CutOffEvidence e = ev(kind);
+            e.dormant = true;
+            CHECK(ClassifyCutOffTurn(e) == CutOffReason::NoProcess, "classify: an open turn in a DORMANT tab -> cut off (no process can be running it)");
+            e = ev(kind);
+            e.resumeMarkerOnOpenTurn = true;
+            CHECK(ClassifyCutOffTurn(e) == CutOffReason::ResumePlaceholder, "classify: the resume placeholder closed an open turn -> cut off");
+            e = ev(kind);
+            e.openTurnSeenDormant = true;
+            CHECK(ClassifyCutOffTurn(e) == CutOffReason::SeenWithoutProcess, "classify: seen open while dormant, the tab started since -> still cut off");
+            e = ev(kind);
+            e.midTurnAtRestore = true;
+            CHECK(ClassifyCutOffTurn(e) == CutOffReason::MidTurnAtRestore, "classify: the record said a turn was in flight at the last restore / restart / park -> cut off");
+        }
+        {
+            // The bare-prompt ambiguity: only the restore-time hint settles it.
+            CutOffEvidence e = ev(OpenTurnKind::Prompt);
+            e.dormant = true;
+            e.resumeMarkerOnOpenTurn = true;
+            e.openTurnSeenDormant = true;
+            CHECK(ClassifyCutOffTurn(e) == CutOffReason::None, "classify: a BARE PROMPT is not cut off by a dormant tab or the placeholder alone (the user may have pressed Esc before any reply)");
+            e.midTurnAtRestore = true;
+            CHECK(ClassifyCutOffTurn(e) == CutOffReason::MidTurnAtRestore, "classify: a bare prompt IS cut off when the record still said a turn was in flight");
+        }
+        {
+            CutOffEvidence e = ev(OpenTurnKind::None);
+            e.shutdownInterrupt = true;
+            CHECK(ClassifyCutOffTurn(e) == CutOffReason::ShutdownFlag, "classify: claude's interruptedByShutdown flag -> cut off, even with the tail closed by the marker");
+        }
+        {
+            // A fork that has not run a turn of its own: every evidence is the SOURCE's.
+            CutOffEvidence e = ev(OpenTurnKind::ToolResult);
+            e.dormant = true;
+            e.resumeMarkerOnOpenTurn = true;
+            e.midTurnAtRestore = true;
+            e.shutdownInterrupt = true;
+            e.forkNotYetMessaged = true;
+            CHECK(ClassifyCutOffTurn(e) == CutOffReason::None, "classify: a fork that has not run a turn of its own is never cut off (its tail was copied from the source)");
+        }
+        for (const CutOffReason r : { CutOffReason::None, CutOffReason::ShutdownFlag, CutOffReason::NoProcess, CutOffReason::ResumePlaceholder, CutOffReason::SeenWithoutProcess, CutOffReason::MidTurnAtRestore })
+        {
+            CHECK(CutOffReasonText(r) != nullptr && CutOffReasonText(r)[0] != L'\0', "classify: every reason has log text");
+        }
+        for (const OpenTurnKind k : { OpenTurnKind::None, OpenTurnKind::Prompt, OpenTurnKind::ToolResult, OpenTurnKind::Assistant })
+        {
+            CHECK(OpenTurnKindText(k) != nullptr && OpenTurnKindText(k)[0] != L'\0', "classify: every open-turn kind has log text");
+        }
+
+        // The synth gate.
+        for (const SessionState st : { SessionState::Idle, SessionState::WaitingForInput, SessionState::NeedsApproval, SessionState::Done })
+        {
+            CHECK(ShouldSynthesizeCutOff(st, CutOffReason::NoProcess), "gate: a cut-off turn fires from Idle / WaitingForInput / NeedsApproval / Done");
+            CHECK(!ShouldSynthesizeCutOff(st, CutOffReason::None), "gate: no verdict -> never fires");
+        }
+        CHECK(!ShouldSynthesizeCutOff(SessionState::Running, CutOffReason::NoProcess), "gate: NEVER from Running (a turn event says a turn is in flight now)");
+        CHECK(!ShouldSynthesizeCutOff(SessionState::Error, CutOffReason::NoProcess), "gate: idempotent - never re-fires from Error");
+        constexpr int64_t P = 1'000'000;
+        CHECK(!ShouldSynthesizeCutOff(SessionState::Idle, CutOffReason::NoProcess, P, P - 120'000, P + 6), "gate: HOLDS while a just-submitted prompt has not reached the transcript (the turn-start guard)");
+        CHECK(ShouldSynthesizeCutOff(SessionState::Idle, CutOffReason::NoProcess, P, P + 300, P + 400), "gate: fires again once the transcript moved past that prompt");
+
+        // The stale-Error release.
+        const int64_t quiet = 120'000;
+        CHECK(ShouldReleaseStaleError(SessionState::Error, false, CutOffReason::None, quiet), "release: Error with no API-error tail and no cut-off verdict -> released");
+        CHECK(!ShouldReleaseStaleError(SessionState::Error, true, CutOffReason::None, quiet), "release: an API error is still the tail -> Error stands");
+        CHECK(!ShouldReleaseStaleError(SessionState::Error, false, CutOffReason::NoProcess, quiet), "release: a cut-off verdict stands -> Error stands");
+        CHECK(!ShouldReleaseStaleError(SessionState::Error, false, CutOffReason::None, kScanStopQuiescenceMs - 1), "release: not while the transcript is still settling (or claude's heartbeat reads working)");
+        CHECK(!ShouldReleaseStaleError(SessionState::Idle, false, CutOffReason::None, quiet), "release: only from Error");
+
+        // The heartbeat promotion's cut-off arm.
+        CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Error, false, true, L"tool_use", false), "promotion: an Error is NOT promoted by a busy heartbeat by default (an API error stays)");
+        CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::Error, false, true, L"tool_use", false, false, true), "promotion: a CUT-OFF Error + a busy heartbeat -> Running (claude is continuing the turn)");
+        CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Error, false, false, L"tool_use", false, false, true), "promotion: a cut-off Error with no activity signal stays");
+        CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Error, false, true, L"stop_sequence", false, false, true),
+              "promotion: the resume placeholder's terminal tail blocks it (claude did NOT continue the turn; a busy heartbeat while it loads is not work)");
+        CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, false, true, L"tool_use", false), "promotion: the classic Idle arm is unchanged");
+    }
+
+    // ---------------- Part 5: the registry ----------------
+    {
+        SessionRegistry reg;
+        SessionInfo s = MakeSession(L"reg-cut", SessionState::Idle);
+        s.live = true;
+        s.midTurnAtRestore = true;
+        s.compactingSinceUnixMs = 123; // a compaction that was in flight when the host died
+        reg.Upsert(s);
+
+        HookMessage cut = Msg(L"reg-cut", HookEvent::Notification);
+        cut.turnCutOff = true;
+        cut.ts = NowMsTest();
+        cut.errorMessage = std::wstring{ kTurnCutOffErrorMessage };
+        reg.OnHookEvent(cut);
+        auto r = reg.Get(L"reg-cut");
+        CHECK(r && r->state == SessionState::Error, "registry: a cut-off synth lands Error");
+        CHECK(r && r->errorMessage == kTurnCutOffErrorMessage && r->errorStatus == 0, "registry: the Error card gets the cut-off message and no HTTP status");
+        CHECK(r && r->lastTurnUnixMs == 0, "registry: a cut-off never stamps the API-turn evidence (no still-cached hint)");
+        CHECK(r && r->compactingSinceUnixMs == 0, "registry: a cut-off closes a compaction window that died with the process");
+        CHECK(r && r->midTurnAtRestore, "registry: entering Error keeps the restore-time hint (the turn is still unfinished)");
+
+        HookMessage resume = Msg(L"reg-cut", HookEvent::SessionStart);
+        resume.source = std::wstring{ kHookSourceResume };
+        reg.OnHookEvent(resume);
+        r = reg.Get(L"reg-cut");
+        CHECK(r && r->state == SessionState::Error && r->errorMessage == kTurnCutOffErrorMessage && r->midTurnAtRestore,
+              "registry: the resumed claude's SessionStart keeps Error, its message and the hint (opening the tab recovers nothing)");
+
+        // claude's working heartbeat promotes it (the scanner's recon-subagent synth).
+        HookMessage busy = Msg(L"reg-cut", HookEvent::PostToolUse);
+        busy.externalWorkActivity = true;
+        busy.ts = NowMsTest();
+        reg.OnHookEvent(busy);
+        r = reg.Get(L"reg-cut");
+        CHECK(r && r->state == SessionState::Running && r->errorMessage.empty() && !r->midTurnAtRestore,
+              "registry: Running clears the Error message AND the hint (the cut-off episode is over)");
+
+        // The user's message is the other way out.
+        SessionInfo s2 = MakeSession(L"reg-cut-2", SessionState::Error);
+        s2.live = true;
+        s2.midTurnAtRestore = true;
+        reg.Upsert(s2);
+        reg.OnHookEvent(UPS(L"reg-cut-2", L"continue"));
+        const auto r2 = reg.Get(L"reg-cut-2");
+        CHECK(r2 && r2->state == SessionState::Running && !r2->midTurnAtRestore, "registry: the user's next message leaves Error for Running and spends the hint");
+
+        // A SessionEnd / a Stop proves no turn ran: the hint stays.
+        SessionInfo s3 = MakeSession(L"reg-cut-3", SessionState::Idle);
+        s3.live = true;
+        s3.midTurnAtRestore = true;
+        reg.Upsert(s3);
+        reg.OnHookEvent(Msg(L"reg-cut-3", HookEvent::SessionEnd));
+        const auto r3 = reg.Get(L"reg-cut-3");
+        CHECK(r3 && r3->midTurnAtRestore, "registry: a SessionEnd does not spend the hint");
+    }
+
+    // ---------------- Part 6: END TO END over a REAL scanner thread ----------------
+    wchar_t tmp[MAX_PATH]{};
+    ::GetTempPathW(MAX_PATH, tmp);
+    const std::wstring cfg = std::wstring{ tmp } + L"am_cutoff_cfg_" + std::to_wstring(::GetCurrentProcessId());
+    const std::wstring cwd = L"K:\\am_scan\\cutoff";
+    const std::wstring dir = cfg + L"\\projects\\" + EncodeCwdToProjectDir(cwd);
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path{ dir }, ec);
+
+    wchar_t prevBuf[2048]{};
+    const DWORD prevN = ::GetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevBuf, 2048);
+    const std::wstring prevCfg{ prevBuf, prevN };
+    ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", cfg.c_str());
+
+    const int64_t quietMs = NowMsTest() - 20 * 60 * 1000; // the transcripts went quiet twenty minutes ago (the app was down)
+    const std::string midTurn = prompt + toolUse + toolResult; // the c47e90a2 tail: a turn stopped on a tool result
+
+    auto reg = std::make_shared<SessionRegistry>();
+    // Stages one transcript and registers its session as a LIVE tab of ours.
+    //   id         — the session id (also the transcript's file name).
+    //   transcript — the transcript content (JSONL).
+    //   state      — the state the record holds (what the restore left).
+    //   started    — false == a DORMANT tab (restored and not entered); true == its claude is running.
+    //   tweak      — optional last-minute record edits (the hint, a fork link, a queue).
+    // Returns the transcript path (for the later appends).
+    const auto stage = [&](const std::wstring& id, const std::string& transcript, SessionState state, bool started, const std::function<void(SessionInfo&)>& tweak = nullptr) {
+        const std::wstring path = dir + L"\\" + id + L".jsonl";
+        MakeJsonl(path, transcript, quietMs, quietMs - 60000);
+        SessionInfo s = MakeSession(id, state);
+        s.workingDir = cwd;
+        s.live = true; // the scanner reconciles LIVE sessions only
+        s.started = started;
+        if (tweak)
+        {
+            tweak(s);
+        }
+        reg->Upsert(s);
+        return path;
+    };
+
+    const std::wstring idA = L"c0ffee00-0000-4000-8000-00000000000a"; // THE INCIDENT, then the user's message
+    const std::wstring idB = L"c0ffee00-0000-4000-8000-00000000000b"; // resumed by claude's heartbeat
+    const std::wstring idC = L"c0ffee00-0000-4000-8000-00000000000c"; // resumed by fresh transcript lines
+    const std::wstring idD = L"c0ffee00-0000-4000-8000-00000000000d"; // CONTROL: a live turn (started, no evidence)
+    const std::wstring idE = L"c0ffee00-0000-4000-8000-00000000000e"; // a bare prompt, no hint
+    const std::wstring idF = L"c0ffee00-0000-4000-8000-00000000000f"; // a bare prompt WITH the hint
+    const std::wstring idG = L"c0ffee00-0000-4000-8000-000000000010"; // a fork that has not run a turn of its own
+    const std::wstring idH = L"c0ffee00-0000-4000-8000-000000000011"; // NeedsApproval on a question that died
+    const std::wstring idI = L"c0ffee00-0000-4000-8000-000000000012"; // dismissed by the user
+    const std::wstring idJ = L"c0ffee00-0000-4000-8000-000000000013"; // a stale Error over a FINISHED turn
+    const std::wstring idK = L"c0ffee00-0000-4000-8000-000000000014"; // started, never seen dormant: the placeholder is the evidence
+    const std::wstring idL = L"c0ffee00-0000-4000-8000-000000000015"; // the USER interrupted: not a cut-off
+    const std::wstring idM = L"c0ffee00-0000-4000-8000-000000000016"; // claude's own shutdown flag
+
+    const std::wstring pathA = stage(idA, midTurn, SessionState::Idle, false, [](SessionInfo& s) {
+        // The restore re-arms the autorunner, and a prompt is waiting in the queue: the incident's setup.
+        s.autorunner.mode = AutorunnerMode::Full;
+        QueuedPrompt next;
+        next.id = L"next-1";
+        next.text = L"the next queued prompt";
+        s.queue.push_back(next);
+    });
+    stage(idB, midTurn, SessionState::Idle, false);
+    const std::wstring pathC = stage(idC, midTurn, SessionState::Idle, false);
+    stage(idD, midTurn, SessionState::Idle, true);
+    stage(idE, prompt, SessionState::Idle, false);
+    stage(idF, prompt, SessionState::Idle, false, [](SessionInfo& s) { s.midTurnAtRestore = true; });
+    stage(idG, midTurn, SessionState::Idle, false, [](SessionInfo& s) { s.forkParentId = L"5055ce00-0000-4000-8000-000000000001"; });
+    stage(idH, prompt + askQuestion, SessionState::NeedsApproval, false);
+    const std::wstring pathI = stage(idI, midTurn, SessionState::Idle, false);
+    stage(idJ, prompt + endTurn, SessionState::Idle, true);
+    stage(idK, midTurn + placeholder, SessionState::Idle, true);
+    stage(idL, midTurn + userInterrupt + placeholder, SessionState::Idle, false);
+    stage(idM, prompt + toolUse + shutdownToolResult + shutdownInterrupt, SessionState::Idle, false);
+    {
+        // idJ: put it in Error over a transcript that shows a finished turn — the leftover a resume keeps.
+        HookMessage stale = Msg(idJ, HookEvent::Notification);
+        stale.turnCutOff = true;
+        stale.ts = NowMsTest();
+        stale.errorMessage = std::wstring{ kTurnCutOffErrorMessage };
+        reg->OnHookEvent(stale);
+    }
+
+    // Every state each session passes through, in order (a flicker cannot slip between two polls).
+    std::mutex historyMtx;
+    std::unordered_map<std::wstring, std::vector<SessionState>> history;
+    SessionScanner scanner{ reg };
+    const auto token = reg->AddObserver([&](const SessionInfo& si, HookEvent) {
+        {
+            std::lock_guard guard{ historyMtx };
+            auto& h = history[si.id];
+            if (h.empty() || h.back() != si.state)
+            {
+                h.push_back(si.state);
+            }
+        }
+        scanner.Wake(); // the production wiring (Engine.cpp): every registry notify wakes a pass
+    });
+    scanner.Start();
+
+    const auto stateOf = [&](const std::wstring& id) {
+        const auto cur = reg->Get(id);
+        return cur ? cur->state : SessionState::Idle;
+    };
+    // Polls until every listed session reads `want`, or `budgetMs` passes. Returns true when all did.
+    const auto allReach = [&](std::initializer_list<std::wstring> ids, SessionState want, int budgetMs) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+        for (;;)
+        {
+            bool all = true;
+            for (const auto& id : ids)
+            {
+                if (stateOf(id) != want)
+                {
+                    all = false;
+                    break;
+                }
+            }
+            if (all || std::chrono::steady_clock::now() >= deadline)
+            {
+                return all;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        }
+    };
+    // Did the session read `st` at any moment AFTER it first read Error?
+    const auto sawAfterError = [&](const std::wstring& id, SessionState st) {
+        std::lock_guard guard{ historyMtx };
+        bool afterError = false;
+        for (const SessionState h : history[id])
+        {
+            if (afterError && h == st)
+            {
+                return true;
+            }
+            if (h == SessionState::Error)
+            {
+                afterError = true;
+            }
+        }
+        return false;
+    };
+
+    // ---- Phase 1: the reopened fleet settles ----
+    const bool cutOffsRead = allReach({ idA, idB, idC, idF, idH, idI, idK, idM }, SessionState::Error, 8000);
+    const bool staleReleased = allReach({ idJ }, SessionState::WaitingForInput, 8000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200)); // the negatives must still be at rest several passes later
+    CHECK(cutOffsRead, "e2e: every cut-off session reads Error after the reopen");
+    CHECK(stateOf(idA) == SessionState::Error, "e2e (A) THE INCIDENT: a restored tab whose transcript stops on a tool result reads Error (was: a ready Idle)");
+    {
+        const auto a = reg->Get(idA);
+        CHECK(a && a->errorMessage == kTurnCutOffErrorMessage && a->errorStatus == 0, "e2e (A) the Error card says that the turn did not finish (no HTTP status)");
+        CHECK(a && a->lastTurnUnixMs == 0, "e2e (A) the cut-off stamps no API-turn evidence");
+        if (a)
+        {
+            // The scheduler's view. Settle disabled (0) so only the READY test decides.
+            CHECK(DecideAdvance(*a, NowMsTest(), 0, false, 0).action == AdvanceAction::None, "e2e (A) the autorunner does NOT send the next queued prompt into the cut-off session");
+            SessionInfo asBefore = *a; // the same record as the old code left it: a started, ready Idle
+            asBefore.state = SessionState::Idle;
+            asBefore.started = true;
+            CHECK(DecideAdvance(asBefore, NowMsTest(), 0, false, 0).action == AdvanceAction::Send, "e2e (A) control: as Idle, the same record WAS sent to (the incident)");
+        }
+    }
+    CHECK(stateOf(idD) == SessionState::Idle, "e2e (D) CONTROL: a STARTED tab mid-turn with no evidence is not cut off (its turn is running; only its hooks were lost)");
+    CHECK(stateOf(idE) == SessionState::Idle, "e2e (E) a dormant tab on a BARE PROMPT with no hint stays as it was (the user may have pressed Esc before any reply)");
+    CHECK(stateOf(idF) == SessionState::Error, "e2e (F) the same bare prompt reads Error when the record said a turn was in flight");
+    CHECK(stateOf(idG) == SessionState::Idle, "e2e (G) a fork that has not run a turn of its own is not cut off (its tail is the source's copy)");
+    CHECK(stateOf(idH) == SessionState::Error, "e2e (H) a restored NeedsApproval whose question died with its process reads Error, not a false 'needs approval'");
+    CHECK(staleReleased && stateOf(idJ) == SessionState::WaitingForInput, "e2e (J) an Error that the tail no longer shows (a finished turn) is released to WaitingForInput");
+    CHECK(stateOf(idK) == SessionState::Error, "e2e (K) a STARTED tab never seen dormant: the resume placeholder after a tool result is the evidence");
+    CHECK(stateOf(idL) == SessionState::Idle, "e2e (L) a turn the USER interrupted is not a cut-off, with or without the placeholder after it");
+    CHECK(stateOf(idM) == SessionState::Error, "e2e (M) claude's own interruptedByShutdown flag reads Error");
+
+    // ---- Phase 2: the tabs are opened (claude --resume) ----
+    const auto openTab = [&](const std::wstring& id) {
+        reg->SetStarted(id, true); // the control started: the tab is no longer dormant
+        HookMessage start = Msg(id, HookEvent::SessionStart);
+        start.source = std::wstring{ kHookSourceResume };
+        start.ts = NowMsTest();
+        reg->OnHookEvent(start); // the resumed claude's SessionStart hook
+    };
+    // (I) the user dismisses the cut-off first (the triage "Move to Idle / Done").
+    reg->Update(idI, [](SessionInfo& x) {
+        x.state = SessionState::Idle;
+        x.errorDismissed = true;
+        x.errorMessage.clear();
+        x.errorStatus = 0;
+    });
+    openTab(idA);
+    openTab(idB);
+    openTab(idC);
+    openTab(idI);
+    CHECK(stateOf(idA) == SessionState::Error, "e2e (A) opening the tab keeps Error (the resumed claude's SessionStart recovers nothing)");
+    AppendJsonl(pathA, placeholder, NowMsTest()); // A: claude does NOT continue the turn - it writes its placeholder
+    AppendJsonl(pathI, placeholder, NowMsTest()); // I: the same, on the dismissed session
+    reg->Update(idB, [](SessionInfo& x) { x.presenceStatus = L"busy"; }); // B: claude continues the turn - its heartbeat reads busy
+    AppendJsonl(pathC, metaContinue + toolUseAfterResume, NowMsTest()); // C: claude continues the turn - its first real line lands
+    scanner.Wake();
+    const bool resumedByHeartbeat = allReach({ idB }, SessionState::Running, 8000);
+    const bool resumedByTranscript = allReach({ idC }, SessionState::Running, 8000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500)); // A and I must hold several passes past the placeholder
+    CHECK(resumedByHeartbeat, "e2e (B) the cut-off turn RESUMED: claude's working heartbeat brings the session back to Running, before any transcript line");
+    CHECK(resumedByTranscript, "e2e (C) the cut-off turn RESUMED: its first real assistant line brings the session back to Running");
+    {
+        const auto b = reg->Get(idB);
+        CHECK(b && b->errorMessage.empty() && !b->midTurnAtRestore, "e2e (B) Running cleared the Error message");
+    }
+    CHECK(stateOf(idA) == SessionState::Error, "e2e (A) THE INCIDENT: the resume placeholder does NOT read as a finished turn - still Error (was: a ready Idle, and a prompt was sent 40 s later)");
+    CHECK(!sawAfterError(idA, SessionState::Idle) && !sawAfterError(idA, SessionState::WaitingForInput),
+          "e2e (A) and the session never read ready at any moment between the reopen and now");
+    CHECK(stateOf(idI) == SessionState::Idle, "e2e (I) a dismissed cut-off stays dismissed when its tab is opened (the placeholder is not a turn event)");
+
+    // ---- Phase 3: the user's next message ----
+    {
+        HookMessage ups = UPS(idA, L"continue");
+        ups.ts = NowMsTest();
+        reg->OnHookEvent(ups);
+        CHECK(stateOf(idA) == SessionState::Running, "e2e (A) the user's next message leaves Error for Running");
+        AppendJsonl(pathA,
+                    R"j({"type":"user","uuid":"p2","parentUuid":"n1","message":{"role":"user","content":"continue"},"timestamp":"2026-10-01T15:36:47.032Z"})j" "\n",
+                    NowMsTest());
+        scanner.Wake();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        const auto a = reg->Get(idA);
+        CHECK(a && a->state == SessionState::Running && a->errorMessage.empty(), "e2e (A) and it stays Running once the prompt line lands (the old tail is behind it)");
+    }
+
+    scanner.Stop();
+    reg->RemoveObserver(token);
     ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevCfg.empty() ? nullptr : prevCfg.c_str());
     std::error_code ecCleanup;
     std::filesystem::remove_all(std::filesystem::path{ cfg }, ecCleanup);

@@ -55,6 +55,13 @@ namespace Agentmaster
     // SessionRegistry::OnHookEvent pairs the two into the new session's continuedFromId/continuedVia link,
     // so the summary panel can list the conversation the /clear left behind (no transcript records it).
     inline constexpr std::wstring_view kHookSourceClear = L"clear";
+    // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): the SessionStart `source` of a
+    // `claude --resume` / `--continue` — the SAME conversation, reloaded by a new claude process (a
+    // window-restored or parked tab on its first activation, "Restart session", a Sessions-page resume).
+    // State-bearing since 2026-10-09: a resume does not recover an errored conversation, so it keeps
+    // SessionState::Error (NextSessionState). Only a turn event does — the user's next message, the first
+    // line of a continued turn, or claude's own working heartbeat.
+    inline constexpr std::wstring_view kHookSourceResume = L"resume";
     inline constexpr std::wstring_view kCompactTriggerManual = L"manual"; // a user-typed `/compact` (the session was AT REST before it)
     inline constexpr std::wstring_view kCompactTriggerAuto = L"auto"; // an auto-compaction (normally MID-TURN: the turn continues after it)
 
@@ -183,12 +190,25 @@ namespace Agentmaster
         // clean turn-complete). The session leaves Error on the next real turn event (a
         // UserPromptSubmit -> Running), so no wire hook ever needs this flag.
         bool apiError{ false };
-        // Engine-internal (never on the wire): the API-error REASON, carried alongside apiError so
-        // OnHookEvent can preserve it onto SessionInfo.errorMessage/errorStatus for the Triage-Board
-        // Error card. errorMessage = the synthetic line's text; errorStatus = its apiErrorStatus HTTP
-        // code (0 when none). Meaningful only when apiError is set.
+        // Engine-internal (never on the wire): the error REASON, carried alongside apiError (or
+        // turnCutOff below) so OnHookEvent can preserve it onto SessionInfo.errorMessage/errorStatus for
+        // the Triage-Board Error card. For an API error: errorMessage = the synthetic line's text and
+        // errorStatus = its apiErrorStatus HTTP code (0 when none). For a cut-off turn: errorMessage =
+        // kTurnCutOffErrorMessage (SessionScanner.h) and errorStatus = 0. Meaningful only when apiError
+        // or turnCutOff is set.
         std::wstring errorMessage;
         int errorStatus{ 0 };
+        // Engine-internal (never on the wire): set ONLY by the SessionScanner's CUT-OFF reconciliation
+        // (ClassifyCutOffTurn / ShouldSynthesizeCutOff, SessionScanner.h — HOOKS.md "Cut-off turns").
+        // The transcript's last turn never finished and no process can be running it: the app was shut
+        // down (or crashed) while the turn ran, or its tab was restarted or deactivated mid-turn. Drives
+        // SessionState::Error through the ONE state machine, like apiError, so the session never reads as
+        // ready (Idle / WaitingForInput) and the autorunner never sends the next queued prompt past
+        // a turn that did not finish (the 2026-10-09 incident, session c47e90a2).
+        // ⚠ Kept SEPARATE from apiError on purpose: IsApiTurnEvidence must answer false for it. A cut-off
+        // is the opposite of an API request, so it must never stamp lastTurnUnixMs (the "still cached"
+        // hint would light on a session that has been dead for hours).
+        bool turnCutOff{ false };
         // Engine-internal (never on the wire): set ONLY by the SessionScanner's recon-subagent
         // promotion (ShouldSynthesizeRunningFromExternalWork). The carrier PostToolUse reports
         // EXTERNAL work — a subagent/teammate side-file write or the busy/shell heartbeat — not a
@@ -225,13 +245,23 @@ namespace Agentmaster
     //   • A synthesized external-work PostToolUse (HookMessage::externalWorkActivity — the
     //     scanner's recon-subagent promotion): the observed activity is a side-file write / the
     //     busy-or-shell heartbeat — work OUTSIDE this conversation; same reasoning as SubagentStop.
+    //   • A synthesized CUT-OFF (HookMessage::turnCutOff — the scanner's recon-cutoff): the turn was cut
+    //     off by a shutdown, possibly hours or days ago. Nothing was requested from the API when the
+    //     scanner noticed it, so it is no evidence of a warm cache. Its carrier event is Notification,
+    //     which counts below, so the flag is tested FIRST.
     // INCLUDED: UserPromptSubmit (the request fires on submit), Pre-/PostToolUse for REAL parent-turn
     // activity (not registered as wire hooks today, but the scanner's recon-run/recon-resume synths
     // ride UserPromptSubmit/PostToolUse for genuine parent-turn work and still count), and
     // Notification (a permission ask / idle nudge arrives mid- or moments-after-turn; the scanner's
     // recon-error synth rides Notification too — the failed request WAS an API attempt moments ago).
+    //   m — the hook message (a real wire hook, or one the scanner synthesized).
+    // Returns true when the event may stamp SessionInfo::lastTurnUnixMs. Never throws.
     inline bool IsApiTurnEvidence(const HookMessage& m) noexcept
     {
+        if (m.turnCutOff)
+        {
+            return false; // a cut-off turn made no API request when it was noticed (see above)
+        }
         switch (m.event)
         {
         case HookEvent::UserPromptSubmit:
@@ -277,6 +307,14 @@ namespace Agentmaster
         {
             return SessionState::Error;
         }
+        // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): the transcript's last turn never
+        // finished and no process can be running it (the scanner's recon-cutoff) -> Error, regardless of
+        // the carrier event and of the current state. Engine-internal like apiError: no wire hook ever
+        // sets m.turnCutOff. The session leaves Error the same way: a turn event (-> Running below).
+        if (m.turnCutOff)
+        {
+            return SessionState::Error;
+        }
         switch (m.event)
         {
         case HookEvent::SessionStart:
@@ -295,7 +333,8 @@ namespace Agentmaster
             // resets to Idle/Done" bug — a background/restored tab's claude fires SessionStart on the
             // first visit). A genuine new turn (UserPromptSubmit -> Running) still clears it; every OTHER
             // current state resets to Idle (fresh launch — a new record starts Idle anyway — plus a
-            // Running/Error/Done restart and a /clear from idle). Turn identity still resets in
+            // Running/Done restart, an Error restart that is NOT a resume — an Error RESUME is kept, see
+            // the cut-off block below — and a /clear from idle). Turn identity still resets in
             // NextSessionStateOrdered (turns = {}).
             if (current == SessionState::WaitingForInput || current == SessionState::NeedsApproval)
             {
@@ -312,6 +351,23 @@ namespace Agentmaster
             // compaction keeps a Running turn Running. Error/Done still normalize to Idle below (a
             // compaction that completed means the conversation is usable again).
             if (m.source == kHookSourceCompact && current == SessionState::Running)
+            {
+                return current;
+            }
+            // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): a RESUME keeps Error. A
+            // `claude --resume` reloads the conversation; it recovers nothing by itself. The error is
+            // still the last thing that happened: an API error line is still the tail, or the last turn
+            // was cut off and is still unfinished. Before 2026-10-09 this reset Error to Idle and left
+            // the scanner to derive it again a pass later. In that gap the session read READY, and a
+            // resumed claude whose heartbeat reads "busy" while it loads was promoted Idle -> Running by
+            // recon-subagent (measured: c47e90a2, 18:37:14 — false Running for 30 s, then a false
+            // "completed" toast). Keeping Error closes the gap.
+            // Scoped to source == "resume" on purpose: a fresh start ("startup"), a /clear and an old
+            // 9-field forwarder (empty source) keep the historical reset to Idle, so a launch that has
+            // no transcript behind it can never keep a stale Error.
+            // The scanner stays the authority on the LEVEL: it releases an Error that the tail no longer
+            // shows (ShouldReleaseStaleError, SessionScanner.h), so this can never strand one.
+            if (m.source == kHookSourceResume && current == SessionState::Error)
             {
                 return current;
             }
@@ -415,6 +471,15 @@ namespace Agentmaster
         // turnComplete false so no question-guard fires and Autorunner does NOT advance off an error (the
         // scheduler's stopOnError backstop handles the autorunner pause on the Error state itself).
         if (m.apiError)
+        {
+            turns.queuedPrompts = 0;
+            return out;
+        }
+        // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): a cut-off turn ended ABNORMALLY too.
+        // out.state is already Error. Same settlement as the API error above: a type-ahead prompt that
+        // was queued behind the dead turn is void, and it is NOT a clean turn boundary — turnComplete
+        // stays false, so no question-guard fires and the Stop seam does not advance the queue.
+        if (m.turnCutOff)
         {
             turns.queuedPrompts = 0;
             return out;

@@ -1103,6 +1103,12 @@ namespace winrt::TerminalApp::implementation
         // `restored`) is Idle. `info` was copied from *restored above, so info.state == restored->state
         // here. The SessionScanner refines the seed from the transcript tail; hooks own it live the instant
         // the tab is activated (claude resumes -> SessionStart -> Idle).
+        // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): BEFORE the normalization below throws
+        // it away, remember whether the record still said that a turn was in flight (a record archived
+        // mid-turn in this run and resumed now; a record the sessions.json load already flagged keeps
+        // its flag). The scanner needs it to tell a turn that was cut off from one the user stopped
+        // (RestoredMidTurnFlag). A fresh spawn has no earlier turn: false.
+        info.midTurnAtRestore = restored ? ::Agentmaster::RestoredMidTurnFlag(info.state, info.midTurnAtRestore) : false;
         info.state = restored ? ::Agentmaster::RestoredSessionState(info.state) : ::Agentmaster::SessionState::Idle;
         // Keep the persisted question-guard flag consistent with the (normalized) state: preserved for a
         // restored WaitingForInput-on-a-question (so the Autorunner queue stays held and can't auto-answer
@@ -1367,6 +1373,13 @@ namespace winrt::TerminalApp::implementation
                     // In-flight/ended states normalize to Idle (RestoredSessionState). The card is not
                     // shown until re-homed (live=false here); the SessionScanner then refines it and the
                     // Waiting decay is read-gated (readUnixMs resets to 0 -> unread -> keeps waiting).
+                    // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): sessions.json holds the
+                    // state the session had when the last run ENDED. Running / NeedsApproval / Error
+                    // there means the run ended (a crash, or a close) while a turn was in flight — the
+                    // 2026-10-09 incident (c47e90a2) is that fact being lost right here. Remember it
+                    // BEFORE the normalization; the scanner joins it with the transcript tail and reads
+                    // a turn that never finished as Error instead of a ready Idle.
+                    s.midTurnAtRestore = ::Agentmaster::RestoredMidTurnFlag(s.state, s.midTurnAtRestore);
                     s.state = ::Agentmaster::RestoredSessionState(s.state);
                     // The question-guard flag (persisted too) rides ONLY a preserved needs-you state:
                     // keep it for a WaitingForInput turn that ended on a question (so the Autorunner queue
@@ -2847,6 +2860,11 @@ namespace winrt::TerminalApp::implementation
             s.tabToken = newWt;
             s.live = true;
             s.pid = 0;
+            // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): a restart ends the old claude. If
+            // the record says a turn was in flight, that turn was just cut off — remember it before the
+            // normalization (RestoredMidTurnFlag). This seam needs the flag more than the others: the
+            // tab stays started, so the scanner never sees it dormant.
+            s.midTurnAtRestore = ::Agentmaster::RestoredMidTurnFlag(s.state, s.midTurnAtRestore);
             s.state = ::Agentmaster::RestoredSessionState(s.state);
             s.lastMessageWasQuestion = ::Agentmaster::RestoredQuestionFlag(s.state, s.lastMessageWasQuestion);
             s.pendingConfirmPromptId.clear();
@@ -3249,6 +3267,10 @@ namespace winrt::TerminalApp::implementation
             s.live = true;
             s.pid = 0;
             s.started = false;
+            // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): a park ends the claude. A turn
+            // that was in flight is cut off by it — remember that before the normalization
+            // (RestoredMidTurnFlag), exactly as the sessions.json load does for a restored tab.
+            s.midTurnAtRestore = ::Agentmaster::RestoredMidTurnFlag(s.state, s.midTurnAtRestore);
             s.state = ::Agentmaster::RestoredSessionState(s.state);
             s.lastMessageWasQuestion = ::Agentmaster::RestoredQuestionFlag(s.state, s.lastMessageWasQuestion);
             s.pendingConfirmPromptId.clear();

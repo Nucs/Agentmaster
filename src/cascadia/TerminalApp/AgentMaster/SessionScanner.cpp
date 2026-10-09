@@ -275,6 +275,11 @@ namespace Agentmaster
                 ev.model = msg->StrAt(L"model");
                 const auto* content = msg->Find(L"content");
                 ev.text = CollectText(content);
+                // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): flag Claude Code's resume
+                // placeholder ("No response requested.", pseudo-model "<synthetic>", not an API error).
+                // The parser stays a plain extractor and keeps the line as an Assistant event with its
+                // terminal stop_reason; the fold decides what it means (it never ends a turn).
+                ev.resumePlaceholder = IsResumePlaceholder(ev.model, ev.apiError, ev.text);
                 ev.toolName = CollectInteractiveToolName(content); // "" unless an interactive tool_use is present
                 ev.fileWritePaths = CollectFileWritePaths(content); // Write/Edit file_path values (COMMANDS.md markdown await)
                 // Context occupancy from message.usage (≈ the size of the request that produced this
@@ -356,6 +361,9 @@ namespace Agentmaster
                     {
                         TranscriptEvent ev;
                         ev.kind = TranscriptEvent::Kind::ToolResult;
+                        // Agentmaster (CUT-OFF TURNS): claude's own "a shutdown aborted this tool" flag
+                        // (top-level, beside toolDenialKind). False on every ordinary tool result.
+                        ev.shutdownInterrupt = obj.BoolAt(L"interruptedByShutdown");
                         out.events.push_back(std::move(ev));
                         continue;
                     }
@@ -411,6 +419,10 @@ namespace Agentmaster
                     // filter (DELIVERY_PLAN.md R1 — NoteExternalPrompt's observedUnixMs): an old
                     // replayed identical line must never vouch for a NEW send's delivery.
                     ev.lineTsMs = ParseTranscriptTimestamp(obj.StrAt(L"timestamp"));
+                    // Agentmaster (CUT-OFF TURNS): on the "[Request interrupted by user…]" marker this is
+                    // claude's own statement that a SHUTDOWN, not the user, aborted the turn. The fold
+                    // reads it only on the marker; on any other prompt it is absent.
+                    ev.shutdownInterrupt = obj.BoolAt(L"interruptedByShutdown");
                     out.events.push_back(std::move(ev));
                 }
             }
@@ -869,6 +881,28 @@ namespace Agentmaster
             st.readReachedEnd = false;
             st.seekDecided = false;
             st.alignSeek = false;
+            // Agentmaster (CUT-OFF TURNS): the open-turn fold describes the OLD file's tail. Drop it with
+            // the cursor, so a rewritten file that holds no turn line cannot inherit a turn "in flight"
+            // (the replay re-establishes it from whatever the new file ends on).
+            st.openTurn = OpenTurnKind::None;
+            st.resumeMarkerOnOpenTurn = false;
+            st.shutdownInterrupt = false;
+            st.openTurnSeenDormant = false;
+        }
+        // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): a session that is Running ENDS the
+        // cut-off episode. A turn is in a live process (a real prompt, recon-run off fresh lines, or
+        // claude's working heartbeat), so the resume-time evidence described a tail that is behind it.
+        // The registry clears its half (SessionInfo::midTurnAtRestore) on the same transition. Left
+        // standing, this evidence would turn the next at-rest moment of the NEW turn into a false
+        // cut-off: a permission prompt, or the 30 s release of a turn that wrote nothing.
+        // Done BEFORE the read on purpose: `s` is the pass snapshot, and a line this pass is about to
+        // fold is NEWER than that snapshot — its own evidence (a shutdown flag on a turn that was still
+        // Running when the snapshot was taken) must survive this pass.
+        if (s.state == SessionState::Running)
+        {
+            st.resumeMarkerOnOpenTurn = false;
+            st.shutdownInterrupt = false;
+            st.openTurnSeenDormant = false;
         }
         // Captured BEFORE the read: events consumed by a not-yet-primed cursor are the initial
         // backlog replay (the tail window -> end on a restored/adopted session, or offset 0 -> end on
@@ -934,6 +968,30 @@ namespace Agentmaster
             }
         };
 
+        // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): judge ONCE per pass whether the turn
+        // at the tail was cut off, here, because three later steps read the verdict: the external-work
+        // promotion (a cut-off Error may go back to Running on claude's working heartbeat), the
+        // cut-off synth, and the stale-Error release.
+        // First latch "this open turn was seen without a process": a dormant tab cannot be running the
+        // turn its transcript shows in flight, and that stays true after the tab starts (see
+        // ScanState::openTurnSeenDormant). Latched for every open kind; the classifier ignores it for a
+        // bare prompt.
+        if (dormant && tailCurrent && st.openTurn != OpenTurnKind::None)
+        {
+            st.openTurnSeenDormant = true;
+        }
+        CutOffEvidence cutOffEvidence;
+        cutOffEvidence.openTurn = st.openTurn;
+        cutOffEvidence.resumeMarkerOnOpenTurn = st.resumeMarkerOnOpenTurn;
+        cutOffEvidence.shutdownInterrupt = st.shutdownInterrupt;
+        cutOffEvidence.dormant = dormant;
+        cutOffEvidence.openTurnSeenDormant = st.openTurnSeenDormant;
+        cutOffEvidence.midTurnAtRestore = s.midTurnAtRestore;
+        cutOffEvidence.forkNotYetMessaged = !s.forkParentId.empty();
+        // tailCurrent: while a catch-up is still reading, the fold describes a line somewhere mid-file,
+        // and a historical tool result is not "the turn in flight". No verdict until the read lands.
+        const CutOffReason cutOffReason = tailCurrent ? ClassifyCutOffTurn(cutOffEvidence) : CutOffReason::None;
+
         // Agentmaster (Error triage dismissal — expiry): the manual "Move to Idle/Done" on an Error
         // card acknowledged THE error that was standing when the user clicked; the ack lasts only
         // until the conversation MOVES. A freshly consumed TURN event is that move — a retry (clears
@@ -986,13 +1044,21 @@ namespace Agentmaster
             if (fresh && (fresh->state == SessionState::Idle || fresh->state == SessionState::WaitingForInput || fresh->state == SessionState::Error))
             {
                 const bool fromError = fresh->state == SessionState::Error;
+                // Agentmaster (CUT-OFF TURNS): an Error that stands for a cut-off turn carries the fixed
+                // cut-off message. Fresh lines after it are the turn RESUMING (claude continued it by
+                // itself, or the user's next message arrived without its hook), not a retry after an API
+                // error — say which, so the log never sends the reader after an API failure that never was.
+                const bool fromCutOff = fromError && fresh->errorMessage == kTurnCutOffErrorMessage;
                 HookMessage run;
                 run.event = HookEvent::UserPromptSubmit;
                 run.sessionId = s.id;
                 run.cwd = s.workingDir;
                 run.ts = NowMs();
                 _registry->OnHookEvent(run);
-                AppendStateLog(L"scanner.log", L"[recon-run] " + s.id + (fromError ? L" (user retried after an API error — Error -> Running)" : L" (turn in progress, prompt hook missed/folded)") + L"\n");
+                AppendStateLog(L"scanner.log", L"[recon-run] " + s.id +
+                                                   (fromCutOff ? L" (the cut-off turn resumed — Error -> Running)" :
+                                                                 (fromError ? L" (user retried after an API error — Error -> Running)" : L" (turn in progress, prompt hook missed/folded)")) +
+                                                   L"\n");
             }
         }
 
@@ -1181,7 +1247,15 @@ namespace Agentmaster
         // Idle/Waiting — it self-limits: once it lands Running it stops re-firing.
         // Agentmaster: held for a DORMANT session (ScanSessionIsDormant) — the side files a parked tab's
         // closed claude left behind stay "fresh" for kScanSubagentFreshMs and would re-light it otherwise.
-        const bool externalWorkRun = ShouldSynthesizeRunningFromExternalWork(s.state, subagentActive, presenceWorking, st.lastStopReason, st.interrupted, externalOutlivesTurn);
+        // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): an Error that stands for a cut-off turn
+        // is the third state this promotion leaves. With CLAUDE_CODE_RESUME_INTERRUPTED_TURN set, a
+        // resumed claude continues the cut-off turn by itself: its heartbeat reads "busy" within a second
+        // or two, while its first transcript line lands only when the first content block is complete
+        // (16.7 s on session 9aa2cb78). The heartbeat is the "it was resumed" signal that does not wait
+        // for that line. Keyed on THIS pass's verdict, so an API-error Error (no cut-off verdict) is
+        // never promoted here.
+        const bool cutOffErrorStanding = s.state == SessionState::Error && cutOffReason != CutOffReason::None;
+        const bool externalWorkRun = ShouldSynthesizeRunningFromExternalWork(s.state, subagentActive, presenceWorking, st.lastStopReason, st.interrupted, externalOutlivesTurn, cutOffErrorStanding);
         if (externalWorkRun && dormant)
         {
             holdDormant(L"recon-subagent");
@@ -1189,7 +1263,12 @@ namespace Agentmaster
         else if (externalWorkRun)
         {
             const auto fresh = _registry->Get(s.id);
-            if (fresh && (fresh->state == SessionState::Idle || fresh->state == SessionState::WaitingForInput))
+            // The cut-off Error arm re-checks the FRESH record against the fixed cut-off message: between
+            // the pass snapshot and this re-Get a real API error could have replaced the cut-off Error,
+            // and that one must stay.
+            const bool freshCutOffError = fresh && fresh->state == SessionState::Error && cutOffErrorStanding &&
+                                          fresh->errorMessage == kTurnCutOffErrorMessage;
+            if (fresh && (fresh->state == SessionState::Idle || fresh->state == SessionState::WaitingForInput || freshCutOffError))
             {
                 HookMessage act;
                 act.event = HookEvent::PostToolUse;
@@ -1205,7 +1284,7 @@ namespace Agentmaster
                 AppendStateLog(L"scanner.log",
                                L"[recon-subagent] " + s.id + L" (" + (presenceWorking ? L"presence=" + s.presenceStatus : L"subagent side-files active") +
                                    (externalOutlivesTurn ? L", outlived turn-end" : L"") +
-                                   L", " + (fresh->state == SessionState::Idle ? L"Idle" : L"Waiting") + L" -> Running)\n");
+                                   L", " + (freshCutOffError ? L"Error (the cut-off turn resumed)" : (fresh->state == SessionState::Idle ? L"Idle" : L"Waiting")) + L" -> Running)\n");
             }
         }
 
@@ -1302,6 +1381,90 @@ namespace Agentmaster
                 stop.lastMessageIsQuestion = false; // the leaf moved off the error; there is no question to surface
                 _registry->OnHookEvent(stop);
                 AppendStateLog(L"scanner.log", L"[recon-error-release] " + s.id + L" (rewound past error -> Waiting)\n");
+            }
+            return; // handled this pass — don't let recon-stop / recon-idle also fire
+        }
+
+        // CUT-OFF reconciliation (HOOKS.md "Cut-off turns"): the turn at the tail never finished, and no
+        // process can be running it — the app was shut down or crashed mid-turn, or the tab was restarted
+        // or deactivated mid-turn. Until 2026-10-09 such a session read Idle (the restore normalizes
+        // Running to Idle), which is READY: on session c47e90a2 the autorunner sent the next queued
+        // prompt 40 s after the tab was opened, into a session whose previous turn had been cut off.
+        // Synthesize Error INSTEAD, through the ONE state machine (the engine-internal turnCutOff flag),
+        // with a message that says what happened. Error is not a ready state, and the scheduler's
+        // stopOnError backstop pauses that session's autorunner.
+        // Checked BEFORE recon-stop on purpose: once a resumed claude has written its placeholder line,
+        // the tail carries a terminal stop_reason, and recon-stop would hand a session that is still
+        // NeedsApproval over a dead turn back as "Waiting for you".
+        // The session LEAVES Error when the turn really goes on: the user's next message (a real
+        // UserPromptSubmit), fresh assistant lines (recon-run, which accepts Error), or claude's working
+        // heartbeat (recon-subagent above, for a cut-off Error only).
+        // The predicate holds while a just-submitted prompt has not reached the transcript (the shared
+        // turn-start guard), and it never fires from Running.
+        if (ShouldSynthesizeCutOff(s.state, cutOffReason, s.turns.lastPromptUnixMs, tailWriteMs, NowMs()))
+        {
+            const auto fresh = _registry->Get(s.id);
+            // Judge the FRESHEST record again, with the same rule: the hint, the fork link, dormancy and
+            // the state all live on the record, and a real hook can change them between the pass snapshot
+            // and this re-Get (a prompt -> Running clears the hint; a tab that just started is no longer
+            // dormant, which the latch above already covers). The fold facts are this thread's own.
+            CutOffEvidence freshEvidence = cutOffEvidence;
+            if (fresh)
+            {
+                freshEvidence.dormant = ScanSessionIsDormant(*fresh);
+                freshEvidence.midTurnAtRestore = fresh->midTurnAtRestore;
+                freshEvidence.forkNotYetMessaged = !fresh->forkParentId.empty();
+            }
+            const CutOffReason freshReason = fresh ? ClassifyCutOffTurn(freshEvidence) : CutOffReason::None;
+            // Manual dismissal gate (the triage "Move to Idle/Done" on the Error card): the user
+            // acknowledged THIS cut-off, so do not derive it again off the unchanged tail. The flag expires
+            // with the conversation's next real turn line (retired at consumption time, above).
+            if (fresh && !fresh->errorDismissed &&
+                ShouldSynthesizeCutOff(fresh->state, freshReason, fresh->turns.lastPromptUnixMs, tailWriteMs, NowMs()))
+            {
+                const SessionState before = fresh->state;
+                HookMessage cut;
+                cut.event = HookEvent::Notification; // neutral carrier; the turnCutOff flag drives the transition
+                cut.turnCutOff = true;
+                cut.sessionId = s.id;
+                cut.cwd = s.workingDir;
+                cut.ts = NowMs();
+                cut.errorMessage = std::wstring{ kTurnCutOffErrorMessage }; // what the Error card shows
+                cut.errorStatus = 0; // no HTTP status: nothing was requested
+                _registry->OnHookEvent(cut);
+                AppendStateLog(L"scanner.log",
+                               L"[recon-cutoff] " + s.id + L" (the last turn stopped on " + OpenTurnKindText(st.openTurn) + L" and never finished; " +
+                                   CutOffReasonText(freshReason) + L") " +
+                                   (before == SessionState::Idle ? L"Idle" :
+                                                                   (before == SessionState::WaitingForInput ? L"Waiting" :
+                                                                                                              (before == SessionState::NeedsApproval ? L"NeedsApproval" : L"Done"))) +
+                                   L" -> Error\n");
+                return; // the cut-off turn owns this pass — recon-stop / recon-block must not also fire on it
+            }
+        }
+
+        // STALE-ERROR release (HOOKS.md "Cut-off turns"): the session is in Error, but the tail shows no
+        // error any more — no API-error line is the newest turn line, and no cut-off verdict stands.
+        // Error is level-derived, so it must not outlive its evidence. Since a resume now KEEPS Error
+        // (NextSessionState, source "resume"), nothing else would clear such a leftover: a turn that
+        // started and finished between two passes with its hooks lost, or an API-error line that a resume
+        // placeholder followed. Release to WaitingForInput (a quiescent Stop), like the rewind release
+        // above. A turn that is starting is not released under its own feet: recon-run / a real prompt
+        // move it to Running first, and the clock below reads 0 while claude's heartbeat reads working.
+        if (tailCurrent && ShouldReleaseStaleError(s.state, st.lastWasApiError, cutOffReason, quietForMs))
+        {
+            const auto fresh = _registry->Get(s.id);
+            if (fresh && fresh->state == SessionState::Error)
+            {
+                HookMessage stop;
+                stop.event = HookEvent::Stop;
+                stop.sessionId = s.id;
+                stop.cwd = s.workingDir;
+                stop.ts = NowMs();
+                stop.quiescentStop = true; // settled: the ordered machine lands WaitingForInput unconditionally
+                stop.lastMessageIsQuestion = false; // the error is gone; there is no question to surface
+                _registry->OnHookEvent(stop);
+                AppendStateLog(L"scanner.log", L"[recon-error-release] " + s.id + L" (the tail shows no error any more -> Waiting)\n");
             }
             return; // handled this pass — don't let recon-stop / recon-idle also fire
         }
@@ -1793,7 +1956,36 @@ namespace Agentmaster
         {
             if (ev.kind == TranscriptEvent::Kind::Assistant)
             {
-                consumedTurnEvent = true;
+                // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): fold the OPEN TURN first.
+                if (ev.resumePlaceholder)
+                {
+                    // Claude Code's resume placeholder ("No response requested."): a later claude
+                    // process loaded this conversation and found its last user line unanswered. It is
+                    // not model output and it finishes no turn, so the open turn STAYS open. When one
+                    // is open, this line is the proof that it belongs to a process that is gone.
+                    // Deliberately NOT a consumed turn event: it is written at load, by no turn. Counting
+                    // it retired a dismissed error (the errorDismissed expiry in _reconcileSession) the
+                    // moment the user merely opened the tab, and the cut-off Error came straight back.
+                    // Everything below still runs for it, exactly as before this fold existed: its
+                    // terminal stop_reason is what lets recon-stop release a session that is still
+                    // Running or NeedsApproval over a turn that is in fact dead.
+                    if (st.openTurn != OpenTurnKind::None)
+                    {
+                        st.resumeMarkerOnOpenTurn = true;
+                    }
+                }
+                else
+                {
+                    consumedTurnEvent = true;
+                    // A REAL assistant line: either it ends the turn (a terminal stop_reason, or the
+                    // API-error line, which is recon-error's domain) or the turn is still in flight on
+                    // it. It is written by a live turn, so it also ends whatever cut-off episode came
+                    // before: the placeholder / dormant / shutdown evidence described an OLDER tail.
+                    st.openTurn = (ev.apiError || IsTerminalStopReason(ev.stopReason)) ? OpenTurnKind::None : OpenTurnKind::Assistant;
+                    st.resumeMarkerOnOpenTurn = false;
+                    st.openTurnSeenDormant = false;
+                    st.shutdownInterrupt = false;
+                }
                 st.lastStopReason = ev.stopReason; // latest assistant line wins (tool_use -> not done)
                 st.interrupted = false; // fresh assistant output: the turn is progressing, not aborted
                 // API-error tail tracking: the synthetic isApiErrorMessage line sets this; ANY other
@@ -1903,6 +2095,25 @@ namespace Agentmaster
                 st.lastWasApiError = false; // activity past any error -> the tail is no longer that error
                 st.errorUuid.clear();
                 st.errorBranchUuids.clear();
+                // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): a tool result leaves the turn
+                // IN FLIGHT — claude always writes an assistant line after it when the turn goes on or
+                // ends. Two exceptions:
+                //   * after the user's interrupt marker (st.interrupted) the turn is already over; a tool
+                //     result that claude flushes late for the aborted tool must not reopen it;
+                //   * the resume-time evidence flags are left alone. The only tool result that can follow
+                //     a dead turn is the "[Tool call interrupted…" repair line a RESUMING claude writes
+                //     for a tool call that never returned — no tool of a dead process can return. So the
+                //     turn it belongs to stays exactly as dead as it was.
+                if (!st.interrupted)
+                {
+                    st.openTurn = OpenTurnKind::ToolResult;
+                }
+                // claude's own flag on the result of a tool that a shutdown aborted. Only ever set here;
+                // the next real turn line clears it.
+                if (ev.shutdownInterrupt)
+                {
+                    st.shutdownInterrupt = true;
+                }
             }
             else if (ev.kind == TranscriptEvent::Kind::LeafMarker)
             {
@@ -1965,10 +2176,27 @@ namespace Agentmaster
                     {
                         _commandWatch->OnTurnEnd(s.id); // an interrupt ends the command's turn too (COMMANDS.md)
                     }
+                    // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): an interrupt CLOSES the
+                    // open turn. When the USER pressed Esc that is the end of it — a turn the user
+                    // stopped was not cut off. When the marker carries claude's interruptedByShutdown
+                    // flag, a shutdown stopped it: the turn is closed AND cut off, and the flag is the
+                    // evidence (ClassifyCutOffTurn). A plain marker also clears a flag an earlier tool
+                    // result of the same turn set — the user's own interrupt is the later word.
+                    st.openTurn = OpenTurnKind::None;
+                    st.resumeMarkerOnOpenTurn = false;
+                    st.openTurnSeenDormant = false;
+                    st.shutdownInterrupt = ev.shutdownInterrupt;
                 }
                 else
                 {
                     st.interrupted = false;
+                    // Agentmaster (CUT-OFF TURNS): a human prompt opens a NEW turn, in flight until
+                    // something answers it. It is written by a live process, so it ends whatever
+                    // cut-off episode came before (the evidence described an older tail).
+                    st.openTurn = OpenTurnKind::Prompt;
+                    st.resumeMarkerOnOpenTurn = false;
+                    st.openTurnSeenDormant = false;
+                    st.shutdownInterrupt = false;
                     // Control markers that masquerade as user lines — command echoes, task
                     // notifications (STATE.md §8 bug-2) — must not be back-filled into the Flight
                     // Plan as Typed prompts. The parser now drops them before they ever get here

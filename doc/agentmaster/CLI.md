@@ -451,3 +451,11 @@ on both installs. Each item says how it is known: **measured** (run on the live 
   into `agentmaster-cli.exe`, but there is no `search` verb and no summary in `show`. The turns
   renderer (`TranscriptTurns.cpp`, the app's Copy ▸ Transcript) is not in the project, so the
   CLI cannot print a whole conversation.
+- **A turn that a shutdown cut off does not read Error.** (read) Since 2026-10-09 the app shows
+  `Error` for a session whose last turn never finished and that no process can be running
+  (HOOKS.md "Cut-off turns"). The CLI's `DeriveState` has no such rule. While the tab is dormant
+  (no claude runs) the session reads `Archived`. Once the tab is opened and the resumed claude's
+  heartbeat reads `idle`, it reads `Idle` — or `NeedsApproval`, when its tail is a question that
+  nobody can answer any more. The app's verdict needs two facts the CLI does not have: whether the
+  tab is dormant, and what the record said when it was last restored. The saved `state` in
+  `sessions.json` does read `Error` once the app has set it.

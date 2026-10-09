@@ -299,7 +299,7 @@ standalone. It encodes Correctness Rule #1 — "waiting" is three distinct state
 `WaitingForInput`:
 
 ```
-SessionStart      -> Idle             # but Waiting/NeedsApproval stay; source=compact keeps Running
+SessionStart      -> Idle             # but Waiting/NeedsApproval stay; source=compact keeps Running; source=resume keeps Error
 UserPromptSubmit  -> Running
 Pre/PostToolUse   -> Running          # if ever enabled (not registered today; the scanner synthesizes PostToolUse)
 Notification      -> NeedsApproval if permissionRequest, else unchanged
@@ -518,6 +518,139 @@ every hook naming that (session, token) pair is dropped whole and logged `[retir
 for the observer's repeats). The retirement is per session, so the same token still speaks for any other
 session. The older `[stale-end]` guard (a `SessionEnd` from a token that is no longer the record's) stays for
 supersedes nobody retired explicitly, such as an in-session re-home.
+
+### Cut-off turns — a turn that a shutdown cut off reads Error (2026-10-09, NOT BUILT yet)
+
+**The incident (release 0.6.8.18, session `c47e90a2`, 2026-10-09, local times).**
+
+| Time | What happened |
+|---|---|
+| 17:29:25 | The session started a turn (`Running`). |
+| 17:34:55 | Its last transcript line before the crash: a tool result. |
+| 17:37:57–17:39:12 | The app died without a close. |
+| 17:41:35 | The app was reopened. The record was normalized `Running` → `Idle` (`RestoredSessionState`), and the restore re-armed the autorunner (`Full`). |
+| 17:58:51 | The user opened the tab, so `claude --resume` started. |
+| 17:58:53 | The resumed claude appended a synthetic assistant line, `No response requested.`, with the terminal stop reason `stop_sequence`. |
+| 17:59:32 | The autorunner sent the next queued prompt (its 40 s status settle had passed). |
+
+`Idle` is a ready state, and nothing in the engine could say "this turn did not finish". The queue went
+past a turn that had been cut off.
+
+**What the transcript shows.** A turn is in flight at the tail when the last turn line is one of these:
+- a tool result with no assistant line after it;
+- an assistant line that does not end the turn (`tool_use`, or a null stop reason);
+- a human prompt with nothing after it.
+
+In a live session that is normal: the turn is running. It is a **cut-off** only when no process can be
+running that turn.
+
+**What Claude Code writes when it resumes such a conversation** (read from the 2.1.291 bundle and checked
+against the 4,407 local transcripts):
+- For a tail **user** line (a tool result or a prompt) it appends the placeholder assistant line
+  `No response requested.` (model `<synthetic>`, not an API error). About 167 such lines exist locally: 29
+  after a real tool result, 16 after a repair tool result, 59 after the meta line below, 18 after a human
+  prompt, 12 after a user interrupt marker, 28 after a local-command line, and a few others.
+- For a tool call that never returned it can append a repair tool result (`[Tool call interrupted…`,
+  `toolDenialKind: interrupted`), followed by the placeholder (the 16 cases above).
+- In some modes it appends a meta user line, `Continue from where you left off.` (`isMeta`, which the
+  scanner's parser skips).
+- For a tail **assistant** line it can also write nothing at load (session `2e09f4f8` on the same day: its
+  tail stayed an unanswered tool call after the resume).
+- With `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` it then **continues the turn by itself**. Its heartbeat reads
+  `busy` at once. Its first transcript line lands only when the first content block is complete (16.7 s on
+  session `9aa2cb78`).
+- It can mark a turn that a shutdown aborted with a top-level `interruptedByShutdown: true`, on the tool
+  result and on the `[Request interrupted by user]` marker. No local transcript has such a line yet.
+
+None of the lines that claude writes at load is progress of the turn.
+
+**The rule** (`SessionScanner.h`, pure: `ClassifyCutOffTurn`).
+
+The fold (`SessionScanner::_readDelta`) keeps `ScanState::openTurn`: the kind of line the turn in flight
+stopped on. A terminal stop reason, an API-error line and the user's interrupt marker close it. The
+placeholder line does **not** close it. A fork that has not run a turn of its own
+(`SessionInfo::forkParentId` still set) is never cut off, because its tail was copied from the source.
+
+| The tail | Cut off when |
+|---|---|
+| A tool result, or an unfinished assistant line | ONE of: the tab is dormant (`ScanSessionIsDormant`); the placeholder line arrived while the turn was open; the turn was seen open while the tab was dormant (`ScanState::openTurnSeenDormant`, which carries the verdict across the moment the tab starts); the restore-time hint |
+| A bare prompt | ONLY the restore-time hint |
+| Any tail with claude's `interruptedByShutdown` flag | Always |
+| A closed tail | Never |
+
+A started tab with an open turn and none of these evidences has a turn that is **running**. That is the
+common case.
+
+**Why a bare prompt needs the hint.** A user who presses Esc before any reply leaves exactly the tail that
+a crash a few seconds after a submit leaves. Eight tabs of the release fleet sat on such a tail on
+2026-10-09, some for weeks, and a resumed claude writes its placeholder after both.
+
+**The restore-time hint** is `SessionInfo::midTurnAtRestore` (transient). `RestoredSessionState` throws
+away the fact that a turn was in flight, so the four seams that apply it to a Claude record remember the
+fact first (`RestoredMidTurnFlag`): the `sessions.json` load, the restored launch, "Restart session" and
+"Deactivate". It is set for `Running`, `NeedsApproval` and `Error`. `Error` counts so that a cut-off
+session, which persists as `Error`, is found again after a second restart. `SessionRegistry::OnHookEvent`
+clears the hint the moment the session is `Running`.
+
+**The synth.** `ShouldSynthesizeCutOff` fires from `Idle`, `WaitingForInput`, `NeedsApproval` and `Done`,
+never from `Running`. It holds while a just-submitted prompt has not reached the transcript (the shared
+turn-start guard), and it has no quiescence floor, because the verdict rests on evidence and not on a
+quiet file. The scanner sends a `Notification` with the engine-internal `HookMessage::turnCutOff`:
+- `NextSessionState` lands `Error`. The Error card shows `kTurnCutOffErrorMessage`, with no HTTP status.
+- It is not a turn completion (no advance, no question guard), and `IsApiTurnEvidence` answers false, so
+  it never lights the "still cached" hint.
+- The check runs before `recon-stop`. After the placeholder line the tail carries a terminal stop reason,
+  and `recon-stop` would hand a session that is `NeedsApproval` over a dead turn back as "Waiting for you".
+- The triage "Move to Idle / Done" dismisses it (`errorDismissed`). The placeholder line is not a turn
+  event, so opening the tab does not undo the dismissal.
+
+**How the session leaves Error.**
+- The user's next message: a real `UserPromptSubmit` → `Running`.
+- Fresh assistant lines: `recon-run`, which accepts `Error`. Its log line says
+  `(the cut-off turn resumed — Error -> Running)`.
+- claude's working heartbeat: `recon-subagent` now accepts an Error **that stands for a cut-off turn**
+  (`ShouldSynthesizeRunningFromExternalWork`, `cutOffErrorStanding`). With the auto-resume variable set,
+  this is what shows `Running` about 2 s after the tab starts, as before. An API-error Error is not
+  promoted this way.
+
+A pass that finds the session `Running` drops the resume-time evidence, so the next at-rest moment of the
+new turn (a permission prompt, a turn that wrote nothing) is not read as a cut-off.
+
+**A resume keeps Error.** `SessionStart` with `source == "resume"` no longer resets `Error` to `Idle`. The
+reset opened a gap in which the session read ready, and in which a resumed claude whose heartbeat reads
+`busy` while it loads was promoted to `Running` for 30 s (measured on `c47e90a2` at 18:37:14, with a false
+"completed" toast at the end). Because that reset also cleared a stale Error, the scanner now releases one
+itself: `ShouldReleaseStaleError` moves a session from `Error` to `WaitingForInput` when the tail shows
+neither an API error nor a cut-off turn.
+
+**What it means for the autorunner.** `Error` is not a ready state, and the `stopOnError` backstop
+(default ON) pauses that session's autorunner until the user re-arms it. With `stopOnError` OFF the queue
+resumes after the cut-off turn has run and finished.
+
+**Behavior changes to know.**
+- "Deactivate" and "Restart session" on a session that is mid-turn now leave it in `Error`. Both end the
+  claude that ran the turn.
+- A restored or parked tab whose turn was blocked on a permission prompt or a question reads `Error`, not
+  `NeedsApproval`. That prompt died with its process (the stale Needs-approval of a parked tab).
+- A session that was cut off before this rule existed, and whose record already read `Idle`, is found at
+  the next start when its tail is a tool result or an assistant line. A bare-prompt tail from before the
+  rule is not found (no hint was recorded).
+
+**Not covered.**
+- A managed Codex session (a rollout records no such state).
+- A fork whose first action is a local slash command, when its source was mid-turn, in a window where the
+  fork's `forkParentId` was already cleared. It can read `Error` until its first message.
+- A dismissal is not persisted, so a dismissed cut-off with a tool-result tail reads `Error` again after an
+  app restart (an API error does the same).
+
+**Logs.** `scanner.log`: `[recon-cutoff] <id> (the last turn stopped on a tool result and never finished;
+the tab is dormant, so no process can be running it) Idle -> Error`, and `[recon-error-release] <id> (the
+tail shows no error any more -> Waiting)`. `autorunner.log`: the existing `[stop-on-error] paused <id>`.
+
+**Tests.** `TestCutOffTurn` (`tests_transcript.cpp`): the state machine, `RestoredMidTurnFlag`, the parser,
+the pure rules, the registry, and thirteen staged sessions on a real scanner thread — the incident, its
+three ways back to `Running`, and every shape that must not read as a cut-off (a live turn, a bare
+prompt, a fork, a user interrupt, a dismissed card).
 
 ### Transcript watcher — the scanner's change feed (ReadDirectoryChangesW)
 

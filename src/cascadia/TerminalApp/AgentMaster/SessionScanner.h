@@ -398,6 +398,20 @@ namespace Agentmaster
         // CommandWatch's markdown await (the /handover "look for the .md being written" signal);
         // empty for a message with no file-writing tool_use. Never affects the state machine.
         std::vector<std::wstring> fileWritePaths;
+        // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"). Assistant only: this line is Claude
+        // Code's RESUME PLACEHOLDER (IsResumePlaceholder) — the synthetic "No response requested."
+        // message a resuming claude appends when the conversation it loaded ends on a user line. It is
+        // NOT model output and it ends no turn: when it follows a turn that was still in flight, that
+        // turn was cut off. The scanner fold therefore keeps the open turn through it instead of reading
+        // its terminal stop_reason as "the turn finished".
+        bool resumePlaceholder{ false };
+        // Agentmaster (CUT-OFF TURNS). ToolResult + UserPrompt: the line's top-level
+        // interruptedByShutdown flag — Claude Code's OWN statement that a shutdown, not the user, aborted
+        // the turn. It rides the tool_result of a tool the shutdown aborted and the
+        // "[Request interrupted by user…]" marker that follows. Read from the 2.1.291 bundle; no line
+        // carrying it existed in the 4,407 local transcripts on 2026-10-09, so the path is pinned by
+        // synthetic fixtures only.
+        bool shutdownInterrupt{ false };
     };
 
     struct TranscriptParse
@@ -729,6 +743,286 @@ namespace Agentmaster
             return false; // the error is still the active leaf (unmoved / a forward descendant advance) — stay Error
         }
         return quietForMs >= kScanStopQuiescenceMs;
+    }
+
+    // ============================================================================================
+    // CUT-OFF TURNS (HOOKS.md "Cut-off turns") — a turn that never finished and that no process can
+    // be running any more.
+    //
+    // THE INCIDENT (2026-10-09, release 0.6.8.18, session c47e90a2). The app died while the session
+    // was mid-turn (its last transcript line: a tool result). On reopen the record was normalized
+    // Running -> Idle (RestoredSessionState). When its tab was opened, the resumed claude appended its
+    // placeholder line "No response requested." (a TERMINAL stop_reason), so the tail read as a
+    // finished turn. Idle is READY for the autorunner: 40 s later it sent the next queued prompt
+    // into a session whose previous turn had been cut off. Nothing in the engine could say "this turn
+    // did not finish".
+    //
+    // WHAT THE TRANSCRIPT SHOWS. A turn is IN FLIGHT at the tail when the last turn line is
+    //   - a tool result with no assistant line after it,
+    //   - an assistant line that does not end the turn (tool_use / a null stop_reason), or
+    //   - a human prompt with nothing after it.
+    // In a live session that is normal: the turn is running. It is a CUT-OFF only when no process can
+    // be running that turn. The fold (SessionScanner::_readDelta) tracks the open turn, and
+    // ClassifyCutOffTurn below joins it with what the engine knows about the process.
+    //
+    // WHAT CLAUDE CODE WRITES ON A RESUME (read from the 2.1.291 bundle, checked against the local
+    // transcripts): its loader repairs the conversation in memory and may append, at load time,
+    //   - "[Tool call interrupted…" tool_result lines for tool calls that never returned (a ToolResult
+    //     event here),
+    //   - a meta user line "Continue from where you left off." (isMeta: the parser skips it),
+    //   - the synthetic assistant line "No response requested." after a tail user line.
+    // None of them is progress of the turn. With CLAUDE_CODE_RESUME_INTERRUPTED_TURN set, the same
+    // claude then CONTINUES the turn by itself: real assistant lines follow and its heartbeat reads
+    // "busy" — that is the session coming back to Running (recon-run / recon-subagent).
+    // ============================================================================================
+
+    // The text of Claude Code's resume placeholder line, and the pseudo-model every line Claude Code
+    // writes ITSELF carries. Both are constants of the Claude Code bundle (2.1.291: `hH` and `sa`); a
+    // release that renames either makes IsResumePlaceholder answer false, which only weakens ONE of the
+    // cut-off evidences (the others — a dormant tab, the restore-time hint — do not depend on any text).
+    inline constexpr std::wstring_view kResumePlaceholderText = L"No response requested.";
+    inline constexpr std::wstring_view kSyntheticModelName = L"<synthetic>";
+
+    // The message a cut-off session's Error card shows (SessionInfo::errorMessage; errorStatus 0). Kept
+    // under the card's 200-char bound, and the recon-run log line recognizes a cut-off Error by it.
+    inline constexpr std::wstring_view kTurnCutOffErrorMessage =
+        L"The last turn did not finish: the session was shut down while the turn was running. Send a message to continue it.";
+
+    // PURE + total: is this assistant line Claude Code's RESUME PLACEHOLDER? The mirror of the bundle's
+    // own test (2.1.291 `DO`): an assistant line that is not an API error, written under the pseudo-model
+    // "<synthetic>", whose whole text is "No response requested.". The model check is what tells it from
+    // a REAL reply: a model does sometimes answer with exactly that sentence.
+    //   model    — the line's message.model.
+    //   apiError — the line's top-level isApiErrorMessage.
+    //   text     — the line's concatenated text blocks.
+    // Returns true for the placeholder. Never throws.
+    inline bool IsResumePlaceholder(std::wstring_view model, bool apiError, std::wstring_view text) noexcept
+    {
+        return !apiError && model == kSyntheticModelName && text == kResumePlaceholderText;
+    }
+
+    // What kind of line a turn that is still in flight at the transcript tail stopped on (the fold's
+    // ScanState::openTurn).
+    enum class OpenTurnKind : uint8_t
+    {
+        None, // no turn is open: nothing read yet, or the last turn ended (a terminal stop_reason, an API error, a user interrupt)
+        Prompt, // a human prompt with nothing after it — AMBIGUOUS by itself (see ClassifyCutOffTurn)
+        ToolResult, // a tool result with no assistant line after it
+        Assistant, // an assistant line that does not end the turn (tool_use / null / an unknown stop_reason)
+    };
+
+    // The log word for an OpenTurnKind. Never returns null; never throws.
+    inline const wchar_t* OpenTurnKindText(OpenTurnKind kind) noexcept
+    {
+        switch (kind)
+        {
+        case OpenTurnKind::Prompt:
+            return L"a prompt with no reply";
+        case OpenTurnKind::ToolResult:
+            return L"a tool result";
+        case OpenTurnKind::Assistant:
+            return L"an unfinished assistant step";
+        case OpenTurnKind::None:
+        default:
+            return L"no open turn";
+        }
+    }
+
+    // Everything ClassifyCutOffTurn reads. A plain value, so the rule is testable without a scanner.
+    struct CutOffEvidence
+    {
+        // The fold: what the unfinished turn at the tail stopped on (None == the tail is closed).
+        OpenTurnKind openTurn{ OpenTurnKind::None };
+        // The fold: Claude Code's resume placeholder arrived while that turn was open. A resuming claude
+        // writes it only for a conversation it did not produce in its own process, so the open turn
+        // belongs to a process that is gone.
+        bool resumeMarkerOnOpenTurn{ false };
+        // The fold: the tail carries Claude Code's own interruptedByShutdown flag.
+        bool shutdownInterrupt{ false };
+        // ScanSessionIsDormant: the tab is ours and its connection never started (a restored tab nobody
+        // entered, or a deactivated one). No process of ours can be running a turn in it.
+        bool dormant{ false };
+        // The scanner saw THIS open turn while the session was dormant, and no turn line replaced it
+        // since. It carries the verdict across the moment the tab starts: `dormant` flips false then,
+        // but the open turn is as dead as before.
+        bool openTurnSeenDormant{ false };
+        // SessionInfo::midTurnAtRestore: the record said a turn was in flight when it was last
+        // normalized for a (re)host, and the session has not been Running since.
+        bool midTurnAtRestore{ false };
+        // The session is a fork that has not run a turn of its own yet (SessionInfo::forkParentId is
+        // still set). Its transcript, once it exists, begins with lines COPIED from the source — an
+        // open turn among them is the source's, not something that was cut off here.
+        bool forkNotYetMessaged{ false };
+    };
+
+    // Why a turn counts as cut off (CutOffReason::None == it does not). The value names the STRONGEST
+    // evidence found, for the log line.
+    enum class CutOffReason : uint8_t
+    {
+        None, // not cut off (or not provable)
+        ShutdownFlag, // Claude Code itself marked the tail interruptedByShutdown
+        NoProcess, // an open turn in a dormant tab: nothing can be running it
+        ResumePlaceholder, // a resuming claude answered the open turn with its placeholder line
+        SeenWithoutProcess, // the open turn was seen while the tab was dormant, and nothing replaced it since
+        MidTurnAtRestore, // the record said a turn was in flight when it was last restored / restarted / parked
+    };
+
+    // The log text for a CutOffReason. Never returns null; never throws.
+    inline const wchar_t* CutOffReasonText(CutOffReason reason) noexcept
+    {
+        switch (reason)
+        {
+        case CutOffReason::ShutdownFlag:
+            return L"claude marked the turn interrupted by a shutdown";
+        case CutOffReason::NoProcess:
+            return L"the tab is dormant, so no process can be running it";
+        case CutOffReason::ResumePlaceholder:
+            return L"the resumed claude answered it with its placeholder line";
+        case CutOffReason::SeenWithoutProcess:
+            return L"it was already open while the tab was dormant";
+        case CutOffReason::MidTurnAtRestore:
+            return L"the session was mid-turn when it was last restored, restarted or parked";
+        case CutOffReason::None:
+        default:
+            return L"not cut off";
+        }
+    }
+
+    // PURE + total: was the turn at the transcript tail CUT OFF — unfinished, with no process that can
+    // still be running it? Returns the strongest evidence, or CutOffReason::None.
+    //
+    // The rule, in order:
+    //   1. A fork that has not run a turn of its own is never cut off: its open turn was copied from
+    //      the source (every evidence below would be the source's).
+    //   2. Claude Code's own interruptedByShutdown flag at the tail -> cut off, whatever else holds.
+    //   3. No open turn -> not cut off. A finished turn, an API error (recon-error's domain) and a
+    //      turn the USER interrupted all close the tail.
+    //   4. A BARE PROMPT is ambiguous: "the user pressed Esc before any reply" leaves exactly the same
+    //      tail as "the host died seconds after the submit", and the first is ordinary (eight tabs of
+    //      the 2026-10-09 release fleet sat on it, some for weeks). Only the restore-time hint settles
+    //      it: the record still said a turn was in flight when the host ended. Neither a dormant tab
+    //      nor the placeholder line proves anything here — a resumed claude writes the placeholder
+    //      after BOTH.
+    //   5. A tool result or an unfinished assistant step is in flight by construction — claude always
+    //      writes something after them when a turn ends normally. It is cut off as soon as ONE of
+    //      these says no process can be running it: the tab is dormant; the placeholder line closed
+    //      it; it was seen while the tab was dormant; the restore-time hint.
+    //   e — the evidence (see CutOffEvidence).
+    // Never throws.
+    // ⚠ A started tab with an open turn and none of the four evidences is a turn that is RUNNING. That
+    // is the common case, and the reason the open turn alone must never count.
+    inline CutOffReason ClassifyCutOffTurn(const CutOffEvidence& e) noexcept
+    {
+        if (e.forkNotYetMessaged)
+        {
+            return CutOffReason::None; // the tail is the fork source's copy, not this session's own turn
+        }
+        if (e.shutdownInterrupt)
+        {
+            return CutOffReason::ShutdownFlag; // claude's own word: a shutdown aborted the turn
+        }
+        if (e.openTurn == OpenTurnKind::None)
+        {
+            return CutOffReason::None; // the tail is closed: finished, errored (recon-error) or interrupted by the user
+        }
+        if (e.openTurn == OpenTurnKind::Prompt)
+        {
+            // The bare-prompt ambiguity (rule 4): only the record's own "a turn was in flight" settles it.
+            return e.midTurnAtRestore ? CutOffReason::MidTurnAtRestore : CutOffReason::None;
+        }
+        if (e.dormant)
+        {
+            return CutOffReason::NoProcess;
+        }
+        if (e.resumeMarkerOnOpenTurn)
+        {
+            return CutOffReason::ResumePlaceholder;
+        }
+        if (e.openTurnSeenDormant)
+        {
+            return CutOffReason::SeenWithoutProcess;
+        }
+        if (e.midTurnAtRestore)
+        {
+            return CutOffReason::MidTurnAtRestore;
+        }
+        return CutOffReason::None; // an open turn in a started tab with no evidence against it: it is running
+    }
+
+    // PURE + total: should the reconciler synthesize SessionState::Error for a cut-off turn?
+    // Fires from the states a cut-off session is stranded in:
+    //   Idle            — the usual one: the restore normalized Running to Idle;
+    //   WaitingForInput — a record promoted by hand, or cut off before this rule existed;
+    //   NeedsApproval   — the turn was blocked on a permission prompt or a question when its host
+    //                     ended. That prompt died with the process: nothing is left to approve, so
+    //                     "needs approval" would be false (the stale Needs-approval of a parked or
+    //                     restored tab);
+    //   Done            — the SessionEnd of the dying process landed first. Like the API error
+    //                     (ShouldSynthesizeError), an unfinished turn outranks the "ended" label.
+    // NEVER from Running: a Running session has a turn in a live process by a turn event, and the tail
+    // may simply not show that turn yet (the turn-start race). NEVER from Error (idempotent).
+    // No quiescence floor, on purpose: the verdict rests on evidence (no process), not on a quiet
+    // file, and waiting would let the resumed claude's "busy" heartbeat promote the session to Running
+    // first (NextSessionState keeps Error across the resume only once it IS Error).
+    //   state            — the session's current state.
+    //   reason           — ClassifyCutOffTurn's verdict for this pass.
+    //   lastPromptUnixMs — TurnAccounting's newest prompt stamp (0 = none): with tailWriteUnixMs and
+    //   tailWriteUnixMs    nowUnixMs it feeds the shared turn-start guard (NewerPromptNotYetInTranscript):
+    //   nowUnixMs          a prompt the transcript has not recorded yet means the tail is an OLDER
+    //                      turn's, so the verdict holds. All three default 0 == the guard is inert.
+    // Returns true when the pass should synthesize the cut-off Error. Never throws.
+    inline bool ShouldSynthesizeCutOff(SessionState state, CutOffReason reason, int64_t lastPromptUnixMs = 0, int64_t tailWriteUnixMs = 0, int64_t nowUnixMs = 0) noexcept
+    {
+        if (reason == CutOffReason::None)
+        {
+            return false; // nothing was cut off (or it cannot be proven)
+        }
+        if (NewerPromptNotYetInTranscript(lastPromptUnixMs, tailWriteUnixMs, nowUnixMs))
+        {
+            return false; // the user just submitted a prompt the tail does not show yet: the open turn is not the current one
+        }
+        switch (state)
+        {
+        case SessionState::Idle:
+        case SessionState::WaitingForInput:
+        case SessionState::NeedsApproval:
+        case SessionState::Done:
+            return true;
+        case SessionState::Running: // a turn event says a turn is in flight NOW — never overrule it from the tail
+        case SessionState::Error: // already Error — idempotent
+        default:
+            return false;
+        }
+    }
+
+    // PURE + total: should the reconciler RELEASE a session from Error because the transcript tail no
+    // longer shows ANY error — neither an API error nor a cut-off turn? Error is LEVEL-derived: it
+    // stands only while its evidence stands. Since 2026-10-09 a resume keeps Error
+    // (NextSessionState, source "resume"), so the reset that used to clear a stale Error on every
+    // SessionStart is gone, and this release replaces it. A session lands here when the evidence was
+    // superseded WITHOUT a state change: a turn that started and finished between two passes with its
+    // hooks lost, an API-error line that a resume placeholder followed, a cut-off whose last evidence
+    // went away. Releases to WaitingForInput (a quiescent Stop).
+    // Disjoint from the other Error exits: recon-run / a real UserPromptSubmit own "a turn started"
+    // (they leave Error for Running), and ShouldReleaseErrorOnLeafMove owns the rewind, which keeps
+    // lastWasApiError TRUE — this one requires it FALSE.
+    //   state           — the session's current state.
+    //   lastWasApiError — the fold's positional flag: an unrecovered API error is still the newest turn line.
+    //   cutOffReason    — ClassifyCutOffTurn's verdict for this pass.
+    //   quietForMs      — the pass's quiescence clock (0 while claude's heartbeat reads working, so a
+    //                     turn that is starting is never released to Waiting under it).
+    // Returns true when the pass should release the Error. Never throws.
+    inline bool ShouldReleaseStaleError(SessionState state, bool lastWasApiError, CutOffReason cutOffReason, int64_t quietForMs) noexcept
+    {
+        if (state != SessionState::Error)
+        {
+            return false; // only a session in Error has anything to release
+        }
+        if (lastWasApiError || cutOffReason != CutOffReason::None)
+        {
+            return false; // the tail still shows the error: Error stands
+        }
+        return quietForMs >= kScanStopQuiescenceMs; // let a line that is just landing settle first
     }
 
     // PURE + total: should the reconciler synthesize a "needs you" state (-> NeedsApproval) because
@@ -1093,9 +1387,30 @@ namespace Agentmaster
     // "needs you / ended" a mere activity signal must not clear. The caller synthesizes it as tool
     // ACTIVITY (PostToolUse -> Running), NOT a UserPromptSubmit (which would inflate the type-ahead
     // queue accounting, ++queuedPrompts).
-    inline bool ShouldSynthesizeRunningFromExternalWork(SessionState state, bool subagentActive, bool presenceWorking, std::wstring_view lastStopReason, bool interrupted, bool externalOutlivesTurn = false) noexcept
+    // `cutOffErrorStanding` (Agentmaster, CUT-OFF TURNS — default false == the classic behavior): the
+    // session is in Error BECAUSE its last turn was cut off (the caller passes state == Error AND a
+    // ClassifyCutOffTurn verdict for this pass). Such an Error is the third state a working session can
+    // be stranded in. With CLAUDE_CODE_RESUME_INTERRUPTED_TURN set, a resumed claude CONTINUES the cut-off
+    // turn by itself; its heartbeat reads "busy" at once, while its first transcript line lands only when
+    // the first content block is complete (measured 16.7 s on session 9aa2cb78, 2026-10-09). The heartbeat
+    // is therefore what brings the card back to Running without that delay ("when the observer sees that
+    // the session resumed, it is Running"). An API-error Error is NOT covered: the flag is false for it,
+    // so "needs you / ended" keeps its meaning there. Every other guard applies unchanged, so the resume
+    // placeholder's terminal stop_reason (written when claude does NOT continue the turn) blocks the
+    // promotion exactly as it blocks one from Waiting.
+    //   state                — the session's current state.
+    //   subagentActive       — a side file was written within kScanSubagentFreshMs.
+    //   presenceWorking      — claude's heartbeat reads busy / shell.
+    //   lastStopReason       — the fold's newest assistant stop_reason.
+    //   interrupted          — the fold's "the user aborted the turn" flag.
+    //   externalOutlivesTurn — the caller's kScanExternalWorkGraceMs proof (see above).
+    //   cutOffErrorStanding  — see above.
+    // Returns true when the pass should synthesize Running. Never throws.
+    inline bool ShouldSynthesizeRunningFromExternalWork(SessionState state, bool subagentActive, bool presenceWorking, std::wstring_view lastStopReason, bool interrupted, bool externalOutlivesTurn = false, bool cutOffErrorStanding = false) noexcept
     {
-        if (state != SessionState::Idle && state != SessionState::WaitingForInput)
+        const bool strandedAtRest = state == SessionState::Idle || state == SessionState::WaitingForInput ||
+                                    (state == SessionState::Error && cutOffErrorStanding);
+        if (!strandedAtRest)
         {
             return false;
         }
@@ -1492,6 +1807,28 @@ namespace Agentmaster
             // turn-complete). CLEARED together with lastWasApiError when a turn event supersedes the error.
             std::wstring errorUuid;
             std::unordered_set<std::wstring> errorBranchUuids;
+            // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"; ClassifyCutOffTurn): the turn that is
+            // still IN FLIGHT at the tail, as the kind of line it stopped on; None once the tail is closed
+            // (a terminal stop_reason, an API error, a user interrupt) or before any turn line was read.
+            // Folded in _readDelta from every turn line. Claude Code's resume placeholder does NOT close
+            // it (that line is what a resuming claude writes for a turn that got no answer), and a
+            // tool result that arrives after the user's interrupt marker does not reopen it.
+            OpenTurnKind openTurn{ OpenTurnKind::None };
+            // The resume placeholder line arrived while `openTurn` was open: a later claude process loaded
+            // this conversation and found that turn unanswered. Cleared by the next real turn line (a
+            // human prompt or an assistant line), and by a pass that finds the session Running.
+            bool resumeMarkerOnOpenTurn{ false };
+            // The tail carries Claude Code's interruptedByShutdown flag (TranscriptEvent::shutdownInterrupt)
+            // on its interrupt marker or on the tool results before it. Cleared like the flag above.
+            bool shutdownInterrupt{ false };
+            // The scanner saw `openTurn` open while the session was DORMANT (ScanSessionIsDormant), and no
+            // real turn line replaced it since. It is what keeps the cut-off verdict standing across the
+            // moment the tab starts: `dormant` turns false there, but a turn that had no process a second
+            // ago did not get one by the tab starting. Without it the verdict would drop for the seconds
+            // until the resumed claude writes its placeholder (or for good, when it writes none — it
+            // writes none after an unfinished ASSISTANT line), and the stale-Error release would then
+            // hand the session back as Waiting. Cleared like the two flags above.
+            bool openTurnSeenDormant{ false };
             int64_t contextTokens{ 0 }; // newest assistant usage tokens (≈ context occupancy); mirrored QUIETLY to SessionInfo for the board card's context-% adornment
             // The newest REAL assistant line's message.model ("<synthetic>" API-error lines skipped) —
             // mirrored change-gated onto SessionInfo.currentModel via the NOTIFYING Update (a model
@@ -1516,7 +1853,9 @@ namespace Agentmaster
         //          workingDir resolves the CommandWatch's relative Write/Edit paths.
         //   size — the transcript size from THIS pass's stat (the read never goes past it).
         // Returns true when ≥1 turn event (user prompt / assistant line) was consumed this call —
-        // the trigger for the missed-UserPromptSubmit repair in _reconcileSession.
+        // the trigger for the missed-UserPromptSubmit repair in _reconcileSession. Claude Code's resume
+        // placeholder line (TranscriptEvent::resumePlaceholder) is NOT a turn event: it is written at
+        // load, not by a turn, so it must neither expire a dismissed error nor look like progress.
         // Throws only what an allocation can (std::bad_alloc from the byte/wide buffers or a registry
         // mirror). The parse contains its own failures (ParseTranscriptDelta), and anything that
         // escapes is caught and logged by _worker's top-level net. The cursor and readReachedEnd are

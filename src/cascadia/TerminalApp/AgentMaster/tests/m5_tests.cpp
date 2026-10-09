@@ -123,6 +123,7 @@ int wmain()
     TestScannerCatchUp(); // the 2026-09-25 catch-up stall end to end (tests_transcript.cpp)
     TestTurnStartRaceGuard(); // the 2026-10-01 turn-start race: the prompt-supersession guard, pure + end to end (tests_transcript.cpp)
     TestScannerDormantHold(); // a parked/restored (dormant) session is never promoted to Running, end to end (tests_transcript.cpp)
+    TestCutOffTurn(); // a turn that a shutdown cut off reads Error and comes back to Running when it resumes - the 2026-10-09 incident, pure + end to end (tests_transcript.cpp)
     TestTranscriptWatcher(); // the scanner's ReadDirectoryChangesW change feed (tests_transcript.cpp)
     TestCompactionLifecycle();
     TestConversationFollowup();
