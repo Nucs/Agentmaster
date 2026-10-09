@@ -432,3 +432,22 @@ on both installs. Each item says how it is known: **measured** (run on the live 
 - **No test covers `agentcli.cpp`.** (read) The m5 harness covers the engine units that it
   links. Its own code (argument parsing, ref resolution, `DeriveState`, the JSON builders) has
   no test.
+- **The Tests Autorunner is visible, not drivable.** The CLI prints each session's mode and
+  queue counts and, in `show`, the limits and every queue row. It has no verb that queues or
+  sends a prompt, sets a mode or pauses (§9, P3), and the app has no command channel that such a
+  verb could use: the app loads `sessions.json` once at its start and writes it again on every
+  change. What the CLI prints is also incomplete:
+  - `autorunnerDetail.autoSendsThisRun` is always 0. (read, and 0 on all 23 open sessions)
+    `Persistence.cpp` neither writes nor reads the counter, and the CLI reads the saved file.
+  - `queueCounts` has no failed or skipped count. (measured) The release profile held 49
+    `Failed` rows; only `show` lists them, one session at a time.
+  - It prints no scheduler state (read): whether the scheduler runs in this install (the
+    dev-or-debug gate; `debugMode` in `settings.json`), Pause all and the interrupt hold (both
+    in memory only), and why a prompt waits (`[advance-skip]` in `autorunner.log`).
+  - Saved and not printed (read): a row's `guardPattern`, `delayMs`, `dependsOn` and `attempts`,
+    the session's `lastMessageWasQuestion`, and `templates.json`.
+- **Engine code that the CLI links and no verb uses.** (read) `SessionSearch.cpp` (the Sessions
+  browser's search) and `ProcessInspect.Summary.cpp` (the session summary analyzer) are compiled
+  into `agentmaster-cli.exe`, but there is no `search` verb and no summary in `show`. The turns
+  renderer (`TranscriptTurns.cpp`, the app's Copy ▸ Transcript) is not in the project, so the
+  CLI cannot print a whole conversation.
