@@ -775,6 +775,25 @@ namespace Agentmaster
     // and its host pin (`X-Provider`) only for chat completions, not for the Messages API Claude Code uses
     // (HARNESSES.md §4.2, check R8). Not run through Claude Code yet, so `tested` is empty.
     //
+    // DeepSeek V4.1 Flash on NanoGPT (the user's request, 2026-10-10: "best strongest parameters"), from DeepSeek's
+    // model card (deepseek-ai/DeepSeek-V4.1-Flash, read 2026-10-10) and NanoGPT's catalog and host list (same day):
+    //   * main model `deepseek/deepseek-v4.1-flash:thinking`, NanoGPT's id for the thinking mode, so the reasoning
+    //     is on whatever the request carries; the background model is the plain id (titles and summaries need no
+    //     reasoning). The /model switch entry is DeepSeek V4 Pro in its thinking mode.
+    //   * Effort max: the card's results all use the maximum reasoning effort (its scale 1-100 at 100), and max is
+    //     the top of the levels NanoGPT lists (none, low, high, max).
+    //   * temperature 1.0, top_p 0.95: the card's evaluation sampling (its table allows top_p 0.95 or 1.0). The card
+    //     runs its agent benchmarks in Claude Code too (DeepSWE v1.1 69.8, Terminal-Bench 2.1 88.0).
+    //   * Context 1,000,000: the catalog's window and the smallest of the hosts that state a precision (Venice,
+    //     Alibaba); only Kitani and Engy (262,144) are smaller, and neither states one. The card benchmarks a 1M
+    //     window.
+    //   * Max output 131,072: the card asks for max_tokens of at least 256K, but Claude Code asks a model it does
+    //     not know for at most 128,000 tokens (the catalog allows 384,000).
+    //   * Precision: DeepSeek's own release is FP8 with its experts in FP4 (510 GB; no higher-precision release
+    //     exists), and NanoGPT labels its automatic route "FP8+", so no host is pinned; a NanoGPT subscription
+    //     covers the model.
+    // Not run through Claude Code yet, so `tested` is empty.
+    //
     // The RunPod template serves a Hugging Face model the user deploys: Xiaomi's official MiMo V2.6 Flash, the
     // MOPD checkpoint (XiaomiMiMo/MiMo-V2.6-Flash-MOPD, published 2026-09-27; Xiaomi's note: a fix for repeated
     // tool calls, which matters most in Claude Code). The model id must be vLLM's served model name, the
@@ -923,6 +942,20 @@ namespace Agentmaster
                 { kPresetFieldMaxOutput, L"131072" },
                 { kPresetFieldTemperature, L"1.0" },
                 { kPresetFieldTopP, L"1.0" },
+            } });
+            // DeepSeek V4.1 Flash: the card's benchmark settings at the maximum effort (see the comment above). The
+            // background model is the plain id on purpose: the thinking id would reason over every title.
+            t.push_back({ L"deepseek-flash.nanogpt", L"", {
+                { kPresetFieldName, L"DeepSeek V4.1 Flash \x00B7 NanoGPT" },
+                { kPresetFieldProvider, L"nanogpt" },
+                { kPresetFieldModel, L"deepseek/deepseek-v4.1-flash:thinking" },
+                { kPresetFieldSmallModel, L"deepseek/deepseek-v4.1-flash" },
+                { kPresetFieldSwitchModel, L"deepseek/deepseek-v4-pro:thinking" },
+                { kPresetFieldEffort, L"max" },
+                { kPresetFieldContext, L"1000000" },
+                { kPresetFieldMaxOutput, L"131072" },
+                { kPresetFieldTemperature, L"1.0" },
+                { kPresetFieldTopP, L"0.95" },
             } });
             // RunPod: one Hugging Face model on the user's own vLLM endpoint (see the comment above). No /model
             // switch entry: the endpoint serves no other model.

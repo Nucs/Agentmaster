@@ -7,7 +7,7 @@
 //   * the list starts EMPTY - no template is added by itself (the user's rule, 2026-10-06) - and an empty list
 //     offers "Add presets..." (a list of hidden presets does not), with help text that names the way to the
 //     Presets tab; one click adds a template as a LINKED, visible "p-" preset, and "Add all tested" adds the five
-//     tested ones in order (the ten templates' order is pinned); a file written by release 0.6.8.18 (which added
+//     tested ones in order (the eleven templates' order is pinned); a file written by release 0.6.8.18 (which added
 //     the templates by itself) loses
 //     exactly the presets it added that nobody touched, and is never pruned again once re-saved;
 //   * launch-presets.json round-trips, and a malformed file reads as an empty config;
@@ -25,7 +25,7 @@
 //     the flag; "none" unsets a template's level; an Extra env line still wins, with a warning;
 //   * top_k and require_parameters: validation, scope (no routing block on Xiaomi), the extra-body merge;
 //   * a Xiaomi preset gets no OpenRouter routing block; the Claude-login preset compiles to flags only;
-//   * the built-in provider table (OpenRouter, Xiaomi MiMo, NanoGPT, RunPod); NanoGPT's two templates compile to
+//   * the built-in provider table (OpenRouter, Xiaomi MiMo, NanoGPT, RunPod); NanoGPT's three templates compile to
 //     the NORMAL models with the values of NanoGPT's catalog (2026-10-09) on its direct API host; RunPod has no
 //     default URL (the refusal shows the endpoint shapes and RUNPOD_BASE_URL), takes RUNPOD_API_KEY, and refuses a
 //     preset that names no model, because a vLLM endpoint serves exactly one;
@@ -214,19 +214,19 @@ void TestLaunchPresets()
               "help: over the Agent Manager the open step is left out and the steps renumber");
     }
 
-    // --- the shipped templates: ten, in order; the five OpenRouter ones tested, the Xiaomi pair, the NanoGPT pair and
-    // the RunPod one not ---
+    // --- the shipped templates: eleven, in order; the five OpenRouter ones tested, the Xiaomi pair, the three NanoGPT
+    // ones and the RunPod one not ---
     {
         const auto& all = LaunchPresetTemplates();
-        const std::vector<std::wstring> order{ L"mimo-pro.openrouter", L"mimo-flash.openrouter", L"kimi.openrouter",    L"qwen.openrouter",
-                                               L"glm.openrouter",      L"mimo-pro.xiaomi",       L"mimo-flash.xiaomi",  L"mimo-flash.nanogpt",
-                                               L"glm-flash.nanogpt",   L"mimo-flash.runpod" };
+        const std::vector<std::wstring> order{ L"mimo-pro.openrouter", L"mimo-flash.openrouter", L"kimi.openrouter",        L"qwen.openrouter",
+                                               L"glm.openrouter",      L"mimo-pro.xiaomi",       L"mimo-flash.xiaomi",      L"mimo-flash.nanogpt",
+                                               L"glm-flash.nanogpt",   L"deepseek-flash.nanogpt", L"mimo-flash.runpod" };
         bool inOrder = all.size() == order.size();
         for (size_t i = 0; inOrder && i < all.size(); ++i)
         {
             inOrder = all[i].id == order[i] && (i < 5) == !all[i].tested.empty();
         }
-        CHECK(inOrder, "templates: ten, in order; the five OpenRouter ones tested, the Xiaomi (R3), NanoGPT and RunPod ones not");
+        CHECK(inOrder, "templates: eleven, in order; the five OpenRouter ones tested, the Xiaomi (R3), NanoGPT and RunPod ones not");
         const LaunchPresetsConfig empty{};
         CHECK(LaunchPresetTemplatesNotInList(empty, true) == std::vector<std::wstring>(order.begin(), order.begin() + 5), "templates: Add all tested = the five tested ones, in order");
         CHECK(LaunchPresetTemplatesNotInList(empty, false) == order, "templates: an empty list offers every template");
@@ -264,8 +264,8 @@ void TestLaunchPresets()
         CHECK(unique && cfg.presets[2].templateId == L"mimo-pro.openrouter" && cfg.presets[5].templateId == L"glm.openrouter",
               "add all: the four others appended in order, every id unique even from one entropy value");
         CHECK(LaunchPresetTemplatesNotInList(cfg, true).empty() &&
-                  LaunchPresetTemplatesNotInList(cfg, false) == std::vector<std::wstring>({ L"mimo-pro.xiaomi", L"mimo-flash.xiaomi", L"mimo-flash.nanogpt", L"glm-flash.nanogpt", L"mimo-flash.runpod" }),
-              "add all: no tested template is left; the five untested ones are still offered, by their own rows");
+                  LaunchPresetTemplatesNotInList(cfg, false) == std::vector<std::wstring>({ L"mimo-pro.xiaomi", L"mimo-flash.xiaomi", L"mimo-flash.nanogpt", L"glm-flash.nanogpt", L"deepseek-flash.nanogpt", L"mimo-flash.runpod" }),
+              "add all: no tested template is left; the six untested ones are still offered, by their own rows");
         const auto entries = LaunchMenuEntriesFrom({ { L"Opus", L"opus" } }, cfg);
         CHECK(entries.size() == 7 && entries[1].first == L"Mine" && entries[2].second == PresetToken(kimi.id) && entries[2].first == L"Kimi K3 \x00B7 OpenRouter",
               "add: the menus list the added presets in list order, under the template's name");
@@ -669,13 +669,17 @@ void TestLaunchPresets()
         {
             const wchar_t* templateId;
             const wchar_t* model;
+            const wchar_t* background; // the haiku tier (titles, summaries): the main model's plain id where it differs
             const wchar_t* switchModel;
             const wchar_t* effort;
             const wchar_t* body;
         };
         static constexpr NanoRef kNano[] = {
-            { L"mimo-flash.nanogpt", L"xiaomi/mimo-v2.6-flash", L"xiaomi/mimo-v2.6-pro", L"high", L"{\"temperature\":1,\"top_p\":0.95}" },
-            { L"glm-flash.nanogpt", L"z-ai/glm-5.3-flash", L"z-ai/glm-5.3", L"max", L"{\"temperature\":1,\"top_p\":1}" },
+            { L"mimo-flash.nanogpt", L"xiaomi/mimo-v2.6-flash", L"xiaomi/mimo-v2.6-flash", L"xiaomi/mimo-v2.6-pro", L"high", L"{\"temperature\":1,\"top_p\":0.95}" },
+            { L"glm-flash.nanogpt", L"z-ai/glm-5.3-flash", L"z-ai/glm-5.3-flash", L"z-ai/glm-5.3", L"max", L"{\"temperature\":1,\"top_p\":1}" },
+            // DeepSeek V4.1 Flash: the thinking id for the session, the plain id for background work, the card's sampling.
+            { L"deepseek-flash.nanogpt", L"deepseek/deepseek-v4.1-flash:thinking", L"deepseek/deepseek-v4.1-flash", L"deepseek/deepseek-v4-pro:thinking", L"max",
+              L"{\"temperature\":1,\"top_p\":0.95}" },
         };
         for (const auto& ref : kNano)
         {
@@ -691,18 +695,20 @@ void TestLaunchPresets()
             const auto c = CompileClaudeLaunch(a, EffectiveLaunchValues(a, MapEnv({})), L"nano-0123456789abcdef");
             CHECK(c.error.empty() && c.warnings.empty() && c.sessionSettings, "nanogpt: the template compiles with nothing dropped");
             CHECK(EnvOf(c, L"ANTHROPIC_BASE_URL") == L"https://api.nano-gpt.com/api", "nanogpt: the session goes to the direct API host");
-            bool tiers = c.model == ref.model;
-            for (const auto* k : { L"ANTHROPIC_MODEL", L"ANTHROPIC_DEFAULT_FABLE_MODEL", L"ANTHROPIC_DEFAULT_OPUS_MODEL", L"ANTHROPIC_DEFAULT_SONNET_MODEL", L"ANTHROPIC_DEFAULT_HAIKU_MODEL", L"CLAUDE_CODE_SUBAGENT_MODEL" })
+            bool tiers = c.model == ref.model && EnvOf(c, L"ANTHROPIC_DEFAULT_HAIKU_MODEL") == ref.background;
+            for (const auto* k : { L"ANTHROPIC_MODEL", L"ANTHROPIC_DEFAULT_FABLE_MODEL", L"ANTHROPIC_DEFAULT_OPUS_MODEL", L"ANTHROPIC_DEFAULT_SONNET_MODEL", L"CLAUDE_CODE_SUBAGENT_MODEL" })
             {
                 tiers &= EnvOf(c, k) == ref.model;
             }
             const std::wstring model{ ref.model };
-            CHECK(tiers && model.find(L"abliterated") == std::wstring::npos && model.find(L"uncensored") == std::wstring::npos,
-                  "nanogpt: every tier runs the NORMAL model (no abliterated / uncensored id)");
+            const std::wstring background{ ref.background };
+            CHECK(tiers && model.find(L"abliterated") == std::wstring::npos && model.find(L"uncensored") == std::wstring::npos &&
+                      background.find(L"abliterated") == std::wstring::npos && background.find(L"uncensored") == std::wstring::npos,
+                  "nanogpt: every tier runs the NORMAL model (no abliterated / uncensored id); the background tier its own id");
             CHECK(EnvOf(c, L"ANTHROPIC_CUSTOM_MODEL_OPTION") == ref.switchModel, "nanogpt: /model switches to the full model of the family");
             CHECK(EnvOf(c, L"CLAUDE_CODE_MAX_CONTEXT_TOKENS") == L"1000000" && EnvOf(c, L"CLAUDE_CODE_MAX_OUTPUT_TOKENS") == L"131072",
                   "nanogpt: context 1,000,000 (the smallest host window but Engy's) and the catalog's 131,072 output");
-            CHECK(EnvOf(c, L"CLAUDE_CODE_EFFORT_LEVEL") == ref.effort && c.effort == ref.effort, "nanogpt: the top effort level the model lists (MiMo: high; GLM: max)");
+            CHECK(EnvOf(c, L"CLAUDE_CODE_EFFORT_LEVEL") == ref.effort && c.effort == ref.effort, "nanogpt: the top effort level the model lists (MiMo: high; GLM and DeepSeek: max)");
             CHECK(EnvOf(c, L"CLAUDE_CODE_EXTRA_BODY") == ref.body, "nanogpt: the body carries the vendor's sampling and no provider block");
         }
         CHECK(PresetModelDisplayName(L"xiaomi/mimo-v2.6-flash:reasoning-effort/none", L"NanoGPT") == L"mimo-v2.6-flash:reasoning-effort/none (NanoGPT)",
@@ -710,6 +716,9 @@ void TestLaunchPresets()
         CHECK(PresetModelDisplayName(L"deepseek/deepseek-r1:free", L"OpenRouter") == L"deepseek-r1:free (OpenRouter)" &&
                   PresetModelDisplayName(L"us.anthropic.claude-x:0", L"") == L"us.anthropic.claude-x:0",
               "display name: ids with a ':' and no slash after it read as before");
+        CHECK(PresetModelDisplayName(L"deepseek/deepseek-v4.1-flash:thinking", L"NanoGPT") == L"deepseek-v4.1-flash:thinking (NanoGPT)" &&
+                  PresetDisplayName(*FindLaunchPreset(cfg, L"deepseek-flash.nanogpt")) == L"DeepSeek V4.1 Flash \x00B7 NanoGPT",
+              "display name: the DeepSeek thinking id keeps its mode in the /model picker; the template's menu name");
     }
 
     // --- RunPod: the user's own vLLM endpoint - no default Base URL (a refusal that shows the URL shapes and the

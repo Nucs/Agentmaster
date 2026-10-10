@@ -29,6 +29,12 @@
 > only the RunPod template: Context 917,504 + Max output 131,072 for the server's 1M window (it had 262,144 +
 > 32,000, which a vLLM server with a 262,144 window could refuse), and Xiaomi's own server command in §9.
 >
+> **2026-10-10, NOT BUILT: DeepSeek V4.1 Flash · NanoGPT** (Q14, D18), "not tested yet": the thinking id
+> `deepseek/deepseek-v4.1-flash:thinking` at Effort max with DeepSeek's benchmark sampling (§4.2). Checked
+> without a build on an isolated copy of HEAD + this change: the engine harness (`TestLaunchPresets` 320 checks,
+> 11 new; a negative control fails exactly its altered check) and all 16 `agentmaster-cli` files under `/Zs` at
+> `/W4 /WX`; the header change is template literals and comments only. No request was sent (R8).
+>
 > The reference configuration is the user's OpenRouter launcher (`mimo`, `mimo-flash`, `kimi`, `qwen`,
 > `glm`: `~/.claude/scripts/openrouter.ps1` + `openrouter-profiles.json`, verified 2026-10-06 on Claude
 > Code 2.1.282, `mimo-flash` re-checked on 2.1.291). Companions: [`ENV_VARS.md`](./ENV_VARS.md) (the env
@@ -60,6 +66,7 @@ feature.
 | Q11 | No template is included by default: the initial preset list is empty, and the user adds presets by hand. While no preset is defined, the menus show an "Add presets…" item where the presets would be; it opens an OK dialog that says where presets are in Settings. There, a button adds the templates. | §4, §8.1, §8.2 |
 | Q12 | (2026-10-09) NanoGPT support, its templates on the NORMAL models, not the abliterated copies the user's evaluation compared (`xiaomi/mimo-v2.6-flash-abliterated`, `z-ai/glm-5.3-flash-uncensored`). The key is the saved `NANOGPT_API_KEY`. | §4, §4.2, §9 |
 | Q13 | (2026-10-09) Routing through RunPod with a Hugging Face model; the key is in the env var `RUNPOD_API_KEY`. | §4, §4.2, §9 |
+| Q14 | (2026-10-10) A DeepSeek V4.1 Flash template with the best, strongest parameters. | §4, §4.2 |
 
 ## 2. The reference: what `mimo` does
 
@@ -194,11 +201,12 @@ TEMPLATES (and of "Add all tested templates"):
 | `mimo-flash.xiaomi` | MiMo Flash · Xiaomi | `mimo-v2.6-flash` | `mimo-v2.6-pro` | 1,048,576 | the same | **not tested**: added only by its own Add |
 | `mimo-flash.nanogpt` | MiMo Flash · NanoGPT | `xiaomi/mimo-v2.6-flash` | `xiaomi/mimo-v2.6-pro` | 1,000,000 | `temperature` 1.0; `top_p` 0.95; no `provider` block; Effort `high` | **not tested** (R8, §4.2) |
 | `glm-flash.nanogpt` | GLM-5.3 Flash · NanoGPT | `z-ai/glm-5.3-flash` | `z-ai/glm-5.3` | 1,000,000 | `temperature` 1.0; `top_p` 1.0; no `provider` block; Effort `max` | **not tested** (R8, §4.2) |
+| `deepseek-flash.nanogpt` | DeepSeek V4.1 Flash · NanoGPT | `deepseek/deepseek-v4.1-flash:thinking` (background: `deepseek/deepseek-v4.1-flash`) | `deepseek/deepseek-v4-pro:thinking` | 1,000,000 | `temperature` 1.0; `top_p` 0.95; no `provider` block; Effort `max` | **not tested** (R8, §4.2) |
 | `mimo-flash.runpod` | MiMo Flash · RunPod | `XiaomiMiMo/MiMo-V2.6-Flash-MOPD` (a Hugging Face id) | — | 917,504 (the server's 1,048,576 window minus Max output) | `temperature` 1.0; `top_p` 0.95; no effort | **not tested** (R9, §4.2) |
 
-All ten set Max output 131,072 (Claude Code asks for at most 128,000 for a model it does not know). The five OpenRouter templates set
-Effort `max`, the level their tests ran with (§2, F9, F10); the untested Xiaomi pair sets none; the NanoGPT
-pair sets the top level each model lists (§4.2); the RunPod one sets none. None sets an identity note
+All eleven set Max output 131,072 (Claude Code asks for at most 128,000 for a model it does not know). The five OpenRouter templates set
+Effort `max`, the level their tests ran with (§2, F9, F10); the untested Xiaomi pair sets none; the three
+NanoGPT ones set the top level each model lists (§4.2); the RunPod one sets none. None sets an identity note
 (§5.2). None is in the preset list until the user adds it (Q11). An untested template is added only by its
 own Add, never by "Add all tested templates", and its row says "not tested yet"; once added it is visible
 like any preset. A release that ships a new template adds nothing to anyone's list: the template only
@@ -294,6 +302,32 @@ The templates use the NORMAL release of each. The values come from NanoGPT's pub
     or a pin makes every request pay-as-you-go plus 5%, outside a subscription.
 - The bigger siblings are the `/model` switch entries: `xiaomi/mimo-v2.6-pro` ($0.435 / $0.87) and
   `z-ai/glm-5.3` ($1.00 / $3.20).
+
+**DeepSeek V4.1 Flash · NanoGPT (Q14, 2026-10-10).** The user asked for "best strongest parameters". The values
+come from DeepSeek's model card (`deepseek-ai/DeepSeek-V4.1-Flash`, its README and `config.json`) and NanoGPT's
+catalog and host list, all read without a key on 2026-10-10:
+
+| Model | Input / cache read / output per M | Window / max output | Effort levels listed | NanoGPT's automatic route |
+|---|---|---|---|---|
+| `deepseek/deepseek-v4.1-flash` (and the `:thinking` id) | $0.13 / $0.006 / $0.52 (the host list's default: $0.14 / $0.0042 / $0.42) | 1,000,000 / 384,000 | none, low, high, max | "FP8+", 156 tok/s, first token 3.6 s; 31 hosts (DeepSeek's own among them) |
+
+- **Effort `max`**: every instruct result on the card uses the maximum reasoning effort (the card's continuous
+  scale 1–100, at 100), and `max` is the top level NanoGPT lists.
+- **The thinking id for the session**: NanoGPT serves the thinking mode under its own id,
+  `deepseek/deepseek-v4.1-flash:thinking`, so the reasoning is on whatever Claude Code's request carries. The
+  BACKGROUND model is the plain id: titles and summaries need no reasoning. The `/model` switch entry is
+  `deepseek/deepseek-v4-pro:thinking` ($1.10 / $2.20; effort levels none, high, max).
+- **Sampling**: temperature 1.0, top_p 0.95, the card's evaluation settings (its table allows top_p 0.95 or 1.0).
+  The card also benchmarks the model INSIDE Claude Code: DeepSWE v1.1 69.8, Terminal-Bench 2.1 88.0 (at the
+  maximum effort, temperature 1.0, top_p 0.95, a 1M-token context).
+- **Context 1,000,000**: the catalog's window, the card's benchmark window, and the smallest window of the hosts
+  that state a precision (Venice, Alibaba); only Kitani and Engy (262,144) are smaller, and neither states one.
+- **Max output 131,072**: the card asks for `max_tokens` of at least 256K, but Claude Code asks a model it does
+  not know for at most 128,000 tokens; the catalog allows 384,000.
+- **Precision**: DeepSeek's own release is FP8 with its MoE experts in FP4 (`quantization_config`: `fp8`,
+  `expert_dtype: fp4`; 510 GB of safetensors, MIT). No higher-precision release exists, NanoGPT labels its
+  automatic route "FP8+", and so no host is pinned (a pin is pay-as-you-go plus 5%, outside a subscription; a
+  NanoGPT subscription covers this model).
 
 **RunPod (Q13).** RunPod hosts the server; Agentmaster only points Claude Code at it. The server must
 speak Claude's `/v1/messages` (vLLM since PR #22627, or SGLang) and serves exactly ONE model, so the preset's
@@ -856,7 +890,7 @@ RunPod endpoint. **None has been run against this implementation yet.** Each sen
 | R5 | A long silent MiMo turn (F8) demoted from Running. | One long turn on a dev build: no `[recon-stop]` before the real Stop. |
 | R6 | The pwsh prompt after claude exits keeps the key. | At that prompt, `$env:ANTHROPIC_AUTH_TOKEN` and `$env:AM_PRESET_TOKEN` are empty. |
 | R7 | The transcript's `message.model` for each provider. | Read one assistant line. |
-| R8 | NanoGPT through Claude Code (2026-10-09 templates): the Bearer token, the effort levels (`high` for MiMo, `max` for GLM), reasoning returned, tool calls, the Context of 1,000,000; and whether NanoGPT's Messages API honors the `X-Provider` header (Extra env `ANTHROPIC_CUSTOM_HEADERS`) and a body `provider` object (`min_quantization`), the only ways to keep GLM-5.3 Flash off its FP4 / NVFP4 hosts (§4.2). | One `-p` call per NanoGPT template with its generated settings file (a fraction of a cent each). For the controls: a request that names an UNKNOWN host (`X-Provider: no-such-host`, or `provider.only: ["no-such-host"]`) fails with `provider_unknown_provider` when the control is honored, before any generation. A pass gives the templates a `tested` line. |
+| R8 | NanoGPT through Claude Code (the 2026-10-09 and 2026-10-10 templates): the Bearer token, the effort levels (`high` for MiMo, `max` for GLM and DeepSeek), reasoning returned (DeepSeek: through its `:thinking` id), tool calls, the Context of 1,000,000; and whether NanoGPT's Messages API honors the `X-Provider` header (Extra env `ANTHROPIC_CUSTOM_HEADERS`) and a body `provider` object (`min_quantization`), the only ways to keep GLM-5.3 Flash off its FP4 / NVFP4 hosts (§4.2). | One `-p` call per NanoGPT template with its generated settings file (a fraction of a cent each). For the controls: a request that names an UNKNOWN host (`X-Provider: no-such-host`, or `provider.only: ["no-such-host"]`) fails with `provider_unknown_provider` when the control is honored, before any generation. A pass gives the templates a `tested` line. |
 | R9 | RunPod: a vLLM endpoint serving `XiaomiMiMo/MiMo-V2.6-Flash-MOPD` answers Claude Code (`/v1/messages`, the tool-call and reasoning parsers, the served name), the 1M window with Context 917,504 + Max output 131,072, and (Serverless) a turn inside the 5.5-minute limit at Max output 32,000. | Needs a running endpoint (§9: 4 x H200, about $14–18 per hour; 2 x H200 with the smaller window about $7–9). |
 
 ## 11. Decisions (as taken)
@@ -880,6 +914,7 @@ RunPod endpoint. **None has been run against this implementation yet.** Each sen
 | D15 | NanoGPT (2026-10-09, Q12) | a built-in provider on the direct API host, with no routing block (NanoGPT's Messages API takes no `provider` object); two untested templates on the NORMAL models, no host pinned (the automatic route, covered by a subscription), effort = the top level each model lists (§4.2) |
 | D16 | RunPod (2026-10-09, Q13) | a built-in provider with NO default URL and `modelRequired` (one model per vLLM endpoint); the key is `RUNPOD_API_KEY` for a Serverless endpoint, or a vLLM key typed in the box for a Pod; one untested template on Xiaomi's official MOPD checkpoint with the benchmark-like limits (Max output 131,072, Context 917,504 = the 1M window minus that output; 32,000 on a Serverless endpoint, by hand); Agentmaster manages no RunPod resource (§12) |
 | D17 | A `/model` display name with a NanoGPT suffix (2026-10-09) | the vendor prefix ends at a slash BEFORE the first `:` (`xiaomi/mimo-v2.6-flash:reasoning-effort/none` → `mimo-v2.6-flash:reasoning-effort/none`) |
+| D18 | DeepSeek V4.1 Flash · NanoGPT (2026-10-10, Q14) | an untested template at the model card's benchmark settings: the THINKING id `deepseek/deepseek-v4.1-flash:thinking` for the session and the plain id for background work, Effort `max`, temperature 1.0, top_p 0.95, Context 1,000,000, Max output 131,072 (Claude Code's own limit for an unknown model); no host pinned (the release is FP8 with FP4 experts, the automatic route "FP8+"); the `/model` switch is DeepSeek V4 Pro thinking (§4.2) |
 
 ## 12. Follow-ups and known gaps
 
