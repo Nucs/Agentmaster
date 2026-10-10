@@ -1663,10 +1663,10 @@ namespace winrt::TerminalApp::implementation
         void _RandomizeTagEditorColor(); // roll a fresh random (non-explicit) pre-pick — on every panel open and after every added tag; always moves off the current pick
         void _ToggleSessionTag(const std::wstring& sessionId, const std::wstring& tag); // add/remove one tag on a session (SessionStore) + refresh its tab badges + re-render the panel list; an untag first registers the tag (tags.json) so losing its last carrier can't vanish it
         void _RemoveGlobalTag(const std::wstring& tag); // the tag-list row's ✕ (0-carrier rows only): explicitly delete the tag from the durable registry — the ONE tag-removal path (a carried tag stays alive via the derived union; the color entry is kept)
-        void _CloseTagEditorPopup(); // dismiss the panel (Esc / outside press / tab switch)
+        void _CloseTagEditorPopup(); // dismiss the panel (Esc / outside press / tab switch). It first ends the panel's tooltips: an open one closes, and one that still waits out its 3 s rest (kTagPanelTipDelay) is cancelled, so it cannot open on the next open of the panel. Idempotent; the tooltip step never throws
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _specifyModelPopup{ nullptr }; // the "Specify a model..." prompt — built once, parented into Root(); its CHILD is rebuilt per open (fresh MRU + this invocation's callback)
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _tagEditorPopup{ nullptr }; // the Tags panel (bookmark tags) — built once, parented into Root()
-        winrt::Windows::UI::Xaml::Controls::Border _tagEditorCard{ nullptr }; // the panel card (the outside-press dismissal's inside/outside boundary)
+        winrt::Windows::UI::Xaml::Controls::Border _tagEditorCard{ nullptr }; // the panel card (the outside-press dismissal's inside/outside boundary, and the root below which _CloseTagEditorPopup ends the panel's tooltips)
         winrt::Windows::UI::Xaml::Controls::TextBox _tagEditorBox{ nullptr }; // row 1: the focusable "name the tag" box
         winrt::Windows::UI::Xaml::Controls::Button _tagEditorAddBtn{ nullptr }; // row 1: the "+" beside the box — appears once text is typed; wears the picked color as its background
         winrt::Windows::UI::Xaml::Controls::StackPanel _tagEditorSwatchRow{ nullptr }; // row 2: the color-picker swatches (one per kTagPalette color; the pick ringed white)

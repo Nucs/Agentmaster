@@ -349,6 +349,9 @@
 - A NEW tag takes the current pick + enters `tags.json`; an EXISTING tag is recolored only by an EXPLICIT swatch tap (never the roulette).
 - **TAG REMOVAL IS EXPLICIT** (Correctness Rule #17): toggling a tag off its LAST session keeps it listed at ·0 (re-appliable); only the **✕** on a 0-carrier row deletes it (`_RemoveGlobalTag` → `UnregisterKnownTag`; a carried tag shows no ✕ and can never be deleted — the derived union keeps it alive; its color entry is kept so a re-created tag regains its color).
 - Opened from the **WT tab context menu** ("Tags"), a **Sessions-page row** right-click, and a **Triage-Board card / Explorer-tree row** right-click (`AgentManagerContent::SetTagsHandler` → `_OpenTagEditorForElement`, anchored under the clicked element).
+- **Its tooltips wait 3 s** (2026-10-10, NOT BUILT yet): every tooltip inside the panel (the name box, the **+**, each color swatch, each tag row and a row's **✕**) opens only after the pointer has rested on that control for 3 s (`kTagPanelTipDelay`, `TerminalPage.AgentObserver.cpp`). Any pointer move restarts the wait. Every other `AgentSetTip` tooltip opens after ~133 ms, except the Triage-Board and side-panel cards (4 s) and the side panel's two drag separators (7 s).
+  - **A new tooltip in the panel must pass the constant too.** The delay is `AgentSetTip`'s open-delay override for one element, given at each of the five call sites (`_EnsureTagEditorPopup`, `_RebuildTagEditorList`). Without it, that one control opens its tooltip after ~133 ms.
+  - **The tooltips end with the panel.** `_CloseTagEditorPopup` calls `AgentCloseTipsIn` on the card before it closes the popup: an open tooltip closes at once, and a pending wait is cancelled. The name box, the **+** and the swatches are built once, so without the cancel a wait that was armed on one of them could open its tooltip on the next open of the panel.
 
 #### Everywhere else.
 

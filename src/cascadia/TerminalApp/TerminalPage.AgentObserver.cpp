@@ -37,7 +37,7 @@
 #include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
 #include "AgentManagerContent.h" // push the External census / RefreshNow
 #include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot); TagColorFor (bookmark tags)
-#include "AgentTipHelpers.h" // AgentSetTip — the islands-safe hover tooltips on the Tag panel's rows
+#include "AgentTipHelpers.h" // AgentSetTip — the islands-safe hover tooltips on the Tags panel's controls (AgentSetTip with kTagPanelTipDelay; AgentCloseTipsIn ends them when the panel closes)
 #include "AgentTabOverlay.h" // build + own the per-tab overlays (complete com_ptr type)
 #include "Tab.h" // get_self<Tab> -> CurrentEffectiveTabBackground (pending-dots contrast)
 #include "TabHeaderControl.h" // get_self<TabHeaderControl> -> ReserveTitleLines (consistent multi-line tab-row height)
@@ -1182,6 +1182,25 @@ namespace winrt::TerminalApp::implementation
         });
     }
 
+    // Agentmaster (bookmark tags): how long the pointer must REST on a control of the Tags panel before
+    // that control's tooltip opens: 3 s (the user's request, 2026-10-10). Every other AgentSetTip tooltip
+    // opens after ~133 ms, except the Triage-Board and side-panel cards (kCardTipDelay, 4 s) and the side
+    // panel's two drag separators (kSidePanelSplitterTipDelay, 7 s).
+    // Why: the panel is a small card of controls that the user clicks one after the other (the name box,
+    // the "+", the color swatches, the tag rows and a row's delete button). With the ~133 ms default a
+    // tooltip opened at nearly every pause of the pointer, over the controls around the hovered one.
+    // After 3 s a tooltip shows only for a user who stops on a control on purpose. Any pointer move
+    // restarts the wait (AgentTipHelpers' rest rule).
+    // EVERY tooltip inside the panel passes this value as AgentSetTip's open-delay override: the three
+    // call sites in _EnsureTagEditorPopup (the name box, the "+", each swatch) and the two in
+    // _RebuildTagEditorList (each tag row, each delete button). A tooltip that is added to the panel
+    // later must pass it too. Without it that one control opens its tooltip after ~133 ms again.
+    // Tradeoff: a user who wants the explanation waits 3 s for it.
+    // Lifetime: a wait can still be pending when the panel closes. _CloseTagEditorPopup cancels it.
+    // Not used by the tag HOVER panel (_ShowTagHoverPanelNow). That panel holds no tooltip, and its own
+    // 160 ms open delay belongs to the panel itself.
+    static constexpr std::chrono::milliseconds kTagPanelTipDelay{ 3000 };
+
     // Build the panel ONCE and parent it into Root() (row-span across the whole page so the
     // root-relative offsets can place it anywhere). Dismissal is deliberately POINTER-based —
     // Esc, tab switch, or any press OUTSIDE the card (a Root() handledEventsToo hook) — never
@@ -1212,7 +1231,7 @@ namespace winrt::TerminalApp::implementation
         _tagEditorBox = TextBox{};
         _tagEditorBox.PlaceholderText(L"tag name");
         _tagEditorBox.VerticalAlignment(VerticalAlignment::Center);
-        AgentSetTip(_tagEditorBox, L"Name a new bookmark tag for this session \x2014 press + (or Enter) to add it. Existing tags are toggled from the list below.");
+        AgentSetTip(_tagEditorBox, L"Name a new bookmark tag for this session \x2014 press + (or Enter) to add it. Existing tags are toggled from the list below.", kTagPanelTipDelay);
         _tagEditorBox.TextChanged([weak = get_weak()](auto&&, auto&&) {
             if (const auto page = weak.get())
             {
@@ -1250,7 +1269,7 @@ namespace winrt::TerminalApp::implementation
         _tagEditorAddBtn.Margin(Thickness{ 6, 0, 0, 0 });
         _tagEditorAddBtn.VerticalAlignment(VerticalAlignment::Center);
         _tagEditorAddBtn.Visibility(Visibility::Collapsed); // appears once the box holds a usable name
-        AgentSetTip(_tagEditorAddBtn, L"Add this tag to the session (a new tag counts toward the global tag limit \x2014 Settings cog \x2192 Max bookmark tags)");
+        AgentSetTip(_tagEditorAddBtn, L"Add this tag to the session (a new tag counts toward the global tag limit \x2014 Settings cog \x2192 Max bookmark tags)", kTagPanelTipDelay);
         _tagEditorAddBtn.Click([weak = get_weak()](auto&&, auto&&) {
             if (const auto page = weak.get())
             {
@@ -1289,7 +1308,7 @@ namespace winrt::TerminalApp::implementation
             sw.BorderThickness(Thickness{ 2, 2, 2, 2 });
             const winrt::hstring hexH{ FormatArgbHexColor(TagPaletteColor(i)) };
             sw.Tag(winrt::box_value(hexH)); // the ring update matches swatches by this hex
-            AgentSetTip(sw, L"Use this color for the next tag you add (picking one explicitly also recolors an existing tag when you re-add its name)");
+            AgentSetTip(sw, L"Use this color for the next tag you add (picking one explicitly also recolors an existing tag when you re-add its name)", kTagPanelTipDelay);
             sw.Tapped([weak = get_weak(), hexH](auto&&, const WUX::Input::TappedRoutedEventArgs& e) {
                 e.Handled(true); // don't let the press double as an outside/inside-card gesture
                 if (const auto page = weak.get())
@@ -1505,7 +1524,7 @@ namespace winrt::TerminalApp::implementation
                 del.BorderThickness(Thickness{ 0, 0, 0, 0 });
                 del.Opacity(0.55);
                 del.VerticalAlignment(VerticalAlignment::Center);
-                AgentSetTip(del, winrt::hstring{ L"Delete tag \x201C" + info.name + L"\x201D \x2014 no session carries it anymore. This removes the name from the tag list (its color is remembered if you ever re-create it)." });
+                AgentSetTip(del, winrt::hstring{ L"Delete tag \x201C" + info.name + L"\x201D \x2014 no session carries it anymore. This removes the name from the tag list (its color is remembered if you ever re-create it)." }, kTagPanelTipDelay);
                 del.Click([weak = get_weak(), tagName](auto&&, auto&&) {
                     if (const auto page = weak.get())
                     {
@@ -1523,7 +1542,7 @@ namespace winrt::TerminalApp::implementation
             }
 
             row.Content(rowGrid);
-            AgentSetTip(row, winrt::hstring{ (on ? L"Remove tag \x201C" + info.name + L"\x201D from this session" : L"Tag this session \x201C" + info.name + L"\x201D") });
+            AgentSetTip(row, winrt::hstring{ (on ? L"Remove tag \x201C" + info.name + L"\x201D from this session" : L"Tag this session \x201C" + info.name + L"\x201D") }, kTagPanelTipDelay);
             row.Click([weak = get_weak(), tagName](auto&&, auto&&) {
                 if (const auto page = weak.get())
                 {
@@ -1795,11 +1814,48 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Dismiss the panel (Esc / a press outside the card / a tab switch). Idempotent.
+    // Dismiss the panel (Esc / a press outside the card / a tab switch). Idempotent: on a panel that is
+    // closed, or was never built, it only clears the session id. So the call that every tab selection
+    // makes (_ApplyAgentTabSelection) costs two checks.
+    // The panel's tooltips end with the panel: an open tooltip closes now, and a tooltip that still
+    // waits out its rest (kTagPanelTipDelay, 3 s) is cancelled. The comment in the body says why.
+    // Parameters: none. Returns: nothing. UI thread only.
+    // Exceptions: the tooltip step never throws (a failure is logged, and the panel closes all the
+    // same). Popup::IsOpen is not guarded here, as before: what it throws goes to the caller.
     void TerminalPage::_CloseTagEditorPopup()
     {
         if (_tagEditorPopup && _tagEditorPopup.IsOpen())
         {
+            // End the panel's tooltips BEFORE the panel leaves the tree. A tooltip here opens only after
+            // kTagPanelTipDelay (3 s) of rest, so a wait is often still pending when the panel closes
+            // while the pointer rests on a control (Esc, or a tab switch from the keyboard). The close
+            // may deliver no PointerExited to that control, and that event is what cancels a wait.
+            //  - While the panel STAYS closed, the pending wait does no harm: the tip host opens a tooltip
+            //    only on a control that is in the live tree, and the content of a closed popup is not.
+            //  - But the name box, the "+" and the color swatches are built ONCE, and the next open shows
+            //    them again. A wait that is armed on one of them would then end on the REOPENED panel
+            //    and open its tooltip there, with the pointer somewhere else. That tooltip would stay
+            //    until the pointer entered and left the control, another tooltip opened, or the panel
+            //    closed.
+            // An OPEN tooltip closes here too. Without this step it stays on screen until the host's 1 s
+            // watchdog sees that its owner left the tree.
+            // AgentCloseTipsIn is the tip helpers' call for a host that is about to be hidden. It cancels
+            // the UI thread's pending open (wherever that open is armed; the next pointer move over a
+            // control with a tooltip arms it again) and closes an open tooltip that belongs to a control
+            // below the card. It stops a timer and closes a ToolTip. Neither is a tree mutation, so the
+            // step is safe inside the outside-press pointer handler and the Esc key handlers.
+            // Contained (Rule #18): a tooltip must never keep the panel open or break a tab switch.
+            try
+            {
+                if (_tagEditorCard)
+                {
+                    AgentCloseTipsIn(_tagEditorCard);
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_CloseTagEditorPopup: end the panel's tooltips");
+            }
             _tagEditorPopup.IsOpen(false);
         }
         _tagEditorSessionId.clear();
