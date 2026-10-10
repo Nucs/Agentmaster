@@ -681,8 +681,15 @@ found rows previews them.
 
 - **The page was not run.** The engine is tested live; the XAML code only compiles.
 - **The toggle is not remembered** across windows or restarts.
-- **A cold index is slow** (9.4). A saved snapshot of the catalog would make the first read of a
-  run one file instead of one per session.
+- **A cold index is slow** (9.4). Three ways to make it faster, none built:
+  - a saved snapshot of the catalog, so the first read of a run is one file instead of one per
+    session;
+  - reading the sidecar files on a few threads (a transcript parse is CPU work per file; whether
+    the first-touch scan runs in parallel was not measured);
+  - serving a STALE sidecar entry at once and refreshing it in a later step. The newest sessions
+    are the live ones, so their sidecar files are stale by construction, and the first step reads
+    exactly those. A stale entry has the right title, folder and paths; only its last-activity
+    time is old.
 - **After a restart, a restored list can lack rows**: the rows outside the page's window need the
   agent's catalog, which is read again only at the next request.
 - **The header shows the column sort's arrow** even while the model's order applies.
