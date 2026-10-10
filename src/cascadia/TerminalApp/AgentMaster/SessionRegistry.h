@@ -98,6 +98,24 @@ namespace Agentmaster
         std::wstring tabToken; // the hosting ConPTY's WT_SESSION as stored (any case); EMPTY until a hook or the Fleet Observer reveals it
     };
 
+    // Agentmaster (tags perf, 2026-10-10 — one more lean registry read): what a LIST of sessions shows
+    // about one of them — its name, its state dot and how recently it was active — copied WITHOUT the rest
+    // of the record. The bookmark-tag surfaces need exactly this for the handful of sessions that carry a
+    // tag: the Tags panel ranks each tag by its carriers' activity, and the tag hover panel lists a tag's
+    // carriers with their status dot. The panel used to take a full Snapshot() for it on every open and
+    // after every toggle — a deep copy of every record the profile ever held with its whole prompt-queue
+    // history (the release profile on 2026-10-10: 1,614 records, 7,234 queued prompts, 7.1 million
+    // characters of prompt text), with the registry mutex held for the length of the copy. Returned by
+    // SessionRegistry::HeadlinesOf.
+    struct SessionHeadline
+    {
+        std::wstring id; // the session id (the registry key), as stored
+        std::wstring title; // SessionInfo::title — the one name the tab, the tree and the persisted record share (Rule #11); may be empty
+        SessionState state{ SessionState::Idle }; // the triage state (meaningful for a live session; an archived one keeps its last)
+        bool live{ false }; // has an open tab this run (SessionInfo::live); false = closed, resumable from the Sessions browser
+        int64_t lastActivityUnixMs{ 0 }; // max(lastActivityUnixMs, convLastActivityUnixMs): the newer of the hook-side stamp and the transcript-derived one; 0 = no recorded activity
+    };
+
     class SessionRegistry
     {
     public:
@@ -164,6 +182,19 @@ namespace Agentmaster
         //   returns — the tokens as stored (any case); empty when no managed Codex session is live.
         //   throws  — std::bad_alloc on allocation failure only.
         std::vector<std::wstring> ManagedCodexTabTokens() const;
+
+        // The headline of each asked session (SessionHeadline: id, title, state, live, newest activity) —
+        // live AND archived records alike, since a closed session can still carry a bookmark tag. For a
+        // reader that shows a few named sessions in a list (the Tags panel's activity ranking, the tag
+        // hover panel's carrier rows): it copies five small fields per asked session, where Snapshot()
+        // copied every record of the registry with its queue.
+        // ⚠ Not for a caller that needs every session: it costs one map lookup per asked id, so ask for
+        // the ids you show.
+        //   ids     — the session ids to look up, in any order. An id the registry does not know is left
+        //             out of the result; an id asked twice is answered twice.
+        //   returns — one headline per KNOWN asked id, in the order asked; empty when none is known.
+        //   throws  — std::bad_alloc on allocation failure only.
+        std::vector<SessionHeadline> HeadlinesOf(const std::vector<std::wstring>& ids) const;
 
         // The SessionScanner's per-pass snapshot: the LIVE sessions (the SnapshotLive set and order), each
         // copied without two parts the scanner never reads:

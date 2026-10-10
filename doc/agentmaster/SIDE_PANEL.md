@@ -270,7 +270,9 @@ never push the tags off the card. An untagged card's band is exactly the old tit
   never kept stale. Tags live in the SessionStore, not the registry, so no drain reports a tag edit:
   the Tags panel's two mutation paths (`_ToggleSessionTag`, `_CommitTagEditorAdd`) call
   `_SidePanelNoteTagsChanged()` (update NOW past the min-gap; collapsed → just dirty) beside the
-  board's `_RefreshManagerBoardTags`. An edit made in **another window** or on the Sessions page
+  board's `_RefreshManagerBoardTags`. (Since 2026-10-10, not built yet, the two paths reach both
+  through `_QueueTagSurfacesRefresh`: ~40 ms after the last edit, so the Tags panel's own list is
+  rebuilt first — UI_THREAD.md §11.) An edit made in **another window** or on the Sessions page
   moves the same epoch (every window runs in one process), and the periodic tick (~2.5 s) compares
   it, so every side panel follows within one tick. Before, another window's panel caught up only on
   its next unrelated rebuild. Not seen: a tag write by another PROCESS on the same profile (the

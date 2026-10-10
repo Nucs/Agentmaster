@@ -691,6 +691,25 @@ namespace winrt::TerminalApp::implementation
                         {
                             return;
                         }
+                        // Agentmaster (tags perf, 2026-10-10): a tag was edited while this page was hidden
+                        // (the Tags panel of a tab), so its chips and table were NOT rebuilt then
+                        // (_SessionsNoteTagsChanged). Repaint them now, from _sessionsTags, which was kept
+                        // in step. BEFORE the scroll restore below: a re-render resets the table's extent,
+                        // and the restore then puts the offset back. Contained (Rule #18): a failed
+                        // repaint must not cost the page its scroll restore and its focus.
+                        if (self->_sessionsTagsDirty)
+                        {
+                            self->_sessionsTagsDirty = false;
+                            try
+                            {
+                                self->_RebuildSessionsTagChips();
+                                self->_RenderSessionsTable();
+                            }
+                            catch (...)
+                            {
+                                ::Agentmaster::AgentLogCaughtException(L"Sessions page restore: repaint after a tag edit made while hidden");
+                            }
+                        }
                         if (self->_sessionsRowsScroll && self->_sessionsSavedScrollOffset > 0.0)
                         {
                             self->_sessionsRowsScroll.UpdateLayout(); // realize the extent first so ChangeView doesn't clamp to 0
@@ -1011,6 +1030,7 @@ namespace winrt::TerminalApp::implementation
         self->_sessionsEntries = std::move(entries);
         self->_sessionsFavorites = std::move(favorites); // FAVORITES.md: the ★ set drives the star column + the Favorite filter
         self->_sessionsTags = std::move(sessionTags); // bookmark tags: sid -> tags, behind the TAG CHIPS row + the tag facet
+        self->_sessionsTagsDirty = false; // this pass re-lists the chips and re-renders the table below, from the fresh load — nothing is owed any more (tags perf, 2026-10-10)
         // A session OPEN in any Agentmaster window (live in the process-wide registry) shows its
         // REAL tab title — SessionInfo.title, the ONE value Explorer name / tab / persistence all
         // share (Rule #11) — instead of the transcript-derived PickDisplayTitle: an in-app rename
@@ -1175,6 +1195,137 @@ namespace winrt::TerminalApp::implementation
         catch (...)
         {
             ::Agentmaster::AgentLogCaughtException(L"_RunSessionsSearch");
+        }
+    }
+
+    // Agentmaster (tags perf, 2026-10-10): the mark on a row's Tags cell (its FrameworkElement.Tag) —
+    // how _UpdateSessionsRowTags finds that cell again among the row grid's children. No other cell of
+    // a row sets a Tag.
+    static constexpr std::wstring_view kSessTagsCellMark{ L"am-tags-cell" };
+
+    // Agentmaster (tags perf, 2026-10-10): see TerminalPage.h. The body is the Tags-cell block that
+    // _RenderSessionsTable held inline, moved here unchanged so the one-row update draws the very same cell.
+    StackPanel TerminalPage::_MakeSessionsTagsCell(const std::vector<std::wstring>& tglist, const std::map<std::wstring, std::wstring>& sessTagColors)
+    {
+        StackPanel tagsCell;
+        tagsCell.Orientation(Orientation::Horizontal);
+        tagsCell.Spacing(2);
+        tagsCell.VerticalAlignment(VerticalAlignment::Center);
+        tagsCell.HorizontalAlignment(HorizontalAlignment::Center); // centered in the fixed 4-ribbon cell
+        constexpr size_t kSessMaxTagRibbons = 4; // the fixed cell holds exactly 4 ribbons
+        const bool overflow = tglist.size() > kSessMaxTagRibbons;
+        const size_t ribbonsToShow = overflow ? (kSessMaxTagRibbons - 1) : tglist.size(); // >4 => 3 ribbons + "+N"
+        for (size_t i = 0; i < ribbonsToShow; ++i)
+        {
+            winrt::Windows::UI::Xaml::Shapes::Polygon ribbon; // the tab badges' 6.5x9.3 bookmark shape
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.5f, 0.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.5f, 9.3f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 3.25f, 6.5f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.3f });
+            ribbon.Fill(SolidColorBrush{ ResolveTagDisplayColor(tglist[i], sessTagColors) });
+            ribbon.Stroke(SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
+            ribbon.StrokeThickness(0.75);
+            ribbon.VerticalAlignment(VerticalAlignment::Center);
+            const winrt::hstring tagName{ tglist[i] };
+            ribbon.PointerEntered([this, tagName](const winrt::Windows::Foundation::IInspectable& s, auto&&) {
+                if (const auto el = s.try_as<winrt::Windows::UI::Xaml::UIElement>())
+                {
+                    _OnTagBadgeHoverBegin(tagName, el);
+                }
+            });
+            ribbon.PointerExited([this](auto&&, auto&&) {
+                _OnTagBadgeHoverEnd();
+            });
+            tagsCell.Children().Append(ribbon);
+        }
+        if (overflow)
+        {
+            auto more = SessText(winrt::hstring{ L"+" + std::to_wstring(tglist.size() - ribbonsToShow) }, 9, false, 0.6);
+            more.VerticalAlignment(VerticalAlignment::Center);
+            more.IsHitTestVisible(false);
+            tagsCell.Children().Append(more);
+        }
+        Grid::SetColumn(tagsCell, 0);
+        tagsCell.Tag(winrt::box_value(winrt::hstring{ kSessTagsCellMark })); // found again by _UpdateSessionsRowTags
+        return tagsCell;
+    }
+
+    // Agentmaster (tags perf, 2026-10-10): see TerminalPage.h. The row is found by the session id its
+    // Border carries as its Tag (the selection highlight's lookup, _UpdateSessionsSelectionHighlight).
+    bool TerminalPage::_UpdateSessionsRowTags(const std::wstring& sessionId)
+    {
+        if (!_sessionsRowsHost || sessionId.empty())
+        {
+            return false;
+        }
+        for (const auto& child : _sessionsRowsHost.Children())
+        {
+            const auto rowBorder = child.try_as<Border>();
+            if (!rowBorder)
+            {
+                continue;
+            }
+            const winrt::hstring rowId = winrt::unbox_value_or<winrt::hstring>(rowBorder.Tag(), L"");
+            if (std::wstring_view{ rowId } != sessionId)
+            {
+                continue;
+            }
+            const auto rowGrid = rowBorder.Child().try_as<Grid>();
+            if (!rowGrid)
+            {
+                return false; // not the row shape _RenderSessionsTable builds — leave it alone
+            }
+            const auto cells = rowGrid.Children();
+            // Drop the old Tags cell, if the row has one (an untagged row was built without it).
+            for (uint32_t i = 0; i < cells.Size(); ++i)
+            {
+                const auto cell = cells.GetAt(i).try_as<FrameworkElement>();
+                if (cell && std::wstring_view{ winrt::unbox_value_or<winrt::hstring>(cell.Tag(), L"") } == kSessTagsCellMark)
+                {
+                    cells.RemoveAt(i);
+                    break;
+                }
+            }
+            // ...and add the current one. Order among the grid's children does not matter: each cell
+            // sits in its own column.
+            if (const auto tit = _sessionsTags.find(sessionId); tit != _sessionsTags.end() && !tit->second.empty())
+            {
+                cells.Append(_MakeSessionsTagsCell(tit->second, ::Agentmaster::LoadAllTagColors()));
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // Agentmaster (tags perf, 2026-10-10): see TerminalPage.h.
+    void TerminalPage::_SessionsNoteTagsChanged(const std::unordered_set<std::wstring>& sessionIds, const bool recolored)
+    {
+        if (!_sessionsRowsHost || !_sessTagChipsPanel)
+        {
+            return; // the page was never built: nothing shows a tag here
+        }
+        if (!_sessionsPageVisible.load(std::memory_order_relaxed))
+        {
+            // Hidden (a tab is on screen, or the page was closed): do not rebuild rows nobody sees. The
+            // page repaints from _sessionsTags when it returns (the overlay's onRestore), and a fresh
+            // open re-gathers everything anyway.
+            _sessionsTagsDirty = true;
+            return;
+        }
+        if (recolored || !_sessionsRowFilter.tags.empty())
+        {
+            // A recolor changes the ribbons of EVERY carrier; a picked tag facet means this edit can add
+            // or remove the row itself (and the chips rebuild may prune the facet). Both need the
+            // whole table.
+            _RebuildSessionsTagChips();
+            _RenderSessionsTable();
+            return;
+        }
+        _RebuildSessionsTagChips(); // the tag universe and its counts
+        for (const auto& id : sessionIds)
+        {
+            _UpdateSessionsRowTags(id); // false = the session is not listed right now: nothing to repaint
         }
     }
 
@@ -1563,50 +1714,11 @@ namespace winrt::TerminalApp::implementation
             // _OnTagBadgeHoverBegin/End (this TU IS TerminalPage). The cell stays HIT-TESTABLE (like the
             // ★ cell — the row's other cells are clickthrough): the ribbons need pointer enter/leave;
             // the gaps between ribbons have no background, so clicks there still pass to the row.
+            // (Agentmaster, tags perf 2026-10-10: the cell itself is built by _MakeSessionsTagsCell, which
+            // the one-row update _UpdateSessionsRowTags shares — a tag edit no longer re-renders the table.)
             if (const auto tit = _sessionsTags.find(r.id); tit != _sessionsTags.end() && !tit->second.empty())
             {
-                const auto& tglist = tit->second;
-                StackPanel tagsCell;
-                tagsCell.Orientation(Orientation::Horizontal);
-                tagsCell.Spacing(2);
-                tagsCell.VerticalAlignment(VerticalAlignment::Center);
-                tagsCell.HorizontalAlignment(HorizontalAlignment::Center); // centered in the fixed 4-ribbon cell
-                constexpr size_t kSessMaxTagRibbons = 4; // the fixed cell holds exactly 4 ribbons
-                const bool overflow = tglist.size() > kSessMaxTagRibbons;
-                const size_t ribbonsToShow = overflow ? (kSessMaxTagRibbons - 1) : tglist.size(); // >4 => 3 ribbons + "+N"
-                for (size_t i = 0; i < ribbonsToShow; ++i)
-                {
-                    winrt::Windows::UI::Xaml::Shapes::Polygon ribbon; // the tab badges' 6.5x9.3 bookmark shape
-                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
-                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.5f, 0.0f });
-                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.5f, 9.3f });
-                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 3.25f, 6.5f });
-                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.3f });
-                    ribbon.Fill(SolidColorBrush{ ResolveTagDisplayColor(tglist[i], sessTagColors) });
-                    ribbon.Stroke(SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
-                    ribbon.StrokeThickness(0.75);
-                    ribbon.VerticalAlignment(VerticalAlignment::Center);
-                    const winrt::hstring tagName{ tglist[i] };
-                    ribbon.PointerEntered([this, tagName](const winrt::Windows::Foundation::IInspectable& s, auto&&) {
-                        if (const auto el = s.try_as<winrt::Windows::UI::Xaml::UIElement>())
-                        {
-                            _OnTagBadgeHoverBegin(tagName, el);
-                        }
-                    });
-                    ribbon.PointerExited([this](auto&&, auto&&) {
-                        _OnTagBadgeHoverEnd();
-                    });
-                    tagsCell.Children().Append(ribbon);
-                }
-                if (overflow)
-                {
-                    auto more = SessText(winrt::hstring{ L"+" + std::to_wstring(tglist.size() - ribbonsToShow) }, 9, false, 0.6);
-                    more.VerticalAlignment(VerticalAlignment::Center);
-                    more.IsHitTestVisible(false);
-                    tagsCell.Children().Append(more);
-                }
-                Grid::SetColumn(tagsCell, 0);
-                g.Children().Append(tagsCell);
+                g.Children().Append(_MakeSessionsTagsCell(tit->second, sessTagColors));
             }
             {
                 Border chip;

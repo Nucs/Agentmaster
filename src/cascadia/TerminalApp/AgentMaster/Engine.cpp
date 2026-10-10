@@ -608,6 +608,55 @@ namespace Agentmaster
                 e->observer->Start();
             }
 
+            // Agentmaster (tags perf, 2026-10-10): read the whole session store ONCE, in the background.
+            // Every whole-store read (the Tags panel's tag universe, the tag hover panel's carrier list,
+            // the Sessions browser's titles / favorites / tags) goes through the store's scan cache: after
+            // one complete pass, a read lists the directory and opens only the records that changed. But
+            // that FIRST pass opens every record file — 2,181 on the release profile — and until now the Tags
+            // panel made it on the UI thread the first time it opened (the user reported a freeze of more
+            // than 5 s there). This thread makes it here instead, so the first panel of a run normally finds the
+            // store warm. A panel opened before the pass is done does not wait for this thread and does
+            // not scan on the UI thread either: it shows "Loading tags..." and runs its own pass on a pool
+            // thread (TerminalPage::_WarmTagStoreThenRefresh).
+            // NORMAL priority, like the other engine threads, and on purpose: the pass takes the store's
+            // cache lock once per record, and the UI thread takes the same lock for every per-card read.
+            // A low-priority thread that is preempted while it holds that lock, on a machine whose cores
+            // are all busy, would make the UI thread wait until the scheduler runs it again — a stall at
+            // start-up, to save a pass that needs ~0.15 s of CPU (measured: 141 ms for 2,181 records with
+            // a warm disk cache) and otherwise waits for the disk. It should also finish soon: the sooner
+            // the store is warm, the smaller the window in which a panel has to load.
+            // Detached, like the UI-stall watchdog: it touches only process-lifetime state (the store's
+            // caches, the log), and the engine is never torn down. Inert in the test harness, which never
+            // calls SharedEngine().
+            // A thread that cannot start (std::system_error) or a pass that throws costs only the head
+            // start: both are logged (Rule #18), and the first panel then loads the store itself.
+            try
+            {
+                std::thread([]() noexcept {
+                    try
+                    {
+                        const uint64_t startedAt = ::GetTickCount64();
+                        const uint64_t readsBefore = SessionStoreRecordFileReads();
+                        const size_t records = WarmSessionStore();
+                        // "file read(s)" is the process-wide counter's move during the pass: a per-session
+                        // read by another thread in those moments is counted too, so on a run that
+                        // restores tagged tabs it can exceed the record count by a few.
+                        AppendStateLog(L"hooks.log",
+                                       L"[engine] session store warmed: " + std::to_wstring(records) + L" record(s), " +
+                                           std::to_wstring(SessionStoreRecordFileReads() - readsBefore) + L" file read(s), " +
+                                           std::to_wstring(::GetTickCount64() - startedAt) + L" ms\n");
+                    }
+                    catch (...)
+                    {
+                        LogSwallowedException(L"session-store warm-up (the pass)");
+                    }
+                }).detach();
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"session-store warm-up (thread start)");
+            }
+
             AppendStateLog(L"hooks.log", L"[engine] bridge listening on " + pipeName + L"\n");
             return e;
         }();

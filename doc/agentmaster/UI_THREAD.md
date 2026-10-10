@@ -826,3 +826,180 @@ Dev and release crashed the same way, 9 minutes apart. Both binaries were the fi
   - In a stacksnap profile, `TermControl` frames must still be absent from the `LayoutUpdated` raise.
   - The input gate, on a started terminal: click, drag a selection, Ctrl+click a link, the wheel, Ctrl+wheel
     zoom, a scroll-bar drag, and a wheel over an INACTIVE window (the GH#979 path). Each must work as before.
+
+## 11. The bookmark-tag surfaces: every store file read on the UI thread (2026-10-10, not built yet)
+
+**The report (release 0.6.8.18, 2026-10-10):** "Tags are really slow, opening tags panel for the first
+time takes >5s, then using it also a bit laggy."
+
+This cost is not a per-frame cost like §4. It is a cost per user action: the UI thread did file I/O for
+the whole profile each time the Tags panel opened, each time a tag was toggled, and each time the pointer
+rested on a tag ribbon.
+
+### 11a. What was measured
+
+All numbers are from the release profile (`~/.agentmaster`), read-only, on 2026-10-10. The benchmark is a
+scratch program that links the repository's `SessionStore.cpp` unchanged.
+
+- **The store is not sparse any more.** `session-store\` held **2,181 files** (dev: 420). Every launched
+  session gets a `title` record. Only **9** sessions carried a tag, and 52 a favorite. The files are
+  small: 90 KB in total, 41 bytes on average.
+- **The registry is large.** `sessions.json` held 1,614 records with 7,234 queued prompts and 7.1 million
+  characters of prompt text (9.4 MB on disk).
+
+| Operation (2,181 records, warm disk cache) | Before | After |
+|---|---|---|
+| List the directory (no file opened) | 3.5–4.5 ms | the same |
+| One stat per file | 32–41 ms (79 ms once) | not done in the steady state |
+| Open + read each file | 80–155 ms | not done in the steady state |
+| `LoadAllSessionTags`, the first call of a process | 80–93 ms | ~141 ms, once, off the UI thread |
+| `LoadAllSessionTags`, every later call | 80–93 ms | **~5 ms** |
+| Titles + favorites + tags (the Sessions page gather) | 258 ms | **15 ms** |
+
+- **The cold case was not measured directly.** The user's ">5 s" corresponds to more than 2.3 ms per open
+  for 2,181 opens. My explanation, not measured: an open of a file that is not in the disk cache reads the disk, and
+  Defender scans a file that it has not seen since its last signature update. If that is right, "the first
+  time" returns after a restart of Windows and after a signature update.
+- **A toggle took less than 289 ms end to end.** hooks.log shows two row clicks 289 ms apart (07:33:51.429
+  and 07:33:51.718), the user's pointer move included.
+
+### 11b. Why it was slow
+
+1. **`LoadAllSessionStoreFieldIn` opened, read and parsed every record file on every call.** It is the
+   body of `LoadAllSessionTags`, `LoadAllStoredSessionTitles` and `LoadAllFavoriteSessions`. The per-session
+   reads had a `(size, mtime)` cache since the 70-tab hotspot fix; the whole-directory reads never used it.
+   Its header still said that the store is sparse, "so a full `LoadAll*` scan is cheap".
+2. **The Tags panel made that call on the UI thread** in `_RebuildTagEditorList`: at every open, and again
+   after every toggle, add and delete.
+3. **The same function deep-copied the whole registry** (`Snapshot()`) to read one number per session.
+   The registry mutex stayed locked for the length of the copy.
+4. **The tag hover panel made the same store scan on every hover** (`_ShowTagHoverPanelNow`), plus one full
+   `Get` (the record with its whole prompt queue) per carrier.
+5. **A toggle repainted every other tag surface before the panel's own list**, hidden or not:
+   - the Sessions page: `_RenderSessionsTable` rebuilt every row of the table (each row builds its context
+     menu eagerly), once the page had ever been built, also while it was hidden;
+   - the Manager: `RefreshNow`, a full board + tree + plan rebuild while the page is on screen; while it
+     is hidden, still a deep copy of every live session for the keep-awake check (While-running mode).
+6. **Smaller repeated reads:** `LoadAllTagColors` and `LoadKnownTags` opened and parsed their file on every
+   call (each tagged tab's badge re-assert, every board rebuild, every Sessions render). The board read
+   `GetSessionTags` for every card on every rebuild (a stat and a record copy per card, up to 4 rebuilds
+   per second while the Manager is on screen). A single-field read copied the whole record first, a
+   stored draft included.
+
+### 11c. The fixes
+
+- **The scan cache** (`SessionStore.cpp`, `VisitStoreDir`). A whole-directory read lists the directory
+  once (`FindFirstFileExW`, basic info, large fetch) and takes each record from the record cache when the
+  listing's `(size, mtime)` equals the cached stamp. Only a new or changed record is opened.
+  - The listing's stamp is only compared, never stored. Every cached stamp comes from a per-file stat. So
+    a file system that reported different stamps through the two calls would cost one stat per record,
+    never a re-parse loop. On NTFS they agree: 2,601 existing records and 1,200 fresh atomic writes
+    compared equal on 2026-10-10 (`C:` and `Q:`).
+  - A write of this process is written through, so the next read needs no open and no stat.
+  - **The write-order guard.** A reader parses outside the cache lock. A write of this process can land
+    while the reader still holds the older content. Each write-through is numbered, and a reader does not
+    store its parse over an entry that a write stored after the read began.
+  - `GetSessionStoreFieldIn` copies one field under the lock, not the whole record.
+- **The two tag files are cached too.** `LoadAllTagColorsIn` and `LoadKnownTagsIn` answer from memory for
+  the cost of one stat. Their read-modify-writes read the file itself, never the cache. One mutex
+  serializes every read and write of the two files in this process.
+- **No whole-store read on the UI thread while the store is cold.**
+  - The engine reads the store once on a background thread at start-up (`Engine.cpp`, lowest CPU priority).
+    hooks.log: `[engine] session store warmed: N record(s), M file read(s), X ms`.
+  - `SessionStoreScanIsWarm()` tells a caller whether that first read is done. When it is not, the Tags
+    panel shows "Loading tags…" and the hover panel shows "loading…". `_WarmTagStoreThenRefresh` reads the
+    store on a pool thread and then fills the surface that is still open. hooks.log: `[tags] the session
+    store was not read yet when a tag panel opened: …`.
+  - While the tag list loads, the "+" stays hidden and Enter adds nothing. An add against an unknown tag
+    list would take every name for new: it would recolor an existing tag with the random pre-pick and
+    could pass the tag limit.
+- **A lean registry read.** `SessionRegistry::HeadlinesOf(ids)` returns id, title, state, live and newest
+  activity for the asked sessions only. The Tags panel asks for the tagged sessions; the hover panel asks
+  once for all carriers.
+- **The panel answers first.** A tag edit rebuilds the panel's list at once. The Sessions page, the Manager
+  board and the side panel are repainted ~40 ms after the last edit (`_QueueTagSurfacesRefresh`, a one-shot
+  timer; a burst of edits is one repaint). The session's own tab badges are still repainted at once.
+- **A hidden surface costs a flag.**
+  - Sessions page hidden: `_sessionsTagsDirty`. The page repaints when it returns with the Manager page; an
+    explicit open gathers again anyway.
+  - Sessions page shown, no tag facet picked, no recolor: the chips, and the changed row's Tags cell in
+    place (`_UpdateSessionsRowTags`). The full table is rebuilt only when a tag facet is picked (the row
+    may have to appear or go) or a tag was recolored (every carrier changes).
+  - Manager page hidden: `AgentManagerContent::NoteTagsChanged` sets the dirty flag and nothing else.
+  - Manager page shown: the board alone is rebuilt (`_Refresh(boardOnly)`). The tree and the Prompt Queue
+    show no tag.
+- **The board caches its cards' tags** by the tag epoch (`_boardTagsCache`), as the side panel does (§10j).
+
+### 11d. What a tag toggle costs now
+
+Estimated from the measured parts. The app is not built, so no live number exists yet.
+
+- **Manager hidden, Sessions page hidden or never built** (the usual case: the panel was opened from a
+  tab): the store write (one small file), one stat per read, one directory listing (~5 ms) and the
+  rebuild of at most 40 panel rows. The side panel then re-reads its cards' tags (one stat per card) in
+  the deferred repaint.
+- **Manager shown:** the same, and one board rebuild ~40 ms later.
+- **Sessions page shown:** the same, and the chips plus one row's cell.
+
+### 11e. Checked
+
+- `TestSessionStoreScanCache` (new, `tests/tests_transcript.cpp`) proves the cost by COUNTING, not by
+  timing. `SessionStoreRecordFileReads()` counts file opens and `SessionStoreRecordFileStats()` counts
+  per-record stats:
+  - the first whole-directory read opens each of 40 records once;
+  - three later whole-directory reads open no file and stat no record;
+  - one changed record costs one open; a deleted record costs nothing; an added one costs one open;
+  - a write of this process is followed by a read with no open and no stat;
+  - a read-modify-write (a record, `tag-colors.json`, `tags.json`) reads the file, not a stale cached
+    copy (staged with an equal-size rewrite at the same modification time);
+  - the write-order guard, staged through a test seam (`SetSessionStoreParseHookForTests`);
+  - four reader threads beside a writer: no deadlock, no torn record.
+- **Negative controls** on a scratch copy of `SessionStore.cpp`: the fast path off, the write-through
+  off, the record read-modify-write through the cache, and the guard off. Each one fails the check that
+  guards it; the unchanged copy fails none.
+- `TestRegistryLeanReads`: `HeadlinesOf` (the asked order, an unknown id left out, an archived record
+  answered, the newer of the two activity stamps, the stored record untouched).
+- **The harness** (isolated copy, scratch profile): 6,164 checks, 3 failures, the known taskbar-badge
+  baseline (HEAD: 6,097 checks, the same 3).
+  - In 3 of 18 runs (13 on earlier states of this change, 5 on the final one) one real-time scheduler
+    check failed too: "woken tab: the queue resumes by itself one settle window after the start" twice,
+    "question cleared: the queued prompt fires" once. All three were on the earlier states. Those checks
+    sleep for fixed times and do not touch the store.
+  - The HEAD build, without this change, shows the same class: run 5 times in turn with the changed build,
+    it failed "the held prompt self-releases once the status held for the full window" once, and the
+    changed build failed none of them in those 5 runs. The machine was under load each time (a compile or
+    a syntax sweep).
+- **Not built.** All 89 TUs of `TerminalAppLib` pass `cl /Zs` with the last Debug build's recorded command
+  lines (`/W3 /WX` and the five always-error warnings) against its PCH (`pch.cpp` is skipped: it would
+  rewrite the PCH). Three probes show that the check reads the changed headers: a correct use compiles, a
+  wrong `static_assert` fails with C2338, and a call with too few arguments fails with C2660.
+
+### 11f. Check after the build
+
+- hooks.log has one `[engine] session store warmed:` line shortly after start. Its file-read count is
+  about the number of files in `session-store\`.
+- Open the Tags panel from a tab's context menu. It opens at once, the first time too.
+- Open it in the first second after the app starts. The list reads "Loading tags…" and then fills; hooks.log
+  has a `[tags] the session store was not read yet …` line. Type a name meanwhile: the "+" appears when
+  the list is in.
+- Toggle several tags quickly. Each check mark flips at once. The tab's ribbons, the side-panel card, the
+  board card and the Sessions row follow.
+- With the Sessions page open and a tag chip picked, untag the listed session: its row leaves the table.
+- Recolor a tag (pick a swatch, add the existing name again): every carrier's ribbon changes on the tab
+  strip, the board, the side panel and the Sessions page.
+- Tag a session in window A: window B's side panel shows it within ~2.5 s, and window B's board at its
+  next rebuild.
+- Rest the pointer on a tag ribbon: the hover panel opens without a pause and lists the carriers.
+- In a `stacksnap` profile taken while tags are toggled, there is no `LoadAllSessionStoreFieldIn` →
+  `ParseRecord` stack on the UI thread, and no `SessionRegistry::Snapshot` under `_RebuildTagEditorList`.
+
+### 11g. Not changed
+
+- `_SidePanelRebuildCards` still re-reads every rendered card's tags after a tag edit (one stat per card),
+  because the tag epoch is one counter for all sessions.
+- `_RefreshAllTabTags` (a recolor) still re-asserts every hosted tab, tagged or not.
+- A tag toggle on the Sessions page with a tag facet picked still rebuilds the whole table.
+- The Sessions gather still calls `LoadAllStoredSessionTitles`, `LoadAllFavoriteSessions` and
+  `LoadAllSessionTags` one after the other. With the scan cache that is three directory listings.
+- A tag written by another PROCESS to the same profile is not seen by the board's and the side panel's
+  tag caches until the epoch moves. No other process writes tags today.

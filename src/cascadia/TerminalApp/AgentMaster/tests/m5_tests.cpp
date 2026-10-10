@@ -117,6 +117,7 @@ int wmain()
     TestCodexObserve();
     TestTranscriptStore();
     TestSessionTags();
+    TestSessionStoreScanCache(); // tags perf: the session store's scan cache, by counting file opens (tests_transcript.cpp)
     TestExtractPathsFromText();
     TestInferWorkingDirectory();
     TestConversationLineage();

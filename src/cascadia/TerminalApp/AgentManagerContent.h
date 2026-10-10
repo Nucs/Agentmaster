@@ -199,6 +199,20 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: force a UI redraw (board/tree/plan) from the current data — the page calls this
         // after an out-of-band reload (the observer survey lands asynchronously) so fresh data shows.
         void RefreshNow();
+        // Agentmaster (tags perf, 2026-10-10): a bookmark tag was added to, removed from or recolored on a
+        // session. Tags live in the SessionStore, never the registry, so no registry notify reports the
+        // change; the page calls this after every tag edit of this window (TerminalPage::
+        // _RefreshManagerBoardTags). It replaced a RefreshNow() there, which cost more than a tag needs:
+        //   - HIDDEN (a tab is on screen — where the Tags panel is used most): only the dirty flag is set,
+        //     and SetLensVisible(true) runs the one catch-up rebuild. RefreshNow's hidden branch also
+        //     re-evaluated the keep-awake hold, which in the While-running mode deep-copies every live
+        //     session; a tag cannot change that hold.
+        //   - VISIBLE: only the BOARD is rebuilt (the cards' ribbons, the header's tag chips, and which
+        //     cards pass the tag filter). The Explorer Tree and the Prompt Queue show no tag, so they keep
+        //     their elements, their scroll position and their focus.
+        // UI thread only. No-op before the layout is built.
+        //   throws - what a board rebuild throws (XAML element creation; std::bad_alloc). Nothing while hidden.
+        void NoteTagsChanged();
         // Agentmaster (perf — the hidden-lens rebuild tax): is this Manager's content ON SCREEN (the
         // window's Agent Manager page shown)? The page drives it from the page show/hide + the tab-switch
         // funnel. While HIDDEN, every refresh trigger — a registry notify, the 30s timing tick, a
@@ -312,7 +326,14 @@ namespace winrt::TerminalApp::implementation
 
     private:
         void _BuildLayout();
-        void _Refresh();
+        // The lens rebuild every refresh trigger funnels through (the hidden-lens gate lives here).
+        //   boardOnly - false (every caller but one): the board, the tree, the plan, the Summary tab, the
+        //               toolbar counts and the keep-awake hold. true (NoteTagsChanged): the board alone,
+        //               from a fresh live snapshot — for a change only the board can show. The tree then
+        //               keeps the state of the last full rebuild; any registry change still brings its own
+        //               full one. While the lens is hidden both forms only mark it dirty.
+        //   throws    - what the XAML rebuilds throw; std::bad_alloc.
+        void _Refresh(bool boardOnly = false);
         void _RefreshFromRegistryEvent(); // Agentmaster (perf): the registry-notify path into _Refresh — trailing-throttled (min gap between event-driven full rebuilds; the trailing edge always runs); UI thread
         void _RebuildBoard(const std::vector<::Agentmaster::SessionInfo>& sessions);
         void _RebuildTree(const std::vector<::Agentmaster::SessionInfo>& sessions);
@@ -999,14 +1020,32 @@ namespace winrt::TerminalApp::implementation
         std::unordered_map<std::wstring, winrt::Windows::UI::Xaml::Controls::Button> _boardCardsById;
         std::unordered_map<std::wstring, winrt::Windows::UI::Xaml::Controls::Button> _treeRowsById;
         // Agentmaster (bookmark tags): the LIVE sessions' tags + the user-picked tag colors,
-        // re-read from the SessionStore at the top of every _RebuildBoard (one tiny per-session
-        // file each — most sessions have none — plus one tag-colors.json read, only when something
-        // is tagged; rebuilds are event-driven, never per-tick) so _MakeCard can hang each card's
-        // bookmark ribbons out of its title band. Same-window fresh (a tag edit triggers a board
+        // refreshed at the top of every _RebuildBoard so _MakeCard can hang each card's bookmark
+        // ribbons out of its title band. Same-window fresh (a tag edit triggers a board
         // refresh via the page); another window's edits land on its next rebuild — the tab badges'
         // accepted cross-window staleness.
+        // Since 2026-10-10 the tags come from _boardTagsCache (below), not from one store read per card
+        // per rebuild; the colors are one LoadAllTagColors per rebuild, which the store answers from its
+        // own cache for the cost of one stat.
         std::unordered_map<std::wstring, std::vector<std::wstring>> _boardTags;
         std::map<std::wstring, std::wstring> _boardTagColors; // folded tag name -> "#AARRGGBB" (empty when no live session is tagged)
+        // Agentmaster (tags perf, 2026-10-10): every shown session's tag list as last read — an EMPTY
+        // list included, since "untagged" is what most sessions cache — valid for the tag epoch it was
+        // read at (_boardTagsEpoch). _RebuildBoard used to call GetSessionTags for every card on every
+        // rebuild: one file stat and a record copy per card, up to four rebuilds a second while the
+        // Manager is on screen (~466 cards in the release's biggest window). Now a rebuild reads a
+        // session's tags only when that session is new to the board, or after
+        // ::Agentmaster::SessionTagsEpoch() moved — a tag or a tag color changed somewhere in this
+        // process, any window — which drops the whole cache (the side panel's rule, SIDE_PANEL.md §2c).
+        // ⚠ NOT seen: a tag written by ANOTHER process to the same profile, until the epoch next moves or
+        // the session leaves the board and returns. No other process writes tags today (the CLI only
+        // reads), and two instances on one profile already draw the profile-mutex warning.
+        // Pruned to the shown sessions on each rebuild, so it cannot grow with every session that ever
+        // crossed the board.
+        std::unordered_map<std::wstring, std::vector<std::wstring>> _boardTagsCache;
+        // The tag epoch _boardTagsCache was read at. Starts at a value SessionTagsEpoch never returns, so
+        // the first rebuild always reads.
+        uint64_t _boardTagsEpoch{ UINT64_MAX };
         // Agentmaster (bookmark tags): the board's picked TAG FILTER — display-cased names in click
         // order; empty == no filter. OR semantics (a card passes when it carries ANY picked tag), the
         // deliberate difference from the Sessions browser's AND — see _BoardTagFilterAccepts. Part of

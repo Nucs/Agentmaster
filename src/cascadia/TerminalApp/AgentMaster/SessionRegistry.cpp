@@ -440,6 +440,25 @@ namespace Agentmaster
         return out;
     }
 
+    std::vector<SessionHeadline> SessionRegistry::HeadlinesOf(const std::vector<std::wstring>& ids) const
+    {
+        std::vector<SessionHeadline> out;
+        out.reserve(ids.size()); // before the lock: the one allocation that needs no registry state
+        std::lock_guard guard{ _mtx };
+        for (const auto& id : ids)
+        {
+            const auto it = _sessions.find(id);
+            if (it == _sessions.end())
+            {
+                continue; // unknown (never loaded, or removed): the caller falls back to its own source
+            }
+            const SessionInfo& s = it->second;
+            // (std::max) parenthesized: windows.h's max macro.
+            out.push_back(SessionHeadline{ s.id, s.title, s.state, s.live, (std::max)(s.lastActivityUnixMs, s.convLastActivityUnixMs) });
+        }
+        return out;
+    }
+
     std::vector<SessionInfo> SessionRegistry::SnapshotLiveForScan() const
     {
         std::lock_guard guard{ _mtx };

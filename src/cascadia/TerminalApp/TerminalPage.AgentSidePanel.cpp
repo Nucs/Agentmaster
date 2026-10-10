@@ -1778,7 +1778,9 @@ namespace winrt::TerminalApp::implementation
 
     // A bookmark tag was added to, removed from, or recolored on a session FROM THIS WINDOW: the Tags
     // panel's two mutation paths (_ToggleSessionTag, _CommitTagEditorAdd) call this right after the
-    // board's _RefreshManagerBoardTags. Tags live in the SessionStore, never the registry, so no
+    // board's _RefreshManagerBoardTags. (Since 2026-10-10 they reach both through
+    // _QueueTagSurfacesRefresh -> _RunTagSurfacesRefresh, ~40 ms after the last edit, so the Tags panel's
+    // own list is rebuilt first; the order here is unchanged.) Tags live in the SessionStore, never the registry, so no
     // registry drain will ever report the change — without this call the cards' top-right ribbons would
     // keep showing the old tags until some unrelated session happened to change. Same-window instant,
     // like the tab badges and the board; another window's side panel catches up on its own next rebuild

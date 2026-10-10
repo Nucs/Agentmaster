@@ -448,6 +448,22 @@ namespace winrt::TerminalApp::implementation
         _Refresh();
     }
 
+    // Agentmaster (tags perf, 2026-10-10): see the header. A tag edit reaches this lens through here
+    // instead of RefreshNow, because a tag changes only what the BOARD shows.
+    void AgentManagerContent::NoteTagsChanged()
+    {
+        if (!_lensVisible)
+        {
+            // Nothing on screen to repaint: owe the one catch-up rebuild SetLensVisible(true) runs. This is
+            // the whole hidden branch on purpose — _Refresh's own also re-evaluates the keep-awake hold
+            // (a SnapshotLive deep copy in the While-running mode), and no tag can change that hold. The
+            // Tags panel is used mostly from a terminal tab, so this is the path nearly every toggle takes.
+            _refreshDirty = true;
+            return;
+        }
+        _Refresh(true /* boardOnly: the tree and the Prompt Queue show no tag */);
+    }
+
     // Agentmaster (perf — the hidden-lens rebuild tax): see the header. The catch-up rebuild runs
     // synchronously here so the page's follow-on steps in the tab-switch funnel (BringSelectedIntoView,
     // the selection highlight) see the rebuilt cards/rows.
@@ -1877,7 +1893,7 @@ namespace winrt::TerminalApp::implementation
         _refreshDelayTimer.Start();
     }
 
-    void AgentManagerContent::_Refresh()
+    void AgentManagerContent::_Refresh(const bool boardOnly)
     {
         if (!_root || !_boardHost || !_treeHost || !_planListHost)
         {
@@ -1946,12 +1962,21 @@ namespace winrt::TerminalApp::implementation
         _cardWarmShown.clear();
         _RebuildBoard(sessions);
         _SyncProgressTimer(); // Agentmaster: run the 1s countdown-bar drainer iff any Waiting-for-you bar is now tracked
-        _RebuildTree(sessions);
-        _RebuildPlan(sessions);
-        _RefreshSummaryTab(); // Agentmaster: refresh the Summary tab (cheap; no-op unless that tab is active)
-        _UpdateReopenButton();
-        _UpdateActivateAllButton(); // Agentmaster (eager-init): recount this window's dormant tabs -> label + show/hide
-        _RefreshKeepAwakeHold(&sessions); // Agentmaster: WhileRunning mode tracks the fleet live (no-op for Off/Always)
+        // Agentmaster (tags perf, 2026-10-10): a BOARD-ONLY refresh stops here. Its one caller is
+        // NoteTagsChanged — a bookmark tag shows on the board's cards and header chips and nowhere below,
+        // so the tree, the plan, the Summary tab, the two toolbar counts and the keep-awake hold are left
+        // exactly as the last full rebuild made them (their elements, scroll offsets and focus included).
+        // The focus-restore step after this block still runs: it puts focus back on a rebuilt CARD, and
+        // a tree row that held it was never torn down.
+        if (!boardOnly)
+        {
+            _RebuildTree(sessions);
+            _RebuildPlan(sessions);
+            _RefreshSummaryTab(); // Agentmaster: refresh the Summary tab (cheap; no-op unless that tab is active)
+            _UpdateReopenButton();
+            _UpdateActivateAllButton(); // Agentmaster (eager-init): recount this window's dormant tabs -> label + show/hide
+            _RefreshKeepAwakeHold(&sessions); // Agentmaster: WhileRunning mode tracks the fleet live (no-op for Off/Always)
+        }
 
         // Re-focus the same card/row if a tagged one held focus and still exists post-rebuild (it may
         // have moved columns on a state change, or be gone if archived — then we leave focus be). The

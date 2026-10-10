@@ -5014,6 +5014,316 @@ void TestSessionTags()
     }
 }
 
+// --- SessionStore SCAN CACHE (tags perf, 2026-10-10) --------------------------------------------
+// The whole-directory reads (LoadAllSessionStoreFieldIn and the typed wrappers over it) used to open
+// and parse EVERY record file on every call: ~85 ms per call on the release profile's 2,181 records
+// (the user reported more than 5 s for the first call of a run), on the UI thread each time the Tags
+// panel opened or a tag was toggled. They now list the directory once and take each record from the in-process cache when the
+// listing's (size, mtime) equals the cached stamp.
+// This test proves the COST promises by counting file opens (SessionStoreRecordFileReads), not by
+// timing: the first read of a directory opens each record once; a repeated read opens none; one
+// changed record costs one open. It proves the CORRECTNESS around them too: an external change, add
+// or delete is seen; a read-modify-write never writes a stale cached copy back; the warm flag; and
+// readers on several threads beside a writer.
+// External writes go through MakeJsonl with EXPLICIT modification times, so no check depends on the
+// file system's timestamp granularity.
+
+// The write-order guard check's shared state: the parse hook is a plain function pointer (the store's
+// test seam takes no closure), so what it writes, and where, lives here. Set and cleared by
+// TestSessionStoreScanCache around the one read that uses it.
+static std::wstring s_scanGuardStore; // the store directory of the staged record
+static std::wstring s_scanGuardSid; // its session id
+static bool s_scanGuardRan = false; // the hook has done its one write
+
+void TestSessionStoreScanCache()
+{
+    std::wprintf(L"\n[TestSessionStoreScanCache]\n");
+
+    wchar_t tmp[MAX_PATH]{};
+    ::GetTempPathW(MAX_PATH, tmp);
+    const std::wstring root = std::wstring{ tmp } + L"am_scancache_" + std::to_wstring(::GetCurrentProcessId());
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::path{ root }, ec);
+
+    // A session id for record number i (a GUID-shaped stem, as the real store holds).
+    const auto sidOf = [](int i) {
+        wchar_t b[40]{};
+        ::swprintf(b, 40, L"%08x-0000-4000-8000-000000000000", static_cast<unsigned>(i));
+        return std::wstring{ b };
+    };
+    // A record file's bytes in the store's own format (a JSON object of string members). Every value
+    // used here is ASCII, so narrowing the dump gives valid UTF-8.
+    const auto recordBytes = [](const std::vector<std::pair<std::wstring, std::wstring>>& fields) {
+        auto o = json::Value::MkObj();
+        for (const auto& [k, v] : fields)
+        {
+            o.Set(k, json::Value::MkStr(v));
+        }
+        const std::wstring dumped = json::Dump(o);
+        return std::string(dumped.begin(), dumped.end());
+    };
+
+    // --- a directory that does not exist: nothing to read, and it then counts as warm ---
+    {
+        const std::wstring missing = root + L"\\missing";
+        CHECK(!SessionStoreScanIsWarmIn(missing), "scan cache: a directory is not warm before its first whole read");
+        CHECK(!SessionStoreScanIsWarmIn(L""), "scan cache: an empty directory name is never warm");
+        CHECK(WarmSessionStoreIn(L"") == 0, "scan cache: warming an empty directory name does nothing");
+        CHECK(LoadAllSessionTagsIn(missing).empty(), "scan cache: a missing directory reads as no tags");
+        CHECK(SessionStoreScanIsWarmIn(missing), "scan cache: a missing directory counts as warm after one read (nothing in it to open)");
+    }
+
+    // --- 40 records written BEHIND the store's back (another run's files): cold -> warm ---
+    const std::wstring store = root + L"\\store";
+    std::filesystem::create_directories(std::filesystem::path{ store }, ec);
+    constexpr int kRecords = 40;
+    const std::wstring tagged1 = sidOf(3);
+    const std::wstring tagged2 = sidOf(17);
+    for (int i = 0; i < kRecords; ++i)
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> fields;
+        wchar_t title[16]{};
+        ::swprintf(title, 16, L"T%02d", i);
+        fields.emplace_back(L"title", title);
+        if (i == 3)
+        {
+            fields.emplace_back(kSessionStoreTagsKey, EncodeTagList({ L"bug", L"perf" }));
+        }
+        if (i == 17)
+        {
+            fields.emplace_back(kSessionStoreTagsKey, EncodeTagList({ L"Bug" }));
+            fields.emplace_back(kSessionStoreFavoriteKey, L"1");
+        }
+        MakeJsonl(store + L"\\" + sidOf(i) + L".json", recordBytes(fields), 1'000'000 + i, 1'000'000 + i);
+    }
+    // Entries the listing must skip, as the old per-file scan did: a non-record file, a record-looking
+    // name in the wrong case, and a DIRECTORY whose name ends in ".json".
+    MakeJsonl(store + L"\\notes.txt", "not a record", 1'000'000, 1'000'000);
+    MakeJsonl(store + L"\\" + sidOf(900) + L".JSON", recordBytes({ { L"title", L"upper-case extension" } }), 1'000'000, 1'000'000);
+    std::filesystem::create_directories(std::filesystem::path{ store + L"\\" + sidOf(901) + L".json" }, ec);
+
+    CHECK(!SessionStoreScanIsWarmIn(store), "scan cache: a directory with unread records is not warm");
+    {
+        const uint64_t before = SessionStoreRecordFileReads();
+        CHECK(WarmSessionStoreIn(store) == kRecords, "scan cache: the warm-up visits every record file (and only record files)");
+        CHECK(SessionStoreRecordFileReads() - before == kRecords, "scan cache: the FIRST read of a directory opens each record exactly once");
+        CHECK(SessionStoreScanIsWarmIn(store), "scan cache: the directory is warm after the pass");
+    }
+    {
+        const uint64_t before = SessionStoreRecordFileReads();
+        const uint64_t statsBefore = SessionStoreRecordFileStats();
+        const auto tags = LoadAllSessionTagsIn(store);
+        CHECK(tags.size() == 2 && tags.count(tagged1) == 1 && tags.count(tagged2) == 1, "scan cache: LoadAll tags finds the two tagged records");
+        CHECK(tags.count(tagged1) == 1 && tags.at(tagged1).size() == 2 && tags.at(tagged1)[0] == L"bug" && tags.at(tagged1)[1] == L"perf",
+              "scan cache: a record served from the cache carries its real tag list");
+        const auto titles = LoadAllSessionStoreFieldIn(store, kSessionStoreTitleKey);
+        CHECK(titles.size() == kRecords && titles.count(sidOf(0)) == 1 && titles.at(sidOf(0)) == L"T00" && titles.at(sidOf(39)) == L"T39",
+              "scan cache: LoadAll titles returns every record (the skipped entries are not records)");
+        const auto favorites = LoadAllSessionStoreFieldIn(store, kSessionStoreFavoriteKey);
+        CHECK(favorites.size() == 1 && favorites.count(tagged2) == 1, "scan cache: LoadAll favorites returns the one starred record");
+        CHECK(SessionStoreRecordFileReads() == before, "scan cache: three whole-directory reads of a WARM directory open NO file (the old scan opened 120)");
+        CHECK(SessionStoreRecordFileStats() == statsBefore,
+              "scan cache: and they stat NO record either - the fast path trusts the directory listing's stamp (the listing and the per-file stat report one stamp)");
+    }
+    {
+        // The per-session reads use the same cache, so they agree with the whole-directory read and cost
+        // no open either: one stat each, the cache's validation.
+        const uint64_t before = SessionStoreRecordFileReads();
+        const uint64_t statsBefore = SessionStoreRecordFileStats();
+        const auto t = GetSessionTagsIn(store, tagged1);
+        CHECK(t.size() == 2 && t[0] == L"bug" && t[1] == L"perf", "scan cache: the per-session read agrees with the whole-directory read");
+        CHECK(GetSessionStoreFieldIn(store, sidOf(5), kSessionStoreTitleKey) == L"T05", "scan cache: a single field comes out of the cached record");
+        CHECK(GetSessionStoreFieldIn(store, sidOf(5), kSessionStoreTagsKey).empty(), "scan cache: a key the record does not hold reads empty");
+        CHECK(SessionStoreRecordFileReads() == before, "scan cache: per-session reads of a warmed directory open no file");
+        CHECK(SessionStoreRecordFileStats() - statsBefore == 3, "scan cache: a per-session read costs exactly one stat (three reads, three stats)");
+    }
+
+    // --- an EXTERNAL change of one record: same size, a later modification time ---
+    {
+        MakeJsonl(store + L"\\" + sidOf(5) + L".json", recordBytes({ { L"title", L"X05" } }), 2'000'000, 2'000'000);
+        const uint64_t before = SessionStoreRecordFileReads();
+        const auto titles = LoadAllSessionStoreFieldIn(store, kSessionStoreTitleKey);
+        CHECK(titles.size() == kRecords && titles.at(sidOf(5)) == L"X05", "scan cache: a record changed by another writer is re-read (the stamp moved)");
+        CHECK(SessionStoreRecordFileReads() - before == 1, "scan cache: ONE changed record costs ONE file open");
+        CHECK(GetSessionStoreFieldIn(store, sidOf(5), kSessionStoreTitleKey) == L"X05", "scan cache: the per-session read sees the change too");
+    }
+    // --- an EXTERNAL delete and an EXTERNAL add ---
+    {
+        ::DeleteFileW((store + L"\\" + sidOf(6) + L".json").c_str());
+        MakeJsonl(store + L"\\" + sidOf(40) + L".json", recordBytes({ { L"title", L"T40" }, { kSessionStoreTagsKey, EncodeTagList({ L"new" }) } }), 3'000'000, 3'000'000);
+        const uint64_t before = SessionStoreRecordFileReads();
+        const auto titles = LoadAllSessionStoreFieldIn(store, kSessionStoreTitleKey);
+        CHECK(titles.size() == kRecords && titles.count(sidOf(6)) == 0 && titles.count(sidOf(40)) == 1,
+              "scan cache: a deleted record is no longer listed and an added one is");
+        CHECK(SessionStoreRecordFileReads() - before == 1, "scan cache: only the ADDED record is opened (a delete costs nothing)");
+        const auto tags = LoadAllSessionTagsIn(store);
+        CHECK(tags.size() == 3 && tags.count(sidOf(40)) == 1, "scan cache: the added record's tags join the universe");
+        CHECK(GetSessionStoreFieldIn(store, sidOf(6), kSessionStoreTitleKey).empty(), "scan cache: the deleted record reads empty per session too");
+    }
+
+    // --- a write by THIS process is written through: no re-read, even inside one timestamp tick ---
+    {
+        CHECK(AddSessionTagIn(store, sidOf(7), L"hot"), "scan cache: fixture tag add through the store");
+        const uint64_t before = SessionStoreRecordFileReads();
+        const uint64_t statsBefore = SessionStoreRecordFileStats();
+        const auto tags = LoadAllSessionTagsIn(store);
+        CHECK(tags.count(sidOf(7)) == 1 && tags.at(sidOf(7)).size() == 1 && tags.at(sidOf(7))[0] == L"hot",
+              "scan cache: a tag added through the store shows in the next whole-directory read");
+        CHECK(SessionStoreRecordFileReads() == before && SessionStoreRecordFileStats() == statsBefore,
+              "scan cache: the store's own write is cached write-through, so the next whole-directory read opens and stats no file (the stamp stored after the write is the one the listing reports)");
+        CHECK(RemoveSessionTagIn(store, sidOf(7), L"HOT"), "scan cache: fixture tag remove through the store");
+        CHECK(LoadAllSessionTagsIn(store).count(sidOf(7)) == 0, "scan cache: the removed tag is gone from the next whole-directory read");
+        // Removing a record's LAST key deletes its file; the whole-directory read must drop it.
+        CHECK(SetSessionStoreFieldIn(store, sidOf(8), kSessionStoreTitleKey, L""), "scan cache: fixture removal of a record's only key");
+        CHECK(LoadAllSessionStoreFieldIn(store, kSessionStoreTitleKey).count(sidOf(8)) == 0, "scan cache: a record the store deleted is no longer listed");
+    }
+
+    // --- a read-modify-write never writes a STALE cached copy back ---
+    // The cache validates by (size, mtime), so a change that keeps both is invisible to a READ until
+    // the stamp moves. A WRITE must not inherit that: it reads the file itself. Staged here by rewriting
+    // a file with equal-length content and the very same modification time behind the cache.
+    {
+        const std::wstring sid = sidOf(9);
+        const std::wstring path = store + L"\\" + sid + L".json";
+        MakeJsonl(path, recordBytes({ { L"title", L"AAA" } }), 4'000'000, 4'000'000);
+        CHECK(GetSessionStoreFieldIn(store, sid, kSessionStoreTitleKey) == L"AAA", "scan cache: fixture record cached");
+        MakeJsonl(path, recordBytes({ { L"title", L"BBB" } }), 4'000'000, 4'000'000); // same size, same time
+        CHECK(SetSessionStoreFieldIn(store, sid, L"note", L"n"), "scan cache: a second key written through the store");
+        CHECK(GetSessionStoreFieldIn(store, sid, kSessionStoreTitleKey) == L"BBB",
+              "scan cache: the record store's read-modify-write read the FILE, not the stale cache (the other writer's title survives)");
+    }
+    {
+        const std::wstring dir = root + L"\\colors";
+        std::filesystem::create_directories(std::filesystem::path{ dir }, ec);
+        const std::wstring path = dir + L"\\tag-colors.json";
+        MakeJsonl(path, "{\"bug\":\"#FF111111\"}", 5'000'000, 5'000'000);
+        CHECK(GetTagColorIn(dir, L"bug") == L"#FF111111", "tag files cache: fixture colors cached");
+        CHECK(GetTagColorIn(dir, L"BUG") == L"#FF111111", "tag files cache: a second read is served (same stamp)");
+        MakeJsonl(path, "{\"bug\":\"#FF222222\"}", 5'000'000, 5'000'000); // same size, same time: invisible to a read
+        CHECK(SetTagColorIn(dir, L"perf", L"#FF333333"), "tag files cache: another tag's color written through the store");
+        const auto all = LoadAllTagColorsIn(dir);
+        CHECK(all.size() == 2 && all.count(L"bug") == 1 && all.at(L"bug") == L"#FF222222" && all.at(L"perf") == L"#FF333333",
+              "tag files cache: SetTagColorIn's read-modify-write read the FILE, not the stale cache (the other writer's color survives)");
+        // An external rewrite whose stamp moves is seen by the next read.
+        MakeJsonl(path, "{\"bug\":\"#FF444444\",\"idea\":\"#FF555555\"}", 6'000'000, 6'000'000);
+        const auto later = LoadAllTagColorsIn(dir);
+        CHECK(later.size() == 2 && later.count(L"idea") == 1 && later.at(L"bug") == L"#FF444444", "tag files cache: an external rewrite is seen once the stamp moves");
+        ::DeleteFileW(path.c_str());
+        CHECK(LoadAllTagColorsIn(dir).empty(), "tag files cache: a deleted colors file reads empty (every tag back on its hash color)");
+    }
+    {
+        const std::wstring dir = root + L"\\registry";
+        std::filesystem::create_directories(std::filesystem::path{ dir }, ec);
+        const std::wstring path = dir + L"\\tags.json";
+        MakeJsonl(path, "[\"Alpha\"]", 7'000'000, 7'000'000);
+        CHECK(LoadKnownTagsIn(dir).size() == 1 && LoadKnownTagsIn(dir)[0] == L"Alpha", "tag files cache: fixture registry cached");
+        MakeJsonl(path, "[\"Gamma\"]", 7'000'000, 7'000'000); // same size, same time: invisible to a read
+        CHECK(RegisterKnownTagIn(dir, L"Beta"), "tag files cache: a tag registered through the store");
+        {
+            const auto k = LoadKnownTagsIn(dir);
+            CHECK(k.size() == 2 && k[0] == L"Gamma" && k[1] == L"Beta",
+                  "tag files cache: RegisterKnownTagIn's read-modify-write read the FILE, not the stale cache (the other writer's tag survives)");
+        }
+        MakeJsonl(path, "[\"Gamma\",\"Beta\",\"Zeta\"]", 8'000'000, 8'000'000);
+        CHECK(LoadKnownTagsIn(dir).size() == 3, "tag files cache: an external rewrite of the registry is seen once the stamp moves");
+        CHECK(UnregisterKnownTagIn(dir, L"gamma"), "tag files cache: unregister through the store");
+        {
+            const auto k = LoadKnownTagsIn(dir);
+            CHECK(k.size() == 2 && k[0] == L"Beta" && k[1] == L"Zeta", "tag files cache: the unregister is written through (the next read answers with it)");
+        }
+        ::DeleteFileW(path.c_str());
+        CHECK(LoadKnownTagsIn(dir).empty(), "tag files cache: a deleted registry reads empty");
+    }
+
+    // --- the WRITE-ORDER GUARD, staged through the store's test seam ---
+    // A reader misses the cache and parses the OLD file. Before it stores what it parsed, this process
+    // writes the record (the hook below). The reader must not put the old content back over that write.
+    // To make a lapse visible, the new file is given the OLD file's stamp: the new title has the old
+    // one's length, and the modification time is set back. That is the one case in which the stat
+    // validation cannot tell the files apart, so a stale entry would be served until the file changed
+    // again. (With different stamps the next read would heal it, and the lapse would go unseen.)
+    {
+        s_scanGuardStore = store;
+        s_scanGuardSid = sidOf(10);
+        s_scanGuardRan = false;
+        constexpr int64_t kOldTimeMs = 9'000'000;
+        const std::wstring path = store + L"\\" + s_scanGuardSid + L".json";
+        MakeJsonl(path, recordBytes({ { L"title", L"OLD" } }), kOldTimeMs, kOldTimeMs); // a new stamp: the next read misses
+        SetSessionStoreParseHookForTests([]() {
+            if (s_scanGuardRan)
+            {
+                return; // only the first miss is staged; the hook's own write parses without the cache
+            }
+            s_scanGuardRan = true;
+            // This process's own write, landing in the middle of the read.
+            SetSessionStoreFieldIn(s_scanGuardStore, s_scanGuardSid, kSessionStoreTitleKey, L"NEW");
+            // Give the new file the old file's modification time (its size is equal already).
+            const std::wstring p = s_scanGuardStore + L"\\" + s_scanGuardSid + L".json";
+            const HANDLE h = ::CreateFileW(p.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                const FILETIME m = UnixMsToFileTime(9'000'000);
+                ::SetFileTime(h, nullptr, nullptr, &m);
+                ::CloseHandle(h);
+            }
+        });
+        const std::wstring during = GetSessionStoreFieldIn(store, s_scanGuardSid, kSessionStoreTitleKey);
+        SetSessionStoreParseHookForTests(nullptr); // process-wide: never leave it set
+        CHECK(s_scanGuardRan, "scan cache: fixture - the staged read missed the cache and the hook wrote the record");
+        CHECK(during == L"NEW", "scan cache: a read that overlapped a write of this process answers with the WRITTEN record, not the older file it parsed");
+        CHECK(GetSessionStoreFieldIn(store, s_scanGuardSid, kSessionStoreTitleKey) == L"NEW",
+              "scan cache: the write-order guard - the older parse was not stored over the write, so the next read is right even under an equal stamp");
+        const auto titles = LoadAllSessionStoreFieldIn(store, kSessionStoreTitleKey);
+        CHECK(titles.count(s_scanGuardSid) == 1 && titles.at(s_scanGuardSid) == L"NEW", "scan cache: and the whole-directory read agrees");
+        s_scanGuardStore.clear();
+        s_scanGuardSid.clear();
+    }
+
+    // --- readers on several threads beside a writer: no deadlock, no torn result ---
+    // The visitors run under the cache lock; a visitor that called back into the store would hang here.
+    {
+        std::atomic<bool> stop{ false };
+        std::atomic<int> badReads{ 0 };
+        std::vector<std::thread> readers;
+        for (int t = 0; t < 4; ++t)
+        {
+            readers.emplace_back([&]() {
+                while (!stop.load(std::memory_order_relaxed))
+                {
+                    const auto tags = LoadAllSessionTagsIn(store);
+                    // tagged1 is never touched by the writer below: every read must hold it, whole.
+                    const auto it = tags.find(tagged1);
+                    if (it == tags.end() || it->second.size() != 2)
+                    {
+                        badReads.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    (void)GetSessionTagsIn(store, tagged2);
+                    (void)WarmSessionStoreIn(store);
+                }
+            });
+        }
+        const std::wstring churn = sidOf(20);
+        for (int i = 0; i < 60; ++i)
+        {
+            AddSessionTagIn(store, churn, L"churn");
+            RemoveSessionTagIn(store, churn, L"churn");
+        }
+        CHECK(AddSessionTagIn(store, churn, L"final"), "scan cache: fixture final tag while readers run");
+        stop.store(true, std::memory_order_relaxed);
+        for (auto& r : readers)
+        {
+            r.join();
+        }
+        CHECK(badReads.load() == 0, "scan cache: concurrent whole-directory reads never returned a torn or missing record");
+        const auto tags = LoadAllSessionTagsIn(store);
+        CHECK(tags.count(churn) == 1 && tags.at(churn).size() == 1 && tags.at(churn)[0] == L"final",
+              "scan cache: after the writer stops, the whole-directory read holds its last write");
+        CHECK(GetSessionTagsIn(store, churn) == tags.at(churn), "scan cache: and the per-session read agrees");
+    }
+
+    std::filesystem::remove_all(std::filesystem::path{ root }, ec);
+}
+
 // --- StripSummaryTableRules: COLLAPSE a one-line message's embedded tables (drop rules + de-frame) ---
 // When a summary message is flattened to one line (wrap-off panel / the always-one-line Sessions
 // detail), an embedded table is pure noise. The collapser (1) DROPS box-drawing "├──┼──┤" / markdown

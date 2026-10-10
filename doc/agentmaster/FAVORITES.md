@@ -70,6 +70,11 @@ Why `SessionStore` and **not** `SessionInfo.favorite`/`sessions.json` nor
   same property the durable *title* already has.
 - **One sparse scan** (`LoadAllSessionStoreField`) — only favorited sessions have a file; the
   Sessions page already runs the identical scan for titles (`LoadAllStoredSessionTitles`).
+  - **Correction (2026-10-10):** the store is not sparse in files. Every launched session gets a `title`
+    record, so the release profile held 2,181 files that day (52 with a star). The scan is cheap for
+    another reason now: it goes through the store's scan cache (one directory listing per call, and a
+    file is opened only when it is new or changed). Its first read in a process opens every file, so it
+    must not run on the UI thread. See UI_THREAD.md §11.
 - **No schema migration** anywhere. `sessions.json`, `settings.json`, `windows/<id>.json` are
   untouched.
 

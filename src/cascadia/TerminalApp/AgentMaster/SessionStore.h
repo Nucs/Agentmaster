@@ -20,8 +20,11 @@
 // One file per session => O(1) by id and cross-window-safe with NO whole-DB write contention
 // (independent files; an atomic temp+rename per write, deduped so an unchanged re-publish is a
 // single small read). Values are strings — JSON-encode richer data into a value when a future key
-// needs structure. The store stays SPARSE: only sessions we actually title/track get a file, so a
-// full LoadAll* scan is cheap.
+// needs structure. The store is sparse per KEY (a session without a tag has no `tags` key), but NOT in
+// files: every launched session gets a `title` record, so a profile holds thousands of them (the
+// release profile: 2,181 on 2026-10-10). A full LoadAll* scan is cheap all the same, because of the
+// SCAN CACHE (below, "whole-directory reads"): one directory listing per call, and a file is opened
+// only when it is new or changed since this process last read it.
 //
 // Pure C++/Win32 (the .cpp is <PrecompiledHeader>NotUsing and links into the standalone test
 // harness). The *In overloads take an explicit store dir for the tests; the bare wrappers resolve
@@ -111,7 +114,80 @@ namespace Agentmaster
 
     // Every session that has a NON-empty value for `key`, gathered in ONE directory scan
     // (sid -> value). Sparse: only sessions with a stored file are visited.
+    // Served through the scan cache (the next section): ONE directory listing, and a record file is
+    // opened only when it is new or changed since this process last read it. The first call of a process
+    // for a directory therefore reads every file once (the user reported more than 5 s for 2,181
+    // records) — a UI thread must not make that call; see SessionStoreScanIsWarmIn.
+    //   throws - std::bad_alloc.
     std::unordered_map<std::wstring, std::wstring> LoadAllSessionStoreFieldIn(const std::wstring& storeDir, const std::wstring& key);
+
+    // ===== whole-directory reads: the SCAN CACHE (tags perf, 2026-10-10) =====================
+    //
+    // Every LoadAll* function (LoadAllSessionStoreFieldIn and the typed wrappers over it: titles,
+    // favorites, tags) reads the whole store directory. Until 2026-10-10 each call opened, read and
+    // JSON-parsed EVERY record file. The Tags panel made that call on the UI thread when it opened and
+    // after every toggle, and a hover on a tag ribbon made it again: ~85 ms per call on the release
+    // profile's 2,181 records, measured with a warm disk cache. The user reported more than 5 s for the
+    // first open of the panel (not measured; a cold disk cache is the likely reason).
+    // Now a call lists the directory once (~3.5 ms for those 2,181 records, no file opened) and takes
+    // each record from the in-process record cache when the listing's (size, mtime) equals the cached
+    // stamp. Only a new or changed record is opened. The per-session reads (GetSessionTagsIn, ...) use
+    // the same cache, so the two can never disagree.
+    // What is left is the FIRST read of a directory in a process, which has nothing cached. These
+    // functions let a caller keep that read off its thread.
+
+    // Has this process completed one whole-directory read of `storeDir` (a LoadAll* call or a
+    // WarmSessionStoreIn)? When true, the next LoadAll* opens only records that changed since. When
+    // false, it opens every record: a UI thread should then show a placeholder, run WarmSessionStoreIn on
+    // a background thread, and read when that returns (the Tags panel and the tag hover panel do).
+    // ⚠ "Warm" is a statement about cost, never about freshness: a warm read still lists the directory
+    // and validates every record's stamp.
+    //   storeDir - the store directory; an empty one is never warm.
+    //   returns  - true once a whole-directory read completed. A directory that does not exist counts
+    //              (there is nothing in it to read), from the first read that found it missing.
+    //   throws   - std::bad_alloc.
+    bool SessionStoreScanIsWarmIn(const std::wstring& storeDir);
+
+    // Read every record of `storeDir` into the cache and mark the directory warm. Call it on a
+    // BACKGROUND thread: the first call of a process opens every record file. A later call costs one
+    // directory listing. Safe to call from several threads at once (two of them may then read the same
+    // file twice; the cache ends up the same).
+    //   storeDir - the store directory; an empty one does nothing.
+    //   returns  - the number of record files the directory holds (0 for an empty or missing directory).
+    //   throws   - std::bad_alloc. The directory is then not marked warm; the records read so far stay
+    //              cached.
+    size_t WarmSessionStoreIn(const std::wstring& storeDir);
+
+    // How many record files this process has opened to parse since it started. A diagnostic counter:
+    // the engine's warm-up logs it, and the harness reads it to prove the scan cache's promises (a
+    // repeated whole-directory read opens no file; one changed record costs one read). Never use it to
+    // decide behavior.
+    //   returns - the count; it only grows.
+    //   throws  - nothing.
+    uint64_t SessionStoreRecordFileReads() noexcept;
+
+    // How many times the record cache has STAT'ed a record file to validate a cached entry. The twin of
+    // SessionStoreRecordFileReads for the cheaper cost: a per-session read (GetSessionTagsIn, ...) pays one
+    // stat; a warm whole-directory read pays NONE, because it trusts the directory listing's stamp. The
+    // harness uses it to pin that fast path — a whole-directory read that fell back to one stat per record
+    // would still open no file, and so pass the other counter, while costing ~40 ms for 2,181 records.
+    // Diagnostic only, like its twin.
+    //   returns - the count; it only grows.
+    //   throws  - nothing.
+    uint64_t SessionStoreRecordFileStats() noexcept;
+
+    // TEST SEAM — the harness only; the app never calls it. Sets a function the record cache calls on a
+    // cache MISS, between parsing the record file and storing the result, on the reading thread with no
+    // lock held (so the hook may call the store). It exists to stage, deterministically, the interleaving
+    // the cache's write-order guard closes: a write of this process that lands while a reader still holds
+    // the older content it parsed. Without the guard that reader would store the older content over the
+    // write, and when the new file has the size and the timestamp of the old one, the stale record would
+    // be served until the file changed again.
+    // ⚠ Process-wide and not scoped: a test must reset it to nullptr before it returns, or every later
+    // cache miss of the process calls the hook.
+    //   hook   - the function to call, or nullptr to remove it.
+    //   throws - nothing.
+    void SetSessionStoreParseHookForTests(void (*hook)()) noexcept;
 
     // ===== live wrappers (resolve <AgentmasterStateDir>\session-store) =======================
 
@@ -119,6 +195,11 @@ namespace Agentmaster
     std::wstring GetSessionStoreField(const std::wstring& sessionId, const std::wstring& key);
     bool SetSessionStoreField(const std::wstring& sessionId, const std::wstring& key, const std::wstring& value);
     std::unordered_map<std::wstring, std::wstring> LoadAllSessionStoreField(const std::wstring& key);
+    // The live store's SessionStoreScanIsWarmIn / WarmSessionStoreIn (the same contracts). The engine
+    // starts one WarmSessionStore on a background thread at start-up (Engine.cpp), so the first Tags
+    // panel of a run normally finds the store warm.
+    bool SessionStoreScanIsWarm();
+    size_t WarmSessionStore();
 
     // ===== typed convenience: the TITLE =====================================================
 
@@ -203,6 +284,9 @@ namespace Agentmaster
     // carrier meanwhile (another window) simply stays alive via the derived union — a carried tag
     // can never be deleted. Its color entry (tag-colors.json) is kept on purpose: a re-created tag
     // REGAINS its color (the documented tag-colors feature).
+    // LoadKnownTagsIn is CACHED like LoadAllTagColorsIn (one stat per read, a re-parse only after the
+    // file's stamp moved; Register / Unregister write through and read the file itself for their
+    // read-modify-write).
     std::vector<std::wstring> LoadKnownTagsIn(const std::wstring& stateDir); // display-cased, CI-deduped, registration order
     bool RegisterKnownTagIn(const std::wstring& stateDir, const std::wstring& tag); // add (no-op success when already known); false on bad input / write error
     bool UnregisterKnownTagIn(const std::wstring& stateDir, const std::wstring& tag); // the explicit ✕ (CI; no-op success when absent)
@@ -219,7 +303,9 @@ namespace Agentmaster
     // tag order = the order the user added them). Return true when the stored list CHANGED.
     bool AddSessionTagIn(const std::wstring& storeDir, const std::wstring& sessionId, const std::wstring& tag);
     bool RemoveSessionTagIn(const std::wstring& storeDir, const std::wstring& sessionId, const std::wstring& tag);
-    // Every tagged session (sid -> its decoded tag list), in ONE sparse directory scan.
+    // Every tagged session (sid -> its decoded tag list), in ONE directory scan through the scan cache
+    // (LoadAllSessionStoreFieldIn: a listing, and only new or changed records opened). The Tags panel
+    // and the tag hover panel call it on the UI thread, so they first ask SessionStoreScanIsWarm.
     std::unordered_map<std::wstring, std::vector<std::wstring>> LoadAllSessionTagsIn(const std::wstring& storeDir);
 
     // ---- live wrappers (resolve <AgentmasterStateDir>\session-store) ----
@@ -243,6 +329,11 @@ namespace Agentmaster
     // shape-validated ("#RRGGBB" / "#AARRGGBB") on write AND on load, so a hand-mangled file can
     // never feed a garbage color into the UI. Concurrency: the same atomic temp+rename write as the
     // per-session records (read-modify-write of one small file; last writer wins).
+    // Reads are CACHED (tags perf, 2026-10-10): LoadAllTagColorsIn parses the file once and then answers
+    // from memory for the cost of one stat, until the file's (size, mtime) moves; SetTagColorIn writes
+    // through, and its own read-modify-write always reads the file itself. Every tag surface calls
+    // LoadAllTagColorsIn (each tagged tab's badge re-assert, every board rebuild, every Sessions render),
+    // so it must stay this cheap: never add a per-call file read back.
     std::map<std::wstring, std::wstring> LoadAllTagColorsIn(const std::wstring& stateDir); // folded name -> "#AARRGGBB"
     std::wstring GetTagColorIn(const std::wstring& stateDir, const std::wstring& tag); // "" when unset (use the hash fallback)
     bool SetTagColorIn(const std::wstring& stateDir, const std::wstring& tag, const std::wstring& hexOrEmpty); // "" removes; invalid hex/tag -> false, no write

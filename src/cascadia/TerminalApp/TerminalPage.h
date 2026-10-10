@@ -1621,7 +1621,7 @@ namespace winrt::TerminalApp::implementation
         void _SetTabAgentTags(const TerminalApp::Tab& tab, const std::vector<std::wstring>& tags); // low-level: resolve each tag's color (user-picked tag-colors.json > name-hash) + write TabStatus.AgentTagsSpec as "name\t#AARRGGBB" lines (idempotent); UI thread
         void _RefreshTabTags(const std::wstring& sessionId); // re-read GetSessionTags(sid) and (re)assert the badges + the tooltip's tag row on this window's hosting tab; map-miss no-op. Called at bind/launch + on toggle
         void _RefreshAllTabTags(); // re-assert badges on EVERY hosted tab — the recolor fan-out (an explicit swatch pick recoloring an existing tag repaints each hosted carrier)
-        void _RefreshManagerBoardTags(); // rebuild THIS window's Manager content now — a tag edit never touches the registry (no notify), so the Triage-Board cards' ribbons (re-read per _RebuildBoard) would otherwise stale until the next unrelated event
+        void _RefreshManagerBoardTags(); // tell THIS window's Manager content that a tag changed (AgentManagerContent::NoteTagsChanged) — a tag edit never touches the registry (no notify), so the Triage-Board cards' ribbons would otherwise stale until the next unrelated event. While the Manager page is hidden this only marks its lens dirty; while shown it rebuilds the board alone (since 2026-10-10; it was a full board + tree + plan rebuild)
         void _OpenTagEditorForTab(const TerminalApp::Tab& tab); // context-menu "Tags" (WT tab menu): open the panel for this tab's session, anchored under its TabViewItem
         void _OpenTagEditorForElement(const std::wstring& sessionId, const winrt::Windows::UI::Xaml::FrameworkElement& anchor); // the Sessions-row / Triage-Board-card / Explorer-tree-row "Tags" items: open for ANY session id, anchored under the clicked element
         void _OpenTagEditorAt(const std::wstring& sessionId, double x, double y); // the shared open: place + show at root-relative (x, y), deferred past the invoking flyout's close (its refocus must not fight the name box); re-randomizes the color pre-pick
@@ -1656,7 +1656,7 @@ namespace winrt::TerminalApp::implementation
         // _addPresetsHelpShowing (re-armed when the dialog closes, and in the catch). Never throws: the body is
         // contained, since an escape from a fire_and_forget would terminate the app.
         winrt::fire_and_forget _PromptAddPresets();
-        void _RebuildTagEditorList(); // re-list the GLOBAL tag universe (CollectGlobalTags over sessions ∪ the tags.json registry — max session activity desc, 0-carrier known tags last) with this session's on/off state per row, a right-aligned ✕ delete on 0-carrier rows, + the "K of N tags" footer
+        void _RebuildTagEditorList(); // re-list the GLOBAL tag universe (CollectGlobalTags over sessions ∪ the tags.json registry — max session activity desc, 0-carrier known tags last) with this session's on/off state per row, a right-aligned ✕ delete on 0-carrier rows, + the "K of N tags" footer. Since 2026-10-10: one cached store scan + one lean registry read; while the store is COLD it shows "Loading tags…" instead and the read runs on a pool thread (_WarmTagStoreThenRefresh) — it never opens the store's files on the UI thread
         void _CommitTagEditorAdd(); // the "+" button / Enter: normalize the typed name; an existing tag just applies to this session, a NEW name is cap-gated (AppSettings::maxTags) + takes the picker's color (an explicit pick also recolors an existing tag); re-randomizes the pick after a successful add
         void _UpdateTagEditorAddState(); // TextChanged: show the "+" only when the box holds a usable name; disable + hint when a NEW name would exceed the cap
         void _SelectTagEditorColor(const std::wstring& hex, bool userPicked); // ring the matching swatch + paint the "+" with the pick; userPicked marks an EXPLICIT choice (the only kind allowed to recolor an existing tag)
@@ -1678,6 +1678,37 @@ namespace winrt::TerminalApp::implementation
         std::wstring _tagEditorSessionId; // the session the open panel edits
         bool _tagEditorOutsideHooked{ false }; // the Root() outside-press dismissal handler is registered (once)
         std::vector<::Agentmaster::GlobalTagInfo> _tagEditorUniverse; // the global tag universe CACHED at open/toggle — the per-keystroke cap check must not re-scan the session-store dir
+        // Agentmaster (tags perf, 2026-10-10): is _tagEditorUniverse the REAL universe? False while the
+        // panel shows "Loading tags…" — the session store was cold when the list was last built, so it
+        // is being read on a pool thread (_WarmTagStoreThenRefresh) — and the universe above is empty
+        // only because it is unknown. While false the "+" stays hidden and Enter adds nothing
+        // (_UpdateTagEditorAddState, _CommitTagEditorAdd): an add against an unknown universe would take
+        // every name for new, so it would recolor an existing tag with the random pre-pick and could
+        // pass the tag limit. Set by _RebuildTagEditorList on every build of the list.
+        bool _tagEditorUniverseReady{ false };
+        // Agentmaster (tags perf, 2026-10-10): the COLD-STORE load. A whole read of the session store
+        // opens every record file the first time a process makes it (2,181 files on the release
+        // profile). The Tags panel made that read on the UI thread at its first open — the freeze the
+        // user reported, more than 5 s — and the tag hover panel at the first hover of a
+        // ribbon. Both now ask ::Agentmaster::SessionStoreScanIsWarm() first; when it says no, they
+        // show a "Loading" line and call _WarmTagStoreThenRefresh, which reads the store on a pool
+        // thread and then calls _OnTagStoreWarm on the UI thread to fill whichever of them is still
+        // open. The engine's start-up warm-up (Engine.cpp) normally makes the read first, so this path
+        // is for a panel opened in the first seconds of a run.
+        winrt::fire_and_forget _WarmTagStoreThenRefresh(); // read the store off the UI thread, then _OnTagStoreWarm; one pass at a time per window; holds no strong page reference across the hop; never throws
+        void _OnTagStoreWarm(); // UI thread: the store was just read — rebuild the open Tags panel's list and refill an open, still-loading hover panel (in place); never throws
+        std::shared_ptr<std::atomic<bool>> _tagStoreWarmInFlight{ std::make_shared<std::atomic<bool>>(false) }; // a _WarmTagStoreThenRefresh pass is running for this window. A shared atomic, not a plain member: the coroutine re-arms it on every exit, also from a pool thread after the window died, so it must not live in the page
+        // Agentmaster (tags perf, 2026-10-10): the DEFERRED repaint of the other tag surfaces. A tag
+        // edit in the Tags panel must also repaint the Sessions page (chips + the row), the Triage Board
+        // (card ribbons + chips) and the side panel's cards. Those repaints used to run inline, BEFORE
+        // the panel's own list was rebuilt, so a click on a tag row showed its check mark only after
+        // the board and the Sessions table were done. Now the panel answers first and the rest follows
+        // ~40 ms after the last edit; a burst of edits is repainted once.
+        void _QueueTagSurfacesRefresh(const std::wstring& sessionId, bool recolored); // remember the edit (recolored = an existing tag's color changed, so every carrier must repaint) and (re)start the one-shot timer; never throws (falls back to repainting at once)
+        void _RunTagSurfacesRefresh(); // the timer's tick: _SessionsNoteTagsChanged + _RefreshManagerBoardTags + _SidePanelNoteTagsChanged, each contained; never throws
+        winrt::Windows::UI::Xaml::DispatcherTimer _tagSurfacesTimer{ nullptr }; // one-shot, restarted by every _QueueTagSurfacesRefresh; its tick stops it through the sender, so it stops even after the page died
+        std::unordered_set<std::wstring> _tagSurfacesPendingIds; // the sessions whose tags changed since the last repaint (the Sessions page updates just their rows)
+        bool _tagSurfacesPendingRecolor{ false }; // an existing tag's color changed since the last repaint (forces the Sessions page's full re-render)
         // Agentmaster (bookmark tags): the rich TAG HOVER PANEL — hovering a tab-header bookmark
         // badge opens a popup listing EVERY session carrying that tag (title + status dot; a LIVE
         // row click jumps to its tab via _ActivateClaudeSession — cross-window). A popup rather
@@ -1689,6 +1720,7 @@ namespace winrt::TerminalApp::implementation
         void _OnTagBadgeHoverEnd(); // badge exit: cancel a pending open; grace-close an open panel
         void _EnsureTagHoverPopup(); // lazily build the popup + card + the two timers, parent into Root()
         void _ShowTagHoverPanelNow(); // the open timer fired: gather the tag's sessions + render rows + place at the pending anchor
+        void _FillTagHoverPanel(); // Agentmaster (tags perf, 2026-10-10): the panel's CONTENT alone (header + one row per carrier of the pending tag), without placing it — _ShowTagHoverPanelNow calls it and then places the panel; _OnTagStoreWarm calls it to refill a panel that opened on a cold store, where it stands. Warm store: one cached scan + one lean registry read (HeadlinesOf) for all carriers. Cold store: the header says "loading…", _tagHoverLoading is set and the store is read on a pool thread
         void _CloseTagHoverPopup(); // dismiss (grace timer / a row jump / tab switch)
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _tagHoverPopup{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Border _tagHoverCard{ nullptr }; // the hover-keepalive boundary (enter cancels the grace close)
@@ -1697,6 +1729,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::DispatcherTimer _tagHoverCloseTimer{ nullptr }; // one-shot ~300ms grace close
         winrt::hstring _tagHoverPendingTag; // the tag to show when the open timer fires
         winrt::Windows::UI::Xaml::UIElement _tagHoverPendingAnchor{ nullptr }; // the hovered badge (transformed into Root() space for placement)
+        bool _tagHoverLoading{ false }; // Agentmaster (tags perf, 2026-10-10): the open hover panel shows "loading…" instead of its rows — the store was cold when it was filled. _OnTagStoreWarm refills it only while this is set; _CloseTagHoverPopup clears it, so a load that lands after the close fills nothing
         void _UpdateManagerSelectionHighlight(); // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the pill — the hovered-or-selected managed session, only while the Agent Manager page is on screen; called on lens change, hover, tab switch, and page show
         void _RevealTabInStrip(const winrt::TerminalApp::Tab& tab, bool leaveFullyVisibleInPlace = false); // Agentmaster (tab-strip reveal): THE way to scroll a tab into view — every tab selection (_UpdatedSelectedTab), an Activate of the already-selected tab, the Manager's lens + card clicks. Virtualization-aware: a derealized (scrolled-far-off) TabViewItem is realized via the TabListView's ScrollIntoView first, then fine-adjusted — a bare StartBringIntoView silently NO-OPS on it. leaveFullyVisibleInPlace (the selection funnel) leaves a tab that is already wholly on screen exactly where it is; false (the card clicks) always lands it inside the pads
         bool _AdjustStripToRevealItem(const Microsoft::UI::Xaml::Controls::TabViewItem& tvi, bool leaveFullyVisibleInPlace); // Agentmaster: the precise reveal pass — measures the header against the strip's scroll VIEWPORT and applies DecideTabStripRevealOffset (TabDragMath.h) with ONE instant ChangeView; returns false while the item has no realized layout (virtualized out / pre-arrange / strip not laid out) so the caller realizes it and retries, true otherwise (incl. "already placed, nothing to do")
@@ -2005,6 +2038,40 @@ namespace winrt::TerminalApp::implementation
         void _ClearSessionsRowFilter(); // drop EVERY facet (the chip click / submenu "Clear filters") + re-render
         bool _SessionsRowPassesRowFilter(const _SessionsRow& r) const; // the AND-predicate over all active facets (true == keep) — the render chokepoint calls this
         void _RebuildSessionsTagChips(); // bookmark tags: re-list the header TAG CHIPS row from _sessionsTags (CollectGlobalTags — max row activity desc), selected state from _sessionsRowFilter.tags; prunes selected tags whose last carrier vanished; collapses the row when no tags exist
+        // Agentmaster (tags perf, 2026-10-10): the Sessions page's reaction to a tag edit made in the
+        // Tags panel. It used to be "_RebuildSessionsTagChips + _RenderSessionsTable" after EVERY edit —
+        // a full rebuild of every row of the table (each with its eager context menu), also while the
+        // page was hidden behind a tab, where nobody could see it. Now, from the cheapest case up:
+        //   - the page was never built: nothing;
+        //   - the page is HIDDEN: one flag (_sessionsTagsDirty); the page repaints when it comes back;
+        //   - the page is shown and the edit can change neither which rows are listed nor another row's
+        //     ribbons (no tag facet is picked, no color changed): the chips, and the changed rows' tag
+        //     cells in place (_UpdateSessionsRowTags);
+        //   - otherwise (a tag facet is picked — the row may have to appear or go — or a tag was
+        //     recolored — every carrier's ribbon changes): the chips and the whole table, as before.
+        // _sessionsTags must already hold the new tags (the Tags panel writes it before it queues this).
+        //   sessionIds - the sessions whose tag list changed.
+        //   recolored  - an existing tag's color changed.
+        // UI thread only. Throws what the XAML rebuilds throw; its one caller (_RunTagSurfacesRefresh) contains it.
+        void _SessionsNoteTagsChanged(const std::unordered_set<std::wstring>& sessionIds, bool recolored);
+        // Replace ONE row's Tags cell with the session's current ribbons (_sessionsTags), leaving the
+        // row, its other cells, its menu and its selection as they are.
+        //   sessionId - the session whose row to update.
+        //   returns   - true when the row is in the table (its cell was replaced or removed); false when
+        //               the session is not listed right now (filtered out, outside the window) — nothing to do.
+        // UI thread only; never call it from inside a pointer handler of that row (it edits the row's
+        // children). Throws what the XAML element build throws.
+        bool _UpdateSessionsRowTags(const std::wstring& sessionId);
+        // Build a row's Tags cell: up to four bookmark ribbons, centered, each wired to the rich tag hover
+        // panel; a fifth-or-more tag turns the fourth slot into a dim "+N". The ONE builder for the table
+        // render and the one-row update, so the two can never draw a cell differently. The cell is marked
+        // (its Tag) so the one-row update can find it again.
+        //   tags      - the session's tags, in the order to draw (non-empty; the callers check).
+        //   tagColors - one LoadAllTagColors() of the caller (folded name -> color; name-hash fallback per tag).
+        //   returns   - the cell, already assigned to the Tags column (0).
+        // UI thread only. Throws what the XAML element build throws.
+        winrt::Windows::UI::Xaml::Controls::StackPanel _MakeSessionsTagsCell(const std::vector<std::wstring>& tags, const std::map<std::wstring, std::wstring>& tagColors);
+        bool _sessionsTagsDirty{ false }; // a tag edit landed while the page was hidden: its chips and table are stale. Repainted, and cleared, when the page returns with the Manager (the overlay's onRestore) or re-gathers (_RefreshSessionsRows, which every explicit open runs)
         void _ToggleSessionsTagFilter(const std::wstring& tag); // bookmark tags: flip one tag in the facet (case-insensitive), then chip + chips row + table re-render
         bool _SessionsRowFilterMatchesAnchor(int kind, const _SessionsRow& r) const; // does the facet for `kind`'s dimension exist AND equal row r's value? (drives the submenu ✓ + the apply-toggle direction)
         std::unordered_set<std::wstring> _ComputeForkFamily(const std::wstring& anchorId) const; // the connected fork-graph component containing anchorId, over the gathered rows (forkedFromId edges, undirected)
@@ -2048,7 +2115,7 @@ namespace winrt::TerminalApp::implementation
         void _SidePanelResetCards(); // drop every card (Children().Clear() + the view map + the order mirror + the count text): the recovery when the list and its mirror disagree or an update failed midway; the next update rebuilds the list from empty. Never throws (a failing Clear is logged)
         void _SidePanelScheduleRebuild(bool force); // coalesced rebuild: force==true rebuilds now (user action); otherwise a rebuild within the min-gap only marks _sidePanelDirty (the periodic tick catches up) — and a COLLAPSED panel always defers (no pixels to show)
         void _SidePanelNoteRegistryChange(); // the registry batch-drain hook (UI thread): a session changed somewhere -> schedule a non-forced rebuild
-        void _SidePanelNoteTagsChanged(); // a bookmark tag changed from THIS window (the Tags panel's _ToggleSessionTag / _CommitTagEditorAdd): rebuild the cards NOW so their top-right ribbons follow (tags live in the SessionStore — no registry drain will report it); collapsed -> only marks dirty. Never throws (a failed rebuild is logged + left dirty for the periodic retry)
+        void _SidePanelNoteTagsChanged(); // a bookmark tag changed from THIS window (the Tags panel's _ToggleSessionTag / _CommitTagEditorAdd, through the deferred _RunTagSurfacesRefresh since 2026-10-10): rebuild the cards NOW so their top-right ribbons follow (tags live in the SessionStore — no registry drain will report it); collapsed -> only marks dirty. Never throws (a failed rebuild is logged + left dirty for the periodic retry)
         winrt::fire_and_forget _SidePanelPeriodicTick(); // liveness-probe rider (SCANNER thread; self-marshals like _ScanCacheWarmTabs — a terminate-netted fire_and_forget over the awaitable Impl): run the deferred dirty rebuild + the ~30s in-place timing-text refresh (no rebuild churn for a clock tick)
         winrt::Windows::Foundation::IAsyncAction _SidePanelPeriodicTickImpl(); // the awaitable body (resume_foreground first) so an exception propagates to _SidePanelPeriodicTick's catch instead of std::terminate
         void _SidePanelSelectSession(const std::wstring& id, bool driveManagerLens); // select a card (highlight + bind the summary below); driveManagerLens==true (a card click) also drives AgentManagerContent::SelectSession so the Manager lens follows — false for calls that ORIGINATE from the lens/tab funnel (re-entrancy guard: an already-selected id is a no-op)

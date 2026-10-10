@@ -2000,10 +2000,47 @@ void TestRegistryLeanReads()
     CHECK(!liveAgain.empty() && liveAgain[0].id == L"live-a" && liveAgain[0].queue.size() == 7 && liveAgain[0].pendingInput == L"an unsent draft",
           "SnapshotLive still copies whole records");
 
+    // --- HeadlinesOf (tags perf, 2026-10-10): five fields per ASKED id, live and archived alike ---
+    // Last among the reads on this fixture: it stamps activity onto the records first, and the checks
+    // above compare a lean copy with a full one taken earlier.
+    {
+        // Two activity stamps on the live record, the transcript-derived one the newer; the archived
+        // record gets only the hook-side one.
+        reg.Update(L"live-a", [](SessionInfo& s) {
+            s.lastActivityUnixMs = 5000;
+            s.convLastActivityUnixMs = 9000;
+        });
+        reg.Update(L"arch", [](SessionInfo& s) {
+            s.title = L"Archived One";
+            s.lastActivityUnixMs = 7000;
+        });
+        const std::vector<std::wstring> asked{ L"arch", L"nope", L"live-a", L"live-b", L"live-a" };
+        const auto heads = reg.HeadlinesOf(asked);
+        CHECK(heads.size() == 4, "HeadlinesOf: one headline per KNOWN asked id (the unknown id is left out, a repeated id answered twice)");
+        CHECK(heads.size() == 4 && heads[0].id == L"arch" && heads[1].id == L"live-a" && heads[2].id == L"live-b" && heads[3].id == L"live-a",
+              "HeadlinesOf: in the order asked");
+        CHECK(heads.size() == 4 && heads[0].title == L"Archived One" && !heads[0].live && heads[0].lastActivityUnixMs == 7000,
+              "HeadlinesOf: an ARCHIVED record answers too (a closed session can still carry a tag), with its hook-side activity");
+        CHECK(heads.size() == 4 && heads[1].title == L"Title A" && heads[1].live && heads[1].state == SessionState::WaitingForInput,
+              "HeadlinesOf: title, live and state as stored");
+        CHECK(heads.size() == 4 && heads[1].lastActivityUnixMs == 9000,
+              "HeadlinesOf: the activity is the NEWER of the hook-side and the transcript-derived stamp");
+        CHECK(heads.size() == 4 && heads[2].title.empty() && heads[2].lastActivityUnixMs == 0,
+              "HeadlinesOf: an untitled session with no recorded activity reads empty / 0");
+        const std::vector<std::wstring> nothing;
+        const std::vector<std::wstring> unknownOnly{ L"nope" };
+        CHECK(reg.HeadlinesOf(nothing).empty() && reg.HeadlinesOf(unknownOnly).empty(), "HeadlinesOf: nothing asked, or nothing known -> empty");
+        const auto stillFull = reg.Get(L"live-a");
+        CHECK(stillFull && stillFull->queue.size() == 7 && stillFull->pendingInput == L"an unsent draft",
+              "HeadlinesOf: the stored record is untouched");
+    }
+
     // --- an empty registry ---
     SessionRegistry empty;
     CHECK(empty.LiveTabBindings().empty() && empty.ManagedCodexTabTokens().empty() && empty.SnapshotLiveForScan().empty() &&
               empty.SnapshotLiveForCards().empty() && !empty.GetWithoutQueue(L"x").has_value() && empty.GetTabToken(L"x").empty(),
           "empty registry: every lean read is empty");
+    const std::vector<std::wstring> askedOfEmpty{ L"x", L"live-a" };
+    CHECK(empty.HeadlinesOf(askedOfEmpty).empty(), "empty registry: HeadlinesOf is empty too");
 }
 

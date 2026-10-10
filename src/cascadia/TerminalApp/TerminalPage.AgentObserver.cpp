@@ -1064,13 +1064,17 @@ namespace winrt::TerminalApp::implementation
     // would otherwise show stale tags until the next unrelated registry event. Same-window
     // instant, like the tab badges; another window's board catches up on its own next rebuild
     // (the accepted cross-window staleness). Safe when the Manager was never built (null get()).
+    // Agentmaster (tags perf, 2026-10-10): through NoteTagsChanged, not RefreshNow. While the Manager
+    // page is hidden — a tab is on screen, where the Tags panel is used most — that only marks the lens
+    // dirty; while it is shown, it rebuilds the board alone and leaves the tree and the Prompt Queue as
+    // they are (AgentManagerContent.h).
     void TerminalPage::_RefreshManagerBoardTags()
     {
         if (const auto ipc = _agentManagerContent.get())
         {
             if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
             {
-                mgr->RefreshNow();
+                mgr->NoteTagsChanged();
             }
         }
     }
@@ -1411,6 +1415,25 @@ namespace winrt::TerminalApp::implementation
     // lastActivityUnixMs and the transcript-derived convLastActivityUnixMs). Click toggles the
     // tag on the session being edited. Also refreshes the cached universe the per-keystroke
     // cap check reads (_tagEditorUniverse — never re-scan the store dir on TextChanged).
+    //
+    // Agentmaster (tags perf, 2026-10-10) — what this costs now, and why it has two outcomes.
+    // It runs on the UI thread at every open of the panel and after every toggle, add and delete. It
+    // used to (1) deep-copy the WHOLE registry for one number per session (Snapshot: 1,614 records and
+    // 7.1 million characters of queued-prompt text on the release profile) and (2) open and parse EVERY
+    // session-store file to find the tagged ones (2,181 files: ~85 ms each time, measured with a warm
+    // disk cache; the user reported more than 5 s for the first open — not measured, a cold disk cache
+    // is the likely reason). Now:
+    //   - the store is WARM (this process has read the whole directory once — normally the engine's
+    //     start-up warm-up): one directory listing (LoadAllSessionTags through the store's scan cache,
+    //     ~5 ms for those 2,181 records) and one lean registry read for the tagged sessions only
+    //     (HeadlinesOf). The list is built and _tagEditorUniverseReady is true.
+    //   - the store is COLD (the panel opened before that first read finished): the UI thread does NOT
+    //     read it. The list shows one "Loading tags…" line, _tagEditorUniverseReady is false — which
+    //     keeps the "+" and Enter from adding anything (see _UpdateTagEditorAddState) — and
+    //     _WarmTagStoreThenRefresh reads the store on a pool thread and calls this function again.
+    // Returns nothing. UI thread only.
+    // Throws: what the XAML row build throws, and std::bad_alloc; every caller runs it from a dispatcher
+    // callback, where the framework reports it.
     void TerminalPage::_RebuildTagEditorList()
     {
         if (!_tagEditorList)
@@ -1419,18 +1442,52 @@ namespace winrt::TerminalApp::implementation
         }
         _tagEditorList.Children().Clear();
 
-        std::unordered_map<std::wstring, int64_t> activity;
-        if (_sessionRegistry)
+        if (!::Agentmaster::SessionStoreScanIsWarm())
         {
-            for (const auto& s : _sessionRegistry->Snapshot())
+            // COLD: every record file would be opened here, on the UI thread. Show a placeholder and let a
+            // pool thread do it. The universe is unknown until then, so nothing may be added: an add that
+            // took a name for NEW when it already exists would recolor that tag with the random pre-pick
+            // and could pass the tag limit.
+            _tagEditorUniverse.clear();
+            _tagEditorUniverseReady = false;
+            TextBlock loading;
+            loading.Text(L"Loading tags\x2026");
+            loading.FontSize(11);
+            loading.Opacity(0.6);
+            _tagEditorList.Children().Append(loading);
+            if (_tagEditorCount)
             {
-                activity[s.id] = std::max(s.lastActivityUnixMs, s.convLastActivityUnixMs);
+                _tagEditorCount.Text(L""); // the "K of N tags" count is unknown until the store is read
+            }
+            _WarmTagStoreThenRefresh();
+            return;
+        }
+
+        // Every tagged session, through the scan cache: a directory listing, and only a record that
+        // changed since the last read is opened.
+        const auto tagsBySession = ::Agentmaster::LoadAllSessionTags();
+        // Activity ranks the tags (most recently active first) and picks each tag's display casing. Only
+        // the sessions that CARRY a tag can contribute, so only they are asked for — a handful of
+        // headlines, where Snapshot() copied every record of the registry with its whole prompt queue.
+        std::unordered_map<std::wstring, int64_t> activity;
+        if (_sessionRegistry && !tagsBySession.empty())
+        {
+            std::vector<std::wstring> carriers;
+            carriers.reserve(tagsBySession.size());
+            for (const auto& entry : tagsBySession)
+            {
+                carriers.push_back(entry.first);
+            }
+            for (const auto& headline : _sessionRegistry->HeadlinesOf(carriers))
+            {
+                activity[headline.id] = headline.lastActivityUnixMs;
             }
         }
         // The universe = every session's tags ∪ the durable KNOWN-TAG registry (tags.json), so a tag
         // whose last carrier was untagged stays listed at ·0 — re-appliable — until its row's ✕
         // explicitly deletes it (tag removal is deliberate, never a side effect of an untag).
-        _tagEditorUniverse = ::Agentmaster::CollectGlobalTags(::Agentmaster::LoadAllSessionTags(), activity, ::Agentmaster::LoadKnownTags());
+        _tagEditorUniverse = ::Agentmaster::CollectGlobalTags(tagsBySession, activity, ::Agentmaster::LoadKnownTags());
+        _tagEditorUniverseReady = true;
         const auto storedColors = ::Agentmaster::LoadAllTagColors(); // picker-chosen colors (hash fallback per row)
 
         std::unordered_set<std::wstring> mine; // folded — this session's tags
@@ -1568,6 +1625,11 @@ namespace winrt::TerminalApp::implementation
     // TextChanged: show the "+" only when the box holds a usable (normalized non-empty) name, and
     // gate it — disabled + a hint — when that name is NEW while the universe already sits at the
     // cap. Reads the CACHED universe (no store-dir scan per keystroke).
+    // While the universe is still LOADING (_tagEditorUniverseReady false — the store was cold when the
+    // panel opened, _RebuildTagEditorList), the "+" stays hidden and the hint says so: whether the typed
+    // name is new or existing, and whether the limit is reached, cannot be known yet. The load's
+    // completion calls this again (_OnTagStoreWarm), so the "+" appears by itself for a name typed
+    // meanwhile.
     void TerminalPage::_UpdateTagEditorAddState()
     {
         if (!_tagEditorBox || !_tagEditorAddBtn)
@@ -1581,6 +1643,16 @@ namespace winrt::TerminalApp::implementation
             if (_tagEditorHint)
             {
                 _tagEditorHint.Visibility(Visibility::Collapsed);
+            }
+            return;
+        }
+        if (!_tagEditorUniverseReady)
+        {
+            _tagEditorAddBtn.Visibility(Visibility::Collapsed);
+            if (_tagEditorHint)
+            {
+                _tagEditorHint.Text(L"Loading the tag list\x2026 you can add this tag in a moment.");
+                _tagEditorHint.Visibility(Visibility::Visible);
             }
             return;
         }
@@ -1658,10 +1730,19 @@ namespace winrt::TerminalApp::implementation
     // The "+" / Enter: add the typed tag to the session being edited. An existing name (case-
     // insensitive) just APPLIES it — reusing the canonical stored casing — while a NEW name is
     // cap-gated (the "+" is already disabled then; this re-check is the belt for a stale cache).
+    // Refused while the tag universe is still loading (_tagEditorUniverseReady false): Enter can reach
+    // this while the "+" is hidden, and with an empty universe every name would read as NEW — an
+    // existing tag would then be recolored with the random pre-pick and re-registered under the typed
+    // casing, and the limit could be passed. The typed text is kept, so Enter works once the list is in.
     void TerminalPage::_CommitTagEditorAdd()
     {
         if (_tagEditorSessionId.empty() || !_tagEditorBox)
         {
+            return;
+        }
+        if (!_tagEditorUniverseReady)
+        {
+            _UpdateTagEditorAddState(); // shows "Loading the tag list…" for the typed name
             return;
         }
         const std::wstring name = ::Agentmaster::NormalizeTagName(std::wstring{ _tagEditorBox.Text() });
@@ -1723,12 +1804,12 @@ namespace winrt::TerminalApp::implementation
                 _RefreshTabTags(_tagEditorSessionId);
             }
             // Sessions page live-sync (the _ToggleSessionTag idiom): reflect the new tag into an
-            // open page's cache + header chips + table; no-ops when the page was never built.
+            // open page's cache now (a map write); its chips + table, the Triage-Board cards' ribbons
+            // (tags never notify the registry) and the side panel's cards (whose ribbons ride the title
+            // band's top-right corner — a recolor too) are repainted a moment later, after this panel's
+            // own list — see _QueueTagSurfacesRefresh.
             _sessionsTags[_tagEditorSessionId] = ::Agentmaster::GetSessionTags(_tagEditorSessionId);
-            _RebuildSessionsTagChips();
-            _RenderSessionsTable();
-            _RefreshManagerBoardTags(); // Triage-Board card ribbons (tags never notify the registry)
-            _SidePanelNoteTagsChanged(); // ...and the side panel's cards, whose ribbons ride the title band's top-right corner (a recolor too)
+            _QueueTagSurfacesRefresh(_tagEditorSessionId, recolorExisting);
             _RandomizeTagEditorColor(); // hand the picker a fresh random color for the NEXT add
         }
         _tagEditorBox.Text(L"");
@@ -1769,8 +1850,10 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::LogNav((has ? L"tag remove \"" : L"tag add \"") + tag + L"\" sid=" + ::Agentmaster::ShortId(sessionId));
             _RefreshTabTags(sessionId);
             // Sessions page live-sync (the _ToggleSessionFavorite idiom): keep an open page's tag
-            // cache + header chips + table in step without a re-gather. All three are no-ops when
-            // the page was never built (null hosts).
+            // cache in step without a re-gather (a map write, done now). Its header chips + table, the
+            // Triage-Board cards' ribbons (tags never notify the registry) and the side panel's cards
+            // (whose ribbons ride the title band's top-right corner) are repainted a moment later, after
+            // this panel's own list — see _QueueTagSurfacesRefresh.
             auto tags = ::Agentmaster::GetSessionTags(sessionId);
             if (tags.empty())
             {
@@ -1780,10 +1863,7 @@ namespace winrt::TerminalApp::implementation
             {
                 _sessionsTags[sessionId] = std::move(tags);
             }
-            _RebuildSessionsTagChips();
-            _RenderSessionsTable();
-            _RefreshManagerBoardTags(); // Triage-Board card ribbons (tags never notify the registry)
-            _SidePanelNoteTagsChanged(); // ...and the side panel's cards, whose ribbons ride the title band's top-right corner
+            _QueueTagSurfacesRefresh(sessionId, false /* a toggle never changes a color */);
         }
         if (_tagEditorPopup && _tagEditorPopup.IsOpen())
         {
@@ -1811,6 +1891,202 @@ namespace winrt::TerminalApp::implementation
         {
             _RebuildTagEditorList();
             _UpdateTagEditorAddState();
+        }
+    }
+
+    // Agentmaster (tags perf, 2026-10-10): how long after the LAST tag edit the OTHER tag surfaces of
+    // this window are repainted (_QueueTagSurfacesRefresh). Long enough for the Tags panel's own list to
+    // be laid out and drawn first — two to three frames — and short enough to read as "at once".
+    static constexpr std::chrono::milliseconds kTagSurfacesRefreshDelay{ 40 };
+
+    // Agentmaster (tags perf, 2026-10-10): a tag was added to, removed from or recolored on a session
+    // from this window's Tags panel — repaint the OTHER surfaces of this window that show tags: the
+    // Sessions page (chips + the row), the Triage Board (card ribbons + chips) and the side panel's
+    // cards. NOT the session's tab badges (the caller repaints those at once — one cheap write) and not
+    // the panel's own list (the caller rebuilds it right after this call).
+    // Why later, and not inline as before: these repaints ran BEFORE the panel's own list was rebuilt,
+    // so a click on a tag row showed its check mark only after the board (rebuilt whole while the
+    // Manager is on screen) and the Sessions table (re-rendered whole) were done. Now the panel answers
+    // the click first, and the rest follows ~40 ms after the last edit (kTagSurfacesRefreshDelay).
+    // A burst of edits is repainted ONCE: each call restarts the timer and adds to the pending set.
+    //   sessionId - the session whose tags changed (remembered for the Sessions page's one-row update).
+    //   recolored - true when an existing tag's COLOR changed: every surface must then repaint every
+    //               carrier of that tag, not only this session.
+    // UI thread only. Never throws: if the timer cannot be armed, the repaint runs at once instead (the
+    // surfaces must not stay stale), and that failure is logged (Rule #18).
+    void TerminalPage::_QueueTagSurfacesRefresh(const std::wstring& sessionId, const bool recolored)
+    {
+        try
+        {
+            if (!sessionId.empty())
+            {
+                _tagSurfacesPendingIds.insert(sessionId);
+            }
+            _tagSurfacesPendingRecolor = _tagSurfacesPendingRecolor || recolored;
+            if (!_tagSurfacesTimer)
+            {
+                _tagSurfacesTimer = WUX::DispatcherTimer{};
+                _tagSurfacesTimer.Interval(kTagSurfacesRefreshDelay);
+                _tagSurfacesTimer.Tick([weak = get_weak()](const winrt::Windows::Foundation::IInspectable& sender, auto&&) {
+                    // One-shot. Stopped through the SENDER, so a timer that outlived its page (the page
+                    // died between the arm and this tick) still stops instead of ticking forever.
+                    if (const auto timer = sender.try_as<WUX::DispatcherTimer>())
+                    {
+                        timer.Stop();
+                    }
+                    if (const auto page = weak.get())
+                    {
+                        page->_RunTagSurfacesRefresh();
+                    }
+                });
+            }
+            _tagSurfacesTimer.Stop();
+            _tagSurfacesTimer.Start(); // restart: a burst of edits is repainted once, after the last one
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_QueueTagSurfacesRefresh: arm the repaint timer (repainting now instead)");
+            _RunTagSurfacesRefresh();
+        }
+    }
+
+    // The deferred repaint itself (the timer's tick, or _QueueTagSurfacesRefresh's fallback): take the
+    // pending edits and repaint each surface. Each surface on its own — one that fails must not cost the
+    // others their repaint — and none may throw out of a dispatcher callback.
+    // UI thread only. Never throws (each step is contained and logged, Rule #18).
+    void TerminalPage::_RunTagSurfacesRefresh()
+    {
+        std::unordered_set<std::wstring> sessionIds;
+        bool recolored = false;
+        try
+        {
+            sessionIds.swap(_tagSurfacesPendingIds);
+            recolored = std::exchange(_tagSurfacesPendingRecolor, false);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_RunTagSurfacesRefresh: take the pending edits");
+        }
+        try
+        {
+            _SessionsNoteTagsChanged(sessionIds, recolored); // chips + the changed rows (or one dirty flag while hidden)
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_RunTagSurfacesRefresh: the Sessions page");
+        }
+        try
+        {
+            _RefreshManagerBoardTags(); // Triage-Board card ribbons + chips (tags never notify the registry)
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_RunTagSurfacesRefresh: the Manager board");
+        }
+        _SidePanelNoteTagsChanged(); // the side panel's cards; contained in itself (it never throws)
+    }
+
+    // Agentmaster (tags perf, 2026-10-10): read the whole session store on a POOL thread, then refresh
+    // the tag surface that waits for it. Called by the two UI-thread readers of "every tagged session" —
+    // the Tags panel's list (_RebuildTagEditorList) and the tag hover panel (_FillTagHoverPanel) — when
+    // the store is COLD: this process has not yet read the whole directory, so the read would open every
+    // record file (2,181 on the release profile) on the UI thread. That read was the freeze the user
+    // reported at the first open of the Tags panel (more than 5 s).
+    // Normally the engine's start-up warm-up (Engine.cpp) has finished long before a panel opens and
+    // this never runs. It covers a panel opened in the first seconds of a run, and a warm-up that failed.
+    // One pass at a time per window: a second call while one is in flight returns at once (the pass in
+    // flight refreshes both surfaces when it lands).
+    // Holds NO strong page reference across the pool hop: if the window closes meanwhile, its last
+    // reference must never be released on a pool thread (the fire_and_forget teardown Gotcha). The
+    // in-flight flag is a shared atomic for the same reason — re-armed on every exit without touching
+    // the page.
+    // Never throws (a fire_and_forget must not: an escape is std::terminate): the pass and the hop back
+    // are contained and logged (Rule #18). After a FAILED pass nothing is refreshed — the surface keeps
+    // its "Loading" line rather than retrying in a loop; the next open of the panel tries again.
+    winrt::fire_and_forget TerminalPage::_WarmTagStoreThenRefresh()
+    {
+        const auto inFlight = _tagStoreWarmInFlight;
+        if (inFlight->exchange(true))
+        {
+            co_return; // a pass is already running for this window
+        }
+        // Re-arm on EVERY exit, from whichever thread the coroutine ends on. Captures the shared flag only.
+        auto rearm = wil::scope_exit([inFlight]() noexcept { inFlight->store(false); });
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+        try
+        {
+            co_await winrt::resume_background();
+
+            bool warmed = false;
+            try
+            {
+                const uint64_t startedAt = ::GetTickCount64();
+                const uint64_t readsBefore = ::Agentmaster::SessionStoreRecordFileReads();
+                const size_t records = ::Agentmaster::WarmSessionStore();
+                warmed = true;
+                // One line per cold load: it is the evidence that a panel had to wait, and for how long.
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[tags] the session store was not read yet when a tag panel opened: read off the UI thread, " +
+                                                  std::to_wstring(records) + L" record(s), " +
+                                                  std::to_wstring(::Agentmaster::SessionStoreRecordFileReads() - readsBefore) + L" file read(s), " +
+                                                  std::to_wstring(::GetTickCount64() - startedAt) + L" ms\n");
+            }
+            catch (...)
+            {
+                // Contained on the pool thread, so the hop below still runs and the flag is re-armed.
+                ::Agentmaster::AgentLogCaughtException(L"_WarmTagStoreThenRefresh: the store pass");
+            }
+
+            co_await wil::resume_foreground(dispatcher);
+            const auto self{ weakThis.get() };
+            if (!self)
+            {
+                co_return; // the window is gone
+            }
+            rearm.reset(); // BEFORE the refresh: a surface that is still cold must be able to ask again
+            if (warmed)
+            {
+                self->_OnTagStoreWarm();
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_WarmTagStoreThenRefresh");
+        }
+    }
+
+    // The store has just been read (_WarmTagStoreThenRefresh, back on the UI thread): fill whichever tag
+    // surface was showing a "Loading" line. A surface that closed meanwhile is simply skipped — its next
+    // open finds the store warm.
+    // UI thread only. Never throws: it runs inside a fire_and_forget; each surface is contained (Rule #18).
+    void TerminalPage::_OnTagStoreWarm()
+    {
+        try
+        {
+            if (_tagEditorPopup && _tagEditorPopup.IsOpen())
+            {
+                _RebuildTagEditorList(); // now the warm path: the real list, and the universe is ready
+                _UpdateTagEditorAddState(); // a name typed while loading gets its "+" now
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_OnTagStoreWarm: the Tags panel");
+        }
+        try
+        {
+            if (_tagHoverLoading && _tagHoverPopup && _tagHoverPopup.IsOpen() && _tagHoverBody && !_tagHoverPendingTag.empty())
+            {
+                // Refill only — the panel stays where it is. Its anchor (a ribbon) may have left the tree
+                // while the store loaded, and placing against a dead anchor would throw the panel into
+                // the window's corner.
+                _FillTagHoverPanel();
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_OnTagStoreWarm: the tag hover panel");
         }
     }
 
@@ -1995,17 +2271,25 @@ namespace winrt::TerminalApp::implementation
         Root().Children().Append(_tagHoverPopup);
     }
 
-    // The open delay elapsed on a badge: gather every session carrying the pending tag (the
-    // durable store — one sparse scan on hover, not per tick), render the rows, and place the
-    // panel just under the badge. LIVE sessions first (activity desc), then closed ones.
-    void TerminalPage::_ShowTagHoverPanelNow()
+    // The hover panel's CONTENT: gather every session carrying the pending tag (the durable store —
+    // one scan on hover, not per tick) and render the header + the rows into _tagHoverBody. LIVE
+    // sessions first (activity desc), then closed ones. Placement is the caller's business
+    // (_ShowTagHoverPanelNow places the panel; _OnTagStoreWarm refills it where it stands).
+    //
+    // Agentmaster (tags perf, 2026-10-10): the gather read every session-store file on the UI thread on
+    // EVERY hover (~85 ms on the release profile with a warm disk cache), and took a full Get —
+    // a deep copy of the record with its whole prompt queue — for each carrier. Now:
+    //   - the store is WARM: one directory listing (LoadAllSessionTags through the scan cache) and ONE
+    //     lean registry read for all carriers (HeadlinesOf);
+    //   - the store is COLD (a ribbon hovered in the first seconds of a run): the header shows
+    //     "loading…" with no rows, _tagHoverLoading is set, and _WarmTagStoreThenRefresh reads the store
+    //     on a pool thread and refills the panel (_OnTagStoreWarm).
+    // No-op without a pending tag or before the popup is built. UI thread only.
+    // Throws: what the XAML row build throws, and std::bad_alloc (the open timer's tick runs it; the
+    // refill after a cold load is contained by _OnTagStoreWarm).
+    void TerminalPage::_FillTagHoverPanel()
     {
-        if (_tagHoverPendingTag.empty() || !_tagHoverPendingAnchor)
-        {
-            return;
-        }
-        _EnsureTagHoverPopup(); // safe here: the open timer's tick is a clean dispatcher pass
-        if (!_tagHoverPopup || !_tagHoverBody)
+        if (_tagHoverPendingTag.empty() || !_tagHoverBody)
         {
             return;
         }
@@ -2021,32 +2305,56 @@ namespace winrt::TerminalApp::implementation
             int64_t activity{ 0 };
         };
         std::vector<HoverRow> rows;
-        for (const auto& [sid, tags] : ::Agentmaster::LoadAllSessionTags())
+        // COLD store: the scan would open every record file here, on the UI thread. Show the header
+        // alone and let a pool thread read the store; _OnTagStoreWarm then calls this again.
+        const bool storeWarm = ::Agentmaster::SessionStoreScanIsWarm();
+        _tagHoverLoading = !storeWarm;
+        if (!storeWarm)
         {
-            bool has = false;
-            for (const auto& t : tags)
+            _WarmTagStoreThenRefresh();
+        }
+        // The carriers first, then ONE registry read for all of them.
+        std::vector<std::wstring> carriers;
+        if (storeWarm)
+        {
+            for (const auto& [sid, tags] : ::Agentmaster::LoadAllSessionTags())
             {
-                if (::Agentmaster::FoldTagName(t) == folded)
+                bool has = false;
+                for (const auto& t : tags)
                 {
-                    has = true;
-                    break;
+                    if (::Agentmaster::FoldTagName(t) == folded)
+                    {
+                        has = true;
+                        break;
+                    }
+                }
+                if (has)
+                {
+                    carriers.push_back(sid);
                 }
             }
-            if (!has)
+        }
+        // id -> headline (title, state, live, newest activity). A carrier the registry does not know (a
+        // session never loaded this run) is simply absent and takes its stored title below.
+        std::unordered_map<std::wstring, ::Agentmaster::SessionHeadline> headlines;
+        if (_sessionRegistry && !carriers.empty())
+        {
+            for (auto& headline : _sessionRegistry->HeadlinesOf(carriers))
             {
-                continue;
+                std::wstring id = headline.id; // copied first: the next line moves the headline, id included
+                headlines.emplace(std::move(id), std::move(headline));
             }
+        }
+        for (const auto& sid : carriers)
+        {
             HoverRow r;
             r.sid = sid;
-            if (_sessionRegistry)
+            if (const auto known = headlines.find(sid); known != headlines.end())
             {
-                if (const auto s = _sessionRegistry->Get(sid))
-                {
-                    r.title = s->title;
-                    r.state = s->state;
-                    r.live = s->live;
-                    r.activity = (std::max)(s->lastActivityUnixMs, s->convLastActivityUnixMs);
-                }
+                r.title = known->second.title;
+                r.state = known->second.state;
+                r.live = known->second.live;
+                r.activity = known->second.lastActivityUnixMs; // max(hook-side, transcript-derived), as before
             }
             if (r.title.empty())
             {
@@ -2093,7 +2401,9 @@ namespace winrt::TerminalApp::implementation
             name.VerticalAlignment(VerticalAlignment::Center);
             h.Children().Append(name);
             TextBlock count;
-            count.Text(winrt::hstring{ L"\x00B7 " + std::to_wstring(rows.size()) + L" session" + (rows.size() == 1 ? L"" : L"s") });
+            // While the store is still being read there is no count to show yet — say so, rather than "0 sessions".
+            count.Text(storeWarm ? winrt::hstring{ L"\x00B7 " + std::to_wstring(rows.size()) + L" session" + (rows.size() == 1 ? L"" : L"s") } :
+                                   winrt::hstring{ L"\x00B7 loading\x2026" });
             count.FontSize(11);
             count.Opacity(0.55);
             count.VerticalAlignment(VerticalAlignment::Center);
@@ -2179,6 +2489,22 @@ namespace winrt::TerminalApp::implementation
             }
             _tagHoverBody.Children().Append(row);
         }
+    }
+
+    // The open delay elapsed on a badge: gather every session carrying the pending tag and render
+    // the rows (_FillTagHoverPanel), then place the panel just under the badge and open it.
+    void TerminalPage::_ShowTagHoverPanelNow()
+    {
+        if (_tagHoverPendingTag.empty() || !_tagHoverPendingAnchor)
+        {
+            return;
+        }
+        _EnsureTagHoverPopup(); // safe here: the open timer's tick is a clean dispatcher pass
+        if (!_tagHoverPopup || !_tagHoverBody)
+        {
+            return;
+        }
+        _FillTagHoverPanel();
 
         // Place just under the badge (root-relative — the tag editor's anchor recipe), clamped
         // so the card can't hang past the window's right edge.
@@ -2225,6 +2551,7 @@ namespace winrt::TerminalApp::implementation
         }
         _tagHoverPendingTag = {};
         _tagHoverPendingAnchor = nullptr;
+        _tagHoverLoading = false; // a store load that lands after the close must not refill a closed panel
     }
 
     // Agentmaster (tab status dot): the registry-observer reaction (bounced to this window's UI

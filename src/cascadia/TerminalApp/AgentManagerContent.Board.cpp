@@ -1078,17 +1078,36 @@ namespace winrt::TerminalApp::implementation
         // store holds every session EVER titled/starred/tagged while the board shows only the live
         // handful. The colors file loads only when something is actually tagged.
         //
+        // Agentmaster (tags perf, 2026-10-10): "re-read" now means "from _boardTagsCache". A session's
+        // tags are read from the store only when the session is new to the board, or after the tag epoch
+        // moved (a tag or tag color changed in this process — then everything cached is dropped). Before,
+        // every rebuild paid one file stat and one record copy per shown card, and the board rebuilds on
+        // every registry notification (see AgentManagerContent.h, _boardTagsCache).
+        // The epoch is loaded BEFORE any tag is read (the reader contract in SessionStore.h): a tag
+        // write that lands during the loop below leaves the OLDER epoch stored here, so the next rebuild
+        // sees the move and re-reads — a cache refreshed once too often, never one kept stale.
+        //
         // The map is narrowed to the sessions this board actually SHOWS (live + the LOCAL/GLOBAL scope
         // + the directory scope — the same three guards each state column applies below, minus the tag
         // filter itself). That is what makes the header's tag chips honest: every chip has at least one
         // card behind it and its count is the number of cards you will see, instead of advertising a
         // tag whose only carrier lives in another window or another folder.
+        const uint64_t tagsEpoch = ::Agentmaster::SessionTagsEpoch();
+        if (tagsEpoch != _boardTagsEpoch)
+        {
+            _boardTagsCache.clear(); // some tag (or tag color) changed since these were read
+            _boardTagsEpoch = tagsEpoch;
+        }
         _boardTags.clear();
         // sid -> last activity. NOT the chips' ordering (that is alphabetical — see
         // _RebuildBoardTagChips): CollectGlobalTags also uses it to pick which carrier's CASING a tag
         // displays under, so feeding it real activity keeps a chip's spelling identical to the same
         // tag's chip on the Sessions page.
         std::unordered_map<std::wstring, int64_t> boardTagActivity;
+        // The ids this rebuild shows (pointers into `sessions`, alive for the whole rebuild): what the
+        // cache is pruned to after the loop.
+        std::vector<const std::wstring*> shownIds;
+        shownIds.reserve(sessions.size());
         for (const auto& s : sessions)
         {
             if (!s.live)
@@ -1103,14 +1122,39 @@ namespace winrt::TerminalApp::implementation
             {
                 continue; // dir scope: another folder's session
             }
-            if (auto tags = ::Agentmaster::GetSessionTags(s.id); !tags.empty())
+            shownIds.push_back(&s.id);
+            // An untagged session caches too (an empty list): it is the common case, and exactly the
+            // read a rebuild must not repeat for every card.
+            auto cached = _boardTagsCache.find(s.id);
+            if (cached == _boardTagsCache.end())
             {
-                _boardTags.emplace(s.id, std::move(tags));
+                cached = _boardTagsCache.emplace(s.id, ::Agentmaster::GetSessionTags(s.id)).first;
+            }
+            if (!cached->second.empty())
+            {
+                _boardTags.emplace(s.id, cached->second);
                 // The transcript-derived recency, falling back to the hook-side stamp for a session
                 // whose transcript hasn't been read yet (a just-launched one) — the same precedence
                 // the card timing uses.
                 boardTagActivity.emplace(s.id, s.convLastActivityUnixMs != 0 ? s.convLastActivityUnixMs : s.lastActivityUnixMs);
             }
+        }
+        if (_boardTagsCache.size() > shownIds.size())
+        {
+            // Keep only the shown sessions' entries, so the cache cannot grow with every session that ever
+            // crossed the board (a session that returns re-reads its tags once). Node handles move each
+            // kept entry over without copying its strings.
+            std::unordered_map<std::wstring, std::vector<std::wstring>> kept;
+            kept.reserve(shownIds.size());
+            for (const auto* id : shownIds)
+            {
+                auto node = _boardTagsCache.extract(*id);
+                if (!node.empty())
+                {
+                    kept.insert(std::move(node));
+                }
+            }
+            _boardTagsCache.swap(kept);
         }
         // Colors are needed for the chips too, so load them whenever a chip could render — that
         // includes a PICKED tag whose carriers have all gone (its chip stays, so it can be clicked off).

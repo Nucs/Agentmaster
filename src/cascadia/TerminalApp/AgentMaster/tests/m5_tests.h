@@ -186,6 +186,7 @@ void TestTranscriptResolve();
 void TestCodexObserve();
 void TestTranscriptStore();
 void TestSessionTags(); // bookmark tags: normalize/fold/encode/decode + the store CRUD + the tag-colors store (tag-colors.json) + the known-tag registry (tags.json — a tag survives 0 carriers) + CollectGlobalTags (incl. the registry overload) + the maxTags clamp/round-trip
+void TestSessionStoreScanCache(); // tags perf (2026-10-10) — the session store's SCAN CACHE, proven by counting file opens (SessionStoreRecordFileReads): the first whole-directory read opens each record once, a repeated one opens none, one changed record costs one open; an external change / add / delete is seen; a write of this process is written through; a read-modify-write (record, tag-colors.json, tags.json) reads the FILE, never a stale cached copy; the warm flag; whole-directory readers on four threads beside a writer
 void TestExtractPathsFromText(); // tab color modes: absolute-path mining from shell command strings (quoted free-form; unquoted 1-space-in-folder-names) + the ClassifyTranscriptLine command wiring
 void TestInferWorkingDirectory(); // tab color modes: the pure inferred-workdir picker (majority-deepest over tool-touched paths)
 void TestConversationLineage();
