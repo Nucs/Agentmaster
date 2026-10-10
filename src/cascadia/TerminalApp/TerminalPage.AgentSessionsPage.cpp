@@ -191,9 +191,10 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumn(search, 2);
         topLeft.Children().Append(search);
 
-        // Agentmaster (SESSIONS.md §9): the AI search — the "AI" toggle and the reset button right
-        // of the box, the strip in a header row of its own, and the box's Enter / Escape keys
-        // (TerminalPage.AgentSessionsAi.cpp). After the box is mounted: it hooks the box's keys.
+        // Agentmaster (SESSIONS.md §9): the AI search — the "AI" toggle INSIDE the box (at its right
+        // end, like an editor's regex toggle), the reset button right of the box, the strip in a
+        // header row of its own, and the box's Enter / Escape keys (TerminalPage.AgentSessionsAi.cpp).
+        // After the box is mounted: the toggle goes into the box's own grid cell, over the box.
         _BuildSessionsAiHeader(topLeft, header);
 
         // The divider-matching spacer (the body divider is Width 1 + 8px margins = a 17px footprint),

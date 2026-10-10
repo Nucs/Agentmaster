@@ -509,16 +509,18 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
 
 ### 9.1 What the user sees
 
-- An **AI** toggle, right of the search box. With it on, the box is a **request line**: write
-  what you remember ("the session where I fixed the tab drag crash") and press **Enter**.
+- An **AI** toggle **inside the search box**, at its right end, like the regex toggle of an
+  editor's find box: flat while it is off, accent-filled while it is on. With it on, the box is a
+  **request line**: write what you remember ("the session where I fixed the tab drag crash") and
+  press **Enter**.
 - A **strip** under the header shows the request, what happens now ("Searching: …"), then the
   model's one-sentence answer, and the size of the conversation ("ctx 12K / 500K").
 - The **table shows exactly the sessions that the model picked**, best match first. The first
   row is selected, so its detail pane is there without a click.
 - A **follow-up refines the list** ("only the open ones", "older than that"): the conversation
   keeps its context.
-- The **crossed circle** (⊘) beside the toggle throws the conversation away. The model forgets
-  everything, and the normal list comes back.
+- The **crossed circle** (⊘) right of the box throws the conversation away. The model forgets
+  everything, and the normal list comes back. It shows only while the AI search is on.
 - **Escape** in the box stops a request that runs. A new request also stops the one before it
   (the newest wins).
 - Typing filters nothing in AI mode. Turning the toggle off brings back the filter box and the
@@ -615,6 +617,22 @@ the header build, the open and close seams, the gather's end, and the render.
   tags work on it. The normal list skips such rows, and they are put back after every gather.
 - **Events** come on the agent's threads. The listener only posts them to the window's dispatcher;
   it takes no strong reference to the page there.
+- **The toggle is inside the box, but it is not a part of the `TextBox`.** It is a sibling in the
+  same grid cell, appended after the box, so it is drawn over the box's right end and takes the
+  pointer there. The box keeps its own chrome (border, hover, the focus underline) around both.
+  `_SessionsAiFitToggleIntoBox` makes the room, each step once: the box's right padding grows by
+  36 DIP (the 30 DIP toggle, its 4 DIP inset and a 2 DIP gap), and the box's own clear button
+  (the template part `DeleteButton`) is shifted left by the same amount with a render transform,
+  so it reads text | ✕ | AI. The toggle's flat look is two local values (a transparent fill, no
+  border): only the rest state uses them, so the stock hover fill and the accent fill of the
+  checked state still show.
+  - ⚠ What this rests on: the WinUI 2.8.4 package's `Generic.xaml` holds the text box template of
+    NumberBox as text (a copy of the default one with spin buttons). There the clear button is the
+    part `DeleteButton`, in the last column, collapsed until the box has focus and text, and not
+    deferred. The DEFAULT text box template is compiled into the package and was not read, and
+    nothing of this was seen on screen. When a template has no such part, the ✕ shows under the
+    toggle (a cosmetic fault; the toggle takes the click), and the code tries again at every focus
+    and text change.
 
 ### 9.6 Memory, and when the process ends
 

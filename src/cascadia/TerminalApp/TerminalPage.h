@@ -1027,7 +1027,9 @@ namespace winrt::TerminalApp::implementation
         // sorts the list like any other.
         int _sessionsAiSortColumn{ 7 };
         bool _sessionsAiSortAscending{ false };
-        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessAiBtn{ nullptr }; // "AI": the mode toggle, right of the search box
+        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessAiBtn{ nullptr }; // "AI": the mode toggle, INSIDE the search box at its right end (like an editor's regex toggle); a sibling of the box in the same grid cell, drawn over it
+        bool _sessAiBoxPadded{ false }; // the search box's right padding was grown once, so its text ends before the toggle (_SessionsAiFitToggleIntoBox)
+        bool _sessAiClearButtonMoved{ false }; // the search box's own clear (X) button was found in its template and shifted left of the toggle
         winrt::Windows::UI::Xaml::Controls::Button _sessAiResetBtn{ nullptr }; // the crossed circle: throw the conversation away. Shown in AI mode only
         winrt::Windows::UI::Xaml::Controls::Border _sessAiStrip{ nullptr }; // header row 3: the request, what happens now / the model's sentence, the context size. Shown in AI mode only
         winrt::Windows::UI::Xaml::Controls::Border _sessAiDot{ nullptr }; // the strip's state dot (working / ready / stopped / failed): a round Border, so this header needs no Shapes projection
@@ -2061,7 +2063,8 @@ namespace winrt::TerminalApp::implementation
 
         // ----- Agentmaster (SESSIONS.md §9): the Sessions page's AI search — TerminalPage.AgentSessionsAi.cpp -----
         // Each is UI-thread-only unless it says otherwise; the full contracts are at the definitions.
-        void _BuildSessionsAiHeader(const winrt::Windows::UI::Xaml::Controls::Grid& topLeft, const winrt::Windows::UI::Xaml::Controls::Grid& header); // one-time, from _BuildSessionsPageShell: the AI toggle + the reset button beside the search box, the strip row under the header, and the box's Enter / Escape keys
+        void _BuildSessionsAiHeader(const winrt::Windows::UI::Xaml::Controls::Grid& topLeft, const winrt::Windows::UI::Xaml::Controls::Grid& header); // one-time, from _BuildSessionsPageShell: the AI toggle inside the search box, the reset button right of it, the strip row under the header, and the box's Enter / Escape keys
+        void _SessionsAiFitToggleIntoBox(); // make room in the search box for the toggle over its right end: grow the right padding, shift the box's own clear (X) button left of the toggle; each once, never throws
         void _SetSessionsAiMode(bool on); // turn the AI search on / off for this page (refuses "on" without a native claude.exe); re-renders
         void _SessionsAiAsk(); // send the search box's text to the conversation (the newest request wins), then clear the box
         void _SessionsAiAttach(); // register this page's agent listener once (events are marshalled to this window's UI thread)

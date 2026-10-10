@@ -21,8 +21,9 @@
 //
 // Agentmaster -- the Sessions page's AI SEARCH (SESSIONS.md §9, SDK_HARNESS.md).
 //
-// What the user sees: an "AI" toggle right of the search box. With it on, the box is a REQUEST
-// line: "the session where I fixed the tab drag crash", Enter. A strip under the header shows
+// What the user sees: an "AI" toggle INSIDE the search box, at its right end, like the regex
+// toggle of an editor's find box (flat while off, accent-filled while on). With it on, the box
+// is a REQUEST line: "the session where I fixed the tab drag crash", Enter. A strip under the header shows
 // the request, what happens ("Searching: ..."), then the model's one-sentence answer; the table
 // shows exactly the sessions the model picked, in its order. A follow-up ("only the open ones")
 // refines the list, because the conversation keeps its context. The crossed circle beside the
@@ -100,6 +101,41 @@ namespace winrt::TerminalApp::implementation
         const wchar_t kSessionsFilterPlaceholder[] = L"search for sessions";
         const wchar_t kSessionsAiPlaceholder[] = L"describe the session you are looking for, then press Enter";
 
+        // The AI toggle sits INSIDE the search box, at its right end. Its size is fixed, so the
+        // room the box must leave for it is known before anything is laid out:
+        // kSessionsAiToggleReserve = the gap between the text and the toggle + the toggle + its
+        // inset from the box's right edge. DIPs.
+        constexpr double kSessionsAiToggleWidth = 30.0;
+        constexpr double kSessionsAiToggleHeight = 24.0; // the box is 32 high: 4 above and below
+        constexpr double kSessionsAiToggleInset = 4.0;
+        constexpr double kSessionsAiToggleGap = 2.0;
+        constexpr double kSessionsAiToggleReserve = kSessionsAiToggleGap + kSessionsAiToggleWidth + kSessionsAiToggleInset;
+
+        // The first element named `name` in the visual tree under `root`, depth first.
+        //   root    - where to look; its own name is not tested.
+        //   name    - the x:Name to find (a template part's name, here).
+        //   returns - the element, or null when there is none (the template is not applied yet,
+        //             or it has no such part).
+        //   throws  - what the visual tree calls throw (hresult_error).
+        // The tree under a TextBox is a dozen elements, so the walk is cheap.
+        FrameworkElement SessAiFindDescendant(const DependencyObject& root, std::wstring_view name)
+        {
+            const int count = VisualTreeHelper::GetChildrenCount(root);
+            for (int i = 0; i < count; ++i)
+            {
+                const auto child = VisualTreeHelper::GetChild(root, i);
+                if (const auto element = child.try_as<FrameworkElement>(); element && std::wstring_view{ element.Name() } == name)
+                {
+                    return element;
+                }
+                if (auto found = SessAiFindDescendant(child, name))
+                {
+                    return found;
+                }
+            }
+            return nullptr;
+        }
+
         // `text` without the white space at its two ends.
         std::wstring SessAiTrim(std::wstring_view text)
         {
@@ -119,28 +155,45 @@ namespace winrt::TerminalApp::implementation
     }
 
     // One-time, from _BuildSessionsPageShell: add the AI search's controls to the page header.
-    //   topLeft — the header's top-left grid (Back · title · search box in columns 0..2). Two
-    //             Auto columns are appended for the toggle and the reset button.
+    //   topLeft — the header's top-left grid (Back · title · search box in columns 0..2). The
+    //             toggle goes INTO the search box's cell, over the box's right end; one Auto
+    //             column is appended for the reset button.
     //   header  — the header grid (rows: top, filters, tag chips). One Auto row is appended for
     //             the strip.
-    // Also hooks the search box's Enter and Escape keys (they act in AI mode only).
+    // Also hooks the search box: its Enter and Escape keys (they act in AI mode only), and the
+    // events at which the box makes room for the toggle (_SessionsAiFitToggleIntoBox).
     // Throws what XAML throws (hresult_error); the caller is the page build, which has no catch
     // of its own — like every other part of the shell.
     void TerminalPage::_BuildSessionsAiHeader(const Grid& topLeft, const Grid& header)
     {
-        for (int i = 0; i < 2; ++i)
-        {
-            ColumnDefinition c;
-            c.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            topLeft.ColumnDefinitions().Append(c);
-        }
-        const int firstColumn = static_cast<int>(topLeft.ColumnDefinitions().Size()) - 2;
+        // The toggle lives INSIDE the search box, at its right end — like the regex or
+        // match-case toggle of an editor's find box (the user's request). It says how the box
+        // reads its text, so it belongs to the box, not beside it.
+        // It is NOT a part of the TextBox: it is a sibling in the same grid cell, appended after
+        // the box, so it is drawn over the box's right end and takes the pointer there. The box
+        // keeps its whole chrome (border, hover, the focus underline) around both, and leaves
+        // the toggle room (_SessionsAiFitToggleIntoBox).
+        const int boxColumn = _sessionsSearchBox ? Grid::GetColumn(_sessionsSearchBox) : 2;
 
-        // The toggle. Its Click only reads the new state; the mode change itself (it re-renders
-        // the table and may open a dialog) runs on a clean tick.
+        // Its Click only reads the new state; the mode change itself (it re-renders the table and
+        // may open a dialog) runs on a clean tick.
         _sessAiBtn = SessToggle(L"AI", L"AI search", L"Ask for sessions in your own words instead of filtering by words. With it on, write what you remember \x2014 \x201Cthe session where I fixed the tab drag crash\x201D \x2014 and press Enter: a Claude model (Sonnet) searches your sessions and puts the ones that fit in the list, best match first. Then refine it: \x201Conly the open ones\x201D, \x201Colder than that\x201D.\n\nThere is one such conversation, shared by every window. It never shows up among your sessions, and it changes nothing: it can only search and show.");
-        _sessAiBtn.Margin(Thickness{ 8, 0, 0, 0 });
+        _sessAiBtn.Width(kSessionsAiToggleWidth);
+        _sessAiBtn.Height(kSessionsAiToggleHeight);
+        _sessAiBtn.Padding(Thickness{ 0, 0, 0, 0 });
+        _sessAiBtn.FontSize(11);
+        _sessAiBtn.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+        // Flat while it is off: no fill and no border of its own, so the box's fill shows through
+        // and the two read as one control. These are LOCAL values, which only the rest state
+        // uses: the stock hover and pressed fills still show, and so does the accent fill of the
+        // checked state — the one cue that the box is in AI mode. (No re-template, no resource
+        // key: a visual state's setter outranks a local value, which is exactly what is wanted.)
+        _sessAiBtn.Background(SessBrush(0, 0, 0, 0));
+        _sessAiBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        _sessAiBtn.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 3, 3, 3, 3 });
+        _sessAiBtn.HorizontalAlignment(HorizontalAlignment::Right);
         _sessAiBtn.VerticalAlignment(VerticalAlignment::Center);
+        _sessAiBtn.Margin(Thickness{ 0, 0, kSessionsAiToggleInset, 0 });
         _sessAiBtn.Click([this](const winrt::Windows::Foundation::IInspectable& s, const RoutedEventArgs&) {
             const auto button = s.try_as<Primitives::ToggleButton>();
             const bool on = button && button.IsChecked() && button.IsChecked().Value();
@@ -151,11 +204,18 @@ namespace winrt::TerminalApp::implementation
                 }
             });
         });
-        Grid::SetColumn(_sessAiBtn, firstColumn);
-        topLeft.Children().Append(_sessAiBtn);
+        Grid::SetColumn(_sessAiBtn, boxColumn);
+        topLeft.Children().Append(_sessAiBtn); // after the box: over it
 
-        // The reset: a crossed circle. A FontIcon, not a TextBlock: a TextBlock keeps room for
-        // descenders and the glyph then sits high beside the toggle (the compose-bar lesson).
+        // The reset: a crossed circle, in a column of its own right of the box. A FontIcon, not a
+        // TextBlock: a TextBlock keeps room for descenders and the glyph then sits high beside
+        // the box (the compose-bar lesson).
+        {
+            ColumnDefinition c;
+            c.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            topLeft.ColumnDefinitions().Append(c);
+        }
+        const int resetColumn = static_cast<int>(topLeft.ColumnDefinitions().Size()) - 1;
         _sessAiResetBtn = Button{};
         {
             FontIcon icon;
@@ -194,7 +254,7 @@ namespace winrt::TerminalApp::implementation
                 }
             });
         });
-        Grid::SetColumn(_sessAiResetBtn, firstColumn + 1);
+        Grid::SetColumn(_sessAiResetBtn, resetColumn);
         topLeft.Children().Append(_sessAiResetBtn);
 
         // The strip: a header row of its own, as wide as the table (the same column mirror the
@@ -270,6 +330,22 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumn(_sessAiStrip, 0);
         stripRow.Children().Append(_sessAiStrip);
 
+        // The box makes room for the toggle that lies over its right end. At Loaded its style is
+        // applied (its padding is known) and its template exists. GotFocus and TextChanged try
+        // again until the box's own clear button was found: they are the two moments at which
+        // the box can show that button, should a template create it only then.
+        if (_sessionsSearchBox)
+        {
+            const auto fit = [this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                _SessionsAiFitToggleIntoBox();
+            };
+            _sessionsSearchBox.Loaded(fit);
+            _sessionsSearchBox.GotFocus(fit);
+            _sessionsSearchBox.TextChanged([this](const winrt::Windows::Foundation::IInspectable&, const TextChangedEventArgs&) {
+                _SessionsAiFitToggleIntoBox();
+            });
+        }
+
         // The box's keys, in AI mode: Enter sends the request; Escape stops a request that runs.
         // KeyDown on the box (not the page host's PreviewKeyDown, which owns Up / Down): the two
         // keys mean this only while the caret is in the box.
@@ -310,6 +386,59 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
             });
+        }
+    }
+
+    // Make room in the search box for the AI toggle that lies over its right end. Two changes,
+    // each made once:
+    //   1. The box's right padding grows by kSessionsAiToggleReserve, so the text and the
+    //      placeholder end before the toggle. (Read from the box, not hard-coded: the style's
+    //      padding stays what it is.)
+    //   2. The box's own clear button — the template part "DeleteButton", the X that shows while
+    //      the box has focus and text — is shifted left by the same amount with a render
+    //      transform, so it stands left of the toggle and not under it. The geometry: the button
+    //      is the template's last column, and the text column's padding grew by the reserve. So
+    //      a button shifted by the reserve keeps its old distance from the text and ends where
+    //      the toggle's room begins (text | X | toggle), and with the X hidden the text still
+    //      ends before the toggle. A render transform moves the hit area with the picture.
+    // Called at the box's Loaded, GotFocus and TextChanged; a no-op once both are done. Before
+    // the box is loaded it does nothing (its style's padding is not known yet).
+    // When the template has no such part, change 2 never happens and the X would show under the
+    // toggle: a cosmetic fault only (the toggle takes the click), and every call tries again.
+    // Never throws: a failure is logged, and the next call tries again.
+    void TerminalPage::_SessionsAiFitToggleIntoBox()
+    {
+        if (!_sessionsSearchBox || (_sessAiBoxPadded && _sessAiClearButtonMoved))
+        {
+            return;
+        }
+        try
+        {
+            if (!_sessionsSearchBox.IsLoaded())
+            {
+                return;
+            }
+            if (!_sessAiBoxPadded)
+            {
+                auto padding = _sessionsSearchBox.Padding();
+                padding.Right += kSessionsAiToggleReserve;
+                _sessionsSearchBox.Padding(padding);
+                _sessAiBoxPadded = true; // set once it is applied: a second Loaded must not add the room again
+            }
+            if (!_sessAiClearButtonMoved)
+            {
+                if (const auto clear = SessAiFindDescendant(_sessionsSearchBox, L"DeleteButton"))
+                {
+                    TranslateTransform shift;
+                    shift.X(-kSessionsAiToggleReserve);
+                    clear.RenderTransform(shift);
+                    _sessAiClearButtonMoved = true;
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SessionsAiFitToggleIntoBox");
         }
     }
 
