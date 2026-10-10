@@ -1,0 +1,3 @@
+[submodule "refs/claude-agent-sdk-cpp"]
+	path = refs/claude-agent-sdk-cpp
+	url = https://github.com/0xeb/claude-agent-sdk-cpp
