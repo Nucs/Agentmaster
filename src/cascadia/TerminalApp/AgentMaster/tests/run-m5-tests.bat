@@ -27,6 +27,10 @@ REM (section 9, TaskbarThumbnail.h); gdi32.lib comes in through both headers' #p
 REM tests_turns.cpp + TranscriptTurns.cpp: the Copy > Transcript levels; the fixtures + goldens it reads are in turns\ (beside the exe).
 REM tests_presets.cpp: PRESETS (HARNESSES.md - LaunchPresets.h, header-only and pure, so no engine .cpp joins; the OS half,
 REM LaunchPresetsOs.h, is TerminalApp-only and stays out of the harness).
+REM tests_harness.cpp + AgentHarnessCore.cpp + SessionSearchTools.cpp: the agent harness's model-free half and the Sessions
+REM page's AI search tools (SDK_HARNESS.md, SESSIONS.md section 9). Neither needs the claude-agent-sdk-cpp submodule or
+REM nlohmann/json: AgentHarness.cpp, the SDK unity file and its process backend stay out of this suite (their test is the
+REM LIVE one, run-harness-live.bat, which starts the real claude.exe).
 REM tests_markdown.cpp + MarkdownBlocks.cpp: the transcript overlay's Markdown flattener, which parses with cmark. The
 REM harness takes cmark from the vcpkg tree a full msbuild installs (obj\x64\vcpkg, static CRT like this /MT build);
 REM without that tree MarkdownBlocks.cpp is left out and AM_HAVE_CMARK stays undefined, so TestMarkdownBlocks
@@ -38,7 +42,7 @@ if exist "%AM_VCPKG%\include\cmark.h" if exist "%AM_VCPKG%\lib\cmark.lib" (
   set "AM_MD_SRC=..\MarkdownBlocks.cpp %AM_VCPKG%\lib\cmark.lib"
   set "AM_MD_FLAGS=/DAM_HAVE_CMARK /I%AM_VCPKG%\include"
 )
-cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE %AM_MD_FLAGS% /Fe:m5_tests.exe m5_tests.cpp tests_state.cpp tests_spawn_sched.cpp tests_persistence.cpp tests_transcript.cpp tests_summary_anchor.cpp tests_commands.cpp tests_tabdrag.cpp tests_invisible.cpp tests_taskbar.cpp tests_turns.cpp tests_markdown.cpp tests_sidepanel.cpp tests_presets.cpp %AM_MD_SRC% ..\TranscriptTurns.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\TranscriptWatcher.cpp ..\CommandWatch.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\SessionStore.cpp ..\Scheduler.cpp ..\Engine.cpp ..\ProcessObserver.cpp ..\ClaudeInvisibleChars.cpp ole32.lib user32.lib oleaut32.lib icu.lib
+cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE %AM_MD_FLAGS% /Fe:m5_tests.exe m5_tests.cpp tests_state.cpp tests_spawn_sched.cpp tests_persistence.cpp tests_transcript.cpp tests_summary_anchor.cpp tests_commands.cpp tests_tabdrag.cpp tests_invisible.cpp tests_taskbar.cpp tests_turns.cpp tests_markdown.cpp tests_sidepanel.cpp tests_presets.cpp tests_harness.cpp %AM_MD_SRC% ..\TranscriptTurns.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\TranscriptWatcher.cpp ..\CommandWatch.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\SessionStore.cpp ..\Scheduler.cpp ..\Engine.cpp ..\ProcessObserver.cpp ..\ClaudeInvisibleChars.cpp ..\AgentHarnessCore.cpp ..\SessionSearchTools.cpp ole32.lib user32.lib oleaut32.lib icu.lib
 if errorlevel 1 (
   echo [error] compile failed
   exit /b 1

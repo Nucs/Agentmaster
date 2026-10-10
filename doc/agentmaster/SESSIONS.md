@@ -500,3 +500,191 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
   `toolUseId` ↔ `meta.json`, `paste-cache` contentHash linkage, `compact_boundary` metadata,
   the three mtime-drift modes, the sweep config, **no SQLite**, the `summary`-line version
   stratum (2.0.75–2.1.25 only), `sessions/<pid>.json` shape, `history.jsonl` shape.
+
+## 9. The AI search
+
+> Status: written 2026-10-10. **NOT BUILT** into the app yet (checked with `cl /Zs`, the m5
+> suite and a live test; the page itself was not run). The engine under it is the agent harness:
+> [`SDK_HARNESS.md`](./SDK_HARNESS.md).
+
+### 9.1 What the user sees
+
+- An **AI** toggle, right of the search box. With it on, the box is a **request line**: write
+  what you remember ("the session where I fixed the tab drag crash") and press **Enter**.
+- A **strip** under the header shows the request, what happens now ("Searching: …"), then the
+  model's one-sentence answer, and the size of the conversation ("ctx 12K / 500K").
+- The **table shows exactly the sessions that the model picked**, best match first. The first
+  row is selected, so its detail pane is there without a click.
+- A **follow-up refines the list** ("only the open ones", "older than that"): the conversation
+  keeps its context.
+- The **crossed circle** (⊘) beside the toggle throws the conversation away. The model forgets
+  everything, and the normal list comes back.
+- **Escape** in the box stops a request that runs. A new request also stops the one before it
+  (the newest wins).
+- Typing filters nothing in AI mode. Turning the toggle off brings back the filter box and the
+  normal list; the conversation is kept.
+
+### 9.2 One conversation for the whole process
+
+There is **one** search conversation, in every window (`SharedSessionSearchAgent`,
+`AgentMaster/SessionSearchAgent.{h,cpp}`). Each window's Sessions page is a view of it: a request
+from one window shows its list in every page that has the AI search on. This is the engine's rule
+(one fleet, many lenses), and it is what "one conversation at a time" means here.
+
+The model and its settings are fixed: **Sonnet 5.5, thinking off, low effort**, no built-in tools,
+nothing written under `~/.claude` (`--no-session-persistence`, so the search conversation is never
+one of the sessions it searches), auto-compaction at 500,000 tokens.
+
+### 9.3 Two tool servers, and the system prompt
+
+The model can do two things (`AgentMaster/SessionSearchTools.{h,cpp}`):
+
+| Tool | What it does |
+|---|---|
+| `mcp__sessions__search` | Runs the page's own search over the session index: every word must match a title, a folder, a branch, a touched file or a typed prompt. Filters: `days` (default 90), `after`, `before`, `dir`, `branch`, `tag`, `favorite`, `open`; `deep` also reads the conversations' text; `sort`, `limit`. It changes nothing on the screen. |
+| `mcp__display__show` | Puts sessions on the screen, in the model's order: `ids` from search results, or `top: N` for the first N rows of the latest search. An empty list means "nothing fits". |
+
+The split is the point. The search tool never changes what the user sees, so the model can look
+around freely. The show tool is the one place where the screen changes.
+
+- **Short ids.** The model reads and writes the first 8 characters of a session id. It must write
+  every id that it wants shown, and output tokens are what a search waits for. A second session
+  with the same first 8 characters gets a longer prefix.
+- **The result text** is compact JSON: the window, the counts, and one object per row (id, title,
+  folder, branch, times, sizes, why it matched). Flags and lists appear only when they say
+  something.
+- **The system prompt** has seven rules: act at once and never ask; one search is usually enough
+  (1 to 3 distinctive words, no `days` unless the user names a period); show only what fits; one
+  sentence under 25 words in the user's language; a follow-up refers to the shown list; times are
+  local; a result with an `indexing` field lacks older sessions.
+
+### 9.4 The session index, and why a search never waits for it
+
+A search runs over a **catalog**: one immutable snapshot of the sessions' index entries (the same
+sidecar files the page itself reads, section 6), with the stored titles, tags, favorites and the
+open sessions.
+
+Reading it can be slow. Measured on this machine (1,506 sessions in 90 days, an optimized build):
+
+| Case | Time |
+|---|---|
+| A sidecar that Windows has cached | 0.3 ms per session; 90 days in 0.5 s |
+| The first touch of a sidecar file (an on-access scan) | 10 to 20 ms; 90 days in 15 to 30 s |
+| A transcript that has no sidecar yet (parsed whole) | seconds for a large one; a new profile needs minutes |
+| A refresh of a complete catalog | 0.1 s |
+
+So the search tool never reads the disk. The agent has an **index keeper**: a background task that
+reads in **steps**. Each step takes everything the step before had (no file read), reads new
+sidecar files for 2.5 s (400 ms in the first step), newest sessions first, and publishes the
+result. A search takes the newest published catalog.
+
+- A catalog that stopped early says how far back it reaches (`coveredSinceUnixMs`). When that is
+  not as far as the search asked, the result has an **`indexing`** field, and the model tells the
+  user that older sessions are still being indexed.
+- A search waits at most 2 s for a catalog that covers its period, and only the first search of a
+  request waits.
+- **The session store is not waited for either.** The stored titles, the tags and the favorites
+  come from `session-store\`, whose first read of a process opens every record file (16 s were
+  measured for 2,181 files that Windows had not cached; this read, not the sidecar files, once
+  made a first search wait 15 s). A step that finds the store unread publishes without it
+  (`storeOverlay` false), the keeper reads the store after that publish, and the next step has
+  it. A search that filters by tag or favorite over such a catalog says so in `indexing`. In the
+  app the engine reads the store at start-up, so this matters only in the first seconds of a run.
+- **A search can be cancelled.** A tool handler runs on the SDK's reader thread; while it runs,
+  that thread cannot deliver the interrupt of its own request. So the handler asks, before each
+  slow step, whether its request is still the newest one (a generation number). A cancelled search
+  returns at once and leaves no trace.
+
+### 9.5 The page
+
+`TerminalPage.AgentSessionsAi.cpp` is the view of one window. It hooks the page at five places:
+the header build, the open and close seams, the gather's end, and the render.
+
+- **The list replaces the view.** `_RenderSessionsTable` is the page's one render chokepoint.
+  While an AI list is active, `_SessionsAiApplyView` replaces the rows that the filters chose with
+  the listed sessions, in the model's order. The Open / Favorite / Hidden / row filters do not
+  apply to it: the model chose these sessions for the request.
+- **A column click sorts the list.** The list keeps the model's order while the sort is the one
+  that was set when the list arrived.
+- **A preview.** A search's rows are shown at once, before the model picked from them (the count
+  line says "choosing…"). The model's pick replaces them about a second later. An empty search
+  result is not previewed.
+- **Rows outside the page's window.** The page lists one month by default; a search covers three.
+  A listed session that the page did not gather gets a real row (`aiExtra`), appended to
+  `_sessionsRows` and `_sessionsEntries`, so the detail pane, resume, fork, rename, favorite and
+  tags work on it. The normal list skips such rows, and they are put back after every gather.
+- **Events** come on the agent's threads. The listener only posts them to the window's dispatcher;
+  it takes no strong reference to the page there.
+
+### 9.6 Memory, and when the process ends
+
+The idle `claude.exe` holds about 400 MB, and the catalog tens of megabytes. A process-wide tally
+counts the pages that show the AI search (the mode is on and the page is on screen). When the last
+one leaves (the toggle goes off, the page closes or is covered by a tab, the window closes), the
+agent **frees its catalog** at once and **parks its process** 10 minutes later. A page that comes
+back sooner finds the same process. After a park, the conversation continues from a digest of its
+record.
+
+The hidden process is not a session: the Fleet Observer and the CLI skip it
+(`SDK_HARNESS.md` section 5).
+
+### 9.7 What is kept across a restart
+
+In `<profile>\harness\`: `sessions-search.json` (the conversation's record) and
+`sessions-search.view.json` (the request, the answer, and the ids of the shown list). A reset
+deletes both. The toggle's state is not kept: the AI search is off when a window opens.
+
+### 9.8 Tests
+
+`tests\tests_harness.cpp` (m5, no model): the arguments (defaults, clamps, the errors written for
+the model), one search over a hand-built catalog with an injected content search (the scope, the
+four match tiers, the sorts, the limit, deep search only on request, a cancelled search), the
+result text (row fields, the `indexing` note), the two tool handlers (short ids and collisions,
+show by ids / top / nothing, unknown ids, a cancelled request, no index at all), and the catalog
+gather on scratch folders (a gather that stops early says how far it got; steps always move
+forward; a refresh reads only what changed).
+
+### 9.9 Measured, end to end
+
+`harness_live.exe --agent "<request>"`, on this machine's real sessions (1,506 in 90 days), Claude
+Code 2.1.291, 2026-10-10, two runs with different requests, each from a new process with no
+prewarm and with the index files in the Windows file cache:
+
+| | Time from the request |
+|---|---|
+| Process start (no prewarm) | 0.7 to 0.9 s |
+| Two searches, run in one model step | at 2.0 s; 0.1 s each |
+| The list on the screen | 3.2 to 3.3 s |
+| The sentence | 4.4 to 4.9 s |
+| A follow-up ("only the three newest of those"): the list | 2.1 to 2.5 s |
+
+With a prewarmed process, the first request saves the process start. On a new profile (no sidecar
+file at all) the first search answered after 2 s of waiting, with the sessions indexed so far, and
+the model said that older sessions were still being indexed.
+
+A model that finds nothing at once tries again (other words, then a longer period, then the full
+text). One such request took 43 s with five searches: 15 s of it were the session-store read that
+is now out of a search's path (9.4), and 15 s were one full-text scan of 365 days. The list is
+shown at the end of such a request; the strip shows each search while it runs, and a search that
+found rows previews them.
+
+### 9.10 Logs
+
+- `[nav] sessions ai on | off | ai-ask turn=N chars=M | ai-stop | ai-reset` (hooks.log): what the
+  user did. The request's words are in the agent's line, not in the nav trail.
+- `[ai-search] ask[N]: … | shown N session(s) | reset | the session index is being built … | the
+  session index is complete: …` (hooks.log).
+- `[harness] sessions-search: process up … | init: … | turn N done: … | parked … | reset …`.
+- `[observer] skipping harness claude (sessions-search, not a session) pid=…`, once per process.
+
+### 9.11 Limits and follow-ups
+
+- **The page was not run.** The engine is tested live; the XAML code only compiles.
+- **The toggle is not remembered** across windows or restarts.
+- **A cold index is slow** (9.4). A saved snapshot of the catalog would make the first read of a
+  run one file instead of one per session.
+- **After a restart, a restored list can lack rows**: the rows outside the page's window need the
+  agent's catalog, which is read again only at the next request.
+- **The header shows the column sort's arrow** even while the model's order applies.
+- **Sessions that the user hid are shown** when the model lists them.
+- **One live compaction of the search conversation was not run** (`SDK_HARNESS.md` section 11).

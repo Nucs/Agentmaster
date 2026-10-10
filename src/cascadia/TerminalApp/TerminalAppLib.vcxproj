@@ -201,6 +201,10 @@
     <ClInclude Include="AgentMaster\TranscriptTurns.h" />
     <ClInclude Include="AgentMaster\MarkdownBlocks.h" />
     <ClInclude Include="AgentMaster\SessionSearch.h" />
+    <ClInclude Include="AgentMaster\SessionSearchTools.h" />
+    <ClInclude Include="AgentMaster\SessionSearchAgent.h" />
+    <ClInclude Include="AgentMaster\AgentHarness.h" />
+    <ClInclude Include="AgentMaster\AgentHarnessCore.h" />
     <ClInclude Include="AgentMaster\SessionStore.h" />
     <ClInclude Include="AgentMaster\Updater.h" />
     <ClInclude Include="AgentMaster\StartupTiming.h" />
@@ -285,6 +289,10 @@
       <SubType>Code</SubType>
     </ClCompile>
     <ClCompile Include="TerminalPage.AgentSessionsPageActions.cpp">
+      <DependentUpon>TerminalPage.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
+    <ClCompile Include="TerminalPage.AgentSessionsAi.cpp">
       <DependentUpon>TerminalPage.xaml</DependentUpon>
       <SubType>Code</SubType>
     </ClCompile>
@@ -438,6 +446,34 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\SessionSearch.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (SDK_HARNESS.md): the agent harness - headless Claude conversations hosted through the
+         pinned claude-agent-sdk-cpp submodule (refs\claude-agent-sdk-cpp, MIT) - and its first user, the
+         Sessions page's AI search (SESSIONS.md section 9). The SDK is compiled through ONE unity file
+         (ClaudeSdkUnity.cpp) with Agentmaster's own process backend (ClaudeSdkProcessWin32.cpp) in place of
+         the SDK's; only the three files that include SDK headers get its include folders. nlohmann/json,
+         the SDK's JSON library, comes from vcpkg (the manifest's "terminal" feature), like cmark. A build
+         needs the submodule checked out (git submodule update with the init switch; CI does it). -->
+    <ClCompile Include="AgentMaster\AgentHarnessCore.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\AgentHarness.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(SolutionDir)refs\claude-agent-sdk-cpp\include;$(SolutionDir)refs\claude-agent-sdk-cpp\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\ClaudeSdkUnity.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(SolutionDir)refs\claude-agent-sdk-cpp\include;$(SolutionDir)refs\claude-agent-sdk-cpp\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\ClaudeSdkProcessWin32.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(SolutionDir)refs\claude-agent-sdk-cpp\include;$(SolutionDir)refs\claude-agent-sdk-cpp\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\SessionSearchTools.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\SessionSearchAgent.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\SessionStore.cpp">

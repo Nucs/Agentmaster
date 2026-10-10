@@ -146,6 +146,8 @@ int wmain()
     TestKeyedListDiff(); // SIDE_PANEL.md §2c — the side panel card list's order planner (tests_sidepanel.cpp)
     TestSessionTimingText(); // the cards' and rows' "created 4d1h, active 2m4s ago" timing line (tests_sidepanel.cpp)
     TestPointerCardPlacement(); // SIDE_PANEL.md §2e — where the "+" launcher card opens (tests_sidepanel.cpp)
+    TestAgentHarnessCore(); // SDK_HARNESS.md — the agent harness's model-free half: record, digest, settings, environment, readers (tests_harness.cpp)
+    TestSessionSearchTools(); // SESSIONS.md section 9 — the AI search's tools: arguments, one search, result text, handlers, the stepwise gather (tests_harness.cpp)
     TestLaunchPresets(); // HARNESSES.md — PRESETS: templates, tiers, the launchArgs snapshot, the compile, refusals, menus (tests_presets.cpp)
     TestTabCloseSuccessor();
     TestTaskbarBadge(); // NOTIFICATIONS.md section 8 — the taskbar unread badge's renderer (tests_taskbar.cpp)

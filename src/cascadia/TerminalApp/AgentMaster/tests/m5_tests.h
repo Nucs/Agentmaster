@@ -21,6 +21,7 @@
 //   tests_turns.cpp           - the Copy > Transcript levels: TranscriptTurns (the C++ port of the am-agentmaster-cli skill's transcript_turns.py v9) vs the reference's own goldens in turns\expected, byte for byte; + the summary's whole-conversation chain (CollectConversationUpstream / BuildSummaryConversation)
 //   tests_markdown.cpp        - the transcript overlay's Markdown flattener (MarkdownBlocks — cmark -> flat render blocks); compiled only when the vcpkg cmark of a full build is present (AM_HAVE_CMARK), else it reports a skip
 //   tests_sidepanel.cpp       - SIDE_PANEL.md §2c: the side panel's in-place card list — the order planner (KeyedListDiff.h): reaches the target, indexes in range, minimal; + the cards' and rows' timing line (SessionTimingText.h)
+//   tests_harness.cpp         - SDK_HARNESS.md + SESSIONS.md section 9: the agent harness's model-free half (AgentHarnessCore — the record, the digest, the --settings text, the child's environment, the readers of Claude Code's lines) and the Sessions page's AI search tools (SessionSearchTools — arguments, one search, the result text, the two tool handlers, the stepwise catalog gather)
 //   tests_presets.cpp         - HARNESSES.md: PRESETS (LaunchPresets.h, pure) — the empty initial list + "Add presets…", the one-click template adds, the 0.6.8.18 cleanup, launch-presets.json, the value tiers, the session snapshot (launchArgs), every OpenRouter template's compile vs its launcher profile (MiMo, Kimi, Qwen, GLM), effort, top_k / require_parameters, refusals, the menus, the /handover hint's preset rule
 // ======================================================================================
 //
@@ -253,6 +254,21 @@ void TestPointerCardPlacement();
 // scope; the refusals (no key / no Base URL / a removed custom provider); reserved env names, forbidden claude flags,
 // the key mask; the menu entries, the /handover hint spec, and the hint's bracketed-name-prefix rule for presets
 void TestLaunchPresets();
+// AgentHarnessCore.{h,cpp} (SDK_HARNESS.md), the model-free half of the agent harness: the conversation record (item
+// caps, JSON round trip, a corrupt file = no conversation, atomic save / load / delete), the cold-start digest (which
+// turns and lines, no tool results, the size bound), the --settings text (auto-compaction ON beside its window, the
+// retry bound, the effort), the child's environment (the AM_HARNESS mark + the removals), the readers of Claude Code's
+// lines over shapes captured from 2.1.291 (init, the three compaction lines, result with is_error), and the Fleet
+// Observer's read of the harness mark (ParseClaudeFacts)
+void TestAgentHarnessCore();
+// SessionSearchTools.{h,cpp} (SESSIONS.md section 9), the Sessions page's AI search tools: the search arguments
+// (defaults, clamps, errors written for the model), one search over a hand-built catalog with an injected content
+// search (scope, the four match tiers, sorts, limit, deep only on request, a cancelled search), the result text
+// (row fields, the "indexing" note of a partial catalog), the two tool handlers (short ids + collisions, show by
+// ids / top / nothing, unknown ids, a cancelled request leaving no trace, no index at all), and GatherSessionCatalog
+// on scratch folders (a gather that stops early says how far it got; steps always move forward; a refresh reads
+// only what changed)
+void TestSessionSearchTools();
 // TabCloseSuccessor.h (FAVORITES.md §4a): the tab focused after the FOCUSED tab closes — upstream's pick
 // kept when it starts nothing; a DORMANT successor replaced by the nearest (in-order) / most recently
 // used (MRU) tab that starts nothing; right-first ties, the Manager fallback, hostile/empty inputs

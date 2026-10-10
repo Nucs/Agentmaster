@@ -377,6 +377,12 @@ factsByPid = { pid: ReadClaudeFacts(pid) for pid in claudes }   // ~15 µs each
 # app -> tell them apart by PE subsystem (IsClaudeDesktopGuiApp). 0 (denied/elevated/WOW64) stays a
 # candidate CLI so a real elevated session is never hidden.
 factsByPid = { pid: f for pid, f in factsByPid if not IsClaudeDesktopGuiApp(f) }
+# Drop a HARNESS child (2026-10-10, SDK_HARNESS.md section 5): the headless claude.exe that an
+# Agentmaster runs for one of its own features (the Sessions page's AI search). It is not a session.
+# Its WT_SESSION and AM_SESSION are removed on purpose, so it would otherwise show as an External
+# "console" claude that the user could try to adopt. It says what it is: env AM_HARNESS=<name>
+# (ClaudeProcessFacts::harnessName). No External row, no census count, no correlation, no orphan check.
+factsByPid = { pid: f for pid, f in factsByPid if f.harnessName == "" }
 for f in factsByPid: f.runningApp = classify(f.amSession, f.wtSession, amSession)
 
 roster = merge(_rosterByWindow)                             // all windows' tabs

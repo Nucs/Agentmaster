@@ -1,0 +1,937 @@
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// ======================================================================================
+// Agentmaster TerminalPage implementation (8 partial files)
+// The TerminalPage-side Agentmaster glue -- engine wiring + session lifecycle + observer +
+// window-record + the Sessions browser -- connecting the Manager engine to WT's TerminalPage.
+// Same class (TerminalPage, declared in TerminalPage.h), split across same-class partial TUs (the
+// upstream TabManagement.cpp pattern) so TerminalPage.cpp stays close to upstream.
+//
+// Partial files in this group (★ marks THIS file):
+//   TerminalPage.AgentEngine.cpp               - ~TerminalPage, _InitAgentmasterEngine (consume the process-wide SharedEngine), the Agent Manager page (+ its Home button), _WireAgentManagerContent
+//   TerminalPage.AgentSessions.cpp             - spawn/launch/restore/close/adopt for Claude + Codex; tab-title sync; smart naming + per-dir tab color
+//   TerminalPage.AgentObserver.cpp             - the per-tab overlay/badge bind/reconcile/liveness (incl. managed-Codex) + the Fleet Observer UI lane (_ObserverProbe)
+//   TerminalPage.AgentWindowRecord.cpp         - M10 per-window record capture/flush/restore + reopen saved windows (Claude + Codex tab refs)
+//   TerminalPage.AgentSessionsPage.cpp         - the Sessions browser (SESSIONS.md): shell + list (search / _RenderSessionsTable / detail + off-thread summary)
+//   TerminalPage.AgentSessionsPageActions.cpp  - the Sessions browser row actions: resume/fork, selection nav, hide/unhide/reset, favorite, rename, row filter, overlay registry
+// ★ TerminalPage.AgentSessionsAi.cpp           - the Sessions browser's AI SEARCH: the "AI" toggle, Enter-to-ask, the reset button, the strip, and the model's list in the table
+//   TerminalPage.AgentSessionsPage.Internal.h  - the Sessions-browser Sess* file-local helpers shared by the SessionsPage TUs above (anonymous namespace)
+// ======================================================================================
+//
+// Agentmaster -- the Sessions page's AI SEARCH (SESSIONS.md §9, SDK_HARNESS.md).
+//
+// What the user sees: an "AI" toggle right of the search box. With it on, the box is a REQUEST
+// line: "the session where I fixed the tab drag crash", Enter. A strip under the header shows
+// the request, what happens ("Searching: ..."), then the model's one-sentence answer; the table
+// shows exactly the sessions the model picked, in its order. A follow-up ("only the open ones")
+// refines the list, because the conversation keeps its context. The crossed circle beside the
+// toggle throws the conversation away and brings the normal list back.
+//
+// What is behind it: ONE conversation per process (SharedSessionSearchAgent, SessionSearchAgent.h)
+// -- a hosted Sonnet 5.5 without thinking, started through the Claude agent SDK, with two tool
+// servers: one searches (the page's own search, SessionSearchTools.h), one shows. This file is
+// only the VIEW of that conversation for one window:
+//   - it sends requests (Ask), resets (Reset), and tells the agent when no page uses it;
+//   - it listens to the agent's events, marshalled to this window's UI thread;
+//   - it keeps the list the model showed, and hands it to _RenderSessionsTable (the page's one
+//     render chokepoint), which shows those rows instead of the window's rows.
+//
+// A session the model shows may be OUTSIDE the page's time window (the page lists one month by
+// default, the search covers three and can go further). Such a session gets a real row, marked
+// aiExtra, appended to _sessionsRows / _sessionsEntries, so that everything a row can do (the
+// detail pane, resume, fork, rename, favorite, tags) works on it without a special case.
+//
+// XAML-Islands rule of the page, kept here: a pointer handler never changes the visual tree; it
+// defers to a clean dispatcher tick.
+//
+// This file implements TerminalPage methods (same class, separate TU -- the TabManagement.cpp
+// pattern).
+
+#include "pch.h"
+#include "TerminalPage.h"
+
+#include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
+#include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the shared tooltip recipe behind SessSetTip
+#include "AgentStatusColors.h" // needed by the shared Sess* helpers (the tag ribbon colors)
+#include "AgentMaster/ClaudeSpawn.h" // LogNav
+#include "AgentMaster/Engine.h" // EnsureClaudeAvailable / SharedEngine().claudeExePath
+#include "AgentMaster/Persistence.h" // needed by the shared Sess* helpers
+#include "AgentMaster/ProcessInspect.h" // kSummarySepMark (the shared Sess* helpers)
+#include "AgentMaster/ProcessObserver.h" // needed by the shared Sess* helpers
+#include "AgentMaster/SessionRegistry.h"
+#include "AgentMaster/SessionSearch.h"
+#include "AgentMaster/SessionSearchAgent.h" // SharedSessionSearchAgent / SessionSearchEvent / SessionSearchSnapshot
+#include "AgentMaster/SessionStore.h"
+#include "AgentMaster/TranscriptStore.h" // SessionIndexEntry
+
+using namespace winrt;
+using namespace winrt::Windows::Foundation::Collections;
+using namespace winrt::Windows::System;
+using namespace winrt::Windows::UI;
+using namespace winrt::Windows::UI::Core;
+using namespace winrt::Windows::UI::Text;
+using namespace winrt::Windows::UI::Xaml::Controls;
+using namespace winrt::Windows::UI::Xaml;
+using namespace winrt::Windows::UI::Xaml::Media;
+using namespace std::chrono_literals;
+#include "TerminalPage.AgentSessionsPage.Internal.h" // the shared Sess* file-local helpers
+
+namespace winrt::TerminalApp::implementation
+{
+    namespace
+    {
+        // How many Sessions pages (one per window) show the AI search right now. The agent is
+        // one per process, so "nobody uses it" is a question about all windows: the page that
+        // takes this to 0 frees the agent's session index and parks its process. Atomic because
+        // a page's destructor can run on a thread-pool thread (the terminate-net note in
+        // ~TerminalPage).
+        std::atomic<int> g_sessionsAiPagesInUse{ 0 };
+
+        // How long the idle claude.exe of the AI search lives after the last page left it. Long
+        // enough that a user who closes the Sessions page, resumes a session and comes back
+        // finds the same process (and with it the model's whole context); short enough that a
+        // process nobody uses does not hold its memory for the rest of the day. After a park the
+        // conversation continues from a digest of its record (HarnessConversation::ParkAfter).
+        constexpr int64_t kSessionsAiParkAfterMs = 10 * 60 * 1000;
+
+        // The search box's two placeholders. The AI one says the two things that differ from the
+        // filter box: write a sentence, and Enter sends it.
+        const wchar_t kSessionsFilterPlaceholder[] = L"search for sessions";
+        const wchar_t kSessionsAiPlaceholder[] = L"describe the session you are looking for, then press Enter";
+
+        // `text` without the white space at its two ends.
+        std::wstring SessAiTrim(std::wstring_view text)
+        {
+            const auto isSpace = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
+            size_t a = 0;
+            size_t b = text.size();
+            while (a < b && isSpace(text[a]))
+            {
+                ++a;
+            }
+            while (b > a && isSpace(text[b - 1]))
+            {
+                --b;
+            }
+            return std::wstring{ text.substr(a, b - a) };
+        }
+    }
+
+    // One-time, from _BuildSessionsPageShell: add the AI search's controls to the page header.
+    //   topLeft — the header's top-left grid (Back · title · search box in columns 0..2). Two
+    //             Auto columns are appended for the toggle and the reset button.
+    //   header  — the header grid (rows: top, filters, tag chips). One Auto row is appended for
+    //             the strip.
+    // Also hooks the search box's Enter and Escape keys (they act in AI mode only).
+    // Throws what XAML throws (hresult_error); the caller is the page build, which has no catch
+    // of its own — like every other part of the shell.
+    void TerminalPage::_BuildSessionsAiHeader(const Grid& topLeft, const Grid& header)
+    {
+        for (int i = 0; i < 2; ++i)
+        {
+            ColumnDefinition c;
+            c.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            topLeft.ColumnDefinitions().Append(c);
+        }
+        const int firstColumn = static_cast<int>(topLeft.ColumnDefinitions().Size()) - 2;
+
+        // The toggle. Its Click only reads the new state; the mode change itself (it re-renders
+        // the table and may open a dialog) runs on a clean tick.
+        _sessAiBtn = SessToggle(L"AI", L"AI search", L"Ask for sessions in your own words instead of filtering by words. With it on, write what you remember \x2014 \x201Cthe session where I fixed the tab drag crash\x201D \x2014 and press Enter: a Claude model (Sonnet) searches your sessions and puts the ones that fit in the list, best match first. Then refine it: \x201Conly the open ones\x201D, \x201Colder than that\x201D.\n\nThere is one such conversation, shared by every window. It never shows up among your sessions, and it changes nothing: it can only search and show.");
+        _sessAiBtn.Margin(Thickness{ 8, 0, 0, 0 });
+        _sessAiBtn.VerticalAlignment(VerticalAlignment::Center);
+        _sessAiBtn.Click([this](const winrt::Windows::Foundation::IInspectable& s, const RoutedEventArgs&) {
+            const auto button = s.try_as<Primitives::ToggleButton>();
+            const bool on = button && button.IsChecked() && button.IsChecked().Value();
+            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), on]() {
+                if (auto self = weak.get())
+                {
+                    self->_SetSessionsAiMode(on);
+                }
+            });
+        });
+        Grid::SetColumn(_sessAiBtn, firstColumn);
+        topLeft.Children().Append(_sessAiBtn);
+
+        // The reset: a crossed circle. A FontIcon, not a TextBlock: a TextBlock keeps room for
+        // descenders and the glyph then sits high beside the toggle (the compose-bar lesson).
+        _sessAiResetBtn = Button{};
+        {
+            FontIcon icon;
+            // Qualified: inside a TerminalPage member the bare name is the page's own FontFamily property.
+            icon.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ L"Segoe UI Symbol" });
+            icon.Glyph(L"\x2298"); // CIRCLED DIVISION SLASH
+            icon.FontSize(15);
+            _sessAiResetBtn.Content(icon);
+        }
+        _sessAiResetBtn.Padding(Thickness{ 6, 2, 6, 2 });
+        _sessAiResetBtn.MinWidth(0);
+        _sessAiResetBtn.MinHeight(0);
+        _sessAiResetBtn.Margin(Thickness{ 6, 0, 0, 0 });
+        _sessAiResetBtn.VerticalAlignment(VerticalAlignment::Center);
+        _sessAiResetBtn.Visibility(Visibility::Collapsed); // AI mode only
+        SessSetTip(_sessAiResetBtn, L"New conversation", L"Throw the AI search's conversation away and start a new one: the model forgets what you asked and what it showed, and the list goes back to normal. Use it when you start looking for something else \x2014 a follow-up refers to the list before it.\n\nIt clears the conversation in every window. Your sessions are not touched.");
+        _sessAiResetBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+                const auto self = weak.get();
+                if (!self)
+                {
+                    return;
+                }
+                try
+                {
+                    ::Agentmaster::LogNav(L"sessions ai-reset");
+                    ::Agentmaster::SharedSessionSearchAgent().Reset(); // the Reset event clears this page's list (and every other window's)
+                    if (self->_sessionsSearchBox)
+                    {
+                        self->_sessionsSearchBox.Focus(FocusState::Programmatic); // the user who resets is about to ask again
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"Sessions AI search: reset");
+                }
+            });
+        });
+        Grid::SetColumn(_sessAiResetBtn, firstColumn + 1);
+        topLeft.Children().Append(_sessAiResetBtn);
+
+        // The strip: a header row of its own, as wide as the table (the same column mirror the
+        // filters row and the tag chips row use).
+        {
+            RowDefinition r;
+            r.Height(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            header.RowDefinitions().Append(r);
+        }
+        Grid stripRow;
+        {
+            const auto col = [&](double v, GridUnitType t) {
+                ColumnDefinition c;
+                c.Width(GridLengthHelper::FromValueAndType(v, t));
+                stripRow.ColumnDefinitions().Append(c);
+            };
+            col(0.6, GridUnitType::Star); // == body table column (the strip lives here)
+            col(0, GridUnitType::Auto); // == body divider footprint
+            col(0.4, GridUnitType::Star); // == body detail column (alignment space)
+        }
+        Grid::SetRow(stripRow, static_cast<int>(header.RowDefinitions().Size()) - 1);
+        header.Children().Append(stripRow);
+
+        _sessAiStrip = Border{};
+        _sessAiStrip.Background(SessBrush(0xFF, 0x26, 0x26, 0x26));
+        _sessAiStrip.BorderBrush(SessBrush(0xFF, 0x3A, 0x3A, 0x3A));
+        _sessAiStrip.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        _sessAiStrip.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 6, 6, 6, 6 });
+        _sessAiStrip.Padding(Thickness{ 10, 6, 10, 6 });
+        _sessAiStrip.Margin(Thickness{ 0, 8, 0, 0 });
+        _sessAiStrip.Visibility(Visibility::Collapsed); // AI mode only
+        Grid inner;
+        {
+            const auto col = [&](double v, GridUnitType t) {
+                ColumnDefinition c;
+                c.Width(GridLengthHelper::FromValueAndType(v, t));
+                inner.ColumnDefinitions().Append(c);
+            };
+            col(0, GridUnitType::Auto); // the state dot
+            col(1, GridUnitType::Star); // the request line over the status line
+            col(0, GridUnitType::Auto); // the context size
+        }
+        _sessAiDot = Border{};
+        _sessAiDot.Width(8);
+        _sessAiDot.Height(8);
+        _sessAiDot.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 4, 4, 4, 4 });
+        _sessAiDot.Margin(Thickness{ 0, 5, 8, 0 });
+        _sessAiDot.VerticalAlignment(VerticalAlignment::Top);
+        _sessAiDot.Background(SessBrush(0xFF, 0x80, 0x80, 0x80));
+        Grid::SetColumn(_sessAiDot, 0);
+        inner.Children().Append(_sessAiDot);
+
+        StackPanel lines;
+        lines.Spacing(2);
+        _sessAiQuestionText = SessText(L"", 11, false, 0.6);
+        _sessAiQuestionText.Visibility(Visibility::Collapsed); // until there is a request
+        lines.Children().Append(_sessAiQuestionText);
+        _sessAiStatusText = SessText(L"", 12, false, 0.95);
+        _sessAiStatusText.TextWrapping(TextWrapping::Wrap);
+        _sessAiStatusText.MaxLines(4); // the answer is one sentence; a failure text can be longer
+        lines.Children().Append(_sessAiStatusText);
+        Grid::SetColumn(lines, 1);
+        inner.Children().Append(lines);
+
+        _sessAiUsageText = SessText(L"", 11, false, 0.5);
+        _sessAiUsageText.Margin(Thickness{ 10, 0, 0, 0 });
+        _sessAiUsageText.VerticalAlignment(VerticalAlignment::Top);
+        SessSetTip(_sessAiUsageText, L"Conversation size", L"How much the AI search's conversation holds, in tokens, of the size at which Claude Code compacts it by itself (500K). A longer conversation is not slower to answer, but a new subject is better served by a new conversation: the crossed circle.");
+        Grid::SetColumn(_sessAiUsageText, 2);
+        inner.Children().Append(_sessAiUsageText);
+
+        _sessAiStrip.Child(inner);
+        Grid::SetColumn(_sessAiStrip, 0);
+        stripRow.Children().Append(_sessAiStrip);
+
+        // The box's keys, in AI mode: Enter sends the request; Escape stops a request that runs.
+        // KeyDown on the box (not the page host's PreviewKeyDown, which owns Up / Down): the two
+        // keys mean this only while the caret is in the box.
+        if (_sessionsSearchBox)
+        {
+            _sessionsSearchBox.KeyDown([this](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::KeyRoutedEventArgs& e) {
+                if (!_sessionsAiMode)
+                {
+                    return;
+                }
+                if (e.Key() == VirtualKey::Enter)
+                {
+                    e.Handled(true);
+                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+                        if (auto self = weak.get())
+                        {
+                            self->_SessionsAiAsk();
+                        }
+                    });
+                }
+                else if (e.Key() == VirtualKey::Escape)
+                {
+                    try
+                    {
+                        auto& agent = ::Agentmaster::SharedSessionSearchAgent();
+                        if (agent.Snapshot().busy)
+                        {
+                            // Only then is the key ours: an Escape with nothing running must
+                            // keep its meaning for whatever else the page does with it.
+                            e.Handled(true);
+                            ::Agentmaster::LogNav(L"sessions ai-stop");
+                            agent.Interrupt();
+                        }
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"Sessions AI search: stop a request");
+                    }
+                }
+            });
+        }
+    }
+
+    // Turn the AI search on or off for this page.
+    //   on — true: the search box becomes the request line, the strip and the reset button
+    //        show, the agent is warmed up (its process starts, its index is read), and the
+    //        conversation's last list — when it has one — replaces the table's rows.
+    //        false: back to the filter box and the normal list; the conversation is kept.
+    // "On" is refused, with the page's "Claude not found" notice, when there is no native
+    // claude.exe: the AI search runs through it.
+    // Never throws: a failure is logged and leaves the mode off.
+    void TerminalPage::_SetSessionsAiMode(bool on)
+    {
+        try
+        {
+            if (on == _sessionsAiMode)
+            {
+                if (_sessAiBtn)
+                {
+                    _sessAiBtn.IsChecked(on); // keep the button honest after a refused "on"
+                }
+                return;
+            }
+            if (on && !::Agentmaster::EnsureClaudeAvailable())
+            {
+                ::Agentmaster::LogNav(L"sessions ai on (blocked: no native claude.exe)");
+                if (_sessAiBtn)
+                {
+                    _sessAiBtn.IsChecked(false);
+                }
+                _PromptClaudeMissing();
+                return;
+            }
+            if (on)
+            {
+                // First the one step that can fail for a reason other than memory: the first use
+                // creates the process's agent. A mode that is on without its agent would show a
+                // strip that never changes; a throw here leaves the mode off (the catch below).
+                _SessionsAiAttach();
+            }
+            _sessionsAiMode = on;
+            ::Agentmaster::LogNav(on ? L"sessions ai on" : L"sessions ai off");
+            if (_sessAiBtn)
+            {
+                _sessAiBtn.IsChecked(on);
+            }
+            // The box changes its meaning, so it starts empty either way: a half-typed filter
+            // must not be sent as a request, and a half-typed request must not filter the list.
+            // (TextChanged does nothing while _sessionsAiMode is set, so clear the query here.)
+            _sessionsQueryText.clear();
+            if (_sessionsSearchBox)
+            {
+                _sessionsSearchBox.Text(L"");
+                _sessionsSearchBox.PlaceholderText(on ? kSessionsAiPlaceholder : kSessionsFilterPlaceholder);
+            }
+            ::Agentmaster::SessionSearchSnapshot snapshot;
+            if (on)
+            {
+                auto& agent = ::Agentmaster::SharedSessionSearchAgent();
+                agent.SetClaudeExePath(::Agentmaster::SharedEngine().claudeExePath); // UI thread: the path's owner
+                _SessionsAiSetInUse(_sessionsPageVisible.load(std::memory_order_relaxed));
+                // While the page's own gather runs, it reads the same sidecar files: the agent
+                // reads its index when that is done (_SessionsAiAfterGather), the process starts now.
+                agent.Prewarm(!_sessionsIndexing.load());
+                snapshot = agent.Snapshot();
+                _sessionsAiEpoch = snapshot.epoch;
+                _SessionsAiAdoptSnapshot(snapshot);
+            }
+            else
+            {
+                _SessionsAiSetInUse(false);
+                _sessionsAiHasShown = false;
+                _sessionsAiPreview = false;
+                _sessionsAiListTurn = 0;
+                _sessionsAiShownIds.clear();
+                _sessionsAiEntries.clear();
+                _SessionsAiMergeExtraRows(); // removes the list's extra rows
+            }
+            _UpdateSessionsAiStrip(snapshot);
+            _RunSessionsSearch(); // the (now empty) filter query, then the render — which applies the AI list when there is one
+            if (_sessionsSearchBox)
+            {
+                _sessionsSearchBox.Focus(FocusState::Programmatic);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SetSessionsAiMode");
+            // Keep the button honest: it must not read "on" for a mode that did not start.
+            try
+            {
+                if (_sessAiBtn)
+                {
+                    _sessAiBtn.IsChecked(_sessionsAiMode);
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_SetSessionsAiMode: restore the toggle");
+            }
+        }
+    }
+
+    // Send the search box's text to the conversation. The newest request wins: one that still
+    // runs is interrupted (SessionSearchAgent::Ask). An empty box does nothing. The box is then
+    // cleared: the strip shows the request, and the box is free for the follow-up.
+    // Never throws.
+    void TerminalPage::_SessionsAiAsk()
+    {
+        try
+        {
+            if (!_sessionsAiMode || !_sessionsSearchBox)
+            {
+                return;
+            }
+            const std::wstring text = SessAiTrim(std::wstring{ _sessionsSearchBox.Text() });
+            if (text.empty())
+            {
+                return;
+            }
+            // The path can be gone since the mode was turned on (the Settings cog's override).
+            if (!::Agentmaster::EnsureClaudeAvailable())
+            {
+                ::Agentmaster::LogNav(L"sessions ai-ask (blocked: no native claude.exe)");
+                _PromptClaudeMissing();
+                return;
+            }
+            _SessionsAiAttach();
+            auto& agent = ::Agentmaster::SharedSessionSearchAgent();
+            agent.SetClaudeExePath(::Agentmaster::SharedEngine().claudeExePath);
+            _SessionsAiSetInUse(true); // a request is use, whatever the tally thought
+            const uint64_t turn = agent.Ask(text);
+            // The words stay out of the nav trail (the agent's own [ai-search] line has them).
+            ::Agentmaster::LogNav(L"sessions ai-ask turn=" + std::to_wstring(turn) + L" chars=" + std::to_wstring(text.size()));
+            _sessionsSearchBox.Text(L"");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SessionsAiAsk");
+        }
+    }
+
+    // Register this page's listener on the process's agent — once. The agent calls a listener
+    // on ITS threads; the listener only posts the event to this window's dispatcher.
+    //   throws — what SharedSessionSearchAgent() throws on its first call (the agent could not
+    //            be created), std::bad_alloc.
+    void TerminalPage::_SessionsAiAttach()
+    {
+        if (_sessionsAiListenerToken != 0)
+        {
+            return;
+        }
+        const auto weakThis = get_weak();
+        const auto dispatcher = Dispatcher(); // agile: callable from the agent's threads
+        _sessionsAiListenerToken = ::Agentmaster::SharedSessionSearchAgent().AddListener([weakThis, dispatcher](const ::Agentmaster::SessionSearchEvent& e) {
+            // ⚠ No strong reference to the page on this thread. A strong reference that is the
+            // LAST one would run ~TerminalPage here, off the UI thread (the terminate-net note
+            // in ~TerminalPage). The weak reference is resolved inside the dispatched call only.
+            dispatcher.RunAsync(CoreDispatcherPriority::Normal, [weakThis, e]() {
+                if (auto self = weakThis.get())
+                {
+                    try
+                    {
+                        self->_OnSessionsAiEvent(e);
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"Sessions AI search: an agent event");
+                    }
+                }
+            });
+        });
+    }
+
+    // ~TerminalPage: remove the listener and leave the in-use tally (Rule #10: a closing window
+    // detaches from the process-wide engine). Thread-safe — the destructor can run on a
+    // thread-pool thread — and it touches no XAML. Never throws.
+    void TerminalPage::_SessionsAiDetach() noexcept
+    {
+        try
+        {
+            if (_sessionsAiListenerToken != 0)
+            {
+                // A token exists only when the agent does: this call cannot create it.
+                ::Agentmaster::SharedSessionSearchAgent().RemoveListener(_sessionsAiListenerToken);
+                _sessionsAiListenerToken = 0;
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SessionsAiDetach");
+        }
+        _SessionsAiSetInUse(false);
+    }
+
+    // Count this page in or out of the pages that show the AI search.
+    //   inUse — true: this page shows it now. false: it does not (the mode is off, the page was
+    //           closed, or the window goes away).
+    // The page that takes the count to 0 frees the agent's session index (tens of megabytes)
+    // and parks its process after kSessionsAiParkAfterMs. Idempotent. Never throws.
+    void TerminalPage::_SessionsAiSetInUse(bool inUse) noexcept
+    {
+        if (inUse == _sessionsAiInUse)
+        {
+            return;
+        }
+        _sessionsAiInUse = inUse;
+        try
+        {
+            if (inUse)
+            {
+                g_sessionsAiPagesInUse.fetch_add(1);
+                return;
+            }
+            if (g_sessionsAiPagesInUse.fetch_sub(1) > 1)
+            {
+                return; // another window's page still shows it
+            }
+            // _sessionsAiInUse was true, so the agent exists: this call cannot create it.
+            auto& agent = ::Agentmaster::SharedSessionSearchAgent();
+            agent.ReleaseCatalog();
+            agent.ParkProcessAfter(kSessionsAiParkAfterMs);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SessionsAiSetInUse");
+        }
+    }
+
+    // The page came on screen or left it: opened (_ShowSessionsPage), closed (_HideSessionsPage),
+    // or covered / uncovered by a tab switch (the page overlay registry's dismiss / restore
+    // hooks). A page behind another tab counts as "not shown": the user may not come back for
+    // hours, and an idle claude.exe holds about 400 MB. The park is delayed
+    // (kSessionsAiParkAfterMs), so a short trip to a tab keeps the same process.
+    //   shown — true when the page is on screen now, false when it is not.
+    // With the AI search on, coming on screen starts the agent's process again (it may have
+    // been parked). Its index is read at once — unless the page's own gather runs (at an open
+    // it does): then the index follows that gather (_SessionsAiAfterGather), so that the two
+    // do not parse the same transcripts at the same time.
+    // Never throws.
+    void TerminalPage::_SessionsAiNotePageShown(bool shown)
+    {
+        if (!_sessionsAiMode)
+        {
+            return;
+        }
+        _SessionsAiSetInUse(shown);
+        if (!shown)
+        {
+            return;
+        }
+        try
+        {
+            auto& agent = ::Agentmaster::SharedSessionSearchAgent();
+            agent.SetClaudeExePath(::Agentmaster::SharedEngine().claudeExePath);
+            agent.Prewarm(!_sessionsIndexing.load());
+            _UpdateSessionsAiStrip(agent.Snapshot());
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SessionsAiNotePageShown");
+        }
+    }
+
+    // The page's own gather landed (_RefreshSessionsRows, on the UI thread, right after it
+    // replaced _sessionsRows / _sessionsEntries):
+    //   1. the gather knows only the page's time window, so the AI list's rows outside it are
+    //      gone — put them back;
+    //   2. the sidecar files of the page's window are current now, so the agent can read its
+    //      index without parsing the same transcripts a second time.
+    // Never throws.
+    void TerminalPage::_SessionsAiAfterGather()
+    {
+        try
+        {
+            _SessionsAiMergeExtraRows();
+            if (_sessionsAiMode && _sessionsAiInUse)
+            {
+                ::Agentmaster::SharedSessionSearchAgent().Prewarm(true);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SessionsAiAfterGather");
+        }
+    }
+
+    // One event of the agent, on this window's UI thread.
+    //   e — the event, with the conversation's state after it (e.snapshot).
+    // A page that does not show the AI search only notes the epoch: turning the mode on adopts
+    // the conversation's state as a whole (_SetSessionsAiMode).
+    //   throws — what the render throws (hresult_error); the dispatched caller logs it.
+    void TerminalPage::_OnSessionsAiEvent(const ::Agentmaster::SessionSearchEvent& e)
+    {
+        using Kind = ::Agentmaster::SessionSearchEventKind;
+        if (e.snapshot.epoch < _sessionsAiEpoch)
+        {
+            return; // an event of a conversation that was reset away
+        }
+        _sessionsAiEpoch = e.snapshot.epoch;
+        if (!_sessionsAiMode)
+        {
+            return;
+        }
+        bool render = false;
+        bool finalList = false; // the model's own pick arrived: select its first row
+        switch (e.kind)
+        {
+        case Kind::Reset:
+            _SessionsAiAdoptSnapshot(e.snapshot); // an empty conversation: no list, the normal rows come back
+            _sessionsSelectedId.clear();
+            render = true;
+            break;
+        case Kind::Candidates:
+            // A search's rows, before the model picked from them. Showing them at once is what
+            // makes the search feel instant (the model's pick comes about a second later and
+            // replaces them). Not when they are empty — a blank table while the model tries
+            // other words reads as "nothing found" — and never over the final list of the same
+            // request.
+            if (!e.sessionIds.empty() && (e.turn > _sessionsAiListTurn || (e.turn == _sessionsAiListTurn && _sessionsAiPreview)))
+            {
+                _sessionsAiPreview = true;
+                _sessionsAiListTurn = e.turn;
+                _sessionsAiShownIds = e.sessionIds;
+                _sessionsAiEntries = e.entries;
+                _sessionsAiSortColumn = _sessionsSortColumn;
+                _sessionsAiSortAscending = _sessionsSortAscending;
+                _SessionsAiMergeExtraRows();
+                render = true;
+            }
+            break;
+        case Kind::Shown:
+            _sessionsAiHasShown = true;
+            _sessionsAiPreview = false;
+            _sessionsAiListTurn = e.turn;
+            _sessionsAiShownIds = e.sessionIds;
+            _sessionsAiEntries = e.entries;
+            _sessionsAiSortColumn = _sessionsSortColumn;
+            _sessionsAiSortAscending = _sessionsSortAscending;
+            _SessionsAiMergeExtraRows();
+            render = true;
+            finalList = true;
+            break;
+        case Kind::Answer:
+        case Kind::Failed:
+            if (_sessionsAiPreview)
+            {
+                // The request ended without a show call (the model answered in words, or it
+                // failed): the preview was never the model's pick. Back to the conversation's
+                // real list.
+                _SessionsAiAdoptSnapshot(e.snapshot);
+                render = true;
+            }
+            break;
+        case Kind::StateChanged:
+        case Kind::Asked:
+        case Kind::Searching:
+        case Kind::Compacting:
+        default:
+            break; // the strip below is all they change
+        }
+        _UpdateSessionsAiStrip(e.snapshot);
+        if (!render)
+        {
+            return;
+        }
+        if (finalList)
+        {
+            // The best match is selected, so its detail pane is there without a click.
+            _sessionsSelectedId = _sessionsAiShownIds.empty() ? std::wstring{} : _sessionsAiShownIds.front();
+        }
+        _RenderSessionsTable();
+        if (finalList || e.kind == Kind::Reset)
+        {
+            _ShowSessionsDetail(_sessionsSelectedId); // an empty id shows the "select a session" text
+            if (_sessionsRowsScroll)
+            {
+                _sessionsRowsScroll.ChangeView(nullptr, 0.0, nullptr, true); // a new list starts at its top
+            }
+        }
+    }
+
+    // Take the conversation's shown list as this page's list: at "AI on", after a reset, and
+    // when a request ends while only a preview is on the screen.
+    //   snapshot — the conversation's state. hasShown false = no list: the normal rows show.
+    // The rows outside the page's window need their index entries; they come from the agent's
+    // in-memory index (EntriesFor). When that index was released (no page used the AI search),
+    // such rows are missing until the next request — the rows inside the window always show.
+    //   throws — std::bad_alloc; what SharedSessionSearchAgent() throws on its first call.
+    void TerminalPage::_SessionsAiAdoptSnapshot(const ::Agentmaster::SessionSearchSnapshot& snapshot)
+    {
+        _sessionsAiHasShown = snapshot.hasShown;
+        _sessionsAiPreview = false;
+        // The list's request is not recorded in the snapshot; the newest request is the latest
+        // it can be. A preview of that request is then not shown over it, one of a later is.
+        _sessionsAiListTurn = snapshot.hasShown ? snapshot.turns : 0;
+        _sessionsAiShownIds = snapshot.shownIds;
+        _sessionsAiEntries.clear();
+        if (snapshot.hasShown && !snapshot.shownIds.empty())
+        {
+            _sessionsAiEntries = ::Agentmaster::SharedSessionSearchAgent().EntriesFor(snapshot.shownIds);
+        }
+        _sessionsAiSortColumn = _sessionsSortColumn;
+        _sessionsAiSortAscending = _sessionsSortAscending;
+        _SessionsAiMergeExtraRows();
+    }
+
+    // Make _sessionsRows / _sessionsEntries hold exactly the extra rows the current AI list
+    // needs: remove every aiExtra row, then add one for each listed session that the page's
+    // gather did not list (it is outside the page's time window).
+    // The two vectors stay index-aligned (row i <-> entry i), which the gather's title overlay
+    // and the rename path rely on; when they are not aligned to begin with, only the rows are
+    // changed (every reader of the entries checks the id).
+    //   throws — std::bad_alloc.
+    void TerminalPage::_SessionsAiMergeExtraRows()
+    {
+        const bool aligned = _sessionsEntries.size() == _sessionsRows.size();
+        size_t keep = 0;
+        for (size_t i = 0; i < _sessionsRows.size(); ++i)
+        {
+            if (_sessionsRows[i].aiExtra)
+            {
+                continue;
+            }
+            if (keep != i)
+            {
+                _sessionsRows[keep] = std::move(_sessionsRows[i]);
+                if (aligned)
+                {
+                    _sessionsEntries[keep] = std::move(_sessionsEntries[i]);
+                }
+            }
+            ++keep;
+        }
+        _sessionsRows.resize(keep);
+        if (aligned)
+        {
+            _sessionsEntries.resize(keep);
+        }
+        if (!_sessionsAiMode || !(_sessionsAiHasShown || _sessionsAiPreview))
+        {
+            return; // no AI list: no extra rows
+        }
+        std::unordered_set<std::wstring> have;
+        have.reserve(_sessionsRows.size() + _sessionsAiEntries.size());
+        for (const auto& r : _sessionsRows)
+        {
+            have.insert(r.id);
+        }
+        const std::unordered_set<std::wstring> listed(_sessionsAiShownIds.begin(), _sessionsAiShownIds.end());
+        for (const auto& entry : _sessionsAiEntries)
+        {
+            if (listed.count(entry.sessionId) == 0 || !have.insert(entry.sessionId).second)
+            {
+                continue; // not in the list any more, or the page has the row already
+            }
+            _SessionsRow row = _SessionsRowFromIndexEntry(entry);
+            row.aiExtra = true;
+            _sessionsRows.push_back(std::move(row));
+            if (aligned)
+            {
+                _sessionsEntries.push_back(entry);
+            }
+        }
+    }
+
+    // _RenderSessionsTable's hook: while the AI search shows a list, the table shows EXACTLY
+    // that list — not the window's rows after the filters.
+    //   view      — in: the rows the normal filters chose. out, when this returns true: the
+    //               listed sessions that have a row, in the model's order.
+    //   keepOrder — out, when this returns true: true = keep that order (the caller must not
+    //               sort); false = the user picked another sort since the list arrived, so the
+    //               column sort applies to these rows like to any others.
+    //   returns   — true when an AI list is active; false leaves `view` and `keepOrder` alone.
+    // The Open / Favorite / Hidden / row filters do not apply to the list: the model chose
+    // these sessions for the request, and a hidden session that the user asks for by content is
+    // one they want to see.
+    //   throws — std::bad_alloc.
+    bool TerminalPage::_SessionsAiApplyView(std::vector<const _SessionsRow*>& view, bool& keepOrder) const
+    {
+        if (!_sessionsAiMode || !(_sessionsAiHasShown || _sessionsAiPreview))
+        {
+            return false;
+        }
+        std::unordered_map<std::wstring, const _SessionsRow*> byId;
+        byId.reserve(_sessionsRows.size());
+        for (const auto& r : _sessionsRows)
+        {
+            byId.emplace(r.id, &r);
+        }
+        view.clear();
+        view.reserve(_sessionsAiShownIds.size());
+        for (const auto& id : _sessionsAiShownIds)
+        {
+            if (const auto it = byId.find(id); it != byId.end())
+            {
+                view.push_back(it->second);
+            }
+        }
+        keepOrder = _sessionsSortColumn == _sessionsAiSortColumn && _sessionsSortAscending == _sessionsAiSortAscending;
+        return true;
+    }
+
+    // Repaint what the page shows OF THE CONVERSATION, outside the table: the strip (request,
+    // status, context size), the state dot, and the reset button.
+    //   snapshot — the conversation's state (an event's, or SessionSearchAgent::Snapshot()).
+    // With the AI search off, the strip and the reset button are hidden and nothing else is done.
+    //   throws — what XAML throws (hresult_error).
+    void TerminalPage::_UpdateSessionsAiStrip(const ::Agentmaster::SessionSearchSnapshot& snapshot)
+    {
+        using State = ::Agentmaster::HarnessState;
+        const auto visible = _sessionsAiMode ? Visibility::Visible : Visibility::Collapsed;
+        if (_sessAiStrip)
+        {
+            _sessAiStrip.Visibility(visible);
+        }
+        if (_sessAiResetBtn)
+        {
+            _sessAiResetBtn.Visibility(visible);
+            // Nothing to throw away in a conversation that has not started.
+            _sessAiResetBtn.IsEnabled(snapshot.turns > 0 || snapshot.busy || snapshot.hasShown);
+        }
+        if (!_sessionsAiMode || !_sessAiStatusText || !_sessAiQuestionText || !_sessAiDot || !_sessAiUsageText)
+        {
+            return;
+        }
+        // The request.
+        if (snapshot.question.empty())
+        {
+            _sessAiQuestionText.Visibility(Visibility::Collapsed);
+        }
+        else
+        {
+            _sessAiQuestionText.Text(winrt::hstring{ L"\x276F " + snapshot.question });
+            _sessAiQuestionText.Visibility(Visibility::Visible);
+        }
+        // The status line and the dot. One of: working (blue), an error (red), the answer
+        // (green dot, plain text), or — before any request — how to use it (gray dot, dim text).
+        std::wstring status;
+        Color dot = ColorHelper::FromArgb(0xFF, 0x80, 0x80, 0x80);
+        Color ink = ColorHelper::FromArgb(0xFF, 0xF2, 0xF2, 0xF2);
+        double inkOpacity = 0.95;
+        if (snapshot.busy)
+        {
+            status = !snapshot.activity.empty() ? snapshot.activity : std::wstring{ L"Thinking\x2026" };
+            if (_sessionsAiPreview)
+            {
+                status += L" \x2014 " + std::to_wstring(_sessionsAiShownIds.size()) + (_sessionsAiShownIds.size() == 1 ? L" candidate, choosing\x2026" : L" candidates, choosing\x2026");
+            }
+            dot = ColorHelper::FromArgb(0xFF, 0x4E, 0xA1, 0xFF);
+            ink = ColorHelper::FromArgb(0xFF, 0x8A, 0xB4, 0xF8);
+        }
+        else if (snapshot.answerIsError || snapshot.state == State::Failed)
+        {
+            status = !snapshot.answer.empty() ? snapshot.answer : std::wstring{ L"The search assistant could not start." };
+            dot = ColorHelper::FromArgb(0xFF, 0xE5, 0x53, 0x3D);
+            ink = ColorHelper::FromArgb(0xFF, 0xF2, 0x8B, 0x82);
+        }
+        else if (!snapshot.answer.empty())
+        {
+            status = snapshot.answer;
+            dot = ColorHelper::FromArgb(0xFF, 0x5C, 0xB8, 0x5C);
+        }
+        else if (snapshot.state == State::Starting)
+        {
+            status = L"Starting the search assistant\x2026";
+            dot = ColorHelper::FromArgb(0xFF, 0x4E, 0xA1, 0xFF);
+            inkOpacity = 0.6;
+        }
+        else
+        {
+            status = L"Describe the session you are looking for and press Enter. A follow-up refines the list; the crossed circle starts over.";
+            if (snapshot.state == State::Ready)
+            {
+                dot = ColorHelper::FromArgb(0xFF, 0x5C, 0xB8, 0x5C);
+            }
+            inkOpacity = 0.6;
+        }
+        _sessAiStatusText.Text(winrt::hstring{ status });
+        _sessAiStatusText.Foreground(SolidColorBrush{ ink });
+        _sessAiStatusText.Opacity(inkOpacity);
+        _sessAiDot.Background(SolidColorBrush{ dot });
+        // The context size, once the model answered at least once.
+        std::wstring usage;
+        if (snapshot.usage.contextTokens > 0)
+        {
+            usage = L"ctx " + SessFormatTokens(snapshot.usage.contextTokens);
+            if (snapshot.usage.contextWindow > 0)
+            {
+                usage += L" / " + SessFormatTokens(snapshot.usage.contextWindow);
+            }
+            if (snapshot.compactions > 0)
+            {
+                usage += L" \x00B7 compacted " + std::to_wstring(snapshot.compactions) + L"\x00D7";
+            }
+        }
+        _sessAiUsageText.Text(winrt::hstring{ usage });
+    }
+
+    // A table row from an index entry alone — no directory listing, no registry. The same
+    // field rules as the gather's rows (_RefreshSessionsRows), through the helpers the search
+    // tool itself uses for the same columns, so a row reads the same whichever way it came.
+    //   entry   — a session's index entry; its liveTitle (a stored or live tab title) wins as
+    //             the title, like the gather's overlays.
+    //   returns — the row; aiExtra is false (the caller marks an extra row).
+    //   throws  — std::bad_alloc.
+    TerminalPage::_SessionsRow TerminalPage::_SessionsRowFromIndexEntry(const ::Agentmaster::SessionIndexEntry& entry)
+    {
+        _SessionsRow r;
+        r.id = entry.sessionId;
+        r.path = entry.path;
+        r.title = ::Agentmaster::SessionSearchTitleOf(entry);
+        r.dir = ::Agentmaster::SessionSearchDirOf(entry);
+        r.branch = entry.stats.gitBranch;
+        r.fork = !entry.stats.forkedFromId.empty();
+        r.forkedFromId = entry.stats.forkedFromId;
+        r.createdMs = ::Agentmaster::SessionSearchCreatedMs(entry);
+        r.lastActivityMs = ::Agentmaster::SessionSearchLastActivityMs(entry);
+        r.sizeBytes = entry.sizeBytes;
+        r.msgs = entry.stats.userPrompts;
+        r.tools = entry.stats.toolUses;
+        r.contextTokens = entry.stats.contextTokens;
+        return r;
+    }
+}

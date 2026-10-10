@@ -530,6 +530,12 @@ namespace winrt::TerminalApp::implementation
         {
             _sidePanelLaunchBar->Shutdown();
         }
+        // Agentmaster (the Sessions page's AI search, SESSIONS.md §9): remove this page's listener from
+        // the process-wide search agent and leave its in-use tally — the last page out lets the agent
+        // free its session index and park its idle process (Rule #10). Thread-safe and noexcept, no
+        // XAML inside, so it needs no guard and is never skipped; a no-op for a page that never
+        // turned the AI search on.
+        _SessionsAiDetach();
         // Agentmaster (cross-window activate): drop this window's activate sink from the shared
         // engine — a stray fan-out after teardown is already a safe no-op (the sink captures
         // get_weak() + an agile dispatcher), this keeps the engine's sink list bounded (Rule #10).

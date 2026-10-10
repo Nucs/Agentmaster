@@ -10,7 +10,8 @@
       "dependencies": [
         "jsoncpp",
         "cli11",
-        "cmark"
+        "cmark",
+        "nlohmann-json"
       ]
     }
   },
@@ -34,6 +35,11 @@
     {
       "name": "cmark",
       "version": "0.31.1"
+    },
+    {
+      "name": "nlohmann-json",
+      "version": "3.12.0",
+      "port-version": 2
     }
   ],
   "builtin-baseline": "15e5f3820f0370f1ba7150853762cec0688cd396",

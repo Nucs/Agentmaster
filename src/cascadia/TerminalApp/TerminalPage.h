@@ -56,6 +56,8 @@ namespace Agentmaster
     class Scheduler;
     class SessionScanner;
     class ProcessObserver;
+    struct SessionSearchEvent; // Agentmaster: SessionSearchAgent.h — one event of the Sessions page's AI search (complete type included by TerminalPage.AgentSessionsAi.cpp)
+    struct SessionSearchSnapshot; // Agentmaster: SessionSearchAgent.h — the AI search's conversation as a page shows it (same TU)
     struct TabDragBand; // Agentmaster: TabDragMath.h — the pointer-owned tab reorder gesture's band record (complete type included by the .cpp)
     enum class DockProbeMode : int; // Agentmaster: Engine.h — cross-window tab docking, what a drag asks a dock target (complete type included by the .cpp)
     struct DockProbeResult; // Agentmaster: Engine.h — cross-window tab docking, a dock target's answer (slot + numeric window id)
@@ -913,6 +915,12 @@ namespace winrt::TerminalApp::implementation
             int64_t contextTokens{ 0 }; // newest assistant turn's usage (≈ context occupancy); the compact "Ctx" column — the same value the Triage Board shows as "ctx N"
             bool fork{ false };
             std::wstring forkedFromId;
+            // Agentmaster (SESSIONS.md §9): true for a row that the AI search added — a session it
+            // shows that is OUTSIDE the page's time window, so the gather did not list it. Such a row
+            // (and its index entry, at the same position in _sessionsEntries) sits at the END of the
+            // vectors, is shown only in the AI search's list, and is put back after every gather
+            // (_SessionsAiMergeExtraRows). The normal list skips it.
+            bool aiExtra{ false };
         };
         winrt::Windows::UI::Xaml::Controls::Grid _sessionsPageHost{ nullptr }; // full-bleed page over Root rows 1-2
         // Agentmaster (LocalTooltip, AgentLocalTooltip.h): the page's hover-description panel — every
@@ -996,6 +1004,36 @@ namespace winrt::TerminalApp::implementation
         // The visible row ids in TABLE (sorted+filtered) order — the Up/Down keyboard
         // navigation list (the archive page's _archiveVisibleOrder pattern). Rebuilt each render.
         std::vector<std::wstring> _sessionsVisibleOrder;
+
+        // ===== Agentmaster (SESSIONS.md §9): the Sessions page's AI SEARCH =======================
+        // The "AI" toggle beside the search box turns the box into a request line: Enter sends the
+        // text to the process's ONE search conversation (SharedSessionSearchAgent — a hosted Sonnet
+        // with two tool servers), which searches with the page's own search and tells the page which
+        // sessions to show. The page is a VIEW of that conversation: every window's Sessions page
+        // shows the same one. All of this state is UI-thread-only; the agent's events arrive on its
+        // threads and are marshalled here (_SessionsAiAttach). Implementation:
+        // TerminalPage.AgentSessionsAi.cpp.
+        bool _sessionsAiMode{ false }; // the AI toggle is on: the search box sends requests, and the model's list (when there is one) replaces the table's rows
+        bool _sessionsAiInUse{ false }; // this page is counted in the process-wide tally of pages that show the AI search (the last one out frees the agent's index and parks its process)
+        uint64_t _sessionsAiListenerToken{ 0 }; // the agent listener of this page; 0 = not attached. Removed in ~TerminalPage (Rule #10)
+        uint64_t _sessionsAiEpoch{ 0 }; // the conversation epoch the page shows; an event of an older one (before a reset) is dropped
+        bool _sessionsAiHasShown{ false }; // _sessionsAiShownIds is a list the model put on the screen (an EMPTY one means "nothing fits": show no row)
+        bool _sessionsAiPreview{ false }; // _sessionsAiShownIds is the rows of a search that the model has not picked from yet (shown at once, replaced by its pick)
+        uint64_t _sessionsAiListTurn{ 0 }; // the request the list (or preview) belongs to: a preview never replaces the final list of its own request
+        std::vector<std::wstring> _sessionsAiShownIds; // the listed sessions, full ids, in the model's order
+        std::vector<::Agentmaster::SessionIndexEntry> _sessionsAiEntries; // their index entries as the agent sent them: the source of the rows outside the page's time window
+        // The table's sort when the list arrived. While the sort still is this one, the list keeps
+        // the MODEL's order; a click on a column header changes the sort, and that column then
+        // sorts the list like any other.
+        int _sessionsAiSortColumn{ 7 };
+        bool _sessionsAiSortAscending{ false };
+        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessAiBtn{ nullptr }; // "AI": the mode toggle, right of the search box
+        winrt::Windows::UI::Xaml::Controls::Button _sessAiResetBtn{ nullptr }; // the crossed circle: throw the conversation away. Shown in AI mode only
+        winrt::Windows::UI::Xaml::Controls::Border _sessAiStrip{ nullptr }; // header row 3: the request, what happens now / the model's sentence, the context size. Shown in AI mode only
+        winrt::Windows::UI::Xaml::Controls::Border _sessAiDot{ nullptr }; // the strip's state dot (working / ready / stopped / failed): a round Border, so this header needs no Shapes projection
+        winrt::Windows::UI::Xaml::Controls::TextBlock _sessAiQuestionText{ nullptr }; // the strip's first line: the newest request
+        winrt::Windows::UI::Xaml::Controls::TextBlock _sessAiStatusText{ nullptr }; // the strip's second line: the activity, the answer, or the hint
+        winrt::Windows::UI::Xaml::Controls::TextBlock _sessAiUsageText{ nullptr }; // the strip's right end: context tokens of the conversation
 
         // Agentmaster: IN-PLACE TITLE EDITING in the Sessions browser (the Manager's Explorer-tree
         // rename idiom, here over the Title cell). Two entry points — the row right-click "Edit
@@ -2020,6 +2058,23 @@ namespace winrt::TerminalApp::implementation
         winrt::fire_and_forget _PromptResumeOrForkSession(std::wstring sessionId, std::wstring dir, std::wstring title, std::wstring forkTitle); // Sessions-page double-click on a NOT-live row: a Resume / Fork / Cancel ContentDialog (the adopt dialog's idiom) instead of resuming silently. Primary=Resume (claude --resume), Secondary=Fork (--fork-session, parent untouched), Close=Cancel; forkTitle is empty for a never-prompted row so the fork seam derives a smart name
         void _UpdateSessionsSelectionHighlight(); // recolor row highlights for _sessionsSelectedId WITHOUT a rebuild (row-tap + keyboard nav)
         void _MoveSessionsSelection(int delta); // Up/Down keyboard nav over _sessionsVisibleOrder: none selected => Down=first / Up=last; wraps (rotates) at the ends
+
+        // ----- Agentmaster (SESSIONS.md §9): the Sessions page's AI search — TerminalPage.AgentSessionsAi.cpp -----
+        // Each is UI-thread-only unless it says otherwise; the full contracts are at the definitions.
+        void _BuildSessionsAiHeader(const winrt::Windows::UI::Xaml::Controls::Grid& topLeft, const winrt::Windows::UI::Xaml::Controls::Grid& header); // one-time, from _BuildSessionsPageShell: the AI toggle + the reset button beside the search box, the strip row under the header, and the box's Enter / Escape keys
+        void _SetSessionsAiMode(bool on); // turn the AI search on / off for this page (refuses "on" without a native claude.exe); re-renders
+        void _SessionsAiAsk(); // send the search box's text to the conversation (the newest request wins), then clear the box
+        void _SessionsAiAttach(); // register this page's agent listener once (events are marshalled to this window's UI thread)
+        void _SessionsAiDetach() noexcept; // ~TerminalPage: remove the listener and leave the in-use tally. Thread-safe, never throws
+        void _SessionsAiSetInUse(bool inUse) noexcept; // count this page in / out of the pages that show the AI search; the last one out frees the agent's index and parks its process
+        void _SessionsAiNotePageShown(bool shown); // the page came on screen or left it (opened / closed, or uncovered / covered by a tab switch): keep the tally right, and warm the agent up when the page comes back in AI mode
+        void _SessionsAiAfterGather(); // the page's own gather landed: put the AI list's extra rows back, and let the agent read the index now (the sidecar files are current)
+        void _OnSessionsAiEvent(const ::Agentmaster::SessionSearchEvent& e); // one agent event, on the UI thread: update the list, the strip, the table
+        void _SessionsAiAdoptSnapshot(const ::Agentmaster::SessionSearchSnapshot& snapshot); // take the conversation's shown list as the page's list (AI mode on, a reset, an answer that ends a preview)
+        void _SessionsAiMergeExtraRows(); // make _sessionsRows / _sessionsEntries hold exactly the extra rows the current AI list needs (aiExtra rows, at the end)
+        bool _SessionsAiApplyView(std::vector<const _SessionsRow*>& view, bool& keepOrder) const; // _RenderSessionsTable: replace the view with the AI list when one is active; false = no AI list, the view is untouched
+        void _UpdateSessionsAiStrip(const ::Agentmaster::SessionSearchSnapshot& snapshot); // repaint the strip, the reset button and the placeholder from the conversation's state
+        static _SessionsRow _SessionsRowFromIndexEntry(const ::Agentmaster::SessionIndexEntry& entry); // a table row from an index entry alone (no directory listing): the rows of sessions outside the page's window
         bool _AddSessionIdToHiddenList(const std::wstring& sessionId); // Agentmaster: append an id to AppSettings.hiddenSessionIds (freshest-disk RMW + in-memory copy); idempotent, returns true if newly added. Shared by the row right-click hide AND the auto-hide-on-delete seam. NO UI side effects — the caller refreshes.
         void _HideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Hide from list": _AddSessionIdToHiddenList + drop it from the table (the transcript on disk is untouched)
         void _UnhideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Unhide" (shown on a revealed hidden row): remove from AppSettings.hiddenSessionIds (freshest-disk RMW) + re-render so it returns to the list normally

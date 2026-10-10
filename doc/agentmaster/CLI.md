@@ -170,6 +170,11 @@ claude's **`host`** — `windows-terminal` / `agentmaster-other` (a sibling inst
 `AM_SESSION` GUID prefix) / `agentmaster-self` (one this same instance stamped) / `console` — so a
 sibling instance's session is never mistaken for a truly-foreign one.
 
+A **harness child** is never listed (2026-10-10): the headless `claude.exe` that an Agentmaster runs
+for the Sessions page's AI search carries `AM_HARNESS=<name>` in its environment, and every verb's
+process census skips it, like the app's own census does ([`SDK_HARNESS.md`](./SDK_HARNESS.md)
+section 5). It is not a session and has no tab.
+
 Default output is a compact human summary; `--json` (stable, `schemaVersion`-stamped) is the agent
 mode.
 

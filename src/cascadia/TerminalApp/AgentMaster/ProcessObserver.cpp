@@ -520,6 +520,21 @@ namespace Agentmaster
                 }
                 continue;
             }
+            // Agentmaster (SDK_HARNESS.md §5): a HARNESS child — the headless claude that an
+            // Agentmaster runs for the Sessions AI search — is not a session. It has no tab, its
+            // WT_SESSION and AM_SESSION are removed on purpose, so without this it would show as
+            // an External "console" claude that the user could try to adopt. Skipped like the
+            // desktop app: out of factsByPid, so no External row, no census count, no correlation
+            // and no orphan check (its own job object ends it with its Agentmaster). This covers
+            // a sibling install's harness child too: the mark says what it is, not whose it is.
+            if (!f.harnessName.empty())
+            {
+                if (_guiExcludedLogged.insert(e.pid).second) // the same once-per-pid set: one skip line per process
+                {
+                    AppendStateLog(L"hooks.log", L"[observer] skipping harness claude (" + f.harnessName + L", not a session) pid=" + std::to_wstring(e.pid) + L"\n");
+                }
+                continue;
+            }
             f.runningApp = ClassifyRunningApp(f.amSession, f.wtSession, _amSession);
             // O7: a fully-empty PEB read (cwd AND commandline) means a denied / elevated /
             // cross-integrity (or WOW64) target — it can't be correlated/bound, so it stays

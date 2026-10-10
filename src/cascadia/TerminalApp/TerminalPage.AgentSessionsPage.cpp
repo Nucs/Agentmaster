@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // ======================================================================================
-// Agentmaster TerminalPage implementation (7 partial files)
+// Agentmaster TerminalPage implementation (8 partial files)
 // The TerminalPage-side Agentmaster glue -- engine wiring + session lifecycle + observer +
 // window-record + the Sessions browser -- connecting the Manager engine to WT's TerminalPage.
 // Same class (TerminalPage, declared in TerminalPage.h), split across same-class partial TUs (the
@@ -15,7 +15,8 @@
 //   TerminalPage.AgentWindowRecord.cpp         - M10 per-window record capture/flush/restore + reopen saved windows (Claude + Codex tab refs)
 // ★ TerminalPage.AgentSessionsPage.cpp         - the Sessions browser (SESSIONS.md): shell + list (search / _RenderSessionsTable / detail + off-thread summary)
 //   TerminalPage.AgentSessionsPageActions.cpp  - the Sessions browser row actions: resume/fork, selection nav, hide/unhide/reset, favorite, rename, row filter, overlay registry
-//   TerminalPage.AgentSessionsPage.Internal.h  - the Sessions-browser Sess* file-local helpers shared by the two SessionsPage TUs above (anonymous namespace)
+//   TerminalPage.AgentSessionsAi.cpp           - the Sessions browser's AI SEARCH: the "AI" toggle, Enter-to-ask, the reset button, the strip, and the model's list in the table
+//   TerminalPage.AgentSessionsPage.Internal.h  - the Sessions-browser Sess* file-local helpers shared by the SessionsPage TUs above (anonymous namespace)
 // ======================================================================================
 //
 // Agentmaster Sessions browser (SESSIONS.md) -- the SOLE on-disk history view. SHELL + LIST: the page shell, the time-window/range, the two-phase search + row gather, _RenderSessionsTable, and the detail panel + off-thread summary. The row ACTIONS (resume/fork/rename/hide/favorite/filter) live in TerminalPage.AgentSessionsPageActions.cpp.
@@ -176,6 +177,10 @@ namespace winrt::TerminalApp::implementation
         search.TextChanged([this](const winrt::Windows::Foundation::IInspectable& s, const TextChangedEventArgs&) {
             if (const auto tb = s.try_as<TextBox>())
             {
+                if (_sessionsAiMode)
+                {
+                    return; // Agentmaster (SESSIONS.md §9, the AI search): the text is a REQUEST, sent with Enter — typing it filters nothing
+                }
                 _sessionsQueryText = std::wstring{ tb.Text() };
                 if (_sessionsSearchThrottled)
                 {
@@ -185,6 +190,11 @@ namespace winrt::TerminalApp::implementation
         });
         Grid::SetColumn(search, 2);
         topLeft.Children().Append(search);
+
+        // Agentmaster (SESSIONS.md §9): the AI search — the "AI" toggle and the reset button right
+        // of the box, the strip in a header row of its own, and the box's Enter / Escape keys
+        // (TerminalPage.AgentSessionsAi.cpp). After the box is mounted: it hooks the box's keys.
+        _BuildSessionsAiHeader(topLeft, header);
 
         // The divider-matching spacer (the body divider is Width 1 + 8px margins = a 17px footprint),
         // so topLeft's right edge lines up exactly with the table's right edge.
@@ -673,6 +683,9 @@ namespace winrt::TerminalApp::implementation
                     {
                         self->_sessionsSavedScrollOffset = self->_sessionsRowsScroll.VerticalOffset();
                     }
+                    // Agentmaster (the AI search): a page behind a tab does not show it. When no
+                    // window's page does, the agent frees its index and parks its process (delayed).
+                    self->_SessionsAiNotePageShown(false);
                 }
             },
             [weak = get_weak()]() {
@@ -719,6 +732,9 @@ namespace winrt::TerminalApp::implementation
                         {
                             self->_sessionsSearchBox.Focus(FocusState::Programmatic);
                         }
+                        // Agentmaster (the AI search): the page is back on screen — its agent is in
+                        // use again (the process is started again when it was parked meanwhile).
+                        self->_SessionsAiNotePageShown(true);
                     });
                 }
             });
@@ -824,6 +840,7 @@ namespace winrt::TerminalApp::implementation
                 self->_sessionsSearchBox.Focus(FocusState::Programmatic);
             }
             self->_RefreshSessionsRows(); // gather + index on a background pass, then render
+            self->_SessionsAiNotePageShown(true); // Agentmaster (the AI search): a page that opens with it on starts the agent's process now; its index follows the gather above
         });
     }
 
@@ -852,6 +869,9 @@ namespace winrt::TerminalApp::implementation
                 self->_sessionsLocalTip.Hide();
                 self->_sessionsPageHost.Visibility(Visibility::Collapsed);
                 self->_sessionsPageVisible.store(false, std::memory_order_relaxed);
+                // Agentmaster (the AI search): this page does not show it any more. When no window's
+                // page does, the agent frees its session index and parks its process.
+                self->_SessionsAiNotePageShown(false);
                 if (self->_sessRangePopup)
                 {
                     self->_sessRangePopup.IsOpen(false);
@@ -1058,6 +1078,10 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         }
+        // Agentmaster (the AI search, SESSIONS.md §9): this pass replaced the rows, so the AI list's
+        // rows OUTSIDE the page's window are gone — put them back before the render below; and the
+        // agent may read its index now (the sidecar files of the window are current).
+        self->_SessionsAiAfterGather();
         self->_RebuildSessionsTagChips(); // bookmark tags: (re)list the header chips from the fresh tag load (also prunes a facet whose tag vanished)
         self->_RunSessionsSearch(); // re-applies the current query (incl. the empty one) + renders
         }
@@ -1471,6 +1495,10 @@ namespace winrt::TerminalApp::implementation
         std::vector<const _SessionsRow*> view;
         for (const auto& r : _sessionsRows)
         {
+            if (r.aiExtra)
+            {
+                continue; // Agentmaster (the AI search): a row outside the page's window — it belongs to the AI list only (applied below)
+            }
             if (!hidden.empty() && hidden.count(r.id))
             {
                 ++hiddenInWindow;
@@ -1500,6 +1528,12 @@ namespace winrt::TerminalApp::implementation
                 view.push_back(&r);
             }
         }
+        // Agentmaster (SESSIONS.md §9, the AI search): while the AI search shows a list, the table
+        // shows EXACTLY that list, in the model's order — the rows above are replaced, and the sort
+        // below is skipped unless the user picked a column since the list arrived
+        // (_SessionsAiApplyView, TerminalPage.AgentSessionsAi.cpp). No AI list: both are untouched.
+        bool aiKeepsModelOrder = false;
+        const bool aiList = _SessionsAiApplyView(view, aiKeepsModelOrder);
         _sessionsVisibleOrder.clear(); // rebuilt below in final (sorted) order — the Up/Down nav list
 
         // Agentmaster (relevance ranking): when a search is active, order the results in TIERS —
@@ -1556,7 +1590,10 @@ namespace winrt::TerminalApp::implementation
 
         const int sortCol = _sessionsSortColumn;
         const bool asc = _sessionsSortAscending;
-        std::sort(view.begin(), view.end(), [sortCol, asc, rankByRelevance, &relevance](const _SessionsRow* a, const _SessionsRow* b) {
+        // Agentmaster (the AI search): an empty range when the model's order is to be kept — the one
+        // change that leaves the comparator below untouched.
+        const auto sortEnd = aiKeepsModelOrder ? view.begin() : view.end();
+        std::sort(view.begin(), sortEnd, [sortCol, asc, rankByRelevance, &relevance](const _SessionsRow* a, const _SessionsRow* b) {
             if (rankByRelevance)
             {
                 // Relevance tier dominates the column sort (more-relevant tier first, independent of
@@ -2332,6 +2369,21 @@ namespace winrt::TerminalApp::implementation
             if (_sessionsIndexing.load())
             {
                 counts += L" \x00B7 indexing\x2026";
+            }
+            if (aiList)
+            {
+                // Agentmaster (the AI search): the rows are the model's list — the window, the
+                // filters and the hidden set did not choose them, so the notes above would lie.
+                counts = std::to_wstring(view.size()) + (view.size() == 1 ? L" session" : L" sessions") + L" \x00B7 AI search";
+                if (_sessionsAiPreview)
+                {
+                    counts += L" \x00B7 choosing\x2026"; // a search's rows; the model's pick replaces them
+                }
+                if (_sessionsAiShownIds.size() > view.size())
+                {
+                    // Listed, but this page has no row for it (its index entry was not available).
+                    counts += L" \x00B7 " + std::to_wstring(_sessionsAiShownIds.size() - view.size()) + L" not listed";
+                }
             }
             _sessionsCountText.Text(winrt::hstring{ counts });
         }

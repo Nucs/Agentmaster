@@ -798,6 +798,8 @@ namespace Agentmaster
         // --- correlation / ownership (env) ---
         facts.wtSession = EnvLookup(env, L"WT_SESSION");
         facts.amSession = EnvLookup(env, L"AM_SESSION");
+        // Agentmaster: a harness child (the Sessions AI search's hidden claude) says so itself.
+        facts.harnessName = EnvLookup(env, kHarnessEnvMarker);
 
         // --- model: --model X, else ANTHROPIC_MODEL, else CLAUDE_CODE_MODEL ---
         if (const auto v = ExtractCmdlineArg(commandline, L"--model"))

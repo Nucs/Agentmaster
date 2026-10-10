@@ -68,6 +68,13 @@ namespace Agentmaster
         Waiting
     };
 
+    // The environment variable that marks a HARNESS child: a headless claude.exe that Agentmaster
+    // itself runs for one of its own features (the Sessions browser's AI search — AgentHarness.h,
+    // SDK_HARNESS.md). Its value is the conversation key. The harness sets it; the Fleet Observer
+    // and the CLI read it and leave such a process out of every census: it is not a session of the
+    // user, it has no tab, and it must never be listed, adopted or reaped.
+    inline constexpr wchar_t kHarnessEnvMarker[] = L"AM_HARNESS";
+
     // Raw facts read out-of-band from one claude.exe (S-lane, ~15 µs/process). The PEB reads
     // (cwd/cmdline/env) plus the parsed flags Claude's command line + CLAUDE_* env expose.
     // (OBSERVER.md §5a)
@@ -88,6 +95,10 @@ namespace Agentmaster
         std::wstring sessionIdArg; // --session-id <id>  (when explicitly passed)
         bool background{}; // CLAUDE_CODE_SESSION_KIND=bg / CLAUDE_BG_* / "daemon run"
         std::wstring sessionName; // CLAUDE_CODE_SESSION_NAME (bg jobs)
+        // env AM_HARNESS (kHarnessEnvMarker): non-empty == a harness child of an Agentmaster — not
+        // a session. Every census skips it. Empty also when the environment could not be read
+        // (denied / elevated): such a process is then listed like any other unreadable claude.
+        std::wstring harnessName;
         // PE subsystem of the main image (IMAGE_SUBSYSTEM_*): 3 = console (the Claude Code CLI),
         // 2 = GUI (the Claude DESKTOP Electron app — same "Claude.exe" leaf name, NOT a CLI session),
         // 0 = undeterminable (denied / elevated / WOW64). Lets the census drop the desktop app + its

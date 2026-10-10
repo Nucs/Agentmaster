@@ -401,6 +401,10 @@ namespace
             {
                 continue; // the Claude DESKTOP app (Electron GUI, cwd C:\WINDOWS\system32), not a CLI session
             }
+            if (!lc.facts.harnessName.empty())
+            {
+                continue; // a harness child (the Sessions AI search's hidden claude): not a session, like the app's own census
+            }
             const SessionPresenceRow* pres = nullptr;
             // Agentmaster: the row must be THIS process's heartbeat, not a leftover `<pid>.json` of a
             // dead claude whose pid this one reused (PresenceRowMatchesProcess — the exact procStart
