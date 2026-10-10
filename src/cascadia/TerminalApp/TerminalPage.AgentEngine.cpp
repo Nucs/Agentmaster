@@ -524,8 +524,8 @@ namespace winrt::TerminalApp::implementation
             CATCH_LOG();
         }
         // Agentmaster (side panel "+" launcher, SIDE_PANEL.md §2e): stop its launch bar's PRESETS hover timer and close
-        // an open drop-down. Shutdown is noexcept and guards each UI-affine call itself (a pool-thread teardown throws
-        // RPC_E_WRONG_THREAD there — caught and logged inside), so it needs no guard here.
+        // an open hover menu and drop-down. Shutdown is noexcept and guards each UI-affine call itself (a pool-thread
+        // teardown throws RPC_E_WRONG_THREAD there — caught and logged inside), so it needs no guard here.
         if (_sidePanelLaunchBar)
         {
             _sidePanelLaunchBar->Shutdown();

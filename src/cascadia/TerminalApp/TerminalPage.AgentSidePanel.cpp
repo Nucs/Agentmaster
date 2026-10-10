@@ -178,14 +178,30 @@ namespace
     constexpr uint8_t kSidePanelSplitterHotGray = 0x60; // #606060 — the pointer-over / drag highlight
 
     // How long the pointer must REST on a drag separator before its tooltip opens: 7 s (2026-10-06), where
-    // every other AgentSetTip tip opens after ~133 ms. Each separator is a thin bar the user aims at to drag
-    // it, and a tip that opened while they aimed got in the way of the drag (the user's report); after 7 s
-    // the tip shows only for someone who stops on the bar on purpose. Any move restarts the wait
-    // (AgentTipHelpers' rest rule). Applies to these two bars only.
+    // the panel's buttons wait 3 s (kSidePanelButtonTipDelay, below) and most other AgentSetTip tips open
+    // after ~133 ms. Each separator is a thin bar the user aims at to drag it, and a tip that opened while
+    // they aimed got in the way of the drag (the user's report); after 7 s the tip shows only for someone
+    // who stops on the bar on purpose. Any move restarts the wait (AgentTipHelpers' rest rule). Applies to
+    // these two bars only.
     // Tradeoff: a user who wants the explanation waits 7 s for it. A drag never shows it at all: the press
     // silences the tip until the drag ends (AgentSuppressTip in each PointerPressed, the text given back by
     // endWidthDrag / endSplitDrag), so a tip that was already open also closes when the drag starts.
     constexpr std::chrono::milliseconds kSidePanelSplitterTipDelay{ 7000 };
+
+    // How long the pointer must REST on one of the side panel's BUTTONS before its tooltip opens: 3 s (2026-10-10,
+    // the user's request), where most other AgentSetTip tips open after ~133 ms. The buttons: the header's "+" · Sum ·
+    // LOCAL / GLOBAL · the sort · ⌖ · ⇄ · the collapse chevron, and the collapsed strip's expand chevron. Every one
+    // of their tips is a paragraph, and at ~133 ms it opened over the panel each time the pointer reached a button
+    // on its way to a click; after 3 s it shows only for someone who stops on the button to read it. Any move
+    // restarts the wait (AgentTipHelpers' rest rule), and the delay is recorded on the element, so the tip keeps it
+    // for the element's life.
+    // ⚠ A NEW button in the panel must pass this constant to its AgentSetTip / AgentSetTitledTip, or its tip opens
+    // after ~133 ms. Not covered on purpose: the filter box (a text box, not a button), the cards (kCardTipDelay,
+    // 4 s), the two drag separators (kSidePanelSplitterTipDelay, 7 s), the summary area's own buttons (the per-tab
+    // summary panel's, AgentTabOverlay — shared with every tab) and the "+" launcher card (the Agent Manager's own
+    // launch bar, AgentLaunchBar — SIDE_PANEL.md §2e keeps the two surfaces identical).
+    // Tradeoff: a first-time user waits 3 s for a button's explanation.
+    constexpr std::chrono::milliseconds kSidePanelButtonTipDelay{ 3000 };
 
     // The two separators' tooltip texts, named once: each is set when its bar is built and set again when a
     // drag on the bar ends (the press emptied it).
@@ -759,7 +775,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelLaunchBtn.Content(winrt::box_value(L"+"));
         // A screen reader would otherwise announce the glyph ("plus"): name the button for what it does.
         winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(_sidePanelLaunchBtn, winrt::hstring{ L"Launch a session" });
-        AgentSetTitledTip(_sidePanelLaunchBtn, L"Launch a session", winrt::hstring{ L"Open the launcher at the click: the Agent Manager's own launch box \x2014 a working directory (recent and matching folders as you type, Browse\x2026) or a session id to resume or fork \x2014 and Launch Claude (hover it for a model or a preset).\nIt shows the same text as the Agent Manager's box. Click outside it, press Esc, or click + again to close it." });
+        AgentSetTitledTip(_sidePanelLaunchBtn, L"Launch a session", winrt::hstring{ L"Open the launcher at the click: the Agent Manager's own launch box \x2014 a working directory (recent and matching folders as you type, Browse\x2026) or a session id to resume or fork \x2014 and Launch Claude (hover it for a model or a preset).\nIt shows the same text as the Agent Manager's box. Click outside it, press Esc, or click + again to close it." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         // The PRESS point, in Root() coordinates: the card's corner sits where the user clicked. Read on the press, not
         // in Click: a Click carries no position, and the Button raises it from its own release handling, before an
         // instance PointerReleased handler would run. handledEventsToo, because the Button marks its presses handled.
@@ -819,7 +835,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelSumBtn.VerticalAlignment(VerticalAlignment::Center);
         _sidePanelSumBtn.IsTabStop(false); // like its siblings: a click must never pull keyboard focus out of the terminal
         _sidePanelSumBtn.Content(winrt::box_value(L"Sum"));
-        AgentSetTitledTip(_sidePanelSumBtn, L"Summary area", winrt::hstring{ L"On: the selected session's summary shows below the cards.\nOff: the cards fill the panel, and hovering a card shows that session's full card beside the panel \x2014 the same card a tab shows when you hover it (scroll it with the mouse wheel).\nThis window remembers its own choice; the last change becomes the default for new windows." });
+        AgentSetTitledTip(_sidePanelSumBtn, L"Summary area", winrt::hstring{ L"On: the selected session's summary shows below the cards.\nOff: the cards fill the panel, and hovering a card shows that session's full card beside the panel \x2014 the same card a tab shows when you hover it (scroll it with the mouse wheel).\nThis window remembers its own choice; the last change becomes the default for new windows." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         _sidePanelSumBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
             if (const auto self = weakThis.get())
             {
@@ -840,7 +856,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelScopeBtn.VerticalAlignment(VerticalAlignment::Center);
         _sidePanelScopeBtn.IsTabStop(false);
         EmphasizeScopeButton(_sidePanelScopeBtn); // the board's accent-blue scope look — this is the panel's primary toggle, louder than sort/dock/collapse
-        AgentSetTitledTip(_sidePanelScopeBtn, L"Card scope", winrt::hstring{ L"Which sessions the cards list: LOCAL = only the sessions open in THIS window (the default), GLOBAL = every window's.\nRemembered for this window only \x2014 a new window always starts LOCAL \x2014 and independent of the Triage Board's own scope." });
+        AgentSetTitledTip(_sidePanelScopeBtn, L"Card scope", winrt::hstring{ L"Which sessions the cards list: LOCAL = only the sessions open in THIS window (the default), GLOBAL = every window's.\nRemembered for this window only \x2014 a new window always starts LOCAL \x2014 and independent of the Triage Board's own scope." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         _sidePanelScopeBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
             if (const auto self = weakThis.get())
             {
@@ -855,7 +871,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelSortBtn.Padding(ThicknessHelper::FromLengths(8, 1, 8, 1));
         _sidePanelSortBtn.VerticalAlignment(VerticalAlignment::Center);
         _sidePanelSortBtn.IsTabStop(false);
-        AgentSetTitledTip(_sidePanelSortBtn, L"Card order", winrt::hstring{ L"Order the session cards. Click to cycle: MOST ACTIVE (last activity of any kind, running sessions on top) \xB7 MOST RECENT (by the last turn boundary only: the prompt you last sent or the reply that last finished \x2014 tool calls and subagent work never move it) \xB7 NEWEST \xB7 OLDEST \xB7 A\x2013Z.\nThe SAME saved order as the Triage Board's card sort \x2014 changing it here re-sorts the board too (and every window)." });
+        AgentSetTitledTip(_sidePanelSortBtn, L"Card order", winrt::hstring{ L"Order the session cards. Click to cycle: MOST ACTIVE (last activity of any kind, running sessions on top) \xB7 MOST RECENT (by the last turn boundary only: the prompt you last sent or the reply that last finished \x2014 tool calls and subagent work never move it) \xB7 NEWEST \xB7 OLDEST \xB7 A\x2013Z.\nThe SAME saved order as the Triage Board's card sort \x2014 changing it here re-sorts the board too (and every window)." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         _sidePanelSortBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
             const auto self = weakThis.get();
             if (!self)
@@ -893,7 +909,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelScrollToTabBtn.VerticalAlignment(VerticalAlignment::Center);
         _sidePanelScrollToTabBtn.IsTabStop(false); // like its siblings: a click must never pull keyboard focus out of the terminal
         _sidePanelScrollToTabBtn.Content(winrt::box_value(L"\x2316")); // ⌖ POSITION INDICATOR — "find my tab's card"
-        AgentSetTitledTip(_sidePanelScrollToTabBtn, L"Scroll to the selected tab", winrt::hstring{ L"On: selecting a tab scrolls these cards to that tab's card \x2014 a card already on screen stays put. Clicking back into the terminal after peeking at another card scrolls back to your tab's card too.\nOff: the list keeps whatever scroll position you left it at.\nSaved globally \x2014 every open window follows it at once." });
+        AgentSetTitledTip(_sidePanelScrollToTabBtn, L"Scroll to the selected tab", winrt::hstring{ L"On: selecting a tab scrolls these cards to that tab's card \x2014 a card already on screen stays put. Clicking back into the terminal after peeking at another card scrolls back to your tab's card too.\nOff: the list keeps whatever scroll position you left it at.\nSaved globally \x2014 every open window follows it at once." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         _sidePanelScrollToTabBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
             if (const auto self = weakThis.get())
             {
@@ -909,7 +925,7 @@ namespace winrt::TerminalApp::implementation
         dockBtn.VerticalAlignment(VerticalAlignment::Center);
         dockBtn.IsTabStop(false);
         dockBtn.Content(winrt::box_value(L"\x21C4")); // ⇄ — flip which side the panel docks on
-        AgentSetTitledTip(dockBtn, L"Dock side", winrt::hstring{ L"Move the panel to the other side of the terminal (left \x21C4 right).\nSaved globally \x2014 other windows adopt it on their next launch or settings change." });
+        AgentSetTitledTip(dockBtn, L"Dock side", winrt::hstring{ L"Move the panel to the other side of the terminal (left \x21C4 right).\nSaved globally \x2014 other windows adopt it on their next launch or settings change." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         dockBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
             if (const auto self = weakThis.get())
             {
@@ -925,7 +941,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelCollapseBtn.VerticalAlignment(VerticalAlignment::Center);
         _sidePanelCollapseBtn.IsTabStop(false);
         // Glyph set by _SidePanelApplyLayout (it points TOWARD the docked edge, so it flips with the dock).
-        AgentSetTip(_sidePanelCollapseBtn, winrt::hstring{ L"Collapse the side panel to a thin strip (click the strip to bring it back)." });
+        AgentSetTip(_sidePanelCollapseBtn, winrt::hstring{ L"Collapse the side panel to a thin strip (click the strip to bring it back)." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         _sidePanelCollapseBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
             if (const auto self = weakThis.get())
             {
@@ -1105,7 +1121,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelStripBtn.FontSize(kSidePanelIconFontSize); // the collapsed strip's chevron — the same icon size as the header's collapse chevron it pairs with
         _sidePanelStripBtn.Padding(ThicknessHelper::FromLengths(2, 10, 2, 10));
         _sidePanelStripBtn.IsTabStop(false);
-        AgentSetTip(_sidePanelStripBtn, winrt::hstring{ L"Expand the side panel (session cards + the selected session's summary)." });
+        AgentSetTip(_sidePanelStripBtn, winrt::hstring{ L"Expand the side panel (session cards + the selected session's summary)." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         _sidePanelStripBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
             if (const auto self = weakThis.get())
             {
@@ -3642,7 +3658,7 @@ namespace winrt::TerminalApp::implementation
                     case SidePanelLaunchKeyAction::Launch:
                         if (bar)
                         {
-                            bar->ClickLaunch(); // exactly a click: the hover menu's timer stopped, then the Default launch
+                            bar->ClickLaunch(); // exactly a click: hover timer stopped, open hover menu closed, Default launch
                         }
                         break;
                     case SidePanelLaunchKeyAction::Fork:

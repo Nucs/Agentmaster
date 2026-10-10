@@ -243,10 +243,10 @@ namespace winrt::TerminalApp::implementation
         }
         if (_launch)
         {
-            // The launch bar's Shutdown stops its PRESETS hover-intent timer and closes an open drop-down — each step
-            // guarded inside (noexcept): a teardown off the UI thread throws RPC_E_WRONG_THREAD there, and nothing may
-            // escape a destructor. Called here, not left to the bar's own destructor, so it runs at this point of the
-            // teardown whatever else still holds the bar.
+            // The launch bar's Shutdown stops its PRESETS hover-intent timer and closes an open hover menu and
+            // drop-down — each step guarded inside (noexcept): a teardown off the UI thread throws RPC_E_WRONG_THREAD
+            // there, and nothing may escape a destructor. Called here, not left to the bar's own destructor, so it runs
+            // at this point of the teardown whatever else still holds the bar.
             _launch->Shutdown();
         }
     }
@@ -962,8 +962,8 @@ namespace winrt::TerminalApp::implementation
             _launchBtns.Spacing(8);
             _launchBtns.VerticalAlignment(VerticalAlignment::Center);
 
-            // The bar's Launch button (its PRESETS hover menu rides it: hover -> the "Open New Session Here" picker
-            // after a short intent delay) and its Fork twin (shown only while the box holds a FOUND session id),
+            // The bar's Launch button (its PRESETS hover menu rides it: a hover opens the "Open New Session Here" picker
+            // at once, a touch after a 450 ms hold) and its Fork twin (shown only while the box holds a FOUND session id),
             // first in the wrappable group, as before.
             _launchBtns.Children().Append(_launch->LaunchButton());
             _launchBtns.Children().Append(_launch->ForkButton());

@@ -178,9 +178,9 @@ namespace winrt::TerminalApp::implementation
         void ValidateLaunchBox();
         // Repaint the agent element (● Claude / ● Codex). Throws as ValidateLaunchBox.
         void UpdateLaunchAgentButton();
-        // Exactly what a click on Launch does: stop the hover-menu timer (a click is a decision), then launch with the
-        // Default target. The side panel's key-up Enter on a focused Launch button calls it. Throws what the host
-        // callbacks throw (a click's own exposure).
+        // Exactly what a click on Launch does: stop the hover-menu timer and close an open hover menu (a click is a
+        // decision), then launch with the Default target. The side panel's key-up Enter on a focused Launch button calls
+        // it. Throws what the host callbacks throw (a click's own exposure); the menu close itself never throws.
         void ClickLaunch();
         // Exactly what a click on Fork does. Throws what the host callbacks throw.
         void ClickFork();
@@ -202,8 +202,9 @@ namespace winrt::TerminalApp::implementation
         //   text   — the new text (a folder or a session id; not normalized here).
         //   throws — what a XAML property write throws on the UI thread (the hosts' callers are contained).
         void SetBoxText(const std::wstring& text);
-        // Stop the Launch hover-menu timer (UI-thread-affine: guarded, a pool-thread teardown throws
-        // RPC_E_WRONG_THREAD there) and close an open drop-down. Safe to call twice and from the destructor.
+        // Stop the Launch hover-menu timer, close an open Launch hover menu and close an open drop-down (each step
+        // UI-thread-affine and guarded: a pool-thread teardown throws RPC_E_WRONG_THREAD there, which is logged). After
+        // it, a hover over the Launch button opens nothing. Safe to call twice and from the destructor.
         void Shutdown() noexcept;
 
         // Add the Agent Manager's six Button STATE brushes to `resources` — ButtonBackground / *PointerOver / *Pressed
@@ -229,11 +230,20 @@ namespace winrt::TerminalApp::implementation
         // --- The agent element + the launch actions (moved from AgentManagerContent.Launch.cpp) ---
         void _UpdateLaunchAgentButton();
         // PRESETS (HARNESSES.md §8.2): the Launch button's hover menu — exactly the "Open New Session Here" picker
-        // (Default, Specify…, the launch models, then the visible presets), opened after a short hover
-        // (_launchHoverTimer) so a pointer merely crossing the bar opens nothing. Offered only while the button
-        // launches a NEW Claude session (not in Codex mode, not when the box holds a session id, not while the button
-        // is disabled). A pick launches through _OnLaunch(target). Never throws (a failed open is logged).
+        // (Default, Specify…, the launch models, then the visible presets). A HOVER opens it at once (2026-10-10; it
+        // waited 450 ms before): the Launch button's PointerEntered calls this directly for a pointer that is not in
+        // contact (a mouse with no button held, a hovering pen). A pointer that arrives IN contact (a touch, a pen
+        // touching down) still waits the 450 ms hold (_launchHoverTimer), so a tap launches without the menu flashing.
+        // Shown TransientWithDismissOnPointerMoveAway: no focus taken, closed once the pointer is 80 DIP away, and every
+        // press passes through it (a click on the button still lands). Offered only while the button launches a NEW
+        // Claude session (not in Codex mode, not when the box holds a session id, not while the button is disabled) and
+        // never after Shutdown. A pick launches through _OnLaunch(target). Never throws (a failed open is logged).
         void _ShowLaunchMenu();
+        // Close the Launch hover menu when one is open (ClickLaunch: a click is a decision; Shutdown: nothing of the bar
+        // may stay open). Hide is asynchronous — the menu's Closed handler clears _launchMenu — so a hover right after
+        // still finds it set and stacks nothing. Never throws: a failure (a torn-down menu, a pool-thread teardown) is
+        // logged (Rule #18).
+        void _CloseLaunchMenu() noexcept;
         // The Launch button's action. `target` (PRESETS): the hover menu's pick — "" = Default (a plain click), a model
         // id, or "@<presetId>" — handed to spawnClaude for a NEW session in the typed folder. A session id in the box
         // resumes that session on its own snapshot and ignores `target`. Throws what the host callbacks throw.
@@ -341,9 +351,11 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Border _cwdUnderline{ nullptr }; // validation underline (green=found session id, red=missing dir / unknown id, amber=will create, transparent=neutral)
         winrt::Windows::UI::Xaml::Controls::Button _launchBtn{ nullptr }; // "Launch Claude" (dir) / "Resume session" (a found session id); disabled on a red box
         winrt::Windows::UI::Xaml::Controls::Button _forkBtn{ nullptr }; // "Fork" — visible only when the box holds a FOUND session id
-        // PRESETS: the hover-intent delay before the Launch button's menu opens (started on PointerEntered, stopped on
-        // PointerExited — a pass over the button never opens it) and the menu currently shown (non-null while open, so a
-        // second hover does not stack a second menu).
+        // PRESETS: the 450 ms hold before the Launch button's menu opens for a pointer that arrives IN CONTACT (a touch,
+        // a pen touching down, a mouse dragging in with a button held) — started on such a PointerEntered, stopped on
+        // PointerExited and by a click, so a tap launches without the menu. A hover does not use it: it opens the menu
+        // at once (2026-10-10). And the menu currently shown (non-null while open, so a second hover does not stack a
+        // second menu).
         winrt::Windows::UI::Xaml::DispatcherTimer _launchHoverTimer{ nullptr };
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _launchMenu{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _pathPopup{ nullptr }; // the drop-down Popup (in host.popupHost)

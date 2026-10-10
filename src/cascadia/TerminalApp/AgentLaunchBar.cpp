@@ -305,10 +305,21 @@ namespace winrt::TerminalApp::implementation
             }
         });
         // PRESETS (HARNESSES.md §8.2): hovering the button opens the "Open New Session Here" picker
-        // (Default · Specify… · models · presets) after a short intent delay; leaving before it fires
-        // opens nothing. The Tick holds only a weak ref, so a torn-down bar is never touched — and a
-        // tick that finds the bar gone stops its own timer (`sender`), so an orphaned timer can't tick
-        // forever (a running DispatcherTimer is kept alive by the dispatcher, not by the bar).
+        // (Default · Specify… · models · presets).
+        //   - A HOVER opens it AT ONCE (2026-10-10, the user's request: the 450 ms wait read as lag) — a mouse with no
+        //     button held, or a pen hovering over the screen. The menu takes no focus and closes again once the
+        //     pointer is 80 DIP away from it (TransientWithDismissOnPointerMoveAway, in _ShowLaunchMenu; the distance
+        //     is WinUI's FlyoutBase::OnRootVisualPointerMoved), so a pointer that only crosses the button flashes the
+        //     menu and is never trapped by it. A click on the button still lands while the menu is up: a transient
+        //     flyout's pass-through element is the root visual, which lets EVERY press through its light-dismiss layer
+        //     (WinUI PointerInputProcessor), and ClickLaunch closes the menu as well.
+        //   - A pointer that arrives IN CONTACT keeps the old 450 ms hold (_launchHoverTimer): a touch, a pen touching
+        //     down, a mouse dragging in with a button held. A touch has no hover — its PointerEntered comes with the
+        //     press of a tap — so opening at once would flash the menu over every tap's launch; with the hold, the
+        //     tap's Click (ClickLaunch stops the timer) wins, and a finger that rests 450 ms still gets the menu.
+        // The Tick holds only a weak ref, so a torn-down bar is never touched — and a tick that finds the bar gone
+        // stops its own timer (`sender`), so an orphaned timer can't tick forever (a running DispatcherTimer is kept
+        // alive by the dispatcher, not by the bar).
         _launchHoverTimer = DispatcherTimer{};
         _launchHoverTimer.Interval(std::chrono::milliseconds{ 450 });
         _launchHoverTimer.Tick([weak](const IInspectable& sender, const IInspectable&) {
@@ -325,9 +336,28 @@ namespace winrt::TerminalApp::implementation
                 t.Stop();
             }
         });
-        _launchBtn.PointerEntered([weak](const IInspectable&, const PointerRoutedEventArgs&) {
+        _launchBtn.PointerEntered([weak](const IInspectable&, const PointerRoutedEventArgs& e) {
             const auto self = weak.lock();
-            if (self && self->_launchHoverTimer && !self->_launchMenu)
+            if (!self || self->_launchMenu)
+            {
+                return; // the bar is gone, or its menu is still up (the pointer came back from it): nothing to stack
+            }
+            // Hover or contact? A failed read takes the contact path — the old hold, which can only delay the menu,
+            // never flash it over a tap.
+            bool inContact = true;
+            try
+            {
+                inContact = e.GetCurrentPoint(nullptr).IsInContact();
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: Launch hover - read the pointer's contact state");
+            }
+            if (!inContact)
+            {
+                self->_ShowLaunchMenu(); // a hover: at once (a failed open is logged inside; the next hover tries again)
+            }
+            else if (self->_launchHoverTimer)
             {
                 self->_launchHoverTimer.Start(); // Start() restarts the interval, so a re-entry waits the full delay
             }
@@ -422,6 +452,10 @@ namespace winrt::TerminalApp::implementation
         {
             _launchHoverTimer.Stop(); // a click is a decision: the hover menu must not pop after it
         }
+        // ...nor stay up over the launch: a mouse hover opens it at once, so it is normally open when the button is
+        // clicked. The click's own press closes a transient menu as well; this covers the keyboard path (the side
+        // panel's key-up Enter on a focused Launch) and a touch whose press arrived together with the menu's open.
+        _CloseLaunchMenu();
         _OnLaunch();
     }
 
@@ -529,6 +563,9 @@ namespace winrt::TerminalApp::implementation
             }
             CATCH_LOG(); // a teardown off the UI thread throws RPC_E_WRONG_THREAD here — never let it escape a destructor
         }
+        // An open Launch hover menu must not outlive the bar either (a pick would launch through a host that is going
+        // away). Noexcept and guarded inside, for the same off-thread teardown exposure.
+        _CloseLaunchMenu();
         if (_pathPopup)
         {
             try
@@ -681,8 +718,9 @@ namespace winrt::TerminalApp::implementation
     {
         // Offered only while the button starts a NEW Claude session: Codex has no presets yet, a session id
         // in the box means "Resume" (that session keeps its own snapshot), and a disabled button (a red box)
-        // must not be bypassed through its menu.
-        if (!_launchBtn || !_cwdBox || _launchMenu || _launchCodex || !_launchBtn.IsEnabled())
+        // must not be bypassed through its menu. Never after Shutdown: the hover opens this straight from
+        // PointerEntered now, and an element can still be under the pointer while its host goes away.
+        if (_shutDown || !_launchBtn || !_cwdBox || _launchMenu || _launchCodex || !_launchBtn.IsEnabled())
         {
             return;
         }
@@ -733,6 +771,25 @@ namespace winrt::TerminalApp::implementation
         {
             _launchMenu = nullptr; // a failed open must not block every later hover
             ::Agentmaster::AgentLogCaughtException(L"_ShowLaunchMenu");
+        }
+    }
+
+    void AgentLaunchBar::_CloseLaunchMenu() noexcept
+    {
+        try
+        {
+            if (_launchMenu)
+            {
+                // Hide is asynchronous: the menu's Closed handler forgets it (_launchMenu = nullptr) a moment later. Until
+                // then a hover finds _launchMenu set and stacks no second menu. A menu that is already closing is a no-op.
+                _launchMenu.Hide();
+            }
+        }
+        catch (...)
+        {
+            // A torn-down menu, or Shutdown on a pool thread (RPC_E_WRONG_THREAD): the menu goes away with its window
+            // then. Recorded (Rule #18), never thrown: Shutdown runs from a destructor.
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: close the Launch hover menu");
         }
     }
 

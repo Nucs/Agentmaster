@@ -759,11 +759,16 @@ Add presets…                   (only while the preset list is empty)
   `/handover open the PR`, `out of memory` or `pro tips` matched every "… · OpenRouter" name. ⚠ That
   older rule runs in release 0.6.8.18 until the next deploy (no hint has picked a preset there so far:
   hooks.log has no `successor model from the message hint: @…` line).
-- **The Launch button's hover menu**: hovering "Launch Claude" for 450 ms opens the same menu under the
-  button (`_ShowLaunchMenu`, `TransientWithDismissOnPointerMoveAway`: it takes no focus and closes when
-  the pointer leaves). A pick launches a NEW session in the typed folder with that target; a plain
-  click is Default, as before. The menu is not offered in Codex mode, while the box holds a session id
-  (that is "Resume session", which keeps the session's own snapshot), or while the button is disabled.
+- **The Launch button's hover menu**: hovering "Launch Claude" opens the same menu under the button AT
+  ONCE (2026-10-10, NOT BUILT yet — the user's request; it waited 450 ms before) (`_ShowLaunchMenu`,
+  `TransientWithDismissOnPointerMoveAway`: it takes no focus and closes once the pointer is 80 DIP away
+  from it). A pointer that arrives in contact — a touch, a pen touching down — still waits the 450 ms
+  hold (`_launchHoverTimer`), because a touch has no hover and an instant menu would flash over every
+  tap's launch. A pick launches a NEW session in the typed folder with that target; a plain click is
+  Default, as before, and it still lands while the menu is up (a transient flyout lets every press
+  through; `ClickLaunch` closes the menu). The menu is not offered in Codex mode, while the box holds a
+  session id (that is "Resume session", which keeps the session's own snapshot), or while the button
+  is disabled.
 
 ### 8.3 Display (not built)
 

@@ -74,11 +74,22 @@ the panel:
   `#606060` under the pointer or during a drag. Each bar is its own grab area, so the drag target is
   3 px too; a wider invisible hit area would have to overlap the terminal's edge or the cards and
   take their pointer input.
-- **Their tooltips open only after 7 s of rest** (`kSidePanelSplitterTipDelay`, 2026-10-06; every
-  other Agentmaster tip opens after ~133 ms). A tip that opened while the user aimed at a bar got in
-  the way of the drag. Any move restarts the 7 s, and a drag never shows the tip: the press silences
-  it (`AgentSuppressTip` — an open tip closes, a pending one is cancelled) and the drag's end
-  (`endWidthDrag` / `endSplitDrag`, on release or capture loss) gives the text back.
+- **Their tooltips open only after 7 s of rest** (`kSidePanelSplitterTipDelay`, 2026-10-06; the
+  panel's buttons wait 3 s, next bullet, and most other Agentmaster tips open after ~133 ms). A tip
+  that opened while the user aimed at a bar got in the way of the drag. Any move restarts the 7 s,
+  and a drag never shows the tip: the press silences it (`AgentSuppressTip` — an open tip closes, a
+  pending one is cancelled) and the drag's end (`endWidthDrag` / `endSplitDrag`, on release or
+  capture loss) gives the text back.
+- **The buttons' tooltips open only after 3 s of rest** (`kSidePanelButtonTipDelay`, 2026-10-10, NOT
+  BUILT yet — the user's request): the header's `+`, **Sum**, LOCAL / GLOBAL, the sort, `⌖`, `⇄` and
+  the collapse chevron, and the collapsed strip's expand chevron. Each tip is a paragraph, and at
+  ~133 ms it opened over the panel whenever the pointer reached a button on its way to a click. Any
+  move restarts the 3 s. A new button in the panel must pass the constant to its `AgentSetTip` /
+  `AgentSetTitledTip`. Not changed on purpose: the filter box (not a button), the cards (4 s), the
+  separators (7 s), the summary area's own buttons (the per-tab summary panel's, shared with every
+  tab) and the `+` launcher card (the Agent Manager's own launch bar, §2e). Check after the build:
+  the pointer still on each of the eight buttons opens its tip after ~3 s, a move restarts the wait,
+  and a click before then shows no tip.
 
 ## 2. TOP — the session cards (the Triage-Board integration, vertical)
 
@@ -500,7 +511,8 @@ Manager's own launch row, so a session starts from the side panel without leavin
    amber = a folder Launch will create, red = Launch disabled), the same drop-down (Browse…, RECENT /
    RECENT MATCHES, GIT WORKTREES, MATCHES / SUBFOLDERS, sized against the window), the same keys in
    the box (Esc closes the drop-down, Enter commits without launching), the same Launch hover menu
-   (Default · Specify… · models · presets), the same launch / resume / fork / "Create & Launch".
+   (Default · Specify… · models · presets — a hover opens it at once, 2026-10-10; a touch waits a
+   450 ms hold, so a tap launches without it), the same launch / resume / fork / "Create & Launch".
    The card's host calls the very page seams the Manager's handlers call (`_SpawnClaudeSession`,
    `_ResumeSessionFromDisk`, `_ForkSessionFromDisk`), with the page's own "Claude not detected"
    notice (`_PromptClaudeMissing`). Both bars push into ONE recent-folders list
@@ -538,7 +550,8 @@ press while it is open reads the open popups once and walks the press's ancestor
 opens it down-right with its corner at the click, and after `⇄` (dock right) down-left; the card
 shows the Manager box's text and the same underline; typing opens the drop-down and mirrors into the
 Manager's box (open the Agent Manager page beside it to watch); Browse… / a RECENT row / a GIT
-WORKTREES row work; hovering Launch opens the model / preset menu, and Specify… keeps the card open
+WORKTREES row work; hovering Launch opens the model / preset menu at once (no wait), a click on
+Launch while that menu is up still launches (one click, not two), and Specify… keeps the card open
 until its pick launches; Launch, a typed session id's Resume and Fork each start the session and
 close the card; Esc closes the drop-down first, then the card, and no ESC reaches the terminal (a
 running claude keeps running); Enter on a focused Launch launches on the key-up and no CR reaches
@@ -695,7 +708,8 @@ below).
   coalesced dispatcher tick (never inside `SizeChanged`), writes the popup offsets only on a real
   move, and its keys act on the KEY-UP, so no CR / ESC of a key that closes the card can reach a
   terminal. Every handler it wires holds the page weakly; the launch bar's own handlers hold the bar
-  weakly; `~TerminalPage` runs the bar's noexcept `Shutdown` (its hover timer is UI-affine).
+  weakly; `~TerminalPage` runs the bar's noexcept `Shutdown` (its hover timer and hover menu are
+  UI-affine).
 
 ## 6. Files
 
