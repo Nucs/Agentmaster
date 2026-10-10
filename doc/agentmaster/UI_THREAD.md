@@ -904,8 +904,12 @@ scratch program that links the repository's `SessionStore.cpp` unchanged.
   the cost of one stat. Their read-modify-writes read the file itself, never the cache. One mutex
   serializes every read and write of the two files in this process.
 - **No whole-store read on the UI thread while the store is cold.**
-  - The engine reads the store once on a background thread at start-up (`Engine.cpp`, lowest CPU priority).
+  - The engine reads the store once on a background thread at start-up (`Engine.cpp`).
     hooks.log: `[engine] session store warmed: N record(s), M file read(s), X ms`.
+    - The thread runs at NORMAL priority on purpose. The pass takes the store's cache lock once per
+      record, and the UI thread takes the same lock for every per-card read. A low-priority thread that
+      is preempted while it holds that lock, on a machine whose cores are all busy, would make the UI
+      thread wait until the scheduler runs that thread again.
   - `SessionStoreScanIsWarm()` tells a caller whether that first read is done. When it is not, the Tags
     panel shows "Loading tags…" and the hover panel shows "loading…". `_WarmTagStoreThenRefresh` reads the
     store on a pool thread and then fills the surface that is still open. hooks.log: `[tags] the session
