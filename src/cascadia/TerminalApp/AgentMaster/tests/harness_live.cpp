@@ -5,13 +5,16 @@
 //
 // Unlike m5_tests.exe this program starts the real claude.exe and makes real model calls, so it
 // needs a logged-in Claude Code, a network, and it uses a little of the account's quota (about
-// ten short Sonnet requests per run). It is NOT part of the m5 suite; run it by hand with
+// twelve short Sonnet requests per run). It is NOT part of the m5 suite; run it by hand with
 // run-harness-live.bat after a change to the harness, to the process backend, or to the pin of
 // the SDK submodule.
 //
 // What it proves, end to end, with the same engine files the app compiles:
-//   1. the SDK builds the expected command line (DescribeCommandLine);
-//   2. a conversation starts, the model calls in-process tools, and the turn's events arrive;
+//   1. the SDK builds the expected command line (DescribeCommandLine), and it asks for BYPASS
+//      PERMISSIONS;
+//   2. a conversation starts, the process REPORTS bypass before any message, the model calls
+//      in-process tools, the turn's events arrive, and the process's own inventory lists exactly
+//      the harness tools;
 //   3. a follow-up message keeps its context in the same process;
 //   4. an idle conversation uses (almost) no CPU — the SDK's own Windows backend spins a core;
 //   5. NEWEST WINS: a message sent while a turn runs interrupts that turn;
@@ -20,11 +23,18 @@
 //      process, a Prewarm brings one back, and a Prewarm cancels a pending park;
 //   7. Reset raises the epoch, empties the record and deletes its file;
 //   8. a missing claude.exe fails fast, with an Error event;
-//   9. (with --agent) the Sessions search agent finds real sessions of this machine.
+//   P. THE PERMISSION POLICY when bypass is not allowed (made with the test seam, refused by
+//      Claude Code itself): P1 a policy switch -> auto; P2 both modes switched off -> dontAsk;
+//      P3 an error at start (--restricted) -> a second start with auto, remembered;
+//   9. (with --agent) the Sessions search agent finds real sessions of this machine — and the
+//      run prints HOW: the command line, the system prompt, the tools as the model reads them,
+//      each request step by step (tool calls with their arguments, results, replies, times),
+//      and what the process reported about itself (its inventory).
 //
 // Usage: harness_live.exe [--claude <path to claude.exe>] [--model <id>] [--agent "<request>"]
-//                         [--only-agent] [--verbose]
+//                         [--only-agent] [--only-permissions] [--verbose]
 //        harness_live.exe --index [days]     measure the session index alone (no model call)
+//   --verbose prints each tool result in full (as far as the record keeps it).
 // Exit code: the number of failed checks.
 
 #include "../AgentHarness.h"
@@ -94,6 +104,130 @@ namespace
         return text;
     }
 
+    // "a, b, c" — or "(none)" for an empty list, so that an empty kind is said, not left out.
+    std::wstring Join(const std::vector<std::wstring>& items)
+    {
+        if (items.empty())
+        {
+            return L"(none)";
+        }
+        std::wstring out;
+        for (const auto& item : items)
+        {
+            out += (out.empty() ? L"" : L", ") + item;
+        }
+        return out;
+    }
+
+    // Print what a harness process reported about ITSELF (HarnessConversation::Inventory): the
+    // rules it runs under and everything its model can use. One line per kind.
+    void SayInventory(const HarnessInventory& inventory)
+    {
+        if (!inventory.known)
+        {
+            Say(L"  inventory: no process answered yet");
+            return;
+        }
+        Say(L"  inventory  permission mode : " + inventory.permissionMode + L" (asked: " + inventory.askedPermissionMode + L")");
+        if (!inventory.complete)
+        {
+            Say(L"  inventory  (the lists come with the first turn of the process)");
+            return;
+        }
+        std::wstring servers;
+        for (const auto& [name, status] : inventory.mcpServers)
+        {
+            servers += (servers.empty() ? L"" : L", ") + name + L"=" + status;
+        }
+        Say(L"  inventory  claude code     : " + inventory.cliVersion + L", model " + inventory.model + L", credentials: " + (inventory.apiKeySource == L"none" ? std::wstring{ L"the Claude login (no API key)" } : inventory.apiKeySource) + L", output style: " + inventory.outputStyle);
+        Say(L"  inventory  tools (" + std::to_wstring(inventory.tools.size()) + L")       : " + Join(inventory.tools));
+        Say(L"  inventory  mcp servers (" + std::to_wstring(inventory.mcpServers.size()) + L") : " + (servers.empty() ? std::wstring{ L"(none)" } : servers));
+        Say(L"  inventory  slash commands  : " + Join(inventory.slashCommands));
+        Say(L"  inventory  skills          : " + Join(inventory.skills));
+        Say(L"  inventory  agent types (" + std::to_wstring(inventory.agents.size()) + L") : " + Join(inventory.agents) + L"   <- they exist; the model can start one only with an Agent tool");
+        Say(L"  inventory  plugins (" + std::to_wstring(inventory.plugins.size()) + L")     : " + Join(inventory.plugins));
+    }
+
+    // The size of the test profile's hooks.log now: the mark for SayHarnessLogSince.
+    uintmax_t HooksLogSize()
+    {
+        std::error_code ec;
+        const uintmax_t size = std::filesystem::file_size(AgentmasterStateDir() + L"\\hooks.log", ec);
+        return ec ? 0 : size;
+    }
+
+    // Print the [harness] lines that the engine wrote into the test profile's hooks.log after
+    // `from` — the harness's own account of what it did (a start, a refused mode, a switch).
+    //   from   — a HooksLogSize() taken before the step.
+    //   needle — only lines that hold this text; empty = every [harness] line.
+    //   returns — the printed lines, joined by '\n' (for a check on what was logged).
+    std::wstring SayHarnessLogSince(uintmax_t from, const std::wstring& needle = {})
+    {
+        std::wstring printed;
+        const std::wstring path = AgentmasterStateDir() + L"\\hooks.log";
+        const HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            return printed;
+        }
+        LARGE_INTEGER at{};
+        at.QuadPart = static_cast<LONGLONG>(from);
+        std::string bytes;
+        if (::SetFilePointerEx(h, at, nullptr, FILE_BEGIN))
+        {
+            char buffer[8192];
+            DWORD got = 0;
+            while (::ReadFile(h, buffer, sizeof(buffer), &got, nullptr) && got > 0)
+            {
+                bytes.append(buffer, got);
+            }
+        }
+        ::CloseHandle(h);
+        const std::wstring text = HarnessFromUtf8(bytes);
+        size_t start = 0;
+        while (start < text.size())
+        {
+            size_t end = text.find(L'\n', start);
+            if (end == std::wstring::npos)
+            {
+                end = text.size();
+            }
+            std::wstring line = text.substr(start, end - start);
+            start = end + 1;
+            while (!line.empty() && line.back() == L'\r')
+            {
+                line.pop_back();
+            }
+            if (line.find(L"[harness]") == std::wstring::npos || (!needle.empty() && line.find(needle) == std::wstring::npos))
+            {
+                continue;
+            }
+            Say(L"  log  " + line);
+            printed += line + L"\n";
+        }
+        return printed;
+    }
+
+    // Wait until `conversation` is Ready or Failed.
+    //   returns — true for Ready.
+    bool WaitReady(HarnessConversation& conversation, int seconds = 20)
+    {
+        for (int i = 0; i < seconds * 20; ++i)
+        {
+            const HarnessState state = conversation.State();
+            if (state == HarnessState::Ready)
+            {
+                return true;
+            }
+            if (state == HarnessState::Failed)
+            {
+                return false;
+            }
+            ::Sleep(50);
+        }
+        return false;
+    }
+
     // Collects a conversation's events and lets the test wait for a turn's end.
     struct Collector
     {
@@ -114,7 +248,7 @@ namespace
                 Say(L"  event state=" + std::wstring{ HarnessStateName(e.state) } + L" epoch=" + std::to_wstring(e.epoch));
                 break;
             case HarnessEventKind::Ready:
-                Say(L"  event ready model=" + e.model + L" claude=" + e.cliVersion);
+                Say(L"  event ready model=" + e.model + L" claude=" + e.cliVersion + L" permission=" + e.permissionMode);
                 break;
             case HarnessEventKind::UserMessage:
                 Say(L"  event user[" + std::to_wstring(e.turn) + L"]: " + Short(e.text));
@@ -368,6 +502,7 @@ namespace
             HarnessConversation conversation{ BaseOptions(claudeExe, model, dir, tools), {} };
             std::wstring line;
             bool hasNoPersistence = false, hasAutocompact = false, hasNoTools = false, hasStrict = false, hasThinking = false, hasSources = false, hasPromptFile = false;
+            bool hasBypassMode = false, hasDangerously = false, hasAllowedTools = false, hasRestricted = false, hasPermissionsKey = false;
             const auto args = conversation.DescribeCommandLine();
             for (size_t i = 0; i < args.size(); ++i)
             {
@@ -375,12 +510,17 @@ namespace
                 hasNoPersistence = hasNoPersistence || args[i] == L"--no-session-persistence";
                 hasStrict = hasStrict || args[i] == L"--strict-mcp-config";
                 hasPromptFile = hasPromptFile || args[i] == L"--system-prompt-file";
+                hasDangerously = hasDangerously || args[i] == L"--dangerously-skip-permissions";
+                hasRestricted = hasRestricted || args[i] == L"--restricted";
                 if (i + 1 < args.size())
                 {
                     hasAutocompact = hasAutocompact || (args[i] == L"--autocompact" && args[i + 1] == L"500000");
                     hasNoTools = hasNoTools || (args[i] == L"--tools" && args[i + 1].empty());
                     hasThinking = hasThinking || (args[i] == L"--thinking" && args[i + 1] == L"disabled");
                     hasSources = hasSources || (args[i] == L"--setting-sources" && args[i + 1].empty());
+                    hasBypassMode = hasBypassMode || (args[i] == L"--permission-mode" && args[i + 1] == L"bypassPermissions");
+                    hasAllowedTools = hasAllowedTools || (args[i] == L"--allowedTools" && args[i + 1].find(L"mcp__search") != std::wstring::npos && args[i + 1].find(L"mcp__display") != std::wstring::npos);
+                    hasPermissionsKey = hasPermissionsKey || (args[i] == L"--settings" && args[i + 1].find(L"\"permissions\"") != std::wstring::npos);
                 }
             }
             Say(L"  " + line);
@@ -391,6 +531,11 @@ namespace
             Check(hasThinking, L"--thinking disabled is passed");
             Check(hasSources, L"--setting-sources \"\" is passed");
             Check(hasPromptFile, L"the system prompt goes through --system-prompt-file");
+            Check(hasBypassMode && hasDangerously, L"BYPASS PERMISSIONS is asked for: --permission-mode bypassPermissions and --dangerously-skip-permissions");
+            Check(hasAllowedTools, L"the tool servers stay on --allowedTools (what keeps the two fallback modes working, and auto fast)");
+            Check(!hasRestricted && !hasPermissionsKey, L"a product launch passes neither --restricted nor a permissions settings key (both are test seams)");
+            const HarnessInventory before = conversation.Inventory();
+            Check(!before.known && !before.complete, L"before a process answered, the inventory says that nothing is known");
         }
 
         Say(L"=== 2. a conversation: start, tools, events ===");
@@ -408,12 +553,37 @@ namespace
             {
                 return; // nothing else can pass
             }
+            // The permission mode is the process's own word, known BEFORE any model request.
+            const HarnessInventory atStart = conversation.Inventory();
+            SayInventory(atStart);
+            Check(atStart.known && atStart.permissionMode == L"bypassPermissions" && atStart.askedPermissionMode == L"bypassPermissions", L"the process REPORTS bypassPermissions at start, before any message (" + atStart.permissionMode + L")");
+            Check(!atStart.complete, L"the lists are not known before the first turn");
 
             const uint64_t turn1 = conversation.Send(L"find the session where I fixed the tab drag crash");
             const HarnessEvent done1 = events.WaitTurn(turn1);
             Check(done1.kind == HarnessEventKind::TurnCompleted && !done1.isError, L"turn 1 completed without an error");
             Check(events.CountKind(HarnessEventKind::ToolCall, turn1) >= 2, L"turn 1 called the tools (search, then show)");
             Check(tools.Shown(L"aaaa1111"), L"turn 1 showed the tab drag crash session");
+            // What the model in this process can use, as the process itself listed it.
+            const HarnessInventory afterTurn = conversation.Inventory();
+            SayInventory(afterTurn);
+            bool onlyOurTools = afterTurn.tools.size() == 2;
+            for (const auto& tool : afterTurn.tools)
+            {
+                onlyOurTools = onlyOurTools && (tool == L"mcp__search__find_sessions" || tool == L"mcp__display__show_sessions");
+            }
+            Check(afterTurn.complete && onlyOurTools, L"the model has EXACTLY the two harness tools (" + Join(afterTurn.tools) + L") - no built-in tool, no MCP resource tool");
+            Check(afterTurn.mcpServers.size() == 2 && afterTurn.slashCommands.empty() && afterTurn.skills.empty(), L"two tool servers, no slash command, no skill");
+            Check(afterTurn.permissionMode == L"bypassPermissions", L"the first turn confirms the mode: " + afterTurn.permissionMode);
+            bool readySaysBypass = false;
+            {
+                std::lock_guard lock{ events.mutex };
+                for (const auto& e : events.events)
+                {
+                    readySaysBypass = readySaysBypass || (e.kind == HarnessEventKind::Ready && e.permissionMode == L"bypassPermissions");
+                }
+            }
+            Check(readySaysBypass, L"the Ready event carries the permission mode");
             Check(done1.usage.contextTokens > 0 && done1.usage.contextWindow == 500000, L"usage: context " + std::to_wstring(done1.usage.contextTokens) + L" of a 500000 window");
             Check(!done1.text.empty(), L"turn 1 has a final sentence");
 
@@ -519,6 +689,105 @@ namespace
         }
     }
 
+    // The PERMISSION POLICY, against the real claude.exe: bypass always; auto when Claude Code
+    // does not allow bypass; dontAsk when it allows neither. This machine's policy allows
+    // everything, so each "not allowed" is made with the test seam (HarnessPermissionProbe) —
+    // the refusal itself is Claude Code's own, exactly as with an administrator's policy.
+    // Three starts cost no model request; two short turns prove that the tools still run in each
+    // fallback mode.
+    void RunPermissionScenarios(const std::wstring& claudeExe, const std::wstring& model, const std::wstring& dir)
+    {
+        const auto options = [&](FakeTools& tools, const wchar_t* name) {
+            HarnessOptions o = BaseOptions(claudeExe, model, dir, tools);
+            o.name = name; // its own log tag, so each scenario's lines can be told apart
+            o.persistRecord = false;
+            o.workDir = dir + L"\\" + name;
+            return o;
+        };
+
+        Say(L"=== P1. bypass is NOT ALLOWED (a policy switch): Claude Code chooses auto, the harness keeps it ===");
+        {
+            FakeTools tools;
+            Collector events;
+            HarnessOptions o = options(tools, L"live-perm-soft");
+            o.permissionProbe.bypassDisabledBySettings = true;
+            const uintmax_t mark = HooksLogSize();
+            HarnessConversation conversation{ std::move(o), std::ref(events) };
+            conversation.Prewarm();
+            Check(WaitReady(conversation), L"the process started although bypass is refused");
+            const HarnessInventory inventory = conversation.Inventory();
+            SayInventory(inventory);
+            Check(inventory.permissionMode == L"auto" && inventory.askedPermissionMode == L"bypassPermissions", L"asked bypassPermissions, runs in auto (" + inventory.permissionMode + L")");
+            const std::wstring logged = SayHarnessLogSince(mark, L"permission mode");
+            Check(logged.find(L"NOT ALLOWED") != std::wstring::npos, L"hooks.log says that bypass is not allowed here");
+            const double t0 = Seconds();
+            const uint64_t turn = conversation.Send(L"find the catalog deploy script session");
+            const HarnessEvent done = events.WaitTurn(turn);
+            Check(done.kind == HarnessEventKind::TurnCompleted && !done.isError && tools.Shown(L"eeee5555"), L"in auto mode the tools run (the allowed list: no classifier request for them): " + std::to_wstring(static_cast<int>((Seconds() - t0) * 1000)) + L" ms");
+            Check(conversation.Inventory().permissionMode == L"auto", L"the first turn confirms auto");
+        }
+
+        Say(L"=== P2. NEITHER bypass nor auto is allowed: Claude Code starts in 'default', the harness switches to dontAsk ===");
+        {
+            FakeTools tools;
+            Collector events;
+            HarnessOptions o = options(tools, L"live-perm-neither");
+            o.permissionProbe.bypassDisabledBySettings = true;
+            o.permissionProbe.autoDisabledBySettings = true;
+            const uintmax_t mark = HooksLogSize();
+            HarnessConversation conversation{ std::move(o), std::ref(events) };
+            conversation.Prewarm();
+            Check(WaitReady(conversation), L"the process started although both modes are refused");
+            const HarnessInventory inventory = conversation.Inventory();
+            SayInventory(inventory);
+            Check(inventory.permissionMode == L"dontAsk", L"the harness ended in dontAsk (" + inventory.permissionMode + L"): a hidden process must not run in a mode that can ask");
+            const std::wstring logged = SayHarnessLogSince(mark, L"permission mode");
+            Check(logged.find(L"auto was REFUSED") != std::wstring::npos && logged.find(L"dontAsk") != std::wstring::npos, L"hooks.log shows both steps: auto refused, then dontAsk");
+            const uint64_t turn = conversation.Send(L"find the NumSharp session");
+            const HarnessEvent done = events.WaitTurn(turn);
+            Check(done.kind == HarnessEventKind::TurnCompleted && !done.isError && tools.Shown(L"cccc3333"), L"in dontAsk the allowed tools still run");
+            const std::wstring modeAfter = conversation.Inventory().permissionMode;
+            Check(modeAfter == L"dontAsk", L"the first turn's own report is dontAsk too (" + modeAfter + L"): the switch held");
+        }
+
+        Say(L"=== P3. bypass is REFUSED WITH AN ERROR at start (--restricted): the harness starts again with auto ===");
+        {
+            FakeTools tools;
+            Collector events;
+            HarnessOptions o = options(tools, L"live-perm-hard");
+            o.permissionProbe.restricted = true;
+            const uintmax_t mark = HooksLogSize();
+            HarnessConversation conversation{ std::move(o), std::ref(events) };
+            const double t0 = Seconds();
+            conversation.Prewarm();
+            const bool ready = WaitReady(conversation, 30);
+            Check(ready, L"the second start worked (" + std::to_wstring(static_cast<int>((Seconds() - t0) * 1000)) + L" ms for both starts)");
+            const HarnessInventory inventory = conversation.Inventory();
+            SayInventory(inventory);
+            Check(inventory.permissionMode == L"auto" && inventory.askedPermissionMode == L"auto", L"it runs in auto, and auto is what the working start asked for");
+            const std::wstring logged = SayHarnessLogSince(mark);
+            Check(logged.find(L"was REFUSED") != std::wstring::npos && logged.find(L"restricted mode") != std::wstring::npos, L"hooks.log holds Claude Code's own reason for the refused start");
+            bool errorEvent = false;
+            {
+                std::lock_guard lock{ events.mutex };
+                for (const auto& e : events.events)
+                {
+                    errorEvent = errorEvent || e.kind == HarnessEventKind::Error;
+                }
+            }
+            Check(!errorEvent, L"the refused first start raised no Error event: the user sees one start");
+            // The refusal is remembered: the next start of this conversation asks for auto at once.
+            bool asksAuto = false, asksBypass = false;
+            const auto args = conversation.DescribeCommandLine();
+            for (size_t i = 0; i < args.size(); ++i)
+            {
+                asksAuto = asksAuto || (args[i] == L"--permission-mode" && i + 1 < args.size() && args[i + 1] == L"auto");
+                asksBypass = asksBypass || args[i] == L"--dangerously-skip-permissions";
+            }
+            Check(asksAuto && !asksBypass, L"later starts of this conversation ask for auto directly (no failed start each time)");
+        }
+    }
+
 #ifndef AM_LIVE_NO_AGENT
     // --index: how long this machine's session index takes to read, and which sessions are the
     // slow ones. No model call. It reads through the same two functions the gather uses
@@ -593,6 +862,98 @@ namespace
         Say(L"  a refresh of it (unchanged sessions copied): " + std::to_wstring(static_cast<int>((Seconds() - t4) * 1000)) + L" ms, " + std::to_wstring(refreshed->entries.size()) + L" session(s)");
     }
 
+    // Print one turn of a conversation record as a TIMELINE: what the user asked, every tool call
+    // with the arguments the model sent, every tool result, and what the model said — each with
+    // its time since the request. This is HOW a request was answered.
+    //   record      — the conversation's record (SessionSearchAgent::Record).
+    //   turn        — the turn to print.
+    //   resultChars — how much of each tool result to print (the record keeps at most
+    //                 kHarnessMaxToolResultChars of one).
+    void SayTurnTrace(const HarnessRecord& record, uint64_t turn, size_t resultChars)
+    {
+        int64_t t0 = 0;
+        for (const auto& item : record.items)
+        {
+            if (item.turn != turn)
+            {
+                continue;
+            }
+            if (t0 == 0)
+            {
+                t0 = item.atUnixMs;
+            }
+            wchar_t at[32]{};
+            swprintf_s(at, L"+%5lld ms", static_cast<long long>(item.atUnixMs - t0));
+            switch (item.kind)
+            {
+            case HarnessItemKind::User:
+                Say(std::wstring{ L"  trace " } + at + L"  USER         " + Short(item.text, 400));
+                break;
+            case HarnessItemKind::ToolCall:
+                Say(std::wstring{ L"  trace " } + at + L"  TOOL CALL    " + item.toolName + L" " + Short(item.argumentsJson, 600));
+                break;
+            case HarnessItemKind::ToolResult:
+                Say(std::wstring{ L"  trace " } + at + L"  TOOL RESULT  " + (item.isError ? L"(ERROR) " : L"") + Short(item.text, resultChars));
+                break;
+            case HarnessItemKind::Assistant:
+                Say(std::wstring{ L"  trace " } + at + L"  MODEL SAYS   " + Short(item.text, 600));
+                break;
+            case HarnessItemKind::Notice:
+            default:
+                Say(std::wstring{ L"  trace " } + at + L"  NOTICE       " + Short(item.text, 400));
+                break;
+            }
+        }
+    }
+
+    // Print what the search agent's model is GIVEN before any request: the command line of its
+    // process, its whole system prompt, and each tool with the description and the argument
+    // schema the model reads. Starts nothing.
+    void SayAgentSetup(const SessionSearchAgent& agent)
+    {
+        Say(L"  --- the process command line (claude.exe + these arguments) ---");
+        const auto args = agent.DescribeCommandLine();
+        for (size_t i = 0; i < args.size(); ++i)
+        {
+            // An option and its value on one line; a value that is itself JSON is long.
+            std::wstring line = args[i].empty() ? L"\"\"" : args[i];
+            if (args[i].rfind(L"--", 0) == 0 && i + 1 < args.size() && args[i + 1].rfind(L"--", 0) != 0)
+            {
+                line += L" " + (args[i + 1].empty() ? std::wstring{ L"\"\"" } : args[i + 1]);
+                ++i;
+            }
+            Say(L"    " + Short(line, 1200));
+        }
+        Say(L"  --- the system prompt (it REPLACES Claude Code's own) ---");
+        const std::wstring prompt = SessionSearchToolset::SystemPrompt();
+        size_t start = 0;
+        while (start < prompt.size())
+        {
+            size_t end = prompt.find(L'\n', start);
+            if (end == std::wstring::npos)
+            {
+                end = prompt.size();
+            }
+            Say(L"    " + prompt.substr(start, end - start));
+            start = end + 1;
+        }
+        Say(L"  --- the tools the model is told about ---");
+        // A toolset of its own, only to list what it declares: its handlers are never called.
+        SessionSearchToolset::Callbacks listOnly;
+        listOnly.catalog = [](int64_t, const std::function<bool()>&) { return std::shared_ptr<const SessionCatalog>{}; };
+        listOnly.onShow = [](const std::vector<std::wstring>&, const std::wstring&) {};
+        SessionSearchToolset toolset{ std::move(listOnly) };
+        for (const auto& server : toolset.Servers())
+        {
+            for (const auto& tool : server.tools)
+            {
+                Say(L"    " + HarnessToolFullName(server.name, tool.name) + (tool.readOnly ? L"  (read-only: calls of one model turn may run at the same time)" : L""));
+                Say(L"      description: " + Short(tool.description, 1500));
+                Say(L"      arguments  : " + Short(tool.inputSchemaJson, 2500));
+            }
+        }
+    }
+
     void RunAgentScenario(const std::wstring& claudeExe, const std::wstring& request)
     {
         Say(L"=== 9. the Sessions search agent, on this machine's real sessions ===");
@@ -600,6 +961,8 @@ namespace
         options.claudeExe = [claudeExe] { return claudeExe; };
         options.persist = false; // a test must not leave a conversation in the profile
         SessionSearchAgent agent{ options };
+        SayAgentSetup(agent);
+        const uintmax_t logMark = HooksLogSize();
 
         std::mutex mutex;
         std::condition_variable changed;
@@ -684,13 +1047,31 @@ namespace
         Check(!snapshot.shownIds.empty() || saidIndexing,
               L"the snapshot holds " + std::to_wstring(snapshot.shownIds.size()) + L" shown id(s)" + (saidIndexing ? std::wstring{ L" (the answer says that the index is still being built)" } : std::wstring{}) + L"; note: " + Short(snapshot.note, 120));
 
+        // HOW it was answered: the turn as the conversation's record holds it, the process's own
+        // account of what its model can use, and the harness's log lines of this run.
+        Say(L"  --- request 1, step by step (times since the request reached the model's process) ---");
+        SayTurnTrace(agent.Record(), turn, g_verbose ? kHarnessMaxToolResultChars : 900);
+        Say(L"  --- what the process reported about itself ---");
+        const HarnessInventory inventory = agent.Inventory();
+        SayInventory(inventory);
+        Check(inventory.complete && inventory.permissionMode == L"bypassPermissions", L"the agent's process runs with bypass permissions (" + inventory.permissionMode + L")");
+        bool onlySearchTools = inventory.tools.size() == 2;
+        for (const auto& tool : inventory.tools)
+        {
+            onlySearchTools = onlySearchTools && (tool == L"mcp__sessions__search" || tool == L"mcp__display__show");
+        }
+        Check(onlySearchTools, L"its model has exactly two tools: " + Join(inventory.tools));
+        Say(L"  --- usage so far: context " + std::to_wstring(snapshot.usage.contextTokens) + L" of " + std::to_wstring(snapshot.usage.contextWindow) + L" tokens; input " + std::to_wstring(snapshot.usage.inputTokens) + L", output " + std::to_wstring(snapshot.usage.outputTokens) + L", cache read " + std::to_wstring(snapshot.usage.cacheReadTokens) + L", cache write " + std::to_wstring(snapshot.usage.cacheCreationTokens) + L" ---");
+        Say(L"  --- the harness's own log lines of this run ---");
+        SayHarnessLogSince(logMark);
+
         // A second request in the same conversation: no process start this time.
         const double t1 = Seconds();
         {
             std::lock_guard lock{ mutex };
             seen.clear();
         }
-        agent.Ask(L"only the three newest of those");
+        const uint64_t turn2 = agent.Ask(L"only the three newest of those");
         bool answered2 = false;
         double shown2At = 0;
         {
@@ -722,6 +1103,8 @@ namespace
         }
         Check(answered2, L"a follow-up was answered; results shown after " + std::to_wstring(static_cast<int>(shown2At * 1000)) + L" ms (warm process)");
         Check(agent.Snapshot().shownIds.size() <= 3, L"the follow-up narrowed the list to " + std::to_wstring(agent.Snapshot().shownIds.size()) + L" session(s)");
+        Say(L"  --- request 2 (the follow-up), step by step ---");
+        SayTurnTrace(agent.Record(), turn2, g_verbose ? kHarnessMaxToolResultChars : 900);
 
         agent.Reset();
         Check(agent.Snapshot().shownIds.empty() && agent.Snapshot().turns == 0, L"Reset cleared the agent's conversation");
@@ -761,6 +1144,7 @@ int wmain(int argc, wchar_t** argv)
     std::wstring model = L"claude-sonnet-5-5";
     std::wstring agentRequest;
     bool onlyAgent = false;
+    bool onlyPermissions = false; // --only-permissions: the permission scenarios alone (two short turns)
     int indexDays = -1; // --index [days]: -1 = not asked, 0 = the default period
     for (int i = 1; i < argc; ++i)
     {
@@ -789,6 +1173,10 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--only-agent")
         {
             onlyAgent = true;
+        }
+        else if (a == L"--only-permissions")
+        {
+            onlyPermissions = true;
         }
         else if (a == L"--verbose")
         {
@@ -824,9 +1212,13 @@ int wmain(int argc, wchar_t** argv)
         return 0;
     }
 #endif
-    if (!onlyAgent)
+    if (!onlyAgent && !onlyPermissions)
     {
         RunHarnessScenarios(claudeExe, model, dir);
+    }
+    if (!onlyAgent)
+    {
+        RunPermissionScenarios(claudeExe, model, dir);
     }
 #ifndef AM_LIVE_NO_AGENT
     if (!agentRequest.empty())

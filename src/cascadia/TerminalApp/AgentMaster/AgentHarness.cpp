@@ -242,8 +242,17 @@ namespace Agentmaster
         // Prewarm / Send / Reset (somebody needs the process) and by the worker when it parks.
         std::optional<std::chrono::steady_clock::time_point> parkAt;
         HarnessRecord record;
+        // What the newest process reported about itself (Inventory()). Written by the worker:
+        // the permission fields when a process answered `initialize`, the lists at its first turn.
+        HarnessInventory inventory;
 
         // ---- cross-thread flags ----
+        // The permission mode the NEXT start asks for. Bypass, until a start with it was refused
+        // with an error AND a start with a lower mode then worked: from then on the lower mode,
+        // for this object's life (what refuses a mode is a policy, and a policy does not change
+        // between two starts; a new app run asks for bypass again). Written by the worker only;
+        // atomic because DescribeCommandLine reads it from other threads.
+        std::atomic<HarnessPermissionMode> launchPermission{ HarnessPermissionMode::Bypass };
         std::atomic<bool> interruptRequested{ false };
         std::atomic<int> toolCallsInFlight{ 0 }; // > 0: a tool handler runs on the SDK reader thread
         std::atomic<uint64_t> activeTurn{ 0 }; // the turn tool events belong to
@@ -260,6 +269,11 @@ namespace Agentmaster
         std::unique_ptr<claude::ClaudeClient> client;
         bool processIsFresh{ false }; // the process has not received a user message yet
         bool readyAnnounced{ false }; // the Ready event of this process was sent
+        // The mode word of the newest report the permission policy acted on, for this process.
+        // A turn's system/init that repeats it is not acted on again: a Claude Code that keeps
+        // reporting a mode the harness could not change must not cost two control requests and
+        // three log lines at every turn.
+        std::wstring lastSettledReport;
         double costAtProcessStart{ 0 }; // record.usage.costUsd when this process started (its own cost counts from 0)
 
         std::thread worker; // LAST: started when everything above exists
@@ -478,10 +492,12 @@ namespace Agentmaster
         }
 
         // The SDK options of this conversation.
-        //   cliPath — the narrow claude.exe path (NarrowPathForSdk); only stored, never opened.
-        //   throws  — std::invalid_argument when a tool's inputSchemaJson is not a JSON object;
-        //             std::bad_alloc.
-        claude::ClaudeOptions BuildSdkOptions(const std::string& cliPath)
+        //   cliPath    — the narrow claude.exe path (NarrowPathForSdk); only stored, never opened.
+        //   permission — the permission mode this start asks for (launchPermission, or the next
+        //                lower mode after a refused start).
+        //   throws     — std::invalid_argument when a tool's inputSchemaJson is not a JSON object;
+        //                std::bad_alloc.
+        claude::ClaudeOptions BuildSdkOptions(const std::string& cliPath, HarnessPermissionMode permission)
         {
             claude::ClaudeOptions o;
             o.cli_path = cliPath;
@@ -494,11 +510,32 @@ namespace Agentmaster
             o.system_prompt_file = prompt;
 
             // The model can call ONLY our tools: no built-in tool, no MCP server of the user.
+            // ⚠ THIS is the limit of what the model can do. The permission mode below limits
+            // nothing in bypass.
             o.tools = std::vector<std::string>{}; // --tools ""
             o.strict_mcp_config = true;
-            o.permission_mode = "dontAsk"; // a tool that is not allowed is refused, never asked about
+            // The permission policy (AgentHarnessCore.h): bypass always; auto, then dontAsk, only
+            // after Claude Code refused. Whether it was GRANTED is read from the process
+            // (SettlePermissionMode) — Claude Code lowers a mode it does not allow without a word.
+            o.permission_mode = HarnessToUtf8(HarnessPermissionModeWord(permission));
+            if (permission == HarnessPermissionMode::Bypass)
+            {
+                // The same mode by its other name. Both are passed: each alone selects bypass
+                // (measured), and a Claude Code that drops one of them still gets the other.
+                o.extra_args["--dangerously-skip-permissions"] = "";
+            }
+            if (options.permissionProbe.restricted)
+            {
+                o.extra_args["--restricted"] = ""; // test seam: bypass is then refused with an error at start
+            }
             o.setting_sources.clear(); // --setting-sources "": no user / project / local settings, no CLAUDE.md
-            o.settings = HarnessToUtf8(BuildHarnessSettingsJson(HarnessSettingsSpec{ options.autoCompactTokens, options.effort, options.apiMaxRetries }));
+            HarnessSettingsSpec settings;
+            settings.autoCompactTokens = options.autoCompactTokens;
+            settings.effort = options.effort;
+            settings.apiMaxRetries = options.apiMaxRetries;
+            settings.disableBypassPermissions = options.permissionProbe.bypassDisabledBySettings; // test seam
+            settings.disableAutoMode = options.permissionProbe.autoDisabledBySettings; // test seam
+            o.settings = HarnessToUtf8(BuildHarnessSettingsJson(settings));
 
             // The whole parent environment, minus the variables of a parent session or tab.
             o.sanitize_environment = false;
@@ -579,6 +616,23 @@ namespace Agentmaster
                         return SdkJson{ { "jsonrpc", "2.0" }, { "result", SdkJson::object() } };
                     }
                     SdkJson response = handler(request);
+                    if (method == "initialize")
+                    {
+                        // The SDK's server says that it has RESOURCES. It has none (it answers
+                        // resources/list with "method not found"), and Claude Code answers the
+                        // claim by giving the model three more tools: ListMcpResourcesTool,
+                        // ReadMcpResourceTool and ReadMcpResourceDirTool. They add 769 tokens to
+                        // every request (measured, Claude Code 2.1.291: 2,224 instead of 1,455
+                        // for two tools), they can only fail, and with bypass permissions nothing
+                        // refuses them. A harness server offers tools and nothing else.
+                        if (const auto result = response.find("result"); result != response.end() && result->is_object())
+                        {
+                            if (const auto capabilities = result->find("capabilities"); capabilities != result->end() && capabilities->is_object())
+                            {
+                                capabilities->erase("resources");
+                            }
+                        }
+                    }
                     if (method == "tools/list")
                     {
                         // Once per process start: what Claude Code was told this server offers. A
@@ -595,7 +649,10 @@ namespace Agentmaster
                     }
                     return response;
                 };
-                o.allowed_tools.push_back("mcp__" + serverName); // the whole server
+                // The whole server, on the allow list. Bypass does not read the list; the two
+                // fallback modes do: in auto an allowed tool runs at once (no classifier request),
+                // in dontAsk it is the only kind of tool that runs at all.
+                o.allowed_tools.push_back("mcp__" + serverName);
             }
 
             o.stderr_callback = [this](const std::string& line) {
@@ -678,24 +735,15 @@ namespace Agentmaster
             readyAnnounced = false;
         }
 
-        // Make sure a process is up. Worker thread only.
-        //   failureOut — receives the reason when the start failed (the text of the Error event).
-        //   returns    — true when `client` is connected; false after reporting the failure
-        //                (state Failed, an Error event).
-        bool EnsureProcess(std::wstring& failureOut) noexcept
+        // ONE start attempt: start claude.exe with `permission` and wait for its `initialize`
+        // answer. Worker thread only; no client exists when it is called.
+        //   permission — the permission mode this attempt asks for.
+        //   returns    — empty when `client` is connected; else why not (the SDK's text plus the
+        //                child's last stderr lines). After a failure no client and no process is left.
+        // Every failure of the start becomes the returned text. (Out of memory while that text is
+        // built ends the process, as for every noexcept function of this file.)
+        std::wstring StartOnce(HarnessPermissionMode permission) noexcept
         {
-            if (client && client->is_connected())
-            {
-                return true;
-            }
-            const bool hadProcess = client != nullptr;
-            Disconnect(true);
-            if (hadProcess)
-            {
-                LogHarness(options.name, L"the process ended; starting a new one");
-            }
-            SetState(HarnessState::Starting);
-            const auto started = std::chrono::steady_clock::now();
             std::wstring failure;
             try
             {
@@ -723,7 +771,7 @@ namespace Agentmaster
                             stderrTail.clear();
                             stderrLogged = 0;
                         }
-                        const claude::ClaudeOptions sdkOptions = BuildSdkOptions(*cliPath);
+                        const claude::ClaudeOptions sdkOptions = BuildSdkOptions(*cliPath, permission);
                         auto watched = std::make_unique<WatchedTransport>(claude::create_subprocess_transport(sdkOptions));
                         client = std::make_unique<claude::ClaudeClient>(sdkOptions, std::move(watched));
                         client->connect(); // starts claude.exe and waits for its `initialize` answer
@@ -736,34 +784,235 @@ namespace Agentmaster
             }
             catch (const std::exception& ex)
             {
-                LogSwallowedException(L"HarnessConversation::EnsureProcess");
+                LogSwallowedException(L"HarnessConversation::StartOnce");
                 failure = L"Claude Code could not be started: " + HarnessFromUtf8(ex.what());
             }
             catch (...)
             {
-                LogSwallowedException(L"HarnessConversation::EnsureProcess");
+                LogSwallowedException(L"HarnessConversation::StartOnce");
                 failure = L"Claude Code could not be started.";
+            }
+            if (failure.empty())
+            {
+                return failure;
+            }
+            // FIRST end the client: that joins the SDK's stderr reader, so every line the child
+            // wrote before it ended is in stderrTail when it is read below. The line is what says
+            // WHY Claude Code ended at once — and EnsureProcess decides on it.
+            Disconnect(true);
+            if (const std::wstring tail = StderrTailText(); !tail.empty())
+            {
+                failure += L" (" + tail + L")";
+            }
+            return failure;
+        }
+
+        // Ask the running process for another permission mode (the control request
+        // set_permission_mode). Worker thread only; `client` is connected.
+        //   word       — the mode word ("auto", "dontAsk").
+        //   refusalOut — receives Claude Code's reason when it said no.
+        //   returns    — true when Claude Code accepted the mode.
+        // Never throws. A refusal is an expected answer here ("Cannot set permission mode to
+        // auto: auto mode disabled by settings"): the caller goes on to the next mode.
+        bool TrySetPermissionMode(const wchar_t* word, std::wstring& refusalOut) noexcept
+        {
+            try
+            {
+                client->set_permission_mode(HarnessToUtf8(word)); // waits for the answer; throws on an error answer
+                return true;
+            }
+            catch (const std::exception& ex)
+            {
+                LogSwallowedException(L"HarnessConversation::TrySetPermissionMode");
+                try
+                {
+                    refusalOut = HarnessFromUtf8(ex.what());
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"HarnessConversation::TrySetPermissionMode (text)");
+                }
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"HarnessConversation::TrySetPermissionMode");
+            }
+            return false;
+        }
+
+        // Carry out the permission policy for a mode the process REPORTED, and record the mode
+        // that is in effect afterwards. Worker thread only; `client` is connected.
+        //   asked    — the mode the launch asked for.
+        //   reported — the mode Claude Code reported: `current_permission_mode` of its answer to
+        //              `initialize`, or `permissionMode` of a turn's system/init line. Empty when
+        //              this Claude Code version reports none at start.
+        //   where    — "at start" / "at the first turn": where the report came from (log text).
+        //   returns  — the mode in effect now (== `reported` when nothing had to change or the
+        //              corrections were refused).
+        // Never throws. Each outcome is one [harness] line, so hooks.log shows for every process
+        // which mode it runs in and why.
+        std::wstring SettlePermissionMode(HarnessPermissionMode asked, const std::wstring& reported, const wchar_t* where) noexcept
+        {
+            std::wstring effective;
+            try
+            {
+                effective = reported;
+                lastSettledReport = reported;
+                const std::wstring askedWord = HarnessPermissionModeWord(asked);
+                std::wstring refusal;
+                switch (DecideHarnessPermissionStep(asked, reported))
+                {
+                case HarnessPermissionStep::Keep:
+                    if (reported.empty())
+                    {
+                        LogHarness(options.name, L"permission mode: asked " + askedWord + L"; this Claude Code reports no mode " + where + L" (it is read from the first turn)");
+                    }
+                    else if (reported == askedWord)
+                    {
+                        LogHarness(options.name, L"permission mode " + reported + L" (" + where + L")");
+                    }
+                    else
+                    {
+                        // The rule's second half, done by Claude Code itself: a policy forbids
+                        // what was asked, and it started in the next mode that never asks.
+                        LogHarness(options.name, L"permission mode " + reported + L" (" + where + L"): " + askedWord + L" is NOT ALLOWED here, Claude Code chose " + reported);
+                    }
+                    break;
+                case HarnessPermissionStep::SwitchToAuto:
+                    if (TrySetPermissionMode(L"auto", refusal))
+                    {
+                        effective = L"auto";
+                        LogHarness(options.name, L"permission mode auto (" + std::wstring{ where } + L"): " + askedWord + L" is NOT ALLOWED here (Claude Code ran in '" + reported + L"', which can ask a person); switched to auto");
+                        break;
+                    }
+                    LogHarness(options.name, L"permission mode: auto was REFUSED too (" + refusal.substr(0, 300) + L")");
+                    [[fallthrough]];
+                case HarnessPermissionStep::SwitchToDontAsk:
+                    refusal.clear();
+                    if (TrySetPermissionMode(L"dontAsk", refusal))
+                    {
+                        effective = L"dontAsk";
+                        LogHarness(options.name, L"permission mode dontAsk (" + std::wstring{ where } + L"): neither bypassPermissions nor auto is allowed here (Claude Code ran in '" + reported + L"'); a tool that is not on the allowed list is refused");
+                    }
+                    else
+                    {
+                        // Measured on 2.1.291: a process without a permission handler REFUSES a
+                        // tool call that no rule allows in "default" too — it does not wait for
+                        // an answer. So what is left here is a mode the harness did not want,
+                        // not a process that can hang.
+                        LogHarness(options.name, L"permission mode stays '" + reported + L"' (" + where + L"): the switch to dontAsk FAILED (" + refusal.substr(0, 300) + L")");
+                    }
+                    break;
+                }
+                std::lock_guard lock{ mutex };
+                inventory.known = true;
+                inventory.askedPermissionMode = askedWord;
+                inventory.permissionMode = effective;
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"HarnessConversation::SettlePermissionMode");
+            }
+            return effective;
+        }
+
+        // Make sure a process is up. Worker thread only.
+        //   failureOut — receives the reason when the start failed (the text of the Error event).
+        //   returns    — true when `client` is connected; false after reporting the failure
+        //                (state Failed, an Error event).
+        // THE PERMISSION POLICY at start (AgentHarnessCore.h): the start asks for
+        // launchPermission (bypass). When Claude Code ENDS with an error that names the
+        // permission mode, the start is done again with the next lower mode — at most twice.
+        // A mode that Claude Code lowers WITHOUT an error is handled after the start, from the
+        // mode the process reports (SettlePermissionMode).
+        bool EnsureProcess(std::wstring& failureOut) noexcept
+        {
+            if (client && client->is_connected())
+            {
+                return true;
+            }
+            const bool hadProcess = client != nullptr;
+            Disconnect(true);
+            if (hadProcess)
+            {
+                LogHarness(options.name, L"the process ended; starting a new one");
+            }
+            SetState(HarnessState::Starting);
+            const auto started = std::chrono::steady_clock::now();
+            const HarnessPermissionMode firstAsked = launchPermission.load();
+            HarnessPermissionMode asked = firstAsked;
+            std::wstring failure = StartOnce(asked);
+            std::wstring firstFailure; // of the highest mode: the one that says what is not allowed
+            while (!failure.empty())
+            {
+                const auto lower = NextHarnessPermissionMode(asked);
+                if (!lower || !HarnessStartFailureNamesPermissionMode(failure))
+                {
+                    break; // not a refusal of the mode (or nothing lower exists): a real failure
+                }
+                LogHarness(options.name, std::wstring{ L"the start with permission mode " } + HarnessPermissionModeWord(asked) + L" was REFUSED (" + failure.substr(0, 300) + L"); starting again with " + HarnessPermissionModeWord(*lower));
+                if (firstFailure.empty())
+                {
+                    firstFailure = std::move(failure);
+                }
+                asked = *lower;
+                failure = StartOnce(asked);
             }
             if (!failure.empty())
             {
-                if (const std::wstring tail = StderrTailText(); !tail.empty())
+                // When every mode failed, the first text is the informative one (the later ones
+                // repeat it, or name a mode the user never asked about). launchPermission is
+                // left as it was: nothing proved that a lower mode works.
+                if (!firstFailure.empty())
                 {
-                    failure += L" (" + tail + L")";
+                    failure = std::move(firstFailure);
                 }
-                Disconnect(true);
                 LogHarness(options.name, L"start FAILED: " + failure);
+                {
+                    std::lock_guard lock{ mutex };
+                    inventory = HarnessInventory{}; // no process answered: nothing is known
+                }
                 SetState(HarnessState::Failed, HarnessEventKind::Error, failure, true);
                 failureOut = std::move(failure); // noexcept move: the caller reports it for a waiting message
                 return false;
             }
+            if (asked != firstAsked)
+            {
+                // A lower mode started where the higher one was refused: later starts of this
+                // conversation ask for it directly, instead of failing once first.
+                launchPermission.store(asked);
+                LogHarness(options.name, std::wstring{ L"permission mode " } + HarnessPermissionModeWord(firstAsked) + L" is taken as NOT ALLOWED for this conversation; its later starts ask for " + HarnessPermissionModeWord(asked));
+            }
             processIsFresh = true;
             readyAnnounced = false;
+            lastSettledReport.clear();
             {
                 std::lock_guard lock{ mutex };
                 costAtProcessStart = record.usage.costUsd;
+                inventory = HarnessInventory{}; // a new process: the old report is not its report
             }
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
             LogHarness(options.name, L"process up pid=" + std::to_wstring(client->get_pid()) + L" in " + std::to_wstring(ms) + L" ms (model " + options.model + L")");
+            // Before Ready, so that no message can reach a process that still runs in a mode
+            // which can ask. The mode is in the `initialize` answer the SDK kept.
+            std::wstring reported;
+            try
+            {
+                if (const auto info = client->get_server_info(); info && info->is_object())
+                {
+                    // ⚠ Only this one key is read. The answer also holds the user's ACCOUNT
+                    // object, which must never reach a log or the record.
+                    if (const auto mode = info->find("current_permission_mode"); mode != info->end() && mode->is_string())
+                    {
+                        reported = HarnessFromUtf8(mode->get<std::string>());
+                    }
+                }
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"HarnessConversation::EnsureProcess (initialize answer)");
+            }
+            SettlePermissionMode(asked, reported, L"at start");
             SetState(HarnessState::Ready);
             return true;
         }
@@ -814,11 +1063,37 @@ namespace Agentmaster
             {
             case HarnessSystemKind::Init:
             {
+                std::wstring knownMode;
                 {
                     std::lock_guard lock{ mutex };
                     if (epoch == turnEpoch && !facts.model.empty())
                     {
                         record.model = facts.model;
+                    }
+                    knownMode = inventory.permissionMode;
+                }
+                // The permission mode, checked at EVERY turn's start (one string compare): it is
+                // the process's own word, and it differs from what the harness holds when this
+                // Claude Code reported no mode at start, or when something changed the mode since.
+                // The policy then runs again, before the model's first tool call of this turn.
+                std::wstring modeNow = knownMode;
+                if (!facts.permissionMode.empty() && facts.permissionMode != knownMode)
+                {
+                    if (facts.permissionMode != lastSettledReport)
+                    {
+                        modeNow = SettlePermissionMode(launchPermission.load(), facts.permissionMode, readyAnnounced ? L"at a later turn" : L"at the first turn");
+                    }
+                    else
+                    {
+                        // The harness asked for another mode after exactly this report, Claude
+                        // Code said yes, and the process still reports the old mode. Asking again
+                        // cannot help; what is recorded must be what is true.
+                        modeNow = facts.permissionMode;
+                        {
+                            std::lock_guard lock{ mutex };
+                            inventory.permissionMode = modeNow;
+                        }
+                        LogHarness(options.name, L"permission mode: the process still reports '" + modeNow + L"' after the switch; that is the mode in effect");
                     }
                 }
                 if (readyAnnounced)
@@ -826,6 +1101,22 @@ namespace Agentmaster
                     break; // Claude Code repeats `init` at every turn; one report per process
                 }
                 readyAnnounced = true;
+                {
+                    // The process's own account of what its model can use (Inventory()).
+                    std::lock_guard lock{ mutex };
+                    inventory.known = true;
+                    inventory.complete = true;
+                    inventory.cliVersion = facts.cliVersion;
+                    inventory.model = facts.model;
+                    inventory.apiKeySource = facts.apiKeySource;
+                    inventory.outputStyle = facts.outputStyle;
+                    inventory.tools = facts.tools;
+                    inventory.mcpServers = facts.mcpServers;
+                    inventory.slashCommands = facts.slashCommands;
+                    inventory.skills = facts.skills;
+                    inventory.agents = facts.agents;
+                    inventory.plugins = facts.plugins;
+                }
                 std::wstring servers;
                 for (const auto& [name, status] : facts.mcpServers)
                 {
@@ -847,16 +1138,26 @@ namespace Agentmaster
                 {
                     toolNames += (i ? L"," : L"") + facts.tools[i];
                 }
-                LogHarness(options.name, L"init: claude " + facts.cliVersion + L" model=" + facts.model + L" permissionMode=" + facts.permissionMode + L" tools=" + std::to_wstring(facts.tools.size()) + L" [" + toolNames + L"] servers:" + servers);
+                // One line with the whole surface: a count for each kind, and the tools by name (a
+                // tool the harness did not give is the first thing to look for here).
+                LogHarness(options.name, L"init: claude " + facts.cliVersion + L" model=" + facts.model + L" permissionMode=" + facts.permissionMode + L" tools=" + std::to_wstring(facts.tools.size()) + L" [" + toolNames + L"] servers:" + servers + L" commands=" + std::to_wstring(facts.slashCommands.size()) + L" skills=" + std::to_wstring(facts.skills.size()) + L" agents=" + std::to_wstring(facts.agents.size()) + L" plugins=" + std::to_wstring(facts.plugins.size()) + L" apiKeySource=" + facts.apiKeySource);
                 HarnessEvent e;
                 e.kind = HarnessEventKind::Ready;
                 e.epoch = turnEpoch;
                 e.turn = turn;
                 e.model = facts.model;
                 e.cliVersion = facts.cliVersion;
+                e.permissionMode = modeNow.empty() ? facts.permissionMode : modeNow;
                 Emit(std::move(e));
                 break;
             }
+            case HarnessSystemKind::PermissionDenied:
+                // Claude Code refused a tool call (the model got the refusal as that call's
+                // result). In bypass this cannot happen; in auto it is the classifier's "no", in
+                // dontAsk a tool that is not on the allowed list. The line is the only trace of
+                // WHY a turn ended without the tool's work.
+                LogHarness(options.name, L"turn " + std::to_wstring(turn) + L": permission DENIED for " + facts.deniedTool + L": " + facts.deniedReason.substr(0, 300));
+                break;
             case HarnessSystemKind::Compacting:
             {
                 HarnessEvent e;
@@ -1470,10 +1771,16 @@ namespace Agentmaster
         return _impl->record;
     }
 
+    HarnessInventory HarnessConversation::Inventory() const
+    {
+        std::lock_guard lock{ _impl->mutex };
+        return _impl->inventory;
+    }
+
     std::vector<std::wstring> HarnessConversation::DescribeCommandLine() const
     {
         // A transport that is never connected: build_command only reads the options.
-        const claude::internal::SubprocessTransport transport{ _impl->BuildSdkOptions("claude.exe") };
+        const claude::internal::SubprocessTransport transport{ _impl->BuildSdkOptions("claude.exe", _impl->launchPermission.load()) };
         std::vector<std::wstring> out;
         for (const auto& arg : transport.build_command())
         {

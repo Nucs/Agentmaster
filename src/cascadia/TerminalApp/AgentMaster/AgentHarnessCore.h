@@ -176,12 +176,98 @@ namespace Agentmaster
 
     // ===== launch policy ====================================================================
 
+    // ----- the permission policy -----------------------------------------------------------
+    //
+    // THE RULE (the user's, 2026-10-12): a harness process ALWAYS runs with bypass permissions,
+    // and in auto mode when bypass is not allowed. The harness adds one last step for the case
+    // that auto is not allowed either: "dontAsk".
+    //
+    // Why a rule is necessary: a harness process has no window, so nobody can answer a permission
+    // question. Each of the three modes decides by itself (HarnessPermissionModeNeverAsks):
+    //   - "bypassPermissions": every tool call runs. Nothing is asked and nothing is classified.
+    //   - "auto": a classifier model decides for each tool call that no allow rule covers. That
+    //     costs 0.3 to 0.6 s per call (measured, Claude Code 2.1.291); a call that an allow rule
+    //     covers runs at once. So the harness keeps its --allowedTools list in every mode.
+    //   - "dontAsk": a tool call that no allow rule covers is refused.
+    // Every other mode ("default" — the wire word of "manual" —, "acceptEdits", "plan") can ask.
+    //
+    // HOW "NOT ALLOWED" SHOWS (measured on 2.1.291; nothing of it is printed):
+    //   - SOFT: Claude Code starts, in a lower mode. With the settings switch
+    //     permissions.disableBypassPermissionsMode it starts in "auto"; with
+    //     permissions.disableAutoMode too, in "default". The one sign is the mode it REPORTS:
+    //     `current_permission_mode` in its answer to `initialize` (before any model request), and
+    //     `permissionMode` in each turn's system/init line.
+    //   - HARD: Claude Code ends at start with an error text. `--restricted` does that for bypass
+    //     ("Error: bypassPermissions not supported in restricted mode"), and a Claude Code that
+    //     does not know a mode word does it for that word ("error: option '--permission-mode
+    //     <mode>' argument '...' is invalid").
+    //   - A switch to a refused mode (the control request set_permission_mode) is answered with
+    //     an error ("Cannot set permission mode to auto: auto mode disabled by settings").
+    //
+    // The functions below are the DECISIONS; AgentHarness.cpp carries them out
+    // (EnsureProcess, SettlePermissionMode).
+
+    // The permission modes a harness process may end in, in the order the harness prefers them.
+    enum class HarnessPermissionMode
+    {
+        Bypass, // "bypassPermissions" (what --dangerously-skip-permissions selects)
+        Auto, // "auto"
+        DontAsk, // "dontAsk"
+    };
+
+    // The word Claude Code uses for `mode`: the --permission-mode value, and what it reports.
+    const wchar_t* HarnessPermissionModeWord(HarnessPermissionMode mode) noexcept;
+
+    // The mode to ASK for after Claude Code refused `mode` with an error at start:
+    // Bypass -> Auto -> DontAsk.
+    //   returns — nullopt after DontAsk: nothing lower exists, so that start failure is final.
+    std::optional<HarnessPermissionMode> NextHarnessPermissionMode(HarnessPermissionMode mode) noexcept;
+
+    // True when the text of a FAILED START says that Claude Code refused the permission mode it
+    // was asked for (the HARD refusal above), so that a start with the next lower mode can work.
+    //   failureText — the start's failure text: the SDK's message plus the child's last stderr
+    //                 lines. Compared without regard to ASCII case.
+    //   returns     — true when it holds one of: "permission-mode", "permission mode",
+    //                 "bypasspermissions", "bypass permissions", "skip-permissions", "auto mode".
+    // ⚠ "permission" alone is not a sign: "permission denied" is what a file error says.
+    bool HarnessStartFailureNamesPermissionMode(std::wstring_view failureText) noexcept;
+
+    // True when `reportedMode` is one of the three modes that decide by themselves
+    // ("bypassPermissions", "auto", "dontAsk"). False for every other word and for an empty one.
+    bool HarnessPermissionModeNeverAsks(std::wstring_view reportedMode) noexcept;
+
+    // What to do after a process reported the mode it runs in.
+    enum class HarnessPermissionStep
+    {
+        Keep, // the mode decides by itself, or it is not known yet (an empty report)
+        SwitchToAuto, // send set_permission_mode "auto"; when that is refused, SwitchToDontAsk
+        SwitchToDontAsk, // send set_permission_mode "dontAsk"
+    };
+
+    // The step for a process that was ASKED for `asked` and REPORTS `reportedMode`.
+    //   asked        — the mode the launch asked for.
+    //   reportedMode — `current_permission_mode` / `permissionMode` as Claude Code reported it;
+    //                  empty when this Claude Code version reports none at start.
+    //   returns      — Keep for a mode that never asks and for an empty report (the mode is then
+    //                  read from the first turn's system/init, and this function is called again);
+    //                  SwitchToAuto when bypass was asked and a mode that can ask is in effect;
+    //                  SwitchToDontAsk when auto (or dontAsk) was asked and such a mode is in
+    //                  effect — auto was refused already, so asking for it again cannot work.
+    // ⚠ "auto" after asking for bypass is Keep, not an error: it IS the rule's second half
+    //   (Claude Code chose it because bypass is not allowed).
+    HarnessPermissionStep DecideHarnessPermissionStep(HarnessPermissionMode asked, std::wstring_view reportedMode) noexcept;
+
     // What BuildHarnessSettingsJson needs to know.
     struct HarnessSettingsSpec
     {
         int64_t autoCompactTokens{}; // 0 = leave auto-compaction as Claude Code decides; else the window in tokens (clamped to 100,000..1,000,000)
         std::wstring effort; // "low" | "medium" | "high" | "xhigh" | "max"; anything else (or empty) sets no effort
         int apiMaxRetries{ 3 }; // how often Claude Code retries a failed API request (clamped to 0..15)
+        // TEST SEAM (HarnessPermissionProbe, AgentHarness.h): write the settings switch with which
+        // an administrator forbids a permission mode. Claude Code then refuses that mode for this
+        // process. No product code sets either.
+        bool disableBypassPermissions{ false }; // "permissions": { "disableBypassPermissionsMode": "disable" }
+        bool disableAutoMode{ false }; // "permissions": { "disableAutoMode": "disable" }
     };
 
     // The JSON object the harness passes as `--settings`. It is the HIGHEST-priority settings a
@@ -198,6 +284,10 @@ namespace Agentmaster
     //     the --effort flag), and the switches that keep a background child quiet and fast: no
     //     auto-update, no nonessential traffic, no terminal-title model call, no CLAUDE.md, no
     //     auto memory, no background tasks.
+    //   - "permissions": ONLY for the test seam (spec.disableBypassPermissions /
+    //     spec.disableAutoMode). A product launch writes no "permissions" key: the permission mode
+    //     is asked for on the command line, and the tools are limited by --tools and
+    //     --allowedTools.
     //   returns — ASCII JSON text (safe on any command line).
     //   throws  — std::bad_alloc.
     std::wstring BuildHarnessSettingsJson(const HarnessSettingsSpec& spec);
@@ -248,10 +338,11 @@ namespace Agentmaster
     enum class HarnessSystemKind
     {
         Other, // not one of the below (or not a system line at all)
-        Init, // the start of a turn: model, session id, version, the tools and MCP servers in effect
+        Init, // the start of a turn: model, session id, version, and everything the model can use
         Compacting, // Claude Code started to compact the context
         CompactFinished, // the compaction ended; compactOk says how
         CompactBoundary, // the compaction's record: preTokens -> postTokens
+        PermissionDenied, // Claude Code refused a tool call of the model: deniedTool, deniedReason
     };
 
     // The facts of one `system` line. Fields that the line does not carry stay empty / 0.
@@ -261,9 +352,19 @@ namespace Agentmaster
         std::wstring model; // Init
         std::wstring sessionId; // Init
         std::wstring cliVersion; // Init: e.g. "2.1.291"
-        std::wstring permissionMode; // Init
+        std::wstring permissionMode; // Init: the mode in effect ("bypassPermissions", "auto", "dontAsk", "default", ...)
+        std::wstring apiKeySource; // Init: where the credentials come from; "none" = the Claude login, no API key
+        std::wstring outputStyle; // Init: e.g. "default"
         std::vector<std::wstring> tools; // Init: the tool names the model can call
         std::vector<std::pair<std::wstring, std::wstring>> mcpServers; // Init: (name, status) — status "connected" is the good one
+        std::vector<std::wstring> slashCommands; // Init: the commands a message that starts with '/' can run
+        std::vector<std::wstring> skills; // Init: the skills the model can load
+        // Init: the subagent types Claude Code knows. ⚠ Listed even when the model has no tool to
+        // start one (a harness process has none): this is what EXISTS, not what can be called.
+        std::vector<std::wstring> agents;
+        std::vector<std::wstring> plugins; // Init: the loaded plugins, by name
+        std::wstring deniedTool; // PermissionDenied: the tool's full name
+        std::wstring deniedReason; // PermissionDenied: Claude Code's text (it names the permission mode or the missing grant)
         bool compactOk{}; // CompactFinished: the compaction succeeded
         std::wstring compactTrigger; // CompactBoundary: "auto" | "manual"
         int64_t preTokens{}; // CompactBoundary: the context before
@@ -274,6 +375,33 @@ namespace Agentmaster
     // Read one `system` line (the line's whole JSON object). Pure and total.
     //   throws — std::bad_alloc.
     HarnessSystemFacts ClassifyHarnessSystemMessage(std::wstring_view rawJson);
+
+    // What a harness process reported about ITSELF: everything the model in it can use, and the
+    // rules it runs under. It is the process's own account (its answer to `initialize` and the
+    // first turn's system/init line), not what the launch asked for — the two differ exactly when
+    // something was refused or added, which is what a review looks for.
+    struct HarnessInventory
+    {
+        // False until a process answered `initialize` (no process was started yet, or the last
+        // start failed). Everything below is then empty.
+        bool known{};
+        // False until the first turn of the process: Claude Code sends the lists (tools, servers,
+        // commands, skills, agents, plugins) only with a turn's system/init line. Until then
+        // only the two permission fields are filled.
+        bool complete{};
+        std::wstring cliVersion; // e.g. "2.1.291"
+        std::wstring model;
+        std::wstring askedPermissionMode; // what the launch asked for ("bypassPermissions" unless a start with it was refused)
+        std::wstring permissionMode; // the mode in effect, after the harness's own correction
+        std::wstring apiKeySource; // "none" = the Claude login
+        std::wstring outputStyle;
+        std::vector<std::wstring> tools; // every tool the model can call, by full name
+        std::vector<std::pair<std::wstring, std::wstring>> mcpServers; // (name, status)
+        std::vector<std::wstring> slashCommands;
+        std::vector<std::wstring> skills;
+        std::vector<std::wstring> agents; // subagent types that exist (see HarnessSystemFacts::agents)
+        std::vector<std::wstring> plugins;
+    };
 
     // The facts of a `result` line: the end of one user message's turn.
     struct HarnessResultFacts

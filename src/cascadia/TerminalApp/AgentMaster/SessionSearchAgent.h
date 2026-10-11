@@ -192,6 +192,26 @@ namespace Agentmaster
         //   throws — std::bad_alloc.
         std::vector<SessionIndexEntry> EntriesFor(const std::vector<std::wstring>& ids) const;
 
+        // ----- diagnostics: what a review of the agent reads (the live test prints all three) -----
+
+        // The conversation's record: every request, every tool call with the arguments the model
+        // sent, every tool result (a preview, cut to kHarnessMaxToolResultChars) and every reply,
+        // each with the time the harness saw it. It is HOW a request was answered; the events
+        // only say what to show.
+        //   throws — std::bad_alloc.
+        HarnessRecord Record() const;
+
+        // What the hosted process reported about itself: the permission mode in effect, and
+        // (after the first request of a process) every tool, tool server, slash command, skill,
+        // agent type and plugin its model has (HarnessConversation::Inventory).
+        //   throws — std::bad_alloc.
+        HarnessInventory Inventory() const;
+
+        // The arguments the next process start uses, without the program name
+        // (HarnessConversation::DescribeCommandLine). Starts nothing.
+        //   throws — std::bad_alloc.
+        std::vector<std::wstring> DescribeCommandLine() const;
+
     private:
         struct Impl;
         std::unique_ptr<Impl> _impl;

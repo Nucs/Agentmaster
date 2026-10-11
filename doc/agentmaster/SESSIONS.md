@@ -503,8 +503,9 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
 
 ## 9. The AI search
 
-> Status: written 2026-10-10. **NOT BUILT** into the app yet (checked with `cl /Zs`, the m5
-> suite and a live test; the page itself was not run). The engine under it is the agent harness:
+> Status: written 2026-10-10. The app was built with it on 2026-10-11 (both configurations); **no
+> build with it is deployed**, and the page itself was never run on screen. The engine is tested
+> live against the real `claude.exe`. The engine under it is the agent harness:
 > [`SDK_HARNESS.md`](./SDK_HARNESS.md).
 
 ### 9.1 What the user sees
@@ -535,7 +536,10 @@ from one window shows its list in every page that has the AI search on. This is 
 
 The model and its settings are fixed: **Sonnet 5.5, thinking off, low effort**, no built-in tools,
 nothing written under `~/.claude` (`--no-session-persistence`, so the search conversation is never
-one of the sessions it searches), auto-compaction at 500,000 tokens.
+one of the sessions it searches), auto-compaction at 500,000 tokens, and **bypass permissions**
+(the harness's rule for every conversation; auto mode when Claude Code does not allow bypass —
+`SDK_HARNESS.md` 5.1). The model has exactly two tools (9.3), so bypass refuses nothing that it
+could otherwise do: the tool list is the limit.
 
 ### 9.3 Two tool servers, and the system prompt
 
@@ -686,13 +690,26 @@ is now out of a search's path (9.4), and 15 s were one full-text scan of 365 day
 shown at the end of such a request; the strip shows each search while it runs, and a search that
 found rows previews them.
 
+**Two runs of 2026-10-12** (bypass permissions, two tools instead of five in the model's list;
+1,447 sessions in 90 days), each about this document's own work:
+
+| Request | The model's searches | The list | The sentence |
+|---|---|---|---|
+| "find the session where we built the agent harness on the claude-agent-sdk-cpp submodule and the AI search for the Sessions page" | `claude-agent-sdk-cpp` (2 rows), `harness` (72 matches, 15 rows) | 2 sessions at 4.0 s, the right one first | at 5.5 s |
+| "where did I ask for the harness to always run in bypass permissions or auto mode" | `bypass permissions` (2 rows: a match on the typed prompt), `auto mode` (49 matches) | 1 session at 3.2 s, the right one | at 4.2 s |
+
+`harness_live.exe --agent "<request>"` prints such a run step by step (`SDK_HARNESS.md` section 8).
+
 ### 9.10 Logs
 
 - `[nav] sessions ai on | off | ai-ask turn=N chars=M | ai-stop | ai-reset` (hooks.log): what the
   user did. The request's words are in the agent's line, not in the nav trail.
 - `[ai-search] ask[N]: … | shown N session(s) | reset | the session index is being built … | the
   session index is complete: …` (hooks.log).
-- `[harness] sessions-search: process up … | init: … | turn N done: … | parked … | reset …`.
+- `[harness] sessions-search: process up … | permission mode bypassPermissions (at start) | init: …
+  permissionMode=… tools=2 […] servers: … commands=0 skills=0 agents=5 plugins=2 … | turn N done: …
+  | parked … | reset …`. A process that could not get bypass says why in its `permission mode`
+  line (`SDK_HARNESS.md` 5.1).
 - `[observer] skipping harness claude (sessions-search, not a session) pid=…`, once per process.
 
 ### 9.11 Limits and follow-ups
@@ -712,4 +729,9 @@ found rows previews them.
   agent's catalog, which is read again only at the next request.
 - **The header shows the column sort's arrow** even while the model's order applies.
 - **Sessions that the user hid are shown** when the model lists them.
+- **A follow-up can widen the list instead of narrowing it** (seen twice, 2026-10-12). After a
+  list of one or two sessions, "only the three newest of those" made the model search again
+  (`sort: active, limit: 3`) and show three sessions, with sessions that were not on the screen
+  before. It said so in its sentence. Rule 5 of the system prompt ("a follow-up refers to what you
+  showed before") does not forbid it. Not changed: the wording of the rules is for the review.
 - **One live compaction of the search conversation was not run** (`SDK_HARNESS.md` section 11).

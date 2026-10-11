@@ -499,11 +499,100 @@ namespace Agentmaster
         return std::clamp<int64_t>(tokens, 100000, 1000000);
     }
 
+    const wchar_t* HarnessPermissionModeWord(HarnessPermissionMode mode) noexcept
+    {
+        switch (mode)
+        {
+        case HarnessPermissionMode::Bypass:
+            return L"bypassPermissions";
+        case HarnessPermissionMode::Auto:
+            return L"auto";
+        case HarnessPermissionMode::DontAsk:
+        default:
+            return L"dontAsk";
+        }
+    }
+
+    std::optional<HarnessPermissionMode> NextHarnessPermissionMode(HarnessPermissionMode mode) noexcept
+    {
+        switch (mode)
+        {
+        case HarnessPermissionMode::Bypass:
+            return HarnessPermissionMode::Auto;
+        case HarnessPermissionMode::Auto:
+            return HarnessPermissionMode::DontAsk;
+        case HarnessPermissionMode::DontAsk:
+        default:
+            return std::nullopt;
+        }
+    }
+
+    bool HarnessStartFailureNamesPermissionMode(std::wstring_view failureText) noexcept
+    {
+        // Each sign as Claude Code 2.1.291 writes it (lower case here; the text is folded below):
+        //   "error: option '--permission-mode <mode>' argument 'x' is invalid"   -> permission-mode
+        //   "Error: bypassPermissions not supported in restricted mode"           -> bypasspermissions
+        //   "--dangerously-skip-permissions cannot be used with ..."              -> skip-permissions
+        // and the wordings a later version may choose for the same refusals.
+        static constexpr std::wstring_view kSigns[] = {
+            L"permission-mode",
+            L"permission mode",
+            L"bypasspermissions",
+            L"bypass permissions",
+            L"skip-permissions",
+            L"auto mode",
+        };
+        const auto lower = [](wchar_t c) noexcept { return (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c + (L'a' - L'A')) : c; };
+        for (const std::wstring_view sign : kSigns)
+        {
+            // An ASCII-case-insensitive search without a copy: this function is noexcept, and a
+            // failure text can be long (the SDK's message plus eight stderr lines).
+            const auto hit = std::search(failureText.begin(), failureText.end(), sign.begin(), sign.end(), [&lower](wchar_t a, wchar_t b) noexcept { return lower(a) == b; });
+            if (hit != failureText.end())
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool HarnessPermissionModeNeverAsks(std::wstring_view reportedMode) noexcept
+    {
+        return reportedMode == L"bypassPermissions" || reportedMode == L"auto" || reportedMode == L"dontAsk";
+    }
+
+    HarnessPermissionStep DecideHarnessPermissionStep(HarnessPermissionMode asked, std::wstring_view reportedMode) noexcept
+    {
+        if (reportedMode.empty() || HarnessPermissionModeNeverAsks(reportedMode))
+        {
+            // Nothing to correct — or nothing known yet: a blind switch could LOWER a process that
+            // runs in bypass and only did not say so.
+            return HarnessPermissionStep::Keep;
+        }
+        // A mode that can ask. After a launch that asked for bypass, auto was not tried by us yet
+        // (Claude Code's own fallback may have skipped it); after any other launch it was.
+        return asked == HarnessPermissionMode::Bypass ? HarnessPermissionStep::SwitchToAuto : HarnessPermissionStep::SwitchToDontAsk;
+    }
+
     std::wstring BuildHarnessSettingsJson(const HarnessSettingsSpec& spec)
     {
         using json::Value;
         Value root = Value::MkObj();
         root.Set(L"verbose", Value::MkBool(false));
+        if (spec.disableBypassPermissions || spec.disableAutoMode)
+        {
+            // The test seam: the switches of an administrator's policy, for this process only.
+            Value permissions = Value::MkObj();
+            if (spec.disableBypassPermissions)
+            {
+                permissions.Set(L"disableBypassPermissionsMode", Value::MkStr(L"disable"));
+            }
+            if (spec.disableAutoMode)
+            {
+                permissions.Set(L"disableAutoMode", Value::MkStr(L"disable"));
+            }
+            root.Set(L"permissions", std::move(permissions));
+        }
         if (const int64_t window = ClampHarnessAutoCompactTokens(spec.autoCompactTokens); window != 0)
         {
             // Both keys: see the header for why the flag alone is not enough.
@@ -640,16 +729,37 @@ namespace Agentmaster
             facts.sessionId = parsed->StrAt(L"session_id");
             facts.cliVersion = parsed->StrAt(L"claude_code_version");
             facts.permissionMode = parsed->StrAt(L"permissionMode");
-            if (const auto* tools = parsed->Find(L"tools"); tools && tools->type == json::Value::Type::Arr)
-            {
-                for (const auto& t : tools->arr)
+            facts.apiKeySource = parsed->StrAt(L"apiKeySource");
+            facts.outputStyle = parsed->StrAt(L"output_style");
+            // A list of names. Claude Code 2.1.291 writes strings for tools, slash_commands,
+            // skills and agents, and objects with a "name" for plugins; both forms are read for
+            // every list, so a version that changes one does not empty it.
+            const auto names = [&parsed](const wchar_t* key) {
+                std::vector<std::wstring> out;
+                if (const auto* list = parsed->Find(key); list && list->type == json::Value::Type::Arr)
                 {
-                    if (t.type == json::Value::Type::Str)
+                    for (const auto& item : list->arr)
                     {
-                        facts.tools.push_back(t.str);
+                        if (item.type == json::Value::Type::Str)
+                        {
+                            out.push_back(item.str);
+                        }
+                        else if (item.type == json::Value::Type::Obj)
+                        {
+                            if (std::wstring name = item.StrAt(L"name"); !name.empty())
+                            {
+                                out.push_back(std::move(name));
+                            }
+                        }
                     }
                 }
-            }
+                return out;
+            };
+            facts.tools = names(L"tools");
+            facts.slashCommands = names(L"slash_commands");
+            facts.skills = names(L"skills");
+            facts.agents = names(L"agents");
+            facts.plugins = names(L"plugins");
             if (const auto* servers = parsed->Find(L"mcp_servers"); servers && servers->type == json::Value::Type::Arr)
             {
                 for (const auto& s : servers->arr)
@@ -660,6 +770,16 @@ namespace Agentmaster
                     }
                 }
             }
+            return facts;
+        }
+        if (subtype == L"permission_denied")
+        {
+            // {"tool_name":"mcp__x__y","message":"Permission to use ... has been denied because
+            //  Claude Code is running in don't ask mode ..."} — the model gets the same text as the
+            // tool's (error) result; this line is how the HOST learns of it.
+            facts.kind = HarnessSystemKind::PermissionDenied;
+            facts.deniedTool = parsed->StrAt(L"tool_name");
+            facts.deniedReason = parsed->StrAt(L"message");
             return facts;
         }
         if (subtype == L"status")

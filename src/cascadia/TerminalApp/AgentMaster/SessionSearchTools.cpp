@@ -873,7 +873,11 @@ namespace Agentmaster
                 o.Set(L"branch", Value::MkStr(e.stats.gitBranch));
             }
             const int64_t active = SessionSearchLastActivityMs(e);
-            o.Set(L"active", Value::MkStr(LocalDateTimeText(active) + L" (" + AgoText(active, nowUnixMs) + L" ago)"));
+            // "2026-10-12 01:08 (5m ago)". A session active within the last minute reads "(now)" —
+            // "(now ago)" is what the model was given before 2026-10-12 — and a session with no
+            // known activity gets no parentheses at all.
+            const std::wstring ago = AgoText(active, nowUnixMs);
+            o.Set(L"active", Value::MkStr(LocalDateTimeText(active) + (ago.empty() ? std::wstring{} : (ago == L"now" ? std::wstring{ L" (now)" } : (L" (" + ago + L" ago)")))));
             o.Set(L"created", Value::MkStr(LocalDateText(SessionSearchCreatedMs(e))));
             o.Set(L"msgs", Value::MkNum(e.stats.userPrompts));
             o.Set(L"tools", Value::MkNum(e.stats.toolUses));

@@ -23,7 +23,13 @@
 //   - no settings, no CLAUDE.md, no hooks, no MCP servers of the user (--setting-sources "",
 //     --strict-mcp-config), and a system prompt that REPLACES Claude Code's own;
 //   - nothing written under ~/.claude (--no-session-persistence): the conversation's durable
-//     form is Agentmaster's own record (HarnessRecord), in the profile.
+//     form is Agentmaster's own record (HarnessRecord), in the profile;
+//   - BYPASS PERMISSIONS, always; auto mode when Claude Code does not allow bypass; "dontAsk"
+//     when it allows neither. A windowless process must never wait for a person's answer. The
+//     mode in effect is read from the process itself (HarnessConversation::Inventory).
+//     ⚠ With bypass, NOTHING refuses a tool call. What the model can do is decided by the tools
+//     it is given (--tools "", the tool servers) — never by the permission mode. Give a
+//     conversation a tool only when it may use that tool without limit.
 //
 // This header needs neither the SDK nor nlohmann/json: only AgentHarness.cpp includes them.
 // Plain C++, no WinRT (the .cpp is <PrecompiledHeader>NotUsing</PrecompiledHeader>).
@@ -36,7 +42,7 @@
 #include <string>
 #include <vector>
 
-#include "AgentHarnessCore.h" // HarnessRecord / HarnessUsage
+#include "AgentHarnessCore.h" // HarnessRecord / HarnessUsage / HarnessInventory
 #include "Json.h" // json::Value — a tool's arguments
 
 namespace Agentmaster
@@ -75,7 +81,10 @@ namespace Agentmaster
     };
 
     // A named group of tools: one in-process MCP server. The name is part of every tool's full
-    // name, and `--allowedTools mcp__<name>` is what lets the model call them without a prompt.
+    // name. The harness also puts `mcp__<name>` on the --allowedTools list: with bypass
+    // permissions that list decides nothing, but in the two fallback modes it is what lets the
+    // model call the tools — at once in auto mode (no classifier request, measured 0.3 to 0.6 s
+    // per call without it), and at all in "dontAsk".
     struct HarnessToolServer
     {
         std::wstring name; // letters, digits, '_' and '-'
@@ -91,6 +100,24 @@ namespace Agentmaster
         CliDefault, // pass nothing: Claude Code decides (adaptive on current models)
         Disabled, // --thinking disabled: no thinking blocks at all (the fastest; measured 0 thinking tokens on Sonnet 5.5)
         Adaptive, // --thinking adaptive
+    };
+
+    // TEST SEAM of the permission policy (AgentHarnessCore.h). No product code sets a field.
+    // Each field makes Claude Code REFUSE a permission mode for this one conversation, which is
+    // the only way to run the "bypass is not allowed" paths on a machine whose policy allows
+    // everything. The launch still asks for bypass first: the refusal is Claude Code's, exactly
+    // as with a real policy.
+    struct HarnessPermissionProbe
+    {
+        // --settings permissions.disableBypassPermissionsMode. Claude Code then starts in "auto"
+        // by itself and says nothing (the SOFT refusal).
+        bool bypassDisabledBySettings{ false };
+        // --settings permissions.disableAutoMode. Together with the field above, Claude Code
+        // starts in "default" and refuses a switch to auto; the harness then switches to "dontAsk".
+        bool autoDisabledBySettings{ false };
+        // --restricted. Claude Code then ENDS at start with an error when it is asked for bypass
+        // (the HARD refusal); the harness starts it again with auto.
+        bool restricted{ false };
     };
 
     // Everything that defines a conversation. Read once, by the constructor.
@@ -150,6 +177,9 @@ namespace Agentmaster
         // A running turn that produces no stream line for this long (tool time not counted) is
         // taken for hung: the process is ended and the turn fails. 0 = never.
         int64_t turnSilenceTimeoutMs{ 180000 };
+
+        // Tests only (see HarnessPermissionProbe). The default refuses nothing.
+        HarnessPermissionProbe permissionProbe;
     };
 
     // ===== events ===========================================================================
@@ -168,7 +198,7 @@ namespace Agentmaster
     enum class HarnessEventKind
     {
         State, // `state` changed (nothing else to say)
-        Ready, // the process answered: `model`, `cliVersion`
+        Ready, // the process answered its first turn's start: `model`, `cliVersion`, `permissionMode`
         UserMessage, // a message went to the model: `text` (the user's words, without the digest)
         AssistantDelta, // partialMessages only: `text` is the next piece of the answer
         AssistantText, // `text` is one complete text block of the answer
@@ -202,6 +232,9 @@ namespace Agentmaster
         int64_t postTokens{ 0 };
         std::wstring model;
         std::wstring cliVersion;
+        // Ready: the permission mode the process runs in ("bypassPermissions"; "auto" or
+        // "dontAsk" when Claude Code did not allow bypass).
+        std::wstring permissionMode;
         HarnessUsage usage;
     };
 
@@ -287,10 +320,24 @@ namespace Agentmaster
         //   throws — std::bad_alloc.
         HarnessRecord Record() const;
 
+        // What the newest process reported about itself: the permission mode in effect (known
+        // as soon as the process is Ready, before any model request) and, after the first turn of
+        // that process, every tool, tool server, slash command, skill, agent type and plugin the
+        // model in it has. Use it to CHECK a conversation ("which mode does it run in", "what can
+        // the model reach") instead of trusting the options it was created with.
+        //   returns — a copy; `known` is false when no process answered yet (and after a failed
+        //             start), `complete` is false until the first turn.
+        //   throws  — std::bad_alloc.
+        // A park or a reset keeps the last report until the next process answers.
+        HarnessInventory Inventory() const;
+
         // The command line the SDK builds for these options, one argument per entry, without the
         // program name. For tests and diagnostics: it proves which flags a conversation runs
         // with, and starts nothing.
-        //   throws — std::invalid_argument (an invalid tool schema); std::bad_alloc.
+        //   returns — the arguments of the NEXT start. They ask for bypass permissions unless an
+        //             earlier start of this conversation was refused with it (then for the mode
+        //             that start ended with).
+        //   throws  — std::invalid_argument (an invalid tool schema); std::bad_alloc.
         std::vector<std::wstring> DescribeCommandLine() const;
 
     private:

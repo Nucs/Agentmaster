@@ -962,6 +962,24 @@ namespace Agentmaster
         return _impl->EntriesFor(ids);
     }
 
+    // The three diagnostics read the conversation object directly: it exists from the
+    // constructor to the destructor (Shutdown ends its process, not the object), and each of its
+    // accessors takes the conversation's own lock.
+    HarnessRecord SessionSearchAgent::Record() const
+    {
+        return _impl->conversation->Record();
+    }
+
+    HarnessInventory SessionSearchAgent::Inventory() const
+    {
+        return _impl->conversation->Inventory();
+    }
+
+    std::vector<std::wstring> SessionSearchAgent::DescribeCommandLine() const
+    {
+        return _impl->conversation->DescribeCommandLine();
+    }
+
     SessionSearchAgent& SharedSessionSearchAgent()
     {
         // Leaked on purpose (see the header). A function-local static: created once, thread-safe.

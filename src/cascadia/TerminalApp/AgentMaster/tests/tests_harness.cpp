@@ -11,11 +11,14 @@
 //   JSON round trip, a corrupt file reading as "no conversation", the atomic save / load /
 //   delete, an empty record deleting its file), the cold-start DIGEST (which turns, which lines,
 //   no tool results, the size bound), the --settings text (auto-compaction ON beside its window -
-//   the pair without which Claude Code never compacts - the retry bound, the effort), the child's
-//   environment (the harness mark, the removals of a parent session's variables), and the readers
-//   of Claude Code's own lines, fed the shapes captured from Claude Code 2.1.291 (init, the three
-//   compaction lines, a result whose failure flag is is_error). Plus the Fleet Observer's side of
-//   the harness mark: ParseClaudeFacts reads AM_HARNESS.
+//   the pair without which Claude Code never compacts - the retry bound, the effort), the
+//   PERMISSION POLICY (bypass always, auto when bypass is not allowed, then dontAsk: the mode
+//   words, the step for each mode a process can report, which start failures are a refused mode,
+//   the test seam's two settings switches), the child's environment (the harness mark, the
+//   removals of a parent session's variables), and the readers of Claude Code's own lines, fed
+//   the shapes captured from Claude Code 2.1.291 (init with its whole inventory, a refused tool
+//   call, the three compaction lines, a result whose failure flag is is_error). Plus the Fleet
+//   Observer's side of the harness mark: ParseClaudeFacts reads AM_HARNESS.
 //
 // TestSessionSearchTools - SessionSearchTools.{h,cpp}: the search tool's arguments (defaults,
 //   clamps, the errors written for the model), ONE search over a hand-built catalog with an
@@ -310,6 +313,46 @@ void TestAgentHarnessCore()
         CHECK(ClampHarnessAutoCompactTokens(0) == 0 && ClampHarnessAutoCompactTokens(1) == 100000 && ClampHarnessAutoCompactTokens(500000) == 500000 && ClampHarnessAutoCompactTokens(5000000) == 1000000 && ClampHarnessAutoCompactTokens(-7) == 0, "the auto-compact clamp: 0 (and less) means no window, anything else 100,000..1,000,000");
     }
 
+    // ---- the permission policy: bypass always, auto when bypass is not allowed, then dontAsk ----
+    // Every text and every mode word below is what Claude Code 2.1.291 really wrote (the
+    // permission matrix of 2026-10-12: sixteen starts of the real claude.exe).
+    {
+        CHECK(std::wstring{ HarnessPermissionModeWord(HarnessPermissionMode::Bypass) } == L"bypassPermissions" && std::wstring{ HarnessPermissionModeWord(HarnessPermissionMode::Auto) } == L"auto" && std::wstring{ HarnessPermissionModeWord(HarnessPermissionMode::DontAsk) } == L"dontAsk", "permission: the three mode words are Claude Code's own");
+        CHECK(NextHarnessPermissionMode(HarnessPermissionMode::Bypass) == HarnessPermissionMode::Auto && NextHarnessPermissionMode(HarnessPermissionMode::Auto) == HarnessPermissionMode::DontAsk && !NextHarnessPermissionMode(HarnessPermissionMode::DontAsk).has_value(), "permission: the order is bypass, auto, dontAsk, and nothing is lower");
+
+        // What the process reports, and what the harness then does.
+        CHECK(DecideHarnessPermissionStep(HarnessPermissionMode::Bypass, L"bypassPermissions") == HarnessPermissionStep::Keep, "permission: bypass was asked and is in effect: keep");
+        CHECK(DecideHarnessPermissionStep(HarnessPermissionMode::Bypass, L"auto") == HarnessPermissionStep::Keep, "permission: bypass was asked, Claude Code chose auto (a policy forbids bypass): keep - that is the rule's second half");
+        CHECK(DecideHarnessPermissionStep(HarnessPermissionMode::Bypass, L"default") == HarnessPermissionStep::SwitchToAuto, "permission: bypass was asked, 'default' is in effect (it can ask): switch to auto");
+        CHECK(DecideHarnessPermissionStep(HarnessPermissionMode::Bypass, L"plan") == HarnessPermissionStep::SwitchToAuto && DecideHarnessPermissionStep(HarnessPermissionMode::Bypass, L"acceptEdits") == HarnessPermissionStep::SwitchToAuto && DecideHarnessPermissionStep(HarnessPermissionMode::Bypass, L"someFutureMode") == HarnessPermissionStep::SwitchToAuto, "permission: every other mode word can ask, a word this build does not know included");
+        CHECK(DecideHarnessPermissionStep(HarnessPermissionMode::Bypass, L"") == HarnessPermissionStep::Keep && DecideHarnessPermissionStep(HarnessPermissionMode::Auto, L"") == HarnessPermissionStep::Keep, "permission: no report at start (an older Claude Code): keep, and read the mode at the first turn - a blind switch could lower a process that runs in bypass");
+        CHECK(DecideHarnessPermissionStep(HarnessPermissionMode::Auto, L"auto") == HarnessPermissionStep::Keep && DecideHarnessPermissionStep(HarnessPermissionMode::Auto, L"default") == HarnessPermissionStep::SwitchToDontAsk, "permission: auto was asked and refused ('default' is in effect): go to dontAsk, auto cannot work");
+        CHECK(DecideHarnessPermissionStep(HarnessPermissionMode::DontAsk, L"dontAsk") == HarnessPermissionStep::Keep && DecideHarnessPermissionStep(HarnessPermissionMode::DontAsk, L"default") == HarnessPermissionStep::SwitchToDontAsk, "permission: the last mode keeps itself, and is asked for again when it is not in effect");
+        CHECK(HarnessPermissionModeNeverAsks(L"bypassPermissions") && HarnessPermissionModeNeverAsks(L"auto") && HarnessPermissionModeNeverAsks(L"dontAsk") && !HarnessPermissionModeNeverAsks(L"default") && !HarnessPermissionModeNeverAsks(L"manual") && !HarnessPermissionModeNeverAsks(L"acceptEdits") && !HarnessPermissionModeNeverAsks(L"plan") && !HarnessPermissionModeNeverAsks(L"") && !HarnessPermissionModeNeverAsks(L"BypassPermissions"), "permission: three modes never ask a person; the compare is exact (Claude Code's own spelling)");
+
+        // A start that Claude Code REFUSED because of the mode (it ends with an error text).
+        CHECK(HarnessStartFailureNamesPermissionMode(L"Claude Code could not be started: The Claude Code process ended. (Error: bypassPermissions not supported in restricted mode)"), "permission: --restricted refuses bypass with an error at start");
+        CHECK(HarnessStartFailureNamesPermissionMode(L"Claude Code could not be started: The Claude Code process ended. (error: option '--permission-mode <mode>' argument 'auto' is invalid. Allowed choices are acceptEdits, bypassPermissions, default, plan.)"), "permission: a Claude Code that does not know a mode word refuses it at start");
+        CHECK(HarnessStartFailureNamesPermissionMode(L"--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons") && HarnessStartFailureNamesPermissionMode(L"Bypass Permissions mode is disabled by your organization") && HarnessStartFailureNamesPermissionMode(L"AUTO MODE is not available for this account"), "permission: the other wordings of a refused mode, in any letter case");
+        CHECK(!HarnessStartFailureNamesPermissionMode(L"Claude Code (claude.exe) was not found.") && !HarnessStartFailureNamesPermissionMode(L"Claude Code could not be started: Access is denied. (permission denied: C:\\x\\claude.exe)") && !HarnessStartFailureNamesPermissionMode(L"error: unknown option '--autocompact'") && !HarnessStartFailureNamesPermissionMode(L"") && !HarnessStartFailureNamesPermissionMode(L"automatic update failed"), "permission: any other start failure is NOT a refused mode ('permission denied' is a file error) - no second start for it");
+
+        // The test seam writes the two switches of an administrator's policy; a product launch writes none.
+        HarnessSettingsSpec product;
+        product.autoCompactTokens = 500000;
+        CHECK(J(BuildHarnessSettingsJson(product)).Find(L"permissions") == nullptr, "settings: a product launch writes no permissions key (the mode is asked for on the command line)");
+        HarnessSettingsSpec noBypass;
+        noBypass.disableBypassPermissions = true;
+        const json::Value noBypassJson = J(BuildHarnessSettingsJson(noBypass));
+        const auto* noBypassPermissions = noBypassJson.Find(L"permissions");
+        CHECK(noBypassPermissions && noBypassPermissions->StrAt(L"disableBypassPermissionsMode") == L"disable" && noBypassPermissions->Find(L"disableAutoMode") == nullptr, "settings (test seam): bypass disabled, auto untouched");
+        HarnessSettingsSpec neither;
+        neither.disableBypassPermissions = true;
+        neither.disableAutoMode = true;
+        const json::Value neitherJson = J(BuildHarnessSettingsJson(neither));
+        const auto* neitherPermissions = neitherJson.Find(L"permissions");
+        CHECK(neitherPermissions && neitherPermissions->StrAt(L"disableBypassPermissionsMode") == L"disable" && neitherPermissions->StrAt(L"disableAutoMode") == L"disable", "settings (test seam): both modes disabled");
+    }
+
     // ---- the child's environment, and the Fleet Observer's side of the mark ----
     {
         const std::map<std::string, std::string> env = BuildHarnessEnvironment(L"sessions-search");
@@ -342,6 +385,22 @@ void TestAgentHarnessCore()
         CHECK(init.kind == HarnessSystemKind::Init && init.model == L"claude-sonnet-5-5" && init.sessionId == L"1d0e" && init.cliVersion == L"2.1.291" && init.permissionMode == L"dontAsk", "system/init: the model, the session id, the version, the permission mode");
         CHECK(init.tools.size() == 3 && init.tools[1] == L"mcp__sessions__search", "system/init: the tools in effect");
         CHECK(init.mcpServers.size() == 2 && init.mcpServers[0].first == L"sessions" && init.mcpServers[0].second == L"connected" && init.mcpServers[1].second == L"failed", "system/init: each MCP server with its status");
+
+        // The whole inventory line, as a harness process in bypass mode wrote it (2026-10-12; the
+        // working folder, the session id and the socket path replaced): what the model can use.
+        const auto full = ClassifyHarnessSystemMessage(LR"({"type":"system","subtype":"init","cwd":"C:\\w","session_id":"f53e","tools":["mcp__display__show","mcp__sessions__search"],"mcp_servers":[{"name":"display","status":"connected","source":"sdk"},{"name":"sessions","status":"connected","source":"sdk"}],"model":"claude-sonnet-5-5","permissionMode":"bypassPermissions","slash_commands":[],"apiKeySource":"none","claude_code_version":"2.1.291","output_style":"default","agents":["claude","Explore","general-purpose","Plan","statusline-setup"],"skills":[],"plugins":[{"name":"cc-plugin-agents-md","path":"builtin","source":"cc-plugin-agents-md@builtin"},{"name":"cc-plugin-plugin-authoring","path":"builtin","source":"cc-plugin-plugin-authoring@builtin"}],"analytics_disabled":true,"fast_mode_state":"off"})");
+        CHECK(full.kind == HarnessSystemKind::Init && full.permissionMode == L"bypassPermissions" && full.apiKeySource == L"none" && full.outputStyle == L"default", "system/init: the permission mode in effect, the credential source, the output style");
+        CHECK(full.tools.size() == 2 && full.slashCommands.empty() && full.skills.empty(), "system/init: two tools, no slash command, no skill (the harness's launch policy)");
+        CHECK(full.agents.size() == 5 && full.agents[1] == L"Explore", "system/init: the agent types that EXIST (listed even though the model has no tool to start one)");
+        CHECK(full.plugins.size() == 2 && full.plugins[0] == L"cc-plugin-agents-md", "system/init: the plugins, by the name of each object");
+        const auto mixed = ClassifyHarnessSystemMessage(LR"({"type":"system","subtype":"init","skills":["review",{"name":"deploy"},{"no":"name"},7],"slash_commands":["compact"]})");
+        CHECK(mixed.skills.size() == 2 && mixed.skills[1] == L"deploy" && mixed.slashCommands.size() == 1, "system/init: a list of names is read whether its items are strings or objects with a name; anything else is skipped");
+
+        // Claude Code refused a tool call (both texts are 2.1.291's own).
+        const auto deniedByMode = ClassifyHarnessSystemMessage(LR"({"type":"system","subtype":"permission_denied","tool_name":"mcp__search__find_sessions","tool_use_id":"toolu_01","decision_reason_type":"mode","message":"Permission to use mcp__search__find_sessions has been denied because Claude Code is running in don't ask mode."})");
+        CHECK(deniedByMode.kind == HarnessSystemKind::PermissionDenied && deniedByMode.deniedTool == L"mcp__search__find_sessions" && deniedByMode.deniedReason.find(L"don't ask mode") != std::wstring::npos, "system/permission_denied: the tool and Claude Code's reason (dontAsk refuses a tool no rule allows)");
+        const auto deniedNoGrant = ClassifyHarnessSystemMessage(LR"({"type":"system","subtype":"permission_denied","tool_name":"mcp__search__find_sessions","tool_use_id":"toolu_02","message":"Claude requested permissions to use mcp__search__find_sessions, but you haven't granted it yet."})");
+        CHECK(deniedNoGrant.kind == HarnessSystemKind::PermissionDenied && deniedNoGrant.deniedReason.find(L"haven't granted") != std::wstring::npos, "system/permission_denied: in 'default' a process without a permission handler refuses too (it does not wait)");
         const auto compacting = ClassifyHarnessSystemMessage(LR"({"type":"system","subtype":"status","status":"compacting"})");
         CHECK(compacting.kind == HarnessSystemKind::Compacting, "system/status compacting");
         const auto finished = ClassifyHarnessSystemMessage(LR"({"type":"system","subtype":"status","status":null,"compact_result":"success"})");
@@ -537,6 +596,15 @@ void TestSessionSearchTools()
         CHECK(!J(FormatSessionSearchResult(noStore, pFav, RunSessionSearch(noStore, pFav, kNow, content), kNow)).StrAt(L"indexing").empty(), "result: ... and so does a favorite filter");
         const auto pPlain = params(LR"({"query":"drag"})");
         CHECK(J(FormatSessionSearchResult(noStore, pPlain, RunSessionSearch(noStore, pPlain, kNow, content), kNow)).Find(L"indexing") == nullptr, "result: ... a search without such a filter has no note");
+
+        // A session that is active this very minute (the one the user works in). The live test of
+        // 2026-10-12 showed the model "(now ago)" for it.
+        SessionCatalog busy = TestCatalog();
+        busy.entries.insert(busy.entries.begin(), Entry(L"eeee5555-0000-4000-8000-000000000006", L"drag work in progress", L"K:\\source\\Agentmaster", 0));
+        const json::Value busyResult = J(FormatSessionSearchResult(busy, pPlain, RunSessionSearch(busy, pPlain, kNow, content), kNow));
+        const auto* busyRows = busyResult.Find(L"sessions");
+        const std::wstring activeNow = (busyRows && !busyRows->arr.empty()) ? busyRows->arr[0].StrAt(L"active") : std::wstring{};
+        CHECK(activeNow.size() > 6 && activeNow.compare(activeNow.size() - 6, 6, L" (now)") == 0 && activeNow.find(L"ago") == std::wstring::npos, "result row: a session active within the last minute reads '(now)', not '(now ago)'");
 
         CHECK(DescribeSessionSearch(params(LR"({"query":"tab drag","days":7,"dir":"Agentmaster","open":true,"deep":true})")) == L"\x201Ctab drag\x201D \x00B7 last 7 days \x00B7 in Agentmaster \x00B7 open \x00B7 full text", "the one-line description of a search, for the user");
         CHECK(DescribeSessionSearch(params(L"{}")).rfind(L"all sessions", 0) == 0 && DescribeSessionSearch(params(LR"({"days":1})")).find(L"last 1 day") != std::wstring::npos, "description: no query, and the singular day");
