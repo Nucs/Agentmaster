@@ -503,9 +503,11 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
 
 ## 9. The AI search
 
-> Status: written 2026-10-10. The app was built with it on 2026-10-11 (both configurations); **no
-> build with it is deployed**, and the page itself was never run on screen. The engine is tested
-> live against the real `claude.exe`. The engine under it is the agent harness:
+> Status: written 2026-10-10. Built on 2026-10-11 and **published in the v0.7.9 pre-release** (the
+> tag is at `b842fcf5a`). No build with it is installed on the development machine, and the page
+> itself was never run on screen by its authors. The engine is tested live against the real
+> `claude.exe`. What 2026-10-12 changed (bypass permissions, two tools instead of five in the
+> model's list, the "(now)" text) is in no build yet. The engine under it is the agent harness:
 > [`SDK_HARNESS.md`](./SDK_HARNESS.md).
 
 ### 9.1 What the user sees
@@ -714,7 +716,8 @@ found rows previews them.
 
 ### 9.11 Limits and follow-ups
 
-- **The page was not run.** The engine is tested live; the XAML code only compiles.
+- **The page was not run by its authors.** The engine is tested live; the XAML code compiles and
+  links (the v0.7.9 pre-release holds it), but nobody looked at it on screen before that release.
 - **The toggle is not remembered** across windows or restarts.
 - **A cold index is slow** (9.4). Three ways to make it faster, none built:
   - a saved snapshot of the catalog, so the first read of a run is one file instead of one per
