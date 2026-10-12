@@ -80,8 +80,9 @@ the panel:
   and a drag never shows the tip: the press silences it (`AgentSuppressTip` — an open tip closes, a
   pending one is cancelled) and the drag's end (`endWidthDrag` / `endSplitDrag`, on release or
   capture loss) gives the text back.
-- **The buttons' tooltips open only after 3 s of rest** (`kSidePanelButtonTipDelay`, 2026-10-10, NOT
-  BUILT yet — the user's request): the header's `+`, **Sum**, LOCAL / GLOBAL, the sort, `⌖`, `⇄` and
+- **The buttons' tooltips open only after 3 s of rest** (`kSidePanelButtonTipDelay`, 2026-10-10, commit
+  952c246fa — the user's request; in production 0.6.8.19 since 2026-10-12 and in the v0.7.9
+  pre-release): the header's `+`, **Sum**, LOCAL / GLOBAL, the sort, `⌖`, `⇄` and
   the collapse chevron, and the collapsed strip's expand chevron. Each tip is a paragraph, and at
   ~133 ms it opened over the panel whenever the pointer reached a button on its way to a click. Any
   move restarts the 3 s. A new button in the panel must pass the constant to its `AgentSetTip` /
@@ -450,7 +451,9 @@ width (the 320 px `ToolTip` cap above); no `[exc] Side-panel card …` lines in 
 
 ### 2e. The "+" launcher — the Agent Manager's launch box, at the click
 
-NOT BUILT yet (2026-10-06). The header's **+** button (the first of the right-aligned buttons, left
+Built 2026-10-06 (commit f73481af7); in production 0.6.8.19 since 2026-10-12 and in the v0.7.9
+pre-release. The fix of item 5 below (2026-10-12, commit bd9ba2eae) is in no build yet. The
+header's **+** button (the first of the right-aligned buttons, left
 of **Sum** — the user's "leftmost, to Sum") opens a small card AT THE CLICK that holds the Agent
 Manager's own launch row, so a session starts from the side panel without leaving the tab:
 

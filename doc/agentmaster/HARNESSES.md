@@ -760,7 +760,8 @@ Add presets…                   (only while the preset list is empty)
   older rule runs in release 0.6.8.18 until the next deploy (no hint has picked a preset there so far:
   hooks.log has no `successor model from the message hint: @…` line).
 - **The Launch button's hover menu**: hovering "Launch Claude" opens the same menu under the button AT
-  ONCE (2026-10-10, NOT BUILT yet — the user's request; it waited 450 ms before) (`_ShowLaunchMenu`,
+  ONCE (2026-10-10, commit 952c246fa — the user's request; it waited 450 ms before; in production
+  0.6.8.19 since 2026-10-12 and in the v0.7.9 pre-release) (`_ShowLaunchMenu`,
   `TransientWithDismissOnPointerMoveAway`: it takes no focus and closes once the pointer is 80 DIP away
   from it). A pointer that arrives in contact — a touch, a pen touching down — still waits the 450 ms
   hold (`_launchHoverTimer`), because a touch has no hover and an instant menu would flash over every
