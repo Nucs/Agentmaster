@@ -114,6 +114,10 @@
   on click (the submenu also carries **Clear filters**); the count line notes `· filtered`. Like the
   hidden set it is a pure **browse-list preference** — nothing is persisted and the transcript on disk
   is never touched (it resets on app restart, unlike `hiddenSessionIds`).
+- **`📂 Folders ▾` (the folder filter, §10):** a dropdown in the filters row listing the folders the
+  listed sessions worked in — each session's launch folder **and** its inferred folder — split
+  **50% / 50%** into **RECENT** over **MOST USED**, with a find box. The picked folders combine with
+  **OR**; the folder filter as a whole ANDs with everything above and reads in the `✕ filter` chip.
 
 ### 1a. Resolved behaviors (proposals — confirm before build)
 
@@ -738,3 +742,107 @@ found rows previews them.
   before. It said so in its sentence. Rule 5 of the system prompt ("a follow-up refers to what you
   showed before") does not forbid it. Not changed: the wording of the rules is for the review.
 - **One live compaction of the search conversation was not run** (`SDK_HARNESS.md` section 11).
+
+---
+
+## 10. The folder filter
+
+> Written 2026-10-12, **NOT BUILT** (checked with `cl /Zs` against the last Debug build and the m5
+> harness; never run on screen). The user's request: "add a folder filter dropdown which pops up a
+> dropdown menu in the sessions search as a filter with OR between each path. The paths are a list
+> split to two 50%/50%, first is the recent sessions workdir/inferred workdir and second is the most
+> commonly used from all sessions. We need the user to be able to add a folder/s that sessions were
+> working in (workdir/inferred workdir)."
+
+### 10.1 What the user sees
+
+- **`📂 Folders ▾`** in the filters row, after **Favorite** and before the window button. It wears the
+  checked accent while a folder is picked; its label then names the one picked folder (a long name
+  ends in `…`) or says `N folders`.
+- A click opens a **dropdown** under it (`_OpenSessionsFoldersPopup`):
+  - a **find box**: every word must appear in a folder's path (case- and slash-insensitive). **Enter**
+    (or **+**) adds the top match of the RECENT half; a typed **absolute path** (`K:\x`,
+    `\\server\share\x`) adds that folder itself, in the sessions' own spelling when one of them uses it;
+  - the **list, split 50% / 50%**: **RECENT** on top (the folder whose newest session was active last
+    comes first; the row shows that age) and **MOST USED** below (the folder more sessions worked in
+    comes first; the row shows the count). Two equal Star rows make the split exactly half and half;
+    each half scrolls on its own. Both halves hold the same folders in two orders;
+  - one **hint** line (what Enter adds, why a list is empty, "still finding where some sessions
+    worked…"), the **picked folders as chips** (`name ✕` removes one — also a picked folder that no
+    list shows), **Include subfolders**, and **Clear**.
+- A click on a folder row picks it or removes it; the dropdown stays open for the next pick, and the
+  rows are re-marked in place (a keyboard user keeps the focused row). **The picked folders combine
+  with OR** — a session in ANY of them is listed — and the folder filter as a whole **ANDs** with the
+  search, the toggles and the other facets (`_SessionsRowPassesRowFilter`).
+- The `✕ filter` chip reads `folder A or B` (plus `(+ subfolders)`), and the count line notes
+  `· filtered`. The chip's click and the row menu's "Clear filters" drop the folders with every other
+  facet; **Include subfolders** keeps its setting (a preference, not a pick).
+- A row's tooltip and the detail pane say **`Works in → <folder> (inferred from its tool calls)`** when a
+  session's inferred folder differs from its launch folder.
+- Keys: Escape closes (the focus returns to the search box), Tab cycles inside the card, the arrow keys
+  move between its controls (XY focus). The page's Up/Down row navigation stands down while the
+  dropdown is open.
+- Closed by a press outside the card (one `handledEventsToo` hook on the page host — the Tags panel's
+  recipe), Escape, the toggle, the page's Back and a tab switch (the overlay's dismiss hook). Nothing is
+  persisted: like every facet it resets at restart.
+- Tooltips inside the card render in the page's description panel (the card is a LocalTooltip scope of
+  the page); in the cramped fallback the floating tips wait 3 s, the Tags panel's value.
+
+### 10.2 Which folders, and how they are counted
+
+- A session **worked in** its **launch folder** (the transcript's `cwd`) and in its **inferred folder**
+  (10.3). It counts once per folder, so a session whose inferred folder is its launch folder counts once.
+- The universe is **every session the page gathered for its time window** — the request's "all
+  sessions", against the RECENT half's "recent sessions" — except the AI search's extra rows and,
+  unless **Hidden** reveals them, hidden sessions. Every listed folder therefore has at least one
+  listed session; older folders come with a wider window.
+  - Measured on the release profile (2026-10-12, its sidecar index): one month = 653 sessions in 40
+    launch folders; three months = 1,458 in 62; all time = 3,624 in 215.
+- A launch "folder" that is not an absolute path (the encoded project-folder name the page shows when
+  no line carried a `cwd`) is no folder; such a session can still count through its inferred folder.
+- Matching is `NormDirKey` (Rule #8). **Exact** by default — the counts in the lists are exact — or,
+  with **Include subfolders**, the folder and everything below it, at a segment boundary (`K:\src`
+  covers `K:\src\app`, never `K:\srcfoo`; a picked drive root covers the drive). The lists themselves
+  always count exactly: a parent folder would otherwise top MOST USED with everyone else's sessions.
+
+### 10.3 The inferred folder of every listed session
+
+- The tab colors' rule (`_ScanInferredTabColors`): the sidecar's `pathsAccessed`, the machine temp
+  roots excluded (`ExcludePathsUnderRoots`), `InferWorkingDirectory` with the git arm per
+  `AppSettings::inferGitRoot`. An answer equal to the launch folder is stored empty.
+- Computed by a **follow-up pass** (`_InferSessionsRowDirs`) after each gather, off the UI thread, so the
+  table never waits for it. The cost that decided this: a Python model of the git walk over one month
+  of sessions (4,571 distinct parent folders) made 6,442 `.git` probes, **6.6 s** with a cold disk cache
+  and 0.3 s warm. `GitRootMemo` is that walk with every probed ancestor memoized.
+- A per-window **cache** (`_sessionsInferredDirCache`), keyed by session id + the transcript's (size,
+  mtime) + the git setting: the gather's background loop takes cache hits itself and hands only the
+  misses to the pass, so only a window's first gather pays. A session that touched no path has nothing
+  to infer and never becomes a job. Results reach the rows only for the gather that asked
+  (`_sessionsGatherGen`); the cache takes them either way.
+- When a pass lands: the table re-renders (with the page hidden, when it returns — the overlay's
+  restore hook), the selected row's detail pane is redrawn, and an open dropdown re-lists.
+
+### 10.4 Code
+
+- `AgentMaster/SessionFolderFilter.h` — pure and header-only: `CollectSessionFolders`,
+  `SortFoldersByRecency` / `SortFoldersByUse`, `SplitFolderFindTerms` / `FolderMatchesFindTerms`,
+  `IsAbsoluteFolderPath` / `TrimFolderPath`, `FolderKeyCovers` / `SessionInPickedFolders`, `GitRootMemo`.
+- `TerminalPage.AgentSessionsPageActions.cpp` — the toggle, the dropdown and its handlers
+  (`_BuildSessionsFolderFilter` through `_InferSessionsRowDirs`); the predicate rides
+  `_SessionsRowPassesRowFilter`, the chip text `_UpdateSessionsFilterChip`.
+- `TerminalPage.AgentSessionsPage.cpp` — the gather's cache lookup and jobs, the dismiss / hide / restore
+  hooks, the Up/Down guard, the card's LocalTooltip scope, the `Works in` lines.
+- `TerminalPage.h` — `_SessionsRow::inferredDir`, `_SessionsRowFilterState::folders`,
+  `_SessionsFolderFilterUi`, the cache and the inference job.
+
+### 10.5 Tests, logs, limits
+
+- `TestSessionFolderFilter` (tests_transcript.cpp): the universe and its counts (spelling variants,
+  launch vs inferred, the encoded fallback), both orders and their tie-breaks, the find box, typed paths,
+  the predicate (exact, subfolders, segment boundary, drive root, UNC, OR), `GitRootMemo` against a
+  counting probe (one probe per new ancestor) and against the real `FindGitRootForDir` on a scratch tree
+  (a `.git` directory and a worktree's `.git` file), and the inference through it.
+- hooks.log: `[sessions-folders] inferred N session folder(s) in X ms (P .git probe(s), git arm on|off)`,
+  one line per pass. Picks are not logged (a view filter, like every facet).
+- Limits: not run on screen yet; not persisted across restarts; MOST USED counts the window's sessions,
+  not all time (a folder the window does not reach would list nothing to pick).

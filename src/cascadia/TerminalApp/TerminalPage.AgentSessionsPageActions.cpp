@@ -61,6 +61,7 @@
 #include "AgentMaster/SessionSearch.h" // the two-phase search
 #include "AgentMaster/SessionStore.h" // durable per-session store (LoadAllStoredSessionTitles — the title overlay)
 #include "AgentMaster/TranscriptStore.h" // EnumerateTranscripts / LoadOrRefreshSessionIndex / PickDisplayTitle
+#include "AgentMaster/SessionFolderFilter.h" // Agentmaster (SESSIONS.md §10): the folder filter's pure half — the folder universe, the two orders, the find box, the OR predicate, GitRootMemo
 
 using namespace winrt;
 using namespace winrt::Windows::Foundation::Collections;
@@ -627,6 +628,14 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         }
+        // Agentmaster (SESSIONS.md §10): the FOLDER FILTER — the one facet whose values combine with OR (the
+        // user's rule): a row in ANY picked folder stays, matched against its launch folder AND its inferred
+        // folder (exact, or with the subfolders when "Include subfolders" is on). A row whose inferred folder
+        // is not computed yet matches by its launch folder only; the inference pass re-renders when it lands.
+        if (!f.folders.empty() && !::Agentmaster::SessionInPickedFolders(f.folders, _sessFolders.includeSubfolders, r.dir, r.inferredDir))
+        {
+            return false;
+        }
         return true;
     }
 
@@ -799,6 +808,7 @@ namespace winrt::TerminalApp::implementation
         _sessionsRowFilter = _SessionsRowFilterState{};
         _UpdateSessionsFilterChip();
         _RebuildSessionsTagChips();
+        _RefreshSessionsFolderMarks(); // Agentmaster (SESSIONS.md §10): the picked folders went with the facets — the toggle, the dropdown's check marks and chips must read "none"
         _RenderSessionsTable();
     }
 
@@ -844,6 +854,21 @@ namespace winrt::TerminalApp::implementation
         for (const auto& t : f.tags)
         {
             add(L"tag \x201C" + t + L"\x201D"); // bookmark tags: each selected chip reads here too
+        }
+        if (!f.folders.empty())
+        {
+            // Agentmaster (SESSIONS.md §10): the picked folders, joined with "or" — they are the one facet
+            // that combines with OR, and the chip should say so rather than read like the AND-ed facets.
+            std::wstring names;
+            for (const auto& folder : f.folders)
+            {
+                if (!names.empty())
+                {
+                    names += L" or ";
+                }
+                names += SessLeaf(folder);
+            }
+            add((f.folders.size() == 1 ? std::wstring{ L"folder " } : std::wstring{ L"folders " }) + names + (_sessFolders.includeSubfolders ? L" (+ subfolders)" : L""));
         }
         _sessFilterChip.Content(winrt::box_value(winrt::hstring{ L"\x2715 " + parts }));
         // Re-titled here as well as at build, so the chip's live tip is self-contained (the panel
@@ -1005,6 +1030,1018 @@ namespace winrt::TerminalApp::implementation
         _UpdateSessionsFilterChip();
         _RebuildSessionsTagChips();
         _RenderSessionsTable();
+    }
+
+    // ===== the FOLDER FILTER (SESSIONS.md §10) ================================================
+    // The filters row's "📂 Folders ▾" toggle opens a dropdown of the folders the listed sessions worked
+    // in — a session's LAUNCH folder (its transcript's cwd) and its INFERRED folder (where its tool calls
+    // concentrate; _InferSessionsRowDirs) — split 50% / 50%: RECENT (the folder whose newest session was
+    // active last, first) over MOST USED (the folder more sessions worked in, first), both over every
+    // session the page gathered for its time window. Clicking a folder adds it to the filter or removes
+    // it; the picked folders combine with OR (a session in ANY of them stays — the user's rule) and the
+    // folder facet ANDs with the search, the toggles and the other facets (_SessionsRowPassesRowFilter).
+    // A find box narrows both halves and its Enter adds the top RECENT match, or a typed absolute path as
+    // is. The pure half (the universe, the orders, the predicate) is AgentMaster/SessionFolderFilter.h.
+    // Transient browse-state like every row facet: nothing is persisted, nothing on disk is touched.
+
+    // How long the pointer must REST on a control inside the dropdown before its FLOATING tooltip opens:
+    // 3 s, the Tags panel's value (the user's request for that dense panel, 2026-10-10). Normally no
+    // floating tip opens inside the dropdown at all — its card is a LocalTooltip scope of the page, so the
+    // tips render in the page's description panel at once. The delay matters only in the cramped fallback
+    // (a window too narrow for that panel), where floating tips take over and a ~133 ms tip on every row of
+    // a list would pop up at each pause of the pointer.
+    static constexpr std::chrono::milliseconds kSessFoldersTipDelay{ 3000 };
+    // The dropdown body's width (DIP; the card adds its 10 px padding and 1 px border on each side).
+    static constexpr double kSessFoldersBodyWidth = 560.0;
+    // The two halves' default height together (header + list, twice); each LIST takes 50% of what the two
+    // headers leave (equal Star rows). Lowered at open when the page has less room below the toggle.
+    static constexpr double kSessFoldersListsHeight = 400.0;
+    // The least height the halves get when the page is short (about two rows per half).
+    static constexpr double kSessFoldersListsMinHeight = 160.0;
+    // What the card needs besides the halves (the find row, the hint, the chips row, the footer, padding):
+    // the budget _OpenSessionsFoldersPopup keeps free below the halves.
+    static constexpr double kSessFoldersChromeHeight = 170.0;
+    // At most this many rows per half. A month here holds ~40 folders and three months ~60; the cap only
+    // keeps a corpus with thousands of distinct folders from building thousands of buttons per keystroke.
+    static constexpr size_t kSessFoldersMaxRows = 150;
+    // The longest folder name the toggle shows when exactly one folder is picked; a longer one ends in "…".
+    static constexpr size_t kSessFoldersButtonNameMax = 24;
+
+    // Build the folder filter ONCE, from _BuildSessionsPageShell: the trigger toggle into the filters bar,
+    // the dropdown card + popup into the page host, and the outside-press dismissal. The card is made a
+    // LocalTooltip scope of the page by the shell, after the page's panel is initialized.
+    //   bar  - the filters row's left-packed controls (the toggle is appended to it).
+    //   host - the page's full-bleed host Grid (the popup is parented into it, so its offsets are
+    //          host-relative and its find box takes keypresses under XAML Islands).
+    // Returns nothing; a second call is a no-op. UI thread only.
+    // Throws: what the XAML element builds throw (hresult_error) and std::bad_alloc — the shell build is
+    // itself on a contained dispatcher path (_ShowSessionsPage).
+    void TerminalPage::_BuildSessionsFolderFilter(const StackPanel& bar, const Grid& host)
+    {
+        if (_sessFolders.button || !bar || !host)
+        {
+            return; // built once per page, and the page shell itself is built once
+        }
+
+        // --- the trigger. A ToggleButton for the CHECKED look — the solid accent the scope toggles beside it
+        // wear — which here means "a folder filter is active". A click flips IsChecked by itself, so the
+        // handler puts it back from the filter state (a programmatic IsChecked raises no Click) and only
+        // toggles the dropdown, one tick later (the popup's lists are rebuilt: the page's rule that a
+        // pointer handler never mutates the tree while the event is still routing).
+        _sessFolders.button = SessToggle(L"\U0001F4C2 Folders \x25BE", L"Folders", L"Show only the sessions that worked in the folders you pick.");
+        _sessFolders.button.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            // The checked look follows the filter, never the click: undo the click's own flip at once (a
+            // property write, no tree change); the label is rewritten only on the deferred tick.
+            _sessFolders.button.IsChecked(!_sessionsRowFilter.folders.empty());
+            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+                if (const auto self = weak.get())
+                {
+                    self->_ToggleSessionsFoldersPopup();
+                }
+            });
+        });
+        bar.Children().Append(_sessFolders.button);
+
+        StackPanel body;
+        body.Spacing(6);
+        body.Width(kSessFoldersBodyWidth);
+
+        // --- row 1: [ find box | + ]. The "+" shows only while Enter would add something.
+        Grid findRow;
+        {
+            ColumnDefinition c0;
+            c0.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            ColumnDefinition c1;
+            c1.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            findRow.ColumnDefinitions().Append(c0);
+            findRow.ColumnDefinitions().Append(c1);
+        }
+        _sessFolders.findBox = TextBox{};
+        _sessFolders.findBox.PlaceholderText(L"find a folder, or type a path to add");
+        _sessFolders.findBox.VerticalAlignment(VerticalAlignment::Center);
+        AgentSetTitledTip(_sessFolders.findBox,
+                          L"Find a folder",
+                          L"Type part of a folder's path to narrow both lists below \x2014 every word has to appear in it. Enter (or +) adds the top match of the recent list; when you typed a whole path such as K:\\source\\app, it adds that folder itself, even one no listed session worked in (useful with Include subfolders).",
+                          kSessFoldersTipDelay);
+        _sessFolders.findBox.TextChanged([this](const winrt::Windows::Foundation::IInspectable&, const TextChangedEventArgs&) {
+            // Coalesce a typing burst into ONE re-list on a LOW-priority tick (the lists are a hundred-odd
+            // buttons). _AddSessionsFolderFromFindBox flushes a queued re-list before it reads the match.
+            if (_sessFolders.listsQueued)
+            {
+                return;
+            }
+            _sessFolders.listsQueued = true;
+            Dispatcher().RunAsync(CoreDispatcherPriority::Low, [weak = get_weak()]() {
+                if (const auto self = weak.get())
+                {
+                    if (!self->_sessFolders.listsQueued)
+                    {
+                        return; // flushed already (an Enter that ran first)
+                    }
+                    self->_sessFolders.listsQueued = false;
+                    if (self->_sessFolders.popup && self->_sessFolders.popup.IsOpen())
+                    {
+                        self->_RebuildSessionsFolderLists();
+                    }
+                }
+            });
+        });
+        _sessFolders.findBox.KeyDown([this](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::KeyRoutedEventArgs& e) {
+            if (e.Key() == VirtualKey::Enter)
+            {
+                e.Handled(true);
+                // Deferred: the add re-lists the dropdown and re-renders the table (tree mutations).
+                Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+                    if (const auto self = weak.get())
+                    {
+                        self->_AddSessionsFolderFromFindBox();
+                    }
+                });
+            }
+            else if (e.Key() == VirtualKey::Escape)
+            {
+                e.Handled(true);
+                _CloseSessionsFoldersPopup(true); // the box goes away with the card: focus back to the page's search
+            }
+        });
+        Grid::SetColumn(_sessFolders.findBox, 0);
+        findRow.Children().Append(_sessFolders.findBox);
+
+        _sessFolders.addBtn = Button{};
+        _sessFolders.addBtn.Content(winrt::box_value(winrt::hstring{ L"+" }));
+        _sessFolders.addBtn.Margin(Thickness{ 6, 0, 0, 0 });
+        _sessFolders.addBtn.VerticalAlignment(VerticalAlignment::Center);
+        _sessFolders.addBtn.Visibility(Visibility::Collapsed); // shown by _RebuildSessionsFolderLists once Enter would add something
+        _sessFolders.addBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+                if (const auto self = weak.get())
+                {
+                    self->_AddSessionsFolderFromFindBox();
+                }
+            });
+        });
+        Grid::SetColumn(_sessFolders.addBtn, 1);
+        findRow.Children().Append(_sessFolders.addBtn);
+        body.Children().Append(findRow);
+
+        // --- row 2: the list, split 50% / 50% — RECENT over MOST USED, each a header (Auto) over a scrolling
+        // list (Star). Two Star rows of equal weight are what make the split exactly half and half, whatever
+        // either half holds; the Grid's Height is set per open to the room below the toggle.
+        _sessFolders.lists = Grid{};
+        {
+            const auto lrow = [&](double v, GridUnitType t) {
+                RowDefinition r;
+                r.Height(GridLengthHelper::FromValueAndType(v, t));
+                _sessFolders.lists.RowDefinitions().Append(r);
+            };
+            lrow(0, GridUnitType::Auto); // RECENT header
+            lrow(1, GridUnitType::Star); // RECENT list
+            lrow(0, GridUnitType::Auto); // MOST USED header
+            lrow(1, GridUnitType::Star); // MOST USED list
+        }
+        _sessFolders.lists.Height(kSessFoldersListsHeight);
+        const auto makeHalf = [&](int headerRow, TextBlock& header, StackPanel& list, const wchar_t* tipTitle, const wchar_t* tipText) {
+            header = SessText(L"", 11, true, 0.6);
+            header.Margin(Thickness{ 2, headerRow == 0 ? 0.0 : 8.0, 0, 3 });
+            AgentSetTitledTip(header, winrt::hstring{ tipTitle }, winrt::hstring{ tipText }, kSessFoldersTipDelay);
+            Grid::SetRow(header, headerRow);
+            _sessFolders.lists.Children().Append(header);
+            list = StackPanel{};
+            list.Spacing(1);
+            ScrollViewer scroll;
+            scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+            scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+            scroll.Padding(Thickness{ 0, 0, 10, 0 }); // keep the rows' right edge clear of the scroll bar
+            scroll.Content(list);
+            Grid::SetRow(scroll, headerRow + 1);
+            _sessFolders.lists.Children().Append(scroll);
+        };
+        makeHalf(0, _sessFolders.recentHeader, _sessFolders.recentList, L"Recent folders", L"The folders of your most recent sessions: each folder is placed by the newest session that worked in it, launched there or inferred there. The time at the right is that session's last activity.");
+        makeHalf(2, _sessFolders.usedHeader, _sessFolders.usedList, L"Most used folders", L"The folders the most sessions worked in, over every session the page lists for its time window. The number at the right counts the sessions: launched there, or launched elsewhere and inferred there from their tool calls.");
+        body.Children().Append(_sessFolders.lists);
+
+        // --- row 3: the hint — inference still running / nothing matches / what Enter adds.
+        _sessFolders.hint = SessText(L"", 11, false, 0.6);
+        _sessFolders.hint.TextWrapping(TextWrapping::Wrap);
+        _sessFolders.hint.TextTrimming(TextTrimming::None);
+        body.Children().Append(_sessFolders.hint);
+
+        // --- row 4: the picked folders as chips (each removes its folder), horizontally scrolling.
+        {
+            ScrollViewer pickedScroll;
+            pickedScroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Auto);
+            pickedScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Disabled);
+            pickedScroll.HorizontalScrollMode(ScrollMode::Enabled);
+            pickedScroll.VerticalScrollMode(ScrollMode::Disabled);
+            _sessFolders.pickedPanel = StackPanel{};
+            _sessFolders.pickedPanel.Orientation(Orientation::Horizontal);
+            _sessFolders.pickedPanel.Spacing(4);
+            pickedScroll.Content(_sessFolders.pickedPanel);
+            body.Children().Append(pickedScroll);
+        }
+
+        // --- row 5: [ ☐ Include subfolders ............ Clear ]
+        Grid footer;
+        {
+            ColumnDefinition c0;
+            c0.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            ColumnDefinition c1;
+            c1.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            footer.ColumnDefinitions().Append(c0);
+            footer.ColumnDefinitions().Append(c1);
+        }
+        _sessFolders.subfoldersBox = CheckBox{};
+        _sessFolders.subfoldersBox.Content(winrt::box_value(winrt::hstring{ L"Include subfolders" }));
+        _sessFolders.subfoldersBox.MinWidth(0);
+        _sessFolders.subfoldersBox.IsChecked(_sessFolders.includeSubfolders);
+        AgentSetTitledTip(_sessFolders.subfoldersBox,
+                          L"Include subfolders",
+                          L"Off: a picked folder lists the sessions that worked in exactly that folder \x2014 the counts in the lists. On: also every session that worked in a folder below it, so K:\\source covers all of its repositories. Kept until you change it, also across Clear.",
+                          kSessFoldersTipDelay);
+        _sessFolders.subfoldersBox.Click([this](const winrt::Windows::Foundation::IInspectable& s, const RoutedEventArgs&) {
+            const auto box = s.try_as<CheckBox>();
+            const bool on = box && box.IsChecked() && box.IsChecked().Value();
+            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), on]() {
+                if (const auto self = weak.get())
+                {
+                    self->_SetSessionsFoldersIncludeSubfolders(on);
+                }
+            });
+        });
+        Grid::SetColumn(_sessFolders.subfoldersBox, 0);
+        footer.Children().Append(_sessFolders.subfoldersBox);
+
+        _sessFolders.clearBtn = Button{};
+        _sessFolders.clearBtn.Content(winrt::box_value(winrt::hstring{ L"Clear" }));
+        _sessFolders.clearBtn.VerticalAlignment(VerticalAlignment::Center);
+        AgentSetTitledTip(_sessFolders.clearBtn, L"Clear", L"Stop filtering by folder: every picked folder is dropped. Include subfolders keeps its setting.", kSessFoldersTipDelay);
+        _sessFolders.clearBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+                if (const auto self = weak.get())
+                {
+                    self->_ClearSessionsFolderFilter();
+                }
+            });
+        });
+        Grid::SetColumn(_sessFolders.clearBtn, 1);
+        footer.Children().Append(_sessFolders.clearBtn);
+        body.Children().Append(footer);
+
+        // --- the card: an Agentmaster dark surface (Conventions), the range popup's look. Escape anywhere
+        // in it closes the dropdown; Tab cycles inside it and the arrow keys move between its controls
+        // (XY focus), so the rows are reachable from the keyboard without a list control of our own.
+        _sessFolders.card = Border{};
+        _sessFolders.card.RequestedTheme(ElementTheme::Dark);
+        _sessFolders.card.Background(SessBrush(0xFF, 0x26, 0x26, 0x26));
+        _sessFolders.card.BorderBrush(SessBrush(0xFF, 0x3A, 0x3A, 0x3A));
+        _sessFolders.card.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        _sessFolders.card.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 6, 6, 6, 6 });
+        _sessFolders.card.Padding(Thickness{ 10, 8, 10, 8 });
+        _sessFolders.card.TabFocusNavigation(winrt::Windows::UI::Xaml::Input::KeyboardNavigationMode::Cycle);
+        _sessFolders.card.XYFocusKeyboardNavigation(winrt::Windows::UI::Xaml::Input::XYFocusKeyboardNavigationMode::Enabled);
+        _sessFolders.card.Child(body);
+        _sessFolders.card.KeyDown([this](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::KeyRoutedEventArgs& e) {
+            if (e.Key() == VirtualKey::Escape)
+            {
+                e.Handled(true);
+                _CloseSessionsFoldersPopup(true);
+            }
+        });
+
+        _sessFolders.popup = Primitives::Popup{};
+        _sessFolders.popup.Child(_sessFolders.card);
+        // Top/left aligned in the host's first row, so HorizontalOffset / VerticalOffset are host-relative
+        // (the range popup's recipe — _OpenSessionsFoldersPopup reads the toggle's position in the host).
+        _sessFolders.popup.HorizontalAlignment(HorizontalAlignment::Left);
+        _sessFolders.popup.VerticalAlignment(VerticalAlignment::Top);
+        Grid::SetRow(_sessFolders.popup, 0);
+        Grid::SetRowSpan(_sessFolders.popup, 2);
+        host.Children().Append(_sessFolders.popup);
+
+        // --- outside-press dismissal: ONE handledEventsToo hook on the page host (the Tags panel's recipe —
+        // pointer-based, never focus-based). A press whose source chain reaches the card is inside; a press
+        // on the toggle is left to the toggle's own Click (which closes an open dropdown); anything else on
+        // the page closes it. Closing a popup is not a tree mutation, so doing it inside the handler is safe.
+        if (!_sessFolders.outsideHooked)
+        {
+            _sessFolders.outsideHooked = true;
+            host.AddHandler(
+                UIElement::PointerPressedEvent(),
+                winrt::box_value(winrt::Windows::UI::Xaml::Input::PointerEventHandler{ [weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) {
+                    const auto self = weak.get();
+                    if (!self || !self->_sessFolders.popup || !self->_sessFolders.popup.IsOpen())
+                    {
+                        return;
+                    }
+                    auto d = e.OriginalSource().try_as<DependencyObject>();
+                    while (d)
+                    {
+                        if (const auto b = d.try_as<Border>(); b && b == self->_sessFolders.card)
+                        {
+                            return; // inside the card
+                        }
+                        if (const auto t = d.try_as<Primitives::ToggleButton>(); t && t == self->_sessFolders.button)
+                        {
+                            return; // the toggle: its Click closes the dropdown (closing here would let the Click reopen it)
+                        }
+                        d = VisualTreeHelper::GetParent(d);
+                    }
+                    self->_CloseSessionsFoldersPopup(false);
+                } }),
+                true /* handledEventsToo — the table rows and buttons handle their own presses */);
+        }
+
+        _UpdateSessionsFoldersButton();
+    }
+
+    // The toggle's click: open the dropdown when it is closed, close it when it is open. The focus stays
+    // on the toggle when it closes (the user just clicked it). UI thread only.
+    // Returns nothing. Throws: what the open / close throw (see them).
+    void TerminalPage::_ToggleSessionsFoldersPopup()
+    {
+        if (_sessFolders.popup && _sessFolders.popup.IsOpen())
+        {
+            _CloseSessionsFoldersPopup(false);
+            return;
+        }
+        _OpenSessionsFoldersPopup();
+    }
+
+    // Open the dropdown under the toggle: placed host-relative (TransformToVisual — the toggle moves when
+    // the window narrows), kept inside the page's right edge, its halves sized to the room below it, the
+    // find box emptied and the lists rebuilt from the current rows; the find box gets the focus one tick
+    // after the open (on the FIRST open the card was only just realized, and a same-tick Focus no-ops —
+    // the Tags panel's lesson). No-op before the page is built. UI thread only.
+    // Returns nothing.
+    // Throws: hresult_error from the XAML calls and std::bad_alloc; the placement itself is contained (an
+    // unmeasured toggle keeps the default spot) and logged (Rule #18).
+    void TerminalPage::_OpenSessionsFoldersPopup()
+    {
+        if (!_sessFolders.popup || !_sessFolders.button || !_sessFolders.lists || !_sessionsPageHost)
+        {
+            return;
+        }
+        double x = 8.0;
+        double y = 80.0;
+        try
+        {
+            const auto pt = _sessFolders.button.TransformToVisual(_sessionsPageHost).TransformPoint(winrt::Windows::Foundation::Point{ 0, 0 });
+            x = pt.X;
+            y = pt.Y + _sessFolders.button.ActualHeight() + 4;
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"Sessions folder dropdown: placement under the toggle");
+        }
+        const double hostW = _sessionsPageHost.ActualWidth();
+        const double hostH = _sessionsPageHost.ActualHeight();
+        const double cardW = kSessFoldersBodyWidth + 22.0; // + the card's padding and border on both sides
+        if (hostW > 0 && x + cardW > hostW - 8.0)
+        {
+            x = hostW - 8.0 - cardW; // never past the page's right edge...
+        }
+        x = std::max(0.0, x); // ...and never past its left edge on a window narrower than the card
+        // The halves get the default height, or what is left between the card's top and the page's bottom
+        // once the find row, hint, chips and footer are paid for — never less than two rows per half.
+        double listsH = kSessFoldersListsHeight;
+        if (hostH > 0)
+        {
+            listsH = std::clamp(hostH - y - kSessFoldersChromeHeight, kSessFoldersListsMinHeight, kSessFoldersListsHeight);
+        }
+        _sessFolders.lists.Height(listsH);
+        _sessFolders.popup.HorizontalOffset(x);
+        _sessFolders.popup.VerticalOffset(y);
+        if (_sessFolders.findBox && !_sessFolders.findBox.Text().empty())
+        {
+            _sessFolders.findBox.Text(L""); // a fresh open lists every folder (the queued re-list this raises is a harmless repeat)
+        }
+        if (_sessFolders.subfoldersBox)
+        {
+            _sessFolders.subfoldersBox.IsChecked(_sessFolders.includeSubfolders);
+        }
+        _RebuildSessionsFolderLists();
+        _sessFolders.popup.IsOpen(true);
+        Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+            if (const auto self = weak.get())
+            {
+                if (self->_sessFolders.popup && self->_sessFolders.popup.IsOpen() && self->_sessFolders.findBox)
+                {
+                    self->_sessFolders.findBox.Focus(FocusState::Programmatic);
+                }
+            }
+        });
+    }
+
+    // Close the dropdown: its open tooltips first (a popup's tips do not close with it), then the popup,
+    // and the page's description panel (it may still describe a row of the closed list). A closed or
+    // never-built dropdown is a no-op, so every dismiss site may call it blindly.
+    //   refocusSearch - true when the focus was inside the card (Escape): hand it to the page's search
+    //                   box, the page's resting focus, instead of letting XAML pick a new home for it.
+    // Returns nothing. UI thread only.
+    // Throws: hresult_error from the XAML calls (the tooltip sweep is contained and logged — Rule #18).
+    void TerminalPage::_CloseSessionsFoldersPopup(bool refocusSearch)
+    {
+        if (!_sessFolders.popup || !_sessFolders.popup.IsOpen())
+        {
+            return;
+        }
+        try
+        {
+            if (_sessFolders.card)
+            {
+                SessCloseTipsIn(_sessFolders.card);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"Sessions folder dropdown: close its tooltips");
+        }
+        _sessFolders.popup.IsOpen(false);
+        _sessionsLocalTip.Hide();
+        if (refocusSearch && _sessionsSearchBox)
+        {
+            _sessionsSearchBox.Focus(FocusState::Programmatic);
+        }
+    }
+
+    // Re-list both halves from the gathered rows and the find text: the folder universe (every row the
+    // table could list — never an AI-only row, a hidden row only while "Hidden" reveals them), filtered by
+    // the find terms, in the two orders; then the headers, the hint, the "+" and (through
+    // _RefreshSessionsFolderMarks) the check marks, the chips and the toggle. Also records what Enter adds
+    // (topMatch) and the sessions' spellings (knownSpelling). No-op before the dropdown is built.
+    // UI thread only; never from inside a pointer handler of a row (it replaces the rows).
+    // Returns nothing. Throws: hresult_error from the XAML builds and std::bad_alloc.
+    void TerminalPage::_RebuildSessionsFolderLists()
+    {
+        if (!_sessFolders.recentList || !_sessFolders.usedList || !_sessFolders.recentHeader || !_sessFolders.usedHeader)
+        {
+            return;
+        }
+        SessCloseTipsIn(_sessFolders.recentList); // the rows about to be cleared must not orphan an open tip
+        SessCloseTipsIn(_sessFolders.usedList);
+        _sessFolders.recentList.Children().Clear();
+        _sessFolders.usedList.Children().Clear();
+
+        // The universe: what the table could list — the hidden set stays out unless "Hidden" reveals it (a
+        // folder whose every session is hidden would otherwise list a folder that shows nothing).
+        const std::unordered_set<std::wstring> hidden(_appSettings.hiddenSessionIds.begin(), _appSettings.hiddenSessionIds.end());
+        const bool showHidden = _sessHiddenBtn && _sessHiddenBtn.IsChecked() && _sessHiddenBtn.IsChecked().Value();
+        std::vector<::Agentmaster::SessionFolderFacts> facts;
+        facts.reserve(_sessionsRows.size());
+        for (const auto& r : _sessionsRows)
+        {
+            if (r.aiExtra || (!showHidden && !hidden.empty() && hidden.count(r.id) != 0))
+            {
+                continue;
+            }
+            facts.push_back(::Agentmaster::SessionFolderFacts{ r.dir, r.inferredDir, r.lastActivityMs });
+        }
+        const auto folders = ::Agentmaster::CollectSessionFolders(facts);
+        _sessFolders.knownSpelling.clear();
+        for (const auto& f : folders)
+        {
+            _sessFolders.knownSpelling.emplace(f.key, f.path);
+        }
+
+        const std::wstring findText = _sessFolders.findBox ? std::wstring{ _sessFolders.findBox.Text() } : std::wstring{};
+        const auto terms = ::Agentmaster::SplitFolderFindTerms(findText);
+        std::vector<::Agentmaster::SessionFolderUse> recent;
+        for (const auto& f : folders)
+        {
+            if (::Agentmaster::FolderMatchesFindTerms(f, terms))
+            {
+                recent.push_back(f);
+            }
+        }
+        auto used = recent;
+        ::Agentmaster::SortFoldersByRecency(recent);
+        ::Agentmaster::SortFoldersByUse(used);
+        _sessFolders.topMatch = recent.empty() ? std::wstring{} : recent.front().path;
+
+        std::unordered_set<std::wstring> pickedKeys;
+        for (const auto& p : _sessionsRowFilter.folders)
+        {
+            pickedKeys.insert(::Agentmaster::NormDirKey(p));
+        }
+        const int64_t now = SessNowMs();
+        // One row: [✓][folder name][full path, dim][meta]. A Button, so it is focusable and Enter / Space
+        // click it; its Tag carries the folder KEY, which _RefreshSessionsFolderMarks matches to re-mark it
+        // in place (no rebuild — a rebuild would drop the focus of a keyboard user). Its click is deferred
+        // one tick: the toggle re-renders the table behind the dropdown.
+        const auto makeRow = [&](const ::Agentmaster::SessionFolderUse& f, const std::wstring& meta) -> Button {
+            const bool on = pickedKeys.count(f.key) != 0;
+            Grid g;
+            {
+                const auto col = [&](double v, GridUnitType t) {
+                    ColumnDefinition c;
+                    c.Width(GridLengthHelper::FromValueAndType(v, t));
+                    g.ColumnDefinitions().Append(c);
+                };
+                col(18, GridUnitType::Pixel); // the check mark
+                col(0, GridUnitType::Auto); // the folder's name
+                col(1, GridUnitType::Star); // its full path
+                col(0, GridUnitType::Auto); // the meta (age / count)
+            }
+            auto check = SessText(winrt::hstring{ on ? L"\x2713" : L"" }, 12, true, 1.0);
+            check.Foreground(SessBrush(0xFF, 0x8A, 0xB4, 0xF8));
+            Grid::SetColumn(check, 0);
+            g.Children().Append(check); // child 0 — _RefreshSessionsFolderMarks finds the mark here
+            std::wstring name = SessLeaf(f.path);
+            if (name.empty())
+            {
+                name = f.path; // a drive root's "leaf" is the root itself
+            }
+            auto nameText = SessText(winrt::hstring{ name }, 12, true, 0.95);
+            nameText.MaxWidth(220);
+            nameText.Margin(Thickness{ 0, 0, 8, 0 });
+            Grid::SetColumn(nameText, 1);
+            g.Children().Append(nameText);
+            auto pathText = SessText(winrt::hstring{ f.path }, 11, false, 0.55);
+            Grid::SetColumn(pathText, 2);
+            g.Children().Append(pathText);
+            auto metaText = SessText(winrt::hstring{ meta }, 11, false, 0.7);
+            metaText.Margin(Thickness{ 8, 0, 0, 0 });
+            Grid::SetColumn(metaText, 3);
+            g.Children().Append(metaText);
+
+            Button b;
+            b.Content(g);
+            b.HorizontalAlignment(HorizontalAlignment::Stretch);
+            b.HorizontalContentAlignment(HorizontalAlignment::Stretch);
+            b.Padding(Thickness{ 6, 3, 6, 3 });
+            b.MinHeight(0);
+            b.BorderThickness(Thickness{ 0, 0, 0, 0 });
+            b.Background(on ? SessBrush(0x30, 0x60, 0xA0, 0xE0) : SessBrush(0, 0, 0, 0)); // the table's selected-row tint
+            b.Tag(winrt::box_value(winrt::hstring{ f.key }));
+            std::wstring tip = f.path + L"\n";
+            tip += std::to_wstring(f.sessions) + (f.sessions == 1 ? L" session" : L" sessions") + L" worked here: ";
+            tip += std::to_wstring(f.launched) + L" launched here";
+            if (f.inferredOnly > 0)
+            {
+                tip += L", " + std::to_wstring(f.inferredOnly) + L" launched elsewhere and inferred here from their tool calls";
+            }
+            tip += L".";
+            if (const auto when = SessLocalDateTime(f.lastActivityMs); !when.empty())
+            {
+                tip += L"\nLast active " + SessAgo(f.lastActivityMs, now) + L" ago (" + when + L").";
+            }
+            tip += on ? L"\n\nPicked. Click to remove it from the filter." : L"\n\nClick to show its sessions. Pick several folders and a session in ANY of them is listed.";
+            AgentSetTitledTip(b, winrt::hstring{ name }, winrt::hstring{ tip }, kSessFoldersTipDelay);
+            const winrt::hstring folder{ f.path };
+            b.Click([this, folder](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), folder]() {
+                    if (const auto self = weak.get())
+                    {
+                        self->_ToggleSessionsFolderFilter(std::wstring{ folder });
+                    }
+                });
+            });
+            return b;
+        };
+        for (size_t i = 0; i < recent.size() && i < kSessFoldersMaxRows; ++i)
+        {
+            const auto ago = SessAgo(recent[i].lastActivityMs, now);
+            _sessFolders.recentList.Children().Append(makeRow(recent[i], ago.empty() ? std::wstring{} : (ago == L"now" ? ago : ago + L" ago")));
+        }
+        for (size_t i = 0; i < used.size() && i < kSessFoldersMaxRows; ++i)
+        {
+            _sessFolders.usedList.Children().Append(makeRow(used[i], std::to_wstring(used[i].sessions) + (used[i].sessions == 1 ? L" session" : L" sessions")));
+        }
+
+        // The headers: the half's name, its order, and how many folders it holds (of how many, when the
+        // find text or the row cap narrows it).
+        const auto headerText = [&](const wchar_t* name, const wchar_t* order) {
+            std::wstring t = std::wstring{ name } + L"  \x00B7  " + order + L"  \x00B7  ";
+            const size_t shown = std::min(recent.size(), kSessFoldersMaxRows);
+            t += (shown != folders.size()) ? (std::to_wstring(shown) + L" of " + std::to_wstring(folders.size())) : std::to_wstring(shown);
+            t += folders.size() == 1 ? L" folder" : L" folders";
+            return winrt::hstring{ t };
+        };
+        _sessFolders.recentHeader.Text(headerText(L"RECENT", L"newest activity first"));
+        _sessFolders.usedHeader.Text(headerText(L"MOST USED", L"most sessions first"));
+
+        // The hint: the most useful single line — what Enter adds, why a list is empty, or that inferred
+        // folders are still being found (they then appear on their own; the pass re-lists an open dropdown).
+        const std::wstring pick = _SessionsFolderFindPick();
+        std::wstring hint;
+        if (_sessionsRows.empty())
+        {
+            hint = _sessionsIndexing.load() ? L"The sessions are still being read\x2026" : L"No session in this time window \x2014 widen it with the window button.";
+        }
+        else if (!terms.empty() && recent.empty())
+        {
+            hint = L"No folder matches \x201C" + ::Agentmaster::TrimFolderPath(findText) + L"\x201D.";
+            if (!pick.empty())
+            {
+                hint += L" Enter adds the path itself: " + pick;
+            }
+        }
+        else if (!pick.empty())
+        {
+            hint = L"Enter adds " + pick;
+        }
+        else
+        {
+            hint = L"Click folders to pick them \x2014 a session in ANY picked folder is listed. Each session counts in its launch folder and in the folder it was inferred to work in.";
+        }
+        if (_sessionsInferPasses.load() > 0)
+        {
+            hint += L"  (Still finding where some sessions worked\x2026)";
+        }
+        _sessFolders.hint.Text(winrt::hstring{ hint });
+        if (_sessFolders.addBtn)
+        {
+            _sessFolders.addBtn.Visibility(pick.empty() ? Visibility::Collapsed : Visibility::Visible);
+            if (!pick.empty())
+            {
+                AgentSetTitledTip(_sessFolders.addBtn, L"Add folder", winrt::hstring{ L"Add " + pick + L" to the folder filter (same as Enter)." }, kSessFoldersTipDelay);
+            }
+        }
+        _RefreshSessionsFolderMarks();
+    }
+
+    // After a pick change: re-mark the existing rows IN PLACE (check mark + tint, matched by the folder key
+    // in each row's Tag — no rebuild, so a keyboard user's focused row stays focused), rebuild the picked
+    // chips, enable Clear, and update the toggle. Safe before the dropdown is built (only the toggle then).
+    // UI thread only; never from inside a pointer handler of a chip (it replaces the chips).
+    // Returns nothing. Throws: hresult_error from the XAML calls and std::bad_alloc.
+    void TerminalPage::_RefreshSessionsFolderMarks()
+    {
+        _UpdateSessionsFoldersButton();
+        if (!_sessFolders.recentList || !_sessFolders.usedList || !_sessFolders.pickedPanel)
+        {
+            return;
+        }
+        std::unordered_set<std::wstring> pickedKeys;
+        for (const auto& p : _sessionsRowFilter.folders)
+        {
+            pickedKeys.insert(::Agentmaster::NormDirKey(p));
+        }
+        for (const auto& list : { _sessFolders.recentList, _sessFolders.usedList })
+        {
+            for (const auto& child : list.Children())
+            {
+                const auto b = child.try_as<Button>();
+                if (!b)
+                {
+                    continue;
+                }
+                const bool on = pickedKeys.count(std::wstring{ winrt::unbox_value_or<winrt::hstring>(b.Tag(), L"") }) != 0;
+                b.Background(on ? SessBrush(0x30, 0x60, 0xA0, 0xE0) : SessBrush(0, 0, 0, 0));
+                if (const auto g = b.Content().try_as<Grid>(); g && g.Children().Size() > 0)
+                {
+                    if (const auto mark = g.Children().GetAt(0).try_as<TextBlock>())
+                    {
+                        mark.Text(on ? L"\x2713" : L"");
+                    }
+                }
+            }
+        }
+
+        // The chips: one per picked folder, in pick order — also the one place a picked folder that no
+        // list shows (a typed path, a folder outside the find text) can be seen and removed.
+        SessCloseTipsIn(_sessFolders.pickedPanel);
+        _sessFolders.pickedPanel.Children().Clear();
+        if (_sessionsRowFilter.folders.empty())
+        {
+            _sessFolders.pickedPanel.Children().Append(SessText(L"No folder picked \x2014 every folder's sessions are listed.", 11, false, 0.5));
+        }
+        for (const auto& folder : _sessionsRowFilter.folders)
+        {
+            std::wstring name = SessLeaf(folder);
+            if (name.empty())
+            {
+                name = folder;
+            }
+            Button chip;
+            chip.Content(winrt::box_value(winrt::hstring{ name + L"  \x2715" }));
+            chip.MinWidth(0);
+            chip.MinHeight(0);
+            chip.FontSize(11);
+            chip.Padding(Thickness{ 8, 1, 8, 2 });
+            chip.Background(SessBrush(0x42, 0x00, 0x78, 0xD4)); // the tag chips' translucent blue: a picked filter value
+            AgentSetTitledTip(chip, winrt::hstring{ name }, winrt::hstring{ folder + L"\n\nClick to remove this folder from the filter." }, kSessFoldersTipDelay);
+            const winrt::hstring chipFolder{ folder };
+            chip.Click([this, chipFolder](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                // Deferred: the removal rebuilds this very chip row (and the table).
+                Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), chipFolder]() {
+                    if (const auto self = weak.get())
+                    {
+                        self->_ToggleSessionsFolderFilter(std::wstring{ chipFolder });
+                    }
+                });
+            });
+            _sessFolders.pickedPanel.Children().Append(chip);
+        }
+        if (_sessFolders.clearBtn)
+        {
+            _sessFolders.clearBtn.IsEnabled(!_sessionsRowFilter.folders.empty());
+        }
+    }
+
+    // Add or remove ONE folder in the folder filter's OR set (filesystem-aware identity — Rule #8, so a case
+    // or slash variant of a picked folder removes it), then refresh what shows the set: the ✕ filter chip,
+    // the toggle, the dropdown's marks and chips, and the table. Deliberately unlogged, like every
+    // view-filter facet.
+    //   folder - the folder as listed or typed (trimmed here; empty is a no-op).
+    // Returns nothing. UI thread only. Throws: what the refreshes throw.
+    void TerminalPage::_ToggleSessionsFolderFilter(const std::wstring& folder)
+    {
+        const std::wstring display = ::Agentmaster::TrimFolderPath(folder);
+        if (display.empty())
+        {
+            return;
+        }
+        const std::wstring key = ::Agentmaster::NormDirKey(display);
+        auto& picked = _sessionsRowFilter.folders;
+        const auto it = std::find_if(picked.begin(), picked.end(), [&](const std::wstring& p) { return ::Agentmaster::NormDirKey(p) == key; });
+        if (it != picked.end())
+        {
+            picked.erase(it);
+        }
+        else
+        {
+            picked.push_back(display);
+        }
+        _UpdateSessionsFilterChip();
+        _RefreshSessionsFolderMarks();
+        _RenderSessionsTable();
+    }
+
+    // The find box's Enter / "+": ADD what _SessionsFolderFindPick names (never removes — a folder already
+    // picked stays picked), then empty the box so the full lists return with the new mark. A re-list that a
+    // keystroke queued is run FIRST, so the pick is computed from the text the user sees, not from the
+    // lists of one keystroke earlier.
+    // Returns nothing. UI thread only. Throws: what the refreshes throw.
+    void TerminalPage::_AddSessionsFolderFromFindBox()
+    {
+        if (_sessFolders.listsQueued)
+        {
+            _sessFolders.listsQueued = false; // the queued tick sees this and does nothing
+            _RebuildSessionsFolderLists();
+        }
+        const std::wstring pick = _SessionsFolderFindPick();
+        if (pick.empty())
+        {
+            return;
+        }
+        const std::wstring key = ::Agentmaster::NormDirKey(pick);
+        auto& picked = _sessionsRowFilter.folders;
+        const bool already = std::any_of(picked.begin(), picked.end(), [&](const std::wstring& p) { return ::Agentmaster::NormDirKey(p) == key; });
+        if (!already)
+        {
+            picked.push_back(pick);
+            _UpdateSessionsFilterChip();
+            _RenderSessionsTable();
+        }
+        if (_sessFolders.findBox)
+        {
+            _sessFolders.findBox.Text(L""); // queues the full re-list (TextChanged)
+        }
+        _RefreshSessionsFolderMarks();
+    }
+
+    // What the find box's Enter would add. A typed ABSOLUTE path (a drive or UNC folder — IsAbsoluteFolderPath)
+    // is added as itself, in the sessions' own spelling when a listed folder has the same key (so the
+    // chip reads like the list); any other text adds the top RECENT match of the last re-list.
+    //   returns - the folder to add; empty when the box is empty or nothing matches.
+    // UI thread only. Throws: std::bad_alloc.
+    std::wstring TerminalPage::_SessionsFolderFindPick() const
+    {
+        if (!_sessFolders.findBox)
+        {
+            return {};
+        }
+        const std::wstring typed = ::Agentmaster::TrimFolderPath(std::wstring{ _sessFolders.findBox.Text() });
+        if (typed.empty())
+        {
+            return {};
+        }
+        if (::Agentmaster::IsAbsoluteFolderPath(typed))
+        {
+            const auto it = _sessFolders.knownSpelling.find(::Agentmaster::NormDirKey(typed));
+            return it != _sessFolders.knownSpelling.end() ? it->second : typed;
+        }
+        return _sessFolders.topMatch;
+    }
+
+    // The dropdown's Clear: drop every picked folder. "Include subfolders" keeps its setting (a preference,
+    // not a pick). No-op when nothing is picked.
+    // Returns nothing. UI thread only. Throws: what the refreshes throw.
+    void TerminalPage::_ClearSessionsFolderFilter()
+    {
+        if (_sessionsRowFilter.folders.empty())
+        {
+            return;
+        }
+        _sessionsRowFilter.folders.clear();
+        _UpdateSessionsFilterChip();
+        _RefreshSessionsFolderMarks();
+        _RenderSessionsTable();
+    }
+
+    // The "Include subfolders" box: store the preference, then refresh the ✕ chip (it says "+ subfolders")
+    // and the toggle's tip; the table re-renders only when a folder is picked (otherwise nothing changes).
+    //   on - the box's new state.
+    // Returns nothing. UI thread only. Throws: what the refreshes throw.
+    void TerminalPage::_SetSessionsFoldersIncludeSubfolders(bool on)
+    {
+        if (_sessFolders.includeSubfolders == on)
+        {
+            return;
+        }
+        _sessFolders.includeSubfolders = on;
+        _UpdateSessionsFilterChip();
+        _UpdateSessionsFoldersButton();
+        if (!_sessionsRowFilter.folders.empty())
+        {
+            _RenderSessionsTable();
+        }
+    }
+
+    // The toggle's face: "📂 Folders ▾" with nothing picked, "📂 <name> ▾" with one folder (a long name ends
+    // in "…"), "📂 N folders ▾" with several; CHECKED (the accent fill) while any folder is picked; and its
+    // tip, which names the picked folders in full. No-op before the toggle is built.
+    // Returns nothing. UI thread only. Throws: hresult_error from the XAML calls, std::bad_alloc.
+    void TerminalPage::_UpdateSessionsFoldersButton()
+    {
+        if (!_sessFolders.button)
+        {
+            return;
+        }
+        const auto& picked = _sessionsRowFilter.folders;
+        std::wstring label = L"\U0001F4C2 ";
+        if (picked.empty())
+        {
+            label += L"Folders";
+        }
+        else if (picked.size() == 1)
+        {
+            std::wstring name = SessLeaf(picked.front());
+            if (name.empty())
+            {
+                name = picked.front();
+            }
+            if (name.size() > kSessFoldersButtonNameMax)
+            {
+                name = name.substr(0, kSessFoldersButtonNameMax - 1) + L"\x2026";
+            }
+            label += name;
+        }
+        else
+        {
+            label += std::to_wstring(picked.size()) + L" folders";
+        }
+        label += L" \x25BE";
+        _sessFolders.button.Content(winrt::box_value(winrt::hstring{ label }));
+        _sessFolders.button.IsChecked(!picked.empty());
+
+        std::wstring tip = L"Show only the sessions that worked in the folders you pick \x2014 where a session was launched, or where its tool calls show it actually worked (its inferred folder). Pick several and a session in ANY of them is listed; the folder filter still combines with the search and every other filter. The list has two halves: the folders of your most recent sessions on top, the folders the most sessions worked in below.";
+        if (!picked.empty())
+        {
+            tip += L"\n\nPicked:";
+            for (const auto& p : picked)
+            {
+                tip += L"\n\x2022 " + p;
+            }
+            if (_sessFolders.includeSubfolders)
+            {
+                tip += L"\n(and the folders below them)";
+            }
+        }
+        SessSetTip(_sessFolders.button, L"Folders", winrt::hstring{ tip });
+    }
+
+    // The follow-up INFERENCE pass of a gather: for each session the gather could not take from the cache,
+    // infer the folder its tool calls concentrate in — off-thread, with the tab colors' rule (machine temp
+    // excluded, InferWorkingDirectory, the git arm through ONE GitRootMemo for the whole pass) — then, on
+    // the UI thread, store every answer in the cache, write them into the rows when the rows still belong
+    // to the same gather, and repaint what shows them: the table (or, with the page hidden, a repaint owed
+    // to its return), the selected row's detail pane, an open dropdown. Logs one [sessions-folders] line.
+    //   jobs      - the gather's cache misses (moved in; each holds a copy of its tool paths).
+    //   useGit    - AppSettings::inferGitRoot when the gather started (also the cache key's git half).
+    //   gatherGen - the _sessionsGatherGen of that gather: results reach only its rows.
+    // Returns nothing (fire_and_forget). Never lets an exception out: the whole body is contained and
+    // logged (Rule #18 — an escape would std::terminate the app), and the running-pass count is given back
+    // on every path.
+    winrt::fire_and_forget TerminalPage::_InferSessionsRowDirs(std::vector<_SessionsInferJob> jobs, bool useGit, uint64_t gatherGen)
+    {
+        auto weakThis{ get_weak() };
+        const auto dispatcher = Dispatcher(); // taken before the hop: after it, `this` may only be reached through weakThis
+        _sessionsInferPasses.fetch_add(1);
+        bool counted = true; // the pass still holds its count (given back once, on whichever path ends it)
+        try
+        {
+            co_await winrt::resume_background();
+
+            const auto started = std::chrono::steady_clock::now();
+            // Temp scratch never votes (the tab-color scan's rule: a session's scratchpad files would infer
+            // the scratchpad), collected once for the whole pass.
+            const std::vector<std::wstring> tempRoots = ::Agentmaster::CollectMachineTempRoots();
+            // The git arm: FindGitRootForDir's walk with every probed ancestor memoized, so sibling paths of
+            // thousands of sessions cost one GetFileAttributesW per NEW folder (6,442 probes for a month here).
+            ::Agentmaster::GitRootMemo gitMemo([](const std::wstring& dir) {
+                return ::GetFileAttributesW((dir + L"\\.git").c_str()) != INVALID_FILE_ATTRIBUTES;
+            });
+            std::function<std::wstring(const std::wstring&)> gitRootOf;
+            if (useGit)
+            {
+                gitRootOf = [&gitMemo](const std::wstring& dir) { return gitMemo.RootOf(dir); };
+            }
+            std::vector<std::pair<std::wstring, _SessionsInferredDir>> results;
+            results.reserve(jobs.size());
+            for (auto& job : jobs)
+            {
+                auto paths = std::move(job.paths);
+                ::Agentmaster::ExcludePathsUnderRoots(paths, tempRoots);
+                std::wstring inferred = ::Agentmaster::InferWorkingDirectory(paths, job.workingDir, gitRootOf);
+                if (::Agentmaster::NormDirKey(inferred) == ::Agentmaster::NormDirKey(job.workingDir))
+                {
+                    inferred.clear(); // the same folder as the launch folder: stored empty (the registry's convention)
+                }
+                results.emplace_back(std::move(job.id), _SessionsInferredDir{ job.sizeBytes, job.mtimeMs, useGit, std::move(inferred) });
+            }
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[sessions-folders] inferred " + std::to_wstring(results.size()) + L" session folder(s) in " + std::to_wstring(ms) +
+                                              L" ms (" + std::to_wstring(gitMemo.Probes()) + L" .git probe(s), git arm " + (useGit ? L"on" : L"off") + L")\n");
+
+            co_await winrt::resume_foreground(dispatcher);
+            const auto self = weakThis.get();
+            if (!self)
+            {
+                co_return; // the page is gone: nothing to give the count back to
+            }
+            self->_sessionsInferPasses.fetch_sub(1);
+            counted = false;
+
+            std::unordered_map<std::wstring, std::wstring> byId;
+            byId.reserve(results.size());
+            for (auto& [id, entry] : results)
+            {
+                byId.emplace(id, entry.inferred); // copied BEFORE the entry moves into the cache
+                self->_sessionsInferredDirCache.insert_or_assign(id, std::move(entry));
+            }
+            const bool dropdownOpen = self->_sessFolders.popup && self->_sessFolders.popup.IsOpen();
+            if (self->_sessionsGatherGen != gatherGen)
+            {
+                // A newer gather replaced the rows: its own lookup (or its own pass) answers for them. The
+                // cache kept these answers, valid for exactly the (size, mtime) they read.
+                if (dropdownOpen)
+                {
+                    self->_RebuildSessionsFolderLists(); // only the "still finding" hint may have changed
+                }
+                co_return;
+            }
+            bool changed = false;
+            bool selectedChanged = false;
+            for (auto& r : self->_sessionsRows)
+            {
+                if (r.aiExtra)
+                {
+                    continue;
+                }
+                const auto it = byId.find(r.id);
+                if (it == byId.end() || r.inferredDir == it->second)
+                {
+                    continue;
+                }
+                r.inferredDir = it->second;
+                changed = true;
+                selectedChanged = selectedChanged || r.id == self->_sessionsSelectedId;
+            }
+            if (dropdownOpen)
+            {
+                self->_RebuildSessionsFolderLists(); // new folders, and the hint's "still finding" goes away
+            }
+            if (!changed)
+            {
+                co_return;
+            }
+            if (self->_sessionsPageVisible.load(std::memory_order_relaxed))
+            {
+                self->_RenderSessionsTable(); // folder matches + row tips ("Works in → …")
+                if (selectedChanged)
+                {
+                    self->_ShowSessionsDetail(self->_sessionsSelectedId); // its "works in" line
+                }
+            }
+            else
+            {
+                self->_sessFolders.renderOwed = true; // repainted when the page returns (the overlay's onRestore)
+            }
+        }
+        catch (...)
+        {
+            if (counted)
+            {
+                if (const auto self = weakThis.get())
+                {
+                    self->_sessionsInferPasses.fetch_sub(1); // atomic: safe from whichever thread threw
+                }
+            }
+            ::Agentmaster::AgentLogCaughtException(L"_InferSessionsRowDirs");
+        }
     }
 
     // ===== the generic window-level page-overlay seam (_agentPageOverlays) ===================

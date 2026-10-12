@@ -918,6 +918,13 @@ namespace winrt::TerminalApp::implementation
             std::wstring path; // transcript path at gather time
             std::wstring title; // PickDisplayTitle(custom > ai > legacy summary > first prompt)
             std::wstring dir; // the REAL cwd from the lines (folder names are lossy)
+            // Agentmaster (SESSIONS.md §10, the folder filter): where the session's tool calls concentrate —
+            // InferWorkingDirectory over its sidecar's pathsAccessed (machine temp excluded, the git arm per
+            // AppSettings::inferGitRoot): the rule the tab colors use. EMPTY while it is not computed yet (the
+            // follow-up pass _InferSessionsRowDirs fills it shortly after a gather; a cache hit fills it in the
+            // gather itself) and when it is the same folder as `dir`. Read by the folder dropdown's lists, the
+            // folder filter, the row tooltip and the detail pane's "works in" line.
+            std::wstring inferredDir;
             std::wstring branch;
             int64_t createdMs{ 0 }; // fork-aware (a fork's copied line stamps lie -> file birth)
             int64_t lastActivityMs{ 0 }; // last MESSAGE timestamp (mtime only as fallback)
@@ -1103,9 +1110,72 @@ namespace winrt::TerminalApp::implementation
             // of them — facets AND, like every other dimension). Rides this struct so the ✕ chip /
             // "Clear filters" / the "· filtered" count line all cover it for free.
             std::vector<std::wstring> tags;
-            bool Any() const { return hasDir || hasBranch || timeGran != TimeGran::None || hasFamily || !tags.empty(); }
+            // Agentmaster (SESSIONS.md §10): the FOLDER FILTER's picked folders (display spellings, in pick
+            // order) from the filters row's "Folders" dropdown. Unlike every other facet these combine with
+            // OR: a row passes when ANY picked folder covers its launch folder or its inferred folder
+            // (SessionInPickedFolders — exact, or with the subfolders per _sessFolders.includeSubfolders).
+            // The folder facet as a whole still ANDs with the rest. Rides this struct so the ✕ chip, "Clear
+            // filters" and the "· filtered" count line cover it exactly like the tags.
+            std::vector<std::wstring> folders;
+            bool Any() const { return hasDir || hasBranch || timeGran != TimeGran::None || hasFamily || !tags.empty() || !folders.empty(); }
         };
         _SessionsRowFilterState _sessionsRowFilter;
+
+        // Agentmaster (SESSIONS.md §10): the FOLDER FILTER dropdown's controls and state. The "📂 Folders"
+        // toggle sits in the filters row; it opens ONE popup (built once, parented into the page host — a
+        // main-tree popup, so its find box takes keypresses under XAML Islands) holding a find box, the
+        // folder list split 50% / 50% — RECENT (the folder whose newest session was active last first) over
+        // MOST USED (the folder more sessions worked in first), both over the page's gathered sessions —
+        // the picked folders as removable chips, "Include subfolders" and Clear. Dismissed by a press
+        // outside the card, Escape, the toggle, the page's hide and the tab-switch dismiss. All UI-thread.
+        struct _SessionsFolderFilterUi
+        {
+            winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton button{ nullptr }; // the filters-row trigger; checked (accent) while any folder is picked
+            winrt::Windows::UI::Xaml::Controls::Primitives::Popup popup{ nullptr }; // the dropdown, parented into the page host
+            winrt::Windows::UI::Xaml::Controls::Border card{ nullptr }; // the popup's child: the inside/outside test of the outside-press dismissal
+            winrt::Windows::UI::Xaml::Controls::TextBox findBox{ nullptr }; // narrows both halves; Enter adds (a typed absolute path, else the top RECENT match)
+            winrt::Windows::UI::Xaml::Controls::Button addBtn{ nullptr }; // "+": the find box's Enter, shown only while Enter would add something
+            winrt::Windows::UI::Xaml::Controls::Grid lists{ nullptr }; // the two halves (header, list, header, list — the lists in equal Star rows); its Height is set per open
+            winrt::Windows::UI::Xaml::Controls::TextBlock recentHeader{ nullptr }; // "RECENT · N folders"
+            winrt::Windows::UI::Xaml::Controls::StackPanel recentList{ nullptr }; // the RECENT half's rows
+            winrt::Windows::UI::Xaml::Controls::TextBlock usedHeader{ nullptr }; // "MOST USED · N folders"
+            winrt::Windows::UI::Xaml::Controls::StackPanel usedList{ nullptr }; // the MOST USED half's rows
+            winrt::Windows::UI::Xaml::Controls::TextBlock hint{ nullptr }; // one line under the lists: inference running / nothing matches / what Enter adds
+            winrt::Windows::UI::Xaml::Controls::StackPanel pickedPanel{ nullptr }; // the picked folders as "name ✕" chips (or a dim "none picked" line)
+            winrt::Windows::UI::Xaml::Controls::CheckBox subfoldersBox{ nullptr }; // "Include subfolders" (mirrors includeSubfolders)
+            winrt::Windows::UI::Xaml::Controls::Button clearBtn{ nullptr }; // drops every picked folder (keeps the subfolders preference)
+            bool includeSubfolders{ false }; // a picked folder also covers the folders under it; a page preference kept across "Clear filters", not persisted
+            bool outsideHooked{ false }; // the page host's handledEventsToo PointerPressed hook is registered (once per page)
+            bool listsQueued{ false }; // a find-box rebuild is queued for the next tick (coalesces a typing burst)
+            bool renderOwed{ false }; // inferred folders landed while the page was hidden: re-render the table when it comes back
+            std::wstring topMatch; // the first RECENT row of the current find text — what Enter adds when the text is not a path
+            std::unordered_map<std::wstring, std::wstring> knownSpelling; // NormDirKey -> the lists' spelling, so a typed path adopts the spelling the sessions use
+        };
+        _SessionsFolderFilterUi _sessFolders;
+        // Agentmaster (SESSIONS.md §10): the inferred-folder CACHE — one entry per session, valid while its
+        // transcript's (size, mtime) and the git-arm setting are unchanged, so only the first gather of a
+        // window pays the inference (git probes on a cold disk cache measured 6.6 s for a month). UI-thread
+        // map; the gather reads a COPY off-thread. Never pruned: bounded by the sessions ever listed here.
+        struct _SessionsInferredDir
+        {
+            int64_t sizeBytes{ 0 }; // the transcript size the inference read
+            int64_t mtimeMs{ 0 }; // the transcript mtime the inference read
+            bool git{ false }; // AppSettings::inferGitRoot at that time (the git arm changes the answer)
+            std::wstring inferred; // the inferred folder; EMPTY = the same folder as the launch folder
+        };
+        std::unordered_map<std::wstring, _SessionsInferredDir> _sessionsInferredDirCache;
+        // One session the follow-up inference pass must compute (a cache miss of the gather): its id, launch
+        // folder (the inference's fallback), the (size, mtime) key, and a COPY of its tool-touched paths.
+        struct _SessionsInferJob
+        {
+            std::wstring id;
+            std::wstring workingDir;
+            int64_t sizeBytes{ 0 };
+            int64_t mtimeMs{ 0 };
+            std::vector<std::wstring> paths;
+        };
+        uint64_t _sessionsGatherGen{ 0 }; // bumps each time a gather lands; an inference pass applies its results to the rows only for ITS gather (the cache takes them either way)
+        std::atomic<int> _sessionsInferPasses{ 0 }; // inference passes running now (a re-gather can start a second one); > 0 = the dropdown's hint says "still finding"
 
         // Agentmaster: WINDOW-LEVEL page overlays (Archive, Sessions, any future full-window
         // page mounted over Root) — each registers itself ONCE at build (host + its atomic
@@ -2146,6 +2216,21 @@ namespace winrt::TerminalApp::implementation
         bool _SessionsRowFilterMatchesAnchor(int kind, const _SessionsRow& r) const; // does the facet for `kind`'s dimension exist AND equal row r's value? (drives the submenu ✓ + the apply-toggle direction)
         std::unordered_set<std::wstring> _ComputeForkFamily(const std::wstring& anchorId) const; // the connected fork-graph component containing anchorId, over the gathered rows (forkedFromId edges, undirected)
         void _UpdateSessionsFilterChip(); // refresh the "✕ filter: …" chip's label + visibility from _sessionsRowFilter
+        // ----- Agentmaster (SESSIONS.md §10): the FOLDER FILTER — TerminalPage.AgentSessionsPageActions.cpp -----
+        // UI-thread only; each one's full contract (params, returns, throws) is at its definition.
+        void _BuildSessionsFolderFilter(const winrt::Windows::UI::Xaml::Controls::StackPanel& bar, const winrt::Windows::UI::Xaml::Controls::Grid& host); // one-time, from _BuildSessionsPageShell: the "📂 Folders" toggle into the filters bar + the dropdown popup into the page host + the outside-press dismissal
+        void _ToggleSessionsFoldersPopup(); // the toggle's click: open the dropdown when closed, close it when open
+        void _OpenSessionsFoldersPopup(); // place the dropdown under the toggle, size its halves to the room below, rebuild the lists, focus the find box
+        void _CloseSessionsFoldersPopup(bool refocusSearch); // close the dropdown (and its tooltips); optionally hand focus back to the page's search box
+        void _RebuildSessionsFolderLists(); // re-list both halves (and the picked chips + hint) from the gathered rows and the find text
+        void _RefreshSessionsFolderMarks(); // after a pick change: the rows' check marks in place, the chips, the hint, the toggle — no list rebuild (keeps the focused row)
+        void _ToggleSessionsFolderFilter(const std::wstring& folder); // add / remove ONE folder in the OR set; refreshes the chip, the toggle, the dropdown and the table
+        void _AddSessionsFolderFromFindBox(); // the find box's Enter / "+": add _SessionsFolderFindPick() (never removes), then clear the box
+        std::wstring _SessionsFolderFindPick() const; // what Enter would add: a typed absolute path (in the sessions' spelling when known), else the top RECENT match; "" = nothing
+        void _ClearSessionsFolderFilter(); // drop every picked folder (the dropdown's Clear); keeps "Include subfolders"
+        void _SetSessionsFoldersIncludeSubfolders(bool on); // the "Include subfolders" box: store the preference, refresh the chip and the table
+        void _UpdateSessionsFoldersButton(); // the toggle's label ("Folders" / the one folder / "N folders"), its checked state and its tip
+        winrt::fire_and_forget _InferSessionsRowDirs(std::vector<_SessionsInferJob> jobs, bool useGit, uint64_t gatherGen); // the follow-up pass: infer each job's folder off-thread, cache it, fill the rows of the same gather, re-render
         // Agentmaster: the generic window-level page-overlay seam (_agentPageOverlays) — register
         // at page build; dismiss-all from any global site (the tab-switch handler). See the struct.
         void _RegisterAgentPageOverlay(const winrt::Windows::UI::Xaml::Controls::Grid& host, std::atomic<bool>* visibleMirror, std::function<void()> onDismiss, std::function<void()> onRestore = {});

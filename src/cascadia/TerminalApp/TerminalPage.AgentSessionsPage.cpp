@@ -365,6 +365,13 @@ namespace winrt::TerminalApp::implementation
         _sessFavOnlyBtn.Click(onToggle);
         bar.Children().Append(_sessFavOnlyBtn);
 
+        // Agentmaster (SESSIONS.md §10): the FOLDER FILTER — "📂 Folders ▾" opens a dropdown of the folders the
+        // listed sessions worked in (their launch folders and their inferred folders), split 50/50 into RECENT
+        // over MOST USED. The picked folders combine with OR, and AND with everything above
+        // (TerminalPage.AgentSessionsPageActions.cpp). Before the window button: it narrows WHAT is listed,
+        // like the Open / Hidden / Favorite filters beside it.
+        _BuildSessionsFolderFilter(bar, host);
+
         // [1 month] — click cycles the presets; hover opens the From/To range popup (Q4).
         _sessWindowBtn = Button{};
         _sessWindowBtn.Content(winrt::box_value(winrt::hstring{ kSessPresets[_sessionsWindowPreset].label }));
@@ -653,6 +660,14 @@ namespace winrt::TerminalApp::implementation
         _sessionsLocalTip.Initialize();
         _sessionsLocalTip.SetClickThrough(true);
         _sessionsLocalTip.AttachScope(host);
+        // Agentmaster (SESSIONS.md §10): the folder dropdown's card is a scope of the SAME panel. Its content
+        // lives in the popup layer, so the card is marked on its own: its rows' tips render in the panel
+        // instead of floating over the list (whether or not its pointer events also reach the host).
+        // Attached here, not where the card is built, because a scope needs the panel initialized first.
+        if (_sessFolders.card)
+        {
+            _sessionsLocalTip.AttachScope(_sessFolders.card);
+        }
         _sessionsLocalTip.AnchorTopRightAbove(host, rightScroll, 10.0);
 
         this->Root().Children().Append(host);
@@ -676,6 +691,9 @@ namespace winrt::TerminalApp::implementation
                     {
                         self->_sessRangePopup.IsOpen(false);
                     }
+                    // Agentmaster (SESSIONS.md §10): the folder dropdown is a popup as well — the collapsed
+                    // host would leave it floating over the tab that replaced the page.
+                    self->_CloseSessionsFoldersPopup(false);
                     if (self->_sessionsPageHost)
                     {
                         SessCloseTipsIn(self->_sessionsPageHost); // tooltips don't collapse with the host either
@@ -724,6 +742,22 @@ namespace winrt::TerminalApp::implementation
                                 ::Agentmaster::AgentLogCaughtException(L"Sessions page restore: repaint after a tag edit made while hidden");
                             }
                         }
+                        // Agentmaster (SESSIONS.md §10): inferred folders landed while the page was hidden
+                        // (_InferSessionsRowDirs), so the table's folder-filter matches and its row tips are
+                        // stale. Repainted here for the tag block's reasons: before the scroll restore below,
+                        // and contained (Rule #18) so a failed repaint cannot cost the restore and the focus.
+                        if (self->_sessFolders.renderOwed)
+                        {
+                            self->_sessFolders.renderOwed = false;
+                            try
+                            {
+                                self->_RenderSessionsTable();
+                            }
+                            catch (...)
+                            {
+                                ::Agentmaster::AgentLogCaughtException(L"Sessions page restore: repaint after inferred folders landed while hidden");
+                            }
+                        }
                         if (self->_sessionsRowsScroll && self->_sessionsSavedScrollOffset > 0.0)
                         {
                             self->_sessionsRowsScroll.UpdateLayout(); // realize the extent first so ChangeView doesn't clamp to 0
@@ -753,6 +787,13 @@ namespace winrt::TerminalApp::implementation
             if (!_sessRenamingId.empty())
             {
                 return; // an in-place title editor owns the keyboard — don't hijack Up/Down for row nav
+            }
+            if (_sessFolders.popup && _sessFolders.popup.IsOpen())
+            {
+                // Agentmaster (SESSIONS.md §10): the folder dropdown is open and its find box / rows have the
+                // focus — the keys reach this host through the popup's parent, but the table behind the
+                // dropdown must not move under it.
+                return;
             }
             e.Handled(true);
             const int delta = (k == winrt::Windows::System::VirtualKey::Down) ? 1 : -1;
@@ -877,6 +918,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     self->_sessRangePopup.IsOpen(false);
                 }
+                self->_CloseSessionsFoldersPopup(false); // Agentmaster (SESSIONS.md §10): the folder dropdown is a popup too — a collapsed host does not hide it
                 // Drop any in-flight title editing so a re-open starts clean (no stray pending arm,
                 // no half-built editor surviving the collapse).
                 self->_DisarmSessionsRenameTimer();
@@ -964,6 +1006,14 @@ namespace winrt::TerminalApp::implementation
         {
             _sessionsCountText.Text(L"indexing\x2026");
         }
+        // Agentmaster (SESSIONS.md §10, the folder filter): a COPY of the inferred-folder cache and of the git
+        // arm's setting, for the background loop below (the cache is a UI-thread member). A session whose
+        // transcript and git setting are unchanged takes its inferred folder from the copy; every other one
+        // becomes a job of the follow-up pass (_InferSessionsRowDirs) — never work done here, because .git
+        // probes on a cold disk cache measured 6.6 s for one month of sessions, and the table must not wait.
+        const bool inferGit = _appSettings.inferGitRoot;
+        const auto inferCache = _sessionsInferredDirCache;
+        std::vector<_SessionsInferJob> inferJobs;
 
         co_await winrt::resume_background();
 
@@ -1003,6 +1053,18 @@ namespace winrt::TerminalApp::implementation
             if (toMs > 0 && r.lastActivityMs > toMs)
             {
                 continue;
+            }
+            // Agentmaster (SESSIONS.md §10): the session's inferred folder. A cache entry counts only for the
+            // SAME transcript (size, mtime — a grown transcript can move the answer) and the same git arm;
+            // a session that touched no path has nothing to infer (its folder is its launch folder), so it
+            // never becomes a job.
+            if (const auto ic = inferCache.find(r.id); ic != inferCache.end() && ic->second.sizeBytes == e.sizeBytes && ic->second.mtimeMs == e.mtimeMs && ic->second.git == inferGit)
+            {
+                r.inferredDir = ic->second.inferred;
+            }
+            else if (!e.stats.pathsAccessed.empty())
+            {
+                inferJobs.push_back(_SessionsInferJob{ r.id, r.dir, e.sizeBytes, e.mtimeMs, e.stats.pathsAccessed });
             }
             rows.push_back(std::move(r));
             entries.push_back(std::move(e));
@@ -1085,6 +1147,19 @@ namespace winrt::TerminalApp::implementation
         self->_SessionsAiAfterGather();
         self->_RebuildSessionsTagChips(); // bookmark tags: (re)list the header chips from the fresh tag load (also prunes a facet whose tag vanished)
         self->_RunSessionsSearch(); // re-applies the current query (incl. the empty one) + renders
+        // Agentmaster (SESSIONS.md §10, the folder filter): these rows are the folder dropdown's new universe.
+        // The generation bumps on EVERY landed gather, so an inference pass of an older gather still feeds the
+        // cache but never writes into these rows; this gather's cache misses go to a pass of their own, which
+        // fills their inferred folders and repaints when it lands.
+        const uint64_t gatherGen = ++self->_sessionsGatherGen;
+        if (!inferJobs.empty())
+        {
+            self->_InferSessionsRowDirs(std::move(inferJobs), inferGit, gatherGen);
+        }
+        if (self->_sessFolders.popup && self->_sessFolders.popup.IsOpen())
+        {
+            self->_RebuildSessionsFolderLists(); // an open dropdown re-lists from the new rows
+        }
         }
         catch (...)
         {
@@ -1949,6 +2024,12 @@ namespace winrt::TerminalApp::implementation
                 }
                 rowTip += L"Session id: " + r.id;
                 rowTip += L"\n" + r.dir;
+                if (!r.inferredDir.empty())
+                {
+                    // Agentmaster (SESSIONS.md §10): where it actually worked, when that is not where it was
+                    // launched — the folder filter matches either folder, so the tip says why a row is listed.
+                    rowTip += L"\nWorks in \x2192 " + r.inferredDir + L" (inferred from its tool calls)";
+                }
                 if (!r.branch.empty())
                 {
                     rowTip += L"\nBranch: " + r.branch;
@@ -2435,6 +2516,12 @@ namespace winrt::TerminalApp::implementation
                 weight += L" \x00B7 fork of " + row->forkedFromId.substr(0, 8) + L"\x2026";
             }
             meta(L"weight", weight);
+        }
+        // Agentmaster (SESSIONS.md §10): where the session actually worked, when that is not its launch folder
+        // (the summary box below names the launch folder) — the folder filter matches both folders.
+        if (!row->inferredDir.empty())
+        {
+            meta(L"works in", row->inferredDir + L"  (inferred from its tool calls)");
         }
         const auto reg = _sessionRegistry ? _sessionRegistry->Get(row->id) : std::nullopt;
         if (reg && reg->live)

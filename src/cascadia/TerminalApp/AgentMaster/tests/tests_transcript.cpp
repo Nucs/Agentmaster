@@ -20,6 +20,7 @@
 // Agentmaster - M5 standalone test harness: transcript tests. Shared CHECK/fixtures/decls
 // live in m5_tests.h; the runner (m5_tests.cpp) calls each entry point. See run-m5-tests.bat.
 #include "m5_tests.h"
+#include "../SessionFolderFilter.h" // the Sessions page's folder filter, pure (SESSIONS.md section 10) - TestSessionFolderFilter
 
 void TestTranscriptScan()
 {
@@ -7205,5 +7206,191 @@ void TestTranscriptWatcher()
         const auto t0 = std::chrono::steady_clock::now();
         w.Stop();
         CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2), "missing root: Stop() interrupts the retry back-off at once");
+    }
+}
+
+// --- the Sessions page's FOLDER FILTER (SESSIONS.md section 10, SessionFolderFilter.h) --------------
+// The pure half of the "Folders" dropdown: which folders the listed sessions worked in (the launch
+// folder + the inferred folder, each session once per folder), the two halves' orders (RECENT / MOST
+// USED), the find box, what a typed path must look like to be added as is, the filter predicate (OR
+// between the picked folders; exact, or with subfolders at a SEGMENT boundary), and GitRootMemo -
+// FindGitRootForDir's walk with a memo per ancestor - proven with a counting fake probe, then against
+// the REAL FindGitRootForDir and InferWorkingDirectory on a scratch tree under %TEMP%.
+// Returns nothing; failures are counted by CHECK. Throws: std::bad_alloc, std::filesystem errors are
+// taken through error_code overloads (a scratch-tree failure fails a CHECK, never the run).
+void TestSessionFolderFilter()
+{
+    std::wprintf(L"[sessions folder filter]\n");
+
+    // --- IsAbsoluteFolderPath: what a typed path must look like to be added as a folder of its own ---
+    CHECK(IsAbsoluteFolderPath(L"K:\\source\\Agentmaster"), "folders: a drive path is absolute");
+    CHECK(IsAbsoluteFolderPath(L"k:/source/x"), "folders: forward slashes after the drive are absolute");
+    CHECK(IsAbsoluteFolderPath(L"K:\\"), "folders: a drive root with its separator is absolute");
+    CHECK(!IsAbsoluteFolderPath(L"K:"), "folders: a drive-relative K: is not absolute");
+    CHECK(!IsAbsoluteFolderPath(L"source\\x"), "folders: a relative path is not absolute");
+    CHECK(!IsAbsoluteFolderPath(L"/k/source/x"), "folders: a POSIX path has no drive to anchor on");
+    CHECK(!IsAbsoluteFolderPath(L"K--source-Agentmaster"), "folders: the encoded project-folder fallback is no folder");
+    CHECK(IsAbsoluteFolderPath(L"\\\\nas\\share"), "folders: a UNC share is absolute");
+    CHECK(IsAbsoluteFolderPath(L"\\\\nas\\share\\proj"), "folders: a folder on a UNC share is absolute");
+    CHECK(!IsAbsoluteFolderPath(L"\\\\nas"), "folders: a UNC server with no share is not");
+    CHECK(!IsAbsoluteFolderPath(L"\\\\nas\\"), "folders: a UNC server with an empty share is not");
+    CHECK(!IsAbsoluteFolderPath(L"\\\\?\\C:\\x"), "folders: the \\\\?\\ device namespace is not a folder");
+    CHECK(!IsAbsoluteFolderPath(L"\\\\.\\pipe\\x"), "folders: the \\\\.\\ device namespace is not a folder");
+    CHECK(!IsAbsoluteFolderPath(L""), "folders: empty is not absolute");
+
+    // --- TrimFolderPath: the display form of a typed / stored folder ---
+    CHECK(TrimFolderPath(L"  K:/source/Agentmaster/  ") == L"K:\\source\\Agentmaster", "folders trim: spaces, slashes and the trailing separator");
+    CHECK(TrimFolderPath(L"\"C:\\Program Files\\App\"") == L"C:\\Program Files\\App", "folders trim: one pair of double quotes (a path pasted from a shell)");
+    CHECK(TrimFolderPath(L"' K:\\x '") == L"K:\\x", "folders trim: single quotes and the spaces inside them");
+    CHECK(TrimFolderPath(L"K:\\") == L"K:\\", "folders trim: a drive root keeps its separator");
+    CHECK(TrimFolderPath(L"K:\\\\\\") == L"K:\\", "folders trim: repeated trailing separators down to the root");
+    CHECK(TrimFolderPath(L"   ").empty(), "folders trim: whitespace only -> empty");
+    CHECK(TrimFolderPath(L"\"K:\\x") == L"\"K:\\x", "folders trim: an unmatched quote is kept (not a quoted path)");
+
+    // --- CollectSessionFolders + the two halves' orders ---
+    {
+        std::vector<SessionFolderFacts> s;
+        s.push_back({ L"K:\\repo", L"", 1000 }); // launched in repo
+        s.push_back({ L"k:/REPO/", L"", 3000 }); // the same folder, another spelling
+        s.push_back({ L"C:\\Users\\me", L"K:\\repo", 5000 }); // launched at home, worked in repo
+        s.push_back({ L"C:\\Users\\me", L"K:\\other", 2000 }); // launched at home, worked in other
+        s.push_back({ L"K:\\other", L"K:\\other", 4000 }); // inferred == launch: one count, not two
+        s.push_back({ L"K--encoded-leaf", L"", 9000 }); // the encoded fallback names no folder
+        s.push_back({ L"K--encoded-leaf", L"K:\\deep\\proj", 6000 }); // ...but its real inferred folder counts
+        auto folders = CollectSessionFolders(s);
+        CHECK(folders.size() == 4, "folders collect: repo, home, other, deep\\proj - the encoded fallback is no folder");
+        const auto find = [&](const std::wstring& key) -> const SessionFolderUse* {
+            for (const auto& f : folders)
+            {
+                if (f.key == key)
+                {
+                    return &f;
+                }
+            }
+            return nullptr;
+        };
+        const auto* repo = find(L"k:\\repo");
+        CHECK(repo && repo->path == L"K:\\repo", "folders collect: the first-seen spelling is the display path");
+        CHECK(repo && repo->sessions == 3 && repo->launched == 2 && repo->inferredOnly == 1, "folders collect: repo = 2 launched (case/slash variants collapse) + 1 inferred");
+        CHECK(repo && repo->lastActivityMs == 5000, "folders collect: repo's newest activity includes the session that only inferred it");
+        const auto* home = find(L"c:\\users\\me");
+        CHECK(home && home->sessions == 2 && home->launched == 2 && home->inferredOnly == 0 && home->lastActivityMs == 5000, "folders collect: home = 2 launched there");
+        const auto* other = find(L"k:\\other");
+        CHECK(other && other->sessions == 2 && other->launched == 1 && other->inferredOnly == 1 && other->lastActivityMs == 4000, "folders collect: a session whose inferred folder IS its launch folder counts once");
+        const auto* deep = find(L"k:\\deep\\proj");
+        CHECK(deep && deep->sessions == 1 && deep->launched == 0 && deep->inferredOnly == 1 && deep->lastActivityMs == 6000, "folders collect: an inferred folder nobody launched in");
+
+        auto recent = folders;
+        SortFoldersByRecency(recent);
+        CHECK(recent.size() == 4 && recent[0].key == L"k:\\deep\\proj" && recent[1].key == L"k:\\repo" && recent[2].key == L"c:\\users\\me" && recent[3].key == L"k:\\other",
+              "folders RECENT: newest activity first; a tie (repo / home at 5000) goes to more sessions");
+        auto used = folders;
+        SortFoldersByUse(used);
+        CHECK(used.size() == 4 && used[0].key == L"k:\\repo" && used[1].key == L"c:\\users\\me" && used[2].key == L"k:\\other" && used[3].key == L"k:\\deep\\proj",
+              "folders MOST USED: most sessions first; a tie (home / other at 2) goes to the more recent");
+
+        // The find box: AND of substrings over the folded key.
+        const auto matching = [&](const std::wstring& text) {
+            const auto terms = SplitFolderFindTerms(text);
+            std::vector<std::wstring> keys;
+            for (const auto& f : used)
+            {
+                if (FolderMatchesFindTerms(f, terms))
+                {
+                    keys.push_back(f.key);
+                }
+            }
+            return keys;
+        };
+        CHECK(matching(L"").size() == 4 && matching(L"  \t ").size() == 4, "folders find: no terms -> every folder");
+        CHECK(matching(L"  Re ") == std::vector<std::wstring>{ L"k:\\repo" }, "folders find: case-insensitive substring");
+        CHECK(matching(L"k:/ ot") == std::vector<std::wstring>{ L"k:\\other" }, "folders find: every term must match, slashes fold to backslashes");
+        CHECK(matching(L"deep/") == std::vector<std::wstring>{ L"k:\\deep\\proj" }, "folders find: a trailing slash folds away");
+        CHECK(matching(L"nowhere").empty(), "folders find: no match -> nothing");
+    }
+
+    // --- FolderKeyCovers / SessionInPickedFolders: the filter predicate ---
+    {
+        CHECK(FolderKeyCovers(L"k:\\src", L"k:\\src", false), "folders covers: the same folder (exact)");
+        CHECK(!FolderKeyCovers(L"k:\\src", L"k:\\src\\app", false), "folders covers: a subfolder is NOT covered without Include subfolders");
+        CHECK(FolderKeyCovers(L"k:\\src", L"k:\\src\\app", true), "folders covers: a subfolder is covered with Include subfolders");
+        CHECK(!FolderKeyCovers(L"k:\\src", L"k:\\srcfoo", true), "folders covers: a sibling with a longer name is never under it (segment boundary)");
+        CHECK(FolderKeyCovers(L"k:\\", L"k:\\anything\\x", true), "folders covers: a picked drive root covers the whole drive");
+        CHECK(FolderKeyCovers(L"k:\\", L"k:\\", false), "folders covers: a drive root equals itself");
+        CHECK(!FolderKeyCovers(L"", L"k:\\x", true) && !FolderKeyCovers(L"k:\\x", L"", true), "folders covers: an empty key never matches");
+        CHECK(FolderKeyCovers(L"\\\\nas\\share", L"\\\\nas\\share\\proj", true), "folders covers: UNC subfolders");
+
+        CHECK(SessionInPickedFolders({}, false, L"K:\\anything", L""), "folders filter: nothing picked -> no constraint");
+        const std::vector<std::wstring> repoOnly{ L"K:\\repo" };
+        CHECK(SessionInPickedFolders(repoOnly, false, L"k:/REPO/", L""), "folders filter: the launch folder matches, filesystem-aware");
+        CHECK(SessionInPickedFolders(repoOnly, false, L"C:\\Users\\me", L"K:\\repo"), "folders filter: the INFERRED folder matches too");
+        CHECK(!SessionInPickedFolders(repoOnly, false, L"K:\\repo\\src", L""), "folders filter: a subfolder launch does not match exactly");
+        CHECK(SessionInPickedFolders(repoOnly, true, L"K:\\repo\\src", L""), "folders filter: ...but does with Include subfolders");
+        const std::vector<std::wstring> two{ L"K:\\a", L"K:\\b" };
+        CHECK(SessionInPickedFolders(two, false, L"K:\\b", L""), "folders filter: OR between the picked folders");
+        CHECK(!SessionInPickedFolders(two, false, L"K:\\c", L"K:\\d"), "folders filter: a session in none of them is dropped");
+        CHECK(!SessionInPickedFolders(repoOnly, true, L"K--repo", L""), "folders filter: the encoded fallback never matches a real folder");
+    }
+
+    // --- GitRootMemo with a counting fake probe: FindGitRootForDir's answers, one probe per new ancestor ---
+    {
+        const std::unordered_set<std::wstring> gitDirs{ L"k:\\repo", L"k:\\repo\\.claude\\worktrees\\w", L"\\\\nas\\share\\proj" };
+        int calls = 0;
+        GitRootMemo memo([&](const std::wstring& d) {
+            ++calls;
+            return gitDirs.count(NormDirKey(d)) != 0;
+        });
+        CHECK(memo.RootOf(L"K:\\repo\\src\\a") == L"K:\\repo", "git memo: the nearest ancestor holding .git");
+        CHECK(memo.Probes() == 3, "git memo: the first walk probes each folder up to the root (a, src, repo)");
+        CHECK(memo.RootOf(L"K:\\repo\\src\\b") == L"K:\\repo" && memo.Probes() == 4, "git memo: a sibling costs ONE probe (src is memoized)");
+        CHECK(memo.RootOf(L"k:/REPO/src/a/") == L"K:\\repo" && memo.Probes() == 4, "git memo: a case / slash variant is a memo hit (no probe)");
+        CHECK(memo.RootOf(L"K:\\repo") == L"K:\\repo" && memo.Probes() == 4, "git memo: the root itself is memoized");
+        CHECK(memo.RootOf(L"K:\\repo\\.claude\\worktrees\\w\\src") == L"K:\\repo\\.claude\\worktrees\\w" && memo.Probes() == 6, "git memo: a worktree's own .git wins over the outer repo (nearest)");
+        CHECK(memo.RootOf(L"K:\\plain\\a\\b").empty() && memo.Probes() == 9, "git memo: no repo up to the drive -> empty, the drive root never probed");
+        CHECK(memo.RootOf(L"K:\\plain\\a\\c").empty() && memo.Probes() == 10, "git memo: a 'no repo' answer is memoized too");
+        CHECK(memo.RootOf(L"relative\\x").empty() && memo.RootOf(L"K:\\").empty() && memo.RootOf(L"\\\\nas\\share").empty() && memo.Probes() == 10,
+              "git memo: relative input, a drive root and a bare share -> empty with no probe");
+        CHECK(memo.RootOf(L"\\\\nas\\share\\proj\\src") == L"\\\\nas\\share\\proj" && memo.Probes() == 12, "git memo: UNC folders below the share");
+        CHECK(calls == static_cast<int>(memo.Probes()), "git memo: every counted probe called the injected probe once");
+        GitRootMemo none{ GitRootMemo::Probe{} };
+        CHECK(none.RootOf(L"K:\\repo\\src").empty(), "git memo: an empty probe answers no repo");
+    }
+
+    // --- GitRootMemo == FindGitRootForDir on a REAL scratch tree, and the inference the page runs with it ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        const DWORD tn = ::GetTempPathW(MAX_PATH, tmp);
+        if (tn > 0 && tn < MAX_PATH)
+        {
+            const std::wstring base = std::wstring(tmp, tn) + L"am-folder-filter-" + std::to_wstring(::GetCurrentProcessId());
+            std::error_code ec;
+            std::filesystem::remove_all(std::filesystem::path{ base }, ec);
+            std::filesystem::create_directories(std::filesystem::path{ base + L"\\repo\\.git" }, ec);
+            std::filesystem::create_directories(std::filesystem::path{ base + L"\\repo\\src\\app" }, ec);
+            std::filesystem::create_directories(std::filesystem::path{ base + L"\\repo\\.claude\\worktrees\\w\\src" }, ec);
+            std::filesystem::create_directories(std::filesystem::path{ base + L"\\plain\\a\\b" }, ec);
+            {
+                // A worktree's .git is a FILE pointing at the main repo's git dir.
+                const HANDLE h = ::CreateFileW((base + L"\\repo\\.claude\\worktrees\\w\\.git").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                CHECK(h != INVALID_HANDLE_VALUE, "git memo (real): fixture - the worktree's .git file was created");
+                if (h != INVALID_HANDLE_VALUE)
+                {
+                    ::CloseHandle(h);
+                }
+            }
+            GitRootMemo memo([](const std::wstring& d) { return ::GetFileAttributesW((d + L"\\.git").c_str()) != INVALID_FILE_ATTRIBUTES; });
+            for (const auto& dir : { base + L"\\repo\\src\\app", base + L"\\repo\\src", base + L"\\repo", base + L"\\repo\\.claude\\worktrees\\w\\src", base + L"\\plain\\a\\b", base + L"\\plain" })
+            {
+                CHECK(NormDirKey(memo.RootOf(dir)) == NormDirKey(FindGitRootForDir(dir)), "git memo (real): the same answer as FindGitRootForDir");
+            }
+            CHECK(NormDirKey(memo.RootOf(base + L"\\repo\\src\\app")) == NormDirKey(base + L"\\repo"), "git memo (real): a repo subfolder resolves to the repo");
+            CHECK(NormDirKey(memo.RootOf(base + L"\\repo\\.claude\\worktrees\\w\\src")) == NormDirKey(base + L"\\repo\\.claude\\worktrees\\w"), "git memo (real): a worktree's .git FILE makes it a root of its own");
+
+            // The page's inference with the memo as the git arm: tool paths in the repo infer the repo.
+            const std::vector<std::wstring> paths{ base + L"\\repo\\src\\app\\a.cs", base + L"\\repo\\src\\app\\b.cs", base + L"\\repo\\README.md" };
+            const std::wstring inferred = InferWorkingDirectory(paths, base + L"\\plain", [&memo](const std::wstring& d) { return memo.RootOf(d); });
+            CHECK(NormDirKey(inferred) == NormDirKey(base + L"\\repo"), "folders inference: repo tool paths infer the repo root through the memo");
+            std::filesystem::remove_all(std::filesystem::path{ base }, ec);
+        }
     }
 }

@@ -120,6 +120,7 @@ int wmain()
     TestSessionStoreScanCache(); // tags perf: the session store's scan cache, by counting file opens (tests_transcript.cpp)
     TestExtractPathsFromText();
     TestInferWorkingDirectory();
+    TestSessionFolderFilter(); // SESSIONS.md section 10 - the Sessions page's folder filter, pure + a scratch git tree (tests_transcript.cpp)
     TestConversationLineage();
     TestScannerCatchUp(); // the 2026-09-25 catch-up stall end to end (tests_transcript.cpp)
     TestTurnStartRaceGuard(); // the 2026-10-01 turn-start race: the prompt-supersession guard, pure + end to end (tests_transcript.cpp)
