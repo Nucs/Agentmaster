@@ -321,11 +321,13 @@ namespace winrt::TerminalApp::implementation
         void _BuildSummaryPanel(); // build the summary panel element (the 2nd slot), collapsed
         void _SetSummaryContent(const std::wstring& text); // fill the panel StackPanel: text runs -> TextBlocks (wrapping; the "* item" file/skill lists NoWrap + clipped), separator sentinels -> full-width Border rules, each numbered conversation line -> a row matched IN ORDER to _summaryPromptRows (▸ jump button when its headIndex >= 0), each session-separator line -> the clickable id rule matched in order to _summarySeparatorRows
         // Agentmaster (the summary's conversation chain): build the clickable SESSION SEPARATOR drawn after
-        // an earlier session's last prompt — a thin rule carrying the first 8 characters of `row.sessionId`.
+        // an earlier session's last prompt — a thin rule carrying the first 8 characters of `row.sessionId`,
+        // led by "fork " when the session below is a fork of it (SummarySeparatorLabel).
         // A click copies the FULL id (with the copy chime) and pops the tooltip "Copied session id of up to
         // here"; hovering shows which session the conversation up to that point belongs to. UI thread only;
         // throws only what XAML element creation throws (the caller renders on the UI thread).
-        //   row — the separator row (sessionId non-empty; title + continuedBy feed the hover text).
+        //   row — the separator row (sessionId non-empty; continuedBy picks the rule's "fork" word, and with
+        //         the title feeds the hover text).
         // Returns the element to append to the panel body.
         winrt::Windows::UI::Xaml::UIElement _MakeSessionSeparator(const SummaryConversationRow& row);
         void _UpdateTimesLine(); // re-render the live "age / last user msg / last activity" ago line (DispatcherTimer-driven)

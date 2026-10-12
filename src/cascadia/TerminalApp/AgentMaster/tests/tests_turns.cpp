@@ -16,7 +16,7 @@
 // the cache rules). Shared CHECK/fixtures/decls live in m5_tests.h.
 #include "m5_tests.h"
 
-#include "../SummaryConversation.h" // BuildSummaryConversation / CodexSummaryConversation (TestSummaryConversation, TestConversationUpstream)
+#include "../SummaryConversation.h" // BuildSummaryConversation / CodexSummaryConversation / SummarySeparatorLabel (TestSummaryConversation, TestConversationUpstream)
 #include "../TranscriptTurns.h"
 
 #include <algorithm> // std::find (the conversation-chain tests)
@@ -408,7 +408,8 @@ namespace
 // listed still gets one); its title from titleOf, else the transcript's own; every prompt listed ONCE —
 // a fork's copy of its parent's prompt under the parent, carrying its ▸ jump index; the session's own
 // pre-/compact parts with no jump index; the toggle OFF = the classic list; a short uuid list never
-// misattributes; and the Codex rows.
+// misattributes; the Codex rows; and the separator's label (SummarySeparatorLabel): "fork <id>" after a
+// fork's parent, the bare id after every other link.
 void TestSummaryConversation()
 {
     std::wprintf(L"\n[SummaryConversation] the summary's numbered conversation list (BuildSummaryConversation, pure)\n");
@@ -508,6 +509,37 @@ void TestSummaryConversation()
     CHECK(codexRows.size() == 2 && codexRows[0].text == L"one" && codexRows[1].text == L"two" && codexRows[0].headIndex == -1 &&
               codexRows[1].headIndex == -1 && codexRows[0].sessionId.empty(),
           "summary-conversation: Codex rows are the rollout prompts, unjumpable");
+
+    // The separator's label (SummarySeparatorLabel) on the rows built above: the fork's parent (rows[3]) leads
+    // its id with "fork", the /clear predecessor (rows[4]) keeps the bare id; 8 characters for the panel's
+    // rule, the whole id (0) for the copied Summary; a prompt row has none.
+    if (rows.size() == 7)
+    {
+        CHECK(SummarySeparatorLabel(rows[3], 8) == L"fork aaaaaaaa",
+              "summary-separator-label: a fork's parent reads \"fork\" + the id's first 8 characters (the panel's rule)");
+        CHECK(SummarySeparatorLabel(rows[3], 0) == L"fork aaaaaaaa-0000-4000-8000-000000000001",
+              "summary-separator-label: idChars 0 = the whole id (the copied Summary's rule), still led by \"fork\"");
+        CHECK(SummarySeparatorLabel(rows[4], 8) == L"bbbbbbbb", "summary-separator-label: a /clear predecessor keeps the bare id");
+        CHECK(SummarySeparatorLabel(rows[0], 8).empty(), "summary-separator-label: a prompt row has no label");
+    }
+    // The other links and the edges, on a hand-built separator row.
+    {
+        SummaryConversationRow sep;
+        sep.sessionId = L"cccccccc-0000-4000-8000-000000000003";
+        sep.continuedBy = L"plan";
+        const bool plan = SummarySeparatorLabel(sep, 8) == L"cccccccc";
+        sep.continuedBy = L"handover";
+        const bool handover = SummarySeparatorLabel(sep, 8) == L"cccccccc";
+        sep.continuedBy.clear();
+        const bool unknown = SummarySeparatorLabel(sep, 8) == L"cccccccc";
+        sep.continuedBy = L"Fork"; // the exact token only: a near miss must never read as a fork
+        const bool nearMiss = SummarySeparatorLabel(sep, 8) == L"cccccccc";
+        CHECK(plan && handover && unknown && nearMiss,
+              "summary-separator-label: a plan-mode restart, a /handover, an unknown link and a near-miss token keep the bare id");
+        sep.sessionId = L"abc";
+        sep.continuedBy = L"fork";
+        CHECK(SummarySeparatorLabel(sep, 8) == L"fork abc", "summary-separator-label: an id shorter than idChars shows whole");
+    }
 }
 
 // Agentmaster (the summary's conversation chain — TranscriptTurns.h section 8): CollectConversationUpstream
@@ -711,6 +743,9 @@ void TestConversationUpstream()
             CHECK(rows[3].sessionId == idP && rows[3].continuedBy == L"fork" && rows[3].sessionTitle == L"Title of P" &&
                       rows[5].sessionId == idF && rows[5].continuedBy == L"fork",
                   "upstream/rows: a separator closes P's part and F's part");
+            // The label the panel draws on those separators, from the link the real chain walk found.
+            CHECK(SummarySeparatorLabel(rows[3], 8) == L"fork 11111111" && SummarySeparatorLabel(rows[5], 0) == L"fork " + idF,
+                  "upstream/rows: each separator of a fork family reads \"fork <id>\" (8 characters on the panel, the whole id in the copy)");
             CHECK(rows[0].headIndex == -1 && rows[1].headIndex == -1 && rows[2].headIndex == 0 && rows[4].headIndex == 1 && rows[6].headIndex == 2,
                   "upstream/rows: the prompts G's terminal holds keep their jump index; the rest have none");
         }

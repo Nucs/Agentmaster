@@ -12,7 +12,7 @@
 // as members and must not drag ProcessInspect.h / TranscriptTurns.h into all of them. The two builders
 // are defined in TranscriptTurns.cpp — next to CollectConversationUpstream, whose result they consume —
 // which the m5 harness compiles too, so the numbering and ownership rules are unit-tested
-// (TestSummaryConversation).
+// (TestSummaryConversation). So is SummarySeparatorLabel, the text a separator's rule shows.
 
 #pragma once
 
@@ -45,7 +45,8 @@ namespace Agentmaster
         // Separator row: that session's title ("" when unknown) — for the separator's hover text.
         std::wstring sessionTitle;
         // Separator row: how the next session continued from it — "fork", "plan" (a plan-mode restart),
-        // "clear" or "handover" ("" when unknown) — for the separator's hover text.
+        // "clear" or "handover" ("" when unknown) — for the separator's hover text, and for its label
+        // ("fork" leads the id on the rule — SummarySeparatorLabel).
         std::wstring continuedBy;
     };
 
@@ -76,4 +77,19 @@ namespace Agentmaster
     //   prompts — the rollout's prompts (CodexRolloutInfo::userPrompts), the list RenderCodexSummary numbers.
     // Returns one prompt row per prompt. Throws std::bad_alloc only.
     std::vector<SummaryConversationRow> CodexSummaryConversation(const std::vector<std::wstring>& prompts);
+
+    // The text a SESSION SEPARATOR's rule shows: the session's id, led by the word "fork" when the session
+    // below is a FORK of it ("fork 358db618" — the user's request of 2026-10-12: a fork's separator read
+    // like any other, so nothing on the rule said that the conversation below is a fork of this one). A
+    // plan-mode restart, a /clear, a /handover and an unknown link keep the bare id; the separator's hover
+    // text names every kind of link. The ONE rule behind both renderings of a separator — the panel's
+    // clickable rule (AgentTabOverlay::_MakeSessionSeparator, 8 characters) and the copied Summary's
+    // plain-text rule (CopySummaryAsync, the whole id) — so the two can never name a link differently.
+    // The word is display only: a click on the rule still copies the bare id.
+    //   row     — a separator row (sessionId non-empty); a prompt row has no label.
+    //   idChars — how many leading characters of the id to show: 8 on the panel's rule; 0 shows the whole
+    //             id (the copy, where `claude --resume <id>` needs all of it). An id shorter than idChars
+    //             shows whole.
+    // Returns the label, or "" for a prompt row. Throws std::bad_alloc only.
+    std::wstring SummarySeparatorLabel(const SummaryConversationRow& row, size_t idChars);
 }

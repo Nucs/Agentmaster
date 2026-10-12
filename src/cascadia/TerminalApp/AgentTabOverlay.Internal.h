@@ -43,8 +43,10 @@ namespace
     // emits it as `\x1E<full session id>` on a line of its own, right after the last prompt of an EARLIER
     // session the current one continues — "the conversation up to here is <id>". The displayed panel
     // turns each into a clickable rule naming the id's first 8 characters (a click copies the full id);
-    // the copyable summary into a plain-text rule carrying the full id. \x1E (ASCII Record Separator)
-    // never occurs in transcript content, and a session id never contains it.
+    // the copyable summary into a plain-text rule carrying the full id. Both lead the id with "fork " when
+    // the session below is a fork of it (SummarySeparatorLabel, read from the separator's row — the line
+    // itself carries only the id). \x1E (ASCII Record Separator) never occurs in transcript content, and a
+    // session id never contains it.
     constexpr wchar_t kSessionSepMark = L'\x1E';
 
     // Summary-panel resize bounds (TAB_OVERLAY.md), as FRACTIONS of the pane. The panel is anchored
@@ -710,7 +712,8 @@ namespace
         // numbered 1..N as ONE conversation: the numbers keep counting across sessions, and each earlier
         // session the current one continues is closed by a lone `kSessionSepMark + <full id>` line. The
         // display turns that line into a clickable rule naming the id's first 8 characters; the copy into a
-        // plain rule with the full id. Every prompt honors the wrap/truncate toggles alike — an earlier
+        // plain rule with the full id (both led by "fork " after a fork's parent — the row's continuedBy,
+        // not this line, carries the link). Every prompt honors the wrap/truncate toggles alike — an earlier
         // session's prompt reads exactly like this session's.
         if (!conversation.empty())
         {
@@ -888,8 +891,9 @@ namespace
     // UI thread, render full=true, then hop back to copy. No-op if there's no transcript / nothing to copy.
     // Agentmaster (the summary's conversation chain): the Messages are ALWAYS the whole conversation (the
     // ⏮ toggle governs only the panel — a copy loses nothing), each earlier session closed by a plain
-    // "──── <full session id> ────" rule. `registry` feeds the recorded /clear + /handover links and the
-    // earlier sessions' titles; null = on-disk links only.
+    // "──── <full session id> ────" rule ("──── fork <full session id> ────" when the session below is a
+    // fork of it, the panel's rule by the same SummarySeparatorLabel). `registry` feeds the recorded
+    // /clear + /handover links and the earlier sessions' titles; null = on-disk links only.
     // `forkParentId` (Claude only; empty otherwise) is the session's fork source: a fork with no messages
     // of its own yet has no transcript, so its source's is summarized instead — exactly what the panel
     // shows for it (_LoadSummaryAsync), so Copy Summary is no longer a silent dead click on a fresh fork.
@@ -926,6 +930,11 @@ namespace
         }
         std::wstring text;
         std::wstring times; // age / last user msg / last activity, snapshotted at copy time
+        // Agentmaster (the summary's conversation chain): the separator rows of the conversation the box is
+        // rendered from, in display order. A rendered `\x1E<full id>` line carries only the id, so the rule
+        // rewrite below takes each rule's label ("fork <id>" after a fork's parent) from its row. Stays empty
+        // for Codex: a rollout has no chain, hence no separator.
+        std::vector<SummaryRow> separatorRows;
         if (codex)
         {
             const auto info = ::Agentmaster::ReadCodexRolloutInfo(path, 0 /* whole file */, 200 /* prompts */);
@@ -942,6 +951,15 @@ namespace
             const auto conversation = ::Agentmaster::BuildSummaryConversation(a, upstream, /*showHistory*/ true, [&registry](const std::wstring& sid) {
                 return SummarySessionTitleOf(registry, sid);
             });
+            // Keep the separators for the rule rewrite below: `conversation` ends with this block, and the
+            // rewrite runs after the times line is prepended.
+            for (const auto& row : conversation)
+            {
+                if (!row.sessionId.empty())
+                {
+                    separatorRows.push_back(row);
+                }
+            }
             // Agentmaster (subagent activity): fold the newest subagent side-file write into "last
             // activity" so a copy taken WHILE a Task/Agent subagent runs matches the live panel — the
             // parent transcript's a.lastTs stays quiescent then (the same fold ReadTranscriptLastActivityTail
@@ -980,13 +998,25 @@ namespace
         // ...and each SESSION separator (`\x1E<full id>`, the end of an earlier session's part) into a plain
         // rule that keeps the FULL id — in a pasted summary the id is the useful part (`claude --resume <id>`
         // reopens that earlier session; a fork's parent may have gone on past the fork since), so it is never
-        // shortened here.
+        // shortened here. Like the panel's rule, a fork's parent reads "fork <id>".
+        // The row each line was rendered from is found the way the panel finds it (_SetSummaryContent's
+        // sepCursor): RenderSummaryBox wrote one `\x1E` line per separator row, in row order, so a line
+        // belongs to the NEXT row, and only when that row carries the line's id.
+        size_t sepCursor = 0;
         for (size_t p = text.find(kSessionSepMark); p != std::wstring::npos; p = text.find(kSessionSepMark, p))
         {
             const size_t eol = text.find(L'\n', p);
             const size_t idEnd = (eol == std::wstring::npos) ? text.size() : eol;
             const std::wstring sid = text.substr(p + 1, idEnd - (p + 1));
-            const std::wstring rule = std::wstring(4, L'\x2500') + L" " + sid + L" " + std::wstring(4, L'\x2500'); // ──── <id> ────
+            // A line no row matches keeps the bare id (the rule's form before the "fork" label); the cursor
+            // then stays, so a later line still meets its own row.
+            std::wstring name = sid;
+            if (sepCursor < separatorRows.size() && separatorRows[sepCursor].sessionId == sid)
+            {
+                name = ::Agentmaster::SummarySeparatorLabel(separatorRows[sepCursor], 0); // 0 = the whole id
+                ++sepCursor;
+            }
+            const std::wstring rule = std::wstring(4, L'\x2500') + L" " + name + L" " + std::wstring(4, L'\x2500'); // ──── <id> ──── or ──── fork <id> ────
             text.replace(p, idEnd - p, rule);
             p += rule.size(); // resume after the replacement (the rule itself holds no sentinel)
         }

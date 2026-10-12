@@ -1485,14 +1485,18 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster (the summary's conversation chain): the clickable SESSION SEPARATOR (see the declaration).
-    // Drawn as a rule — a short dash, the id's first 8 characters, a dash to the right edge — in the panel's
-    // own rule + dim-text colors, so it reads as a mark INSIDE one conversation rather than a new section.
+    // Drawn as a rule — a short dash, the id's first 8 characters (led by "fork " when the session below is a
+    // fork of this one), a dash to the right edge — in the panel's own rule + dim-text colors, so it reads as
+    // a mark INSIDE one conversation rather than a new section.
     // It is a Button with the jump buttons' recipe (a transparent but hit-testable fill whose stock
     // hover/press highlight is the "clickable" cue; never a tab stop — keyboard focus stays on the ConPTY).
     winrt::Windows::UI::Xaml::UIElement AgentTabOverlay::_MakeSessionSeparator(const SummaryConversationRow& row)
     {
         const std::wstring id = row.sessionId;
-        const std::wstring shortId = id.substr(0, std::min<size_t>(8, id.size()));
+        // The rule's text: "358db618", or "fork 358db618" after a fork's parent — the shared rule
+        // (SummarySeparatorLabel), so the copied Summary's plain-text rule names the link the same way.
+        // Display only: the click below still copies the bare id.
+        const std::wstring ruleText = ::Agentmaster::SummarySeparatorLabel(row, 8);
 
         // The hover text: whose conversation it is up to here, how the session below continued it, and
         // what a click does. A via the chain did not name ("" or an unexpected token) reads neutrally.
@@ -1550,7 +1554,7 @@ namespace winrt::TerminalApp::implementation
         idText.Foreground(Fill(0xFF, 0x9E, 0x9E, 0x9E)); // dim: a marker, not content
         idText.Margin(ThicknessHelper::FromLengths(4, 0, 4, 0));
         idText.VerticalAlignment(VerticalAlignment::Center);
-        idText.Text(winrt::hstring{ shortId });
+        idText.Text(winrt::hstring{ ruleText });
         Grid::SetColumn(idText, 1);
         g.Children().Append(idText);
 

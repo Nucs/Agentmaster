@@ -420,8 +420,12 @@ before. Codex renders a reduced box
 **The WHOLE conversation (2026-10-03, the `⏮` toggle).** The Messages list is no longer only the current
 session's file: it lists **every prompt of the conversation the session continues**, oldest first,
 **numbered 1..N as ONE conversation**, and a **session separator** closes each earlier session's part — a
-thin rule carrying the session id's first 8 characters (`─ 1a2b3c4d ─────`). Clicking a separator copies
-that session's FULL id (with the copy chime) and pops **"Copied session id of up to here"**; hovering it
+thin rule carrying the session id's first 8 characters (`─ 1a2b3c4d ─────`). When the session below is a
+**fork** of it, the id is led by the word `fork` (`─ fork 358db618 ─────`; 2026-10-12, NOT BUILT yet — the
+user's request: a fork's separator read like any other, so nothing on the rule said that a fork begins
+there). A plan-mode restart, a `/clear` and a `/handover` keep the bare id. Clicking a separator copies
+that session's FULL id — the bare id, never the `fork` word — (with the copy chime) and pops **"Copied
+session id of up to here"**; hovering it
 names the session, its title, and how the session below continued it (a fork / a plan-mode restart /
 `/clear` / `/handover`). The chain is followed **upstream only** — a session that forked from, was handed
 over from, or `/clear`-ed out of THIS one belongs to its own summary — through four kinds of link:
@@ -445,8 +449,11 @@ The pieces: `TranscriptTurns.h` **`CollectConversationUpstream`** (the chain wal
 first: an ordinary session pays one head read; a process-wide 32-slot cache keyed by transcript + birth +
 recorded link, shared in-flight work, and only FINAL answers cached — never for a transcript without its
 first prompt yet, nor one created < 10 s ago), `SummaryConversation.h` **`BuildSummaryConversation`** (the
-rows: prompts + separators, pure, harness-tested), `RenderSummaryBox` (a prompt row = one ` N. ` line, a
-separator = a lone `\x1E<full id>` line), and `_SetSummaryContent`, which matches the lines back to the rows
+rows: prompts + separators, pure, harness-tested) and **`SummarySeparatorLabel`** (a separator row's rule
+text — `fork ` + the id when the row's `continuedBy` is exactly `fork`, else the bare id; 8 characters on the
+panel, the whole id in the copy; harness-tested), `RenderSummaryBox` (a prompt row = one ` N. ` line, a
+separator = a lone `\x1E<full id>` line — the line carries only the id, so both renderings read the link from
+the row), and `_SetSummaryContent`, which matches the lines back to the rows
 **in order** (`_summaryPromptRows` / `_summarySeparatorRows`) — so `Copy Prompt` works on every row, an
 earlier session's included, and a row without a ▸ keeps an invisible stand-in of the button's width so all
 prompt text lines up. A reload whose text and rows are unchanged **skips the rebuild** (the list can hold
@@ -455,7 +462,8 @@ there IS earlier history) flips the GLOBAL `AppSettings::summaryPanelShowHistory
 key: the one it replaced (`summaryPanelShowPrevious`, default false, which showed only the pre-`/compact`
 parts under `Previous session N` headers) held a stored `false` in every install. OFF lists only the part
 after the last compaction. The copied `Summary` always carries the whole conversation, each separator as a
-plain `──── <full id> ────` rule.
+plain `──── <full id> ────` rule (`──── fork <full id> ────` when the session below is a fork of it; the copy
+finds each line's row the way the panel does — the next separator row, only when it carries the line's id).
 
 **A fork with no messages yet.** A `--fork-session` fork writes no transcript until its first message, so
 the panel summarizes its fork source's transcript (`SessionInfo::forkParentId`) — since 88cb5e415, and never

@@ -5910,7 +5910,7 @@ namespace Agentmaster
 
     // =============================================================================================
     // Agentmaster — the summary panel's conversation list (SummaryConversation.h), built from section 8's
-    // upstream. Pure: no I/O; NOT part of the transcript_turns.py port.
+    // upstream, and the label its separator rows show. Pure: no I/O; NOT part of the transcript_turns.py port.
     // =============================================================================================
 
     std::vector<SummaryConversationRow> BuildSummaryConversation(const SessionSummary& a,
@@ -6008,5 +6008,25 @@ namespace Agentmaster
             rows.push_back(std::move(row));
         }
         return rows;
+    }
+
+    std::wstring SummarySeparatorLabel(const SummaryConversationRow& row, size_t idChars)
+    {
+        if (row.sessionId.empty())
+        {
+            return {}; // a prompt row: the renderers number it and never draw it as a rule
+        }
+        std::wstring label;
+        // Only a fork names its link on the rule (the user's request). The token is the chain walk's own
+        // ChainLink::via ("fork" when ResolveChain's FindForkParent found the parent), compared exactly:
+        // an unknown or future token must read as the bare id, never as a guessed word.
+        if (row.continuedBy == L"fork")
+        {
+            label = L"fork ";
+        }
+        // append(str, pos, n) stops at the end of the id by itself, so an id shorter than idChars shows
+        // whole; npos (idChars 0) takes all of it.
+        label.append(row.sessionId, 0, idChars == 0 ? std::wstring::npos : idChars);
+        return label;
     }
 }
