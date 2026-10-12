@@ -25,7 +25,13 @@
 //
 // THE RULES THIS CLASS KEEPS (each one has a comment at its code):
 //   - The drop-down opens only on a USER focus (Pointer / Keyboard), a tap or a keystroke — never on a programmatic
-//     focus — and an Esc / Enter / blur dismissal sticks until the box is refocused or tapped.
+//     focus — and an Esc / Enter / blur dismissal sticks until the box is refocused or tapped. "User focus" is read
+//     from the box's GettingFocus (the input mode as it was), never from GotFocus's FocusState: XAML reports a
+//     programmatic focus there as Pointer or Keyboard (the last input device). A programmatic text write (SetBoxText,
+//     a Browse… pick) never opens it either, because TextChanged arrives later, when the box may hold focus.
+//   - An open drop-down re-anchors under the box after the layout pass that follows its open, and after a host moves
+//     the box (ReanchorPathPickerAfterLayout): XAML moves a popup's child to new offsets only in the next layout pass,
+//     so a read before it anchors the list to the box's previous place.
 //   - The drop-down rows never take focus (IsTabStop false, AllowFocusOnInteraction false): a row that took focus
 //     would let the box's LostFocus tear the drop-down down before the click lands.
 //   - A programmatic Text write re-validates EXPLICITLY: TextChanged does not fire reliably while the box is off the
@@ -48,6 +54,7 @@
 #include <cstdint> // uint32_t — the recent-folders limit getter
 #include <functional> // the host callbacks
 #include <memory> // std::shared_ptr / enable_shared_from_this — stable identity for weak-capturing handlers
+#include <optional> // the pending programmatic text write (_programmaticTextPending)
 #include <string> // paths, ids, titles
 #include <vector> // the recent-folders list
 
@@ -191,6 +198,12 @@ namespace winrt::TerminalApp::implementation
         // Re-fit an OPEN drop-down to a resized window on the next dispatcher tick (coalesced). Call from a
         // SizeChanged handler; never re-fits synchronously. Never throws (logged, the latch re-armed).
         void QueuePathPickerRelayout();
+        // Re-anchor an OPEN drop-down under the box after the NEXT layout pass. Call right after the host moved what holds
+        // the box — the side panel writes new offsets on its card's Popup. XAML places a popup's child at new offsets only
+        // in the next layout pass (WinUI CPopupRoot::ArrangeOverride; the offset write only invalidates that arrange), so
+        // a re-fit read now would anchor the list to the card's previous place. A no-op while the drop-down is closed
+        // (every open re-anchors itself). Never throws: a failure is logged, and the list keeps its place.
+        void ReanchorPathPickerAfterLayout() noexcept;
         // The box is about to leave the screen (the side panel's card closes): close the drop-down, latch the dismissal
         // and normalize the text — what the box's own blur does one tick later, done now so the caller reads the
         // normalized text at once. Never throws (logged).
@@ -198,13 +211,16 @@ namespace winrt::TerminalApp::implementation
         // The box's current text, untrimmed. Empty when the box is not built. Never throws in practice.
         std::wstring BoxText() const;
         // Replace the box's text when it differs, put the caret at the end, and re-validate explicitly (the box may be
-        // off the live tree, where TextChanged is unreliable). A no-op for identical text.
+        // off the live tree, where TextChanged is unreliable). A no-op for identical text. A programmatic write: it never
+        // opens the drop-down, even if the box holds focus when its (asynchronous) TextChanged arrives; an open drop-down
+        // is re-listed for the new text.
         //   text   — the new text (a folder or a session id; not normalized here).
         //   throws — what a XAML property write throws on the UI thread (the hosts' callers are contained).
         void SetBoxText(const std::wstring& text);
-        // Stop the Launch hover-menu timer, close an open Launch hover menu and close an open drop-down (each step
-        // UI-thread-affine and guarded: a pool-thread teardown throws RPC_E_WRONG_THREAD there, which is logged). After
-        // it, a hover over the Launch button opens nothing. Safe to call twice and from the destructor.
+        // Stop the Launch hover-menu timer, close an open Launch hover menu, drop the drop-down's re-anchor hook and close
+        // an open drop-down (each step UI-thread-affine and guarded: a pool-thread teardown throws RPC_E_WRONG_THREAD
+        // there, which is logged). After it, a hover over the Launch button opens nothing. Safe to call twice and from
+        // the destructor.
         void Shutdown() noexcept;
 
         // Add the Agent Manager's six Button STATE brushes to `resources` — ButtonBackground / *PointerOver / *Pressed
@@ -306,15 +322,33 @@ namespace winrt::TerminalApp::implementation
         // one by one and log via AgentLogCaughtException (Rule #18), each keeping its previous value. ⚠ It reads LIVE
         // layout: never call it synchronously from a SizeChanged / LayoutUpdated handler (mid-pass geometry is stale,
         // and mutating a parented Popup inside a layout pass is the E_LAYOUTCYCLE fail-fast the tab-strip tag badges
-        // hit) — go through _QueuePathPickerRelayout instead.
-        void _LayoutPathPicker();
+        // hit) — go through _QueuePathPickerRelayout instead. The anchor offsets are written only on a real move
+        // (more than kPathPickerAnchorEpsilonDips): any offset write invalidates the popup root's arrange, so an
+        // unchanged one would cost a layout pass for nothing.
+        //   dx, dy  — optional: receive how far the anchor moved (DIPs; 0 when it did not). Null = not needed.
+        //   returns — true when the anchor moved (an offset was written).
+        bool _LayoutPathPicker(double* dx = nullptr, double* dy = nullptr);
+        // Arm the one-shot "re-anchor after the next layout pass": a LayoutUpdated hook on the box that drops itself on
+        // its first call and queues a re-fit (_QueuePathPickerRelayout) — the re-fit then reads the box where that pass
+        // placed it. Never inside the handler itself (the E_LAYOUTCYCLE rule above). A no-op while the drop-down is
+        // closed, after Shutdown, or when already armed (one pass serves every pending request). Never throws (logged;
+        // the list keeps its place).
+        void _ArmPathPickerReanchor() noexcept;
+        // Drop the re-anchor hook, if armed (a close, Shutdown, or the hook's own first call). Never throws: a C++/WinRT
+        // revoker ignores the remove's result.
+        void _DisarmPathPickerReanchor() noexcept;
+        // Write `text` into the box as a PROGRAMMATIC change: _programmaticTextPending records it first, so its
+        // TextChanged (asynchronous) opens no drop-down. SetBoxText and a Browse… pick use it; typing never does.
+        //   text   — the text to write (written as is; the caller decides on normalization and on the caret).
+        //   throws — what the XAML Text write throws on the UI thread (the callers are contained).
+        void _WriteBoxTextProgrammatically(const std::wstring& text);
         // Re-fit the OPEN drop-down to a resized window on the next dispatcher tick (via _LayoutPathPicker). A no-op
         // while the list is closed (every open re-fits anyway) or while a re-fit is already queued, so a drag-resize's
         // burst of SizeChanged events costs at most one re-fit per tick. Never throws: a failed enqueue (the
         // dispatcher shutting down with the window) is logged and RE-ARMS the queued latch — a latch left stuck would
         // silently stop the open list from ever following the window size again.
         void _QueuePathPickerRelayout();
-        void _ClosePathPicker(); // close the drop-down Popup (no latch change)
+        void _ClosePathPicker(); // close the drop-down Popup and drop its re-anchor hook (no latch change)
         void _PickPath(const std::wstring& dir); // a row click: drive the box to `dir` (drilling into a folder) and keep it focused
         void _NormalizeCwdBox(); // platform-sensitive NormPath of the box (on commit / blur / pick / launch)
 
@@ -372,6 +406,36 @@ namespace winrt::TerminalApp::implementation
         // re-fits (so a resize landing after its reads still queues another) and on a failed enqueue; if it ever stuck
         // true, the open list would stop following the window size.
         bool _pathPickerRelayoutQueued{ false };
+        // How focus last ARRIVED at the box, recorded by its GettingFocus (raised synchronously, with the input mode as
+        // it was: Programmatic stays Programmatic). GotFocus reads and clears it. Why not GotFocus's own FocusState():
+        // XAML coerces a programmatic focus before GotFocus (WinUI CFocusManager::UpdateFocus → CoerceFocusState:
+        // Programmatic becomes Pointer after a mouse / touch / pen input, Keyboard after a key). So the side panel card's
+        // Focus(Programmatic), right after the "+" click, read as Pointer: the drop-down opened on every "+" — against
+        // the user's choice (the cursor in the box, the list closed until a click or a key) — and before the card was
+        // laid out at its place, which anchored it over the box and Launch (the user's report, 2026-10-12).
+        // Unfocused = no GettingFocus since the last GotFocus (a re-focus of the focused box raises none): GotFocus then
+        // falls back to FocusState(), the old read.
+        winrt::Windows::UI::Xaml::FocusState _cwdBoxFocusArrival{ winrt::Windows::UI::Xaml::FocusState::Unfocused };
+        // A PROGRAMMATIC text write (_WriteBoxTextProgrammatically) whose TextChanged has not arrived yet: the text written.
+        // TextChanged is ASYNCHRONOUS (WinUI CTextBox::UpdateTextProperty raises it through the event queue, not
+        // synchronously), so it can arrive after a focus — the card copies the Agent Manager's text, opens, then focuses
+        // its box — and the handler took the write for typing and opened the drop-down. The next TextChanged consumes it:
+        // when the box still holds exactly this text, the change is the write — validated and mirrored as always, an OPEN
+        // list re-listed — and it opens no drop-down. A write whose TextChanged never comes (the box off the live tree)
+        // is cleared by the next edit, whose text differs.
+        std::optional<std::wstring> _programmaticTextPending;
+        // The one-shot re-anchor hook (_ArmPathPickerReanchor): a LayoutUpdated registration on the box, alive only from
+        // an open / a host move until the layout pass that follows it. LayoutUpdated runs after EVERY layout pass of the
+        // UI thread (all windows), so a hook left registered would cost a call per pass for nothing.
+        winrt::Windows::UI::Xaml::FrameworkElement::LayoutUpdated_revoker _pathPickerReanchorRevoker{};
+        bool _pathPickerReanchorArmed{ false }; // the hook above is registered
+        // Set by the hook when it queues its re-fit, consumed by that re-fit: tells a re-anchor round from a window-resize
+        // re-fit (only a re-anchor round that MOVED the list is logged).
+        bool _pathPickerReanchorDue{ false };
+        // Re-anchor rounds since the last open or host request. A re-fit that still MOVED the list arms one more round
+        // (the layout pass that ran may have been another window's on this UI thread); kPathPickerReanchorMaxRounds caps
+        // it, so a list can never chase a box forever.
+        uint8_t _pathPickerReanchorRounds{ 0 };
         bool _shutDown{ false }; // Shutdown ran: a second call (the destructor's) does nothing
     };
 }

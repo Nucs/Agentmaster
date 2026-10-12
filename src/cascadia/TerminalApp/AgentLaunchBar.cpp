@@ -33,6 +33,7 @@
 #include <filesystem> // create_directories — the "Create & Launch" affordance for a not-yet-existing dir
 #include <optional>
 #include <system_error> // std::error_code — non-throwing create_directories
+#include <utility> // std::exchange — the drop-down re-fit tick consumes its "re-anchor round" flag
 #include <shobjidl.h> // IFileOpenDialog — required BY AgentManagerContent.Internal.h's PickFolder / PickClaudeExe helpers (per-TU anonymous-namespace copy)
 
 using namespace winrt::Windows::Foundation;
@@ -67,6 +68,35 @@ namespace winrt::TerminalApp::implementation
     // (the ABI ::IInspectable vs the using-directive's winrt::Windows::Foundation::IInspectable). The same alias here
     // keeps the moved code verbatim; redeclaring an alias of the same type is legal if one ever arrives.
     using IInspectable = ::winrt::Windows::Foundation::IInspectable;
+
+    namespace
+    {
+        // The drop-down's anchor offsets are rewritten only when the anchor moved by more than this (DIPs). Any offset
+        // write invalidates the popup root's arrange (WinUI CPopup::SetValue does so for every HorizontalOffset /
+        // VerticalOffset write, equal or not), so an unchanged write would cost a layout pass, and a re-anchor round
+        // would count its own write as a move.
+        constexpr double kPathPickerAnchorEpsilonDips = 0.25;
+
+        // How many "re-anchor after the next layout pass" rounds may follow one open or one host request
+        // (_pathPickerReanchorRounds). The first round normally settles the anchor; a second one covers a layout pass
+        // that belonged to another window on this UI thread; the cap keeps a list from chasing a box forever.
+        constexpr uint8_t kPathPickerReanchorMaxRounds = 3;
+
+        // COM identity of two projected objects (their IUnknown), null-safe. GettingFocus names the new focus as a
+        // DependencyObject and the box is a TextBox: two projections of one object are equal only by identity.
+        //   a, b    — the objects to compare (either may be null).
+        //   returns — true when both are non-null and are the same object.
+        bool LaunchBarSameObject(const IInspectable& a, const IInspectable& b) noexcept
+        {
+            if (!a || !b)
+            {
+                return false;
+            }
+            const auto ua = a.try_as<winrt::Windows::Foundation::IUnknown>();
+            const auto ub = b.try_as<winrt::Windows::Foundation::IUnknown>();
+            return ua && ub && winrt::get_abi(ua) == winrt::get_abi(ub);
+        }
+    }
 
     std::shared_ptr<AgentLaunchBar> AgentLaunchBar::Create(AgentLaunchBarHost host)
     {
@@ -165,6 +195,30 @@ namespace winrt::TerminalApp::implementation
         }
         // Path-picker drop-down. Open it only on *user* focus (Pointer/Keyboard) so the
         // dropdown doesn't pop every time the tab is programmatically activated.
+        // HOW focus arrived is recorded here, in GettingFocus: it is raised synchronously, inside the Focus call or the
+        // input that moves focus, with the input mode as it was (WinUI RaiseAndProcessGettingAndLosingFocusEvents gets
+        // the NON-coerced state). GotFocus comes later and can no longer tell (see _cwdBoxFocusArrival).
+        _cwdBox.GettingFocus([weak](const UIElement&, const GettingFocusEventArgs& e) {
+            const auto self = weak.lock();
+            if (!self || !self->_cwdBox)
+            {
+                return;
+            }
+            try
+            {
+                // Only for the box itself: GettingFocus bubbles, and a part inside the box taking focus is not the box's
+                // focus (the TextBox template's parts are not tab stops today; the check keeps it exact anyway).
+                if (LaunchBarSameObject(e.NewFocusedElement(), self->_cwdBox))
+                {
+                    self->_cwdBoxFocusArrival = e.FocusState();
+                }
+            }
+            catch (...)
+            {
+                // GotFocus then falls back to the coerced FocusState() (the old read). Recorded (Rule #18).
+                ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: box GettingFocus");
+            }
+        });
         _cwdBox.GotFocus([weak](const IInspectable&, const RoutedEventArgs&) {
             const auto self = weak.lock();
             if (!self || !self->_cwdBox)
@@ -175,7 +229,17 @@ namespace winrt::TerminalApp::implementation
             // keystroke brings the list back; when the focus itself came from the user
             // (pointer/keyboard) open it right away.
             self->_pathPickerUserDismissed = false;
-            const auto fs = self->_cwdBox.FocusState();
+            // The REAL input mode (GettingFocus above), consumed here: every focus change raises its own GettingFocus.
+            // Not FocusState(): XAML coerces a programmatic focus to the last input device's state before raising
+            // GotFocus, so the side panel card's Focus(Programmatic) right after the "+" click read as Pointer and opened
+            // the list on every "+". Unfocused = no GettingFocus seen (a re-focus of the already focused box, whose
+            // coerced state changed, raises GotFocus alone): then the old read.
+            auto fs = self->_cwdBoxFocusArrival;
+            self->_cwdBoxFocusArrival = FocusState::Unfocused;
+            if (fs == FocusState::Unfocused)
+            {
+                fs = self->_cwdBox.FocusState();
+            }
             if (fs == FocusState::Pointer || fs == FocusState::Keyboard)
             {
                 self->_OpenPathPicker();
@@ -202,6 +266,16 @@ namespace winrt::TerminalApp::implementation
             {
                 return;
             }
+            // Is this the TextChanged of a PROGRAMMATIC write (SetBoxText, a Browse… pick)? TextChanged arrives later than
+            // its write, so the box may hold focus by now (the card focuses it right after copying the Manager's text) —
+            // and a write is not typing: it must not OPEN the list (see _programmaticTextPending). The box still holding
+            // exactly the written text says it is that write; any other text means the user edited since.
+            bool programmaticWrite = false;
+            if (self->_programmaticTextPending)
+            {
+                programmaticWrite = *self->_programmaticTextPending == std::wstring{ self->_cwdBox.Text() };
+                self->_programmaticTextPending.reset(); // one TextChanged per write; a lost one is cleared here by the next edit
+            }
             // Agentmaster: paint the validation underline + enable/disable launch on every edit
             // (a working dir OR a session id). Runs before the picker logic's focus early-out so
             // it always reflects the current text.
@@ -221,11 +295,11 @@ namespace winrt::TerminalApp::implementation
             }
             if (self->_pathPopup && self->_pathPopup.IsOpen())
             {
-                self->_RebuildPathPicker();
+                self->_RebuildPathPicker(); // an open list follows any text, a write's too
             }
-            else
+            else if (!programmaticWrite)
             {
-                self->_OpenPathPicker();
+                self->_OpenPathPicker(); // typing opens it; a write leaves a closed list closed
             }
         });
         // Close only when focus truly left (not when a row button briefly takes it):
@@ -487,6 +561,21 @@ namespace winrt::TerminalApp::implementation
         _QueuePathPickerRelayout();
     }
 
+    void AgentLaunchBar::ReanchorPathPickerAfterLayout() noexcept
+    {
+        // A fresh budget for this request: the box moved, so the rounds of an earlier open or move say nothing about it.
+        _pathPickerReanchorRounds = 0;
+        _ArmPathPickerReanchor(); // noexcept; a no-op while the drop-down is closed
+    }
+
+    void AgentLaunchBar::_WriteBoxTextProgrammatically(const std::wstring& text)
+    {
+        // Recorded BEFORE the write: TextChanged is asynchronous, but if it were ever raised inside the write, the
+        // handler must already see the mark.
+        _programmaticTextPending = text;
+        _cwdBox.Text(winrt::hstring{ text });
+    }
+
     void AgentLaunchBar::DismissForHide() noexcept
     {
         try
@@ -517,7 +606,10 @@ namespace winrt::TerminalApp::implementation
         }
         if (std::wstring{ _cwdBox.Text() } != text)
         {
-            _cwdBox.Text(winrt::hstring{ text });
+            // A host write, not typing: its TextChanged (asynchronous — it can come after the host focuses the box)
+            // must not open the drop-down. The side panel's card copies the Agent Manager's text here, then opens and
+            // focuses its box.
+            _WriteBoxTextProgrammatically(text);
             _cwdBox.Select(static_cast<int32_t>(text.size()), 0); // caret to end
         }
         // Re-validate explicitly: the box may be off the live tree (a hidden Manager page, a closed card), where
@@ -566,6 +658,9 @@ namespace winrt::TerminalApp::implementation
         // An open Launch hover menu must not outlive the bar either (a pick would launch through a host that is going
         // away). Noexcept and guarded inside, for the same off-thread teardown exposure.
         _CloseLaunchMenu();
+        // Nor a drop-down re-anchor hook: it is a LayoutUpdated registration, called after every layout pass of the UI
+        // thread while it lives. Noexcept (the revoker ignores the remove's result, also off the UI thread).
+        _DisarmPathPickerReanchor();
         if (_pathPopup)
         {
             try
@@ -1298,10 +1393,14 @@ namespace winrt::TerminalApp::implementation
             }
             const std::wstring dir = NormPath(*picked);
             self->_PushRecentDir(dir); // a Browse pick joins the recents right away (shared MRU with launches)
-            self->_cwdBox.Text(winrt::hstring{ dir }); // set the launch target (fires TextChanged -> _ValidateLaunchBox)
+            // Set the launch target (fires TextChanged -> _ValidateLaunchBox) as a PROGRAMMATIC write: its TextChanged
+            // re-lists an open list but does not reopen a closed one — "leave a closed one closed", below.
+            self->_WriteBoxTextProgrammatically(dir);
             self->_cwdBox.Select(static_cast<int32_t>(dir.size()), 0); // caret to end
             self->_ValidateLaunchBox(); // explicit: a dismissed picker can early-out of the TextChanged path
-            self->_cwdBox.Focus(FocusState::Programmatic); // keep the box focused (don't strand focus on the dialog)
+            // Keep the box focused (don't strand focus on the dialog). A programmatic focus: GotFocus reads it as such
+            // (GettingFocus's input mode), so it does not reopen a closed list either.
+            self->_cwdBox.Focus(FocusState::Programmatic);
             // Refresh the open picker so the just-added recent shows; leave a closed one closed (the
             // user made a definitive choice via the modal).
             if (self->_pathPopup && self->_pathPopup.IsOpen())
@@ -1615,16 +1714,31 @@ namespace winrt::TerminalApp::implementation
         _LayoutPathPicker(); // anchor under the box + size against the window (the width rule + the 90%-of-height cap)
         _RebuildPathPicker();
         _pathPopup.IsOpen(true);
+        // ...and once more after the next layout pass, where the box really is then: the anchor above read the box's
+        // LAST layout, and a box that just moved is not there yet — a card whose Popup offsets were just written (its
+        // child moves only in the next pass), or one never laid out at all (the window's first "+"). A list anchored to
+        // that stale place covered the box and Launch (2026-10-12). The re-anchor writes only on a real move.
+        _pathPickerReanchorRounds = 0;
+        _ArmPathPickerReanchor();
     }
 
     // Agentmaster: the drop-down's geometry (contract on the declaration). Three independent steps —
     // anchor, width, height cap — each guarded on its own, so a failed read keeps that step's previous
     // value without skipping the others. Runs at every open and on a (deferred) window resize while open.
-    void AgentLaunchBar::_LayoutPathPicker()
+    bool AgentLaunchBar::_LayoutPathPicker(double* dx, double* dy)
     {
+        if (dx)
+        {
+            *dx = 0.0;
+        }
+        if (dy)
+        {
+            *dy = 0.0;
+        }
+        bool moved = false;
         if (!_pathPopup || !_cwdBox)
         {
-            return;
+            return moved;
         }
         // The host panel the drop-down is parented into: its coordinate space is the offsets' (top-left aligned,
         // grid row 0), and its width is the "window" the width rule measures against.
@@ -1641,8 +1755,29 @@ namespace winrt::TerminalApp::implementation
             const auto xform = _cwdBox.TransformToVisual(layoutRoot);
             const auto pt = xform.TransformPoint(Point{ 0.0f, static_cast<float>(_cwdBox.ActualHeight()) });
             leftInRoot = static_cast<double>(pt.X);
-            _pathPopup.HorizontalOffset(leftInRoot);
-            _pathPopup.VerticalOffset(static_cast<double>(pt.Y) + kAnchorGapDips);
+            const double top = static_cast<double>(pt.Y) + kAnchorGapDips;
+            // Written only on a real move: an offset write invalidates the popup root's arrange even when the value is
+            // the same, and the re-anchor rounds read "moved" from these writes.
+            const double moveX = leftInRoot - _pathPopup.HorizontalOffset();
+            const double moveY = top - _pathPopup.VerticalOffset();
+            if (std::abs(moveX) > kPathPickerAnchorEpsilonDips)
+            {
+                _pathPopup.HorizontalOffset(leftInRoot);
+                moved = true;
+                if (dx)
+                {
+                    *dx = moveX;
+                }
+            }
+            if (std::abs(moveY) > kPathPickerAnchorEpsilonDips)
+            {
+                _pathPopup.VerticalOffset(top);
+                moved = true;
+                if (dy)
+                {
+                    *dy = moveY;
+                }
+            }
         }
         catch (...)
         {
@@ -1712,6 +1847,7 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AgentLogCaughtException(L"_LayoutPathPicker height"); // keeps the previous cap
             }
         }
+        return moved;
     }
 
     // Agentmaster: a window resize while the drop-down is open re-fits it on the NEXT tick (contract on
@@ -1735,9 +1871,33 @@ namespace winrt::TerminalApp::implementation
                 try
                 {
                     self->_pathPickerRelayoutQueued = false; // BEFORE the re-fit: a resize after its reads queues another
+                    // A re-anchor round (the layout-pass hook queued this) or a window-resize re-fit? Only the log
+                    // below tells them apart; both re-fit the same way.
+                    const bool reanchorRound = std::exchange(self->_pathPickerReanchorDue, false);
                     if (self->_pathPopup && self->_pathPopup.IsOpen())
                     {
-                        self->_LayoutPathPicker();
+                        double dx = 0.0;
+                        double dy = 0.0;
+                        if (self->_LayoutPathPicker(&dx, &dy))
+                        {
+                            // The list MOVED: the box was not where the previous anchor read it. A re-anchor round that
+                            // moves it is the stale-anchor case of the 2026-10-12 report, caught and corrected — worth a
+                            // line (rare: an open on a box that was not laid out at its place yet, or a host move).
+                            if (reanchorRound)
+                            {
+                                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                                              L"[launchbar] the folder list moved under its box after a layout pass (dx=" +
+                                                                  std::to_wstring(std::lround(dx)) + L" dy=" + std::to_wstring(std::lround(dy)) +
+                                                                  L" DIP)\n");
+                            }
+                            // Check once more after the next layout pass: the pass that just ran may have been another
+                            // window's on this UI thread. Bounded, so a list can never chase a box forever.
+                            if (self->_pathPickerReanchorRounds < kPathPickerReanchorMaxRounds)
+                            {
+                                ++self->_pathPickerReanchorRounds;
+                                self->_ArmPathPickerReanchor(); // noexcept
+                            }
+                        }
                     }
                 }
                 catch (...)
@@ -1761,10 +1921,52 @@ namespace winrt::TerminalApp::implementation
 
     void AgentLaunchBar::_ClosePathPicker()
     {
+        _DisarmPathPickerReanchor(); // a closed list re-anchors nothing; its next open arms afresh
+        _pathPickerReanchorDue = false; // a round queued just before the close has nothing to re-fit (its tick finds the list closed)
         if (_pathPopup)
         {
             _pathPopup.IsOpen(false);
         }
+    }
+
+    void AgentLaunchBar::_ArmPathPickerReanchor() noexcept
+    {
+        try
+        {
+            if (_shutDown || _pathPickerReanchorArmed || !_cwdBox || !_pathPopup || !_pathPopup.IsOpen())
+            {
+                return; // the bar is shut down, a hook already waits (one pass serves every request), or nothing is open
+            }
+            // LayoutUpdated, not SizeChanged: the box does not change SIZE when only its card moves. It is raised after
+            // every layout pass of the UI thread, the pass that places a moved popup's child included — so the hook
+            // lives for exactly one call.
+            _pathPickerReanchorRevoker = _cwdBox.LayoutUpdated(winrt::auto_revoke, [weak = weak_from_this()](const IInspectable&, const IInspectable&) {
+                const auto self = weak.lock();
+                if (!self)
+                {
+                    return; // the bar is gone; its revoker went with it
+                }
+                // One-shot: drop the hook FIRST, then re-fit on the next tick — never here: moving a parented Popup from a
+                // layout-driven handler re-enters the pass (the E_LAYOUTCYCLE fail-fast). Both calls contain their own
+                // failures, so nothing escapes into XAML.
+                self->_DisarmPathPickerReanchor();
+                self->_pathPickerReanchorDue = true;
+                self->_QueuePathPickerRelayout();
+            });
+            _pathPickerReanchorArmed = true;
+        }
+        catch (...)
+        {
+            // No hook: the list keeps the anchor it has (the old behavior). Recorded (Rule #18).
+            _pathPickerReanchorArmed = false;
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: arm the folder list re-anchor");
+        }
+    }
+
+    void AgentLaunchBar::_DisarmPathPickerReanchor() noexcept
+    {
+        _pathPickerReanchorArmed = false;
+        _pathPickerReanchorRevoker.revoke(); // noexcept: a C++/WinRT revoker ignores the remove's result (a no-op when unarmed)
     }
 
     // Normalize the Launch path box in place. Platform-sensitive via NormPath (Windows: flip

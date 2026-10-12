@@ -3806,7 +3806,11 @@ namespace winrt::TerminalApp::implementation
             // Focus the box one tick later: on the FIRST open the card was only just realized, and a same-tick Focus on
             // a TextBox that has not been laid out can do nothing (the tag editor's lesson). PROGRAMMATIC focus: the
             // box's GotFocus opens the drop-down only for a pointer / keyboard focus, so the caret waits in the box and
-            // the list opens on the first click or keystroke (the user's choice for a card that pops up).
+            // the list opens on the first click or keystroke (the user's choice for a card that pops up). The bar reads
+            // that from the box's GettingFocus, because XAML reports this focus as Pointer in GotFocus (the last input
+            // was the "+" click) — until 2026-10-12 it did read GotFocus, and every "+" opened the list, sometimes over
+            // the box and Launch (the card was not laid out at its place yet). The text copied above is a programmatic
+            // write too: its late TextChanged opens nothing either.
             Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis = get_weak()]() {
                 const auto self = weakThis.get();
                 if (!self || !self->_SidePanelLaunchCardOpen() || !self->_sidePanelLaunchBar)
@@ -3970,13 +3974,24 @@ namespace winrt::TerminalApp::implementation
                                                                 root ? root.ActualWidth() : 0.0,
                                                                 root ? root.ActualHeight() : 0.0);
             // Written only on a real move, so a re-placement that changes nothing invalidates nothing.
+            bool moved = false;
             if (std::abs(_sidePanelLaunchPopup.HorizontalOffset() - placed.left) > kSidePanelLaunchPlaceEpsilonPx)
             {
                 _sidePanelLaunchPopup.HorizontalOffset(placed.left);
+                moved = true;
             }
             if (std::abs(_sidePanelLaunchPopup.VerticalOffset() - placed.top) > kSidePanelLaunchPlaceEpsilonPx)
             {
                 _sidePanelLaunchPopup.VerticalOffset(placed.top);
+                moved = true;
+            }
+            // The card moved with its folder list open (a window resize clamped it; Fork appeared on a card that grows
+            // leftward): the list must follow the box. Not now — the card's child moves to the new offsets only in the
+            // next layout pass, so a read now would anchor the list to the card's old place — but after that pass
+            // (noexcept; a no-op while the list is closed).
+            if (moved && _sidePanelLaunchBar)
+            {
+                _sidePanelLaunchBar->ReanchorPathPickerAfterLayout();
             }
         }
         catch (...)

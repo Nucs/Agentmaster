@@ -493,6 +493,30 @@ Manager's own launch row, so a session starts from the side panel without leavin
 5. **Focus:** the box gets PROGRAMMATIC focus one tick after the open — the caret waits in the box,
    and the drop-down stays closed until a click in the box or a keystroke (the box's own rule: it
    opens only on a pointer / keyboard focus, a tap or typing).
+   - **The fix of 2026-10-12 (NOT BUILT yet) — the user's report:** "In some cases when pressing +
+     it causes the Browse which is top row to be over the path text box and so it hides the entire
+     textbox and Launch Claude button." Two XAML facts, both read in the WinUI source, broke the rule
+     above:
+     - XAML coerces a programmatic focus before `GotFocus` (`CFocusManager::CoerceFocusState`): after
+       the "+" click the box's `FocusState` read **Pointer**, so `GotFocus` opened the list on every
+       "+". The card's copy of the Agent Manager text did the same, through its late, asynchronous
+       `TextChanged`.
+     - That open came before the card was laid out at its place: a popup's child moves to new offsets
+       only in the next layout pass (`CPopupRoot::ArrangeOverride`). The list read the card's
+       previous place, or (0,0) on a window's first open, and covered the box and Launch. Whether
+       the late focus event came before or after that pass decided "some cases".
+   - **Now** the bar reads how focus really arrived from the box's `GettingFocus` (synchronous,
+     uncoerced; `_cwdBoxFocusArrival`), and a programmatic write (`SetBoxText`, a Browse… pick)
+     opens no list (`_programmaticTextPending`). An open list re-anchors after the next layout pass
+     (`_ArmPathPickerReanchor`: a one-shot `LayoutUpdated`, then the queued re-fit), at every open
+     and after every real card move (`_SidePanelPlaceLaunchCard` →
+     `AgentLaunchBar::ReanchorPathPickerAfterLayout`). A re-anchor that moved the list writes
+     `[launchbar] the folder list moved under its box after a layout pass (dx=… dy=… DIP)` to
+     hooks.log.
+   - **Side effects, both what the code's comments always said:** after Browse…, a closed list stays
+     closed ("leave a closed one closed"), and on the Agent Manager page a selection that pre-aims
+     the box no longer opens its list when the box happens to hold focus ("unfocused then, so no
+     path-picker pop").
 6. **Claude only.** The agent element is a fixed `● Claude` chip (the toggle's content, no button
    chrome, no click); its tooltip says Codex launches from here are planned. The bar never enters
    Codex mode.
@@ -548,6 +572,11 @@ press while it is open reads the open popups once and walks the press's ancestor
 
 **Check after the build:** `+` sits left of Sum and toggles the card; a click near the top-left
 opens it down-right with its corner at the click, and after `⇄` (dock right) down-left; the card
+opens with the caret in the box and the folder list CLOSED — the first "+" of a new window, a "+"
+after selecting another tab (the Manager's text changed), and a "+" after `⇄`; a click in the box
+then opens the list right below the box; with the list open, a window resize that moves the card
+and a typed session id that shows Fork keep the list under the box; after Browse… the list stays as
+it was; the card
 shows the Manager box's text and the same underline; typing opens the drop-down and mirrors into the
 Manager's box (open the Agent Manager page beside it to watch); Browse… / a RECENT row / a GIT
 WORKTREES row work; hovering Launch opens the model / preset menu at once (no wait), a click on
