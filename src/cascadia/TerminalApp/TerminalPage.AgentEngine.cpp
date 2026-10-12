@@ -39,6 +39,8 @@
 #include "AgentTranscriptOverlay.h" // ~TerminalPage destroys the com_ptr<AgentTranscriptOverlay> — needs the complete type
 #include "AgentLaunchBar.h" // ~TerminalPage shuts the side panel "+" launcher's bar down (AgentLaunchBar::Shutdown) — needs the complete type
 #include "AgentCatchLog.h" // exception forensics: InstallAgentExceptionTrace (VEH throw-stack ring + wil failure logger, engine init below)
+#include "AgentTipHelpers.h" // AgentSetTip — the Home button's tooltip, whose text follows its face (Home / jump back)
+#include <winrt/Windows.UI.Xaml.Automation.h> // AutomationProperties::SetName — the Home button's accessible name follows its face too
 #include "AgentToastActivator.h" // System notifications: the toast COM activator (registered once, process-wide, from the engine init below)
 #include "TabHeaderControl.h" // Agentmaster: SetTabRenameCommitMode (push the GLOBAL rename-commit mode to tab headers)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / AgentmasterStateDir / MaterializeSharedHookFiles
@@ -240,6 +242,25 @@ static void _PaintManagerHomeButton(const winrt::WUX::Controls::Button& btn, con
     {
         ::Agentmaster::AgentLogCaughtException(L"_PaintManagerHomeButton");
     }
+}
+
+// Agentmaster: how long the pointer must rest on the Home button before its tooltip opens — the delay its
+// XAML tooltip had before the tooltip moved to AgentSetTip (2026-10-12, when the text started following
+// the button's face). XAML's ToolTipService opens a mouse-hovered tip after TWICE the system mouse-hover
+// time (WinUI ToolTipService::GetInitialShowDelay: Mouse = 2x SPI_GETMOUSEHOVERTIME, 400 ms by default),
+// while AgentSetTip's default is a third of it (~133 ms). The button sits at the strip's left edge, where
+// the pointer passes on its way to the tabs, so the faster default would pop the tip up far more often;
+// keeping the old delay keeps the old feel.
+// Returns: 2 x the system mouse-hover time (800 ms when the setting is unreadable or zero).
+// Never throws: one SystemParametersInfoW read, with a fallback.
+static std::chrono::milliseconds _ManagerHomeButtonTipDelay() noexcept
+{
+    UINT hoverMs = 0;
+    if (!::SystemParametersInfoW(SPI_GETMOUSEHOVERTIME, 0, &hoverMs, 0) || hoverMs == 0)
+    {
+        hoverMs = 400; // ToolTipService's own fallback (DEFAULT_SPI_GETMOUSEHOVERTIME)
+    }
+    return std::chrono::milliseconds{ 2LL * hoverMs };
 }
 
 // ---- Agentmaster: UI-stall RESCUE window + self-RESTART (Engine.h's escalation block) -------------
@@ -693,9 +714,10 @@ namespace winrt::TerminalApp::implementation
     // and persist it (the window now reopens onto the Manager — its record names no focused tab).
     // Parameters:
     //   reason - which entry point asked; rides the [nav] line ("home", "last tab closed", ...).
-    // Idempotent: while the page is already up this does nothing — a double-clicked Home never flickers,
-    //   and a Sessions page open over the Manager keeps its keyboard focus. No page (a failed build) is a
-    //   no-op too. UI thread only.
+    // Idempotent: while the page is already up this does nothing — a Sessions page open over the Manager
+    //   keeps its keyboard focus. (A double-clicked Home never reaches here twice: the button's own
+    //   double-click guard drops the second click, which would otherwise land on its jump-back face —
+    //   _OnManagerHomeButtonClick.) No page (a failed build) is a no-op too. UI thread only.
     // Never throws: every step is contained and logged (Rule #18); a failed step degrades only its effect.
     void TerminalPage::_ShowManagerPage(const std::wstring_view reason)
     {
@@ -821,9 +843,9 @@ namespace winrt::TerminalApp::implementation
     // SelectionChanged and _OnTabSelectionChanged leaves the page. But when `tab` is ALREADY the strip's
     // selected item — MUX kept or re-acquired the selection under the page (see
     // _DeselectTabStripForManagerPage) — selecting it again raises nothing, and the page would stay up over
-    // a tab the user just asked for (Jump Back to the tab you came from, a click on that tab's header, a
-    // toast click). Then this runs the switch the funnel would have run: hide the page, swap the tab in, the
-    // shared Agentmaster selection effects, the record save and the nav buttons.
+    // a tab the user just asked for (the Home button's jump back to the tab you came from, a click on that
+    // tab's header, a toast click). Then this runs the switch the funnel would have run: hide the page,
+    // swap the tab in, the shared Agentmaster selection effects, the record save and the nav buttons.
     // Parameters:
     //   tab - the tab about to be selected (null tolerated).
     // Returns: true when it switched to `tab` itself; false when the page is not up, `tab` is null, or the
@@ -934,17 +956,128 @@ namespace winrt::TerminalApp::implementation
         return {};
     }
 
-    // Agentmaster: recompute the two tab-strip nav buttons — the Agent Manager's whole presence in the strip
-    // now that it is a page, not a tab:
-    //  - Home: shown whenever this window HAS a Manager page (always, once _CreateAgentManagerPage built
-    //    it) — it is the ONLY way to open the page, so it can never hide the way the old scroll-triggered
-    //    "the Manager tab scrolled off" Home did. While the page is on screen it paints as the active
-    //    entry of the strip (the tabs are deselected then — nothing else says "you are here").
-    //  - Jump Back: shown while the page IS on screen and a managed session card is selected that this
-    //    window hosts as a live tab (jump BACK to it — typically the session you came from, which the
-    //    Linked-Lenses sync auto-selected).
-    // Called from tab add/remove, tab switch, page show/hide, the lens-changed push (selection), and once
-    // at first layout. Cheap and idempotent (both writes are change-gated). UI thread only.
+    // Agentmaster: the session the Home button's JUMP-BACK face returns to — the Manager lens's selected
+    // managed session (the board card / tree row highlighted on the page; the Linked-Lenses sync selects
+    // the session of the tab you switched from, so it is usually where you came from), but only while the
+    // Agent Manager page is on screen and only when THIS window hosts that session as a live tab. A
+    // session hosted by another window (the GLOBAL board shows the whole fleet) is no jump BACK — a click
+    // would carry the user into a different window — so the button keeps its Home face then; the same rule
+    // the separate Jump Back button had before it merged into Home (2026-10-12).
+    // Returns: the session id; empty when there is nothing to jump back to (off the page, nothing or an
+    //   external selected, the session's tab closed or hosted elsewhere).
+    // UI thread only (reads the page flag and _claudeTabs). Never throws: a flag read, the lens's own
+    //   selection read and a map lookup with a weak-reference resolve.
+    std::wstring TerminalPage::_ManagerJumpBackSessionId() const
+    {
+        if (!_managerPageVisible)
+        {
+            return {};
+        }
+        auto sel = _ManagerSelectedSessionId();
+        if (sel.empty())
+        {
+            return {};
+        }
+        const auto it = _claudeTabs.find(sel);
+        if (it == _claudeTabs.end() || !it->second.get())
+        {
+            return {}; // its tab is gone, or it lives in another window
+        }
+        return sel;
+    }
+
+    // Agentmaster: put the Home button's FACE on it — its glyph, tooltip and accessible name, which always
+    // change together (the click decides from the live state, the same way — _OnManagerHomeButtonClick):
+    //  - off the page: HOME (E80F). A click opens the Agent Manager page.
+    //  - on the page, nothing to jump back to: still HOME (painted active by _PaintManagerHomeButton). A
+    //    click does nothing — the page is already up — so the tooltip says how the arrow comes back.
+    //  - on the page, with a session to jump back to: the JUMP-BACK arrow (E7A7, the Undo glyph the separate
+    //    Jump Back button wore until 2026-10-12). A click returns to that session's tab. The tooltip and the
+    //    accessible name say which session, by the title its tab shows (a managed tab's pinned session
+    //    title, Rule #11) — the selection is not always the tab you came from (a card clicked on the page,
+    //    or a page opened from a shell tab, which leaves the earlier selection in place).
+    // Change-gated on the tooltip text (_managerHomeButtonTip), which encodes the whole face, because the
+    // updater runs on every tab add / remove / switch — hundreds of times in a big window restore — and each
+    // glyph write would re-measure the strip. The tooltip goes through AgentSetTip, the shared islands-safe
+    // tip: a re-call only swaps the recorded text, and a tip open on the button shows the new text at once.
+    // Parameters:
+    //   backSessionId - the session a click would return to (_ManagerJumpBackSessionId); empty = a Home face.
+    // UI thread only. Never throws: a failed write is logged (Rule #18) and leaves the gate unchanged, so the
+    //   next update retries; a click still does the right thing meanwhile, since it reads the live state.
+    void TerminalPage::_ApplyManagerHomeButtonFace(const std::wstring& backSessionId)
+    {
+        if (!_managerHomeButton)
+        {
+            return;
+        }
+        try
+        {
+            const bool back = !backSessionId.empty();
+            // The session the arrow names: its tab's title. Never empty for a managed tab in practice (the
+            // title is pinned at launch); an empty one falls back to a generic phrase, still a full sentence.
+            std::wstring backTitle;
+            if (back)
+            {
+                if (const auto it = _claudeTabs.find(backSessionId); it != _claudeTabs.end())
+                {
+                    if (const auto tab = it->second.get())
+                    {
+                        backTitle = std::wstring{ tab.Title() };
+                    }
+                }
+            }
+            std::wstring tip;
+            std::wstring name;
+            if (back)
+            {
+                const auto quoted = backTitle.empty() ? std::wstring{ L"the selected session" } : (L"\x201C" + backTitle + L"\x201D");
+                tip = L"Jump back to " + quoted + L" \x2014 leave the Agent Manager for the tab of the session selected in it.";
+                name = L"Jump back to " + (backTitle.empty() ? std::wstring{ L"the selected session" } : backTitle);
+            }
+            else if (_managerPageVisible)
+            {
+                tip = L"Agent Manager \x2014 open now. Select a session of this window (a board card or a tree row) and this button turns into a back arrow that returns to its tab. Or click any tab.";
+                name = L"Agent Manager";
+            }
+            else
+            {
+                tip = L"Agent Manager \x2014 open the fleet page (Triage Board, Explorer Tree, Prompt Queue). While it is open, this button turns into a back arrow that returns to the selected session's tab.";
+                name = L"Agent Manager";
+            }
+            if (_managerHomeButtonTip == tip)
+            {
+                return; // this face is already on the button
+            }
+            // The glyph: the FontIcon is the button's DIRECT Content (TabRowControl.xaml keeps it so). A
+            // different Content would only leave the glyph unchanged; the tooltip and the name still flip.
+            if (const auto glyph = _managerHomeButton.Content().try_as<winrt::WUX::Controls::FontIcon>())
+            {
+                glyph.Glyph(back ? L"\xE7A7" : L"\xE80F");
+            }
+            winrt::WUX::Automation::AutomationProperties::SetName(_managerHomeButton, winrt::hstring{ name });
+            // With the open delay the XAML tooltip had (_ManagerHomeButtonTipDelay), not AgentSetTip's faster default.
+            AgentSetTip(_managerHomeButton, winrt::hstring{ tip }, _ManagerHomeButtonTipDelay());
+            // Last, so a throw above leaves the gate on the old face and the next update writes again.
+            _managerHomeButtonTip = std::move(tip);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ApplyManagerHomeButtonFace");
+        }
+    }
+
+    // Agentmaster: recompute the tab-strip Home button — the Agent Manager's whole presence in the strip now
+    // that it is a page, not a tab:
+    //  - shown whenever this window HAS a Manager page (always, once _CreateAgentManagerPage built it) — it
+    //    is the ONLY way to open the page, so it can never hide the way the old scroll-triggered "the
+    //    Manager tab scrolled off" Home did;
+    //  - painted as the strip's active entry while the page is on screen (the tabs are deselected then —
+    //    nothing else says "you are here");
+    //  - its face: Home, or — on the page, with a selected managed session this window hosts as a live tab
+    //    (typically the session you came from, which the Linked-Lenses sync auto-selected) — the jump-back
+    //    arrow that returns to that tab (the separate Jump Back button until 2026-10-12).
+    // Called from tab add/remove, tab switch, page show/hide, the lens-changed push (selection), a hover on
+    // the button, and once at first layout. Cheap and idempotent (every write is change-gated). UI thread only.
     void TerminalPage::_UpdateManagerNavButtons()
     {
         _EnsureTabStripScrollViewer();
@@ -953,38 +1086,79 @@ namespace winrt::TerminalApp::implementation
         _SetTabStripButtonVisible(_managerHomeButton, static_cast<bool>(_managerPage));
         _PaintManagerHomeButton(_managerHomeButton, _managerPageVisible);
 
-        // --- Jump Back: on the page, with a selected managed session this window hosts live. ---
-        auto showBack = false;
-        if (_managerPageVisible)
-        {
-            if (const auto sel = _ManagerSelectedSessionId(); !sel.empty())
-            {
-                const auto it = _claudeTabs.find(sel);
-                showBack = (it != _claudeTabs.end()) && static_cast<bool>(it->second.get());
-            }
-        }
-        _SetTabStripButtonVisible(_managerJumpBackButton, showBack);
+        // --- Its face: the jump-back arrow on the page with a selected managed session this window hosts
+        //     live; Home otherwise. ---
+        _ApplyManagerHomeButtonFace(_ManagerJumpBackSessionId());
     }
 
-    // Agentmaster: the Home button's action — open the Agent Manager page (the one and only user-facing
-    // way to reach it, now that the pinned Manager tab is gone). Idempotent: a click while the page is
-    // already up does nothing (so a double-click can't flicker, and a Sessions page open over the Manager
-    // keeps its focus); leaving the page is a click on any tab, Jump Back, or a tab-switching key.
+    // Agentmaster: the Home button's action, by the face it shows (both read from the live state here, not
+    // from the face, so a click can never act on a stale face):
+    //  - off the page: open the Agent Manager page (the one and only user-facing way to reach it, now that
+    //    the pinned Manager tab is gone);
+    //  - on the page, with a session to jump back to (_ManagerJumpBackSessionId): return to that session's
+    //    tab. _ActivateClaudeSession selects it in this window, and that selection takes the page off screen
+    //    (the tab-switch funnel, or _LeaveManagerPageOntoSelectedTab when the strip still had that tab
+    //    selected under the page) — whereupon the button turns back into Home;
+    //  - on the page, with nothing to jump back to: nothing (the page is already up; a Sessions page open
+    //    over the Manager keeps its focus).
+    // A DOUBLE-CLICK GUARD: a click within the system double-click time of a click that ACTED (opened the
+    // page, or jumped back) is ignored. Without it a double-click on Home would open the page and jump
+    // straight back (its second click lands on the arrow), and a double-click on the arrow would jump back
+    // and reopen the page. The guard is armed BEFORE the action, so it holds however the tab switch is
+    // delivered; a click that does nothing (the Home face on the page) does not arm it. Logged as a [nav]
+    // line so a "my click did nothing" report shows why.
+    // Parameters: sender / args — the Click event's (unused: the button is the one _managerHomeButton).
+    // UI thread only. Never throws: an event handler must not (an exception escaping into XAML's dispatch
+    // can end the process), so a failure — the jump back's tab selection on a TabView torn down under it —
+    // is logged (Rule #18) and the click simply does nothing more.
     void TerminalPage::_OnManagerHomeButtonClick(const IInspectable& /*sender*/, const winrt::WUX::RoutedEventArgs& /*args*/)
     {
-        _ShowManagerPage(L"home");
+        try
+        {
+            const auto now = ::GetTickCount64();
+            if (_managerHomeButtonFlipTick != 0 && now - _managerHomeButtonFlipTick <= ::GetDoubleClickTime())
+            {
+                ::Agentmaster::LogNav(L"home-button click ignored (the second click of a double-click)");
+                return;
+            }
+            if (_managerPageVisible)
+            {
+                const auto backId = _ManagerJumpBackSessionId();
+                if (backId.empty())
+                {
+                    return; // the Home face on the page: nothing to jump back to, and the page is already up
+                }
+                _managerHomeButtonFlipTick = now;
+                ::Agentmaster::LogNav(L"home-button jump-back -> " + ::Agentmaster::ShortId(backId));
+                _ActivateClaudeSession(winrt::hstring{ backId });
+                return;
+            }
+            _managerHomeButtonFlipTick = now;
+            _ShowManagerPage(L"home");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_OnManagerHomeButtonClick");
+        }
     }
 
-    // Agentmaster: the Jump Back button's action — the inverse of Home. Return to the tab of the
-    // session currently selected in the Manager lens (the card auto-selected when you came from it).
-    // _ActivateClaudeSession jumps locally, else fans out to the window that hosts the session; either
-    // way the resulting tab selection is what takes the page off screen (the tab-switch funnel, or
-    // _LeaveManagerPageOntoSelectedTab when the strip still had that tab selected under the page).
-    void TerminalPage::_OnManagerJumpBackButtonClick(const IInspectable& /*sender*/, const winrt::WUX::RoutedEventArgs& /*args*/)
+    // Agentmaster: the pointer entered the Home button — bring its face up to date before its tooltip opens
+    // (the shared tip reads the text when it opens, ~1/3 of the hover time later). The jump-back tooltip
+    // names the session by its tab's title, and a rename while the page is up (F2 in the tree) raises
+    // nothing that reaches the button, so without this the arrow could name the session's old title.
+    // Parameters: sender / args — the PointerEntered event's (unused; never marked Handled, so the button's
+    // own hover visuals and the tooltip's handlers run as before).
+    // UI thread only. Never throws: an event handler must not, so a failure is logged (Rule #18) and the
+    //   button keeps the face it had.
+    void TerminalPage::_OnManagerHomeButtonPointerEntered(const IInspectable& /*sender*/, const winrt::WUX::Input::PointerRoutedEventArgs& /*args*/)
     {
-        if (const auto sel = _ManagerSelectedSessionId(); !sel.empty())
+        try
         {
-            _ActivateClaudeSession(winrt::hstring{ sel });
+            _UpdateManagerNavButtons();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_OnManagerHomeButtonPointerEntered");
         }
     }
 
@@ -2191,8 +2365,9 @@ namespace winrt::TerminalApp::implementation
                 // Linked Lenses: a selection change is one of the lens mutations — re-pill the
                 // selected session's tab (when nothing is hovered, the pill tracks the selection).
                 self->_UpdateManagerSelectionHighlight();
-                // Agentmaster: the Jump Back button targets the selected session, so a selection
-                // change while the Manager page is up flips whether it has somewhere to jump back to.
+                // Agentmaster: the Home button's jump-back face targets the selected session, so a
+                // selection change while the Manager page is up flips whether it has somewhere to jump
+                // back to (arrow vs Home) and which session its tooltip names.
                 self->_UpdateManagerNavButtons();
                 // Side panel: follow the lens selection (a board-card/tree click selects the same
                 // session's card + summary there). driveManagerLens=false — the lens IS the

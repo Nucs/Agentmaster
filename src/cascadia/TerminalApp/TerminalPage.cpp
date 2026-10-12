@@ -397,20 +397,19 @@ namespace winrt::TerminalApp::implementation
         auto tabRowImpl = winrt::get_self<implementation::TabRowControl>(_tabRow);
         _newTabButton = tabRowImpl->NewTabButton();
 
-        // Agentmaster: the two tab-strip nav buttons (TabStripHeader, immediately left of the `<` scroll
-        // arrow), both hidden in XAML and driven by _UpdateManagerNavButtons. Home is the Agent Manager's
-        // place in the strip — shown once the window's Manager page exists, it is the ONLY way to open the
-        // page (the Manager is no longer a tab); Jump Back is its inverse — shown while the page is up, it
-        // returns to the selected session's tab. Clicks wired here (like the New Tab button).
+        // Agentmaster: the tab-strip Home button (TabStripHeader, immediately left of the `<` scroll arrow),
+        // hidden in XAML and driven by _UpdateManagerNavButtons. It is the Agent Manager's place in the
+        // strip — shown once the window's Manager page exists, it is the ONLY way to open the page (the
+        // Manager is no longer a tab) — and on the page it turns into the jump-back arrow that returns to
+        // the selected session's tab. The click is wired here (like the New Tab button), and so is the
+        // hover refresh that keeps its tooltip naming the session under its current title (a rename while
+        // the page is up raises nothing that reaches the button). Both weak: the tab row can outlive this
+        // TerminalPage by a beat at teardown.
         _managerHomeButton = tabRowImpl->ManagerHomeButton();
         if (_managerHomeButton)
         {
             _managerHomeButton.Click({ get_weak(), &TerminalPage::_OnManagerHomeButtonClick });
-        }
-        _managerJumpBackButton = tabRowImpl->ManagerJumpBackButton();
-        if (_managerJumpBackButton)
-        {
-            _managerJumpBackButton.Click({ get_weak(), &TerminalPage::_OnManagerJumpBackButtonClick });
+            _managerHomeButton.PointerEntered({ get_weak(), &TerminalPage::_OnManagerHomeButtonPointerEntered });
         }
 
         if (_settings.GlobalSettings().ShowTabsInTitlebar())

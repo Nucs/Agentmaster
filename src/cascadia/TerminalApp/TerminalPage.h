@@ -340,16 +340,28 @@ namespace winrt::TerminalApp::implementation
         Microsoft::UI::Xaml::Controls::SplitButton _newTabButton{ nullptr };
         winrt::TerminalApp::ColorPickupFlyout _tabColorPicker{ nullptr };
 
-        // Agentmaster: the two tab-strip nav buttons in the TabStripHeader (immediately left of the
-        // `<` scroll arrow), driven by _UpdateManagerNavButtons. _managerHomeButton IS the Agent
-        // Manager's place in the strip now that the Manager is a page, not a tab: always shown (once
-        // the page exists), the ONLY way to open the page, and painted as the active tab while the page
-        // is on screen. _managerJumpBackButton is its inverse — shown while the page is up with a session
-        // card selected, it jumps BACK to that session's tab. Plus the TabView's internal horizontal
-        // ScrollViewer (found lazily once the strip is templated) that the strip reveal and the drag
-        // gesture's auto-scroll drive.
+        // Agentmaster: the tab-strip nav button in the TabStripHeader (immediately left of the `<` scroll
+        // arrow), driven by _UpdateManagerNavButtons. _managerHomeButton IS the Agent Manager's place in
+        // the strip now that the Manager is a page, not a tab: always shown (once the page exists), the
+        // ONLY way to open the page, and painted as the active tab while the page is on screen. It has two
+        // FACES (_ApplyManagerHomeButtonFace): Home off the page, and — on the page, while a session this
+        // window hosts is selected in the Manager — the jump-back arrow, whose click returns to that
+        // session's tab (until 2026-10-12 that was a separate Jump Back button beside Home).
+        // Plus the TabView's internal horizontal ScrollViewer (found lazily once the strip is templated)
+        // that the strip reveal and the drag gesture's auto-scroll drive.
         Windows::UI::Xaml::Controls::Button _managerHomeButton{ nullptr };
-        Windows::UI::Xaml::Controls::Button _managerJumpBackButton{ nullptr };
+        // The tooltip text _ApplyManagerHomeButtonFace last applied to the Home button — its change gate.
+        // The text encodes the whole face (Home off the page / Home on the page / the jump-back arrow plus
+        // the name of the session it returns to), so equal text == nothing to rewrite. Empty == never
+        // applied (the first update always writes), and a failed apply leaves it untouched so the next
+        // update retries.
+        std::wstring _managerHomeButtonTip;
+        // GetTickCount64() of the last Home-button click that ACTED (it opened the page, or it jumped back
+        // off it); 0 == none yet. _OnManagerHomeButtonClick ignores a click within the system double-click
+        // time of it: a double-click on Home would otherwise open the page and jump straight back (the
+        // second click lands on the jump-back face), and a double-click on the arrow would jump back and
+        // reopen the page.
+        uint64_t _managerHomeButtonFlipTick{ 0 };
         Windows::UI::Xaml::Controls::ScrollViewer _tabStripScrollViewer{ nullptr };
         // Agentmaster: the POINTER-OWNED tab reorder/tear-out gesture's state (native MUX drag is
         // permanently OFF — the drag-AV resolution; TerminalPage.AgentEngine.cpp). One gesture at a
@@ -2437,17 +2449,21 @@ namespace winrt::TerminalApp::implementation
         void _OnTabCloseRequested(const IInspectable& sender, const Microsoft::UI::Xaml::Controls::TabViewTabCloseRequestedEventArgs& eventArgs);
         void _OnFirstLayout(const IInspectable& sender, const IInspectable& eventArgs);
 
-        // Agentmaster: the two tab-strip nav buttons. _UpdateManagerNavButtons recomputes both: Home (the
-        // Agent Manager's place in the strip — always shown once the page exists, painted as the active tab
-        // while the page is up) and Jump Back (its inverse — return to the selected session's tab while the
-        // page is up). _EnsureTabStripScrollViewer binds (lazily) to the TabView's internal horizontal
-        // scroller that the strip reveal + the drag gesture drive. (All defined in
+        // Agentmaster: the tab-strip Home button. _UpdateManagerNavButtons recomputes it: shown once the page
+        // exists, painted as the active tab while the page is up, and its face — Home, or on the page the
+        // jump-back arrow to the selected session's tab (_ManagerJumpBackSessionId picks that session,
+        // _ApplyManagerHomeButtonFace writes the glyph / tooltip / accessible name). Its click opens the page
+        // or jumps back, by the face it shows; hovering it re-runs the update so the tooltip names the
+        // session as it is called right now. _EnsureTabStripScrollViewer binds (lazily) to the TabView's
+        // internal horizontal scroller that the strip reveal + the drag gesture drive. (All defined in
         // TerminalPage.AgentEngine.cpp.)
         void _OnManagerHomeButtonClick(const IInspectable& sender, const Windows::UI::Xaml::RoutedEventArgs& args);
-        void _OnManagerJumpBackButtonClick(const IInspectable& sender, const Windows::UI::Xaml::RoutedEventArgs& args);
+        void _OnManagerHomeButtonPointerEntered(const IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& args);
         void _EnsureTabStripScrollViewer();
         void _UpdateManagerNavButtons();
         std::wstring _ManagerSelectedSessionId() const; // the Manager lens's currently-selected managed session (empty if none / an external is selected)
+        std::wstring _ManagerJumpBackSessionId() const; // the session the Home button's jump-back face returns to (empty: no jump back now)
+        void _ApplyManagerHomeButtonFace(const std::wstring& backSessionId);
 
         void _UpdatedSelectedTab(const winrt::TerminalApp::Tab& tab);
         void _UpdateBackground(const winrt::Microsoft::Terminal::Settings::Model::Profile& profile);

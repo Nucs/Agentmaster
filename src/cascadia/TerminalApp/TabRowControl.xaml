@@ -55,7 +55,9 @@
                   to the LEFT of the `<` scroll arrow. It hosts the existing elevation shield AND the
                   "Home" button — the Agent Manager's place in the strip now that the Manager is a page,
                   not a tab: always shown (TerminalPage::_UpdateManagerNavButtons) and the ONLY way to
-                  open the Agent Manager page; it paints as the active tab while the page is up.  -->
+                  open the Agent Manager page; it paints as the active tab while the page is up, and on
+                  the page it turns into the jump-back arrow (one button, two faces — there is no
+                  separate Jump Back button any more).  -->
             <StackPanel Orientation="Horizontal"
                         VerticalAlignment="Stretch">
                 <!--  EA18 is the "Shield" glyph  -->
@@ -67,12 +69,20 @@
                           Glyph="&#xEA18;"
                           Visibility="{x:Bind ShowElevationShield, Mode=OneWay}" />
 
-                <!--  Agentmaster: E80F is the "Home" glyph. Collapsed here until the window's Agent
-                      Manager page exists (TerminalPage shows it then, for good), and TerminalPage wires the
-                      Click (like the New Tab button, in C++) — not here. Flat/transparent so it reads as part
-                      of the tab strip beside the scroll arrows; sized/aligned to match the New Tab button.
-                      While the page is on screen TerminalPage paints its Background with the accent
-                      "selected" tint (the tabs are deselected then).  -->
+                <!--  Agentmaster: the Agent Manager's button, with TWO FACES (TerminalPage::
+                      _ApplyManagerHomeButtonFace). Off the page it is HOME (E80F = the "Home" glyph): a click
+                      opens the Agent Manager page. On the page, while a session of this window is selected in
+                      the Manager, it turns into the JUMP-BACK arrow (E7A7 = the "Undo" glyph — the arrow the
+                      separate Jump Back button wore until 2026-10-12): a click returns to that session's tab.
+                      Collapsed here until the window's Agent Manager page exists (TerminalPage shows it then,
+                      for good), and TerminalPage wires the Click (like the New Tab button, in C++) — not here.
+                      Flat/transparent so it reads as part of the tab strip beside the scroll arrows;
+                      sized/aligned to match the New Tab button. While the page is on screen TerminalPage paints
+                      its Background with the accent "selected" tint (the tabs are deselected then), in both faces.
+                      ⚠ The glyph is flipped through the button's Content, so the FontIcon must stay its DIRECT
+                      Content. The tooltip is set from C++ (AgentSetTip — its text follows the face and names the
+                      session a click returns to); never add a ToolTipService.ToolTip here: the shared tip's open
+                      and close REPLACE and then CLEAR whatever tooltip the button carries.  -->
                 <Button x:Name="ManagerHomeButton"
                         Height="24"
                         MinWidth="0"
@@ -83,32 +93,10 @@
                         Background="Transparent"
                         BorderThickness="0"
                         Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
-                        ToolTipService.ToolTip="Agent Manager &#x2014; open the fleet page (Triage Board, Explorer, Auto Testing). Click any tab to go back to it."
                         Visibility="Collapsed">
                     <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
                               FontSize="14"
                               Glyph="&#xE80F;" />
-                </Button>
-
-                <!--  Agentmaster: the inverse of Home — a "Jump Back" revert button (E7A7 = Undo glyph).
-                      Collapsed by default; TerminalPage surfaces it while the Agent Manager page is on
-                      screen and a session card is selected, and on click jumps back to that session's tab
-                      (the one auto-selected when you came from it). Click wired in C++. Same flat look as Home.  -->
-                <Button x:Name="ManagerJumpBackButton"
-                        Height="24"
-                        MinWidth="0"
-                        Margin="2,4,2,4"
-                        Padding="8,0"
-                        VerticalAlignment="Bottom"
-                        AutomationProperties.Name="Jump back to the selected session"
-                        Background="Transparent"
-                        BorderThickness="0"
-                        Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
-                        ToolTipService.ToolTip="Jump back to the selected session &#x2014; return to the tab of the session highlighted in the Manager (shown while the Agent Manager is open)."
-                        Visibility="Collapsed">
-                    <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                              FontSize="14"
-                              Glyph="&#xE7A7;" />
                 </Button>
             </StackPanel>
         </mux:TabView.TabStripHeader>

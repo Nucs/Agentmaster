@@ -1449,9 +1449,10 @@ namespace winrt::TerminalApp::implementation
             // strip had been scrolled to. Reveal it explicitly then (a no-op when it is wholly on screen).
             // A different tab needs nothing here: the selection change runs the funnel, which reveals it.
             const bool alreadySelected = (_tabView.SelectedItem() == item);
-            // Agentmaster (the Agent Manager PAGE): the same no-SelectionChanged trap covers the page — a
-            // Jump Back / card double-click / toast click for the tab MUX still holds selected under the
-            // page would otherwise leave the page up. Switch explicitly then (a no-op off the page).
+            // Agentmaster (the Agent Manager PAGE): the same no-SelectionChanged trap covers the page — the
+            // Home button's jump back / a card double-click / a toast click for the tab MUX still holds
+            // selected under the page would otherwise leave the page up. Switch explicitly then (a no-op off
+            // the page).
             if (alreadySelected)
             {
                 _LeaveManagerPageOntoSelectedTab(tab);

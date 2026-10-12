@@ -48,7 +48,7 @@ You never have to open the Manager to read a session. Every classified tab wears
 - **Never dead-ends** — quit an agent and you land on a live shell prompt at its cwd, not a dead pane.
 - **Sessions row Filter** — right-click a row to narrow the list by dir / branch / day / week / month / fork-family.
 - **Favorite crown** — a starred session wears a gold crown on its tab-strip dot.
-- **Home / Jump-Back** — jump to the pinned Manager tab and back to where you were.
+- **Home / jump back** — one button in the tab strip opens the Agent Manager; while it is open, the same button turns into a back arrow that returns you to the session's tab.
 - **Hide / Unhide** — drop a session from the Sessions list (reversible; the transcript is untouched).
 
 ## 🟢 Status

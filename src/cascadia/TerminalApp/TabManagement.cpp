@@ -832,7 +832,7 @@ namespace winrt::TerminalApp::implementation
             // Agentmaster: the successor is now the selected tab, but _OnTabSelectionChanged skipped the
             // switch (the _removing guard), so run the same Agentmaster effects a normal switch gets —
             // _ApplyAgentTabSelection's one shared body — plus the funnel's two tail steps. Without them,
-            // the Home / Jump Back buttons were computed while the closed tab still held the selection, the
+            // the Home button (paint and face) was computed while the closed tab still held the selection, the
             // successor's overlay never learned it was focused, and the Linked-Lenses selection kept
             // pointing at the closed session. Skipped once the window's teardown has begun (the
             // deterministic close flush already captured the record, and the window is going away).
@@ -1573,9 +1573,9 @@ namespace winrt::TerminalApp::implementation
         }
         _UpdateTabView();
 
-        // Agentmaster: adding/removing tabs can close (or bring back) the tab Jump Back targets — so
-        // re-evaluate the Manager nav buttons. Also a retry point for binding the internal scroller if
-        // it wasn't realized at first layout.
+        // Agentmaster: adding/removing tabs can close (or bring back) the tab the Home button's jump-back
+        // face targets — so re-evaluate the Manager nav button. Also a retry point for binding the
+        // internal scroller if it wasn't realized at first layout.
         _UpdateManagerNavButtons();
 
         // Agentmaster: a tab with a multi-line title being added or removed changes the tallest tab in
@@ -1799,9 +1799,9 @@ namespace winrt::TerminalApp::implementation
             // Agentmaster (tab-strip reveal): upstream's `tab.TabViewItem().StartBringIntoView()` silently
             // NO-OPS on a tab scrolled far off the strip — the strip virtualizes, so such a tab's
             // TabViewItem is not in the visual tree — and Agentmaster windows hold hundreds of tabs. Every
-            // selection of a far tab (a card double-click, Jump Back, a toast click, switchToTab, a close
-            // successor, Move to start/end, a restored window's focused tab) swapped the content in without
-            // scrolling the strip to it. _RevealTabInStrip realizes it first. leaveFullyVisibleInPlace
+            // selection of a far tab (a card double-click, the Home button's jump back, a toast click,
+            // switchToTab, a close successor, Move to start/end, a restored window's focused tab) swapped the
+            // content in without scrolling the strip to it. _RevealTabInStrip realizes it first. leaveFullyVisibleInPlace
             // keeps what StartBringIntoView did right: a tab already wholly on screen — the one you just
             // clicked — never moves.
             _RevealTabInStrip(tab, /*leaveFullyVisibleInPlace*/ true);
@@ -1985,8 +1985,8 @@ namespace winrt::TerminalApp::implementation
             // _ScheduleWindowRecordSave no-ops until startup completes, so the tab-creation selection
             // churn during restore never thrashes a save, and rapid switching collapses to one write.
             _ScheduleWindowRecordSave();
-            // Agentmaster: the active tab just changed — re-evaluate the tab-strip nav buttons (Home drops
-            // its active paint and Jump Back hides once a tab replaced the Agent Manager page).
+            // Agentmaster: the active tab just changed — re-evaluate the tab-strip nav button (Home drops
+            // its active paint and its jump-back face once a tab replaced the Agent Manager page).
             _UpdateManagerNavButtons();
         }
     }
