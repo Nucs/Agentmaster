@@ -2,7 +2,7 @@
 
 > **Status: DESIGN (2026-10-12). Not implemented.** Every number here was measured on this machine's
 > real corpus, with a prototype of the schema in a scratch database (DuckDB 2.0.0-alpha through Python;
-> the scripts are in [`tools/sessiondb-bench/`](../../tools/sessiondb-bench/), §14). The decisions D1–D13
+> the scripts are in [`tools/sessiondb-bench/`](../../tools/sessiondb-bench/), §14). The decisions D1–D15
 > (§13) are open; the recommendations are marked. Companions: [`SESSIONS.md`](./SESSIONS.md) (the Sessions
 > page, its search and the AI search as they work today), [`SDK_HARNESS.md`](./SDK_HARNESS.md) (the agent
 > harness the AI search runs on), [`CLI.md`](./CLI.md), [`PROFILES.md`](./PROFILES.md).
@@ -39,6 +39,17 @@
   its index (§5.4). A cold build is estimated at about 2 minutes in C++ (§7.3); new text is searchable
   within about 2 s (§7.4). `duckdb.dll` is 36.7 MB (x64, 1.5.6): about +13 MB per architecture in the
   downloads (D10).
+- **The summary panel from the database (§8.5, measured and verified).** The summary box (per-tab
+  panel, side panel, tab tooltip, Sessions detail) re-reads the whole transcript on every growth: 2.7 s
+  for a 128.7 MB session in today's C++. A precomputed summary row answers in **2.8 ms**. Its 20 facts
+  equal the C++ analyzer's on **921 of 921** sessions.
+- **The session row (§5.6).** About 120 columns per session, grounded in a census of what Claude Code
+  writes: normalized place keys (`cwd_key`, `inferred_dir_key`, `git_root_key`, …, by `NormDirKey`),
+  versions, models, effort, Claude Code's **own cost record** (`cost-state`), token usage, outcomes,
+  work done, titles, lineage. One pass computes them: 922 sessions (3.11 GB) in 11.5 s.
+- **What DuckDB buys and what it does not (§3.5)**, and **the other parts of Agentmaster that would
+  read it (§8.6)**: the conversation chain, the inferred folder of closed sessions, the Fleet
+  Observer's External rows, the launch bar's id check, usage and cost, diagnostics.
 - **Indexes (§6.8, measured).** Every large table is kept **sorted by its main read key** (sorted merges
   plus a periodic re-cluster, 2–5 s per GB), so DuckDB's automatic min/max zonemaps do the work: a
   session's 304 lines read in 2.9 ms sorted against 113 ms interleaved. **ART indexes only where
@@ -195,6 +206,66 @@ The official `libduckdb` DLL of the pinned version (x64 and arm64) through the C
 (Option A in §6.5 would add `fts` through a custom DuckDB build). No network: extension autoinstall and
 autoload are off.
 
+### 3.5 What DuckDB buys, feature by feature, and what it does not
+
+**Wins** (measured on this machine unless marked otherwise):
+
+- **Full-text search over every session:** 2–42 s → 2–33 ms (§6; our own inverted index in DuckDB
+  tables).
+- **The session list without a file read per session:** 6 s+ → 8 ms.
+- **A session's summary:** 2.7 s → 2.8 ms (a precomputed row). It equals the C++ analyzer's on 921 of
+  921 sessions (§8.5).
+- **One pass computes every fact of every session:** `from_json` parses each line once into a typed
+  struct (3.11 GB in 6.7 s on 4 threads), and ordered aggregates turn the lines into a session row:
+  922 sessions in 11.5 s (§5.6).
+- **Columnar storage with ZSTD:** 10.42 GB of JSONL kept verbatim in 2.22 GB (4.7×).
+  - Any transcript rebuilds byte for byte (128.7 MB in 0.6–0.9 s), even after Claude's sweep deleted
+    it (D7).
+  - A parser fix re-derives every table from the stored lines without touching the files.
+- **Joins and aggregations across all sessions:**
+  - A fork's parent from its copied uuids in 8.7–29 ms; the C++ chain walk scans the project folder in
+    260–309 ms.
+  - "Who touched this file", related sessions, token use by day / model / folder.
+- **Ordered aggregates and window functions** (`arg_min` / `arg_max`, `row_number`, `QUALIFY`, running
+  sums) do first / last values, copy de-duplication, compaction segments and timelines in one
+  statement.
+- **Lists, structs and maps in columns:** `histogram()` gives each session a tool-call map, and a whole
+  summary (the numbered prompts, three file lists) is one row.
+- **Zonemaps on sorted tables:** a session's rows in 2.9 ms with no index; ART indexes only for batches
+  of random id lookups (§6.8).
+- **Transactions (MVCC) and a write-ahead log:** an ingest batch is atomic, readers never see half of
+  it, and a crash loses nothing committed.
+- **Cancellation and progress** (`duckdb_interrupt`, `duckdb_query_progress`): a newer keystroke stops
+  the older query.
+- **Appenders and prepared statements** for the C++ ingest and the planner.
+- **SQL over any field** (`v_lines` + `json_extract`): a new question needs no new parser. The summary
+  rules of §8.5 and the session columns of §5.6 were expressed and verified this way, with no C++.
+- **Exports** (Parquet, CSV, JSON), and the DuckDB CLI for diagnosis while the service is stopped (or
+  through `quack` later).
+- **Semantic search later** through the `vss` extension (HNSW).
+
+**No win, or a cost:**
+
+- **Live state** — the scanner's tail and the state machine (Rules #1 and #7), the hook bridge, the
+  delivery gate, presence, the pending-input reader. It stays in memory in the GUI process; a database
+  round trip would only add latency.
+- **Graph walks** (the live branch, long fork chains): SQL runs one recursive step per link. They stay
+  C++ at ingest, and the database stores their result (`line.on_branch`, `session.forked_from`).
+- **Small answers computed from raw lines:** per-statement overhead makes a 1.7 MB session's summary
+  194 ms in SQL against 33 ms in C++. Only precomputed rows are fast (2.8 ms).
+- **One writer process per file**, hence the service process (D3), its protocol and its lifecycle.
+- **A second implementation** of rules that already exist in C++ (the summary), hence a parity test
+  (D14).
+- **Size:** the 36.7 MB DLL (+13 MB per architecture in the downloads, D10), ~3.1 GB on disk, a bounded
+  memory budget (1 GB), a cold build (~2 minutes, estimated).
+- **Traps hit in this prototype** (rules for the implementation):
+  - In 2.0, `->` and `->>` take the lambda arrow's precedence: `j->'a'->>'b' = 'x'` binds as
+    `j -> (('a'->>'b') = 'x')`. It fails to bind, or reads the wrong field without an error. Use
+    `json_extract_string` and `from_json`.
+  - `arg_min` / `arg_max` skip rows whose VALUE is NULL; `arg_min_null` does not.
+  - `regexp_extract` answers the leftmost match, and `EXPLAIN` alone does not show an ART index scan
+    (§6.8).
+
 ## 4. Architecture
 
 ### 4.1 The processes
@@ -296,25 +367,46 @@ CREATE TABLE src_file (
     missing_since  BIGINT               -- set when the file disappeared (D7)
 );
 
--- One row per session: the browse list, the sidecar's TranscriptStats, lineage, usage totals.
+-- One row per session: the browse list, the sidecar's TranscriptStats, places, versions, cost, usage,
+-- outcomes, lineage. ABRIDGED: §5.6 lists every column with its source and rule.
 CREATE TABLE session (
     sid_key        INTEGER PRIMARY KEY,
     session_id     UUID NOT NULL UNIQUE,
     file_id        INTEGER,
-    project_dir    VARCHAR,             -- the encoded folder name (lossy)
-    cwd            VARCHAR,             -- the first line's cwd (the truth)
-    cwd_fold       VARCHAR,             -- folded, '/'-separated: the folder search and grouping key
-    git_branch     VARCHAR,
+    project_dir    VARCHAR,             -- the encoded folder name (lossy, never decoded)
+    cwd            VARCHAR,             -- the first line's cwd as written (the truth)
+    cwd_key        VARCHAR,             -- NormDirKey(cwd): equality and grouping, identical to the GUI's key
+    cwd_fold       VARCHAR,             -- lower-case, '/'-separated: the slash-insensitive folder SEARCH
+    cwd_last VARCHAR, cwd_last_key VARCHAR, cwd_count SMALLINT,
+    inferred_dir VARCHAR, inferred_dir_key VARCHAR,   -- InferWorkingDirectory, computed by the service (D15)
+    git_root_key VARCHAR, color_key VARCHAR, home_launch BOOLEAN,
+    branch_first VARCHAR, branch_last VARCHAR,
+    version_first VARCHAR, version_last VARCHAR, models VARCHAR[], model_last VARCHAR, effort_last VARCHAR,
     created_ms     BIGINT,              -- fork-aware (a fork: the file's birth time)
     last_activity_ms BIGINT,            -- the last non-sidechain user/assistant timestamp
+    last_typed_ms BIGINT, last_turn_end_ms BIGINT,
     custom_title   VARCHAR, ai_title VARCHAR, legacy_summary VARCHAR, first_prompt VARCHAR,
-    forked_from    UUID, fork_root UUID,
+    forked_from    UUID, fork_root UUID, fork_point_line BIGINT, plan_parent UUID,
     user_prompts   INTEGER, assistant_lines INTEGER, tool_uses INTEGER, subagents INTEGER,
     context_tokens BIGINT,              -- the newest turn's usage sum, or a compaction's postTokens
     in_tokens BIGINT, out_tokens BIGINT, cache_read_tokens BIGINT, cache_write_tokens BIGINT,
+    cost_usd DOUBLE, api_ms BIGINT, tool_ms BIGINT, lines_added INTEGER, lines_removed INTEGER,  -- cost-state
     model          VARCHAR, cc_version VARCHAR, size_bytes BIGINT,
+    -- … the rest of §5.6: outcomes, work done, more titles, Agentmaster's facts
     transcript     UTINYINT,            -- 0 present, 1 deleted by Claude's sweep (D7), 2 replaced
     first_doc_id   UINTEGER, last_doc_id UINTEGER  -- the session's block range after the last re-cluster (§6.8)
+);
+
+-- The summary box of every session (§8.5), one row each, refreshed for the sessions an ingest batch
+-- touched: the precomputed form the summary surfaces read with one point query (~3 ms).
+CREATE TABLE summary (
+    sid_key INTEGER PRIMARY KEY,
+    prompts STRUCT(seg SMALLINT, kind UTINYINT, text VARCHAR, uuid UUID)[],  -- the numbered list, earlier segments first
+    files_created VARCHAR[], files_edited VARCHAR[], files_read VARCHAR[],   -- display labels (SeSummaryFileLabel)
+    skills VARCHAR[], tasks_done SMALLINT, tasks_open SMALLINT,
+    plan_exit BOOLEAN, plan_content BOOLEAN, plan_file VARCHAR, plan_reads SMALLINT,
+    recap VARCHAR, compactions SMALLINT,
+    first_ts VARCHAR, last_ts VARCHAR, last_user_ts VARCHAR, branch VARCHAR
 );
 
 -- THE LOSSLESS STORE (§5.5): every line of every transcript (top-level and subagent), verbatim.
@@ -328,6 +420,10 @@ CREATE TABLE line (
     type      VARCHAR,                  -- user, assistant, attachment, progress, mode, last-prompt, ...
     ts_ms     BIGINT,
     bytes     INTEGER,
+    on_branch BOOLEAN,                  -- on the live branch (ActiveBranchUuids, run in C++ at ingest);
+                                        -- rewritten for the session when a rewind moves the leaf (§8.5)
+    seg       SMALLINT,                 -- the /compact segment by position (boundaries before it, itself included)
+    is_copy   BOOLEAN,                  -- its uuid was written earlier: a fork copy, or a legacy re-append
     raw       VARCHAR USING COMPRESSION zstd   -- the line exactly as written, without its newline
 );
 -- Spilled tool outputs (<sid>/tool-results/*) and other per-session side files, one row per file.
@@ -373,7 +469,8 @@ CREATE TABLE doc_hot (
 -- New lines wait here the same way until a merge appends them to `line` sorted by line_id (§6.8).
 CREATE TABLE line_hot (
     line_id BIGINT NOT NULL, file_id INTEGER NOT NULL, line_no INTEGER NOT NULL,
-    uuid UUID, type VARCHAR, ts_ms BIGINT, bytes INTEGER, raw VARCHAR
+    uuid UUID, type VARCHAR, ts_ms BIGINT, bytes INTEGER, on_branch BOOLEAN, seg SMALLINT, is_copy BOOLEAN,
+    raw VARCHAR
 );
 
 -- Tool-touched paths: the 📁/📄 scopes, "who touched this file", the inferred folder.
@@ -406,10 +503,11 @@ memory and never stores it. Presence and the hidden-sessions list (a view prefer
 ### 5.3 Views (the SQL and MCP surface)
 
 `v_sessions` (display title by the page's precedence: stored title > custom > AI > legacy summary >
-first prompt), `v_messages` (`doc` ∪ `doc_hot` with role names), `v_lines` (`line` ∪ `line_hot`: the raw
-JSON of every line, for `json_extract` over fields no other view has), `v_paths`, `v_usage`, `v_links`.
-The read-only SQL tool sees only these views (§10); their columns are listed in the `sql` tool's
-contract (§8.4).
+first prompt; the §5.6 columns a question needs, and the macro `effective_dir_key(mode)`), `v_messages`
+(`doc` ∪ `doc_hot` with role names), `v_lines` (`line` ∪ `line_hot`: the raw JSON of every line, for
+`json_extract` over fields no other view has), `v_paths`, `v_usage`, `v_links`. The read-only SQL tool
+sees only these views (§10); their columns are listed in the `sql` tool's contract (§8.4).
+⚠ Read JSON with `json_extract_string` / `from_json`, never with `->` chains (§3.5).
 
 ### 5.4 Size for today's corpus
 
@@ -479,8 +577,8 @@ original reproduces it exactly, checked when it is written) could save up to ~23
   `claude --resume`: its lines, subagent files and spilled outputs are all there.
 - **A stronger G6:** a parser upgrade (a new line type, a fixed rule) re-derives `doc`, `session`,
   `path_access` and `usage` from the stored lines, without the files.
-- **Later:** the transcript overlay, the summary panel and the Copy ▸ Transcript levels can read a
-  session from the database instead of its file.
+- **The summary panel** reads a precomputed row instead of its file (§8.5); later the transcript overlay
+  and the Copy ▸ Transcript levels can read parsed rows too (§8.6).
 - **SQL over any field:** `v_lines` plus `json_extract`.
 
 **Not covered: side folders outside `projects/`.** `file-history/` (2.07 GB, 62,708 files: the pre-edit
@@ -490,6 +588,188 @@ snapshots that `/rewind` restores; D12), `paste-cache/` (7 MB), `todos/`, `tasks
 **Caveats.** The prototype read the spills as text, and DuckDB's `read_text` refused 4 of its 11
 batches (files that are not valid UTF-8), so the store keeps spills as BLOB. A live transcript keeps
 growing, so a rebuild equals the bytes stored so far; the check compared exactly those bytes.
+
+### 5.6 The session row: every column, and where it comes from
+
+**The question** (2026-10-12): which columns should a session carry? For example, the working
+directory and the inferred directory as normalized paths.
+
+**What the transcripts carry.** Measured by `field_census.py` over the newest 3.0 GB (332 sessions,
+633,905 lines, Claude Code 2.1.123–2.1.291), plus `rg` counts over all 4,444 top-level transcripts on
+disk. A value that changes inside a session needs a first / last pair or a list:
+
+| A session … | Share |
+|---|---|
+| changes `cwd` (the shell's `cd`; fdefc0e8 visits 31 folders) | 47.6% |
+| changes model | 28.3% |
+| changes Claude Code version (resumed after an update) | 8.7% |
+| changes git branch | 6.9% |
+| changes permission mode | 0.3% |
+| has a `/compact` boundary · an idle recap · a message typed while Claude worked | 45.5% · 67.2% · 52.1% |
+| hit an API error · was interrupted · pasted an image | 10.5% · 8.7% · 2.4% |
+| carries more than one leaf marker (one per turn; rewinds hide among them) | 96.7% |
+
+Line kinds that carry session facts. The lossless store keeps them all; ⚠ the classifier
+(`ClassifyTranscriptLine`) extracts none of these facts today.
+
+| Kind | Carries | Sessions |
+|---|---|---|
+| `cost-state` | Claude Code's own running totals: `totalCostUSD`, API time with and without retries, tool time, `totalLinesAdded` / `totalLinesRemoved`, wall time, per-model usage with its `costUSD`, `hasUnknownModelCost` (a model it cannot price, such as a preset's) | 562 of 4,444 (written since ~2.1.225) |
+| `worktree-state` | `worktreePath`, `worktreeName`, `worktreeBranch`, `originalCwd`, `originalBranch`, `originalHeadCommit` | 14 |
+| `relocated` | `relocatedCwd`: the session moved to another folder | rare |
+| `agent-name` | `agentName` | 22 |
+| `frame-link` | an artifact the session published: `path`, `frameUrl`, `title` | 25 |
+| attachment `environment` | `workingDirectory`, `isWorktree`, `isGitRepo`, `additionalWorkingDirectories`, `platform`, `shell`, `osVersion`, `scratchpadDirectory` | newer sessions |
+| attachment `model` | `modelId`, `marketingName`, `knowledgeCutoff` | newer sessions |
+| system `stop_hook_summary` | each Stop hook's command and `durationMs`, its errors | most |
+| system `turn_duration` | `durationMs` and `messageCount` per turn | most |
+| `mode`, `permission-mode` | `normal` / `plan`; `bypassPermissions` / `plan` / `default` | most |
+| `file-history-delta`, `atis-latch` | the file-history tracking of each edited file; an internal flag | — |
+
+Envelope fields, per line:
+
+- **Assistant lines:** `effort` (`max` / `high`), `perTurnEffort`, `requestId`, `attributionSkill` (29% of
+  lines), `attributionMcpServer` / `attributionMcpTool` (6%), `thinkingDurationMs` (14%),
+  `isApiErrorMessage` + `apiErrorStatus`, `isAbortedMidStream`.
+- **`message.usage`:** input, output, cache read, cache creation (split 5 min / 1 h), `server_tool_use`
+  (web searches and fetches), `service_tier`, `speed`, `inference_geo`.
+- **`stop_reason`** includes `refusal` (99 of 228,907 assistant lines) and `max_tokens`.
+- **User lines:** `promptId`, `promptSource` (`typed` / `system`), `turnOrigin`, `origin.kind`, and the
+  structured `toolUseResult` (a Write's `type` create / update, an Edit's `structuredPatch`, a Bash
+  call's stdout / stderr / interrupted).
+- **Entry points:** `cli`, `sdk-cli`, `sdk-ts`.
+- **Model ids** include preset models (`xiaomi/mimo-v2.6-flash`, `z-ai/glm-5.3-flash-uncensored`,
+  `moonshotai/kimi-k3`) and `<synthetic>` (an API error line, never a model).
+
+**Normalized paths: two forms per path.**
+
+- **The KEY** is `NormDirKey` (`Persistence.h`). On Windows: `/` → `\`, trailing separators dropped (a
+  drive root keeps its `\`), lower-case; on POSIX only the trailing `/` goes. The per-directory tab
+  colors are keyed by it, and it agrees with `PathEq` / `NormPath`, which the Explorer tree groups with
+  (case- and slash-insensitive on Windows, Rule #8). The service runs the same C++ function, so a key in
+  the database equals the GUI's key for the same folder: `GROUP BY cwd_key` is the Explorer tree's
+  grouping.
+- **The FOLD** is lower-case with `/` separators, for the folder SEARCH (today's search is
+  slash-insensitive; T1 in §6.2). Kept only where a search reads it (`cwd_fold`,
+  `path_access.dir_fold` / `leaf_fold`).
+
+**The columns** (about 120, plus Agentmaster's facts). Sources:
+
+- **T** — the transcript, computed while the ingest classifies the lines;
+- **S** — the service, with Agentmaster's own C++ (filesystem probes, graph walks);
+- **A** — Agentmaster's facts, mirrored from their files (§7.1);
+- **V** — a view or a macro, not stored.
+
+Coverage is the share of NumSharp's 922 sessions where `session_columns.py` found the column set; "—"
+means the prototype did not compute it.
+
+*Places*
+
+| Column | Src | Rule | Coverage |
+|---|---|---|---|
+| `cwd`, `cwd_key`, `cwd_fold` | T | the first line's cwd as written, its key and its fold | 96.5% |
+| `cwd_last`, `cwd_last_key` | T | the last line's cwd (where the shell ended up) | 96.5% |
+| `cwd_count` | T | distinct cwd keys | 96.5% (fdefc0e8: 31) |
+| `project_dir` | T | the encoded projects folder the transcript is filed under (never decoded: the encoding is lossy) | 100% |
+| `relocated_cwd`, `relocated_cwd_key` | T | the last `relocated` line | 0% |
+| `worktree_path`, `worktree_key`, `worktree_name`, `worktree_branch`, `worktree_original_cwd` | T | the last `worktree-state` line | 0.5% |
+| `env_is_git_repo`, `env_is_worktree`, `env_shell`, `env_extra_dirs` | T | the first `environment` attachment | 7.5% |
+| `git_root`, `git_root_key` | S | `FindGitRootForDir(cwd)`: the nearest `.git` folder or file | — |
+| `color_key` | S | the main repository root (`ResolveWorktreeMainRoot`) when the cwd is a worktree, else `cwd_key`: Rule #12's color key | — |
+| `inferred_dir`, `inferred_dir_key`, `inferred_git` | S | `InferWorkingDirectory` over the session's `path_access` votes: machine TEMP excluded, the git snap per the `inferGitRoot` setting (stored with the result). Re-run when `path_access` grows (throttled, as `_ScanInferredTabColors` is) and for every session when the setting changes. Stored only when it differs from the cwd, like `SessionInfo::inferredWorkingDir` (D15). | — |
+| `home_launch` | S | `cwd_key` equals the key of `%USERPROFILE%` (`SessionInfersWorkingDir`'s forcing rule) | — |
+| `effective_dir_key(mode)` | V | a macro over the row: the inferred key when the tab-color mode is Inferred or the session is a home launch, else `cwd_key` — `EffectiveWorkingDir`'s rule, so the page and the tools group like the Explorer tree | — |
+| `fs_checked_ms` | S | when the S columns were last probed: again when the session changes, and once a day (a repository can appear or vanish) | — |
+
+*Identity, versions, models*
+
+| Column | Src | Rule | Coverage |
+|---|---|---|---|
+| `session_id`, `short_id` | T, S | the file stem; the short id the tools print (§8.4.2) | 100% |
+| `kind` | T | `claude` (Codex later) | 100% |
+| `entrypoint` | T | the first line's (`cli` / `sdk-cli` / `sdk-ts`) | 72.7% |
+| `branch_first`, `branch_last`, `branch_count` | T | the first and last `gitBranch`, and how many | 96.5% |
+| `version_first`, `version_last` | T | Claude Code's version on the first and the last line | 96.5% |
+| `models`, `model_last` | T | the distinct assistant models (not `<synthetic>`), and the last one | 94.9% |
+| `effort_last` | T | the last assistant line's `effort` | 58.9% |
+| `permission_mode_last`, `plan_mode_marks` | T | the last `permission-mode` line; the `mode` lines that read `plan` | 72.0%, 0% |
+| `agent_name` | T | the last `agent-name` line | 0.9% |
+| `preset`, `launch_model` | A | the session store's `launchArgs` (HARNESSES.md §7) | — |
+
+*Times and turns*
+
+| Column | Src | Rule | Coverage |
+|---|---|---|---|
+| `created_ms` | T, S | fork-aware: a fork's file birth time (§5.2) | 100% |
+| `first_ms`, `last_ms` | T | the first and last live-branch timestamp (the summary's) | 96.3% |
+| `last_typed_ms`, `last_turn_end_ms` | T | the last typed prompt and the last `end_turn` reply: the MOST RECENT sort's turn boundaries for sessions that are not open | 96.3%, 79.6% |
+| `last_user_ms` | T | the summary's "last user message" (a typed prompt, an answered question, or a message typed while Claude worked) | — |
+| `turns_timed`, `turn_ms_total`, `turn_ms_max` | T | the `turn_duration` lines | 91.4% |
+
+*Cost and usage*
+
+| Column | Src | Rule | Coverage |
+|---|---|---|---|
+| `cost_usd`, `api_ms`, `api_ms_no_retries`, `tool_ms`, `wall_ms`, `lines_added`, `lines_removed`, `cost_unknown_model` | T | the LAST `cost-state` line: Claude Code's own running totals (D13) | 18.4% (newer sessions) |
+| `api_messages`, `in_tokens`, `out_tokens`, `cache_read_tokens`, `cache_write_tokens`, `web_searches`, `web_fetches` | T | summed per API message (`message.id`): Claude Code writes each content block of a response as its own line and repeats the response's usage on each one | 94.9% |
+| `context_max`, `context_tokens` | T | the largest, and the newest, input + cache read + cache write of one message; a compaction's `postTokens` replaces the newest (the Ctx column) | 94.9% |
+
+*Outcomes*
+
+| Column | Src | Rule | Coverage |
+|---|---|---|---|
+| `api_errors`, `api_error_status_last` | T | `isApiErrorMessage` lines, and the last one's HTTP status | 9.0%, 1.7% |
+| `refusals`, `max_token_stops`, `aborted_mid_stream` | T | `stop_reason` `refusal` / `max_tokens`; `isAbortedMidStream` | 0.3%, 0%, 0% |
+| `interrupts` | T | `[Request interrupted …]` markers | 18.3% |
+| `end_state` | S | how the last ingested turn ended: completed, cut off (`ClassifyCutOffTurn`), or waiting on a question — for sessions that are not open | — |
+| `stop_hook_ms_total`, `stop_hook_ms_max` | T | the `stop_hook_summary` lines (fdefc0e8's slowest Stop hook took 32.4 s) | 65.3% |
+
+*Work done*
+
+| Column | Src | Rule | Coverage |
+|---|---|---|---|
+| `prompts_typed`, `prompts_queued`, `prompts_listed` | T | typed prompts; messages typed while Claude worked; the summary's numbered prompts | 96.3%, 18.7%, — |
+| `assistant_lines`, `tool_calls`, `tool_calls_by_tool` | T | `tool_calls_by_tool` is a `MAP(VARCHAR, BIGINT)` (`histogram()`) | 94.9%, 93.4%, 93.4% |
+| `skills_used`, `mcp_servers_used` | T | `attributionSkill` and Skill tool calls; `attributionMcpServer` | 27.5%, 5.0% |
+| `subagents_spawned`, `subagent_files` | T | Task / Agent tool calls; the `subagents` side files | 7.4%, 7.2% |
+| `files_read`, `files_created`, `files_edited` | T | the counts of the summary's three lists (the `summary` table holds the lists) | — |
+| `images_pasted` | T | image blocks in user lines | 0.7% |
+| `compactions`, `compactions_auto`, `compaction_pre_tokens_max` | T | `compact_boundary` lines and their `compactMetadata` | 12.0%, 6.2%, 12.0% |
+| `recaps`, `recap_last` | T | `away_summary` lines (the summary's Recap) | 58.6% |
+| `tasks_done`, `tasks_open`, `plan_exit`, `plan_file` | T | the summary's rules (the last TodoWrite; ExitPlanMode; a Write into `/plans/`) | — |
+| `artifacts_published`, `artifact_last_title`, `artifact_last_url` | T | `frame-link` lines | 0.5% |
+
+*Titles*
+
+| Column | Src | Rule | Coverage |
+|---|---|---|---|
+| `custom_title`, `ai_title`, `legacy_summary` | T | the last line of each kind | 0.1%, 0.8%, 0% |
+| `first_prompt`, `last_prompt`, `last_reply` | T | the first 200 characters of each: the fallback title and the row's preview | 96.3% (first) |
+| `display_title` | V | stored title > custom > AI > legacy summary > first prompt (`PickDisplayTitle`'s order, Agentmaster's title first) | — |
+
+*Lineage*
+
+| Column | Src | Rule | Coverage |
+|---|---|---|---|
+| `forked_from`, `fork_point_line`, `fork_root` | S | at a file's first ingest: the file that first wrote the uuids it opens with (a uuid → first-file map, §8.5), and the last copied line | — |
+| `plan_parent` | T | "read the full transcript at: <parent>.jsonl" in the first prompt | 0% in NumSharp |
+| `continued_from`, `continued_via` | A | the `/clear` and `/handover` links (`sessions.json`, `am_link`) | — |
+| `forks` | V | the sessions whose `forked_from` is this one | — |
+| `leaf_uuid`, `off_branch_lines` | S | the live-branch walk at ingest; more than 0 means a rewind abandoned lines | — |
+
+*Agentmaster's facts* (A, mirrored; the files stay the truth, G6): the stored title, favorite, tags,
+hidden, the session's own tab color (Individual mode), the inferred folder the GUI last computed,
+`launchArgs`, `managed` (known to `sessions.json`), the last window. Runtime state is never stored
+(open, live state, presence, the unsent draft; §5.2).
+
+*Bookkeeping* (`src_file`): size, modification and birth times, the parsed byte cursor, the head hash,
+the line count, a torn last line, the classifier version, the ingest time.
+
+**Per-line columns** (`line`, §5.2): `on_branch`, `seg` and `is_copy`, which the summary needs (§8.5).
+
+**Measured** (`session_columns.py`: 73 of the T columns over NumSharp's 922 sessions, 3.11 GB of JSONL
+in the line store): one `from_json` parse per line, 6.7 s; the columns, 4.8 s; **11.5 s in all, 269 MB/s
+on 4 threads**. The C++ ingest computes them while it classifies, with no second pass.
 
 ## 6. Search
 
@@ -734,7 +1014,11 @@ blocks into one string; the database needs them apart. A block-level variant
 (`ClassifyTranscriptBlocks`) is the one implementation, and the sidecar path and the database both use
 it, so the two can never disagree. Additions: the human `queued_command` prompts
 (`SeQueuedHumanPromptRawText`'s rule, SESSIONS.md §3), tool names on results (through `tool_use_id`),
-usage deduplicated by message id, and no duplicate of a tool result through `toolUseResult`.
+usage deduplicated by message id, and no duplicate of a tool result through `toolUseResult`. It also
+reads the line kinds and envelope fields the session row needs (§5.6: `cost-state`, `worktree-state`,
+`relocated`, `agent-name`, `frame-link`, the `environment` attachment, `effort`, `stop_reason`, the
+Stop-hook times), and the ingest runs `ActiveBranchUuids` per changed session for `line.on_branch`
+(§8.5).
 
 ### 7.3 The cold build
 
@@ -755,6 +1039,10 @@ usage deduplicated by message id, and no duplicate of a tool result through `too
 - Per changed file: read from `parsed_bytes` to the last complete line; classify; append to `doc_hot`,
   `prompt`, `path_access`, `usage`; update the `session` row and the cursor; **one transaction**.
 - From a line written to it being searchable: **≤ 2 s** (batching window + one transaction).
+- **The live branch and the summary** (§8.5): new lines normally extend the live branch (they descend
+  from the current leaf), so they are `on_branch`. A new leaf marker that does not descend from the old
+  leaf is a rewind: that session is walked again and its `on_branch` flags rewritten. The `summary` rows
+  of the sessions in the batch are rebuilt in the same transaction.
 
 ### 7.5 Correctness rules
 
@@ -1041,15 +1329,17 @@ Schema), the **result**, the **errors**, the **plan** (what the service runs) an
 
 ##### `usage`
 
-- **Description:** "Token use, and an estimated cost, grouped by session, day, model or folder. Each API
-  message counts once. The cost comes from a price table and is an estimate, not a bill."
+- **Description:** "Token use and cost, grouped by session, day, model or folder. Each API message counts
+  once. A session's cost is Claude Code's own record when the session has one (`cost_source` "claude");
+  otherwise it comes from a price table and is an estimate (`cost_source` "estimate"), not a bill."
 - **Parameters:** `group_by` (required: `session` | `day` | `model` | `dir`), `days` (default 30),
   `after`, `before`, `dir`, `id`, `limit` (1–200, default 20); `additionalProperties: false`.
-- **Result:** `{"rows": [{"key", "input", "output", "cache_read", "cache_write", "cost_usd"}], "totals": {…}, "prices": "<price table version>"}`.
+- **Result:** `{"rows": [{"key", "input", "output", "cache_read", "cache_write", "cost_usd", "cost_source"}], "totals": {…}, "prices": "<price table version>"}`.
 - **Errors:** an unknown `group_by`; a bad date.
-- **Plan:** `usage` grouped (deduplicated by message id at ingest).
+- **Plan:** `usage` grouped (deduplicated by message id at ingest); costs from `session.cost_usd` (the
+  last `cost-state`, §5.6) where set, else the price table.
 - **Budget:** 50 ms.
-- **Open:** the price table (D13).
+- **Open:** the price table for the sessions without a `cost-state` (D13).
 
 ##### `related`
 
@@ -1067,8 +1357,9 @@ Schema), the **result**, the **errors**, the **plan** (what the service runs) an
 
 - **Description:** "Run one read-only SQL query (DuckDB dialect) over these views when no other tool
   fits: counts, groupings, unusual filters. Returns at most 200 rows within 2 s. Views:
-  v_sessions(id, uuid, title, dir, branch, created, active, msgs, tools, model, input_tokens,
-  output_tokens, forked_from, favorite, tags, open); v_messages(id, ref, time, role, tool, text);
+  v_sessions(id, uuid, title, dir, dir_key, inferred_dir, branch, created, active, msgs, tools, model,
+  models, effort, version, input_tokens, output_tokens, cost_usd, api_errors, interrupts, compactions,
+  forked_from, favorite, tags, open); v_messages(id, ref, time, role, tool, text);
   v_lines(id, line, type, time, raw): raw is the line's JSON, read fields with json_extract;
   v_paths(id, path, dir, file, op, n, first, last); v_usage(id, time, model, input_tokens,
   output_tokens, cache_read_tokens, cache_write_tokens); v_links(id, from_id, via)."
@@ -1117,6 +1408,108 @@ Schema), the **result**, the **errors**, the **plan** (what the service runs) an
    description change changes the model's prompt (and its cache), so changes ship together.
 9. **Docs.** The contract goes into §8.4.3, and a line into SESSIONS.md §9.3.
 
+### 8.5 The summary panel, from the database
+
+**The question** (2026-10-12): can the summary we show in the side panel come from DuckDB? Yes. It
+was measured, and verified field for field against today's code.
+
+**Today.** The summary box is `AnalyzeSessionTranscript` (`ProcessInspect.Content.cpp`). It serves the
+per-tab summary panel, the side panel's summary area (the same `AgentTabOverlay` in fill-host mode), the
+tab tooltip's card, the Sessions detail, the Manager's Summary tab and Copy ▸ Summary.
+
+- It reads the WHOLE transcript, widens it to UTF-16, parses every line and walks the live branch.
+- It runs again whenever the file grows (a (size, mtime) cache), so a working session pays it every
+  turn.
+- Its own comment puts the transient allocations at 5–8× the file size (the `bad_alloc` crash class).
+
+Measured with an optimized build of that code (`bench_summary.cpp`, warm file cache):
+
+| | 128.7 MB | 102.3 MB | 1.7 MB | 922 NumSharp sessions (3.11 GB) |
+|---|---|---|---|---|
+| `AnalyzeSessionTranscript` (the summary box) | 2.70–2.85 s | 2.20 s | 33 ms | 67.7 s |
+| `RenderTranscriptTurnsFile`, Default level (the transcript overlay) | 1.62 s | 1.37 s | 24 ms | |
+| `CollectConversationUpstream` (the whole-conversation chain) | 17 ms | 21 ms | 260–309 ms (a fork: it scans the project folder) | |
+
+**From the database** (`summary_from_db.py` over the lossless store):
+
+| | 128.7 MB | 102.3 MB | 1.7 MB |
+|---|---|---|---|
+| Today (C++, whole file) | 2.70–2.85 s | 2.20 s | 33 ms |
+| A: from the stored lines, nothing precomputed | 1.91 s (the live-branch walk 0.70 s in Python, the parse 0.89 s, the sections 0.28 s, the reads 37 ms) | 1.53 s | 194 ms |
+| B: precomputed section tables, 7 queries | 39.5 ms | 39.7 ms | 35.7 ms |
+| B: one precomputed summary row, 1 query | **2.75 ms** | **2.99 ms** | **2.80 ms** |
+
+- B's tables for all 922 sessions take 54.4 s with the Python live-branch walk (20.4 s of it), about
+  34 s without it, against 67.7 s for the C++ analyzer.
+- The one-row-per-session `summary` table builds from them in 0.12 s.
+- Their sizes: 5,149 prompt rows, 150,094 tool calls, 9,899 tool results, 478,634 live-branch uuids.
+
+**Verified.** 20 facts are compared on every session that did not change after the ingest: the prompts
+of the current segment, all prompts, the earlier segments, the files read / created / edited, the
+skills, the tasks done / open, compacted, the recap's length, the first / last / last-user time, the
+branch, the plan parent, the plan-mode exit, the plan content, the plan file and the plan reads. They
+**equal the C++ analyzer's on 921 of 921 sessions**, through both read paths. Getting there found
+three rules a first SQL draft had wrong (each is now a comment in the script):
+
+1. **The live branch.** Lines that a double-ESC rewind abandoned stay in the file. The first draft had
+   no walk (and the two rules below wrong): it disagreed on up to 10% of the sessions per field (files
+   read: 95 of 921).
+2. **Teammate protocol.** Only the FIRST `<teammate-message>` tag of a message decides. A prose report
+   followed by a termination notice in the same message is a real prompt.
+3. **Created vs edited.** An Edit before a file's first creation keeps the file under "edited": the
+   analyzer never removes an earlier entry.
+
+**The design**
+
+- **The summary reads tables the design already has:** prompts (`prompt`; `doc` roles 1 and 7), tool
+  calls and results (`doc` roles 4 and 5, with `tool` and `tool_use_id`), files (`path_access`). The
+  ingest adds three per-line facts (`line`, §5.2):
+  - `on_branch`, from the C++ `ActiveBranchUuids` walk. A graph walk does not belong in SQL: a
+    recursive CTE runs one step per link of a chain that is 20,000 lines long. A rewind moves the leaf
+    and rewrites the flag for that one session.
+  - `seg`, the compaction segment by position.
+  - `is_copy`.
+- **A `summary` table** (§5.2): one row per session with the numbered prompts (with segment numbers
+  and uuids), the three file-label lists, the skills, the task counts, the plan facts, the recap and
+  the times. It is refreshed for the sessions an ingest batch touched, with one SQL statement.
+- **`sessionSummary(id)`** (§9) returns that row in ~3 ms. The page, the tooltip and the panels stop
+  reading transcripts, and a transcript's growth costs the summary nothing beyond its own ingest.
+- **Two implementations of the rules.** The C++ analyzer stays, for the CLI's offline readers and as the
+  fallback. So parity is a test: the m5 fixtures, a live corpus check (the prototype's `--verify`), and
+  Shadow mode's `[sessdb-diff] summary <sid8> <field>` lines (D14).
+- **The whole-conversation chain** (`CollectConversationUpstream`):
+  - the fork parent is a lookup: 29 ms by scanning every line's uuid, 8.7 ms through a uuid →
+    first-file map (715,662 uuids, built in 0.1 s), and none at all once the ingest stores
+    `forked_from` (§5.6). It finds the same 150 copied lines as the C++ chain walk;
+  - the plan parent is a column, and `/clear` / `/handover` come from `am_link`;
+  - each parent's prompts come from its own summary row; the copied uuids say where that parent's
+    part ends.
+
+### 8.6 Other parts of Agentmaster that would read the database
+
+| Part | Today | Cost (measured or logged) | With the database | Phase |
+|---|---|---|---|---|
+| The summary panel, the side panel's summary, the tab tooltip's card, the Sessions detail, the Manager's Summary tab, Copy ▸ Summary | `AnalyzeSessionTranscript`: the whole file, on every growth | 2.7 s per growth of a 128.7 MB session; 5–8× the file size in memory | `sessionSummary`, ~3 ms (§8.5) | P3 |
+| The summary's conversation chain | `CollectConversationUpstream`: a project-folder scan, then each parent analyzed | 17–309 ms, plus each parent's analyze | `forked_from`, `plan_parent`, `am_link`, and the parents' summary rows | P3 |
+| The transcript overlay, Copy ▸ Transcript levels | `RenderTranscriptTurnsFile`: read, parse, render | 1.62 s at Default for 128.7 MB (measured); 0.27–5.3 s in the release log, once 94.2 s | Later: the render reads parsed rows instead of re-parsing JSON; the Markdown rules stay in C++ (the goldens) | Later |
+| The Sessions page | sidecars, ripgrep, re-parse | §1.1: 6 s+ to open, 2–42 s for content | §8.1 | P2 |
+| The AI search's catalog and index keeper | `GatherSessionCatalog` | 3 minutes for a cold catalog | §8.2 | P3 |
+| Sessions that are not open: MOST RECENT sort keys, "active … ago" | the sidecar facts | — | `last_typed_ms`, `last_turn_end_ms`, `last_activity_ms` | P2 |
+| The launch bar's typed session id (the green "Resume session") | `ClaudeConversationExists`: a glob over every project folder | — | a `session` lookup; the resume itself stays transcript-gated on disk (Rule #6) | P2 |
+| The inferred working directory | `_ScanInferredTabColors`: each open session's sidecar paths, mtime-gated, every ~15 s | — | `session.inferred_dir_key` for EVERY session (D15), so the page can group closed sessions by where they worked | P5 |
+| The Fleet Observer's External rows | `ReadTranscriptInfo` head reads, a worker-thread title cache | — | the `session` row by id: title, branch, times | P4 |
+| The Manager's read-only prompt list of an external | a background transcript read | — | `summary.prompts` | P4 |
+| The CLI's `show` and `sessions` | transcript tails and `sessions.json`, offline | — | the service when it runs; the offline readers stay (the CLI works with the app down) | P4 |
+| The Tags panel, the tag hover panel, favorites | session-store scans (cached since UI_THREAD.md §11) | ~5 ms per call | `am_tag` joins: "tagged release AND mentions DuckDB" in one query | Later |
+| The compose box's Up / Down history | `_BuildPromptHistory`: the selected session's sent prompts, from the registry's queue | — | a global history: every prompt ever typed in any session, searchable | Later |
+| Usage and cost (new) | — | — | `cost_usd` (Claude Code's own `cost-state`) and token sums by day, model, folder (the `usage` tool) | Later |
+| Diagnostics (new) | `grep` over `hooks.log` | — | API errors, refusals, interrupts, slow Stop hooks per session (fdefc0e8's slowest: 32.4 s), in SQL | Later |
+
+**What stays out** (no win): the scanner's live tail and the state machine (Rules #1 and #7), the hook
+bridge, the pending-input reader (it reads the screen), the delivery gate, presence and liveness. That
+is real-time state in the GUI process, where a pipe round trip only adds latency. Every resume and fork
+decision reads the transcript on disk: the database can lag by up to ~2 s (G3).
+
 ## 9. The protocol
 
 - **Transport:** the named pipe `\\.\pipe\agentmaster.sessiondb.<hash>`, `PIPE_REJECT_REMOTE_CLIENTS`,
@@ -1126,7 +1519,8 @@ Schema), the **result**, the **errors**, the **plan** (what the service runs) an
   response `{id, result}` or `{id, error: {code, message}}`; `{method: "cancel", params: {id}}` interrupts
   that request's query.
 - **Methods:** `hello` (versions: service, schema, tool registry), `listSessions`, `search`,
-  `sessionDetail` (the `session` tool), `messages`, `grep`, `files`, `whoTouched`, `timeline`, `usage`,
+  `sessionDetail` (the `session` tool), `sessionSummary` (the `summary` row, §8.5; with `chain: true`
+  also the rows of the sessions it continues), `messages`, `grep`, `files`, `whoTouched`, `timeline`, `usage`,
   `related`, `sql`, `rebuild` (a transcript from the lossless store, or the whole index), `status`,
   `factsChanged` (the GUI says a title, tag, favorite or link changed), `openChanged` (the GUI's open
   sessions), `shutdown`. Each tool of §8.4 maps to one method.
@@ -1169,12 +1563,12 @@ Schema), the **result**, the **errors**, the **plan** (what the service runs) an
 | Phase | Content |
 |---|---|
 | **P0 spike** | A new project `agentmaster-sessiondb` linking `duckdb.dll` (2.0.0), shipped in the wapproj, the portable zip and CI (x64 and arm64); the copy-out and a hot-swap with an MCP client connected; appender throughput, `duckdb_interrupt`, and **the C++ cold build measured on this corpus**. |
-| **P1 engine** | Schema and migrations; the lossless line store (D11) and its byte-exact rebuild check; `ClassifyTranscriptBlocks` shared with the sidecars; tokenizer; cold build, incremental ingest, merge, re-cluster; the planner; the pipe server; harness tests; `agentmaster sessdb status`. |
-| **P2 page** | The virtualized table (can ship first, on today's data); `SessionDbClient`; list / search / detail through the service behind `AppSettings::sessionDb` = Off / Shadow / On. **Shadow** runs both and logs timings and differences (`[sessdb-diff]`). |
-| **P3 AI search** | On the service; the tool registry of §8.4.4 with the contracts of §8.4.3 (`scopes` replace `deep`); a live trace per tool. |
-| **P4 CLI and MCP** | The verbs; `mcp` mode; the Settings button (D6). |
-| **P5 cleanup** | After weeks of Shadow parity: remove the sidecars and the ripgrep path; the inferred-folder scan reads `path_access`. |
-| **Later** | `vss` semantic search, Codex rollouts, a usage view. |
+| **P1 engine** | Schema and migrations; the lossless line store (D11) and its byte-exact rebuild check; `ClassifyTranscriptBlocks` shared with the sidecars, extended to the line kinds of §5.6 (`cost-state`, `worktree-state`, `relocated`, `agent-name`, `frame-link`, the `environment` attachment); the session row of §5.6; the live-branch walk at ingest (`line.on_branch`, `seg`, `is_copy`) and the `summary` table (§8.5); tokenizer; cold build, incremental ingest, merge, re-cluster; the planner; the pipe server; harness tests; `agentmaster sessdb status`. |
+| **P2 page** | The virtualized table (can ship first, on today's data); `SessionDbClient`; list / search / detail through the service behind `AppSettings::sessionDb` = Off / Shadow / On. **Shadow** runs both and logs timings and differences (`[sessdb-diff]`). The sort keys of sessions that are not open; the launch bar's session-id lookup. |
+| **P3 AI search and the summary** | The AI search on the service; the tool registry of §8.4.4 with the contracts of §8.4.3 (`scopes` replace `deep`); a live trace per tool. The summary surfaces read `sessionSummary` (§8.5); in Shadow they also run `AnalyzeSessionTranscript` and log `[sessdb-diff] summary`; the conversation chain from `forked_from` / `plan_parent` / `am_link`. |
+| **P4 CLI and MCP** | The verbs; `mcp` mode; the Settings button (D6); the Fleet Observer's External rows and the Manager's external prompt list from the `session` and `summary` rows. |
+| **P5 cleanup** | After weeks of Shadow parity: remove the sidecars and the ripgrep path; the inferred-folder scan reads `path_access` and `session.inferred_dir_key` (D15). |
+| **Later** | `vss` semantic search, Codex rollouts, a usage and cost view, diagnostics views, a global prompt history, the transcript overlay from parsed rows (§8.6). |
 
 **Tests**
 
@@ -1201,7 +1595,9 @@ Schema), the **result**, the **errors**, the **plan** (what the service runs) an
 | **D10** | `duckdb.dll` (36.7 MB x64; +~13 MB per architecture in the bundle and the portable zips, today 20.6 / 13.9 / 14.3 MB) | **Ship it** in the package and the zips | Download it on first use, pinned by hash (smaller downloads; needs the network once and a trust rule like the updater's) |
 | **D11** | The lossless store: every transcript line verbatim (§5.5) | **Yes**: +2.2 GB, byte-exact rebuilds, resumable after Claude's sweep, re-derivable index | No: the search projection only (~0.9 GB); a transcript cannot be rebuilt |
 | **D12** | `file-history/` (2.07 GB, the `/rewind` snapshots) in the lossless store | **No** for version 1: files, not conversation | Yes: a swept session would keep `/rewind` |
-| **D13** | `usage` costs | **A price table** shipped with the app, versioned, labeled an estimate | Tokens only, no cost |
+| **D13** | `usage` costs | **Claude Code's own `cost-state` totals where a session has them** (562 of 4,444 sessions, written since ~2.1.225, with per-model `costUSD`; `hasUnknownModelCost` marks a model it cannot price), and **a price table only for the others**, shipped with the app, versioned, labeled an estimate | A price table for every session; or tokens only, no cost |
+| **D14** | How the summary is computed (§8.5) | **A precomputed `summary` row per session**: SQL over the section tables, the live branch walked in C++ at ingest, and a parity test against the C++ analyzer (fixtures, a live corpus check, Shadow diffs) | The C++ analyzer as an incremental fold inside the service (one implementation, a larger refactor: the analyzer is a whole-file pass today); or keep reading transcripts |
+| **D15** | Columns that need the filesystem: the git root, the worktree's main root, the inferred working directory (§5.6) | **The service computes them for every session** with Agentmaster's C++ (`FindGitRootForDir`, `ResolveWorktreeMainRoot`, `InferWorkingDirectory`), probes again when the session changes and once a day, and re-infers every session when `inferGitRoot` changes | The GUI computes them for its open sessions only, as today (closed sessions cannot be grouped by where they worked) |
 
 ## 14. Measurements
 
@@ -1223,6 +1619,11 @@ cache; best of 3–5 runs. The corpus as in §1.2.
 | Lossless store, full (`raw_lines.py`) | 3,308,864 lines, 10.42 GB of JSONL (+ 2,800 spills, 0.33 GB) → **2.22 GB** (4.7×) in **232 s**; **20 / 20** sample files rebuilt byte-exact (128.7 MB in 609 ms); fork copies 36.4% of uuid lines, 23.4% of the bytes, 4 of 115 sampled copies byte-identical |
 | Access paths (`access_paths.py`, 10% sample: 312,887 lines, 0.98 GB) | sorted vs shuffled: big session 149 / 303 ms, small session 2.9 / 113 ms, one line 2.8 / 3.8 ms, 30 random lines 145 / 142 ms; with ART: 30 random lines 6.9 / 4.2 ms, small session 5.2 / 4.6 ms, big session unchanged (above the threshold; `EXPLAIN ANALYZE`: sequential scan, the others index scans); ART build 0.06–0.10 s and 3.9–5.0 MB per index; a rewrite in another order 2.2 s (a first run under more load: 1.2–1.9× slower) |
 | Side folders | `file-history` 2.07 GB (62,708 files), `debug` 3.20 GB, `shell-snapshots` 0.47 GB, `paste-cache` 7 MB, `todos` / `tasks` / `plans` small |
+| Today's whole-file readers (`bench_summary.exe`: an optimized build, `/O2`, of the engine's own code) | `AnalyzeSessionTranscript` 2.70–2.85 s (128.7 MB), 2.20 s (102.3 MB), 33–40 ms (1.7 MB), **67.7 s** for NumSharp's 922 sessions (3.11 GB); `RenderTranscriptTurnsFile` at Default 1.62 / 1.37 s / 24 ms; `CollectConversationUpstream` 17 / 21 / 260–309 ms |
+| The summary from the database (`summary_from_db.py`; NumSharp's line store: 1,771 files, 4.63 GB, ingested by `raw_lines.py` in 125 s) | A, from the stored lines: 1.91 / 1.53 s / 194 ms. B: the section tables for 922 sessions in 54.4 s (the Python live-branch walk 20.4 s); a summary in 35.7–39.7 ms over 7 queries, **2.75–2.99 ms** as one precomputed row (all rows built in 0.12 s). **921 / 921** sessions equal the analyzer on all 20 facts, through both read paths |
+| The session row (`session_columns.py`) | 73 columns for 922 sessions (3.11 GB): the parse 6.7 s, the columns 4.8 s (269 MB/s) |
+| The field census (`field_census.py`) | the newest 3.0 GB (332 sessions, 633,905 lines, Claude Code 2.1.123–2.1.291) in 31 s; `cost-state` in 562 of 4,444 top-level transcripts (`rg -l`) |
+| A fork's parent (NumSharp's 1.63 M lines) | 29.1 ms by scanning every line's uuid; 8.7 ms through a uuid → first-file map (715,662 uuids, built in 0.1 s); the same 150 copied lines as `CollectConversationUpstream` |
 
 **Reproduce** with [`tools/sessiondb-bench/`](../../tools/sessiondb-bench/): Python 3.12 in a venv
 outside the repo with `pip install --pre duckdb` (2.0 until it is released). Scratch files go to
@@ -1245,6 +1646,21 @@ the transcripts are only read. The order matters, each step uses the previous on
 9. `raw_lines.py <line db>` (~6 minutes; independent of the steps above) — the lossless store, the
    byte-exact rebuild check and the fork copies (§5.5); then `access_paths.py <line db>` — clustering
    against ART (§6.8).
+10. `field_census.py [--budget-gb N | --all]` — the fields and line kinds Claude Code writes (§5.6); no
+    database.
+11. The summary and the session row (§8.5, §5.6) on ONE project folder (the numbers above:
+    `K--source-NumSharp`):
+    - `raw_lines.py <project db> K--source-NumSharp` — that folder's line store (~2 minutes);
+    - `build_bench_summary.bat` — builds `bench_summary.exe` into the work folder (~30 s; Visual Studio
+      2022's `vcvars64.bat`; no app build, no package);
+    - `set AGENTMASTER_PROFILE=<an empty scratch folder>`, then `bench_summary.exe <scratch dir>
+      <transcript.jsonl>...` for today's timings, and `bench_summary.exe --facts <facts.tsv>
+      %USERPROFILE%\.claude\projects\K--source-NumSharp` for the analyzer's facts of every session (68 s).
+      ⚠ Set the variable: a shell hosted by the release carries the LIVE profile's path, and the
+      engine code logs through it;
+    - `summary_from_db.py <project db> <session id prefixes> --verify <facts.tsv>` — A, B and the
+      comparison;
+    - `session_columns.py <project db> [session id prefix]` — the session row and its coverage.
 
 ## 15. Sources
 
@@ -1258,6 +1674,9 @@ the transcripts are only read. The order matters, each step uses the previous on
   at `v1.5.0`, `v1.5.6` and `main`) · [vcpkg port](https://github.com/microsoft/vcpkg/blob/master/ports/duckdb/vcpkg.json).
 - MCP: [`mcp-server-motherduck`](https://github.com/motherduckdb/mcp-server-motherduck) ·
   [`duckdb_mcp`](https://github.com/teaguesterling/duckdb_mcp).
-- This repository: SESSIONS.md §1, §6, §9; `SessionSearch.{h,cpp}`, `TranscriptStore.{h,cpp}`,
-  `TerminalPage.AgentSessionsPage.cpp`, `SessionSearchTools.h`; the release `hooks.log` `[nav] sessions`
-  lines.
+- This repository: SESSIONS.md §1, §6, §9; `SessionSearch.{h,cpp}`, `TranscriptStore.{h,cpp}`
+  (`ActiveBranchUuids`, `InferWorkingDirectory`, `FindGitRootForDir`), `ProcessInspect.Content.cpp`
+  (`AnalyzeSessionTranscript`, `CollectConversationSegments`, `SeIsCommandNoise`, `SeSummaryFileLabel`),
+  `TranscriptTurns.h` (`CollectConversationUpstream`), `Persistence.h` (`NormDirKey`,
+  `EffectiveWorkingDir`, `SessionColorKeyDir`), `TerminalPage.AgentSessionsPage.cpp`,
+  `SessionSearchTools.h`; the release `hooks.log` `[nav] sessions` and `[transcript]` lines.
