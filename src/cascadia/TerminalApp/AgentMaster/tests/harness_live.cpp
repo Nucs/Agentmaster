@@ -29,7 +29,9 @@
 //   9. (with --agent) the Sessions search agent finds real sessions of this machine — and the
 //      run prints HOW: the command line, the system prompt, the tools as the model reads them,
 //      each request step by step (tool calls with their arguments, results, replies, times),
-//      and what the process reported about itself (its inventory).
+//      and what the process reported about itself (its inventory). It also checks rule 1 of the
+//      system prompt on both requests: the model's first step mentions which kinds of tool calls
+//      it can use and how, and the page's answer stays the final sentence alone.
 //
 // Usage: harness_live.exe [--claude <path to claude.exe>] [--model <id>] [--agent "<request>"]
 //                         [--only-agent] [--only-permissions] [--verbose]
@@ -906,6 +908,94 @@ namespace
         }
     }
 
+    // Check the system prompt's rule 1 (the user's, 2026-10-13) on one answered request, and print
+    // what the model wrote for it. Rule 1: the model's FIRST step mentions which kinds of tool calls it
+    // can use for the request, out of all its tools, and how in different ways — in the same message
+    // as its first calls.
+    //   record — the conversation's record (SessionSearchAgent::Record) after the request ended.
+    //   turn   — the request's turn id.
+    //   answer — the page's answer for that request (the snapshot's `answer` right after it ended).
+    //   label  — "request 1" / "request 2": the prefix of the printed and checked lines.
+    //   throws — std::bad_alloc (the printed lines). Nothing else: the record is only read, and a
+    //            failed check is counted and printed, never thrown.
+    // What it checks, and why each is robust against thread timing:
+    //   - an assistant text that is NOT the final sentence was recorded before the turn's show call.
+    //     Not "before the first search": the record's Assistant items come from the worker thread and
+    //     its ToolCall items from the SDK's reader thread, so a mention and the search it announces can
+    //     be recorded in either order within milliseconds; the show call is a whole model step later.
+    //   - the page's answer does not contain the mention: the result line carries only the last
+    //     message's text, so the strip shows the final sentence alone.
+    // It also prints how long the model's first step took (the request to its first tool call): the
+    // cost of the mention is the difference to the runs before rule 1 (SESSIONS.md 9.9).
+    void CheckFirstStepMention(const HarnessRecord& record, uint64_t turn, const std::wstring& answer, const std::wstring& label)
+    {
+        std::wstring mention;
+        bool mentionBeforeShow = false;
+        bool showSeen = false;
+        int64_t userAt = 0;
+        int64_t firstCallAt = 0;
+        for (const auto& item : record.items)
+        {
+            if (item.turn != turn)
+            {
+                continue;
+            }
+            switch (item.kind)
+            {
+            case HarnessItemKind::User:
+                userAt = item.atUnixMs;
+                break;
+            case HarnessItemKind::Assistant:
+                // The first text that is not the answer. A model that skipped rule 1 has only its
+                // final sentence, which equals the answer, so it never counts as a mention.
+                if (mention.empty() && item.text != answer)
+                {
+                    mention = item.text;
+                    mentionBeforeShow = !showSeen;
+                }
+                break;
+            case HarnessItemKind::ToolCall:
+                if (firstCallAt == 0)
+                {
+                    firstCallAt = item.atUnixMs;
+                }
+                showSeen = showSeen || item.toolName == L"mcp__display__show";
+                break;
+            case HarnessItemKind::ToolResult:
+            case HarnessItemKind::Notice:
+            default:
+                break;
+            }
+        }
+        Say(L"  " + label + L": the model's first step said: " + (mention.empty() ? std::wstring{ L"(nothing)" } : Short(mention, 700)));
+        Check(!mention.empty() && mentionBeforeShow, label + L": rule 1 - the model mentioned the kinds of tool calls it can use, and how, before it showed anything");
+        Check(!answer.empty() && (mention.empty() || answer.find(mention) == std::wstring::npos), label + L": the page's answer is the final sentence alone, without the mention");
+        if (userAt != 0 && firstCallAt != 0)
+        {
+            Say(L"  " + label + L": the first tool call came " + std::to_wstring(firstCallAt - userAt) + L" ms after the request reached the process");
+        }
+        // Rule 5 asks for ONE sentence under 25 words. Printed, not checked: it is the model's style,
+        // and the first run with rule 1 drifted to two or three sentences (the reason rule 5 now says
+        // that the mention is not the reply). A sentence ends at '.', '!' or '?' followed by a space and
+        // an upper-case letter or a quote — so a title such as "v0.7.9" does not count as an end.
+        int sentences = answer.empty() ? 0 : 1;
+        int words = 0;
+        bool inWord = false;
+        for (size_t i = 0; i < answer.size(); ++i)
+        {
+            const wchar_t c = answer[i];
+            const bool space = c == L' ' || c == L'\t' || c == L'\r' || c == L'\n';
+            words += (!space && !inWord) ? 1 : 0;
+            inWord = !space;
+            if ((c == L'.' || c == L'!' || c == L'?') && i + 2 < answer.size() && answer[i + 1] == L' ')
+            {
+                const wchar_t next = answer[i + 2];
+                sentences += ((next >= L'A' && next <= L'Z') || next == L'"' || next == L'\x201C') ? 1 : 0;
+            }
+        }
+        Say(L"  " + label + L": the answer has " + std::to_wstring(sentences) + L" sentence(s), " + std::to_wstring(words) + L" word(s) (rule 5: one sentence, under 25 words)");
+    }
+
     // Print what the search agent's model is GIVEN before any request: the command line of its
     // process, its whole system prompt, and each tool with the description and the argument
     // schema the model reads. Starts nothing.
@@ -1051,6 +1141,7 @@ namespace
         // account of what its model can use, and the harness's log lines of this run.
         Say(L"  --- request 1, step by step (times since the request reached the model's process) ---");
         SayTurnTrace(agent.Record(), turn, g_verbose ? kHarnessMaxToolResultChars : 900);
+        CheckFirstStepMention(agent.Record(), turn, snapshot.answer, L"request 1");
         Say(L"  --- what the process reported about itself ---");
         const HarnessInventory inventory = agent.Inventory();
         SayInventory(inventory);
@@ -1105,6 +1196,7 @@ namespace
         Check(agent.Snapshot().shownIds.size() <= 3, L"the follow-up narrowed the list to " + std::to_wstring(agent.Snapshot().shownIds.size()) + L" session(s)");
         Say(L"  --- request 2 (the follow-up), step by step ---");
         SayTurnTrace(agent.Record(), turn2, g_verbose ? kHarnessMaxToolResultChars : 900);
+        CheckFirstStepMention(agent.Record(), turn2, agent.Snapshot().answer, L"request 2");
 
         agent.Reset();
         Check(agent.Snapshot().shownIds.empty() && agent.Snapshot().turns == 0, L"Reset cleared the agent's conversation");

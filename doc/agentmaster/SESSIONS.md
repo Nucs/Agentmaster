@@ -565,10 +565,24 @@ around freely. The show tool is the one place where the screen changes.
 - **The result text** is compact JSON: the window, the counts, and one object per row (id, title,
   folder, branch, times, sizes, why it matched). Flags and lists appear only when they say
   something.
-- **The system prompt** has seven rules: act at once and never ask; one search is usually enough
-  (1 to 3 distinctive words, no `days` unless the user names a period); show only what fits; one
-  sentence under 25 words in the user's language; a follow-up refers to the shown list; times are
-  local; a result with an `indexing` field lacks older sessions.
+- **The system prompt** has eight rules. The first is new (the user's request of 2026-10-13, in no
+  build yet; production 0.6.8.19 has the seven rules without it):
+  - The model's first step, for every request, starts with a mention, in one or two short lines,
+    of which kinds of tool calls it can use for the request, out of everything its two tools can do
+    (search by words; by folder, branch, tag, favorite or open; by a period; the full text; sort and
+    limit; show by ids or `top`), and how it will use them in different ways (the words it will
+    try, the filters, a longer period, `deep` last).
+  - It is written in the same message as the step's first calls, so it costs output tokens, never
+    a model request (measured in 9.9).
+  - **The page does not show it.** The strip shows the turn's final sentence: Claude Code's
+    `result` line carries only the last message's text (checked live). The mention stays in the
+    conversation record (`harness\sessions-search.json`) and in the live test's trace.
+
+  The other seven: act at once and never ask; one search is usually enough (1 to 3 distinctive
+  words, no `days` unless the user names a period); show only what fits; exactly one sentence under
+  25 words in the user's language, with an example of one, and the mention is not the reply; a
+  follow-up refers to the shown list; times are local; a result with an `indexing` field lacks
+  older sessions.
 - **The redesign** (2026-10-13, DESIGN ONLY): [`SESSIONS_AGENT.md`](SESSIONS_AGENT.md) — eleven tools
   (`search` with phrasings, scopes and folder exclusion, `grep`, `peek`, `read` at the transcript
   levels, `files`, `related`, `timeline`, `usage`, `sql`, `show` with reasons, `reveal`), a context
@@ -673,9 +687,10 @@ deletes both. The toggle's state is not kept: the AI search is off when a window
 the model), one search over a hand-built catalog with an injected content search (the scope, the
 four match tiers, the sorts, the limit, deep search only on request, a cancelled search), the
 result text (row fields, the `indexing` note), the two tool handlers (short ids and collisions,
-show by ids / top / nothing, unknown ids, a cancelled request, no index at all), and the catalog
+show by ids / top / nothing, unknown ids, a cancelled request, no index at all), the catalog
 gather on scratch folders (a gather that stops early says how far it got; steps always move
-forward; a refresh reads only what changed).
+forward; a refresh reads only what changed), and the system prompt (ASCII, the two tool names,
+rule 1 with every kind of call in it, eight rules).
 
 ### 9.9 Measured, end to end
 
@@ -710,6 +725,45 @@ found rows previews them.
 | "where did I ask for the harness to always run in bypass permissions or auto mode" | `bypass permissions` (2 rows: a match on the typed prompt), `auto mode` (49 matches) | 1 session at 3.2 s, the right one | at 4.2 s |
 
 `harness_live.exe --agent "<request>"` prints such a run step by step (`SDK_HARNESS.md` section 8).
+Since 2026-10-13 it also checks rule 1 (a mention before the show call, and a page answer without
+it) and prints when the first tool call came and how many sentences and words the answer has.
+
+**Rule 1, measured (2026-10-13)**: seven runs from a new process each (1,464 sessions in 90 days),
+each a request and the follow-up "only the three newest of those". The requests: "find the session
+where we built the agent harness on the claude-agent-sdk-cpp submodule" (three runs), "what did we
+change about the tab strip last week" (two), "the session about the taskbar unread badge", and "the
+session where I recovered lost code with git, in a project other than NumSharp" (the request that
+failed on 2026-10-12, `SESSIONS_AGENT.md` §1.2). The column "before" is the two runs of 2026-10-12
+above.
+
+| | Before | With rule 1 |
+|---|---|---|
+| Requests that started with the mention | — | 14 of 14 |
+| The first tool call of a first request (from the request reaching the process) | 1.3 and 1.5 s | 1.6 to 2.1 s (median 1.85 s) |
+| The list on the screen, first request (process start included) | 3.2 and 4.0 s | 3.9 to 4.8 s; one at 8.3 s |
+| The follow-up made a new search | 2 of 2 (and widened the list, 9.11) | 0 of 6 that had a list on the screen: show by ids from the earlier results |
+| The follow-up's list (from the request reaching the process) | 3.6 and 4.3 s | 2.4 to 3.4 s |
+| Answers of one sentence | 4 of 4 | 0 of 2 with the old reply rule; 2 of 5 with "exactly ONE … not your reply"; 5 of 6 with the example |
+
+- The mention: "I'll search by words (the "claude-agent-sdk-cpp" name and "harness"), and fall back
+  to a longer period or deep:true if needed."; for a follow-up: "I can reuse the earlier results,
+  with no new search: I'll show the three by ids, newest first."
+- **It costs about 0.4–0.5 s** on a first request (the mention's output tokens). A follow-up that
+  only narrows the list came sooner than on 2026-10-12, because the model did not search again; the
+  follow-ups of 2026-10-10 took 2.1 to 2.5 s (the table above).
+- **The answers grew.** With rule 1 and the old reply rule both answers had two or three sentences.
+  The reply rule now says "exactly ONE short sentence", "The mention of rule 1 is not your reply: no
+  second sentence", and shows one answer as an example. The one answer of two sentences left
+  answered a question about content ("I only saw the session titles and snippets, so I can't say
+  what changed in the code."); one answer of one sentence had 26 words.
+- **The mention does not bind the model.** In one run it named a folder search that the model then
+  did not make.
+- **The request of 2026-10-12 still fails.** Three quick searches found one unrelated session; the
+  model's second step searched `recover` with `deep: true` and `days: 365`, which ran past the live
+  test's 120 s limit. The shipped search cannot exclude a project; the redesign answers this
+  request (`SESSIONS_AGENT.md` §9.1). The superseded search then held up the follow-up (9.11).
+- Seven runs is a small set: the evaluation of the redesign (`SESSIONS_AGENT.md` §11) measures
+  such effects with a set of requests.
 
 ### 9.10 Logs
 
@@ -744,8 +798,17 @@ found rows previews them.
 - **A follow-up can widen the list instead of narrowing it** (seen twice, 2026-10-12). After a
   list of one or two sessions, "only the three newest of those" made the model search again
   (`sort: active, limit: 3`) and show three sessions, with sessions that were not on the screen
-  before. It said so in its sentence. Rule 5 of the system prompt ("a follow-up refers to what you
-  showed before") does not forbid it. Not changed: the wording of the rules is for the review.
+  before. It said so in its sentence. Rule 6 of the system prompt (rule 5 before 2026-10-13: "a
+  follow-up refers to what you showed before") does not forbid it. Not changed: the wording of the
+  rules is for the review. With the first-step rule, six runs of six that had a list on the screen
+  answered the same follow-up from the earlier results, with no new search (9.9); one of them added
+  a session of the earlier search to a list of two.
+- **A superseded request's queued search runs in full** (seen 2026-10-13, NOT FIXED). The search
+  handler takes the request generation when it starts (`SessionSearchTools.cpp`, `startGeneration`).
+  A call that the SDK queued behind a slow call of the same step starts only after the next request
+  raised the number, reads the new one, and is never cancelled. Measured: a full-text scan of 365
+  days ran 29 s after the follow-up was sent, and the follow-up reached the process only after it.
+  The fix and the reason are in `SESSIONS_AGENT.md` §7.6.
 - **One live compaction of the search conversation was not run** (`SDK_HARNESS.md` section 11).
 
 ---

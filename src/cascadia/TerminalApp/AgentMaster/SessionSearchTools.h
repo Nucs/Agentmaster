@@ -299,8 +299,15 @@ namespace Agentmaster
         //   throws — std::bad_alloc.
         std::wstring ResolveHandle(const std::wstring& handle) const;
 
-        // The system prompt of the Sessions AI search: the role, the two tools, and the rules
-        // that make it fast (act at once, one show call, one sentence). ASCII.
+        // The system prompt of the Sessions AI search: the role, the two tools, and eight rules.
+        // Rule 1 makes the model's FIRST step a short mention of which kinds of tool calls it can use
+        // for the request, out of everything the tools can do, and how it will use them in different
+        // ways — written in the same message as its first calls, so it costs output tokens in that
+        // step but no extra model request. The other rules keep it fast: act at once, one show call,
+        // one sentence. ASCII (it travels through a file and the API unchanged).
+        //   returns — a static, NUL-terminated string; never null.
+        // ⚠ Its text is part of every request's prompt and of the prompt cache's key: a change costs a
+        //   new cache entry, and the m5 suite pins rule 1 and the count of rules.
         static const wchar_t* SystemPrompt() noexcept;
 
         // The servers' and tools' names (the model calls mcp__sessions__search and mcp__display__show).
