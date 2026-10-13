@@ -1,16 +1,17 @@
 # The agent harness (Claude conversations that Agentmaster hosts itself)
 
 > Status: written 2026-10-10. Built on 2026-10-11, locally in both configurations and by the
-> GitHub workflows, and **published in the v0.7.9 pre-release** (the tag is at `b842fcf5a`). No
-> build with it is installed on the development machine (release 0.6.8.18, dev 0.0.1.5; two builds
-> of `0ad98316e` are staged on `Q:`), and the Sessions page's AI search was never run on screen by
-> its authors.
+> GitHub workflows, and **published in the v0.7.9 pre-release** (the tag is at `b842fcf5a`).
 >
 > The permission policy, the inventory report and the removal of the MCP-resource tools are of
-> 2026-10-12 (`ba11d315d`) and are **in NO build**: checked with `cl /Zs` (the flags of the
-> 2026-10-11 build), the m5 suite, and the live test against the real `claude.exe` and Sonnet 5.5
-> (72 checks, section 8). ⚠ The v0.7.9 pre-release and the staged builds run the harness in
-> `dontAsk`, with five tools in the model's list (5.1 and 7 describe what changed).
+> 2026-10-12 (`ba11d315d`). They are in production 0.6.8.19 (built at `fb4161da8`, swapped in on
+> 2026-10-12) and in dev 0.0.1.6 (since 2026-10-13), checked by a string probe of both installed
+> `TerminalApp.dll` files; at the first live use (2026-10-12 20:31) the release `hooks.log` showed
+> `permission mode bypassPermissions (at start)` and `tools=2`. Before that they were checked with
+> `cl /Zs`, the m5 suite, and the live test against the real `claude.exe` and Sonnet 5.5 (72
+> checks, section 8). The user ran the Sessions page's AI search in production on 2026-10-12; no
+> session looked at its details on screen. ⚠ The v0.7.9 pre-release runs the harness in `dontAsk`,
+> with five tools in the model's list (5.1 and 7 describe what changed).
 
 Agentmaster manages Claude Code sessions that the user drives in a terminal. The harness is the
 opposite case: a Claude conversation that **Agentmaster itself** drives, with no terminal and no
