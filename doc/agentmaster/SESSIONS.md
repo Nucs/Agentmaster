@@ -508,10 +508,13 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
 ## 9. The AI search
 
 > Status: written 2026-10-10. Built on 2026-10-11 and **published in the v0.7.9 pre-release** (the
-> tag is at `b842fcf5a`). No build with it is installed on the development machine, and the page
-> itself was never run on screen by its authors. The engine is tested live against the real
-> `claude.exe`. What 2026-10-12 changed (bypass permissions, two tools instead of five in the
-> model's list, the "(now)" text) is in no build yet. The engine under it is the agent harness:
+> tag is at `b842fcf5a`). What 2026-10-12 changed (bypass permissions, two tools instead of five in
+> the model's list, the "(now)" text) is in production 0.6.8.19 (since 2026-10-12) and dev 0.0.1.6
+> (since 2026-10-13), checked with a string probe of both installed `TerminalApp.dll` files; the
+> v0.7.9 pre-release does not have it. The user ran the page in production on 2026-10-12 (its first
+> real requests: `SESSIONS_AGENT.md` §1.2); no session looked at its details on screen. The system
+> prompt's first-step rule of 2026-10-13 (9.3) is in no build yet. The engine is tested live
+> against the real `claude.exe`. The engine under it is the agent harness:
 > [`SDK_HARNESS.md`](./SDK_HARNESS.md).
 
 ### 9.1 What the user sees
@@ -781,6 +784,7 @@ above.
 
 - **The page was not run by its authors.** The engine is tested live; the XAML code compiles and
   links (the v0.7.9 pre-release holds it), but nobody looked at it on screen before that release.
+  The user ran it in production on 2026-10-12; the details of 9.5 were not looked at by a session.
 - **The toggle is not remembered** across windows or restarts.
 - **A cold index is slow** (9.4). Three ways to make it faster, none built:
   - a saved snapshot of the catalog, so the first read of a run is one file instead of one per
