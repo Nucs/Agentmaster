@@ -9,8 +9,8 @@ server's `tools/list`, waits until every server has listed its tools, then sends
 tools, and each tool. NO user message is sent, so no model request is made.
 
 Two configurations, both read from the repo:
-  shipped  - the seven-rule prompt and the two tools of SessionSearchTools.cpp (kSystemPrompt,
-             kSearchSchema, kShowSchema and the two descriptions)
+  shipped  - the system prompt and the two tools of SessionSearchTools.cpp (kSystemPrompt,
+             kSearchSchema, kShowSchema and the two descriptions), as the source holds them now
   proposed - SESSIONS_AGENT.md section 8.6 (the prompt; the doc's line wrap undone) and
              SESSIONS_AGENT.tools.json (the tools)
 

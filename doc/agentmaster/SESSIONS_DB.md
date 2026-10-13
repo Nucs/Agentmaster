@@ -1263,7 +1263,8 @@ and list its decisions" (`search` → `messages`); "which sessions edited `Termi
 
 Two tools exist (built 2026-10-10; `SessionSearchTools.cpp`, SESSIONS.md §9.3). Each has a description
 and a JSON schema in which every parameter has a one-sentence description, and a 7-rule system prompt
-goes with them:
+goes with them (8 rules since 2026-10-13, in no build yet: the first step mentions the kinds of tool
+calls the model can use and how; SESSIONS.md §9.3):
 
 | Tool | Description the model reads (as shipped) | Parameters |
 |---|---|---|

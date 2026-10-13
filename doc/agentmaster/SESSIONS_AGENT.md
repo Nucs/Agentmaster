@@ -42,8 +42,8 @@ and an evaluation set that settles each open choice by measurement (§11).
 **Expected effect (estimate from the trace's model time, §1.2).** The 52.6 s follow-up becomes about
 five model steps of ~1.7 s each plus tool time: about 9–10 s on the session database, and from the
 right project (§9.1). On today's code (phase A, §10), scoped content scans replace the one 42 s scan
-and stop at a budget. The price: the fixed prompt (system prompt + tool list) grows from 1,389 to
-6,786 tokens (measured, §8.7), served by the prompt cache after a process's first request.
+and stop at a budget. The price: the fixed prompt (system prompt + tool list) grows from 1,620 to
+7,000 tokens (measured, §8.7), served by the prompt cache after a process's first request.
 
 ## 1. The shipped agent, and its first real failure
 
@@ -55,6 +55,10 @@ and stop at a budget. The price: the fixed prompt (system prompt + tool list) gr
   screen 3.2–4.0 s after the request (the live test) and 4.6 s in the trace below.
 - A seven-rule system prompt (`SessionSearchTools.cpp` `kSystemPrompt`): act at once, one search with
   1–3 words, then more words, then `days: 365`, then `deep: true`; show once; one sentence.
+  - Since 2026-10-13 (in no build yet) it has eight: the new first rule makes the model's first step
+    a short mention of which kinds of tool calls it can use for the request, out of everything its
+    tools can do, and how it will use them in different ways, written in the same message as its
+    first calls (`SESSIONS.md` 9.3, measured in 9.9). The proposed prompt keeps that rule (§8.6).
 
 ### 1.2 The trace (the release profile's harness record, 2026-10-12)
 
@@ -576,7 +580,7 @@ name, path and prompt tiers (milliseconds).
 ### 7.3 The clock and the stop rule
 
 - Every result carries `elapsed`; the system prompt says: show by the fourth step; by step 8 or 30
-  seconds, show the best you have (§8.6, rule 8).
+  seconds, show the best you have (§8.6, rule 9).
 - The hard cap stays: `SessionSearchAgent.cpp` sets `HarnessOptions::maxTurnsPerMessage = 12` today,
   above the stop rule's 8 steps.
 
@@ -597,6 +601,19 @@ last shown list and its reasons, so "the second one" still resolves after a park
 Unchanged: the generation number (`SessionSearchToolset::Callbacks::generation`). Every tool asks it
 before each slow step (A's scans and parses, `peek`'s threads), and the service cancels its query
 (`SESSIONS_DB.md` §9 `cancel`).
+
+- ⚠ **Today a call that STARTS after the supersede is not cancelled** (seen 2026-10-13, `SESSIONS.md`
+  9.11). The handler takes the number when it starts (`SessionSearchTools.cpp`, `startGeneration`).
+  A call that the SDK queued behind a slow call of the same step (§8.3) starts after the next
+  request raised the number, reads the new one, and runs in full.
+  - Measured: a superseded request's second full-text scan of 365 days ran 29 s, and the follow-up
+    reached the process only after it: the harness writes a new request when the old turn has
+    ended, and Claude Code's acknowledgement of the interrupt waits behind the queued call on the
+    SDK's reader thread.
+  - The fix (for today's tool and for every tool here): a call compares with the generation of the
+    request whose turn the process is answering, not with the newest. The agent can record that
+    generation when the harness reports that it wrote the request (its `UserMessage` event); a
+    call whose turn is older returns at once.
 
 ### 7.7 What the user sees
 
@@ -667,7 +684,7 @@ key, so every change of one is visible.
   a row the agent showed, and `[nav] sessions ai evidence <sid8>` for an evidence click. The share of
   requests whose top row is opened is the live quality signal; logs stay local.
 
-### 8.6 The system prompt (replaces the seven rules; ASCII, 3,343 characters, 1,085 tokens)
+### 8.6 The system prompt (replaces the shipped eight rules; ASCII, 4,064 characters, 1,299 tokens)
 
 ```
 You are the search agent of the Sessions browser in Agentmaster, an app that manages Claude Code
@@ -689,30 +706,50 @@ about: facts and one line per turn), read (one session as a transcript at a zoom
 at a time), files, related, timeline, usage, sql. Display (mcp__display__*): show, reveal.
 
 How to work:
-1. Act at once. Never ask before searching. Make independent calls in the same step.
-2. Phrase widely in one call. Users describe outcomes; sessions contain the actions. Put 3 to 6
+1. Your first step, for every request: before your first tool call, in the same message, mention in
+   one or two short lines which kinds of tool calls you can use for this request, out of everything
+   your tools can do (search by phrasings, scopes, folders, files touched and time; grep for an
+   exact text; peek and read the candidates; files, related, timeline; usage and sql; show and
+   reveal), and how you will use them in different ways (the phrasings and scopes you will try, the
+   filters, the level you will read at, what you will check before show). Then make the calls of
+   that step at once.
+2. Act at once. Never ask before searching. Make independent calls in the same step.
+3. Phrase widely in one call. Users describe outcomes; sessions contain the actions. Put 3 to 6
    phrasings into search's `any`: synonyms, the commands, error texts, file and function names that
    would appear. Keep the `command` scope on when the request is about something that was done.
-3. Turn meaning into filters: a project or folder -> dirs or not_dirs; a time -> after and before; a
+4. Turn meaning into filters: a project or folder -> dirs or not_dirs; a time -> after and before; a
    file -> touched (and op); starred -> favorite; open tabs -> open.
-4. Read the hints in every result: `words` (a word matched nothing: rephrase it), `outside_window`
+5. Read the hints in every result: `words` (a word matched nothing: rephrase it), `outside_window`
    (matches exist before the period: widen days), `facets` (narrow by folder or month), `partial` or
    `indexing` (coverage is incomplete: say so in your reply).
-5. Check before you show. Peek the candidates (one call, up to 8 ids). If an outline does not settle
+6. Check before you show. Peek the candidates (one call, up to 8 ids). If an outline does not settle
    it, read the turn of the evidence (`around` its ref) at level minimal or compact, or grep inside
    the candidates. Use default, full, max or raw only for the one turn whose details you need.
-6. Show once, best first, only sessions you have evidence for. Each row gets `why`: what in that
+7. Show once, best first, only sessions you have evidence for. Each row gets `why`: what in that
    session matches, concrete, under 12 words, in the user's language; and `ref`: the evidence. When
    nothing fits, show an empty list.
-7. Reply after show. A search request: ONE sentence under 25 words (what is on the screen and the
-   best match's title). A question about content (what was decided, which command worked, why it
-   failed): answer in up to three short sentences and name the session; call reveal when the user
-   asked to see the place. When the results split into clearly different groups, end with one short
-   question. No markdown, no ids.
-8. Be quick. Every result gives `elapsed` seconds. Aim to show by the fourth step; by step 8 or 30
+8. Reply after show. A search request: ONE sentence under 25 words (what is on the screen and the
+   best match's title), for example: Three sessions are on the screen; the best match is "Fix tab
+   drag crash". A question about content (what was decided, which command worked, why it failed):
+   answer in up to three short sentences and name the session; call reveal when the user asked to
+   see the place. When the results split into clearly different groups, end with one short
+   question. The mention of rule 1 is not your reply. No markdown, no ids.
+9. Be quick. Every result gives `elapsed` seconds. Aim to show by the fourth step; by step 8 or 30
    seconds, show the best you have and say what you tried.
-9. Times are local; `now` is in every result. Use only ids that a result gave you.
+10. Times are local; `now` is in every result. Use only ids that a result gave you.
 ```
+
+Rule 1 is the shipped prompt's rule 1 (the user's request of 2026-10-13), with this tool list in its
+parentheses; `SESSIONS.md` 9.3 states it and 9.9 has its measured cost.
+
+- **The mention is written in the same message as the step's first calls**, so it adds output
+  tokens to that step, never a model request: measured on the shipped agent, the first call came
+  1.6–2.1 s after the request instead of 1.3–1.5 s.
+- **It made the replies wordier.** The example in rule 8 and the sentence "The mention of rule 1 is
+  not your reply" are what brought the shipped agent's replies back to one sentence (`SESSIONS.md`
+  9.9). The evaluation (§11) checks both against this prompt's longer reply rule.
+- **It does not bind the model.** In one shipped run the mention named a folder search that the
+  model then did not make; the evaluation reads the mentions beside the calls.
 
 ### 8.7 What the prompt and the tool list cost (measured)
 
@@ -722,12 +759,18 @@ message, so no model request; `tools/sessiondb-bench/agent_prompt_cost.py`). The
 
 | | System prompt | Tool list | Together |
 |---|---|---|---|
-| Shipped (7 rules; `search`, `show`) | 661 tokens (2,064 characters) | 728 (`search` 535, `show` 193) | **1,389** |
-| Proposed (§8.6; 11 tools) | 1,085 (3,343 characters) | 5,701 | **6,786** |
-| Proposed, phase A (without `usage`, `sql`) | 1,085 | 5,015 | 6,100 |
+| Shipped (8 rules; `search`, `show`) | 892 tokens (2,824 characters) | 728 (`search` 535, `show` 193) | **1,620** |
+| Proposed (§8.6; 11 tools) | 1,299 (4,064 characters) | 5,701 | **7,000** |
+| Proposed, phase A (without `usage`, `sql`) | 1,299 | 5,015 | 6,314 |
 
 Per tool: `search` 1,648, `read` 829, `grep` 735, `show` 398, `sql` 381, `peek` 375, `usage` 305,
 `timeline` 302, `related` 280, `files` 271, `reveal` 179.
+
+- **The first rule's cost** (the first step's mention, 2026-10-13, measured again the same day): the
+  shipped prompt went from 661 tokens (2,064 characters, seven rules) to 892, with the reply rule's
+  example; the proposed one from 1,085 (3,343 characters) to 1,299. The fixed prompt was 1,389
+  (shipped) and 6,786 (proposed) before it. The seven-rule prompt is the one in production
+  (0.6.8.19).
 
 - It is the fixed start of every model request, so the prompt cache serves it after a process's
   first request; the evaluation (§11) measures the step time with it.

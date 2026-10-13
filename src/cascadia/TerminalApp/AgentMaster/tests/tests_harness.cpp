@@ -661,6 +661,16 @@ void TestSessionSearchTools()
             promptAscii = promptAscii && (c == L'\n' || (c >= 0x20 && c < 0x7F));
         }
         CHECK(promptAscii && prompt.find(L"mcp__sessions__search") != std::wstring::npos && prompt.find(L"mcp__display__show") != std::wstring::npos && prompt.find(L"indexing") != std::wstring::npos, "toolset: the system prompt is ASCII and names both tools and the indexing note");
+        // The user's rule of 2026-10-13: the FIRST step mentions which kinds of tool calls the request can
+        // use, out of all the tools, and how in different ways. Pinned by its place (rule 1), its words,
+        // and the rule count that SESSIONS.md 9.3 states.
+        const size_t ruleOne = prompt.find(L"\n1. Your first step");
+        const size_t ruleTwo = prompt.find(L"\n2. ");
+        CHECK(ruleOne != std::wstring::npos && ruleTwo != std::wstring::npos && ruleOne < ruleTwo, "toolset: rule 1 of the system prompt is the first step");
+        const std::wstring ruleOneText = (ruleOne != std::wstring::npos && ruleTwo != std::wstring::npos && ruleOne < ruleTwo) ? prompt.substr(ruleOne, ruleTwo - ruleOne) : std::wstring{};
+        CHECK(ruleOneText.find(L"kinds of tool calls") != std::wstring::npos && ruleOneText.find(L"out of everything your tools can do") != std::wstring::npos && ruleOneText.find(L"in different ways") != std::wstring::npos && ruleOneText.find(L"before your first tool call, in the same message") != std::wstring::npos, "toolset: rule 1 says to mention the kinds of tool calls, out of all the tools, and how in different ways - in the same message as the first calls (no extra model request)");
+        CHECK(ruleOneText.find(L"deep:true") != std::wstring::npos && ruleOneText.find(L"top:N") != std::wstring::npos && ruleOneText.find(L"after or before") != std::wstring::npos, "toolset: rule 1 lists every kind of call (words, filters, period, full text, show) so the plan is chosen from all of them");
+        CHECK(prompt.find(L"\n8. ") != std::wstring::npos && prompt.find(L"\n9. ") == std::wstring::npos, "toolset: the system prompt has eight rules (the count SESSIONS.md 9.3 states)");
         const auto& search = servers[0].tools[0].handler;
         const auto& show = servers[1].tools[0].handler;
 
