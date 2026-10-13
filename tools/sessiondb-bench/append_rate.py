@@ -42,17 +42,35 @@ def transcript_paths() -> list:
 
 
 def sizes() -> dict:
-    """The current size of every transcript and spilled tool output.
+    """The current size of every transcript, subagent file and spilled tool output, by directory enumeration.
+
+    os.scandir hands back each entry's size from the directory listing itself (FindFirstFile data on
+    Windows), one call per folder and no open or stat per file — the way the service's C++ sweep would
+    read the tree, so its time is the sweep's cost.
 
     Returns:
-        path -> size in bytes. A file that vanishes between the listing and its stat is left out.
+        path -> size in bytes. A folder that vanishes during the walk is skipped.
     """
     out = {}
-    for path in transcript_paths() + glob.glob(os.path.join(ROOT, "*", "*", "tool-results", "*")):
+    try:
+        projects = [e for e in os.scandir(ROOT) if e.is_dir()]
+    except OSError:
+        return out
+    for proj in projects:
         try:
-            out[path] = os.stat(path).st_size
+            entries = list(os.scandir(proj.path))
         except OSError:
             continue
+        for entry in entries:
+            if entry.is_file() and entry.name.endswith(".jsonl"):
+                out[entry.path] = entry.stat().st_size
+            elif entry.is_dir():
+                for side in ("subagents", "tool-results"):
+                    try:
+                        for f in os.scandir(os.path.join(entry.path, side)):
+                            out[f.path] = f.stat().st_size
+                    except OSError:
+                        continue  # most sessions have no side folder
     return out
 
 
@@ -144,10 +162,13 @@ def right_now(samples: int, interval: float) -> None:
         samples: how many snapshots (>= 2).
         interval: seconds between snapshots.
     """
-    start = time.perf_counter()
-    prev = sizes()
-    stat_ms = (time.perf_counter() - start) * 1000
-    print(f"== right now: {len(prev)} files, one stat sweep {stat_ms:.0f} ms; {samples - 1} intervals of {interval:.0f} s")
+    sweeps = []
+    for _ in range(3):  # the best of three: the first walk may also warm the directory cache
+        start = time.perf_counter()
+        prev = sizes()
+        sweeps.append((time.perf_counter() - start) * 1000)
+    print(f"== right now: {len(prev)} files, one sweep by directory enumeration {min(sweeps):.0f} ms (best of 3; "
+          f"first {sweeps[0]:.0f} ms); {samples - 1} intervals of {interval:.0f} s")
     for i in range(samples - 1):
         time.sleep(interval)
         cur = sizes()
