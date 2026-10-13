@@ -48,7 +48,7 @@ these build recipes but adds the pipeline/draft/publish flow).
 |---|---|---|
 | Package | `AgentmasterDev_56k4f06dsfp9r` | `Agentmaster_56k4f06dsfp9r` |
 | Manifest source | `Package-Dev.appxmanifest` (default) | `Package-Rel.appxmanifest` (`/p:AgentmasterPackageIdentity=Release`) |
-| Registered from | **a layout slot** (§4a): `src\cascadia\CascadiaPackage\bin\x64\Debug\` (A), `…\bin\x64\Debug-B\` (B), or a folder outside the repo such as `Q:\agentmaster-layouts\Debug` (a build waits there since 2026-10-12) — always read `(Get-AppxPackage AgentmasterDev).InstallLocation` | **a layout slot** (§4a): `…\bin\x64\Release\` (A), `…\bin\x64\Release-B\` (B), or a folder outside the repo — **since 2026-10-12 `Q:\agentmaster-layouts\Release`** (K: is short of space) — always read `(Get-AppxPackage Agentmaster).InstallLocation` |
+| Registered from | **a layout slot** (§4a): `src\cascadia\CascadiaPackage\bin\x64\Debug\` (A), `…\bin\x64\Debug-B\` (B), or a folder outside the repo such as `Q:\agentmaster-layouts\Debug` (dev runs from there since 2026-10-13) — always read `(Get-AppxPackage AgentmasterDev).InstallLocation` | **a layout slot** (§4a): `…\bin\x64\Release\` (A), `…\bin\x64\Release-B\` (B), or a folder outside the repo — **since 2026-10-12 `Q:\agentmaster-layouts\Release`** (K: is short of space) — always read `(Get-AppxPackage Agentmaster).InstallLocation` |
 | Launch | alias `agentmasterdev` · Start "Agentmaster Dev" · `shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App` | alias `agentmaster` · Start "Agentmaster" · `shell:appsFolder\Agentmaster_56k4f06dsfp9r!App` |
 | Profile (state) | `~\.agentmaster-dev` | `~\.agentmaster` |
 | Updated by | any full **Debug** package build | any full **Release** package build (incl. release pre-validation!) |
