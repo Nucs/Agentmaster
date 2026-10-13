@@ -569,6 +569,11 @@ around freely. The show tool is the one place where the screen changes.
   (1 to 3 distinctive words, no `days` unless the user names a period); show only what fits; one
   sentence under 25 words in the user's language; a follow-up refers to the shown list; times are
   local; a result with an `indexing` field lacks older sessions.
+- **The redesign** (2026-10-13, DESIGN ONLY): [`SESSIONS_AGENT.md`](SESSIONS_AGENT.md) — eleven tools
+  (`search` with phrasings, scopes and folder exclusion, `grep`, `peek`, `read` at the transcript
+  levels, `files`, `related`, `timeline`, `usage`, `sql`, `show` with reasons, `reveal`), a context
+  line and an instant pass on every request, secret redaction, and a new system prompt; worked out on
+  the first real request that failed (52.6 s, a session from the excluded project).
 
 ### 9.4 The session index, and why a search never waits for it
 

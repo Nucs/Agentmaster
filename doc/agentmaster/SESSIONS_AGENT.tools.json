@@ -1,0 +1,194 @@
+{
+  "comment": "DRAFT (2026-10-13, DESIGN ONLY): the session agent's tools exactly as the model would read them (tools/list of the two in-process MCP servers). SESSIONS_AGENT.md section 6 is the contract; this file is its machine-readable form, used to measure the prompt cost (section 8.7) and to seed the C++ registry. Keep the two in step.",
+  "version": 1,
+  "servers": {
+    "sessions": [
+      {
+        "name": "search",
+        "description": "Find sessions (Claude Code conversations on this computer) by words, by the files they touched, and by when and where they ran. Every word of `query` must match somewhere in a session, in the chosen `scopes` (each word may match a different place); \"double quotes\" make a phrase; a whole session id finds that session and its forks. `any` adds up to 6 alternative phrasings and a session must also match at least one of them: users describe outcomes, sessions contain the actions, so add the commands, error texts, file and function names that would appear. Returns sessions best first; each row says where it matched and gives up to `hits` evidence snippets whose `ref` opens that place in read. A thin result says which words matched nothing and how many matches lie outside the period; a broad one adds `facets` to narrow with. Changes nothing on the screen. Fast: search again freely.",
+        "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
+        "inputSchema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "query": {"type": "string", "maxLength": 500, "description": "Words that must all match. Leave it out to list sessions by `any` and the filters only."},
+            "any": {"type": "array", "maxItems": 6, "items": {"type": "string", "minLength": 1, "maxLength": 200}, "description": "Alternative phrasings; a session must match at least one (all of that phrasing's words). Results are merged; `via` says which matched."},
+            "scopes": {"type": "array", "uniqueItems": true, "items": {"enum": ["title", "path", "prompt", "reply", "command", "edit", "tool", "output", "thinking", "subagent"]}, "default": ["title", "path", "prompt", "reply", "command"], "description": "Where words may match. title: names and ids. path: folders and touched files. prompt: what the user typed. reply: Claude's text. command: shell commands Claude ran. edit: text Claude wrote into files. tool: other tool inputs (searches, reads, web, agents). output: tool results (broad, noisy). thinking. subagent: subagents' work."},
+            "fuzzy": {"type": "boolean", "default": false, "description": "Also match words one or two letters off."},
+            "days": {"type": "integer", "minimum": 1, "maximum": 3650, "default": 90, "description": "Only sessions active in the last N days."},
+            "after": {"type": "string", "format": "date", "description": "Only sessions active on or after this local date, YYYY-MM-DD. Overrides days."},
+            "before": {"type": "string", "format": "date", "description": "Only sessions active on or before this local date."},
+            "dirs": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 300}, "description": "Only sessions whose folder (launched in, or worked in) contains one of these parts. '/' and '\\' are the same."},
+            "not_dirs": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 300}, "description": "Leave out sessions whose folder contains any of these parts: 'another project'."},
+            "touched": {"type": "string", "maxLength": 300, "description": "Only sessions that touched this: a full path, a folder (everything under it), or a file name alone."},
+            "op": {"enum": ["read", "edit", "write", "search", "shell"], "description": "With touched: only this kind of touch."},
+            "branch": {"type": "string", "maxLength": 200, "description": "Part of the git branch name."},
+            "tag": {"type": "string", "maxLength": 100, "description": "A bookmark tag, the whole name, any case."},
+            "favorite": {"type": "boolean", "description": "true: only starred sessions."},
+            "open": {"type": "boolean", "description": "true: only sessions with a tab open now."},
+            "model": {"type": "string", "maxLength": 60, "description": "Part of a model id the session used: opus, sonnet, fable, a preset."},
+            "ids": {"type": "array", "maxItems": 50, "items": {"type": "string"}, "description": "Only these sessions: 'which of those mention X'."},
+            "not_ids": {"type": "array", "maxItems": 100, "items": {"type": "string"}, "description": "Never these sessions."},
+            "sort": {"enum": ["relevance", "active", "created"], "default": "relevance", "description": "relevance: name matches, then path, then content by score. active / created: newest first."},
+            "hits": {"type": "integer", "minimum": 0, "maximum": 5, "default": 2, "description": "Evidence snippets per session."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 30, "default": 10},
+            "cursor": {"type": "string", "description": "The `next` of the previous result, for the following rows."}
+          }
+        }
+      },
+      {
+        "name": "grep",
+        "description": "Find every place an exact text or a regular expression occurs, in order, with the text around it: an error message, a hash, a function name, a command. Searches the sessions in `ids`, or all sessions in the filters. Use search to rank sessions by topic and grep to locate exact strings. Each match has a `ref` for read. A regex needs a literal of 3 or more characters, or `ids`.",
+        "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
+        "inputSchema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "pattern": {"type": "string", "minLength": 1, "maxLength": 500, "description": "The text (or regex) to find."},
+            "patterns": {"type": "array", "maxItems": 5, "items": {"type": "string", "minLength": 1, "maxLength": 500}, "description": "Instead of pattern: several, any of them."},
+            "regex": {"type": "boolean", "default": false},
+            "case_sensitive": {"type": "boolean", "default": false},
+            "ids": {"type": "array", "maxItems": 50, "items": {"type": "string"}, "description": "Only these sessions."},
+            "not_ids": {"type": "array", "maxItems": 100, "items": {"type": "string"}},
+            "dirs": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 300}},
+            "not_dirs": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 300}},
+            "days": {"type": "integer", "minimum": 1, "maximum": 3650, "default": 90},
+            "after": {"type": "string", "format": "date"},
+            "before": {"type": "string", "format": "date"},
+            "scopes": {"type": "array", "uniqueItems": true, "items": {"enum": ["title", "path", "prompt", "reply", "command", "edit", "tool", "output", "thinking", "subagent"]}, "description": "As in search. Default: every scope but thinking."},
+            "context": {"type": "integer", "minimum": 0, "maximum": 400, "default": 100, "description": "Characters of text on each side of a match."},
+            "per_session": {"type": "integer", "minimum": 1, "maximum": 20, "default": 3, "description": "Matches per session at most."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 30},
+            "cursor": {"type": "string"}
+          }
+        }
+      },
+      {
+        "name": "peek",
+        "description": "A quick look at up to 8 sessions at once, to tell what each was about without reading it: its facts (titles, folder, branch, dates, size, models, lineage, tags, open tab, files edited, plan, tasks) and its outline, one line per turn: when, how much work, what the user asked and how Claude's last reply began. Turns that hold evidence from your latest search are marked. Use it on a search's candidates before you show them.",
+        "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
+        "inputSchema": {
+          "type": "object", "additionalProperties": false, "required": ["ids"],
+          "properties": {
+            "ids": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string"}, "description": "Session ids from a result."},
+            "outline": {"type": "integer", "minimum": 0, "maximum": 200, "default": 40, "description": "Outline lines per session; a longer session keeps its first 10 and last 30 turns."},
+            "files": {"type": "integer", "minimum": 0, "maximum": 10, "default": 5, "description": "Most-touched files per session."}
+          }
+        }
+      },
+      {
+        "name": "read",
+        "description": "Read one session as a transcript at the zoom level you need, a few turns at a time. Levels, shortest first: outline (one line per turn); minimal (the user's messages and each final reply; a whole session is often 3K to 25K characters); compact (+ the user's answers, slash commands, compactions, subagent briefs and reports); default (+ every tool call on one line and the remarks between them; about 10K characters per turn); full (+ each shell command, its first output line, durations; about 20K per turn, some 70K+); max (+ every file written, stats per turn); raw (the exact message blocks, verbatim, each with its ref; set `roles`). Start shallow and go deeper only on the turns that matter: `turns` (\"3\", \"2-4\", \"last\", \"last 2\") or `around` (a ref from search or grep). The text ends with `next` when more remains.",
+        "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
+        "inputSchema": {
+          "type": "object", "additionalProperties": false, "required": ["id"],
+          "properties": {
+            "id": {"type": "string", "minLength": 8, "maxLength": 80, "description": "A session id, or <id>/<agent id> for a subagent's own transcript."},
+            "level": {"enum": ["outline", "minimal", "compact", "default", "full", "max", "raw"], "default": "minimal"},
+            "turns": {"type": "string", "maxLength": 20, "description": "\"5\", \"2-4\", \"last\", \"last 3\" or \"all\". Default: from turn 1, or the turn of `around`."},
+            "around": {"type": "string", "maxLength": 100, "description": "A ref from search or grep: the turn that holds it (raw: the blocks around it)."},
+            "roles": {"type": "array", "uniqueItems": true, "items": {"enum": ["prompt", "queued", "reply", "thinking", "tool_call", "tool_result", "system"]}, "default": ["prompt", "queued", "reply", "tool_call"], "description": "Level raw only: the kinds of blocks."},
+            "chain": {"type": "boolean", "default": false, "description": "Also render the sessions this one was forked or restarted from, as one conversation; turns then number through the chain."},
+            "budget": {"type": "integer", "minimum": 2000, "maximum": 60000, "default": 20000, "description": "At most this many characters; the rest is paged."},
+            "cursor": {"type": "string", "description": "The `next` of the previous result."}
+          }
+        }
+      },
+      {
+        "name": "files",
+        "description": "The files and folders one session read, edited, wrote, searched or named in shell commands, with counts and first and last times. Use it to see what a session worked on; to go the other way (which sessions touched a file) use search with `touched`.",
+        "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
+        "inputSchema": {
+          "type": "object", "additionalProperties": false, "required": ["id"],
+          "properties": {
+            "id": {"type": "string", "minLength": 8, "maxLength": 36},
+            "op": {"enum": ["read", "edit", "write", "search", "shell"], "description": "Only this kind of touch."},
+            "under": {"type": "string", "maxLength": 300, "description": "Only paths under this folder."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}
+          }
+        }
+      },
+      {
+        "name": "related",
+        "description": "Travel from one session to its neighbors: its lineage (the session it was forked, restarted or continued from, its forks and successors), the sessions that touched the most of the same files, the sessions that share its rare words, and the sessions that ran in the same folder within a day of it.",
+        "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
+        "inputSchema": {
+          "type": "object", "additionalProperties": false, "required": ["id"],
+          "properties": {
+            "id": {"type": "string", "minLength": 8, "maxLength": 36},
+            "kinds": {"type": "array", "uniqueItems": true, "items": {"enum": ["lineage", "files", "words", "nearby"]}, "description": "Default: all."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5, "description": "Sessions per kind."}
+          }
+        }
+      },
+      {
+        "name": "timeline",
+        "description": "What happened when: for each day (or hour) of a period, the sessions that were active, with their prompts and turns. Use it for questions like 'what was I doing last Tuesday'.",
+        "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
+        "inputSchema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "from": {"type": "string", "format": "date", "description": "Default: 7 days ago."},
+            "to": {"type": "string", "format": "date", "description": "Default: today."},
+            "group": {"enum": ["day", "hour"], "default": "day"},
+            "dir": {"type": "string", "maxLength": 300, "description": "Part of the working folder's path."},
+            "not_dirs": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 300}},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "Sessions per bucket."}
+          }
+        }
+      },
+      {
+        "name": "usage",
+        "description": "Token use and cost, grouped by session, day, model or folder. Each API message counts once. A session's cost is Claude Code's own record when the session has one (`cost_source` \"claude\"); otherwise it comes from a price table and is an estimate (`cost_source` \"estimate\"), not a bill.",
+        "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
+        "inputSchema": {
+          "type": "object", "additionalProperties": false, "required": ["group_by"],
+          "properties": {
+            "group_by": {"enum": ["session", "day", "model", "dir"]},
+            "days": {"type": "integer", "minimum": 1, "maximum": 3650, "default": 30},
+            "after": {"type": "string", "format": "date"},
+            "before": {"type": "string", "format": "date"},
+            "dir": {"type": "string", "maxLength": 300},
+            "id": {"type": "string", "maxLength": 36},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20}
+          }
+        }
+      },
+      {
+        "name": "sql",
+        "description": "Run one read-only SQL query (DuckDB dialect) over these views when no other tool fits: counts, groupings, unusual filters. Returns at most 200 rows within 2 s. Views: v_sessions(id, uuid, title, dir, dir_key, inferred_dir, branch, created, active, msgs, tools, model, models, effort, version, input_tokens, output_tokens, cost_usd, api_errors, interrupts, compactions, forked_from, favorite, tags, open); v_messages(id, ref, time, role, tool, text); v_lines(id, line, type, time, raw): raw is the line's JSON, read fields with json_extract; v_paths(id, path, dir, file, op, n, first, last); v_usage(id, time, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens); v_links(id, from_id, via).",
+        "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
+        "inputSchema": {
+          "type": "object", "additionalProperties": false, "required": ["query"],
+          "properties": {
+            "query": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}
+          }
+        }
+      }
+    ],
+    "display": [
+      {
+        "name": "show",
+        "description": "Put sessions on the user's screen in your order, replacing the list. Each row needs `why`: what in that session matches the request, concrete, in a few words (shown under its title), and the `ref` of your evidence (a click opens the transcript there). Show only sessions you have evidence for. Call it once per request, after checking the candidates; an empty `rows` clears the list when nothing fits.",
+        "inputSchema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "rows": {"type": "array", "maxItems": 30, "items": {"type": "object", "additionalProperties": false, "required": ["id", "why"], "properties": {"id": {"type": "string"}, "why": {"type": "string", "maxLength": 100}, "ref": {"type": "string", "maxLength": 100}}}},
+            "top": {"type": "integer", "minimum": 1, "maximum": 30, "description": "Instead of rows: the first N rows of your latest search; each row's why is its first evidence."},
+            "note": {"type": "string", "maxLength": 80, "description": "A caption for the list, in the user's language."}
+          }
+        }
+      },
+      {
+        "name": "reveal",
+        "description": "Open one place for the user: selects the session on the screen and opens its transcript at the turn of `ref`, at `level`. Use it after show when the user asked to see or read something specific.",
+        "inputSchema": {
+          "type": "object", "additionalProperties": false, "required": ["ref"],
+          "properties": {
+            "ref": {"type": "string", "maxLength": 100},
+            "level": {"enum": ["minimal", "compact", "default", "full", "max"], "default": "default"}
+          }
+        }
+      }
+    ]
+  }
+}

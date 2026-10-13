@@ -1241,6 +1241,12 @@ New verbs: `agentmaster search <query> [--scopes …] [--days N] [--json]`, `age
 
 ### 8.4 The MCP tools
 
+> **2026-10-13:** [`SESSIONS_AGENT.md`](SESSIONS_AGENT.md) redesigns this tool list for the AI search
+> (search with alternative phrasings, a shell-command scope and folder exclusion; `peek`; `read` at the
+> Copy ▸ Transcript levels; `show` with a reason and an evidence ref per row; `reveal`). Where the two
+> documents differ, `SESSIONS_AGENT.md` is the newer proposal; the conventions of §8.4.2 and the
+> extension contract of §8.4.4 hold for both.
+
 The same tool registry serves two clients: the in-app AI search (tool servers `sessions` and
 `display`, in-process, calling the service) and **any Claude Code session** through the stdio MCP server
 `agentmaster-sessiondb.exe mcp` (server name `agentmaster`, so its tools read `mcp__agentmaster__search`
