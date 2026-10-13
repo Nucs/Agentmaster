@@ -47,6 +47,10 @@
   writes: normalized place keys (`cwd_key`, `inferred_dir_key`, `git_root_key`, …, by `NormDirKey`),
   versions, models, effort, Claude Code's **own cost record** (`cost-state`), token usage, outcomes,
   work done, titles, lineage. One pass computes them: 922 sessions (3.11 GB) in 11.5 s.
+- **Kept current by events, never rebuilt for a search (§7.6).** The service's own transcript watcher
+  appends each file's new lines within ~2 s, in the background, while the app runs; after a downtime
+  the next start catches up. Measured load: ~190 MB of transcript lines a day; the busiest hour costs
+  0.18–0.34% of one core in the service, and nothing in the GUI.
 - **What DuckDB buys and what it does not (§3.5)**, and **the other parts of Agentmaster that would
   read it (§8.6)**: the conversation chain, the inferred folder of closed sessions, the Fleet
   Observer's External rows, the launch bar's id check, usage and cost, diagnostics.
@@ -306,7 +310,8 @@ from the DuckDB CLI).
 - **One per profile:** a named mutex `Local\Agentmaster.SessionDb.<hash>` and the pipe name, where
   `<hash>` = the first 16 hex digits of SHA-256 of the folded profile path.
 - It exits when no client has been connected for 10 minutes. The GUI keeps one connection open while
-  it runs.
+  it runs, so the database stays current for as long as the app runs; after a downtime, the next start
+  catches up (§7.6).
 - **Versions:** the `hello` request returns the service's version and schema. A newer GUI asks an older
   service to `shutdown` (it commits, closes the file and exits) and starts its own. An older client never
   replaces a newer service.
@@ -420,6 +425,9 @@ CREATE TABLE line (
     type      VARCHAR,                  -- user, assistant, attachment, progress, mode, last-prompt, ...
     ts_ms     BIGINT,
     bytes     INTEGER,
+    parent_uuid UUID,                   -- the line's parentUuid: the edge the live-branch walk follows
+    leaf_uuid UUID,                     -- a leaf marker's leafUuid (last-prompt lines); a compaction
+                                        -- root's other edges come from its own raw line (few)
     on_branch BOOLEAN,                  -- on the live branch (ActiveBranchUuids, run in C++ at ingest);
                                         -- rewritten for the session when a rewind moves the leaf (§8.5)
     seg       SMALLINT,                 -- the /compact segment by position (boundaries before it, itself included)
@@ -469,8 +477,8 @@ CREATE TABLE doc_hot (
 -- New lines wait here the same way until a merge appends them to `line` sorted by line_id (§6.8).
 CREATE TABLE line_hot (
     line_id BIGINT NOT NULL, file_id INTEGER NOT NULL, line_no INTEGER NOT NULL,
-    uuid UUID, type VARCHAR, ts_ms BIGINT, bytes INTEGER, on_branch BOOLEAN, seg SMALLINT, is_copy BOOLEAN,
-    raw VARCHAR
+    uuid UUID, type VARCHAR, ts_ms BIGINT, bytes INTEGER, parent_uuid UUID, leaf_uuid UUID,
+    on_branch BOOLEAN, seg SMALLINT, is_copy BOOLEAN, raw VARCHAR
 );
 
 -- Tool-touched paths: the 📁/📄 scopes, "who touched this file", the inferred folder.
@@ -1035,7 +1043,7 @@ Stop-hook times), and the ingest runs `ActiveBranchUuids` per changed session fo
 ### 7.4 Incremental
 
 - The watcher (the `TranscriptWatcher` code: one `ReadDirectoryChangesW` on `projects`, subtree on)
-  plus a 30 s resync.
+  plus a 30 s resync — the service's own, not the GUI's (§7.6 has why, the belts and the measured load).
 - Per changed file: read from `parsed_bytes` to the last complete line; classify; append to `doc_hot`,
   `prompt`, `path_access`, `usage`; update the `session` row and the cursor; **one transaction**.
 - From a line written to it being searchable: **≤ 2 s** (batching window + one transaction).
@@ -1057,6 +1065,74 @@ Stop-hook times), and the ingest runs `ActiveBranchUuids` per changed session fo
 - **Claude's sweep deletes a transcript** (after `cleanupPeriodDays`): D7.
 - **Never lose a swallowed exception** (Rule #18): the service reports through the same
   `LogSwallowedException` chokepoint into its log.
+
+### 7.6 Staying current: driven by events, in the background, never rebuilt for a search
+
+**The question** (2026-10-13): does the database stay current by itself, from events in the
+background, or does it belong to the Sessions page and get rebuilt when the page re-indexes?
+
+**The answer:** by events, in the service, all the time; never rebuilt for a search or a page open.
+
+- **The service's own watcher drives the ingest.** It is the engine's `TranscriptWatcher` code (one
+  `ReadDirectoryChangesW` on `~/.claude/projects`, subtree on), linked into the service the way the CLI
+  links the engine, plus `history.jsonl` and the profile's session store and `sessions.json`. It is not
+  fed by the GUI's Fleet Observer or scanner:
+  - the database must stay current while the GUI is closed or restarting: the CLI and the MCP server
+    read it, and claude sessions also run in other terminals;
+  - the scanner and the observer are the GUI's real-time path. A pipe send per transcript event would
+    add work and a failure mode to it, and a GUI crash would drop events the service must then find
+    anyway;
+  - both read the same appended bytes, which the OS already holds in its cache, so reading them twice
+    costs nothing measurable.
+- **What the GUI does send:** only facts that live in the GUI — `factsChanged` (a title, tag, favorite
+  or link changed: the service re-reads that session's record) and `openChanged` (the open set, for the
+  `open` filter and the catch-up order). The GUI never reads the database for live state: the database
+  lags by up to ~2 s and can be down (Rules #1 and #7).
+- **Per change**, coalesced per file (a ≤ 2 s window, at most about one commit a second):
+  1. read from the file's cursor to its last complete line;
+  2. classify the new lines and append them;
+  3. update the touched sessions' derived rows: the session row's aggregates; the `summary` row, from
+     the small section tables; the live branch, recomputed in C++ from that session's `parent_uuid` /
+     `leaf_uuid` columns (milliseconds), writing only the flags that changed;
+  4. advance the cursor in the SAME transaction (a crash replays the batch, never loses or doubles it).
+
+  Every step is proportional to the new bytes: no step re-reads a session's history.
+- **Belts.** A stat sweep every 30 s, and at once when the watch overflows (`ERROR_NOTIFY_ENUM_DIR`) or
+  fails, with polling until it recovers. At service start, a reconciliation: every `src_file` is stat'ed
+  and the deltas are ingested, open and newest sessions first, with `indexing` coverage reported
+  meanwhile.
+- **Lifecycle.** The GUI holds a connection, so the service runs whenever Agentmaster runs. It exits
+  10 minutes after its last client. No resident daemon: the next start (GUI, CLI or MCP) catches up — a
+  stat sweep plus whatever was appended meanwhile (a whole day here, ~190 MB: about 4 s of parsing at
+  46 MB/s).
+- **The page's ↻** asks the service to resync now (the stat sweep), never to rebuild.
+
+**The load, measured** (`append_rate.py`, `commit_cost.py`; 2026-10-12/13, 55–100+ claude sessions):
+
+| | |
+|---|---|
+| Written in the last 24 h (line timestamps; a file created that day counted whole, for its fork copies) | **190 MB** of transcript lines (38,720 lines, 71 files, 19 of them new); average **2.2 KB/s**; busiest hour **23.4 MB** (6.5 KB/s); plus 32.5 MB of spilled tool outputs |
+| A burst | a new fork file: 5.2 MB at once |
+| A stat sweep over every transcript and spill (11,228 files) | 0.37–0.44 s |
+| COMMIT of one ingest transaction (20 real lines, a file database on C:) | 1.9–2.3 ms median, 3.1–4.6 ms p95 |
+| A whole busy hour (23 MB) in 20-line transactions | 6.6–12.3 s of database time: **0.18–0.34% of one core for that hour**, inserted through Python (the C API's appender is cheaper) |
+| Merging the hot lines into the ZSTD table (6.9–9.7 K lines) | 0.21–0.28 s |
+| A checkpoint after it | 0.22–0.27 s |
+
+So the steady cost is under 1% of one core in the busiest hour, at background CPU and I/O priority, in
+another process; the GUI pays nothing. Merges, re-clusters and checkpoints run when no query runs (the
+service knows when one does), and they can be interrupted.
+
+**Full rebuilds happen only in three cases:**
+
+1. **A profile's first build** (§7.3): once, in the background, newest sessions first. The page works
+   meanwhile from what is indexed, and says how far back that is.
+2. **A new schema, tokenizer or classifier version:** new tables are re-derived from the lossless `line`
+   table (no transcript is read) and swapped in, in one transaction; searches use the old tables until
+   the swap. The per-line envelope parse runs at ~460 MB/s (3.11 GB in 6.7 s on 4 threads, §5.6), so a
+   re-derive of today's 10.4 GB is a background job of minutes.
+3. **A file that does not open** (§11): it is renamed aside and rebuilt from the transcripts, in the
+   background.
 
 ## 8. Consumers
 
@@ -1553,8 +1629,10 @@ decision reads the transcript on disk: the database can lag by up to ~2 s (G3).
 |---|---|
 | The service crashes | The GUI's client reconnects and restarts it (with backoff). During the rollout (P2–P4) the page falls back to today's code path; later it shows "search unavailable" and retries. |
 | The file does not open (corrupt, or written by a newer DuckDB) | Renamed to `sessions.duckdb.broken-<time>`; a background rebuild starts; the page says "indexing". |
-| The schema version differs | A newer service migrates (or rebuilds); an older one refuses a newer schema and never writes it. |
-| A new DuckDB version | The storage format reads forward; the index is ours, so only a change of `meta.tokenizer_version` forces a rebuild. |
+| The schema version differs | A newer service migrates, or re-derives new tables from the stored lines and swaps them in (§7.6); an older one refuses a newer schema and never writes it. |
+| A new DuckDB version | The storage format reads forward; the index is ours, so only a change of `meta.tokenizer_version` forces a re-derive (§7.6). |
+| The watch overflows or fails | A stat sweep at once, then polling every 30 s until the watch recovers (§7.6). |
+| The service was not running while transcripts changed | At its next start: a stat sweep of every file, the deltas ingested, open and newest sessions first; searches report the coverage meanwhile (§7.6). |
 | The disk is full | Ingest pauses and logs; searches keep working on what is there. |
 | Two installs on one profile | One service (the mutex); the profile mutex already warns. |
 
@@ -1624,6 +1702,8 @@ cache; best of 3–5 runs. The corpus as in §1.2.
 | The session row (`session_columns.py`) | 73 columns for 922 sessions (3.11 GB): the parse 6.7 s, the columns 4.8 s (269 MB/s) |
 | The field census (`field_census.py`) | the newest 3.0 GB (332 sessions, 633,905 lines, Claude Code 2.1.123–2.1.291) in 31 s; `cost-state` in 562 of 4,444 top-level transcripts (`rg -l`) |
 | A fork's parent (NumSharp's 1.63 M lines) | 29.1 ms by scanning every line's uuid; 8.7 ms through a uuid → first-file map (715,662 uuids, built in 0.1 s); the same 150 copied lines as `CollectConversationUpstream` |
+| The ingest load (`append_rate.py`, 2026-10-12/13) | 190 MB of transcript lines in 24 h (38,720 lines, 71 files; 21.7 MB of it fork copies in 19 new files), 2.2 KB/s average, 23.4 MB in the busiest hour; + 32.5 MB of spills; a stat sweep of 11,228 files 0.37–0.44 s |
+| Its cost in DuckDB (`commit_cost.py`, a file database on C:) | COMMIT of a 20-line transaction 1.9–2.3 ms median (p95 3.1–4.6 ms); a 23 MB busy hour 6.6–12.3 s of database time (0.18–0.34% of one core); a merge of 6.9–9.7 K hot lines 0.21–0.28 s; a checkpoint 0.22–0.27 s |
 
 **Reproduce** with [`tools/sessiondb-bench/`](../../tools/sessiondb-bench/): Python 3.12 in a venv
 outside the repo with `pip install --pre duckdb` (2.0 until it is released). Scratch files go to
@@ -1661,6 +1741,8 @@ the transcripts are only read. The order matters, each step uses the previous on
     - `summary_from_db.py <project db> <session id prefixes> --verify <facts.tsv>` — A, B and the
       comparison;
     - `session_columns.py <project db> [session id prefix]` — the session row and its coverage.
+12. `append_rate.py [--samples N] [--interval S]` and `commit_cost.py` — what keeping the database
+    current costs (§7.6); no database needed for the first, the second makes and deletes its own.
 
 ## 15. Sources
 
